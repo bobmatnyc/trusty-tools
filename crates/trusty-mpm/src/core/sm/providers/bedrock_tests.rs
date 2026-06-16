@@ -4,14 +4,12 @@
 //! All tests are unit-level — no real AWS calls. The `complete`/`call_once`
 //! path is exercised with a `no_credentials()` client, which errors inside the
 //! SDK before any TCP connection, proving the error-mapping wiring.
-//! What: region resolution, model-id validation, cost estimation, construction,
-//! and the no-credentials `complete` error path.
+//! What: region resolution, model-id validation, construction, and the
+//! no-credentials `complete` error path. Cost estimation is covered centrally
+//! in `pricing_tests.rs`.
 //! Test: included as `#[cfg(test)] mod tests` via `#[path]` from `bedrock.rs`.
 
-use super::{
-    BedrockProvider, LlmProvider, LlmRequest, estimate_bedrock_cost_usd, resolve_bedrock_region,
-    validate_model_id,
-};
+use super::{BedrockProvider, LlmProvider, LlmRequest, resolve_bedrock_region, validate_model_id};
 use crate::core::sm::providers::{ChatMessage, SmLlmError};
 use aws_config::BehaviorVersion;
 use aws_sdk_bedrockruntime::Client as BedrockClient;
@@ -53,26 +51,6 @@ fn bedrock_prefix_validation() {
     assert!(matches!(err, SmLlmError::Validation(_)));
     assert!(err.is_alarm());
     assert!(!err.is_retryable());
-}
-
-#[test]
-fn bedrock_cost_estimate_sonnet() {
-    let cost = estimate_bedrock_cost_usd("us.anthropic.claude-sonnet-4-6", 1_000_000, 1_000_000);
-    assert!(
-        (cost - 18.0_f64).abs() < 1e-9,
-        "expected $18.00, got {cost}"
-    );
-}
-
-#[test]
-fn bedrock_cost_estimate_haiku() {
-    let cost = estimate_bedrock_cost_usd("us.anthropic.claude-haiku-4-5", 1_000_000, 1_000_000);
-    assert!((cost - 4.8_f64).abs() < 1e-9, "expected $4.80, got {cost}");
-}
-
-#[test]
-fn bedrock_cost_estimate_unknown() {
-    assert_eq!(estimate_bedrock_cost_usd("us.mystery.model", 100, 100), 0.0);
 }
 
 /// Why: the `from_client` accessors must report name/region without AWS calls.

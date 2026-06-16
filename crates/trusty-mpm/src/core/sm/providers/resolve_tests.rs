@@ -319,14 +319,14 @@ async fn registry_bedrock_prefix_without_feature() {
 /// Why: when built WITH the `bedrock` feature, `auto` precedence must prefer
 /// Bedrock over OpenRouter when AWS creds are available and Anthropic is not.
 /// What: routes a bare-model auto config with only AWS creds + an OpenRouter
-/// key, asserts Bedrock is selected. (Construction attempts the SDK chain; we
-/// only assert the *kind*, so this stays offline-safe via the resolution path —
-/// the actual client build uses the default chain which succeeds at config
-/// load without network.)
+/// key and asserts the resolved *kind* + bare model are Bedrock. Uses
+/// `resolve_kind_and_model` (the pure decision half of `build`) so the test
+/// makes ZERO network calls — it never reaches `construct`, which would load
+/// the real AWS SDK config chain (potentially probing IMDS/network in CI).
 /// Test: only compiled in the `--features bedrock` build.
 #[cfg(feature = "bedrock")]
-#[tokio::test]
-async fn registry_auto_prefers_bedrock_when_available() {
+#[test]
+fn registry_auto_prefers_bedrock_when_available() {
     let mut cfg = empty_cfg();
     cfg.provider = "auto".to_string();
     cfg.sm_model = "bedrock/us.anthropic.claude-sonnet-4-6".to_string();
@@ -335,11 +335,9 @@ async fn registry_auto_prefers_bedrock_when_available() {
         aws_credentials_available: true,
         openrouter_api_key: Some("sk-or".to_string()),
     };
-    let resolved = registry
-        .build(&cfg, SmModelTier::Orchestration)
-        .await
-        .expect("bedrock builds via SDK config load");
-    assert_eq!(resolved.kind, ProviderKind::Bedrock);
-    assert_eq!(resolved.model, "us.anthropic.claude-sonnet-4-6");
-    assert_eq!(resolved.provider.name(), "bedrock");
+    let (kind, model) = registry
+        .resolve_kind_and_model(&cfg, SmModelTier::Orchestration)
+        .expect("auto precedence resolves to bedrock");
+    assert_eq!(kind, ProviderKind::Bedrock);
+    assert_eq!(model, "us.anthropic.claude-sonnet-4-6");
 }

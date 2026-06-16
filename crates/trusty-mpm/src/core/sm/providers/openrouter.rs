@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::{LlmProvider, LlmRequest, LlmResponse, error::SmLlmError};
+use super::{LlmProvider, LlmRequest, LlmResponse, error::SmLlmError, pricing};
 
 /// Default OpenRouter chat-completions endpoint.
 pub const DEFAULT_OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -69,40 +69,6 @@ struct OrcChoiceMessage {
 struct OrcUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
-}
-
-// ─── Pricing ──────────────────────────────────────────────────────────────────
-
-/// Approximate `(input, output)` USD cost per million tokens for the model ids
-/// the SM commonly routes through OpenRouter.
-///
-/// Why: surfaces a per-call cost estimate in [`LlmResponse`] (§5.5). Unknown
-/// ids fall back to `(0.0, 0.0)` — a missing estimate, not an error.
-/// What: covers the Anthropic Sonnet/Haiku tiers (the SM defaults) as billed
-/// through OpenRouter, plus a couple of common OpenAI ids.
-/// Test: `cost_estimate_known`, `cost_estimate_unknown`.
-fn cost_per_million(model: &str) -> (f64, f64) {
-    match model {
-        // Anthropic via OpenRouter (SM default tiers).
-        m if m.contains("claude-sonnet") => (3.00, 15.00),
-        m if m.contains("claude-haiku") => (0.80, 4.00),
-        m if m.contains("claude-opus") => (15.00, 75.00),
-        // Common OpenAI ids.
-        "openai/gpt-5.4-mini-20260317" => (0.75, 4.50),
-        "openai/gpt-5.4-nano-20260317" => (0.20, 1.25),
-        _ => (0.0, 0.0),
-    }
-}
-
-/// Compute a USD cost estimate from token counts and the pricing table.
-///
-/// Why: lets the SM total session cost and rank tiers by cost (§5.5).
-/// What: applies [`cost_per_million`]; returns `0.0` for unknown models.
-/// Test: `cost_estimate_known`, `cost_estimate_unknown`.
-pub fn estimate_cost_usd(model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
-    let (in_price, out_price) = cost_per_million(model);
-    (input_tokens as f64 / 1_000_000.0) * in_price
-        + (output_tokens as f64 / 1_000_000.0) * out_price
 }
 
 // ─── Provider ──────────────────────────────────────────────────────────────────
@@ -254,7 +220,7 @@ impl LlmProvider for OpenRouterProvider {
             .map(|u| (u.prompt_tokens, u.completion_tokens))
             .unwrap_or((0, 0));
         let model_used = orc.model.unwrap_or_else(|| self.model.clone());
-        let cost_usd = estimate_cost_usd(&model_used, input_tokens, output_tokens);
+        let cost_usd = pricing::estimate_cost_usd(&model_used, input_tokens, output_tokens);
 
         debug!(
             provider = "openrouter",

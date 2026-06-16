@@ -10,22 +10,24 @@
 
 use super::*;
 use crate::core::sm::providers::ChatMessage;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use crate::core::sm::providers::test_support::read_full_request;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 /// Spawn a one-shot HTTP mock returning `status_line`/`body`; yields the base
 /// `http://127.0.0.1:PORT` URL.
 ///
 /// Why: drive `complete` without touching the real Anthropic API.
-/// What: binds an ephemeral port, accepts one connection, replies, shuts down.
+/// What: binds an ephemeral port, accepts one connection, drains the full
+/// request via [`read_full_request`] (so the reply never races ahead of the
+/// client's `write`), replies, and shuts down.
 /// Test: used by the `complete_*` tests.
 async fn spawn_mock(status_line: &'static str, body: String) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.expect("accept");
-        let mut buf = vec![0u8; 16384];
-        let _ = sock.read(&mut buf).await;
+        read_full_request(&mut sock).await;
         let resp = format!(
             "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
@@ -75,18 +77,6 @@ fn build_body_places_system_top_level() {
     assert_eq!(body["messages"][0]["content"], "go");
     // The system prompt must NOT also appear as a message.
     assert_eq!(body["messages"].as_array().unwrap().len(), 1);
-}
-
-#[test]
-fn cost_estimate_known() {
-    let cost = estimate_cost_usd("claude-haiku-4-5", 1_000_000, 1_000_000);
-    // (0.80, 4.00) → 0.80 + 4.00 = 4.80
-    assert!((cost - 4.80_f64).abs() < 1e-9, "expected $4.80, got {cost}");
-}
-
-#[test]
-fn cost_estimate_unknown() {
-    assert_eq!(estimate_cost_usd("gpt-self", 100, 100), 0.0);
 }
 
 /// Why: prove `complete` drives the native path — building the body, parsing a

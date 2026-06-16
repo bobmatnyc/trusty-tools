@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tracing::{debug, warn};
 
-use super::{LlmProvider, LlmRequest, LlmResponse, error::SmLlmError};
+use super::{LlmProvider, LlmRequest, LlmResponse, error::SmLlmError, pricing};
 
 /// Default Anthropic API base (no trailing `/v1/messages`).
 pub const DEFAULT_ANTHROPIC_BASE: &str = "https://api.anthropic.com";
@@ -32,34 +32,6 @@ pub const ENV_ANTHROPIC_BASE_URL: &str = "ANTHROPIC_BASE_URL";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const CONNECT_TIMEOUT_SECS: u64 = 10;
 const READ_TIMEOUT_SECS: u64 = 120;
-
-// ─── Pricing ──────────────────────────────────────────────────────────────────
-
-/// Approximate `(input, output)` USD cost per million tokens for the Anthropic
-/// model families the SM uses (Sonnet orchestration, Haiku summarization).
-///
-/// Why: per-call cost telemetry (§5.5). Unknown ids fall back to `(0.0, 0.0)`.
-/// What: matches on the model-family substring so version suffixes still price.
-/// Test: `cost_estimate_known`, `cost_estimate_unknown`.
-fn cost_per_million(model: &str) -> (f64, f64) {
-    match model {
-        m if m.contains("sonnet") => (3.00, 15.00),
-        m if m.contains("haiku") => (0.80, 4.00),
-        m if m.contains("opus") => (15.00, 75.00),
-        _ => (0.0, 0.0),
-    }
-}
-
-/// Compute a USD cost estimate from token counts and the pricing table.
-///
-/// Why: lets the SM total session cost (§5.5).
-/// What: applies [`cost_per_million`]; `0.0` for unknown models.
-/// Test: `cost_estimate_known`, `cost_estimate_unknown`.
-pub fn estimate_cost_usd(model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
-    let (in_price, out_price) = cost_per_million(model);
-    (input_tokens as f64 / 1_000_000.0) * in_price
-        + (output_tokens as f64 / 1_000_000.0) * out_price
-}
 
 // ─── Request / response shaping (native Anthropic wire format) ─────────────────
 
@@ -260,7 +232,7 @@ impl LlmProvider for AnthropicProvider {
             .and_then(|m| m.as_str())
             .unwrap_or(&self.model)
             .to_string();
-        let cost_usd = estimate_cost_usd(&model_used, input_tokens, output_tokens);
+        let cost_usd = pricing::estimate_cost_usd(&model_used, input_tokens, output_tokens);
 
         debug!(
             provider = "anthropic",

@@ -29,10 +29,14 @@
 pub mod anthropic;
 pub mod error;
 pub mod openrouter;
+pub mod pricing;
 pub mod resolve;
 
 #[cfg(feature = "bedrock")]
 pub mod bedrock;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use anthropic::AnthropicProvider;
 pub use error::SmLlmError;

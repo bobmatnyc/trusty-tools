@@ -13,9 +13,10 @@
 //! `us.`/`eu.`/… cross-region inference-profile prefix is required and validated
 //! up front so a bare foundation-model id fails early as [`SmLlmError::Validation`].
 //! Test: `bedrock_region_resolution`, `bedrock_prefix_validation`,
-//! `bedrock_cost_estimate_*`, `bedrock_provider_stores_model_and_region`,
+//! `bedrock_provider_stores_model_and_region`,
 //! `bedrock_no_credentials_returns_error`,
-//! `bedrock_empty_messages_is_validation_error` in tests.
+//! `bedrock_empty_messages_is_validation_error` in tests; cost estimation is
+//! covered centrally in `pricing_tests.rs`.
 
 use std::time::{Duration, Instant};
 
@@ -27,7 +28,7 @@ use aws_sdk_bedrockruntime::types::{
 };
 use tracing::{debug, warn};
 
-use super::{LlmProvider, LlmRequest, LlmResponse, error::SmLlmError};
+use super::{LlmProvider, LlmRequest, LlmResponse, error::SmLlmError, pricing};
 
 /// Region env var: trusty-specific override (highest precedence).
 const ENV_REGION_TRUSTY: &str = "TRUSTY_AWS_REGION";
@@ -83,34 +84,6 @@ fn validate_model_id(model_id: &str) -> Result<(), SmLlmError> {
     )))
 }
 
-// ─── Pricing ──────────────────────────────────────────────────────────────────
-
-/// Approximate `(input, output)` USD cost per million tokens for the Anthropic
-/// families served on Bedrock.
-///
-/// Why: per-call cost telemetry (§5.5).
-/// What: family-substring match; unknown → `(0.0, 0.0)`.
-/// Test: `bedrock_cost_estimate_sonnet`, `bedrock_cost_estimate_unknown`.
-fn cost_per_million(model: &str) -> (f64, f64) {
-    match model {
-        m if m.contains("sonnet") => (3.00, 15.00),
-        m if m.contains("haiku") => (0.80, 4.00),
-        m if m.contains("opus") => (15.00, 75.00),
-        _ => (0.0, 0.0),
-    }
-}
-
-/// Compute a USD cost estimate from token counts and the pricing table.
-///
-/// Why: lets the SM total session cost (§5.5).
-/// What: applies [`cost_per_million`]; `0.0` for unknown models.
-/// Test: `bedrock_cost_estimate_sonnet`, `bedrock_cost_estimate_unknown`.
-pub fn estimate_bedrock_cost_usd(model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
-    let (in_price, out_price) = cost_per_million(model);
-    (input_tokens as f64 / 1_000_000.0) * in_price
-        + (output_tokens as f64 / 1_000_000.0) * out_price
-}
-
 // ─── Provider ──────────────────────────────────────────────────────────────────
 
 /// AWS Bedrock Converse provider for the SM.
@@ -120,7 +93,7 @@ pub fn estimate_bedrock_cost_usd(model: &str, input_tokens: u32, output_tokens: 
 /// What: holds a `BedrockClient`, the bare model id, and the resolved region.
 /// `complete` calls `Converse`, extracts text + usage, retries transient
 /// errors up to [`MAX_RETRIES`].
-/// Test: `bedrock_no_credentials_returns_error`,
+/// Test: `bedrock_provider_stores_model_and_region`,
 /// `bedrock_no_credentials_returns_error`.
 pub struct BedrockProvider {
     client: BedrockClient,
@@ -161,7 +134,7 @@ impl BedrockProvider {
     /// Why: tests inject a `no_credentials()` client to drive provider logic
     /// without AWS.
     /// What: stores the client verbatim.
-    /// Test: `bedrock_no_credentials_returns_error`,
+    /// Test: `bedrock_provider_stores_model_and_region`,
     /// `bedrock_no_credentials_returns_error`.
     #[cfg(test)]
     pub fn from_client(
@@ -238,7 +211,7 @@ impl BedrockProvider {
         let latency_ms = start.elapsed().as_millis() as u64;
         let text = extract_converse_text(&resp).unwrap_or_default();
         let (input_tokens, output_tokens) = extract_token_usage(&resp);
-        let cost_usd = estimate_bedrock_cost_usd(&req.model, input_tokens, output_tokens);
+        let cost_usd = pricing::estimate_cost_usd(&req.model, input_tokens, output_tokens);
 
         Ok(LlmResponse {
             text,
@@ -303,8 +276,8 @@ impl LlmProvider for BedrockProvider {
     /// What: calls `call_once`; retries up to [`MAX_RETRIES`] while
     /// `is_retryable()`; returns other errors immediately. Logs cost/usage to
     /// stderr.
-    /// Test: `bedrock_no_credentials_returns_error`,
-    /// `bedrock_no_credentials_returns_error`.
+    /// Test: `bedrock_no_credentials_returns_error` (error path),
+    /// `bedrock_empty_messages_is_validation_error` (validation path).
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, SmLlmError> {
         debug!(
             provider = "bedrock",

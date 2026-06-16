@@ -195,7 +195,11 @@ pub struct ProviderRegistry {
     /// `ANTHROPIC_API_KEY` value, if present and non-empty.
     pub anthropic_api_key: Option<String>,
     /// Whether AWS credentials are resolvable (the daemon probes this; tests
-    /// set it directly). Only consulted when the `bedrock` feature is enabled.
+    /// set it directly). Only consulted by the `auto` precedence chain when the
+    /// `bedrock` feature is enabled. NOTE: [`Self::from_env`] sets this from a
+    /// conservative env-marker heuristic that cannot see `~/.aws/credentials`,
+    /// ECS/EKS/IMDS sources — set `provider = "bedrock"` explicitly in those
+    /// deployments (see [`Self::from_env`]).
     pub aws_credentials_available: bool,
     /// `OPENROUTER_API_KEY` value, if present and non-empty.
     pub openrouter_api_key: Option<String>,
@@ -210,6 +214,17 @@ impl ProviderRegistry {
     /// as absent) and probes AWS credential presence via `AWS_ACCESS_KEY_ID` /
     /// `AWS_PROFILE` / `AWS_ROLE_ARN` env markers (a cheap, non-async heuristic;
     /// the real SDK chain is the final authority at call time).
+    ///
+    /// This env-marker probe is **intentionally conservative**: it only sees
+    /// credentials advertised through those three env vars. It deliberately
+    /// does NOT detect AWS-native credential sources that the SDK chain resolves
+    /// at call time — the shared-credentials file (`~/.aws/credentials`), an ECS
+    /// task role, EKS IRSA, or EC2 IMDS. In those AWS-native deployments the
+    /// `auto` precedence chain may therefore skip Bedrock even though Bedrock is
+    /// in fact reachable. Operators running in such environments should set
+    /// `[session_manager.inference].provider = "bedrock"` EXPLICITLY to bypass
+    /// the `auto` heuristic and pin Bedrock; the explicit provider path does not
+    /// consult this flag.
     /// Test: side-effect-only env read; logic covered via the explicit-field
     /// constructor used by `registry_*` tests.
     pub fn from_env() -> Self {
@@ -242,6 +257,34 @@ impl ProviderRegistry {
         cfg: &SmInferenceConfig,
         tier: SmModelTier,
     ) -> Result<ResolvedCall, SmLlmError> {
+        let (effective_kind, bare_model) = self.resolve_kind_and_model(cfg, tier)?;
+        let provider = self.construct(effective_kind, &bare_model).await?;
+        Ok(ResolvedCall {
+            provider,
+            model: bare_model,
+            kind: effective_kind,
+        })
+    }
+
+    /// Resolve a tier into its `(effective_kind, bare_model)` WITHOUT building
+    /// the concrete provider.
+    ///
+    /// Why: this is the pure, network-free decision half of [`Self::build`] —
+    /// parsing/validating `provider`, selecting the tier model, applying prefix
+    /// routing, and running the `auto` precedence chain. Splitting it out keeps
+    /// `build` thin and lets tests assert the routing decision (including the
+    /// Bedrock-preference precedence) without `construct`'s real AWS SDK config
+    /// load (which can probe IMDS/network).
+    /// What: (1) parses `cfg.provider`; (2) selects the tier model via
+    /// [`resolve_tier_model`]; (3) routes via [`resolve_provider_and_model`];
+    /// (4) resolves an `Auto` routed kind through [`Self::auto_precedence`].
+    /// Test: `registry_auto_precedence`, `registry_degraded_without_creds`,
+    /// `registry_auto_prefers_bedrock_when_available` (feature-gated).
+    fn resolve_kind_and_model(
+        &self,
+        cfg: &SmInferenceConfig,
+        tier: SmModelTier,
+    ) -> Result<(ProviderKind, String), SmLlmError> {
         let default_provider = ProviderKind::parse(&cfg.provider)?;
         let tier_model = resolve_tier_model(cfg, tier)?;
         let (routed_kind, bare_model) = resolve_provider_and_model(&tier_model, default_provider);
@@ -258,13 +301,7 @@ impl ProviderRegistry {
             bare_model = %bare_model,
             "sm resolve provider+model"
         );
-
-        let provider = self.construct(effective_kind, &bare_model).await?;
-        Ok(ResolvedCall {
-            provider,
-            model: bare_model,
-            kind: effective_kind,
-        })
+        Ok((effective_kind, bare_model))
     }
 
     /// Pick the first provider with credentials in §5.3 precedence order.

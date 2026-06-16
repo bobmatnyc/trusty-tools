@@ -10,7 +10,8 @@
 
 use super::*;
 use crate::core::sm::providers::ChatMessage;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use crate::core::sm::providers::test_support::read_full_request;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 /// Spawn a one-shot HTTP mock that replies with `status`/`body` and returns the
@@ -19,16 +20,16 @@ use tokio::net::TcpListener;
 /// Why: the providers must be tested without touching the real OpenRouter API;
 /// a raw `TcpListener` (matching the trusty-review test pattern) is the
 /// lightest dependency-free mock.
-/// What: binds an ephemeral port, accepts ONE connection, reads the request,
-/// writes a fixed HTTP response, and shuts down.
+/// What: binds an ephemeral port, accepts ONE connection, drains the FULL
+/// request via [`read_full_request`] (headers + body) so the reply never races
+/// ahead of the client's `write`, writes a fixed HTTP response, and shuts down.
 /// Test: used by `complete_roundtrips_against_mock` / `complete_maps_http_errors`.
 async fn spawn_mock(status_line: &'static str, body: String) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.expect("accept");
-        let mut buf = vec![0u8; 16384];
-        let _ = sock.read(&mut buf).await;
+        read_full_request(&mut sock).await;
         let resp = format!(
             "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(),
@@ -53,21 +54,6 @@ fn new_rejects_empty_key() {
 fn new_succeeds_with_valid_key() {
     let p = OpenRouterProvider::new("sk-test", "anthropic/claude-haiku").expect("ok");
     assert_eq!(p.name(), "openrouter");
-}
-
-#[test]
-fn cost_estimate_known() {
-    // Sonnet tier billed at (3.00, 15.00) per million.
-    let cost = estimate_cost_usd("anthropic/claude-sonnet-4-6", 1_000_000, 1_000_000);
-    assert!(
-        (cost - 18.0_f64).abs() < 1e-9,
-        "expected $18.00, got {cost}"
-    );
-}
-
-#[test]
-fn cost_estimate_unknown() {
-    assert_eq!(estimate_cost_usd("mystery/model", 100, 100), 0.0);
 }
 
 /// Why: prove `complete` actually drives the HTTP path — building the request,
