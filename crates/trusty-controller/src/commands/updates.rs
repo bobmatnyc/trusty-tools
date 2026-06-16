@@ -104,7 +104,18 @@ fn print_human(report: &UpdatesReport) {
     println!("{} update(s) available:", report.count);
     for c in &report.candidates {
         let installed = c.installed.as_deref().unwrap_or("(not installed)");
-        println!("  {}  {} → {}", c.crate_name, installed, c.latest);
+        // `is_install` distinguishes a fresh install (binary absent) from an
+        // upgrade of an existing one, so the operator knows what `tctl upgrade`
+        // will do before they confirm.
+        let action = if c.is_install {
+            "will install"
+        } else {
+            "will upgrade"
+        };
+        println!(
+            "  {}  {} → {}  ({action})",
+            c.crate_name, installed, c.latest
+        );
     }
     println!("Run `tctl upgrade` to apply (you will be asked to confirm).");
 }

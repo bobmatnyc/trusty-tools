@@ -5,21 +5,19 @@
 //! view and the data the console / scripts consume via `--json`.
 //!
 //! What: For each stable-set member, reports the installed version (via
-//! `<binary> --version`) and — for daemons — a coarse health verdict (via
-//! `<binary> health --json`, reusing the `up::system_runner::classify_status`
-//! mapping). Renders a human table or a `--json` envelope. Returns exit 0 when
-//! every daemon is healthy (or absent-but-reported), 2 when a daemon is down.
+//! `<binary> --version`) and — for daemons — a coarse health verdict (via the
+//! shared `probe::probe_member_health`, strategy-aware so process-managed
+//! members like trusty-mpm report `unknown` rather than a false `down`).
+//! Renders a human table or a `--json` envelope. Returns exit 0 when every
+//! daemon is healthy (or absent/unknown-but-reported), 2 when a daemon is down.
 //!
 //! Test: `tests` covers the report shaping + the overall verdict derivation; the
-//! probes are side-effecting.
-
-use std::process::Command;
+//! probes are side-effecting (hoisted to `probe`, tested there).
 
 use serde::Serialize;
 
+use super::probe::probe_member_health;
 use super::stable_set::stable_set;
-use super::up::member::MemberHealth;
-use super::up::system_runner::classify_status;
 use super::update_engine::installed_version;
 use crate::output::render_json;
 
@@ -95,63 +93,6 @@ impl StatusReport {
     }
 }
 
-/// Coarse health probe for a daemon member (`<binary> health --json`).
-///
-/// Why: `status` reports a one-word health per daemon; reuse the same
-/// classification the boot path uses so the vocabulary is consistent.
-/// What: Spawns `<binary> health --json`; maps the `status` field via
-/// `classify_status`. Returns `NotInstalled` when the binary is absent, `Down`
-/// on spawn/parse failure.
-/// Test: Side-effect-only (subprocess); `classify_status` is unit-tested in `up`.
-fn probe_daemon_health(binary: &str) -> MemberHealth {
-    if which::which(binary).is_err() {
-        return MemberHealth::NotInstalled;
-    }
-    let out = Command::new(binary).args(["health", "--json"]).output();
-    let Ok(out) = out else {
-        return MemberHealth::Down;
-    };
-    if !out.status.success() {
-        return MemberHealth::Down;
-    }
-    classify_health_json(&out.stdout)
-}
-
-/// Classify a daemon's `health --json` stdout bytes into a [`MemberHealth`].
-///
-/// Why: Isolating the parse + classification as a pure function makes the
-/// fallback policy testable without spawning a subprocess. The re-review fix
-/// lives here: unparseable output is `Down`, not `HealthyStale`.
-/// What: Parses `bytes` as JSON; on success maps the `status` field via
-/// `classify_status` (defaulting to `down` when the field is absent). On a parse
-/// failure returns `Down` — garbage output means the daemon is broken, not
-/// merely stale ("if in doubt, degraded").
-/// Test: `tests::unparseable_health_is_down`, `tests::parsed_status_classifies`.
-fn classify_health_json(bytes: &[u8]) -> MemberHealth {
-    match serde_json::from_slice::<serde_json::Value>(bytes) {
-        Ok(v) => {
-            let status = v.get("status").and_then(|s| s.as_str()).unwrap_or("down");
-            classify_status(status)
-        }
-        Err(_) => MemberHealth::Down,
-    }
-}
-
-/// Map a [`MemberHealth`] to the status report's coarse string.
-///
-/// Why: The report uses a flat string vocabulary; centralise the mapping.
-/// What: `HealthyVersionOk` → `healthy`, `HealthyStale` → `stale`, `Down` →
-/// `down`, `NotInstalled` → `not_installed`.
-/// Test: `tests::health_string_mapping`.
-fn health_string(h: MemberHealth) -> &'static str {
-    match h {
-        MemberHealth::HealthyVersionOk => "healthy",
-        MemberHealth::HealthyStale => "stale",
-        MemberHealth::Down => "down",
-        MemberHealth::NotInstalled => "not_installed",
-    }
-}
-
 /// Handle `tctl status`.
 ///
 /// Why: Phase-1 stack summary (#1316 priority 5).
@@ -165,10 +106,7 @@ pub fn run(json: bool) -> i32 {
     for m in stable_set() {
         let installed = installed_version(&m.binary);
         let (health, daemon) = if m.daemon {
-            (
-                health_string(probe_daemon_health(&m.binary)).to_owned(),
-                true,
-            )
+            (probe_member_health(&m.binary, m.manage), true)
         } else {
             (
                 if installed.is_some() {
@@ -272,43 +210,14 @@ mod tests {
         assert_eq!(incomplete.exit_code(), 0);
     }
 
-    /// Why: Re-review fix — a daemon that emits unparseable `health --json`
-    /// output is BROKEN, not merely stale, so the fallback must be `Down`
-    /// ("if in doubt, degraded"). Pin this so it cannot regress to `HealthyStale`.
-    /// What: Feeds non-JSON bytes to `classify_health_json`; asserts `Down`.
+    /// Why: A process-managed member (mpm) reports `unknown` health, which must
+    /// NOT degrade the verdict (it is not a `down` daemon).
+    /// What: Builds a report with an `unknown` daemon; asserts `ready`.
     /// Test: This is the test.
     #[test]
-    fn unparseable_health_is_down() {
-        assert_eq!(classify_health_json(b"not json at all"), MemberHealth::Down);
-        assert_eq!(classify_health_json(b""), MemberHealth::Down);
-    }
-
-    /// Why: Valid JSON must still classify via the shared `classify_status`
-    /// vocabulary, and an absent `status` field defaults to `down`.
-    /// What: Feeds healthy / stale / field-less JSON; asserts each mapping.
-    /// Test: This is the test.
-    #[test]
-    fn parsed_status_classifies() {
-        assert_eq!(
-            classify_health_json(br#"{"status":"healthy"}"#),
-            MemberHealth::HealthyVersionOk
-        );
-        assert_eq!(
-            classify_health_json(br#"{"status":"stale"}"#),
-            MemberHealth::HealthyStale
-        );
-        // Parseable JSON without a `status` field → defaults to `down`.
-        assert_eq!(classify_health_json(br#"{"other":1}"#), MemberHealth::Down);
-    }
-
-    /// Why: The health-string mapping is the report's vocabulary; pin it.
-    /// What: Asserts each `MemberHealth` → string.
-    /// Test: This is the test.
-    #[test]
-    fn health_string_mapping() {
-        assert_eq!(health_string(MemberHealth::HealthyVersionOk), "healthy");
-        assert_eq!(health_string(MemberHealth::HealthyStale), "stale");
-        assert_eq!(health_string(MemberHealth::Down), "down");
-        assert_eq!(health_string(MemberHealth::NotInstalled), "not_installed");
+    fn unknown_health_does_not_degrade() {
+        let report = StatusReport::build(vec![ms("trusty-mpm", Some("0.9.0"), "unknown", true)]);
+        assert_eq!(report.verdict, "ready");
+        assert_eq!(report.exit_code(), 0);
     }
 }
