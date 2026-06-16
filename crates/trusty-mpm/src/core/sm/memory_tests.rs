@@ -56,6 +56,57 @@ fn palace_create_is_idempotent() {
     assert_eq!(second.palace_id().as_str(), "session-manager");
 }
 
+/// Why: the TOCTOU-race fix in `ensure_palace` must take the OPEN branch (not
+/// re-create) when the palace already exists on disk but is absent from THIS
+/// instance's registry cache — the exact situation a second concurrent or
+/// restarted SM faces after another process has already created the palace.
+/// This guards against the create-when-exists fallback wiping or duplicating an
+/// existing palace.
+/// What: builds a first `SmMemory`, writes a distinctive fact (forcing the
+/// palace + content onto disk), drops it, then builds a SECOND `SmMemory` with a
+/// FRESH registry against the same root. The second instance must converge on
+/// the existing palace (exactly one persisted) AND surface the first instance's
+/// already-written fact via recall — proving it opened the existing palace
+/// rather than creating a fresh empty one.
+/// Test: this is the test.
+#[tokio::test]
+async fn ensure_palace_falls_back_to_open_when_palace_already_exists() {
+    seed_shared_embedder_with_mock();
+    let dir = TempDir::new().expect("tempdir");
+    let cfg = SmMemoryConfig::default();
+
+    // First instance materialises the palace and writes a marker fact.
+    {
+        let first = SmMemory::open(dir.path(), &cfg).expect("first open");
+        assert_eq!(first.persisted_palace_count().expect("count"), 1);
+        first
+            .remember("TOCTOU_MARKER existing palace content written by first SM")
+            .await
+            .expect("remember in first instance");
+        // `first` (and its registry cache) drops here — the palace now lives
+        // ONLY on disk, exactly as a second process would observe it.
+    }
+
+    // Second instance has a brand-new registry, so `ensure_palace` cannot hit
+    // the cached fast path — it must take the open-first branch against disk.
+    let second = SmMemory::open(dir.path(), &cfg).expect("second open");
+    assert_eq!(
+        second.persisted_palace_count().expect("count"),
+        1,
+        "create-when-exists fallback must open the existing palace, not add a second"
+    );
+
+    let hits = second
+        .recall("what marker did the first SM write")
+        .await
+        .expect("recall from second instance");
+    assert!(
+        hits.iter()
+            .any(|h| h.drawer.content.contains("TOCTOU_MARKER")),
+        "second SM must open the EXISTING palace (seeing prior content), not a fresh one; got {hits:?}"
+    );
+}
+
 /// Why: the core round-trip — a remembered fact must be retrievable via recall
 /// from the SM palace.
 /// What: remembers a distinctive sentence, recalls a related query, asserts the

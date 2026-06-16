@@ -161,39 +161,54 @@ impl SmMemory {
     /// Open-or-create the bound palace, returning a live handle.
     ///
     /// Why: every operation needs a handle; centralising the idempotent
-    /// open-from-disk-else-create here means a single, well-tested code path
-    /// enforces "exactly one palace" for both construction and every later call.
-    /// What: returns the cached handle if registered; else opens from disk when
-    /// `palace.json` exists, otherwise creates and persists a new palace. Scoped
-    /// entirely to `self.palace_id` — no other id is reachable.
-    /// Test: `palace_create_is_idempotent`, `writes_target_only_the_sm_palace`.
+    /// open-or-create here means a single, well-tested code path enforces
+    /// "exactly one palace" for both construction and every later call. The
+    /// open-or-create must also be RACE-SAFE: two concurrent first-starts
+    /// against the same data root (e.g. two SM processes, or two threads) must
+    /// converge on ONE palace without either erroring. The previous
+    /// `exists()`-then-branch form had a TOCTOU window where both callers could
+    /// observe "missing" and both take the create branch; this form closes it.
+    /// What: returns the cached handle if registered (fast path). Otherwise
+    /// tries `open_palace` first — which succeeds whenever `palace.json` is
+    /// already on disk, including the case where a concurrent creator just
+    /// finished writing it. If the open fails (the normal first-run case: no
+    /// metadata yet), it falls back to `create_palace`, which is itself
+    /// idempotent (`create_dir_all` + an atomic `palace.json` rename), so two
+    /// racing creators both succeed and the registry de-duplicates by id. Both
+    /// branches are scoped entirely to `self.palace_id` — no other id is
+    /// reachable. Any final failure is wrapped in [`SmMemoryError::Palace`].
+    /// Test: `palace_create_is_idempotent`, `writes_target_only_the_sm_palace`,
+    /// `ensure_palace_falls_back_to_open_when_palace_already_exists`.
     fn ensure_palace(&self) -> SmMemoryResult<Arc<PalaceHandle>> {
         if let Some(handle) = self.registry.get(&self.palace_id) {
             return Ok(handle);
         }
 
-        let palace_dir = self.data_root.join(self.palace_id.as_str());
-        let result = if palace_dir.join("palace.json").exists() {
-            self.registry.open_palace(&self.data_root, &self.palace_id)
-        } else {
-            let palace = Palace {
-                id: self.palace_id.clone(),
-                name: "Session Manager".to_string(),
-                description: Some(
-                    "Dedicated Session-Manager memory palace (DOC-14 §8): goals, \
-                     outcomes, and decisions across sessions."
-                        .to_string(),
-                ),
-                created_at: Utc::now(),
-                data_dir: palace_dir,
-            };
-            self.registry.create_palace(&self.data_root, palace)
-        };
+        // Open-first, create-on-failure: no `exists()` pre-check, so there is no
+        // TOCTOU window. `open_palace` resolves the common "already on disk"
+        // case (including a concurrent creator that has finished); only when it
+        // fails do we attempt the idempotent create.
+        if let Ok(handle) = self.registry.open_palace(&self.data_root, &self.palace_id) {
+            return Ok(handle);
+        }
 
-        result.map_err(|source| SmMemoryError::Palace {
-            palace: self.palace_id.to_string(),
-            source,
-        })
+        let palace = Palace {
+            id: self.palace_id.clone(),
+            name: "Session Manager".to_string(),
+            description: Some(
+                "Dedicated Session-Manager memory palace (DOC-14 §8): goals, \
+                 outcomes, and decisions across sessions."
+                    .to_string(),
+            ),
+            created_at: Utc::now(),
+            data_dir: self.data_root.join(self.palace_id.as_str()),
+        };
+        self.registry
+            .create_palace(&self.data_root, palace)
+            .map_err(|source| SmMemoryError::Palace {
+                palace: self.palace_id.to_string(),
+                source,
+            })
     }
 
     /// Recall the top-k SM memories matching `query` (standard L0+L1+L2 path).
@@ -296,14 +311,16 @@ impl SmMemory {
         Self::count_persisted(&self.data_root, &self.palace_id)
     }
 
-    /// Count persisted palaces under `data_root` (free helper for tests/callers).
+    /// Count persisted palaces under `data_root` (internal helper).
     ///
-    /// Why: lets a test count palaces from a path without first building an
-    /// `SmMemory`, keeping the idempotency assertions independent of the very
-    /// object under test where useful.
+    /// Why: factors the registry-listing + error-mapping out of
+    /// [`SmMemory::persisted_palace_count`] so the public accessor stays a thin
+    /// one-liner. Private by design — the only caller is `persisted_palace_count`
+    /// (which the idempotency tests drive); it takes the path/id as arguments
+    /// purely to avoid borrowing `self` twice, not to expose a standalone API.
     /// What: delegates to [`PalaceRegistry::list_palaces`]; maps failure to
     /// [`SmMemoryError::Palace`] tagged with `palace_id`.
-    /// Test: `palace_create_is_idempotent`.
+    /// Test: `palace_create_is_idempotent` (via `persisted_palace_count`).
     fn count_persisted(data_root: &Path, palace_id: &PalaceId) -> SmMemoryResult<usize> {
         PalaceRegistry::list_palaces(data_root)
             .map(|palaces| palaces.len())
