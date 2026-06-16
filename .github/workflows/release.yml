@@ -739,6 +739,21 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      # ── Checkout the repository (required by git-cliff) ──────────────────────
+      # Why: the git-cliff step below (orhun/git-cliff-action@v4) reads cliff.toml
+      # from the repo root and walks the git history/tags to render RELEASE_NOTES.md.
+      # Without a checkout this job runs in an empty working dir: git-cliff cannot
+      # find cliff.toml (falls back to the default config) NOR the git repository
+      # ("could not find repository at '/home/runner/work/trusty-tools/trusty-tools'"),
+      # so it errors out, RELEASE_NOTES.md is never written, and softprops fails to
+      # read body_path → no GitHub Release is created (regression from #1322 / PR #1346).
+      # fetch-depth: 0 fetches the FULL history and all tags, which git-cliff needs
+      # for its --latest / --tag-pattern tag-range walking.
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v5
         with:
