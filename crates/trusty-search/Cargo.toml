@@ -1,6 +1,6 @@
 [package]
 name = "trusty-search"
-version = "0.24.6"
+version = "0.24.7"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
@@ -41,13 +41,11 @@ path = "src/bin/trusty-embedderd.rs"
 # single command (issue #187 Phase 2 follow-up). The daemon's logic lives
 # entirely in the trusty-embedderd library crate; this is a thin shim.
 
-[[bin]]
-name = "trusty-console"
-path = "src/bin/trusty-console.rs"
-# Why: bundle trusty-console into trusty-search's install surface so
-# `cargo install trusty-search` produces trusty-console alongside the other
-# binaries (Single-Install Convention, epic #943). All dashboard logic lives
-# in the trusty-console library crate; this is a thin shim.
+# Why (issue #1318): the `trusty-console` `[[bin]]` shim was REMOVED here.
+# Single-owner-per-binary — the standalone `trusty-console` crate is now the
+# sole producer of the `trusty-console` binary, so `cargo install trusty-search`
+# no longer collides on `.crates2.json` binary ownership (#1262). Install the
+# console separately (`cargo install trusty-console`) or via `tctl` (#1316).
 
 # [patch.crates-io] moved to workspace root Cargo.toml — Cargo only honours
 # [patch] tables at the workspace root. The monorepo root patches
@@ -66,10 +64,9 @@ trusty-common = { version = "0.15.1", default-features = false, features = ["axu
 # two binaries. The shim at src/bin/trusty-embedderd.rs calls
 # `trusty_embedderd::run()` so all daemon logic stays in the library crate.
 trusty-embedderd = { workspace = true }
-# Why: bundle trusty-console (Single-Install Convention, epic #943). Declaring
-# it as a dep causes `cargo install trusty-search` to also install trusty-console.
-# All dashboard logic stays in the trusty-console library crate.
-trusty-console = { workspace = true }
+# Why (issue #1318): the `trusty-console` dependency was REMOVED. The console
+# is no longer bundled into trusty-search (single-owner-per-binary); the
+# standalone `trusty-console` crate is its sole producer.
 
 # ── Async runtime / HTTP ───────────────────────────────────────────────────
 tokio = { version = "1", features = ["full"] }

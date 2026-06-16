@@ -1,6 +1,6 @@
 [package]
 name = "trusty-embedderd"
-version = "0.3.3"
+version = "0.3.4"
 publish = true
 edition = "2021"
 license.workspace = true
@@ -18,17 +18,15 @@ path = "src/lib.rs"
 # to the same function. crate-type rlib keeps link semantics clean.
 crate-type = ["rlib"]
 
-[[bin]]
-name = "trusty-embedderd"
-path = "src/main.rs"
-# Why (issue #250): the `trusty-embedderd` binary boots the axum HTTP daemon
-# (and the stdio / UDS transports that share its `AppState`), so it needs the
-# `http-server` feature compiled in. Listing it here keeps
-# `--no-default-features` library builds (e.g. consumers that only want the
-# `protocol` / `batch_queue` modules) from accidentally trying to build this
-# binary without axum and failing to link `run` / `run_with_args` /
-# `health_handler` / `embed_handler`.
-required-features = ["http-server"]
+# Why (issue #1318): single-owner-per-binary — the standalone `trusty-embedderd`
+# crate is now LIBRARY-ONLY. The `trusty-embedderd` binary is produced solely by
+# `trusty-search` (the host that bundles + spawns it), so there is exactly one
+# producing crate for the binary name and `cargo install trusty-search` no
+# longer collides on `.crates2.json` binary ownership. This crate is still
+# published to crates.io as a LIBRARY (dependent published crates require it).
+# The former `[[bin]]`/`src/main.rs` shim (required-features = ["http-server"])
+# was removed; it now lives ONLY as
+# `crates/trusty-search/src/bin/trusty-embedderd.rs`.
 
 [dependencies]
 # Shared client / wire types — now provided by trusty-common's `embedder-client` feature.

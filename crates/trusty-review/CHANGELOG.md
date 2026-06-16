@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.10] — 2026-06-16
+
+### Changed (closes part of #1318)
+
+- **De-bundled `trusty-console`.** Removed the bundled `trusty-console`
+  `[[bin]]` shim and dependency. `cargo install trusty-review` now produces
+  the `trusty-review` binary only. Install the console with
+  `cargo install trusty-console`. This is part of the single-owner-per-binary
+  fix for the cargo binary-ownership collisions (#1262).
+
 ## [0.3.8] — 2026-06-09
 
 ### Fixed

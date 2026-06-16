@@ -1,5 +1,15 @@
 # Changelog — trusty-mpm
 
+## [0.8.2] — 2026-06-16
+
+### Changed (closes part of #1318)
+
+- **De-bundled `trusty-console`.** Removed the bundled `trusty-console`
+  `[[bin]]` shim and dependency. `cargo install trusty-mpm` now produces
+  `tm` and `trusty-mpm` only. Install the console with
+  `cargo install trusty-console`. This is part of the single-owner-per-binary
+  fix for the cargo binary-ownership collisions (#1262).
+
 ## [Unreleased]
 
 ### Deprecated: verbose managed session-lifecycle verbs (issue #1205)

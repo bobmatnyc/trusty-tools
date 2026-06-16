@@ -7,6 +7,18 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.24.7] — 2026-06-16
+
+### Changed (closes part of #1318)
+
+- **De-bundled `trusty-console`.** Removed the bundled `trusty-console`
+  `[[bin]]` shim and dependency. `cargo install trusty-search` now produces
+  `trusty-search` and `trusty-embedderd` only. The console is its own
+  single-owner crate — install it with `cargo install trusty-console`. This
+  resolves the cargo binary-ownership collision that forced `--force` on
+  install / self-`upgrade` (#1262). `trusty-embedderd` is still bundled here
+  (single-owner: search is its sole producer).
+
 ## [0.24.4] — 2026-06-09
 
 ### Fixed

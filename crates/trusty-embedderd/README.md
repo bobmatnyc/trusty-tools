@@ -28,37 +28,39 @@ When used as a sidecar the lifecycle is implicit: when the parent closes its
 write end of the pipe (on exit), the child's stdin reaches EOF and the daemon
 exits cleanly with code 0. No explicit kill signal needed.
 
-You can also run it manually for testing the stdio transport:
+You can also run it manually for testing the stdio transport. As of #1318 this
+crate is **library-only** — the `trusty-embedderd` binary is produced solely by
+`trusty-search`, so run it via that crate's bundled bin target:
 
 ```bash
 # The parent side must write JSON-RPC frames to stdin and read responses from stdout.
 # Logs always go to stderr — stdout is reserved for JSON-RPC frames.
-cargo run -p trusty-embedderd -- --stdio
+cargo run -p trusty-search --bin trusty-embedderd -- --stdio
 ```
 
 ### HTTP mode
 
 ```bash
 # Default: binds to 127.0.0.1:7890
-cargo run -p trusty-embedderd -- --http 127.0.0.1:7890
+cargo run -p trusty-search --bin trusty-embedderd -- --http 127.0.0.1:7890
 
 # Custom address
-cargo run -p trusty-embedderd -- --http 127.0.0.1:9000
+cargo run -p trusty-search --bin trusty-embedderd -- --http 127.0.0.1:9000
 
 # Via env var
-TRUSTY_EMBEDDERD_ADDR=127.0.0.1:9000 cargo run -p trusty-embedderd -- --http ""
+TRUSTY_EMBEDDERD_ADDR=127.0.0.1:9000 cargo run -p trusty-search --bin trusty-embedderd -- --http ""
 ```
 
 ### UDS mode
 
 ```bash
-cargo run -p trusty-embedderd -- --socket /tmp/trusty-embedderd.sock
+cargo run -p trusty-search --bin trusty-embedderd -- --socket /tmp/trusty-embedderd.sock
 ```
 
 ### Combined HTTP + UDS (--stdio is mutually exclusive with both)
 
 ```bash
-cargo run -p trusty-embedderd -- --http 127.0.0.1:7890 --socket /tmp/trusty-embedderd.sock
+cargo run -p trusty-search --bin trusty-embedderd -- --http 127.0.0.1:7890 --socket /tmp/trusty-embedderd.sock
 ```
 
 All logs are written to **stderr**. Stdout is reserved for JSON-RPC frames in
@@ -141,12 +143,10 @@ cargo install trusty-search --locked   # installs trusty-search AND trusty-embed
 trusty-search start                    # auto-spawns trusty-embedderd --stdio, supervised
 ```
 
-For users who want **only** the embedding daemon (e.g. trusty-memory without
-trusty-search), the standalone install is still available:
-
-```bash
-cargo install trusty-embedderd --locked
-```
+As of #1318 (single-owner-per-binary) the `trusty-embedderd` **binary** is no
+longer produced by this crate standalone — it is installed solely via
+`cargo install trusty-search` (the host that bundles and supervises it). This
+crate is still published to crates.io as a **library** for dependent crates.
 
 Override with `TRUSTY_EMBEDDER=in-process` to use the legacy in-process path.
 

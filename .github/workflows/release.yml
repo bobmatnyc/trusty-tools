@@ -75,11 +75,12 @@ jobs:
       version:  ${{ steps.parse.outputs.version }}
       matrix:   ${{ steps.matrix.outputs.matrix }}
       dry_run:  ${{ steps.parse.outputs.dry_run }}
-      # Why: bundled crates (trusty-console, trusty-bm25-daemon, trusty-embedderd)
-      # are published to crates.io as library/sidecar crates but ship their
-      # binaries INSIDE a parent crate under the Single-Install Convention
-      # (epic #943).  They have no standalone distributable binary target, so
-      # the build and release jobs must be skipped when one of their tags fires.
+      # Why (#1318): library-only sidecar crates (trusty-bm25-daemon,
+      # trusty-embedderd) are published to crates.io as LIBRARIES but ship their
+      # binaries INSIDE a host crate (single-owner-per-binary). They have no
+      # standalone distributable binary target, so the build and release jobs
+      # must be skipped when one of their tags fires. (trusty-console is NO
+      # LONGER bundled — it now has its own standalone release job.)
       bundled:  ${{ steps.config.outputs.bundled }}
 
     steps:
@@ -131,17 +132,17 @@ jobs:
           CRATE="${{ steps.parse.outputs.crate }}"
 
           if [[ "$CRATE" == "trusty-search" ]]; then
-            # Binaries: trusty-search + trusty-embedderd + trusty-console
-            # All three [[bin]] targets are declared in trusty-search/Cargo.toml.
-            # trusty-console was added as part of the Single-Install Convention
-            # (epic #943) so `cargo install trusty-search` installs the dashboard.
+            # Binaries: trusty-search + trusty-embedderd
+            # Both [[bin]] targets are declared in trusty-search/Cargo.toml.
+            # trusty-console was REMOVED from the install surface in #1318
+            # (single-owner-per-binary); it now ships as its own release job.
             # UI-embedding crate: SKIP_UI_BUILD=1 required for cargo publish / build.
             # Default features: bundled-ort (static ORT, glibc ≥ 2.38 / macOS).
             # AL2023 variant: --no-default-features --features load-dynamic
             #   (trusty-search has a bare `load-dynamic` feature; there is NO
             #    `http-server` feature in this crate — confirmed from Cargo.toml).
             CARGO_PKG="trusty-search"
-            BINARIES="trusty-search trusty-embedderd trusty-console"
+            BINARIES="trusty-search trusty-embedderd"
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
@@ -150,16 +151,18 @@ jobs:
             AL2023_FEATURES="load-dynamic"
 
           elif [[ "$CRATE" == "trusty-memory" ]]; then
-            # Binaries: trusty-memory + trusty-bm25-daemon + trusty-console
-            # All three [[bin]] targets confirmed in trusty-memory/Cargo.toml.
-            # trusty-memory-mcp-bridge was removed; trusty-console was added as
-            # part of the Single-Install Convention (epic #943).
+            # Binaries: trusty-memory + trusty-bm25-daemon
+            # Both [[bin]] targets confirmed in trusty-memory/Cargo.toml.
+            # trusty-console was REMOVED from the install surface in #1318
+            # (single-owner-per-binary); it now ships as its own release job.
+            # (The trusty-memory-mcp-bridge compat shim is built but not part of
+            # the released asset set, matching prior release behaviour.)
             # trusty-memory bin has required-features=["axum-server"]; default
-            # features include axum-server so all three build with default features.
+            # features include axum-server so all build with default features.
             # UI-embedding crate: SKIP_UI_BUILD=1
             # No ORT bundling (BM25 sidecar, no ONNX): no AL2023 variant.
             CARGO_PKG="trusty-memory"
-            BINARIES="trusty-memory trusty-bm25-daemon trusty-console"
+            BINARIES="trusty-memory trusty-bm25-daemon"
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
@@ -168,17 +171,17 @@ jobs:
             AL2023_FEATURES=""
 
           elif [[ "$CRATE" == "trusty-analyze" ]]; then
-            # Binaries: trusty-analyze + trusty-console
-            # Both [[bin]] targets confirmed in trusty-analyze/Cargo.toml.
-            # trusty-console was added as part of the Single-Install Convention
-            # (epic #943) so `cargo install trusty-analyze` installs the dashboard.
+            # Binaries: trusty-analyze
+            # The trusty-analyze [[bin]] target is confirmed in trusty-analyze/Cargo.toml.
+            # trusty-console was REMOVED from the install surface in #1318
+            # (single-owner-per-binary); it now ships as its own release job.
             # required-features=["http-server"]; default = ["http-server","bundled-ort"].
             # UI-embedding crate: SKIP_UI_BUILD=1
             # ORT-bundling (bundled-ort default): AL2023 load-dynamic variant needed.
             # trusty-analyze DOES have an `http-server` feature (unlike trusty-search),
             # so the AL2023 flags are: --no-default-features --features http-server,load-dynamic.
             CARGO_PKG="trusty-analyze"
-            BINARIES="trusty-analyze trusty-console"
+            BINARIES="trusty-analyze"
             SKIP_UI_BUILD="true"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
@@ -187,14 +190,14 @@ jobs:
             AL2023_FEATURES="http-server,load-dynamic"
 
           elif [[ "$CRATE" == "trusty-review" ]]; then
-            # Binaries: trusty-review + trusty-console
-            # Both [[bin]] targets confirmed in trusty-review/Cargo.toml.
-            # trusty-console was added as part of the Single-Install Convention
-            # (epic #943) so `cargo install trusty-review` installs the dashboard.
+            # Binaries: trusty-review
+            # The trusty-review [[bin]] target is confirmed in trusty-review/Cargo.toml.
+            # trusty-console was REMOVED from the install surface in #1318
+            # (single-owner-per-binary); it now ships as its own release job.
             # required-features=[]. Default features = ["http-server","mcp"].
             # No ORT, no UI embedding. No SKIP_UI_BUILD, no AL2023 variant.
             CARGO_PKG="trusty-review"
-            BINARIES="trusty-review trusty-console"
+            BINARIES="trusty-review"
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
@@ -203,18 +206,19 @@ jobs:
             AL2023_FEATURES=""
 
           elif [[ "$CRATE" == "trusty-mpm" ]]; then
-            # Binaries: tm, trusty-mpm, trusty-console
-            # trusty-mpm/Cargo.toml defines [[bin]] targets: tm, trusty-mpm, trusty-console,
+            # Binaries: tm, trusty-mpm
+            # trusty-mpm/Cargo.toml defines [[bin]] targets: tm, trusty-mpm,
             # plus shim binaries not shipped in the distribution (trusty-mpmd, trusty-mpm-tui,
             # trusty-mpm-telegram) and Tauri GUI (trusty-mpm-gui, excluded — needs webview).
-            # trusty-console was added as part of the Single-Install Convention (epic #943).
+            # trusty-console was REMOVED from the install surface in #1318
+            # (single-owner-per-binary); it now ships as its own release job.
             # The `cli` feature embeds daemon + tui + telegram as SUBCOMMANDS of tm/trusty-mpm;
             # the shim binaries are thin entry-point wrappers not part of the user-facing CLI.
             # Default features = ["cli","daemon"] which already implies daemon+tui+telegram
             # via the cli → daemon+tui+telegram dependency chain; no explicit --features needed.
             # No SKIP_UI_BUILD, no AL2023 variant.
             CARGO_PKG="trusty-mpm"
-            BINARIES="tm trusty-mpm trusty-console"
+            BINARIES="tm trusty-mpm"
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
@@ -249,24 +253,41 @@ jobs:
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
 
-          # ── Bundled crates — graceful skip, not an error ─────────────────────
-          # These crates are published to crates.io as library/sidecar packages
-          # under the Single-Install Convention (epic #943).  Their binaries ship
-          # INSIDE a parent distributable crate and there is NO standalone binary
+          elif [[ "$CRATE" == "trusty-console" ]]; then
+            # Binaries: trusty-console
+            # As of #1318 (single-owner-per-binary) the standalone trusty-console
+            # crate is the SOLE producer of the `trusty-console` binary — it was
+            # de-bundled from trusty-search/memory/analyze/review/mpm to fix the
+            # cargo `.crates2.json` binary-ownership collisions (#1262). It now has
+            # its own standalone release job.
+            # Single [[bin]] `trusty-console` at src/main.rs (delegates to
+            # `trusty_console::run()`). No required-features.
+            # UI-embedding crate (embeds ui/dist via rust-embed): SKIP_UI_BUILD=1.
+            # No ORT, no AL2023 variant.
+            CARGO_PKG="trusty-console"
+            BINARIES="trusty-console"
+            SKIP_UI_BUILD="true"
+            CARGO_FEATURES=""
+            NO_DEFAULT_FEATURES="false"
+            AL2023_VARIANT="false"
+            AL2023_NO_DEFAULT="false"
+            AL2023_FEATURES=""
+
+          # ── Library-only sidecar crates — graceful skip, not an error ────────
+          # As of #1318 (single-owner-per-binary), these two crates are published
+          # to crates.io as LIBRARIES ONLY. Their binaries are produced solely by
+          # the host crate that bundles + spawns them (search owns trusty-embedderd,
+          # memory owns trusty-bm25-daemon), so there is NO standalone binary
           # target to build here:
           #
-          #   trusty-console    — bundled into trusty-search, trusty-memory,
-          #                       trusty-analyze, trusty-review, trusty-mpm
-          #   trusty-bm25-daemon — bundled into trusty-memory
-          #   trusty-embedderd   — bundled into trusty-search
+          #   trusty-bm25-daemon — binary produced by trusty-memory
+          #   trusty-embedderd   — binary produced by trusty-search
           #
-          # When one of these tags fires (e.g. trusty-console-v0.3.0), we emit
+          # When one of these tags fires (e.g. trusty-embedderd-v0.3.4) we emit
           # bundled=true so the build / release / homebrew-bump jobs are skipped.
-          elif [[ "$CRATE" == "trusty-console" || \
-                  "$CRATE" == "trusty-bm25-daemon" || \
+          elif [[ "$CRATE" == "trusty-bm25-daemon" || \
                   "$CRATE" == "trusty-embedderd" ]]; then
-            echo "Skipping bundled crate '$CRATE' — ships inside parent crate(s)."
-            echo "  trusty-console   → trusty-search, trusty-memory, trusty-analyze, trusty-review, trusty-mpm"
+            echo "Skipping library-only sidecar crate '$CRATE' — binary ships inside its host crate."
             echo "  trusty-bm25-daemon → trusty-memory"
             echo "  trusty-embedderd   → trusty-search"
             echo "No standalone binary to build. Exiting successfully."
@@ -276,9 +297,9 @@ jobs:
           else
             echo "ERROR: crate '$CRATE' is not in the release config map."
             echo "  Distributable crates: trusty-search, trusty-memory, trusty-analyze,"
-            echo "    trusty-review, trusty-mpm, trusty-git-analytics, trusty-code"
-            echo "  Bundled crates (skipped — no standalone binary): trusty-console,"
-            echo "    trusty-bm25-daemon, trusty-embedderd"
+            echo "    trusty-review, trusty-mpm, trusty-git-analytics, trusty-code, trusty-console"
+            echo "  Library-only sidecars (skipped — no standalone binary): trusty-bm25-daemon,"
+            echo "    trusty-embedderd"
             echo "  Out-of-scope (publish=false / internal): trusty-agents*, trusty-mpm-gui,"
             echo "    tc-services, cto-assistant, trusty-cto-db, trusty-gworkspace,"
             echo "    trusty-common"
@@ -890,12 +911,16 @@ jobs:
 
           # ── Determine binaries to install ──────────────────────────────────
           # Map known multi-binary crates; default is the crate name itself.
+          # NOTE (#1318): trusty-console was de-bundled — it is its own formula
+          # now (single-owner-per-binary), so it no longer appears in any host's
+          # INSTALL_BINS. The trusty-console case below installs only its own bin.
           case "${CRATE}" in
-            trusty-search)   INSTALL_BINS="trusty-search trusty-embedderd trusty-console" ;;
-            trusty-memory)   INSTALL_BINS="trusty-memory trusty-bm25-daemon trusty-console" ;;
-            trusty-analyze)  INSTALL_BINS="trusty-analyze trusty-console" ;;
-            trusty-review)   INSTALL_BINS="trusty-review trusty-console" ;;
-            trusty-mpm)      INSTALL_BINS="tm trusty-mpm trusty-console" ;;
+            trusty-search)   INSTALL_BINS="trusty-search trusty-embedderd" ;;
+            trusty-memory)   INSTALL_BINS="trusty-memory trusty-bm25-daemon" ;;
+            trusty-analyze)  INSTALL_BINS="trusty-analyze" ;;
+            trusty-review)   INSTALL_BINS="trusty-review" ;;
+            trusty-mpm)      INSTALL_BINS="tm trusty-mpm" ;;
+            trusty-console)  INSTALL_BINS="trusty-console" ;;
             trusty-git-analytics) INSTALL_BINS="tga" ;;
             trusty-code)     INSTALL_BINS="tcode" ;;
             *)               INSTALL_BINS="${CRATE}" ;;

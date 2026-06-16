@@ -1,5 +1,17 @@
 # Changelog — trusty-memory
 
+## [0.15.5] — 2026-06-16
+
+### Changed (closes part of #1318)
+
+- **De-bundled `trusty-console`.** Removed the bundled `trusty-console`
+  `[[bin]]` shim and dependency. `cargo install trusty-memory` now produces
+  `trusty-memory` and `trusty-bm25-daemon` only. The console is its own
+  single-owner crate — install it with `cargo install trusty-console`. This
+  resolves the cargo binary-ownership collision that forced `--force` on
+  install / self-`upgrade` (#1262). `trusty-bm25-daemon` is still bundled here
+  (single-owner: memory is its sole producer).
+
 ## [0.15.2] — 2026-06-09
 
 ### Fixed

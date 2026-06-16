@@ -6,8 +6,10 @@
 //! `trusty_console::run()` without duplicating any logic. This mirrors the
 //! exact pattern used by trusty-embedderd (bundled into trusty-search via
 //! issue #187) and trusty-bm25-daemon (bundled into trusty-memory via PR #190).
-//! What: Re-exports all public submodules and provides `run()` as the
-//! canonical library entry point that parses argv and dispatches to subcommands.
+//! What: Re-exports all public submodules and provides `run_from(argv)` as the
+//! canonical library entry point that parses an explicit argv vector and
+//! dispatches to subcommands; `run()` is a thin wrapper passing the process's
+//! global argv.
 //! Test: `cargo test -p trusty-console` exercises the CLI parsing tests defined
 //! in the submodules.
 
@@ -18,6 +20,24 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing::info;
 use trusty_common::{init_tracing, shutdown_signal, write_daemon_addr};
+
+/// Default console HTTP bind address (used for both serve and `port` reporting).
+///
+/// Why: A single constant keeps the serve default and the `port` verb's
+/// fallback in lock-step so `tctl` never discovers a port the console would
+/// not actually bind to.
+/// What: `127.0.0.1:7788` — the canonical localhost console address.
+/// Test: `test_resolve_reported_addr_default` asserts the `port` verb falls
+/// back to this value's host/port when no discovery file is present.
+pub const DEFAULT_HTTP: &str = "127.0.0.1:7788";
+
+/// Default console port, parsed once from [`DEFAULT_HTTP`].
+///
+/// Why: The `port` verb reports this when no running console has written a
+/// discovery file yet.
+/// What: `7788`.
+/// Test: covered by the `port` verb tests below.
+pub const DEFAULT_PORT: u16 = 7788;
 
 pub mod bind;
 pub mod connector;
@@ -50,13 +70,35 @@ pub struct Cli {
 
 /// Available subcommands.
 ///
-/// Why: P0/P1 only has `serve`; future phases add `status` (CLI-only) etc.
+/// Why: `serve` runs the dashboard; `port` is a non-serving contract verb that
+/// reports the console's bound (or default) port so orchestrators like `tctl`
+/// can discover/launch the console without parsing logs.
 /// What: Clap enum; each variant carries its own args.
 /// Test: Subcommand selection tested via `Cli::parse_from`.
 #[derive(Debug, Subcommand)]
 pub enum Commands {
     /// Start the HTTP server and serve the console dashboard.
     Serve(ServeArgs),
+    /// Report the console's bound (or default) HTTP port and exit.
+    Port(PortArgs),
+}
+
+/// Arguments for `trusty-console port`.
+///
+/// Why: `tctl` (the orchestrator, issue #1316) discovers the console URL by
+/// spawning `trusty-console port --json` and parsing the `{addr,port}`
+/// envelope (see trusty-controller `os_env.rs`). The verb must exist and be
+/// machine-readable for that discovery to work after the console is de-bundled
+/// from the host crates (#1318).
+/// What: A single `--json` flag selecting JSON output (default is a single
+/// human-readable port line).
+/// Test: `test_port_args_json_flag` / `test_port_args_default` below.
+#[derive(Debug, Parser)]
+pub struct PortArgs {
+    /// Emit a JSON envelope `{"addr":"<host>","port":<u16>}` instead of a bare
+    /// port number. Consumed by `tctl` console discovery.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
 }
 
 /// Arguments for `trusty-console serve`.
@@ -107,25 +149,84 @@ pub struct ServeArgs {
 
 // ─── public entry point ────────────────────────────────────────────────────
 
-/// Library entry point for the trusty-console daemon.
+/// Library entry point for the trusty-console daemon, using the process argv.
 ///
-/// Why: Bundled shim binaries inside host crates (trusty-search, trusty-memory,
-/// trusty-analyze, trusty-review, trusty-mpm) call this function so all daemon
-/// logic stays here in the library crate — no duplication. This mirrors the
-/// pattern of `trusty_embedderd::run()` (issue #187) and
-/// `trusty_bm25_daemon::run()` (PR #190).
-/// What: Initialises tracing, parses argv via `Cli::parse()`, and dispatches
-/// to the matching subcommand handler. Returns `Ok(())` after clean shutdown.
-/// Test: Direct CLI-arg tests in `tests` module below; integration via
-/// `cargo test -p trusty-console`.
+/// Why: The standalone `trusty-console` crate is now the SOLE producer of the
+/// `trusty-console` binary (#1318 — de-bundled from the 5 host crates). The
+/// thin `main.rs` calls this, which simply forwards the process's global argv
+/// to `run_from`.
+/// What: Collects `std::env::args()` and delegates to [`run_from`].
+/// Test: Indirectly via the `run_from` tests below and the binary smoke test.
 pub async fn run() -> Result<()> {
+    run_from(std::env::args().collect()).await
+}
+
+/// Library entry point parameterised on an explicit argv vector.
+///
+/// Why: Decoupling argument parsing from the process's global argv (#1318)
+/// lets callers (tests, future embedders) drive the console deterministically
+/// without mutating `std::env`. Previously `run()` called `Cli::parse()`,
+/// which read global argv and could not be exercised in isolation.
+/// What: Initialises tracing, parses `argv` via `Cli::parse_from`, and
+/// dispatches to the matching subcommand handler. `argv[0]` is the program
+/// name (clap convention). Returns `Ok(())` after clean shutdown.
+/// Test: `test_run_from_port_json_outputs_envelope` drives this directly with
+/// a synthetic argv; integration via `cargo test -p trusty-console`.
+pub async fn run_from(argv: Vec<String>) -> Result<()> {
     init_tracing(1);
 
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(argv);
 
     match cli.command {
         Commands::Serve(args) => run_serve(args).await,
+        Commands::Port(args) => run_port(args),
     }
+}
+
+/// Resolve the console's reportable HTTP address (host, port).
+///
+/// Why: The `port` verb must report the LIVE port of a running console when
+/// one exists, falling back to the default otherwise — so `tctl` discovery
+/// (issue #1316) points at the real dashboard, not a guess.
+/// What: Reads the `trusty-console` discovery file via
+/// `trusty_common::read_daemon_addr`; on a parseable `host:port` returns that
+/// pair, else falls back to ([`DEFAULT_HTTP`] host, [`DEFAULT_PORT`]). Never
+/// errors — discovery failures degrade to the default.
+/// Test: `test_resolve_reported_addr_default` (no file → default).
+pub fn resolve_reported_addr() -> (String, u16) {
+    if let Ok(Some(recorded)) = trusty_common::read_daemon_addr("trusty-console")
+        && let Ok(sa) = recorded.parse::<std::net::SocketAddr>()
+    {
+        return (sa.ip().to_string(), sa.port());
+    }
+    let default_host = DEFAULT_HTTP
+        .rsplit_once(':')
+        .map(|(h, _)| h.to_owned())
+        .unwrap_or_else(|| "127.0.0.1".to_owned());
+    (default_host, DEFAULT_PORT)
+}
+
+/// Run the `port` subcommand: print the console's bound/default port and exit.
+///
+/// Why: `tctl` console discovery spawns `trusty-console port --json` and
+/// parses a `{addr,port}` envelope (trusty-controller `os_env.rs`). This verb
+/// is the contract that makes that discovery work; without it the call exits
+/// non-zero and console discovery is silently broken (the latent bug fixed by
+/// #1318).
+/// What: Resolves the reportable address; with `--json` prints
+/// `{"addr":"<host>","port":<u16>}` to stdout, otherwise prints the bare port.
+/// Returns `Ok(())`.
+/// Test: `test_run_from_port_json_outputs_envelope`,
+/// `test_port_envelope_is_valid_json`.
+pub fn run_port(args: PortArgs) -> Result<()> {
+    let (addr, port) = resolve_reported_addr();
+    if args.json {
+        let envelope = serde_json::json!({ "addr": addr, "port": port });
+        println!("{envelope}");
+    } else {
+        println!("{port}");
+    }
+    Ok(())
 }
 
 /// Run the `serve` subcommand.
@@ -141,11 +242,9 @@ pub async fn run() -> Result<()> {
 /// Test: Server integration tests in `server.rs` cover the router directly
 /// without exercising this function (to avoid real TCP binding in unit tests).
 pub async fn run_serve(args: ServeArgs) -> Result<()> {
-    const DEFAULT_HTTP: &str = "127.0.0.1:7788";
-
     // ── resolve bind mode ───────────────────────────────────────────────────
     let mode = bind::BindMode::from_env_and_flags(&args.http, DEFAULT_HTTP, args.tailscale);
-    let port = bind::port_from_addr(&args.http, 7788);
+    let port = bind::port_from_addr(&args.http, DEFAULT_PORT);
     let addrs = bind::resolve_bind_addrs(&mode, port, bind::detect_tailscale_ipv4);
 
     // ── service setup ───────────────────────────────────────────────────────
@@ -363,6 +462,15 @@ pub async fn run_serve(args: ServeArgs) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Serialises tests that mutate the `TRUSTY_DATA_DIR_OVERRIDE` env var.
+    ///
+    /// Why: `std::env::set_var`/`remove_var` are process-global; parallel test
+    /// threads racing on them cause flaky failures. A module-level mutex makes
+    /// the override-set / call / override-clear sequence atomic per test.
+    /// What: a `()` mutex acquired at the top of each env-mutating test.
+    /// Test: used by the `port` verb tests below.
+    static DATA_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Why: default http address must be 127.0.0.1:7788 and tailscale off.
     /// What: parses `serve` with no flags and checks all defaults.
     /// Test: this test itself.
@@ -376,6 +484,7 @@ mod tests {
                 assert!(!args.tailscale);
                 assert_eq!(args.poll_interval, 15);
             }
+            other => panic!("expected Serve, got {other:?}"),
         }
     }
 
@@ -390,6 +499,7 @@ mod tests {
                 assert!(args.tailscale);
                 assert_eq!(args.http, "127.0.0.1:7788");
             }
+            other => panic!("expected Serve, got {other:?}"),
         }
     }
 
@@ -403,6 +513,7 @@ mod tests {
             Commands::Serve(args) => {
                 assert_eq!(args.http, "0.0.0.0:9000");
             }
+            other => panic!("expected Serve, got {other:?}"),
         }
     }
 
@@ -416,6 +527,124 @@ mod tests {
             Commands::Serve(args) => {
                 assert_eq!(args.poll_interval, 30);
             }
+            other => panic!("expected Serve, got {other:?}"),
         }
+    }
+
+    /// Why: the `port` subcommand must parse with a default (non-JSON) form so
+    /// the bare-port output path is reachable.
+    /// What: parses `port` and asserts `--json` defaults to false.
+    /// Test: this test itself.
+    #[test]
+    fn test_port_args_default() {
+        let cli = Cli::parse_from(["trusty-console", "port"]);
+        match cli.command {
+            Commands::Port(args) => assert!(!args.json),
+            other => panic!("expected Port, got {other:?}"),
+        }
+    }
+
+    /// Why: `tctl` invokes `trusty-console port --json`; the flag must parse.
+    /// What: parses `port --json` and asserts `json == true`.
+    /// Test: this test itself.
+    #[test]
+    fn test_port_args_json_flag() {
+        let cli = Cli::parse_from(["trusty-console", "port", "--json"]);
+        match cli.command {
+            Commands::Port(args) => assert!(args.json),
+            other => panic!("expected Port, got {other:?}"),
+        }
+    }
+
+    /// Why: when no console has written a discovery file, the reported port
+    /// must fall back to the canonical default so `tctl` still gets a usable
+    /// address.
+    /// What: calls `resolve_reported_addr` under an isolated data dir (no
+    /// discovery file present) and asserts the default host/port.
+    /// Test: this test itself; uses the data-dir override env to avoid reading
+    /// a real running console's file.
+    #[test]
+    fn test_resolve_reported_addr_default() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "trusty-console-port-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&tmp).expect("create temp data dir");
+        // SAFETY: guarded by data_dir_test_lock to serialise env mutation.
+        unsafe {
+            std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, &tmp);
+        }
+        let (addr, port) = resolve_reported_addr();
+        unsafe {
+            std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
+        }
+        assert_eq!(addr, "127.0.0.1");
+        assert_eq!(port, DEFAULT_PORT);
+    }
+
+    /// Why: the JSON envelope emitted by `run_port` must be valid JSON with the
+    /// `addr` and `port` keys that `tctl`'s `parse_console_port` consumes.
+    /// What: builds the same envelope `run_port` prints and round-trips it
+    /// through serde to assert structure.
+    /// Test: this test itself.
+    #[test]
+    fn test_port_envelope_is_valid_json() {
+        let envelope = serde_json::json!({ "addr": "127.0.0.1", "port": DEFAULT_PORT });
+        let s = envelope.to_string();
+        let v: serde_json::Value = serde_json::from_str(&s).expect("valid json");
+        assert_eq!(v.get("addr").and_then(|a| a.as_str()), Some("127.0.0.1"));
+        assert_eq!(
+            v.get("port").and_then(|p| p.as_u64()),
+            Some(DEFAULT_PORT as u64)
+        );
+    }
+
+    /// Why: the #1318 decoupling requires that an explicit argv parses to the
+    /// `Port` command and that the `port` handler runs without touching the
+    /// process's global argv. This exercises that parse → dispatch path.
+    /// What: parses `["trusty-console","port","--json"]` via `Cli::parse_from`
+    /// (the same call `run_from` makes) and runs `run_port` synchronously under
+    /// an isolated data dir; asserts the dispatch matches `Port` and the
+    /// handler returns Ok. Kept synchronous so the env-override mutex is never
+    /// held across an `await` (clippy::await_holding_lock).
+    /// Test: this test itself.
+    #[test]
+    fn test_run_from_port_json_outputs_envelope() {
+        let _guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!(
+            "trusty-console-runfrom-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&tmp).expect("create temp data dir");
+        // SAFETY: guarded by DATA_DIR_ENV_LOCK to serialise env mutation.
+        unsafe {
+            std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, &tmp);
+        }
+        let argv = [
+            "trusty-console".to_owned(),
+            "port".to_owned(),
+            "--json".to_owned(),
+        ];
+        let cli = Cli::parse_from(argv);
+        let result = match cli.command {
+            Commands::Port(args) => {
+                assert!(args.json, "argv --json should parse to json=true");
+                run_port(args)
+            }
+            other => panic!("expected Port, got {other:?}"),
+        };
+        unsafe {
+            std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
+        }
+        assert!(result.is_ok(), "run_port(port --json) should succeed");
     }
 }
