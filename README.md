@@ -183,9 +183,40 @@ documentation.
 
 ## Installation
 
-### With Homebrew (recommended for end users)
+### One-liner: `curl | sh` Bootstrap Installer
 
-The easiest way to install any trusty-* binary. First, add the tap:
+Install the full trusty-tools platform with one command (no Rust toolchain required):
+
+```bash
+curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh
+```
+
+This downloads the prebuilt `tctl` controller binary (SHA-256 verified), installs it to `~/.local/bin`, and runs `tctl install` to set up the rest of the platform (search, memory, analyze, review, console).
+
+**Non-interactive** (CI / scripted):
+```bash
+curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh -s -- -y
+```
+
+**Options** (environment variables):
+
+| Variable | Effect |
+|---|---|
+| `TRUSTY_VERSION` | Pin a specific version (e.g. `0.2.0`) |
+| `TRUSTY_INSTALL_DIR` | Override the install directory (default `~/.local/bin`) |
+| `TRUSTY_YES=1` | Skip all prompts (same as `-y`) |
+| `TRUSTY_FORCE=1` | Re-download even if already installed (same as `--force`) |
+| `TRUSTY_NO_MODIFY_PATH=1` | Don't modify your shell PATH |
+
+**Supported platforms:** macOS (Apple Silicon) and Linux (x86_64). For other platforms, build from source with `cargo install trusty-controller`.
+
+**Security:** The installer is served over HTTPS and every downloaded binary is SHA-256 verified against its published checksum. The installer script itself is not signed — review it before running if you require higher assurance: https://github.com/bobmatnyc/trusty-tools/blob/main/install.sh
+
+---
+
+### With Homebrew
+
+The easiest way to install individual trusty-* binaries via package manager. First, add the tap:
 
 ```bash
 brew tap bobmatnyc/trusty

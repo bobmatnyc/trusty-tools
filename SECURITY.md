@@ -1,5 +1,21 @@
 # Security Policy
 
+## Installer trust model
+
+The `curl | sh` bootstrap installer (`install.sh`) follows the same trust model as rustup:
+
+- **Transport integrity:** the script and all assets are fetched over HTTPS only. The installer aborts on any non-HTTPS URL or HTTP error.
+- **Binary integrity:** every downloaded binary tarball is verified against its published `.sha256` checksum before installation. A checksum mismatch aborts the install.
+- **Installer integrity:** the `install.sh` script itself is **not** cryptographically signed. HTTPS is the only integrity guarantee for the script. If you require higher assurance, download and review the script before executing it:
+  ```bash
+  curl -sSfO https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh
+  less install.sh   # review
+  sh install.sh
+  ```
+- **Idempotent re-runs:** when a matching version is already installed, the installer skips re-download and therefore skips checksum re-verification of the existing binary. Run with `--force` (or `TRUSTY_FORCE=1`) to always re-download and re-verify.
+
+---
+
 ## Supported Versions
 
 We maintain security updates for recent releases. The exact version support matrix is maintained in the individual crate CHANGELOG files (located in `crates/*/CHANGELOG.md`).
