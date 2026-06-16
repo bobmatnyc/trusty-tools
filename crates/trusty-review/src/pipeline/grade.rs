@@ -7,9 +7,15 @@
 //!   - REQUEST_CHANGES leaked to APPROVE* 64% of the time: High findings were
 //!     under-graded.
 //!
-//! The fix has two deterministic rules applied in `derive_verdict`:
+//! The fix has these deterministic rules applied in `derive_verdict`:
 //!
-//! 1. LOW-CONFIDENCE OVERRIDE (checked first): if ALL findings have confidence
+//! 0. SUBSTANTIVE-FINDING FILTER (#1343, applied first): findings that are
+//!    verifier-refuted (`Refuted` / `ErrorRefuted` / `TruncationRefuted`) OR carry
+//!    `confidence < 0.50` (`FLOOR_COUNT_MIN_CONFIDENCE`) are excluded from ALL
+//!    floor logic.  They are noise, never evidence — a `confidence:0.1` or refuted
+//!    finding must never harden the verdict.
+//!
+//! 1. LOW-CONFIDENCE OVERRIDE: if ALL substantive findings have confidence
 //!    ≤ 0.65 AND none are `High`-effort, force APPROVE — overriding even a
 //!    model-proposed APPROVE* downward.  Prevents APPROVE* over-fire on
 //!    clean PRs with speculative low-confidence findings.
@@ -18,6 +24,15 @@
 //!    As of #1015, Medium findings only count when `confidence > 0.80`
 //!    (`FLOOR_MIN_CONFIDENCE`); advisory-tier Medium findings (0.66–0.80)
 //!    must not force REQUEST_CHANGES on PRs the model judged clean.
+//!
+//! 3. SOURCE-OF-TRUTH RECONCILIATION (#1343): when the model's own verdict is a
+//!    clean `APPROVE`, a *count-based* REQUEST_CHANGES floor (≥2 Medium findings)
+//!    is capped at APPROVE* — it must not contradict the model's own APPROVE
+//!    review_body.  The grade is the model's primary signal; the count heuristic
+//!    may surface an advisory concern but may NOT harden an APPROVE into
+//!    REQUEST_CHANGES (which would loop the PM merge workflow forever).  A
+//!    High-effort (critical) finding is exempt — it still floors to BLOCK, because
+//!    BLOCK is grounded critical evidence, not a Medium-count heuristic.
 //!
 //!   | Finding set                                          | Minimum floor   |
 //!   |------------------------------------------------------|-----------------|
@@ -65,11 +80,16 @@
 //! `grade_high_confidence_medium_above_floor_threshold_escalates`,
 //! `derive_verdict_with_grade_grade_a_no_findings_approve`,
 //! `derive_verdict_with_grade_grade_f_no_findings_block`,
-//! `derive_verdict_with_grade_severity_overrides_grade_a`.
+//! `derive_verdict_with_grade_severity_overrides_grade_a`,
+//! `floor_excludes_refuted_and_low_confidence_findings` (#1343),
+//! `approve_b_plus_survives_refuted_and_low_confidence_findings` (#1343),
+//! `approve_b_plus_two_high_conf_medium_caps_at_approve_star` (#1343),
+//! `model_request_changes_review_body_still_surfaces_request_changes` (#1343),
+//! `high_effort_finding_still_overrides_approve` (#1343).
 
 use tracing::debug;
 
-use crate::models::{Effort, Finding, Verdict};
+use crate::models::{Effort, Finding, Verdict, VerifyOutcome};
 use crate::pipeline::letter_grade::{Grade, clamp_grade_to_verdict, verdict_for_grade};
 
 // ─── Confidence thresholds ────────────────────────────────────────────────────
@@ -101,6 +121,20 @@ const LOW_CONFIDENCE_THRESHOLD: f32 = 0.65;
 /// Test: `grade_advisory_medium_below_floor_threshold_does_not_escalate`,
 /// `grade_high_confidence_medium_above_floor_threshold_escalates`.
 const FLOOR_MIN_CONFIDENCE: f32 = 0.80;
+
+/// Confidence floor below which a finding is excluded from verdict hardening
+/// entirely (closes #1343).
+///
+/// Why: the calibration bug in #1343 showed the structured verdict drifting to
+/// REQUEST_CHANGES/D+ while the model's own `review_body` said APPROVE/B+, partly
+/// driven by speculative findings carrying `confidence: 0.1` (and verifier-refuted
+/// findings, which are demoted to 0.10 by `VERIFY_REFUTED_CONFIDENCE`).  Such
+/// findings must never count toward any floor — they are noise, not evidence.
+/// What: any finding with `confidence < FLOOR_COUNT_MIN_CONFIDENCE` is dropped
+/// from the severity-floor input set (alongside any verifier-refuted finding).
+/// Test: `floor_excludes_refuted_and_low_confidence_findings`,
+/// `approve_b_plus_survives_refuted_and_low_confidence_findings`.
+const FLOOR_COUNT_MIN_CONFIDENCE: f32 = 0.50;
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
@@ -134,27 +168,50 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
         return Verdict::Unknown;
     }
 
-    // Low-confidence override (ceiling): if ALL findings are advisory-only
-    // (confidence ≤ threshold) AND none are High-effort, the batch is noise.
+    // #1343: exclude refuted and sub-0.50-confidence findings from ALL floor
+    // logic.  A verifier-refuted finding (demoted to 0.10) or a speculative
+    // `confidence: 0.1` finding is noise, not evidence — it must never harden the
+    // verdict above what the model holistically concluded.  This is the source-of-
+    // truth reconciliation: the floor only sees substantive findings.
+    let substantive: Vec<&Finding> = findings.iter().filter(|f| is_substantive(f)).collect();
+
+    // Low-confidence override (ceiling): if ALL substantive findings are advisory-
+    // only (confidence ≤ threshold) AND none are High-effort, the batch is noise.
     // Override the model down to APPROVE — this specifically prevents APPROVE*
     // over-fire (Fix 4).  High-effort findings escape this gate: a confirmed
     // bug with low confidence should still BLOCK, not disappear.
-    let has_high = findings.iter().any(|f| f.effort == Effort::High);
-    let all_low_confidence = !findings.is_empty()
-        && findings
+    let has_high = substantive.iter().any(|f| f.effort == Effort::High);
+    let all_low_confidence = !substantive.is_empty()
+        && substantive
             .iter()
             .all(|f| f.confidence <= LOW_CONFIDENCE_THRESHOLD);
 
     if all_low_confidence && !has_high {
         debug!(
             model_verdict = %model_proposed,
-            "low-confidence override: all findings ≤0.65 confidence, no High-effort → APPROVE"
+            "low-confidence override: all substantive findings ≤0.65 confidence, no High-effort → APPROVE"
         );
         return Verdict::Approve;
     }
 
     // Severity floor: take the stricter of model-proposed and severity-derived.
-    let floor = severity_floor(findings);
+    let mut floor = severity_floor(&substantive);
+
+    // #1343: source-of-truth reconciliation.  When the model holistically judged
+    // the change APPROVE, a *count-based* REQUEST_CHANGES floor (≥2 Medium findings)
+    // must NOT override that judgment into REQUEST_CHANGES — that is exactly the
+    // calibration bug where APPROVE/B+ drifted to REQUEST_CHANGES/D+.  Cap the
+    // count-based floor at APPROVE* (advisory) in that case.  High-effort findings
+    // are unaffected: a genuine critical (BLOCK floor) still escalates an APPROVE,
+    // because BLOCK is grounded critical evidence, not a count heuristic.
+    if model_proposed == Verdict::Approve && floor == Verdict::RequestChanges {
+        debug!(
+            "source-of-truth reconciliation: model APPROVE + count-based REQUEST_CHANGES floor \
+             → capping floor at APPROVE* (no Medium-count override of an APPROVE review_body)"
+        );
+        floor = Verdict::ApproveWithReservations;
+    }
+
     let final_verdict = stricter_of(model_proposed.clone(), floor.clone());
 
     debug!(
@@ -165,6 +222,27 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
     );
 
     final_verdict
+}
+
+/// Return `true` if a finding is substantive enough to count toward the verdict
+/// floor (closes #1343).
+///
+/// Why: refuted findings and very-low-confidence speculation must never harden
+/// the verdict.  The #1343 calibration bug surfaced REQUEST_CHANGES/D+ on PRs the
+/// model graded APPROVE/B+ partly because `verified:"refuted"` findings (demoted to
+/// 0.10) and raw `confidence:0.1` findings were still fed into the severity floor.
+/// What: returns `false` when the finding is any refutation variant
+/// (`Refuted` / `ErrorRefuted` / `TruncationRefuted`) OR its confidence is below
+/// `FLOOR_COUNT_MIN_CONFIDENCE` (0.50); `true` otherwise.
+/// Test: `floor_excludes_refuted_and_low_confidence_findings`.
+fn is_substantive(f: &Finding) -> bool {
+    let refuted = matches!(
+        f.verified,
+        Some(VerifyOutcome::Refuted)
+            | Some(VerifyOutcome::ErrorRefuted { .. })
+            | Some(VerifyOutcome::TruncationRefuted)
+    );
+    !refuted && f.confidence >= FLOOR_COUNT_MIN_CONFIDENCE
 }
 
 // ─── Floor computation ────────────────────────────────────────────────────────
@@ -195,7 +273,10 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
 /// `grade_one_medium_yields_approve_star`,
 /// `grade_advisory_medium_below_floor_threshold_does_not_escalate`,
 /// `grade_high_confidence_medium_above_floor_threshold_escalates`.
-fn severity_floor(findings: &[Finding]) -> Verdict {
+///
+/// As of #1343 the caller pre-filters refuted / sub-0.50-confidence findings via
+/// `is_substantive`, so this function only ever sees substantive findings.
+fn severity_floor(findings: &[&Finding]) -> Verdict {
     if findings.is_empty() {
         return Verdict::Approve;
     }

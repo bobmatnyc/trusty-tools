@@ -10,11 +10,24 @@
 //! Test: this file is the test module.
 
 use super::*;
-use crate::models::Finding;
+use crate::models::{Finding, VerifyOutcome};
 use crate::pipeline::letter_grade::Grade;
 
 fn finding(effort: Effort, confidence: f32) -> Finding {
     Finding::new("src/lib.rs", "test", "desc", "", confidence, effort)
+}
+
+/// Build a finding with a `verified` outcome already recorded.
+///
+/// Why: the #1343 regression fixtures need findings tagged `Refuted` to assert
+/// they are excluded from the verdict floor.
+/// What: constructs a finding, sets its `verified` field, returns it.
+/// Test: used by `floor_excludes_refuted_and_low_confidence_findings` and
+/// `approve_b_plus_survives_refuted_and_low_confidence_findings`.
+fn verified_finding(effort: Effort, confidence: f32, outcome: VerifyOutcome) -> Finding {
+    let mut f = finding(effort, confidence);
+    f.verified = Some(outcome);
+    f
 }
 
 // ── Tier 1: Critical / High ──────────────────────────────────────────────────
@@ -60,10 +73,13 @@ fn grade_two_medium_yields_request_changes() {
     assert_eq!(verdict, Verdict::RequestChanges);
 }
 
-/// Three high-confidence Medium findings (confidence > 0.80) must floor to REQUEST_CHANGES.
+/// Three high-confidence Medium findings, but the MODEL itself said APPROVE_STAR
+/// → REQUEST_CHANGES.
 ///
-/// Why: with confidence > FLOOR_MIN_CONFIDENCE, three Medium findings are genuine
-/// concerns warranting REQUEST_CHANGES (#1015).
+/// Why: when the model's own verdict is APPROVE* (not a clean APPROVE), the
+/// count-based floor is free to escalate to REQUEST_CHANGES — the model already
+/// flagged reservations, so the floor is not contradicting an APPROVE review_body.
+/// What: model APPROVE* + three Medium@0.85 → floor REQUEST_CHANGES (stricter wins).
 #[test]
 fn grade_three_medium_yields_request_changes() {
     let findings = vec![
@@ -71,8 +87,32 @@ fn grade_three_medium_yields_request_changes() {
         finding(Effort::Medium, 0.85),
         finding(Effort::Medium, 0.85),
     ];
-    let verdict = derive_verdict(Verdict::Approve, &findings);
+    let verdict = derive_verdict(Verdict::ApproveWithReservations, &findings);
     assert_eq!(verdict, Verdict::RequestChanges);
+}
+
+/// #1343: a clean model APPROVE must NOT be count-overridden to REQUEST_CHANGES by
+/// the Medium-count floor — it caps at APPROVE*.
+///
+/// Why: this is the core calibration bug.  The model holistically judged the change
+/// APPROVE; a count-based REQUEST_CHANGES floor (≥2 high-confidence Mediums) must
+/// not contradict the model's own verdict.  The floor still surfaces the concern as
+/// an advisory APPROVE* (not silent APPROVE), but never hardens an APPROVE
+/// review_body to REQUEST_CHANGES.
+/// What: model APPROVE + three Medium@0.85 → APPROVE* (capped, not REQUEST_CHANGES).
+#[test]
+fn grade_model_approve_caps_medium_count_floor_at_approve_star() {
+    let findings = vec![
+        finding(Effort::Medium, 0.85),
+        finding(Effort::Medium, 0.85),
+        finding(Effort::Medium, 0.85),
+    ];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::ApproveWithReservations,
+        "model APPROVE must cap the Medium-count floor at APPROVE* (#1343)"
+    );
 }
 
 // ── Tier 3: Exactly 1 Medium ─────────────────────────────────────────────────
@@ -395,22 +435,141 @@ fn grade_advisory_medium_below_floor_threshold_does_not_escalate() {
     );
 }
 
-/// Two Medium findings ABOVE the floor threshold DO escalate appropriately.
+/// Two Medium findings ABOVE the floor threshold DO escalate when the model did
+/// not give a clean APPROVE.
 ///
 /// Why: confirms the complementary behavior — the fix is calibrated, not a
-/// blanket suppression.  Well-grounded Medium findings (confidence > 0.80)
-/// still trigger REQUEST_CHANGES.
-/// What: two Medium@0.85 → both count → floor = REQUEST_CHANGES.
+/// blanket suppression.  Well-grounded Medium findings (confidence > 0.80) still
+/// trigger REQUEST_CHANGES when the model itself flagged reservations (APPROVE*).
+/// What: model APPROVE* + two Medium@0.85 → both count → floor = REQUEST_CHANGES.
 /// Test: this test itself.
 #[test]
 fn grade_high_confidence_medium_above_floor_threshold_escalates() {
     let findings = vec![finding(Effort::Medium, 0.85), finding(Effort::Medium, 0.85)];
-    let verdict = derive_verdict(Verdict::Approve, &findings);
+    let verdict = derive_verdict(Verdict::ApproveWithReservations, &findings);
     assert_eq!(
         verdict,
         Verdict::RequestChanges,
-        "Medium findings above FLOOR_MIN_CONFIDENCE must still trigger REQUEST_CHANGES"
+        "Medium findings above FLOOR_MIN_CONFIDENCE must still trigger REQUEST_CHANGES \
+         when the model did not give a clean APPROVE"
     );
+}
+
+// ── #1343 regression: structured verdict/grade must honor the model review_body ─
+
+/// #1343: refuted and sub-0.50-confidence findings are excluded from the floor.
+///
+/// Why: the calibration bug surfaced REQUEST_CHANGES/D+ partly because
+/// `verified:"refuted"` findings (demoted to 0.10) and raw `confidence:0.1`
+/// findings were still fed into the severity floor.  They must be treated as noise.
+/// What: model APPROVE + one refuted High@0.95 + one Medium@0.1 → APPROVE (no floor
+/// escalation, because neither finding is substantive).
+/// Test: this test itself.
+#[test]
+fn floor_excludes_refuted_and_low_confidence_findings() {
+    let findings = vec![
+        verified_finding(Effort::High, 0.10, VerifyOutcome::Refuted),
+        finding(Effort::Medium, 0.10),
+    ];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::Approve,
+        "refuted + sub-0.50-confidence findings must not harden the verdict (#1343)"
+    );
+}
+
+/// #1343 end-to-end: a model review_body of APPROVE / B+ must NOT surface a
+/// structured REQUEST_CHANGES / D+, even with refuted + low-confidence findings.
+///
+/// Why: this is the exact PR #1342 evidence pattern — the inner reviewer said
+/// APPROVE/B+ every round while refuted (confidence 0.10) and other low-confidence
+/// findings were present.  The structured verdict/grade must reconcile to the
+/// model's own APPROVE/B+ rather than hardening to REQUEST_CHANGES/D+.
+/// What: model APPROVE, grade B+, findings = [refuted High@0.10, Medium@0.1,
+/// Low@0.3] → (APPROVE, B+).  Grade is NOT clamped to D+.
+/// Test: this test itself.
+#[test]
+fn approve_b_plus_survives_refuted_and_low_confidence_findings() {
+    let findings = vec![
+        verified_finding(Effort::High, 0.10, VerifyOutcome::Refuted),
+        finding(Effort::Medium, 0.10),
+        finding(Effort::Low, 0.30),
+    ];
+    let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::BPlus, &findings);
+    assert_eq!(
+        v,
+        Verdict::Approve,
+        "APPROVE review_body must not surface structured REQUEST_CHANGES (#1343)"
+    );
+    assert_eq!(
+        g,
+        Grade::BPlus,
+        "B+ grade must not be clamped down to D+ (#1343 footer/grade consistency)"
+    );
+}
+
+/// #1343: even high-confidence, non-refuted Medium findings cannot count-override a
+/// clean APPROVE/B+ review_body to REQUEST_CHANGES — they cap at APPROVE* / C+.
+///
+/// Why: the source-of-truth reconciliation: a count-based REQUEST_CHANGES floor
+/// must never contradict the model's own APPROVE verdict.  The concern is surfaced
+/// as an advisory APPROVE* (grade clamped to C+, the APPROVE* ceiling), never as a
+/// REQUEST_CHANGES that loops the PM merge workflow forever.
+/// What: model APPROVE, grade B+, two Medium@0.85 → (APPROVE*, C+).
+/// Test: this test itself.
+#[test]
+fn approve_b_plus_two_high_conf_medium_caps_at_approve_star() {
+    let findings = vec![finding(Effort::Medium, 0.85), finding(Effort::Medium, 0.85)];
+    let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::BPlus, &findings);
+    assert_eq!(
+        v,
+        Verdict::ApproveWithReservations,
+        "clean APPROVE must cap the Medium-count floor at APPROVE* (#1343)"
+    );
+    assert_eq!(
+        g,
+        Grade::CPlus,
+        "grade clamps to C+ (APPROVE* ceiling), never D+ (#1343)"
+    );
+}
+
+/// #1343 guardrail: a genuine model REQUEST_CHANGES must still surface
+/// REQUEST_CHANGES (the reconciliation only protects an APPROVE review_body).
+///
+/// Why: the fix must not over-correct — when the model itself requests changes,
+/// the structured verdict must honor that, not relax it.
+/// What: model REQUEST_CHANGES, grade D+, no findings → REQUEST_CHANGES / D+.
+/// Test: this test itself.
+#[test]
+fn model_request_changes_review_body_still_surfaces_request_changes() {
+    let (v, g) = derive_verdict_with_grade(Verdict::RequestChanges, Grade::DPlus, &[]);
+    assert_eq!(
+        v,
+        Verdict::RequestChanges,
+        "a genuine REQUEST_CHANGES review_body must still surface REQUEST_CHANGES (#1343)"
+    );
+    assert_eq!(g, Grade::DPlus);
+}
+
+/// #1343: a confirmed High finding still BLOCKs an APPROVE — verified critical
+/// evidence is allowed to override the model (the reconciliation is count-only).
+///
+/// Why: the source-of-truth reconciliation must not disarm the genuine safety net.
+/// A High-effort (critical) finding floors to BLOCK regardless of the model verdict,
+/// because BLOCK is grounded critical evidence, not a Medium-count heuristic.
+/// What: model APPROVE, grade B+, one High@0.95 (substantive, non-refuted) → BLOCK/F.
+/// Test: this test itself.
+#[test]
+fn high_effort_finding_still_overrides_approve() {
+    let findings = vec![finding(Effort::High, 0.95)];
+    let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::BPlus, &findings);
+    assert_eq!(
+        v,
+        Verdict::Block,
+        "a substantive High-effort finding must still BLOCK an APPROVE (#1343)"
+    );
+    assert_eq!(g, Grade::F);
 }
 
 /// A confirmed High finding still drives BLOCK even with a B+ grade (#1015 regression).
