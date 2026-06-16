@@ -75,12 +75,15 @@ jobs:
       version:  ${{ steps.parse.outputs.version }}
       matrix:   ${{ steps.matrix.outputs.matrix }}
       dry_run:  ${{ steps.parse.outputs.dry_run }}
-      # Why (#1318): library-only sidecar crates (trusty-bm25-daemon,
-      # trusty-embedderd) are published to crates.io as LIBRARIES but ship their
-      # binaries INSIDE a host crate (single-owner-per-binary). They have no
-      # standalone distributable binary target, so the build and release jobs
-      # must be skipped when one of their tags fires. (trusty-console is NO
-      # LONGER bundled — it now has its own standalone release job.)
+      # Why (#1318 + library-tag fix): `bundled=true` means "this tag has no
+      # standalone distributable binary, skip the build/release/homebrew jobs
+      # GREEN." It fires for any crate NOT in the binary-crate allowlist in the
+      # `config` step — i.e. all library-only crates. Examples: trusty-common
+      # (shared lib), trusty-bm25-daemon / trusty-embedderd (sidecar binaries
+      # that ship INSIDE a host crate, single-owner-per-binary), trusty-progress,
+      # the internal trusty-agents* libs, etc. Previously a library-only tag
+      # (e.g. trusty-common-v0.15.3) errored RED; it now green-skips. (trusty-console
+      # is NOT bundled — it has its own standalone release job.)
       bundled:  ${{ steps.config.outputs.bundled }}
 
     steps:
@@ -273,37 +276,52 @@ jobs:
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
 
-          # ── Library-only sidecar crates — graceful skip, not an error ────────
-          # As of #1318 (single-owner-per-binary), these two crates are published
-          # to crates.io as LIBRARIES ONLY. Their binaries are produced solely by
-          # the host crate that bundles + spawns them (search owns trusty-embedderd,
-          # memory owns trusty-bm25-daemon), so there is NO standalone binary
-          # target to build here:
+          # ── Library-only crates — GREEN-SKIP, never an error ─────────────────
+          # The branches ABOVE are the authoritative ALLOWLIST of binary-producing
+          # crates that ship a standalone distributable binary. Anything that does
+          # NOT match one of those branches falls through to here.
           #
-          #   trusty-bm25-daemon — binary produced by trusty-memory
-          #   trusty-embedderd   — binary produced by trusty-search
+          # Many workspace crates publish to crates.io as LIBRARIES ONLY and have
+          # no standalone binary target this workflow can build/package/upload:
           #
-          # When one of these tags fires (e.g. trusty-embedderd-v0.3.4) we emit
-          # bundled=true so the build / release / homebrew-bump jobs are skipped.
-          elif [[ "$CRATE" == "trusty-bm25-daemon" || \
-                  "$CRATE" == "trusty-embedderd" ]]; then
-            echo "Skipping library-only sidecar crate '$CRATE' — binary ships inside its host crate."
-            echo "  trusty-bm25-daemon → trusty-memory"
-            echo "  trusty-embedderd   → trusty-search"
-            echo "No standalone binary to build. Exiting successfully."
+          #   trusty-common      — shared library (thiserror error types, memory-core, …)
+          #   trusty-bm25-daemon — binary ships INSIDE trusty-memory (#1318)
+          #   trusty-embedderd   — binary ships INSIDE trusty-search (#1318)
+          #   trusty-progress    — shared progress-reporting library
+          #   trusty-agents-common / trusty-agents-local — internal libs (publish=false)
+          #   …and any future library-only crate added to the workspace.
+          #
+          # Pushing a tag for one of these (e.g. `trusty-common-v0.15.3`) used to
+          # hit a fatal `exit 1`, turning the whole release run RED even though
+          # there was nothing wrong — there simply is no binary to release. That
+          # false-red is the bug this branch fixes.
+          #
+          # Design (#1318 follow-up): treat the binary-crate table above as a
+          # strict allowlist and DEFAULT EVERYTHING ELSE TO A GRACEFUL SKIP. We
+          # emit bundled=true (re-using the existing skip plumbing) so the build /
+          # release / homebrew-bump jobs are skipped and the run finishes GREEN.
+          # New library crates then "just work" (green-skip) with no workflow edit.
+          #
+          # CAVEAT — adding a NEW binary crate: because the default is skip, a brand
+          # new *binary*-producing crate will ALSO green-skip until you add an
+          # explicit config branch for it above. That is intentional (fail-safe, not
+          # fail-loud), but it means a missing binary release is silent. Known gap:
+          # `trusty-controller` (bin `tctl`, added in #1316) is a real binary crate
+          # that does NOT yet have a config branch above, so its tags currently
+          # green-skip. Wire it into the allowlist before relying on tctl releases.
+          else
+            echo "::notice title=Library-only crate — release skipped::Crate '$CRATE' is not in the binary-release allowlist; treating it as library-only and skipping the binary release gracefully (green, not an error)."
+            echo "Binary-producing crates (built + released): trusty-search, trusty-memory,"
+            echo "  trusty-analyze, trusty-review, trusty-mpm, trusty-git-analytics (tga),"
+            echo "  trusty-code, trusty-console."
+            echo "Library-only / internal crates (green-skip, no standalone binary):"
+            echo "  trusty-common, trusty-bm25-daemon, trusty-embedderd, trusty-progress,"
+            echo "  trusty-agents*, trusty-mpm-gui, tc-services, cto-assistant,"
+            echo "  trusty-cto-db, trusty-gworkspace, and any future library crate."
+            echo "If '$CRATE' SHOULD produce a released binary, add a config branch for it"
+            echo "above (see the 'TO ADD A NEW CRATE' note) — otherwise this skip is correct."
             echo "bundled=true" >> "$GITHUB_OUTPUT"
             exit 0
-
-          else
-            echo "ERROR: crate '$CRATE' is not in the release config map."
-            echo "  Distributable crates: trusty-search, trusty-memory, trusty-analyze,"
-            echo "    trusty-review, trusty-mpm, trusty-git-analytics, trusty-code, trusty-console"
-            echo "  Library-only sidecars (skipped — no standalone binary): trusty-bm25-daemon,"
-            echo "    trusty-embedderd"
-            echo "  Out-of-scope (publish=false / internal): trusty-agents*, trusty-mpm-gui,"
-            echo "    tc-services, cto-assistant, trusty-cto-db, trusty-gworkspace,"
-            echo "    trusty-common"
-            exit 1
           fi
 
           # Export config values as step outputs for the matrix job below.
