@@ -46,6 +46,20 @@ telegram = ["dep:teloxide", "dep:tokio-util"]
 # Bedrock provider weight is strictly opt-in. Build/test with `--features bedrock`.
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-types"]
 
+# `sm-memory` gates the Session Manager's dedicated memory palace (SM-4, DOC-14
+# §8). NOT in `default`: it turns on `trusty-common/memory-core`, which pulls the
+# heavy Memory Palace storage engine (usearch/hnsw_rs HNSW vector index, redb +
+# postcard stores, git2, and the bundled-ORT FastEmbedder). Keeping it opt-in
+# means a `--no-default-features` build — and even the default daemon build —
+# does NOT pay the ONNX/usearch compile or runtime cost unless the operator
+# explicitly opts the SM memory subsystem in. Build/test with `--features
+# sm-memory`. The `core::sm::memory` module is compiled only under this flag.
+# `embedder-test-support` is included so the SM-4 unit tests can seed the MOCK
+# embedder (`seed_shared_embedder_with_mock`) and run without the ONNX model;
+# it only exposes a test double and pulls no extra runtime weight beyond the
+# embedder that `memory-core` already requires.
+sm-memory = ["trusty-common/memory-core", "trusty-common/embedder-test-support"]
+
 # `gui` is intentionally a no-dep CLI-gating feature. The `tm gui` subcommand
 # is ALWAYS available; this flag exists only so the subcommand can optionally
 # advertise itself. The Tauri GUI lives in the separate, publish=false
