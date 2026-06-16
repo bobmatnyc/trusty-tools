@@ -194,36 +194,12 @@ pub fn slugify_for_palace(path: &Path) -> Result<String> {
 /// String-level slug helper used by [`slugify_for_palace`].
 ///
 /// Why: exposed separately so the CLI can slugify an arbitrary repo name
-/// (e.g. from `--to my_project`) without re-deriving from a path.
-/// What: applies the canonicalisation rules described on
-/// [`slugify_for_palace`].
-/// Test: `tests::slug_derivation_cases`.
-pub fn slugify_string(input: &str) -> String {
-    let lowered = input.trim().to_ascii_lowercase();
-    let stripped = lowered.strip_suffix(".git").unwrap_or(&lowered);
-    let mut out = String::with_capacity(stripped.len());
-    let mut prev_hyphen = false;
-    for c in stripped.chars() {
-        let next = match c {
-            'a'..='z' | '0'..='9' => Some(c),
-            '_' | '-' | ' ' | '\t' => Some('-'),
-            // Strip everything else.
-            _ => None,
-        };
-        if let Some(c) = next {
-            if c == '-' {
-                if !prev_hyphen && !out.is_empty() {
-                    out.push('-');
-                    prev_hyphen = true;
-                }
-            } else {
-                out.push(c);
-                prev_hyphen = false;
-            }
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    out
-}
+/// (e.g. from `--to my_project`) without re-deriving from a path. As of #1348
+/// the implementation lives in `trusty-common` as the single source of truth
+/// (shared with trusty-controller's `tctl ensure`); this is a re-export shim
+/// kept so the many `trusty_memory::messaging::slugify_string` call sites do
+/// not churn.
+/// What: re-exports [`trusty_common::slugify_string`] verbatim.
+/// Test: canonical cases pinned in `trusty-common` (`slug::tests`); parity
+/// re-asserted here in `tests::slug_derivation_cases`.
+pub use trusty_common::slugify_string;

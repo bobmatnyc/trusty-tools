@@ -13,16 +13,19 @@
 //! What: [`index_id_for`] (trusty-search index id = directory basename, matching
 //! `trusty-search`'s own `resolve_index_name` default), [`palace_slug`] (the pure
 //! pin-or-basename slug core), and [`palace_name_for`] (the I/O edge that reads
-//! the optional pin file then delegates to [`palace_slug`]). [`slugify`] mirrors
-//! `trusty_memory::messaging::slugify_string` so the slugs agree byte-for-byte.
+//! the optional pin file then delegates to [`palace_slug`]). The slug rule itself
+//! is `trusty_common::slugify_string` — the single source of truth shared with
+//! trusty-memory's `validate_palace_name` (issue #1348), so the slugs agree
+//! byte-for-byte by construction rather than by parallel re-implementation.
 //!
-//! Test: `tests` exercise `slugify`, `index_id_for`, and `palace_slug` across the
-//! pin-present, basename, and empty cases; the daemon-parity slug cases mirror
-//! the trusty-memory unit tests.
+//! Test: `tests` exercise `index_id_for` and `palace_slug` across the
+//! pin-present, basename, and empty cases; the canonical slug behaviour is
+//! pinned in `trusty-common` (`slug::tests`).
 
 use std::path::Path;
 
 use serde::Deserialize;
+use trusty_common::slugify_string;
 
 /// Relative path of the trusty-memory palace pin file within a project root.
 ///
@@ -44,45 +47,6 @@ pub const PIN_FILE_REL: &str = ".trusty-tools/trusty-memory.yaml";
 struct PinView {
     /// The pinned palace slug, stored verbatim (no re-slugification).
     palace: String,
-}
-
-/// Slugify a string the same way `trusty_memory::messaging::slugify_string` does.
-///
-/// Why: the palace name must match the daemon's derived slug byte-for-byte or
-/// `validate_palace_name` rejects creation. Re-implementing the exact rule here
-/// (lowercase, strip a trailing `.git`, map `_`/`-`/space/tab to a single `-`,
-/// drop every other char, trim leading/trailing `-`) keeps trusty-controller
-/// from taking a dependency on the whole trusty-memory crate while staying in
-/// lockstep with its slug semantics.
-/// What: applies the canonicalisation rules above and returns the slug.
-/// Test: `tests::slugify_matches_memory_rules`.
-pub fn slugify(input: &str) -> String {
-    let lowered = input.trim().to_ascii_lowercase();
-    let stripped = lowered.strip_suffix(".git").unwrap_or(&lowered);
-    let mut out = String::with_capacity(stripped.len());
-    let mut prev_hyphen = false;
-    for c in stripped.chars() {
-        let mapped = match c {
-            'a'..='z' | '0'..='9' => Some(c),
-            '_' | '-' | ' ' | '\t' => Some('-'),
-            _ => None,
-        };
-        if let Some(c) = mapped {
-            if c == '-' {
-                if !prev_hyphen && !out.is_empty() {
-                    out.push('-');
-                    prev_hyphen = true;
-                }
-            } else {
-                out.push(c);
-                prev_hyphen = false;
-            }
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    out
 }
 
 /// Derive the trusty-search index id for a project directory.
@@ -120,7 +84,7 @@ pub fn palace_slug(pin: Option<&str>, project_root: &Path) -> Option<String> {
         }
     }
     let basename = project_root.file_name()?.to_str()?;
-    let slug = slugify(basename);
+    let slug = slugify_string(basename);
     if slug.is_empty() {
         None
     } else {
@@ -154,17 +118,19 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// Why: the slug must agree with trusty-memory's rule or palace creation is
-    /// rejected; pin the representative cases from its own `slug_derivation_cases`.
-    /// What: case folding, `_`/space → `-`, collapse, `.git` strip, trim.
+    /// Why: `tctl ensure` derives the palace name through the shared
+    /// `trusty_common::slugify_string` (issue #1348); this guards that the
+    /// import wiring resolves to the canonical rule so the controller's slug
+    /// still agrees byte-for-byte with the daemon's `validate_palace_name`.
+    /// What: re-asserts the representative cases against the re-exported fn.
     /// Test: This is the test.
     #[test]
     fn slugify_matches_memory_rules() {
-        assert_eq!(slugify("Trusty-Tools"), "trusty-tools");
-        assert_eq!(slugify("My_Cool Project"), "my-cool-project");
-        assert_eq!(slugify("repo.git"), "repo");
-        assert_eq!(slugify("  --weird__name--  "), "weird-name");
-        assert_eq!(slugify("!!!"), "");
+        assert_eq!(slugify_string("Trusty-Tools"), "trusty-tools");
+        assert_eq!(slugify_string("My_Cool Project"), "my-cool-project");
+        assert_eq!(slugify_string("repo.git"), "repo");
+        assert_eq!(slugify_string("  --weird__name--  "), "weird-name");
+        assert_eq!(slugify_string("!!!"), "");
     }
 
     /// Why: the index id must be the bare directory basename so it matches
@@ -261,7 +227,7 @@ mod tests {
                 .unwrap_or(0)
         ));
         std::fs::create_dir_all(&tmp).expect("mkdir");
-        let expected = slugify(tmp.file_name().unwrap().to_str().unwrap());
+        let expected = slugify_string(tmp.file_name().unwrap().to_str().unwrap());
         assert_eq!(palace_name_for(&tmp).as_deref(), Some(expected.as_str()));
         let _ = std::fs::remove_dir_all(&tmp);
     }

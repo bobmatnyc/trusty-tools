@@ -343,6 +343,19 @@ pub mod crate_config;
 /// Test: `cargo test -p trusty-common -- port::tests`.
 pub mod port;
 
+/// Canonical project-slug derivation (issue #1348).
+///
+/// Why: trusty-memory and trusty-controller both need the identical
+/// directory-basename/repo-name → slug rule (the trusty-memory daemon's
+/// `validate_palace_name` rejects a palace whose slug disagrees with the one it
+/// re-derives). Centralising the rule here makes it the single source of truth
+/// so the two crates cannot silently diverge.
+/// What: Exposes [`slug::slugify_string`], re-exported at the crate root as
+/// [`slugify_string`].
+/// Test: `cargo test -p trusty-common -- slug::tests`.
+pub mod slug;
+pub use slug::slugify_string;
+
 /// Shared GitHub `owner/repo` path derivation (issue #1220).
 ///
 /// Why: trusty-mpm's managed-session workspace root
