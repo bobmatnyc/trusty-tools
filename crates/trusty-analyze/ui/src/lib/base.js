@@ -1,22 +1,37 @@
 // KEEP IN SYNC WITH crates/trusty-{memory,search}/ui/src/lib/base.js
 /*
- * Why: When the SPA is served through the trusty-console reverse-proxy at
- * `/proxy/analyze/`, absolute fetch paths like `/health` or EventSource URLs
- * like `/sse` would resolve to the console host root instead of the daemon.
- * This helper derives the correct base URL from the document's actual location
- * so that all API calls work both when served directly by the daemon
- * (base = origin/) and when served under a proxy sub-path
- * (base = origin/proxy/analyze/).
+ * Why: The daemon serves this SPA under the `/ui/` mount (routes `/ui/` and
+ * `/ui/{*path}` in src/service/routes.rs) while the JSON API endpoints
+ * (`/health`, `/indexes`, the SSE streams, …) live as SIBLINGS at the daemon
+ * ROOT — one level ABOVE `ui/`. Earlier code (PR #996) derived the API base
+ * straight from `document.baseURI`, which at `…/ui/` is the `/ui/` directory
+ * itself; a path like `/health` then resolved to `…/ui/health`, which the
+ * daemon answers with the SPA's index.html (text/html) instead of the JSON
+ * API. That produced the offline badge of #1329. The fix is to strip the
+ * trailing `ui/` segment so the base points at the API root that is the parent
+ * of the SPA mount.
+ *
+ * This also preserves the trusty-console reverse-proxy case (PR #996's
+ * original intent). The console mounts `/proxy/{daemon}/{*path}` and forwards
+ * `{*path}` verbatim to the daemon root (see trusty-console
+ * src/proxy/routes.rs). So when the SPA is opened at
+ * `https://console/proxy/analyze/ui/`, stripping the trailing `ui/` yields the
+ * API base `https://console/proxy/analyze/`; a `/health` fetch then resolves to
+ * `https://console/proxy/analyze/health`, which the proxy rewrites to the
+ * daemon's `/health`. Both the direct and proxied cases collapse to the same
+ * rule: API base = document.baseURI with its trailing `ui/` segment removed.
+ *
  * What: Returns an absolute base URL string by snapshotting document.baseURI
- * once at module load (before any navigation), stripping the trailing
- * `index.html` if present. The legacy `window.__ANALYZER_BASE__` override is
- * still honoured if set, so any existing deployment that injects that global
- * keeps working.
- * Test: In a browser at http://127.0.0.1:7788/proxy/analyze/ the return
- * value should be "http://127.0.0.1:7788/proxy/analyze/"; at
- * http://127.0.0.1:7879/ it should be "http://127.0.0.1:7879/".
- * Verify proxy mode: open the SPA at /proxy/analyze/ and confirm api.health()
- * fetches /proxy/analyze/health not /health.
+ * once at module load (before any navigation), then stripping a trailing
+ * `index.html` and a trailing `ui/` path segment. The legacy
+ * `window.__ANALYZER_BASE__` override is still honoured if set, so any existing
+ * deployment that injects that global keeps working.
+ * Test: Unit-covered in base.test.js. In a browser at
+ * http://127.0.0.1:7879/ui/ the API base should be "http://127.0.0.1:7879/"
+ * and api.health() should fetch http://127.0.0.1:7879/health (NOT
+ * .../ui/health). Behind the console at
+ * https://console/proxy/analyze/ui/ the base should be
+ * "https://console/proxy/analyze/".
  *
  * NOTE: The base is snapshotted once at module-init time (see API_BASE
  * below). All three SPAs use hash-based routing, so location.pathname never
@@ -28,7 +43,7 @@
  * Compute the base URL once from the current document location.
  * Checks (in order):
  * 1. `window.__ANALYZER_BASE__` (legacy override, kept for backward-compat).
- * 2. `document.baseURI` stripped of trailing `index.html`.
+ * 2. `document.baseURI` with trailing `index.html` and trailing `ui/` stripped.
  * 3. "/" as a final fallback for non-browser environments.
  * @returns {string}
  */
@@ -40,7 +55,12 @@ function computeBase() {
   if (typeof document === 'undefined') {
     return '/';
   }
-  return document.baseURI.replace(/index\.html$/, '');
+  // 1. Strip a trailing "index.html" so the base always ends with "/".
+  // 2. Strip the trailing "ui/" mount segment: the daemon serves the SPA at
+  //    `/ui/` but the API endpoints are siblings at the parent (issue #1329).
+  return document.baseURI
+    .replace(/index\.html$/, '')
+    .replace(/(^|\/)ui\/$/, '$1');
 }
 
 // Snapshot the base once at module load. This runs before any client-side

@@ -36,4 +36,11 @@ export default defineConfig({
       '/admin': 'http://127.0.0.1:7878',
     },
   },
+  // Why: the API base-URL derivation (src/lib/base.js) reads document.baseURI,
+  // so its regression tests (issue #1329) need a DOM. jsdom gives vitest a
+  // `document`/`window` to stub. Test: `pnpm test` runs src/lib/base.test.js.
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.test.js'],
+  },
 });
