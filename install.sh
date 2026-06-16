@@ -21,6 +21,7 @@
 #   TRUSTY_INSTALL_DIR     Install dir (default: ~/.local/bin)
 #   TRUSTY_YES             Set to 1 to skip all prompts (same as -y)
 #   TRUSTY_NO_MODIFY_PATH  Set to 1 to skip PATH modification
+#   TRUSTY_FORCE           Set to 1 to re-download even if already installed
 #
 # Security note: This script is served over HTTPS, which is the primary
 # integrity guarantee. The installer script itself is not signed — if you
@@ -104,7 +105,7 @@ detect_target() {
                     printf 'aarch64-apple-darwin'
                     ;;
                 x86_64)
-                    die "macOS Intel (x86_64) is not yet supported. Try Rosetta 2 or: cargo install ${CRATE}"
+                    die "macOS Intel (x86_64) is not yet supported. Build from source: cargo install ${CRATE}"
                     ;;
                 *)
                     die "unsupported macOS architecture '${_arch}'. Build from source: cargo install ${CRATE}"
@@ -177,14 +178,10 @@ resolve_version() {
         die "no ${TAG_PREFIX}* release found at ${API_RELEASES_URL}"
     fi
 
-    # Sanity-check it looks like a version number (not a garbled API response).
-    case "${_ver}" in
-        [0-9]*.[0-9]*.[0-9]*)
-            ;; # X.Y.Z semver — proceed
-        *)
-            die "unexpected version string from API; got: '${_ver}' (expected X.Y.Z)"
-            ;;
-    esac
+    # Sanity-check it looks like a strict X.Y.Z version (digits and dots only).
+    # Use anchored grep -E rather than a case glob to reject suffixes like '-rc1'.
+    printf '%s' "${_ver}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$' \
+        || die "unexpected version string from API; got: '${_ver}' (expected X.Y.Z)"
 
     printf '%s' "${_ver}"
 }
@@ -347,8 +344,10 @@ download_and_install() {
         chmod 0755 "${_tmp_bin}" \
             || die "failed to set permissions on temp install binary"
     fi
-    mv "${_tmp_bin}" "${_install_dir}/${BIN}" \
-        || die "failed to move binary into place at ${_install_dir}/${BIN}"
+    mv "${_tmp_bin}" "${_install_dir}/${BIN}" || {
+        rm -f "${_tmp_bin}"
+        die "failed to move binary into place at ${_install_dir}/${BIN}"
+    }
 
     say "Installed ${BIN} to ${_install_dir}/${BIN}"
 }
@@ -430,14 +429,20 @@ cleanup() {
 # Test: Run end-to-end on a supported platform; run with -y and TRUSTY_VERSION;
 #      re-run to exercise the idempotent skip path.
 main() {
+    trap 'cleanup' EXIT
+
     # Default assume-yes from env; the -y flag below can also set it.
     ASSUME_YES="${TRUSTY_YES:-0}"
+    FORCE_INSTALL="${TRUSTY_FORCE:-0}"
 
     # Parse flags (supports both `sh install.sh -y` and `| sh -s -- -y`).
     while [ "$#" -gt 0 ]; do
         case "$1" in
             -y | --yes)
                 ASSUME_YES="1"
+                ;;
+            --force)
+                FORCE_INSTALL="1"
                 ;;
             -h | --help)
                 say "Usage: install.sh [-y]"
@@ -473,9 +478,11 @@ main() {
     # download. We still run `tctl install` below (it is itself idempotent).
     _existing="$(command -v "${BIN}" 2>/dev/null || true)"
     _need_install="1"
-    if [ -n "${_existing}" ]; then
+    if [ "${FORCE_INSTALL}" != "1" ] && [ -n "${_existing}" ]; then
         _existing_ver="$("${_existing}" --version 2>/dev/null | awk 'NR==1{print $2}' || true)"
         if [ "${_existing_ver}" = "${_version}" ]; then
+            # Security note: this skips checksum re-verification of the existing binary.
+            # Run with --force / TRUSTY_FORCE=1 to always re-download and re-verify.
             say "${BIN} ${_version} is already installed, skipping download."
             _need_install="0"
         fi
@@ -483,7 +490,6 @@ main() {
 
     if [ "${_need_install}" = "1" ]; then
         # Create temp working dir now that we know we will download.
-        trap 'cleanup' EXIT
         TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t trusty-install)" \
             || die "failed to create temp directory"
 
