@@ -1,5 +1,23 @@
 # Changelog — trusty-mpm
 
+## [0.9.0] — 2026-06-16
+
+### Release
+
+- **First monorepo publish.** This is the first `trusty-mpm` release published
+  from the unified `trusty-tools` workspace. It supersedes the stale `0.8.1`
+  on crates.io, which was published from the now-archived standalone repo.
+
+### Fixed
+
+- **Standalone build break:** `daemon/mcp_console.rs` imports
+  `trusty_common::console_metrics` unconditionally, but that module is gated
+  behind trusty-common's `console-metrics` feature. trusty-mpm's main
+  `trusty-common` dependency now enables `console-metrics`, so
+  `cargo check -p trusty-mpm` and `cargo publish` no longer fail to resolve
+  the module. (Workspace feature-unification previously masked this under
+  `cargo test`.)
+
 ## [0.8.2] — 2026-06-16
 
 ### Changed (closes part of #1318)
