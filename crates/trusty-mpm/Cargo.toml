@@ -46,6 +46,25 @@ telegram = ["dep:teloxide", "dep:tokio-util"]
 # Bedrock provider weight is strictly opt-in. Build/test with `--features bedrock`.
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-types"]
 
+# `sm-memory` gates the Session Manager's dedicated memory palace (SM-4, DOC-14
+# §8). NOT in `default`: it turns on `trusty-common/memory-core`, which pulls the
+# heavy Memory Palace storage engine (usearch/hnsw_rs HNSW vector index, redb +
+# postcard stores, git2, and the bundled-ORT FastEmbedder). Keeping it opt-in
+# means a `--no-default-features` build — and even the default daemon build —
+# does NOT pay the ONNX/usearch compile or runtime cost unless the operator
+# explicitly opts the SM memory subsystem in. Build/test with `--features
+# sm-memory`. The `core::sm::memory` module is compiled only under this flag.
+#
+# Production hygiene (SM-4 review): this feature deliberately does NOT enable
+# `trusty-common/embedder-test-support`. That test double (and its
+# `seed_shared_embedder_with_mock` seam) must never link into a production
+# `--features sm-memory` build. The SM-4 unit tests still need the mock
+# embedder to run without the ONNX model, so the test-support feature is wired
+# in via `[dev-dependencies]` below — Cargo unifies dev-dependency features only
+# for test/bench/example builds, so `cargo test` gets the mock while a plain
+# `cargo build --features sm-memory` does not.
+sm-memory = ["trusty-common/memory-core"]
+
 # `gui` is intentionally a no-dep CLI-gating feature. The `tm gui` subcommand
 # is ALWAYS available; this flag exists only so the subcommand can optionally
 # advertise itself. The Tauri GUI lives in the separate, publish=false
@@ -183,6 +202,13 @@ nix = { version = "0.29", features = ["signal"] }
 
 # ── Dev dependencies ───────────────────────────────────────────────────────────
 [dev-dependencies]
+# Re-declare trusty-common with `embedder-test-support` (SM-4 review): Cargo
+# merges dev-dependency features ONLY for test/bench/example builds, so this
+# turns on the mock-embedder seam (`seed_shared_embedder_with_mock`) for
+# `cargo test --features sm-memory` WITHOUT leaking it into a production
+# `cargo build --features sm-memory`. `memory-core` is repeated so the unified
+# feature set still includes the palace storage engine the SM-4 tests exercise.
+trusty-common = { workspace = true, features = ["memory-core", "embedder-test-support"] }
 tempfile.workspace = true
 axum.workspace = true
 http-body-util.workspace = true

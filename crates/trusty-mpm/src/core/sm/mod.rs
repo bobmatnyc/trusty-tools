@@ -16,11 +16,24 @@
 
 pub mod agent;
 pub mod config;
+/// Dedicated SM memory palace + recall/remember wiring (SM-4, DOC-14 §8).
+///
+/// Why: gated behind the `sm-memory` feature because it turns on
+/// `trusty-common/memory-core` — the heavy Memory Palace storage engine
+/// (usearch HNSW, redb, bundled-ORT FastEmbedder). Default and
+/// `--no-default-features` builds must not pay that cost, so the module (and its
+/// dependency) are strictly opt-in.
+/// What: re-compiled only under `--features sm-memory`.
+/// Test: `memory::tests` (run with `--features sm-memory`).
+#[cfg(feature = "sm-memory")]
+pub mod memory;
 pub mod prompt;
 pub mod providers;
 
 pub use agent::SessionManagerAgent;
 pub use config::{SessionManagerConfig, SmInferenceConfig, SmMemoryConfig, SmRoundsConfig};
+#[cfg(feature = "sm-memory")]
+pub use memory::{SmMemory, SmMemoryError, SmMemoryResult};
 pub use prompt::{
     FILE_SM_INSTRUCTIONS, FILE_SM_TOOLS, FILE_SM_WORKFLOW, SM_OVERRIDE_SUBDIR, assemble_sm_prompt,
     resolve_sm_prompt, resolve_sm_prompt_default, sm_override_dir,
