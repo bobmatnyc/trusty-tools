@@ -7,8 +7,7 @@ control plane, and an orchestrator — all co-located under one Cargo workspace.
 ## Project Overview
 
 This is a **Rust workspace** (Cargo workspace, resolver v2, glob members
-`crates/*`) under the Elastic License 2.0 (per-crate; a few crates are MIT —
-see each `Cargo.toml`). Every crate manages its own `version` field independently;
+`crates/*`) under the MIT License. Every crate manages its own `version` field independently;
 `[workspace.package]` shares `rust-version`, `edition`, `license`, `repository`,
 and `authors` but no longer carries a version field (see #343).
 
