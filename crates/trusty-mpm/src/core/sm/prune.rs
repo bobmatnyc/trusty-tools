@@ -17,6 +17,27 @@
 //! `decide_no_verdict_skips`, `decide_unknown_skips`, plus the
 //! `normalize_verdict_*` cases in the `tests` module below.
 
+/// Sentinel error meaning "the Session Manager could not be reached".
+///
+/// Why: `prune_idle` runs inside `#[tokio::main]` with a live `reqwest::Client`
+/// and (potentially) other async resources; calling `std::process::exit` from
+/// there would skip their `Drop` and is a code smell flagged in review. Instead
+/// the SM-unavailable condition is modeled as a typed error that propagates up
+/// the normal `?` chain to the top-level command boundary (`main`), where no
+/// async resources are live and the process can exit cleanly with the documented
+/// code. Keeping it a distinct error type (not a generic `anyhow` string) lets
+/// `main` downcast and branch precisely on "SM off" vs. any other failure.
+/// What: a unit error enum whose single variant carries no payload; `main`
+/// downcasts the boxed `anyhow::Error` to it and exits `EXIT_SM_UNAVAILABLE`.
+/// Test: `prune_error_is_sm_unavailable` asserts the Display string; the
+/// end-to-end exit wiring is covered by `cli_prune_idle_unreachable_exit_code`.
+#[derive(Debug, thiserror::Error)]
+pub enum PruneError {
+    /// The daemon was unreachable / SM is disabled — graceful no-op, exit 75.
+    #[error("session manager unavailable (daemon unreachable or SM disabled); nothing to prune")]
+    SmUnavailable,
+}
+
 /// The teardown action the prune policy selects for one session.
 ///
 /// Why: the prune command must map each session's latest activity verdict to
@@ -244,5 +265,17 @@ mod tests {
     fn normalize_verdict_lowercases() {
         assert_eq!(normalize_verdict("IDLE"), "idle");
         assert_eq!(normalize_verdict("Done"), "done");
+    }
+
+    /// Why: `prune_idle` returns this typed error so `main` can downcast and exit
+    /// 75 instead of `process::exit`-ing inside an async fn; the Display string is
+    /// what an operator sees on stderr, so it must stay clear and stable.
+    /// What: asserts the `SmUnavailable` Display message.
+    /// Test: this test.
+    #[test]
+    fn prune_error_is_sm_unavailable() {
+        let msg = PruneError::SmUnavailable.to_string();
+        assert!(msg.contains("session manager unavailable"), "{msg}");
+        assert!(msg.contains("nothing to prune"), "{msg}");
     }
 }

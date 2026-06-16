@@ -16,19 +16,47 @@
 //! Test: `build_plan_*` and `render_*` in the `tests` module below; the policy
 //! mapping itself is covered in `core::sm::prune::tests`.
 
+use std::sync::Arc;
+
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
 use trusty_mpm::core::sm::prune::{PruneAction, decide};
+
+/// Re-export the typed SM-unavailable error so `main` can downcast on it via
+/// `commands::prune::PruneError` without reaching into the library crate path.
+///
+/// Why: keeps the top-level exit-code translation in `main` referring to the
+/// same module that owns the prune command, rather than threading
+/// `trusty_mpm::core::sm::prune` through the binary's call sites.
+/// What: alias for the library's [`trusty_mpm::core::sm::prune::PruneError`].
+/// Test: used by `cli_prune_idle_unreachable_exit_code`.
+pub(crate) use trusty_mpm::core::sm::prune::PruneError;
+
+/// Max concurrent per-session activity fetches against the daemon.
+///
+/// Why: prune fans out one `GET …/activity` per managed session; doing them
+/// sequentially is slow for a large fleet, but unbounded concurrency would
+/// hammer the daemon. A small semaphore bounds in-flight requests to a value
+/// that parallelizes well without overwhelming the loopback server.
+/// What: caps concurrent verdict fetches at `12`.
+/// Test: `fetch_verdicts_preserves_order` exercises the fan-out join + sort.
+const MAX_INFLIGHT_VERDICTS: usize = 12;
 
 /// Exit code emitted when SM is off / the daemon is unreachable (graceful no-op).
 ///
 /// Why: the claude-mpm pause skill calls this command and must distinguish "ran,
 /// nothing to do" from "SM not available" without treating the latter as a hard
 /// failure. A distinct, non-1 code lets the caller branch while a human reading
-/// stderr still sees a clear message.
+/// stderr still sees a clear message. `prune_idle` no longer exits the process
+/// itself — it returns [`PruneError::SmUnavailable`]; `main` downcasts that error
+/// and exits with this code at the top-level command boundary (no live async
+/// resources), which is why the constant is `pub(crate)`.
 /// What: `75` (EX_TEMPFAIL-adjacent) signals "SM unavailable, not an error".
-/// Test: `cli_prune_idle_unreachable_exit_code` asserts the constant is wired.
+/// Test: `unavailable_exit_code_is_stable` (value) and
+/// `cli_prune_idle_unreachable_exit_code` (end-to-end wiring).
 pub(crate) const EXIT_SM_UNAVAILABLE: i32 = 75;
 
 /// A session paired with its latest activity verdict (the prune input row).
@@ -86,15 +114,23 @@ struct JsonRow {
 /// Top-level JSON document for `--json`.
 ///
 /// Why: callers want a single object with the dry-run flag and a counted summary
-/// alongside the per-session rows.
-/// What: `dry_run`, `actionable` count, `total`, and the `sessions` array.
-/// Test: `render_plan_json_shape`.
+/// alongside the per-session rows. The `sm_available` flag lets the claude-mpm
+/// pause skill distinguish a real (SM-up) empty plan from the SM-unavailable
+/// no-op without parsing exit codes or stderr, and it keeps the unavailable
+/// branch emitting the SAME serde-derived schema as the normal path rather than
+/// a hand-rolled JSON string literal.
+/// What: `dry_run`, `actionable` count, `total`, the `sessions` array, and
+/// `sm_available` (`true` on the normal path, `false` on the SM-unavailable
+/// no-op).
+/// Test: `render_plan_json_shape` (available path) and
+/// `render_unavailable_json_shape` (unavailable path).
 #[derive(Debug, Serialize)]
 struct JsonPlan {
     dry_run: bool,
     actionable: usize,
     total: usize,
     sessions: Vec<JsonRow>,
+    sm_available: bool,
 }
 
 /// Turn fetched session/verdict rows into a concrete action plan (pure).
@@ -194,6 +230,28 @@ pub(crate) fn render_plan_json(plan: &[PlannedAction], dry_run: bool) -> anyhow:
         actionable: actionable_count(plan),
         total: plan.len(),
         sessions,
+        sm_available: true,
+    };
+    Ok(serde_json::to_string_pretty(&doc)?)
+}
+
+/// Render the SM-unavailable no-op as the same JSON schema as a real plan.
+///
+/// Why: when the daemon is unreachable / SM is disabled we still emit `--json`
+/// output, but it must be the SAME serde-derived shape as the available path
+/// (issue #1313 review) — never a hand-rolled string literal that can drift from
+/// [`JsonPlan`]. The only signal that distinguishes it is `sm_available: false`.
+/// What: serializes an empty [`JsonPlan`] (`actionable: 0`, `total: 0`, no
+/// `sessions`) with `sm_available` set to `false`, preserving the requested
+/// `dry_run` flag.
+/// Test: `render_unavailable_json_shape`.
+pub(crate) fn render_unavailable_json(dry_run: bool) -> anyhow::Result<String> {
+    let doc = JsonPlan {
+        dry_run,
+        actionable: 0,
+        total: 0,
+        sessions: Vec::new(),
+        sm_available: false,
     };
     Ok(serde_json::to_string_pretty(&doc)?)
 }
@@ -213,52 +271,51 @@ fn short_id(id: &str) -> &str {
 /// Why: the operator-facing (and pause-automated) entry point. It must reuse the
 /// existing managed list/activity/runtime-stop/decommission surface, apply the
 /// pure policy, and no-op gracefully when SM is unavailable.
-/// What: fetches the managed session list; if the daemon is unreachable it prints
-/// a clear message and exits [`EXIT_SM_UNAVAILABLE`]; otherwise it reads each
-/// session's verdict, builds the plan via [`build_plan`], renders it (text or
-/// JSON), and — unless `dry_run` — executes the actionable rows by POSTing to the
-/// existing `runtime-stop` / `decommission` endpoints (delegating to the
-/// `managed` handlers; teardown is NOT reimplemented here).
+/// What: fetches the managed session list; a *transport* error (daemon down / SM
+/// off) surfaces as [`PruneError::SmUnavailable`] which propagates to `main` for
+/// the graceful exit [`EXIT_SM_UNAVAILABLE`] — this function never calls
+/// `process::exit` itself so no live async resource is leaked. A reachable daemon
+/// returning a 4xx/5xx is a *real* failure and propagates as an ordinary `Err`
+/// (exit 1). On success it reads each session's verdict concurrently (bounded
+/// fan-out), builds the plan via [`build_plan`], renders it (text or JSON), and —
+/// unless `dry_run` — executes the actionable rows by delegating to the existing
+/// `runtime-stop` / `decommission` handlers (teardown is NOT reimplemented here).
 /// Test: the pure plan/render logic is covered by `build_plan_*`/`render_*`;
-/// CLI parsing by `cli_parses_session_prune_idle` in `tests.rs`. The HTTP
-/// round-trip reuses the `managed` handlers already covered by
-/// `tests/session_manager_mvp.rs`.
+/// CLI parsing by `cli_parses_session_prune_idle` in `tests.rs`; the
+/// SM-unavailable → exit-75 wiring by `cli_prune_idle_unreachable_exit_code` in
+/// `tests/session_manager_mvp.rs`. The HTTP round-trip reuses the `managed`
+/// handlers already covered there.
 pub(crate) async fn prune_idle(
     client: &reqwest::Client,
     url: &str,
     dry_run: bool,
     json: bool,
 ) -> anyhow::Result<()> {
-    // 1) List managed sessions. A transport error (daemon down) is the graceful
-    //    no-op path: print a message and exit with the distinct code so the
-    //    pause flow does not treat "SM off" as a failure.
+    // 1) List managed sessions. `fetch_sessions` distinguishes the two failure
+    //    modes: a transport error (daemon down / SM off) is the graceful no-op
+    //    path → render the SM-unavailable document/message and return the typed
+    //    `SmUnavailable` error so `main` can exit with the distinct code without
+    //    treating "SM off" as a hard failure; a reachable-but-erroring daemon
+    //    (4xx/5xx) propagates as an ordinary `Err` (a real failure).
     let sessions = match fetch_sessions(client, url).await {
         Ok(sessions) => sessions,
-        Err(_) => {
+        Err(FetchSessionsError::Unreachable) => {
             if json {
-                println!(
-                    "{{\"dry_run\":{dry_run},\"actionable\":0,\"total\":0,\"sessions\":[],\"sm_available\":false}}"
-                );
+                println!("{}", render_unavailable_json(dry_run)?);
             } else {
-                eprintln!(
-                    "session manager unavailable (daemon unreachable or SM disabled); nothing to prune"
-                );
+                eprintln!("{}", PruneError::SmUnavailable);
             }
-            std::process::exit(EXIT_SM_UNAVAILABLE);
+            return Err(PruneError::SmUnavailable.into());
         }
+        Err(FetchSessionsError::Http(e)) => return Err(e),
     };
 
-    // 2) Read each session's latest verdict (best-effort; a per-session activity
-    //    failure surfaces as `None` → policy skips it).
-    let mut rows = Vec::with_capacity(sessions.len());
-    for s in sessions {
-        let verdict = fetch_verdict(client, url, &s.id).await;
-        rows.push(SessionVerdict {
-            id: s.id,
-            name: s.name,
-            verdict,
-        });
-    }
+    // 2) Read each session's latest verdict concurrently (bounded fan-out). A
+    //    per-session activity failure surfaces as `None` → policy skips it. The
+    //    result is re-sorted into the daemon's original list order so the plan
+    //    (and its rendered output) stays deterministic regardless of completion
+    //    order.
+    let rows = fetch_verdicts(client, url, sessions).await;
 
     // 3) Build the plan (pure) and render it.
     let plan = build_plan(&rows);
@@ -291,37 +348,140 @@ pub(crate) async fn prune_idle(
 /// A managed-session id+name pair as read from the list endpoint.
 ///
 /// Why: prune only needs the id (to act) and name (to display) from the richer
-/// list response.
+/// list response. `Clone` so each ref can be moved into a concurrent
+/// verdict-fetch task.
 /// What: deserializes the subset of `SessionSummary` it uses.
 /// Test: exercised via `fetch_sessions` against the integration daemon.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct SessionRef {
     id: String,
     name: String,
 }
 
+/// The two distinct failure modes of listing managed sessions.
+///
+/// Why: review finding #3 — prune must NOT collapse a reachable-but-erroring
+/// daemon (4xx/5xx) into the same "empty list / graceful no-op" path as a
+/// genuinely unreachable daemon. A transport error means SM is off/down (exit
+/// 75, no-op); a non-2xx HTTP status means the daemon answered with a real
+/// failure that should surface as a hard error (exit 1), not a silent "0 of 0".
+/// What: `Unreachable` wraps the connection/transport case; `Http` carries the
+/// real error to propagate (non-2xx status or a body-decode failure).
+/// Test: `fetch_sessions` behavior is covered via the integration daemon path
+/// and the policy-level distinction by `cli_prune_idle_unreachable_exit_code`.
+enum FetchSessionsError {
+    /// The daemon could not be reached (connection refused, DNS, timeout, …).
+    Unreachable,
+    /// The daemon answered but with a non-2xx status or an undecodable body.
+    Http(anyhow::Error),
+}
+
 /// Fetch the managed session list, lowered to id+name refs.
 ///
 /// Why: the first step of prune; isolating it keeps `prune_idle` readable and
-/// lets a transport error become the graceful no-op.
-/// What: GETs `/api/v1/sessions/managed`; a non-success status yields an empty
-/// list (SM enabled but no sessions), a transport error propagates so the caller
-/// can no-op.
-/// Test: covered via the integration daemon path.
-async fn fetch_sessions(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<SessionRef>> {
+/// lets a *transport* error become the graceful no-op while a reachable-daemon
+/// HTTP error stays a real failure (review finding #3).
+/// What: GETs `/api/v1/sessions/managed`. A `reqwest` send error (daemon
+/// unreachable) → `FetchSessionsError::Unreachable`. A non-success HTTP status
+/// (daemon up but erroring) → `FetchSessionsError::Http` carrying the status —
+/// it is NOT treated as an empty list. A 2xx with a decodable body → the
+/// session vec (which may legitimately be empty when SM is enabled with no
+/// sessions).
+/// Test: covered via the integration daemon path; the unreachable branch by
+/// `cli_prune_idle_unreachable_exit_code`.
+async fn fetch_sessions(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<Vec<SessionRef>, FetchSessionsError> {
     #[derive(Deserialize)]
     struct ListResp {
         sessions: Vec<SessionRef>,
     }
+    // A send error is a transport failure → SM unavailable (graceful no-op).
     let resp = client
         .get(format!("{url}/api/v1/sessions/managed"))
         .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Ok(Vec::new());
+        .await
+        .map_err(|_| FetchSessionsError::Unreachable)?;
+    // A reachable daemon returning non-2xx is a REAL failure, not "no sessions".
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(FetchSessionsError::Http(anyhow::anyhow!(
+            "session manager returned HTTP {status} listing managed sessions"
+        )));
     }
-    let body: ListResp = resp.json().await?;
+    let body: ListResp = resp
+        .json()
+        .await
+        .map_err(|e| FetchSessionsError::Http(e.into()))?;
     Ok(body.sessions)
+}
+
+/// Concurrently read every session's latest verdict, preserving list order.
+///
+/// Why: review finding #2 — fetching verdicts sequentially is slow for a large
+/// fleet. Fanning the per-session activity reads out with a bounded
+/// [`JoinSet`] + [`Semaphore`] parallelizes them without hammering the daemon,
+/// while re-sorting by the original index keeps `build_plan`'s output (and the
+/// rendered plan / tests) deterministic regardless of task completion order.
+/// What: spawns one bounded task per session that calls [`fetch_verdict`]
+/// (best-effort → `None` on failure), joins them all, then sorts the results
+/// back into the input order and lowers them into [`SessionVerdict`] rows.
+/// Test: `fetch_verdicts_preserves_order` covers the order-restoring reorder
+/// (via [`reorder_by_index`]); the verdict→action mapping in
+/// `core::sm::prune::tests`.
+async fn fetch_verdicts(
+    client: &reqwest::Client,
+    url: &str,
+    sessions: Vec<SessionRef>,
+) -> Vec<SessionVerdict> {
+    let semaphore = Arc::new(Semaphore::new(MAX_INFLIGHT_VERDICTS));
+    let mut join_set: JoinSet<(usize, SessionVerdict)> = JoinSet::new();
+    for (idx, s) in sessions.into_iter().enumerate() {
+        let client = client.clone();
+        let url = url.to_string();
+        let semaphore = Arc::clone(&semaphore);
+        join_set.spawn(async move {
+            // The semaphore is never closed, so acquire cannot fail; the permit
+            // is held for the duration of the request and dropped on return.
+            let _permit = semaphore
+                .acquire()
+                .await
+                .expect("prune verdict semaphore is never closed");
+            let verdict = fetch_verdict(&client, &url, &s.id).await;
+            (
+                idx,
+                SessionVerdict {
+                    id: s.id,
+                    name: s.name,
+                    verdict,
+                },
+            )
+        });
+    }
+
+    let mut indexed: Vec<(usize, SessionVerdict)> = Vec::new();
+    while let Some(joined) = join_set.join_next().await {
+        // A task panic is a programmer error; surface it loudly rather than
+        // silently dropping a session from the plan.
+        let row = joined.expect("prune verdict task panicked");
+        indexed.push(row);
+    }
+    reorder_by_index(indexed)
+}
+
+/// Re-sort fan-out results back into the original list order (pure).
+///
+/// Why: `JoinSet` yields completed tasks in nondeterministic order, but the
+/// plan — and the rendered output / dry-run-vs-live equality — must be stable.
+/// Tagging each task with its input index and sorting on it restores the
+/// daemon's list order deterministically. Extracted as a pure function so the
+/// ordering guarantee is unit-testable without spawning tasks or a daemon.
+/// What: sorts `(index, row)` pairs by index, then drops the index.
+/// Test: `fetch_verdicts_preserves_order`.
+fn reorder_by_index(mut indexed: Vec<(usize, SessionVerdict)>) -> Vec<SessionVerdict> {
+    indexed.sort_by_key(|(idx, _)| *idx);
+    indexed.into_iter().map(|(_, row)| row).collect()
 }
 
 /// Read one session's latest activity verdict, best-effort.
@@ -483,6 +643,51 @@ mod tests {
         assert_eq!(v["sessions"][0]["verdict"], "idle");
         assert_eq!(v["sessions"][1]["action"], "skip");
         assert_eq!(v["sessions"][1]["reason"], "working");
+    }
+
+    /// Why: the concurrent verdict fan-out (`JoinSet`) completes tasks in
+    /// nondeterministic order, but the plan must mirror the daemon's list order.
+    /// `reorder_by_index` is the pure piece that restores it; proving it sorts
+    /// out-of-order completions back to input order guarantees deterministic
+    /// plans (and byte-identical dry-run/live output) regardless of scheduling.
+    /// What: feeds `(index, row)` pairs in shuffled order and asserts the result
+    /// is in ascending-index (i.e. original list) order.
+    /// Test: this test.
+    #[test]
+    fn fetch_verdicts_preserves_order() {
+        // Tasks "completed" out of order: indices 2, 0, 1.
+        let shuffled = vec![
+            (2, row("c", "charlie", Some("done"))),
+            (0, row("a", "alpha", Some("idle"))),
+            (1, row("b", "bravo", Some("working"))),
+        ];
+        let ordered = reorder_by_index(shuffled);
+        let ids: Vec<&str> = ordered.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "c"]);
+    }
+
+    /// Why: the SM-unavailable `--json` branch must emit the SAME serde schema as
+    /// the available path (issue #1313 review finding #4) — never a hand-rolled
+    /// literal. The only difference is `sm_available: false` and empty counts.
+    /// What: parses `render_unavailable_json` and asserts every field the
+    /// available-path `render_plan_json_shape` test checks, plus `sm_available`.
+    /// Test: this test.
+    #[test]
+    fn render_unavailable_json_shape() {
+        let json = render_unavailable_json(true).expect("json");
+        let v: serde_json::Value = serde_json::from_str(&json).expect("parse");
+        // Same schema/keys as the available path…
+        assert_eq!(v["dry_run"], true);
+        assert_eq!(v["actionable"], 0);
+        assert_eq!(v["total"], 0);
+        assert!(v["sessions"].is_array());
+        assert_eq!(v["sessions"].as_array().expect("array").len(), 0);
+        // …distinguished only by the availability flag.
+        assert_eq!(v["sm_available"], false);
+        // The available path sets the same flag to `true`.
+        let avail = render_plan_json(&[], false).expect("json");
+        let av: serde_json::Value = serde_json::from_str(&avail).expect("parse");
+        assert_eq!(av["sm_available"], true);
     }
 
     /// Why: the graceful no-op exit code must stay the documented constant.
