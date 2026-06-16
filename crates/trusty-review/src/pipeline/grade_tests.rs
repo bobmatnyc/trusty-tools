@@ -572,6 +572,71 @@ fn high_effort_finding_still_overrides_approve() {
     assert_eq!(g, Grade::F);
 }
 
+// ── PR #1350 advisory fix A: High-effort findings keep their floor seat ──────
+
+/// A High-effort finding with confidence < 0.50 (and NOT refuted) must STILL drive
+/// the verdict floor (PR #1350 safety-net restoration).
+///
+/// Why: the original #1343 `is_substantive` predicate dropped EVERY finding below
+/// 0.50 confidence, including genuine High-effort criticals.  That silently
+/// softened an uncertain-but-critical finding to APPROVE — exactly the safety net
+/// PR #1350's review flagged.  A non-refuted High-effort finding must keep its seat
+/// at the floor regardless of confidence, so it still escalates to BLOCK.
+/// What: model APPROVE + one High@0.45 (non-refuted, below FLOOR_COUNT_MIN_CONFIDENCE)
+/// → BLOCK (has_high path is reached, severity_floor returns BLOCK).
+/// Test: this test itself.
+#[test]
+fn low_confidence_high_effort_finding_still_drives_floor() {
+    let findings = vec![finding(Effort::High, 0.45)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "a non-refuted High-effort finding below 0.50 confidence must still BLOCK (PR #1350)"
+    );
+}
+
+/// End-to-end form: a low-confidence non-refuted High-effort finding clamps a clean
+/// APPROVE/B+ down to BLOCK/F via the grade-aware entry point (PR #1350).
+///
+/// Why: confirms the restored safety net flows through `derive_verdict_with_grade`,
+/// not just the bare `derive_verdict` — the uncertain critical hardens both verdict
+/// and grade.
+/// What: model APPROVE, grade B+, one High@0.40 → (BLOCK, F).
+/// Test: this test itself.
+#[test]
+fn low_confidence_high_effort_clamps_grade_to_block() {
+    let findings = vec![finding(Effort::High, 0.40)];
+    let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::BPlus, &findings);
+    assert_eq!(
+        v,
+        Verdict::Block,
+        "uncertain critical (High@0.40) must still BLOCK through the grade pipeline (PR #1350)"
+    );
+    assert_eq!(g, Grade::F, "grade must clamp to F when verdict=BLOCK");
+}
+
+/// A REFUTED High-effort finding (even at high confidence) must STILL be excluded —
+/// the safety-net fix retains uncertain criticals but never disproven ones (PR #1350).
+///
+/// Why: advisory fix A widens the floor net for *uncertain* High-effort findings,
+/// but a verifier-`Refuted` finding is disproven evidence and must never harden the
+/// verdict — even when its effort is High.  This guards against the fix being
+/// mis-read as "all High-effort findings always count".
+/// What: model APPROVE + one refuted High@0.95 → APPROVE (the refuted critical is
+/// excluded; no other substantive finding remains).
+/// Test: this test itself.
+#[test]
+fn refuted_high_effort_finding_is_still_excluded() {
+    let findings = vec![verified_finding(Effort::High, 0.95, VerifyOutcome::Refuted)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::Approve,
+        "a REFUTED High-effort finding must not harden the verdict, even high-confidence (PR #1350)"
+    );
+}
+
 /// A confirmed High finding still drives BLOCK even with a B+ grade (#1015 regression).
 ///
 /// Why: the fix must not soften correctness blockers.  High-effort findings are
