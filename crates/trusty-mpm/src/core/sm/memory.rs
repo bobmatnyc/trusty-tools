@@ -299,6 +299,68 @@ impl SmMemory {
             .map_err(|source| SmMemoryError::Operation { op: "note", source })
     }
 
+    /// Remember a tagged, short-fact-tolerant entry into the SM palace.
+    ///
+    /// Why: SM-6 persists each goal as a STRUCTURED palace entry it must later
+    /// enumerate deterministically (not via fuzzy recall) to rebuild the hot
+    /// cache on startup. Enumeration keys on a stable tag, so the write path must
+    /// accept explicit tags; and a serialised goal can be short (a one-line
+    /// description), so — like [`SmMemory::note`] — it must bypass the
+    /// min-token gate. Routing through the bound palace id keeps the SM-only
+    /// scope invariant intact.
+    /// What: ensures the palace, then calls `remember_with_options` in the
+    /// `General` room at [`SM_DEFAULT_IMPORTANCE`] with the supplied `tags` and
+    /// the curated-fact preset ([`RememberOptions::note`], which pins `UserFact`
+    /// and skips the token check). Returns the new drawer's UUID as a string.
+    /// Test: `goals` module rebuild/dual-persistence tests drive this via the
+    /// `GoalMemory` seam; `writes_target_only_the_sm_palace` covers scope.
+    pub async fn remember_tagged(
+        &self,
+        text: impl Into<String>,
+        tags: Vec<String>,
+    ) -> SmMemoryResult<String> {
+        let handle = self.ensure_palace()?;
+        handle
+            .remember_with_options(
+                text.into(),
+                RoomType::General,
+                tags,
+                SM_DEFAULT_IMPORTANCE,
+                RememberOptions::note(),
+            )
+            .await
+            .map(|id| id.to_string())
+            .map_err(|source| SmMemoryError::Operation {
+                op: "remember_tagged",
+                source,
+            })
+    }
+
+    /// Enumerate the content of every SM-palace entry carrying `tag`.
+    ///
+    /// Why: rebuilding the SM goal cache on startup (§9.4) must be DETERMINISTIC
+    /// and COMPLETE — every persisted goal, not the embedding-ranked top-k a
+    /// `recall` would return. `list_drawers` is the exact-match, non-fuzzy
+    /// enumeration that gives that guarantee, scoped strictly to the bound SM
+    /// palace.
+    /// What: ensures the palace, then lists drawers filtered to `tag` (no room
+    /// filter, a generous cap), returning each matching drawer's raw `content`
+    /// string. The goal store deserialises these back into `Goal`s. No fuzzy
+    /// scoring is involved.
+    /// Test: `goals` module rebuild tests (`rebuild_*`) assert the full set
+    /// round-trips through this enumeration.
+    pub fn list_tagged(&self, tag: &str) -> SmMemoryResult<Vec<String>> {
+        let handle = self.ensure_palace()?;
+        // A cap far above any realistic live-goal count; `list_drawers` returns
+        // up to this many, sorted by importance (irrelevant here — we take all).
+        const LIST_CAP: usize = 100_000;
+        Ok(handle
+            .list_drawers(None, Some(tag.to_string()), LIST_CAP)
+            .into_iter()
+            .map(|d| d.content)
+            .collect())
+    }
+
     /// Number of palaces currently persisted under the SM data root.
     ///
     /// Why: the idempotency contract ("create twice → one palace") is most
