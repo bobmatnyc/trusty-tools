@@ -245,16 +245,38 @@ async fn reader_task<R: AsyncBufRead + Unpin>(
                 // entry (not all) so other in-flight requests stay valid. The stale
                 // frame is discarded by the id-lookup when it eventually arrives.
                 // Issue #857: provider-aware hint so macOS operators are not misled.
+                //
+                // Why (log-level split, closes #1326): when `oldest_id` is None the
+                // pending map was empty — no in-flight request to blame, just a
+                // periodic re-arm while the embedder is idle and healthy. Emitting
+                // WARN there produces ~2,800 benign lines/day. When `oldest_id` is
+                // Some(id) a real in-flight request timed out — that is a genuine
+                // stall signal worth WARN.
+                // What: branches on the Option to select DEBUG (benign) vs WARN (real).
+                // Test: existing `reader_task_survives_timeout_and_serves_next_request`
+                // unit test covers the Some-id path; the None path is exercised by
+                // running with RUST_LOG=debug and verifying no WARN during idle periods.
                 let stall_hint = timeout_stall_hint(resolve_expected_provider());
-                tracing::warn!(
-                    timeout_secs = timeout.as_secs(),
-                    timed_out_id = ?oldest_id,
-                    "StdioEmbedderClient reader: timed out waiting for response \
-                     ({}s — {}) — removing stalled entry, \
-                     re-arming; task STAYS ALIVE",
-                    timeout.as_secs(),
-                    stall_hint,
-                );
+                if let Some(id) = oldest_id {
+                    tracing::warn!(
+                        timeout_secs = timeout.as_secs(),
+                        timed_out_id = id,
+                        "StdioEmbedderClient reader: timed out waiting for response \
+                         ({}s — {}) — removing stalled entry, \
+                         re-arming; task STAYS ALIVE",
+                        timeout.as_secs(),
+                        stall_hint,
+                    );
+                } else {
+                    tracing::debug!(
+                        timeout_secs = timeout.as_secs(),
+                        timed_out_id = ?oldest_id,
+                        "StdioEmbedderClient reader: timeout fired with no in-flight \
+                         request (idle re-arm, {}s — embedder healthy) — re-arming; \
+                         task STAYS ALIVE",
+                        timeout.as_secs(),
+                    );
+                }
                 if let Some(id) = oldest_id {
                     let req = {
                         let mut guard = pending.lock().await;

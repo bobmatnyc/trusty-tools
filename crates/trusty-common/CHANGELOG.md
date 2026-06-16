@@ -1,5 +1,11 @@
 # Changelog — trusty-common
 
+## [0.15.3] — 2026-06-16
+
+### Changed (closes #1326)
+
+- **`StdioEmbedderClient` reader: down-level benign `timed_out_id=None` timeout to `debug!`** — when the timeout fires with no in-flight request (empty pending map, a periodic idle re-arm while the embedder is healthy), the log is now `debug!` instead of `warn!`. The `warn!` path is preserved for `timed_out_id=Some(id)`, where a real in-flight request actually stalled. Eliminates ~2,800 spurious WARN lines/day during normal operation.
+
 ## [0.14.0] — 2026-06-04
 
 ### Changed (closes #753)

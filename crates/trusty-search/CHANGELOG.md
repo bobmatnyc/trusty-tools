@@ -7,6 +7,12 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.24.8] — 2026-06-16
+
+### Changed (closes #1326)
+
+- **Bumps `trusty-common` to 0.15.3**, which down-levels the benign `timed_out_id=None` embedder-stall WARN to `debug!`, eliminating ~2,800 spurious log lines/day during normal operation.
+
 ## [0.24.7] — 2026-06-16
 
 ### Changed (closes part of #1318)
