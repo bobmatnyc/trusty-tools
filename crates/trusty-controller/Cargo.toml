@@ -1,6 +1,6 @@
 [package]
 name = "trusty-controller"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"
