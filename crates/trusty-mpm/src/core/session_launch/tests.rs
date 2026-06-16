@@ -685,6 +685,101 @@ fn preseed_trust_leaves_malformed_file() {
 }
 
 #[test]
+fn preseed_trust_enables_mcp_servers_from_mcp_json() {
+    // Why (#1296): a spawned workspace ships a `.mcp.json` with multiple MCP
+    // servers; Claude Code shows a blocking "new MCP servers found" dialog
+    // unless the server names are pre-approved via `enabledMcpjsonServers` in
+    // the project entry. Seeding trust must also seed that approval list.
+    let tmp = tempdir().unwrap();
+    let claude_json = tmp.path().join(".claude.json");
+    let workspace = tmp.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    // The project ships a `.mcp.json` with two servers.
+    std::fs::write(
+        workspace.join(".mcp.json"),
+        r#"{"mcpServers":{"trusty-search":{"command":"trusty-search"},"trusty-memory":{"command":"trusty-memory"}}}"#,
+    )
+    .unwrap();
+
+    preseed_workspace_trust(&claude_json, &workspace).expect("seed succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+    let key = workspace.to_string_lossy().to_string();
+    let enabled = value["projects"][&key]["enabledMcpjsonServers"]
+        .as_array()
+        .expect("enabledMcpjsonServers is an array");
+    let mut names: Vec<&str> = enabled.iter().filter_map(|v| v.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        vec!["trusty-memory", "trusty-search"],
+        "all .mcp.json server names must be pre-approved"
+    );
+}
+
+#[test]
+fn preseed_trust_enables_empty_when_no_mcp_json() {
+    // Why (#1296): when the workspace has no `.mcp.json`, seeding must never
+    // crash; it writes an empty approval list so the key is present and Claude
+    // Code does not prompt.
+    let tmp = tempdir().unwrap();
+    let claude_json = tmp.path().join(".claude.json");
+    let workspace = tmp.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    preseed_workspace_trust(&claude_json, &workspace).expect("seed succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+    let key = workspace.to_string_lossy().to_string();
+    let enabled = value["projects"][&key]["enabledMcpjsonServers"]
+        .as_array()
+        .expect("enabledMcpjsonServers is an array");
+    assert!(
+        enabled.is_empty(),
+        "no .mcp.json yields an empty approval list, not a crash"
+    );
+}
+
+#[test]
+fn prepare_session_preseeds_enabled_mcp_servers() {
+    // Why (#1296): the single launch-prep entry point injects trusty-memory and
+    // trusty-search into `.mcp.json`, then seeds trust. The pre-seeded trust
+    // entry in ~/.claude.json must list BOTH injected servers under
+    // `enabledMcpjsonServers` so the spawned session runs non-interactively.
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    // prepare_session seeds the operator's real ~/.claude.json via
+    // preseed_workspace_trust_home, so re-derive the per-workspace approval list
+    // by reading .mcp.json directly and asserting both injected servers landed.
+    let mcp: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
+    let servers = mcp["mcpServers"].as_object().expect("mcpServers object");
+    assert!(servers.contains_key("trusty-memory"));
+    assert!(servers.contains_key("trusty-search"));
+
+    // Seed an isolated ~/.claude.json to assert the approval list is derived
+    // from the now-populated .mcp.json.
+    let claude_json = tmp_home.path().join(".claude-iso.json");
+    preseed_workspace_trust(&claude_json, project).expect("seed succeeds");
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&claude_json).unwrap()).unwrap();
+    let key = project.to_string_lossy().to_string();
+    let enabled = value["projects"][&key]["enabledMcpjsonServers"]
+        .as_array()
+        .expect("enabledMcpjsonServers is an array");
+    let mut names: Vec<&str> = enabled.iter().filter_map(|v| v.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["trusty-memory", "trusty-search"]);
+}
+
+#[test]
 fn deploy_output_style_writes_file() {
     // Why: Claude Code resolves the `trusty-mpm` output style only when a
     // matching file exists in `~/.claude/output-styles/`; deployment must
