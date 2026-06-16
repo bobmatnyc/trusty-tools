@@ -1,8 +1,7 @@
 # trusty-tools
 
 Unified Rust workspace consolidating the entire trusty-* AI tooling ecosystem.
-Unified Rust workspace consolidating 25 crates of AI development tooling,
-with three flagship MCP servers for code search, memory management, and analysis.
+21 crates of AI development tooling with three flagship MCP servers for code search, memory management, and analysis.
 
 ## Three Flagship MCP Servers
 
@@ -56,7 +55,7 @@ cargo run -p trusty-memory -- serve
 # }
 ```
 
-**MCP tools:** `store_memory`, `search_memories`, `update_memory`, `list_collections`, `create_collection`, `get_memory`, `delete_memory`
+**MCP tools:** `memory_remember`, `memory_recall`, `memory_recall_deep`, `memory_recall_all`, `memory_note`, `memory_list`, `memory_forget`, `list_prompt_facts`, `remove_prompt_fact`, `get_prompt_context`
 
 See [crates/trusty-memory/README.md](crates/trusty-memory/README.md) for full documentation.
 
@@ -104,13 +103,13 @@ documentation.
 
 ---
 
-## Full Crate Index (All 25 Crates)
+## Full Crate Index (All 21 Crates)
 
 ### Core Daemons / MCP Servers
 
 | Crate | Description | License |
 |---|---|---|
-| `trusty-search` | Hybrid code search (BM25 + vector + KG) + MCP server | Elastic-2.0 |
+| `trusty-search` | Hybrid code search (BM25 + vector + KG) + MCP server | MIT |
 | `trusty-memory` | Memory palace UI + MCP frontend (storage engine lives in `trusty-common`'s `memory-core` feature) | MIT |
 | `trusty-analyze` | Code-analysis sidecar daemon (complexity, smells, facts) + MCP server | MIT |
 
@@ -132,21 +131,28 @@ documentation.
 
 | Crate | Description |
 |---|---|
-| `trusty-mpm-core` | Core domain types and traits |
-| `trusty-mpm-mcp` | MCP server for MPM (OpenAPI / Swagger) |
-| `trusty-mpm-daemon` | Background daemon service |
-| `trusty-mpm-client` | API client library |
-| `trusty-mpm-cli` | CLI binary — `trusty-mpm` / `tm` |
-| `trusty-mpm-tui` | Terminal UI (ratatui + crossterm) |
-| `trusty-mpm-telegram` | Telegram bot integration |
+| `trusty-mpm` | Core platform with embedded CLI, daemon, and MCP server |
 | `trusty-mpm-gui` | Desktop GUI (Tauri) |
+
+### Supporting Tools & Agents
+
+| Crate | Description |
+|---|---|
+| `trusty-bm25-daemon` | Standalone BM25 full-text search daemon |
+| `trusty-code` | Code generation and analysis utilities |
+| `trusty-console` | Terminal UI for system monitoring |
+| `trusty-controller` | Infrastructure controller |
+| `trusty-progress` | Progress tracking and reporting |
+| `trusty-review` | Code review automation and analysis |
 
 ### Analytics & Orchestration
 
 | Crate | Description |
 |---|---|
 | `trusty-git-analytics` | Developer productivity analytics from git history |
-| `trusty-agents` | agent orchestration platform |
+| `trusty-agents` | Agent orchestration platform |
+| `trusty-agents-common` | Shared types and utilities for agent framework |
+| `trusty-agents-local` | Local agent runtime implementation |
 | `cto-assistant` | CTO domain assistant |
 
 ## Architecture
@@ -226,23 +232,6 @@ cargo install --path crates/trusty-search --locked
 # More tools available via: cargo install --path crates/<crate>
 ```
 
-## Quick Start — All Crates (Source Build)
-
-```bash
-git clone https://github.com/bobmatnyc/trusty-tools
-cd trusty-tools
-
-# Build all crates
-cargo build --release
-
-# Run all tests
-cargo test
-
-# Install the CLI tools
-cargo install --path crates/trusty-search --locked
-# More tools available via: cargo install --path crates/<crate>
-```
-
 ## Build & Test Commands
 
 ```bash
@@ -258,14 +247,14 @@ cargo fmt
 
 ## Workspace Info
 
-**Single source of truth:** This monorepo consolidates seven formerly separate repos. All 24 crates are co-located under `crates/` with one workspace root and one `Cargo.lock` — no more `[patch.crates-io]` dances during active development.
+**Single source of truth:** This monorepo consolidates seven formerly separate repos. All 21 crates are co-located under `crates/` with one workspace root and one `Cargo.lock` — no more `[patch.crates-io]` dances during active development.
 
-**MSRV:** Rust 1.88+ (required for `let-chains` used by `trusty-mpm-*` and `trusty-agents` in edition 2024)
+**MSRV:** Rust 1.91+ (required by indirect `aws-smithy-*` dependencies)
 
-**License:** Elastic License 2.0 (most crates), MIT (trusty-memory, trusty-analyze). See each crate's `Cargo.toml` for the authoritative license field.
+**License:** MIT for all crates. See each crate's `Cargo.toml` for the authoritative license field.
 
 **Where to start:**
 - **I want to search code:** Read [crates/trusty-search/README.md](crates/trusty-search/README.md)
 - **I want persistent memory:** Read [crates/trusty-memory/README.md](crates/trusty-memory/README.md)
-- **I want the full platform: Read [crates/trusty-agents/README.md](crates/trusty-agents/README.md)
+- **I want the full platform:** Read [crates/trusty-agents/README.md](crates/trusty-agents/README.md)
 
