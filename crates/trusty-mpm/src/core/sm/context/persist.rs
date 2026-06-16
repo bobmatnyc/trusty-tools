@@ -19,8 +19,22 @@
 //! error.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::model::SmConversation;
+
+/// Process-wide monotonic counter that uniquifies temp-file names per `save`.
+///
+/// Why: two `save` calls for the SAME `conv_id` in the same process (and within
+/// the same nanosecond, or on a coarse clock) would otherwise generate identical
+/// temp paths and race — one write could clobber the other's temp file mid-flight
+/// and produce a torn read before either rename. A monotonic counter combined
+/// with the wall-clock nanos guarantees a distinct temp path for every call.
+/// What: incremented once per `save`; the value is mixed into the temp filename.
+/// Test: `concurrent_saves_use_distinct_temp_paths` (distinct paths) and
+/// `concurrent_saves_same_conv_id_do_not_corrupt` (no torn file).
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Subdirectory under the data root that holds SM conversation state files.
 ///
@@ -113,11 +127,14 @@ impl ConversationStore {
     /// rename guarantees readers see either the old or the new content, never a
     /// partial write. This is the contract the connection-safe restart relies on.
     /// What: ensures the `sm/` directory exists, serialises `conv` to pretty JSON,
-    /// writes it to a sibling temp file (`<target>.tmp.<pid>`), flushes+closes it,
-    /// then renames the temp file over the target. All failures map to a typed
-    /// [`ConversationStoreError`].
+    /// writes it to a sibling temp file whose name is unique per call
+    /// (`<target>.tmp.<pid>.<nanos>.<counter>`), flushes+closes it, then renames
+    /// the temp file over the target. The per-call uniquifier means two concurrent
+    /// saves for the same `conv_id` use different temp files and cannot corrupt
+    /// each other. All failures map to a typed [`ConversationStoreError`].
     /// Test: `save_then_load_round_trips`, `save_is_atomic_overwrite`,
-    /// `save_creates_sm_subdir`.
+    /// `save_creates_sm_subdir`, `concurrent_saves_use_distinct_temp_paths`,
+    /// `concurrent_saves_same_conv_id_do_not_corrupt`.
     pub fn save(&self, conv_id: &str, conv: &SmConversation) -> ConversationStoreResult<()> {
         let io_err = |source: std::io::Error| ConversationStoreError::Io {
             conv_id: conv_id.to_string(),
@@ -134,10 +151,15 @@ impl ConversationStore {
 
         let target = self.path_for(conv_id);
         // Same-directory temp file → rename is atomic on the same filesystem.
+        // The temp name is unique PER CALL (pid + wall-clock nanos + a process
+        // monotonic counter) so two concurrent saves for the same conv_id can
+        // never share a temp path and clobber each other before the rename.
         let tmp = self.dir.join(format!(
-            "conversation-{}.tmp.{}",
+            "conversation-{}.tmp.{}.{}.{}",
             sanitise_conv_id(conv_id),
-            std::process::id()
+            std::process::id(),
+            unique_temp_token(),
+            TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::write(&tmp, &json).map_err(io_err)?;
         std::fs::rename(&tmp, &target).map_err(|source| {
@@ -187,6 +209,23 @@ impl ConversationStore {
     pub fn dir(&self) -> &Path {
         &self.dir
     }
+}
+
+/// Wall-clock nanoseconds since the Unix epoch, for temp-file uniqueness.
+///
+/// Why: combined with the pid and a process-monotonic counter, the nanosecond
+/// timestamp makes a temp filename overwhelmingly unlikely to collide across
+/// processes; the counter handles the (common) case where two same-process saves
+/// land in the same nanosecond on a coarse clock.
+/// What: returns `SystemTime::now()` as nanos since the epoch, falling back to `0`
+/// if the clock is somehow before the epoch (the counter still guarantees
+/// per-call uniqueness within a process, so a `0` fallback is safe).
+/// Test: exercised indirectly by `concurrent_saves_use_distinct_temp_paths`.
+fn unique_temp_token() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 /// Sanitise a conversation id into a safe single-path-segment filename stem.

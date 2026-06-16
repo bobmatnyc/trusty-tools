@@ -90,11 +90,15 @@ impl SmContextEngine {
     /// loads as empty. The config slices size the window and budgets. The data
     /// root is injectable so tests use a tempdir.
     /// What: constructs a [`ConversationStore`] under `data_root`, loads the
-    /// conversation for `conv_id` (empty if absent), and copies the window/budget
-    /// numbers out of the config. A load failure (corrupt file) surfaces as a
-    /// [`SmContextError::Persist`].
+    /// conversation for `conv_id` (empty if absent), copies the window/budget
+    /// numbers out of the config, and **recomputes `token_estimate` from the loaded
+    /// content** so the persisted (possibly stale / heuristic-drifted) cache can
+    /// never trigger a spurious compaction on the first `record`. A load failure
+    /// (corrupt file) surfaces as a [`SmContextError::Persist`].
     /// Test: `engine_resumes_persisted_conversation`,
-    /// `new_conversation_starts_empty`.
+    /// `new_conversation_starts_empty`,
+    /// `open_recomputes_stale_token_estimate`,
+    /// `loaded_stale_estimate_does_not_spuriously_compact`.
     pub fn open(
         conv_id: impl Into<String>,
         data_root: impl Into<std::path::PathBuf>,
@@ -104,14 +108,20 @@ impl SmContextEngine {
         let conv_id = conv_id.into();
         let store = ConversationStore::new(data_root);
         let conversation = store.load(&conv_id)?;
-        Ok(Self {
+        let mut engine = Self {
             conv_id,
             conversation,
             window: rounds.window as usize,
             token_budget: inference.context_token_budget as usize,
             compressed_max_tokens: inference.compressed_context_max_tokens as usize,
             store,
-        })
+        };
+        // §7.2: the persisted `token_estimate` is a denormalised cache of the
+        // content size under the *then-current* heuristic. Recompute it from the
+        // loaded content immediately so a stale (or heuristic-drifted) on-disk
+        // value can never trip a spurious compaction on the first `record`.
+        engine.recompute_estimate();
+        Ok(engine)
     }
 
     /// Read-only access to the live conversation (for §7.5 / `sm.context.get`).
@@ -176,8 +186,84 @@ impl SmContextEngine {
             evicted += 1;
         }
 
+        // §7.2/§7.6 convergence: the eviction loop above always keeps ≥1 verbatim
+        // round, so when a SINGLE retained round (plus the compressed block) alone
+        // exceeds the token budget it would exit with `should_compact()` still
+        // true — leaving a silently over-budget context. Run a bounded post-loop
+        // pass that re-summarises the compressed block (and, if still over budget,
+        // folds the oversized retained round into it) until the budget is met or
+        // no further reduction is possible.
+        self.converge_within_budget(provider, compaction_model)
+            .await?;
+
         self.store.save(&self.conv_id, &self.conversation)?;
         Ok(evicted)
+    }
+
+    /// Post-eviction convergence: bring an over-budget single round + compressed
+    /// block back within the token budget without looping forever (§7.2/§7.6).
+    ///
+    /// Why: the `record` eviction loop deliberately keeps the last verbatim round,
+    /// so a lone oversized round (or an oversized compressed block) can leave the
+    /// context silently over `token_budget` with `should_compact()` still true. The
+    /// budget is a hard safety valve, so we must make a best effort to honour it
+    /// rather than persist a context we know is too large — but we must also never
+    /// hang, since the summariser may be unable to shrink content below the budget.
+    /// What: while still over budget, (1) re-summarise the compressed block if it
+    /// is non-empty, then (2) if still over budget AND a single verbatim round
+    /// remains, FOLD that round into the compressed block (keeping the conversation
+    /// coherent — the round's content moves into the summary rather than being
+    /// dropped) and re-summarise. Each iteration MUST strictly reduce the token
+    /// estimate; if an iteration fails to make progress we stop (residual logged at
+    /// debug) so a stubborn summariser can never spin the loop. An empty context
+    /// (nothing left to summarise) also terminates.
+    /// Test: `single_oversized_round_converges_within_budget`,
+    /// `convergence_terminates_when_summariser_cannot_shrink`.
+    async fn converge_within_budget(
+        &mut self,
+        provider: &dyn LlmProvider,
+        compaction_model: &str,
+    ) -> Result<(), SmContextError> {
+        while self.should_compact() {
+            let before = self.conversation.token_estimate;
+
+            // (1) Re-summarise the compressed block if there is one to shrink.
+            if !self.conversation.compressed_context.trim().is_empty() {
+                let resp = resummarise(
+                    provider,
+                    compaction_model,
+                    &self.conversation.compressed_context,
+                )
+                .await?;
+                self.conversation.compressed_context = resp.text;
+                self.recompute_estimate();
+            }
+
+            // (2) Still over budget? Fold the lone retained round into the
+            // compressed block so its content is preserved (not dropped) while the
+            // verbatim window empties. We never evict the *last* round in the main
+            // loop, but here folding it is the only way to honour the budget.
+            if self.should_compact() && self.conversation.recent_rounds.len() == 1 {
+                self.compact_once(provider, compaction_model).await?;
+            }
+
+            // Termination guard: if an iteration cannot strictly reduce the
+            // estimate (summariser returned something no smaller and there is no
+            // round left to fold), stop rather than spin. The residual over-budget
+            // context is the best achievable; persisting it beats hanging.
+            if self.conversation.token_estimate >= before
+                && self.conversation.recent_rounds.is_empty()
+            {
+                tracing::debug!(
+                    conv_id = %self.conv_id,
+                    token_estimate = self.conversation.token_estimate,
+                    token_budget = self.token_budget,
+                    "context convergence stalled; persisting best-effort over-budget context"
+                );
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// True when EITHER §7.2 trigger holds: window over size OR estimate over
@@ -265,21 +351,26 @@ impl SmContextEngine {
 
     /// Assemble the working-prompt messages in the exact §7.5 order.
     ///
-    /// Why: §7.5 mandates a precise message order — system → compressed context →
-    /// memory recall → recent rounds → current message. Producing it here (not at
-    /// the call site) guarantees the order is correct and identical everywhere,
-    /// and lets SM-7 simply pass the assembled SM system prompt and the SM-4
-    /// recall text it already has.
-    /// What: builds a `Vec<ChatMessage>` in five ordered parts — (1) the system
-    /// message `system_prompt` (skipped if empty); (2) the compressed-context
-    /// block as a `system` message prefixed "Earlier in this conversation:"
-    /// (skipped if empty); (3) the memory-recall block as a `system` message
-    /// prefixed "Relevant memory:" (skipped if `memory_recall` is empty/None);
-    /// (4) each verbatim recent round as alternating `user`/`assistant` turns;
-    /// (5) the current operator `message` as the final `user` turn. The recall
-    /// text is a PARAMETER (not fetched here) so SM-7 passes SM-4's recall
-    /// results; SM-5 does not wire memory.
-    /// Test: `assembly_order_is_exact`, `assembly_skips_empty_blocks`.
+    /// Why: §7.5 mandates a precise content order — system prompt → compressed
+    /// context → memory recall → recent rounds → current message. Producing it here
+    /// (not at the call site) guarantees the order is correct and identical
+    /// everywhere, and lets SM-7 simply pass the assembled SM system prompt and the
+    /// SM-4 recall text it already has. The three leading system-role sections are
+    /// consolidated into a SINGLE `system` message because several providers
+    /// (OpenAI Chat Completions among them) reject more than one `system` message
+    /// in the array — emitting three would make the assembled prompt unusable on
+    /// those backends.
+    /// What: builds a `Vec<ChatMessage>` — (1) ONE `system` message that
+    /// concatenates, IN §7.5 ORDER and each omitted if empty: the base
+    /// `system_prompt`, then an "Earlier in this conversation:" compressed block,
+    /// then a "Relevant memory:" recall block (sections joined by blank lines); if
+    /// all three are empty no system message is emitted at all; (2) each verbatim
+    /// recent round as alternating `user`/`assistant` turns; (3) the current
+    /// operator `message` as the final `user` turn. The recall text is a PARAMETER
+    /// (not fetched here) so SM-7 passes SM-4's recall results; SM-5 does not wire
+    /// memory.
+    /// Test: `assembly_order_is_exact`, `assembly_skips_empty_blocks`,
+    /// `assembly_emits_single_system_message`.
     pub fn assemble_working_prompt(
         &self,
         system_prompt: &str,
@@ -288,36 +379,33 @@ impl SmContextEngine {
     ) -> Vec<ChatMessage> {
         let mut msgs: Vec<ChatMessage> = Vec::new();
 
-        // 1. System message.
+        // 1. ONE consolidated system message: base prompt, then compressed
+        // context, then memory recall — in §7.5 order, each section omitted when
+        // empty. A single `system` message keeps the prompt valid on providers
+        // that reject more than one system-role entry.
+        let mut sections: Vec<String> = Vec::new();
         if !system_prompt.trim().is_empty() {
-            msgs.push(ChatMessage {
-                role: ROLE_SYSTEM.to_string(),
-                content: system_prompt.to_string(),
-            });
+            sections.push(system_prompt.to_string());
         }
-
-        // 2. Compressed-context block.
         if !self.conversation.compressed_context.trim().is_empty() {
-            msgs.push(ChatMessage {
-                role: ROLE_SYSTEM.to_string(),
-                content: format!(
-                    "Earlier in this conversation: {}",
-                    self.conversation.compressed_context
-                ),
-            });
+            sections.push(format!(
+                "Earlier in this conversation: {}",
+                self.conversation.compressed_context
+            ));
         }
-
-        // 3. Memory-recall block (injected by the caller, SM-4 results).
         if let Some(recall) = memory_recall
             && !recall.trim().is_empty()
         {
+            sections.push(format!("Relevant memory: {recall}"));
+        }
+        if !sections.is_empty() {
             msgs.push(ChatMessage {
                 role: ROLE_SYSTEM.to_string(),
-                content: format!("Relevant memory: {recall}"),
+                content: sections.join("\n\n"),
             });
         }
 
-        // 4. Recent verbatim rounds as alternating user/assistant turns.
+        // 2. Recent verbatim rounds as alternating user/assistant turns.
         for round in &self.conversation.recent_rounds {
             msgs.push(ChatMessage {
                 role: ROLE_USER.to_string(),
@@ -329,7 +417,7 @@ impl SmContextEngine {
             });
         }
 
-        // 5. Current operator message.
+        // 3. Current operator message.
         msgs.push(ChatMessage {
             role: ROLE_USER.to_string(),
             content: message.to_string(),

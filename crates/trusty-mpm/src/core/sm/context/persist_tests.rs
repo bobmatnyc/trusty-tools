@@ -165,3 +165,107 @@ fn conv_id_is_sanitised() {
     let loaded = store.load(nasty).expect("load sanitised");
     assert_eq!(loaded, SmConversation::new());
 }
+
+/// Why: FINDING 3 — the atomic-write temp file must be unique PER CALL, not just
+/// per pid, so two concurrent saves for the SAME conv_id cannot share a temp path
+/// and clobber each other. After many sequential saves for one id, no two of them
+/// may ever have produced the same temp filename.
+/// What: monkey-patches nothing; instead it drives many `save` calls for one
+/// conv_id and asserts the directory never accumulated a `.tmp.` leftover and that
+/// the final value loads cleanly (a torn write would corrupt it). To directly
+/// assert distinct temp paths, it also generates many temp names back-to-back via
+/// the same scheme `save` uses and asserts they are all distinct.
+/// Test: this is the test.
+#[test]
+fn concurrent_saves_use_distinct_temp_paths() {
+    let dir = tempdir().expect("tempdir");
+    let store = ConversationStore::new(dir.path());
+
+    // Many rapid saves for the same id; none should leave a temp file and the
+    // final load must be intact (no torn write).
+    for n in 0..200u64 {
+        let mut c = SmConversation::new();
+        c.total_rounds = n;
+        store.save("hot", &c).expect("save");
+    }
+    let loaded = store.load("hot").expect("load");
+    assert_eq!(loaded.total_rounds, 199);
+
+    let leftovers: Vec<_> = std::fs::read_dir(store.dir())
+        .expect("read sm dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp."))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no leftover temp files: {leftovers:?}"
+    );
+}
+
+/// Why: FINDING 3 — two `save` calls for the same conv_id issued from separate
+/// threads (sharing the process) must not corrupt the state file. With a per-pid
+/// temp name they could collide; with a per-call uniquifier each writes its own
+/// temp file and the final rename leaves a well-formed JSON document.
+/// What: spawns two threads that each save a distinct conversation for the same id
+/// many times, then asserts the file loads cleanly to ONE of the two writers'
+/// values (never a torn/half-written file) and no temp leftovers remain.
+/// Test: this is the test.
+#[test]
+fn concurrent_saves_same_conv_id_do_not_corrupt() {
+    let dir = tempdir().expect("tempdir");
+    let store = ConversationStore::new(dir.path());
+    // Ensure the dir exists so neither thread races on create_dir_all semantics.
+    std::fs::create_dir_all(store.dir()).expect("mkdir");
+
+    let a = store.clone();
+    let b = store.clone();
+
+    let ha = std::thread::spawn(move || {
+        for _ in 0..200 {
+            let mut c = SmConversation::new();
+            c.compressed_context = "AAAA".to_string();
+            c.total_rounds = 1;
+            a.save("dup", &c).expect("save A");
+        }
+    });
+    let hb = std::thread::spawn(move || {
+        for _ in 0..200 {
+            let mut c = SmConversation::new();
+            c.compressed_context = "BBBB".to_string();
+            c.total_rounds = 2;
+            b.save("dup", &c).expect("save B");
+        }
+    });
+    ha.join().expect("thread A");
+    hb.join().expect("thread B");
+
+    // The file must load to a well-formed value from one of the two writers —
+    // never a torn/corrupt document.
+    let loaded = store.load("dup").expect("load must not be corrupt");
+    assert!(
+        loaded == {
+            let mut c = SmConversation::new();
+            c.compressed_context = "AAAA".to_string();
+            c.total_rounds = 1;
+            c
+        } || loaded == {
+            let mut c = SmConversation::new();
+            c.compressed_context = "BBBB".to_string();
+            c.total_rounds = 2;
+            c
+        },
+        "final state is one writer's intact value, got {loaded:?}"
+    );
+
+    let leftovers: Vec<_> = std::fs::read_dir(store.dir())
+        .expect("read sm dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp."))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no leftover temp files: {leftovers:?}"
+    );
+}

@@ -330,11 +330,15 @@ async fn oversized_summary_is_resummarised() {
     assert_eq!(reqs[1].system, COMPRESS_SUMMARY_SYSTEM_PROMPT);
 }
 
-/// Why: §7.5 — the working prompt must be assembled in EXACTLY the order
-/// system → compressed → recall → recent rounds → current message.
+/// Why: §7.5 — the working prompt must be assembled with EXACTLY ONE leading
+/// system message that contains the three labeled blocks (base prompt, compressed
+/// context, memory recall) in order, followed by the recent rounds, then the
+/// current message. A single system message keeps the prompt valid on providers
+/// that reject more than one system-role entry (finding 4).
 /// What: builds an engine, injects a compressed block + one recent round, then
 /// assembles with a system prompt, a recall string, and a current message;
-/// asserts the precise role/content sequence.
+/// asserts exactly one system message with the three ordered blocks, then the
+/// round, then the current message.
 /// Test: this is the test.
 #[tokio::test]
 async fn assembly_order_is_exact() {
@@ -353,21 +357,68 @@ async fn assembly_order_is_exact() {
 
     let msgs = eng.assemble_working_prompt("SYSTEM", Some("RECALL"), "CURRENT");
 
-    // system + compressed + recall + (user, assistant) for one round + current.
-    assert_eq!(msgs.len(), 6, "exact §7.5 message count");
-    // system, compressed, recall, [user(recent), assistant(recent)], current(user)
+    // ONE system + (user, assistant) for one round + current.
+    assert_eq!(msgs.len(), 4, "exact §7.5 message count (single system)");
+
+    // Exactly one system-role message, and it leads.
+    let system_count = msgs.iter().filter(|m| m.role == "system").count();
+    assert_eq!(system_count, 1, "exactly one system message");
     assert_eq!(msgs[0].role, "system");
-    assert_eq!(msgs[0].content, "SYSTEM");
-    assert_eq!(msgs[1].role, "system");
-    assert!(msgs[1].content.starts_with("Earlier in this conversation:"));
-    assert_eq!(msgs[2].role, "system");
-    assert!(msgs[2].content.starts_with("Relevant memory:"));
+
+    // The three §7.5 blocks appear IN ORDER inside that single system message.
+    let sys = &msgs[0].content;
+    let base = sys.find("SYSTEM").expect("base prompt present");
+    let earlier = sys
+        .find("Earlier in this conversation:")
+        .expect("compressed block present");
+    let recall = sys.find("Relevant memory:").expect("recall block present");
+    assert!(
+        base < earlier && earlier < recall,
+        "blocks ordered base < compressed < recall in: {sys}"
+    );
+
+    // Then the recent round, then the current message.
+    assert_eq!(msgs[1].role, "user");
+    assert_eq!(msgs[1].content, "recent-u");
+    assert_eq!(msgs[2].role, "assistant");
+    assert_eq!(msgs[2].content, "recent-a");
     assert_eq!(msgs[3].role, "user");
-    assert_eq!(msgs[3].content, "recent-u");
-    assert_eq!(msgs[4].role, "assistant");
-    assert_eq!(msgs[4].content, "recent-a");
-    assert_eq!(msgs[5].role, "user");
-    assert_eq!(msgs[5].content, "CURRENT");
+    assert_eq!(msgs[3].content, "CURRENT");
+}
+
+/// Why: finding 4 — providers like OpenAI Chat Completions reject more than one
+/// `system` message; even when ALL of base prompt, compressed context, and recall
+/// are present, the assembler must emit exactly one consolidated system message.
+/// What: window=1, two records to build a compressed block, then assemble with a
+/// system prompt AND a recall string; asserts a single system message containing
+/// all three labeled sections.
+/// Test: this is the test.
+#[tokio::test]
+async fn assembly_emits_single_system_message() {
+    let inf = inference();
+    let mock = MockProvider::fixed("compressed-summary");
+    let (mut eng, _dir) = engine_with(1, &inf);
+    eng.record(&mock, "m", "old-u", "old-a", ts(0), Vec::new())
+        .await
+        .expect("r0");
+    eng.record(&mock, "m", "recent-u", "recent-a", ts(1), Vec::new())
+        .await
+        .expect("r1");
+
+    let msgs = eng.assemble_working_prompt("BASE-PROMPT", Some("MEM"), "NOW");
+
+    let system_count = msgs.iter().filter(|m| m.role == "system").count();
+    assert_eq!(system_count, 1, "only one system message allowed");
+    let sys = &msgs[0].content;
+    assert!(sys.contains("BASE-PROMPT"), "base section present: {sys}");
+    assert!(
+        sys.contains("Earlier in this conversation: compressed-summary"),
+        "compressed section present: {sys}"
+    );
+    assert!(
+        sys.contains("Relevant memory: MEM"),
+        "recall section present: {sys}"
+    );
 }
 
 /// Why: §7.5 — empty optional blocks (no compressed context, no recall) must be
@@ -402,4 +453,176 @@ async fn token_estimate_tracks_content() {
         .expect("r0");
     // 8 chars / 4 = 2 tokens, no compressed block yet.
     assert_eq!(eng.conversation().token_estimate, 2);
+}
+
+/// Why: FINDING 1 — when a SINGLE retained round alone exceeds the token budget,
+/// the eviction loop (which always keeps ≥1 round) exits with `should_compact()`
+/// still true. The post-loop convergence pass must re-summarise / fold so the
+/// persisted context is NOT left silently over budget, and the loop must
+/// terminate (no hang).
+/// What: window=10, tiny token budget, a small first round then a single HUGE
+/// second round. A `Fixed` mock returns a short summary so folding the huge round
+/// into the compressed block strictly shrinks the estimate. Asserts the engine
+/// converged within budget and the huge round was folded out of the window.
+/// Test: this is the test.
+#[tokio::test]
+async fn single_oversized_round_converges_within_budget() {
+    let mut inf = inference();
+    inf.context_token_budget = 50; // tiny safety valve
+    inf.compressed_context_max_tokens = 1_000_000; // don't let §7.6 interfere
+    let (mut eng, _dir) = engine_with(10, &inf);
+    // A short canned summary keeps the compressed block tiny after folding.
+    let mock = MockProvider::fixed("tiny");
+
+    eng.record(&mock, "m", "small", "small", ts(0), Vec::new())
+        .await
+        .expect("record small");
+
+    // One huge round (~8000 chars → ~2000 tokens ≫ 50-token budget). The window
+    // count is only 2 (≤ 10), so the count trigger does not fire; the budget
+    // trigger does, and after evicting the first round the LONE huge round still
+    // exceeds budget — exactly the non-convergence case.
+    let huge = "x".repeat(8_000);
+    eng.record(&mock, "m", huge, "ok", ts(1), Vec::new())
+        .await
+        .expect("record huge");
+
+    // Convergence: the persisted context is back within budget (the huge round
+    // was folded into the compressed block, which the short mock summary shrank).
+    let budget = inf.context_token_budget as usize;
+    assert!(
+        eng.conversation().token_estimate <= budget,
+        "converged within budget: estimate={} budget={}",
+        eng.conversation().token_estimate,
+        budget
+    );
+    // The oversized verbatim round must no longer be sitting in the window.
+    assert!(
+        eng.conversation().window_len() <= 1,
+        "huge round folded out of the verbatim window"
+    );
+    // And the on-disk state reflects the converged (within-budget) context.
+    let store = ConversationStore::new(_dir.path());
+    let persisted = store.load(eng.conv_id()).expect("load persisted");
+    assert!(
+        persisted.token_estimate <= budget,
+        "persisted context within budget"
+    );
+}
+
+/// Why: FINDING 1 — the convergence pass must TERMINATE even when the summariser
+/// cannot shrink content below the budget. A growing/`Echo` mock can never bring
+/// the estimate under a tiny budget; the loop must still stop (best-effort
+/// over-budget context) rather than hang.
+/// What: window=10, tiny budget, an `Echo` mock (whose summaries only grow). A
+/// single huge round forces convergence. The test asserts `record` RETURNS (the
+/// `#[tokio::test]` would otherwise hang) — completion is the assertion.
+/// Test: this is the test.
+#[tokio::test]
+async fn convergence_terminates_when_summariser_cannot_shrink() {
+    let mut inf = inference();
+    inf.context_token_budget = 1; // unreachable budget
+    inf.compressed_context_max_tokens = 1_000_000;
+    let (mut eng, _dir) = engine_with(10, &inf);
+    // Echo summaries only ever grow, so the budget can never be met.
+    let mock = MockProvider::echo("ECHO> ");
+
+    eng.record(&mock, "m", "first", "first", ts(0), Vec::new())
+        .await
+        .expect("record first");
+    let huge = "y".repeat(4_000);
+    // If convergence did not terminate this `await` would hang the test forever.
+    eng.record(&mock, "m", huge, "ok", ts(1), Vec::new())
+        .await
+        .expect("record huge terminates");
+
+    // Best-effort: the window has been drained as far as it can (≤1 round) and the
+    // call returned. We do NOT assert within-budget here — it is provably
+    // impossible with this mock — only that we did not hang.
+    assert!(eng.conversation().window_len() <= 1, "window drained");
+}
+
+/// Why: FINDING 2 — `token_estimate` is persisted but must be RECOMPUTED on load
+/// so a stale/absurd on-disk value cannot trip a spurious compaction. Mutating the
+/// JSON's `token_estimate` to a huge value and reopening must yield the correct
+/// recomputed estimate.
+/// What: persist a conversation, rewrite the on-disk `token_estimate` to an absurd
+/// value, reopen via `open`, and assert the estimate equals chars/4 of the actual
+/// content (not the absurd persisted value).
+/// Test: this is the test.
+#[tokio::test]
+async fn open_recomputes_stale_token_estimate() {
+    let inf = inference();
+    let dir = tempdir().expect("tempdir");
+    let rounds = SmRoundsConfig { window: 10 };
+    let mock = MockProvider::fixed("s");
+
+    let mut eng = SmContextEngine::open("c", dir.path(), &inf, &rounds).expect("open");
+    // "abcd" + "efgh" = 8 chars → 2 tokens.
+    eng.record(&mock, "m", "abcd", "efgh", ts(0), Vec::new())
+        .await
+        .expect("r0");
+    drop(eng);
+
+    // Corrupt ONLY the cached estimate on disk to an absurd value.
+    let store = ConversationStore::new(dir.path());
+    let path = store.path_for("c");
+    let raw = std::fs::read_to_string(&path).expect("read state");
+    let mut json: serde_json::Value = serde_json::from_str(&raw).expect("parse state");
+    json["token_estimate"] = serde_json::json!(999_999_999u64);
+    std::fs::write(&path, serde_json::to_string_pretty(&json).expect("ser")).expect("write state");
+
+    // Reopen: the engine must recompute, ignoring the absurd cached value.
+    let reopened = SmContextEngine::open("c", dir.path(), &inf, &rounds).expect("reopen");
+    assert_eq!(
+        reopened.conversation().token_estimate,
+        2,
+        "estimate recomputed from content, not the stale 999_999_999"
+    );
+}
+
+/// Why: FINDING 2 — a loaded conversation whose persisted estimate is absurdly
+/// high must NOT spuriously compact on the next `record` once the estimate is
+/// recomputed. With a generous real budget, a fresh small round after reload
+/// should evict nothing and make no compaction call.
+/// What: persist a small conversation, corrupt the on-disk estimate to a huge
+/// value, reopen with a generous budget, record one more small round, and assert
+/// zero evictions and zero provider calls.
+/// Test: this is the test.
+#[tokio::test]
+async fn loaded_stale_estimate_does_not_spuriously_compact() {
+    // Generous budget so ONLY a stale estimate could (wrongly) trigger compaction.
+    let mut inf = inference();
+    inf.context_token_budget = 1_000_000;
+    let dir = tempdir().expect("tempdir");
+    let rounds = SmRoundsConfig { window: 10 };
+
+    let seed = MockProvider::fixed("s");
+    let mut eng = SmContextEngine::open("c", dir.path(), &inf, &rounds).expect("open");
+    eng.record(&seed, "m", "u0", "a0", ts(0), Vec::new())
+        .await
+        .expect("seed round");
+    drop(eng);
+
+    // Corrupt the cached estimate to exceed the budget.
+    let store = ConversationStore::new(dir.path());
+    let path = store.path_for("c");
+    let raw = std::fs::read_to_string(&path).expect("read state");
+    let mut json: serde_json::Value = serde_json::from_str(&raw).expect("parse");
+    json["token_estimate"] = serde_json::json!(5_000_000u64);
+    std::fs::write(&path, serde_json::to_string_pretty(&json).expect("ser")).expect("write");
+
+    // Reopen (recomputes the estimate down to reality) and record a small round.
+    let mut reopened = SmContextEngine::open("c", dir.path(), &inf, &rounds).expect("reopen");
+    let probe = MockProvider::fixed("should-not-be-called");
+    let evicted = reopened
+        .record(&probe, "m", "u1", "a1", ts(1), Vec::new())
+        .await
+        .expect("record after reload");
+
+    assert_eq!(evicted, 0, "no spurious eviction from a stale estimate");
+    assert!(
+        probe.requests().is_empty(),
+        "no spurious compaction call from a stale estimate"
+    );
 }
