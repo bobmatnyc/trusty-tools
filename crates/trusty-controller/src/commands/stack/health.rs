@@ -49,13 +49,21 @@ impl HealthReport {
     /// Build a report and compute the verdict.
     ///
     /// Why: one place derives the verdict so the exit code + JSON agree.
-    /// What: `degraded` when any member is `down`, else `ready`. `unknown`,
-    /// `stale`, and `not_installed` do NOT degrade — only a definitive `down`
-    /// does (a down daemon is the failure signal).
-    /// Test: `tests::verdict_down_is_degraded`, `tests::verdict_unknown_is_ready`.
+    /// What: degrade policy — both `down` AND `not_installed` degrade the verdict
+    /// to `degraded`. A `down` daemon is the running-but-broken failure signal; a
+    /// `not_installed` member is a real gap in the resolved stable set (an
+    /// operator after a failed install must NOT see green). Only a genuinely
+    /// `unknown` member (e.g. trusty-mpm, which has no `health --json` verb) does
+    /// NOT degrade — its health is unprobeable, not absent. `stale` also stays
+    /// non-degrading (running, just below the version floor).
+    /// Test: `tests::verdict_down_is_degraded`,
+    /// `tests::verdict_not_installed_is_degraded`,
+    /// `tests::verdict_unknown_is_ready`.
     fn build(members: Vec<HealthRow>) -> Self {
-        let any_down = members.iter().any(|m| m.health == health_str::DOWN);
-        let verdict = if any_down { "degraded" } else { "ready" };
+        let degrades = members
+            .iter()
+            .any(|m| m.health == health_str::DOWN || m.health == health_str::NOT_INSTALLED);
+        let verdict = if degrades { "degraded" } else { "ready" };
         Self {
             command: "stack health",
             members,
@@ -141,14 +149,35 @@ mod tests {
         assert_eq!(r.exit_code(), 2);
     }
 
-    /// Why: an `unknown` member (mpm) must NOT degrade the verdict.
-    /// What: one unknown member → `ready`, exit 0.
+    /// Why: a `not_installed` member is a real gap in the resolved stable set
+    /// (e.g. a failed install). It MUST degrade the verdict so an operator does
+    /// not see green over a missing daemon.
+    /// What: one not_installed member → `degraded`, exit 2.
+    /// Test: This is the test.
+    #[test]
+    fn verdict_not_installed_is_degraded() {
+        let r = HealthReport::build(vec![row("trusty-search", "not_installed")]);
+        assert_eq!(r.verdict, "degraded");
+        assert_eq!(r.exit_code(), 2);
+    }
+
+    /// Why: an `unknown` member (mpm) must NOT degrade the verdict — its health
+    /// is merely unprobeable via the standard contract, not absent.
+    /// What: one unknown member → `ready`, exit 0. A mix of unknown + healthy
+    /// also stays ready, proving unknown never falsely degrades.
     /// Test: This is the test.
     #[test]
     fn verdict_unknown_is_ready() {
         let r = HealthReport::build(vec![row("trusty-mpm", "unknown")]);
         assert_eq!(r.verdict, "ready");
         assert_eq!(r.exit_code(), 0);
+
+        let mixed = HealthReport::build(vec![
+            row("trusty-search", "healthy"),
+            row("trusty-mpm", "unknown"),
+        ]);
+        assert_eq!(mixed.verdict, "ready");
+        assert_eq!(mixed.exit_code(), 0);
     }
 
     /// Why: the exit code must track the verdict.

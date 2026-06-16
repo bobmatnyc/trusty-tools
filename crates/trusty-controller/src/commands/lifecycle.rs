@@ -126,6 +126,14 @@ impl LifecycleReport {
 /// Why: dependencies must come up before dependents and go down after them;
 /// `start` walks the topological (stable-set) order, `stop`/`restart` walk it in
 /// reverse so dependents stop first.
+///
+/// Note on `restart`: restart is a PER-MEMBER ROLLING bounce — each member is
+/// stopped-then-started in turn (`apply_to_member` does bootout+bootstrap for one
+/// member before moving to the next). It is NOT a stop-all-then-start-all barrier.
+/// The reversed iteration order here is purely about teardown grouping (so a
+/// dependent is bounced before the dependency it relies on); it does not imply
+/// the whole stack goes down before any member comes back up.
+///
 /// What: filters `selected` to daemons (non-`None` strategy) and reverses for
 /// `Stop`/`Restart`.
 /// Test: `tests::ordering_is_directional`.
@@ -296,8 +304,13 @@ fn launchd_control(verb: Verb, binary: &str) -> anyhow::Result<String> {
             Ok(format!("bootstrapped {}", cfg.label))
         }
         Verb::Restart => {
+            // Bootout first (stop); only then bootstrap (start). If bootstrap
+            // fails after a successful bootout, surface that the daemon WAS
+            // stopped — the operator is now in a stopped (not still-running)
+            // state, which changes their next action.
             cfg.bootout()?;
-            cfg.bootstrap()?;
+            cfg.bootstrap()
+                .map_err(|e| anyhow::anyhow!("booted out successfully; bootstrap failed: {e}"))?;
             Ok(format!("restarted {}", cfg.label))
         }
     }

@@ -87,7 +87,10 @@ pub fn format_output(addr: &str, format: PortFormat) -> Option<String> {
             let port = parse_port_from_addr(addr)?;
             let colon = addr.rfind(':')?;
             let host = &addr[..colon];
-            Some(format!(r#"{{"addr":"{host}","port":{port}}}"#))
+            // Serialise via serde_json so a host needing JSON escaping (quotes,
+            // backslashes) can't break the output. Field names/shape are
+            // identical to the prior hand-rolled form, so existing tests hold.
+            Some(serde_json::json!({ "addr": host, "port": port }).to_string())
         }
     }
 }

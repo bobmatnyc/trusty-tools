@@ -18,6 +18,12 @@
 //! rather than silently ignored. This keeps `ensure` doing real, idempotent work
 //! today without fabricating a daemon-coupled subsystem.
 //!
+//! Exit codes: `0` = patched OK (and `--wait` was NOT requested); `2` = a patch
+//! failed; `4` = the `.mcp.json` patch succeeded but `--wait` was requested and
+//! the readiness-wait is deferred/not-implemented. The distinct `4` lets CI
+//! callers detect they did NOT actually block on readiness, instead of being
+//! lulled by a `0` they would read as "waited and ready".
+//!
 //! Test: `tests` covers the MCP-entry table (`mcp_members`) and the report
 //! shaping; the actual file patch is side-effecting (covered by
 //! `claude_config::patch_mcp_server`'s own tests).
@@ -139,16 +145,22 @@ impl EnsureReport {
         }
     }
 
-    /// Process exit code: 0 all ok, 2 any patch failed.
+    /// Process exit code: 2 if any patch failed, 4 if patched OK but `--wait`
+    /// was requested-but-deferred, else 0.
     ///
-    /// Why: CI / setup scripts branch on this.
-    /// What: `0` if `all_ok`, else `2`.
-    /// Test: `tests::report_all_ok`.
+    /// Why: CI / setup scripts branch on this. A failed patch (`2`) must take
+    /// precedence over the deferred-wait signal (`4`) — a broken `.mcp.json` is
+    /// the more serious condition. `4` is distinct from `0` so a caller that
+    /// passed `--wait` can detect it did NOT actually block on readiness.
+    /// What: `2` when any patch failed; else `4` when `wait_deferred`; else `0`.
+    /// Test: `tests::report_all_ok`, `tests::wait_deferred_exit_code`.
     fn exit_code(&self) -> i32 {
-        if self.all_ok {
-            0
-        } else {
+        if !self.all_ok {
             2
+        } else if self.wait_deferred {
+            4
+        } else {
+            0
         }
     }
 }
@@ -189,7 +201,9 @@ fn ensure_member(path: &Path, m: &McpMember) -> EnsureOutcome {
 /// Why: Phase-2 entry point — idempotently wire the project's `.mcp.json`.
 /// What: upserts every MCP-serving member's entry into `./.mcp.json`, renders the
 /// report, and returns the exit code. `--wait` is accepted but its readiness
-/// polling is deferred (reported via `wait_deferred`; see module note).
+/// polling is deferred: when `--wait` is requested the patch is still applied,
+/// but the verb returns exit `4` (not `0`) so callers know they did NOT block on
+/// readiness (see module note).
 /// Test: side-effecting (filesystem); the table + report are unit-tested.
 pub fn run(wait: bool, json: bool) -> i32 {
     let path = Path::new(MCP_FILE);
@@ -306,5 +320,40 @@ mod tests {
         );
         assert!(ok.all_ok);
         assert_eq!(ok.exit_code(), 0);
+    }
+
+    /// Why: when `--wait` was requested but readiness-wait is deferred, the verb
+    /// must return the distinct code `4` (not `0`) so CI callers know they did
+    /// NOT actually block on readiness — while still reporting `all_ok`.
+    /// What: all-ok + `wait_deferred = true` → exit 4; a failed patch still wins
+    /// with exit 2 even when `wait_deferred` is set.
+    /// Test: This is the test.
+    #[test]
+    fn wait_deferred_exit_code() {
+        // Patched OK but --wait deferred → distinct exit 4.
+        let deferred = EnsureReport::build(
+            vec![EnsureOutcome {
+                member: "a".to_owned(),
+                ok: true,
+                changed: true,
+                detail: "added/updated".to_owned(),
+            }],
+            true,
+        );
+        assert!(deferred.all_ok);
+        assert_eq!(deferred.exit_code(), 4);
+
+        // A failed patch outranks the deferred-wait signal → exit 2.
+        let failed_and_deferred = EnsureReport::build(
+            vec![EnsureOutcome {
+                member: "a".to_owned(),
+                ok: false,
+                changed: false,
+                detail: "permission denied".to_owned(),
+            }],
+            true,
+        );
+        assert!(!failed_and_deferred.all_ok);
+        assert_eq!(failed_and_deferred.exit_code(), 2);
     }
 }

@@ -167,16 +167,20 @@ pub struct VersionConformance {
 /// `contract_version` and a non-empty `verbs[]`. Isolating the check as a pure
 /// function over a `serde_json::Value` makes it testable without spawning the
 /// member.
-/// What: returns a [`VersionConformance`] — `conformant` iff BOTH a non-empty
-/// `contract_version` (string or number) AND a non-empty `verbs[]` array are
-/// present.
+/// What: returns a [`VersionConformance`] — `conformant` iff BOTH a valid
+/// `contract_version` (a POSITIVE number `>= 1`, or a non-empty string) AND a
+/// non-empty `verbs[]` array are present. A numeric `0` is rejected.
 /// Test: `tests::validate_version_envelope_conformant`,
 /// `tests::validate_version_envelope_missing_contract`,
-/// `tests::validate_version_envelope_missing_verbs`.
+/// `tests::validate_version_envelope_missing_verbs`,
+/// `tests::validate_version_envelope_zero_contract_rejected`.
 pub fn validate_version_envelope(v: &serde_json::Value) -> VersionConformance {
-    let has_contract_version = v
-        .get("contract_version")
-        .is_some_and(|c| c.is_number() || c.as_str().is_some_and(|s| !s.is_empty()));
+    // A numeric contract_version must be POSITIVE (>= 1); `0` is not a valid
+    // contract version and must NOT be treated as conformant. A non-empty string
+    // form (the alternate envelope shape, e.g. "1") is still accepted.
+    let has_contract_version = v.get("contract_version").is_some_and(|c| {
+        c.as_u64().map(|n| n > 0).unwrap_or(false) || c.as_str().is_some_and(|s| !s.is_empty())
+    });
     let verbs = v.get("verbs").and_then(|x| x.as_array());
     let verb_count = verbs.map(|a| a.len()).unwrap_or(0);
     let has_verbs = verb_count > 0;
@@ -288,5 +292,24 @@ mod tests {
         let c2 = validate_version_envelope(&empty_verbs);
         assert!(!c2.conformant);
         assert!(!c2.has_verbs);
+    }
+
+    /// Why: `contract_version: 0` is not a valid contract version — the numeric
+    /// branch must require a positive value, so `0` is non-conformant while `1`
+    /// is conformant.
+    /// What: validates a `0` envelope (not conformant) and a `1` envelope
+    /// (conformant), both with a non-empty `verbs[]` so only the version differs.
+    /// Test: This is the test.
+    #[test]
+    fn validate_version_envelope_zero_contract_rejected() {
+        let zero = serde_json::json!({ "contract_version": 0, "verbs": ["health"] });
+        let c0 = validate_version_envelope(&zero);
+        assert!(!c0.has_contract_version);
+        assert!(!c0.conformant);
+
+        let one = serde_json::json!({ "contract_version": 1, "verbs": ["health"] });
+        let c1 = validate_version_envelope(&one);
+        assert!(c1.has_contract_version);
+        assert!(c1.conformant);
     }
 }
