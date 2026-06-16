@@ -38,6 +38,10 @@ which = { workspace = true }
 tokio = { workspace = true }
 # flock(2)-based system advisory lock for `tctl up` idempotency/concurrency (DOC-12 §3.4 / DOC-3 §4)
 libc = { workspace = true }
+# HTTP client for `tctl ensure` project-setup stages (POST /indexes → trusty-search,
+# POST /api/v1/palaces → trusty-memory) and `--wait` readiness polling against the
+# daemon /health endpoints (#1341). Reuses the workspace reqwest (rustls-tls).
+reqwest = { workspace = true }
 # Structured logging to stderr (CLAUDE.md: logs → stderr, stdout = data)
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
