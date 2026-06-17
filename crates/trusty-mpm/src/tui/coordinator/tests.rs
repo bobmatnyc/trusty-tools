@@ -15,13 +15,13 @@ use super::layout::{
     CONTROLLER_STATUS, DAEMON_REACHABLE, DAEMON_UNREACHABLE, INPUT_PROMPT, STATUS_BAR_HINT,
     daemon_indicator, input_line, status_bar_text,
 };
-use super::poll::coord_session_to_entry;
+use super::poll::{coord_poll_daemon, coord_session_to_entry};
 use super::rows::{
     COLUMN_SEPARATOR, CONTROLLER_GLYPH, SESSION_GLYPH, active_row_two_col, controller_bullet_row,
     session_row, session_short_id,
 };
 use super::state::{CoordinatorState, INPUT_HISTORY_LIMIT, SessionEntry};
-use crate::client::CoordinatorSession;
+use crate::client::{CoordinatorSession, DaemonClient};
 
 /// Render a ratatui `Line` to a flat string for content assertions.
 fn line_text(line: &ratatui::text::Line<'_>) -> String {
@@ -444,4 +444,78 @@ fn daemon_indicator_reflects_reachability() {
     assert_eq!(daemon_indicator(&state), DAEMON_REACHABLE);
     // The two indicators are visually distinct.
     assert_ne!(DAEMON_REACHABLE, DAEMON_UNREACHABLE);
+}
+
+// ---- Child #2: live polling — daemon-down branch (async) ------------------
+
+/// Reserve, then immediately release, a loopback port so a client pointed at it
+/// is guaranteed to be refused (nothing is listening).
+///
+/// Why: the daemon-down test needs a `DaemonClient` whose probe deterministically
+/// fails. Binding `127.0.0.1:0` lets the OS hand us a free port; dropping the
+/// listener frees it again, so a connect to it is refused rather than hanging on
+/// an open-but-silent socket.
+/// What: binds an ephemeral TCP listener, reads its local addr, drops it, and
+/// returns `http://127.0.0.1:<port>`.
+/// Test: consumed by `poll_marks_unreachable_clears_sessions`.
+fn dead_loopback_url() -> String {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral loopback port");
+    let port = listener.local_addr().expect("read bound local addr").port();
+    drop(listener); // release the port so a later connect is refused
+    format!("http://127.0.0.1:{port}")
+}
+
+#[tokio::test]
+async fn poll_marks_unreachable_clears_sessions() {
+    // Why: `coord_poll_daemon` must, on an unreachable daemon, clear any rows it
+    // previously showed and flip `daemon_reachable` to false (DOC-13 §6) so the
+    // operator never sees stale sessions behind a `daemon ✗` indicator. The live
+    // (daemon-UP) branch needs a running daemon and is exercised manually / by
+    // the daemon suites, not here.
+    //
+    // Determinism note: `coord_poll_daemon` self-heals via `rediscover`, which
+    // re-resolves the URL from the lock file on a failed probe. If a real daemon
+    // is discoverable on this machine the function will (correctly) re-point to
+    // it and report reachable, so we only assert the daemon-down outcome when
+    // discovery itself yields no reachable daemon — which is always the case in
+    // CI. We pin the client to discovery's own result so the no-op `rediscover`
+    // path is taken and the probe is the sole determinant.
+    let discovered = crate::core::resolve_daemon_url(None);
+    let probe = DaemonClient::new(discovered.clone());
+    if probe.is_healthy().await {
+        // A real daemon is up locally; the down-branch is unreachable through the
+        // self-healing poll, so there is nothing deterministic to assert here.
+        // CI (no daemon) always exercises the assertions below.
+        eprintln!(
+            "skipping daemon-down assertions: a reachable daemon was discovered at {discovered}"
+        );
+        return;
+    }
+
+    // No daemon is discoverable. Pin the client at a guaranteed-dead port; since
+    // `discovered` is itself unreachable, `rediscover` cannot rescue the probe.
+    let mut state = CoordinatorState::live();
+    state.daemon_reachable = true; // pretend a prior poll had succeeded
+    state.sessions = vec![
+        SessionEntry::new("4f9ca1b2", "aipowerranking", "Active", "Running tests"),
+        SessionEntry::new("7b2ec0d1", "genealogy", "Idle", "Idle"),
+    ];
+    state.selected = 2; // selection sits on the last session
+
+    let mut client = DaemonClient::new(dead_loopback_url());
+    coord_poll_daemon(&mut state, &mut client).await;
+
+    assert!(
+        !state.daemon_reachable,
+        "an unreachable daemon must flip daemon_reachable to false"
+    );
+    assert!(
+        state.sessions.is_empty(),
+        "a daemon-down poll must clear stale session rows"
+    );
+    assert_eq!(
+        state.selected, 0,
+        "clearing the list clamps the selection back to the controller row"
+    );
 }

@@ -33,9 +33,11 @@ use super::state::{CoordinatorState, SessionEntry};
 /// [`SessionEntry`]; on a transport error or an unreachable daemon it clears the
 /// rows and sets `daemon_reachable = false`. Always clamps the selection so a
 /// shrunk list never leaves `selected` past the end.
-/// Test: `poll_maps_live_sessions`, `poll_marks_unreachable_clears_sessions`
-/// exercise the mapping/clear paths via a stub client shape; the live transport
-/// is covered by the daemon suites.
+/// Test: `poll_marks_unreachable_clears_sessions` drives the daemon-down branch
+/// against a guaranteed-dead client and asserts the rows clear + `daemon_reachable`
+/// flips false; the pure projection is covered by the `coord_session_to_entry_*`
+/// tests. The daemon-UP path requires a live daemon, so it is exercised manually /
+/// by the daemon suites rather than unit-tested here.
 pub(crate) async fn coord_poll_daemon(state: &mut CoordinatorState, client: &mut DaemonClient) {
     state.daemon_reachable = client.is_healthy().await;
     if rediscover(client, state.daemon_reachable) {

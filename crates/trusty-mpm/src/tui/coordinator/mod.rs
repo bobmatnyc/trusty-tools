@@ -136,6 +136,11 @@ async fn run_loop(
     loop {
         terminal.draw(|frame| layout::render(frame, &state))?;
 
+        // NOTE: `event::poll` blocks this async task for up to `KEY_POLL`. This
+        // mirrors the existing dashboard event loop (`tui/event_loop.rs`); we are
+        // intentionally not diverging one screen. Converting the whole TUI to
+        // `crossterm::event::EventStream` + `tokio::select!` is tracked as a
+        // separate follow-up.
         if event::poll(KEY_POLL)?
             && let Event::Key(key) = event::read()?
         {

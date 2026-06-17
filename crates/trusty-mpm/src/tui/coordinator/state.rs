@@ -92,8 +92,9 @@ pub struct CoordinatorState {
     /// `DashboardState::daemon_reachable`. Defaults to `false` so the TUI reads
     /// "unreachable" until the priming poll confirms otherwise.
     /// What: set by [`super::poll::coord_poll_daemon`] after each health probe.
-    /// Test: `poll_marks_unreachable_clears_sessions` /
-    /// `poll_maps_live_sessions` in `super::tests`.
+    /// Test: `poll_marks_unreachable_clears_sessions` in `super::tests` covers the
+    /// daemon-down flip to `false`; the daemon-up flip needs a live daemon and is
+    /// exercised manually.
     pub daemon_reachable: bool,
     /// Set when the operator asks to quit; the event loop exits on the next tick.
     pub should_exit: bool,
