@@ -14,6 +14,7 @@
 //! --include-ignored` additionally runs the live `live_openrouter_call` test.
 
 mod client;
+mod client_trait;
 mod error;
 mod message;
 mod request;
@@ -23,6 +24,7 @@ mod usage;
 // ── Public API re-exports ─────────────────────────────────────────────────────
 
 pub use client::{LlmClient, LlmClientConfig};
+pub use client_trait::LlmClientTrait;
 pub use error::LlmError;
 pub use message::ChatMessage;
 pub use request::{ChatRequest, FunctionCall, FunctionDefinition, ToolCall, ToolDefinition};
