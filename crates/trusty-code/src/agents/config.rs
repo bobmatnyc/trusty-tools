@@ -79,7 +79,10 @@ pub struct AgentInfo {
 
 /// LLM parameters for a single agent.
 ///
-/// Why: Each agent may need different temperature, token budget, or provider.
+/// Why: Each agent may need different temperature, token budget, or model. The
+/// backend (OpenRouter vs. Bedrock) is no longer a boolean here — it is derived
+/// from the resolved model slug by `provider::provider_for` (#1021), so a single
+/// slug like `bedrock/...` selects the backend without a separate flag.
 /// What: Standard LLM knobs, all optional with sensible defaults.
 /// Test: `agent_config_llm_params`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -90,9 +93,6 @@ pub struct LlmParams {
     /// Maximum tokens in the LLM response.
     #[serde(default)]
     pub max_tokens: Option<u32>,
-    /// Route directly to Anthropic API instead of OpenRouter.
-    #[serde(default)]
-    pub use_anthropic_direct: bool,
     /// Model override at the `[llm]` level (lower precedence than `[agent].model`).
     #[serde(default)]
     pub model_override: Option<String>,

@@ -169,6 +169,17 @@ pub mod identity;
 /// Test: `logging::tests::*`.
 pub mod logging;
 
+/// Provider abstraction and per-agent model routing.
+///
+/// Why: Each agent routes to its own model, possibly behind a different backend
+/// (OpenRouter today, AWS Bedrock later). The agent loop depends on the
+/// `Provider` trait rather than branching on the backend, and a factory maps a
+/// model slug to the right implementation.
+/// What: `Provider`, `ToolChoice`, `OpenRouterProvider`, `BedrockProvider`,
+/// `provider_for`, `resolve_model`, `DEFAULT_MODEL`.
+/// Test: `provider::*` submodule tests.
+pub mod provider;
+
 // ── Phase 4 orchestration layer (per #1028) ──
 
 /// Multi-turn agent loop driving an LLM through tool calls to completion.
