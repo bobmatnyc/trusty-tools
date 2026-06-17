@@ -240,6 +240,51 @@ fn rederive_confirmed_medium_caps_at_approve_star() {
 }
 
 #[test]
+fn rederive_confirmed_praise_keeps_clean_approve() {
+    // Path (a2) — #1343 runtime residual: the model itself emitted a clean APPROVE
+    // (grade A-).  The verifier CONFIRMS a confidence=1.0 low-effort `praise`
+    // finding.  Confirming a non-High finding must NOT raise the baseline to
+    // APPROVE* — the source-of-truth APPROVE review_body wins.  Before the fix,
+    // path (a2) hard-coded the baseline to APPROVE*, yielding APPROVE* and
+    // clamping the A- grade down to C+.  After the fix, severity-min(APPROVE,
+    // APPROVE*) = APPROVE, so the verdict stays APPROVE and the grade stays A-.
+    let mut praise = finding(Effort::Low, 1.0);
+    apply_outcome(&mut praise, VerifyOutcome::Confirmed);
+    let verdict = rederive_verdict(Verdict::Approve, true, false, &[praise]);
+    assert_eq!(
+        verdict,
+        Verdict::Approve,
+        "a confirmed low-effort praise finding must NOT harden a clean APPROVE to \
+         APPROVE* (path a2 — #1343 runtime residual)"
+    );
+
+    // And the grade clamp must keep A- (not downgrade to C+): clamp_grade_to_verdict
+    // of A- against APPROVE is a no-op, whereas against APPROVE* it would drop to C+.
+    use crate::pipeline::letter_grade::{Grade, clamp_grade_to_verdict};
+    let clamped = clamp_grade_to_verdict(Grade::AMinus, &verdict);
+    assert_eq!(
+        clamped,
+        Grade::AMinus,
+        "grade must stay A- when verdict stays APPROVE (#1343 runtime residual)"
+    );
+}
+
+#[test]
+fn rederive_confirmed_high_effort_still_escalates_from_approve() {
+    // Guard: the #1343 fix must NOT defang the safety net.  A CONFIRMED High-effort
+    // (critical) finding still escalates even when the model said APPROVE — path (a)
+    // keeps primary_verdict, and derive_verdict's BLOCK floor then escalates.
+    let mut high = finding(Effort::High, 0.95);
+    apply_outcome(&mut high, VerifyOutcome::Confirmed);
+    let verdict = rederive_verdict(Verdict::Approve, true, false, &[high]);
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "a confirmed High-effort finding still escalates APPROVE to BLOCK (path a)"
+    );
+}
+
+#[test]
 fn rederive_mixed_keeps_only_surviving_floor() {
     // Path (a2): High refuted + confirmed Medium@0.85, model said APPROVE*.
     let mut high = finding(Effort::High, 0.95);
