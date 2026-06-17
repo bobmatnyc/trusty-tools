@@ -245,6 +245,22 @@ pub mod memory_core;
 #[cfg(feature = "tickets")]
 pub mod tickets;
 
+/// Intent-source resolver (ISR) for the intent/method conformance gates (#1358).
+///
+/// Why: the DOC-15 conformance capability needs one shared resolver that both
+/// the FRONT gate (trusty-mpm) and the BACK gate (trusty-review) call, so
+/// ticket+spec resolution and the precedence rule (ticket > spec) are
+/// implemented once, centrally, and the two gates can never disagree
+/// (`SPEC-CONFORMANCE-03~draft`, spec §6).
+/// What: gated behind the `intent-source` feature (depends on `tickets` and
+/// `chat`). Exposes `intent_source::{resolve, ResolvedIntent, IntentQuery, …}`
+/// plus the pluggable `TicketFetcher` / `IntentTokenResolver` / `SpecLookup` /
+/// `MethodExtractor` seams. Fail-open throughout (`thiserror`, no `unwrap`).
+/// Test: `cargo test -p trusty-common --features intent-source` runs the
+/// module's AC-1..AC-7 unit tests with no network access.
+#[cfg(feature = "intent-source")]
+pub mod intent_source;
+
 /// Declarative CLI help system with "did you mean?" suggestions (issue #216).
 ///
 /// Why: every standalone trusty-* binary used to render its `--help` and

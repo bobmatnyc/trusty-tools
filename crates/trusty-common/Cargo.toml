@@ -335,6 +335,17 @@ embedder-client = ["dep:thiserror", "embedder"]
 # crate). Pulls in `chrono`, `uuid`, `base64`, `thiserror`, and `toml` as
 # additional optional deps. Requires the `mcp` feature for the stdio loop.
 tickets = ["mcp", "dep:uuid", "dep:base64", "dep:thiserror", "dep:toml"]
+# Enables the `intent_source` module: the shared intent-source resolver (ISR)
+# for the intent/method conformance gates (DOC-15, SPEC-CONFORMANCE-03, #1358).
+# Resolves the ticket method + spec method from a PR or ticket-id and applies
+# precedence (ticket > spec), returning one `ResolvedIntent` that both the
+# FRONT gate (trusty-mpm) and the BACK gate (trusty-review) consume. Reuses the
+# in-crate `tickets` backend (`Backend::get_issue`) and is designed to compose
+# with the `chat` `ChatProvider` surface for optional method extraction; it
+# lifts tga's PR→ticket regexes so neither gate pulls tga's git2/rusqlite stack.
+# Pulls in `regex` and `thiserror`. The non-consumer trusty-common dependents
+# pay nothing (feature off by default).
+intent-source = ["tickets", "dep:regex", "dep:thiserror"]
 # Enables the `help` module: declarative CLI help loader (`HelpConfig` parsed
 # from a per-binary `help.yaml` bundled via `include_str!`), the canonical
 # `render_help` formatter, and a Jaro-Winkler-based `suggest("did you mean?")`
