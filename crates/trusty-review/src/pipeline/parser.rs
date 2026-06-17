@@ -18,13 +18,21 @@
 //!
 //! If ALL THREE strategies fail (e.g. a genuine LLM/transport error produced
 //! empty or unparseable output), the function returns a fail-safe `ParsedReview`
-//! with `verdict = APPROVE` and an empty findings list (spec REV-130).
-//! The fail-safe is now reserved for genuine errors only — parse failures are
-//! no longer expected in normal operation because the schema forces valid JSON.
+//! with `verdict = UNKNOWN` and an empty findings list.
+//!
+//! ## Fail-CLOSED posture (#1241 — supersedes spec REV-130)
+//! Spec REV-130 originally specified a fail-OPEN APPROVE here: any parse/LLM
+//! failure would silently APPROVE so a pipeline failure never blocked a merge.
+//! Ticket #1241 supersedes that decision (ticket > spec precedence): a silent
+//! APPROVE on unparseable or truncated model output is a *safety hole* — it
+//! posts a green GitHub check for a review that never actually happened.  The
+//! fail-safe is now fail-CLOSED: `verdict = UNKNOWN`, which surfaces a clear
+//! "could not review" state and never posts a green merge-approval.  See
+//! `docs/specs/` REV-130 (marked SUPERSEDED) for the rationale.
 //!
 //! Test: `parse_direct_json_happy_path`, `parse_json_block_happy_path`,
-//! `parse_verdict_keyword_fallback`, `parse_fail_safe_approve_on_empty_response`,
-//! `parse_fail_safe_approve_on_malformed_json`.
+//! `parse_verdict_keyword_fallback`, `parse_fail_safe_unknown_on_empty_response`,
+//! `parse_fail_safe_unknown_on_malformed_json`.
 
 use serde::Deserialize;
 use tracing::{debug, warn};
@@ -99,22 +107,25 @@ pub struct ParsedReview {
     pub summary: String,
     /// Parsed findings (may be empty).
     pub findings: Vec<Finding>,
-    /// True if the parser failed and fell back to the fail-safe APPROVE default.
+    /// True if the parser failed and fell back to the fail-safe UNKNOWN default.
     pub is_fail_safe: bool,
     /// Human-readable reason for the fail-safe, if `is_fail_safe` is true.
     pub fail_safe_reason: Option<String>,
 }
 
 impl ParsedReview {
-    /// Construct a fail-safe result with verdict APPROVE.
+    /// Construct a fail-safe result with verdict UNKNOWN (fail-CLOSED).
     ///
-    /// Why: spec REV-130 requires the pipeline to APPROVE on any parse or LLM
-    /// failure; a pipeline failure must never block a merge.
-    /// What: sets `verdict = Approve`, `findings = []`, `is_fail_safe = true`.
-    /// Test: `parse_fail_safe_approve_on_empty_response`.
+    /// Why: ticket #1241 supersedes spec REV-130's fail-OPEN APPROVE.  A silent
+    /// APPROVE on unparseable/truncated model output posts a green GitHub check
+    /// for a review that never happened — a safety hole.  Failing CLOSED to
+    /// UNKNOWN surfaces a clear "could not review" state that is never treated as
+    /// a merge-approval downstream (see `post.rs` / the webhook finalize path).
+    /// What: sets `verdict = Unknown`, `findings = []`, `is_fail_safe = true`.
+    /// Test: `parse_fail_safe_unknown_on_empty_response`.
     pub fn fail_safe(reason: impl Into<String>) -> Self {
         Self {
-            verdict: Verdict::Approve,
+            verdict: Verdict::Unknown,
             grade: None,
             summary: String::new(),
             findings: Vec::new(),
@@ -137,14 +148,15 @@ impl ParsedReview {
 ///   2. JSON-block extraction — legacy free-text path with fenced JSON block.
 ///   3. Verdict-keyword scan — last-resort spec REV-112 fallback.
 ///
-/// If ALL THREE fail, returns fail-safe APPROVE (genuine error path only;
-/// not expected in normal operation with structured output enforced).
+/// If ALL THREE fail, returns fail-safe UNKNOWN (fail-CLOSED; genuine error path
+/// only — not expected in normal operation with structured output enforced).
+/// Ticket #1241 supersedes spec REV-130: the fail-safe is UNKNOWN, not APPROVE.
 ///
 /// Test: `parse_direct_json_happy_path`, `parse_json_block_happy_path`,
-/// `parse_verdict_keyword_fallback`, `parse_fail_safe_approve_on_empty_response`.
+/// `parse_verdict_keyword_fallback`, `parse_fail_safe_unknown_on_empty_response`.
 pub fn parse_review_response(body: &str) -> ParsedReview {
     if body.trim().is_empty() {
-        warn!("LLM returned empty response — applying fail-safe APPROVE");
+        warn!("LLM returned empty response — applying fail-safe UNKNOWN (fail-closed, #1241)");
         return ParsedReview::fail_safe("empty LLM response");
     }
 
@@ -180,7 +192,8 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
     // All three strategies failed — genuine error, not a parse failure.
     warn!(
         body_len = body.len(),
-        "failed to parse verdict from LLM response — applying fail-safe APPROVE (spec REV-130)"
+        "failed to parse verdict from LLM response — applying fail-safe UNKNOWN \
+         (fail-closed; #1241 supersedes spec REV-130)"
     );
     ParsedReview::fail_safe("no parseable verdict in LLM response")
 }
@@ -205,7 +218,9 @@ fn try_parse_direct_json(body: &str) -> Option<ParsedReview> {
         return None;
     }
     let block: LlmOutputBlock = serde_json::from_str(trimmed).ok()?;
-    let verdict = parse_verdict_string(&block.verdict).unwrap_or(Verdict::Approve);
+    // Fail-CLOSED (#1241): an unrecognised verdict token inside otherwise-valid
+    // JSON must NOT silently default to APPROVE — surface UNKNOWN instead.
+    let verdict = parse_verdict_string(&block.verdict).unwrap_or(Verdict::Unknown);
     let grade = extract_grade_field(&block.grade);
     let findings = block
         .findings
@@ -249,7 +264,8 @@ fn try_parse_json_block(body: &str) -> Option<ParsedReview> {
         }
     };
 
-    let verdict = parse_verdict_string(&block.verdict).unwrap_or(Verdict::Approve);
+    // Fail-CLOSED (#1241): unrecognised verdict token → UNKNOWN, never APPROVE.
+    let verdict = parse_verdict_string(&block.verdict).unwrap_or(Verdict::Unknown);
     let grade = extract_grade_field(&block.grade);
     let findings = block
         .findings

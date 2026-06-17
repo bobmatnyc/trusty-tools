@@ -61,6 +61,37 @@ fn cost_estimate_for_unknown_model() {
     assert_eq!(cost, 0.0);
 }
 
+#[test]
+fn cost_estimate_gemini_pro_nonzero() {
+    // #1241: a versioned google/gemini-* Pro slug must get a non-zero estimate via
+    // the family substring match (1.25 in + 10.00 out per million).
+    let cost = estimate_cost_usd("google/gemini-2.5-pro", 1_000_000, 1_000_000);
+    assert!(
+        (cost - 11.25_f64).abs() < 1e-9,
+        "expected $11.25 for gemini pro, got {cost}"
+    );
+}
+
+#[test]
+fn cost_estimate_gemini_flash_nonzero() {
+    // #1241: Flash tier (0.30 in + 2.50 out per million).
+    let cost = estimate_cost_usd("google/gemini-2.5-flash", 1_000_000, 1_000_000);
+    assert!(
+        (cost - 2.80_f64).abs() < 1e-9,
+        "expected $2.80 for gemini flash, got {cost}"
+    );
+}
+
+#[test]
+fn cost_estimate_gemini_flash_lite_cheapest() {
+    // #1241: Flash-Lite is the cheapest tier and must be matched before "flash".
+    let cost = estimate_cost_usd("google/gemini-2.5-flash-lite", 1_000_000, 1_000_000);
+    assert!(
+        (cost - 0.50_f64).abs() < 1e-9,
+        "expected $0.50 for gemini flash-lite, got {cost}"
+    );
+}
+
 /// Verify that when `response_schema` is set, the serialized request body
 /// includes `response_format.type = "json_schema"` and the schema name.
 ///

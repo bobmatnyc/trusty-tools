@@ -4,7 +4,7 @@
 //! while preserving full test coverage.
 //! What: exercises the direct JSON parse path (structured output), the
 //! fence-based JSON block path (legacy), the verdict keyword scan fallback,
-//! and the fail-safe APPROVE path.
+//! and the fail-CLOSED UNKNOWN fail-safe path (#1241).
 //! Test: included as `#[cfg(test)] mod tests` from `parser.rs`.
 
 use super::*;
@@ -217,26 +217,32 @@ fn parse_verdict_keyword_fallback_block() {
 // ── Fail-safe path ────────────────────────────────────────────────────────
 
 #[test]
-fn parse_fail_safe_approve_on_empty_response() {
+fn parse_fail_safe_unknown_on_empty_response() {
+    // Fail-CLOSED (#1241 supersedes REV-130): empty output → UNKNOWN, not APPROVE.
     let result = parse_review_response("");
     assert!(result.is_fail_safe, "empty response must trigger fail-safe");
     assert_eq!(
         result.verdict,
-        Verdict::Approve,
-        "fail-safe must default to APPROVE"
+        Verdict::Unknown,
+        "fail-safe must fail CLOSED to UNKNOWN (#1241), never silently APPROVE"
     );
     assert!(result.fail_safe_reason.is_some());
 }
 
 #[test]
-fn parse_fail_safe_approve_on_malformed_json() {
+fn parse_fail_safe_unknown_on_malformed_json() {
+    // Fail-CLOSED (#1241): broken JSON with no recoverable keyword → UNKNOWN.
     let body = r#"This is a review response with no verdict.
 
 ```json
 { "verdict": "definitely yes", "this_is": broken json
 "#;
     let result = parse_review_response(body);
-    assert_eq!(result.verdict, Verdict::Approve);
+    assert_eq!(
+        result.verdict,
+        Verdict::Unknown,
+        "malformed JSON with no keyword must fail CLOSED to UNKNOWN (#1241)"
+    );
     assert!(
         result.is_fail_safe,
         "malformed JSON with no keyword must be fail-safe"
@@ -244,12 +250,33 @@ fn parse_fail_safe_approve_on_malformed_json() {
 }
 
 #[test]
-fn parse_fail_safe_approve_on_unparseable_verdict() {
+fn parse_fail_safe_unknown_on_unparseable_verdict() {
+    // Fail-CLOSED (#1241): a valid JSON block carrying an UNRECOGNISED verdict
+    // token must NOT silently default to APPROVE — it surfaces UNKNOWN.
     let body = r#"```json
 {"verdict": "LOOKS_OK", "summary": "fine", "findings": []}
 ```"#;
     let result = parse_review_response(body);
-    assert_eq!(result.verdict, Verdict::Approve);
+    assert_eq!(
+        result.verdict,
+        Verdict::Unknown,
+        "unrecognised verdict token must fail CLOSED to UNKNOWN (#1241)"
+    );
+}
+
+#[test]
+fn parse_truncated_json_object_is_unknown() {
+    // Fail-CLOSED (#1241): a structured-output response cut off mid-object BEFORE
+    // the verdict field is emitted (no closing brace, no fence, no verdict token)
+    // is unparseable by all three strategies → UNKNOWN, never silent APPROVE.
+    let body = r#"{"summary": "Reviewing the changes to the auth module, I found that the handl"#;
+    let result = parse_review_response(body);
+    assert_eq!(
+        result.verdict,
+        Verdict::Unknown,
+        "truncated JSON must fail CLOSED to UNKNOWN, never parse-and-APPROVE (#1241)"
+    );
+    assert!(result.is_fail_safe, "truncated JSON must trigger fail-safe");
 }
 
 // ── Verdict string normalization ─────────────────────────────────────────

@@ -6,8 +6,9 @@
 //!
 //! What: exposes `build_review_prompt` which assembles the `LlmRequest` for the
 //! reviewer role from the diff, PR metadata, and optional context blocks.  The
-//! system prompt encodes the fail-safe APPROVE-default policy (spec REV-130)
-//! and the structured output format the parser expects.
+//! system prompt encodes the verdict policy (the pipeline now fails CLOSED to
+//! UNKNOWN on parse/truncation errors — #1241 supersedes spec REV-130's fail-open
+//! APPROVE) and the structured output format the parser expects.
 //!
 //! Structured output contract (required by parser):
 //!   The LLM MUST end its response with a JSON block delimited exactly as:
@@ -44,8 +45,18 @@ use super::prompt_user_msg::build_user_message;
 /// Reviewer temperature — tighter than chat for more deterministic verdicts.
 const REVIEWER_TEMPERATURE: f32 = 0.3;
 
-/// Maximum tokens for the review response.
+/// Maximum tokens for the review response (default for most models).
 const REVIEWER_MAX_TOKENS: u32 = 4096;
+
+/// Higher output-token ceiling for Gemini models (#1241).
+///
+/// Why: Gemini models are noticeably more verbose in their structured JSON than
+/// the OpenAI/Anthropic reviewers — at the 4096 default their `findings` array is
+/// frequently cut off mid-object, which the #1241 truncation guard now (correctly)
+/// converts to UNKNOWN.  Raising Gemini's ceiling to 8192 lets the full structured
+/// JSON land so the review actually completes instead of failing closed.
+/// What: applied by `max_tokens_for_model` when the bare slug contains `gemini`.
+const GEMINI_MAX_TOKENS: u32 = 8192;
 
 // ─── Review output schema ─────────────────────────────────────────────────────
 
@@ -165,9 +176,10 @@ pub struct ReviewContext {
 
 /// Return the stock base system prompt for the reviewer role (no layering).
 ///
-/// Why: the stock system prompt encodes the fail-safe verdict policy (spec
-/// REV-130), the output format contract, and the quality bar for
-/// REQUEST_CHANGES/BLOCK.  Kept as a function for backward compatibility and
+/// Why: the stock system prompt encodes the verdict policy (the pipeline fails
+/// CLOSED to UNKNOWN on parse/truncation errors per #1241, which supersedes spec
+/// REV-130's fail-open APPROVE), the output format contract, and the quality bar
+/// for REQUEST_CHANGES/BLOCK.  Kept as a function for backward compatibility and
 /// for tests that need only the stock text.  For the full 3-layer prompt
 /// (stock → principles → voice) use `build_system_prompt(voice_config)`.
 /// The `coverage_gating_enabled` parameter controls whether the prompt tells
@@ -344,8 +356,26 @@ fn build_review_prompt_inner(
             content: user_message,
         }],
         temperature: REVIEWER_TEMPERATURE,
-        max_tokens: REVIEWER_MAX_TOKENS,
+        max_tokens: max_tokens_for_model(reviewer_model),
         response_schema: Some(review_response_schema()),
+    }
+}
+
+/// Pick the output-token ceiling for a given reviewer model id (#1241).
+///
+/// Why: a single 4096 default truncates Gemini's verbose structured JSON, which
+/// the truncation guard then fails closed to UNKNOWN — the review never completes.
+/// Gemini needs a larger ceiling; other models keep the leaner default.
+/// What: strips any `bedrock/`/`openrouter/` routing prefix, lowercases the bare
+/// slug, and returns `GEMINI_MAX_TOKENS` (8192) when it contains `gemini`, else
+/// `REVIEWER_MAX_TOKENS` (4096).
+/// Test: `max_tokens_gemini_is_raised`, `max_tokens_default_for_non_gemini`.
+fn max_tokens_for_model(reviewer_model: &str) -> u32 {
+    let bare = strip_provider_prefix(reviewer_model).to_ascii_lowercase();
+    if bare.contains("gemini") {
+        GEMINI_MAX_TOKENS
+    } else {
+        REVIEWER_MAX_TOKENS
     }
 }
 
