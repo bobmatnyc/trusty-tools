@@ -68,6 +68,39 @@ pub fn status_bar_text() -> &'static str {
     STATUS_BAR_HINT
 }
 
+/// The status-bar indicator shown when the daemon answered its last probe.
+///
+/// Why: Child #2 polls the daemon live; the operator needs an at-a-glance
+/// signal that the list is fresh. A constant keeps the reachable glyph + label
+/// single-sourced between the renderer and its test.
+/// What: the literal `daemon ●`.
+/// Test: `daemon_indicator_reflects_reachability`.
+pub const DAEMON_REACHABLE: &str = "daemon ●";
+
+/// The status-bar indicator shown when the daemon is unreachable.
+///
+/// Why: the counterpart to [`DAEMON_REACHABLE`] — a distinct glyph so a
+/// daemon-down state reads differently from a healthy one, mirroring the cleared
+/// (empty) session list `coord_poll_daemon` produces on failure.
+/// What: the literal `daemon ✗`.
+/// Test: `daemon_indicator_reflects_reachability`.
+pub const DAEMON_UNREACHABLE: &str = "daemon ✗";
+
+/// Pick the daemon-reachability indicator for the current state.
+///
+/// Why: keeps the reachable/unreachable branch out of [`render`] and gives the
+/// indicator a pure, testable seam.
+/// What: returns [`DAEMON_REACHABLE`] when `state.daemon_reachable`, else
+/// [`DAEMON_UNREACHABLE`].
+/// Test: `daemon_indicator_reflects_reachability`.
+pub fn daemon_indicator(state: &CoordinatorState) -> &'static str {
+    if state.daemon_reachable {
+        DAEMON_REACHABLE
+    } else {
+        DAEMON_UNREACHABLE
+    }
+}
+
 /// Build the unified session-list items: controller row 0, then sessions.
 ///
 /// Why: the list always leads with the controller bullet and renders the
@@ -145,8 +178,14 @@ pub fn render(frame: &mut Frame, state: &CoordinatorState) {
     );
     frame.render_widget(list, chunks[1]);
 
-    // Status / key bar (bottom).
-    let status = Paragraph::new(Line::from(status_bar_text())).style(
+    // Status / key bar (bottom): key hints on the left, the live daemon-
+    // reachability indicator on the right.
+    let status = Paragraph::new(Line::from(format!(
+        "{}  ·  {}",
+        status_bar_text(),
+        daemon_indicator(state)
+    )))
+    .style(
         Style::default()
             .add_modifier(Modifier::BOLD)
             .add_modifier(Modifier::REVERSED),

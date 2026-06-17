@@ -12,13 +12,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::events::{SlashCommand, handle_key, is_quit, parse_slash};
 use super::layout::{
-    CONTROLLER_STATUS, INPUT_PROMPT, STATUS_BAR_HINT, input_line, status_bar_text,
+    CONTROLLER_STATUS, DAEMON_REACHABLE, DAEMON_UNREACHABLE, INPUT_PROMPT, STATUS_BAR_HINT,
+    daemon_indicator, input_line, status_bar_text,
 };
+use super::poll::coord_session_to_entry;
 use super::rows::{
     COLUMN_SEPARATOR, CONTROLLER_GLYPH, SESSION_GLYPH, active_row_two_col, controller_bullet_row,
     session_row, session_short_id,
 };
 use super::state::{CoordinatorState, INPUT_HISTORY_LIMIT, SessionEntry};
+use crate::client::CoordinatorSession;
 
 /// Render a ratatui `Line` to a flat string for content assertions.
 fn line_text(line: &ratatui::text::Line<'_>) -> String {
@@ -364,4 +367,81 @@ fn status_bar_lists_keys() {
 #[test]
 fn controller_status_is_synthetic() {
     assert!(CONTROLLER_STATUS.contains("ready"));
+}
+
+// ---- Child #2: live polling — pure session mapping ------------------------
+
+/// Build a `CoordinatorSession` wire value for the mapping tests.
+fn coord_session(id: &str, prefix: &str, status: &str, recent: &[&str]) -> CoordinatorSession {
+    CoordinatorSession {
+        id: id.to_string(),
+        name: format!("tmpm-{prefix}"),
+        prefix: prefix.to_string(),
+        workdir: "/tmp".to_string(),
+        status: status.to_string(),
+        active_delegations: 0,
+        recent_output: recent.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+#[test]
+fn coord_session_to_entry_summarizes_last_output() {
+    // The summary is the LAST non-empty line of recent_output (a trailing blank
+    // line must be skipped), per DOC-13 §6.2 option C.
+    let s = coord_session(
+        "4f9ca1b2deadbeef", // pragma: allowlist secret — fake session id
+        "aipowerranking",
+        "Active",
+        &["", "Running tests"],
+    );
+    let entry = coord_session_to_entry(s);
+    assert_eq!(entry.summary, "Running tests");
+    assert_eq!(entry.short_id, "4f9ca1b2");
+    assert_eq!(entry.prefix, "aipowerranking");
+    assert_eq!(entry.status, "Active");
+}
+
+#[test]
+fn coord_session_to_entry_falls_back_to_status() {
+    // With no recent_output the summary falls back to the status word.
+    let s = coord_session("7b2ec0d1cafef00d", "genealogy", "Paused", &[]);
+    let entry = coord_session_to_entry(s);
+    assert_eq!(entry.summary, "Paused", "empty pane → status word");
+    // An all-whitespace pane tail also falls back to the status word.
+    let blank = coord_session("abc", "p", "Idle", &["   ", "\t"]);
+    assert_eq!(coord_session_to_entry(blank).summary, "Idle");
+}
+
+#[test]
+fn coord_session_to_entry_derives_short_id() {
+    // Long UUIDs truncate to 8 hex; short ids pass through whole.
+    // pragma: allowlist secret — fake session id
+    let long = coord_session("0123456789abcdef0123", "p", "Active", &["x"]);
+    assert_eq!(coord_session_to_entry(long).short_id, "01234567");
+    let short = coord_session("abc", "p", "Active", &["x"]);
+    assert_eq!(coord_session_to_entry(short).short_id, "abc");
+}
+
+#[test]
+fn live_state_starts_empty_and_unreachable() {
+    let state = CoordinatorState::live();
+    assert!(
+        state.sessions.is_empty(),
+        "no placeholder rows in live mode"
+    );
+    assert!(
+        !state.daemon_reachable,
+        "daemon presumed down until first poll"
+    );
+    assert_eq!(state.selected, 0, "controller selected at start");
+}
+
+#[test]
+fn daemon_indicator_reflects_reachability() {
+    let mut state = CoordinatorState::live();
+    assert_eq!(daemon_indicator(&state), DAEMON_UNREACHABLE);
+    state.daemon_reachable = true;
+    assert_eq!(daemon_indicator(&state), DAEMON_REACHABLE);
+    // The two indicators are visually distinct.
+    assert_ne!(DAEMON_REACHABLE, DAEMON_UNREACHABLE);
 }

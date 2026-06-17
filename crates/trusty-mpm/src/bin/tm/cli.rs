@@ -108,16 +108,16 @@ pub(crate) enum Command {
     /// from the existing `tm tui` dashboard. It is exposed under its own name
     /// because `coordinator` already names the session-manager chat command
     /// (`tm coordinator` / `tm sm`); a `-tui` suffix avoids that collision.
-    /// What: Child #1 ships the skeleton — layout, selection, input editing, and
-    /// a panic-safe terminal; live polling and slash-command dispatch land in
-    /// later children. `--url` is resolved via `resolve_daemon_url`;
-    /// `--interval-ms` is the (future) refresh cadence.
+    /// What: Child #2 polls the daemon's coordinator-context endpoint live on the
+    /// `--interval-ms` cadence (self-healing the daemon URL on failure) and maps
+    /// each session into the list; slash-command dispatch lands in later children.
+    /// `--url` is resolved via `resolve_daemon_url`.
     /// Test: `cli_parses_coordinator_tui` in `tests.rs`.
     CoordinatorTui {
         /// Base URL of the trusty-mpm daemon.
         #[arg(long, env = "TRUSTY_MPM_URL")]
         url: Option<String>,
-        /// Poll interval in milliseconds (refresh cadence; used by later children).
+        /// Poll interval in milliseconds (daemon refresh cadence).
         #[arg(long, default_value_t = 1500)]
         interval_ms: u64,
     },

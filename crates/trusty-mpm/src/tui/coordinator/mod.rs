@@ -3,17 +3,21 @@
 //! Why: operators want one conversational surface to talk to a coordinator and
 //! watch a fleet of sessions (DOC-13). This module is the NEW coordinator screen
 //! built alongside (not on top of) the existing `tui/dashboard` — keeping it
-//! separate avoids touching the at-cap dashboard/health files. Child #1 lands
-//! the skeleton: layout, selection, input editing, and a panic-safe terminal.
+//! separate avoids touching the at-cap dashboard/health files. Child #1 landed
+//! the skeleton (layout, selection, input editing, panic-safe terminal); Child
+//! #2 wires live session-list polling + daemon-down handling.
 //! What: thin façade re-exporting the submodules and exposing [`run`], the
-//! `tm coordinator-tui` entry point. Live polling, the daemon-backed
-//! `last_summary` column, and slash-command dispatch are deferred to later
-//! children; Child #1 renders static placeholder rows.
+//! `tm coordinator-tui` entry point. [`run`] polls the daemon's
+//! coordinator-context endpoint on the `--interval-ms` cadence and maps each
+//! session into the live list (see [`poll`]). The daemon-backed `last_summary`
+//! column and slash-command dispatch are deferred to later children; the summary
+//! is derived client-side from `recent_output` until then.
 //! Test: the pure pieces (rows, state, events, layout text) are unit-tested in
 //! [`tests`]; [`run`] is the thin terminal glue exercised by launching the TUI.
 
 pub mod events;
 pub mod layout;
+pub mod poll;
 pub mod rows;
 pub mod state;
 
@@ -21,7 +25,7 @@ pub mod state;
 mod tests;
 
 use std::io::{self, Stdout};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::{
     event::{self, Event},
@@ -30,7 +34,9 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
+use crate::client::DaemonClient;
 use events::handle_key;
+use poll::coord_poll_daemon;
 use state::CoordinatorState;
 
 /// RAII guard that restores the terminal on drop — including during a panic.
@@ -64,30 +70,29 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// How long [`run`] blocks waiting for a key before redrawing.
+/// How long [`run_loop`] blocks waiting for a key before redrawing.
 ///
-/// Why: a short poll keeps input responsive while still yielding the CPU; the
-/// skeleton has no live data, so the interval only bounds redraw latency.
+/// Why: a short key poll keeps input responsive while still yielding the CPU;
+/// it is independent of the daemon refresh cadence (`interval_ms`), so input
+/// never waits a whole poll interval to register.
 /// What: 50ms, matching the dashboard's input cadence.
 const KEY_POLL: Duration = Duration::from_millis(50);
 
-/// Launch the coordinator TUI against `url`.
+/// Launch the coordinator TUI against `url`, polling every `interval_ms`.
 ///
 /// Why: the `tm coordinator-tui` subcommand needs one entry point that owns the
-/// terminal lifecycle. Kept synchronous (no daemon IO in Child #1) so the
-/// caller does not need an async context for the skeleton.
-/// What: enters raw mode + the alternate screen, installs a [`TerminalGuard`]
-/// whose `Drop` restores the terminal, then runs the event loop. Because the
-/// guard restores on unwind as well as on normal return, a panic or early exit
-/// never leaves the operator's terminal in raw mode / the alternate screen.
-/// `url` and `interval_ms` are accepted now (and threaded into state via the
-/// signature) so Child #2 can wire live polling without a signature change.
+/// terminal lifecycle. Now async (Child #2 added live daemon IO) so it runs on
+/// the same tokio runtime as `tui::run`.
+/// What: builds a [`DaemonClient`] for `url`, enters raw mode + the alternate
+/// screen, installs a [`TerminalGuard`] whose `Drop` restores the terminal, then
+/// runs the event loop polling the daemon on the `interval_ms` cadence. Because
+/// the guard restores on unwind as well as on normal return, a panic or early
+/// exit never leaves the operator's terminal in raw mode / the alternate screen.
 /// Test: terminal glue is exercised by launching the TUI; the loop's pure
-/// pieces (key dispatch, layout text) are unit-tested.
-pub fn run(url: String, interval_ms: u64) -> anyhow::Result<()> {
-    // `url` / `interval_ms` are not consumed by the skeleton (no live poll yet);
-    // logging them keeps the launch auditable and documents the deferred wiring.
-    tracing::info!(%url, interval_ms, "launching coordinator TUI (skeleton)");
+/// pieces (key dispatch, layout text, session mapping) are unit-tested.
+pub async fn run(url: String, interval_ms: u64) -> anyhow::Result<()> {
+    tracing::info!(%url, interval_ms, "launching coordinator TUI");
+    let mut client = DaemonClient::new(url);
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -99,21 +104,35 @@ pub fn run(url: String, interval_ms: u64) -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    run_loop(&mut terminal)
+    run_loop(&mut terminal, &mut client, interval_ms).await
     // `_guard` drops here (or during an unwind), restoring the terminal.
 }
 
-/// The skeleton render + input loop.
+/// The live render + poll + input loop.
 ///
 /// Why: kept separate from [`run`] so terminal setup/teardown wraps it cleanly
-/// and the loop body stays focused on draw → poll-key → dispatch.
-/// What: seeds [`CoordinatorState::skeleton`], then each iteration draws the
-/// frame, polls the keyboard for [`KEY_POLL`], dispatches any key via
-/// [`handle_key`], and exits once `should_exit` is set (`q` / Ctrl-C).
-/// Test: the dispatch and layout text are unit-tested; this terminal-bound loop
-/// is exercised by launching the TUI.
-fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
-    let mut state = CoordinatorState::skeleton();
+/// and the loop body stays focused on poll → draw → poll-key → dispatch.
+/// What: seeds [`CoordinatorState::live`], primes it with one
+/// [`coord_poll_daemon`] so the list is populated before the first frame, then
+/// each iteration draws the frame, polls the keyboard for [`KEY_POLL`] and
+/// dispatches any key via [`handle_key`], and re-polls the daemon once at least
+/// `interval_ms` has elapsed since the last poll (tokio [`Instant`] timer).
+/// Exits once `should_exit` is set (`q` / Ctrl-C).
+/// Test: the dispatch, layout text, and session mapping are unit-tested; this
+/// terminal-bound loop is exercised by launching the TUI.
+async fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    client: &mut DaemonClient,
+    interval_ms: u64,
+) -> anyhow::Result<()> {
+    let interval = Duration::from_millis(interval_ms);
+    let mut state = CoordinatorState::live();
+
+    // Prime the list before the first frame so the operator never sees an empty
+    // list flash before the first interval tick.
+    coord_poll_daemon(&mut state, client).await;
+    let mut last_poll = Instant::now();
+
     loop {
         terminal.draw(|frame| layout::render(frame, &state))?;
 
@@ -124,6 +143,12 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result
             if state.should_exit {
                 return Ok(());
             }
+        }
+
+        // Throttle the data refresh: only re-poll the daemon every interval_ms.
+        if last_poll.elapsed() >= interval {
+            coord_poll_daemon(&mut state, client).await;
+            last_poll = Instant::now();
         }
     }
 }
