@@ -84,6 +84,18 @@ pub struct CoordinatorState {
     pub sessions: Vec<SessionEntry>,
     /// Selected row index across the unified list (`0` = controller bullet).
     pub selected: usize,
+    /// Whether the daemon answered its last health probe.
+    ///
+    /// Why: Child #2 polls the coordinator-context endpoint on a timer and must
+    /// surface daemon-down to the operator (a `daemon ✗` status indicator) and
+    /// clear the session list rather than showing stale rows. Mirrors
+    /// `DashboardState::daemon_reachable`. Defaults to `false` so the TUI reads
+    /// "unreachable" until the priming poll confirms otherwise.
+    /// What: set by [`super::poll::coord_poll_daemon`] after each health probe.
+    /// Test: `poll_marks_unreachable_clears_sessions` in `super::tests` covers the
+    /// daemon-down flip to `false`; the daemon-up flip needs a live daemon and is
+    /// exercised manually.
+    pub daemon_reachable: bool,
     /// Set when the operator asks to quit; the event loop exits on the next tick.
     pub should_exit: bool,
 }
@@ -116,6 +128,20 @@ impl CoordinatorState {
             ],
             ..Self::default()
         }
+    }
+
+    /// Build the live starting state: no rows, daemon presumed unreachable.
+    ///
+    /// Why: Child #2 drives the list from the daemon, not from the placeholder
+    /// rows [`Self::skeleton`] seeds. The run loop starts here and the priming
+    /// poll fills `sessions` + flips `daemon_reachable` once the context lands;
+    /// starting empty (rather than with placeholders) means a single transient
+    /// daemon outage never leaves stale illustrative rows on screen.
+    /// What: returns [`CoordinatorState::default`] — empty input/history, no
+    /// sessions, controller (row 0) selected, `daemon_reachable = false`.
+    /// Test: `live_state_starts_empty_and_unreachable`.
+    pub fn live() -> Self {
+        Self::default()
     }
 
     /// Total number of selectable rows: the controller plus every session.
