@@ -50,15 +50,20 @@ pub enum SlashCommand {
 /// Why: Enter on a `/`-prefixed line should be classified as a command rather
 /// than echoed as chat; doing the classification in a pure function keeps it
 /// testable and keeps the leading-`/` contract (§3.4) in one place.
-/// What: returns `None` when `input` does not start with `/`; otherwise lowercases
-/// the first whitespace-delimited token (sans the `/`) and maps it to the
-/// matching [`SlashCommand`], falling back to [`SlashCommand::Unknown`] carrying
-/// that token.
+/// What: returns `None` when `input` does not start with `/`, or when the input
+/// is a bare `/` with no command word (e.g. `/` or `/   `) — a lone slash is not
+/// a command, so it falls through to chat rather than yielding
+/// `Unknown("")`. Otherwise lowercases the first whitespace-delimited token
+/// (sans the `/`) and maps it to the matching [`SlashCommand`], falling back to
+/// [`SlashCommand::Unknown`] carrying that token.
 /// Test: `parse_slash_recognises_known_commands`,
-/// `parse_slash_classifies_unknown`, `parse_slash_ignores_plain_text`.
+/// `parse_slash_classifies_unknown`, `parse_slash_ignores_plain_text`,
+/// `parse_slash_bare_slash_is_not_a_command`.
 pub fn parse_slash(input: &str) -> Option<SlashCommand> {
     let rest = input.strip_prefix('/')?;
-    let word = rest.split_whitespace().next().unwrap_or("").to_lowercase();
+    // A bare `/` (no command word) is not a command — treat it as chat so the
+    // operator never sees a spurious `Unknown("")` classification.
+    let word = rest.split_whitespace().next()?.to_lowercase();
     let cmd = match word.as_str() {
         "help" => SlashCommand::Help,
         "new" => SlashCommand::New,

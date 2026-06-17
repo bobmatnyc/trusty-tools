@@ -268,6 +268,15 @@ fn parse_slash_ignores_plain_text() {
     assert_eq!(parse_slash(""), None);
 }
 
+#[test]
+fn parse_slash_bare_slash_is_not_a_command() {
+    // A lone `/` (or `/` followed only by whitespace) has no command word, so it
+    // must NOT classify as `Unknown("")` — it falls through to chat as `None`.
+    assert_eq!(parse_slash("/"), None);
+    assert_eq!(parse_slash("/   "), None);
+    assert_eq!(parse_slash("/\t"), None);
+}
+
 // ---- events: key dispatch -------------------------------------------------
 
 #[test]
