@@ -183,6 +183,19 @@ pub mod logging;
 /// recoverable tool error, usage accrual) plus an `#[ignore]`-gated live test.
 pub mod agent_loop;
 
+/// System-prompt assembly layer implementing the parity spec.
+///
+/// Why: The cross-model comparison harness must assemble the same fixed
+/// instruction surface for every model so the comparison measures the model,
+/// not the scaffolding (`docs/trusty-code/parity-spec.md` §1). This module owns
+/// that surface: the byte-identical BASE preamble, its version token, and the
+/// fixed-order assembler that merges BASE + agent prompt + project `CLAUDE.md`
+/// context + optional per-tier fallback guidance (the #1023 seam).
+/// What: `BASE_PREAMBLE`, `BASE_PREAMBLE_VERSION`, `PromptAssembler`, and
+/// `assemble_system_prompt`.
+/// Test: `prompt::tests::*`.
+pub mod prompt;
+
 // ── Package-level re-exports ──
 
 /// Version string, re-exported so integration tests can assert it without
