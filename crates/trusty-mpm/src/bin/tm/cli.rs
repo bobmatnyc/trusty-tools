@@ -366,6 +366,61 @@ pub(crate) enum Command {
         #[command(subcommand)]
         cmd: WatchCmd,
     },
+
+    /// Standalone metaharness — PM + sub-agent delegation without the daemon (#1045).
+    ///
+    /// Why: the M1 POC (issue #1045) builds a self-contained metaharness that
+    /// boots without the trusty-mpm daemon or the `claude` CLI, driving PM →
+    /// sub-agent delegation in-process via trusty-code (Seam A). The `meta`
+    /// command group is the operator entry point for that harness. WI-1 lands
+    /// only the bootstrap skeleton: argument parsing, structured logging, and a
+    /// placeholder run summary. The live delegation loop, fs/bash tool wiring,
+    /// and OpenRouter inference arrive in WI-2..WI-8 and are intentionally
+    /// deferred here.
+    /// What: a `run` sub-subcommand that accepts `--demo` (run the bundled demo
+    /// task) and `--project <PATH>` (the working directory the harness operates
+    /// in). For WI-1 the handler validates its arguments, emits a structured
+    /// "bootstrap" JSON summary to stdout, and exits 0.
+    /// Test: `cli_parses_meta_run`, `cli_parses_meta_run_demo`,
+    /// `cli_parses_meta_run_project`, `cli_meta_requires_action` in `tests.rs`.
+    Meta {
+        /// Metaharness action to run.
+        #[command(subcommand)]
+        action: MetaAction,
+    },
+}
+
+/// Verbs for the `tm meta` standalone-metaharness command group (#1045, WI-1).
+///
+/// Why: `meta` is a group rather than a bare command because future work items
+/// will add sibling verbs (e.g. inspecting transcripts under
+/// `.trusty-mpm/meta-runs/`); modelling it as a sub-subcommand enum from the
+/// start keeps that surface extensible without a breaking CLI change.
+/// What: a single `Run` variant carrying the `--demo` flag and the optional
+/// `--project <PATH>` working-directory argument.
+/// Test: `cli_parses_meta_run`, `cli_parses_meta_run_demo`,
+/// `cli_parses_meta_run_project`, `cli_meta_requires_action` in `tests.rs`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum MetaAction {
+    /// Boot the metaharness for a single run (WI-1: bootstrap skeleton only).
+    ///
+    /// Why: this is the harness's primary entry point — eventually it boots the
+    /// PM, delegates to a sub-agent, captures a transcript, and exits. For WI-1
+    /// it only validates inputs and prints a bootstrap summary so the scaffold
+    /// is exercisable end-to-end before the real runtime lands.
+    /// What: `--demo` selects the bundled demo task; `--project <PATH>` sets the
+    /// working directory the harness runs against (defaults to the process cwd).
+    /// Test: `cli_parses_meta_run*` in `tests.rs`; handler behaviour in the
+    /// `commands::meta` unit tests.
+    Run {
+        /// Run the bundled demo task instead of a user-supplied task.
+        #[arg(long)]
+        demo: bool,
+
+        /// Working directory the metaharness operates in (defaults to the cwd).
+        #[arg(long)]
+        project: Option<std::path::PathBuf>,
+    },
 }
 
 /// Modes for the `tm watch` command group.
