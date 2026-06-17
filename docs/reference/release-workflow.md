@@ -44,6 +44,20 @@ The `[workspace.package]` table no longer carries a `version` field (see #343).
 When publishing, bump only the crates that actually changed — do not cascade
 version bumps to siblings with no functional changes.
 
+### Docker end-to-end validation (release gate)
+
+The Docker E2E harness (`.github/workflows/e2e-docker.yml`, driver `scripts/e2e-docker.sh`, docs `docker/e2e/README.md`) validates that published crates install cleanly from crates.io on a clean Linux image and pass minimal end-to-end scenarios.
+
+**Release gate policy:**
+- **On-demand** via `workflow_dispatch` (manual trigger): primary workflow; run anytime from the Actions UI.
+- **As a release gate**: when a release batch spans **≥3 crates OR ≥3 PRs**, run the E2E validation manually before declaring the release complete. Smaller releases (1–2 crates, 1–2 PRs) may skip it and rely on standard CI.
+- **Nightly schedule**: runs automatically at 02:00 UTC as a regression safety-net, catching published-artifact and crates.io breakage independent of releases.
+
+The workflow is **not** triggered on every PR or every release; it is a deliberate gate. When needed, trigger it from **Actions → e2e-docker → Run workflow** or:
+```bash
+gh workflow run e2e-docker.yml
+```
+
 ## Bundled Crates — Intentionally Skipped by `release.yml`
 
 `release.yml` only builds standalone distributable binaries. Three crates are

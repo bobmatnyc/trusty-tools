@@ -30,6 +30,11 @@
 #     validate after a new crate publish before the nightly run fires.
 #   NOT triggered on push/PR — the source build CI covers those paths.
 #
+# RELEASE GATE POLICY (issue #1376):
+#   Run E2E manually when a release batch spans ≥3 crates OR ≥3 PRs.
+#   Smaller releases (1–2 crates, 1–2 PRs) may skip and rely on standard CI.
+#   See docs/reference/release-workflow.md "Docker end-to-end validation (release gate)" for details.
+#
 # CARGO REGISTRY CACHE:
 #   The Cargo registry (index + downloaded crate sources) is cached via
 #   actions/cache using a weekly key. Docker layer caching is not used here

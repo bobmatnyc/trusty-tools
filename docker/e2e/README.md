@@ -154,14 +154,26 @@ that trusty-search >= 0.25.0 excludes them by default.
 directory component with that name. Naming the container path `sample-code`
 avoids this exclusion so the `.rs` files are actually indexed.
 
-## CI trigger
+## When does this run?
 
-The workflow (`.github/workflows/e2e-docker.yml`) runs:
-- **Nightly** at 02:00 UTC — catches regressions in published crates.
-- **Manual** via `workflow_dispatch` — run after a new crate publish to
-  validate before the next nightly run fires.
+The workflow (`.github/workflows/e2e-docker.yml`) is triggered by three conditions:
 
-It is **not triggered on PRs** — the source-build CI covers that path.
+### 1. On-demand (manual)
+Run from the GitHub Actions UI (**Actions → e2e-docker → Run workflow**) or the CLI:
+```bash
+gh workflow run e2e-docker.yml
+```
+Use this anytime to validate a published release before declaring it complete. Optionally pin specific crate versions via the workflow inputs.
+
+### 2. Release gate (scheduled on-demand)
+When a release batch spans **≥3 crates OR ≥3 PRs**, manually run the E2E validation before marking the release as done. This ensures published artifacts work end-to-end on a clean Linux image. Smaller releases (1–2 crates, 1–2 PRs) may skip this and rely on standard CI.
+
+### 3. Nightly safety-net (automatic schedule)
+Runs automatically **every day at 02:00 UTC**. This catches regressions in published crates independently of releases — e.g., crates.io outages, yanked dependencies, or external ecosystem changes.
+
+### Why separate from main CI?
+
+Source-build CI (`.github/workflows/ci.yml`) builds from the local checkout. This workflow is the complementary **install-from-crates.io** gate, proving that published binaries install cleanly on a clean Linux base image. This path is what users actually run, so it must be tested independently.
 
 ## Environment variables
 
