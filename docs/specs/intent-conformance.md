@@ -603,6 +603,60 @@ token-resolver seam** (mirroring review's `IssueTokenResolver`,
 
 ---
 
+## 10. Operating the gates (config & feature flags)
+
+These are the operator-facing knobs the implemented gates (C1–C4) expose. They
+are documented here so a reader of the spec can map the contract above onto the
+concrete configuration surface (C5, #1362).
+
+### 10.1 The `intent-source` feature flag (trusty-common)
+
+The shared ISR lives behind the **`intent-source`** Cargo feature in
+trusty-common (`Cargo.toml [features]`, §7.3). The feature gates the
+`intent_source` module so the ~11 non-consumer trusty-common dependents pay
+nothing (§6.5). The two gate crates enable it explicitly:
+
+- **trusty-review** enables it unconditionally in its dependency declaration
+  (`trusty-common = { workspace = true, features = ["intent-source"] }`).
+- **trusty-mpm**'s FRONT gate reaches the same module through the crate's
+  trusty-common dependency.
+
+Build/test the ISR in isolation with
+`cargo test -p trusty-common --features intent-source`.
+
+### 10.2 The `conformance` context-source config (trusty-review BACK gate)
+
+The BACK gate is registered as a `ContextSource` named `conformance`
+(§7.1) and configured through trusty-review's layered context-source config
+(`ContextSourcesConfig` / `[context.sources.conformance]`). Resolution precedence
+is **env var > TOML > default** per source:
+
+| Knob | Value |
+|---|---|
+| Enable (env) | `TRUSTY_REVIEW_CONTEXT_CONFORMANCE_ENABLED=true` (lenient: `true`/`1`/`yes`/`on`) |
+| Mode (env) | `TRUSTY_REVIEW_CONTEXT_CONFORMANCE_MODE=live` (`semantic` not implemented) |
+| TOML | `[context.sources.conformance] enabled = true` (under `[context]`) |
+| Default | **DISABLED** — unlike the other sources it does NOT auto-enable on credential presence (it issues a GitHub ticket fetch; opt-in only). |
+
+Auth follows review's dual-mode `AuthStrategy` (CLI → PAT/`gh`, serve → App/JWT)
+through the pluggable token-resolver seam (§7.4) — the gate adds no new credential
+path. On any auth/fetch failure the source fails open to an empty section and
+manufactures no finding (§4.2, AC-11).
+
+Operator-facing copy of these knobs lives in the trusty-review README
+(*Context sources & the conformance gate*).
+
+### 10.3 The FRONT gate (trusty-mpm) — capability state
+
+The FRONT gate composes its conformance disposition with `evaluate_autonomy_tier`
+(stricter-wins, §5.1, AC-16) and escalates via `pending_decision`. Until **#1269**
+(headless-spawn) lands, the headless auto-spawn approval path is unavailable and
+an escalation degrades to the CLI-owned operator-confirm path
+(`HeadlessApproval::current() == OperatorConfirm`, §5.1). There is no separate
+feature flag — the gate runs on the default `daemon` feature set.
+
+---
+
 ## 12. Non-goals
 
 - Implementing any gate or the ISR in Rust (this PR is doc-only).

@@ -360,6 +360,34 @@ impl ConformanceSource {
         }
     }
 
+    /// Whether the BACK gate would surface a method to flag the diff against.
+    ///
+    /// Why: the cross-gate golden test (AC-18, spec §8) must assert that the SAME
+    /// `ResolvedIntent` drives the FRONT gate (`trusty_mpm`) and the BACK gate
+    /// (here) to *consistent* matrix outcomes — FRONT `Escalate` ⇔ BACK
+    /// would-flag (M5), FRONT `AutoAccept` ⇔ BACK no-finding (M3). The back gate
+    /// never emits a conformance finding unless it first surfaces a prescribed
+    /// method for the reviewer LLM to check the diff against; a gap / unresolved
+    /// intent renders an empty section and can produce no finding (spec §5.2,
+    /// §4.2). This predicate exposes exactly that "is there an intent to flag
+    /// against?" signal — derived from the *real* renderer ([`render_section`]),
+    /// not a reimplementation — so a cross-crate test can drive the genuine gate
+    /// code path against a shared intent.
+    /// What: returns `true` iff [`render_section`] produces a non-empty section
+    /// (i.e. the precedence-winning method exists and is surfaced); `false` for a
+    /// gap (M3), an `unresolved` fail-open intent, or any intent with no method on
+    /// either axis. This is a necessary condition for a back-gate finding: the
+    /// LLM is instructed to flag *only* an explicit contradiction of a surfaced
+    /// method, so no surfaced method ⇒ no possible conformance finding.
+    ///
+    /// [`render_section`]: ConformanceSource::render_section
+    /// Test: `would_flag_*` in `conformance_tests.rs`; the cross-gate AC-18 golden
+    /// test in `trusty-mpm/tests/conformance_cross_gate.rs`.
+    #[must_use]
+    pub fn would_flag(intent: &ResolvedIntent) -> bool {
+        !Self::render_section(intent).snippets.is_empty()
+    }
+
     /// An empty section (no snippets) — the fail-open / gap signal.
     ///
     /// Why: the orchestrator drops empty sections, so an empty section is exactly
