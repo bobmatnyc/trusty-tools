@@ -406,3 +406,73 @@ fn parse_direct_json_approve_star() {
     assert!(!result.is_fail_safe);
     assert_eq!(result.verdict, Verdict::ApproveWithReservations);
 }
+
+// ── Method-conformance finding category (#1359) ──────────────────────────
+
+/// A finding emitting `"category":"method-conformance"` parses to the
+/// `MethodConformance` category.
+///
+/// Why: the back gate (#1359) distinguishes conformance findings by category so
+/// the verdict floor can cap them at REQUEST_CHANGES.  The parser must preserve
+/// the LLM-emitted category.
+/// What: parses a direct-JSON finding with the conformance category, asserts the
+/// internal `Finding.category`.
+/// Test: no network.
+#[test]
+fn parse_method_conformance_finding_category() {
+    let body = r#"{
+        "verdict":"REQUEST_CHANGES",
+        "summary":"Diff contradicts the ticket method.",
+        "findings":[{
+            "title":"Uses offset pagination",
+            "body":"Ticket specifies cursor-based pagination.",
+            "severity":"medium",
+            "confidence":0.9,
+            "file":"src/page.rs",
+            "category":"method-conformance"
+        }]
+    }"#;
+    let result = parse_review_response(body);
+    assert!(!result.is_fail_safe);
+    assert_eq!(result.findings.len(), 1);
+    assert_eq!(
+        result.findings[0].category,
+        FindingCategory::MethodConformance,
+        "the conformance category must survive parsing"
+    );
+}
+
+/// A finding that OMITS `category` defaults to `Correctness` (back-compat).
+///
+/// Why: existing fixtures and models that do not emit `category` must keep
+/// parsing as correctness findings (the `#[serde(default)]` guarantee, AC). This
+/// is also the cross-provider safety net for #1359: `category` is in the schema's
+/// `required` array ONLY because OpenAI strict mode demands every property be
+/// required (see `review_schema_is_openai_strict_compliant`). Non-strict backends
+/// (Bedrock/Anthropic tool-use, Gemini) and older models can omit `category`
+/// WITHOUT client-side rejection — both the OpenRouter and Bedrock backends route
+/// their structured output through THIS serde path, so an omitted `category` is
+/// silently defaulted here rather than rejected by any validation layer.
+/// What: parses a finding with no `category` key, asserts the default.
+/// Test: no network.
+#[test]
+fn parse_finding_without_category_defaults_correctness() {
+    let body = r#"{
+        "verdict":"REQUEST_CHANGES",
+        "summary":"Bug.",
+        "findings":[{
+            "title":"Null deref",
+            "body":"Unchecked unwrap.",
+            "severity":"high",
+            "confidence":0.95,
+            "file":"src/x.rs"
+        }]
+    }"#;
+    let result = parse_review_response(body);
+    assert_eq!(result.findings.len(), 1);
+    assert_eq!(
+        result.findings[0].category,
+        FindingCategory::Correctness,
+        "a finding with no category must default to Correctness (back-compat)"
+    );
+}

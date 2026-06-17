@@ -95,7 +95,7 @@
 
 use tracing::debug;
 
-use crate::models::{Effort, Finding, Verdict, VerifyOutcome};
+use crate::models::{Effort, Finding, FindingCategory, Verdict, VerifyOutcome};
 use crate::pipeline::letter_grade::{Grade, clamp_grade_to_verdict, verdict_for_grade};
 
 // ─── Confidence thresholds ────────────────────────────────────────────────────
@@ -218,7 +218,22 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
     // count-based floor at APPROVE* (advisory) in that case.  High-effort findings
     // are unaffected: a genuine critical (BLOCK floor) still escalates an APPROVE,
     // because BLOCK is grounded critical evidence, not a count heuristic.
-    if model_proposed == Verdict::Approve && floor == Verdict::RequestChanges {
+    //
+    // #1359: a CONFIRMED method-conformance divergence (a conformance finding that
+    // clears FLOOR_MIN_CONFIDENCE = 0.80) is grounded explicit evidence — the diff
+    // contradicts a method the ticket/spec stated — NOT a Medium-count heuristic.
+    // Like the High-effort exemption, it is exempt from this cap so AC-8 holds: a
+    // model APPROVE + a confident conformance divergence still floors to
+    // REQUEST_CHANGES.  (A sub-0.80 conformance finding never reaches the
+    // RequestChanges floor in the first place — see `conformance_floor` — so the
+    // cap correctly still applies to advisory-only conformance, honouring AC-12.)
+    let has_confident_conformance = substantive.iter().any(|f| {
+        f.category == FindingCategory::MethodConformance && f.confidence >= FLOOR_MIN_CONFIDENCE
+    });
+    if model_proposed == Verdict::Approve
+        && floor == Verdict::RequestChanges
+        && !has_confident_conformance
+    {
         debug!(
             "source-of-truth reconciliation: model APPROVE + count-based REQUEST_CHANGES floor \
              → capping floor at APPROVE* (no Medium-count override of an APPROVE review_body)"
@@ -335,7 +350,44 @@ fn is_high_severity(f: &Finding) -> bool {
 ///
 /// As of #1343 the caller pre-filters refuted / sub-0.50-confidence findings via
 /// `is_substantive`, so this function only ever sees substantive findings.
+///
+/// As of #1359 the floor is split by `FindingCategory`: correctness findings run
+/// the four-tier rule unchanged, while method-conformance findings run a separate,
+/// strictly-weaker rule (see [`conformance_floor`]) that caps at `REQUEST_CHANGES`
+/// and never contributes `BLOCK`.  The combined floor is the stricter of the two.
 fn severity_floor(findings: &[&Finding]) -> Verdict {
+    if findings.is_empty() {
+        return Verdict::Approve;
+    }
+
+    // #1359: a method-conformance divergence is an *intent overlay*, capped at
+    // REQUEST_CHANGES — it must never drive BLOCK (reserved for correctness /
+    // safety).  Run the standard floor over the CORRECTNESS findings only, then
+    // combine with the conformance floor via `stricter_of`.
+    let (conformance, correctness): (Vec<&&Finding>, Vec<&&Finding>) = findings
+        .iter()
+        .partition(|f| f.category == FindingCategory::MethodConformance);
+
+    let correctness_floor = correctness_floor(&correctness);
+    let conformance_floor = conformance_floor(&conformance);
+    stricter_of(correctness_floor, conformance_floor)
+}
+
+/// The four-tier correctness floor (the pre-#1359 `severity_floor` body).
+///
+/// Why: separating the correctness rule from the conformance rule (#1359) keeps
+/// each rule readable and lets the conformance rule be strictly weaker (capped at
+/// REQUEST_CHANGES) without touching the proven correctness tiers.
+/// What: applies the unchanged four-tier rule set over correctness findings:
+///   1. Any `High`-effort finding → BLOCK
+///   2. ≥2 high-confidence Medium-effort findings → REQUEST_CHANGES
+///   3. Exactly 1 high-confidence Medium-effort finding → APPROVE*
+///   4. Only `Low` / no floor-counting findings → APPROVE
+///
+/// Test: `grade_two_medium_yields_request_changes`,
+///       `grade_one_medium_yields_approve_star`,
+///       `grade_advisory_medium_below_floor_threshold_does_not_escalate`.
+fn correctness_floor(findings: &[&&Finding]) -> Verdict {
     if findings.is_empty() {
         return Verdict::Approve;
     }
@@ -367,6 +419,37 @@ fn severity_floor(findings: &[&Finding]) -> Verdict {
 
     // Tier 4: only Low-effort, no findings, or all-advisory Medium findings.
     Verdict::Approve
+}
+
+/// The method-conformance floor (#1359, `SPEC-CONFORMANCE-02` §5.2; AC-8/AC-12).
+///
+/// Why: a method-conformance divergence is an advisory overlay on top of the
+/// correctness review — it must be conservative and bounded.  The spec is
+/// explicit: a conformance finding caps the verdict at `REQUEST_CHANGES` and
+/// NEVER drives `BLOCK` (BLOCK is reserved for correctness/safety, OQ-5), and a
+/// conformance finding must clear `FLOOR_MIN_CONFIDENCE` (0.80) to affect the
+/// verdict at all — below that it is advisory only and does NOT raise the floor
+/// (the primary false-positive guard, G3).
+/// What: returns `REQUEST_CHANGES` when ANY conformance finding clears 0.80
+/// confidence (regardless of its `Effort` — even a `High`-effort conformance
+/// finding is capped here, never BLOCK); otherwise `APPROVE` (advisory only).
+/// Note the caller's `is_substantive` pre-filter has already dropped refuted /
+/// sub-0.50 findings, but the 0.80 gate here is stricter and is what AC-12 pins.
+/// Test: `conformance_finding_caps_at_request_changes`,
+/// `conformance_high_effort_never_blocks`,
+/// `conformance_below_floor_confidence_is_advisory`.
+fn conformance_floor(findings: &[&&Finding]) -> Verdict {
+    // Effort is intentionally ignored: the conformance cap is confidence-only (never BLOCK).
+    let any_confident = findings
+        .iter()
+        .any(|f| f.confidence >= FLOOR_MIN_CONFIDENCE);
+    if any_confident {
+        // Capped at REQUEST_CHANGES — conformance NEVER drives BLOCK.
+        Verdict::RequestChanges
+    } else {
+        // Below the confidence floor → advisory only, does not raise the floor.
+        Verdict::Approve
+    }
 }
 
 // ─── Verdict ordering ─────────────────────────────────────────────────────────

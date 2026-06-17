@@ -10,11 +10,21 @@
 //! Test: this file is the test module.
 
 use super::*;
-use crate::models::{Finding, VerifyOutcome};
+use crate::models::{Finding, FindingCategory, VerifyOutcome};
 use crate::pipeline::letter_grade::Grade;
 
 fn finding(effort: Effort, confidence: f32) -> Finding {
     Finding::new("src/lib.rs", "test", "desc", "", confidence, effort)
+}
+
+/// Build a method-conformance finding (#1359) at a given effort + confidence.
+///
+/// Why: the back-gate verdict-floor tests need conformance-category findings to
+/// assert the REQUEST_CHANGES cap (never BLOCK) and the 0.80 advisory gate.
+/// What: constructs a finding and tags its category `MethodConformance`.
+/// Test: used by the `conformance_*` tests below.
+fn conformance_finding(effort: Effort, confidence: f32) -> Finding {
+    finding(effort, confidence).with_category(FindingCategory::MethodConformance)
 }
 
 /// Build a finding with a `verified` outcome already recorded.
@@ -691,4 +701,143 @@ fn grade_confirmed_high_still_blocks_despite_b_plus_grade() {
         "High-effort finding must still BLOCK regardless of grade (#1015 regression)"
     );
     assert_eq!(g, Grade::F, "grade must clamp to F when verdict=BLOCK");
+}
+
+// ── Method-conformance back gate (#1359, SPEC-CONFORMANCE-02 §5.2; AC-8..AC-12) ─
+
+/// AC-8: a confident conformance divergence floors the verdict to REQUEST_CHANGES
+/// even when the model proposed APPROVE.
+///
+/// Why: a confirmed contradiction between the diff and an explicit ticket/spec
+/// method (M5) must surface as REQUEST_CHANGES; the #1343 source-of-truth cap is
+/// exempt for grounded conformance evidence (mirrors the High-effort exemption).
+/// What: model APPROVE + one Medium@0.90 conformance finding → REQUEST_CHANGES.
+/// Test: this test itself.
+#[test]
+fn conformance_finding_caps_at_request_changes() {
+    let findings = vec![conformance_finding(Effort::Medium, 0.90)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::RequestChanges,
+        "a confident conformance divergence must floor to REQUEST_CHANGES (AC-8)"
+    );
+}
+
+/// AC-8 (never-BLOCK): a HIGH-effort conformance finding is still capped at
+/// REQUEST_CHANGES — conformance NEVER drives BLOCK.
+///
+/// Why: BLOCK is reserved for correctness/safety (OQ-5).  Even a high-severity
+/// conformance divergence must not block; the conformance floor caps it.
+/// What: model APPROVE + one High@0.95 conformance finding → REQUEST_CHANGES
+/// (NOT BLOCK, the value a High *correctness* finding would yield).
+/// Test: this test itself.
+#[test]
+fn conformance_high_effort_never_blocks() {
+    let findings = vec![conformance_finding(Effort::High, 0.95)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::RequestChanges,
+        "conformance must cap at REQUEST_CHANGES and NEVER drive BLOCK (AC-8)"
+    );
+    assert_ne!(verdict, Verdict::Block, "conformance must never BLOCK");
+}
+
+/// AC-12: a conformance finding BELOW FLOOR_MIN_CONFIDENCE (0.80) is advisory and
+/// does NOT raise the verdict floor.
+///
+/// Why: the 0.80 gate is the primary false-positive guard (G3); a low-confidence
+/// conformance finding must not move the verdict.
+/// What: model APPROVE + one Medium@0.75 conformance finding → APPROVE.
+/// Test: this test itself.
+#[test]
+fn conformance_below_floor_confidence_is_advisory() {
+    let findings = vec![conformance_finding(Effort::Medium, 0.75)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::Approve,
+        "a sub-0.80 conformance finding is advisory only and must not raise the floor (AC-12)"
+    );
+}
+
+/// AC-12 (High-effort variant): even a HIGH-effort conformance finding below 0.80
+/// must not block — it stays advisory on the conformance axis.
+///
+/// Why: the never-BLOCK ceiling and the 0.80 advisory gate must hold together; a
+/// low-confidence high-severity conformance finding must not sneak to BLOCK via
+/// the correctness `has_high` path.
+/// What: model APPROVE + one High@0.60 conformance finding → APPROVE (the
+/// low-confidence override keeps it advisory; it never reaches BLOCK).
+/// Test: this test itself.
+#[test]
+fn conformance_low_confidence_high_effort_never_blocks() {
+    let findings = vec![conformance_finding(Effort::High, 0.60)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_ne!(
+        verdict,
+        Verdict::Block,
+        "a conformance finding must never BLOCK regardless of effort/confidence (AC-8/AC-12)"
+    );
+}
+
+/// AC-9: no conformance finding (a gap / conforming diff) leaves the verdict
+/// unchanged by conformance.
+///
+/// Why: when intent is a gap (M3) or the diff conforms, the back gate emits no
+/// conformance finding and must not perturb the verdict.
+/// What: model APPROVE + only a Low correctness finding → APPROVE.
+/// Test: this test itself.
+#[test]
+fn conformance_absent_leaves_verdict_unchanged() {
+    let findings = vec![finding(Effort::Low, 0.95)];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::Approve,
+        "no conformance finding → unchanged (AC-9)"
+    );
+}
+
+/// A conformance finding must NEVER yield BLOCK even when combined with the
+/// grade-aware entry point and an F-implying grade is absent.
+///
+/// Why: the verdict ceiling for conformance is REQUEST_CHANGES at every entry
+/// point, including `derive_verdict_with_grade`.
+/// What: model APPROVE, grade B (APPROVE) + one High@0.90 conformance finding →
+/// REQUEST_CHANGES, not BLOCK.
+/// Test: this test itself.
+#[test]
+fn conformance_never_blocks_via_grade_entry_point() {
+    let findings = vec![conformance_finding(Effort::High, 0.90)];
+    let (v, _g) = derive_verdict_with_grade(Verdict::Approve, Grade::B, &findings);
+    assert_eq!(
+        v,
+        Verdict::RequestChanges,
+        "conformance caps at REQUEST_CHANGES"
+    );
+    assert_ne!(v, Verdict::Block, "conformance never BLOCKs (AC-8)");
+}
+
+/// A confident conformance finding combined with a confirmed High *correctness*
+/// finding still BLOCKs — the correctness axis is unaffected by the conformance cap.
+///
+/// Why: the conformance cap must only bound the conformance axis; a real
+/// correctness blocker in the same review still drives BLOCK.
+/// What: one High@0.90 correctness + one Medium@0.90 conformance → BLOCK
+/// (stricter_of(BLOCK, REQUEST_CHANGES)).
+/// Test: this test itself.
+#[test]
+fn conformance_cap_does_not_weaken_correctness_block() {
+    let findings = vec![
+        finding(Effort::High, 0.90),
+        conformance_finding(Effort::Medium, 0.90),
+    ];
+    let verdict = derive_verdict(Verdict::Approve, &findings);
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "a real correctness High finding still BLOCKs alongside a conformance finding"
+    );
 }

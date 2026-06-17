@@ -79,6 +79,9 @@ pub struct ContextSourcesConfig {
     pub confluence: SourceConfig,
     /// GitHub Issues live source.
     pub github_issues: SourceConfig,
+    /// Intent/method-conformance back gate (#1359).  Default DISABLED: it calls
+    /// the ISR (GitHub ticket fetch) so it must be explicitly opted in.
+    pub conformance: SourceConfig,
 }
 
 impl ContextSourcesConfig {
@@ -95,6 +98,7 @@ impl ContextSourcesConfig {
             jira: resolve_source("JIRA", file.map(|f| &f.jira)),
             confluence: resolve_source("CONFLUENCE", file.map(|f| &f.confluence)),
             github_issues: resolve_source("GITHUB_ISSUES", file.map(|f| &f.github_issues)),
+            conformance: resolve_source("CONFORMANCE", file.map(|f| &f.conformance)),
         }
     }
 }
@@ -141,6 +145,9 @@ pub struct ContextSourcesFileConfig {
     /// `[context.sources.github_issues]`.
     #[serde(default)]
     pub github_issues: SourceFileConfig,
+    /// `[context.sources.conformance]` — the intent/method-conformance back gate.
+    #[serde(default)]
+    pub conformance: SourceFileConfig,
 }
 
 /// TOML-deserialisable single-source table (all fields optional).

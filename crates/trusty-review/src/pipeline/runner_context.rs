@@ -19,8 +19,8 @@ use crate::{
     integrations::{
         apex_context::fetch_apex_context,
         context::{
-            ConfluenceSource, ContextSource, GithubIssuesSource, JiraSource, ReviewSubject,
-            gather_external_context, render_sections,
+            ConfluenceSource, ConformanceSource, ContextSource, GithubIssuesSource, JiraSource,
+            ReviewSubject, gather_external_context, render_sections,
         },
         github::RunMode,
     },
@@ -182,7 +182,9 @@ fn build_apex_cross_query(
 /// What: constructs the enabled context sources from `config.context_sources`
 /// (each auto-disabled when its credentials are absent), builds a `ReviewSubject`
 /// carrying the PR title + body (#599 Fix 3 — the body is scanned for JIRA ticket
-/// keys and folded into each source's query), runs the sources concurrently and
+/// keys and folded into each source's query) and the PR number (#1359 — the
+/// conformance source threads it into the ISR `IntentQuery::Pr`; `0` in local-diff
+/// mode), runs the sources concurrently and
 /// fail-open via the orchestrator, and renders the surviving sections to a
 /// markdown block.  Returns an empty string when no source contributes.
 /// Test: source construction is covered by each source's `from_config` tests;
@@ -197,6 +199,7 @@ pub(crate) async fn gather_external_context_md(
     changed_files: &[String],
     pr_title: &str,
     pr_body: &str,
+    pr_number: u64,
     run_mode: RunMode,
 ) -> String {
     let cs = &config.context_sources;
@@ -205,6 +208,13 @@ pub(crate) async fn gather_external_context_md(
         Box::new(ConfluenceSource::from_config(&cs.confluence)),
         Box::new(GithubIssuesSource::from_config(
             &cs.github_issues,
+            run_mode,
+            config.clone(),
+        )),
+        // BACK gate (#1359): surfaces the resolved ticket/spec intent so the LLM
+        // can flag explicit method contradictions.  Default DISABLED (needs auth).
+        Box::new(ConformanceSource::from_config(
+            &cs.conformance,
             run_mode,
             config.clone(),
         )),
@@ -223,6 +233,7 @@ pub(crate) async fn gather_external_context_md(
         body: pr_body.to_string(),
         changed_files: changed_files.to_vec(),
         identifiers: identifiers.to_vec(),
+        pr_number,
     };
 
     let sections = gather_external_context(&sources, &subject).await;
