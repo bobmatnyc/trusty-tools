@@ -7,6 +7,58 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.26.0] — 2026-06-17
+
+### Added (closes #1373)
+
+- **`trusty-search serve --index <id>` / `--project <path>` pin an MCP session
+  to one index.** When pinned, every tool handler defaults an omitted
+  `index_id` to the pinned id, and fan-out tools (`search_all` / `grep` without
+  `index_id`) scope to the pinned index instead of sweeping every registered
+  index. The pinned index is advertised in `tools/list` (its `index_id` becomes
+  optional and its description names the default) so the LLM never has to call
+  `list_indexes` and guess. `--index` wins over `--project`; `--project`'s id is
+  derived via the shared `trusty_common::derive_index_id` (git-root basename).
+  Without either flag, behaviour is unchanged — callers must supply `index_id`
+  and fan-out sweeps all indexes.
+
+### Changed
+
+- **Index-id derivation is now the single source of truth in `trusty-common`.**
+  `detect_project` delegates to `trusty_common::derive_index_id` so trusty-mpm's
+  register-and-pin and trusty-search's CLI/MCP paths always agree on the id.
+
+## [0.25.0] — 2026-06-17
+
+### Added (closes #1372)
+
+- **Configurable per-index indexing hygiene + dashboard config API.** Indexing
+  hygiene is now per-project config defaults that are overridable per index
+  (and editable via the dashboard), rather than hardcoded constants:
+  - **Walker** gains `DATA_EXTS` (json/xml/txt/log), a 64 KiB
+    `DEFAULT_DATA_FILE_MAX_BYTES` cap for data-ish files, and
+    `DEFAULT_EXTRA_SKIP_DIRS` (data/exports/output/reports/snapshots/results).
+    `WalkOptions` carries `extra_skip_dirs` + `data_file_max_bytes`; data files
+    get the tighter cap while everything else keeps the 1 MiB global cap.
+  - **Config + persistence:** `IndexConfig` (`trusty-search.yaml`),
+    `ProjectConfig` (`.trusty-search.yaml`), and `PersistedIndex`
+    (`indexes.toml`, serde-default for backward compat) all gain the two
+    hygiene fields, threaded through `CreateIndexRequest` → handle →
+    `WalkOptions`.
+  - **New per-index config API:** `GET /indexes/{id}/config` returns the hygiene
+    config; `PATCH /indexes/{id}/config` updates the in-memory handle and
+    persists to `indexes.toml` (validates inputs, rejecting
+    `data_file_max_bytes == 0`).
+
+## [0.24.10] — 2026-06-16
+
+### Added (closes #1365)
+
+- **`trusty-search status [INDEX] --watch`.** `status` now accepts an optional
+  positional `INDEX` argument to scope the overview to a single index, plus a
+  `--watch` flag that refreshes the status view on an interval for live
+  monitoring of daemon + index state.
+
 ## [0.24.9] — 2026-06-16
 
 ### Fixed (closes #1325)

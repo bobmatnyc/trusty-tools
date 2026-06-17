@@ -405,3 +405,157 @@ pub(super) async fn spawn_mock_daemon(
     let base_url = format!("http://{addr}");
     (base_url, captured_bodies, captured_paths)
 }
+
+// Issue #1373 — pinned-index resolution + serve-time pin
+// ----------------------------------------------------------------
+
+/// `resolve_index_id` precedence: explicit arg wins, else pinned, else None.
+///
+/// Why: the whole #1373 fix hinges on this precedence — a pinned session must
+/// default an omitted `index_id` to the pin, still honour an explicit id, and
+/// (without a pin) fall through to `None` so behaviour is unchanged.
+/// What: exercises all four combinations on the bare helper.
+/// Test: this is the test.
+#[test]
+fn resolve_index_id_prefers_explicit_then_pinned() {
+    let pinned = McpServer::new("http://127.0.0.1:1").with_pinned_index("my-project");
+    // Omitted → pinned.
+    assert_eq!(
+        pinned.resolve_index_id(&serde_json::json!({})),
+        Some("my-project".to_string())
+    );
+    // Explicit wins over the pin.
+    assert_eq!(
+        pinned.resolve_index_id(&serde_json::json!({ "index_id": "other" })),
+        Some("other".to_string())
+    );
+    // Empty explicit id is ignored → falls back to the pin.
+    assert_eq!(
+        pinned.resolve_index_id(&serde_json::json!({ "index_id": "" })),
+        Some("my-project".to_string())
+    );
+
+    // No pin: omitted → None (unchanged legacy behaviour).
+    let unpinned = McpServer::new("http://127.0.0.1:1");
+    assert_eq!(unpinned.resolve_index_id(&serde_json::json!({})), None);
+    assert_eq!(
+        unpinned.resolve_index_id(&serde_json::json!({ "index_id": "x" })),
+        Some("x".to_string())
+    );
+}
+
+/// A blank `--index ""` pin is treated as "no pin" so a degenerate flag can't
+/// wedge every call onto an empty-string index.
+///
+/// Why: defensive — an operator (or a buggy launcher) passing `--index ""`
+/// must not silently pin to `""`.
+/// What: asserts `with_pinned_index("")` leaves `pinned_index` unset.
+/// Test: this is the test.
+#[test]
+fn blank_pin_is_treated_as_no_pin() {
+    let s = McpServer::new("http://127.0.0.1:1").with_pinned_index("   ");
+    assert_eq!(s.resolve_index_id(&serde_json::json!({})), None);
+}
+
+/// Without a pin, `search` with no `index_id` fast-fails (unchanged).
+///
+/// Why: backward-compatibility — the pre-#1373 contract requires `index_id`,
+/// and the fix must not relax that when no pin is configured.
+/// What: dispatches `search` (no index_id, no pin) and asserts INVALID_PARAMS.
+/// Test: this is the test.
+#[tokio::test]
+async fn search_without_pin_requires_index_id() {
+    let server = McpServer::new("http://127.0.0.1:1");
+    let resp = server
+        .dispatch(req("search", serde_json::json!({ "query": "fn main" })))
+        .await;
+    let err = resp.error.expect("expected error");
+    assert_eq!(err.code, error_codes::INVALID_PARAMS);
+}
+
+/// With a pin, `search` with no `index_id` targets the pinned index endpoint.
+///
+/// Why: the core acceptance criterion — a pinned session must resolve a bare
+/// `search` to its own project index, never sweeping or guessing.
+/// What: spins up the mock daemon, dispatches `search` (query only) against a
+/// server pinned to `pinned-proj`, and asserts the daemon saw a POST to
+/// `/indexes/pinned-proj/search`.
+/// Test: this is the test.
+#[tokio::test]
+async fn pinned_search_defaults_index_id_to_pin() {
+    let (base_url, _bodies, paths) = spawn_mock_daemon(
+        serde_json::json!({ "search_capabilities": ["vector", "kg"] }),
+        serde_json::json!({ "results": [], "intent": "Definition", "latency_ms": 1 }),
+    )
+    .await;
+    let server =
+        McpServer::with_client(base_url, reqwest::Client::new()).with_pinned_index("pinned-proj");
+
+    let resp = server
+        .dispatch(req("search", serde_json::json!({ "query": "fn main" })))
+        .await;
+    assert!(
+        resp.error.is_none(),
+        "pinned search should succeed: {resp:?}"
+    );
+
+    let seen = paths.lock().await;
+    assert_eq!(seen.len(), 1, "exactly one daemon search call: {seen:?}");
+    assert_eq!(seen[0], "/indexes/pinned-proj/search");
+}
+
+/// With a pin, `grep` with no `index_id` scopes to the pinned index endpoint
+/// instead of the global fan-out `/grep`.
+///
+/// Why: #1373 requires fan-out tools to scope to the pin so a project session
+/// never sweeps every registered index.
+/// What: mock daemon captures the grep path; asserts the pinned per-index
+/// endpoint was hit.
+/// Test: this is the test.
+#[tokio::test]
+async fn pinned_grep_scopes_to_pinned_index() {
+    use axum::extract::{Path, State};
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    async fn per_index_grep(
+        Path(id): Path<String>,
+        State(c): State<Arc<Mutex<Vec<String>>>>,
+        Json(_body): Json<Value>,
+    ) -> Json<Value> {
+        c.lock().await.push(format!("/indexes/{id}/grep"));
+        Json(serde_json::json!({ "matches": [] }))
+    }
+    async fn global_grep(
+        State(c): State<Arc<Mutex<Vec<String>>>>,
+        Json(_body): Json<Value>,
+    ) -> Json<Value> {
+        c.lock().await.push("/grep".to_string());
+        Json(serde_json::json!({ "matches": [] }))
+    }
+
+    let app = Router::new()
+        .route("/indexes/{id}/grep", post(per_index_grep))
+        .route("/grep", post(global_grep))
+        .with_state(Arc::clone(&captured));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let base_url = format!("http://{addr}");
+
+    let server =
+        McpServer::with_client(base_url, reqwest::Client::new()).with_pinned_index("pinned-proj");
+    let resp = server
+        .dispatch(req("grep", serde_json::json!({ "pattern": "fn foo" })))
+        .await;
+    assert!(resp.error.is_none(), "pinned grep should succeed: {resp:?}");
+
+    let seen = captured.lock().await;
+    assert_eq!(seen.as_slice(), &["/indexes/pinned-proj/grep".to_string()]);
+}

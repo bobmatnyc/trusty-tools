@@ -23,7 +23,12 @@ use trusty_common::mcp::DaemonBridgeConfig;
 /// discovery file (issue #117). EOF self-exit is unit-tested in
 /// `crates/trusty-common/src/mcp/mod.rs` (`stdio_loop_exits_on_eof`).
 /// Auto-start behavior covered by `trusty_common::mcp::daemon_bridge` tests.
-pub async fn handle_serve(with_http: bool, port: u16, http: Option<String>) -> Result<()> {
+pub async fn handle_serve(
+    with_http: bool,
+    port: u16,
+    http: Option<String>,
+    pinned_index: Option<String>,
+) -> Result<()> {
     // Resolve the HTTP bind address. HTTP is OFF by default (issue #123) --
     // Claude Code MCP hooks only need stdio. Precedence:
     //   1. legacy `--http <addr>`   -> explicit bind (implies HTTP on)
@@ -37,10 +42,17 @@ pub async fn handle_serve(with_http: bool, port: u16, http: Option<String>) -> R
         None
     };
 
+    // Apply the optional index pin (#1373) to the dispatcher so omitted
+    // `index_id`s default to it and fan-out tools scope to it.
+    let pin = |server: crate::mcp::McpServer| match pinned_index.clone() {
+        Some(id) => server.with_pinned_index(id),
+        None => server,
+    };
+
     match bind_addr {
         Some(addr) => {
             let daemon_url = daemon_base_url();
-            let server = crate::mcp::McpServer::new(daemon_url.clone());
+            let server = pin(crate::mcp::McpServer::new(daemon_url.clone()));
             serve_http(server, addr, &daemon_url).await
         }
         None => {
@@ -48,7 +60,14 @@ pub async fn handle_serve(with_http: bool, port: u16, http: Option<String>) -> R
             // MCP dispatch loop. The McpServer forwards every tool call to
             // the daemon's REST API, so the daemon MUST be reachable.
             let base_url = ensure_search_daemon_up().await?;
-            let server = crate::mcp::McpServer::new(base_url.clone());
+            let server = pin(crate::mcp::McpServer::new(base_url.clone()));
+            if let Some(ref id) = pinned_index {
+                eprintln!(
+                    "{} MCP session pinned to index {}",
+                    "\u{25c9}".green(),
+                    id.cyan()
+                );
+            }
             eprintln!(
                 "{} MCP stdio (no HTTP) -> daemon {}",
                 "\u{25c9}".green(),

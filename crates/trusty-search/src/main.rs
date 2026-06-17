@@ -544,6 +544,27 @@ enum Commands {
         /// `--port`. Kept for backward compatibility with older docs.
         #[arg(long)]
         http: Option<String>,
+
+        /// Pin this MCP session to a single index id (issue #1373).
+        ///
+        /// When set, search/grep/index tools default an omitted `index_id` to
+        /// this id, and fan-out tools (`search_all`/`grep` without `index_id`)
+        /// scope to it instead of sweeping every registered index. The pinned
+        /// index is advertised in `tools/list` so the LLM never has to call
+        /// `list_indexes` and guess. Without this flag, behaviour is unchanged
+        /// (callers must supply `index_id`; fan-out sweeps all). Wins over
+        /// `--project` when both are given.
+        #[arg(long)]
+        index: Option<String>,
+
+        /// Pin the MCP session to the index for this project path (issue #1373).
+        ///
+        /// The index id is derived from the path the same way the CLI derives
+        /// it (git-root basename, fallback to the path basename), so a session
+        /// launched with `--project .` pins to the current project's index.
+        /// Ignored when `--index` is also given.
+        #[arg(long)]
+        project: Option<String>,
     },
 
     /// Manage the macOS launchd service (install/uninstall/status/logs)
@@ -1270,8 +1291,20 @@ async fn run() -> Result<()> {
             no_http: _, // deprecated no-op (issue #123): HTTP is opt-in now
             port,
             http,
+            index,
+            project,
         } => {
-            commands::serve::handle_serve(with_http, port, http).await?;
+            // Resolve the pinned index id (#1373): `--index` wins; otherwise
+            // derive it from `--project` via the shared derivation so it
+            // matches the CLI / trusty-mpm.
+            let pinned_index = index.or_else(|| {
+                project.map(|p| {
+                    let start = std::path::PathBuf::from(&p);
+                    let root = trusty_common::resolve_project_root(&start);
+                    trusty_common::derive_index_id(&root)
+                })
+            });
+            commands::serve::handle_serve(with_http, port, http, pinned_index).await?;
         }
 
         Commands::Service { action } => {

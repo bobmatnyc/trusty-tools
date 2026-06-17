@@ -372,6 +372,18 @@ pub mod port;
 pub mod slug;
 pub use slug::slugify_string;
 
+/// Canonical trusty-search index-id derivation from a project path (issue #1373).
+///
+/// Why: trusty-mpm (register-and-pin at session launch) and trusty-search
+/// (`detect_project`, MCP serve pin) must derive the byte-for-byte identical
+/// index id from the same project root, or a session pins one id while querying
+/// another. Centralising the rule here — the crate both already depend on —
+/// keeps them in lockstep without a trusty-mpm → trusty-search dependency edge.
+/// What: Exposes [`index_id::derive_index_id`] and [`index_id::resolve_project_root`].
+/// Test: `cargo test -p trusty-common -- index_id::tests`.
+pub mod index_id;
+pub use index_id::{derive_index_id, resolve_project_root};
+
 /// Shared GitHub `owner/repo` path derivation (issue #1220).
 ///
 /// Why: trusty-mpm's managed-session workspace root

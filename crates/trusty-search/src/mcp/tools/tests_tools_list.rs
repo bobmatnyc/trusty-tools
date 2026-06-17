@@ -167,3 +167,126 @@ async fn search_all_without_index_id_calls_global_fanout_endpoint() {
     assert!(resp.error.is_none());
     assert_eq!(captured.lock().await.as_slice(), &["/search".to_string()]);
 }
+
+// Issue #1373 — pinned-index descriptor advertisement
+// ----------------------------------------------------------------
+
+/// Find a tool's inputSchema in a `tool_descriptors*` array by name.
+fn schema_of<'a>(tools: &'a Value, name: &str) -> &'a Value {
+    tools
+        .as_array()
+        .expect("descriptors array")
+        .iter()
+        .find(|t| t.get("name").and_then(Value::as_str) == Some(name))
+        .unwrap_or_else(|| panic!("tool {name} missing"))
+        .get("inputSchema")
+        .expect("inputSchema")
+}
+
+/// `tool_descriptors_pinned(None)` is byte-identical to `tool_descriptors()`.
+///
+/// Why: the no-pin path must be a pure pass-through so legacy sessions see
+/// exactly the same catalogue they always have.
+/// What: asserts equality of the two values.
+/// Test: this is the test.
+#[test]
+fn tool_descriptors_pinned_none_is_unchanged() {
+    use super::descriptors::{tool_descriptors, tool_descriptors_pinned};
+    assert_eq!(tool_descriptors_pinned(None), tool_descriptors());
+}
+
+/// When pinned, `search`'s `inputSchema` no longer lists `index_id` as
+/// required (the pin supplies it) but `query` still is.
+///
+/// Why: the LLM should be able to call `search` with only a `query` once the
+/// session is pinned — that is what makes a bare search resolve to the right
+/// index.
+/// What: pins to `trusty-tools` and asserts `required` lost `index_id` but kept
+/// `query`.
+/// Test: this is the test.
+#[test]
+fn pinned_descriptors_make_index_id_optional() {
+    use super::descriptors::tool_descriptors_pinned;
+    let pinned = tool_descriptors_pinned(Some("trusty-tools"));
+    let schema = schema_of(&pinned, "search");
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .expect("required")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        !required.contains(&"index_id"),
+        "index_id should not be required when pinned: {required:?}"
+    );
+    assert!(
+        required.contains(&"query"),
+        "query stays required: {required:?}"
+    );
+}
+
+/// When pinned, the `index_id` property description names the pinned default.
+///
+/// Why: the schema description is a first-class prompt — telling the model what
+/// `index_id` defaults to means it never has to call `list_indexes`.
+/// What: pins to `trusty-tools` and asserts the `search` `index_id` description
+/// mentions the pinned id.
+/// Test: this is the test.
+#[test]
+fn pinned_descriptors_annotate_index_id() {
+    use super::descriptors::tool_descriptors_pinned;
+    let pinned = tool_descriptors_pinned(Some("trusty-tools"));
+    let schema = schema_of(&pinned, "search");
+    let desc = schema
+        .get("properties")
+        .and_then(|p| p.get("index_id"))
+        .and_then(|i| i.get("description"))
+        .and_then(Value::as_str)
+        .expect("index_id description");
+    assert!(
+        desc.contains("trusty-tools") && desc.contains("pinned"),
+        "index_id description should name the pinned default: {desc:?}"
+    );
+    // The note must be joined with exactly one separating period — never a
+    // double-period, regardless of whether the base description ended in `.`.
+    assert!(
+        !desc.contains(".."),
+        "annotated description must not contain a double-period: {desc:?}"
+    );
+    assert!(
+        desc.contains(". Defaults to this session's pinned project index"),
+        "note must follow exactly one period+space: {desc:?}"
+    );
+}
+
+/// `tools/list` over a PINNED server advertises the optional `index_id`.
+///
+/// Why: end-to-end — the dispatcher must feed its `pinned_index` into the
+/// descriptor builder so the wire `tools/list` reflects the pin.
+/// What: dispatches `tools/list` on a pinned server and asserts `search`'s
+/// schema dropped `index_id` from `required`.
+/// Test: this is the test.
+#[tokio::test]
+async fn tools_list_reflects_session_pin() {
+    let server = McpServer::new("http://127.0.0.1:1").with_pinned_index("trusty-tools");
+    let resp = server.dispatch(req("tools/list", Value::Null)).await;
+    let tools = resp
+        .result
+        .expect("result")
+        .get("tools")
+        .cloned()
+        .expect("tools");
+    let schema = schema_of(&tools, "search");
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .expect("required")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        !required.contains(&"index_id"),
+        "pin must reach tools/list: {required:?}"
+    );
+}

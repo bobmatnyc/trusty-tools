@@ -1,5 +1,34 @@
 # Changelog — trusty-common
 
+## [0.17.0] — 2026-06-17
+
+### Added (refs #1373)
+
+- **`index_id` module: `derive_index_id` + `resolve_project_root`.** The single
+  source of truth for deriving a trusty-search index id from a project path
+  (the path basename, preserved verbatim for backward-compatibility) and for
+  walking up to the git root. Both trusty-search (`detect_project`, serve pin)
+  and trusty-mpm (register-and-pin at session launch) call these so they cannot
+  drift. Re-exported at the crate root as `trusty_common::derive_index_id` and
+  `trusty_common::resolve_project_root`.
+
+## [0.16.0] — 2026-06-16
+
+### Changed (refs #1361, PR #1371)
+
+- **SLD spec-resolver hardening (C4).** Strengthened the Spec-Linked
+  Documentation spec resolver so traceability survives realistic doc drift:
+  - **Block-scoped `# Spec References` parsing** — references are now collected
+    from a delimited block rather than scanned line-by-line across the whole
+    file, so stray matches outside the references block no longer pollute the
+    resolved set.
+  - **Revision-tolerant section matching** — section lookups tolerate revision
+    suffixes / minor heading reformatting, so a spec section still resolves when
+    its heading has been lightly edited.
+  - **Drift flagging** — references that no longer resolve to a live spec section
+    are surfaced as drift rather than silently dropped, giving CI a signal to act
+    on instead of a false pass.
+
 ## [0.15.3] — 2026-06-16
 
 ### Changed (closes #1326)

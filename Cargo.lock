@@ -10740,7 +10740,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10949,7 +10949,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11065,7 +11065,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "async-trait",

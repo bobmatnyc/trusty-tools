@@ -41,11 +41,14 @@ pub(super) async fn dispatch_search_tool(
         "search_kg" => Some(server.run_lane_search(args, SearchLane::Graph).await),
         "search_all" => {
             // Polymorphic for back-compat (issue #138):
-            //   * with `index_id`  → per-index full hybrid (alias for
-            //     `search`; matches the #138 ticket spec).
-            //   * without `index_id` → cross-project fan-out (legacy
-            //     issue #10 behaviour preserved).
-            if args.get("index_id").and_then(Value::as_str).is_some() {
+            //   * with `index_id` (explicit or pinned, #1373) → per-index full
+            //     hybrid (alias for `search`; matches the #138 ticket spec).
+            //   * without any index → cross-project fan-out (legacy issue #10
+            //     behaviour preserved).
+            // The pinned-index resolution (#1373) means a trusty-mpm session
+            // scoped to one project never silently sweeps every registered
+            // index — it runs the per-index hybrid against its own index.
+            if server.resolve_index_id(args).is_some() {
                 return Some(server.run_lane_search(args, SearchLane::All).await);
             }
             let query = match require_str(args, "query") {
@@ -65,9 +68,15 @@ pub(super) async fn dispatch_search_tool(
             Some(server.post("/search", &body).await)
         }
         "search" => {
-            let index_id = match require_str(args, "index_id") {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
+            // Default `index_id` to the session's pinned index when omitted
+            // (#1373); an explicit caller-supplied id still wins.
+            let index_id = match server.resolve_index_id(args) {
+                Some(v) => v,
+                None => {
+                    return Some(Err(DispatchError::InvalidParams(
+                        "missing required string field: index_id".into(),
+                    )))
+                }
             };
             // Accept the spec form `{query: string, top_k?: int}` and
             // also a pre-built `{query: object}` body for callers that
@@ -200,7 +209,11 @@ impl McpServer {
         args: &Value,
         lane: SearchLane,
     ) -> Result<Value, DispatchError> {
-        let index_id = require_str(args, "index_id")?;
+        // Default `index_id` to the session's pinned index when omitted (#1373);
+        // an explicit caller-supplied id still wins.
+        let index_id = self.resolve_index_id(args).ok_or_else(|| {
+            DispatchError::InvalidParams("missing required string field: index_id".into())
+        })?;
         let query_text = require_str(args, "query")?;
 
         // Pre-flight stage check for lanes that need Stage 2 or Stage 3.
