@@ -39,8 +39,18 @@ use std::time::Duration;
 /// the cwd to matching indexes and renders each one; `--watch` with multiple
 /// matches errors with the candidate ids so the user can pick.
 ///
-/// Test: `handle_index_status_renders_ready_table` in this module's tests.
+/// Rejects `--watch` + `--json` up front (before any daemon contact): the watch
+/// loop emits one JSON document per poll, and on a TTY interleaves them with
+/// in-place cursor-up escape codes, producing garbled, unparseable output. This
+/// single guard covers BOTH `status <idx> --watch --json` and
+/// `index-status <idx> --watch --json`, since `status` delegates here.
+///
+/// Test: `watch_plus_json_is_rejected` in this module's tests.
 pub async fn handle_index_status(index_id: Option<&str>, watch: bool, json: bool) -> Result<()> {
+    if watch && json {
+        anyhow::bail!("`--watch` and `--json` cannot be used together");
+    }
+
     let base = daemon_base_url();
     crate::commands::daemon_guard::ensure_daemon_running_or_exit(&base).await?;
 
@@ -459,6 +469,30 @@ mod tests {
         let exact_msg = "y".repeat(80);
         let result = truncate_reason(&exact_msg);
         assert_eq!(result, exact_msg, "80-char messages must not be truncated");
+    }
+
+    /// `--watch` combined with `--json` must be rejected before any daemon
+    /// contact, with a message naming both flags.
+    ///
+    /// Why: the watch loop emits one JSON document per poll and, on a TTY,
+    /// interleaves them with in-place cursor-up escape codes — garbled,
+    /// unparseable output. The guard lives at the top of `handle_index_status`
+    /// (before `ensure_daemon_running_or_exit`), so it fails fast without a
+    /// live daemon and covers both `status <idx> --watch --json` and
+    /// `index-status <idx> --watch --json`, which both delegate here.
+    /// What: calls `handle_index_status` with `watch=true, json=true` and
+    /// asserts an `Err` whose message mentions `--watch` and `--json`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn watch_plus_json_is_rejected() {
+        let err = handle_index_status(Some("some-index"), true, true)
+            .await
+            .expect_err("`--watch` + `--json` must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--watch") && msg.contains("--json"),
+            "error message must name both flags, got: {msg}"
+        );
     }
 
     /// The percentage computation must use `checked_div` and return 0 when

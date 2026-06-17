@@ -123,14 +123,26 @@ enum Commands {
 
     /// Show daemon status and all index stats  [alias: st]
     ///
-    /// Shows daemon liveness, version, and per-index chunk counts.
-    /// `health` produces the same output (kept for backward compatibility).
+    /// With no INDEX, shows daemon liveness, version, and per-index chunk
+    /// counts (`health` produces the same output, kept for backward
+    /// compatibility).  With an INDEX, shows per-stage status for that single
+    /// index — identical to `index-status <INDEX>` — and `--watch` polls until
+    /// embedding finishes.  `--watch` requires an explicit INDEX.
     ///
     /// Examples:
     ///   trusty-search status
     ///   trusty-search status --json
+    ///   trusty-search status Writing
+    ///   trusty-search status Writing --watch
     #[command(alias = "st", display_order = 3)]
-    Status,
+    Status {
+        /// Optional index ID to inspect (omit to show all indexes)
+        index_id: Option<String>,
+
+        /// Poll every ~1 s; refresh output in-place on a TTY (requires INDEX)
+        #[arg(long)]
+        watch: bool,
+    },
 
     /// Show per-stage status for an index, with optional live embed tracking
     ///
@@ -1118,8 +1130,28 @@ async fn run() -> Result<()> {
             commands::watch::handle_watch(&cli.index, path).await?;
         }
 
-        Commands::Status => {
-            commands::status::handle_status(cli.json).await?;
+        Commands::Status { index_id, watch } => {
+            match index_id {
+                // Per-index status: delegate to the `index-status` handler so
+                // behaviour (single-index fetch + `--watch` poll loop against
+                // GET /indexes/:id/status) matches `index-status` exactly.
+                Some(id) => {
+                    commands::index_status::handle_index_status(Some(id.as_str()), watch, cli.json)
+                        .await?;
+                }
+                // All-indexes overview. `--watch` is rejected here: there is no
+                // all-index poll loop, so we fail fast with a clear hint rather
+                // than silently ignoring the flag or producing interleaved
+                // output across every index.
+                None => {
+                    if watch {
+                        anyhow::bail!(
+                            "`--watch` requires an explicit INDEX (e.g. `trusty-search status <INDEX> --watch`)"
+                        );
+                    }
+                    commands::status::handle_status(cli.json).await?;
+                }
+            }
         }
 
         Commands::IndexStatus { index_id, watch } => {
@@ -1357,4 +1389,67 @@ async fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! CLI argument-parsing tests for the `status` subcommand (issue #1365).
+    //!
+    //! Why: `status` was a clap unit variant, so `status <INDEX> --watch` was
+    //! rejected as an unexpected argument. These tests pin the new struct
+    //! variant shape so the ergonomics regression cannot silently return.
+    //! What: parse representative `status` argument vectors via
+    //! `Cli::try_parse_from` and assert on the resulting `Commands::Status`.
+    //! Test: this module — run with `cargo test -p trusty-search`.
+
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    /// Why: the reported bug — `status <INDEX> --watch` must now parse.
+    /// What: asserts the positional index and `--watch` flag are captured.
+    /// Test: this function.
+    #[test]
+    fn status_accepts_positional_index_and_watch() {
+        let cli = Cli::try_parse_from(["trusty-search", "status", "Writing", "--watch"])
+            .expect("status Writing --watch should parse");
+        match cli.command {
+            Commands::Status { index_id, watch } => {
+                assert_eq!(index_id.as_deref(), Some("Writing"));
+                assert!(watch, "--watch should be true");
+            }
+            _ => panic!("expected Commands::Status"),
+        }
+    }
+
+    /// Why: bare `status` must keep its all-indexes overview behaviour.
+    /// What: asserts no index and `watch == false` when no args are given.
+    /// Test: this function.
+    #[test]
+    fn status_alone_has_no_index_and_no_watch() {
+        let cli =
+            Cli::try_parse_from(["trusty-search", "status"]).expect("bare status should parse");
+        match cli.command {
+            Commands::Status { index_id, watch } => {
+                assert_eq!(index_id, None);
+                assert!(!watch, "--watch should default to false");
+            }
+            _ => panic!("expected Commands::Status"),
+        }
+    }
+
+    /// Why: a positional index without `--watch` is a valid one-shot query.
+    /// What: asserts the index is captured and `watch == false`.
+    /// Test: this function.
+    #[test]
+    fn status_accepts_positional_index_without_watch() {
+        let cli = Cli::try_parse_from(["trusty-search", "status", "Writing"])
+            .expect("status Writing should parse");
+        match cli.command {
+            Commands::Status { index_id, watch } => {
+                assert_eq!(index_id.as_deref(), Some("Writing"));
+                assert!(!watch);
+            }
+            _ => panic!("expected Commands::Status"),
+        }
+    }
 }
