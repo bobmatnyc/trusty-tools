@@ -240,6 +240,75 @@ fn render_unresolved_is_empty() {
     assert!(section.snippets.is_empty());
 }
 
+// ─── would_flag predicate (cross-gate AC-18 contribution) ─────────────────────
+
+/// A resolved intent whose TICKET prescribes `m` (precedence: Ticket) — the M5
+/// shape (a prescribed method the diff could contradict).
+fn ticket_intent(m: &str) -> ResolvedIntent {
+    ResolvedIntent {
+        ticket: Some(TicketRef {
+            id: "#1362".to_string(),
+            title: "t".to_string(),
+            url: None,
+            backend: "github".to_string(),
+        }),
+        ticket_method: Some(Method {
+            text: m.to_string(),
+            kind: MethodKind::Approach,
+            source_excerpt: m.to_string(),
+        }),
+        spec_section: None,
+        spec_method: None,
+        precedence_winner: Precedence::Ticket,
+        conflict: false,
+        stale_spec: false,
+        unresolved: None,
+    }
+}
+
+/// `would_flag` is TRUE when a prescribed method exists (M1/M2/M5) — the back
+/// gate surfaces a method to check the diff against.
+///
+/// Why: AC-18 asserts FRONT `Escalate` ⇔ BACK would-flag for M5 inputs; this
+/// pins the BACK half of that equivalence at the renderer level (spec §5.2).
+/// What: a ticket-prescribed-method intent → `would_flag == true`.
+/// Test: this test; pure, no network.
+#[test]
+fn would_flag_true_for_prescribed_method() {
+    let intent = ticket_intent("use cursor-based pagination");
+    assert!(
+        ConformanceSource::would_flag(&intent),
+        "a prescribed method must be surfaced (M5 would-flag)"
+    );
+}
+
+/// `would_flag` is FALSE for a gap (M3) — nothing to flag against.
+///
+/// Why: AC-18 asserts FRONT `AutoAccept` ⇔ BACK no-finding for M3 inputs; this
+/// pins the BACK half (spec §4.1 M3, §4.2).
+/// What: `ResolvedIntent::none()` → `would_flag == false`.
+/// Test: this test; pure.
+#[test]
+fn would_flag_false_for_gap() {
+    assert!(
+        !ConformanceSource::would_flag(&ResolvedIntent::none()),
+        "a gap (M3) surfaces no method → no finding possible"
+    );
+}
+
+/// `would_flag` is FALSE for an `unresolved` (fail-open) intent (AC-11).
+///
+/// Why: a missing/unfetchable intent source must never manufacture a finding.
+/// What: `ResolvedIntent::unresolved(..)` → `would_flag == false`.
+/// Test: this test; pure.
+#[test]
+fn would_flag_false_for_unresolved() {
+    assert!(
+        !ConformanceSource::would_flag(&ResolvedIntent::unresolved("fetch failed")),
+        "an unresolved intent is fail-open → no finding (AC-11)"
+    );
+}
+
 // ─── gather: mode + enabled ───────────────────────────────────────────────────
 
 /// Semantic mode is not implemented (PR-B parity) → error (logged, fail-open by
