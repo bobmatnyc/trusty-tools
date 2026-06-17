@@ -4,7 +4,7 @@
 //! trusty-mpm must instead build the `claude` CLI invocation with an explicit
 //! `--model` flag so the resolved model actually takes effect. This module
 //! centralises the command-string construction so every launch path (CLI
-//! `tm launch`, `tm session start`, daemon) emits the same correctly-formed
+//! `tm launch`, `tm sessions start`, daemon) emits the same correctly-formed
 //! command.
 //! What: [`build_claude_command`] composes the full shell string passed to
 //! `tmux send-keys`; it optionally appends `--model <id>` and
@@ -43,7 +43,7 @@ pub fn write_prompt_file(prompt: &str) -> Option<PathBuf> {
 
 /// Resolve the model for a PM-session launch (no named agent).
 ///
-/// Why: the top-level `tm launch` / `tm session start` path spawns Claude
+/// Why: the top-level `tm launch` / `tm sessions start` path spawns Claude
 /// Code as the PM, not as a named specialist agent. The model resolution still
 /// reads from the config (using the special key `"pm"` or the configured
 /// `models.default`) so operators can pin the PM tier.

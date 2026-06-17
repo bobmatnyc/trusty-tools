@@ -163,7 +163,7 @@ pub(crate) async fn session(
             url: tui_url,
             interval_ms,
         } => {
-            // #1392: the coordinator TUI is `tm session tui` (formerly the
+            // #1392: the coordinator TUI is `tm sessions tui` (formerly the
             // top-level `tm coordinator-tui`). It polls the daemon live, so its
             // `run` is async and runs on the tokio runtime like `tui::run`.
             // `resolve_daemon_url` honours an explicit `--url`, then the lock
@@ -466,7 +466,7 @@ pub(crate) async fn resolve_session_id(
 /// prompt — the text actually delivered to `claude --append-system-prompt-file`.
 /// The old code returned `output.merged` (the legacy pipeline: INSTRUCTIONS.md +
 /// delegation authority + CLAUDE.md) for display, while stashing `resolve_pm_prompt`
-/// separately. That caused `tm session instructions` to print content that differed
+/// separately. That caused `tm sessions instructions` to print content that differed
 /// from what Claude received, which is exactly the divergence issue #382 describes.
 /// The single source of truth for "what claude receives" is `resolve_pm_prompt`;
 /// the display and the stash must both come from it.
@@ -498,7 +498,7 @@ pub(crate) fn compose_session_instructions(
 
     // The single source of truth for the live PM prompt is `resolve_pm_prompt`.
     // Writing it to the stash AND returning it as the display string ensures that
-    // `tm session instructions` always shows exactly what `claude` received (the
+    // `tm sessions instructions` always shows exactly what `claude` received (the
     // #382 fix). Previously this function returned `output.merged` for display,
     // which came from the old pipeline (INSTRUCTIONS.md + delegation + CLAUDE.md)
     // and differed from the stash, causing the visible divergence.

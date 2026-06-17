@@ -280,7 +280,7 @@ impl MpmConfig {
 /// What: evaluates four sources in descending priority order:
 ///
 /// 1. `explicit` — a model string explicitly specified by the caller (e.g.,
-///    from the `tm session start --model` flag). If `Some`, wins immediately.
+///    from the `tm sessions start --model` flag). If `Some`, wins immediately.
 /// 2. `config.models.agents.<agent_name>` — the per-agent override in
 ///    `~/.trusty-mpm/config.toml`.
 /// 3. `frontmatter_model` — the `model:` field from the agent's frontmatter

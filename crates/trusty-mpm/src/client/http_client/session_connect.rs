@@ -19,7 +19,7 @@ impl DaemonClient {
     ///
     /// Why: the TUI's `/connect <dir>` command is the single entry point for
     /// "connect to or launch a session for a project" — when no session exists
-    /// for a directory it must start one, mirroring `tm session start`. A
+    /// for a directory it must start one, mirroring `tm sessions start`. A
     /// trusty-mpm session is always the `claude` (Claude Code) CLI, never
     /// `claude-mpm`; the trusty-mpm behaviour comes from the custom instructions
     /// (deployed agents + project `CLAUDE.md`) prepared before launch.

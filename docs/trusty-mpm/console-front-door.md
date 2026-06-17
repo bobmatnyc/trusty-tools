@@ -87,6 +87,6 @@ The Telegram bot currently calls the daemon's HTTP API directly
 
 ## Backward compatibility
 
-P2/P3 are strictly additive. The daemon's HTTP REST API and the `tm session …`
+P2/P3 are strictly additive. The daemon's HTTP REST API and the `tm sessions …`
 CLI are unchanged; the daemon HTTP is documented as internal plumbing but **not
 removed**. Removal is a possible follow-up once all known callers have migrated.

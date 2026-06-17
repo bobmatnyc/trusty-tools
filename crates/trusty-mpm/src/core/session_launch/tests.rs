@@ -418,7 +418,7 @@ fn inject_trusty_memory_mcp_preserves_existing() {
 
 #[test]
 fn inject_trusty_memory_mcp_is_idempotent() {
-    // Why: `/connect` and `tm session start` may run repeatedly; a second
+    // Why: `/connect` and `tm sessions start` may run repeatedly; a second
     // injection must not duplicate or alter the `trusty-memory` entry.
     let tmp = tempdir().unwrap();
     let project = tmp.path();
@@ -994,7 +994,7 @@ fn prepare_session_reports_skill_deploy() {
 
 #[test]
 fn prepare_session_is_idempotent() {
-    // Why: `/connect` and `tm session start` may run repeatedly on the same
+    // Why: `/connect` and `tm sessions start` may run repeatedly on the same
     // project; a second prep must not fail and must not recreate CLAUDE.md.
     // Use a dedicated tmp_home so parallel tests never race on the shared
     // ~/.claude/agents manifest (each test needs its own claude_agents_dir).

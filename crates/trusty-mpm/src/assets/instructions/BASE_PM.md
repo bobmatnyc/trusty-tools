@@ -38,7 +38,7 @@ Trigger phrases -> act immediately:
 
 After writing: confirm file path, note "takes effect at next session startup."
 Inspect: `ls .trusty-mpm/*.md 2>/dev/null`
-Verify the resolved prompt: `tm session instructions` (or read
+Verify the resolved prompt: `tm sessions instructions` (or read
 `.trusty-mpm/last-instructions.md`).
 
 ## Trusty Tool Priority (Non-Overridable)

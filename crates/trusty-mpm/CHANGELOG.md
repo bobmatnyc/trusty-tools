@@ -46,6 +46,20 @@
 
 ## [Unreleased]
 
+### Changed: CLI command group `session` → `sessions` (issue #1394)
+
+The top-level CLI command group was renamed from the singular `session` to the
+plural **`sessions`** to match the `/api/v1/sessions/*` HTTP API surface. Every
+subcommand is now invoked under the plural name, e.g. `tm sessions tui`,
+`tm sessions ls`, `tm sessions new`.
+
+- The singular `session` spelling is **removed entirely** — it is not retained
+  as an alias. Invoking `tm session …` now fails with an
+  unrecognized-subcommand error. Update any scripts or muscle memory to
+  `tm sessions …`.
+- This is a CLI-only change; the HTTP API (already `/api/v1/sessions/*`) and the
+  separate `session-manager` / `sm` coordinator command are unaffected.
+
 ### Deprecated: verbose managed session-lifecycle verbs (issue #1205)
 
 The managed session-lifecycle CLI verbs were renamed to the cleaner, symmetric
@@ -55,15 +69,15 @@ will be removed in a future release.
 
 | Deprecated verb | Use instead | Behavior |
 |-----------------|-------------|----------|
-| `tm session runtime-stop <id>` | `tm session stop <id>` | Stop the runtime, keep the workspace (resumable) |
-| `tm session managed-stop <id>` | `tm session stop <id>` | Same as `runtime-stop` |
-| `tm session managed-resume <id>` | `tm session resume <id>` | Re-spawn the runtime in the existing workspace |
+| `tm sessions runtime-stop <id>` | `tm sessions stop <id>` | Stop the runtime, keep the workspace (resumable) |
+| `tm sessions managed-stop <id>` | `tm sessions stop <id>` | Same as `runtime-stop` |
+| `tm sessions managed-resume <id>` | `tm sessions resume <id>` | Re-spawn the runtime in the existing workspace |
 
-- The deprecated verbs are hidden from `tm session --help` but continue to parse
+- The deprecated verbs are hidden from `tm sessions --help` but continue to parse
   for backward compatibility.
 - Each deprecated invocation prints `warning: '<old>' is deprecated; use '<new>'`
   to stderr; stdout stays clean for scripts.
-- `tm session decommission <id>` (terminal teardown: remove workspace from disk)
+- `tm sessions decommission <id>` (terminal teardown: remove workspace from disk)
   is unchanged.
 
 ## [0.5.0] — 2026-05-28

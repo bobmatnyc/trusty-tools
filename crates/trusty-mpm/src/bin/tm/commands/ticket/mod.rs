@@ -221,7 +221,7 @@ pub(crate) async fn ticket(
 /// POST the managed-session spawn request that drives the ticket implementation.
 ///
 /// Why: reuses the exact session-manager spawn path (`POST
-/// /api/v1/sessions/managed`) that `tm session new` uses, so `tm ticket` plugs
+/// /api/v1/sessions/managed`) that `tm sessions new` uses, so `tm ticket` plugs
 /// into the existing isolated-workspace + runtime-adapter machinery rather than
 /// re-implementing it. The provisioner clones the repo and the driver agent
 /// creates `branch` off the base ref per the task instructions.

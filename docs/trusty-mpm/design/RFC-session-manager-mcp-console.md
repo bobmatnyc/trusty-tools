@@ -16,7 +16,7 @@ The trusty-mpm session manager is currently a two-surface system:
 | Surface | Implementation | Location |
 |---|---|---|
 | HTTP REST API | axum daemon, binds `:7880` (or auto-port) | `crates/trusty-mpm/src/daemon/api.rs` |
-| CLI | `tm session …` subcommands shelling out to HTTP | `crates/trusty-mpm/src/bin/tm/commands/session.rs` |
+| CLI | `tm sessions …` subcommands shelling out to HTTP | `crates/trusty-mpm/src/bin/tm/commands/session.rs` |
 
 This creates three concrete pain points:
 
@@ -487,7 +487,7 @@ Console provides a configuration UI for trusty-mpm.
    - `FrameworkPaths` gains a `workspace_root(github_path: Option<&GithubPath>) -> PathBuf`
      method: returns `~/trusty-mpm-projects/<owner>/<repo>` when a github path is
      available, falls back to `~/.trusty-mpm/workspaces/<project>` for backward compat.
-   - `tm session new` (and the MCP `session_new` tool) derive the default workspace
+   - `tm sessions new` (and the MCP `session_new` tool) derive the default workspace
      root from the target repo's GitHub remote URL.
    - CLI flag `--workspace-root` and MCP tool param `workspace_root` override the
      default.
@@ -512,7 +512,7 @@ Console provides a configuration UI for trusty-mpm.
      (added in P1 / follow-up to P1).
 
 **Acceptance criteria:**
-- `tm session new` in a git repo defaults to `~/trusty-mpm-projects/bobmatnyc/trusty-tools/<id>/`.
+- `tm sessions new` in a git repo defaults to `~/trusty-mpm-projects/bobmatnyc/trusty-tools/<id>/`.
 - `~/.trusty-tools/trusty-mpm/config.yaml` is read at daemon startup;
   `workspace_root_template` overrides the default.
 - Console config UI renders and saves trusty-mpm config.
@@ -550,7 +550,7 @@ CLI:
 
 | Existing surface | Impact in P1 | Impact in P2–P4 |
 |---|---|---|
-| `tm session list/new/stop/resume` | No change | No change |
+| `tm sessions list/new/stop/resume` | No change | No change |
 | `GET http://...:7880/sessions` | No change | Documented as internal; not removed |
 | `trusty-mpm daemon` binary | `POST /rpc` endpoint added | No change |
 | `.mcp.json` trusty-mpm entry | Added (new) | Extended |

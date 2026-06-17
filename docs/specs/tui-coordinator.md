@@ -35,7 +35,7 @@ message]`.
 This is the conversational front door to the fleet of durable, tmux-backed
 Claude Code sessions that the session manager already owns (see the
 `session-manager-driver` skill). It replaces the need to drive the fleet through
-discrete `tm session …` CLI calls for the common "talk to my fleet, spin up
+discrete `tm sessions …` CLI calls for the common "talk to my fleet, spin up
 work, watch it progress" loop.
 
 ### 1.2 Goals
@@ -439,7 +439,7 @@ meaningful line from `recent_output`, else the status word.
 
 - Editing code or files inside a session (that is the session's own Claude Code).
 - A web/graphical UI — owned by `trusty-console` / `trusty-mpm-gui`.
-- Replacing the `tm session …` / `tm` CLI (the TUI complements it).
+- Replacing the `tm sessions …` / `tm` CLI (the TUI complements it).
 - Implementing the daemon-side `last_summary` enrichment (that is its own child
   ticket; this spec only specifies the contract the TUI needs).
 - Fixing #1268 / #1269 (external dependencies the TUI consumes).

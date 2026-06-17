@@ -100,7 +100,7 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 ///
 /// Why: this is the single source of truth #381 requires — both the live prompt
 /// delivered to `claude` (`--append-system-prompt-file`) and the inspectable
-/// stash (`tm session instructions` / `.trusty-mpm/last-instructions.md`) call
+/// stash (`tm sessions instructions` / `.trusty-mpm/last-instructions.md`) call
 /// it, so the inspectable copy can never diverge from what the PM actually
 /// received (the #382 concern).
 ///

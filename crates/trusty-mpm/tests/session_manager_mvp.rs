@@ -900,7 +900,7 @@ async fn front_gate_answer_unblocks_spawn() {
 /// it returns `PruneError::SmUnavailable`, which `main` downcasts and translates
 /// to exit 75. Pointing the command at a dead loopback port forces the transport
 /// (unreachable) branch deterministically without standing up a daemon.
-/// What: spawns `tm --url http://127.0.0.1:<dead> session prune-idle --json` and
+/// What: spawns `tm --url http://127.0.0.1:<dead> sessions prune-idle --json` and
 /// asserts the process exits with status code 75. Uses `CARGO_BIN_EXE_tm`
 /// (set by Cargo for integration tests) so no extra dev-dependency is needed.
 /// Test: this test.
@@ -915,7 +915,7 @@ fn cli_prune_idle_unreachable_exit_code() {
         .args([
             "--url",
             "http://127.0.0.1:1",
-            "session",
+            "sessions",
             "prune-idle",
             "--json",
         ])
