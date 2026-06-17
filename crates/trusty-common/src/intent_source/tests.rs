@@ -564,6 +564,20 @@ fn spec_resolve_method_section_scoped_top_level_heading() {
     );
 }
 
+/// C4 (review C4, Finding 3): `anchor_in_heading` only treats a `{#…}` marker
+/// as a candidate when it is a SPEC id. A heading carrying an ordinary markdown
+/// slug (`{#overview}`) must NOT be matched as a spec section — so resolving a
+/// SPEC anchor against a doc whose only `{#…}` marker is a non-SPEC slug yields
+/// no section (the method block under that slug is never attributed).
+#[test]
+fn spec_resolve_anchor_in_heading_rejects_non_spec() {
+    let md = "## Overview {#overview}\n\n- use cursor pagination\n";
+    assert!(
+        resolve_spec_section(md, "SPEC-X-01~draft").is_none(),
+        "a non-SPEC `{{#slug}}` anchor must not match a SPEC section"
+    );
+}
+
 // ───────────────────────── FsSpecLookup path-traversal guard ────────────────
 
 /// Review MEDIUM #2 (path traversal): `FsSpecLookup::load` must refuse a
@@ -795,6 +809,32 @@ fn spec_resolve_parse_block_terminated_by_next_heading() {
     let refs = parse_spec_refs(src);
     assert_eq!(refs.len(), 1, "only the in-block ref counts");
     assert_eq!(refs[0].spec_id, "SPEC-A-01~v1");
+}
+
+/// C4 (review C4, Finding 1): a `## Sub-section` heading (double-hash) after an
+/// opened `# Spec References` block MUST terminate it — a ref under the
+/// sub-section is not attributed to the spec-references block. Regression for
+/// the bug where termination only fired on single-`#` headings.
+#[test]
+fn spec_resolve_parse_block_terminated_by_subsection_heading() {
+    let src = "//! # Spec References\n\
+        //!\n\
+        //! - [`SPEC-A-01~v1`](docs/specs/a.md#SPEC-A-01~v1)\n\
+        //!\n\
+        //! ## Implementation Notes\n\
+        //!\n\
+        //! - [`SPEC-B-02~v1`](docs/specs/b.md#SPEC-B-02~v1)\n";
+    let refs = parse_spec_refs(src);
+    assert_eq!(
+        refs.len(),
+        1,
+        "a `## Sub-section` heading must terminate the spec-references block"
+    );
+    assert_eq!(refs[0].spec_id, "SPEC-A-01~v1");
+    assert!(
+        !refs.iter().any(|r| r.spec_id == "SPEC-B-02~v1"),
+        "a ref after a `## Sub-section` heading must NOT be attributed to the block"
+    );
 }
 
 /// C4: `revision_of` splits the `~rev` suffix off a spec id/anchor.

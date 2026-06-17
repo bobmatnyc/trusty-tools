@@ -132,8 +132,9 @@ fn sld_link_re() -> &'static Regex {
 /// What: walks the source line by line, recognising a rustdoc heading line
 /// (`//!`/`///` whose content is `# Spec References`, case-insensitive). Once
 /// inside such a block, accumulates subsequent rustdoc-comment lines until a
-/// non-rustdoc line or a different rustdoc heading terminates it. Returns the
-/// joined body of each block (without comment markers).
+/// non-rustdoc line or a different rustdoc heading at ANY level (`#`..`######`)
+/// terminates it. Returns the joined body of each block (without comment
+/// markers).
 /// Test: `super::tests::spec_resolve_parse_block_scoped`,
 /// `spec_resolve_parse_ignores_non_block_ref`.
 fn spec_reference_blocks(source: &str) -> Vec<String> {
@@ -152,8 +153,11 @@ fn spec_reference_blocks(source: &str) -> Vec<String> {
                         blocks.push(done);
                     }
                     current = Some(String::new());
-                } else if content.trim_start().starts_with("# ") {
-                    // A different rustdoc heading ends the current block.
+                } else if content.trim_start().starts_with('#') {
+                    // A different rustdoc heading at ANY level (`#`..`######`)
+                    // ends the current block. Matching only single-`#` headings
+                    // let a `## Sub-section` slip through, wrongly attributing
+                    // later `SPEC-…` links to the open `# Spec References` block.
                     if let Some(done) = current.take() {
                         blocks.push(done);
                     }
@@ -318,14 +322,23 @@ fn section_body(markdown: &str, anchor: &str) -> Option<(String, String)> {
 /// Why: section matching keys on the heading's `{#anchor}` marker; isolating
 /// the parse keeps `section_body` readable and lets the test surface assert on
 /// the anchor capture directly.
-/// What: returns the `SPEC-…` id inside a `{#…}` marker on the line, or `None`
-/// when the line carries no such marker.
-/// Test: covered by `super::tests::spec_resolve_section_*`.
+/// What: returns the anchor inside a `{#…}` marker on the line, but only when
+/// the extracted anchor is a SPEC id (starts with `SPEC-`); returns `None` for
+/// a non-SPEC anchor (e.g. an ordinary `{#overview}` slug) or no marker at all.
+/// Test: covered by `super::tests::spec_resolve_section_*`,
+/// `super::tests::spec_resolve_anchor_in_heading_rejects_non_spec`.
 fn anchor_in_heading(line: &str) -> Option<String> {
     let open = line.find("{#")?;
     let rest = &line[open + 2..];
     let close = rest.find('}')?;
-    Some(rest[..close].trim().to_string())
+    let anchor = rest[..close].trim();
+    // Tighten the contract: section matching keys on SPEC ids, so a generic
+    // markdown slug (`{#overview}`) must not be returned as a candidate anchor.
+    if anchor.starts_with("SPEC-") {
+        Some(anchor.to_string())
+    } else {
+        None
+    }
 }
 
 /// Lift the Behavior-Contract + Rationale prose out of a section body.
