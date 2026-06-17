@@ -29,7 +29,7 @@ use super::state::{CoordinatorState, SessionEntry};
 /// `tui::poll_daemon` so both surfaces self-heal the daemon URL identically.
 /// What: probes health; if the daemon looks down, re-resolves the URL from the
 /// lock file via [`rediscover`] and retries one health probe. When reachable it
-/// pulls `GET /api/v1/coordinator/context` and maps every session into a
+/// pulls `GET /api/v1/sessions/context` and maps every session into a
 /// [`SessionEntry`]; on a transport error or an unreachable daemon it clears the
 /// rows and sets `daemon_reachable = false`. Always clamps the selection so a
 /// shrunk list never leaves `selected` past the end.

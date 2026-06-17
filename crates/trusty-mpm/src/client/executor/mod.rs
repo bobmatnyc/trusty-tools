@@ -450,7 +450,7 @@ impl CommandExecutor {
     ///
     /// Why: the CLI/Telegram entry point for the coordinator; a stateless
     /// invocation has no rolling history, so each call is a fresh conversation.
-    /// What: calls `POST /api/v1/coordinator/chat` with an empty history.
+    /// What: calls `POST /api/v1/sessions/chat` with an empty history.
     /// Test: `coordinator_chat_outcome_deserializes` in the client tests.
     async fn coordinator_chat(&self, message: &str) -> CommandResult {
         match self.client.coordinator_chat(message, &[]).await {

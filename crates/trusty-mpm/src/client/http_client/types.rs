@@ -282,7 +282,7 @@ pub struct CoordinatorSession {
     pub recent_output: Vec<String>,
 }
 
-/// Snapshot returned by `GET /api/v1/coordinator/context`.
+/// Snapshot returned by `GET /api/v1/sessions/context`.
 ///
 /// Why: the coordinator UI displays the per-session summaries that the daemon's
 /// coordinator reasons over; this is the deserialized view of that snapshot.
@@ -296,7 +296,7 @@ pub struct CoordinatorContext {
     pub sessions: Vec<CoordinatorSession>,
 }
 
-/// Outcome of a `POST /api/v1/coordinator/chat` call.
+/// Outcome of a `POST /api/v1/sessions/chat` call.
 ///
 /// Why: a coordinator message resolves to either a routed command or an LLM
 /// answer; the caller renders both from this one shape.

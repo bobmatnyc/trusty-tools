@@ -45,11 +45,14 @@ use super::state::DaemonState;
 pub mod claude_config_routes;
 pub use claude_config_routes::*;
 
-/// The cross-session coordinator routes (`/api/v1/coordinator/*`).
+/// The cross-session coordinator routes (`/api/v1/sessions/context` + `/chat`).
 ///
 /// Why: the coordinator's context and chat endpoints form their own cohesive
 /// cluster; keeping them in a sibling module mirrors `claude_config_routes` and
-/// keeps `api.rs` focused on the core session / hook / tmux surface.
+/// keeps `api.rs` focused on the core session / hook / tmux surface. As of #1392
+/// these endpoints live under the plural `/api/v1/sessions/*` namespace (the
+/// former `/api/v1/coordinator/*` paths are removed); the internal module and
+/// handler names keep the `coordinator_` prefix for continuity.
 /// The handlers are re-exported so `router` can refer to them as
 /// `super::api::<handler>`.
 pub mod coordinator_routes;
@@ -118,11 +121,15 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route("/optimizer", get(get_optimizer))
         .route("/overseer", get(get_overseer))
         .route("/llm/chat", post(llm_chat))
-        .route("/api/v1/coordinator/context", get(coordinator_context))
-        .route("/api/v1/coordinator/chat", post(coordinator_chat))
+        // #1392: the cross-session coordinator surface lives under the plural
+        // `/api/v1/sessions/*` namespace (unified with `/sessions/managed/*`);
+        // the former `/api/v1/coordinator/*` paths are removed. The descriptive
+        // leaves (`context`, `chat`) avoid colliding with the managed-session
+        // routes below.
+        .route("/api/v1/sessions/context", get(coordinator_context))
+        .route("/api/v1/sessions/chat", post(coordinator_chat))
         // DOC-14 D0.1: `/session-manager/*` aliases resolve to the SAME handlers
-        // as `/coordinator/*`. The coordinator paths remain the stable surface
-        // (DOC-13 TUI + GUI bind them); these aliases are the canonical SM names.
+        // as the session context/chat endpoints; these are the canonical SM names.
         .route("/api/v1/session-manager/context", get(coordinator_context))
         .route("/api/v1/session-manager/chat", post(coordinator_chat))
         .route("/tmux/sessions", get(list_tmux_sessions))

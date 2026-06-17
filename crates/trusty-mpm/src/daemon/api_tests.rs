@@ -485,7 +485,7 @@ async fn llm_chat_without_overseer_is_503() {
 
 #[tokio::test]
 async fn coordinator_context_returns_snapshot() {
-    // `GET /api/v1/coordinator/context` always returns a snapshot; with a
+    // `GET /api/v1/sessions/context` always returns a snapshot; with a
     // registered session it appears in the `sessions` array.
     let (state, _id) = state_with_session();
     let snapshot = coordinator_context(State(state)).await;

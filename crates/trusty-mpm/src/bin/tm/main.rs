@@ -219,17 +219,6 @@ async fn main() -> anyhow::Result<()> {
             let resolved = trusty_mpm::core::resolve_daemon_url(Some(&tui_url));
             trusty_mpm::tui::run(resolved, interval_ms).await
         }
-        // #1274 Child #2: the coordinator TUI now polls the daemon live, so its
-        // `run` is async and runs on the tokio runtime like `tui::run`.
-        // `resolve_daemon_url` honours an explicit `--url`, then the lock file,
-        // then the default.
-        Command::CoordinatorTui {
-            url: tui_url,
-            interval_ms,
-        } => {
-            let resolved = trusty_mpm::core::resolve_daemon_url(tui_url.as_deref());
-            trusty_mpm::tui::coordinator::run(resolved, interval_ms).await
-        }
         Command::Gui => launch_gui(),
         Command::Telegram { cmd } => telegram(&url, cmd).await,
         Command::Install { force } => install(force),

@@ -232,7 +232,7 @@ pub struct DashboardState {
     pub command_bar: CommandBar,
     /// Rolling LLM chat history threaded through the coordinator endpoint.
     ///
-    /// Why: `POST /api/v1/coordinator/chat` is stateless; the TUI holds the
+    /// Why: `POST /api/v1/sessions/chat` is stateless; the TUI holds the
     /// conversation window so successive messages form one conversation.
     pub coord_history: Vec<crate::client::ChatMessage>,
     /// Whether the event loop should exit.

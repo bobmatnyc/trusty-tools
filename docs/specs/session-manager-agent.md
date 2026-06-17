@@ -33,7 +33,7 @@ the name **coordinator** in several load-bearing places:
 
 | Surface | Current name | Files |
 |---|---|---|
-| REST endpoints | `/api/v1/coordinator/context`, `/api/v1/coordinator/chat` | `daemon/api.rs:98-99`, `daemon/api/coordinator_routes.rs` |
+| REST endpoints | `/api/v1/sessions/context`, `/api/v1/sessions/chat` (renamed from `/api/v1/coordinator/*` in #1392) | `daemon/api.rs`, `daemon/api/coordinator_routes.rs` |
 | Daemon module | `coordinator` | `daemon/coordinator.rs`, `daemon/mod.rs:16` |
 | CLI | `tm coordinator` | `bin/tm/cli.rs:166` |
 | GUI bridge | coordinator commands | `trusty-mpm-gui/src/commands.rs:160-210` |
@@ -47,6 +47,10 @@ config, prompts, and docs. For the existing wire/CLI surface we adopt a
 
 - **D0.1 — Endpoints: keep `/api/v1/coordinator/*` as the stable path; add
   `/api/v1/session-manager/*` aliases** routed to the same handlers. The
+  > **Superseded by #1392:** the `/api/v1/coordinator/*` paths were retired and
+  > unified under the plural `/api/v1/sessions/*` namespace
+  > (`/api/v1/sessions/context`, `/api/v1/sessions/chat`); the
+  > `/api/v1/session-manager/*` aliases remain.
   coordinator paths remain valid (DOC-13 TUI and `trusty-mpm-gui` already bind
   them) and are marked *legacy alias* in OpenRPC/route docs. A future major
   version may retire the coordinator paths; that retirement is out of scope here.
@@ -664,7 +668,7 @@ are thin front-ends over the same surface (§1A.3).
 │ trusty-mpm daemon                                                │
 │                                                                  │
 │  PRIMARY: claude-mpm / PM ──JSON-RPC/stdio──► SM core (§1A.1)    │
-│  ALSO:    DOC-13 TUI / GUI ──HTTP──► /api/v1/coordinator/chat    │
+│  ALSO:    DOC-13 TUI / GUI ──HTTP──► /api/v1/sessions/chat       │
 │                              (alias /api/v1/session-manager/chat)│
 │                                   │                              │
 │                                   ▼                              │

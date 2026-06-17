@@ -100,27 +100,6 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 1000)]
         interval_ms: u64,
     },
-    /// Launch the coordinator TUI: an input box over a live session list (#1272).
-    ///
-    /// Why (DOC-13): a Claude-Code-like surface — a text input on top of a live
-    /// session list (controller bullet + one row per managed session, the active
-    /// row in two columns `[id] │ [summary]`). This is a NEW screen, distinct
-    /// from the existing `tm tui` dashboard. It is exposed under its own name
-    /// because `coordinator` already names the session-manager chat command
-    /// (`tm coordinator` / `tm sm`); a `-tui` suffix avoids that collision.
-    /// What: Child #2 polls the daemon's coordinator-context endpoint live on the
-    /// `--interval-ms` cadence (self-healing the daemon URL on failure) and maps
-    /// each session into the list; slash-command dispatch lands in later children.
-    /// `--url` is resolved via `resolve_daemon_url`.
-    /// Test: `cli_parses_coordinator_tui` in `tests.rs`.
-    CoordinatorTui {
-        /// Base URL of the trusty-mpm daemon.
-        #[arg(long, env = "TRUSTY_MPM_URL")]
-        url: Option<String>,
-        /// Poll interval in milliseconds (daemon refresh cadence).
-        #[arg(long, default_value_t = 1500)]
-        interval_ms: u64,
-    },
     /// Launch the Tauri desktop GUI (or open the web build in the browser
     /// when Tauri is unavailable).
     Gui,
@@ -739,6 +718,27 @@ pub(crate) enum SessionAction {
         /// Project directory (defaults to the cwd).
         #[arg(long)]
         dir: Option<String>,
+    },
+    /// Launch the coordinator TUI: an input box over a live session list (#1272).
+    ///
+    /// Why (DOC-13): a Claude-Code-like surface — a text input on top of a live
+    /// session list (controller bullet + one row per managed session, the active
+    /// row in two columns `[id] │ [summary]`). This is a NEW screen, distinct
+    /// from the existing `tm tui` dashboard. It lives under the `session` group
+    /// as `tm session tui` (#1392): it operates on the same managed-session list
+    /// the other `session` verbs do, so grouping it there keeps the surface
+    /// discoverable without colliding with the `coordinator` SM chat command.
+    /// What: polls the daemon's coordinator-context endpoint live on the
+    /// `--interval-ms` cadence (self-healing the daemon URL on failure) and maps
+    /// each session into the list. `--url` is resolved via `resolve_daemon_url`.
+    /// Test: `cli_parses_session_tui` in `tests.rs`.
+    Tui {
+        /// Base URL of the trusty-mpm daemon.
+        #[arg(long, env = "TRUSTY_MPM_URL")]
+        url: Option<String>,
+        /// Poll interval in milliseconds (daemon refresh cadence).
+        #[arg(long, default_value_t = 1500)]
+        interval_ms: u64,
     },
     /// Reap dead sessions for the current project.
     Clean {

@@ -1,4 +1,4 @@
-//! Coordinator HTTP routes (`/api/v1/coordinator/*`).
+//! Coordinator HTTP routes (`/api/v1/sessions/context` + `/api/v1/sessions/chat`).
 //!
 //! Why: the TUI/GUI coordinator surface needs two daemon endpoints — one that
 //! returns a cross-session activity snapshot for display, and one that takes a
@@ -23,7 +23,7 @@ use crate::daemon::llm_overseer::ChatMessage;
 use crate::daemon::services::{SessionService, TmuxService};
 use crate::daemon::state::DaemonState;
 
-/// JSON body for `POST /api/v1/coordinator/chat`.
+/// JSON body for `POST /api/v1/sessions/chat`.
 ///
 /// Why: the coordinator chat is conversational; the caller owns the history so
 /// the daemon stays stateless about chat sessions, exactly like `/llm/chat`.
@@ -53,7 +53,7 @@ pub struct CoordinatorChatRequest {
     pub conv_id: Option<String>,
 }
 
-/// Response of `POST /api/v1/coordinator/chat`.
+/// Response of `POST /api/v1/sessions/chat`.
 ///
 /// Why: a coordinator message resolves to one of two outcomes — a direct
 /// command routed at a session, or an LLM answer; the response carries enough
@@ -85,7 +85,7 @@ pub struct CoordinatorChatResponse {
     pub conv_id: Option<String>,
 }
 
-/// `GET /api/v1/coordinator/context` — a cross-session activity snapshot.
+/// `GET /api/v1/sessions/context` — a cross-session activity snapshot.
 ///
 /// Why: the TUI/GUI display the per-session summaries (name, status, recent
 /// output) the coordinator reasons over; this endpoint is that read-only view.
@@ -95,7 +95,7 @@ pub struct CoordinatorChatResponse {
 /// Test: `coordinator_context_returns_snapshot`.
 #[utoipa::path(
     get,
-    path = "/api/v1/coordinator/context",
+    path = "/api/v1/sessions/context",
     tag = "config",
     responses((status = 200, description = "Cross-session activity snapshot"))
 )]
@@ -105,7 +105,7 @@ pub async fn coordinator_context(
     Json(build_coordinator_context(&state))
 }
 
-/// `POST /api/v1/coordinator/chat` — coordinator message; route or answer.
+/// `POST /api/v1/sessions/chat` — coordinator message; route or answer.
 ///
 /// Also serves the DOC-14 D0.1 alias `POST /api/v1/session-manager/chat` (same
 /// handler).
@@ -131,7 +131,7 @@ pub async fn coordinator_context(
 /// `coordinator_sm_tests.rs`.
 #[utoipa::path(
     post,
-    path = "/api/v1/coordinator/chat",
+    path = "/api/v1/sessions/chat",
     tag = "config",
     request_body = CoordinatorChatRequest,
     responses(

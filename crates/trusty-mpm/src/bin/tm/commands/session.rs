@@ -159,6 +159,19 @@ pub(crate) async fn session(
                 println!("{} {} {}", short_id(&s.id), status, s.workdir);
             }
         }
+        SessionAction::Tui {
+            url: tui_url,
+            interval_ms,
+        } => {
+            // #1392: the coordinator TUI is `tm session tui` (formerly the
+            // top-level `tm coordinator-tui`). It polls the daemon live, so its
+            // `run` is async and runs on the tokio runtime like `tui::run`.
+            // `resolve_daemon_url` honours an explicit `--url`, then the lock
+            // file, then the default — so we resolve from this subcommand's own
+            // `--url`/`TRUSTY_MPM_URL` flag rather than the dispatcher's `url`.
+            let resolved = trusty_mpm::core::resolve_daemon_url(tui_url.as_deref());
+            trusty_mpm::tui::coordinator::run(resolved, interval_ms).await?;
+        }
         SessionAction::Clean { dir } => {
             // `dir` is accepted for symmetry; the daemon reaps globally.
             let _ = resolve_dir(dir)?;
