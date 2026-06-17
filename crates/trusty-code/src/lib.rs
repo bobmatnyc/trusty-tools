@@ -194,6 +194,22 @@ pub mod provider;
 /// recoverable tool error, usage accrual) plus an `#[ignore]`-gated live test.
 pub mod agent_loop;
 
+/// In-process agent runner — the runtime execution layer (per #1029).
+///
+/// Why: The PM's `delegate_to_agent` tool dispatches to an `AgentRunner`; the M1
+/// harness runs the delegated sub-agent *in-process* so a delegation cycle is
+/// cheap, fully observable, and rolls the sub-agent's token usage onto the same
+/// shared LLM client as the PM. This module is the production implementation of
+/// that seam — and `RunnerKind::InProcess` is the real default backend.
+/// What: `InProcessAgentRunner` (implements `tools::AgentRunner`), the
+/// `RegistryFactory` DI seam for sub-agent tool assembly, `InProcessRunnerConfig`
+/// (default turn/timeout budget), `RunnerError`, and `agent_config_exists`. Each
+/// `run` loads the agent config, gates its tools by `tools.allowed`, resolves the
+/// model + assembled system prompt, drives an `AgentLoop`, and returns its output.
+/// Test: `runner::tests::*` (stubbed-PM delegation, return-to-PM output,
+/// `tools.allowed` enforcement, usage roll-up) — all offline.
+pub mod runner;
+
 /// System-prompt assembly layer implementing the parity spec.
 ///
 /// Why: The cross-model comparison harness must assemble the same fixed

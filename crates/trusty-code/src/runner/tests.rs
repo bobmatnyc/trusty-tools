@@ -1,0 +1,568 @@
+//! Unit tests for the in-process agent runner (issue #1029).
+//!
+//! Why: The runner is the runtime execution layer the PM delegates through;
+//! every acceptance criterion — engineer runs its own loop on its own slug,
+//! returns an `AgentOutput` to the PM, `tools.allowed` is enforced, and usage
+//! rolls up — must be provable offline, without a live LLM. The scripted
+//! `LlmClientTrait` mock from the agent-loop tests is the seam that makes this
+//! deterministic.
+//! What: Defines a `ScriptedLlm` that replays a queue of `ChatResponse`s and
+//! records the system prompt + model of every request, a `RecordingTool` whose
+//! execution is observable, and exercises the runner end-to-end: a stubbed PM
+//! delegates to a `python-engineer` agent whose loop runs against its own slug.
+//! Test: this module is itself the test surface.
+
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use tempfile::TempDir;
+
+use super::{InProcessAgentRunner, InProcessRunnerConfig};
+use crate::agents::AgentConfig;
+use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
+use crate::tools::{
+    AgentRunner, DelegateToAgentTool, RunContext, ToolExecutor, ToolRegistry, ToolResult,
+};
+
+// ── Test doubles ───────────────────────────────────────────────────────────────
+
+/// A `LlmClientTrait` that replays a fixed script and records every request.
+///
+/// Why: Deterministic, offline substitute for the network client; recording the
+/// requests lets tests assert what model and system prompt the runner resolved.
+/// What: Holds scripted `ChatResponse`s, an atomic cursor, and a Mutex log of
+/// `(model, system_prompt)` pairs captured from each `chat` call. Running past
+/// the end yields a transport-style error so a runaway loop fails loudly.
+/// Test: Used by every runner test below.
+struct ScriptedLlm {
+    responses: Vec<ChatResponse>,
+    cursor: AtomicUsize,
+    seen: Mutex<Vec<(String, String)>>,
+}
+
+impl ScriptedLlm {
+    /// Build a scripted client from JSON response fixtures.
+    ///
+    /// Why: `ChatResponse` is `Deserialize`-only; tests author responses as JSON.
+    /// What: Deserialises each fixture and seeds an empty request log.
+    /// Test: Used by every runner test below.
+    fn from_json(fixtures: &[Value]) -> Self {
+        let responses = fixtures
+            .iter()
+            .map(|v| serde_json::from_value(v.clone()).expect("valid ChatResponse fixture"))
+            .collect();
+        Self {
+            responses,
+            cursor: AtomicUsize::new(0),
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Number of `chat` calls made so far.
+    fn calls(&self) -> usize {
+        self.cursor.load(Ordering::SeqCst)
+    }
+
+    /// The `(model, system_prompt)` of the first recorded request.
+    fn first_request(&self) -> (String, String) {
+        self.seen
+            .lock()
+            .expect("seen lock")
+            .first()
+            .cloned()
+            .expect("at least one request recorded")
+    }
+}
+
+#[async_trait]
+impl LlmClientTrait for ScriptedLlm {
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        let system = req
+            .messages
+            .iter()
+            .find(|m| m.role == "system")
+            .and_then(|m| m.content.clone())
+            .unwrap_or_default();
+        self.seen
+            .lock()
+            .expect("seen lock")
+            .push((req.model.clone(), system));
+
+        let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
+        match self.responses.get(idx) {
+            Some(resp) => Ok(resp.clone()),
+            None => Err(LlmError::MissingConfig(format!(
+                "scripted LLM exhausted at call {idx}"
+            ))),
+        }
+    }
+}
+
+/// A tool whose invocations are recorded, used to prove gating.
+///
+/// Why: To assert `tools.allowed` enforcement we need a tool that records
+/// whether it was actually dispatched.
+/// What: `execute` pushes its name onto a shared log and returns success.
+/// Test: `tools_allowed_is_enforced`.
+struct RecordingTool {
+    name: &'static str,
+    invoked: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl ToolExecutor for RecordingTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": "recording tool",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        })
+    }
+
+    async fn execute(&self, _args: Value) -> ToolResult {
+        self.invoked
+            .lock()
+            .expect("invoked lock")
+            .push(self.name.to_string());
+        ToolResult::ok(format!("{}: ran", self.name))
+    }
+}
+
+// ── Fixture builders ─────────────────────────────────────────────────────────
+
+/// A response in which the assistant calls a named tool with empty args.
+fn tool_call_response(call_id: &str, tool: &str) -> Value {
+    json!({
+        "id": "gen-tool",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": { "name": tool, "arguments": "{}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40 }
+    })
+}
+
+/// A response in which the assistant emits final text and stops.
+fn stop_response(text: &str) -> Value {
+    json!({
+        "id": "gen-stop",
+        "choices": [{
+            "message": { "role": "assistant", "content": text, "tool_calls": [] },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 15, "completion_tokens": 5, "total_tokens": 20 }
+    })
+}
+
+// ── Fixtures: an agents config dir ───────────────────────────────────────────
+
+/// Create a temp agents dir containing a `python-engineer.toml`.
+///
+/// Why: The runner loads `<dir>/<agent>.toml`; tests need a real file on disk.
+/// What: Writes `python-engineer.toml` with the given body and returns the dir.
+/// Test: Used by most runner tests.
+fn agents_dir_with(body: &str, agent: &str) -> TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(tmp.path().join(format!("{agent}.toml")), body).expect("write agent toml");
+    tmp
+}
+
+/// A registry factory closure that registers the given recording tools.
+///
+/// Why: Tests need a `RegistryFactory` that yields a known tool set so gating
+/// and dispatch are observable.
+/// What: Returns an `Arc<ToolRegistry>` with each `(name)` registered as a
+/// `RecordingTool` sharing `invoked`.
+fn recording_factory(
+    tools: Vec<&'static str>,
+    invoked: Arc<Mutex<Vec<String>>>,
+) -> impl Fn(
+    AgentConfig,
+    RunContext,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Arc<ToolRegistry>> + Send>> {
+    move |_agent: AgentConfig, _ctx: RunContext| {
+        let tools = tools.clone();
+        let invoked = Arc::clone(&invoked);
+        Box::pin(async move {
+            let mut reg = ToolRegistry::new();
+            for name in tools {
+                reg.register(Arc::new(RecordingTool {
+                    name,
+                    invoked: Arc::clone(&invoked),
+                }));
+            }
+            Arc::new(reg)
+        })
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+/// Default config is sane.
+///
+/// Why: Defaults are the most-used construction path; guard them.
+/// What: Assert positive turn cap and timeout.
+/// Test: this test.
+#[test]
+fn config_default_is_sane() {
+    let cfg = InProcessRunnerConfig::default();
+    assert!(cfg.max_turns >= 1);
+    assert!(cfg.timeout_secs >= 1);
+}
+
+/// `agent_config_exists` detects present and absent configs.
+///
+/// Why: Callers pre-check agent names with the same path rule the runner uses.
+/// What: Write one agent; assert present is true and a bogus name is false.
+/// Test: this test.
+#[test]
+fn agent_config_exists_detects_present_and_absent() {
+    let tmp = agents_dir_with("[agent]\nname = \"python-engineer\"\n", "python-engineer");
+    assert!(super::agent_config_exists(tmp.path(), "python-engineer"));
+    assert!(!super::agent_config_exists(tmp.path(), "ghost"));
+}
+
+/// Stubbed-PM: `delegate_to_agent(python-engineer)` runs the engineer's own loop
+/// on its own slug and returns an `AgentOutput` to the PM.
+///
+/// Why: This is the core #1029 acceptance criterion — the PM's delegate tool
+/// dispatches to the in-process runner, which drives the engineer's loop and
+/// hands the result back. We assert the engineer's model slug was used and the
+/// PM received the engineer's final text.
+/// What: Engineer config pins `deepseek/deepseek-chat`. Script [tool_call,
+/// stop("engineer done")]. Build the runner, wrap it in a `DelegateToAgentTool`
+/// (the PM's tool), and `execute` a delegation. Assert success, the returned
+/// content, that the engineer's slug drove the loop, and two chat calls.
+/// Test: this test.
+#[tokio::test]
+async fn delegate_runs_engineer_loop() {
+    let body = r#"
+[agent]
+name = "python-engineer"
+model = "deepseek/deepseek-chat"
+
+[system_prompt]
+content = "You are a Python engineer."
+"#;
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("c1", "work_tool"),
+        stop_response("engineer done"),
+    ]));
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec!["work_tool"], Arc::clone(&invoked)));
+
+    let runner = Arc::new(InProcessAgentRunner::new(
+        llm.clone(),
+        factory,
+        tmp.path().to_path_buf(),
+    ));
+
+    // The PM dispatches through its delegate tool — the production call path.
+    let delegate = DelegateToAgentTool::new(runner).with_config_dir(tmp.path().to_path_buf());
+    let result = delegate
+        .execute(json!({"agent_name": "python-engineer", "task": "write a function"}))
+        .await;
+
+    assert!(
+        !result.is_error(),
+        "delegation should succeed: {}",
+        result.content()
+    );
+    assert_eq!(
+        result.content(),
+        "engineer done",
+        "PM must receive the engineer's final AgentOutput content"
+    );
+    assert_eq!(llm.calls(), 2, "engineer loop made exactly two chat calls");
+    let (model, _) = llm.first_request();
+    assert_eq!(
+        model, "deepseek/deepseek-chat",
+        "engineer's own model slug must drive its loop"
+    );
+    assert_eq!(
+        invoked.lock().expect("invoked").as_slice(),
+        ["work_tool"],
+        "the engineer's tool must have run inside its own loop"
+    );
+}
+
+/// An unknown agent name yields a `RunnerError::UnknownAgent` (no loop runs).
+///
+/// Why: Delegating to a non-existent agent must fail cleanly, not panic or spin
+/// the loop.
+/// What: Empty agents dir; call `run("ghost", ...)`; assert an error whose
+/// message names the agent, and that the LLM was never called.
+/// Test: this test.
+#[tokio::test]
+async fn unknown_agent_errors() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("never reached")]));
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec![], invoked));
+    let runner = InProcessAgentRunner::new(llm.clone(), factory, tmp.path().to_path_buf());
+
+    let err = runner
+        .run("ghost", "do something")
+        .await
+        .expect_err("unknown agent must error");
+
+    assert!(
+        err.to_string().contains("ghost"),
+        "error must name the unknown agent, got: {err}"
+    );
+    assert_eq!(llm.calls(), 0, "loop must not run for an unknown agent");
+}
+
+/// `tools.allowed` is enforced: a tool the model calls but the agent does not
+/// allow is not dispatched (it is gated out of the registry).
+///
+/// Why: Per-agent tool gating is a hard #1029 criterion — an agent must not be
+/// able to invoke a tool outside its allowlist.
+/// What: Agent allows only `allowed_tool`. The factory builds BOTH `allowed_tool`
+/// and `denied_tool`. Script the model to call `denied_tool`, then stop. Assert
+/// the denied tool never ran (its name is absent from the invocation log) and the
+/// allowed tool would have run had it been called.
+/// Test: this test.
+#[tokio::test]
+async fn tools_allowed_is_enforced() {
+    let body = r#"
+[agent]
+name = "python-engineer"
+model = "openai/gpt-4o-mini"
+
+[tools]
+allowed = ["allowed_tool"]
+"#;
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    // Model tries to call the DENIED tool, then concludes.
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("c1", "denied_tool"),
+        stop_response("concluded"),
+    ]));
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(
+        vec!["allowed_tool", "denied_tool"],
+        Arc::clone(&invoked),
+    ));
+    let runner = InProcessAgentRunner::new(llm.clone(), factory, tmp.path().to_path_buf());
+
+    let out = runner
+        .run("python-engineer", "try the denied tool")
+        .await
+        .expect("loop completes (denied tool surfaces a recoverable error)");
+
+    assert_eq!(out.content, "concluded");
+    let ran = invoked.lock().expect("invoked");
+    assert!(
+        !ran.contains(&"denied_tool".to_string()),
+        "denied tool must never execute; gated out of the registry, ran: {ran:?}"
+    );
+}
+
+/// With no `tools.allowed`, every tool the factory builds is permitted.
+///
+/// Why: An absent allowlist means "all tools"; gating must not strip them.
+/// What: Agent has no `[tools]` table. Model calls `any_tool`, then stops.
+/// Assert the tool actually ran.
+/// Test: this test.
+#[tokio::test]
+async fn no_allowlist_permits_all() {
+    let body = r#"
+[agent]
+name = "python-engineer"
+model = "openai/gpt-4o-mini"
+"#;
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("c1", "any_tool"),
+        stop_response("ok"),
+    ]));
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec!["any_tool"], Arc::clone(&invoked)));
+    let runner = InProcessAgentRunner::new(llm.clone(), factory, tmp.path().to_path_buf());
+
+    runner
+        .run("python-engineer", "use a tool")
+        .await
+        .expect("completes");
+
+    assert_eq!(
+        invoked.lock().expect("invoked").as_slice(),
+        ["any_tool"],
+        "with no allowlist, the tool must run"
+    );
+}
+
+/// The engineer's token usage rolls up into the returned `AgentOutput`.
+///
+/// Why: For #1030 the orchestrator sums the sub-agent's usage into the PM's
+/// transcript; that requires the runner's `AgentOutput.usage` to carry the
+/// engineer's accrued tokens across all of its turns.
+/// What: Script [tool_call (30+10), stop (15+5)]; the returned usage must equal
+/// the sum across both engineer turns.
+/// Test: this test.
+#[tokio::test]
+async fn usage_rolls_up_to_output() {
+    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("c1", "any_tool"),
+        stop_response("done"),
+    ]));
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec!["any_tool"], invoked));
+    let runner = InProcessAgentRunner::new(llm.clone(), factory, tmp.path().to_path_buf());
+
+    let out = runner
+        .run("python-engineer", "task")
+        .await
+        .expect("completes");
+
+    assert_eq!(
+        out.usage.prompt_tokens,
+        30 + 15,
+        "prompt tokens sum across turns"
+    );
+    assert_eq!(
+        out.usage.completion_tokens,
+        10 + 5,
+        "completion tokens sum across turns"
+    );
+}
+
+/// `RunContext.model` overrides the agent's configured model for one call.
+///
+/// Why: The orchestrator can pin a model per delegation; per-call override must
+/// win over agent config (model-comparison harness varies the model per run).
+/// What: Agent config pins one model; `RunContext.model` pins another. Assert the
+/// RunContext slug drove the loop's request.
+/// Test: this test.
+#[tokio::test]
+async fn run_context_overrides_model() {
+    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n";
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec![], invoked));
+    let runner = InProcessAgentRunner::new(llm.clone(), factory, tmp.path().to_path_buf());
+
+    let ctx = RunContext {
+        model: Some("anthropic/claude-sonnet-4-6".to_string()),
+        ..Default::default()
+    };
+    runner
+        .run_with_context("python-engineer", "task", &ctx)
+        .await
+        .expect("completes");
+
+    let (model, _) = llm.first_request();
+    assert_eq!(
+        model, "anthropic/claude-sonnet-4-6",
+        "RunContext.model must override the agent's configured model"
+    );
+}
+
+/// `RunContext.max_turns_override` caps the loop below the runner default.
+///
+/// Why: A per-call turn cap lets the orchestrator bound a single delegation; the
+/// override must win over `InProcessRunnerConfig.max_turns`.
+/// What: Runner default is 8 turns, but `max_turns_override = 1`. Script only
+/// tool-call responses so the loop would run forever without a cap; assert it
+/// aborts after exactly one chat call.
+/// Test: this test.
+#[tokio::test]
+async fn run_context_overrides_max_turns() {
+    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    // Always-tool-call: the loop never converges, so only the cap stops it.
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("c1", "any_tool"),
+        tool_call_response("c2", "any_tool"),
+        tool_call_response("c3", "any_tool"),
+    ]));
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec!["any_tool"], invoked));
+    let runner = InProcessAgentRunner::new(llm.clone(), factory, tmp.path().to_path_buf())
+        .with_config(InProcessRunnerConfig {
+            max_turns: 8,
+            timeout_secs: 30,
+        });
+
+    let ctx = RunContext {
+        max_turns_override: Some(1),
+        ..Default::default()
+    };
+    let err = runner
+        .run_with_context("python-engineer", "loop", &ctx)
+        .await
+        .expect_err("a 1-turn cap on a non-converging loop must abort");
+
+    assert!(
+        err.to_string().contains("turn cap of 1"),
+        "error should report the overridden cap, got: {err}"
+    );
+    assert_eq!(
+        llm.calls(),
+        1,
+        "loop must stop after the single allowed turn"
+    );
+}
+
+/// Project `CLAUDE.md` context is injected into the assembled system prompt.
+///
+/// Why: Sub-agents must see the same project rules as the PM (parity-spec); the
+/// runner threads project context into `assemble_system_prompt`.
+/// What: Attach a distinctive project-context marker; assert it appears in the
+/// system prompt the scripted client received.
+/// Test: this test.
+#[tokio::test]
+async fn project_context_reaches_prompt() {
+    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n[system_prompt]\ncontent = \"AGENT-PROMPT-MARKER\"\n";
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec![], invoked));
+    let runner = InProcessAgentRunner::new(llm.clone(), factory, tmp.path().to_path_buf())
+        .with_project_context("PROJECT-CONTEXT-MARKER");
+
+    runner
+        .run("python-engineer", "task")
+        .await
+        .expect("completes");
+
+    let (_, system) = llm.first_request();
+    assert!(
+        system.contains("AGENT-PROMPT-MARKER"),
+        "assembled prompt must include the agent's own system prompt"
+    );
+    assert!(
+        system.contains("PROJECT-CONTEXT-MARKER"),
+        "assembled prompt must include the injected project context"
+    );
+}

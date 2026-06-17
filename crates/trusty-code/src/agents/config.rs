@@ -144,20 +144,25 @@ pub struct RunnerConfig {
 /// Execution backend for agent invocations.
 ///
 /// Why: Abstracts over the concrete runner selected at startup so config can
-/// swap backends without code changes.
-/// What: `SubProcess` is the default (spawns a new process via NDJSON IPC);
-/// `ClaudeCode` wraps the `claude` CLI binary.
-/// Test: `runner_kind_deserializes`.
+/// swap backends without code changes. As of #1029 the in-process runner is the
+/// real, production default — the M1 model-comparison harness drives a delegated
+/// sub-agent inside the PM's own process (cheap, observable, usage rolls up onto
+/// one transcript). The subprocess and Claude-Code CLI backends are retained as
+/// future variants for deployments that need process isolation.
+/// What: `InProcess` is the default (drives the sub-agent's `AgentLoop` in the
+/// same process — see `crate::runner::InProcessAgentRunner`); `SubProcess` spawns
+/// a new process via NDJSON IPC; `ClaudeCode` wraps the `claude` CLI binary.
+/// Test: `runner_kind_deserializes`, `runner_kind_defaults_to_in_process`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerKind {
-    /// Spawn a subprocess; communicate via NDJSON over stdin/stdout.
+    /// Drive the sub-agent's `AgentLoop` in the PM's own process (the default).
     #[default]
+    InProcess,
+    /// Spawn a subprocess; communicate via NDJSON over stdin/stdout.
     SubProcess,
     /// Use the `claude` CLI binary as the runner.
     ClaudeCode,
-    /// In-process mock runner (tests only).
-    InProcess,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -245,5 +250,23 @@ kind = "claude_code"
         }
         let w: Wrapper = toml::from_str("kind = \"claude_code\"").expect("parse runner kind");
         assert_eq!(w.kind, RunnerKind::ClaudeCode);
+    }
+
+    /// `RunnerKind` defaults to `InProcess` (the real default since #1029).
+    ///
+    /// Why: The acceptance criterion for #1029 makes the in-process runner the
+    /// production default; a regression that flipped it back to `SubProcess`
+    /// would silently route every undeclared agent through the wrong backend.
+    /// What: `RunnerKind::default()` equals `InProcess`; an agent config with no
+    /// `[runner]` table leaves `runner` `None` (callers treat absence as default).
+    /// Test: this test.
+    #[test]
+    fn runner_kind_defaults_to_in_process() {
+        assert_eq!(RunnerKind::default(), RunnerKind::InProcess);
+        let cfg = AgentConfig::from_toml_str(MINIMAL_TOML).expect("parse minimal");
+        assert!(
+            cfg.runner.is_none(),
+            "absent [runner] leaves runner None; callers apply the InProcess default"
+        );
     }
 }
