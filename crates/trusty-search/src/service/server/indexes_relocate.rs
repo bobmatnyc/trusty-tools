@@ -165,6 +165,9 @@ pub(super) async fn relocate_index_handler(
         path_filter: existing.path_filter.clone(),
         include_docs: existing.include_docs,
         respect_gitignore: existing.respect_gitignore,
+        // Issue #1372: preserve hygiene knobs across relocation.
+        extra_skip_dirs: existing.extra_skip_dirs.clone(),
+        data_file_max_bytes: Some(existing.data_file_max_bytes),
         lexical_only: existing.lexical_only,
         skip_kg: existing.skip_kg,
         defer_embed: existing.defer_embed,
@@ -228,6 +231,9 @@ pub(super) async fn relocate_index_handler(
         domain_terms: existing.domain_terms.clone(),
         include_docs: existing.include_docs,
         respect_gitignore: existing.respect_gitignore,
+        // Issue #1372: preserve hygiene knobs across relocation.
+        extra_skip_dirs: existing.extra_skip_dirs.clone(),
+        data_file_max_bytes: existing.data_file_max_bytes,
         path_filter: existing.path_filter.clone(),
         // Preserve in-memory context/stage/SHA fields from the existing handle
         // so ongoing searches see a coherent state.

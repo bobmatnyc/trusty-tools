@@ -366,6 +366,7 @@ mod tests {
             name: name.map(str::to_string),
             path: path.map(PathBuf::from),
             exclude: exclude.map(|v| v.into_iter().map(str::to_string).collect()),
+            ..Default::default()
         }
     }
 

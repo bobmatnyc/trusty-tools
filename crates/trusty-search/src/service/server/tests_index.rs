@@ -193,6 +193,8 @@ async fn create_index_rejects_relative_root_path() {
             lexical_only: None,
             skip_kg: None,
             defer_embed: None,
+            extra_skip_dirs: None,
+            data_file_max_bytes: None,
         }),
     )
     .await;
@@ -233,6 +235,8 @@ async fn create_index_rejects_nonexistent_root_path() {
             lexical_only: None,
             skip_kg: None,
             defer_embed: None,
+            extra_skip_dirs: None,
+            data_file_max_bytes: None,
         }),
     )
     .await;
@@ -302,6 +306,8 @@ async fn create_index_canonicalizes_symlinked_root_path() {
             lexical_only: None,
             skip_kg: None,
             defer_embed: None,
+            extra_skip_dirs: None,
+            data_file_max_bytes: None,
         }),
     )
     .await;
@@ -361,6 +367,8 @@ async fn create_index_accepts_valid_absolute_root_path() {
             lexical_only: None,
             skip_kg: None,
             defer_embed: None,
+            extra_skip_dirs: None,
+            data_file_max_bytes: None,
         }),
     )
     .await;

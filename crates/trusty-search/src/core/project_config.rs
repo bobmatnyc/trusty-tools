@@ -42,7 +42,7 @@ pub const PROJECT_CONFIG_FILENAME: &str = ".trusty-search.yaml";
 /// list; `path` is parsed for backward-compatibility but is no longer consumed
 /// for root selection (see module-level doc comment).
 /// Test: round-tripped and field-checked in this module's `#[cfg(test)]` block.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProjectConfig {
     /// Index name. Overrides the directory-basename default when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,6 +62,55 @@ pub struct ProjectConfig {
     /// built-in skip list. Absent → no extra excludes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exclude: Option<Vec<String>>,
+
+    /// Issue #1372: extra directory basenames pruned during the walk on top of
+    /// the built-in `walker::SKIP_DIRS`. Default
+    /// `walker::DEFAULT_EXTRA_SKIP_DIRS` (`data`, `exports`, `output`,
+    /// `reports`, `snapshots`, `results`).
+    ///
+    /// Why: data-heavy single-project repos over-index thousands of files under
+    /// data-export directory trees. Exposed as an editable default so a teammate
+    /// can override or clear the list in the committed `.trusty-search.yaml`.
+    /// What: a `Vec<String>` of directory basenames. When the field is absent
+    /// the serde default supplies the targeted set, and the default also
+    /// serialises back so the value is discoverable.
+    /// Test: `data_file_hygiene_defaults_and_round_trips` in this module.
+    #[serde(default = "crate::service::walker::default_extra_skip_dirs")]
+    pub extra_skip_dirs: Vec<String>,
+
+    /// Issue #1372: tighter size cap (bytes) applied only to data-ish file
+    /// extensions (`walker::DATA_EXTS`: json/xml/txt/log). `None` ⇒ the built-in
+    /// default (`walker::DEFAULT_DATA_FILE_MAX_BYTES`, 64 KiB). Non-data
+    /// extensions keep the global `walker::MAX_FILE_BYTES` (1 MiB) cap.
+    ///
+    /// Why: see `super::repo_config::IndexConfig::data_file_max_bytes`.
+    /// What: an `Option<u64>` byte count, defaulting to `Some(65_536)`.
+    /// Test: `data_file_hygiene_defaults_and_round_trips` in this module.
+    #[serde(default = "default_data_file_max_bytes")]
+    pub data_file_max_bytes: Option<u64>,
+}
+
+/// Shared serde default for `ProjectConfig::data_file_max_bytes` (issue #1372):
+/// `Some(64 KiB)`. A named fn because serde's `default` attribute requires a
+/// zero-arg function path.
+fn default_data_file_max_bytes() -> Option<u64> {
+    Some(crate::service::walker::DEFAULT_DATA_FILE_MAX_BYTES)
+}
+
+impl Default for ProjectConfig {
+    /// `extra_skip_dirs` and `data_file_max_bytes` default to the targeted
+    /// data-export hygiene values (issue #1372); the other fields are `None`.
+    /// A manual impl is required because `Vec::default()` is empty, not the
+    /// six-directory default set.
+    fn default() -> Self {
+        Self {
+            name: None,
+            path: None,
+            exclude: None,
+            extra_skip_dirs: crate::service::walker::default_extra_skip_dirs(),
+            data_file_max_bytes: default_data_file_max_bytes(),
+        }
+    }
 }
 
 impl ProjectConfig {
@@ -163,5 +212,47 @@ exclude:
         .unwrap();
         let res = ProjectConfig::load(tmp.path());
         assert!(res.is_err(), "malformed yaml must return Err, not panic");
+    }
+
+    /// Issue #1372: the dotfile carries the same hygiene defaults — when the
+    /// fields are absent they fall back to the targeted data-export set and the
+    /// 64 KiB cap, an explicit value round-trips, and the default serialises so
+    /// it is discoverable in a freshly-written file.
+    #[test]
+    fn data_file_hygiene_defaults_and_round_trips() {
+        // Default constructor carries the targeted defaults.
+        let cfg = ProjectConfig::default();
+        assert!(cfg.extra_skip_dirs.contains(&"data".to_string()));
+        assert_eq!(cfg.extra_skip_dirs.len(), 6);
+        assert_eq!(cfg.data_file_max_bytes, Some(65_536));
+
+        // A dotfile with only `name:` still gets the hygiene defaults.
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join(PROJECT_CONFIG_FILENAME), "name: foo\n").unwrap();
+        let cfg = ProjectConfig::load(tmp.path()).unwrap().unwrap();
+        assert!(
+            cfg.extra_skip_dirs.contains(&"snapshots".to_string()),
+            "missing field defaults to the targeted set: {:?}",
+            cfg.extra_skip_dirs
+        );
+        assert_eq!(cfg.data_file_max_bytes, Some(65_536));
+
+        // Explicit values round-trip.
+        let tmp = tempdir().unwrap();
+        fs::write(
+            tmp.path().join(PROJECT_CONFIG_FILENAME),
+            "extra_skip_dirs: [archive]\ndata_file_max_bytes: 8192\n",
+        )
+        .unwrap();
+        let cfg = ProjectConfig::load(tmp.path()).unwrap().unwrap();
+        assert_eq!(cfg.extra_skip_dirs, vec!["archive".to_string()]);
+        assert_eq!(cfg.data_file_max_bytes, Some(8192));
+
+        // The defaults serialise into a fresh file (discoverable).
+        let serialized = serde_yml::to_string(&ProjectConfig::default()).unwrap();
+        assert!(
+            serialized.contains("extra_skip_dirs") && serialized.contains("data_file_max_bytes"),
+            "defaults must serialise: {serialized}"
+        );
     }
 }

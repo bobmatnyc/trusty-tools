@@ -56,6 +56,8 @@ async fn validate_root_path_denylist_rejects_ssh() {
             lexical_only: None,
             skip_kg: None,
             defer_embed: None,
+            extra_skip_dirs: None,
+            data_file_max_bytes: None,
         }),
     )
     .await;

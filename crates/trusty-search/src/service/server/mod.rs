@@ -16,6 +16,7 @@ mod contrib_graph;
 mod files;
 mod health;
 mod helpers;
+mod index_config;
 mod indexes;
 mod indexes_relocate;
 mod reindex_handlers;
@@ -45,6 +46,8 @@ mod tests_grep;
 mod tests_health;
 #[cfg(test)]
 mod tests_index;
+#[cfg(test)]
+mod tests_index_config;
 #[cfg(test)]
 mod tests_list;
 #[cfg(test)]
@@ -78,6 +81,7 @@ use admin::{
 use contrib_graph::{graph_neighbors_handler, ingest_graph_handler};
 use files::{get_index_chunks_handler, index_file_handler, remove_file_handler};
 use health::health_handler;
+use index_config::{index_config_handler, patch_index_config_handler};
 use indexes::{create_index_handler, list_indexes_handler, relocate_index_handler};
 use reindex_handlers::{reindex_handler, reindex_stream_handler};
 use routing::search_similar_handler;
@@ -182,6 +186,10 @@ pub fn build_router(state: SearchAppState) -> Router {
         .route("/chat", post(chat_handler))
         .route("/api/chat/providers", get(list_chat_providers))
         .route("/indexes/{id}/status", get(index_status_handler))
+        .route(
+            "/indexes/{id}/config",
+            get(index_config_handler).patch(patch_index_config_handler),
+        )
         .route("/indexes/{id}/graph", get(graph_handler))
         .route("/indexes/{id}/graph/stats", get(graph_stats_handler))
         .route(

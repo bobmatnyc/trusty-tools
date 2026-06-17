@@ -90,6 +90,29 @@ export const api = {
       body: JSON.stringify(root_path ? { root_path } : {})
     }),
 
+  /**
+   * Why: Per-index indexing-hygiene config (issue #1372) lets operators tune
+   * what each index scans (skip dirs, data-file size cap, extension allow-list,
+   * exclude globs, doc/gitignore toggles) without editing YAML by hand.
+   * What: GET the current resolved config for one index.
+   * Test: register an index, call getIndexConfig(id), assert the response has
+   * `extra_skip_dirs` (array) and `data_file_max_bytes` (number).
+   */
+  getIndexConfig: (id) => request(`/indexes/${encodeURIComponent(id)}/config`),
+
+  /**
+   * Why: Apply a partial update to an index's hygiene config. PATCH semantics:
+   * only supplied fields are applied, so callers omit untouched fields.
+   * What: PATCH the config; returns `{ id, config, reindex_required }`.
+   * Test: call updateIndexConfig(id, { include_docs: false }); assert the
+   * returned config reflects the change and `reindex_required` is a boolean.
+   */
+  updateIndexConfig: (id, patch) =>
+    request(`/indexes/${encodeURIComponent(id)}/config`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch)
+    }),
+
   chat: (index_id, message, history = []) =>
     request('/chat', {
       method: 'POST',

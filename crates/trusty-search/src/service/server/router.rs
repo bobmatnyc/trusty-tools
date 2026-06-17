@@ -132,6 +132,31 @@ pub struct CreateIndexRequest {
     /// Test: `defer_embed_false_forces_synchronous_index` in `service::reindex::tests`.
     #[serde(default)]
     pub defer_embed: Option<bool>,
+
+    /// Issue #1372: extra directory basenames pruned during the reindex walk on
+    /// top of the built-in `SKIP_DIRS`. `None`/missing ⇒ the targeted default
+    /// set (`data`/`exports`/`output`/`reports`/`snapshots`/`results`); an
+    /// explicit (possibly empty) list overrides it.
+    ///
+    /// Why: data-heavy repos over-index thousands of data-export files; this
+    /// lets a project prune those directory trees as a per-index default.
+    /// What: `Option<Vec<String>>`; basenames matched the same way as
+    /// `SKIP_DIRS`. Persisted to `indexes.toml`.
+    /// Test: `create_index_threads_hygiene_fields` in `service::server::tests_index`.
+    #[serde(default)]
+    pub extra_skip_dirs: Option<Vec<String>>,
+
+    /// Issue #1372: tighter size cap (bytes) applied only to data-ish file
+    /// extensions (json/xml/txt/log). `None`/missing ⇒ the 64 KiB built-in
+    /// default. Non-data extensions keep the global 1 MiB cap.
+    ///
+    /// Why: data exports in those formats are usually under 1 MiB so the global
+    /// cap lets them through; a tighter cap prunes the bulk exports while small
+    /// config files of the same extension stay indexable.
+    /// What: `Option<u64>`; persisted to `indexes.toml`.
+    /// Test: `create_index_threads_hygiene_fields` in `service::server::tests_index`.
+    #[serde(default)]
+    pub data_file_max_bytes: Option<u64>,
 }
 
 #[derive(Deserialize)]

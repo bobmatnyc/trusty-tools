@@ -122,6 +122,45 @@ pub struct IndexConfig {
     /// Test: `repo_config::tests::defer_embed_round_trips_yaml` in this module.
     #[serde(default = "default_true")]
     pub defer_embed: bool,
+
+    /// Issue #1372: extra directory basenames pruned during the walk on top of
+    /// the built-in `walker::SKIP_DIRS`. Default
+    /// `walker::DEFAULT_EXTRA_SKIP_DIRS` (`data`, `exports`, `output`,
+    /// `reports`, `snapshots`, `results`).
+    ///
+    /// Why: data-heavy repos over-index thousands of files under data-export
+    /// directory trees. These dir names are NOT in the baseline `SKIP_DIRS`
+    /// (a few projects keep source under e.g. `output/`), so they are exposed
+    /// as an editable per-index default rather than a hardcoded constant — a
+    /// project can override or clear the list in `trusty-search.yaml`.
+    /// What: a `Vec<String>` of directory basenames. When the field is absent
+    /// the serde default supplies the targeted set; the default also
+    /// serialises back so users can see and edit it.
+    /// Test: `extra_skip_dirs_defaults_and_round_trips` in this module.
+    #[serde(default = "crate::service::walker::default_extra_skip_dirs")]
+    pub extra_skip_dirs: Vec<String>,
+
+    /// Issue #1372: tighter size cap (bytes) applied only to data-ish file
+    /// extensions (`walker::DATA_EXTS`: json/xml/txt/log). `None` ⇒ the built-in
+    /// default (`walker::DEFAULT_DATA_FILE_MAX_BYTES`, 64 KiB). Non-data
+    /// extensions keep the global `walker::MAX_FILE_BYTES` (1 MiB) cap.
+    ///
+    /// Why: JSON/XML/TXT/log data exports are usually under 1 MiB so the global
+    /// cap lets them all through; a tighter cap prunes the bulk exports while
+    /// small config files of the same extension (`package.json`, `tsconfig.json`)
+    /// stay indexable.
+    /// What: an `Option<u64>` byte count. Defaults to `Some(65_536)` so the
+    /// value is discoverable in a freshly-written config.
+    /// Test: `data_file_max_bytes_defaults_and_round_trips` in this module.
+    #[serde(default = "default_data_file_max_bytes")]
+    pub data_file_max_bytes: Option<u64>,
+}
+
+/// Shared serde default for `IndexConfig::data_file_max_bytes` (issue #1372):
+/// `Some(64 KiB)`. A separate fn (not a closure) because serde's `default`
+/// attribute requires a named zero-arg function path.
+fn default_data_file_max_bytes() -> Option<u64> {
+    Some(crate::service::walker::DEFAULT_DATA_FILE_MAX_BYTES)
 }
 
 /// Shared serde default helper that returns `true`.
@@ -154,6 +193,8 @@ impl Default for IndexConfig {
             respect_gitignore: true,
             skip_kg: false,
             defer_embed: true,
+            extra_skip_dirs: crate::service::walker::default_extra_skip_dirs(),
+            data_file_max_bytes: default_data_file_max_bytes(),
         }
     }
 }
@@ -591,5 +632,114 @@ indexes:
         assert!(loaded.indexes[0].skip_kg);
         assert!(loaded.indexes[0].respect_gitignore);
         assert!(loaded.indexes[0].include_docs);
+    }
+
+    /// Issue #1372: `extra_skip_dirs` defaults to the targeted data-export set
+    /// when absent, an explicit list round-trips, and the default also
+    /// serialises so users can see and edit it.
+    #[test]
+    fn extra_skip_dirs_defaults_and_round_trips() {
+        // Default constructor carries the targeted set.
+        let cfg = IndexConfig::default();
+        assert!(cfg.extra_skip_dirs.contains(&"data".to_string()));
+        assert!(cfg.extra_skip_dirs.contains(&"results".to_string()));
+        assert_eq!(cfg.extra_skip_dirs.len(), 6);
+
+        // Missing field deserialises to the default set.
+        let tmp = tempdir().unwrap();
+        write_yaml(
+            tmp.path(),
+            r#"
+version: 1
+indexes:
+  - name: legacy
+"#,
+        );
+        let loaded = RepoConfig::load(tmp.path()).unwrap().unwrap();
+        assert!(
+            loaded.indexes[0]
+                .extra_skip_dirs
+                .contains(&"exports".to_string()),
+            "missing field must default to the targeted set: {:?}",
+            loaded.indexes[0].extra_skip_dirs
+        );
+
+        // Explicit list round-trips (overrides the default).
+        let tmp = tempdir().unwrap();
+        write_yaml(
+            tmp.path(),
+            r#"
+version: 1
+indexes:
+  - name: custom
+    extra_skip_dirs: ["archive", "dumps"]
+"#,
+        );
+        let loaded = RepoConfig::load(tmp.path()).unwrap().unwrap();
+        assert_eq!(
+            loaded.indexes[0].extra_skip_dirs,
+            vec!["archive".to_string(), "dumps".to_string()]
+        );
+
+        // The default serialises back into a freshly-written config (discoverable).
+        let serialized = serde_yml::to_string(&RepoConfig {
+            version: 1,
+            indexes: vec![IndexConfig {
+                name: "x".into(),
+                ..Default::default()
+            }],
+        })
+        .unwrap();
+        assert!(
+            serialized.contains("extra_skip_dirs"),
+            "default must serialise so it is discoverable: {serialized}"
+        );
+    }
+
+    /// Issue #1372: `data_file_max_bytes` defaults to `Some(64 KiB)`, an
+    /// explicit value round-trips, and the default serialises into a fresh
+    /// config so it is discoverable.
+    #[test]
+    fn data_file_max_bytes_defaults_and_round_trips() {
+        let cfg = IndexConfig::default();
+        assert_eq!(cfg.data_file_max_bytes, Some(65_536));
+
+        // Missing field defaults to Some(64 KiB).
+        let tmp = tempdir().unwrap();
+        write_yaml(
+            tmp.path(),
+            r#"
+version: 1
+indexes:
+  - name: legacy
+"#,
+        );
+        let loaded = RepoConfig::load(tmp.path()).unwrap().unwrap();
+        assert_eq!(loaded.indexes[0].data_file_max_bytes, Some(65_536));
+
+        // Explicit value round-trips.
+        let tmp = tempdir().unwrap();
+        write_yaml(
+            tmp.path(),
+            r#"
+version: 1
+indexes:
+  - name: custom
+    data_file_max_bytes: 131072
+"#,
+        );
+        let loaded = RepoConfig::load(tmp.path()).unwrap().unwrap();
+        assert_eq!(loaded.indexes[0].data_file_max_bytes, Some(131_072));
+
+        // Default serialises into a fresh config.
+        let serialized = serde_yml::to_string(&IndexConfig {
+            name: "x".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            serialized.contains("data_file_max_bytes"),
+            "default must serialise: {serialized}"
+        );
     }
 }
