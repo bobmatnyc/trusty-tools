@@ -224,6 +224,54 @@ fn base_preamble_version_is_semver_shaped() {
     }
 }
 
+/// Expected FNV-1a-style fold of [`BASE_PREAMBLE`]'s bytes, folded with its
+/// byte length. Regenerate this whenever the preamble legitimately changes
+/// (see [`base_preamble_hash_tripwire`] for the contributor instructions).
+const EXPECTED_PREAMBLE_HASH: u64 = 0x4443_27ac_ff1b_c454;
+
+/// Test-time guard coupling `BASE_PREAMBLE` *content* to its version constant.
+///
+/// Why: `BASE_PREAMBLE_VERSION` (in `prompt/version.rs`) is hand-maintained and
+/// otherwise decoupled from the preamble text — a contributor can edit the
+/// preamble and forget to bump the version, silently making the parity report's
+/// version token (spec D5 disclosure) stale. This tripwire fails the build the
+/// moment the preamble bytes change without the expected hash being refreshed,
+/// forcing the version bump into the same review.
+///
+/// What: Folds `BASE_PREAMBLE`'s bytes with an inline FNV-1a-style hash (mixed
+/// with the byte length) and asserts it equals [`EXPECTED_PREAMBLE_HASH`].
+///
+/// Note: This is a *tripwire*, not a security or cryptographic hash — collision
+/// resistance is irrelevant; we only need a deterministic fingerprint that
+/// trips on edits. We deliberately compute the fold inline (FNV-1a over the
+/// bytes plus a length mix) rather than using `std::collections::hash_map::
+/// DefaultHasher`, whose output is only guaranteed stable *within* a Rust
+/// release; the inline fold is byte-stable across every toolchain, so the
+/// stored constant never needs a cross-compiler caveat.
+///
+/// Test: this test (self-checking against the stored constant).
+#[test]
+fn base_preamble_hash_tripwire() {
+    // FNV-1a 64-bit constants (public-domain reference values).
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for &byte in BASE_PREAMBLE.as_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    // Mix the byte length so a pure-truncation edit can't preserve the hash.
+    hash ^= BASE_PREAMBLE.len() as u64;
+    hash = hash.wrapping_mul(FNV_PRIME);
+
+    assert_eq!(
+        hash, EXPECTED_PREAMBLE_HASH,
+        "BASE_PREAMBLE changed — update EXPECTED_PREAMBLE_HASH and bump \
+         BASE_PREAMBLE_VERSION in prompt/version.rs (actual hash: {hash:#018x})"
+    );
+}
+
 /// The `PromptAssembler` struct produces the same output as the free function.
 ///
 /// Why: The two entry points must never diverge.
