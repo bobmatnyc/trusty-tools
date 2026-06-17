@@ -157,15 +157,15 @@ pub async fn session_output(id: String, state: State<'_, GuiState>) -> Result<Va
     Ok(resp.json::<Value>().await.unwrap_or(Value::Null))
 }
 
-/// `GET /api/v1/coordinator/context` — fetch the coordinator's context.
+/// `GET /api/v1/sessions/context` — fetch the coordinator's context.
 ///
 /// Why: `CoordinatorChat` opens with a greeting summarizing the active
 /// sessions; this proxy supplies that snapshot in desktop mode.
-/// What: Forwards to `/api/v1/coordinator/context` and returns the JSON body.
+/// What: Forwards to `/api/v1/sessions/context` and returns the JSON body.
 /// Test: Invoke with a live daemon and assert a JSON object is returned.
 #[tauri::command]
 pub async fn coordinator_context(state: State<'_, GuiState>) -> Result<Value, String> {
-    let url = format!("{}/api/v1/coordinator/context", state.daemon_url);
+    let url = format!("{}/api/v1/sessions/context", state.daemon_url);
     let resp = state
         .client
         .get(&url)
@@ -180,11 +180,11 @@ pub async fn coordinator_context(state: State<'_, GuiState>) -> Result<Value, St
         .map_err(|e| format!("coordinator_context parse failed: {e}"))
 }
 
-/// `POST /api/v1/coordinator/chat` — send a chat turn to the coordinator.
+/// `POST /api/v1/sessions/chat` — send a chat turn to the coordinator.
 ///
 /// Why: The coordinator chat is the GUI's permanent main panel; every user
 /// message flows through here. The shell only relays the call.
-/// What: POSTs `{message, history}` to `/api/v1/coordinator/chat` and returns
+/// What: POSTs `{message, history}` to `/api/v1/sessions/chat` and returns
 /// the JSON reply (which may carry `routed_to` / `command_output`).
 /// Test: POST a plain message against a live daemon and assert a JSON reply.
 #[tauri::command]
@@ -193,7 +193,7 @@ pub async fn coordinator_chat(
     history: Value,
     state: State<'_, GuiState>,
 ) -> Result<Value, String> {
-    let url = format!("{}/api/v1/coordinator/chat", state.daemon_url);
+    let url = format!("{}/api/v1/sessions/chat", state.daemon_url);
     let body = serde_json::json!({ "message": message, "history": history });
     let resp = state
         .client

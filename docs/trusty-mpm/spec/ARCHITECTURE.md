@@ -279,7 +279,7 @@ Built in `api::router` (`daemon/api.rs:72-127`). Default base
 | GET | `/breakers` | Per-agent circuit-breaker state. | ✅ |
 | GET | `/optimizer` · `/overseer` | Read framework-managed policy. | ✅ |
 | POST | `/llm/chat` | Coordinator LLM chat (503 if no overseer). | ✅ |
-| GET / POST | `/api/v1/coordinator/context` · `/chat` | Cross-session coordinator. | ✅ |
+| GET / POST | `/api/v1/sessions/context` · `/chat` | Cross-session coordinator. | ✅ |
 | GET / POST | `/tmux/sessions`, `/tmux/sessions/{name}/snapshot`, `/tmux/adopt` | Universal tmux management. | ✅ |
 | GET / POST | `/claude-config*` | Claude Code config analyzer + checkpoints/profiles. | ✅ |
 | POST / GET | `/pair/request` · `/confirm` · `/status` · `/reset` | Telegram pairing. | ✅ |

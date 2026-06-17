@@ -610,11 +610,11 @@ impl DaemonClient {
     /// Why: the TUI/GUI coordinator sidebar refreshes its session list from the
     /// daemon's activity snapshot — every session with its status and a
     /// recent-output excerpt.
-    /// What: `GET /api/v1/coordinator/context`, returns the deserialized
+    /// What: `GET /api/v1/sessions/context`, returns the deserialized
     /// [`CoordinatorContext`]; `Err` on a transport or decode failure.
     /// Test: `coordinator_context_deserializes` covers the wire shape.
     pub async fn coordinator_context(&self) -> anyhow::Result<CoordinatorContext> {
-        let url = format!("{}/api/v1/coordinator/context", self.base);
+        let url = format!("{}/api/v1/sessions/context", self.base);
         let context = self
             .http
             .get(&url)
@@ -632,7 +632,7 @@ impl DaemonClient {
     /// every session — a `@prefix:` message routes a command at a named
     /// session, a plain message is answered by the LLM with full session
     /// context. The UI owns the rolling chat history and threads it through.
-    /// What: POSTs `{ message, history }` to `/api/v1/coordinator/chat`; returns
+    /// What: POSTs `{ message, history }` to `/api/v1/sessions/chat`; returns
     /// `Ok(Some(outcome))` on success, `Ok(None)` when the daemon answers `503`
     /// (LLM not configured for a non-prefixed message), and `Err` on transport
     /// failure.
@@ -642,7 +642,7 @@ impl DaemonClient {
         message: &str,
         history: &[ChatMessage],
     ) -> anyhow::Result<Option<CoordinatorChatOutcome>> {
-        let url = format!("{}/api/v1/coordinator/chat", self.base);
+        let url = format!("{}/api/v1/sessions/chat", self.base);
         let resp = self
             .http
             .post(&url)

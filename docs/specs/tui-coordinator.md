@@ -77,8 +77,8 @@ Today it provides:
 |---|---|---|
 | Coordinator chat pane + `CMD>` input bar (history ring) | `tui/dashboard/mod.rs` (`CommandBar`, `DashboardState`, `render`) | Input is **at the bottom**, chat above it, session **sidebar** to the side. |
 | Session **sidebar** | `tui/dashboard/mod.rs` (`SessionRow`) | A side panel, not the "below the input" list this spec asks for. |
-| Poll `GET /api/v1/coordinator/context` → session rows | `tui/mod.rs::poll_daemon` + `tui/client.rs` | Timer-based, `--interval-ms` (default poll). |
-| Send to `POST /api/v1/coordinator/chat` | `tui/mod.rs::coordinator_send` | Free text → LLM; `@prefix:` → routed command. |
+| Poll `GET /api/v1/sessions/context` → session rows | `tui/mod.rs::poll_daemon` + `tui/client.rs` | Timer-based, `--interval-ms` (default poll). |
+| Send to `POST /api/v1/sessions/chat` | `tui/mod.rs::coordinator_send` | Free text → LLM; `@prefix:` → routed command. |
 | Health screen (`[2]`), screen switching | `tui/mod.rs` (`Screen`), `tui/health/` | Secondary surface. |
 | Self-healing daemon URL re-resolution | `tui/mod.rs::rediscover_daemon` + `core/discovery.rs` | Re-reads `~/.trusty-mpm/daemon.lock` on failed poll. |
 
@@ -267,7 +267,7 @@ Frame
 ### 5.1 The coordinator (top input)
 
 The input talks to a **coordinator / PM-like agent**. Two routing modes
-(existing `POST /api/v1/coordinator/chat` semantics, `coordinator.rs`):
+(existing `POST /api/v1/sessions/chat` semantics, `coordinator.rs`):
 
 - **Free text** → the coordinator LLM answers using a snapshot of all sessions
   (`build_coordinator_context`). Requires `OPENROUTER_API_KEY`; when absent the
@@ -321,7 +321,7 @@ list reflects the mutation immediately (§3.2).
 
 Two viable feeds (the TUI already uses the first):
 
-1. **Coordinator context** — `GET /api/v1/coordinator/context` returns
+1. **Coordinator context** — `GET /api/v1/sessions/context` returns
    `sessions: [CoordinatorSession { id, name, prefix, workdir, status,
    active_delegations, recent_output }]`. Lifecycle status words map to
    `core::session::SessionStatus` (`Starting`, `Active`, `AwaitingApproval`,
@@ -402,7 +402,7 @@ meaningful line from `recent_output`, else the status word.
 
 ## 8. Behavior contract (summary)
 
-- **Inputs:** keystrokes; daemon poll responses (`coordinator/context`,
+- **Inputs:** keystrokes; daemon poll responses (`sessions/context`,
   `sessions/managed*`, `…/activity`); the daemon URL (resolved).
 - **Outputs:** a rendered full-screen TUI; `POST`s to coordinator-chat and
   managed-lifecycle endpoints; a restored terminal on exit (always, even on
@@ -517,7 +517,7 @@ shippable.
   files ≤500 SLOC.
 
 ### Child #2 — Session-list data wiring from the session-manager API
-- **Scope:** Poll `GET /api/v1/coordinator/context` (reuse `poll_daemon` /
+- **Scope:** Poll `GET /api/v1/sessions/context` (reuse `poll_daemon` /
   `coordinator_session_to_row`) to fill the list under the controller bullet;
   map status words to `SessionStatus`; bullet glyph/color by status
   (incl. `AwaitingApproval`); selection-by-ID survives refresh; render the

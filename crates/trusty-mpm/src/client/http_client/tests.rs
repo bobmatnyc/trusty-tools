@@ -190,7 +190,7 @@ fn llm_chat_response_deserializes() {
 
 #[test]
 fn coordinator_context_deserializes() {
-    // The `GET /api/v1/coordinator/context` snapshot carries the session
+    // The `GET /api/v1/sessions/context` snapshot carries the session
     // summaries; the daemon's `recent_events` field is ignored.
     let json = serde_json::json!({
         "sessions": [{

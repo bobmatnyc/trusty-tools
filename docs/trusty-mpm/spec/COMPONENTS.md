@@ -219,7 +219,7 @@ paths), **current state**, and **gaps**.
 - **Key types.** `Overseer` trait + `DeterministicOverseer` (always on) + optional
   `CompositeOverseer`/`llm_overseer` (built from `overseer.toml [llm]`);
   `overseer_compose` (`daemon/overseer_compose.rs`); `POST /llm/chat` and the
-  `/api/v1/coordinator/*` routes (`daemon/api/coordinator_routes.rs`); the `tm
+  `/api/v1/sessions/*` routes (formerly `/api/v1/coordinator/*`, renamed in #1392) (`daemon/api/coordinator_routes.rs`); the `tm
   coordinator` CLI + `tui` coordinator chat.
 - **Current state.** ✅ Deterministic overseer + opt-in LLM overseer (reuses
   `OPENROUTER_API_KEY`); cross-session coordinator chat. Disabled by default.

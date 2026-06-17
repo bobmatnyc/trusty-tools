@@ -1,6 +1,6 @@
-//! Session-Manager endpoint tests for `coordinator/chat` (DOC-14 SM-7).
+//! Session-Manager endpoint tests for `/api/v1/sessions/chat` (DOC-14 SM-7).
 //!
-//! Why: SM-7 rewires `POST /api/v1/coordinator/chat` to route through the SM
+//! Why: SM-7 rewires `POST /api/v1/sessions/chat` to route through the SM
 //! agent when enabled + provisioned, adds `/api/v1/session-manager/*` aliases,
 //! and preserves the DOC-13 TUI contract. These tests pin every one of those:
 //! the SM turn returns reply + cost; degraded maps to 503; `enabled = false`
@@ -134,7 +134,7 @@ async fn disabled_sm_falls_back_to_legacy_503() {
 }
 
 /// Why: D0.1 — the `/api/v1/session-manager/chat` alias must resolve to the SAME
-/// handler as `/api/v1/coordinator/chat`, so identical input yields identical
+/// handler as `/api/v1/sessions/chat`, so identical input yields identical
 /// output. Driving both through the router via `oneshot` proves the alias wiring.
 /// What: posts the same SM request to both paths; asserts both 200 with equal
 /// `reply`/`cost`/`conv_id`.
@@ -175,7 +175,7 @@ async fn session_manager_chat_alias_matches_coordinator() {
         }
     };
 
-    let (coord_status, coord_json) = post("/api/v1/coordinator/chat").await;
+    let (coord_status, coord_json) = post("/api/v1/sessions/chat").await;
     let (sm_status, sm_json) = post("/api/v1/session-manager/chat").await;
 
     assert_eq!(coord_status, StatusCode::OK);
@@ -228,4 +228,39 @@ fn doc13_tui_contract_is_preserved() {
         "conv_id must be absent when None"
     );
     assert!(json.get("routed_to_session").is_none());
+}
+
+/// Why: #1392 — the cross-session coordinator surface moved under the plural
+/// `/api/v1/sessions/*` namespace and the former `/api/v1/coordinator/*` paths
+/// were removed. This pins both halves of that contract at the router level so a
+/// future re-add of the old mount (or a typo in the new one) fails loudly.
+/// What: drives the `router` via `oneshot` and asserts `GET /api/v1/sessions/context`
+/// answers `200` while the retired `GET /api/v1/coordinator/context` answers `404`.
+/// Test: this is the test.
+#[tokio::test]
+async fn sessions_context_replaces_coordinator_namespace() {
+    let get = |path: &str| {
+        let app = router(DaemonState::shared());
+        let path = path.to_string();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+
+    // New plural namespace responds.
+    assert_eq!(get("/api/v1/sessions/context").await, StatusCode::OK);
+    // Retired coordinator namespace is gone.
+    assert_eq!(
+        get("/api/v1/coordinator/context").await,
+        StatusCode::NOT_FOUND,
+    );
 }

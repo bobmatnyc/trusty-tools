@@ -119,7 +119,7 @@ pub struct DaemonState {
     pub(super) llm: Option<Arc<crate::daemon::llm_overseer::LlmOverseer>>,
     /// The Session Manager agent (DOC-14 SM-7), built once at startup.
     ///
-    /// Why: `POST /api/v1/coordinator/chat` (and its `/session-manager/*`
+    /// Why: `POST /api/v1/sessions/chat` (and its `/session-manager/*`
     /// aliases) route a chat turn through this agent when
     /// `[session_manager].enabled = true` AND a provider is available, superseding
     /// the legacy [`LlmOverseer`] path. Built unconditionally (cheap — config +

@@ -223,7 +223,7 @@ pub(crate) fn spawn_health_pollers(
 /// Send the typed message to the coordinator and fold the reply into the chat.
 ///
 /// Why: pressing Enter is the single action of the coordinator dashboard —
-/// every message goes to `POST /api/v1/coordinator/chat`, which either routes a
+/// every message goes to `POST /api/v1/sessions/chat`, which either routes a
 /// `@prefix:` command at a session or answers via the LLM.
 /// What: appends the user message to the transcript, calls the daemon, then
 /// appends the coordinator reply (or routed-command output). A `None` response

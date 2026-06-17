@@ -190,7 +190,7 @@ impl DaemonState {
 
     /// The Session Manager agent (DOC-14 SM-7).
     ///
-    /// Why: `POST /api/v1/coordinator/chat` (and its `/session-manager/*`
+    /// Why: `POST /api/v1/sessions/chat` (and its `/session-manager/*`
     /// aliases) consult this to decide whether to route a turn through the SM
     /// (`is_enabled()` AND `has_runtime()`) or fall back to the legacy
     /// [`LlmOverseer`](crate::daemon::llm_overseer::LlmOverseer) path. Sharing the

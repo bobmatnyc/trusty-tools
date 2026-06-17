@@ -131,7 +131,7 @@ pub enum TrustyCommand {
     /// for the coordinator — a message prefixed with `@session:` routes a
     /// command at that session, a plain message is answered by the LLM with
     /// full session context.
-    /// What: the message text to send to `POST /api/v1/coordinator/chat`.
+    /// What: the message text to send to `POST /api/v1/sessions/chat`.
     CoordinatorChat {
         /// The message to send to the coordinator.
         message: String,

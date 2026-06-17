@@ -21,8 +21,8 @@ const API_MAP: Record<string, { method: string; path: (args: any) => string }> =
   get_breakers:   { method: 'GET', path: () => '/breakers' },
   get_daemon_url: { method: 'GET', path: () => '/health' }, // no-op in web mode
   session_output: { method: 'GET', path: (a) => `/sessions/${a.id}/output` },
-  coordinator_context: { method: 'GET', path: () => '/api/v1/coordinator/context' },
-  coordinator_chat: { method: 'POST', path: () => '/api/v1/coordinator/chat' },
+  coordinator_context: { method: 'GET', path: () => '/api/v1/sessions/context' },
+  coordinator_chat: { method: 'POST', path: () => '/api/v1/sessions/chat' },
 };
 
 /** Forward a call to the native Tauri command of the same name. */
@@ -73,7 +73,7 @@ export async function invoke(command: string, args?: Record<string, unknown>): P
  *
  * Why: `CoordinatorChat` opens with a greeting summarizing what the
  * coordinator can see; this is the single call that supplies that snapshot.
- * What: Dual-mode wrapper over `GET /api/v1/coordinator/context`.
+ * What: Dual-mode wrapper over `GET /api/v1/sessions/context`.
  * Test: With the daemon up, the returned value is a JSON object describing
  * the active sessions.
  */
@@ -87,7 +87,7 @@ export async function coordinatorContext(): Promise<any> {
  * Why: The coordinator chat is the GUI's permanent main panel; every user
  * message flows through here. `@session-name:` prefixes are interpreted
  * server-side, which may populate `routed_to` / `command_output` on the reply.
- * What: Dual-mode wrapper over `POST /api/v1/coordinator/chat` carrying the
+ * What: Dual-mode wrapper over `POST /api/v1/sessions/chat` carrying the
  * new message plus prior history for context.
  * Test: Post a plain message → a `coordinator` reply returns; post one
  * prefixed with `@id:` → the reply (or the user echo) carries `routed_to`.
