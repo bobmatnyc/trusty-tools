@@ -1,4 +1,4 @@
-//! `tm session prune-idle` — reclaim idle session-manager sessions (issue #1313).
+//! `tm sessions prune-idle` — reclaim idle session-manager sessions (issue #1313).
 //!
 //! Why: paused orchestration sessions leave behind idle SM tmux sessions that
 //! consume claude Max rate-limit slots and clutter the fleet. This command
@@ -266,7 +266,7 @@ fn short_id(id: &str) -> &str {
     id.split('-').next().unwrap_or(id)
 }
 
-/// `tm session prune-idle` — enumerate idle SM sessions and reclaim them.
+/// `tm sessions prune-idle` — enumerate idle SM sessions and reclaim them.
 ///
 /// Why: the operator-facing (and pause-automated) entry point. It must reuse the
 /// existing managed list/activity/runtime-stop/decommission surface, apply the

@@ -58,7 +58,7 @@ If found:
 - Display warning with action count and context percentage
 - Options:
   - **Continue**: Resume work from pause state
-  - **Finalize**: Run `tm session --finalize` to create snapshot
+  - **Finalize**: Run `tm sessions --finalize` to create snapshot
   - **Discard**: Start fresh (previous work still in git)
 
 **Example Response**:
@@ -70,7 +70,7 @@ Context usage: ~92%
 
 Options:
 1. Continue working (actions will be recorded)
-2. Finalize pause: tm session --finalize
+2. Finalize pause: tm sessions --finalize
 3. Discard pause: Delete .trusty-mpm/sessions/ACTIVE-PAUSE.jsonl
 
 Would you like to continue from the paused session?

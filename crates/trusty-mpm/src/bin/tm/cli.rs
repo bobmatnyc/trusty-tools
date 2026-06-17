@@ -82,6 +82,17 @@ pub(crate) enum Command {
         action: ProjectAction,
     },
     /// Define and manage Claude Code sessions within a project.
+    ///
+    /// Why (#1394): the invoked name is the plural `sessions` to match the
+    /// `/api/v1/sessions/*` HTTP API surface. The singular `session` spelling
+    /// is intentionally NOT accepted (no alias) so the CLI and API agree on one
+    /// name. The Rust variant stays `Session` (with an explicit
+    /// `#[command(name = "sessions")]`) to keep the `SessionAction` group and
+    /// every match arm coherent without renaming ~80 internal references.
+    /// What: the `tm sessions <action>` command group (`tui`, `ls`, `new`, …).
+    /// Test: `cli_parses_sessions_plural` / `cli_rejects_singular_session` in
+    /// `tests.rs`.
+    #[command(name = "sessions")]
     Session {
         /// Session action to perform.
         #[command(subcommand)]
@@ -619,7 +630,7 @@ pub(crate) enum CatalogAction {
 pub(crate) enum RepairAction {
     /// Repair the agent/skill deploy state in `~/.claude/`.
     ///
-    /// Why: a crash during `tm install` or `tm session start` may leave stale
+    /// Why: a crash during `tm install` or `tm sessions start` may leave stale
     /// `.tmp` staging files in `~/.claude/agents/` or `~/.claude/skills/`, or
     /// leave either manifest corrupt. This command removes the orphans and
     /// validates both manifests.
@@ -725,7 +736,7 @@ pub(crate) enum SessionAction {
     /// session list (controller bullet + one row per managed session, the active
     /// row in two columns `[id] │ [summary]`). This is a NEW screen, distinct
     /// from the existing `tm tui` dashboard. It lives under the `session` group
-    /// as `tm session tui` (#1392): it operates on the same managed-session list
+    /// as `tm sessions tui` (#1392): it operates on the same managed-session list
     /// the other `session` verbs do, so grouping it there keeps the surface
     /// discoverable without colliding with the `coordinator` SM chat command.
     /// What: polls the daemon's coordinator-context endpoint live on the
@@ -805,7 +816,7 @@ pub(crate) enum SessionAction {
     /// Spawn a new managed session from a repo + ref (session-manager MVP).
     ///
     /// Why: the session-manager MVP provisions an isolated workspace from a git
-    /// repo and starts a harness in it; `tm session new` is the operator-facing
+    /// repo and starts a harness in it; `tm sessions new` is the operator-facing
     /// entry point that posts to `POST /api/v1/sessions/managed`.
     /// What: posts repo, ref, task, and an optional name hint to the daemon.
     /// Test: `cli_parses_session_new`.

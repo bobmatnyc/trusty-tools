@@ -32,7 +32,7 @@ pub(super) const SPINNER_TIPS: &[&str] = &[
     "Delegate Rust code to rust-engineer — PM never edits .rs files",
     "gh issue create to track work; commits include Closes #N",
     "tmux ls shows all active tmpm-<folder> sessions",
-    "tm session list shows daemon-managed sessions",
+    "tm sessions list shows daemon-managed sessions",
     "/compact at ~50% context to stay focused",
     "Layer new features behind the HTTP API before wiring CLI or TUI",
 ];

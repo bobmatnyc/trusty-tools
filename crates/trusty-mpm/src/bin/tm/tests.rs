@@ -294,7 +294,7 @@ fn normalize_workdir_strips_trailing_slash() {
 
 #[test]
 fn cli_parses_session_start() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "start"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "start"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Start { dir },
@@ -305,7 +305,7 @@ fn cli_parses_session_start() {
 
 #[test]
 fn cli_parses_session_start_with_dir() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "start", "--dir", "/work/p"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "start", "--dir", "/work/p"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Start { dir },
@@ -316,7 +316,7 @@ fn cli_parses_session_start_with_dir() {
 
 #[test]
 fn cli_parses_session_stop() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "stop", "tmpm-quiet-falcon"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "stop", "tmpm-quiet-falcon"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Stop { id_or_name },
@@ -328,12 +328,12 @@ fn cli_parses_session_stop() {
 #[test]
 fn cli_session_stop_requires_arg() {
     // `session stop` without an id-or-name is an error.
-    assert!(Cli::try_parse_from(["trusty-mpm", "session", "stop"]).is_err());
+    assert!(Cli::try_parse_from(["trusty-mpm", "sessions", "stop"]).is_err());
 }
 
 #[test]
 fn cli_parses_session_list() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "list"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "list"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::List { dir },
@@ -344,7 +344,7 @@ fn cli_parses_session_list() {
 
 #[test]
 fn cli_parses_session_clean() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "clean"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "clean"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Clean { dir },
@@ -355,7 +355,7 @@ fn cli_parses_session_clean() {
 
 #[test]
 fn cli_parses_session_info() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "info", "abc-123"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "info", "abc-123"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Info { id_or_name },
@@ -366,7 +366,7 @@ fn cli_parses_session_info() {
 
 #[test]
 fn cli_parses_session_instructions() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "instructions"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "instructions"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Instructions { dir },
@@ -378,7 +378,7 @@ fn cli_parses_session_instructions() {
 #[test]
 fn cli_parses_session_instructions_with_dir() {
     let cli =
-        Cli::try_parse_from(["trusty-mpm", "session", "instructions", "--dir", "/tmp"]).unwrap();
+        Cli::try_parse_from(["trusty-mpm", "sessions", "instructions", "--dir", "/tmp"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Instructions { dir },
@@ -433,13 +433,13 @@ fn cli_parses_tui_with_interval() {
 
 #[test]
 fn cli_parses_session_tui() {
-    // #1392: the coordinator TUI is the `tm session tui` subcommand (renamed
+    // #1392: the coordinator TUI is the `tm sessions tui` subcommand (renamed
     // from the former top-level `tm coordinator-tui`). Its `--interval-ms`
     // defaults to 1500. The `url` arg carries `env = "TRUSTY_MPM_URL"`, so an
     // ambient `TRUSTY_MPM_URL` in the test runner would override the (absent)
     // default — assert only the env-independent interval default here, and the
     // url plumbing in `cli_parses_session_tui_with_flags`.
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "tui"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "tui"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Tui { interval_ms, .. },
@@ -454,7 +454,7 @@ fn cli_parses_session_tui() {
 fn cli_parses_session_tui_with_flags() {
     let cli = Cli::try_parse_from([
         "trusty-mpm",
-        "session",
+        "sessions",
         "tui",
         "--url",
         "http://127.0.0.1:9999",
@@ -471,6 +471,34 @@ fn cli_parses_session_tui_with_flags() {
         }
         other => panic!("expected Session::Tui, got {other:?}"),
     }
+}
+
+#[test]
+fn cli_parses_sessions_plural() {
+    // #1394: the command group is invoked as the plural `sessions` (matching
+    // the `/api/v1/sessions/*` HTTP API). Assert a representative subcommand
+    // parses under the plural name.
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "list"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::List { dir },
+        } => assert_eq!(dir, None),
+        other => panic!("expected sessions list, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_rejects_singular_session() {
+    // #1394: the singular `session` spelling was renamed to `sessions` with NO
+    // alias kept. Parsing the singular name must fail with an
+    // unrecognized-subcommand error so the CLI and the HTTP API agree on one
+    // name. (The separate `session-manager` command is unaffected and remains.)
+    let err = Cli::try_parse_from(["trusty-mpm", "session", "list"]).unwrap_err();
+    assert_eq!(
+        err.kind(),
+        clap::error::ErrorKind::InvalidSubcommand,
+        "singular `session` must be rejected as an unrecognized subcommand"
+    );
 }
 
 #[test]
@@ -658,7 +686,7 @@ fn cli_parses_supervisor_flags() {
 fn cli_parses_session_new() {
     let cli = Cli::try_parse_from([
         "trusty-mpm",
-        "session",
+        "sessions",
         "new",
         "https://github.com/owner/repo",
         "--git-ref",
@@ -697,7 +725,7 @@ fn cli_parses_session_new_with_tcode_runtime() {
     // `--runtime tcode`; this guards the flag wiring on the New subcommand.
     let cli = Cli::try_parse_from([
         "trusty-mpm",
-        "session",
+        "sessions",
         "new",
         "https://github.com/owner/repo",
         "--task",
@@ -723,7 +751,7 @@ fn cli_rejects_unknown_runtime_at_parse_time() {
     // rather than being forwarded to the daemon and rejected at the HTTP layer.
     let err = Cli::try_parse_from([
         "trusty-mpm",
-        "session",
+        "sessions",
         "new",
         "https://github.com/owner/repo",
         "--task",
@@ -741,7 +769,7 @@ fn cli_rejects_unknown_runtime_at_parse_time() {
 
 #[test]
 fn cli_parses_session_ls() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "ls", "--json"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "ls", "--json"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Ls { json },
@@ -752,7 +780,7 @@ fn cli_parses_session_ls() {
 
 #[test]
 fn cli_parses_session_activity() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "activity", "abc"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "activity", "abc"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Activity { id },
@@ -763,7 +791,7 @@ fn cli_parses_session_activity() {
 
 #[test]
 fn cli_parses_session_send() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "send", "abc", "hello"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "send", "abc", "hello"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Send { id, text },
@@ -777,7 +805,7 @@ fn cli_parses_session_send() {
 
 #[test]
 fn cli_parses_session_answer() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "answer", "abc", "rebase"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "answer", "abc", "rebase"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Answer { id, answer },
@@ -791,7 +819,7 @@ fn cli_parses_session_answer() {
 
 #[test]
 fn cli_parses_session_attach() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "attach", "abc"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "attach", "abc"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Attach { id },
@@ -802,7 +830,7 @@ fn cli_parses_session_attach() {
 
 #[test]
 fn cli_parses_session_managed_stop() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "managed-stop", "abc"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "managed-stop", "abc"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::ManagedStop { id },
@@ -814,7 +842,7 @@ fn cli_parses_session_managed_stop() {
 #[test]
 fn cli_parses_session_runtime_stop() {
     // The deprecated `runtime-stop` verb still parses (alias of `stop`, #1205).
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "runtime-stop", "abc"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "runtime-stop", "abc"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::RuntimeStop { id },
@@ -826,7 +854,7 @@ fn cli_parses_session_runtime_stop() {
 #[test]
 fn cli_parses_session_managed_resume() {
     // The deprecated `managed-resume` verb still parses (alias of `resume`, #1205).
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "managed-resume", "abc"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "managed-resume", "abc"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::ManagedResume { id },
@@ -839,7 +867,7 @@ fn cli_parses_session_managed_resume() {
 fn cli_parses_session_stop_verb() {
     // The canonical `stop` verb parses to the local-session Stop action (#1205);
     // it shares the clean name the deprecated managed verbs now point at.
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "stop", "abc"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "stop", "abc"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Stop { id_or_name },
@@ -851,7 +879,7 @@ fn cli_parses_session_stop_verb() {
 #[test]
 fn cli_parses_session_resume_verb() {
     // The canonical `resume` verb parses to the Resume action (#1205).
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "resume", "abc"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "resume", "abc"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Resume { id_or_name },
@@ -863,7 +891,7 @@ fn cli_parses_session_resume_verb() {
 #[test]
 fn cli_parses_session_decommission() {
     // `decommission` remains the terminal teardown verb (#1205).
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "decommission", "abc"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "decommission", "abc"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::Decommission { id },
@@ -875,8 +903,14 @@ fn cli_parses_session_decommission() {
 #[test]
 fn cli_parses_session_prune_idle() {
     // `prune-idle` (#1313) accepts both flags; defaults are false.
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "prune-idle", "--dry-run", "--json"])
-        .unwrap();
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "sessions",
+        "prune-idle",
+        "--dry-run",
+        "--json",
+    ])
+    .unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::PruneIdle { dry_run, json },
@@ -891,7 +925,7 @@ fn cli_parses_session_prune_idle() {
 #[test]
 fn cli_parses_session_prune_idle_defaults() {
     // With no flags, prune-idle defaults to a live (non-dry-run), text run.
-    let cli = Cli::try_parse_from(["trusty-mpm", "session", "prune-idle"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "prune-idle"]).unwrap();
     match cli.command {
         Command::Session {
             action: SessionAction::PruneIdle { dry_run, json },
@@ -939,7 +973,7 @@ fn classify_managed_target_matches_by_id() {
 #[test]
 fn classify_managed_target_matches_by_name_returns_id() {
     // A friendly managed name must resolve to the canonical UUID the managed
-    // endpoints require, so `tm session stop <name>` works for managed sessions.
+    // endpoints require, so `tm sessions stop <name>` works for managed sessions.
     use crate::commands::managed::{ManagedSummary, classify_managed_target};
     let uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
     let sessions: Vec<ManagedSummary> = serde_json::from_value(serde_json::json!([

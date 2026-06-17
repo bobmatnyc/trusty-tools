@@ -107,7 +107,7 @@ command prints the cached counts and exits 0.
 ### 3.2 Step 1 — Spawn a session
 
 ```
-tm session new \
+tm sessions new \
   --repo  <https://github.com/org/repo> \
   --ref   <branch-or-sha> \
   --task  "<human-readable task description>" \
@@ -182,7 +182,7 @@ The driver must not treat the optional LLM `state` field as authoritative when
 **Send arbitrary text to the session pane:**
 
 ```
-tm session send <id> "<text>"
+tm sessions send <id> "<text>"
 ```
 
 HTTP: `POST /api/v1/sessions/managed/{id}/send  { "text": "..." }`
@@ -198,7 +198,7 @@ When `pending_decision` is non-null, the driver applies the autonomy policy
 To inject an accepted or overridden answer:
 
 ```
-tm session answer <id> "<answer text>"
+tm sessions answer <id> "<answer text>"
 ```
 
 HTTP: `POST /api/v1/sessions/managed/{id}/answer  { "answer": "..." }`
@@ -214,10 +214,10 @@ workspace.
 
 | Operation | CLI | HTTP | Effect |
 |---|---|---|---|
-| Stop runtime (keep workspace) | `tm session runtime-stop <id>` | `POST /api/v1/sessions/managed/{id}/runtime-stop` | Kills tmux session + claude process; workspace intact; state → `stopped`; resumable |
-| Resume (restart runtime) | `tm session managed-resume <id>` | `POST /api/v1/sessions/managed/{id}/resume` | Re-spawns claude in the EXISTING workspace; no re-clone; state → `active` |
-| Decommission (full teardown) | `tm session decommission <id>` | `POST /api/v1/sessions/managed/{id}/decommission` | Kills runtime, removes workspace from disk, state → `decommissioned`; tombstone record kept; no resume possible |
-| Legacy stop alias | `tm session managed-stop <id>` | `DELETE /api/v1/sessions/managed/{id}` | Delegates to `runtime-stop`; backward-compatible |
+| Stop runtime (keep workspace) | `tm sessions runtime-stop <id>` | `POST /api/v1/sessions/managed/{id}/runtime-stop` | Kills tmux session + claude process; workspace intact; state → `stopped`; resumable |
+| Resume (restart runtime) | `tm sessions managed-resume <id>` | `POST /api/v1/sessions/managed/{id}/resume` | Re-spawns claude in the EXISTING workspace; no re-clone; state → `active` |
+| Decommission (full teardown) | `tm sessions decommission <id>` | `POST /api/v1/sessions/managed/{id}/decommission` | Kills runtime, removes workspace from disk, state → `decommissioned`; tombstone record kept; no resume possible |
+| Legacy stop alias | `tm sessions managed-stop <id>` | `DELETE /api/v1/sessions/managed/{id}` | Delegates to `runtime-stop`; backward-compatible |
 
 **Lifecycle state machine:**
 
@@ -253,7 +253,7 @@ for correlating the session to its artifacts.
 **Listing all sessions:**
 
 ```
-tm session ls [--json]
+tm sessions ls [--json]
 ```
 
 HTTP: `GET /api/v1/sessions/managed`
@@ -270,7 +270,7 @@ GET /api/v1/sessions/managed/{id}
 **Getting the tmux attach command (for human inspection):**
 
 ```
-tm session attach <id>        # prints: tmux attach-session -t tmpm-<slug>
+tm sessions attach <id>        # prints: tmux attach-session -t tmpm-<slug>
 ```
 
 HTTP: `GET /api/v1/sessions/managed/{id}/attach-cmd`
@@ -359,16 +359,16 @@ the daemon base URL discovered from `~/.trusty-mpm/daemon.lock` (default
 |---|---|
 | `tm catalog sync [--force]` | `CatalogSync::sync` — fetches claude-mpm repo catalog to `~/.trusty-mpm/catalog/` |
 | `tm catalog ls [--json]` | Lists cached agents and skills |
-| `tm session new --repo --ref --task [--name]` | `POST /api/v1/sessions/managed` |
-| `tm session ls [--json]` | `GET /api/v1/sessions/managed` |
-| `tm session activity <id>` | `GET /api/v1/sessions/managed/{id}/activity` |
-| `tm session send <id> <text>` | `POST /api/v1/sessions/managed/{id}/send` |
-| `tm session answer <id> <answer>` | `POST /api/v1/sessions/managed/{id}/answer` |
-| `tm session attach <id>` | `GET /api/v1/sessions/managed/{id}/attach-cmd` |
-| `tm session runtime-stop <id>` | `POST /api/v1/sessions/managed/{id}/runtime-stop` |
-| `tm session managed-stop <id>` | Alias for `runtime-stop` (backward-compatible) |
-| `tm session managed-resume <id>` | `POST /api/v1/sessions/managed/{id}/resume` |
-| `tm session decommission <id>` | `POST /api/v1/sessions/managed/{id}/decommission` |
+| `tm sessions new --repo --ref --task [--name]` | `POST /api/v1/sessions/managed` |
+| `tm sessions ls [--json]` | `GET /api/v1/sessions/managed` |
+| `tm sessions activity <id>` | `GET /api/v1/sessions/managed/{id}/activity` |
+| `tm sessions send <id> <text>` | `POST /api/v1/sessions/managed/{id}/send` |
+| `tm sessions answer <id> <answer>` | `POST /api/v1/sessions/managed/{id}/answer` |
+| `tm sessions attach <id>` | `GET /api/v1/sessions/managed/{id}/attach-cmd` |
+| `tm sessions runtime-stop <id>` | `POST /api/v1/sessions/managed/{id}/runtime-stop` |
+| `tm sessions managed-stop <id>` | Alias for `runtime-stop` (backward-compatible) |
+| `tm sessions managed-resume <id>` | `POST /api/v1/sessions/managed/{id}/resume` |
+| `tm sessions decommission <id>` | `POST /api/v1/sessions/managed/{id}/decommission` |
 
 ---
 
@@ -396,7 +396,7 @@ The existing catalog-sync mechanism delivers the content:
 
 1. `tm catalog sync` fetches `repo/.claude/agents` and `repo/.claude/skills` from
    the claude-mpm repository and caches them under `~/.trusty-mpm/catalog/`.
-2. `prepare_session` (called by the workspace provisioner on `tm session new`) reads
+2. `prepare_session` (called by the workspace provisioner on `tm sessions new`) reads
    from `~/.trusty-mpm/catalog/` and deploys agents/skills into each new isolated
    workspace under `~/.trusty-mpm/workspaces/<project>/<session-id>/`.
 3. The calling agentic process loads the `harness-operator` agent and
@@ -440,7 +440,7 @@ end-to-end test driven by a calling agentic process (not a human typing CLI comm
 
 7. **Decommission**: the calling agentic process calls `POST .../decommission`; the
    session transitions to `decommissioned`; the workspace directory no longer exists
-   on disk; the tombstone record remains in `tm session ls` output.
+   on disk; the tombstone record remains in `tm sessions ls` output.
 
 8. **Autonomy policy**: during the cycle above, the driver auto-accepted at least one
    proposed default (using structured guardrail signals, not pane-reading alone) and

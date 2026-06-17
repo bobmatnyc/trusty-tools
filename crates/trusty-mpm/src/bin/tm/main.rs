@@ -274,7 +274,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Meta { action } => commands::meta::meta(action),
     };
 
-    // Top-level exit-code translation: a `tm session prune-idle` that found the
+    // Top-level exit-code translation: a `tm sessions prune-idle` that found the
     // Session Manager unavailable returns `PruneError::SmUnavailable`. That is a
     // graceful no-op, not a failure, so exit with the distinct code 75 (the
     // pause skill branches on it) instead of anyhow's default 1. Any other error

@@ -1,6 +1,6 @@
 //! Managed session-manager CLI handlers (session-manager MVP).
 //!
-//! Why: the session-manager MVP adds operator commands (`tm session new/ls/
+//! Why: the session-manager MVP adds operator commands (`tm sessions new/ls/
 //! activity/send/answer/attach/managed-stop` and `tm catalog sync/ls`) that talk
 //! to the daemon's `/api/v1/sessions/managed/*` surface. Keeping these handlers
 //! in their own file keeps `session.rs` under the SLOC cap.
@@ -55,7 +55,7 @@ pub(crate) struct ManagedSummary {
 
 /// Decide whether an id-or-name refers to a MANAGED session, returning its UUID.
 ///
-/// Why: the canonical `tm session stop`/`resume` verbs must operate on managed
+/// Why: the canonical `tm sessions stop`/`resume` verbs must operate on managed
 /// sessions (the documented #842 driver-skill behavior) while still serving the
 /// older local/project-session family. #1218: those verbs were routing every
 /// argument to the project-sessions API, so managed UUIDs came back "not found".
@@ -79,7 +79,7 @@ pub(crate) fn classify_managed_target(
 
 /// Resolve an id-or-name to a MANAGED session id by querying the daemon.
 ///
-/// Why: `tm session stop`/`resume` need to know — before choosing an endpoint —
+/// Why: `tm sessions stop`/`resume` need to know — before choosing an endpoint —
 /// whether the argument is a managed session (#1218). Fetching the managed list
 /// and applying [`classify_managed_target`] keeps that decision in one place and
 /// off the project-session path.
@@ -110,7 +110,7 @@ pub(crate) async fn resolve_managed_id(
     classify_managed_target(&body.sessions, id_or_name)
 }
 
-/// `tm session new` — spawn a managed session from a repo + ref.
+/// `tm sessions new` — spawn a managed session from a repo + ref.
 ///
 /// Why: the operator-facing entry point to provision an isolated workspace and
 /// start a harness in it, optionally selecting the runtime backend.
@@ -162,7 +162,7 @@ pub(crate) async fn session_new(
     Ok(())
 }
 
-/// `tm session ls` — list managed sessions.
+/// `tm sessions ls` — list managed sessions.
 ///
 /// Why: operators need a quick view of every managed session and its pending
 /// decision.
@@ -203,7 +203,7 @@ pub(crate) async fn session_ls(
     Ok(())
 }
 
-/// `tm session activity <id>` — inspect a managed session's activity state.
+/// `tm sessions activity <id>` — inspect a managed session's activity state.
 ///
 /// Why: inspect what a session is doing without attaching; the raw pane is
 /// always returned for the calling agentic process to reason over. The LLM
@@ -281,7 +281,7 @@ pub(crate) async fn session_activity(
     Ok(())
 }
 
-/// `tm session send <id> <text>` — inject text into a managed session's pane.
+/// `tm sessions send <id> <text>` — inject text into a managed session's pane.
 ///
 /// Why: send a message to the harness without attaching to tmux.
 /// What: POSTs `/api/v1/sessions/managed/{id}/send`.
@@ -300,7 +300,7 @@ pub(crate) async fn session_send(
     handle_simple_ok(resp, "sent").await
 }
 
-/// `tm session answer <id> <answer>` — answer a pending decision.
+/// `tm sessions answer <id> <answer>` — answer a pending decision.
 ///
 /// Why: resolve a decision the harness is blocked on.
 /// What: POSTs `/api/v1/sessions/managed/{id}/answer`.
@@ -319,7 +319,7 @@ pub(crate) async fn session_answer(
     handle_simple_ok(resp, "answered").await
 }
 
-/// `tm session attach <id>` — print the tmux attach command.
+/// `tm sessions attach <id>` — print the tmux attach command.
 ///
 /// Why: operators need the exact `tmux attach` command to take over a pane.
 /// What: GETs `/api/v1/sessions/managed/{id}/attach-cmd`.
@@ -346,7 +346,7 @@ pub(crate) async fn session_attach(
     Ok(())
 }
 
-/// `tm session managed-stop <id>` — stop runtime only (keep workspace, deprecated alias).
+/// `tm sessions managed-stop <id>` — stop runtime only (keep workspace, deprecated alias).
 ///
 /// Why: backward-compatible alias for `session_stop`; existing scripts that call
 /// `managed-stop` keep working but get a deprecation nudge toward `stop` (#1205).
@@ -363,7 +363,7 @@ pub(crate) async fn session_managed_stop(
     session_stop(client, url, id).await
 }
 
-/// `tm session runtime-stop <id>` — stop runtime only (deprecated alias).
+/// `tm sessions runtime-stop <id>` — stop runtime only (deprecated alias).
 ///
 /// Why: `runtime-stop` was renamed to `stop` (#1205); the old spelling still
 /// parses but emits a deprecation notice steering operators to `stop`.
@@ -378,7 +378,7 @@ pub(crate) async fn session_runtime_stop(
     session_stop(client, url, id).await
 }
 
-/// `tm session managed-resume <id>` — resume a stopped session (deprecated alias).
+/// `tm sessions managed-resume <id>` — resume a stopped session (deprecated alias).
 ///
 /// Why: `managed-resume` was renamed to `resume` (#1205); the old spelling still
 /// parses but emits a deprecation notice steering operators to `resume`.
@@ -394,7 +394,7 @@ pub(crate) async fn session_managed_resume(
     session_resume(client, url, id).await
 }
 
-/// `tm session stop <id>` — stop the runtime of a managed session, keep the workspace.
+/// `tm sessions stop <id>` — stop the runtime of a managed session, keep the workspace.
 ///
 /// Why: a session ENDURES beyond its runtime; `stop` kills only the tmux session
 /// and claude process, preserving the workspace for later `resume`. Renamed from
@@ -420,7 +420,7 @@ pub(crate) async fn session_stop(
     Ok(())
 }
 
-/// `tm session resume <id>` — resume a stopped managed session in its existing workspace.
+/// `tm sessions resume <id>` — resume a stopped managed session in its existing workspace.
 ///
 /// Why: after `stop`, the workspace is still on disk; `resume` re-spawns the
 /// runtime there without re-cloning. Renamed from the verbose `managed-resume`
@@ -457,7 +457,7 @@ pub(crate) async fn session_resume(
     Ok(())
 }
 
-/// `tm session decommission <id>` — full teardown (remove workspace from disk).
+/// `tm sessions decommission <id>` — full teardown (remove workspace from disk).
 ///
 /// Why: the ONLY operation that permanently removes the workspace directory.
 /// Unlike `runtime-stop`, decommission is terminal — no resume is possible.

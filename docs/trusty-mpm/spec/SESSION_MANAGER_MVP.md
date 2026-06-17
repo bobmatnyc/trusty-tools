@@ -141,7 +141,7 @@ runs in each session — it is purely a control plane.
 **The driving logic is borrowed, not built.** The substrate (trusty-mpm daemon) is a
 dumb harness launcher and observer. It does not make autonomy decisions. Those are
 the calling agentic process's job — whether that is Bob's CTO Claude MPM instance, a Unicorn
-Factory controlling bot, or a human typing `tm session send`. See section 5 for the
+Factory controlling bot, or a human typing `tm sessions send`. See section 5 for the
 substrate/caller boundary.
 
 ```
@@ -464,7 +464,7 @@ share.
 ### 6.3 CLI surface
 
 ```
-tm session new --repo <url> --ref <branch-or-sha> --task "<description>" [--name <hint>]
+tm sessions new --repo <url> --ref <branch-or-sha> --task "<description>" [--name <hint>]
 ```
 
 `--repo` and `--ref` replace the v1 `--cwd` flag (which assumed the caller had
@@ -671,13 +671,13 @@ Response `200 OK`:
 ### 8.3 CLI surface (`tm session`)
 
 ```
-tm session new --repo <url> --ref <branch-or-sha> --task "<desc>" [--name <hint>]
-tm session ls [--json]
-tm session activity <id>
-tm session send <id> "<text>"
-tm session answer <id> "<answer>"
-tm session attach <id>     # prints attach_cmd; does not exec into tmux
-tm session stop <id>
+tm sessions new --repo <url> --ref <branch-or-sha> --task "<desc>" [--name <hint>]
+tm sessions ls [--json]
+tm sessions activity <id>
+tm sessions send <id> "<text>"
+tm sessions answer <id> "<answer>"
+tm sessions attach <id>     # prints attach_cmd; does not exec into tmux
+tm sessions stop <id>
 ```
 
 `tm catalog sync [--force]` and `tm catalog ls` are added alongside.
@@ -837,20 +837,20 @@ The smallest independently demoable slice:
 
 1. `tm catalog sync` fetches the agent/skill catalog from the claude-mpm repo and
    caches it under `~/.trusty-mpm/catalog/`.
-2. `tm session new --repo https://github.com/… --ref main --task "implement OAuth2"`
+2. `tm sessions new --repo https://github.com/… --ref main --task "implement OAuth2"`
    provisions an isolated workspace under `~/.trusty-mpm/workspaces/`, runs
    `prepare_session` using the synced catalog, creates a named tmux session, and
    spawns `env -u ANTHROPIC_API_KEY claude` in the pane.
-3. `tm session ls` shows the session with its name, state, workspace path, repo, and
+3. `tm sessions ls` shows the session with its name, state, workspace path, repo, and
    branch.
-4. `tm session send <id> "what have you done so far?"` injects text into the pane.
-5. `tm session activity <id>` returns an LLM verdict plus any `pending_decision` +
+4. `tm sessions send <id> "what have you done so far?"` injects text into the pane.
+5. `tm sessions activity <id>` returns an LLM verdict plus any `pending_decision` +
    `proposed_default` the harness has surfaced. A second call without pane change
    returns the cached verdict without an LLM call.
-6. `tm session answer <id> "Create branch fix/token-refresh"` injects the answer
+6. `tm sessions answer <id> "Create branch fix/token-refresh"` injects the answer
    into the pane and clears `pending_decision`.
-7. `tm session attach <id>` prints `tmux attach-session -t tmpm-<slug>`.
-8. `tm session stop <id>` kills the tmux session and marks the record dead.
+7. `tm sessions attach <id>` prints `tmux attach-session -t tmpm-<slug>`.
+8. `tm sessions stop <id>` kills the tmux session and marks the record dead.
 9. After a daemon restart, running sessions are re-adopted; dead ones are marked
    orphaned.
 
@@ -861,7 +861,7 @@ The smallest independently demoable slice:
 1. `tm catalog sync` exits 0 and writes agent/skill artifacts under
    `~/.trusty-mpm/catalog/`; `tm catalog ls` lists at least one agent and one skill.
 
-2. `tm session new --repo <url> --ref main --task "…"` exits 0; the workspace exists
+2. `tm sessions new --repo <url> --ref main --task "…"` exits 0; the workspace exists
    at `~/.trusty-mpm/workspaces/<project>/<session-id>/`; it is NOT inside any of
    the operator's existing project directories; `tmux has-session -t tmpm-<slug>`
    succeeds.
@@ -874,14 +874,14 @@ The smallest independently demoable slice:
    in its environment. Confirmed by verifying the command sent was
    `env -u ANTHROPIC_API_KEY claude`.
 
-5. `tm session ls` returns a list that includes the session from criterion 2 with
+5. `tm sessions ls` returns a list that includes the session from criterion 2 with
    `state: active` or `state: starting`, and includes `workspace_path`, `repo_url`,
    and `branch` fields with correct values.
 
-6. `tm session send <id> "hello from test"` exits 0; the string appears in the pane
+6. `tm sessions send <id> "hello from test"` exits 0; the string appears in the pane
    output captured by `tmux capture-pane -p -t <name>` within 2 seconds.
 
-7. `tm session activity <id>` returns a JSON body with:
+7. `tm sessions activity <id>` returns a JSON body with:
    - `verdict.state` set to one of `{working, idle, blocked_on_permission, errored, done}`.
    - `verdict.summary` non-empty.
    - `cost.model`, `cost.input_tokens`, `cost.latency_ms` present.
@@ -889,20 +889,20 @@ The smallest independently demoable slice:
    - `proposed_default` field present (may be `null`).
 
 8. With a pane that has been idle (unchanged last-60-line tail), a second call to
-   `tm session activity <id>` returns `cache_hit: true` and does NOT increment
+   `tm sessions activity <id>` returns `cache_hit: true` and does NOT increment
    `input_tokens` in the cost tally.
 
-9. When `pending_decision` is non-null, `tm session answer <id> "<text>"` exits 0;
-   a subsequent `tm session activity <id>` returns `pending_decision: null`; the
+9. When `pending_decision` is non-null, `tm sessions answer <id> "<text>"` exits 0;
+   a subsequent `tm sessions activity <id>` returns `pending_decision: null`; the
    injected answer text appears in the pane capture.
 
-10. `tm session attach <id>` prints exactly `tmux attach-session -t tmpm-<slug>` to
+10. `tm sessions attach <id>` prints exactly `tmux attach-session -t tmpm-<slug>` to
     stdout and exits 0.
 
-11. `tm session stop <id>` exits 0; `tmux has-session -t <name>` returns non-zero
-    afterwards; `tm session ls` shows the record with `state: dead`.
+11. `tm sessions stop <id>` exits 0; `tmux has-session -t <name>` returns non-zero
+    afterwards; `tm sessions ls` shows the record with `state: dead`.
 
-12. After `tm daemon restart` (SIGTERM + relaunch), `tm session ls` shows:
+12. After `tm daemon restart` (SIGTERM + relaunch), `tm sessions ls` shows:
     - Previously active sessions as `active` (re-adopted from tmux).
     - Sessions whose tmux session was killed before the restart as `orphaned`.
 
@@ -949,7 +949,7 @@ the acceptance criteria stay tight.
 
 ### Open Questions
 
-1. Should `tm session new` block until the `claude` prompt is visible in the pane
+1. Should `tm sessions new` block until the `claude` prompt is visible in the pane
    (polling `capture-pane`) or return immediately with `state: starting`?
    Recommendation: return immediately; let the operator poll `activity` or attach.
 

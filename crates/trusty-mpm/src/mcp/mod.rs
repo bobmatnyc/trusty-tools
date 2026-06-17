@@ -122,7 +122,7 @@ pub trait OrchestratorBackend: Send + Sync {
     ///
     /// Why: the driver skill needs a typed, JSON-native way to create an
     ///      isolated, provisioned workspace and launch a harness in it — without
-    ///      scraping `tm session new` CLI text (the #842 defect).
+    ///      scraping `tm sessions new` CLI text (the #842 defect).
     /// What: provisions a workspace cloned from `repo_url` at `git_ref`, creates
     ///       the tmux host, launches the selected `runtime` (default claude-code)
     ///       with `task`, and returns the new session's id / tmux name /
