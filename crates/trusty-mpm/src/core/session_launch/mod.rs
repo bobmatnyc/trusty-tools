@@ -26,8 +26,8 @@ use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::{DeployStats, deploy_skills};
 use settings::{
     deploy_output_style, inject_trusty_memory_mcp, inject_trusty_search_mcp,
-    preseed_workspace_trust_home, remove_global_trusty_memory_hooks, write_output_style,
-    write_project_hooks,
+    preseed_workspace_trust_home, register_project_index, remove_global_trusty_memory_hooks,
+    write_output_style, write_project_hooks,
 };
 
 /// Outcome of the pre-launch preparation for one session.
@@ -167,11 +167,18 @@ pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepRe
         tracing::warn!("failed to inject trusty-memory MCP server: {err}");
     }
 
-    // Inject the `trusty-search` MCP server too (issue #1270 / step 4) so the
-    // spawned session can reach the code-search tools (`search`, `grep`,
-    // `get_call_chain`, …) alongside the memory tools. Non-fatal: the session
-    // still launches without code search.
-    if let Err(err) = inject_trusty_search_mcp(project_dir) {
+    // Register + pin the project's trusty-search index (issue #1373). Derive
+    // the project's canonical index id (git-root basename, via the shared
+    // `trusty_common::derive_index_id`), best-effort find-or-create it in the
+    // running daemon, then inject the `trusty-search` MCP stub PINNED to that id
+    // (`serve --index <id>`). Pinning makes a bare `search`/`grep` resolve to
+    // the session's OWN project index instead of letting the LLM guess (and
+    // routinely pick the wrong `claude-mpm` index). The daemon-unreachable case
+    // is handled inside `register_project_index` (logged, non-fatal) and still
+    // returns the id so the stub is pinned; a `None` id (empty derivation) falls
+    // back to the unpinned stub. Either way the session launches.
+    let pinned_index = register_project_index(project_dir);
+    if let Err(err) = inject_trusty_search_mcp(project_dir, pinned_index.as_deref()) {
         tracing::warn!("failed to inject trusty-search MCP server: {err}");
     }
 

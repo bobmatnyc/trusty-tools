@@ -1,5 +1,21 @@
 # Changelog — trusty-mpm
 
+## [0.10.0] — 2026-06-17
+
+### Fixed (closes #1373)
+
+- **Sessions now register + pin their own project's trusty-search index.** At
+  session launch `prepare_session` derives the project's canonical index id
+  (git-root basename, via the shared `trusty_common::derive_index_id`),
+  best-effort find-or-creates it in the running trusty-search daemon
+  (`POST /indexes`), and injects the `trusty-search` MCP stub **pinned** to that
+  id (`serve --index <id>`). A bare `search`/`grep` therefore resolves to the
+  session's own project index instead of letting the LLM guess — which
+  routinely picked the wrong (usually persistent `claude-mpm`) index. The
+  daemon-unreachable case is graceful: it logs a warning and still pins the
+  stub (the index is created on first reindex); an empty derived id falls back
+  to the unpinned `serve` stub. Either way the session always launches.
+
 ## [0.9.0] — 2026-06-16
 
 ### Release

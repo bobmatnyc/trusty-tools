@@ -45,7 +45,10 @@ pub fn detect_project(start: &Path) -> ProjectContext {
     loop {
         // Prefer .git as the strongest signal of a project root.
         if current.join(".git").exists() {
-            let name = basename(&current);
+            // Single source of truth (#1373): derive the id via the shared
+            // `trusty_common::derive_index_id` so trusty-mpm's register-and-pin
+            // and this CLI path always produce the identical index id.
+            let name = trusty_common::derive_index_id(&current);
             return ProjectContext {
                 index_id: name,
                 root_path: current,
@@ -54,7 +57,7 @@ pub fn detect_project(start: &Path) -> ProjectContext {
         }
         // Then check for an explicit trusty-search marker.
         if current.join(".trusty-search").exists() {
-            let name = basename(&current);
+            let name = trusty_common::derive_index_id(&current);
             return ProjectContext {
                 index_id: name,
                 root_path: current,
@@ -67,7 +70,7 @@ pub fn detect_project(start: &Path) -> ProjectContext {
     }
     // Fallback: use CWD basename so commands still have something to call the index.
     let cwd = start.to_path_buf();
-    let name = basename(&cwd);
+    let name = trusty_common::derive_index_id(&cwd);
     ProjectContext {
         index_id: name,
         root_path: cwd,
@@ -75,9 +78,12 @@ pub fn detect_project(start: &Path) -> ProjectContext {
     }
 }
 
-/// Why: Several detection branches need a UTF-8 directory basename.
+/// Why: the tests below assert that the derived `index_id` equals the path
+/// basename; production code now derives ids via `trusty_common::derive_index_id`
+/// (#1373), so this local helper is test-only.
 /// What: Returns the final path component as a `String`, lossy on non-UTF8.
 /// Test: basename(Path::new("/foo/bar")) == "bar"; empty path returns "".
+#[cfg(test)]
 fn basename(p: &Path) -> String {
     p.file_name()
         .unwrap_or_default()

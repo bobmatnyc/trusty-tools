@@ -7,6 +7,27 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.26.0] — 2026-06-17
+
+### Added (closes #1373)
+
+- **`trusty-search serve --index <id>` / `--project <path>` pin an MCP session
+  to one index.** When pinned, every tool handler defaults an omitted
+  `index_id` to the pinned id, and fan-out tools (`search_all` / `grep` without
+  `index_id`) scope to the pinned index instead of sweeping every registered
+  index. The pinned index is advertised in `tools/list` (its `index_id` becomes
+  optional and its description names the default) so the LLM never has to call
+  `list_indexes` and guess. `--index` wins over `--project`; `--project`'s id is
+  derived via the shared `trusty_common::derive_index_id` (git-root basename).
+  Without either flag, behaviour is unchanged — callers must supply `index_id`
+  and fan-out sweeps all indexes.
+
+### Changed
+
+- **Index-id derivation is now the single source of truth in `trusty-common`.**
+  `detect_project` delegates to `trusty_common::derive_index_id` so trusty-mpm's
+  register-and-pin and trusty-search's CLI/MCP paths always agree on the id.
+
 ## [0.24.9] — 2026-06-16
 
 ### Fixed (closes #1325)

@@ -1,5 +1,17 @@
 # Changelog — trusty-common
 
+## [0.17.0] — 2026-06-17
+
+### Added (refs #1373)
+
+- **`index_id` module: `derive_index_id` + `resolve_project_root`.** The single
+  source of truth for deriving a trusty-search index id from a project path
+  (the path basename, preserved verbatim for backward-compatibility) and for
+  walking up to the git root. Both trusty-search (`detect_project`, serve pin)
+  and trusty-mpm (register-and-pin at session launch) call these so they cannot
+  drift. Re-exported at the crate root as `trusty_common::derive_index_id` and
+  `trusty_common::resolve_project_root`.
+
 ## [0.15.3] — 2026-06-16
 
 ### Changed (closes #1326)

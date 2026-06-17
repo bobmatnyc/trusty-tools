@@ -36,7 +36,7 @@ pub(crate) mod misc;
 pub(crate) mod search;
 pub(crate) mod types;
 
-pub use descriptors::tool_descriptors;
+pub use descriptors::{tool_descriptors, tool_descriptors_pinned};
 
 use types::{
     wrap_stage_not_ready_error, wrap_text_content, wrap_tool_error, wrap_tool_result, DispatchError,
@@ -71,6 +71,14 @@ pub const STAGE_NOT_READY_CODE: i32 = -32010;
 pub struct McpServer {
     pub(crate) base_url: String,
     pub(crate) http: reqwest::Client,
+    /// Index id this MCP session is pinned to, if any (issue #1373).
+    ///
+    /// `Some(id)` when `trusty-search serve --index <id>` (or `--project`) was
+    /// passed: tool handlers default an omitted `index_id` to it and fan-out
+    /// tools scope to it instead of sweeping every registered index. `None`
+    /// preserves the legacy behaviour (callers must supply `index_id`; fan-out
+    /// sweeps all). See [`McpServer::resolve_index_id`].
+    pub(crate) pinned_index: Option<String>,
 }
 
 impl McpServer {
@@ -80,6 +88,7 @@ impl McpServer {
         Self {
             base_url: base_url.into(),
             http: reqwest::Client::new(),
+            pinned_index: None,
         }
     }
 
@@ -88,12 +97,51 @@ impl McpServer {
         Self {
             base_url: base_url.into(),
             http,
+            pinned_index: None,
         }
+    }
+
+    /// Pin this dispatcher to a single index id (issue #1373).
+    ///
+    /// Why: a trusty-mpm session launches `trusty-search serve --index <id>`
+    /// so every search/grep call targets the session's own project index
+    /// rather than letting the LLM guess (and routinely pick the wrong one,
+    /// usually `claude-mpm`). Pinning makes `index_id` optional for the LLM and
+    /// scopes fan-out tools to the one index.
+    /// What: builder that sets [`McpServer::pinned_index`]. An empty / blank id
+    /// is treated as "no pin" so a degenerate `--index ""` cannot wedge every
+    /// call onto an empty-string index.
+    /// Test: `resolve_index_id_prefers_explicit_then_pinned` in `tests.rs`;
+    /// pin-aware descriptors in `tests_tools_list.rs`.
+    pub fn with_pinned_index(mut self, index_id: impl Into<String>) -> Self {
+        let id = index_id.into();
+        self.pinned_index = if id.trim().is_empty() { None } else { Some(id) };
+        self
     }
 
     /// Daemon base URL.
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Resolve the effective index id for a tool call (issue #1373).
+    ///
+    /// Why: pinning lets the LLM omit `index_id` entirely — the session is
+    /// already scoped to one project index — while still honouring an explicit
+    /// caller-supplied id (which always wins, so a pinned session can still
+    /// reach another index when asked). Centralising the precedence in one
+    /// helper keeps every tool arm consistent.
+    /// What: returns the caller's `index_id` argument when present and
+    /// non-empty; otherwise the session's [`McpServer::pinned_index`]; otherwise
+    /// `None` (caller must then error as before).
+    /// Test: `resolve_index_id_prefers_explicit_then_pinned` in `tests.rs`.
+    pub(crate) fn resolve_index_id(&self, args: &Value) -> Option<String> {
+        if let Some(id) = args.get("index_id").and_then(Value::as_str) {
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+        self.pinned_index.clone()
     }
 
     /// Translate a JSON-RPC request into a daemon HTTP call and wrap the
@@ -164,7 +212,10 @@ impl McpServer {
                 }
             }
             "tools/list" => {
-                return Response::ok(id, serde_json::json!({ "tools": tool_descriptors() }));
+                // Advertise the session's pinned index (#1373) so the LLM can
+                // omit `index_id` and never has to guess which index to query.
+                let tools = tool_descriptors_pinned(self.pinned_index.as_deref());
+                return Response::ok(id, serde_json::json!({ "tools": tools }));
             }
             // OpenRPC 1.3.2 discovery — see `mcp::openrpc`. Returns the
             // full service description so orchestrators (open-mpm, etc.)

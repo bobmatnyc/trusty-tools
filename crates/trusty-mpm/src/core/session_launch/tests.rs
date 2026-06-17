@@ -1,6 +1,7 @@
 use super::settings::{
     clean_global_trusty_memory_hooks, deploy_output_style, inject_trusty_memory_mcp,
-    inject_trusty_search_mcp, preseed_workspace_trust, write_output_style, write_project_hooks,
+    inject_trusty_search_mcp, preseed_workspace_trust, register_project_index,
+    trusty_search_mcp_value, write_output_style, write_project_hooks,
 };
 use super::*;
 use tempfile::tempdir;
@@ -500,7 +501,7 @@ fn inject_trusty_search_mcp_adds_server() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    inject_trusty_search_mcp(project).expect("injection succeeds");
+    inject_trusty_search_mcp(project, None).expect("injection succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
@@ -517,7 +518,7 @@ fn inject_trusty_search_mcp_preserves_existing() {
     let project = tmp.path();
     inject_trusty_memory_mcp(project).expect("memory injection succeeds");
 
-    inject_trusty_search_mcp(project).expect("search injection succeeds");
+    inject_trusty_search_mcp(project, None).expect("search injection succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
@@ -535,9 +536,9 @@ fn inject_trusty_search_mcp_is_idempotent() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    inject_trusty_search_mcp(project).expect("first injection succeeds");
+    inject_trusty_search_mcp(project, None).expect("first injection succeeds");
     let first = std::fs::read_to_string(project.join(".mcp.json")).unwrap();
-    inject_trusty_search_mcp(project).expect("second injection succeeds");
+    inject_trusty_search_mcp(project, None).expect("second injection succeeds");
     let second = std::fs::read_to_string(project.join(".mcp.json")).unwrap();
 
     assert_eq!(first, second, "re-injecting must leave the file unchanged");
@@ -551,7 +552,7 @@ fn inject_both_mcp_servers_coexist() {
     let project = tmp.path();
 
     inject_trusty_memory_mcp(project).expect("memory injection succeeds");
-    inject_trusty_search_mcp(project).expect("search injection succeeds");
+    inject_trusty_search_mcp(project, None).expect("search injection succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
@@ -565,6 +566,93 @@ fn inject_both_mcp_servers_coexist() {
         servers["trusty-search"]["args"],
         serde_json::json!(["serve"])
     );
+}
+
+// ──────────────────────────────────────────────
+// trusty-search index pin (#1373)
+// ──────────────────────────────────────────────
+
+#[test]
+fn trusty_search_mcp_value_pins_index() {
+    // Why (#1373): when an index id is known the stub MUST pin the session via
+    // `serve --index <id>` so a bare search resolves to the project's own index.
+    let v = trusty_search_mcp_value(Some("trusty-tools"));
+    assert_eq!(v["command"], serde_json::json!("trusty-search"));
+    assert_eq!(
+        v["args"],
+        serde_json::json!(["serve", "--index", "trusty-tools"])
+    );
+}
+
+#[test]
+fn trusty_search_mcp_value_unpinned() {
+    // Why (#1373 back-compat): a `None` (or blank) id yields the legacy bare
+    // `serve` stub so the session still gets the tools.
+    assert_eq!(
+        trusty_search_mcp_value(None)["args"],
+        serde_json::json!(["serve"])
+    );
+    assert_eq!(
+        trusty_search_mcp_value(Some("   "))["args"],
+        serde_json::json!(["serve"]),
+        "a blank id must not pin"
+    );
+}
+
+#[test]
+fn inject_trusty_search_mcp_pins_index() {
+    // Why (#1373): the injected `.mcp.json` entry must carry the pin so the
+    // launched Claude session is scoped to its project index.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    inject_trusty_search_mcp(project, Some("my-project")).expect("injection succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        value["mcpServers"]["trusty-search"]["args"],
+        serde_json::json!(["serve", "--index", "my-project"])
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn register_project_index_returns_derived_id() {
+    // Why (#1373): registration must derive the project's index id (git-root
+    // basename, via the shared `trusty_common::derive_index_id`) AND remain
+    // graceful when the trusty-search daemon is unreachable — it still returns
+    // the id so the stub can be pinned. We force the daemon-down path by
+    // pointing the data dir at an empty temp dir so `read_daemon_addr` finds no
+    // `http_addr` file (and thus issues no HTTP POST). `#[serial]` because the
+    // override env var is process-global.
+    let data_dir = tempdir().unwrap();
+    let prev = std::env::var(trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV).ok();
+    // SAFETY: guarded by `#[serial]`; restored before the test returns.
+    unsafe {
+        std::env::set_var(
+            trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV,
+            data_dir.path(),
+        );
+    }
+
+    // A git-rooted project: id == the git-root basename, even from a nested dir.
+    let project = tempdir().unwrap();
+    std::fs::create_dir_all(project.path().join(".git")).unwrap();
+    let nested = project.path().join("crates/inner");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    let id = register_project_index(&nested);
+    let expected = trusty_common::derive_index_id(project.path());
+    assert_eq!(id, Some(expected), "id is the git-root basename");
+
+    // Restore the env var for other serial tests.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV, v),
+            None => std::env::remove_var(trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV),
+        }
+    }
 }
 
 #[test]

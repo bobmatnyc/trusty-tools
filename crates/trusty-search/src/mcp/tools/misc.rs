@@ -32,9 +32,14 @@ pub(super) async fn dispatch_misc_tool(
     match tool {
         "search_health" => Some(server.get("/health").await),
         "chat" => {
-            let index_id = match require_str(args, "index_id") {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
+            // Default `index_id` to the session's pinned index (#1373).
+            let index_id = match server.resolve_index_id(args) {
+                Some(v) => v,
+                None => {
+                    return Some(Err(DispatchError::InvalidParams(
+                        "missing required string field: index_id".into(),
+                    )))
+                }
             };
             // Accept either `message` (legacy / UI) or `question` (issue #15 spec).
             let message = args
@@ -71,9 +76,14 @@ pub(super) async fn dispatch_misc_tool(
             // Issue #76 — annotated call tree for an entry-point function.
             // The daemon endpoint returns `text/plain`; we wrap the body in
             // the JSON envelope MCP clients consume.
-            let index_id = match require_str(args, "index_id") {
-                Ok(v) => v,
-                Err(e) => return Some(Err(e)),
+            // Default `index_id` to the session's pinned index (#1373).
+            let index_id = match server.resolve_index_id(args) {
+                Some(v) => v,
+                None => {
+                    return Some(Err(DispatchError::InvalidParams(
+                        "missing required string field: index_id".into(),
+                    )))
+                }
             };
             let entry_point = match require_str(args, "entry_point") {
                 Ok(v) => v,
@@ -145,7 +155,10 @@ pub(super) async fn dispatch_misc_tool(
             {
                 body["max_results"] = Value::from(v);
             }
-            match args.get("index_id").and_then(Value::as_str) {
+            // Scope to the resolved index (explicit arg, else pinned, #1373).
+            // Only when neither is set do we fan out across every index via the
+            // global `/grep` endpoint — a pinned session never sweeps all.
+            match server.resolve_index_id(args) {
                 Some(id) => Some(server.post(&format!("/indexes/{id}/grep"), &body).await),
                 None => Some(server.post("/grep", &body).await),
             }

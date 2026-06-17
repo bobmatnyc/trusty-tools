@@ -364,3 +364,64 @@ pub fn tool_descriptors() -> Value {
         }
     ])
 }
+
+/// `tools/list` descriptors with the session's pinned index advertised (#1373).
+///
+/// Why: when `trusty-search serve --index <id>` pins the session to one
+/// project index, the LLM should not have to call `list_indexes` and guess
+/// which index to pass — it routinely picks the wrong one (usually the
+/// persistent `claude-mpm` index). Advertising the pin in the schema makes
+/// `index_id` optional and tells the model exactly what it defaults to, so a
+/// bare `search`/`grep` resolves to the session's own project index.
+/// What: returns [`tool_descriptors`] verbatim when `pinned` is `None`
+/// (backward-compatible); when `Some(id)`, for every tool whose `inputSchema`
+/// has an `index_id` property it (1) removes `index_id` from the `required`
+/// array (the pin supplies the default) and (2) appends a note to the
+/// `index_id` property description naming the pinned default.
+/// Test: `pinned_descriptors_make_index_id_optional` and
+/// `pinned_descriptors_annotate_index_id` in `tests_tools_list.rs`;
+/// `tool_descriptors_pinned_none_is_unchanged` pins the no-op case.
+pub fn tool_descriptors_pinned(pinned: Option<&str>) -> Value {
+    let mut defs = tool_descriptors();
+    let Some(id) = pinned else {
+        return defs;
+    };
+    let note = format!(" Defaults to this session's pinned project index ('{id}') when omitted.");
+    if let Some(tools) = defs.as_array_mut() {
+        for tool in tools.iter_mut() {
+            let Some(schema) = tool.get_mut("inputSchema").and_then(Value::as_object_mut) else {
+                continue;
+            };
+            // Only touch tools that actually accept an `index_id`.
+            let has_index_id = schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|p| p.contains_key("index_id"));
+            if !has_index_id {
+                continue;
+            }
+            // (1) Drop `index_id` from `required` — the pin supplies it.
+            if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
+                required.retain(|v| v.as_str() != Some("index_id"));
+            }
+            // (2) Annotate the `index_id` property description with the default.
+            if let Some(prop) = schema
+                .get_mut("properties")
+                .and_then(Value::as_object_mut)
+                .and_then(|p| p.get_mut("index_id"))
+                .and_then(Value::as_object_mut)
+            {
+                let base = prop
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Target index id")
+                    .to_string();
+                prop.insert(
+                    "description".to_string(),
+                    Value::String(format!("{base}.{note}")),
+                );
+            }
+        }
+    }
+    defs
+}

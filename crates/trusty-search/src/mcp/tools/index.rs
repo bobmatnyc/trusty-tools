@@ -17,6 +17,22 @@ use super::{
     McpServer,
 };
 
+/// Resolve `index_id` for an index-management tool, defaulting to the pinned
+/// index (#1373) when the caller omits it.
+///
+/// Why: a pinned trusty-search session (`serve --index <id>`) should let the
+/// LLM run `index_status`, `reindex`, `list_chunks`, etc. without repeating the
+/// project's index id, exactly as the search tools do. Centralising the
+/// precedence here keeps every index arm consistent with `search`.
+/// What: returns the caller's non-empty `index_id` argument, else the session's
+/// pinned index, else an `InvalidParams` error naming the missing field.
+/// Test: `pinned_index_status_defaults_to_pin` in `tests.rs`.
+fn required_index_id(server: &McpServer, args: &Value) -> Result<String, DispatchError> {
+    server.resolve_index_id(args).ok_or_else(|| {
+        DispatchError::InvalidParams("missing required string field: index_id".into())
+    })
+}
+
 /// Route one of the eight index-management tool names to the correct daemon
 /// call.
 ///
@@ -34,7 +50,7 @@ pub(super) async fn dispatch_index_tool(
 ) -> Option<Result<Value, DispatchError>> {
     match tool {
         "index_file" => {
-            let index_id = match require_str(args, "index_id") {
+            let index_id = match required_index_id(server, args) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -56,7 +72,7 @@ pub(super) async fn dispatch_index_tool(
             )
         }
         "remove_file" => {
-            let index_id = match require_str(args, "index_id") {
+            let index_id = match required_index_id(server, args) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -95,14 +111,14 @@ pub(super) async fn dispatch_index_tool(
             )
         }
         "delete_index" => {
-            let index_id = match require_str(args, "index_id") {
+            let index_id = match required_index_id(server, args) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
             Some(server.delete(&format!("/indexes/{index_id}")).await)
         }
         "reindex" => {
-            let index_id = match require_str(args, "index_id") {
+            let index_id = match required_index_id(server, args) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -118,7 +134,7 @@ pub(super) async fn dispatch_index_tool(
             )
         }
         "index_status" => {
-            let index_id = match require_str(args, "index_id") {
+            let index_id = match required_index_id(server, args) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
@@ -130,7 +146,7 @@ pub(super) async fn dispatch_index_tool(
             // Issue #1325: an optional `after` cursor switches to an indexed
             // redb seek (O(page) at any depth) instead of the O(offset) scan;
             // the daemon echoes `next_cursor` for the next call.
-            let index_id = match require_str(args, "index_id") {
+            let index_id = match required_index_id(server, args) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             };
