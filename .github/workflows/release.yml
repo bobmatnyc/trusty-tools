@@ -72,6 +72,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       crate:    ${{ steps.parse.outputs.crate }}
+      # Why (#1128): the ORIGINAL tag prefix before alias canonicalization (e.g.
+      # `tga` stays `tga`, while `crate` becomes `trusty-git-analytics`). Used by
+      # the release job's changelog --tag-pattern, which must match the literal
+      # pushed tag. For non-aliased crates tag_prefix == crate.
+      tag_prefix: ${{ steps.parse.outputs.tag_prefix }}
       version:  ${{ steps.parse.outputs.version }}
       matrix:   ${{ steps.matrix.outputs.matrix }}
       dry_run:  ${{ steps.parse.outputs.dry_run }}
@@ -106,12 +111,38 @@ jobs:
             VERSION="${BASH_REMATCH[2]}"
             DRY_RUN="false"
           fi
+
+          # ── Tag-prefix aliases (issue #1128) ─────────────────────────────────
+          # Some crates publish to crates.io under a SHORT package name that
+          # differs from their directory / canonical crate name, and the
+          # documented release convention (CLAUDE.md "Git Tag / Release
+          # Convention", abbreviation table) lets contributors tag with either
+          # form. We canonicalize the alias here so every downstream consumer —
+          # the per-crate config map, the homebrew-bump case statement, the
+          # changelog --include-path, and the GitHub Release name — keys off the
+          # single canonical crate/directory name.
+          #
+          # tga (the crates.io package name for trusty-git-analytics) → its
+          # directory/canonical name trusty-git-analytics. Pushing tga-v<ver>
+          # previously fell through to the library-only green-skip branch and
+          # silently produced no binaries; it now resolves to the same config as
+          # trusty-git-analytics-v<ver>.
+          #
+          # TAG_PREFIX retains the ORIGINAL tag prefix (before aliasing) because
+          # the changelog step keys --tag-pattern off the literal pushed tag, not
+          # the canonical crate name. For non-aliased crates TAG_PREFIX == CRATE.
+          TAG_PREFIX="$CRATE"
+          case "$CRATE" in
+            tga) CRATE="trusty-git-analytics" ;;
+          esac
+
           {
             echo "crate=$CRATE"
+            echo "tag_prefix=$TAG_PREFIX"
             echo "version=$VERSION"
             echo "dry_run=$DRY_RUN"
           } >> "$GITHUB_OUTPUT"
-          echo "Parsed: crate=$CRATE  version=$VERSION  dry_run=$DRY_RUN"
+          echo "Parsed: crate=$CRATE  tag_prefix=$TAG_PREFIX  version=$VERSION  dry_run=$DRY_RUN"
 
       # ── Per-crate configuration table ──────────────────────────────────────
       # Each entry encodes everything the build job needs for one crate:
@@ -231,6 +262,9 @@ jobs:
 
           elif [[ "$CRATE" == "trusty-git-analytics" ]]; then
             # Cargo package name is `tga` (short name in Cargo.toml — confirmed).
+            # Also serves `tga-v*` tags: the parse step canonicalizes the `tga`
+            # tag-prefix alias to `trusty-git-analytics` (issue #1128), so both
+            # tga-v<ver> and trusty-git-analytics-v<ver> resolve to this branch.
             # Single [[bin]] `tga` at src/main.rs confirmed in Cargo.toml.
             # Default features = [] (empty); no required-features on the bin target.
             # No SKIP_UI_BUILD, no AL2023 variant.
@@ -784,14 +818,16 @@ jobs:
       # per-crate, Keep-a-Changelog-grouped body driven by the same cliff.toml
       # that produces the per-crate CHANGELOG.md files.
       #
-      # Scoping: needs.setup.outputs.crate is BASH_REMATCH[1] from the tag, i.e.
-      # the literal tag PREFIX (the part before `-v`). For all binary-release
-      # crates this equals the directory under crates/ — including
-      # trusty-git-analytics (whose CARGO package name is `tga`, but whose tag
-      # prefix / directory is trusty-git-analytics). We therefore reuse it
-      # directly for BOTH --include-path crates/<crate>/** and --tag-pattern
-      # <crate>-v*; no crate→dir remap is needed here because we key off the tag
-      # prefix, not the cargo package name.
+      # Scoping (issue #1128): two distinct keys are used here on purpose.
+      #   --include-path crates/<crate>/**  keys off needs.setup.outputs.crate,
+      #     the CANONICAL crate/directory name (e.g. trusty-git-analytics). This
+      #     must be the directory under crates/ so git-cliff scopes commits to
+      #     the right path.
+      #   --tag-pattern <tag_prefix>-v*  keys off needs.setup.outputs.tag_prefix,
+      #     the ORIGINAL tag prefix actually pushed (e.g. `tga`). This must match
+      #     the literal tag so --latest selects this release's section.
+      # For non-aliased crates the two are identical (tag_prefix == crate); only
+      # aliased tags like tga-v* (canonical trusty-git-analytics) differ.
       #
       # --latest emits only this tag's section; --strip all drops the
       # Keep-a-Changelog header/footer so the body is just the grouped commits.
@@ -807,7 +843,7 @@ jobs:
           config: cliff.toml
           args: >-
             --include-path "crates/${{ needs.setup.outputs.crate }}/**"
-            --tag-pattern "${{ needs.setup.outputs.crate }}-v*"
+            --tag-pattern "${{ needs.setup.outputs.tag_prefix }}-v*"
             --latest
             --strip all
         env:
@@ -1010,6 +1046,8 @@ jobs:
             trusty-review)   INSTALL_BINS="trusty-review" ;;
             trusty-mpm)      INSTALL_BINS="tm trusty-mpm" ;;
             trusty-console)  INSTALL_BINS="trusty-console" ;;
+            # Keyed on the canonical crate name; `tga-v*` tags are already
+            # canonicalized to trusty-git-analytics in the parse step (#1128).
             trusty-git-analytics) INSTALL_BINS="tga" ;;
             trusty-code)     INSTALL_BINS="tcode" ;;
             trusty-controller) INSTALL_BINS="tctl" ;;

@@ -271,6 +271,17 @@ versions by version number.
 7. Publish: `cargo publish -p <crate-name>` (or `SKIP_UI_BUILD=1 cargo publish` for UI-embedding crates).
 8. Build and install: `cargo install --path crates/<dir> --locked`.
 
+🟢 **`tga` tag aliases (issue #1128):** `trusty-git-analytics` publishes to
+crates.io under the short package name `tga`. The binary-release workflow
+(`.github/workflows/release.yml`) accepts **both** tag forms — `tga-v<version>`
+and `trusty-git-analytics-v<version>` — and they resolve to the **same** build
+config (CARGO_PKG=`tga`, binary `tga`) and the same Homebrew formula. The parse
+step canonicalizes the `tga` prefix to `trusty-git-analytics` for the config map,
+the homebrew-bump job, and changelog path scoping, while the changelog
+`--tag-pattern` keys off the literal pushed tag so release notes match either
+form. Use whichever you prefer; the documented `<crate-name>-v<version>`
+convention (i.e. `tga-v<version>`, matching the abbreviation table) works.
+
 🔴 **CRITICAL macOS note:** Never use `cp` to install release binaries on macOS — always use `cargo install`. See release workflow reference for the detailed explanation.
 
 ### macOS Full Disk Access must be re-granted after every `cargo install` (issue #873)

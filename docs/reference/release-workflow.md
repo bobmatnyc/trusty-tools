@@ -3,6 +3,15 @@
 Each crate is tagged independently using the pattern `<crate-name>-v<version>`,
 e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 
+> **`tga` tag aliases (issue #1128):** `trusty-git-analytics` publishes under the
+> short package name `tga`. The binary-release workflow accepts **both**
+> `tga-v<version>` and `trusty-git-analytics-v<version>` tags — they resolve to
+> the same build config and Homebrew formula. The parse step canonicalizes the
+> `tga` prefix to `trusty-git-analytics` for config/path lookups while keeping
+> changelog `--tag-pattern` matched to the literal pushed tag. Either form works;
+> you no longer need to push a second `trusty-git-analytics-v<version>` tag after
+> a `tga-v<version>` push.
+
 ## Release Steps
 
 1. Bump the crate version in `crates/<name>/Cargo.toml`.

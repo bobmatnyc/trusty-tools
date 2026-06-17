@@ -235,6 +235,13 @@ Use the **crate package name** from `Cargo.toml`, NOT the directory name.
 - `trusty-common` → `-p trusty-common` → tag: **`trusty-common-v0.8.0`** ✓
 - `open-mpm` → `-p open-mpm` → tag: **`open-mpm-v0.2.3`** ✓
 
+> **tga tag aliases (issue #1128):** the binary-release workflow accepts **both**
+> `tga-v<version>` and `trusty-git-analytics-v<version>` — they resolve to the
+> same build config and Homebrew formula (the parse step canonicalizes the `tga`
+> prefix to `trusty-git-analytics`). The documented form above (`tga-v<version>`,
+> matching the published package name) is preferred; you no longer need a second
+> `trusty-git-analytics-v<version>` tag to trigger a successful binary release.
+
 The crate name **always** comes from the `name` field in `Cargo.toml`:
 
 ```bash
