@@ -102,6 +102,7 @@ impl LlmProvider for FakeLlm {
             output_tokens: self.output_tokens.unwrap_or(50),
             latency_ms: 42,
             cost_usd: 0.000042,
+            finish_reason: None,
         })
     }
 }
@@ -127,6 +128,7 @@ impl LlmProvider for FakeVerifier {
             output_tokens: 3,
             latency_ms: 1,
             cost_usd: 0.0,
+            finish_reason: None,
         })
     }
 }
@@ -395,32 +397,157 @@ async fn run_review_truncated_output_is_unknown() {
     );
 }
 
+/// PRIMARY signal (#1357): a length/max_tokens finish_reason flags truncation
+/// regardless of the token count.
+///
+/// Why: the provider's own completion reason is authoritative; an explicit
+/// `length` means the model was cut off even if token accounting looks fine.
+/// What: asserts `length` / `max_tokens` → truncated even with low output tokens.
+/// Test: this test itself.
 #[test]
-fn is_truncated_at_ceiling_true() {
-    // 4096 ceiling: ceil(4096 * 0.95) = 3892; output >= that is truncated.
-    assert!(is_truncated(4096, 4096), "exactly at ceiling is truncated");
+fn is_truncated_finish_reason_length_true() {
     assert!(
-        is_truncated(3892, 4096),
-        "at the 95% threshold is truncated"
+        is_truncated(Some("length"), 10, 4096),
+        "finish_reason=length is truncated even well under the ceiling"
+    );
+    assert!(
+        is_truncated(Some("max_tokens"), 10, 4096),
+        "finish_reason=max_tokens (Bedrock) is truncated"
+    );
+    // Case-insensitive / padded.
+    assert!(is_truncated(Some(" LENGTH "), 10, 4096));
+}
+
+/// PRIMARY signal (#1357): a natural-stop finish_reason at a HIGH token ratio is
+/// NOT flagged — this is the false-positive the issue targets.
+///
+/// Why: before #1357 a complete response landing ≥95 % of the ceiling was
+/// mis-flagged UNKNOWN.  With finish_reason primary, `stop`/`end_turn` overrides
+/// the ratio heuristic entirely.
+/// What: asserts `stop` / `end_turn` at 99–100 % of the ceiling → NOT truncated.
+/// Test: this test itself.
+#[test]
+fn is_truncated_finish_reason_stop_at_high_ratio_false() {
+    assert!(
+        !is_truncated(Some("stop"), 4096, 4096),
+        "finish_reason=stop at 100% of ceiling is NOT truncated (#1357 false-positive fix)"
+    );
+    assert!(
+        !is_truncated(Some("end_turn"), 4090, 4096),
+        "finish_reason=end_turn (Bedrock natural stop) near the ceiling is NOT truncated"
+    );
+}
+
+/// FALLBACK heuristic (#1357): when finish_reason is absent, the token-ratio
+/// behaves exactly as the pre-#1357 #1241 logic.
+///
+/// Why: providers that don't surface a reason must still fail closed on a likely
+/// cut-off response.
+/// What: 4096 ceiling, ceil(4096*0.95)=3892; output >= that → truncated.
+/// Test: this test itself.
+#[test]
+fn is_truncated_ratio_fallback_at_ceiling_true() {
+    assert!(
+        is_truncated(None, 4096, 4096),
+        "no finish_reason, exactly at ceiling → truncated"
+    );
+    assert!(
+        is_truncated(None, 3892, 4096),
+        "no finish_reason, at the 95% threshold → truncated"
+    );
+    // An empty-string finish_reason is treated as "absent" → fall back to ratio.
+    assert!(
+        is_truncated(Some(""), 4096, 4096),
+        "empty reason falls back to ratio"
     );
 }
 
 #[test]
-fn is_truncated_well_under_false() {
+fn is_truncated_ratio_fallback_well_under_false() {
     assert!(
-        !is_truncated(3891, 4096),
-        "one below the 95% threshold is NOT truncated"
+        !is_truncated(None, 3891, 4096),
+        "no finish_reason, one below the 95% threshold → NOT truncated"
     );
-    assert!(!is_truncated(50, 4096), "a short response is NOT truncated");
+    assert!(
+        !is_truncated(None, 50, 4096),
+        "no finish_reason, a short response → NOT truncated"
+    );
 }
 
 #[test]
 fn is_truncated_unset_ceiling_false() {
-    // max_tokens == 0 means the ceiling is unknown — never false-positive.
+    // max_tokens == 0 means the ceiling is unknown — never false-positive on the
+    // fallback path.
     assert!(
-        !is_truncated(10_000, 0),
-        "unknown ceiling (0) disables the truncation check"
+        !is_truncated(None, 10_000, 0),
+        "unknown ceiling (0) disables the fallback truncation check"
     );
+}
+
+// ── Configurable fallback ratio (#1357) ───────────────────────────────────
+// These tests mutate a process-global env var, so they must not interleave with
+// each other.  A local mutex serialises them; each restores the prior value.
+
+/// Serialises env-mutating ratio tests so they don't race.
+static RATIO_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// #1357: a valid `TRUSTY_REVIEW_TRUNCATION_TOKEN_RATIO` override changes the
+/// fallback threshold.
+///
+/// Why: operators must be able to retune the fallback band without a rebuild.
+/// What: sets the env ratio to 0.50; asserts a 50 %-of-ceiling response (no
+/// finish_reason) is now flagged where the 0.95 default would not flag it.
+/// Test: this test itself (serialised via `RATIO_ENV_LOCK`).
+#[test]
+fn truncation_ratio_env_override_applies() {
+    let _guard = RATIO_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var(TRUNCATION_TOKEN_RATIO_ENV).ok();
+    // SAFETY: single-threaded within the lock; restored before unlock.
+    unsafe { std::env::set_var(TRUNCATION_TOKEN_RATIO_ENV, "0.50") };
+
+    assert!(
+        (truncation_token_ratio() - 0.50).abs() < f64::EPSILON,
+        "env override should set the ratio to 0.50"
+    );
+    // ceil(4096 * 0.50) = 2048 — a 2048-token response now flags (would not at 0.95).
+    assert!(
+        is_truncated(None, 2048, 4096),
+        "with ratio 0.50, 50% of ceiling is truncated on the fallback path"
+    );
+
+    match prev {
+        Some(v) => unsafe { std::env::set_var(TRUNCATION_TOKEN_RATIO_ENV, v) },
+        None => unsafe { std::env::remove_var(TRUNCATION_TOKEN_RATIO_ENV) },
+    }
+}
+
+/// #1357: an invalid / out-of-range override falls back to the default ratio.
+///
+/// Why: a typo (or a nonsensical value like `2.0`) must never silently disable
+/// the truncation safety check.
+/// What: sets the env ratio to an out-of-range value; asserts the default 0.95
+/// is used.
+/// Test: this test itself (serialised via `RATIO_ENV_LOCK`).
+#[test]
+fn truncation_ratio_env_invalid_falls_back() {
+    let _guard = RATIO_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let prev = std::env::var(TRUNCATION_TOKEN_RATIO_ENV).ok();
+    unsafe { std::env::set_var(TRUNCATION_TOKEN_RATIO_ENV, "2.0") };
+    assert!(
+        (truncation_token_ratio() - DEFAULT_TRUNCATION_TOKEN_RATIO).abs() < f64::EPSILON,
+        "out-of-range override (>1.0) must fall back to the default"
+    );
+
+    unsafe { std::env::set_var(TRUNCATION_TOKEN_RATIO_ENV, "not-a-number") };
+    assert!(
+        (truncation_token_ratio() - DEFAULT_TRUNCATION_TOKEN_RATIO).abs() < f64::EPSILON,
+        "unparseable override must fall back to the default"
+    );
+
+    match prev {
+        Some(v) => unsafe { std::env::set_var(TRUNCATION_TOKEN_RATIO_ENV, v) },
+        None => unsafe { std::env::remove_var(TRUNCATION_TOKEN_RATIO_ENV) },
+    }
 }
 
 /// REQUIRED-CONTEXT GATE (#590): when trusty-search is unreachable and required

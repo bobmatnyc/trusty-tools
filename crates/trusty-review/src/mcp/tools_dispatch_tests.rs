@@ -59,6 +59,7 @@ impl LlmProvider for ApproveLlm {
             output_tokens: 5,
             latency_ms: 0,
             cost_usd: 0.0,
+            finish_reason: None,
         })
     }
 }
@@ -292,11 +293,16 @@ async fn deps_from_state_openrouter_override_switches_provider() {
     // state must build a fresh OpenRouter provider, NOT silently reuse the startup
     // (Bedrock) provider.
     let state = bedrock_startup_state();
-    let deps = super::deps_from_state(&state, "openrouter/openai/gpt-5.4-mini-20260317").await;
+    let (deps, fallback) =
+        super::deps_from_state(&state, "openrouter/openai/gpt-5.4-mini-20260317").await;
     assert_eq!(
         deps.llm.name(),
         "openrouter",
         "an openrouter/ override must route to the OpenRouter backend (#1233)"
+    );
+    assert!(
+        fallback.is_none(),
+        "a successful override build must NOT report a fallback (#1357)"
     );
 }
 
@@ -305,10 +311,45 @@ async fn deps_from_state_no_override_reuses_startup_provider() {
     // Control: a bare model id (no routing prefix) keeps the startup provider —
     // the stub `ApproveLlm`, whose name() is NOT "openrouter".
     let state = bedrock_startup_state();
-    let deps = super::deps_from_state(&state, "us.anthropic.claude-sonnet-4-6").await;
+    let (deps, fallback) = super::deps_from_state(&state, "us.anthropic.claude-sonnet-4-6").await;
     assert_ne!(
         deps.llm.name(),
         "openrouter",
         "a bare model id must reuse the startup (Bedrock) provider, not switch"
+    );
+    assert!(
+        fallback.is_none(),
+        "the no-override path must NOT report a fallback (#1357)"
+    );
+}
+
+/// #1357 item 2: when an override provider fails to build, `deps_from_state` must
+/// report a `Some(reason)` fallback so the MCP caller can detect the wrong-backend
+/// silent fallback.
+///
+/// Why: previously the failed-override path only `warn!`d and silently reused the
+/// startup provider; an MCP caller had no way to know it got the wrong backend.
+/// What: an `openrouter/...` override against a Bedrock-startup state whose config
+/// has an EMPTY OpenRouter key makes `build_provider` fail the empty-key guard;
+/// the result must fall back to the startup provider AND carry a fallback reason.
+/// Test: this test itself.
+#[tokio::test]
+async fn deps_from_state_build_failure_reports_fallback() {
+    let mut state = bedrock_startup_state();
+    // Empty the key so OpenRouterProvider::new() fails its empty-key guard.
+    state.config.openrouter_api_key = String::new();
+
+    let (deps, fallback) =
+        super::deps_from_state(&state, "openrouter/openai/gpt-5.4-mini-20260317").await;
+    // Fell back to the startup (Bedrock) provider, not the requested OpenRouter one.
+    assert_ne!(
+        deps.llm.name(),
+        "openrouter",
+        "a failed override build must fall back to the startup provider"
+    );
+    let reason = fallback.expect("a failed override build must report a fallback reason (#1357)");
+    assert!(
+        reason.contains("reviewer_model") && reason.contains("fell back"),
+        "fallback reason must be actionable: {reason}"
     );
 }

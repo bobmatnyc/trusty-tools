@@ -325,6 +325,11 @@ impl BedrockProvider {
         let (input_tokens, output_tokens) = extract_token_usage(&resp);
         let cost_usd = estimate_bedrock_cost_usd(&req.model, input_tokens, output_tokens);
 
+        // Bedrock Converse surfaces a stop reason (`end_turn`, `max_tokens`, …);
+        // thread it through as the PRIMARY truncation signal (#1357).  `max_tokens`
+        // is the truncation case the runner keys off.
+        let finish_reason = Some(resp.stop_reason().as_str().trim().to_ascii_lowercase());
+
         Ok(LlmResponse {
             text,
             model: req.model.clone(),
@@ -332,6 +337,7 @@ impl BedrockProvider {
             output_tokens,
             latency_ms,
             cost_usd,
+            finish_reason,
         })
     }
 }

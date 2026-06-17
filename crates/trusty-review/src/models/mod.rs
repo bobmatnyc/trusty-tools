@@ -60,6 +60,33 @@ pub enum Verdict {
     Unknown,
 }
 
+impl Verdict {
+    /// Ordinal severity for this verdict (higher = more severe).
+    ///
+    /// Why: the grade-derivation (`grade.rs`) and verification re-derivation
+    /// (`verify.rs`) paths both need a total order over verdicts to compute the
+    /// stricter-of / less-severe-of two verdicts.  Before #1357 each module
+    /// carried its OWN private `verdict_ord` with an identical mapping — two
+    /// copies of the same ordinal table is a maintenance hazard (drift between
+    /// them would silently corrupt the floor/ceiling logic).  Centralising the
+    /// mapping here makes `Verdict` the single source of truth.
+    /// What: returns `APPROVE=0 < APPROVE*=1 < REQUEST_CHANGES=2 < BLOCK=3`.
+    /// `Unknown=4` is a terminal state (the diff was unassessable); callers
+    /// short-circuit it before any ordinal comparison, so it never participates
+    /// in normal flow — the value is defined only so the match is exhaustive.
+    /// Test: `verdict_ordinal_is_monotonic` in this module; exercised
+    /// transitively by `grade.rs::stricter_of` and `verify.rs::verdict_min`.
+    pub fn ordinal(&self) -> u8 {
+        match self {
+            Verdict::Approve => 0,
+            Verdict::ApproveWithReservations => 1,
+            Verdict::RequestChanges => 2,
+            Verdict::Block => 3,
+            Verdict::Unknown => 4,
+        }
+    }
+}
+
 impl std::fmt::Display for Verdict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -432,6 +459,25 @@ mod tests {
         assert_eq!(json, "\"UNKNOWN\"");
         let back: Verdict = serde_json::from_str(&json).unwrap();
         assert_eq!(back, Verdict::Unknown);
+    }
+
+    /// Verify the single-source-of-truth verdict ordinal is strictly monotonic.
+    ///
+    /// Why: #1357 collapsed two duplicate `verdict_ord` tables (grade.rs +
+    /// verify.rs) into `Verdict::ordinal`.  This test pins the ordering both
+    /// call sites depend on so a future reorder can't silently invert the
+    /// floor/ceiling comparisons.
+    /// What: asserts APPROVE < APPROVE* < REQUEST_CHANGES < BLOCK < UNKNOWN.
+    /// Test: this test itself.
+    #[test]
+    fn verdict_ordinal_is_monotonic() {
+        assert!(Verdict::Approve.ordinal() < Verdict::ApproveWithReservations.ordinal());
+        assert!(Verdict::ApproveWithReservations.ordinal() < Verdict::RequestChanges.ordinal());
+        assert!(Verdict::RequestChanges.ordinal() < Verdict::Block.ordinal());
+        assert!(Verdict::Block.ordinal() < Verdict::Unknown.ordinal());
+        // Pin the exact values the comparison logic relies on.
+        assert_eq!(Verdict::Approve.ordinal(), 0);
+        assert_eq!(Verdict::Block.ordinal(), 3);
     }
 
     #[test]
