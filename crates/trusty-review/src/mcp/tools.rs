@@ -211,7 +211,7 @@ async fn call_review_pr(args: &Value, state: &AppState) -> Result<Value, ToolErr
         token,
     };
 
-    let deps = deps_from_state(state, &reviewer_model);
+    let deps = deps_from_state(state, &reviewer_model).await;
     let input = ReviewInput {
         diff_source,
         reviewer_model: reviewer_model.clone(),
@@ -262,7 +262,7 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
     let path = tmp.path().to_path_buf();
     let diff_source = DiffSource::LocalFile { path };
 
-    let deps = deps_from_state(state, &reviewer_model);
+    let deps = deps_from_state(state, &reviewer_model).await;
     let input = ReviewInput {
         diff_source,
         reviewer_model: reviewer_model.clone(),
@@ -352,16 +352,56 @@ async fn call_review_health(state: &AppState) -> Value {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Build `ReviewDeps` from the shared `AppState`, substituting the reviewer
-/// model from the tool arguments when provided.
+/// Build `ReviewDeps` from the shared `AppState`, honouring the provider implied
+/// by a `reviewer_model` override (closes #1233).
 ///
-/// Why: all three tools need the same deps structure; factoring it out avoids
-/// repetition across the three handlers.
-/// What: clones `Arc` handles from `state`; does not allocate new providers.
-/// Test: covered transitively by tool handler tests.
-fn deps_from_state(state: &AppState, _reviewer_model: &str) -> ReviewDeps {
+/// Why: an MCP caller can pass `reviewer_model: "openrouter/..."` (or
+/// `bedrock/...`) to switch backends per-call.  The old implementation ignored
+/// the override and always cloned `state.llm` (the *startup* provider), so an
+/// `openrouter/...` override silently hit the Bedrock backend (or vice-versa) —
+/// the wrong API, wrong credentials, wrong cost.  Resolving the override's
+/// provider prefix and building a matching provider when it differs makes the
+/// per-call override actually route to the requested backend.
+/// What: resolves the override's provider via `resolve_provider_and_model`; when
+/// it matches the startup provider, cheaply clones `state.llm` (no allocation).
+/// When it differs, builds a fresh provider via `build_provider` (async); on a
+/// build error it logs a `warn!` and falls back to the startup `state.llm` so a
+/// malformed override degrades gracefully rather than failing the whole review.
+/// The verifier / search / analyze / dedup handles are always cloned from state.
+/// Test: `deps_from_state_openrouter_override_switches_provider`,
+/// `deps_from_state_no_override_reuses_startup_provider` (in `tools_dispatch_tests.rs`).
+async fn deps_from_state(state: &AppState, reviewer_model: &str) -> ReviewDeps {
+    let startup_provider = &state.config.role_models.reviewer.provider;
+    let (override_provider, _bare) =
+        crate::llm::resolve_provider_and_model(reviewer_model, startup_provider);
+
+    let llm = if &override_provider == startup_provider {
+        // Same backend as startup — reuse the already-built provider (no alloc).
+        Arc::clone(&state.llm)
+    } else {
+        // Different backend — build a provider that matches the override prefix.
+        match crate::llm::build_provider(
+            reviewer_model,
+            startup_provider,
+            &state.config.openrouter_api_key,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    reviewer_model,
+                    error = %e,
+                    "mcp: failed to build provider for reviewer_model override — \
+                     falling back to startup provider"
+                );
+                Arc::clone(&state.llm)
+            }
+        }
+    };
+
     ReviewDeps {
-        llm: Arc::clone(&state.llm),
+        llm,
         verifier: state.verifier.clone(),
         search: Arc::clone(&state.search),
         analyze: state.analyze.clone(),
