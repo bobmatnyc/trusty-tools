@@ -81,6 +81,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Compute the cache key BEFORE the cache step so the expression resolves.
+      - name: Get week number for cache key
+        id: date
+        run: echo "week=$(date +%Y-%V)" >> "$GITHUB_OUTPUT"
+
       # Cache the Cargo registry index and downloaded source tarballs.
       # Key rotates weekly so stale index entries don't accumulate.
       - name: Cache Cargo registry
@@ -92,10 +97,6 @@ jobs:
           key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.toml') }}-weekly-${{ steps.date.outputs.week }}
           restore-keys: |
             cargo-registry-${{ runner.os }}-
-
-      - name: Get week number for cache key
-        id: date
-        run: echo "week=$(date +%Y-%V)" >> "$GITHUB_OUTPUT"
 
       # Set up Docker Buildx for efficient layer caching.
       - name: Set up Docker Buildx
@@ -123,10 +124,15 @@ jobs:
 
       - name: Run E2E smoke tests
         run: |
+          # Bind-mount a host directory so per-tool logs survive after the
+          # --rm container exits and are available for artifact upload on failure.
+          mkdir -p "${{ github.workspace }}/e2e-logs"
           docker run --rm \
             -e TRUSTY_SKIP_RAM_CHECK=1 \
             -e XDG_DATA_HOME=/tmp/trusty-data \
             -e HOME=/root \
+            -e E2E_LOG_DIR=/tmp/e2e-logs \
+            -v "${{ github.workspace }}/e2e-logs:/tmp/e2e-logs" \
             trusty-e2e:ci
 
       - name: Upload smoke test logs on failure
@@ -134,6 +140,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: e2e-logs-${{ github.run_id }}
-          path: /tmp/e2e-*.log
+          path: ${{ github.workspace }}/e2e-logs/
           if-no-files-found: ignore
           retention-days: 7

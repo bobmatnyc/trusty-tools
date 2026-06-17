@@ -13,6 +13,10 @@
 #   TRUSTY_SKIP_RAM_CHECK=1   — bypass 16 GB RAM guard (required in Docker)
 #   XDG_DATA_HOME             — daemon state root (default: /tmp/trusty-data)
 #   HOME                      — required for path expansion (default: /root)
+#   E2E_LOG_DIR               — directory for per-tool log files; bind-mounted
+#                               by the CI runner so logs survive container exit
+#                               (default: /tmp/e2e-logs)
+#   TA_PORT                   — trusty-analyze HTTP port (default: 7879)
 
 set -euo pipefail
 
@@ -56,7 +60,12 @@ semver_gte() {
     [ "$sorted" = "$a" ]
 }
 
-mkdir -p "${XDG_DATA_HOME:-/tmp/trusty-data}"
+# Log directory: bind-mounted by CI so logs survive the --rm container exit.
+E2E_LOG_DIR="${E2E_LOG_DIR:-/tmp/e2e-logs}"
+mkdir -p "${XDG_DATA_HOME:-/tmp/trusty-data}" "${E2E_LOG_DIR}"
+
+# trusty-analyze HTTP port (configurable for parallel test runs).
+TA_PORT="${TA_PORT:-7879}"
 
 # ---------------------------------------------------------------------------
 # SCENARIO 1: trusty-search
@@ -69,7 +78,7 @@ echo "  Binary : ${TS_BIN}"
 echo "  Version: ${TS_VERSION}"
 
 # Start daemon in background (foreground flag keeps it in-process).
-TRUSTY_SKIP_RAM_CHECK=1 trusty-search start > /tmp/ts.log 2>&1 &
+TRUSTY_SKIP_RAM_CHECK=1 trusty-search start > "${E2E_LOG_DIR}/ts.log" 2>&1 &
 TS_PID=$!
 
 # Wait for HTTP to come up on the auto-selected port.
@@ -79,61 +88,61 @@ echo "  Port   : ${TS_PORT}"
 
 if wait_http "http://127.0.0.1:${TS_PORT}/health" 30; then
     pass "trusty-search daemon healthy"
+
+    # Create a lexical-only index over the fixture repo (no ONNX required).
+    # IMPORTANT: the directory must NOT be under a path component named "fixtures"
+    # (trusty-search's walker skips dirs named "fixtures" — see SKIP_DIRS in
+    # crates/trusty-search/src/service/walker.rs). We use /e2e/sample-code.
+    FIXTURE_DIR="/e2e/sample-code"
+    INDEX_ID="smoke-fixture"
+
+    echo "  Indexing ${FIXTURE_DIR} ..."
+    INDEX_LOG="$(trusty-search index "${FIXTURE_DIR}" --name "${INDEX_ID}" --lexical-only 2>&1)"
+    echo "  Index output: ${INDEX_LOG}"
+    if echo "${INDEX_LOG}" | grep -q "chunks"; then
+        pass "trusty-search index created"
+    else
+        fail "trusty-search index failed (no chunks in output)"
+    fi
+
+    # Run a query and assert we get a hit on 'authenticate' using the CLI.
+    # (The /grep HTTP endpoint requires POST with JSON body; the CLI `query`
+    # subcommand is simpler and always works regardless of lexical/semantic mode.)
+    echo "  Running query for 'authenticate' ..."
+    QUERY_OUT="$(trusty-search query 'authenticate' --index "${INDEX_ID}" 2>&1 || echo '')"
+    echo "  Query output (first 5 lines):"
+    echo "${QUERY_OUT}" | head -5
+
+    if echo "${QUERY_OUT}" | grep -qi "authenticate\|auth\.rs"; then
+        pass "trusty-search query returned results for 'authenticate'"
+    else
+        fail "trusty-search search returned no results for 'authenticate'"
+    fi
+
+    # -------------------------------------------------------------------------
+    # Indexing-hygiene assertion (version-gated: requires >= 0.25.0)
+    # -------------------------------------------------------------------------
+    HYGIENE_MIN_VERSION="0.25.0"
+    if semver_gte "${TS_VERSION}" "${HYGIENE_MIN_VERSION}"; then
+        echo "  Running indexing-hygiene assertion (${TS_VERSION} >= ${HYGIENE_MIN_VERSION}) ..."
+
+        # The fixture data/ directory contains a >64KiB JSON file.
+        # With hygiene defaults, the data/ dir and large JSON files should be
+        # excluded from the index. Verify by checking listed chunks for the file.
+        CHUNKS_OUT="$(curl -sf "http://127.0.0.1:${TS_PORT}/indexes/${INDEX_ID}/chunks?limit=1000" 2>/dev/null || echo '{}')"
+
+        DATA_JSON_HITS="$(echo "${CHUNKS_OUT}" | grep -c 'large_dataset\.json' || true)"
+        if [ "${DATA_JSON_HITS}" -eq 0 ]; then
+            pass "hygiene: data/large_dataset.json excluded from index (>64KiB .json in data/)"
+        else
+            fail "hygiene: data/large_dataset.json was NOT excluded — hygiene defaults missing"
+        fi
+    else
+        skip "hygiene assertion requires trusty-search >= ${HYGIENE_MIN_VERSION}, installed ${TS_VERSION} — skipping"
+    fi
 else
     fail "trusty-search daemon did not start"
     kill "${TS_PID}" 2>/dev/null || true
-fi
-
-# Create a lexical-only index over the fixture repo (no ONNX required).
-# IMPORTANT: the directory must NOT be under a path component named "fixtures"
-# (trusty-search's walker skips dirs named "fixtures" — see SKIP_DIRS in
-# crates/trusty-search/src/service/walker.rs). We use /e2e/sample-code.
-FIXTURE_DIR="/e2e/sample-code"
-INDEX_ID="smoke-fixture"
-
-echo "  Indexing ${FIXTURE_DIR} ..."
-INDEX_LOG="$(trusty-search index "${FIXTURE_DIR}" --name "${INDEX_ID}" --lexical-only 2>&1)"
-echo "  Index output: ${INDEX_LOG}"
-if echo "${INDEX_LOG}" | grep -q "chunks"; then
-    pass "trusty-search index created"
-else
-    fail "trusty-search index failed (no chunks in output)"
-fi
-
-# Run a query and assert we get a hit on 'authenticate' using the CLI.
-# (The /grep HTTP endpoint requires POST with JSON body; the CLI `query`
-# subcommand is simpler and always works regardless of lexical/semantic mode.)
-echo "  Running query for 'authenticate' ..."
-QUERY_OUT="$(trusty-search query 'authenticate' --index "${INDEX_ID}" 2>&1 || echo '')"
-echo "  Query output (first 5 lines):"
-echo "${QUERY_OUT}" | head -5
-
-if echo "${QUERY_OUT}" | grep -qi "authenticate\|auth\.rs"; then
-    pass "trusty-search query returned results for 'authenticate'"
-else
-    fail "trusty-search search returned no results for 'authenticate'"
-fi
-
-# ---------------------------------------------------------------------------
-# Indexing-hygiene assertion (version-gated: requires >= 0.25.0)
-# ---------------------------------------------------------------------------
-HYGIENE_MIN_VERSION="0.25.0"
-if semver_gte "${TS_VERSION}" "${HYGIENE_MIN_VERSION}"; then
-    echo "  Running indexing-hygiene assertion (${TS_VERSION} >= ${HYGIENE_MIN_VERSION}) ..."
-
-    # The fixture data/ directory contains a >64KiB JSON file.
-    # With hygiene defaults, the data/ dir and large JSON files should be
-    # excluded from the index. Verify by checking listed chunks for the file.
-    CHUNKS_OUT="$(curl -sf "http://127.0.0.1:${TS_PORT}/indexes/${INDEX_ID}/chunks?limit=1000" 2>/dev/null || echo '{}')"
-
-    DATA_JSON_HITS="$(echo "${CHUNKS_OUT}" | grep -c 'large_dataset\.json' || true)"
-    if [ "${DATA_JSON_HITS}" -eq 0 ]; then
-        pass "hygiene: data/large_dataset.json excluded from index (>64KiB .json in data/)"
-    else
-        fail "hygiene: data/large_dataset.json was NOT excluded — hygiene defaults missing"
-    fi
-else
-    skip "hygiene assertion requires trusty-search >= ${HYGIENE_MIN_VERSION}, installed ${TS_VERSION} — skipping"
 fi
 
 # Stop trusty-search.
@@ -153,14 +162,14 @@ echo "  Version: ${TM_VERSION}"
 
 # Start daemon in foreground on a fixed port to avoid port-file races.
 TRUSTY_MEMORY_HTTP="127.0.0.1:7070"
-trusty-memory serve --foreground --http "${TRUSTY_MEMORY_HTTP}" > /tmp/tm.log 2>&1 &
+trusty-memory serve --foreground --http "${TRUSTY_MEMORY_HTTP}" > "${E2E_LOG_DIR}/tm.log" 2>&1 &
 TM_PID=$!
 
 if wait_http "http://${TRUSTY_MEMORY_HTTP}/health" 60; then
     pass "trusty-memory daemon healthy"
 else
     echo "  --- daemon log ---"
-    cat /tmp/tm.log
+    cat "${E2E_LOG_DIR}/tm.log"
     echo "  --- end ---"
     fail "trusty-memory daemon did not start"
     kill "${TM_PID}" 2>/dev/null || true
@@ -254,7 +263,7 @@ fi
 
 # Start the daemon and verify it comes up.
 echo "  Starting tm daemon ..."
-tm start > /tmp/mpm.log 2>&1 &
+tm start > "${E2E_LOG_DIR}/mpm.log" 2>&1 &
 MPM_DAEMON_PID=$!
 sleep 5
 
@@ -265,7 +274,7 @@ if echo "${STATUS_OUT}" | grep -qi "running\|ok\|active\|daemon\|version\|sessio
 else
     # Status might exit non-zero if daemon is not up — that counts as fail.
     echo "  --- daemon log ---"
-    cat /tmp/mpm.log
+    cat "${E2E_LOG_DIR}/mpm.log"
     echo "  --- end ---"
     fail "trusty-mpm: daemon status did not indicate running"
 fi
@@ -286,7 +295,7 @@ echo "  Version: ${TA_VERSION}"
 
 # trusty-analyze requires a running trusty-search daemon.
 echo "  Starting trusty-search for analyze scenario ..."
-TRUSTY_SKIP_RAM_CHECK=1 trusty-search start > /tmp/ts2.log 2>&1 &
+TRUSTY_SKIP_RAM_CHECK=1 trusty-search start > "${E2E_LOG_DIR}/ts2.log" 2>&1 &
 TS2_PID=$!
 sleep 3
 TS2_PORT="$(trusty-search port 2>/dev/null || echo '7878')"
@@ -295,7 +304,7 @@ echo "  trusty-search port: ${TS2_PORT}"
 if ! wait_http "http://127.0.0.1:${TS2_PORT}/health" 30; then
     fail "trusty-search dependency for analyze did not start"
     echo "  --- ts log ---"
-    cat /tmp/ts2.log
+    cat "${E2E_LOG_DIR}/ts2.log"
     echo "  --- end ---"
     kill "${TS2_PID}" 2>/dev/null || true
     TS2_PID=""
@@ -305,21 +314,21 @@ fi
 if [ -n "${TS2_PID}" ]; then
     ANALYZE_INDEX="smoke-analyze"
     trusty-search index "/e2e/sample-code" --name "${ANALYZE_INDEX}" --lexical-only \
-        > /tmp/ts2-index.log 2>&1 || true
+        > "${E2E_LOG_DIR}/ts2-index.log" 2>&1 || true
 
     # Start trusty-analyze daemon.
     # Note: --search-url is a GLOBAL flag (before the subcommand), not a serve flag.
     # Use the TRUSTY_SEARCH_URL env var to keep the invocation readable.
-    echo "  Starting trusty-analyze daemon ..."
+    echo "  Starting trusty-analyze daemon (port ${TA_PORT}) ..."
     TRUSTY_SEARCH_URL="http://127.0.0.1:${TS2_PORT}" \
-        trusty-analyze serve --foreground > /tmp/ta.log 2>&1 &
+        trusty-analyze serve --foreground > "${E2E_LOG_DIR}/ta.log" 2>&1 &
     TA_PID=$!
 
-    if wait_http "http://127.0.0.1:7879/health" 30; then
+    if wait_http "http://127.0.0.1:${TA_PORT}/health" 30; then
         pass "trusty-analyze daemon healthy"
     else
         echo "  --- analyze log ---"
-        cat /tmp/ta.log
+        cat "${E2E_LOG_DIR}/ta.log"
         echo "  --- end ---"
         fail "trusty-analyze daemon did not start"
         kill "${TA_PID}" 2>/dev/null || true
@@ -340,7 +349,7 @@ if [ -n "${TS2_PID}" ]; then
         fi
 
         # Also verify the health endpoint reports search_reachable.
-        TA_HEALTH="$(curl -sf "http://127.0.0.1:7879/health" 2>/dev/null || echo '{}')"
+        TA_HEALTH="$(curl -sf "http://127.0.0.1:${TA_PORT}/health" 2>/dev/null || echo '{}')"
         echo "  Health: ${TA_HEALTH}"
         if echo "${TA_HEALTH}" | grep -q '"status"'; then
             pass "trusty-analyze: health endpoint returned structured JSON"

@@ -41,6 +41,7 @@ ANALYZE_VERSION=""
 NO_CACHE=""
 IMAGE_TAG="trusty-e2e:latest"
 DOCKERFILE_DIR="docker/e2e"
+LOG_DIR=""   # resolved to ${REPO_ROOT}/e2e-logs after arg parsing
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -101,9 +102,22 @@ echo ""
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
+# Resolve log directory (after REPO_ROOT is known).
+LOG_DIR="${REPO_ROOT}/e2e-logs"
+
 echo ">>> Building Docker image ${IMAGE_TAG} ..."
+
+# Build the --no-cache flag safely so an empty NO_CACHE never inserts a
+# bare empty word into the docker build invocation.
+# The array is always declared (even empty) to avoid "unbound variable"
+# errors under set -u.
+BUILD_EXTRA_FLAGS=()
+if [ -n "${NO_CACHE}" ]; then
+    BUILD_EXTRA_FLAGS+=("--no-cache")
+fi
+
 docker build \
-    ${NO_CACHE} \
+    ${BUILD_EXTRA_FLAGS[@]+"${BUILD_EXTRA_FLAGS[@]}"} \
     --build-arg "TRUSTY_SEARCH_VERSION=${SEARCH_VERSION}" \
     --build-arg "TRUSTY_MEMORY_VERSION=${MEMORY_VERSION}" \
     --build-arg "TRUSTY_MPM_VERSION=${MPM_VERSION}" \
@@ -118,10 +132,18 @@ echo ""
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
+# Bind-mount a host log directory so per-tool logs are accessible after the
+# --rm container exits (mirrors the CI bind-mount convention).
+mkdir -p "${LOG_DIR}"
+echo ">>> Log directory: ${LOG_DIR}"
+echo ""
+
 docker run --rm \
     -e TRUSTY_SKIP_RAM_CHECK=1 \
     -e XDG_DATA_HOME=/tmp/trusty-data \
     -e HOME=/root \
+    -e E2E_LOG_DIR=/tmp/e2e-logs \
+    -v "${LOG_DIR}:/tmp/e2e-logs" \
     "${IMAGE_TAG}"
 
 EXIT_CODE=$?
