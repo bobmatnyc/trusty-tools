@@ -50,6 +50,9 @@ pub use resolve::{
     EnvTokenResolver, IntentTokenResolver, SpecLookup, TicketData, TicketFetcher, apply_precedence,
     resolve, resolve_default,
 };
+pub use spec_resolve::{
+    SpecSectionResolution, extract_spec_method, parse_spec_refs, resolve_spec_section, revision_of,
+};
 pub use types::{
     ChangedFile, IntentQuery, IsrError, Method, MethodKind, Precedence, ResolvedIntent, SpecRef,
     TicketRef,

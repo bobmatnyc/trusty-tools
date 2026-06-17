@@ -18,7 +18,9 @@ use super::resolve::{
     EnvTokenResolver, IntentTokenResolver, SpecLookup, TicketData, TicketFetcher, resolve,
     resolve_default,
 };
-use super::spec_resolve::{extract_spec_method, parse_spec_refs};
+use super::spec_resolve::{
+    extract_spec_method, parse_spec_refs, resolve_spec_section, revision_of,
+};
 use super::types::{ChangedFile, IntentQuery, IsrError, MethodKind, Precedence, ResolvedIntent};
 
 // ───────────────────────── Test doubles ──────────────────────────────────────
@@ -562,6 +564,20 @@ fn spec_resolve_method_section_scoped_top_level_heading() {
     );
 }
 
+/// C4 (review C4, Finding 3): `anchor_in_heading` only treats a `{#…}` marker
+/// as a candidate when it is a SPEC id. A heading carrying an ordinary markdown
+/// slug (`{#overview}`) must NOT be matched as a spec section — so resolving a
+/// SPEC anchor against a doc whose only `{#…}` marker is a non-SPEC slug yields
+/// no section (the method block under that slug is never attributed).
+#[test]
+fn spec_resolve_anchor_in_heading_rejects_non_spec() {
+    let md = "## Overview {#overview}\n\n- use cursor pagination\n";
+    assert!(
+        resolve_spec_section(md, "SPEC-X-01~draft").is_none(),
+        "a non-SPEC `{{#slug}}` anchor must not match a SPEC section"
+    );
+}
+
 // ───────────────────────── FsSpecLookup path-traversal guard ────────────────
 
 /// Review MEDIUM #2 (path traversal): `FsSpecLookup::load` must refuse a
@@ -724,4 +740,251 @@ async fn resolve_with_explicit_extractor() {
     let intent = resolve(ticket_query(vec![]), &fetcher, &AlwaysSome, &lookup).await;
     assert_eq!(intent.precedence_winner, Precedence::Ticket);
     assert_eq!(intent.ticket_method.unwrap().text, "forced");
+}
+
+// ═════════════════════ C4 (#1361): SLD spec-resolver hardening ═══════════════
+//
+// AC-6 hardening + AC-18 contribution. Each test pins one normative §6.4 rule:
+// SLD-block scoping (module + fn level), Behavior-Contract/Rationale-scoped
+// extraction, revision-drift (v1 ref → v2 section resolves + flags), and the
+// no-linkage gap.
+
+/// C4: a ref declared in a MODULE-level `//! # Spec References` block parses.
+#[test]
+fn spec_resolve_parse_module_level_block() {
+    let src = "//! Some crate doc.\n\
+        //!\n\
+        //! # Spec References\n\
+        //!\n\
+        //! - [`SPEC-X-01~v1`](docs/specs/x.md#SPEC-X-01~v1)\n\
+        \n\
+        pub fn f() {}\n";
+    let refs = parse_spec_refs(src);
+    assert_eq!(refs.len(), 1, "module-level block ref must parse");
+    assert_eq!(refs[0].spec_id, "SPEC-X-01~v1");
+    assert_eq!(refs[0].anchor, "SPEC-X-01~v1");
+}
+
+/// C4: a ref declared in a FUNCTION-level `/// # Spec References` block parses.
+#[test]
+fn spec_resolve_parse_fn_level_block() {
+    let src = "/// Does a thing.\n\
+        ///\n\
+        /// # Spec References\n\
+        ///\n\
+        /// - [`SPEC-Y-02~draft`](docs/specs/y.md#SPEC-Y-02~draft)\n\
+        pub fn g() {}\n";
+    let refs = parse_spec_refs(src);
+    assert_eq!(refs.len(), 1, "fn-level block ref must parse");
+    assert_eq!(refs[0].spec_id, "SPEC-Y-02~draft");
+    assert_eq!(refs[0].file, "docs/specs/y.md");
+}
+
+/// C4 NORMATIVE (§6.4 "the ISR does not invent linkage"): a `SPEC-…` link that
+/// is NOT inside a `# Spec References` block must NOT be treated as linkage.
+#[test]
+fn spec_resolve_parse_ignores_non_block_ref() {
+    // The link sits in a plain code comment and in ordinary rustdoc prose — but
+    // never under a `# Spec References` heading.
+    let src = "// see [`SPEC-Z-09~v1`](docs/specs/z.md#SPEC-Z-09~v1) for context\n\
+        /// This fn relates to [`SPEC-Z-09~v1`](docs/specs/z.md#SPEC-Z-09~v1).\n\
+        pub fn h() {}\n";
+    assert!(
+        parse_spec_refs(src).is_empty(),
+        "a SPEC link outside a `# Spec References` block must not link"
+    );
+}
+
+/// C4: a different rustdoc heading after the block terminates it — a ref placed
+/// under the *following* heading is not attributed to `# Spec References`.
+#[test]
+fn spec_resolve_parse_block_terminated_by_next_heading() {
+    let src = "//! # Spec References\n\
+        //!\n\
+        //! - [`SPEC-A-01~v1`](docs/specs/a.md#SPEC-A-01~v1)\n\
+        //!\n\
+        //! # Examples\n\
+        //!\n\
+        //! - [`SPEC-B-02~v1`](docs/specs/b.md#SPEC-B-02~v1)\n";
+    let refs = parse_spec_refs(src);
+    assert_eq!(refs.len(), 1, "only the in-block ref counts");
+    assert_eq!(refs[0].spec_id, "SPEC-A-01~v1");
+}
+
+/// C4 (review C4, Finding 1): a `## Sub-section` heading (double-hash) after an
+/// opened `# Spec References` block MUST terminate it — a ref under the
+/// sub-section is not attributed to the spec-references block. Regression for
+/// the bug where termination only fired on single-`#` headings.
+#[test]
+fn spec_resolve_parse_block_terminated_by_subsection_heading() {
+    let src = "//! # Spec References\n\
+        //!\n\
+        //! - [`SPEC-A-01~v1`](docs/specs/a.md#SPEC-A-01~v1)\n\
+        //!\n\
+        //! ## Implementation Notes\n\
+        //!\n\
+        //! - [`SPEC-B-02~v1`](docs/specs/b.md#SPEC-B-02~v1)\n";
+    let refs = parse_spec_refs(src);
+    assert_eq!(
+        refs.len(),
+        1,
+        "a `## Sub-section` heading must terminate the spec-references block"
+    );
+    assert_eq!(refs[0].spec_id, "SPEC-A-01~v1");
+    assert!(
+        !refs.iter().any(|r| r.spec_id == "SPEC-B-02~v1"),
+        "a ref after a `## Sub-section` heading must NOT be attributed to the block"
+    );
+}
+
+/// C4: `revision_of` splits the `~rev` suffix off a spec id/anchor.
+#[test]
+fn spec_resolve_revision_of() {
+    assert_eq!(revision_of("SPEC-X-01~v2").as_deref(), Some("v2"));
+    assert_eq!(revision_of("SPEC-X-01~draft").as_deref(), Some("draft"));
+    assert_eq!(revision_of("SPEC-X-01"), None);
+}
+
+/// C4 (§6.4 Behavior Contract + Rationale): the method is lifted from the BC and
+/// Rationale sub-blocks, NOT from an unrelated sub-block (e.g. an Inputs list).
+#[test]
+fn spec_resolve_contract_scoped() {
+    let md = "## Gate {#SPEC-X-01~draft}\n\
+        \n\
+        **Inputs:**\n\
+        \n\
+        - reuse the existing FooBar trait (this is NOT the method block)\n\
+        \n\
+        **Behavior Contract (WHAT):**\n\
+        \n\
+        - use cursor-based pagination\n\
+        \n\
+        **Rationale (WHY):** keeps it stable.\n\
+        \n\
+        ## Next\n";
+    let r = resolve_spec_section(md, "SPEC-X-01~draft").expect("section resolves");
+    let m = r.method.expect("BC block prescribes a method");
+    assert_eq!(m.kind, MethodKind::Approach);
+    assert!(
+        m.source_excerpt.contains("cursor-based pagination"),
+        "method must come from the Behavior Contract block, not Inputs"
+    );
+}
+
+/// C4: a section with NO formal BC/Rationale labels falls back to the whole
+/// section body so an inline method still resolves (conservative for loose specs).
+#[test]
+fn spec_resolve_contract_fallback() {
+    let md = "## Gate {#SPEC-X-01~draft}\n\nuse cursor-based pagination\n\n## Next\n";
+    let r = resolve_spec_section(md, "SPEC-X-01~draft").expect("section resolves");
+    assert!(
+        r.method.is_some(),
+        "an inline method in an unlabelled section must still resolve"
+    );
+}
+
+/// C4 (§6.4 revision awareness, OQ-6): a `~v1` ref pointing at a `~v2` section
+/// STILL resolves the method (from the current section) AND flags
+/// `revision_drift = true` — stale-adjacent metadata, never an error.
+#[test]
+fn spec_resolve_drift_v1_ref_v2_section_resolves_and_flags() {
+    let md = "## Gate {#SPEC-X-01~v2}\n\
+        \n\
+        **Behavior Contract (WHAT):**\n\
+        \n\
+        - use cursor-based pagination\n\
+        \n\
+        ## Next\n";
+    // Reference the v1 anchor; the section is v2.
+    let r = resolve_spec_section(md, "SPEC-X-01~v1").expect("v1 ref still resolves v2 section");
+    assert!(
+        r.method.is_some(),
+        "method resolves from the current section"
+    );
+    assert_eq!(r.section_revision.as_deref(), Some("v2"));
+    assert!(r.revision_drift, "v1 ref → v2 section must flag drift");
+}
+
+/// C4: a ref whose revision MATCHES the section does not flag drift.
+#[test]
+fn spec_resolve_drift_matching_revision_no_flag() {
+    let md = "## Gate {#SPEC-X-01~v2}\n\n**Rationale (WHY):** use cursor pagination.\n\n## Next\n";
+    let r = resolve_spec_section(md, "SPEC-X-01~v2").expect("section resolves");
+    assert!(!r.revision_drift, "matching revision must not flag drift");
+}
+
+/// C4 end-to-end (§6.4): a drifted SLD ref resolves the spec method AND raises
+/// `stale_spec` on the `ResolvedIntent` WITHOUT setting `conflict` — non-blocking
+/// (OUTDATED enforcement is a non-goal).
+#[tokio::test]
+async fn spec_resolve_drift_sets_stale_spec_without_conflict() {
+    let spec_file = "docs/specs/x.md";
+    // Section heading is v2; the changed file references v1.
+    let md = "## Gate {#SPEC-X-01~v2}\n\
+        \n\
+        **Behavior Contract (WHAT):**\n\
+        \n\
+        - use cursor-based pagination\n\
+        \n\
+        ## Next\n";
+    let lookup = MapSpecLookup::with(spec_file, md);
+    let changed = vec![sld_file(
+        "crates/x/src/lib.rs",
+        "SPEC-X-01~v1",
+        spec_file,
+        "SPEC-X-01~v1",
+    )];
+    // Ticket silent so the spec axis is the sole method (spec-only → Spec).
+    let fetcher = MockFetcher::ok("Add the thing.");
+    let intent = resolve_default(ticket_query(changed), &fetcher, &lookup).await;
+
+    assert!(
+        intent.spec_method.is_some(),
+        "drifted spec still resolves a method"
+    );
+    assert_eq!(intent.precedence_winner, Precedence::Spec);
+    assert!(
+        intent.stale_spec,
+        "revision drift flags stale_spec-adjacent metadata"
+    );
+    assert!(
+        !intent.conflict,
+        "drift is advisory, not a method conflict (non-blocking)"
+    );
+    assert!(intent.unresolved.is_none(), "drift never fails the resolve");
+}
+
+/// C4 NORMATIVE end-to-end (§6.4): a changed file with NO SLD ref returns
+/// `spec_section = None` (a gap) — the ISR does not fabricate linkage.
+#[tokio::test]
+async fn spec_resolve_no_block_ref_is_gap_end_to_end() {
+    // A SPEC link in a plain comment (NOT a `# Spec References` block) must not
+    // produce a spec section.
+    let changed = vec![ChangedFile {
+        path: "crates/x/src/lib.rs".to_string(),
+        content: "// related: [`SPEC-X-01~v1`](docs/specs/x.md#SPEC-X-01~v1)\npub fn f() {}\n"
+            .to_string(),
+    }];
+    let fetcher = MockFetcher::ok("Add the thing.");
+    let lookup = MapSpecLookup::with(
+        "docs/specs/x.md",
+        &spec_md("SPEC-X-01~v1", "use cursor pagination"),
+    );
+    let intent = resolve_default(ticket_query(changed), &fetcher, &lookup).await;
+
+    assert!(
+        intent.spec_section.is_none(),
+        "a non-block SPEC link must not invent linkage"
+    );
+    assert!(intent.spec_method.is_none());
+    assert!(!intent.stale_spec);
+}
+
+/// C4: `extract_spec_method` back-compat wrapper still returns the section
+/// method (so the C1 calling convention is unchanged).
+#[test]
+fn spec_resolve_extract_method_wrapper_unchanged() {
+    let md = spec_md("SPEC-X-01~draft", "use cursor-based pagination");
+    let m = extract_spec_method(&md, "SPEC-X-01~draft").expect("wrapper resolves method");
+    assert_eq!(m.kind, MethodKind::Approach);
 }

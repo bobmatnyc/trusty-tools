@@ -14,7 +14,7 @@ use async_trait::async_trait;
 
 use super::extract::{HeuristicMethodExtractor, MethodExtractor};
 use super::linkage::extract_pr_ticket;
-use super::spec_resolve::{extract_spec_method, parse_spec_refs};
+use super::spec_resolve::{parse_spec_refs, resolve_spec_section};
 use super::types::{
     ChangedFile, IntentQuery, IsrError, Method, Precedence, ResolvedIntent, SpecRef, TicketRef,
 };
@@ -135,9 +135,15 @@ pub async fn resolve(
     };
 
     // ── Spec axis (gap, never an error: ISR never invents linkage) ────────
-    let (spec_section, spec_method) = resolve_spec(&changed_files, spec_lookup);
+    let (spec_section, spec_method, spec_drift) = resolve_spec(&changed_files, spec_lookup);
 
-    build_resolved(ticket_ref, ticket_method, spec_section, spec_method)
+    build_resolved(
+        ticket_ref,
+        ticket_method,
+        spec_section,
+        spec_method,
+        spec_drift,
+    )
 }
 
 /// Pull `(owner, repo, ticket_id, changed_files)` out of a query.
@@ -173,39 +179,45 @@ fn resolve_ticket_id(query: &IntentQuery) -> Option<(String, String, String, Vec
     }
 }
 
-/// Resolve the spec section + spec method from changed files.
+/// Resolve the spec section + spec method (+ revision drift) from changed files.
 ///
 /// Why: the spec axis is greenfield and must never fabricate linkage — a file
-/// with no SLD ref yields no spec method (spec §6.4).
+/// with no SLD ref yields no spec method (spec §6.4). C4 (#1361) additionally
+/// surfaces revision drift so a `~v1` ref to a `~v2` section still resolves and
+/// is flagged `stale_spec`-adjacent without blocking (§6.4, OQ-6).
 /// What: parses SLD refs from each changed file (first match wins), looks up
-/// the spec markdown via `spec_lookup`, and extracts the spec method from the
-/// governed section. Returns `(None, None)` when no SLD ref is declared.
+/// the spec markdown via `spec_lookup`, and resolves the governed section via
+/// [`resolve_spec_section`] — returning the `SpecRef`, the extracted method, and
+/// whether the referenced revision drifted from the section's. Returns
+/// `(None, None, false)` when no SLD ref is declared.
 ///
-/// KNOWN C1 LIMITATION (spec §6.4 "first match wins"): the loop returns the
-/// FIRST changed file that declares an SLD ref and silently ignores SLD refs in
-/// later files. This is intentional for C1 — a PR that touches multiple files
-/// each governed by a different spec section is out of scope. Multi-file /
-/// multi-section reconciliation (picking the most-specific governing section,
-/// or surfacing a conflict across files) is deferred to C4 (#1361), which
-/// hardens this seam.
+/// KNOWN LIMITATION (spec §6.4 "first match wins"): the loop returns the FIRST
+/// changed file that declares an SLD ref and silently ignores SLD refs in later
+/// files. A PR touching multiple files each governed by a different spec
+/// section is out of scope; multi-file/multi-section reconciliation is not part
+/// of C4.
 /// Test: `super::tests::spec_resolve_*` (AC-6).
 fn resolve_spec(
     changed_files: &[ChangedFile],
     spec_lookup: &dyn SpecLookup,
-) -> (Option<SpecRef>, Option<Method>) {
-    // First changed file with an SLD ref wins (see KNOWN C1 LIMITATION above).
+) -> (Option<SpecRef>, Option<Method>, bool) {
+    // First changed file with an SLD ref wins (see KNOWN LIMITATION above).
     for file in changed_files {
         let refs = parse_spec_refs(&file.content);
         if let Some(spec_ref) = refs.into_iter().next() {
             // Look up the spec markdown; a missing file is a gap, not an error
             // (the ISR reads declared links, it does not enforce them).
-            let method = spec_lookup
+            let resolution = spec_lookup
                 .load(&spec_ref.file)
-                .and_then(|md| extract_spec_method(&md, &spec_ref.anchor));
-            return (Some(spec_ref), method);
+                .and_then(|md| resolve_spec_section(&md, &spec_ref.anchor));
+            let (method, drift) = match resolution {
+                Some(r) => (r.method, r.revision_drift),
+                None => (None, false),
+            };
+            return (Some(spec_ref), method, drift);
         }
     }
-    (None, None)
+    (None, None, false)
 }
 
 /// Pluggable spec-markdown loader.
@@ -229,15 +241,20 @@ pub trait SpecLookup: Send + Sync {
 /// Assemble a `ResolvedIntent` and apply precedence to it.
 ///
 /// Why: keeps `resolve` readable by separating wiring from the normative
-/// precedence computation (spec §6.1).
-/// What: builds the struct from the resolved axes, then runs
-/// [`apply_precedence`] to set `precedence_winner`/`conflict`/`stale_spec`.
-/// Test: `super::tests::precedence_*` (AC-1..AC-4).
+/// precedence computation (spec §6.1). C4 also folds the SLD revision-drift
+/// signal into `stale_spec`-adjacent metadata here (spec §6.4).
+/// What: builds the struct from the resolved axes, runs [`apply_precedence`] to
+/// set `precedence_winner`/`conflict`/`stale_spec`, then, when the spec was
+/// resolved via a drifted revision (`spec_drift`), raises `stale_spec` WITHOUT
+/// setting `conflict` — a non-blocking advisory marker (OUTDATED enforcement is
+/// out of scope, §1.3). Drift never lowers a precedence winner.
+/// Test: `super::tests::precedence_*` (AC-1..AC-4), `spec_resolve_drift_*`.
 fn build_resolved(
     ticket: TicketRef,
     ticket_method: Option<Method>,
     spec_section: Option<SpecRef>,
     spec_method: Option<Method>,
+    spec_drift: bool,
 ) -> ResolvedIntent {
     let mut intent = ResolvedIntent {
         ticket: Some(ticket),
@@ -250,6 +267,12 @@ fn build_resolved(
         unresolved: None,
     };
     apply_precedence(&mut intent);
+    // Revision drift is `stale_spec`-adjacent advisory metadata: flag it without
+    // declaring a method conflict and without disturbing the precedence winner
+    // (§6.4 — the method still resolves from the current section).
+    if spec_drift {
+        intent.stale_spec = true;
+    }
     intent
 }
 
