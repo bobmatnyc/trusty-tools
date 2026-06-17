@@ -41,6 +41,7 @@ impl LlmProvider for FakeLlm {
             output_tokens: 50,
             latency_ms: 10,
             cost_usd: 0.0001,
+            finish_reason: None,
         })
     }
 }

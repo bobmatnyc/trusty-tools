@@ -298,28 +298,10 @@ fn rederive_verdict(
 /// Test: `rederive_confirmed_medium_caps_at_approve_star` (REQUEST_CHANGES→APPROVE*),
 /// `rederive_confirmed_praise_keeps_clean_approve` (APPROVE stays APPROVE — #1343).
 fn verdict_min(a: Verdict, b: Verdict) -> Verdict {
-    if verdict_ord(&a) <= verdict_ord(&b) {
-        a
-    } else {
-        b
-    }
-}
-
-/// Ordinal severity for a verdict (higher = more severe).
-///
-/// Why: `verdict_min` needs a total order over verdicts to pick the less-severe one.
-/// Mirrors the ordering in `grade.rs::verdict_ord` so the two modules agree.
-/// What: APPROVE=0, APPROVE*=1, REQUEST_CHANGES=2, BLOCK=3, UNKNOWN=4 (terminal,
-/// never compared in normal flow).
-/// Test: covered transitively by `verdict_min` callers in `verify_tests.rs`.
-fn verdict_ord(v: &Verdict) -> u8 {
-    match v {
-        Verdict::Approve => 0,
-        Verdict::ApproveWithReservations => 1,
-        Verdict::RequestChanges => 2,
-        Verdict::Block => 3,
-        Verdict::Unknown => 4,
-    }
+    // #1357: compare via `Verdict::ordinal` (the single source of truth) instead
+    // of a module-local copy of the ordinal table, so this module and `grade.rs`
+    // can never drift apart.
+    if a.ordinal() <= b.ordinal() { a } else { b }
 }
 
 // ─── Candidate selection ─────────────────────────────────────────────────────

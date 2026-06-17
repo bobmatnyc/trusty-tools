@@ -49,6 +49,7 @@ impl LlmProvider for FixedVerifier {
             output_tokens: 5,
             latency_ms: 1,
             cost_usd: 0.0,
+            finish_reason: None,
         })
     }
 }
@@ -70,6 +71,7 @@ impl LlmProvider for TruncatedVerifier {
             output_tokens: 3,
             latency_ms: 1,
             cost_usd: 0.0,
+            finish_reason: None,
         })
     }
 }

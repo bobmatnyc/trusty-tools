@@ -93,6 +93,11 @@ struct OrcResponse {
 #[derive(Debug, Deserialize)]
 struct OrcChoice {
     message: OrcChoiceMessage,
+    /// OpenAI-compatible completion reason: `"stop"` (natural end), `"length"`
+    /// (hit `max_tokens` → truncated), `"content_filter"`, etc.  Threaded into
+    /// `LlmResponse.finish_reason` as the PRIMARY truncation signal (#1357).
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +161,16 @@ fn cost_per_million(model: &str) -> (f64, f64) {
 /// caller's unknown-model fallback is preserved.
 /// Test: `cost_estimate_gemini_pro_nonzero`, `cost_estimate_gemini_flash_nonzero`,
 /// `cost_estimate_unknown_model` (still zero).
+///
+/// PRICING PROVENANCE (#1357 item 4):
+///   Source:    OpenRouter model pricing — https://openrouter.ai/models?q=gemini
+///              (per-million input/output USD; cross-check against
+///              https://ai.google.dev/gemini-api/docs/pricing for Google direct).
+///   Reference date: 2026-06-17 (best-effort snapshot; family substring match,
+///              NOT per-slug exact pricing).
+///   TODO: refresh pricing — re-verify these tiers against the OpenRouter pricing
+///   page; if `compare`-mode cost ranking ever depends on exact per-slug Gemini
+///   pricing, replace these family-tier estimates with an exact-slug table.
 fn gemini_cost_per_million(model: &str) -> (f64, f64) {
     let m = model.to_ascii_lowercase();
     if !m.contains("gemini") {
@@ -163,6 +178,7 @@ fn gemini_cost_per_million(model: &str) -> (f64, f64) {
     }
     // Flash-Lite is cheapest; Flash mid; Pro top-tier.  Order matters: check the
     // more specific "flash-lite" before "flash".
+    // Values: USD per million (input, output); source/date in the doc comment above.
     if m.contains("flash-lite") {
         (0.10, 0.40)
     } else if m.contains("flash") {
@@ -343,10 +359,13 @@ impl LlmProvider for OpenRouterProvider {
             }
         })?;
 
-        let text = orc
-            .choices
-            .into_iter()
-            .next()
+        let first_choice = orc.choices.into_iter().next();
+        // Capture finish_reason BEFORE consuming the message content (#1357).
+        let finish_reason = first_choice
+            .as_ref()
+            .and_then(|c| c.finish_reason.clone())
+            .map(|r| r.trim().to_ascii_lowercase());
+        let text = first_choice
             .and_then(|c| c.message.content)
             .unwrap_or_default();
 
@@ -365,6 +384,7 @@ impl LlmProvider for OpenRouterProvider {
             output_tokens,
             latency_ms,
             cost_usd,
+            finish_reason,
         })
     }
 }

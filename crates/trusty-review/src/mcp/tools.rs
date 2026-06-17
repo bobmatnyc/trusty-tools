@@ -211,7 +211,7 @@ async fn call_review_pr(args: &Value, state: &AppState) -> Result<Value, ToolErr
         token,
     };
 
-    let deps = deps_from_state(state, &reviewer_model).await;
+    let (deps, reviewer_model_fallback) = deps_from_state(state, &reviewer_model).await;
     let input = ReviewInput {
         diff_source,
         reviewer_model: reviewer_model.clone(),
@@ -224,7 +224,7 @@ async fn call_review_pr(args: &Value, state: &AppState) -> Result<Value, ToolErr
 
     info!(owner, repo, pr, reviewer_model, "mcp: review_pr");
     let result = run_review(&state.config, input, deps).await;
-    Ok(wrap_result(&result))
+    Ok(wrap_result(&result, reviewer_model_fallback.as_deref()))
 }
 
 // ─── review_diff ─────────────────────────────────────────────────────────────
@@ -262,7 +262,7 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
     let path = tmp.path().to_path_buf();
     let diff_source = DiffSource::LocalFile { path };
 
-    let deps = deps_from_state(state, &reviewer_model).await;
+    let (deps, reviewer_model_fallback) = deps_from_state(state, &reviewer_model).await;
     let input = ReviewInput {
         diff_source,
         reviewer_model: reviewer_model.clone(),
@@ -276,7 +276,7 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
     info!(bytes = diff.len(), reviewer_model, "mcp: review_diff");
     let result = run_review(&state.config, input, deps).await;
     // `tmp` is dropped here — temp file cleaned up automatically.
-    Ok(wrap_result(&result))
+    Ok(wrap_result(&result, reviewer_model_fallback.as_deref()))
 }
 
 // ─── review_health ────────────────────────────────────────────────────────────
@@ -368,13 +368,22 @@ async fn call_review_health(state: &AppState) -> Value {
 /// build error it logs a `warn!` and falls back to the startup `state.llm` so a
 /// malformed override degrades gracefully rather than failing the whole review.
 /// The verifier / search / analyze / dedup handles are always cloned from state.
+///
+/// Returns the built `ReviewDeps` alongside an OPTIONAL `reviewer_model_fallback`
+/// reason (closes #1357 item 2): `Some(reason)` when an override provider failed to
+/// build and we silently fell back to the startup provider, so the caller can
+/// surface it in the tool response metadata instead of getting the wrong backend
+/// with no signal.  `None` on the happy path (override matched startup, or built
+/// successfully).
 /// Test: `deps_from_state_openrouter_override_switches_provider`,
-/// `deps_from_state_no_override_reuses_startup_provider` (in `tools_dispatch_tests.rs`).
-async fn deps_from_state(state: &AppState, reviewer_model: &str) -> ReviewDeps {
+/// `deps_from_state_no_override_reuses_startup_provider`,
+/// `deps_from_state_build_failure_reports_fallback` (in `tools_dispatch_tests.rs`).
+async fn deps_from_state(state: &AppState, reviewer_model: &str) -> (ReviewDeps, Option<String>) {
     let startup_provider = &state.config.role_models.reviewer.provider;
     let (override_provider, _bare) =
         crate::llm::resolve_provider_and_model(reviewer_model, startup_provider);
 
+    let mut fallback_reason: Option<String> = None;
     let llm = if &override_provider == startup_provider {
         // Same backend as startup — reuse the already-built provider (no alloc).
         Arc::clone(&state.llm)
@@ -389,24 +398,30 @@ async fn deps_from_state(state: &AppState, reviewer_model: &str) -> ReviewDeps {
         {
             Ok(p) => p,
             Err(e) => {
+                let reason = format!(
+                    "failed to build provider for reviewer_model override '{reviewer_model}' \
+                     ({e}); fell back to the startup '{startup_provider}' provider"
+                );
                 tracing::warn!(
                     reviewer_model,
                     error = %e,
                     "mcp: failed to build provider for reviewer_model override — \
                      falling back to startup provider"
                 );
+                fallback_reason = Some(reason);
                 Arc::clone(&state.llm)
             }
         }
     };
 
-    ReviewDeps {
+    let deps = ReviewDeps {
         llm,
         verifier: state.verifier.clone(),
         search: Arc::clone(&state.search),
         analyze: state.analyze.clone(),
         dedup: state.dedup.clone(),
-    }
+    };
+    (deps, fallback_reason)
 }
 
 /// Extract a required string field from the tool arguments.
@@ -420,20 +435,46 @@ fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolError> {
         .ok_or_else(|| ToolError::InvalidParams(format!("missing or non-string '{key}'")))
 }
 
-/// Wrap a `ReviewResult` in the MCP content envelope.
+/// Wrap a `ReviewResult` in the MCP content envelope, optionally surfacing a
+/// reviewer-model override-fallback reason (closes #1357 item 2).
 ///
 /// Why: MCP `tools/call` responses must carry results inside a `content[]` array
-/// (per MCP spec) so the LLM can render them correctly.
-/// What: serialises `ReviewResult` to a pretty JSON string, wraps it in a text
-/// content block.
-/// Test: result shape verified by `review_health_does_not_require_creds`.
-fn wrap_result(result: &ReviewResult) -> Value {
-    let text = serde_json::to_string_pretty(result)
-        .unwrap_or_else(|_| serde_json::to_string(result).unwrap_or_default());
-    serde_json::json!({
+/// (per MCP spec) so the LLM can render them correctly.  When a `reviewer_model`
+/// override failed to build and the pipeline silently fell back to the startup
+/// provider, the caller would otherwise get the WRONG backend with no signal.
+/// Surfacing the fallback in the response metadata (and inside the serialised
+/// payload the LLM reads) makes it DETECTABLE without breaking the non-error
+/// contract — the review still ran, just on a different model than requested.
+/// What: serialises `ReviewResult` to pretty JSON; when `fallback` is
+/// `Some(reason)` it injects a `reviewer_model_fallback` string into BOTH the
+/// serialised JSON object (so the LLM reading `content[0].text` sees it) and as a
+/// top-level envelope field (so programmatic callers can detect it without
+/// re-parsing the text).  `None` leaves the envelope unchanged (no extra field).
+/// Test: `wrap_result_surfaces_reviewer_model_fallback`,
+/// `wrap_result_no_fallback_omits_field` (in `tools_tests.rs`).
+fn wrap_result(result: &ReviewResult, fallback: Option<&str>) -> Value {
+    // Serialise to a JSON Value first so we can splice in the fallback marker.
+    let mut payload = serde_json::to_value(result).unwrap_or(Value::Null);
+    if let (Some(reason), Some(obj)) = (fallback, payload.as_object_mut()) {
+        obj.insert(
+            "reviewer_model_fallback".to_string(),
+            Value::String(reason.to_string()),
+        );
+    }
+    let text = serde_json::to_string_pretty(&payload)
+        .unwrap_or_else(|_| serde_json::to_string(&payload).unwrap_or_default());
+
+    let mut envelope = serde_json::json!({
         "content": [{ "type": "text", "text": text }],
         "isError": false,
-    })
+    });
+    if let (Some(reason), Some(obj)) = (fallback, envelope.as_object_mut()) {
+        obj.insert(
+            "reviewer_model_fallback".to_string(),
+            Value::String(reason.to_string()),
+        );
+    }
+    envelope
 }
 
 /// Wrap an arbitrary JSON value in the MCP content envelope.

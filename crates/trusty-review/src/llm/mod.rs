@@ -108,7 +108,9 @@ pub struct LlmRequest {
 /// What: `text` is the full response; `model` echoes the actual model id
 /// used (providers may normalise or alias the requested id); `input_tokens` /
 /// `output_tokens` come from the API usage field; `latency_ms` is wall-clock
-/// end-to-end; `cost_usd` is an estimate from a pricing table.
+/// end-to-end; `cost_usd` is an estimate from a pricing table; `finish_reason`
+/// is the provider's normalised completion reason (`"stop"` / `"length"` / …)
+/// when surfaced, used as the PRIMARY truncation signal (#1357).
 /// Test: `llm_response_serde_roundtrip` in this module.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmResponse {
@@ -124,6 +126,15 @@ pub struct LlmResponse {
     pub latency_ms: u64,
     /// Estimated USD cost for this call based on the model pricing table.
     pub cost_usd: f64,
+    /// Provider completion / stop reason, normalised to a lowercase token
+    /// (#1357).  `Some("stop")` / `Some("end_turn")` means the model finished
+    /// naturally; `Some("length")` / `Some("max_tokens")` means it was cut off
+    /// at the output-token ceiling (a genuine truncation).  `None` when the
+    /// provider did not surface a reason — callers fall back to the token-ratio
+    /// heuristic in that case.  Defaulted on deserialise so older serialised
+    /// `ReviewResult` logs (and test fakes) remain compatible.
+    #[serde(default)]
+    pub finish_reason: Option<String>,
 }
 
 // ─── Provider trait ───────────────────────────────────────────────────────────
@@ -256,6 +267,7 @@ mod tests {
             output_tokens: 64,
             latency_ms: 1234,
             cost_usd: 0.000123,
+            finish_reason: None,
         };
         let json = serde_json::to_string(&resp).expect("serialise");
         let back: LlmResponse = serde_json::from_str(&json).expect("deserialise");

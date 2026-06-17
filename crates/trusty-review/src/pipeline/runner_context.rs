@@ -302,6 +302,7 @@ mod tests {
                 output_tokens: 1,
                 latency_ms: 0,
                 cost_usd: 0.0,
+                finish_reason: None,
             })
         }
     }

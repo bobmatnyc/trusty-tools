@@ -209,6 +209,7 @@ mod tests {
                 output_tokens: 1,
                 latency_ms: 1,
                 cost_usd: 0.0,
+                finish_reason: None,
             })
         }
     }

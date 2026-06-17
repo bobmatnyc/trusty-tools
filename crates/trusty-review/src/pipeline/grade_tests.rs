@@ -637,6 +637,44 @@ fn refuted_high_effort_finding_is_still_excluded() {
     );
 }
 
+/// #1352: the explicit `is_high_severity` predicate identifies exactly the
+/// critical/high-severity tier and drives the verdict floor accordingly.
+///
+/// Why: #1352 replaced the bare `f.effort == Effort::High` check in the floor
+/// guard with a named `is_high_severity` predicate to make the *severity* intent
+/// explicit.  This test pins (a) the predicate's own truth table and (b) that it
+/// drives the floor for an uncertain (low-confidence) high-severity finding — the
+/// #1350 safety-net path that depends on it.  Behaviour must stay equivalent to
+/// the prior `Effort::High` check.
+/// What: asserts `is_high_severity` is true only for `Effort::High`, then asserts
+/// a low-confidence (0.30) High-effort finding still floors a model APPROVE to
+/// BLOCK (the safety net), while a low-confidence Medium does not.
+/// Test: this test itself.
+#[test]
+fn is_high_severity_matches_high_effort() {
+    // (a) Predicate truth table — High only.
+    assert!(is_high_severity(&finding(Effort::High, 0.5)));
+    assert!(!is_high_severity(&finding(Effort::Medium, 0.5)));
+    assert!(!is_high_severity(&finding(Effort::Low, 0.5)));
+
+    // (b) The predicate drives the floor: a low-confidence High-severity finding
+    // still escalates an APPROVE to BLOCK (the #1350 safety net the predicate gates).
+    let high_low_conf = vec![finding(Effort::High, 0.30)];
+    assert_eq!(
+        derive_verdict(Verdict::Approve, &high_low_conf),
+        Verdict::Block,
+        "a low-confidence high-severity finding must still drive the BLOCK floor"
+    );
+
+    // A low-confidence Medium (non-high-severity) is filtered out → no escalation.
+    let medium_low_conf = vec![finding(Effort::Medium, 0.30)];
+    assert_eq!(
+        derive_verdict(Verdict::Approve, &medium_low_conf),
+        Verdict::Approve,
+        "a low-confidence Medium is NOT high-severity and must not escalate"
+    );
+}
+
 /// A confirmed High finding still drives BLOCK even with a B+ grade (#1015 regression).
 ///
 /// Why: the fix must not soften correctness blockers.  High-effort findings are

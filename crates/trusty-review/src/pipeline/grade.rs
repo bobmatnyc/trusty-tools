@@ -194,7 +194,7 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
     // Override the model down to APPROVE — this specifically prevents APPROVE*
     // over-fire (Fix 4).  High-effort findings escape this gate: a confirmed
     // bug with low confidence should still BLOCK, not disappear.
-    let has_high = substantive.iter().any(|f| f.effort == Effort::High);
+    let has_high = substantive.iter().any(|f| is_high_severity(f));
     let all_low_confidence = !substantive.is_empty()
         && substantive
             .iter()
@@ -272,11 +272,36 @@ fn is_substantive(f: &Finding) -> bool {
             | Some(VerifyOutcome::ErrorRefuted { .. })
             | Some(VerifyOutcome::TruncationRefuted)
     );
-    // A refuted finding is disproven evidence — always excluded, even High-effort.
-    // Otherwise retain it if it clears the confidence floor OR is a High-effort
-    // (critical/high severity) finding: a genuine critical concern must keep its
-    // place at the verdict floor even when the model is only uncertain about it.
-    !refuted && (f.confidence >= FLOOR_COUNT_MIN_CONFIDENCE || f.effort == Effort::High)
+    // A refuted finding is disproven evidence — always excluded, even high-severity.
+    // Otherwise retain it if it clears the confidence floor OR is a high-severity
+    // (critical or high) finding: a genuine critical or high-severity concern must
+    // keep its place at the verdict floor even when the model is only uncertain
+    // about it.
+    !refuted && (f.confidence >= FLOOR_COUNT_MIN_CONFIDENCE || is_high_severity(f))
+}
+
+/// Return `true` when a finding is critical- or high-severity (closes #1352).
+///
+/// Why: the verdict-floor guard must single out "a critical/high-severity finding
+/// that must never be silently dropped".  Before #1352 the call sites spelled this
+/// as the bare check `f.effort == Effort::High`, which made `Effort` do double duty
+/// as a severity proxy and left the *intent* (severity, not remediation cost)
+/// implicit.  Naming the predicate makes that intent unmistakable at every call
+/// site and gives a single place to evolve the severity definition if `Finding`
+/// ever grows a dedicated severity axis.
+/// What: returns `f.effort == Effort::High`.  In this domain model `Effort` IS the
+/// severity proxy — `Effort::High` is defined as "Critical or High severity"
+/// (see the module-level mapping and `models::Effort`), `Effort::Medium` as Medium
+/// severity, and `Effort::Low` as Low severity.  This is therefore behaviour-
+/// equivalent to the previous inline check (verified by the #1343 calibration
+/// regression tests, which are unchanged) while reading as the severity question
+/// it actually asks.  Should a separate `Severity::{Critical,High}` field land
+/// later, this is the one function to update.
+/// Test: `is_high_severity_matches_high_effort`,
+/// `low_confidence_high_effort_finding_still_drives_floor` (#1350),
+/// `floor_excludes_refuted_and_low_confidence_findings` (#1343).
+fn is_high_severity(f: &Finding) -> bool {
+    f.effort == Effort::High
 }
 
 // ─── Floor computation ────────────────────────────────────────────────────────
@@ -316,7 +341,7 @@ fn severity_floor(findings: &[&Finding]) -> Verdict {
     }
 
     // Partition findings by effort tier.
-    let has_high = findings.iter().any(|f| f.effort == Effort::High);
+    let has_high = findings.iter().any(|f| is_high_severity(f));
 
     // Only count Medium findings whose confidence clears the floor threshold
     // (#1015: advisory-tier Medium findings must not force REQUEST_CHANGES).
@@ -351,33 +376,13 @@ fn severity_floor(findings: &[&Finding]) -> Verdict {
 /// Why: the floor is a MINIMUM; we take `max(model, floor)` using verdict
 /// severity ordering so the model can escalate beyond the floor but cannot
 /// go below it.
-/// What: defines an ordinal ordering APPROVE(0) < APPROVE*(1) <
-/// REQUEST_CHANGES(2) < BLOCK(3).  Unknown(4) is a separate terminal case
-/// handled before `stricter_of` is called.
+/// What: compares via `Verdict::ordinal` (the single source of truth, #1357):
+/// APPROVE(0) < APPROVE*(1) < REQUEST_CHANGES(2) < BLOCK(3).  Unknown(4) is a
+/// separate terminal case handled before `stricter_of` is called.
 /// Test: `grade_floor_overrides_model_approve`,
 /// `grade_model_block_kept_when_no_critical_finding`.
 fn stricter_of(a: Verdict, b: Verdict) -> Verdict {
-    if verdict_ord(&b) > verdict_ord(&a) {
-        b
-    } else {
-        a
-    }
-}
-
-/// Ordinal severity for a verdict (higher = more severe).
-///
-/// Why: needed by `stricter_of` to compare two verdicts without a full match.
-/// What: APPROVE=0, APPROVE*=1, REQUEST_CHANGES=2, BLOCK=3.  UNKNOWN is never
-/// passed here (handled before the call site).
-/// Test: covered transitively by `stricter_of` tests.
-fn verdict_ord(v: &Verdict) -> u8 {
-    match v {
-        Verdict::Approve => 0,
-        Verdict::ApproveWithReservations => 1,
-        Verdict::RequestChanges => 2,
-        Verdict::Block => 3,
-        Verdict::Unknown => 4, // Should not reach this branch in normal flow.
-    }
+    if b.ordinal() > a.ordinal() { b } else { a }
 }
 
 // ─── Grade-aware entry point ──────────────────────────────────────────────────
