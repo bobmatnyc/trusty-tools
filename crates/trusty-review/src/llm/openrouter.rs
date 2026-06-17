@@ -119,6 +119,12 @@ struct OrcUsage {
 /// Source: OpenRouter model pricing page, June 2026.
 /// IMPORTANT: OpenRouter slugs are version-stamped; update this table when
 /// new model versions replace old ones or pricing changes.
+///
+/// Gemini note (#1241): the `google/gemini-*` slugs are NOT version-stamped in the
+/// same way and the project may use several point releases, so they are matched by
+/// family substring (after the exact-slug table misses) rather than exact id.  The
+/// Gemini numbers are a clearly-flagged best-effort estimate from the OpenRouter
+/// pricing page; refine them if exact per-slug pricing is needed for `compare` mode.
 fn cost_per_million(model: &str) -> (f64, f64) {
     match model {
         // GPT-5.5 Pro — top-tier, high cost.
@@ -131,8 +137,39 @@ fn cost_per_million(model: &str) -> (f64, f64) {
         "openai/gpt-5.4-mini-20260317" => (0.75, 4.50),
         // GPT-5.4 Nano — cheapest; default verifier and summarizer.
         "openai/gpt-5.4-nano-20260317" => (0.20, 1.25),
-        // Unknown model — no cost estimate.
-        _ => (0.0, 0.0),
+        // Gemini family (#1241): matched by substring so version-stamped point
+        // releases still get a non-zero estimate.  BEST-EFFORT pricing (USD per
+        // million, input/output) from the OpenRouter pricing page (June 2026).
+        other => gemini_cost_per_million(other),
+    }
+}
+
+/// Best-effort `(input, output)` USD-per-million pricing for the Gemini family.
+///
+/// Why: `google/gemini-*` OpenRouter slugs are not version-stamped like the GPT
+/// slugs, so an exact-match table would miss point releases and report cost 0.0
+/// (#1241).  A family substring match keeps the cost estimate non-zero across
+/// releases.  These numbers are a clearly-flagged BEST-EFFORT estimate — refine if
+/// exact per-slug pricing matters for `compare` ranking.
+/// What: returns Pro/Flash/Flash-Lite tier pricing when the lowercased slug
+/// contains the matching family token; `(0.0, 0.0)` for non-Gemini slugs so the
+/// caller's unknown-model fallback is preserved.
+/// Test: `cost_estimate_gemini_pro_nonzero`, `cost_estimate_gemini_flash_nonzero`,
+/// `cost_estimate_unknown_model` (still zero).
+fn gemini_cost_per_million(model: &str) -> (f64, f64) {
+    let m = model.to_ascii_lowercase();
+    if !m.contains("gemini") {
+        return (0.0, 0.0);
+    }
+    // Flash-Lite is cheapest; Flash mid; Pro top-tier.  Order matters: check the
+    // more specific "flash-lite" before "flash".
+    if m.contains("flash-lite") {
+        (0.10, 0.40)
+    } else if m.contains("flash") {
+        (0.30, 2.50)
+    } else {
+        // Pro (and any unrecognised Gemini variant) → Pro-tier estimate.
+        (1.25, 10.00)
     }
 }
 

@@ -293,11 +293,19 @@ pub async fn run_review(
     );
     debug!(model = %input.reviewer_model, "calling LLM reviewer");
 
+    // Capture the requested output ceiling BEFORE the request is moved into
+    // `complete`; truncation detection (#1241) compares the produced
+    // `output_tokens` against this ceiling.
+    let requested_max_tokens = llm_req.max_tokens;
+
     let llm_resp = match deps.llm.complete(llm_req).await {
         Ok(resp) => resp,
         Err(e) => {
-            warn!("LLM call failed: {e} — applying fail-safe APPROVE (spec REV-130)");
-            result.verdict = Verdict::Approve;
+            // Fail-CLOSED (#1241 supersedes spec REV-130): an LLM/transport error
+            // means the review never happened — never silently APPROVE.  UNKNOWN
+            // surfaces a clear "could not review" state and posts no green check.
+            warn!("LLM call failed: {e} — applying fail-safe UNKNOWN (fail-closed, #1241)");
+            result.verdict = Verdict::Unknown;
             result.error = Some(format!("LLM error: {e}"));
             return abort_dry(result, config, &input, &deps);
         }
@@ -325,12 +333,31 @@ pub async fn run_review(
         }
     }
 
+    // ── Step 6b: truncation guard (#1241) ─────────────────────────────────
+    // If the reviewer hit (or nearly hit) the output-token ceiling, its JSON is
+    // very likely cut off mid-object.  Parsing such output and treating it as a
+    // verdict risks a silent (and wrong) APPROVE.  Fail CLOSED to UNKNOWN instead
+    // of parse-and-trust.
+    if is_truncated(llm_resp.output_tokens, requested_max_tokens) {
+        warn!(
+            output_tokens = llm_resp.output_tokens,
+            max_tokens = requested_max_tokens,
+            "LLM output hit the token ceiling — treating as truncated → UNKNOWN (fail-closed, #1241)"
+        );
+        result.verdict = Verdict::Unknown;
+        result.error = Some(format!(
+            "review output truncated at token ceiling ({}/{} tokens) — could not review",
+            llm_resp.output_tokens, requested_max_tokens
+        ));
+        return abort_dry(result, config, &input, &deps);
+    }
+
     // ── Step 7: parse verdict + findings ──────────────────────────────────
     let parsed = parse_review_response(&llm_resp.text);
     if parsed.is_fail_safe {
         warn!(
             reason = ?parsed.fail_safe_reason,
-            "verdict parsing fell back to fail-safe APPROVE"
+            "verdict parsing fell back to fail-safe UNKNOWN (fail-closed, #1241)"
         );
     }
 
@@ -380,6 +407,39 @@ pub async fn run_review(
     );
 
     finalize_run(result, config, &input, deps.dedup.as_ref()).await
+}
+
+/// Fraction of the output-token ceiling at/above which a response is treated as
+/// truncated (closes #1241).
+///
+/// Why: providers stop generating exactly at `max_tokens` without always setting
+/// an explicit `finish_reason`.  When the completion lands at ≥95 % of the ceiling
+/// the structured JSON is very likely cut off mid-object, so trusting its parse
+/// risks a silent wrong-APPROVE.  95 % (not 100 %) leaves a small margin for
+/// provider-side token-count rounding so a genuinely-complete response that lands
+/// a few tokens under the ceiling is not mis-flagged.
+/// What: the multiplier applied to `max_tokens` in `is_truncated`.
+/// Test: `is_truncated_*` unit tests in `runner_tests.rs`.
+const TRUNCATION_TOKEN_RATIO: f64 = 0.95;
+
+/// Return `true` when an LLM completion appears truncated at the token ceiling.
+///
+/// Why: a truncated reviewer response must fail CLOSED to UNKNOWN rather than be
+/// parsed into a (likely wrong) APPROVE — the #1241 safety fix.  Detection is
+/// purely arithmetic so it works across every provider regardless of whether the
+/// provider surfaces an explicit `finish_reason`.
+/// What: returns `true` when `max_tokens > 0` AND
+/// `output_tokens >= ceil(max_tokens * TRUNCATION_TOKEN_RATIO)`.  A `max_tokens`
+/// of 0 (unset / unknown ceiling) disables the check (returns `false`) so we never
+/// false-positive when the ceiling is unknown.
+/// Test: `is_truncated_at_ceiling_true`, `is_truncated_well_under_false`,
+/// `is_truncated_unset_ceiling_false`.
+fn is_truncated(output_tokens: u32, max_tokens: u32) -> bool {
+    if max_tokens == 0 {
+        return false;
+    }
+    let threshold = (f64::from(max_tokens) * TRUNCATION_TOKEN_RATIO).ceil() as u32;
+    output_tokens >= threshold
 }
 
 #[cfg(test)]

@@ -487,6 +487,34 @@ fn system_prompt_describes_unknown_grade() {
     );
 }
 
+// ── max_tokens model routing (#1241) ──────────────────────────────────────────
+
+#[test]
+fn max_tokens_gemini_is_raised() {
+    // #1241: Gemini's verbose JSON needs a higher ceiling (8192) so it isn't
+    // truncated → UNKNOWN.  Matches the bare slug and prefixed routing forms.
+    assert_eq!(max_tokens_for_model("google/gemini-2.5-pro"), 8192);
+    assert_eq!(
+        max_tokens_for_model("openrouter/google/gemini-2.5-flash"),
+        8192
+    );
+    assert_eq!(
+        max_tokens_for_model("GOOGLE/GEMINI-2.5-PRO"),
+        8192,
+        "match must be case-insensitive"
+    );
+}
+
+#[test]
+fn max_tokens_default_for_non_gemini() {
+    // Non-Gemini models keep the leaner 4096 default.
+    assert_eq!(max_tokens_for_model("openai/gpt-5.4-mini-20260317"), 4096);
+    assert_eq!(
+        max_tokens_for_model("bedrock/us.anthropic.claude-sonnet-4-6"),
+        4096
+    );
+}
+
 // ── APEX prompt tests ─────────────────────────────────────────────────────────
 // Extracted to prompt_tests_apex.rs to keep this file under the 500-line cap (#610).
 #[path = "prompt_tests_apex.rs"]

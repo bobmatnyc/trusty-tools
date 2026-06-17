@@ -256,3 +256,59 @@ async fn call_tool_review_pr_no_token_returns_error() {
         }
     }
 }
+
+// ── reviewer_model provider override (#1233) ───────────────────────────────────
+
+/// Build an offline `AppState` whose STARTUP provider is Bedrock, with a non-empty
+/// OpenRouter API key so an `openrouter/...` override can actually build.
+///
+/// Why: the #1233 regression is that an `openrouter/...` override against a
+/// Bedrock-startup state was silently routed to Bedrock.  The test needs a state
+/// whose startup provider is unambiguously Bedrock and whose config carries an
+/// OpenRouter key so `build_provider` succeeds for the override.
+/// What: loads config, forces `role_models.reviewer.provider = Bedrock`, sets a
+/// dummy `openrouter_api_key`, and wires the offline stubs.
+/// Test: used by `deps_from_state_*` tests below.
+fn bedrock_startup_state() -> AppState {
+    use crate::config::Provider;
+    let mut config = ReviewConfig::load(None);
+    config.context.require_search = false;
+    config.context.require_analyze = false;
+    config.role_models.reviewer.provider = Provider::Bedrock;
+    // Non-empty dummy key so build_provider's empty-key guard passes; not a real
+    // credential.
+    config.openrouter_api_key = "dummy-openrouter-key-for-tests".to_string(); // pragma: allowlist secret
+    AppState::new(
+        config,
+        Arc::new(ApproveLlm), // startup provider stub (name() == "approve-stub")
+        Arc::new(FakeSearchDispatch),
+        Some(Arc::new(ReadyAnalyzeDispatch)),
+    )
+}
+
+#[tokio::test]
+async fn deps_from_state_openrouter_override_switches_provider() {
+    // #1233: an `openrouter/...` reviewer_model override against a Bedrock-startup
+    // state must build a fresh OpenRouter provider, NOT silently reuse the startup
+    // (Bedrock) provider.
+    let state = bedrock_startup_state();
+    let deps = super::deps_from_state(&state, "openrouter/openai/gpt-5.4-mini-20260317").await;
+    assert_eq!(
+        deps.llm.name(),
+        "openrouter",
+        "an openrouter/ override must route to the OpenRouter backend (#1233)"
+    );
+}
+
+#[tokio::test]
+async fn deps_from_state_no_override_reuses_startup_provider() {
+    // Control: a bare model id (no routing prefix) keeps the startup provider —
+    // the stub `ApproveLlm`, whose name() is NOT "openrouter".
+    let state = bedrock_startup_state();
+    let deps = super::deps_from_state(&state, "us.anthropic.claude-sonnet-4-6").await;
+    assert_ne!(
+        deps.llm.name(),
+        "openrouter",
+        "a bare model id must reuse the startup (Bedrock) provider, not switch"
+    );
+}

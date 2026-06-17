@@ -195,19 +195,27 @@ pub async fn run_verification_round(
 /// Four-way baseline selection:
 ///   a)  confirmed + at least one confirmed High-effort finding
 ///       → keep `primary_verdict` (grounded critical evidence, e.g. BLOCK stays BLOCK)
-///   a2) confirmed, but only Medium/Low-effort findings confirmed (#1015)
-///       → cap lower bound at APPROVE*; a lone confirmed Medium must not anchor
-///         REQUEST_CHANGES from a floor-driven escalation
+///   a2) confirmed, but only Medium/Low-effort findings confirmed (#1015 + #1343)
+///       → CAP (ceiling) the baseline at APPROVE*: `min(primary_verdict, APPROVE*)`.
+///         A lone confirmed Medium must not anchor REQUEST_CHANGES from a
+///         floor-driven escalation (#1015) — BUT confirming a non-High finding must
+///         ALSO never *raise* a clean APPROVE baseline to APPROVE* (#1343 runtime
+///         residual).  Using the severity-min of (primary, APPROVE*) is the
+///         source-of-truth reconciliation that mirrors grade.rs::derive_verdict: a
+///         confirmed `praise`/Low-effort finding can neither harden the verdict nor
+///         downgrade the grade when the model itself said APPROVE.
 ///   b)  clean model REFUTED, nothing confirmed
 ///       → drop to APPROVE baseline (escalation rested on refuted evidence)
 ///   c)  all demotions are infra failures (TruncationRefuted/ErrorRefuted), no confirmed
 ///       → preserve `primary_verdict` (do not discard on verifier infra failure, #726)
 ///
 /// `UNKNOWN` is handled by the caller and never reaches here.
-/// What: filters survivors (non-refuted), selects baseline, calls
+/// What: filters survivors (non-refuted), selects baseline (path a2 takes the
+/// severity-min of `primary_verdict` and APPROVE*), calls
 /// `derive_verdict(baseline, survivors)`.
 /// Test: `rederive_excludes_refuted_relaxes` (b), `rederive_keeps_confirmed_block` (a),
 /// `rederive_confirmed_medium_caps_at_approve_star` (a2 — #1015),
+/// `rederive_confirmed_praise_keeps_clean_approve` (a2 — #1343 runtime residual),
 /// `rederive_error_refuted_preserves_primary_verdict` (c — #726),
 /// `rederive_truncation_refuted_preserves_primary_verdict` (c).
 fn rederive_verdict(
@@ -239,9 +247,10 @@ fn rederive_verdict(
     //  a)  confirmed + at least one High-effort confirmed
     //      → keep primary_verdict as lower bound (grounded critical evidence)
     //  a2) confirmed, but only Medium/Low confirmed
-    //      → cap lower bound at APPROVE* (advisory tier); don't let a floor-driven
-    //         REQUEST_CHANGES pin the verdict when the confirmed finding is merely
-    //         Medium-effort (#1015)
+    //      → CAP the baseline at APPROVE* via severity-min(primary, APPROVE*); don't
+    //         let a floor-driven REQUEST_CHANGES pin the verdict when the confirmed
+    //         finding is merely Medium-effort (#1015), and don't let a confirmed
+    //         non-High finding *raise* a clean APPROVE to APPROVE* (#1343 residual).
     //  b)  clean refuted, nothing confirmed
     //      → drop to APPROVE; let survivors alone decide
     //  c)  infra-only fail (TruncationRefuted / ErrorRefuted), nothing confirmed
@@ -250,12 +259,17 @@ fn rederive_verdict(
         // Path (a): confirmed High-effort evidence supports the escalation fully.
         primary_verdict
     } else if any_confirmed {
-        // Path (a2): confirmed evidence, but only Medium/Low tier.  Cap the lower
-        // bound at APPROVE* so a lone confirmed Medium cannot permanently anchor a
-        // REQUEST_CHANGES verdict that was itself only floor-driven (#1015).
-        // `derive_verdict(APPROVE*, survivors)` will still escalate further if the
+        // Path (a2): confirmed evidence, but only Medium/Low tier.  Take the
+        // severity-MIN of the model's own verdict and APPROVE* (the advisory tier):
+        //   - primary=REQUEST_CHANGES/BLOCK → capped down to APPROVE* (#1015), so a
+        //     lone confirmed Medium cannot permanently anchor a floor-driven escalation.
+        //   - primary=APPROVE → stays APPROVE (#1343 runtime residual): confirming a
+        //     low-effort `praise` finding must NOT harden the verdict to APPROVE* nor
+        //     downgrade the grade.  This is the same source-of-truth reconciliation
+        //     grade.rs applies — the model's APPROVE review_body is authoritative.
+        // `derive_verdict(baseline, survivors)` will still escalate further if the
         // surviving findings warrant it (e.g. a surviving High → BLOCK).
-        Verdict::ApproveWithReservations
+        verdict_min(primary_verdict, Verdict::ApproveWithReservations)
     } else if any_clean_refuted {
         // Path (b): at least one clean REFUTED from the model — escalation rested
         // on refuted evidence; let survivors alone decide.
@@ -268,6 +282,44 @@ fn rederive_verdict(
     };
 
     derive_verdict(baseline, &survivors)
+}
+
+/// Return the *less severe* (severity-min) of two verdicts.
+///
+/// Why: path (a2) of `rederive_verdict` must CAP the baseline at APPROVE* without
+/// ever *raising* a clean APPROVE — confirming a Medium/Low-effort finding may relax
+/// a floor-driven REQUEST_CHANGES (#1015) but must never harden an APPROVE the model
+/// itself emitted (#1343 runtime residual).  `derive_verdict` already takes the
+/// stricter-of(model, floor) downstream, so using the severity-min here is purely a
+/// ceiling on the *baseline*, not on the final verdict.
+/// What: defines the ordinal APPROVE(0) < APPROVE*(1) < REQUEST_CHANGES(2) <
+/// BLOCK(3) and returns whichever of `a`/`b` has the lower ordinal.  `Unknown` is
+/// terminal and never reaches here (the caller short-circuits it).
+/// Test: `rederive_confirmed_medium_caps_at_approve_star` (REQUEST_CHANGES→APPROVE*),
+/// `rederive_confirmed_praise_keeps_clean_approve` (APPROVE stays APPROVE — #1343).
+fn verdict_min(a: Verdict, b: Verdict) -> Verdict {
+    if verdict_ord(&a) <= verdict_ord(&b) {
+        a
+    } else {
+        b
+    }
+}
+
+/// Ordinal severity for a verdict (higher = more severe).
+///
+/// Why: `verdict_min` needs a total order over verdicts to pick the less-severe one.
+/// Mirrors the ordering in `grade.rs::verdict_ord` so the two modules agree.
+/// What: APPROVE=0, APPROVE*=1, REQUEST_CHANGES=2, BLOCK=3, UNKNOWN=4 (terminal,
+/// never compared in normal flow).
+/// Test: covered transitively by `verdict_min` callers in `verify_tests.rs`.
+fn verdict_ord(v: &Verdict) -> u8 {
+    match v {
+        Verdict::Approve => 0,
+        Verdict::ApproveWithReservations => 1,
+        Verdict::RequestChanges => 2,
+        Verdict::Block => 3,
+        Verdict::Unknown => 4,
+    }
 }
 
 // ─── Candidate selection ─────────────────────────────────────────────────────

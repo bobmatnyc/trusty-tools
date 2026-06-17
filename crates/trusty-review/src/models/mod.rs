@@ -28,13 +28,15 @@ use crate::config::constants::REVIEW_VERSION;
 /// `"REQUEST_CHANGES"`, `"BLOCK"`, `"UNKNOWN"`.  Deserialises the same.
 /// Display prints the same strings.
 ///
-/// # Fail-safe policy
-/// When the pipeline encounters a genuine parse/transport error, the
-/// fail-safe default is `Approve` (spec REV-130 — never block a merge due
-/// to a pipeline failure).  When the model *itself* reports the diff was
-/// too truncated or insufficient to assess, emit `Unknown` instead (not
-/// `Approve`) so the board can distinguish "clean review" from "could not
-/// assess".
+/// # Fail-safe policy (fail-CLOSED since #1241)
+/// When the pipeline encounters a genuine parse/transport error or a truncated
+/// model response, the fail-safe default is `Unknown` (fail-CLOSED).  Ticket
+/// #1241 supersedes spec REV-130's original fail-OPEN `Approve`: a silent APPROVE
+/// on unparseable/truncated output posts a green check for a review that never
+/// happened, which is a safety hole.  `Unknown` surfaces a clear "could not
+/// review" state and is never treated as a merge-approval downstream.  The model
+/// *itself* also emits `Unknown` when it judges the diff too truncated to assess,
+/// so the board can distinguish "clean review" from "could not assess".
 ///
 /// Test: `verdict_serde_roundtrip`, `verdict_display`,
 /// `verdict_unknown_round_trip`.

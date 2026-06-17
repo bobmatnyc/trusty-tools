@@ -25,6 +25,9 @@ use std::path::PathBuf;
 struct FakeLlm {
     response: String,
     error: Option<String>,
+    /// Output-token count to report (overrides the default 50).  Used by the
+    /// truncation test (#1241) to simulate a completion that hit the ceiling.
+    output_tokens: Option<u32>,
 }
 
 impl FakeLlm {
@@ -37,6 +40,22 @@ impl FakeLlm {
 ```"#
                 .to_string(),
             error: None,
+            output_tokens: None,
+        }
+    }
+
+    /// A response that parses to APPROVE but reports an output-token count at the
+    /// ceiling — simulating a truncated completion (#1241).  The runner's
+    /// truncation guard must convert this to UNKNOWN BEFORE trusting the parse.
+    fn truncated_at_ceiling() -> Self {
+        Self {
+            response: r#"```json
+{"verdict":"APPROVE","summary":"looks fine","findings":[]}
+```"#
+                .to_string(),
+            error: None,
+            // 4096 is the non-Gemini reviewer ceiling; 4096 >= ceil(4096*0.95)=3892.
+            output_tokens: Some(4096),
         }
     }
 
@@ -53,6 +72,7 @@ impl FakeLlm {
 ```"#
                     .to_string(),
                 error: None,
+                output_tokens: None,
             }
     }
 
@@ -60,6 +80,7 @@ impl FakeLlm {
         Self {
             response: String::new(),
             error: Some(msg.into()),
+            output_tokens: None,
         }
     }
 }
@@ -78,7 +99,7 @@ impl LlmProvider for FakeLlm {
             text: self.response.clone(),
             model: req.model.clone(),
             input_tokens: 100,
-            output_tokens: 50,
+            output_tokens: self.output_tokens.unwrap_or(50),
             latency_ms: 42,
             cost_usd: 0.000042,
         })
@@ -328,15 +349,77 @@ async fn run_review_fail_safe_on_llm_error() {
     let deps = ready_deps(Arc::new(FakeLlm::errors("simulated transport error")), None);
 
     let result = run_review(&config, input, deps).await;
-    // Fail-safe: verdict must be APPROVE on LLM error (spec REV-130).
+    // Fail-CLOSED (#1241 supersedes REV-130): verdict must be UNKNOWN on LLM error.
     assert_eq!(
         result.verdict,
-        Verdict::Approve,
-        "LLM error must fall back to APPROVE"
+        Verdict::Unknown,
+        "LLM error must fail CLOSED to UNKNOWN, never silently APPROVE (#1241)"
     );
     assert!(
         result.error.is_some(),
         "error field must be set when LLM fails"
+    );
+}
+
+#[tokio::test]
+async fn run_review_truncated_output_is_unknown() {
+    // Fail-CLOSED (#1241): the LLM returns parseable APPROVE JSON but reports an
+    // output-token count at the ceiling — i.e. the response was truncated.  The
+    // runner's truncation guard must convert this to UNKNOWN BEFORE trusting the
+    // (likely incomplete) parse, never posting a silent green APPROVE.
+    let (source, _tmp) = local_diff_source("+fn x() {}\n");
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+    };
+    let deps = ready_deps(Arc::new(FakeLlm::truncated_at_ceiling()), None);
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(
+        result.verdict,
+        Verdict::Unknown,
+        "output at the token ceiling must fail CLOSED to UNKNOWN (#1241)"
+    );
+    let err = result
+        .error
+        .expect("truncation must set an actionable error");
+    assert!(
+        err.contains("truncat"),
+        "error must explain the truncation: {err}"
+    );
+}
+
+#[test]
+fn is_truncated_at_ceiling_true() {
+    // 4096 ceiling: ceil(4096 * 0.95) = 3892; output >= that is truncated.
+    assert!(is_truncated(4096, 4096), "exactly at ceiling is truncated");
+    assert!(
+        is_truncated(3892, 4096),
+        "at the 95% threshold is truncated"
+    );
+}
+
+#[test]
+fn is_truncated_well_under_false() {
+    assert!(
+        !is_truncated(3891, 4096),
+        "one below the 95% threshold is NOT truncated"
+    );
+    assert!(!is_truncated(50, 4096), "a short response is NOT truncated");
+}
+
+#[test]
+fn is_truncated_unset_ceiling_false() {
+    // max_tokens == 0 means the ceiling is unknown — never false-positive.
+    assert!(
+        !is_truncated(10_000, 0),
+        "unknown ceiling (0) disables the truncation check"
     );
 }
 
