@@ -445,7 +445,14 @@ fn parse_method_conformance_finding_category() {
 /// A finding that OMITS `category` defaults to `Correctness` (back-compat).
 ///
 /// Why: existing fixtures and models that do not emit `category` must keep
-/// parsing as correctness findings (the `#[serde(default)]` guarantee, AC).
+/// parsing as correctness findings (the `#[serde(default)]` guarantee, AC). This
+/// is also the cross-provider safety net for #1359: `category` is in the schema's
+/// `required` array ONLY because OpenAI strict mode demands every property be
+/// required (see `review_schema_is_openai_strict_compliant`). Non-strict backends
+/// (Bedrock/Anthropic tool-use, Gemini) and older models can omit `category`
+/// WITHOUT client-side rejection — both the OpenRouter and Bedrock backends route
+/// their structured output through THIS serde path, so an omitted `category` is
+/// silently defaulted here rather than rejected by any validation layer.
 /// What: parses a finding with no `category` key, asserts the default.
 /// Test: no network.
 #[test]

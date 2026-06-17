@@ -262,6 +262,7 @@ pub async fn run_review(
             &changed_files,
             title,
             body,
+            pr_number,
             input.run_mode,
         ),
     );

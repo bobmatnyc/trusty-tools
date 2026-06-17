@@ -114,6 +114,15 @@ pub struct ReviewSubject {
     pub changed_files: Vec<String>,
     /// Identifiers extracted from the diff (function/type/symbol names).
     pub identifiers: Vec<String>,
+    /// PR number (`0` in local-diff mode or when not yet known).
+    ///
+    /// Why: the conformance BACK gate (#1359) builds an `IntentQuery::Pr` for the
+    /// ISR, which keys ticket linkage off the PR (body + number).  Carrying the
+    /// real PR number here lets the source pass it through instead of hard-coding
+    /// `0`; `0` remains the sentinel for local-diff mode where no PR exists.
+    /// What: the GitHub PR number, or `0` when reviewing a local diff.
+    /// Test: `query_carries_pr_number` (conformance_tests.rs).
+    pub pr_number: u64,
 }
 
 impl ReviewSubject {

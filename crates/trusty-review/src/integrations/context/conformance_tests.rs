@@ -52,6 +52,10 @@ impl SpecLookup for NoSpecLookup {
     }
 }
 
+/// PR number used by the test subject; lets `query_carries_pr_number` assert the
+/// real number is threaded into the ISR query rather than the old hard-coded `0`.
+const TEST_PR_NUMBER: u64 = 1359;
+
 /// Build a subject whose PR body links a ticket via `Closes #N`.
 fn subject_with_body(body: &str) -> ReviewSubject {
     ReviewSubject {
@@ -61,6 +65,7 @@ fn subject_with_body(body: &str) -> ReviewSubject {
         body: body.to_string(),
         changed_files: vec!["src/page.rs".to_string()],
         identifiers: vec![],
+        pr_number: TEST_PR_NUMBER,
     }
 }
 
@@ -321,4 +326,48 @@ fn from_config_respects_explicit_enable() {
     let src = ConformanceSource::from_config(&cfg_on, RunMode::Cli, ReviewConfig::load(None));
     assert!(src.is_enabled(), "explicit enable must turn the source on");
     assert_eq!(src.name(), "conformance");
+}
+
+// ─── build_query: PR-number threading (#1359) ─────────────────────────────────
+
+/// `build_query` threads the real PR number into the ISR query (no hard-coded 0).
+///
+/// Why: the ISR's `IntentQuery::Pr` keys ticket linkage off the PR (body +
+/// number); the source previously hard-coded `pr_number: 0`, losing the real
+/// number.  This pins the threading so a regression to `0` is caught.
+/// What: builds a query from a subject carrying `TEST_PR_NUMBER` and asserts the
+/// resulting `IntentQuery::Pr.pr_number` matches.
+/// Test: this test; no network.
+#[test]
+fn query_carries_pr_number() {
+    let subject = subject_with_body("Closes #1325");
+    let query = ConformanceSource::build_query(&subject).expect("owner/repo present → Some");
+    match query {
+        IntentQuery::Pr { pr_number, .. } => {
+            assert_eq!(
+                pr_number, TEST_PR_NUMBER,
+                "the real PR number must be threaded, not hard-coded 0"
+            );
+        }
+        other => panic!("build_query must produce IntentQuery::Pr, got {other:?}"),
+    }
+}
+
+/// `build_query` returns `None` when there is no owner/repo (local-diff mode).
+///
+/// Why: a local diff has no PR to resolve intent against; `gather` must skip with
+/// an empty section rather than issue a meaningless ISR query.
+/// What: a subject with empty owner/repo → `build_query` returns `None`.
+/// Test: this test; no network.
+#[test]
+fn query_none_without_owner_repo() {
+    let subject = ReviewSubject {
+        owner: String::new(),
+        repo: String::new(),
+        ..subject_with_body("Closes #1325")
+    };
+    assert!(
+        ConformanceSource::build_query(&subject).is_none(),
+        "no owner/repo (local-diff) must yield None"
+    );
 }

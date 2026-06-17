@@ -124,6 +124,22 @@ pub fn review_response_schema() -> ResponseSchema {
                         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                         "file": {"type": "string"},
                         "line": {"type": ["integer", "null"]},
+                        // `category` (#1359) is intentionally listed here so
+                        // `enforce_strict_mode` adds it to `findings.items.required`.
+                        // OpenAI strict mode REQUIRES every declared property to be
+                        // in `required` (an omission rejects the whole request), so it
+                        // MUST stay required for the `openai/*` path. Non-strict
+                        // providers (Bedrock/Anthropic tool-use, Gemini) and older
+                        // models that omit `category` are NOT rejected client-side:
+                        // both backends funnel their structured output through the
+                        // SAME `parse_review_response` serde path, where
+                        // `LlmFinding.category` is `#[serde(default)]` → `Correctness`.
+                        // So "required" here is a strict-mode requirement, not a
+                        // hard contract that breaks lenient providers; the serde
+                        // default is the cross-provider safety net. See
+                        // `parse_finding_without_category_defaults_correctness`
+                        // (parser_tests.rs) and the assertion in
+                        // `review_schema_is_openai_strict_compliant` (prompt_tests.rs).
                         "category": {
                             "type": "string",
                             "enum": ["correctness", "method-conformance"],
@@ -134,7 +150,10 @@ pub fn review_response_schema() -> ResponseSchema {
             }
         }
     });
-    // Make every object node OpenAI strict-mode compliant in one pass.
+    // Make every object node OpenAI strict-mode compliant in one pass. This is
+    // what adds `category` (and every other property) to `findings.items.required`
+    // for OpenAI strict mode; non-strict providers rely on the serde default
+    // instead (see the `category` note above).
     enforce_strict_mode(&mut schema);
     ResponseSchema {
         name: REVIEW_SCHEMA_NAME.to_string(),

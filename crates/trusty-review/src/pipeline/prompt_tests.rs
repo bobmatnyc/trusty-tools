@@ -457,6 +457,12 @@ fn review_schema_is_openai_strict_compliant() {
         .iter()
         .filter_map(serde_json::Value::as_str)
         .collect();
+    // `category` (#1359) MUST be in `required` here: OpenAI strict mode rejects
+    // any schema whose object node omits a declared property from `required`.
+    // This does NOT make `category` mandatory for non-strict providers — those
+    // funnel through the serde path where `LlmFinding.category` is
+    // `#[serde(default)]` → `Correctness`, so an omitted `category` is defaulted,
+    // never rejected (see `parse_finding_without_category_defaults_correctness`).
     assert_eq!(
         required,
         [

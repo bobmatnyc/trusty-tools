@@ -86,29 +86,50 @@ pub trait ConformanceTokenResolver: Send + Sync {
 pub struct DualModeConformanceToken {
     run_mode: RunMode,
     config: ReviewConfig,
+    /// HTTP client built ONCE at construction (mirrors sibling sources, which
+    /// build their `GithubClient` once rather than per call).
+    ///
+    /// `GithubClient::new()` can fail only on TLS-backend init; that failure is
+    /// captured here as the `Err` string so `resolve` surfaces the same fail-open
+    /// `NotConfigured` skip it did when it built the client per call — without
+    /// reconstructing the client (and its connection pool) on every `resolve`.
+    client: Result<GithubClient, String>,
 }
 
 impl DualModeConformanceToken {
     /// Construct from the run mode and a config snapshot.
     ///
-    /// Why: the resolver needs the same config the rest of the GitHub path uses.
-    /// What: stores `run_mode` and a clone of `config`.
+    /// Why: the resolver needs the same config the rest of the GitHub path uses,
+    /// and should reuse ONE `GithubClient` (connection pool) across calls instead
+    /// of rebuilding it on every `resolve` — matching the sibling sources.
+    /// What: stores `run_mode`, a clone of `config`, and a `GithubClient` built
+    /// once (its rare TLS-init failure is captured as an `Err` string so the
+    /// infallible `from_config` path stays infallible and `resolve` reports the
+    /// failure as a fail-open skip).
     /// Test: covered transitively by `ConformanceSource::from_config`.
     #[must_use]
     pub fn new(run_mode: RunMode, config: ReviewConfig) -> Self {
-        Self { run_mode, config }
+        let client = GithubClient::new().map_err(|e| format!("failed to build HTTP client: {e}"));
+        Self {
+            run_mode,
+            config,
+            client,
+        }
     }
 }
 
 #[async_trait]
 impl ConformanceTokenResolver for DualModeConformanceToken {
     async fn resolve(&self, owner: &str) -> Result<String, ContextSourceError> {
-        let client = GithubClient::new().map_err(|e| ContextSourceError::NotConfigured {
-            src: SOURCE_NAME,
-            reason: format!("failed to build HTTP client: {e}"),
-        })?;
+        let client = self
+            .client
+            .as_ref()
+            .map_err(|reason| ContextSourceError::NotConfigured {
+                src: SOURCE_NAME,
+                reason: reason.clone(),
+            })?;
         AuthStrategy::select(self.run_mode, None)
-            .resolve_token(&client, &self.config, owner)
+            .resolve_token(client, &self.config, owner)
             .await
             .map_err(|e| ContextSourceError::NotConfigured {
                 src: SOURCE_NAME,
@@ -212,15 +233,17 @@ impl ConformanceSource {
     ///
     /// Why: the ISR's `IntentQuery::Pr` keys ticket linkage off the PR body and
     /// (forward-looking) spec resolution off changed-file content.  The
-    /// `ReviewSubject` carries the owner/repo/body/changed-file *paths*; file
-    /// *content* is not available at this seam, so spec-link resolution is a gap
-    /// for C2 (documented; C4/#1361 hardens the spec axis).  The ticket-method
+    /// `ReviewSubject` carries the owner/repo/body/PR-number/changed-file *paths*;
+    /// file *content* is not available at this seam, so spec-link resolution is a
+    /// gap for C2 (documented; C4/#1361 hardens the spec axis).  The ticket-method
     /// axis — the primary C2 path — works from the PR body.
-    /// What: maps the subject into an `IntentQuery::Pr` with empty branch /
-    /// commit-message linkage sources (body-only) and changed files carrying
+    /// What: maps the subject into an `IntentQuery::Pr` with the real PR number
+    /// (threaded from the runner; `0` only in local-diff mode), empty branch /
+    /// commit-message linkage sources (body-only), and changed files carrying
     /// paths but empty content.  Returns `None` when there is no owner/repo (e.g.
     /// local-diff mode) so `gather` skips with an empty section.
-    /// Test: `query_none_without_owner_repo`, `gather_renders_ticket_method`.
+    /// Test: `query_none_without_owner_repo`, `query_carries_pr_number`,
+    /// `gather_renders_ticket_method`.
     fn build_query(subject: &ReviewSubject) -> Option<IntentQuery> {
         if subject.owner.is_empty() || subject.repo.is_empty() {
             return None;
@@ -229,6 +252,10 @@ impl ConformanceSource {
             .changed_files
             .iter()
             .map(|p| ChangedFile {
+                // FIXME(C4/#1361): changed-file *content* is not available at this
+                // seam, so the spec axis cannot resolve declared spec links yet;
+                // PR-body → ticket linkage is the primary C2 path. C4 plumbs file
+                // content (and any remaining spec-axis hardening) through here.
                 path: p.clone(),
                 content: String::new(),
             })
@@ -236,7 +263,10 @@ impl ConformanceSource {
         Some(IntentQuery::Pr {
             owner: subject.owner.clone(),
             repo: subject.repo.clone(),
-            pr_number: 0,
+            // Threaded from the runner (#1359); `0` only in local-diff mode where
+            // no PR exists. `build_query` already returns `None` for local diffs
+            // (empty owner/repo), so a live query always carries the real number.
+            pr_number: subject.pr_number,
             body: subject.body.clone(),
             branch: None,
             commit_messages: Vec::new(),

@@ -439,6 +439,7 @@ fn correctness_floor(findings: &[&&Finding]) -> Verdict {
 /// `conformance_high_effort_never_blocks`,
 /// `conformance_below_floor_confidence_is_advisory`.
 fn conformance_floor(findings: &[&&Finding]) -> Verdict {
+    // Effort is intentionally ignored: the conformance cap is confidence-only (never BLOCK).
     let any_confident = findings
         .iter()
         .any(|f| f.confidence >= FLOOR_MIN_CONFIDENCE);
