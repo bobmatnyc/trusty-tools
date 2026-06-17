@@ -162,6 +162,11 @@ libc.workspace = true
 # Portable executable lookup on PATH (replaces the non-portable `which` shell-out
 # in the tcode runtime adapter's availability probe — see #1213).
 which.workspace = true
+# trusty-code: in-process agent runtime (Seam A). The standalone metaharness
+# (`tm meta run`, #1045) reuses tcode's tool system — ToolRegistry plus the
+# fs/bash/delegate tools — to drive PM → sub-agent delegation without the daemon
+# or the `claude` CLI. Always-on because the `meta` subcommand is part of `cli`.
+trusty-code = { workspace = true }
 
 # ── Optional dependencies (feature-gated) ────────────────────────────────────
 
