@@ -100,6 +100,27 @@ pub(crate) enum Command {
         #[arg(long, default_value_t = 1000)]
         interval_ms: u64,
     },
+    /// Launch the coordinator TUI: an input box over a live session list (#1272).
+    ///
+    /// Why (DOC-13): a Claude-Code-like surface — a text input on top of a live
+    /// session list (controller bullet + one row per managed session, the active
+    /// row in two columns `[id] │ [summary]`). This is a NEW screen, distinct
+    /// from the existing `tm tui` dashboard. It is exposed under its own name
+    /// because `coordinator` already names the session-manager chat command
+    /// (`tm coordinator` / `tm sm`); a `-tui` suffix avoids that collision.
+    /// What: Child #1 ships the skeleton — layout, selection, input editing, and
+    /// a panic-safe terminal; live polling and slash-command dispatch land in
+    /// later children. `--url` is resolved via `resolve_daemon_url`;
+    /// `--interval-ms` is the (future) refresh cadence.
+    /// Test: `cli_parses_coordinator_tui` in `tests.rs`.
+    CoordinatorTui {
+        /// Base URL of the trusty-mpm daemon.
+        #[arg(long, env = "TRUSTY_MPM_URL")]
+        url: Option<String>,
+        /// Poll interval in milliseconds (refresh cadence; used by later children).
+        #[arg(long, default_value_t = 1500)]
+        interval_ms: u64,
+    },
     /// Launch the Tauri desktop GUI (or open the web build in the browser
     /// when Tauri is unavailable).
     Gui,

@@ -432,6 +432,43 @@ fn cli_parses_tui_with_interval() {
 }
 
 #[test]
+fn cli_parses_coordinator_tui() {
+    // #1272 Child #1: the coordinator TUI is its own subcommand (the
+    // `coordinator` name is taken by the SM chat command). Its `--interval-ms`
+    // defaults to 1500. The `url` arg carries `env = "TRUSTY_MPM_URL"`, so an
+    // ambient `TRUSTY_MPM_URL` in the test runner would override the (absent)
+    // default — assert only the env-independent interval default here, and the
+    // url plumbing in `cli_parses_coordinator_tui_with_flags`.
+    let cli = Cli::try_parse_from(["trusty-mpm", "coordinator-tui"]).unwrap();
+    match cli.command {
+        Command::CoordinatorTui { interval_ms, .. } => {
+            assert_eq!(interval_ms, 1500);
+        }
+        other => panic!("expected CoordinatorTui, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_coordinator_tui_with_flags() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "coordinator-tui",
+        "--url",
+        "http://127.0.0.1:9999",
+        "--interval-ms",
+        "750",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::CoordinatorTui { url, interval_ms } => {
+            assert_eq!(url.as_deref(), Some("http://127.0.0.1:9999"));
+            assert_eq!(interval_ms, 750);
+        }
+        other => panic!("expected CoordinatorTui, got {other:?}"),
+    }
+}
+
+#[test]
 fn cli_parses_telegram_pair() {
     let cli = Cli::try_parse_from(["trusty-mpm", "telegram", "pair"]).unwrap();
     assert!(matches!(

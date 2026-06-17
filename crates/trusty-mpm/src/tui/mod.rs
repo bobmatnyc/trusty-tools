@@ -13,6 +13,7 @@
 //! client; `trusty-mpm tui` launches the live dashboard.
 
 pub mod client;
+pub mod coordinator;
 pub mod dashboard;
 mod event_loop;
 pub mod health;
