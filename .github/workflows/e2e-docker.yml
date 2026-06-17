@@ -1,0 +1,145 @@
+# Docker-based install-from-crates.io E2E smoke test (issue #1376).
+#
+# WHY this workflow exists:
+#   CI and PR workflows build the crates from source. This workflow is the
+#   complementary "install path" gate: it proves that the PUBLISHED crate
+#   versions on crates.io install cleanly on a clean Linux base image and
+#   pass a minimal end-to-end scenario for each tool. This catches:
+#     - packaging mistakes (missing files, bad manifest entries)
+#     - install-time dependency issues (missing system libs)
+#     - CLI regressions in the published binary surface
+#   The "install from crates.io" path is what users actually execute, so
+#   it must be tested independently from the source build.
+#
+# WHAT it does:
+#   1. Builds the Docker image defined in docker/e2e/Dockerfile. The image
+#      runs cargo install trusty-{search,memory,mpm,analyze} from crates.io
+#      (not from source).
+#   2. Runs docker/e2e/smoke.sh inside the container, which exercises four
+#      end-to-end scenarios and exits non-zero on any failure.
+#   3. Reports per-tool PASS / FAIL / SKIP. The indexing-hygiene assertion
+#      for trusty-search is version-gated: it auto-enables once
+#      trusty-search >= 0.25.0 is published; before that it logs a SKIP.
+#
+# TRIGGERS:
+#   - schedule: nightly at 02:00 UTC. Nightly is appropriate because the
+#     install-from-crates.io path can only change when a new version is
+#     published, not on every commit. Running nightly also catches any
+#     external regressions (e.g. crates.io outages, yanked dependencies).
+#   - workflow_dispatch: manual trigger from the Actions UI. Use this to
+#     validate after a new crate publish before the nightly run fires.
+#   NOT triggered on push/PR — the source build CI covers those paths.
+#
+# CARGO REGISTRY CACHE:
+#   The Cargo registry (index + downloaded crate sources) is cached via
+#   actions/cache using a weekly key. Docker layer caching is not used here
+#   because GHA free runners have limited disk; the weekly Cargo cache is
+#   enough to reduce the most expensive index-fetch step.
+#
+# RUNTIME NOTE:
+#   Building four Rust crates from source inside Docker takes ~15-30 minutes
+#   on a free GHA runner (2 vCPU). This is acceptable for a nightly job.
+#   If build time grows, consider splitting into per-tool matrix jobs.
+
+name: Docker E2E (install from crates.io)
+
+on:
+  schedule:
+    # Nightly at 02:00 UTC (off-peak for GHA runner availability).
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      trusty_search_version:
+        description: 'trusty-search version to install (empty = latest published)'
+        required: false
+        default: ''
+      trusty_memory_version:
+        description: 'trusty-memory version to install (empty = latest published)'
+        required: false
+        default: ''
+      trusty_mpm_version:
+        description: 'trusty-mpm version to install (empty = latest published)'
+        required: false
+        default: ''
+      trusty_analyze_version:
+        description: 'trusty-analyze version to install (empty = latest published)'
+        required: false
+        default: ''
+
+# Cancel superseded nightly runs to avoid wasting runner minutes.
+concurrency:
+  group: e2e-docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-smoke:
+    name: E2E smoke (install from crates.io)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Compute the cache key BEFORE the cache step so the expression resolves.
+      - name: Get week number for cache key
+        id: date
+        run: echo "week=$(date +%Y-%V)" >> "$GITHUB_OUTPUT"
+
+      # Cache the Cargo registry index and downloaded source tarballs.
+      # Key rotates weekly so stale index entries don't accumulate.
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.toml') }}-weekly-${{ steps.date.outputs.week }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      # Set up Docker Buildx for efficient layer caching.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Resolve version inputs. workflow_dispatch inputs override defaults;
+      # scheduled runs always use latest published (empty string).
+      - name: Resolve version inputs
+        id: versions
+        run: |
+          echo "search=${{ github.event.inputs.trusty_search_version || '' }}" >> "$GITHUB_OUTPUT"
+          echo "memory=${{ github.event.inputs.trusty_memory_version || '' }}" >> "$GITHUB_OUTPUT"
+          echo "mpm=${{ github.event.inputs.trusty_mpm_version || '' }}" >> "$GITHUB_OUTPUT"
+          echo "analyze=${{ github.event.inputs.trusty_analyze_version || '' }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build E2E Docker image
+        run: |
+          docker build \
+            --build-arg "TRUSTY_SEARCH_VERSION=${{ steps.versions.outputs.search }}" \
+            --build-arg "TRUSTY_MEMORY_VERSION=${{ steps.versions.outputs.memory }}" \
+            --build-arg "TRUSTY_MPM_VERSION=${{ steps.versions.outputs.mpm }}" \
+            --build-arg "TRUSTY_ANALYZE_VERSION=${{ steps.versions.outputs.analyze }}" \
+            -t trusty-e2e:ci \
+            docker/e2e/
+
+      - name: Run E2E smoke tests
+        run: |
+          # Bind-mount a host directory so per-tool logs survive after the
+          # --rm container exits and are available for artifact upload on failure.
+          mkdir -p "${{ github.workspace }}/e2e-logs"
+          docker run --rm \
+            -e TRUSTY_SKIP_RAM_CHECK=1 \
+            -e XDG_DATA_HOME=/tmp/trusty-data \
+            -e HOME=/root \
+            -e E2E_LOG_DIR=/tmp/e2e-logs \
+            -v "${{ github.workspace }}/e2e-logs:/tmp/e2e-logs" \
+            trusty-e2e:ci
+
+      - name: Upload smoke test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ github.run_id }}
+          path: ${{ github.workspace }}/e2e-logs/
+          if-no-files-found: ignore
+          retention-days: 7
