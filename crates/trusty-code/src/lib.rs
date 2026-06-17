@@ -169,6 +169,20 @@ pub mod identity;
 /// Test: `logging::tests::*`.
 pub mod logging;
 
+// ── Phase 4 orchestration layer (per #1028) ──
+
+/// Multi-turn agent loop driving an LLM through tool calls to completion.
+///
+/// Why: A task needing file reads, tool runs, and reaction to results cannot be
+/// done in one chat call; the loop is the bounded control structure that calls
+/// the model, dispatches gated tool calls, feeds results back, and iterates.
+/// What: `AgentLoop`, `AgentLoopConfig`, `AgentLoopError`, and `Transcript`. The
+/// loop is bounded by a turn cap and a wall-clock timeout, accrues token usage
+/// via `PerfCollector`, and returns an `AgentOutput`.
+/// Test: `agent_loop::tests::*` (stubbed two-turn flow, turn-cap abort,
+/// recoverable tool error, usage accrual) plus an `#[ignore]`-gated live test.
+pub mod agent_loop;
+
 // ── Package-level re-exports ──
 
 /// Version string, re-exported so integration tests can assert it without
