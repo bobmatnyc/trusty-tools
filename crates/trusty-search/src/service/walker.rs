@@ -175,7 +175,7 @@ pub const DOC_EXCLUDE_BASENAME_SUBSTRINGS: &[&str] = &["changelog", "license", "
 /// operator wants to index on purpose) need to opt out. Keeping the
 /// toggle as a struct makes future additions (e.g. `include_configs`)
 /// non-breaking.
-/// What: a `Copy` struct passed to [`walk_source_files_with_options`].
+/// What: a `Clone` struct passed by reference to [`walk_source_files_with_options`].
 /// As of v0.8.3 / #118, the default is `include_docs: true`,
 /// `respect_gitignore: true`; the legacy [`walk_source_files`] entry
 /// point preserves these defaults.
@@ -185,7 +185,14 @@ pub const DOC_EXCLUDE_BASENAME_SUBSTRINGS: &[&str] = &["changelog", "license", "
 ///   `test_walker_honors_gitignore`,
 ///   `test_walker_respects_disable_flag`,
 ///   `test_walker_honors_dot_ignore`.
-#[derive(Debug, Clone, Copy)]
+///
+/// Issue #1372 adds two hygiene knobs that the daemon resolves from per-index
+/// config (`trusty-search.yaml` / `.trusty-search.yaml`) before each walk:
+/// `extra_skip_dirs` (extra directory basenames pruned on top of the built-in
+/// [`SKIP_DIRS`]) and `data_file_max_bytes` (a tighter size cap applied only to
+/// [`DATA_EXTS`] files). Because these carry an owned `Vec<String>`, `WalkOptions`
+/// is no longer `Copy`; the orchestrator clones it per subtree.
+#[derive(Debug, Clone)]
 pub struct WalkOptions {
     /// When `true` (default as of v0.8.3 / issue #118), files matching
     /// [`DOC_EXCLUDE_EXTS`] or [`DOC_EXCLUDE_BASENAME_SUBSTRINGS`] are
@@ -202,18 +209,32 @@ pub struct WalkOptions {
     /// the fix for issue #100; the opt-out exists for callers that need to
     /// index a vendored subtree on purpose.
     pub respect_gitignore: bool,
+    /// Extra directory basenames pruned on top of the built-in [`SKIP_DIRS`]
+    /// (issue #1372). Matched on basename only, identical to `SKIP_DIRS`.
+    /// Default [`DEFAULT_EXTRA_SKIP_DIRS`] (`data`, `exports`, `output`,
+    /// `reports`, `snapshots`, `results`).
+    pub extra_skip_dirs: Vec<String>,
+    /// Tighter size cap (bytes) applied only to [`DATA_EXTS`] files
+    /// (issue #1372). Resolved from `IndexConfig::data_file_max_bytes`
+    /// (`Option<u64>`) to a concrete value at the daemon boundary; the walker
+    /// always receives a concrete cap. Default [`DEFAULT_DATA_FILE_MAX_BYTES`]
+    /// (64 KiB). Non-data extensions keep the global [`MAX_FILE_BYTES`] cap.
+    pub data_file_max_bytes: u64,
 }
 
 impl Default for WalkOptions {
-    /// Default `include_docs: true` (issue #118) and `respect_gitignore:
-    /// true` (issue #100). The `code` vs `text` mode filter
-    /// (`is_allowed_for_mode`) is now the single source of truth for
-    /// which file types appear in results, so the walker no longer has
-    /// to pre-filter.
+    /// Default `include_docs: true` (issue #118), `respect_gitignore: true`
+    /// (issue #100), `extra_skip_dirs` = [`DEFAULT_EXTRA_SKIP_DIRS`] and
+    /// `data_file_max_bytes` = [`DEFAULT_DATA_FILE_MAX_BYTES`] (issue #1372).
+    /// The `code` vs `text` mode filter (`is_allowed_for_mode`) is the single
+    /// source of truth for which file types appear in results, so the walker
+    /// no longer has to pre-filter.
     fn default() -> Self {
         Self {
             include_docs: true,
             respect_gitignore: true,
+            extra_skip_dirs: default_extra_skip_dirs(),
+            data_file_max_bytes: DEFAULT_DATA_FILE_MAX_BYTES,
         }
     }
 }
@@ -261,6 +282,94 @@ const BINARY_EXTS: &[&str] = &[
 /// Files larger than this are silently skipped. 1 MiB is generous for a source
 /// file; anything bigger is almost certainly generated or a data blob.
 pub const MAX_FILE_BYTES: u64 = 1_048_576; // 1 MiB
+
+/// Data-ish file extensions subject to the tighter [`WalkOptions::data_file_max_bytes`]
+/// cap rather than the global [`MAX_FILE_BYTES`] (issue #1372).
+///
+/// Why: data-heavy repos (e.g. `cto-reports`) carry thousands of JSON/XML/TXT/log
+/// exports that are well under the 1 MiB global cap, so they all pass the walk
+/// filter and bloat the index with ~15k non-source files. These four extensions
+/// double as legitimate config formats (`package.json`, `tsconfig.json`,
+/// small logs) — almost always well under 64 KiB — so a tighter per-extension
+/// cap prunes the bulk exports while keeping real config indexable. `yaml`/`yml`/
+/// `toml` are deliberately NOT in this set: they are overwhelmingly config, not
+/// data dumps, and keep the global 1 MiB cap.
+/// What: lowercase extensions (no leading dot) matched against the file extension.
+/// Test: `test_data_cap_skips_large_json` and the round-trip walker tests.
+pub const DATA_EXTS: &[&str] = &["json", "xml", "txt", "log"];
+
+/// Default tighter size cap (64 KiB) applied to [`DATA_EXTS`] files (issue #1372).
+///
+/// Why: 64 KiB comfortably covers real config files (a large `package.json` or
+/// `tsconfig.json` is a few KiB) while pruning multi-hundred-KiB data exports
+/// that the 1 MiB global cap let through. Used as the resolved default when a
+/// caller leaves `IndexConfig::data_file_max_bytes` / the wire field unset.
+/// What: a `u64` byte count.
+/// Test: `test_data_cap_skips_large_json`, `test_data_cap_keeps_small_json`.
+pub const DEFAULT_DATA_FILE_MAX_BYTES: u64 = 65_536; // 64 KiB
+
+/// Default extra directory basenames pruned on top of the built-in [`SKIP_DIRS`]
+/// (issue #1372).
+///
+/// Why: common data-export directory names (`data/`, `exports/`, `output/`,
+/// `reports/`, `snapshots/`, `results/`) hold machine-generated blobs that bloat
+/// the index without source-code signal. They are NOT in the baseline `SKIP_DIRS`
+/// because a few projects legitimately keep source under e.g. `build/` — these
+/// are surfaced as an editable per-index default so a project can override them.
+/// What: lowercase directory basenames; matched the same way as `SKIP_DIRS`.
+/// Test: `test_walker_skips_default_data_dirs`.
+pub const DEFAULT_EXTRA_SKIP_DIRS: &[&str] = &[
+    "data",
+    "exports",
+    "output",
+    "reports",
+    "snapshots",
+    "results",
+];
+
+/// Build the default extra-skip-dir list as owned `String`s (issue #1372).
+///
+/// Why: serde defaults and `impl Default` for the config structs need an owned
+/// `Vec<String>`; [`DEFAULT_EXTRA_SKIP_DIRS`] is a `&[&str]`. One helper keeps
+/// the default in a single place so the walker, `IndexConfig`, and `ProjectConfig`
+/// never drift.
+/// What: maps the static slice to a `Vec<String>`.
+/// Test: exercised by the config round-trip tests in `repo_config` / `project_config`.
+pub fn default_extra_skip_dirs() -> Vec<String> {
+    DEFAULT_EXTRA_SKIP_DIRS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Return `true` when `path` is a [`DATA_EXTS`] file larger than `data_file_max_bytes`
+/// (issue #1372).
+///
+/// Why: layered on top of [`should_skip_path`] (which still enforces the global
+/// 1 MiB cap for every extension), this applies the tighter data-file cap only
+/// to JSON/XML/TXT/log so bulk data exports are pruned while small config files
+/// of the same extension stay indexable. Non-data extensions always return
+/// `false` here and keep the global cap.
+/// What: lowercases the extension, checks [`DATA_EXTS`] membership, then stats the
+/// file and compares its length against `data_file_max_bytes`. A stat failure
+/// returns `false` (the walker's `should_skip_path` already handles unreadable
+/// files defensively).
+/// Test: `test_data_cap_skips_large_json`, `test_data_cap_keeps_small_json`,
+/// `test_data_cap_ignores_non_data_ext`.
+pub fn exceeds_data_cap(path: &Path, data_file_max_bytes: u64) -> bool {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !DATA_EXTS.contains(&ext.as_str()) {
+        return false;
+    }
+    match std::fs::metadata(path) {
+        Ok(meta) => meta.len() > data_file_max_bytes,
+        Err(_) => false,
+    }
+}
 
 /// If a JS/CSS file's longest line exceeds this and the file has fewer than
 /// [`MIN_LINES_FOR_READABLE_JS`] total lines, it is treated as minified.
@@ -411,7 +520,7 @@ pub struct WalkResult {
 /// `WalkOptions::default()`.
 /// Test: every existing walker test exercises this entry point.
 pub fn walk_source_files(root: &Path) -> WalkResult {
-    walk_source_files_with_options(root, WalkOptions::default())
+    walk_source_files_with_options(root, &WalkOptions::default())
 }
 
 /// Walk `root` recursively, applying the supplied [`WalkOptions`].
@@ -457,7 +566,7 @@ pub fn walk_source_files(root: &Path) -> WalkResult {
 /// `test_walker_respects_disable_flag`,
 /// `test_walker_honors_dot_ignore`,
 /// `test_walker_still_skips_hardcoded_dirs`.
-pub fn walk_source_files_with_options(root: &Path, opts: WalkOptions) -> WalkResult {
+pub fn walk_source_files_with_options(root: &Path, opts: &WalkOptions) -> WalkResult {
     let mut files = Vec::new();
     let mut skipped_dirs = 0usize;
 
@@ -515,10 +624,15 @@ pub fn walk_source_files_with_options(root: &Path, opts: WalkOptions) -> WalkRes
         // needs the hardcoded skip list to keep `node_modules` etc. out of
         // the index. Match on any component's basename so a nested
         // `vendor/foo/node_modules/bar.js` is still pruned.
+        //
+        // Issue #1372: also prune any component whose basename is in the
+        // per-index `extra_skip_dirs` set (default: data/exports/output/
+        // reports/snapshots/results) so data-export trees never reach the
+        // indexer. Matched on basename only, identical to SKIP_DIRS semantics.
         if path
             .components()
             .filter_map(|c| c.as_os_str().to_str())
-            .any(|seg| SKIP_DIRS.contains(&seg))
+            .any(|seg| SKIP_DIRS.contains(&seg) || opts.extra_skip_dirs.iter().any(|d| d == seg))
         {
             continue;
         }
@@ -529,8 +643,16 @@ pub fn walk_source_files_with_options(root: &Path, opts: WalkOptions) -> WalkRes
         if !SOURCE_EXTS.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
             continue;
         }
-        // Path-level skip: minified filenames, binaries, large files.
+        // Path-level skip: minified filenames, binaries, large files (global
+        // 1 MiB cap).
         if should_skip_path(path) {
+            continue;
+        }
+        // Issue #1372: tighter per-extension cap for data-ish files
+        // (JSON/XML/TXT/log). Layered on top of the global cap above so a
+        // 200 KiB data export is pruned while a small `package.json` of the
+        // same extension stays indexable.
+        if exceeds_data_cap(path, opts.data_file_max_bytes) {
             continue;
         }
         // Issue #77: default doc/changelog/license exclusion. Skipped before
@@ -706,7 +828,7 @@ mod tests {
 
         let names: Vec<String> = walk_source_files_with_options(
             root,
-            WalkOptions {
+            &WalkOptions {
                 include_docs: false,
                 ..WalkOptions::default()
             },
@@ -809,6 +931,178 @@ mod tests {
         let small_path = tmp.path().join("small.js");
         fs::write(&small_path, b"const x = 1;").unwrap();
         assert!(!should_skip_path(&small_path));
+    }
+
+    // --- Issue #1372: data-file cap + extra skip dirs ---
+
+    /// A data-ish file (json/xml/txt/log) larger than the 64 KiB default cap
+    /// is pruned by `exceeds_data_cap`, even though it is well under the global
+    /// 1 MiB `MAX_FILE_BYTES` cap.
+    #[test]
+    fn test_data_cap_skips_large_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for ext in ["json", "xml", "txt", "log"] {
+            let p = tmp.path().join(format!("export.{ext}"));
+            // 100 KiB — over 64 KiB cap, under 1 MiB global cap.
+            fs::write(&p, "x".repeat(100 * 1024)).unwrap();
+            assert!(
+                exceeds_data_cap(&p, DEFAULT_DATA_FILE_MAX_BYTES),
+                "{ext}: large data file must exceed the 64 KiB cap"
+            );
+            // The global path-skip (1 MiB) does NOT catch it — proving the
+            // tighter data cap is what prunes it.
+            assert!(
+                !should_skip_path(&p),
+                "{ext}: 100 KiB file is under the global 1 MiB cap"
+            );
+        }
+    }
+
+    /// A small data-ish config file (e.g. `package.json`, `tsconfig.json`) stays
+    /// indexable under the 64 KiB cap.
+    #[test]
+    fn test_data_cap_keeps_small_json() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for name in ["package.json", "config.xml", "notes.txt", "app.log"] {
+            let p = tmp.path().join(name);
+            fs::write(&p, "{\"a\":1}").unwrap();
+            assert!(
+                !exceeds_data_cap(&p, DEFAULT_DATA_FILE_MAX_BYTES),
+                "{name}: small data file must stay indexable"
+            );
+        }
+    }
+
+    /// Non-data extensions (`.rs`, `.md`, `.toml`) are never subject to the
+    /// data cap — only the global 1 MiB cap applies. A 100 KiB `.rs`/`.md`/
+    /// `.toml` file (over the 64 KiB data cap, under the 1 MiB global cap)
+    /// must still be indexed.
+    #[test]
+    fn test_data_cap_ignores_non_data_ext() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for ext in ["rs", "md", "toml"] {
+            let p = tmp.path().join(format!("big.{ext}"));
+            fs::write(&p, "x".repeat(100 * 1024)).unwrap();
+            assert!(
+                !exceeds_data_cap(&p, DEFAULT_DATA_FILE_MAX_BYTES),
+                "{ext}: non-data extension must ignore the data cap"
+            );
+            assert!(
+                !should_skip_path(&p),
+                "{ext}: 100 KiB file is under the global 1 MiB cap and must be kept"
+            );
+        }
+    }
+
+    /// End-to-end: the walker prunes large data files but keeps small config
+    /// files of the same extension, and keeps large non-data source files.
+    #[test]
+    fn test_walker_applies_data_cap() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        // Large data exports — pruned by the 64 KiB cap.
+        fs::write(root.join("dump.json"), "x".repeat(100 * 1024)).unwrap();
+        fs::write(root.join("feed.xml"), "x".repeat(100 * 1024)).unwrap();
+        // Small config — kept.
+        fs::write(root.join("package.json"), "{\"name\":\"x\"}").unwrap();
+        // Large non-data source / config — kept (only the 1 MiB cap applies).
+        fs::write(
+            root.join("Cargo.toml"),
+            format!("# {}", "x".repeat(100 * 1024)),
+        )
+        .unwrap();
+        fs::write(
+            root.join("big.rs"),
+            format!("// {}\nfn x() {{}}", "y".repeat(100 * 1024)),
+        )
+        .unwrap();
+        fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+
+        let names: Vec<String> = walk_source_files(root)
+            .files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        assert!(
+            !names.contains(&"dump.json".to_string()),
+            "large json pruned: {names:?}"
+        );
+        assert!(
+            !names.contains(&"feed.xml".to_string()),
+            "large xml pruned: {names:?}"
+        );
+        assert!(
+            names.contains(&"package.json".to_string()),
+            "small json kept: {names:?}"
+        );
+        assert!(
+            names.contains(&"Cargo.toml".to_string()),
+            "large toml kept: {names:?}"
+        );
+        assert!(
+            names.contains(&"big.rs".to_string()),
+            "large rs kept: {names:?}"
+        );
+        assert!(
+            names.contains(&"main.rs".to_string()),
+            "source kept: {names:?}"
+        );
+    }
+
+    /// The walker prunes files under each default extra-skip dir
+    /// (`data`/`exports`/`output`/`reports`/`snapshots`/`results`) while keeping
+    /// normal source elsewhere.
+    #[test]
+    fn test_walker_skips_default_data_dirs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        for dir in DEFAULT_EXTRA_SKIP_DIRS {
+            let d = root.join(dir);
+            fs::create_dir_all(&d).unwrap();
+            // Use a source extension to prove the DIRECTORY is pruned, not the
+            // extension.
+            fs::write(d.join("trapped.rs"), "fn t() {}").unwrap();
+        }
+        fs::write(root.join("kept.rs"), "fn k() {}").unwrap();
+
+        let names: Vec<String> = walk_source_files(root)
+            .files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        assert!(
+            names.contains(&"kept.rs".to_string()),
+            "normal source kept: {names:?}"
+        );
+        assert!(
+            !names.contains(&"trapped.rs".to_string()),
+            "files inside default data dirs must be pruned: {names:?}"
+        );
+    }
+
+    /// An empty `extra_skip_dirs` (explicit override) means the default data
+    /// dirs are NOT pruned — proving the list is honoured rather than hardcoded.
+    #[test]
+    fn test_walker_extra_skip_dirs_overridable() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let d = root.join("reports");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("kept.rs"), "fn k() {}").unwrap();
+
+        let opts = WalkOptions {
+            extra_skip_dirs: Vec::new(),
+            ..WalkOptions::default()
+        };
+        let names: Vec<String> = walk_source_files_with_options(root, &opts)
+            .files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        assert!(
+            names.contains(&"kept.rs".to_string()),
+            "empty extra_skip_dirs must NOT prune reports/: {names:?}"
+        );
     }
 
     // --- should_skip_content tests ---
@@ -1253,8 +1547,9 @@ mod tests {
         let opts = WalkOptions {
             include_docs: false,
             respect_gitignore: false,
+            ..WalkOptions::default()
         };
-        let names: Vec<String> = walk_source_files_with_options(root, opts)
+        let names: Vec<String> = walk_source_files_with_options(root, &opts)
             .files
             .iter()
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))

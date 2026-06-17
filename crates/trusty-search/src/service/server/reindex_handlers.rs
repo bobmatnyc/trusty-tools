@@ -143,6 +143,10 @@ pub(super) async fn reindex_handler(
                     domain_terms: handle.domain_terms.clone(),
                     include_docs: handle.include_docs,
                     respect_gitignore: handle.respect_gitignore,
+                    // Issue #1372: preserve the hygiene knobs across the
+                    // root_path override — they are orthogonal to the path.
+                    extra_skip_dirs: handle.extra_skip_dirs.clone(),
+                    data_file_max_bytes: handle.data_file_max_bytes,
                     path_filter: handle.path_filter.clone(),
                     // Preserve the previously inferred context (if any). A
                     // fresh reindex will overwrite this with the metadata

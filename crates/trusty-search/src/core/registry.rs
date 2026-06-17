@@ -252,6 +252,38 @@ pub struct IndexHandle {
     /// and the persistence-round-trip tests in `service::persistence`.
     pub respect_gitignore: bool,
 
+    /// Issue #1372: extra directory basenames pruned during the reindex walk on
+    /// top of the built-in `walker::SKIP_DIRS`. Default
+    /// `walker::DEFAULT_EXTRA_SKIP_DIRS` (`data`, `exports`, `output`, `reports`,
+    /// `snapshots`, `results`).
+    ///
+    /// Why: data-heavy repos carry thousands of files under data-export
+    /// directories that bloat the index without source signal. These dir names
+    /// are NOT in the baseline `SKIP_DIRS` (a few projects legitimately keep
+    /// source under e.g. `output/`), so they are a per-index editable default
+    /// rather than a hardcoded constant.
+    /// What: a `Vec<String>` threaded onto `WalkOptions::extra_skip_dirs`.
+    /// Sourced from `trusty-search.yaml`'s `extra_skip_dirs:` field, the
+    /// `POST /indexes` `extra_skip_dirs` field, or `PATCH /indexes/:id/config`.
+    /// Test: `service::walker::test_walker_skips_default_data_dirs` plus the
+    /// persistence round-trip tests.
+    pub extra_skip_dirs: Vec<String>,
+
+    /// Issue #1372: tighter size cap (bytes) applied only to data-ish file
+    /// extensions (`walker::DATA_EXTS`: json/xml/txt/log) during the reindex
+    /// walk. Default `walker::DEFAULT_DATA_FILE_MAX_BYTES` (64 KiB). Non-data
+    /// extensions keep the global `walker::MAX_FILE_BYTES` (1 MiB) cap.
+    ///
+    /// Why: data exports in JSON/XML/TXT/log are typically well under 1 MiB so
+    /// the global cap lets them all through; a tighter cap prunes the bulk
+    /// exports while small config files of the same extension stay indexable.
+    /// What: a resolved `u64` (the config-level `Option<u64>` is resolved to the
+    /// default at the daemon boundary) threaded onto
+    /// `WalkOptions::data_file_max_bytes`.
+    /// Test: `service::walker::test_walker_applies_data_cap` plus the
+    /// persistence round-trip tests.
+    pub data_file_max_bytes: u64,
+
     /// Glob patterns matched against the *immediate subdirectory name* under
     /// `root_path`. When non-empty, the reindex walker keeps only files
     /// whose first path component (relative to `root_path`) matches one of
@@ -446,6 +478,8 @@ impl IndexHandle {
             domain_terms: Vec::new(),
             include_docs: true,
             respect_gitignore: true,
+            extra_skip_dirs: crate::service::walker::default_extra_skip_dirs(),
+            data_file_max_bytes: crate::service::walker::DEFAULT_DATA_FILE_MAX_BYTES,
             path_filter: Vec::new(),
             context_embedding: Arc::new(RwLock::new(None)),
             context_summary: Arc::new(RwLock::new(None)),

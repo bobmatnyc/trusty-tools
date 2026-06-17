@@ -55,12 +55,18 @@ pub(super) fn collect_files_to_index(handle: &IndexHandle) -> crate::service::wa
     };
     let mut walked_files: Vec<PathBuf> = Vec::new();
     let mut total_skipped_dirs: usize = 0;
+    // Issue #1372: resolve the per-index hygiene knobs onto the walk options.
+    // `data_file_max_bytes` is an `Option<u64>` on the handle's config source;
+    // it was already resolved to a concrete `u64` field on the handle, so the
+    // walker always receives a concrete cap.
     let walk_opts = WalkOptions {
         include_docs: handle.include_docs,
         respect_gitignore: handle.respect_gitignore,
+        extra_skip_dirs: handle.extra_skip_dirs.clone(),
+        data_file_max_bytes: handle.data_file_max_bytes,
     };
     for subtree in &include_paths {
-        let w = walk_source_files_with_options(subtree, walk_opts);
+        let w = walk_source_files_with_options(subtree, &walk_opts);
         walked_files.extend(w.files);
         total_skipped_dirs = total_skipped_dirs.saturating_add(w.skipped_dirs);
     }

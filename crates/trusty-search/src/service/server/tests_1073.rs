@@ -108,6 +108,8 @@ async fn relocate_index_updates_root_path() {
             lexical_only: None,
             skip_kg: None,
             defer_embed: None,
+            extra_skip_dirs: None,
+            data_file_max_bytes: None,
         }),
     )
     .await;
