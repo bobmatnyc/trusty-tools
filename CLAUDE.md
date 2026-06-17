@@ -226,7 +226,7 @@ throughout.
 `axum-server` feature flag. Do not add axum as an unconditional dependency in
 any library crate. Enable it explicitly in crates that serve HTTP.
 
-🟡 **Rust editions** — `edition = "2024"` for `trusty-mpm`, `trusty-mpm-gui`, `trusty-agents`, `trusty-agents-common`, and `trusty-agents-local`
+🟡 **Rust editions** — `edition = "2024"` for `trusty-mpm`, `trusty-mpm-gui`, `trusty-agents`, `trusty-agents-common`, `trusty-agents-local`, and `trusty-code`
 (they use let-chains); `edition = "2021"` for all other crates. Check the crate
 `Cargo.toml` before assuming an edition.
 
