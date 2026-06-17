@@ -210,6 +210,15 @@ nix = { version = "0.29", features = ["signal"] }
 # `cargo build --features sm-memory`. `memory-core` is repeated so the unified
 # feature set still includes the palace storage engine the SM-4 tests exercise.
 trusty-common = { workspace = true, features = ["memory-core", "embedder-test-support"] }
+# DEV-ONLY (DOC-15 C5 / #1362): the cross-gate AC-18 golden test
+# (`tests/conformance_cross_gate.rs`) drives BOTH conformance gates from one
+# shared `trusty_common::intent_source::ResolvedIntent` — the trusty-mpm FRONT
+# gate (`front_gate_disposition`) and the trusty-review BACK gate
+# (`ConformanceSource::would_flag`). trusty-review is a dev-dependency ONLY (it
+# is NOT a runtime dependency of trusty-mpm, and neither crate depends on the
+# other normally, so this introduces no dependency cycle and adds zero cost to a
+# production `cargo build`).
+trusty-review = { workspace = true }
 tempfile.workspace = true
 axum.workspace = true
 http-body-util.workspace = true

@@ -10,6 +10,13 @@
   - [0002 — Single-install convention](./adr/0002-single-install-convention.md)
   - [0003 — MSRV & edition policy](./adr/0003-msrv-and-edition-policy.md)
 
+# Behavior-Contract Specs
+
+- [Specs Index](./specs/README.md)
+  - [DOC-13 — Coordinator TUI](./specs/tui-coordinator.md)
+  - [DOC-14 — Session Manager Agent](./specs/session-manager-agent.md)
+  - [DOC-15 — Intent / Method Conformance](./specs/intent-conformance.md)
+
 # trusty-agents
 
 - [Overview](./trusty-agents/README.md)

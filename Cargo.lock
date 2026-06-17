@@ -10993,6 +10993,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "trusty-common",
+ "trusty-review",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",

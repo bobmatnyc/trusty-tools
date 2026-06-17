@@ -255,6 +255,51 @@ Returns a health status object:
 AWS credentials can also be supplied via `~/.aws/credentials`, IAM roles, or SSO.
 The full AWS credential chain is supported.
 
+## Context sources & the conformance gate
+
+`trusty-review` enriches a review with external **context sources** (JIRA,
+Confluence, GitHub Issues, and the intent/method-**conformance** back gate). Each
+source resolves independently from layered config — an env var beats a TOML key
+beats the built-in default (the `ContextSourcesConfig` struct):
+
+| Source | Enable env var | Mode env var | TOML table | Default |
+|--------|----------------|--------------|------------|---------|
+| JIRA | `TRUSTY_REVIEW_CONTEXT_JIRA_ENABLED` | `…_JIRA_MODE` | `[context.sources.jira]` | auto (on creds) |
+| Confluence | `TRUSTY_REVIEW_CONTEXT_CONFLUENCE_ENABLED` | `…_CONFLUENCE_MODE` | `[context.sources.confluence]` | auto (on creds) |
+| GitHub Issues | `TRUSTY_REVIEW_CONTEXT_GITHUB_ISSUES_ENABLED` | `…_GITHUB_ISSUES_MODE` | `[context.sources.github_issues]` | auto (on creds) |
+| **Conformance** | `TRUSTY_REVIEW_CONTEXT_CONFORMANCE_ENABLED` | `…_CONFORMANCE_MODE` | `[context.sources.conformance]` | **DISABLED** |
+
+Enable values are lenient (`true`/`1`/`yes`/`on`); mode is `live` (only mode
+supported today) or `semantic` (not yet implemented for these sources).
+
+### The `conformance` back gate (DOC-15)
+
+The conformance source is the **BACK gate** of the intent/method-conformance
+capability ([`docs/specs/intent-conformance.md`](../../docs/specs/intent-conformance.md)).
+During review it resolves "what method did the ticket/spec prescribe?" via the
+shared intent-source resolver (ISR) and surfaces it so the reviewer LLM can flag a
+diff that **explicitly contradicts** that method (matrix M5). A gap or an
+unresolved intent surfaces nothing — the gate is conservative and fail-open, so it
+never manufactures a false-positive finding.
+
+It is **default-DISABLED** (unlike the other sources, it does not auto-enable on
+mere credential presence) because it issues a GitHub ticket fetch and is opt-in.
+Turn it on explicitly:
+
+```bash
+# Env (one-shot)
+TRUSTY_REVIEW_CONTEXT_CONFORMANCE_ENABLED=true trusty-review serve
+
+# …or in $XDG_CONFIG_HOME/trusty-review/config.toml
+[context.sources.conformance]
+enabled = true
+mode = "live"
+```
+
+The gate is backed by the `intent_source` module in **trusty-common**, gated
+behind that crate's **`intent-source`** Cargo feature (which `trusty-review`
+already enables). See the [Cargo features](#cargo-features) note below.
+
 ## Reviewer model
 
 The default reviewer model is `us.anthropic.claude-sonnet-4-6` on AWS Bedrock.
@@ -277,6 +322,12 @@ Provider prefix convention:
 | `http-server` | yes | Axum HTTP daemon (`serve` subcommand without `--stdio`) |
 | `mcp` | yes | MCP stdio JSON-RPC service (`serve --stdio`) |
 | `profile` | yes | Longitudinal contributor-profiling pipeline (`profile` subcommand); pulls in `tga` + `rusqlite` |
+
+> The conformance back gate (above) is backed by **trusty-common**'s
+> **`intent-source`** feature, which `trusty-review` enables unconditionally
+> (it is part of the dependency declaration, not a `trusty-review` feature). That
+> feature gates the shared intent-source resolver (ISR) so the other trusty-common
+> consumers that do not need it pay nothing.
 
 Slim build (no contributor profiling, no `tga`/`rusqlite` compilation):
 
