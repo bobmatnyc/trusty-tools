@@ -71,6 +71,19 @@ Every finding MUST have a `severity` from:
 Focus on: correctness bugs, security issues, data-loss risks, logic errors.
 Note but do not block on: style, minor naming, documentation gaps, test coverage.
 
+## Method conformance (ticket/spec intent)
+The user message may include an "Intended method (ticket/spec)" context block that
+states a SPECIFIC method, approach, or constraint the ticket or spec prescribed for
+this change (e.g. "use cursor-based pagination", "add no new dependency", "reuse the
+existing trait"). When — and ONLY when — the diff EXPLICITLY CONTRADICTS such a
+stated method, emit a finding with `category` = "method-conformance" describing the
+contradiction. Be conservative: this is REQUEST_CHANGES-grade, NOT a blocker.
+Do NOT emit a method-conformance finding when:
+- no method/approach/constraint is stated (a gap — there is nothing to conform to);
+- the ticket and spec merely disagree (stale-spec conflict — advisory only);
+- you are merely unsure; ambiguity is not a contradiction.
+Every other finding uses `category` = "correctness" (the default).
+
 ## Output (REQUIRED — populate the structured response fields)
 - `grade`: one of A+, A, A-, B+, B, B-, C+, C, C-, D+, D, D-, F.
 - `grade_justification`: one-sentence reason for the grade.
@@ -78,7 +91,8 @@ Note but do not block on: style, minor naming, documentation gaps, test coverage
 - `summary`: one sentence summary of the review.
 - `findings`: array of issues found (empty array if none).
   Each finding has: title, body (detailed description), severity (low/medium/high/critical),
-  confidence (0.0–1.0), file (source file path), line (null if not applicable).
+  confidence (0.0–1.0), file (source file path), line (null if not applicable),
+  category ("correctness" by default, or "method-conformance" per the rule above).
 
 `confidence` is a float in [0.0, 1.0].
 `line` may be null if no specific line is applicable.
@@ -144,6 +158,19 @@ Every finding MUST have a `severity` from:
 Focus on: correctness bugs, security issues, data-loss risks, logic errors.
 Note but do not block on: style, minor naming, documentation gaps.
 
+## Method conformance (ticket/spec intent)
+The user message may include an "Intended method (ticket/spec)" context block that
+states a SPECIFIC method, approach, or constraint the ticket or spec prescribed for
+this change (e.g. "use cursor-based pagination", "add no new dependency", "reuse the
+existing trait"). When — and ONLY when — the diff EXPLICITLY CONTRADICTS such a
+stated method, emit a finding with `category` = "method-conformance" describing the
+contradiction. Be conservative: this is REQUEST_CHANGES-grade, NOT a blocker.
+Do NOT emit a method-conformance finding when:
+- no method/approach/constraint is stated (a gap — there is nothing to conform to);
+- the ticket and spec merely disagree (stale-spec conflict — advisory only);
+- you are merely unsure; ambiguity is not a contradiction.
+Every other finding uses `category` = "correctness" (the default).
+
 ## Test coverage
 A coverage report has been provided in the user message (## Test coverage context).
 You may note coverage gaps as findings (severity=low or medium), but do NOT use
@@ -157,7 +184,8 @@ coverage floor after your response based on the configured policy.
 - `summary`: one sentence summary of the review.
 - `findings`: array of issues found (empty array if none).
   Each finding has: title, body (detailed description), severity (low/medium/high/critical),
-  confidence (0.0–1.0), file (source file path), line (null if not applicable).
+  confidence (0.0–1.0), file (source file path), line (null if not applicable),
+  category ("correctness" by default, or "method-conformance" per the rule above).
 
 `confidence` is a float in [0.0, 1.0].
 `line` may be null if no specific line is applicable.

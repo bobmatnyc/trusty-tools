@@ -170,6 +170,38 @@ pub enum VerifyOutcome {
     Skipped,
 }
 
+// ─── Finding category ──────────────────────────────────────────────────────────
+
+/// The axis a finding speaks to: code correctness vs. intent/method conformance.
+///
+/// Why: the intent/method-conformance back gate (DOC-15, `SPEC-CONFORMANCE-02`,
+/// #1359) adds a second, distinct *kind* of finding — one that flags a diff
+/// **contradicting an explicit method the ticket/spec stated**, separate from a
+/// correctness bug.  The two must be distinguishable so the verdict floor can
+/// treat them differently: a conformance divergence caps at `REQUEST_CHANGES`
+/// and NEVER drives `BLOCK` (BLOCK is reserved for correctness/safety), whereas a
+/// correctness finding floors normally.  Threading a category through the finding
+/// model is the minimal way to carry that distinction from the LLM JSON all the
+/// way to `grade::severity_floor`.
+/// What: a two-variant enum serialised kebab-case (`"correctness"` /
+/// `"method-conformance"`).  It is `#[serde(default)]` (→ `Correctness`) wherever
+/// it appears so pre-#1359 fixtures and LLM responses that omit `category` still
+/// deserialise unchanged (back-compat — every legacy finding is a correctness
+/// finding).
+/// Test: `finding_category_serde_roundtrip`,
+/// `finding_defaults_category_correctness`, and the parser/grade tests that
+/// assert the conformance cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum FindingCategory {
+    /// A correctness / logic / safety finding (the default, legacy behaviour).
+    #[default]
+    Correctness,
+    /// An intent/method-conformance divergence: the diff contradicts an explicit
+    /// method the ticket or spec prescribed (`SPEC-CONFORMANCE-02`, M5).
+    MethodConformance,
+}
+
 // ─── Finding ──────────────────────────────────────────────────────────────────
 
 /// A single code-review finding / fix suggestion.
@@ -198,6 +230,13 @@ pub struct Finding {
     pub confidence: f32,
     /// Estimated remediation effort.
     pub effort: Effort,
+    /// Which axis this finding speaks to (correctness vs. method-conformance).
+    ///
+    /// Why: the back gate (#1359) caps `MethodConformance` findings at
+    /// `REQUEST_CHANGES` in the verdict floor.  `#[serde(default)]` keeps every
+    /// pre-#1359 serialised finding deserialising as `Correctness`.
+    #[serde(default)]
+    pub category: FindingCategory,
     // ── Transient pipeline state ──────────────────────────────────────────
     /// Verification outcome; `None` before the verification round.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -230,9 +269,24 @@ impl Finding {
             suggestion: suggestion.into(),
             confidence: confidence.clamp(0.0, 1.0),
             effort,
+            category: FindingCategory::Correctness,
             verified: None,
             issue_eligible: false,
         }
+    }
+
+    /// Set this finding's category, returning the finding for chaining.
+    ///
+    /// Why: `Finding::new` defaults to `Correctness` so every existing call site
+    /// is unchanged; the back-gate parser (#1359) needs to override the category
+    /// for an LLM-emitted `method-conformance` finding without a new constructor
+    /// arity.  A small builder keeps construction ergonomic and the default safe.
+    /// What: overwrites `self.category` and returns `self`.
+    /// Test: `finding_with_category_sets_method_conformance`.
+    #[must_use]
+    pub fn with_category(mut self, category: FindingCategory) -> Self {
+        self.category = category;
+        self
     }
 }
 
@@ -511,6 +565,75 @@ mod tests {
 
         let f_mid = Finding::new("src/lib.rs", "bug", "desc", "fix", 0.85, Effort::Medium);
         assert!((f_mid.confidence - 0.85_f32).abs() < f32::EPSILON);
+    }
+
+    /// `FindingCategory` round-trips via its kebab-case wire form.
+    ///
+    /// Why: the LLM emits and the review log persists the category as a string;
+    /// the back gate (#1359) keys verdict-floor behaviour off it, so the wire
+    /// shape must be stable.
+    /// What: serialises both variants, asserts the exact tokens, deserialises back.
+    /// Test: this test itself.
+    #[test]
+    fn finding_category_serde_roundtrip() {
+        assert_eq!(
+            serde_json::to_string(&FindingCategory::Correctness).unwrap(),
+            "\"correctness\""
+        );
+        assert_eq!(
+            serde_json::to_string(&FindingCategory::MethodConformance).unwrap(),
+            "\"method-conformance\""
+        );
+        let back: FindingCategory = serde_json::from_str("\"method-conformance\"").unwrap();
+        assert_eq!(back, FindingCategory::MethodConformance);
+        assert_eq!(FindingCategory::default(), FindingCategory::Correctness);
+    }
+
+    /// A `Finding` constructed via `new` defaults to the `Correctness` category.
+    ///
+    /// Why: every existing call site must keep producing correctness findings
+    /// (back-compat); only the back-gate parser opts into `MethodConformance`.
+    /// What: builds a finding via `new`, asserts the category.
+    /// Test: this test itself.
+    #[test]
+    fn finding_defaults_category_correctness() {
+        let f = Finding::new("src/lib.rs", "bug", "desc", "fix", 0.9, Effort::Low);
+        assert_eq!(f.category, FindingCategory::Correctness);
+    }
+
+    /// `with_category` overrides the default category.
+    ///
+    /// Why: the back-gate parser threads `MethodConformance` onto an LLM finding
+    /// via this builder.
+    /// What: chains `with_category`, asserts the override took effect.
+    /// Test: this test itself.
+    #[test]
+    fn finding_with_category_sets_method_conformance() {
+        let f = Finding::new("src/lib.rs", "bug", "desc", "fix", 0.9, Effort::Medium)
+            .with_category(FindingCategory::MethodConformance);
+        assert_eq!(f.category, FindingCategory::MethodConformance);
+    }
+
+    /// A serialised finding WITHOUT a `category` field still deserialises (the
+    /// `#[serde(default)]` back-compat guarantee for pre-#1359 fixtures).
+    ///
+    /// Why: AC requires existing finding fixtures (no `category` key) to keep
+    /// deserialising, defaulting to `Correctness`.
+    /// What: deserialises a category-less JSON object, asserts the default.
+    /// Test: this test itself.
+    #[test]
+    fn finding_without_category_field_defaults_correctness() {
+        let json = r#"{
+            "file": "src/main.rs",
+            "kind": "logic-error",
+            "description": "off-by-one",
+            "suggestion": "use <=",
+            "confidence": 0.7,
+            "effort": "medium"
+        }"#;
+        let f: Finding = serde_json::from_str(json).expect("legacy finding must deserialise");
+        assert_eq!(f.category, FindingCategory::Correctness);
+        assert_eq!(f.kind, "logic-error");
     }
 
     #[test]

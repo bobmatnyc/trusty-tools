@@ -37,7 +37,7 @@
 use serde::Deserialize;
 use tracing::{debug, warn};
 
-use crate::models::{Effort, Finding, Verdict};
+use crate::models::{Effort, Finding, FindingCategory, Verdict};
 
 // ─── Wire types (JSON block deserialization) ──────────────────────────────────
 
@@ -69,8 +69,11 @@ struct LlmOutputBlock {
 /// Why: the LLM emits findings as structured JSON; we convert them to the
 /// internal `Finding` type.
 /// What: mirrors the finding schema in the system prompt.  All fields except
-/// `title` and `body` are optional and default gracefully.
-/// Test: covered transitively by `parse_json_block_happy_path`.
+/// `title` and `body` are optional and default gracefully.  `category` is new in
+/// #1359 (back gate); it is `#[serde(default)]` (→ `Correctness`) so responses
+/// from models that do not emit it — and every pre-#1359 fixture — still parse.
+/// Test: covered transitively by `parse_json_block_happy_path` and
+/// `parse_method_conformance_finding_category` in `parser_tests`.
 #[derive(Debug, Deserialize)]
 struct LlmFinding {
     title: String,
@@ -83,6 +86,9 @@ struct LlmFinding {
     file: String,
     #[serde(default)]
     line: Option<u32>,
+    /// Finding axis: `"correctness"` (default) or `"method-conformance"` (#1359).
+    #[serde(default)]
+    category: FindingCategory,
 }
 
 // ─── Parsed output ────────────────────────────────────────────────────────────
@@ -288,8 +294,11 @@ fn try_parse_json_block(body: &str) -> Option<ParsedReview> {
 /// Why: `Finding::new` clamps confidence and normalises effort; the LLM may
 /// produce out-of-range values or unknown effort strings.
 /// What: maps severity → effort (high/critical → High; medium → Medium; else Low);
-/// uses the `title` as the `kind` and `body` as `description`.
-/// Test: covered transitively by `parse_json_block_happy_path`.
+/// uses the `title` as the `kind` and `body` as `description`; preserves the
+/// finding `category` (#1359 — defaulting to `Correctness` when the model omits
+/// it) so the verdict floor can cap a `method-conformance` finding.
+/// Test: covered transitively by `parse_json_block_happy_path` and
+/// `parse_method_conformance_finding_category`.
 fn convert_llm_finding(f: LlmFinding) -> Finding {
     let effort = match f.severity.to_lowercase().as_str() {
         "high" | "critical" => Effort::High,
@@ -301,8 +310,11 @@ fn convert_llm_finding(f: LlmFinding) -> Finding {
     } else {
         f.file
     };
-    let mut finding = Finding::new(file, f.title, f.body, String::new(), f.confidence, effort);
-    finding.line = f.line;
+    let category = f.category;
+    let line = f.line;
+    let mut finding = Finding::new(file, f.title, f.body, String::new(), f.confidence, effort)
+        .with_category(category);
+    finding.line = line;
     finding
 }
 

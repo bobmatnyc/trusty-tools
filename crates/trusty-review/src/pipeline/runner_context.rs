@@ -19,8 +19,8 @@ use crate::{
     integrations::{
         apex_context::fetch_apex_context,
         context::{
-            ConfluenceSource, ContextSource, GithubIssuesSource, JiraSource, ReviewSubject,
-            gather_external_context, render_sections,
+            ConfluenceSource, ConformanceSource, ContextSource, GithubIssuesSource, JiraSource,
+            ReviewSubject, gather_external_context, render_sections,
         },
         github::RunMode,
     },
@@ -205,6 +205,13 @@ pub(crate) async fn gather_external_context_md(
         Box::new(ConfluenceSource::from_config(&cs.confluence)),
         Box::new(GithubIssuesSource::from_config(
             &cs.github_issues,
+            run_mode,
+            config.clone(),
+        )),
+        // BACK gate (#1359): surfaces the resolved ticket/spec intent so the LLM
+        // can flag explicit method contradictions.  Default DISABLED (needs auth).
+        Box::new(ConformanceSource::from_config(
+            &cs.conformance,
             run_mode,
             config.clone(),
         )),

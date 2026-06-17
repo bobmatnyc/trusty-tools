@@ -123,7 +123,12 @@ pub fn review_response_schema() -> ResponseSchema {
                         },
                         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
                         "file": {"type": "string"},
-                        "line": {"type": ["integer", "null"]}
+                        "line": {"type": ["integer", "null"]},
+                        "category": {
+                            "type": "string",
+                            "enum": ["correctness", "method-conformance"],
+                            "description": "Almost always \"correctness\". Use \"method-conformance\" ONLY when the diff explicitly contradicts a method/approach/constraint the ticket or spec stated in the \"Intended method (ticket/spec)\" context — never for a missing method (advisory gap) or a stale-spec conflict."
+                        }
                     }
                 }
             }

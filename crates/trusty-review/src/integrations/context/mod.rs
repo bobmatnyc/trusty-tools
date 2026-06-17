@@ -33,6 +33,7 @@ pub mod atlassian;
 pub mod config;
 pub mod confluence;
 pub mod confluence_parse;
+pub mod conformance;
 pub mod github_issues;
 pub mod jira;
 pub mod jira_parse;
@@ -40,6 +41,7 @@ pub mod orchestrator;
 
 pub use config::{ContextSourcesConfig, ContextSourcesFileConfig, SourceConfig, SourceFileConfig};
 pub use confluence::ConfluenceSource;
+pub use conformance::ConformanceSource;
 pub use github_issues::GithubIssuesSource;
 pub use jira::JiraSource;
 pub use orchestrator::{gather_external_context, render_sections};

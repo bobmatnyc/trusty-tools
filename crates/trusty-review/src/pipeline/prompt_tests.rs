@@ -459,9 +459,17 @@ fn review_schema_is_openai_strict_compliant() {
         .collect();
     assert_eq!(
         required,
-        ["body", "confidence", "file", "line", "severity", "title"]
-            .into_iter()
-            .collect(),
+        [
+            "body",
+            "category",
+            "confidence",
+            "file",
+            "line",
+            "severity",
+            "title"
+        ]
+        .into_iter()
+        .collect(),
         "findings.items must require every property under strict mode"
     );
 }
