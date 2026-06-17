@@ -131,6 +131,30 @@ impl ToolRegistry {
         self.dispatch_gated(name, args, allowed).await
     }
 
+    /// Build a new registry containing only the tools named in `allowed`.
+    ///
+    /// Why: The agent loop calls `dispatch_gated(name, args, None)` — it does
+    /// not thread a per-agent allowlist through every dispatch. The robust place
+    /// to enforce an agent's `tools.allowed` (issue #1029 acceptance criterion)
+    /// is therefore *before* the loop runs: hand the loop a registry that simply
+    /// does not contain the denied tools, so a denied call surfaces as the same
+    /// structured "no tool registered" error and the model can self-correct.
+    /// Unknown names in `allowed` are ignored (they register nothing); this keeps
+    /// a typo in an agent config from being a hard error.
+    /// What: Returns a fresh `ToolRegistry` whose map holds cloned `Arc`s for
+    /// exactly the registered tools whose `name()` appears in `allowed`,
+    /// preserving the shared executors (no re-construction). Order-independent.
+    /// Test: `gated_keeps_only_allowed`, `gated_ignores_unknown_names`.
+    pub fn gated(&self, allowed: &[String]) -> ToolRegistry {
+        let tools = self
+            .tools
+            .iter()
+            .filter(|(name, _)| allowed.iter().any(|a| a == *name))
+            .map(|(name, tool)| (name.clone(), Arc::clone(tool)))
+            .collect();
+        ToolRegistry { tools }
+    }
+
     /// Emit all registered tool schemas as raw JSON values.
     ///
     /// Why: The sub-agent tool-calling loop attaches raw JSON schemas to LLM
@@ -336,6 +360,64 @@ mod tests {
             .dispatch_for_user("open_tool", json!({}), None, &user)
             .await;
         assert!(!result.is_error());
+    }
+
+    /// `gated` retains only the tools named in the allowlist.
+    ///
+    /// Why: This is the enforcement point for an agent's `tools.allowed`; the
+    /// resulting registry must contain exactly the permitted tools.
+    /// What: Register three tools, gate to two of them, assert membership.
+    /// Test: This test.
+    #[test]
+    fn gated_keeps_only_allowed() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(MockTool::new("read_file")));
+        reg.register(Arc::new(MockTool::new("write_file")));
+        reg.register(Arc::new(MockTool::new("bash")));
+
+        let allowed = vec!["read_file".to_string(), "bash".to_string()];
+        let gated = reg.gated(&allowed);
+
+        assert!(gated.contains("read_file"), "allowed tool must survive");
+        assert!(gated.contains("bash"), "allowed tool must survive");
+        assert!(
+            !gated.contains("write_file"),
+            "denied tool must be dropped from the gated registry"
+        );
+        assert_eq!(gated.schemas().len(), 2, "exactly the two allowed tools");
+    }
+
+    /// `gated` silently ignores allowlist entries that match no registered tool.
+    ///
+    /// Why: A typo in an agent's `tools.allowed` should not be a hard error; it
+    /// simply contributes no tool to the gated registry.
+    /// What: Gate with a mix of a real and a bogus name; only the real one survives.
+    /// Test: This test.
+    #[test]
+    fn gated_ignores_unknown_names() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(MockTool::new("read_file")));
+
+        let allowed = vec!["read_file".to_string(), "does_not_exist".to_string()];
+        let gated = reg.gated(&allowed);
+
+        assert!(gated.contains("read_file"));
+        assert_eq!(gated.schemas().len(), 1, "unknown name registers nothing");
+    }
+
+    /// `gated` with an empty allowlist produces an empty registry.
+    ///
+    /// Why: An agent that explicitly allows no tools must be handed a registry
+    /// with no tools (the model then has nothing to call).
+    /// What: Gate a populated registry with `&[]`; assert empty.
+    /// Test: This test.
+    #[test]
+    fn gated_empty_allowlist_is_empty() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(MockTool::new("read_file")));
+        let gated = reg.gated(&[]);
+        assert!(gated.schemas().is_empty());
+        assert!(!gated.contains("read_file"));
     }
 
     /// `filter_tools_for_user` drops tools that the user's tier is blocked for.
