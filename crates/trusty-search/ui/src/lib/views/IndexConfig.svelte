@@ -90,7 +90,10 @@
     return Math.round(n * UNIT_BYTES[sizeUnit]);
   });
 
-  // Compare arrays order-insensitively for dirty detection.
+  // Compare arrays order-insensitively for dirty detection. Order-independence
+  // is intentional: the walker treats extra_skip_dirs / extensions /
+  // exclude_globs as sets (membership tests, no positional meaning), so a pure
+  // reorder is not a semantic change and should not mark the form dirty.
   function sameSet(a, b) {
     if (a.length !== b.length) return false;
     const sb = new Set(b);
@@ -273,7 +276,7 @@
           </select>
         </div>
         <div class="field-help">
-          Files larger than this that look like data (JSON/CSV/etc.) are skipped.
+          Files larger than this with a data extension (JSON/XML/TXT/LOG) are skipped.
           {#if draftBytes != null && Number.isFinite(draftBytes) && draftBytes > 0}
             = <code>{draftBytes.toLocaleString()}</code> bytes.
           {:else if config.data_file_max_bytes}

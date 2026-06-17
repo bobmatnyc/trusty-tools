@@ -134,22 +134,26 @@ pub(super) async fn index_config_handler(
 /// the in-memory handle with the merged fields (preserving the live indexer and
 /// all Arc-shared state), re-registers it, then upserts the matching
 /// `indexes.toml` entry. Returns the updated `IndexConfigView` plus
-/// `reindex_required`.
+/// `reindex_required` on success. A persistence failure returns **500** with a
+/// clear error body so the UI never claims success while `indexes.toml` silently
+/// went stale (the in-memory change is left applied, but the response is
+/// truthful).
+///
+/// Concurrency note (review #1372): the `dashmap::Ref` returned by
+/// `registry.get` is dropped (its scope ends at `read_existing_fields`) BEFORE
+/// `registry.register` takes a shard write-lock or `persist_hygiene_update`
+/// performs blocking file I/O — holding a read-guard across either could
+/// self-deadlock on the same shard. We clone every field we need out of the
+/// guard up front, then operate only on owned locals.
 /// Test: `patch_updates_only_supplied_fields`, `patch_rejects_zero_cap`,
-/// `patch_persists_to_toml`, `patch_unknown_index_404`.
+/// `patch_persists_to_toml`, `patch_persist_failure_returns_500`,
+/// `patch_unknown_index_404`.
 pub(super) async fn patch_index_config_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
     Json(req): Json<PatchIndexConfigRequest>,
 ) -> Response {
     let index_id = IndexId::new(id);
-    let Some(existing) = state.registry.get(&index_id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": format!("unknown index '{}'", index_id.0) })),
-        )
-            .into_response();
-    };
 
     // Validate: a zero (or absurd) data cap would prune every data file.
     if matches!(req.data_file_max_bytes, Some(0)) {
@@ -162,66 +166,122 @@ pub(super) async fn patch_index_config_handler(
             .into_response();
     }
 
-    // Merge: start from the current handle values, overlay the supplied fields.
-    let extra_skip_dirs = req
-        .extra_skip_dirs
-        .map(sanitize_dirs)
-        .unwrap_or_else(|| existing.extra_skip_dirs.clone());
-    let data_file_max_bytes = req
-        .data_file_max_bytes
-        .unwrap_or(existing.data_file_max_bytes);
-    let extensions = req
-        .extensions
-        .map(sanitize_extensions)
-        .unwrap_or_else(|| existing.extensions.clone());
-    let exclude_globs = req
-        .exclude_globs
-        .map(sanitize_dirs)
-        .unwrap_or_else(|| existing.exclude_globs.clone());
-    let include_docs = req.include_docs.unwrap_or(existing.include_docs);
-    let respect_gitignore = req.respect_gitignore.unwrap_or(existing.respect_gitignore);
+    // Read everything we need out of the handle guard and DROP the guard before
+    // any write-lock (`register`) or file I/O (`persist_hygiene_update`). The
+    // inner scope bounds the `dashmap::Ref` lifetime so it cannot be held across
+    // those operations (review #1372 — deadlock guard).
+    let new_handle = {
+        let Some(existing) = state.registry.get(&index_id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": format!("unknown index '{}'", index_id.0) })),
+            )
+                .into_response();
+        };
 
-    // Rebuild the handle, preserving the live indexer + all Arc-shared state
-    // (stages, context, SHA, …). Mirrors the reindex/relocate rebuild pattern.
-    let new_handle = IndexHandle {
-        id: index_id.clone(),
-        indexer: Arc::clone(&existing.indexer),
-        root_path: existing.root_path.clone(),
-        include_paths: existing.include_paths.clone(),
-        exclude_globs: exclude_globs.clone(),
-        extensions: extensions.clone(),
-        domain_terms: existing.domain_terms.clone(),
-        include_docs,
-        respect_gitignore,
-        extra_skip_dirs: extra_skip_dirs.clone(),
-        data_file_max_bytes,
-        path_filter: existing.path_filter.clone(),
-        context_embedding: Arc::clone(&existing.context_embedding),
-        context_summary: Arc::clone(&existing.context_summary),
-        indexed_head_sha: Arc::clone(&existing.indexed_head_sha),
-        last_indexed_at: Arc::clone(&existing.last_indexed_at),
-        lexical_only: existing.lexical_only,
-        skip_kg: existing.skip_kg,
-        defer_embed: existing.defer_embed,
-        stages: Arc::clone(&existing.stages),
-        search_pressure: Arc::clone(&existing.search_pressure),
-        walk_diagnostics: Arc::clone(&existing.walk_diagnostics),
+        // Merge: start from the current handle values, overlay the supplied
+        // fields.
+        let extra_skip_dirs = req
+            .extra_skip_dirs
+            .map(sanitize_dirs)
+            .unwrap_or_else(|| existing.extra_skip_dirs.clone());
+        let data_file_max_bytes = req
+            .data_file_max_bytes
+            .unwrap_or(existing.data_file_max_bytes);
+        let extensions = req
+            .extensions
+            .map(sanitize_extensions)
+            .unwrap_or_else(|| existing.extensions.clone());
+        let exclude_globs = req
+            .exclude_globs
+            .map(sanitize_dirs)
+            .unwrap_or_else(|| existing.exclude_globs.clone());
+        let include_docs = req.include_docs.unwrap_or(existing.include_docs);
+        let respect_gitignore = req.respect_gitignore.unwrap_or(existing.respect_gitignore);
+
+        // Rebuild the handle, preserving the live indexer + all Arc-shared state
+        // (stages, context, SHA, …). Mirrors the reindex/relocate rebuild
+        // pattern. Built entirely from clones of the guard's fields so the
+        // guard can be released as this block returns.
+        IndexHandle {
+            id: index_id.clone(),
+            indexer: Arc::clone(&existing.indexer),
+            root_path: existing.root_path.clone(),
+            include_paths: existing.include_paths.clone(),
+            exclude_globs,
+            extensions,
+            domain_terms: existing.domain_terms.clone(),
+            include_docs,
+            respect_gitignore,
+            extra_skip_dirs,
+            data_file_max_bytes,
+            path_filter: existing.path_filter.clone(),
+            context_embedding: Arc::clone(&existing.context_embedding),
+            context_summary: Arc::clone(&existing.context_summary),
+            indexed_head_sha: Arc::clone(&existing.indexed_head_sha),
+            last_indexed_at: Arc::clone(&existing.last_indexed_at),
+            lexical_only: existing.lexical_only,
+            skip_kg: existing.skip_kg,
+            defer_embed: existing.defer_embed,
+            stages: Arc::clone(&existing.stages),
+            search_pressure: Arc::clone(&existing.search_pressure),
+            walk_diagnostics: Arc::clone(&existing.walk_diagnostics),
+        }
+        // `existing` (the dashmap::Ref) is dropped here as the block ends.
     };
+
+    // Snapshot the owned fields we need for persistence + the response view.
+    // The guard is already released, so these are all owned clones.
     let view = IndexConfigView::from_handle(&new_handle);
+    let root_path = new_handle.root_path.clone();
+    let extra_skip_dirs = new_handle.extra_skip_dirs.clone();
+    let data_file_max_bytes = new_handle.data_file_max_bytes;
+    let extensions = new_handle.extensions.clone();
+    let exclude_globs = new_handle.exclude_globs.clone();
+    let include_docs = new_handle.include_docs;
+    let respect_gitignore = new_handle.respect_gitignore;
+
+    // Apply the in-memory change (shard write-lock; guard already dropped).
     state.registry.register(new_handle);
 
     // Persist: load the existing entry (to preserve fields the handle doesn't
     // carry — colocated, LRU timestamps), overlay the hygiene fields, upsert.
-    persist_hygiene_update(
+    // A failure here means the in-memory change took but `indexes.toml` did not
+    // — surface it as 500 so the caller does NOT report success and revert on
+    // the next daemon restart (review #1372).
+    if let Err(e) = persist_hygiene_update(
         &index_id.0,
-        &existing.root_path,
+        &root_path,
         &extra_skip_dirs,
         data_file_max_bytes,
         &extensions,
         &exclude_globs,
         include_docs,
         respect_gitignore,
-    );
+    ) {
+        tracing::error!(
+            "patch_index_config[{}]: persistence failed: {e}",
+            index_id.0
+        );
+        // The handle was re-registered so the live daemon honours the new
+        // config until restart; still emit the event so subscribers stay in
+        // sync with in-memory state.
+        state.emit(DaemonEvent::IndexRegistered {
+            id: index_id.0.clone(),
+        });
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!(
+                    "config applied in memory but could not be persisted to indexes.toml: {e}. \
+                     The change will be lost on the next daemon restart."
+                ),
+                "config": view,
+                "persisted": false,
+            })),
+        )
+            .into_response();
+    }
 
     state.emit(DaemonEvent::IndexRegistered {
         id: index_id.0.clone(),
@@ -231,6 +291,7 @@ pub(super) async fn patch_index_config_handler(
         "id": index_id.0,
         "config": view,
         "reindex_required": true,
+        "persisted": true,
     }))
     .into_response()
 }
@@ -265,13 +326,18 @@ fn sanitize_extensions(v: Vec<String>) -> Vec<String> {
 ///
 /// Why: `indexes.toml` carries fields the in-memory handle does not (colocated,
 /// LRU timestamps); a blind rebuild would lose them. Loading-then-overlaying
-/// preserves everything else. Best-effort: a persistence failure is logged but
-/// does not fail the request (the in-memory change already took).
+/// preserves everything else. The write is NOT best-effort: a failed `upsert`
+/// is returned to the caller so the PATCH response can report 500 rather than
+/// claim success while the on-disk registry silently diverges (review #1372).
+/// A load failure is still tolerated (the registry file may not exist yet) —
+/// we log it and seed a minimal entry, because that path still produces a
+/// correct persisted record.
 /// What: reads the registry file, finds the matching entry (or seeds a minimal
 /// one), updates the six hygiene fields, and writes back via
-/// `upsert_index_registry_entry`.
-/// Test: `patch_persists_to_toml` drives the persistence boundary against a
-/// tempfile.
+/// `upsert_index_registry_entry`, propagating any write error.
+/// Test: `patch_persists_to_toml` drives the success path against a tempfile;
+/// `patch_persist_failure_returns_500` forces an unwritable registry path and
+/// asserts the error surfaces.
 #[allow(clippy::too_many_arguments)]
 fn persist_hygiene_update(
     id: &str,
@@ -282,7 +348,7 @@ fn persist_hygiene_update(
     exclude_globs: &[String],
     include_docs: bool,
     respect_gitignore: bool,
-) {
+) -> anyhow::Result<()> {
     use crate::service::persistence::{
         load_index_registry, upsert_index_registry_entry, PersistedIndex,
     };
@@ -310,7 +376,5 @@ fn persist_hygiene_update(
     entry.exclude_globs = exclude_globs.to_vec();
     entry.include_docs = include_docs;
     entry.respect_gitignore = respect_gitignore;
-    if let Err(e) = upsert_index_registry_entry(entry) {
-        tracing::warn!("patch_index_config[{id}]: could not persist hygiene update: {e}");
-    }
+    upsert_index_registry_entry(entry)
 }

@@ -10,6 +10,9 @@
    * the new array through `bind:items`. Empty input is ignored.
    * Test: type "data" + Enter, assert `items` becomes ['data']; type "data"
    * again, assert no duplicate is added; click the × on a tag, assert removal.
+   * Removal note: the × button calls `preventDefault` on mousedown so the
+   * input does not blur (which would fire `add()`) before the click lands —
+   * removing a tag while a non-empty draft is in the input must not re-add it.
    */
   let {
     items = $bindable([]),
@@ -56,6 +59,7 @@
           type="button"
           class="tag-remove"
           aria-label={`Remove ${item}`}
+          onmousedown={(e) => e.preventDefault()}
           onclick={() => removeAt(i)}>×</button
         >
       </span>

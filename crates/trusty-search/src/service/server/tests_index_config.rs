@@ -175,6 +175,61 @@ async fn patch_rejects_zero_cap() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+/// A persistence failure surfaces as 500 (not a silent 200) so the UI never
+/// reports "saved" while `indexes.toml` actually went stale (review #1372).
+///
+/// We force the failure by pointing `TRUSTY_DATA_DIR` at a path whose parent is
+/// a regular file: `data_dir()`'s `create_dir_all` then fails, so
+/// `upsert_index_registry_entry` returns `Err`. The body carries
+/// `persisted: false` and an error string.
+#[tokio::test]
+#[serial_test::serial]
+async fn patch_persist_failure_returns_500() {
+    // Create a regular file, then point the data dir *inside* it — the OS
+    // refuses to mkdir under a non-directory, so persistence fails.
+    let tmp = tempfile::tempdir().unwrap();
+    let blocker = tmp.path().join("not-a-dir");
+    std::fs::write(&blocker, b"x").unwrap();
+    let bad_data_dir = blocker.join("data"); // parent is a file → mkdir fails
+    unsafe { std::env::set_var("TRUSTY_DATA_DIR", &bad_data_dir) };
+
+    let state = state_with_index("cfg-persist-fail");
+    let resp = patch_index_config_handler(
+        State(Arc::clone(&state)),
+        Path("cfg-persist-fail".to_string()),
+        Json(PatchIndexConfigRequest {
+            data_file_max_bytes: Some(16_384),
+            ..Default::default()
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "persist failure must surface as 500, not a silent 200"
+    );
+    let body = body_json(resp).await;
+    assert_eq!(
+        body["persisted"].as_bool(),
+        Some(false),
+        "body must report persisted:false: {body}"
+    );
+    assert!(
+        body["error"].as_str().is_some(),
+        "body must carry an error message: {body}"
+    );
+
+    // The in-memory change is still applied (the daemon honours it until
+    // restart) — the response is truthful about the persistence gap only.
+    let handle = state
+        .registry
+        .get(&IndexId::new("cfg-persist-fail"))
+        .expect("handle");
+    assert_eq!(handle.data_file_max_bytes, 16_384);
+
+    unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+}
+
 /// PATCH on an unknown index id returns 404.
 #[tokio::test]
 async fn patch_unknown_index_404() {
