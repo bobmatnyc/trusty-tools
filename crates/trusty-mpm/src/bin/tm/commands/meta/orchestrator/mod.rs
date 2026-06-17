@@ -89,15 +89,21 @@ impl RecordingRunner {
     ///
     /// Why: Both trait methods record identically; factoring it avoids drift.
     /// What: Locks the log and appends a `DelegationRecord`. A poisoned lock is
-    /// ignored (recording is best-effort telemetry, never a failure path).
+    /// best-effort-skipped — recording is telemetry, never a failure path — but it
+    /// emits a `tracing::warn!` (to stderr) so the dropped delegation turn is
+    /// visible rather than silently lost.
     /// Test: `orchestrator_records_delegation`.
     fn record(&self, agent: &str, task: &str, output: &AgentOutput) {
-        if let Ok(mut log) = self.records.lock() {
-            log.push(DelegationRecord {
+        match self.records.lock() {
+            Ok(mut log) => log.push(DelegationRecord {
                 agent: agent.to_string(),
                 task: task.to_string(),
                 output: output.clone(),
-            });
+            }),
+            Err(_) => tracing::warn!(
+                agent,
+                "metaharness: delegation-record lock poisoned; dropping recorded turn (transcript will omit this delegation)"
+            ),
         }
     }
 }
@@ -390,11 +396,22 @@ impl Orchestrator {
 /// What: `build` returns an empty `Arc<ToolRegistry>`.
 /// Test: covered by `orchestrator_runs_full_delegation_cycle` (no nested
 /// delegation occurs, so the empty registry is never narrowed).
+///
+/// NOTE (known limitation): in this bounded demo, a sub-agent that delegates
+/// *further* (a nested sub-agent) gets this empty tool set — nested delegation is
+/// wired for completeness but is not expected to occur. `build` therefore emits a
+/// `tracing::warn!` if it is ever actually invoked, so the limitation surfaces in
+/// the logs rather than silently handing a nested agent zero tools.
 struct NullRegistryFactory;
 
 #[async_trait]
 impl RegistryFactory for NullRegistryFactory {
-    async fn build(&self, _agent: &AgentConfig, _ctx: &RunContext) -> Arc<ToolRegistry> {
+    async fn build(&self, agent: &AgentConfig, _ctx: &RunContext) -> Arc<ToolRegistry> {
+        tracing::warn!(
+            agent = %agent.agent.name,
+            "metaharness: nested sub-agent delegation is unsupported in this bounded demo; \
+             handing the nested agent an empty tool set"
+        );
         Arc::new(ToolRegistry::new())
     }
 }
@@ -418,10 +435,14 @@ fn gate_registry(registry: ToolRegistry, config: &AgentConfig) -> ToolRegistry {
 /// Why: The transcript needs the sub-agent turns in delegation order; draining
 /// the shared log yields exactly those, once.
 /// What: Locks the log, maps each `DelegationRecord` to an `AgentTurn`, and
-/// returns them. A poisoned lock yields an empty list (best-effort telemetry).
+/// returns them. A poisoned lock yields an empty list (best-effort telemetry) but
+/// first emits a `tracing::warn!` (to stderr) so the lost turns are visible.
 /// Test: `orchestrator_runs_full_delegation_cycle`.
 fn drain_delegations(records: &Arc<Mutex<Vec<DelegationRecord>>>) -> Vec<AgentTurn> {
     let Ok(log) = records.lock() else {
+        tracing::warn!(
+            "metaharness: delegation-record lock poisoned; transcript will omit all recorded delegations"
+        );
         return Vec::new();
     };
     log.iter()
@@ -445,19 +466,33 @@ fn snapshot_files(dir: &Path) -> std::collections::BTreeSet<PathBuf> {
 /// Recursive helper for [`snapshot_files`].
 ///
 /// Why: Directory walking needs a recursive worker that records paths relative to
-/// the snapshot root.
-/// What: For each entry under `current`, recurse into dirs and insert files'
-/// paths relative to `root`. Unreadable entries are skipped.
-/// Test: via `snapshot_files` in `snapshot_then_new_artifacts_detects_created_file`.
+/// the snapshot root — and must not follow symlinks, which would risk infinite
+/// recursion (and a stack overflow) on a symlink cycle, and would also record a
+/// symlink's target as if it were a run artifact.
+/// What: For each entry under `current`, classifies it with `entry.file_type()`
+/// (which does *not* traverse symlinks, unlike `Path::is_dir`/`is_file`): recurses
+/// only into real directories and records only real files' paths relative to
+/// `root`. Symlinks (and entries whose type is unreadable) are skipped, so a
+/// symlink cycle can never drive the recursion.
+/// Test: via `snapshot_files` in `snapshot_then_new_artifacts_detects_created_file`
+/// and `collect_files_skips_symlinks` (symlink-skip / no-cycle-recursion).
 fn collect_files(root: &Path, current: &Path, out: &mut std::collections::BTreeSet<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(current) else {
         return;
     };
     for entry in entries.flatten() {
+        // `file_type()` here reflects the entry itself (it does not follow
+        // symlinks), so a symlink — even one pointing at a directory or forming a
+        // cycle — is neither recursed into nor recorded.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             collect_files(root, &path, out);
-        } else if let Ok(rel) = path.strip_prefix(root) {
+        } else if file_type.is_file()
+            && let Ok(rel) = path.strip_prefix(root)
+        {
             out.insert(rel.to_path_buf());
         }
     }
@@ -470,6 +505,9 @@ fn collect_files(root: &Path, current: &Path, out: &mut std::collections::BTreeS
 /// What: Snapshots `dir` again, keeps paths not in `before`, and builds an
 /// [`Artifact`] (relative path + byte length) for each, sorted by path.
 /// Test: `snapshot_then_new_artifacts_detects_created_file`.
+// TODO: also detect modified (not just new) files via mtime/size — the current
+// snapshot diff only surfaces files that did not exist before the run, so an
+// in-place edit of a pre-existing file is invisible in the transcript.
 fn new_artifacts(dir: &Path, before: &std::collections::BTreeSet<PathBuf>) -> Vec<Artifact> {
     let after = snapshot_files(dir);
     after

@@ -66,9 +66,16 @@ impl UsageTotals {
     /// Accumulate another `UsageTotals` into this one.
     ///
     /// Why: The run-wide rollup is the sum of the PM's usage and every
-    /// sub-agent's usage; a single `add` keeps the summation in one place.
-    /// What: Adds each counter field-wise (saturating to avoid overflow panics).
+    /// sub-agent's usage; a single `add` keeps the summation in one place. Rather
+    /// than accumulating `total_tokens` independently (which would drift if any
+    /// actor's `total` did not equal its prompt+completion), the total is *derived*
+    /// from the summed components after the fact — keeping `add` consistent with
+    /// [`from_token_usage`], where `total = prompt + completion`.
+    /// What: Adds prompt/completion/cache counters field-wise (saturating to avoid
+    /// overflow panics), then sets `total_tokens = prompt + completion`.
     /// Test: `usage_totals_add_sums_fields`.
+    ///
+    /// [`from_token_usage`]: UsageTotals::from_token_usage
     pub fn add(&mut self, other: &UsageTotals) {
         self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
         self.completion_tokens = self
@@ -80,7 +87,7 @@ impl UsageTotals {
         self.cache_creation_tokens = self
             .cache_creation_tokens
             .saturating_add(other.cache_creation_tokens);
-        self.total_tokens = self.total_tokens.saturating_add(other.total_tokens);
+        self.total_tokens = self.prompt_tokens.saturating_add(self.completion_tokens);
     }
 }
 
@@ -280,6 +287,39 @@ mod tests {
         a.add(&UsageTotals::from_token_usage(&usage(15, 5)));
         assert_eq!(a.prompt_tokens, 45);
         assert_eq!(a.completion_tokens, 15);
+        assert_eq!(a.total_tokens, 60);
+    }
+
+    /// `add` derives `total_tokens` from the summed components, not from the
+    /// operands' own totals.
+    ///
+    /// Why: Fix #2 — accumulating `total_tokens` independently is fragile if an
+    /// actor's `total` ever diverges from prompt+completion (e.g. a provider that
+    /// reports a non-additive total). The rollup must equal the summed
+    /// prompt+completion regardless of the operands' stored totals.
+    /// What: Hand-build two totals whose `total_tokens` is deliberately wrong, add
+    /// them, and assert the result's `total_tokens` equals summed prompt+completion.
+    /// Test: this test.
+    #[test]
+    fn usage_totals_add_derives_total_from_components() {
+        let mut a = UsageTotals {
+            prompt_tokens: 30,
+            completion_tokens: 10,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_tokens: 999, // deliberately inconsistent
+        };
+        let b = UsageTotals {
+            prompt_tokens: 15,
+            completion_tokens: 5,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            total_tokens: 7, // deliberately inconsistent
+        };
+        a.add(&b);
+        assert_eq!(a.prompt_tokens, 45);
+        assert_eq!(a.completion_tokens, 15);
+        // Derived from components (45 + 15), NOT 999 + 7.
         assert_eq!(a.total_tokens, 60);
     }
 

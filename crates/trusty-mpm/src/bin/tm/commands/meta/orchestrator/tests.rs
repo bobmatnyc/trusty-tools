@@ -263,6 +263,44 @@ fn snapshot_then_new_artifacts_detects_created_file() {
     assert_eq!(arts[0].bytes, 12);
 }
 
+/// `collect_files` skips symlinks (no cycle recursion, no symlink artifacts).
+///
+/// Why: Fix #1 — walking with `Path::is_dir()` follows symlinks, so a symlink
+/// cycle would recurse forever (stack overflow) and a symlink to a file would be
+/// recorded as a bogus artifact. Using `entry.file_type()` (which does not follow
+/// symlinks) fixes both. This test creates a directory symlink cycle and a file
+/// symlink and asserts the walk terminates and records only the real file.
+/// What: Build `dir/real.txt` and `dir/sub/`; symlink `dir/sub/loop -> dir`
+/// (a cycle) and `dir/link.txt -> dir/real.txt`; snapshot and assert the only
+/// recorded path is `real.txt`.
+/// Test: this test (Unix-only; symlink creation differs on Windows).
+#[cfg(unix)]
+#[test]
+fn collect_files_skips_symlinks() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    std::fs::write(root.join("real.txt"), b"hi").expect("write real file");
+    std::fs::create_dir(root.join("sub")).expect("create subdir");
+
+    // A directory-symlink cycle: sub/loop -> root. With is_dir() this recurses
+    // forever; with file_type() it is skipped.
+    std::os::unix::fs::symlink(root, root.join("sub").join("loop")).expect("dir symlink");
+    // A file symlink that must NOT be recorded as an artifact.
+    std::os::unix::fs::symlink(root.join("real.txt"), root.join("link.txt")).expect("file symlink");
+
+    let snapshot = snapshot_files(root);
+
+    let paths: Vec<String> = snapshot
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["real.txt".to_string()],
+        "only the real file is recorded; symlinks (cycle + file link) are skipped, got: {paths:?}"
+    );
+}
+
 /// Live end-to-end: a real OpenRouter model drives the PM → engineer cycle and
 /// the engineer writes the demo artifact (#1045 WI-8 live variant).
 ///

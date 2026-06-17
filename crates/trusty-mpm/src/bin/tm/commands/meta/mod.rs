@@ -231,13 +231,35 @@ pub(crate) fn meta_runs_dir(project: &Path) -> PathBuf {
     project.join(META_STATE_DIR).join("meta-runs")
 }
 
+/// Compute the transcript filename for a run at instant `now`.
+///
+/// Why: Second-granularity filenames collide when two runs start within the same
+/// wall-clock second, silently overwriting the earlier transcript. Deriving the
+/// name from milliseconds-since-epoch makes intra-second collisions vanishingly
+/// unlikely while keeping the name sortable and human-readable. Factoring this out
+/// of [`write_transcript`] keeps the (otherwise IO-bound) naming logic unit-testable.
+/// What: returns `run-<unix_ts_millis>.json`, falling back to `0` if the clock is
+/// before the Unix epoch (which cannot happen for `SystemTime::now`).
+/// Test: `meta_run_filename_uses_millisecond_precision`.
+fn run_transcript_filename(now: std::time::SystemTime) -> String {
+    let millis = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("run-{millis}.json")
+}
+
 /// Persist a combined transcript as pretty JSON, returning its path.
 ///
 /// Why: The transcript is the run's auditable record; writing it to disk lets
 /// downstream tooling (and humans) inspect the PM + engineer turns after exit.
-/// What: creates the runs dir, writes `run-<unix_ts>.json` with the serialised
-/// transcript, and returns the path; surfaces an `anyhow` error on IO failure.
-/// Test: side-effect IO; the transcript shape is covered by `transcript::tests`.
+/// What: creates the runs dir, writes `run-<unix_ts_millis>.json` with the
+/// serialised transcript, and returns the path; surfaces an `anyhow` error on IO
+/// failure. Millisecond (not second) precision is used for the filename so two
+/// runs started within the same wall-clock second do not collide and overwrite
+/// each other's transcript.
+/// Test: `meta_run_filename_uses_millisecond_precision`; the transcript shape is
+/// covered by `transcript::tests`.
 fn write_transcript(
     project: &Path,
     transcript: &transcript::MetaTranscript,
@@ -245,11 +267,7 @@ fn write_transcript(
     let dir = meta_runs_dir(project);
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create runs dir: {}", dir.display()))?;
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let path = dir.join(format!("run-{ts}.json"));
+    let path = dir.join(run_transcript_filename(std::time::SystemTime::now()));
     let body = serde_json::to_string_pretty(transcript)
         .context("failed to serialise transcript to JSON")?;
     std::fs::write(&path, body)
@@ -418,6 +436,22 @@ mod tests {
         assert_eq!(
             read_project_context(tmp.path()).as_deref(),
             Some("PROJECT RULES")
+        );
+    }
+
+    #[test]
+    fn meta_run_filename_uses_millisecond_precision() {
+        // Two instants in the same wall-clock second but different milliseconds
+        // must yield distinct filenames (fix #3: no same-second overwrite).
+        let base = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_123);
+        let same_second = base + std::time::Duration::from_millis(456);
+        let a = run_transcript_filename(base);
+        let b = run_transcript_filename(same_second);
+        assert_eq!(a, "run-1700000000123.json");
+        assert_eq!(b, "run-1700000000579.json");
+        assert_ne!(
+            a, b,
+            "millisecond precision must disambiguate same-second runs"
         );
     }
 
