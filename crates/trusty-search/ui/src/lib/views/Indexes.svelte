@@ -17,6 +17,7 @@
   import { onDestroy } from 'svelte';
   import { api } from '../api.js';
   import { apiUrl } from '../base.js';
+  import { navigate } from '../router.svelte.js';
   import { getIndexes, getLoading, getError, refreshIndexes } from '../state.svelte.js';
 
   let indexes = $derived(getIndexes());
@@ -503,6 +504,13 @@
                   {/if}
                 </td>
                 <td style="text-align: right; white-space: nowrap">
+                  <button
+                    class="btn btn-sm"
+                    title="Edit indexing-hygiene settings"
+                    onclick={() => navigate(`/indexes/${encodeURIComponent(ix.id)}/config`)}
+                  >
+                    ⚙ Settings
+                  </button>
                   <button
                     class="btn btn-sm"
                     disabled={busyId === ix.id || !!progress[ix.id]}

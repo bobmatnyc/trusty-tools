@@ -13,6 +13,7 @@
   import Dashboard from './lib/views/Dashboard.svelte';
   import Search from './lib/views/Search.svelte';
   import Indexes from './lib/views/Indexes.svelte';
+  import IndexConfig from './lib/views/IndexConfig.svelte';
   import Config from './lib/views/Config.svelte';
   import Health from './lib/views/Health.svelte';
   import Logs from './lib/views/Logs.svelte';
@@ -40,6 +41,14 @@
     const segs = route.segments;
     if (segs.length === 0) return { kind: 'dashboard' };
     if (segs[0] === 'search') return { kind: 'search' };
+    // Drill-down: #/indexes/<id>/config → per-index hygiene settings (#1372).
+    if (
+      (segs[0] === 'indexes' || segs[0] === 'index') &&
+      segs.length >= 3 &&
+      segs[2] === 'config'
+    ) {
+      return { kind: 'index-config', id: decodeURIComponent(segs[1]) };
+    }
     if (segs[0] === 'indexes' || segs[0] === 'index') return { kind: 'indexes' };
     if (segs[0] === 'config') return { kind: 'config' };
     if (segs[0] === 'health') return { kind: 'health' };
@@ -72,6 +81,8 @@
         <Search />
       {:else if view.kind === 'indexes'}
         <Indexes />
+      {:else if view.kind === 'index-config'}
+        <IndexConfig id={view.id} />
       {:else if view.kind === 'config'}
         <Config />
       {:else if view.kind === 'health'}
