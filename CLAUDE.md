@@ -263,6 +263,14 @@ versions by version number.
 ### Quick Release Steps
 
 1. Bump the crate version in `crates/<name>/Cargo.toml`.
+   - Shortcut: `scripts/bump-version.sh <crate-dir> <major|minor|patch>` reads the
+     current version, computes the next semver, edits the package version in
+     place, stages the unreleased `CHANGELOG.md` section (via
+     `scripts/generate-changelog.sh`), and **prints** the exact `git tag` /
+     `git push` commands for you to run. It never tags or pushes — the human
+     stays in the loop per the manual-tag convention. It honours the
+     `trusty-git-analytics` tag-prefix gotcha automatically (tags are
+     `trusty-git-analytics-v*`, not `tga-v*`).
 2. Update any dependent crates that pin that version.
 3. Run `cargo test -p <name>` and `cargo clippy --workspace -- -D warnings`.
 4. Commit the version bump.

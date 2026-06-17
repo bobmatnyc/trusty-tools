@@ -7,6 +7,26 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 
 1. Bump the crate version in `crates/<name>/Cargo.toml`.
 2. Update any dependent crates that pin that version.
+
+> **Convenience helper:** `scripts/bump-version.sh <crate-dir> <major|minor|patch>`
+> automates step 1 and the changelog staging. It reads the current package
+> `version` from `crates/<crate-dir>/Cargo.toml`, computes the next semver,
+> rewrites the package version line in place (dependency `version =` pins are
+> left untouched), calls `scripts/generate-changelog.sh <crate-dir> <tag-prefix>`
+> to prepend the unreleased `CHANGELOG.md` section, then **prints — but does not
+> run —** the `git tag <prefix>-v<version>` and `git push origin <prefix>-v<version>`
+> commands. This preserves the manual-tag convention (the human reviews and
+> tags). The tag prefix defaults to the crate-dir name, with the one documented
+> exception baked in: `trusty-git-analytics` (package name `tga`) releases under
+> the `trusty-git-analytics-v*` tag series, NOT `tga-v*`.
+>
+> ```bash
+> scripts/bump-version.sh trusty-search patch
+> scripts/bump-version.sh trusty-git-analytics minor
+> ```
+>
+> The `--suggest` auto-bump-from-commit-types enhancement noted in #1322/#1345
+> is intentionally deferred and not yet implemented.
 3. Run `cargo test -p <name>` and `cargo clippy --workspace -- -D warnings`.
 4. Commit the version bump.
 5. Create the tag: `git tag <crate-name>-v<version>`.
