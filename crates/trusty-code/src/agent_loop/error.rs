@@ -40,11 +40,21 @@ pub enum AgentLoopError {
     /// bounds cost. The partial transcript is still returned so the caller sees
     /// how far the run got.
     /// What: Carries the `AgentOutput` assembled from the turns that completed.
+    ///
+    /// Note: the `partial` output is for INSPECTION / diagnostics ONLY. The cap
+    /// can fire mid-turn — e.g. on an assistant turn that requested tool calls
+    /// whose results were never appended — so the transcript may be internally
+    /// inconsistent (dangling tool calls, no final answer). It is NOT safe to
+    /// replay against an LLM or to resume from; treat it as a snapshot.
     #[error("turn cap of {max_turns} exceeded; returning partial transcript")]
     TurnCapExceeded {
         /// The configured turn limit that was hit.
         max_turns: u32,
         /// Partial output accumulated before the cap fired.
+        ///
+        /// Inspection/diagnostics only — see the variant note. May reflect an
+        /// incomplete turn (e.g. tool calls without matching results); do NOT
+        /// replay or resume from it.
         partial: Box<AgentOutput>,
     },
 
@@ -54,11 +64,21 @@ pub enum AgentLoopError {
     /// indefinitely; the timeout bounds total latency.
     /// What: Carries the configured `timeout_secs` and the partial `AgentOutput`
     /// assembled before the deadline.
+    ///
+    /// Note: the `partial` output is for INSPECTION / diagnostics ONLY. The
+    /// deadline can elapse at any point — including between an assistant turn's
+    /// tool calls and their results — so the transcript may be internally
+    /// inconsistent (dangling tool calls, no final answer). It is NOT safe to
+    /// replay against an LLM or to resume from; treat it as a snapshot.
     #[error("wall-clock timeout of {timeout_secs}s elapsed; returning partial transcript")]
     Timeout {
         /// The configured timeout in seconds that elapsed.
         timeout_secs: u64,
         /// Partial output accumulated before the deadline.
+        ///
+        /// Inspection/diagnostics only — see the variant note. May reflect an
+        /// incomplete turn (e.g. tool calls without matching results); do NOT
+        /// replay or resume from it.
         partial: Box<AgentOutput>,
     },
 }

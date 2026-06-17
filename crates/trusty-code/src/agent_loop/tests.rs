@@ -145,6 +145,33 @@ fn tool_call_response(call_id: &str, text_arg: &str) -> Value {
     })
 }
 
+/// Build a response that BOTH calls the `echo` tool AND reports `finish_reason
+/// == "stop"`.
+///
+/// Why: Exercises the D3 finish/tool-call precedence rule — a `stop` reason must
+/// not short-circuit pending tool dispatch. Some providers emit this shape.
+fn tool_call_with_stop_finish(call_id: &str, text_arg: &str) -> Value {
+    json!({
+        "id": "gen-tool-stop",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "echo",
+                        "arguments": format!("{{\"text\":\"{text_arg}\"}}")
+                    }
+                }]
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 11, "completion_tokens": 9, "total_tokens": 20 }
+    })
+}
+
 /// Build a response fixture in which the assistant emits final text and stops.
 fn stop_response(text: &str) -> Value {
     json!({
@@ -206,6 +233,26 @@ fn parse_args_handles_malformed() {
     assert_eq!(parsed_ok["text"], "hi");
 }
 
+/// `schema_tool_name` extracts `function.name` and degrades gracefully.
+///
+/// Why: When a tool schema fails to parse, the warn log names the offending tool
+/// via this helper; it must pull the name from a still-valid raw schema and not
+/// panic on absent/malformed paths.
+/// What: Assert the name is read from a well-formed schema, and that missing or
+/// non-string paths fall back to `"<unknown>"`.
+/// Test: this test.
+#[test]
+fn schema_tool_name_extracts_or_falls_back() {
+    let good = json!({ "type": "function", "function": { "name": "echo" } });
+    assert_eq!(super::schema_tool_name(&good), "echo");
+
+    let no_function = json!({ "type": "function" });
+    assert_eq!(super::schema_tool_name(&no_function), "<unknown>");
+
+    let non_string_name = json!({ "function": { "name": 42 } });
+    assert_eq!(super::schema_tool_name(&non_string_name), "<unknown>");
+}
+
 /// A two-turn flow: assistant calls the tool, then stops with final text.
 ///
 /// Why: This is the canonical happy path the loop exists to support.
@@ -228,6 +275,42 @@ async fn two_turn_flow_completes() {
 
     assert_eq!(out.content, "Final answer: done");
     assert_eq!(llm.calls(), 2, "loop should make exactly two chat calls");
+}
+
+/// A response carrying BOTH tool calls and `finish_reason == "stop"` still
+/// dispatches the tool and continues — `stop` does not short-circuit.
+///
+/// Why: Per the D3 finish/tool-call precedence rule, completion is signalled
+/// ONLY by a no-tool-call turn; a `stop` reason alongside pending tool calls
+/// must not drop those calls. This guards against the prior `|| finished`
+/// early-exit that silently discarded them.
+/// What: Script [tool_call_with_stop_finish, stop]; run; assert the loop made
+/// exactly TWO chat calls (proving it dispatched the tool and looped) and ended
+/// on the second turn's final text, not the first turn's `stop`.
+/// Test: this test.
+#[tokio::test]
+async fn stop_finish_with_tool_call_still_dispatches() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_with_stop_finish("call_1", "world"),
+        stop_response("Final answer: done"),
+    ]));
+    let registry = registry_with_echo(false);
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default());
+
+    let out = agent
+        .run("You are helpful.", "Echo then conclude.")
+        .await
+        .expect("loop should dispatch the tool despite stop finish_reason");
+
+    assert_eq!(
+        out.content, "Final answer: done",
+        "must continue past the stop-with-tool-call turn, not exit early"
+    );
+    assert_eq!(
+        llm.calls(),
+        2,
+        "stop finish_reason must not short-circuit pending tool dispatch"
+    );
 }
 
 /// Exhausting the turn cap aborts with a partial transcript, not a bare error.

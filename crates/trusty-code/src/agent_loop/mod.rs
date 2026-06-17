@@ -11,8 +11,9 @@
 //! history + registry schemas, call `LlmClientTrait::chat`, accrue usage into a
 //! `PerfCollector`, append the assistant turn, and — if there are tool calls —
 //! dispatch each via `ToolRegistry::dispatch_gated` and append the results.
-//! Exits with `AgentOutput` when the model stops; aborts with a partial output
-//! when the turn cap or timeout fires.
+//! Exits with `AgentOutput` on the first assistant turn that has NO tool calls
+//! (the D3 no-tool-call finish convention); aborts with a partial output when
+//! the turn cap or timeout fires.
 //! What: The whole `chat → dispatch → iterate` body runs inside a single
 //! `tokio::time::timeout` so a stalled model or hung tool cannot block forever.
 //! Test: `agent_loop::tests` — stubbed two-turn flow, turn-cap abort, recoverable
@@ -35,9 +36,6 @@ use crate::tools::{AgentOutput, ToolRegistry};
 
 pub use error::AgentLoopError;
 pub use transcript::Transcript;
-
-/// Finish reason the API emits when the model is done and wants no more tools.
-const FINISH_REASON_STOP: &str = "stop";
 
 /// Phase name used when accruing token usage into the `PerfCollector`.
 const PERF_PHASE: &str = "agent_loop";
@@ -147,9 +145,11 @@ impl AgentLoop {
     /// halves readable and lets the timeout path reuse the same transcript/perf
     /// state to assemble a partial result.
     /// What: Iterates up to `max_turns`: build request → chat → accrue usage →
-    /// append assistant turn → if tool calls, dispatch each and append results →
-    /// else (or on `stop`) return the assembled output. Exhausting the turn
-    /// budget returns `TurnCapExceeded` with the partial transcript.
+    /// append assistant turn → if tool calls are present, dispatch each and
+    /// append results, then continue; otherwise (a no-tool-call turn) return the
+    /// assembled output. Per D3, `finish_reason` never gates termination —
+    /// pending tool calls always run first. Exhausting the turn budget returns
+    /// `TurnCapExceeded` with the partial transcript.
     /// Test: Same tests as `run`.
     async fn run_inner(
         &self,
@@ -166,9 +166,16 @@ impl AgentLoop {
             transcript.push_response(&response);
 
             let tool_calls = response.first_tool_calls().to_vec();
-            let finished = response.finish_reason() == Some(FINISH_REASON_STOP);
 
-            if tool_calls.is_empty() || finished {
+            // Finish/tool-call precedence (D3, per docs/trusty-code/parity-spec.md §5):
+            // pending tool calls are ALWAYS executed and the loop continues, even
+            // when the same response also carries `finish_reason == "stop"`.
+            // Completion is signalled ONLY by an assistant turn with NO tool calls;
+            // that turn returns the final answer regardless of `finish_reason`.
+            // We must not let a `stop` reason short-circuit pending tool dispatch,
+            // or those calls would be silently dropped and the run would end with
+            // an unanswered tool request.
+            if tool_calls.is_empty() {
                 return Ok(build_output(transcript, perf));
             }
 
@@ -231,17 +238,48 @@ impl AgentLoop {
     /// Why: The registry emits OpenAI-format `serde_json::Value` schemas, but
     /// `ChatRequest.tools` is typed as `Vec<ToolDefinition>`; this bridges the
     /// two without forcing every tool to know about the request type.
-    /// What: Deserialises each schema value; silently drops any that fail to
-    /// parse (a malformed schema should not abort the run).
+    /// What: Deserialises each schema value; a schema that fails to parse is
+    /// dropped (a malformed schema must not abort the run) but logged with
+    /// `tracing::warn!` — including the offending tool's name (best-effort from
+    /// the raw schema) and the parse error — so a misconfigured tool that is
+    /// never advertised to the model is diagnosable rather than silent.
     /// Test: `agent_loop::tests::two_turn_flow_completes` advertises a real tool
     /// schema through this path.
     fn tool_definitions(&self) -> Vec<ToolDefinition> {
         self.registry
             .schemas()
             .into_iter()
-            .filter_map(|v| serde_json::from_value::<ToolDefinition>(v).ok())
+            .filter_map(
+                |v| match serde_json::from_value::<ToolDefinition>(v.clone()) {
+                    Ok(def) => Some(def),
+                    Err(e) => {
+                        let name = schema_tool_name(&v);
+                        tracing::warn!(
+                            "dropping unparseable tool schema (tool={name}): {e}; raw schema: {v}"
+                        );
+                        None
+                    }
+                },
+            )
             .collect()
     }
+}
+
+/// Best-effort extraction of a tool's name from its raw OpenAI-format schema.
+///
+/// Why: When a schema fails to deserialise into `ToolDefinition`, the warning is
+/// far more actionable if it names the offending tool; pulling `function.name`
+/// out of the still-valid JSON gives operators a handle even though the full
+/// typed parse failed.
+/// What: Reads `schema["function"]["name"]` as a string, falling back to
+/// `"<unknown>"` when the path is absent or non-string.
+/// Test: `agent_loop::tests::schema_tool_name_extracts_or_falls_back`.
+fn schema_tool_name(schema: &Value) -> &str {
+    schema
+        .get("function")
+        .and_then(|f| f.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>")
 }
 
 /// Parse a tool call's JSON argument string into a `Value`.
