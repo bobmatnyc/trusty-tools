@@ -60,7 +60,14 @@ pub fn resolve_model(agent_config: &AgentConfig, run_context: Option<&RunContext
 /// content; `None` otherwise.
 /// Test: `routing::tests::resolve_model_skips_empty_strings`.
 fn non_empty(value: Option<&str>) -> Option<&str> {
-    value.filter(|v| !v.trim().is_empty())
+    value.and_then(|v| {
+        let trimmed = v.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -157,6 +164,46 @@ mod tests {
             resolve_model(&config, Some(&ctx)),
             "google/gemma-2-27b-it",
             "empty RunContext and empty agent model must fall through"
+        );
+    }
+
+    /// Whitespace-padded slugs are trimmed at every precedence tier.
+    ///
+    /// Why: A TOML or RunContext slug like `"  openai/gpt-4o  "` would otherwise
+    /// route to an invalid, whitespace-padded model id. `non_empty` must return
+    /// the trimmed value, not the original padded slice.
+    /// What: (a) padded `RunContext.model` resolves to the trimmed slug; (b) with
+    /// no RunContext, a padded `agent.model` resolves to its trimmed slug; (c) an
+    /// all-whitespace `agent.model` falls through to the next tier (`model_override`).
+    /// Test: this test.
+    #[test]
+    fn resolve_model_trims_padded_slugs() {
+        // (a) Padded per-call override is trimmed and wins.
+        let config = cfg(Some("anthropic/claude-sonnet-4-5"), None);
+        let ctx = RunContext {
+            model: Some("  openai/gpt-4o  ".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_model(&config, Some(&ctx)),
+            "openai/gpt-4o",
+            "padded RunContext.model must resolve to the trimmed slug"
+        );
+
+        // (b) Padded agent.model is trimmed when no RunContext override exists.
+        let config = cfg(Some("  anthropic/claude-haiku-4-5  "), None);
+        assert_eq!(
+            resolve_model(&config, None),
+            "anthropic/claude-haiku-4-5",
+            "padded agent.model must resolve to the trimmed slug"
+        );
+
+        // (c) All-whitespace agent.model falls through to model_override.
+        let config = cfg(Some("   "), Some("deepseek/deepseek-chat"));
+        assert_eq!(
+            resolve_model(&config, None),
+            "deepseek/deepseek-chat",
+            "all-whitespace agent.model must fall through to the next tier"
         );
     }
 }
