@@ -11,6 +11,7 @@
 
 use async_trait::async_trait;
 
+use super::backend_fetcher::FsSpecLookup;
 use super::extract::{HeuristicMethodExtractor, MethodExtractor, heuristic_method};
 use super::linkage::{extract_branch_ticket, extract_pr_ticket, extract_ticket_id, is_ticketed};
 use super::resolve::{
@@ -252,6 +253,36 @@ fn ac5_branch_name() {
     );
 }
 
+/// Review MEDIUM #3 (tga #445): a bare `#N` mentioned only in passing in the
+/// free-text PR body must NOT resolve, but a qualifying `Closes #N` must.
+#[test]
+fn ac5_pr_body_bare_ref_does_not_link() {
+    // Bare `#42` in prose — NOT a qualifying ref — must not resolve from body.
+    assert_eq!(
+        extract_pr_ticket("See discussion in #42 for background", &[], None),
+        None,
+        "a bare #N mentioned in passing must not link (tga #445)"
+    );
+    // Action-keyword ref qualifies and resolves.
+    assert_eq!(
+        extract_pr_ticket("Closes #42", &[], None),
+        Some("#42".to_string()),
+        "a qualifying `Closes #N` must resolve"
+    );
+}
+
+/// The bare-`#N` last resort is retained for commit messages (terse trailers),
+/// even though the PR body rejects it.
+#[test]
+fn ac5_commit_bare_ref_still_links() {
+    let commits = vec!["address #42".to_string()];
+    assert_eq!(
+        extract_pr_ticket("See discussion in #42", &commits, None),
+        Some("#42".to_string()),
+        "commit messages keep the bare-#N fallback"
+    );
+}
+
 #[test]
 fn ac5_no_linkage_is_none() {
     assert_eq!(
@@ -444,6 +475,34 @@ fn extract_heuristic_ambiguous_is_none() {
     assert!(heuristic_method("Add a flag to the CLI.").is_none());
 }
 
+/// A Rust `use` import must NOT be misclassified as an approach method
+/// (review MEDIUM #1: the old `cue.starts_with("use ")` guard was too broad).
+#[test]
+fn extract_heuristic_use_import_not_approach() {
+    assert!(
+        heuristic_method("use std::collections::HashMap;").is_none(),
+        "a Rust import must not classify as an Approach method"
+    );
+    assert!(
+        heuristic_method("    use crate::foo::Bar;").is_none(),
+        "an indented Rust import must not classify either"
+    );
+    assert!(
+        heuristic_method("use caution when deploying").is_none(),
+        "casual `use X` phrasing must not classify as Approach"
+    );
+}
+
+/// A narrow `use …` directive that IS a prescribed approach still classifies —
+/// proves the tightened guard did not over-reject genuine cues.
+#[test]
+fn extract_heuristic_use_directive_is_approach() {
+    let m = heuristic_method("Use the existing pagination helper.").unwrap();
+    assert_eq!(m.kind, MethodKind::Reuse);
+    let m = heuristic_method("- use offset-based windows").unwrap();
+    assert_eq!(m.kind, MethodKind::Approach);
+}
+
 #[test]
 fn extract_trait_default_matches_fn() {
     let extractor = HeuristicMethodExtractor;
@@ -490,6 +549,92 @@ fn spec_resolve_method_section_scoped() {
     // NOT be attributed to this anchor.
     let md = "# Doc\n\n## A {#SPEC-X-01~draft}\n\njust prose, no method.\n\n## B\n\n- use cursor pagination\n";
     assert!(extract_spec_method(md, "SPEC-X-01~draft").is_none());
+}
+
+/// Review LOW #4: a top-level `# ` heading must terminate the section too, so a
+/// following top-level section's method does not bleed into this anchor.
+#[test]
+fn spec_resolve_method_section_scoped_top_level_heading() {
+    let md = "## A {#SPEC-X-01~draft}\n\njust prose, no method.\n\n# Next Top Level\n\n- use cursor pagination\n";
+    assert!(
+        extract_spec_method(md, "SPEC-X-01~draft").is_none(),
+        "a `# ` top-level heading must terminate the anchored section"
+    );
+}
+
+// ───────────────────────── FsSpecLookup path-traversal guard ────────────────
+
+/// Review MEDIUM #2 (path traversal): `FsSpecLookup::load` must refuse a
+/// `..`-laden spec_file that escapes the repo root, even though such a file may
+/// physically exist on disk. The in-root file loads; the traversal returns
+/// `None`.
+#[test]
+fn fs_spec_lookup_rejects_traversal() {
+    use std::fs;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let root_path = root.path();
+
+    // A legitimate spec under docs/specs/ loads fine.
+    let specs_dir = root_path.join("docs/specs");
+    fs::create_dir_all(&specs_dir).expect("create docs/specs");
+    fs::write(specs_dir.join("real.md"), "# real spec\n").expect("write spec");
+
+    // A "secret" file OUTSIDE the repo root that a traversal would try to read.
+    let secret_dir = tempfile::tempdir().expect("secret tempdir");
+    let secret = secret_dir.path().join("passwd");
+    fs::write(&secret, "root:x:0:0:root\n").expect("write secret");
+
+    let lookup = FsSpecLookup::new(root_path);
+
+    // In-root path resolves.
+    assert_eq!(
+        lookup.load("docs/specs/real.md").as_deref(),
+        Some("# real spec\n"),
+        "an in-root spec must load"
+    );
+
+    // Build a traversal that points at the secret file relative to the root.
+    // e.g. docs/specs/../../<secret-dir-basename>/passwd, then enough `..` to
+    // climb out — we construct it relative to root so canonicalize would land on
+    // the secret were the guard absent.
+    let secret_canon = secret.canonicalize().expect("canonicalize secret");
+    let root_canon = root_path.canonicalize().expect("canonicalize root");
+    let traversal = pathdiff_relative(&root_canon, &secret_canon);
+    assert!(
+        lookup.load(&traversal).is_none(),
+        "a `..` traversal escaping repo_root must return None (got Some for {traversal})"
+    );
+
+    // A blatantly bad literal also returns None (the file does not exist under
+    // root, so canonicalize fails → None).
+    assert!(
+        lookup.load("docs/specs/../../etc/passwd").is_none(),
+        "a docs/specs/../../etc/passwd traversal must return None"
+    );
+}
+
+/// Compute a `from`→`to` relative path as a `/`-joined string (test helper).
+///
+/// Why: the traversal test needs a relative path (with `..` segments) from the
+/// repo root to an out-of-tree secret so the guard is exercised against a path
+/// that *would* canonicalize successfully without the containment check.
+/// What: walks up from `from` to the common ancestor, then down to `to`.
+/// Test: used by `fs_spec_lookup_rejects_traversal`.
+fn pathdiff_relative(from: &std::path::Path, to: &std::path::Path) -> String {
+    let from_c: Vec<_> = from.components().collect();
+    let to_c: Vec<_> = to.components().collect();
+    let common = from_c
+        .iter()
+        .zip(to_c.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let ups = from_c.len() - common;
+    let mut parts: Vec<String> = std::iter::repeat_n("..".to_string(), ups).collect();
+    for c in &to_c[common..] {
+        parts.push(c.as_os_str().to_string_lossy().into_owned());
+    }
+    parts.join("/")
 }
 
 // ───────────────────────── constructors / error display ─────────────────────

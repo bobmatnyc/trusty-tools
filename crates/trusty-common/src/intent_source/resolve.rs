@@ -180,11 +180,20 @@ fn resolve_ticket_id(query: &IntentQuery) -> Option<(String, String, String, Vec
 /// What: parses SLD refs from each changed file (first match wins), looks up
 /// the spec markdown via `spec_lookup`, and extracts the spec method from the
 /// governed section. Returns `(None, None)` when no SLD ref is declared.
+///
+/// KNOWN C1 LIMITATION (spec §6.4 "first match wins"): the loop returns the
+/// FIRST changed file that declares an SLD ref and silently ignores SLD refs in
+/// later files. This is intentional for C1 — a PR that touches multiple files
+/// each governed by a different spec section is out of scope. Multi-file /
+/// multi-section reconciliation (picking the most-specific governing section,
+/// or surfacing a conflict across files) is deferred to C4 (#1361), which
+/// hardens this seam.
 /// Test: `super::tests::spec_resolve_*` (AC-6).
 fn resolve_spec(
     changed_files: &[ChangedFile],
     spec_lookup: &dyn SpecLookup,
 ) -> (Option<SpecRef>, Option<Method>) {
+    // First changed file with an SLD ref wins (see KNOWN C1 LIMITATION above).
     for file in changed_files {
         let refs = parse_spec_refs(&file.content);
         if let Some(spec_ref) = refs.into_iter().next() {

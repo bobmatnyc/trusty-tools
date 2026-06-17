@@ -51,6 +51,14 @@ pub fn parse_spec_refs(source: &str) -> Vec<SpecRef> {
         let spec_id = caps[1].to_string();
         let file = caps[2].to_string();
         let anchor = caps[3].to_string();
+        // Defence in depth (the canonicalization guard in `FsSpecLookup::load`
+        // is the primary control): reject any captured path containing a `..`
+        // traversal segment so a malicious source file cannot point linkage
+        // outside `docs/specs/`. The `regex` crate has no look-around, so this
+        // is a post-match filter rather than a pattern exclusion.
+        if file.split('/').any(|seg| seg == "..") {
+            continue;
+        }
         // De-duplicate on the spec id (first-seen wins) to keep the result
         // deterministic when the same ref appears in both module- and
         // function-level rustdoc.
@@ -97,8 +105,9 @@ pub fn extract_spec_method(spec_markdown: &str, anchor: &str) -> Option<Method> 
 /// whole document, so an unrelated method elsewhere in the spec is not
 /// attributed to this change (spec §6.4).
 /// What: finds the heading line containing `{#anchor}` and returns the text
-/// from there up to (but excluding) the next top-level `## ` heading or `---`
-/// horizontal rule. Returns `None` when no heading carries the anchor.
+/// from there up to (but excluding) the next `## ` or top-level `# ` heading,
+/// or a `---` horizontal rule. Returns `None` when no heading carries the
+/// anchor.
 /// Test: `super::tests::spec_resolve_section_*`.
 fn section_body(markdown: &str, anchor: &str) -> Option<String> {
     let marker = format!("{{#{anchor}}}");
@@ -108,8 +117,11 @@ fn section_body(markdown: &str, anchor: &str) -> Option<String> {
     let mut body = String::new();
     for line in &lines[start + 1..] {
         let trimmed = line.trim_start();
-        // A new `## ` section or a `---` rule terminates the current section.
-        if trimmed.starts_with("## ") || trimmed == "---" {
+        // A new `## ` subsection, a top-level `# ` section, or a `---` rule
+        // terminates the current section. Breaking on `# ` too prevents a
+        // following top-level section's prose from bleeding into this anchor's
+        // method extraction.
+        if trimmed.starts_with("## ") || trimmed.starts_with("# ") || trimmed == "---" {
             break;
         }
         body.push_str(line);

@@ -71,8 +71,10 @@ impl MethodExtractor for HeuristicMethodExtractor {
 /// - **Constraint:** "no new dep…", "do not …", "don't …", "must not …",
 ///   "never …", "without …".
 /// - **Reuse:** "reuse …", "use the existing …".
-/// - **Approach:** "use … pagination", "use cursor-…", a "method:"/"approach:"
-///   labelled line, or "gate … behind a feature flag".
+/// - **Approach:** a narrow `use …` directive (a known technique lead like
+///   "use cursor…"/"use offset…", or an article form like "use the existing
+///   X" — *not* a Rust `use std::…;` import), "cursor[- ]based pagination", a
+///   "method:"/"approach:" labelled line, or "gate … behind a feature flag".
 ///
 /// Ambiguous prose with no cue → `None` (conservative).
 ///
@@ -144,13 +146,68 @@ fn classify_cue(lower: &str, cue: &str) -> Option<MethodKind> {
     }
 
     // Approach / technique cues.
-    if cue.starts_with("use ")
+    //
+    // The `use …` cue is deliberately NARROW: a bare `cue.starts_with("use ")`
+    // would misclassify ordinary Rust import statements (`use
+    // std::collections::HashMap;`) and throwaway phrasing (`use caution`) as a
+    // prescribed approach. We instead require the `use` to introduce a
+    // recognised approach phrasing — a known technique follow-word (`use
+    // cursor`, `use offset`) or an article/determiner that signals an
+    // imperative directive (`use the existing X`, `use a token bucket`). Rust
+    // `use` imports never match (their next token is a `::`-qualified path), and
+    // `use X;` import lines are additionally rejected by the path/semicolon
+    // guard in `is_approach_use_cue`.
+    if is_approach_use_cue(cue)
         || lower.contains("cursor-based pagination")
         || lower.contains("cursor pagination")
-        || lower.contains("gate") && lower.contains("feature flag")
+        || (lower.contains("gate") && lower.contains("feature flag"))
     {
         return Some(MethodKind::Approach);
     }
 
     None
+}
+
+/// Whether a `use …` cue is a *prescribed approach*, not a Rust import.
+///
+/// Why: `cue.starts_with("use ")` is too broad — it captures Rust import
+/// statements (`use std::collections::HashMap;`) and casual phrasing (`use
+/// caution`) as `MethodKind::Approach`, fabricating a method the author never
+/// prescribed (spec §6.2 conservative bias).
+/// What: returns `true` only when the token after `use ` is a recognised
+/// approach lead — a known technique noun (`cursor`, `offset`, `pagination`,
+/// `token`, `cache`, `index`, …) or an article/determiner that introduces an
+/// imperative directive (`the`, `a`, `an`). Rust import lines are excluded
+/// because their follow-token is a `::`-qualified path or ends in `;`.
+/// Test: `super::tests::extract_heuristic_use_import_not_approach`.
+fn is_approach_use_cue(cue: &str) -> bool {
+    let Some(rest) = cue.strip_prefix("use ") else {
+        return false;
+    };
+    let rest = rest.trim();
+    // Reject obvious Rust import statements: a `::`-qualified path, or a line
+    // that terminates in `;` (an import/use-declaration, never prose).
+    if rest.contains("::") || rest.ends_with(';') {
+        return false;
+    }
+    let Some(first) = rest.split_whitespace().next() else {
+        return false;
+    };
+    // Strip trailing punctuation so `cursor-based` / `the,` still match.
+    let head = first.trim_end_matches([',', '.', ':', ';']);
+    // Articles/determiners introduce an imperative directive ("use the existing
+    // trait", "use a bounded channel").
+    const DETERMINERS: [&str; 3] = ["the", "a", "an"];
+    // Known approach/technique nouns (extend as cues accrue; conservative set).
+    const TECHNIQUE_LEADS: [&str; 8] = [
+        "cursor",
+        "offset",
+        "pagination",
+        "token",
+        "cache",
+        "index",
+        "streaming",
+        "batching",
+    ];
+    DETERMINERS.contains(&head) || TECHNIQUE_LEADS.iter().any(|t| head.starts_with(t))
 }

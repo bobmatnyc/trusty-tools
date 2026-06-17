@@ -124,22 +124,37 @@ pub fn extract_branch_ticket(branch: &str) -> Option<String> {
 ///
 /// Why: the BACK gate must pick *one* ticket deterministically from several
 /// possible linkage sources; the spec fixes the order (§6.3).
-/// What: tries, in order — (a) the PR body via [`extract_ticket_id`]
-/// (preferring action-keyword/qualifying refs), (b) each commit message, then
-/// (c) the branch name via [`extract_branch_ticket`]. Returns the first match;
-/// `None` when the PR carries no linkage at all.
-/// Test: `super::tests::linkage_pr_*` (AC-5).
+/// What: tries, in order — (a) the PR **body**, which is free-text prose and so
+/// must carry a *qualifying* reference ([`is_ticketed`]: an action-keyword
+/// GitHub ref, a JIRA/Linear id, or an ADO ref) before a ticket-id is taken
+/// from it; (b) each commit message (a bare `#N` here is acceptable — commit
+/// trailers are conventionally terse); then (c) the branch name via
+/// [`extract_branch_ticket`]. Returns the first match; `None` when the PR
+/// carries no linkage at all.
+///
+/// The body is gated on `is_ticketed` specifically to avoid the tga #445
+/// false-positive: a PR body like `"See discussion in #42 for background"`
+/// mentions `#42` only in passing and must NOT resolve to ticket 42, whereas
+/// `"Closes #42"` (an action keyword) qualifies. Commit messages and branch
+/// names are NOT free-text discussion, so they retain the bare-`#N`
+/// last-resort fallback (spec §6.3).
+/// Test: `super::tests::linkage_pr_*`, `super::tests::ac5_pr_body_bare_ref_*`
+/// (AC-5).
 #[must_use]
 pub fn extract_pr_ticket(
     body: &str,
     commit_messages: &[String],
     branch: Option<&str>,
 ) -> Option<String> {
-    // (a) PR body — prefer a qualifying ref, then any extractable id.
-    if let Some(id) = extract_ticket_id(body) {
+    // (a) PR body — free-text prose: require a QUALIFYING ref (tga #445). A bare
+    // `#N` mentioned in passing must not link; an action keyword / JIRA / ADO
+    // ref does. (Combinator form avoids a let-chain — trusty-common is edition
+    // 2021 — while satisfying clippy::collapsible_if.)
+    if let Some(id) = is_ticketed(body).then(|| extract_ticket_id(body)).flatten() {
         return Some(id);
     }
-    // (b) commit-message trailers in the diff's commits.
+    // (b) commit-message trailers — terse by convention, so a bare `#N` is an
+    // acceptable last resort here.
     for msg in commit_messages {
         if let Some(id) = extract_ticket_id(msg) {
             return Some(id);

@@ -88,9 +88,12 @@ impl TicketFetcher for BackendTicketFetcher {
 /// Why: the common case resolves spec markdown straight off disk relative to
 /// the checkout; review's serve mode can supply a different loader (spec §6.4).
 /// What: holds a repo-root path; `load` joins the `docs/specs/*.md` relative
-/// path and reads the file, returning `None` on any read error (a gap, never
-/// an error — the ISR reads links, it does not enforce them).
-/// Test: `super::tests::fs_spec_lookup_*`.
+/// path, **canonicalizes it and asserts it stays under the canonicalized
+/// repo_root** (path-traversal guard), then reads the file — returning `None`
+/// on any read/escape error (a gap, never an error — the ISR reads links, it
+/// does not enforce them).
+/// Test: `super::tests::fs_spec_lookup_*`,
+/// `super::tests::fs_spec_lookup_rejects_traversal`.
 pub struct FsSpecLookup {
     repo_root: PathBuf,
 }
@@ -112,7 +115,19 @@ impl FsSpecLookup {
 
 impl SpecLookup for FsSpecLookup {
     fn load(&self, spec_file: &str) -> Option<String> {
-        let path = self.repo_root.join(spec_file);
-        std::fs::read_to_string(path).ok()
+        // PATH-TRAVERSAL GUARD: `spec_file` is regex-captured from untrusted
+        // source files (`parse_spec_refs`), so a malicious `..`-laden path
+        // (`docs/specs/../../etc/passwd`) could otherwise read arbitrary files.
+        // We canonicalize both the repo root and the joined target, then refuse
+        // any target that does not stay under the root. Canonicalization
+        // resolves `..`/symlinks; the `starts_with` check is the containment
+        // assertion. A target that does not exist (or escapes) → `None` (a gap,
+        // never an error — consistent with the rest of `load`).
+        let root = self.repo_root.canonicalize().ok()?;
+        let candidate = root.join(spec_file).canonicalize().ok()?;
+        if !candidate.starts_with(&root) {
+            return None;
+        }
+        std::fs::read_to_string(candidate).ok()
     }
 }
