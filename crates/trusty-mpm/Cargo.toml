@@ -119,6 +119,7 @@ trusty-common = { workspace = true, features = [
     "bug-capture",
     "crate-config",
     "console-metrics",
+    "intent-source",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by

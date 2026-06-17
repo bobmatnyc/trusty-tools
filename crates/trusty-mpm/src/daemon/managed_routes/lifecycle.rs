@@ -134,6 +134,21 @@ pub async fn spawn_managed(
             e.to_string()
         })?;
 
+    // Step 2.5 — INTENT-CONFORMANCE FRONT GATE (#1360, spec §5.1).
+    //
+    // Between record-creation and `adapter.spawn`, resolve the ticket+spec intent
+    // for this task and decide whether to auto-proceed or escalate BEFORE any code
+    // is written. The gate is fail-open (non-ticketed work, an unresolved ISR, or
+    // a gap all auto-proceed) so it can never be the reason a spawn stalls. On an
+    // escalation it withholds the spawn, writes `pending_decision`/`proposed_default`
+    // (surfaced through every existing channel), and leaves the session in its
+    // pre-spawn `Provisioning` state until a human resolves it via `POST …/answer`.
+    if let Some(record) =
+        front_gate_or_escalate(&mgr, &record, &params.repo_url, &params.task).await?
+    {
+        return Ok(record);
+    }
+
     if let Err(e) = mgr
         .set_workspace(
             &record.id,
@@ -170,6 +185,140 @@ pub async fn spawn_managed(
     }
 
     Ok(mgr.get(&record.id).await.unwrap_or(record))
+}
+
+/// Perform the withheld spawn (Step 3) for a FRONT-gate-escalated session.
+///
+/// Why: when the FRONT gate escalates (#1360), the spawn is WITHHELD and the
+/// session sits in `Provisioning` with a `pending_decision`. After a human
+/// resolves it via `POST …/answer`, the runtime must actually start — otherwise
+/// the answer clears the decision but the agent never launches (AC-15). This is
+/// the exact Step 3 from [`spawn_managed`], lifted so the answer path can invoke
+/// it on demand.
+/// What: transitions the record to `Active` (persisting the workspace), builds
+/// the runtime adapter, and spawns the harness in the pane — marking the record
+/// errored on spawn failure (non-fatal, mirroring `spawn_managed`). Idempotent
+/// guard: callers should only invoke this for a session still in `Provisioning`
+/// (never spawned), so an already-live session is not double-spawned.
+/// Test: `front_gate_answer_unblocks_spawn` in tests/session_manager_mvp.rs.
+pub async fn spawn_runtime_for(
+    state: &Arc<DaemonState>,
+    record: &SessionRecord,
+) -> Result<(), String> {
+    let mgr = state.session_manager().await;
+    let workspace = record
+        .workspace_path
+        .clone()
+        .unwrap_or_else(|| record.cwd.clone());
+
+    if let Err(e) = mgr
+        .set_workspace(&record.id, workspace.clone(), ManagedSessionState::Active)
+        .await
+    {
+        warn!(id = %record.id, "spawn_runtime_for: set_workspace failed: {e}");
+    }
+
+    let tmux_arc = mgr.tmux_driver();
+    let adapter = build_adapter(record.runtime, tmux_arc);
+    if let Err(e) = adapter.spawn(&record.tmux_name, &workspace, &record.task) {
+        warn!(
+            id = %record.id,
+            name = %record.tmux_name,
+            "spawn_runtime_for: runtime adapter spawn failed: {e}"
+        );
+        let _ = mgr
+            .mark_errored(&record.id, &format!("spawn failed: {e}"))
+            .await;
+        return Err(e.to_string());
+    }
+    info!(
+        id = %record.id,
+        name = %record.tmux_name,
+        "FRONT-gate-escalated session spawned after human approval"
+    );
+    Ok(())
+}
+
+/// Run the intent-conformance FRONT gate for a freshly-created session record.
+///
+/// Why: factored out of [`spawn_managed`] so the gate's escalate-vs-proceed
+/// decision (and the #1269 degraded operator-confirm branch) is a single, named,
+/// testable step rather than inlined in the spawn ritual (spec §5.1, #1360). It
+/// keeps `spawn_managed` linear and under the 500-SLOC production cap.
+/// What: derives owner/repo from the repo URL, builds the production
+/// [`IsrConformanceGate`] rooted at the provisioned workspace, composes the
+/// conformance disposition with the pre-work autonomy disposition (stricter-wins,
+/// via [`run_front_gate`]), and —
+/// - on **auto-accept** → returns `Ok(None)`; the caller proceeds to spawn;
+/// - on **escalate** → writes `pending_decision`/`proposed_default` (so the
+///   escalation surfaces through `…/activity`, MCP `session_status`, the
+///   supervisor, and the `tm` CLI), withholds the spawn, logs the divergence,
+///   and returns `Ok(Some(record))` so the caller returns early WITHOUT spawning.
+///
+/// #1269 degradation: until the headless auto-spawn approval path lands
+/// ([`HeadlessApproval::current`] returns `OperatorConfirm`), an escalation
+/// degrades to the operator-confirm path — the pending decision is recorded and a
+/// human resolves it via `POST …/answer` (which then unblocks the spawn). The
+/// gate itself always functions; only the *resolution channel* is degraded.
+///
+/// Fail-open: the gate never `Err`s on its own resolution failures (it returns an
+/// `AutoAccept`); this function only returns `Err` if persisting the escalation
+/// fails — in which case the caller surfaces the store error rather than silently
+/// spawning.
+/// Test: `front_gate_escalation_sets_pending_decision` /
+/// `front_gate_clean_match_spawns` in tests/session_manager_mvp.rs, plus the unit
+/// matrix in `managed_routes::front_gate::tests`.
+async fn front_gate_or_escalate(
+    mgr: &Arc<crate::session_manager::SessionManager>,
+    record: &SessionRecord,
+    repo_url: &str,
+    task: &str,
+) -> Result<Option<SessionRecord>, String> {
+    use super::front_gate::{
+        HeadlessApproval, IsrConformanceGate, prework_autonomy_disposition, run_front_gate,
+    };
+
+    let (owner, repo) = match trusty_common::github_path::parse_github_path(repo_url) {
+        Some(gh) => (gh.owner, gh.repo),
+        // No GitHub identity → no ticket backend to resolve against; fail-open.
+        None => return Ok(None),
+    };
+
+    let repo_root = record
+        .workspace_path
+        .clone()
+        .unwrap_or_else(|| record.cwd.clone());
+    let gate = IsrConformanceGate::new(repo_root);
+    let autonomy = prework_autonomy_disposition(task);
+    let approval = HeadlessApproval::current();
+
+    let outcome = run_front_gate(&gate, &owner, &repo, task, autonomy, approval).await;
+
+    if outcome.may_spawn() {
+        return Ok(None);
+    }
+
+    let reason = outcome
+        .escalation_reason()
+        .unwrap_or("conformance escalation")
+        .to_string();
+    warn!(
+        id = %record.id,
+        approval = ?outcome.approval,
+        "spawn_managed: FRONT gate escalated; withholding spawn: {reason}"
+    );
+    mgr.set_pending_decision(&record.id, &reason, outcome.proposed_default.as_deref())
+        .await
+        .map_err(|e| {
+            warn!(id = %record.id, "spawn_managed: set_pending_decision failed: {e}");
+            e.to_string()
+        })?;
+
+    // Return the updated record (now carrying the pending decision), withholding
+    // the spawn. The session stays in `Provisioning` until a human answers.
+    Ok(Some(
+        mgr.get(&record.id).await.unwrap_or_else(|_| record.clone()),
+    ))
 }
 
 /// Typed failure modes for [`resume_managed`], shared across transports.

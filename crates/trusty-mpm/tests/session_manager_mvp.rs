@@ -180,6 +180,103 @@ async fn session_manager_answer_clears_pending_and_injects() {
     assert!(after.proposed_default.is_none());
 }
 
+/// FRONT gate (#1360): an escalation records a pending decision + proposed default.
+///
+/// Why: when the conformance FRONT gate escalates, the spawn is withheld and the
+/// divergence must surface through the SAME `pending_decision`/`proposed_default`
+/// channel the harness uses, leaving the session in its pre-spawn `Provisioning`
+/// state (AC-14). This asserts the manager primitive that does it.
+/// What: creates a session, calls `set_pending_decision`, and asserts the fields
+/// and that the lifecycle state was NOT advanced past `Provisioning`.
+/// Test: this IS the test.
+#[tokio::test]
+async fn front_gate_escalation_sets_pending_decision() {
+    use trusty_mpm::session_manager::ManagedSessionState;
+
+    let dir = TempDir::new().unwrap();
+    let tmux = RecordingTmux::new();
+    let mgr = SessionManager::new(dir.path(), tmux.clone())
+        .await
+        .expect("manager");
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/ws")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+
+    mgr.set_pending_decision(
+        &record.id,
+        "conformance divergence: ticket specifies cursor; plan uses offset",
+        Some("use cursor-based pagination"),
+    )
+    .await
+    .expect("set_pending_decision");
+
+    let after = mgr.get(&record.id).await.expect("get");
+    assert!(after.pending_decision.unwrap().contains("divergence"));
+    assert_eq!(
+        after.proposed_default.as_deref(),
+        Some("use cursor-based pagination")
+    );
+    // Spawn was withheld: state stays Provisioning, and no harness was injected.
+    assert_eq!(after.state, ManagedSessionState::Provisioning);
+    let injected = {
+        let sends = tmux.sends.lock().unwrap();
+        sends.iter().any(|(_, text)| text.contains("cursor"))
+    };
+    assert!(
+        !injected,
+        "set_pending_decision must not inject into the pane"
+    );
+}
+
+/// FRONT gate (#1360): clearing a pending decision performs no pane injection.
+///
+/// Why: a FRONT-gate escalation is answered BEFORE a harness exists; clearing the
+/// decision must not send text to the bare pane — the spawn happens separately
+/// (AC-15). This isolates the clear half.
+/// What: sets then clears a pending decision; asserts both fields are `None` and
+/// nothing was sent to tmux.
+/// Test: this IS the test.
+#[tokio::test]
+async fn front_gate_clear_pending_decision_no_injection() {
+    let dir = TempDir::new().unwrap();
+    let tmux = RecordingTmux::new();
+    let mgr = SessionManager::new(dir.path(), tmux.clone())
+        .await
+        .expect("manager");
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/ws")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+
+    mgr.set_pending_decision(&record.id, "divergence", Some("use cursor"))
+        .await
+        .expect("set");
+    mgr.clear_pending_decision(&record.id).await.expect("clear");
+
+    let after = mgr.get(&record.id).await.expect("get");
+    assert!(after.pending_decision.is_none());
+    assert!(after.proposed_default.is_none());
+    let sends = tmux.sends.lock().unwrap();
+    assert!(sends.is_empty(), "clear must not inject any text");
+}
+
 // ── Handler-level anti-stub tests ────────────────────────────────────────────
 //
 // These tests call the critical path that the `spawn_session` HTTP handler
@@ -700,6 +797,63 @@ async fn resume_managed_typed_invalid_state_is_conflict() {
         matches!(err, ResumeManagedError::InvalidState(_)),
         "non-resumable state must map to the typed InvalidState variant (→ 409), got {err:?}"
     );
+}
+
+/// FRONT gate (#1360, AC-15): the withheld spawn launches after human approval.
+///
+/// Why: a session escalated by the FRONT gate sits in `Provisioning` with no
+/// runtime. Resolving its decision must actually LAUNCH the runtime (not just
+/// clear the flag) — `spawn_runtime_for` is the lifted Step 3 the answer path
+/// invokes. This asserts the runtime is spawned and the session leaves
+/// `Provisioning`.
+/// What: seeds a `Provisioning` session with a pending decision via the daemon's
+/// manager, calls `spawn_runtime_for`, and asserts the session is no longer
+/// `Provisioning` (the spawn was performed — `Active` on success, `Errored` only
+/// if the runtime binary is absent).
+/// Test: this function IS the test.
+#[tokio::test]
+async fn front_gate_answer_unblocks_spawn() {
+    use trusty_mpm::daemon::managed_routes::spawn_runtime_for;
+    use trusty_mpm::session_manager::ManagedSessionState;
+
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root(root.path().to_path_buf()));
+    let mgr = state.session_manager().await;
+
+    let id = ResumeSessionId::new();
+    let ws = root.path().join(format!("{id}-frontgate-ws"));
+    let record = mgr
+        .create_with_id(
+            id,
+            "Closes #1360: implement listing".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws),
+            Some("https://github.com/owner/repo".to_string()),
+            Some("main".to_string()),
+            ResumeRuntimeKind::default(),
+        )
+        .await
+        .expect("seed session");
+
+    // Simulate a FRONT-gate escalation: pending decision, still Provisioning.
+    mgr.set_pending_decision(&record.id, "conformance divergence", Some("use cursor"))
+        .await
+        .expect("set_pending_decision");
+    let before = mgr.get(&record.id).await.expect("get");
+    assert_eq!(before.state, ManagedSessionState::Provisioning);
+
+    // Human approves → clear decision + launch the withheld runtime.
+    mgr.clear_pending_decision(&record.id).await.expect("clear");
+    let _ = spawn_runtime_for(&state, &record).await;
+
+    let after = mgr.get(&record.id).await.expect("get");
+    assert_ne!(
+        after.state,
+        ManagedSessionState::Provisioning,
+        "the withheld spawn must advance the session out of Provisioning (AC-15)"
+    );
+    assert!(after.pending_decision.is_none());
 }
 
 /// Why: issue #1313 review nitpick #7 — assert the SM-unavailable → exit-code-75

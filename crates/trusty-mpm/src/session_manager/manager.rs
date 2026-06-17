@@ -684,4 +684,53 @@ impl SessionManager {
         self.store.write().await.upsert(record).await?;
         Ok(())
     }
+
+    /// Record a pending decision (an escalation) on a session, awaiting a human.
+    ///
+    /// Why: the intent-conformance FRONT gate (#1360) escalates *before* the
+    /// runtime is spawned. It must surface the divergence reason + the conformant
+    /// default through the SAME channel the harness uses (`pending_decision` /
+    /// `proposed_default`), so it appears in `GET …/activity`, MCP
+    /// `session_status`, the supervisor, and the `tm` CLI with zero new UI. The
+    /// session is left NOT `Active` (the runtime never started) so it reads as
+    /// awaiting approval until a human resolves it via `POST …/answer`.
+    /// What: looks up the record, sets `pending_decision`/`proposed_default`,
+    /// leaves the lifecycle state untouched (it stays `Provisioning` — the
+    /// runtime was withheld), and persists. No tmux input is sent (unlike
+    /// `answer_decision`): the pane has no running harness to receive it yet.
+    /// Test: `front_gate_escalation_sets_pending_decision` in
+    /// tests/session_manager_mvp.rs.
+    pub async fn set_pending_decision(
+        &self,
+        id: &ManagedSessionId,
+        decision: &str,
+        proposed_default: Option<&str>,
+    ) -> Result<(), ManagedError> {
+        let mut record = self.get(id).await?;
+        record.pending_decision = Some(decision.to_string());
+        record.proposed_default = proposed_default.map(str::to_string);
+        record.last_activity_at = Some(Utc::now());
+        self.store.write().await.upsert(record).await?;
+        Ok(())
+    }
+
+    /// Clear a pending decision WITHOUT injecting any text into the pane.
+    ///
+    /// Why: a FRONT-gate (#1360) escalation is resolved *before* a harness exists
+    /// — the session is still `Provisioning` with no runtime in the pane. Unlike
+    /// [`answer_decision`](Self::answer_decision) (which sends the answer to a
+    /// LIVE harness), the FRONT-gate answer path must clear the decision and then
+    /// LAUNCH the withheld runtime; sending the answer to a bare shell would be
+    /// meaningless. This method does the clear half only.
+    /// What: looks up the record, clears `pending_decision`/`proposed_default`,
+    /// updates `last_activity_at`, and persists. No tmux I/O.
+    /// Test: `front_gate_answer_unblocks_spawn` in tests/session_manager_mvp.rs.
+    pub async fn clear_pending_decision(&self, id: &ManagedSessionId) -> Result<(), ManagedError> {
+        let mut record = self.get(id).await?;
+        record.pending_decision = None;
+        record.proposed_default = None;
+        record.last_activity_at = Some(Utc::now());
+        self.store.write().await.upsert(record).await?;
+        Ok(())
+    }
 }

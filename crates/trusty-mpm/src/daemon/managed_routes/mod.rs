@@ -26,8 +26,14 @@ use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
 use crate::session_manager::{ManagedSessionId, SessionRecord};
 
+pub mod front_gate;
 mod lifecycle;
-pub use lifecycle::{ResumeManagedError, SpawnParams, resume_managed, spawn_managed};
+pub use front_gate::{
+    ConformanceGate, FrontGateOutcome, HeadlessApproval, IsrConformanceGate, run_front_gate,
+};
+pub use lifecycle::{
+    ResumeManagedError, SpawnParams, resume_managed, spawn_managed, spawn_runtime_for,
+};
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
 
@@ -461,19 +467,44 @@ pub async fn answer_session_decision(
         Err((code, msg)) => return (code, msg).into_response(),
     };
     let mgr = state.session_manager().await;
-    let tmux_name = match mgr.get(&id).await {
-        Ok(r) => r.tmux_name,
+    let record = match mgr.get(&id).await {
+        Ok(r) => r,
         Err(_) => {
             return (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response();
         }
     };
-    match mgr.answer_decision(&id, &req.answer).await {
-        Ok(()) => Json(AnswerResponse {
-            injected: true,
-            tmux_name,
-        })
-        .into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    let tmux_name = record.tmux_name.clone();
+
+    // FRONT-gate (#1360) path: a session escalated *before* spawn sits in
+    // `Provisioning` with a `pending_decision` and NO running harness. Answering
+    // it must clear the decision AND launch the withheld runtime (AC-15) — not
+    // inject the answer into a bare pane. Any other state is the ordinary
+    // harness-question path (`answer_decision`, which injects into the live pane).
+    let is_front_gate_escalation = record.state
+        == crate::session_manager::ManagedSessionState::Provisioning
+        && record.pending_decision.is_some();
+
+    if is_front_gate_escalation {
+        if let Err(e) = mgr.clear_pending_decision(&id).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+        match spawn_runtime_for(&state, &record).await {
+            Ok(()) => Json(AnswerResponse {
+                injected: true,
+                tmux_name,
+            })
+            .into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        }
+    } else {
+        match mgr.answer_decision(&id, &req.answer).await {
+            Ok(()) => Json(AnswerResponse {
+                injected: true,
+                tmux_name,
+            })
+            .into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
     }
 }
 
