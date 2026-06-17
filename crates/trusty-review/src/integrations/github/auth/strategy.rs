@@ -305,8 +305,15 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn select_garbage_override_falls_through_to_mode() {
-        // An unrecognised override is ignored; mode default applies.
+        // An unrecognised override is ignored; mode default applies.  This test
+        // reads AUTH_MODE_ENV via `select`, so it must be #[serial] like its
+        // siblings AND clear AUTH_MODE_ENV first — otherwise a concurrent sibling
+        // that set `AUTH_MODE_ENV=app` would flip the mode default and the
+        // assertion would flake (#1312).
+        // SAFETY: test-only env mutation, serialised via #[serial].
+        unsafe { std::env::remove_var(AUTH_MODE_ENV) };
         assert_eq!(
             AuthStrategy::select(RunMode::Cli, Some("nonsense")),
             AuthStrategy::Cli
