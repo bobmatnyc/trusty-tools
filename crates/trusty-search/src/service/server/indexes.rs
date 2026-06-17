@@ -257,6 +257,19 @@ pub(super) async fn create_index_handler(
     // background-embed path. Callers opt out by passing `defer_embed: false`
     // to force synchronous full indexing. Has no effect on `lexical_only` indexes.
     let defer_embed: bool = req.defer_embed.unwrap_or(true);
+    // Issue #1372: per-index indexing hygiene. `extra_skip_dirs` defaults to
+    // the targeted data-export dir set when the caller omits it; an explicit
+    // (possibly empty) list always wins. `data_file_max_bytes` is `Option<u64>`
+    // on the wire; `None`/missing ⇒ the 64 KiB default. Both are resolved to
+    // concrete values for the handle and persisted (the `Option` form) so the
+    // value is discoverable and editable.
+    let extra_skip_dirs: Vec<String> = req
+        .extra_skip_dirs
+        .clone()
+        .unwrap_or_else(crate::service::walker::default_extra_skip_dirs);
+    let data_file_max_bytes_opt: Option<u64> = req.data_file_max_bytes;
+    let data_file_max_bytes: u64 =
+        crate::service::persistence::resolve_data_file_max_bytes(data_file_max_bytes_opt);
     // Issue #403: new indexes use colocated storage (`<root>/.trusty-search/`).
     // Register the root in `roots.toml` so the startup scanner can find it on
     // the next daemon boot, and ensure `.trusty-search/` is git-ignored.
@@ -281,6 +294,8 @@ pub(super) async fn create_index_handler(
             path_filter: path_filter.clone(),
             include_docs,
             respect_gitignore,
+            extra_skip_dirs: extra_skip_dirs.clone(),
+            data_file_max_bytes: data_file_max_bytes_opt,
             lexical_only,
             skip_kg,
             defer_embed,
@@ -324,6 +339,8 @@ pub(super) async fn create_index_handler(
         domain_terms,
         include_docs,
         respect_gitignore,
+        extra_skip_dirs,
+        data_file_max_bytes,
         path_filter,
         context_embedding: Arc::new(tokio::sync::RwLock::new(None)),
         context_summary: Arc::new(tokio::sync::RwLock::new(None)),

@@ -11065,7 +11065,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.24.10"
+version = "0.25.0"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -145,6 +145,10 @@ pub(crate) async fn restore_index_on_demand(
         domain_terms: entry.domain_terms,
         include_docs: entry.include_docs,
         respect_gitignore: entry.respect_gitignore,
+        extra_skip_dirs: entry.extra_skip_dirs,
+        data_file_max_bytes: crate::service::persistence::resolve_data_file_max_bytes(
+            entry.data_file_max_bytes,
+        ),
         path_filter: entry.path_filter,
         context_embedding: Arc::new(tokio::sync::RwLock::new(None)),
         context_summary: Arc::new(tokio::sync::RwLock::new(None)),

@@ -21,4 +21,3 @@ crates/trusty-search/src/commands/doctor_checks.rs	503
 crates/trusty-search/src/core/indexer/tests.rs	2472
 crates/trusty-search/src/service/call_chain.rs	738
 crates/trusty-search/src/service/embedder_supervisor.rs	521
-crates/trusty-search/src/service/persistence.rs	579

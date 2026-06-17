@@ -62,6 +62,8 @@ async fn create_index_returns_503_with_error_when_embedder_failed() {
             lexical_only: None,
             skip_kg: None,
             defer_embed: None,
+            extra_skip_dirs: None,
+            data_file_max_bytes: None,
         }),
     )
     .await;
