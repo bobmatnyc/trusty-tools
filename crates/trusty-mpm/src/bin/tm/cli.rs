@@ -383,15 +383,13 @@ pub(crate) enum Command {
     /// Why: the M1 POC (issue #1045) builds a self-contained metaharness that
     /// boots without the trusty-mpm daemon or the `claude` CLI, driving PM →
     /// sub-agent delegation in-process via trusty-code (Seam A). The `meta`
-    /// command group is the operator entry point for that harness. WI-1 lands
-    /// only the bootstrap skeleton: argument parsing, structured logging, and a
-    /// placeholder run summary. The live delegation loop, fs/bash tool wiring,
-    /// and OpenRouter inference arrive in WI-2..WI-8 and are intentionally
-    /// deferred here.
-    /// What: a `run` sub-subcommand that accepts `--demo` (run the bundled demo
-    /// task) and `--project <PATH>` (the working directory the harness operates
-    /// in). For WI-1 the handler validates its arguments, emits a structured
-    /// "bootstrap" JSON summary to stdout, and exits 0.
+    /// command group is the operator entry point for that harness. As of WI-4
+    /// (#1030) `meta run --demo` performs a real PM → engineer delegation against
+    /// a live OpenRouter model and persists a combined transcript; a bare
+    /// `meta run` stays offline and prints the assembled tool-registry summary.
+    /// What: a `run` sub-subcommand that accepts `--demo` (drive the live demo
+    /// delegation) and `--project <PATH>` (the working directory the harness
+    /// operates in). The demo requires `OPENROUTER_API_KEY`.
     /// Test: `cli_parses_meta_run`, `cli_parses_meta_run_demo`,
     /// `cli_parses_meta_run_project`, `cli_meta_requires_action` in `tests.rs`.
     Meta {
@@ -401,7 +399,7 @@ pub(crate) enum Command {
     },
 }
 
-/// Verbs for the `tm meta` standalone-metaharness command group (#1045, WI-1).
+/// Verbs for the `tm meta` standalone-metaharness command group (#1045).
 ///
 /// Why: `meta` is a group rather than a bare command because future work items
 /// will add sibling verbs (e.g. inspecting transcripts under
@@ -413,18 +411,20 @@ pub(crate) enum Command {
 /// `cli_parses_meta_run_project`, `cli_meta_requires_action` in `tests.rs`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum MetaAction {
-    /// Boot the metaharness for a single run (WI-1: bootstrap skeleton only).
+    /// Boot the metaharness for a single run.
     ///
-    /// Why: this is the harness's primary entry point — eventually it boots the
-    /// PM, delegates to a sub-agent, captures a transcript, and exits. For WI-1
-    /// it only validates inputs and prints a bootstrap summary so the scaffold
-    /// is exercisable end-to-end before the real runtime lands.
-    /// What: `--demo` selects the bundled demo task; `--project <PATH>` sets the
-    /// working directory the harness runs against (defaults to the process cwd).
+    /// Why: this is the harness's primary entry point — it boots the PM,
+    /// delegates one task to a sub-agent, captures a combined transcript, and
+    /// exits. With `--demo` (#1030, WI-4) it drives a live PM → engineer
+    /// delegation against a real model; without it, it prints the offline
+    /// tool-registry summary.
+    /// What: `--demo` runs the bundled demo task (requires `OPENROUTER_API_KEY`)
+    /// and writes a transcript under `<project>/.trusty-mpm/meta-runs/`;
+    /// `--project <PATH>` sets the working directory (defaults to the cwd).
     /// Test: `cli_parses_meta_run*` in `tests.rs`; handler behaviour in the
     /// `commands::meta` unit tests.
     Run {
-        /// Run the bundled demo task instead of a user-supplied task.
+        /// Drive the live demo delegation (requires OPENROUTER_API_KEY).
         #[arg(long)]
         demo: bool,
 

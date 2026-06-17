@@ -269,9 +269,10 @@ async fn main() -> anyhow::Result<()> {
         } => commands::ticket::ticket(&client, &url, issue, system, notes, runtime).await,
         Command::Issue { cmd, system } => commands::issue::issue(cmd, system),
         Command::Watch { cmd } => dispatch_watch(&client, &url, cmd).await,
-        // #1045 WI-1: the metaharness boots standalone (no daemon, no HTTP
-        // client). Dispatch straight to the synchronous bootstrap handler.
-        Command::Meta { action } => commands::meta::meta(action),
+        // #1045: the metaharness boots standalone (no daemon, no HTTP client).
+        // The handler is async because `meta run --demo` (#1030, WI-4) drives a
+        // live in-process PM → engineer agent loop.
+        Command::Meta { action } => commands::meta::meta(action).await,
     };
 
     // Top-level exit-code translation: a `tm sessions prune-idle` that found the
