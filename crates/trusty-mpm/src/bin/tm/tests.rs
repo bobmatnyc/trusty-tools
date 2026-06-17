@@ -432,27 +432,30 @@ fn cli_parses_tui_with_interval() {
 }
 
 #[test]
-fn cli_parses_coordinator_tui() {
-    // #1272 Child #1: the coordinator TUI is its own subcommand (the
-    // `coordinator` name is taken by the SM chat command). Its `--interval-ms`
+fn cli_parses_session_tui() {
+    // #1392: the coordinator TUI is the `tm session tui` subcommand (renamed
+    // from the former top-level `tm coordinator-tui`). Its `--interval-ms`
     // defaults to 1500. The `url` arg carries `env = "TRUSTY_MPM_URL"`, so an
     // ambient `TRUSTY_MPM_URL` in the test runner would override the (absent)
     // default — assert only the env-independent interval default here, and the
-    // url plumbing in `cli_parses_coordinator_tui_with_flags`.
-    let cli = Cli::try_parse_from(["trusty-mpm", "coordinator-tui"]).unwrap();
+    // url plumbing in `cli_parses_session_tui_with_flags`.
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "tui"]).unwrap();
     match cli.command {
-        Command::CoordinatorTui { interval_ms, .. } => {
+        Command::Session {
+            action: SessionAction::Tui { interval_ms, .. },
+        } => {
             assert_eq!(interval_ms, 1500);
         }
-        other => panic!("expected CoordinatorTui, got {other:?}"),
+        other => panic!("expected Session::Tui, got {other:?}"),
     }
 }
 
 #[test]
-fn cli_parses_coordinator_tui_with_flags() {
+fn cli_parses_session_tui_with_flags() {
     let cli = Cli::try_parse_from([
         "trusty-mpm",
-        "coordinator-tui",
+        "session",
+        "tui",
         "--url",
         "http://127.0.0.1:9999",
         "--interval-ms",
@@ -460,12 +463,27 @@ fn cli_parses_coordinator_tui_with_flags() {
     ])
     .unwrap();
     match cli.command {
-        Command::CoordinatorTui { url, interval_ms } => {
+        Command::Session {
+            action: SessionAction::Tui { url, interval_ms },
+        } => {
             assert_eq!(url.as_deref(), Some("http://127.0.0.1:9999"));
             assert_eq!(interval_ms, 750);
         }
-        other => panic!("expected CoordinatorTui, got {other:?}"),
+        other => panic!("expected Session::Tui, got {other:?}"),
     }
+}
+
+#[test]
+fn cli_rejects_removed_coordinator_tui() {
+    // #1392: the old top-level `tm coordinator-tui` was deleted (not aliased).
+    // Parsing it must now fail with an unrecognized-subcommand error.
+    let err = Cli::try_parse_from(["trusty-mpm", "coordinator-tui"]).unwrap_err();
+    assert_eq!(
+        err.kind(),
+        clap::error::ErrorKind::InvalidSubcommand,
+        "expected InvalidSubcommand, got {:?}",
+        err.kind()
+    );
 }
 
 #[test]
