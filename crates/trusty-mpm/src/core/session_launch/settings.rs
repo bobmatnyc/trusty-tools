@@ -443,7 +443,11 @@ pub(super) fn register_project_index(project_root: &Path) -> Option<String> {
 /// keeps that nested runtime entirely off the async worker, so the call is safe
 /// from both sync and async callers. A non-2xx response or transport error is
 /// logged at warn/debug and swallowed; the daemon endpoint is idempotent so
-/// re-creates are harmless.
+/// re-creates are harmless. The client uses a tight ~1s overall timeout
+/// (750 ms connect) so the joined thread returns quickly: this call sits on the
+/// `prepare_session` hot path and must NOT stall a session launch when the
+/// daemon is slow or unreachable. Registration is purely best-effort — the
+/// index is also created on the first reindex — so a short cap is acceptable.
 /// Test: exercised via `register_project_index_returns_derived_id` (daemon-down
 /// path) and `launch_session_errors_when_daemon_unreachable` (async-context
 /// safety); the live HTTP path is covered by integration use.
@@ -454,8 +458,11 @@ fn best_effort_create_index(base: &str, index_id: &str, root: &Path) {
     let root_display = root.display().to_string();
 
     let result = std::thread::spawn(move || {
+        // 1s overall / 750ms connect cap: this runs synchronously on the
+        // session-launch hot path, so the worst-case stall must stay small.
         let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(1))
+            .connect_timeout(std::time::Duration::from_millis(750))
             .build()?;
         let resp = client.post(&url).json(&body).send()?;
         Ok::<reqwest::StatusCode, reqwest::Error>(resp.status())

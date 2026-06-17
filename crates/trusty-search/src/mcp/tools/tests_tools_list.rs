@@ -248,6 +248,16 @@ fn pinned_descriptors_annotate_index_id() {
         desc.contains("trusty-tools") && desc.contains("pinned"),
         "index_id description should name the pinned default: {desc:?}"
     );
+    // The note must be joined with exactly one separating period — never a
+    // double-period, regardless of whether the base description ended in `.`.
+    assert!(
+        !desc.contains(".."),
+        "annotated description must not contain a double-period: {desc:?}"
+    );
+    assert!(
+        desc.contains(". Defaults to this session's pinned project index"),
+        "note must follow exactly one period+space: {desc:?}"
+    );
 }
 
 /// `tools/list` over a PINNED server advertises the optional `index_id`.

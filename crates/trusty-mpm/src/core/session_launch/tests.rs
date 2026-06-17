@@ -6,6 +6,43 @@ use super::settings::{
 use super::*;
 use tempfile::tempdir;
 
+/// Why: env-mutating tests previously restored the var by hand at the end of the
+/// test body, so a panic between set and restore leaked process-global state
+/// into sibling `#[serial]` tests. This guard restores the prior value (or
+/// removes it) in `Drop`, making cleanup panic-safe.
+/// What: on construction it snapshots the current value and sets the new one;
+/// on drop it restores the snapshot (or removes the var if it was unset).
+/// Test: used by `register_project_index_returns_derived_id`; correctness is
+/// observable via that serial test passing without leaking the override env var.
+struct EnvVarGuard {
+    key: &'static str,
+    prev: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &std::path::Path) -> Self {
+        let prev = std::env::var(key).ok();
+        // SAFETY: env-mutating tests using this guard are tagged `#[serial]`, so
+        // no other thread races the set/restore. Restore happens in `Drop`.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: see `set` — serialized by `#[serial]`.
+        unsafe {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
 #[test]
 fn build_system_prompt_includes_trusty_block() {
     // Why: `build_system_prompt` must always yield a prompt — generating
@@ -545,6 +582,30 @@ fn inject_trusty_search_mcp_is_idempotent() {
 }
 
 #[test]
+fn inject_trusty_search_mcp_pinned_is_idempotent() {
+    // Why (#1373): re-running prep with the SAME pinned index id must not rewrite
+    // or churn the `.mcp.json` — the pinned entry has to be stable across launches.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    inject_trusty_search_mcp(project, Some("my-project")).expect("first injection succeeds");
+    let first = std::fs::read_to_string(project.join(".mcp.json")).unwrap();
+    inject_trusty_search_mcp(project, Some("my-project")).expect("second injection succeeds");
+    let second = std::fs::read_to_string(project.join(".mcp.json")).unwrap();
+
+    assert_eq!(
+        first, second,
+        "re-injecting the same pinned id must leave the file unchanged"
+    );
+    // And the pin is still present/correct after the second pass.
+    let value: serde_json::Value = serde_json::from_str(&second).unwrap();
+    assert_eq!(
+        value["mcpServers"]["trusty-search"]["args"],
+        serde_json::json!(["serve", "--index", "my-project"])
+    );
+}
+
+#[test]
 fn inject_both_mcp_servers_coexist() {
     // Why (#1270/step 4): the end state must have BOTH servers so the spawned
     // session gets memory AND code search.
@@ -627,14 +688,13 @@ fn register_project_index_returns_derived_id() {
     // `http_addr` file (and thus issues no HTTP POST). `#[serial]` because the
     // override env var is process-global.
     let data_dir = tempdir().unwrap();
-    let prev = std::env::var(trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV).ok();
-    // SAFETY: guarded by `#[serial]`; restored before the test returns.
-    unsafe {
-        std::env::set_var(
-            trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV,
-            data_dir.path(),
-        );
-    }
+    // Panic-safe restore: the guard restores/removes the override env var in its
+    // `Drop`, so a panic in the assertions below never leaks it to sibling
+    // serial tests.
+    let _env = EnvVarGuard::set(
+        trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV,
+        data_dir.path(),
+    );
 
     // A git-rooted project: id == the git-root basename, even from a nested dir.
     let project = tempdir().unwrap();
@@ -645,14 +705,6 @@ fn register_project_index_returns_derived_id() {
     let id = register_project_index(&nested);
     let expected = trusty_common::derive_index_id(project.path());
     assert_eq!(id, Some(expected), "id is the git-root basename");
-
-    // Restore the env var for other serial tests.
-    unsafe {
-        match prev {
-            Some(v) => std::env::set_var(trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV, v),
-            None => std::env::remove_var(trusty_common::data_dir::DATA_DIR_OVERRIDE_ENV),
-        }
-    }
 }
 
 #[test]

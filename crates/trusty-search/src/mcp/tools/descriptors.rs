@@ -386,7 +386,7 @@ pub fn tool_descriptors_pinned(pinned: Option<&str>) -> Value {
     let Some(id) = pinned else {
         return defs;
     };
-    let note = format!(" Defaults to this session's pinned project index ('{id}') when omitted.");
+    let note = format!("Defaults to this session's pinned project index ('{id}') when omitted.");
     if let Some(tools) = defs.as_array_mut() {
         for tool in tools.iter_mut() {
             let Some(schema) = tool.get_mut("inputSchema").and_then(Value::as_object_mut) else {
@@ -414,11 +414,14 @@ pub fn tool_descriptors_pinned(pinned: Option<&str>) -> Value {
                 let base = prop
                     .get("description")
                     .and_then(Value::as_str)
-                    .unwrap_or("Target index id")
-                    .to_string();
+                    .unwrap_or("Target index id");
+                // Normalise the join so the result reads "<base>. <note>" with
+                // exactly one separating period+space, whether or not `base`
+                // already ends in a period (avoids the ".." double-period bug).
+                let base = base.trim_end().trim_end_matches('.');
                 prop.insert(
                     "description".to_string(),
-                    Value::String(format!("{base}.{note}")),
+                    Value::String(format!("{base}. {note}")),
                 );
             }
         }

@@ -33,6 +33,14 @@ use std::path::{Path, PathBuf};
 /// What: returns the first ancestor of `start` (inclusive) that contains a
 /// `.git` directory or file; when none is found, returns `start` itself
 /// (a path with no enclosing git repo is still indexable by its own basename).
+///
+/// Known limitation: this returns the FIRST (innermost) ancestor with a `.git`,
+/// so in a nested-repo / monorepo layout where a parent directory above the
+/// intended project also has `.git`, the *inner* repo wins — and if the project
+/// itself has no `.git` but a parent does, that parent `.git` would win. This
+/// matches trusty-search's prior `detect_project` semantics (the two must agree
+/// to derive the same index id), so it is intentional, not a bug; documented
+/// here so a future monorepo-aware override is a conscious change, not a surprise.
 /// Test: `resolve_project_root_finds_git_root` and
 /// `resolve_project_root_falls_back_to_start` in `tests`.
 pub fn resolve_project_root(start: &Path) -> PathBuf {
