@@ -11,7 +11,7 @@
 use clap::Parser;
 
 use crate::cli::{
-    CatalogAction, Cli, Command, DEFAULT_URL, ProjectAction, SessionAction, TelegramCmd,
+    CatalogAction, Cli, Command, DEFAULT_URL, MetaAction, ProjectAction, SessionAction, TelegramCmd,
 };
 use crate::formatters::banner::{
     fallback_session_name, normalize_workdir, print_launch_banner,
@@ -132,6 +132,58 @@ fn cli_parses_project_info() {
 fn cli_project_requires_action() {
     // `project` with no action is an error.
     assert!(Cli::try_parse_from(["trusty-mpm", "project"]).is_err());
+}
+
+#[test]
+fn cli_parses_meta_run() {
+    // Bare `meta run` defaults to no demo and no explicit project (#1045 WI-1).
+    let cli = Cli::try_parse_from(["trusty-mpm", "meta", "run"]).unwrap();
+    match cli.command {
+        Command::Meta {
+            action: MetaAction::Run { demo, project },
+        } => {
+            assert!(!demo);
+            assert_eq!(project, None);
+        }
+        other => panic!("expected meta run, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_meta_run_demo() {
+    // `meta run --demo` sets the demo flag.
+    let cli = Cli::try_parse_from(["trusty-mpm", "meta", "run", "--demo"]).unwrap();
+    match cli.command {
+        Command::Meta {
+            action: MetaAction::Run { demo, project },
+        } => {
+            assert!(demo);
+            assert_eq!(project, None);
+        }
+        other => panic!("expected meta run --demo, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_meta_run_project() {
+    // `meta run --demo --project <PATH>` captures both the flag and the path.
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "meta", "run", "--demo", "--project", "/tmp"]).unwrap();
+    match cli.command {
+        Command::Meta {
+            action: MetaAction::Run { demo, project },
+        } => {
+            assert!(demo);
+            assert_eq!(project.as_deref(), Some(std::path::Path::new("/tmp")));
+        }
+        other => panic!("expected meta run --project, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_meta_requires_action() {
+    // `meta` with no action is an error.
+    assert!(Cli::try_parse_from(["trusty-mpm", "meta"]).is_err());
 }
 
 #[test]
