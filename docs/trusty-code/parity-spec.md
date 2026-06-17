@@ -1,6 +1,6 @@
 # trusty-code — System-Instruction Parity Spec
 
-> **Status:** DRAFT — requires user sign-off before merge.
+> **Status:** APPROVED (signed off 2026-06-17).
 > **Issue:** [#1031](https://github.com/bobmatnyc/trusty-tools/issues/1031) (WI-12)
 > **Milestone:** trusty-code article-ready model-comparison harness (#1).
 > **Consumed by:** [#1032](https://github.com/bobmatnyc/trusty-tools/issues/1032)
@@ -76,7 +76,7 @@ part of the parity surface even though they ride a different channel.
 > system prompt so that, for the common case (native-tool-calling models), it is
 > empty and the assembled prompt for those models is exactly sections 1→2→3. The
 > floor for a strong model is therefore the strict prefix of the floor for a
-> weak one. This is a genuine design choice — see Open Decision **D4**.
+> weak one. This is a genuine design choice — see confirmed decision **D4** (§6).
 
 ### 2a. BASE protocol preamble — *byte-identical across all models*
 
@@ -133,7 +133,7 @@ parity floor** — see §3 (skills).
 ### 2c. Project / `CLAUDE.md` context injection
 
 If the project root contains a `CLAUDE.md`, its contents are injected as
-section 3. Default policy (pending **D1**):
+section 3. Policy (confirmed, **D1**):
 
 - Injected **verbatim** (no summarization, no truncation), matching how
   trusty-mpm treats the project `CLAUDE.md` stub.
@@ -244,7 +244,7 @@ The multi-turn loop (#1028) iterates *"until final / limits"*. To terminate
 **deterministically** (rather than guessing from prose), the loop needs an
 unambiguous completion signal that works across all providers.
 
-Decision (pending **D3**): an agent signals completion by **producing an
+Decision (confirmed, **D3**): an agent signals completion by **producing an
 assistant turn that contains no tool call** (a pure final-answer turn). The loop
 treats "model returned content with zero tool calls" as the terminal state and
 returns that content as the `AgentOutput`.
@@ -270,42 +270,46 @@ Loop termination is therefore the **disjunction**:
 A reserved `finish`/`attempt_completion` tool was considered and rejected for
 the floor because it would burden fallback-tier models with one more emission
 format to get right — increasing variance in exactly the place parity must
-protect. (Revisit under **D3** if a structured payload at finish proves
+protect. (Per **D3** (§6), revisit only if a structured payload at finish proves
 necessary.)
 
 ---
 
-## 6. Open decisions for the user
+## 6. Decisions (signed off)
 
-These are genuine product/design choices the parity floor depends on. Please
-confirm or override each; defaults reflect the draft above.
+These are the genuine product/design choices the parity floor depends on. Each
+was reviewed and **signed off by the user on 2026-06-17**; the chosen option is
+now settled policy that §§1–5 already encode.
 
-- **D1 — `CLAUDE.md` injection: verbatim vs. summarized?**
-  Draft default: **verbatim, identical for every model, read-only** (no
-  auto-create/mutate). Alternative: inject a length-capped summary to keep the
-  floor small. *Verbatim maximizes parity fidelity; summarizing risks a
-  non-reproducible, model-confounding step.* **Confirm verbatim?**
+- **D1 — `CLAUDE.md` injection: verbatim. CONFIRMED.**
+  `CLAUDE.md` is injected **verbatim, identical for every model, read-only** (no
+  auto-create/mutate). The rejected alternative — a length-capped summary —
+  would have introduced a non-reproducible, model-confounding step; verbatim
+  injection maximizes parity fidelity.
 
-- **D2 — Cap the tool-schema count / total schema bytes?**
-  Draft default: **no cap** — send the full registered (then agent-gated) set.
-  A cap would help models with small context windows but means different models
-  could see different tool sets, breaking parity. **Keep "no cap, full set"?**
+- **D2 — Tool-schema count: no cap. CONFIRMED.**
+  The assembler sends the **full registered (then agent-gated) set** with no cap
+  on schema count or total bytes. A cap would help models with small context
+  windows but could let different models see different tool sets, breaking
+  parity; the full set is sent identically to every model.
 
-- **D3 — Finish signal: no-tool-call turn vs. explicit `finish` tool?**
-  Draft default: **no-tool-call turn** (§5). Choose explicit `finish` only if
-  you want a structured completion payload (e.g. a self-reported success flag).
-  **Confirm no-tool-call turn?**
+- **D3 — Finish signal: no-tool-call turn. CONFIRMED.**
+  Completion is signaled by an **assistant turn that contains no tool call**
+  (§5), not an explicit `finish` tool. This is provider-agnostic and avoids
+  burdening fallback-tier models with an extra emission format. A structured
+  `finish` payload remains a future option only if a self-reported completion
+  field becomes necessary.
 
-- **D4 — Fallback guidance placement: last (prefix-compatible) vs. adjacent to
-  the tool-use protocol?**
-  Draft default: **last**, so a strong model's prompt is the strict prefix of a
-  weak model's (clean diff, easy disclosure). Alternative: place it right after
-  §2a item 2 for locality. **Confirm last?**
+- **D4 — Fallback guidance placement: last (prefix-compatible). CONFIRMED.**
+  The fallback guidance (§4) is ordered **last**, so a strong (native-tool)
+  model's prompt is the strict prefix of a weak model's — yielding clean diffs
+  and easy disclosure. Placement adjacent to the tool-use protocol was
+  considered and rejected.
 
-- **D5 — Does the parity report disclose the exact assembled prompt per run?**
-  Draft default: **yes** — record the BASE version, the agent prompt hash, the
-  `CLAUDE.md` hash, the tool-schema set hash, and the fallback tier, so any
-  parity claim is auditable. **Confirm full disclosure in the report?**
+- **D5 — Parity report discloses the exact assembled prompt per run. CONFIRMED.**
+  The parity report records, per run, the **BASE version, the agent-prompt hash,
+  the `CLAUDE.md` hash, the tool-schema set hash, and the fallback tier**, so any
+  parity claim is auditable.
 
-Once these are signed off, #1032 implements the assembler to this contract and
-#1023 supplies the per-tier fallback text and extraction matrix.
+With these decisions signed off, #1032 implements the assembler to this contract
+and #1023 supplies the per-tier fallback text and extraction matrix.
