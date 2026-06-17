@@ -845,15 +845,53 @@ async fn front_gate_answer_unblocks_spawn() {
 
     // Human approves → clear decision + launch the withheld runtime.
     mgr.clear_pending_decision(&record.id).await.expect("clear");
-    let _ = spawn_runtime_for(&state, &record).await;
+    // Re-fetch after clearing so we spawn from the fresh, post-clear snapshot
+    // (mirrors the answer-route fix; #1360 review).
+    let fresh = mgr.get(&record.id).await.expect("get fresh");
+    let spawn_result = spawn_runtime_for(&state, &fresh).await;
 
     let after = mgr.get(&record.id).await.expect("get");
+    // The withheld spawn must ALWAYS leave Provisioning (AC-15).
     assert_ne!(
         after.state,
         ManagedSessionState::Provisioning,
         "the withheld spawn must advance the session out of Provisioning (AC-15)"
     );
     assert!(after.pending_decision.is_none());
+
+    // Fail LOUDLY on an unexpected terminal state. Two outcomes are legitimate:
+    //   - `Active`  → the runtime actually spawned (`spawn_runtime_for` => Ok);
+    //   - `Errored` → CI-without-tmux: no tmux/runtime binary is present, so
+    //     `adapter.spawn` fails and `spawn_runtime_for` returns Err, which
+    //     `mark_errored` records as a spawn failure on the record's task field.
+    // We tie the assertion to the spawn RESULT (not a blanket "any non-Provisioning
+    // state") so a genuinely wrong transition can never pass silently. The benign
+    // CI case is distinguished by asserting on the recorded error reason, not by
+    // blindly accepting any Errored state.
+    match spawn_result {
+        Ok(()) => assert_eq!(
+            after.state,
+            ManagedSessionState::Active,
+            "successful spawn must leave the session Active"
+        ),
+        Err(_) => {
+            assert_eq!(
+                after.state,
+                ManagedSessionState::Errored,
+                "a failed spawn must mark the session Errored, not any other state"
+            );
+            // `mark_errored` appends `[error: spawn failed: …]` to the task field;
+            // asserting on it confirms this is the benign runtime/tmux-unavailable
+            // case (the only way spawn legitimately fails in CI) rather than an
+            // unrelated failure that happens to land in Errored.
+            assert!(
+                after.task.contains("[error: spawn failed:"),
+                "Errored state must carry the runtime/tmux-unavailable spawn-failure \
+                 reason (CI-without-tmux); got task: {:?}",
+                after.task
+            );
+        }
+    }
 }
 
 /// Why: issue #1313 review nitpick #7 — assert the SM-unavailable → exit-code-75

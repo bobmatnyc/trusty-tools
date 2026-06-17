@@ -207,6 +207,38 @@ fn stricter_wins_both_escalate_prefers_autonomy() {
     );
 }
 
+// ── stricter_of_with_source: escalation-source tagging (#1360 review) ────────────
+
+#[test]
+fn source_both_clear_is_neither() {
+    let (d, src) = stricter_of_with_source(auto("conformance ok"), auto("autonomy ok"));
+    assert!(d.is_auto_accept());
+    assert_eq!(src, EscalationSource::Neither);
+}
+
+#[test]
+fn source_conformance_only_is_conformance() {
+    let (d, src) = stricter_of_with_source(esc("conformance divergence"), auto("autonomy ok"));
+    assert_eq!(d, esc("conformance divergence"));
+    assert_eq!(src, EscalationSource::Conformance);
+}
+
+#[test]
+fn source_autonomy_only_is_autonomy() {
+    let (d, src) = stricter_of_with_source(auto("conformance ok"), esc("T4: destructive"));
+    assert_eq!(d, esc("T4: destructive"));
+    assert_eq!(src, EscalationSource::Autonomy);
+}
+
+#[test]
+fn source_both_escalate_is_autonomy() {
+    // Autonomy wins outright when both escalate; the source is Autonomy so the
+    // (possibly irrelevant) conformance-derived proposed_default is suppressed.
+    let (d, src) = stricter_of_with_source(esc("conformance divergence"), esc("T4"));
+    assert_eq!(d, esc("T4"), "tier authority wins");
+    assert_eq!(src, EscalationSource::Autonomy);
+}
+
 // ── run_front_gate: orchestration (AC-13, AC-14, AC-16, AC-17) ──────────────────
 
 fn gate_with(intent: ResolvedIntent) -> MockGate {
@@ -282,6 +314,67 @@ async fn run_divergence_escalates_and_proposes_default() {
         out.proposed_default.as_deref(),
         Some("use cursor-based pagination"),
         "proposed_default is the conformant ticket method"
+    );
+}
+
+#[tokio::test]
+async fn run_autonomy_only_escalation_has_no_proposed_default() {
+    // #1360 review: conformance is CLEAN (plan matches ticket method) but the
+    // autonomy tier escalates (T4). proposed_default must be None — surfacing the
+    // conformance method here would mislead the human (reason says "T4", default
+    // would say "use cursor pagination", which is unrelated to why we stopped).
+    let gate = gate_with(ticket_intent("use cursor pagination"));
+    let out = run_front_gate(
+        &gate,
+        "owner",
+        "repo",
+        // Plan agrees with the ticket method, so conformance auto-accepts; the
+        // autonomy disposition supplied below is the lone escalation source.
+        "Closes #1360: implement listing.\nuse cursor pagination",
+        esc("T4: irreversible or security-sensitive operation; human confirmation required"),
+        HeadlessApproval::OperatorConfirm,
+    )
+    .await;
+    assert!(!out.may_spawn(), "autonomy T4 escalates");
+    assert!(
+        out.escalation_reason().unwrap().contains("T4"),
+        "reason is the autonomy tier reason"
+    );
+    assert!(
+        out.proposed_default.is_none(),
+        "autonomy-only escalation must not surface a conformance proposed_default"
+    );
+}
+
+#[tokio::test]
+async fn run_both_escalate_reason_is_autonomy_and_default_not_conformance() {
+    // #1360 review: BOTH paths escalate — conformance diverges AND autonomy is T4.
+    // The autonomy tier wins (safety authority), so the reason is the autonomy
+    // reason and proposed_default is NOT the (now-irrelevant) conformance method.
+    let gate = gate_with(ticket_intent("use cursor-based pagination"));
+    let out = run_front_gate(
+        &gate,
+        "owner",
+        "repo",
+        // Plan diverges from the ticket method → conformance escalates too.
+        "Fixes #1360: implement listing.\nuse offset pagination for the endpoint",
+        esc("T4: irreversible or security-sensitive operation; human confirmation required"),
+        HeadlessApproval::OperatorConfirm,
+    )
+    .await;
+    assert!(!out.may_spawn(), "both escalate");
+    assert!(
+        out.escalation_reason().unwrap().contains("T4"),
+        "autonomy reason wins when both escalate"
+    );
+    assert_ne!(
+        out.proposed_default.as_deref(),
+        Some("use cursor-based pagination"),
+        "must not surface the conformance method when autonomy is the escalation source"
+    );
+    assert!(
+        out.proposed_default.is_none(),
+        "autonomy-sourced escalation carries no proposed_default"
     );
 }
 

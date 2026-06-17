@@ -488,7 +488,18 @@ pub async fn answer_session_decision(
         if let Err(e) = mgr.clear_pending_decision(&id).await {
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
-        match spawn_runtime_for(&state, &record).await {
+        // Re-fetch AFTER clearing: `clear_pending_decision` upserts a new record
+        // version, so the `record` captured above is now stale (it still carries
+        // the pending decision). Spawn the runtime from the fresh snapshot so the
+        // withheld harness launches against the post-clear state (#1360 review).
+        let fresh = match mgr.get(&id).await {
+            Ok(r) => r,
+            Err(_) => {
+                return (StatusCode::NOT_FOUND, format!("session {id_str} not found"))
+                    .into_response();
+            }
+        };
+        match spawn_runtime_for(&state, &fresh).await {
             Ok(()) => Json(AnswerResponse {
                 injected: true,
                 tmux_name,

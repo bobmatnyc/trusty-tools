@@ -316,28 +316,76 @@ pub fn front_gate_disposition(
     }
 }
 
-/// Compose two dispositions STRICTER-WINS (escalate beats auto-accept).
+/// Which input won the stricter-wins composition (the escalation source).
+///
+/// Why: the FRONT gate's `proposed_default` is only meaningful when the
+/// *conformance* path is what escalated — it names the conformant method to
+/// adopt. When the *autonomy* tier is the escalation source (e.g. a T4
+/// destructive task), surfacing the conformance-derived method is misleading: the
+/// reason reads "T4: destructive" while `proposed_default` says "use cursor
+/// pagination", which has nothing to do with why we stopped (#1360 review). The
+/// composition must therefore report which side won so the caller can scope
+/// `proposed_default` to the conformance case only.
+/// What: `Conformance` — the conformance disposition is the (sole) escalation
+/// source; `Autonomy` — the autonomy tier escalated (it wins outright when both
+/// escalate, since the tier engine is the authoritative safety floor); `Neither`
+/// — both auto-accepted, no escalation.
+/// Test: `tests::stricter_wins_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscalationSource {
+    /// Both inputs auto-accepted; the composition did not escalate.
+    Neither,
+    /// The conformance disposition is the escalation source.
+    Conformance,
+    /// The autonomy tier is the escalation source (wins when both escalate).
+    Autonomy,
+}
+
+/// Compose two dispositions STRICTER-WINS, reporting the escalation source.
 ///
 /// Why: spec §5.1 / AC-16 — the conformance disposition is *combined* with the
 /// standard `evaluate_autonomy_tier` decision by taking the stricter outcome. The
 /// gate must NEVER *lower* a tier escalation to auto-accept (a T4/destructive
 /// action still escalates regardless of conformance). Equally, a conformance
 /// divergence must escalate even when the autonomy tier would auto-accept.
-/// What: returns `Escalate` if EITHER input escalates (preferring the autonomy
-/// reason when both escalate, since the tier engine is the established safety
-/// authority); returns `AutoAccept` only when BOTH auto-accept.
+/// Beyond the disposition, the caller needs to know WHICH side escalated so it can
+/// scope `proposed_default` to the conformance-only case (#1360 review): a
+/// `proposed_default` derived from conformance is meaningless when the autonomy
+/// tier is the reason we stopped.
+/// What: returns the stricter `Disposition` plus an [`EscalationSource`] tag —
+/// `Escalate` if EITHER input escalates (preferring the autonomy reason when both
+/// escalate, since the tier engine is the established safety authority, and
+/// tagging the source `Autonomy` in that case); `AutoAccept` (tagged `Neither`)
+/// only when BOTH auto-accept.
+/// Test: `tests::stricter_wins_*`, `tests::run_*_proposed_default_*`.
+#[must_use]
+pub fn stricter_of_with_source(
+    conformance: Disposition,
+    autonomy: Disposition,
+) -> (Disposition, EscalationSource) {
+    match (&conformance, &autonomy) {
+        // Both clear → auto-accept (cite conformance, the gate's own reason).
+        (Disposition::AutoAccept { .. }, Disposition::AutoAccept { .. }) => {
+            (conformance, EscalationSource::Neither)
+        }
+        // Autonomy escalates → autonomy wins (tier safety is authoritative; it
+        // must never be lowered by conformance). It wins even when conformance
+        // ALSO escalates, so the source is `Autonomy` in both sub-cases.
+        (_, Disposition::Escalate { .. }) => (autonomy, EscalationSource::Autonomy),
+        // Only conformance escalates → conformance wins.
+        (Disposition::Escalate { .. }, _) => (conformance, EscalationSource::Conformance),
+    }
+}
+
+/// Compose two dispositions STRICTER-WINS (escalate beats auto-accept).
+///
+/// Why: the disposition-only projection of [`stricter_of_with_source`], for call
+/// sites and tests that do not need the escalation-source tag.
+/// What: returns the stricter `Disposition`, discarding the source tag.
 /// Test: `tests::stricter_wins_*`.
 #[must_use]
 pub fn stricter_of(conformance: Disposition, autonomy: Disposition) -> Disposition {
-    match (&conformance, &autonomy) {
-        // Both clear → auto-accept (cite conformance, the gate's own reason).
-        (Disposition::AutoAccept { .. }, Disposition::AutoAccept { .. }) => conformance,
-        // Autonomy escalates → autonomy wins (tier safety is authoritative; it
-        // must never be lowered by conformance).
-        (_, Disposition::Escalate { .. }) => autonomy,
-        // Only conformance escalates → conformance wins.
-        (Disposition::Escalate { .. }, _) => conformance,
-    }
+    stricter_of_with_source(conformance, autonomy).0
 }
 
 /// Run the FRONT gate for a spawn, producing a [`FrontGateOutcome`].
@@ -383,15 +431,22 @@ pub async fn run_front_gate(
     // (3) Derive the planned method from the task prose (heuristic, offline).
     let planned = heuristic_method(task);
 
-    // (4) Map to a conformance disposition; (5) compose stricter-wins.
+    // (4) Map to a conformance disposition; (5) compose stricter-wins, keeping the
+    // escalation source so we can scope `proposed_default` correctly.
     let conformance = front_gate_disposition(&intent, planned.as_ref());
     let prescribed = prescribed_method(&intent).map(|m| m.text.trim().to_string());
-    let disposition = stricter_of(conformance, autonomy);
+    let (disposition, source) = stricter_of_with_source(conformance, autonomy);
 
-    // Only surface a proposed default when we actually escalate.
-    let proposed_default = match &disposition {
-        Disposition::Escalate { .. } => prescribed,
-        Disposition::AutoAccept { .. } => None,
+    // `proposed_default` carries the conformant method to adopt — it is ONLY
+    // meaningful when the CONFORMANCE path is the escalation source. When the
+    // autonomy tier escalates (e.g. T4 destructive), the conformance-derived
+    // method is unrelated to why we stopped, so surfacing it would mislead the
+    // human (the reason would say "T4: destructive" while the default says "use
+    // cursor pagination"). Scope it to `Conformance` only; `None` otherwise
+    // (#1360 review).
+    let proposed_default = match source {
+        EscalationSource::Conformance => prescribed,
+        EscalationSource::Autonomy | EscalationSource::Neither => None,
     };
 
     FrontGateOutcome {
@@ -443,13 +498,28 @@ pub fn autonomy_disposition(ctx: &ActionContext, signals: &GuardrailSignals) -> 
 /// the destructive-keyword scan reads) under `ChangeClass::StyleOnly`, plus a
 /// neutral pre-work [`GuardrailSignals`], and runs `evaluate_autonomy_tier`. Maps
 /// the empty-task error to a fail-open `AutoAccept`.
-/// Test: `tests::prework_autonomy_*`.
+///
+/// Why `ChangeClass::StyleOnly` is the safe pre-work default: the destructive
+/// scan is NOT gated by the change class. `classify_tier` first derives a base
+/// tier from the class (StyleOnly → T1) and then *unconditionally* bumps to T4 if
+/// `ActionContext::mentions_destructive_op()` matches a destructive keyword —
+/// `if ctx.mentions_destructive_op() { base.max(T4) }` runs independently of
+/// `change_class`. So picking the *lowest* base tier (StyleOnly/T1) cannot
+/// suppress a destructive escalation: a "drop table" task is forced to T4
+/// regardless. This is exactly the pre-work intent — ordinary work auto-accepts
+/// (T1), destructive text escalates (T4). The passing test
+/// `tests::prework_autonomy_destructive_task_escalates` ("drop table sessions …")
+/// pins this behaviour; if the keyword scan were ever gated on `change_class`,
+/// switch this default to `ChangeClass::Standard` as the conservative floor.
+/// Test: `tests::prework_autonomy_*` (esp. `prework_autonomy_destructive_task_escalates`).
 #[must_use]
 pub fn prework_autonomy_disposition(task: &str) -> Disposition {
     let ctx = ActionContext {
         pending_decision: task.to_string(),
         // Pre-spawn we cannot classify the diff; the destructive-keyword scan in
-        // `evaluate_autonomy_tier` still forces T4 on irreversible task text.
+        // `evaluate_autonomy_tier` (`classify_tier`) forces T4 on irreversible
+        // task text INDEPENDENT of this class, so StyleOnly is the safe default —
+        // it sets the lowest base tier without suppressing destructive escalation.
         change_class: ChangeClass::StyleOnly,
         correlation: SessionCorrelation::new(),
         prior_rejections: 0,
