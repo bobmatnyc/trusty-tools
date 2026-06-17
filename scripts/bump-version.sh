@@ -4,20 +4,18 @@
 # Why: trusty-tools releases each crate independently (tag `<prefix>-v<version>`),
 # and the manual ritual — read the current version, hand-compute the next semver,
 # edit Cargo.toml, regenerate the unreleased CHANGELOG section, then recall the
-# exact tag/push commands — is error-prone. The most common slip is the
-# trusty-git-analytics tag-prefix gotcha (its crate name is `tga` but its release
-# tags are `trusty-git-analytics-v*`). This helper does the mechanical bump and
-# changelog staging, then PRINTS (never runs) the tag/push commands so the human
-# stays in the loop per the repo's manual-tag release convention.
+# exact tag/push commands — is error-prone. This helper does the mechanical bump
+# and changelog staging, then PRINTS (never runs) the tag/push commands so the
+# human stays in the loop per the repo's manual-tag release convention.
 #
 # What: Given a crate directory under crates/ and a bump level
 # (major|minor|patch), reads the package `version = "X.Y.Z"` from
 # crates/<crate-dir>/Cargo.toml, computes the next semver, edits that line in
 # place, then calls scripts/generate-changelog.sh <crate-dir> <tag-prefix> to
-# prepend the unreleased CHANGELOG section. The tag prefix defaults to the
-# crate-dir name; a small lookup table records the only exception
-# (trusty-git-analytics, whose prefix is NOT its `tga` package name). Finally it
-# prints — but does NOT execute — the `git tag` and `git push` commands.
+# prepend the unreleased CHANGELOG section. For every current crate the tag
+# prefix equals the crate-dir name (tag_prefix_for() is the single, easy-to-
+# extend place that derives it). Finally it prints — but does NOT execute — the
+# `git tag` and `git push` commands.
 #
 # Test: `bash -n scripts/bump-version.sh` for syntax and `shellcheck
 # scripts/bump-version.sh` for lint. Functionally, the pure version-bump logic
@@ -36,17 +34,16 @@ set -euo pipefail
 
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Why: encode the ONLY tag-prefix exception so callers never have to remember it.
-# The release tag prefix equals the crate-dir name for every crate EXCEPT
-# trusty-git-analytics, whose package name is `tga` but whose tags are
-# `trusty-git-analytics-v*`. generate-changelog.sh makes the same distinction.
-# What: maps crate-dir -> tag-prefix; any dir not listed defaults to itself.
+# Why: keep a single place where the release tag prefix is derived so it is easy
+# to extend if a crate ever needs a prefix that differs from its directory name.
+# For every CURRENT crate the tag prefix IS the crate directory name — including
+# trusty-git-analytics, whose tags are `trusty-git-analytics-v*` (the cargo
+# *package* short-name `tga` is never used as a tag prefix). The caller already
+# passes the crate-dir, so today this is an identity mapping.
+# What: prints the tag prefix for a given crate-dir.
 tag_prefix_for() {
   local crate_dir="$1"
-  case "${crate_dir}" in
-    trusty-git-analytics) echo "trusty-git-analytics" ;;
-    *) echo "${crate_dir}" ;;
-  esac
+  echo "${crate_dir}"
 }
 
 usage() {
@@ -159,17 +156,41 @@ main() {
     exit 1
   fi
 
+  # Pre-flight (BEFORE mutating any Cargo.toml): the changelog generator must
+  # exist and be executable. Failing here keeps the repo unmodified rather than
+  # leaving it half-bumped (version edited but CHANGELOG never staged).
+  local changelog_script="${WORKSPACE_ROOT}/scripts/generate-changelog.sh"
+  if [[ ! -x "${changelog_script}" ]]; then
+    echo "ERROR: ${changelog_script} is missing or not executable — refusing to" >&2
+    echo "       bump ${manifest} to avoid leaving the repo half-bumped." >&2
+    exit 1
+  fi
+
   local current next prefix
   current="$(read_package_version "${manifest}")"
   next="$(bump_semver "${current}" "${level}")"
   prefix="$(tag_prefix_for "${crate_dir}")"
 
+  # Defensive no-op guard: a computed version equal to the current one means
+  # nothing would change — abort rather than print a misleading "Bumped" line.
+  if [[ "${next}" == "${current}" ]]; then
+    echo "ERROR: computed version ${next} equals current version ${current}; nothing to bump" >&2
+    exit 1
+  fi
+
   write_package_version "${manifest}" "${current}" "${next}"
+
+  # Verify the rewrite actually landed: a silent awk non-match (e.g. an
+  # unexpected manifest layout) must abort here instead of printing "Bumped".
+  if ! grep -qF "version = \"${next}\"" "${manifest}"; then
+    echo "ERROR: version rewrite failed — ${manifest} still contains ${current}" >&2
+    exit 1
+  fi
   echo "Bumped crates/${crate_dir}/Cargo.toml: ${current} -> ${next} (${level})" >&2
 
   # Stage the unreleased CHANGELOG section for this crate's tag series.
   echo "Staging unreleased CHANGELOG section via generate-changelog.sh ..." >&2
-  "${WORKSPACE_ROOT}/scripts/generate-changelog.sh" "${crate_dir}" "${prefix}"
+  "${changelog_script}" "${crate_dir}" "${prefix}"
 
   # Print — but DO NOT RUN — the manual tag/push commands (human stays in loop).
   local tag="${prefix}-v${next}"
