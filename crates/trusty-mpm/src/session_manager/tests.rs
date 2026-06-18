@@ -141,6 +141,100 @@ async fn manager_create_record() {
     assert_eq!(listed[0].id, record.id);
 }
 
+/// A SUCCESSFUL create must DISARM the ownership guard so the freshly-created
+/// tmux session is NOT reaped at the end of the request scope (#1453).
+///
+/// Why: the create path owns the new tmux session via a `TmuxSessionGuard` until
+/// the record is persisted, then hands ownership to the store by disarming. If
+/// disarm were ever dropped from the happy path, every created session would be
+/// killed the instant `create_with_id` returned — a catastrophic regression.
+/// This test pins disarm to the success path: no `kill_session` must occur.
+/// What: creates a session through the manager (which persists successfully via
+/// the temp store) and asserts the fake driver recorded ZERO kill calls.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_create_success_does_not_reap_session() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "keep me alive".into(),
+            Some(PathBuf::from("/tmp/keepalive")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+
+    assert!(
+        fake.kill_calls.lock().unwrap().is_empty(),
+        "a successful create must NOT kill the session it created (guard disarmed); \
+         kills seen: {:?}",
+        fake.kill_calls.lock().unwrap()
+    );
+    // And the session is still tracked.
+    assert_eq!(mgr.get(&record.id).await.unwrap().id, record.id);
+}
+
+/// When the store write FAILS, the orphaned tmux session must be reaped (#1453).
+///
+/// Why: this is the exact failure that produced 159 orphans (#1452). If
+/// `create_session` succeeds but the subsequent `store.upsert` fails, the tmux
+/// session has no owner in the registry — the armed `TmuxSessionGuard` must drop
+/// and kill it so it cannot accumulate as an orphan.
+/// What: makes the store's backing `sessions.json` a NON-EMPTY directory so the
+/// atomic `rename(tmp, sessions.json)` inside `save()` fails, drives a create,
+/// asserts the create returns a `Store` error AND that the fake driver recorded
+/// a `kill_session` for the exact tmux name that was created.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_create_store_failure_reaps_orphan() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    // Sabotage the store: replace `sessions.json` (a file after `load`) with a
+    // NON-EMPTY directory of the same name. `save()` writes `sessions.json.tmp`
+    // then renames it onto `sessions.json`; renaming a file onto a non-empty
+    // directory fails on every supported platform, so `upsert` returns an error
+    // AFTER `create_session` already created the tmux session — the orphan case.
+    let store_path = dir.path().join("sessions.json");
+    let _ = std::fs::remove_file(&store_path);
+    std::fs::create_dir_all(store_path.join("not-empty")).expect("make sessions.json a dir");
+
+    let err = mgr
+        .create(
+            "doomed".into(),
+            Some(PathBuf::from("/tmp/doomed-ws")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("create must fail when the store write fails");
+
+    assert!(
+        matches!(err, ManagedError::Store(_)),
+        "store-write failure must surface as a Store error, got {err:?}"
+    );
+
+    // The orphaned tmux session must have been reaped by the guard's Drop.
+    let kills = fake.kill_calls.lock().unwrap();
+    assert_eq!(
+        kills.len(),
+        1,
+        "exactly one orphaned tmux session must be reaped; kills: {kills:?}"
+    );
+    assert!(
+        kills[0].starts_with("tmpm-"),
+        "the reaped session is the one just created (tmpm- prefix): {}",
+        kills[0]
+    );
+}
+
 #[tokio::test]
 async fn manager_naming_convention() {
     let dir = TempDir::new().unwrap();

@@ -236,6 +236,15 @@ impl SessionManager {
             .create_session(&tmux_name, &workdir)
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
 
+        // OWN the freshly-created tmux session immediately (#1453). From here
+        // until the record is durably persisted, this guard is the session's
+        // sole owner: any early return (e.g. a failing `store.upsert`) drops the
+        // guard and reaps the otherwise-orphaned tmux session. Ownership is
+        // transferred to the persistent store via `disarm` only AFTER upsert
+        // succeeds — closing the window that let 159 orphans accumulate (#1452).
+        let mut tmux_guard =
+            super::session_guard::TmuxSessionGuard::new(tmux_name.clone(), self.tmux.clone());
+
         // Seed the session↔artifact correlation from what we know at creation
         // time (worktree path + branch). PR / issue ids accrue later as the
         // driver pushes work and opens a PR.
@@ -265,6 +274,12 @@ impl SessionManager {
         };
 
         self.store.write().await.upsert(record.clone()).await?;
+
+        // The record is durably persisted; the store/registry now owns the
+        // session's lifetime. Disarm so the guard's drop is a no-op and the
+        // tracked session is NOT reaped at the end of this request scope (#1453).
+        tmux_guard.disarm();
+
         info!(id = %id, name = %tmux_name, runtime = %runtime.as_str(), "managed session created");
         Ok(record)
     }

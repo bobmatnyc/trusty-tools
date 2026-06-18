@@ -720,6 +720,25 @@ use trusty_mpm::daemon::managed_routes::{ResumeManagedError, resume_managed};
 use trusty_mpm::daemon::state::DaemonState;
 use trusty_mpm::runtime::RuntimeKind as ResumeRuntimeKind;
 use trusty_mpm::session_manager::ManagedSessionId as ResumeSessionId;
+use trusty_mpm::session_manager::TmuxSessionGuard;
+
+/// Build an ARMED RAII teardown guard that reaps `tmux_name` on test exit (#1459).
+///
+/// Why: the two tests below seed a session through a `DaemonState` whose session
+/// manager uses the REAL tmux driver when `tmux` is on the host. Without this,
+/// each run leaked a live `tmpm-…` tmux session — those orphans saturated the
+/// host fork limit (epic #1452). Reusing the production [`TmuxSessionGuard`]
+/// (left ARMED — never disarmed) means the session is killed when the guard
+/// drops at the end of the test, on success, failure, OR panic unwind.
+/// What: pulls the manager's real driver via `tmux_driver()` and wraps it in an
+/// armed guard owning `tmux_name`.
+/// Test: exercised by `resume_managed_typed_invalid_state_is_conflict` and
+/// `front_gate_answer_unblocks_spawn`; the guard's own kill/disarm behavior is
+/// unit-tested in `session_manager::session_guard`.
+async fn reap_on_drop(state: &Arc<DaemonState>, tmux_name: &str) -> TmuxSessionGuard {
+    let driver = state.session_manager().await.tmux_driver();
+    TmuxSessionGuard::new(tmux_name.to_string(), driver)
+}
 
 /// Resuming a missing session yields the typed `NotFound` variant (→ HTTP 404).
 ///
@@ -776,18 +795,23 @@ async fn resume_managed_typed_invalid_state_is_conflict() {
     // keeps the name unique even after truncation; rooting it under the hermetic
     // temp dir keeps it isolated.
     let ws = root.path().join(format!("{id}-resume-ws"));
-    mgr.create_with_id(
-        id,
-        "regression: invalid-state resume".to_string(),
-        Some(ws.clone()),
-        None,
-        Some(ws),
-        Some("https://example.com/r.git".to_string()),
-        Some("main".to_string()),
-        ResumeRuntimeKind::default(),
-    )
-    .await
-    .expect("seed session");
+    let seeded = mgr
+        .create_with_id(
+            id,
+            "regression: invalid-state resume".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws),
+            Some("https://example.com/r.git".to_string()),
+            Some("main".to_string()),
+            ResumeRuntimeKind::default(),
+        )
+        .await
+        .expect("seed session");
+
+    // Reap the real tmux session this test created on exit (#1459). Held to the
+    // end of the function so success, failure, or panic all trigger the kill.
+    let _reaper = reap_on_drop(&state, &seeded.tmux_name).await;
 
     let err = resume_managed(&state, &id)
         .await
@@ -835,6 +859,11 @@ async fn front_gate_answer_unblocks_spawn() {
         )
         .await
         .expect("seed session");
+
+    // Reap the real tmux session this test created (and any runtime
+    // `spawn_runtime_for` starts in the SAME `tmux_name`) on exit (#1459). Held
+    // to function end so success, failure, or panic all trigger the kill.
+    let _reaper = reap_on_drop(&state, &record.tmux_name).await;
 
     // Simulate a FRONT-gate escalation: pending decision, still Provisioning.
     mgr.set_pending_decision(&record.id, "conformance divergence", Some("use cursor"))

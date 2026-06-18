@@ -10,6 +10,7 @@
 
 pub mod manager;
 pub mod record;
+pub mod session_guard;
 pub mod store;
 
 #[cfg(test)]
@@ -22,6 +23,7 @@ pub mod real_tmux;
 
 pub use manager::{ManagedError, ManagedTmuxDriver, ReconcileReport, SessionManager};
 pub use record::{ManagedSessionId, ManagedSessionState, RecordError, SessionRecord};
+pub use session_guard::TmuxSessionGuard;
 pub use store::{SessionStore, StoreError};
 
 #[cfg(feature = "daemon")]
