@@ -165,6 +165,26 @@ impl<C: LlmClassifier> ActivityMonitor<C> {
         }
     }
 
+    /// Lock the synchronous sidecar mutex, recovering from poisoning.
+    ///
+    /// Why: a panic while the `summaries` lock is held would poison it and make
+    /// every later `.lock()` return `Err`. The sidecar holds only derived,
+    /// regenerable state (the latest summary + an in-flight bool), so panicking
+    /// the whole daemon over a poisoned sidecar would be a worse failure than
+    /// continuing. We therefore recover the inner guard — but log a `warn!` so
+    /// the recovery is visible in the daemon's stderr logs instead of silently
+    /// masking a panic that happened elsewhere.
+    /// What: returns the locked guard; on poison, emits one `warn!` and returns
+    /// the recovered guard (`PoisonError::into_inner`).
+    /// Test: exercised by every sidecar accessor test
+    /// (`cached_summary_reflects_llm_verdict`, `summarizing_true_during_inference`).
+    fn lock_summaries(&self) -> std::sync::MutexGuard<'_, HashMap<String, SummarySlot>> {
+        self.summaries.lock().unwrap_or_else(|e| {
+            warn!("activity monitor: summaries mutex poisoned, recovering");
+            e.into_inner()
+        })
+    }
+
     /// Return the latest cached LLM-produced summary for a session, if any.
     ///
     /// Why: the coordinator-context poll (`build_coordinator_context`) needs the
@@ -177,7 +197,7 @@ impl<C: LlmClassifier> ActivityMonitor<C> {
     /// when inference is unconfigured — the degraded placeholder is never stored).
     /// Test: `cached_summary_reflects_llm_verdict`, `cached_summary_none_without_check`.
     pub fn cached_summary(&self, session_id: &str) -> Option<String> {
-        let slots = self.summaries.lock().unwrap_or_else(|e| e.into_inner());
+        let slots = self.lock_summaries();
         slots.get(session_id).and_then(|s| s.last_summary.clone())
     }
 
@@ -191,7 +211,7 @@ impl<C: LlmClassifier> ActivityMonitor<C> {
     /// that never starts a real call reports `false`).
     /// Test: `summarizing_flag_is_false_when_idle`, `summarizing_true_during_inference`.
     pub fn is_summarizing(&self, session_id: &str) -> bool {
-        let slots = self.summaries.lock().unwrap_or_else(|e| e.into_inner());
+        let slots = self.lock_summaries();
         slots.get(session_id).is_some_and(|s| s.summarizing)
     }
 
@@ -203,7 +223,7 @@ impl<C: LlmClassifier> ActivityMonitor<C> {
     /// What: synchronously upserts the session's slot and writes `flag`.
     /// Test: covered by `summarizing_true_during_inference`.
     fn set_summarizing(&self, session_id: &str, flag: bool) {
-        let mut slots = self.summaries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slots = self.lock_summaries();
         slots.entry(session_id.to_owned()).or_default().summarizing = flag;
     }
 
@@ -216,7 +236,7 @@ impl<C: LlmClassifier> ActivityMonitor<C> {
     /// What: synchronously upserts the session's slot and writes `summary`.
     /// Test: `cached_summary_reflects_llm_verdict`.
     fn store_summary(&self, session_id: &str, summary: String) {
-        let mut slots = self.summaries.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slots = self.lock_summaries();
         slots.entry(session_id.to_owned()).or_default().last_summary = Some(summary);
     }
 
@@ -676,11 +696,21 @@ mod tests {
             "test-model",
         ));
 
+        // Subscribe to the "entered" notification BEFORE spawning the task that
+        // fires it. `Notify::notified()` only registers the waiter once the
+        // future is polled; `enable()` registers it eagerly here so the
+        // classifier's `notify_one()` (which races with the spawn) cannot be
+        // lost. Without this, a `notify_one()` that fires before we start
+        // awaiting could be dropped, hanging the test forever.
+        let entered_sub = entered.notified();
+        tokio::pin!(entered_sub);
+        entered_sub.as_mut().enable();
+
         let m = monitor.clone();
         let handle = tokio::spawn(async move { m.check("s1", "pane").await });
 
         // Wait until the classifier is inside the call, then observe the flag.
-        entered.notified().await;
+        entered_sub.await;
         assert!(monitor.is_summarizing("s1"));
 
         // Release the call and let it finish; the flag must clear.
