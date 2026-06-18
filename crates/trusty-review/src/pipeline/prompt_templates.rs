@@ -92,7 +92,26 @@ Every other finding uses `category` = "correctness" (the default).
 - `findings`: array of issues found (empty array if none).
   Each finding has: title, body (detailed description), severity (low/medium/high/critical),
   confidence (0.0–1.0), file (source file path), line (null if not applicable),
-  category ("correctness" by default, or "method-conformance" per the rule above).
+  category ("correctness" by default, or "method-conformance" per the rule above),
+  consequence (see below), suggested_replacement (see below).
+
+`consequence`: a brief statement of the FAILURE MECHANISM — what concretely goes
+wrong in practice if this finding is not addressed (e.g. "panics on empty input",
+"silently drops the last row", "leaks the DB connection under load"). One short
+phrase, not a restatement of the issue. Empty string when there is no concrete
+consequence.
+
+`confidence`: be honest — use a LOW value (< 0.6) when you are not sure the
+finding is real; the review will hedge low-confidence findings rather than assert
+them.
+
+`suggested_replacement`: when — and ONLY when — the fix is a concrete code
+replacement for the specific line(s) at `line`, provide the EXACT replacement
+line(s) here so the author can one-click apply them as a GitHub suggestion. Do
+NOT wrap it in a code fence and do NOT put prose in it — just the literal
+replacement code. When the fix is not a concrete line replacement (it spans
+multiple hunks, is advisory, or is best described in words), set it to null and
+explain the fix in `body`.
 
 `confidence` is a float in [0.0, 1.0].
 `line` may be null if no specific line is applicable.
@@ -185,7 +204,26 @@ coverage floor after your response based on the configured policy.
 - `findings`: array of issues found (empty array if none).
   Each finding has: title, body (detailed description), severity (low/medium/high/critical),
   confidence (0.0–1.0), file (source file path), line (null if not applicable),
-  category ("correctness" by default, or "method-conformance" per the rule above).
+  category ("correctness" by default, or "method-conformance" per the rule above),
+  consequence (see below), suggested_replacement (see below).
+
+`consequence`: a brief statement of the FAILURE MECHANISM — what concretely goes
+wrong in practice if this finding is not addressed (e.g. "panics on empty input",
+"silently drops the last row", "leaks the DB connection under load"). One short
+phrase, not a restatement of the issue. Empty string when there is no concrete
+consequence.
+
+`confidence`: be honest — use a LOW value (< 0.6) when you are not sure the
+finding is real; the review will hedge low-confidence findings rather than assert
+them.
+
+`suggested_replacement`: when — and ONLY when — the fix is a concrete code
+replacement for the specific line(s) at `line`, provide the EXACT replacement
+line(s) here so the author can one-click apply them as a GitHub suggestion. Do
+NOT wrap it in a code fence and do NOT put prose in it — just the literal
+replacement code. When the fix is not a concrete line replacement (it spans
+multiple hunks, is advisory, or is best described in words), set it to null and
+explain the fix in `body`.
 
 `confidence` is a float in [0.0, 1.0].
 `line` may be null if no specific line is applicable.

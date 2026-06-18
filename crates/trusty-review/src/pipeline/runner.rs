@@ -16,7 +16,9 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use super::runner_coverage::load_coverage_contrib;
-use super::runner_helpers::{abort_dry, apply_grade_and_floor, fetch_github_pr_meta, finalize_run};
+use super::runner_helpers::{
+    abort_dry, apply_grade_and_floor, attach_inline_comments, fetch_github_pr_meta, finalize_run,
+};
 use crate::{
     config::ReviewConfig,
     coverage::{CoverageVerdictContrib, apply_coverage_floor},
@@ -410,6 +412,12 @@ pub async fn run_review(
         crate::pipeline::letter_grade::clamp_grade_to_verdict(final_grade, &result.verdict)
             .to_string(),
     );
+
+    // 7e: build inline per-line comments from the RAW diff (#1414).  Using the
+    // pre-filter `raw_diff` (not the noise-filtered `diff` sent to the LLM) means
+    // anchors map to the actual PR diff lines GitHub will accept; findings that do
+    // not map to a diff line fall back to the summary body.
+    attach_inline_comments(&mut result, &raw_diff);
 
     finalize_run(result, config, &input, deps.dedup.as_ref()).await
 }

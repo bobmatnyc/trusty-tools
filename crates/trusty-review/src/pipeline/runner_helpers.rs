@@ -13,11 +13,12 @@ use std::sync::Arc;
 use tracing::warn;
 
 use crate::integrations::github::{
-    AuthStrategy, GithubClient, GithubError, RunMode, fetch_pr_metadata,
+    AuthStrategy, CommentableLines, GithubClient, GithubError, RunMode, build_inline_plan,
+    fetch_pr_metadata,
 };
 use crate::{
     config::ReviewConfig,
-    models::{ReviewResult, Verdict},
+    models::{InlineCommentOut, ReviewResult, Verdict},
     pipeline::{
         grade::derive_verdict_with_grade,
         letter_grade::default_grade_for_verdict,
@@ -128,6 +129,41 @@ pub(super) fn abort_dry(
         print_review_result(&result);
     }
     result
+}
+
+/// Build inline per-line comments from the raw diff and attach to the result (#1414).
+///
+/// Why: findings reach posting with only `file` + `line`; to post them as inline
+/// review comments (or, in dry-run, preview them) the runner must map each finding
+/// to a commentable diff line and divert off-diff findings to the summary body.
+/// Computing this here — where the raw, unfiltered diff is available — is the only
+/// place that knows the true PR diff positions GitHub will accept.
+/// What: parses `raw_diff` into a `CommentableLines` index, builds the inline plan
+/// from `result.findings`, and stores the inline comments as `InlineCommentOut` on
+/// the result plus the suppressed-nit count (#1420).  Findings that fall back to the
+/// summary stay in `result.findings` (the body renders the non-inline ones).  A
+/// no-op when there are no findings.
+/// Test: `attach_inline_comments_maps_on_diff` (runner_tests.rs).
+pub(super) fn attach_inline_comments(result: &mut ReviewResult, raw_diff: &str) {
+    if result.findings.is_empty() {
+        return;
+    }
+    let commentable = CommentableLines::from_unified_diff(raw_diff);
+    let plan = build_inline_plan(&result.findings, &commentable);
+    result.suppressed_nits = plan.suppressed_nits;
+    // Carry the authoritative inline/summary partition by finding identity so the
+    // summary body never drops a finding that shares a (file, line) with an inline
+    // one (#1414 silent-omission fix).
+    result.inline_finding_indices = plan.inline_indices;
+    result.inline_comments = plan
+        .comments
+        .into_iter()
+        .map(|c| InlineCommentOut {
+            path: c.path,
+            line: c.line,
+            body: c.body,
+        })
+        .collect();
 }
 
 /// Apply post-or-log finalisation (Phase 1, #582) for a completed review.

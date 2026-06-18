@@ -224,8 +224,27 @@ pub struct Finding {
     pub kind: String,
     /// Human-readable description of the issue.
     pub description: String,
-    /// Proposed fix or remediation suggestion.
+    /// Brief "what goes wrong if unaddressed" — the failure mechanism (#1416).
+    ///
+    /// Why: a finding that states the failure consequence (not just the issue) is
+    /// far more actionable — it tells the author *why it matters* and helps them
+    /// prioritise.  Kept as its own field so the renderer can place it distinctly
+    /// (a `_Why it matters:_` line) rather than burying it in the description.
+    /// `#[serde(default)]` (empty string) keeps every pre-#1416 finding parsing.
+    #[serde(default)]
+    pub consequence: String,
+    /// Proposed fix or remediation suggestion (prose).
     pub suggestion: String,
+    /// Exact replacement code for a committable GitHub `suggestion` block (#1415).
+    ///
+    /// Why: a one-click-appliable GitHub ```suggestion block must contain the
+    /// *exact* replacement lines for the anchored location — not prose.  Keeping
+    /// it in a dedicated field (separate from the prose `suggestion`) lets the
+    /// renderer emit a committable block only when the model provides concrete
+    /// replacement code, and degrade to prose otherwise.  `#[serde(default)]` +
+    /// skip-if-none keeps every pre-#1415 finding deserialising with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_replacement: Option<String>,
     /// Confidence score in `[0.0, 1.0]`.  Clamped at construction time.
     pub confidence: f32,
     /// Estimated remediation effort.
@@ -266,7 +285,9 @@ impl Finding {
             line: None,
             kind: kind.into(),
             description: description.into(),
+            consequence: String::new(),
             suggestion: suggestion.into(),
+            suggested_replacement: None,
             confidence: confidence.clamp(0.0, 1.0),
             effort,
             category: FindingCategory::Correctness,
@@ -288,6 +309,27 @@ impl Finding {
         self.category = category;
         self
     }
+}
+
+// ─── InlineCommentOut ───────────────────────────────────────────────────────────
+
+/// A serialisable inline review comment anchored to a PR diff line (#1414).
+///
+/// Why: the runner builds the inline-comment set from the findings + diff, and it
+/// must be carried on the `ReviewResult` so (a) the live poster can attach it to
+/// the GitHub review and (b) the dry-run / MCP response can preview exactly what
+/// would be posted.  It is a flat, owned projection (no borrows, serde-friendly)
+/// distinct from the posting-layer's internal `InlineComment` type.
+/// What: `path` + `line` are the new-side anchor; `body` is the rendered markdown.
+/// Test: `inline_comment_out_serde_roundtrip`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlineCommentOut {
+    /// Changed file path (new side), e.g. `src/db.rs`.
+    pub path: String,
+    /// New-side line number the comment anchors to.
+    pub line: u32,
+    /// Rendered inline-comment markdown body.
+    pub body: String,
 }
 
 // ─── ReviewResult ─────────────────────────────────────────────────────────────
@@ -325,6 +367,37 @@ pub struct ReviewResult {
     pub grade: Option<String>,
     /// Extracted findings.
     pub findings: Vec<Finding>,
+    /// Per-line inline review comments that were (or, in dry-run, would be)
+    /// posted to the PR diff (#1414).
+    ///
+    /// Why: when posting findings as inline per-line comments, the dry-run /MCP
+    /// response must show the exact set of would-be inline comments so a caller
+    /// can preview what live mode would attach to the diff.  Storing them on the
+    /// result is the single source of truth for both the live POST and the
+    /// dry-run preview.  `#[serde(default)]` keeps every pre-#1414 serialised
+    /// result deserialising with an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline_comments: Vec<InlineCommentOut>,
+    /// Indices (into `findings`) of the findings that were placed inline (#1414).
+    ///
+    /// Why: the summary body must render exactly the findings that did NOT land
+    /// inline.  Deriving that set by matching `(file, line)` against
+    /// `inline_comments` is lossy — two distinct findings at the same anchor
+    /// collide and one is silently omitted from *both* the inline set and the
+    /// summary (data loss).  Carrying the authoritative inline index set from the
+    /// `InlinePlan` lets the renderer partition by finding identity, so no finding
+    /// is ever dropped.  `#[serde(default)]` + skip-if-empty keeps pre-existing
+    /// serialised results deserialising unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline_finding_indices: Vec<usize>,
+    /// Count of low-severity nits suppressed past the inline cap (#1420).
+    ///
+    /// Why: the nit-volume cap rolls overflow nits into one summary line rather
+    /// than spamming inline comments; the count must reach the body renderer (and
+    /// the dry-run / MCP response) so the suppression is acknowledged, not silent.
+    /// `#[serde(default)]` + skip-if-zero keeps pre-#1420 results unchanged.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub suppressed_nits: usize,
 
     // ── Telemetry ─────────────────────────────────────────────────────────
     /// Model id used for the main reviewer call.
@@ -386,6 +459,9 @@ impl ReviewResult {
             verdict: Verdict::Unknown,
             grade: None,
             findings: Vec::new(),
+            inline_comments: Vec::new(),
+            inline_finding_indices: Vec::new(),
+            suppressed_nits: 0,
             model: String::new(),
             input_tokens: 0,
             output_tokens: 0,
@@ -414,6 +490,16 @@ impl ReviewResult {
         self.latency_ms = resp.latency_ms;
         self.review_body = resp.text.clone();
     }
+}
+
+/// Serde skip-predicate: true when a `usize` is zero (#1420).
+///
+/// Why: `#[serde(skip_serializing_if)]` needs a path to a predicate; this keeps
+/// `suppressed_nits: 0` out of serialised results so pre-#1420 logs are unchanged.
+/// What: returns `*n == 0`.
+/// Test: covered transitively by `review_result_serde_roundtrip`.
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Return a simple ISO-8601 UTC timestamp without depending on chrono.
@@ -634,6 +720,43 @@ mod tests {
         let f: Finding = serde_json::from_str(json).expect("legacy finding must deserialise");
         assert_eq!(f.category, FindingCategory::Correctness);
         assert_eq!(f.kind, "logic-error");
+    }
+
+    /// `InlineCommentOut` survives a serde round-trip (#1414).
+    ///
+    /// Why: the dry-run / MCP response serialises `ReviewResult.inline_comments`;
+    /// the projection must round-trip so callers can preview would-be comments.
+    /// What: serialises an `InlineCommentOut`, deserialises it, asserts equality.
+    /// Test: this test itself.
+    #[test]
+    fn inline_comment_out_serde_roundtrip() {
+        let c = InlineCommentOut {
+            path: "src/db.rs".to_string(),
+            line: 42,
+            body: "**security** — SQL injection".to_string(),
+        };
+        let json = serde_json::to_string(&c).expect("serialise");
+        let back: InlineCommentOut = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(back, c);
+    }
+
+    /// A pre-#1414 `ReviewResult` JSON (no `inline_comments`) still deserialises.
+    ///
+    /// Why: `inline_comments` is `#[serde(default)]` so older review logs keep
+    /// loading with an empty inline-comment list.
+    /// What: builds a result, serialises with no comments (skipped when empty),
+    /// re-parses, asserts the field defaults to empty.
+    /// Test: this test itself.
+    #[test]
+    fn review_result_without_inline_comments_defaults_empty() {
+        let result = ReviewResult::new("o", "r", 1, "t", "u");
+        let json = serde_json::to_string(&result).expect("serialise");
+        assert!(
+            !json.contains("inline_comments"),
+            "empty inline_comments is skipped in serialisation"
+        );
+        let back: ReviewResult = serde_json::from_str(&json).expect("deserialise");
+        assert!(back.inline_comments.is_empty());
     }
 
     #[test]

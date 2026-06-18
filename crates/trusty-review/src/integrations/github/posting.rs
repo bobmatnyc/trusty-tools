@@ -1,15 +1,17 @@
-//! Live PR review-comment posting (issue #582 work-item a).
+//! Live PR review-comment posting (issue #582 work-item a; inline comments #1414).
 //!
 //! Why: until Phase 1 the pipeline was always dry-run — it could form a verdict
-//! but never tell the author.  Live mode posts the verdict back as a PR-level
-//! review comment so the review is actually actionable.  We post a *review*
-//! (`POST /pulls/{n}/reviews` with `event: COMMENT`), not per-line inline
-//! comments, mirroring duetto-code-intelligence's `_post_review`.
+//! but never tell the author.  Live mode posts the verdict back as a review so it
+//! is actually actionable.  As of #1414 the review carries *inline per-line
+//! comments* (`POST /pulls/{n}/reviews` with a `comments[]` array, each anchored
+//! to a file + diff line) for every finding that maps to a line in the diff;
+//! findings with no diff anchor are rolled into the review summary body.
 //!
-//! What: `build_review_comment_body` renders the markdown body (a prose summary
-//! followed by a fenced ```json block of the structured verdict + findings, so
-//! both humans and downstream tooling can read it); `post_pr_review` POSTs it
-//! through the shared `GithubClient` using a token from the auth abstraction.
+//! What: `build_review_comment_body` renders the summary body (verdict heading,
+//! prose, a counts header, the non-inline summary findings, and a fenced ```json
+//! block of the structured verdict + findings); `post_pr_review` POSTs it through
+//! the shared `GithubClient` together with the `comments[]` array built from
+//! `result.inline_comments`.
 //!
 //! Firewall note: posting a *review comment* is an explicitly permitted
 //! operation (spec COMPONENTS §pr.rs) — it is read+comment only and does not
@@ -78,20 +80,43 @@ impl VerdictBlock {
 /// Test: `body_contains_signature`.
 pub const REVIEW_SIGNATURE: &str = "<!-- trusty-review -->";
 
-/// Build the markdown body for a PR review comment.
+/// Return the findings that did NOT land inline, in original order (#1414).
 ///
-/// Why: the body must be readable by humans (prose summary, verdict, findings)
-/// and parseable by tooling (the fenced JSON block), matching code-intelligence
-/// so existing consumers keep working.
-/// What: renders the signature, a grade+verdict heading, the LLM prose summary
-/// (or a fallback line, trimmed), and a findings list followed by a trailing
-/// fenced ```json block holding a `VerdictBlock`.  The grade/model/token/cost
-/// footer is NOT generated here — it is appended to `result.review_body` by
-/// `finalize_review` (via `format_review_footer` in `pipeline/post.rs`) before
-/// this function is called, so the footer appears naturally in the prose section
-/// and is identical in both the live GitHub comment and the dry-run/MCP response
-/// (single source of truth for closes #728 + #732).
-/// Test: `body_contains_prose_and_json_block`, `body_contains_signature`.
+/// Why: the summary body must render exactly the findings that were not placed
+/// inline.  Earlier this was derived by matching each finding's `(file, line)`
+/// against `inline_comments` — but two distinct findings can share an anchor, so
+/// a finding that did *not* get an inline comment could be flagged inline and
+/// silently dropped from BOTH the inline set and the summary (data loss).  The
+/// `InlinePlan` already partitions findings authoritatively; its inline index set
+/// is carried on the result, so we partition by identity (index), never coordinate.
+/// What: returns every `findings[i]` whose index `i` is NOT in
+/// `result.inline_finding_indices`.  Order is preserved.
+/// Test: `summary_keeps_same_line_non_inline_finding`,
+/// `body_omits_inline_findings_from_summary`.
+fn summary_findings(result: &ReviewResult) -> Vec<&crate::models::Finding> {
+    result
+        .findings
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !result.inline_finding_indices.contains(i))
+        .map(|(_, f)| f)
+        .collect()
+}
+
+/// Build the markdown summary body for a PR review (#1414).
+///
+/// Why: with inline per-line comments carrying the actionable findings, the
+/// review-level body becomes a *summary*: a verdict heading, the prose, a counts
+/// header, and only the findings that could NOT be anchored inline (off-diff /
+/// file-level).  It stays readable by humans and parseable by tooling (the fenced
+/// JSON block of the full verdict + findings is retained for downstream consumers).
+/// What: renders the signature, a grade+verdict heading, the LLM prose summary (or
+/// a fallback), an inline/summary counts header, the non-inline findings list, and
+/// the trailing fenced ```json `VerdictBlock`.  The grade/model/token/cost footer
+/// is NOT generated here — `finalize_review` appends it to `result.review_body`
+/// before this is called (single source of truth for #728 + #732).
+/// Test: `body_contains_prose_and_json_block`, `body_contains_signature`,
+/// `body_omits_inline_findings_from_summary`.
 pub fn build_review_comment_body(result: &ReviewResult) -> String {
     let mut md = String::with_capacity(1024);
     md.push_str(REVIEW_SIGNATURE);
@@ -117,12 +142,28 @@ pub fn build_review_comment_body(result: &ReviewResult) -> String {
         md.push_str("\n\n");
     }
 
-    // Findings list (human-readable).
-    if result.findings.is_empty() {
-        md.push_str("**Findings:** none\n\n");
+    // Counts header: how many findings landed inline vs. in this summary.
+    let inline_count = result.inline_comments.len();
+    let summary_findings = summary_findings(result);
+    if inline_count > 0 {
+        md.push_str(&format!(
+            "**Findings:** {} total — {inline_count} inline, {} below.\n\n",
+            result.findings.len(),
+            summary_findings.len()
+        ));
+    }
+
+    // Findings list — only the findings NOT posted inline (off-diff / file-level).
+    if summary_findings.is_empty() {
+        if inline_count == 0 {
+            md.push_str("**Findings:** none\n\n");
+        }
     } else {
-        md.push_str(&format!("**Findings ({}):**\n\n", result.findings.len()));
-        for (i, f) in result.findings.iter().enumerate() {
+        md.push_str(&format!(
+            "**General / off-diff findings ({}):**\n\n",
+            summary_findings.len()
+        ));
+        for (i, f) in summary_findings.iter().enumerate() {
             let loc = match f.line {
                 Some(l) => format!("{}:{l}", f.file),
                 None => f.file.clone(),
@@ -139,6 +180,15 @@ pub fn build_review_comment_body(result: &ReviewResult) -> String {
             ));
         }
         md.push('\n');
+    }
+
+    // Suppressed-nit rollup (#1420): one honest line instead of inline nit spam.
+    if result.suppressed_nits > 0 {
+        let plural = if result.suppressed_nits == 1 { "" } else { "s" };
+        md.push_str(&format!(
+            "_+{} more minor nit{plural} suppressed to keep this review focused._\n\n",
+            result.suppressed_nits
+        ));
     }
 
     // Embedded structured block — fenced JSON, mirroring code-intelligence.
@@ -190,13 +240,38 @@ fn review_event(_verdict: &Verdict) -> &'static str {
     "COMMENT"
 }
 
-/// Post a completed review to a GitHub PR as a review comment.
+/// Build the `comments[]` array for the review from inline comments (#1414).
 ///
-/// Why: the live half of the runner's post-or-log decision — it makes the
-/// review visible on the PR.  Routed through the auth abstraction's resolved
-/// token so it works identically in CLI (PAT/`gh`) and service (App) modes.
-/// What: `POST /repos/{owner}/{repo}/pulls/{pr}/reviews` with a `COMMENT` event
-/// and the markdown body from `build_review_comment_body`.  Returns the created
+/// Why: GitHub's review API attaches per-line comments via a `comments[]` array,
+/// each entry anchored with the modern `line` + `side: RIGHT` format (the new-side
+/// diff line).  Building it here keeps `post_pr_review` a thin POST.
+/// What: maps each `result.inline_comments` entry to `{path, line, side, body}`.
+/// Returns an empty vec when there are no inline comments (a plain summary review).
+/// Test: `inline_comments_payload_shape` (asserts the per-comment JSON shape).
+fn build_inline_comments_payload(result: &ReviewResult) -> Vec<serde_json::Value> {
+    result
+        .inline_comments
+        .iter()
+        .map(|c| {
+            json!({
+                "path": c.path,
+                "line": c.line,
+                "side": "RIGHT",
+                "body": c.body,
+            })
+        })
+        .collect()
+}
+
+/// Post a completed review to a GitHub PR with inline per-line comments (#1414).
+///
+/// Why: the live half of the runner's post-or-log decision — it makes the review
+/// visible on the PR.  Routed through the auth abstraction's resolved token so it
+/// works identically in CLI (PAT/`gh`) and service (App) modes.
+/// What: `POST /repos/{owner}/{repo}/pulls/{pr}/reviews` with a `COMMENT` event,
+/// the summary `body` from `build_review_comment_body`, and a `comments[]` array
+/// of inline per-line comments built from `result.inline_comments`.  The
+/// `comments` key is omitted when there are none.  Returns the created
 /// `PostedReview` on success or a typed `GithubError`.
 /// Test: `post_pr_review_transport_error_on_unreachable` (network-free); the
 /// happy path requires a live PR and is covered by `#[ignore]` integration tests.
@@ -212,10 +287,16 @@ pub async fn post_pr_review(
     let event = review_event(&result.verdict);
     let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr}/reviews");
 
-    let payload = json!({
+    let comments = build_inline_comments_payload(result);
+    let mut payload = json!({
         "body": body,
         "event": event,
     });
+    if !comments.is_empty()
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert("comments".to_string(), serde_json::Value::Array(comments));
+    }
 
     let resp = client
         .http
@@ -325,6 +406,130 @@ mod tests {
         result.review_body = String::new();
         let body = build_review_comment_body(&result);
         assert!(body.contains("No narrative summary"));
+    }
+
+    #[test]
+    fn body_omits_inline_findings_from_summary() {
+        // A finding that was posted inline must not be duplicated in the summary
+        // findings list; an off-diff finding (no matching inline comment) stays.
+        let mut result = sample_result();
+        // The sole finding (index 0) is at src/db.rs:42 → mark it inline.
+        result
+            .inline_comments
+            .push(crate::models::InlineCommentOut {
+                path: "src/db.rs".to_string(),
+                line: 42,
+                body: "**security** — SQL injection".to_string(),
+            });
+        result.inline_finding_indices = vec![0];
+        let body = build_review_comment_body(&result);
+        // Counts header reflects the inline placement.
+        assert!(
+            body.contains("1 inline"),
+            "counts header must show inline count: {body}"
+        );
+        // The inline finding is NOT re-listed under the off-diff section.
+        assert!(
+            !body.contains("**General / off-diff findings"),
+            "no off-diff section when the only finding went inline: {body}"
+        );
+    }
+
+    #[test]
+    fn summary_keeps_same_line_non_inline_finding() {
+        // Two DISTINCT findings at the SAME file+line: one is placed inline, the
+        // other is NOT.  The non-inline one must appear in the summary body — it
+        // must never be silently dropped just because it shares a coordinate with
+        // an inline finding (the #1414 silent-omission regression this fix closes).
+        let mut result = sample_result(); // findings[0] @ src/db.rs:42
+        let mut second = Finding::new(
+            "src/db.rs",
+            "performance",
+            "N+1 query in the same hot path",
+            "Batch the lookups",
+            0.80,
+            Effort::Medium,
+        );
+        second.line = Some(42); // SAME (file, line) as findings[0]
+        result.findings.push(second); // findings[1]
+
+        // Only findings[0] became an inline comment; findings[1] fell back.
+        result
+            .inline_comments
+            .push(crate::models::InlineCommentOut {
+                path: "src/db.rs".to_string(),
+                line: 42,
+                body: "**security** — SQL injection".to_string(),
+            });
+        result.inline_finding_indices = vec![0];
+
+        let body = build_review_comment_body(&result);
+
+        // The non-inline finding (index 1) must be rendered in the summary body.
+        assert!(
+            body.contains("N+1 query in the same hot path"),
+            "the non-inline same-line finding must appear in the summary body \
+             (never silently dropped): {body}"
+        );
+        // The off-diff / summary section header must be present and report 1 finding.
+        assert!(
+            body.contains("**General / off-diff findings (1):**"),
+            "summary section must list exactly the one non-inline finding: {body}"
+        );
+        // Counts header: 2 total — 1 inline, 1 below. Neither finding is lost.
+        assert!(
+            body.contains("2 total — 1 inline, 1 below"),
+            "counts header must account for every finding: {body}"
+        );
+    }
+
+    #[test]
+    fn inline_comments_payload_shape() {
+        let mut result = sample_result();
+        result
+            .inline_comments
+            .push(crate::models::InlineCommentOut {
+                path: "src/db.rs".to_string(),
+                line: 42,
+                body: "**security** — use a bind param".to_string(),
+            });
+        let payload = build_inline_comments_payload(&result);
+        assert_eq!(payload.len(), 1);
+        assert_eq!(payload[0]["path"], "src/db.rs");
+        assert_eq!(payload[0]["line"], 42);
+        assert_eq!(payload[0]["side"], "RIGHT");
+        assert!(payload[0]["body"].as_str().unwrap().contains("bind param"));
+    }
+
+    #[test]
+    fn body_renders_suppressed_nit_rollup() {
+        // The suppressed-nit count surfaces as one summary line (#1420).
+        let mut result = sample_result();
+        result.suppressed_nits = 7;
+        let body = build_review_comment_body(&result);
+        assert!(
+            body.contains("+7 more minor nits suppressed"),
+            "rollup line must appear: {body}"
+        );
+    }
+
+    #[test]
+    fn body_no_rollup_when_zero_suppressed() {
+        let result = sample_result(); // suppressed_nits defaults to 0
+        let body = build_review_comment_body(&result);
+        assert!(
+            !body.contains("suppressed"),
+            "no rollup line when nothing suppressed: {body}"
+        );
+    }
+
+    #[test]
+    fn payload_empty_when_no_inline_comments() {
+        let result = sample_result();
+        assert!(
+            build_inline_comments_payload(&result).is_empty(),
+            "no inline comments → empty comments[] (plain summary review)"
+        );
     }
 
     #[test]

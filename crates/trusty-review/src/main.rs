@@ -33,7 +33,9 @@ use commands::serve::{ServeArgs, cmd_serve};
 /// An LLM-backed code reviewer that fetches PR diffs, retrieves code context
 /// from trusty-search, and produces structured review verdicts.
 ///
-/// All reviews are dry-run by default (no comments posted to GitHub).
+/// Reviews are dry-run by default (no comments posted to GitHub). `run` and
+/// `serve` post live when posting is enabled — set `PR_INTELLIGENCE_DRY_RUN=false`
+/// to allow live PR comments.
 #[derive(Debug, Parser)]
 #[command(
     name = "trusty-review",
@@ -58,9 +60,11 @@ enum Commands {
     /// Run a single PR review with the default (or overridden) reviewer model.
     ///
     /// Fetches the PR diff from GitHub and runs the LLM review pipeline.
-    /// Always dry-run in the MVP (no comment posted to GitHub).
+    /// Dry-run by default (no comment posted). Posts the review live to the PR
+    /// when posting is enabled — set `PR_INTELLIGENCE_DRY_RUN=false` to allow it.
     ///
-    /// Use --local-diff to review a local unified diff file without GitHub.
+    /// Use --local-diff to review a local unified diff file without GitHub
+    /// (local-diff is always dry-run — it can never post).
     Run(RunArgs),
 
     /// Compare the same PR across multiple models to evaluate speed/cost/quality.
@@ -95,12 +99,13 @@ enum Commands {
     /// Exposes:
     ///   GET  /health                  — liveness + dep status
     ///   GET  /status                  — in-flight count + last error
-    ///   POST /review                  — synchronous on-demand review (dry-run)
+    ///   POST /review                  — synchronous on-demand review
     ///   POST /pr/github/webhook       — GitHub PR webhook (HMAC-validated)
     ///
     /// Pass --stdio to run as a MCP JSON-RPC stdio service instead.
     ///
-    /// All reviews are dry-run (no comments posted to GitHub).
+    /// Dry-run by default (no comments posted). Posts reviews live to the PR
+    /// when posting is enabled — set `PR_INTELLIGENCE_DRY_RUN=false` to allow it.
     /// Graceful shutdown on SIGTERM/SIGINT (in-flight requests are drained).
     #[cfg(feature = "http-server")]
     Serve(ServeArgs),

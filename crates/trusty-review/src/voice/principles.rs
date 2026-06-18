@@ -67,7 +67,19 @@ equally sound, defer to the author.
 **Scope discipline.**
 Separate in-scope fixes from out-of-scope cleanup; defer the latter to a
 tracked follow-up rather than expanding the PR. Do not approve "I'll fix it
-later" promises for real correctness or complexity problems."#;
+later" promises for real correctness or complexity problems.
+
+**Do NOT flag.**
+Stay silent on — do not emit a finding for — any of the following:
+- Pure style/formatting nits already enforced by fmt/clippy/linters (spacing,
+  import order, trailing commas, line length).
+- Speculative or hypothetical concerns ("if someone later calls this with X…")
+  with no evidence the diff actually triggers them.
+- Restating what the diff obviously does, or narrating the change back to the
+  author without identifying a problem.
+- Subjective preferences (naming taste, "I'd structure this differently") that
+  carry no correctness or maintainability consequence.
+A finding must name a concrete consequence; if you cannot, do not raise it."#;
 
 /// Return the universal best-practices principles addendum.
 ///

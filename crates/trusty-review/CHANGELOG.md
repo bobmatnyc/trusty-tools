@@ -6,6 +6,58 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.4.0] — 2026-06-18
+
+### Added — output fidelity (epic #1413)
+
+- **Inline per-line PR comments (#1414).** Findings now post as inline review
+  comments anchored to the exact file + diff line via the GitHub reviews API
+  `comments[]` array, instead of being concatenated into one summary comment. A
+  finding whose line is not in the PR diff (or has no line) falls back to the
+  review summary body rather than failing the post. The would-be inline comments
+  are carried on `ReviewResult.inline_comments` so dry-run / the MCP response
+  previews exactly what live mode would post.
+- **Committable `suggestion` blocks (#1415).** Findings that carry a concrete code
+  fix render a one-click-appliable GitHub ```suggestion block (new
+  `Finding.suggested_replacement` field). Malformed or multi-line/prose
+  replacements degrade to a prose fix, never a broken block.
+- **Consequence + uncertainty signaling (#1416).** Findings carry a new
+  `consequence` field ("what goes wrong if unaddressed"), rendered as a
+  `_Why it matters:_` line. Low-confidence findings (`confidence < 0.6`) are
+  hedged ("This may be an issue: …") rather than asserted.
+- **Nit-volume cap + what-not-to-flag guardrails (#1420).** At most 5 low-severity
+  nits post inline; the overflow rolls up into a single "+N more minor nits
+  suppressed" summary line. The reviewer prompt gains a concise "do NOT flag"
+  section (linter-enforced style, speculative/hypothetical concerns, restating
+  the diff, and consequence-free preferences).
+
+### Fixed
+
+- **Summary body no longer silently drops same-line findings (#1414).** The
+  review summary previously decided which findings to render by matching each
+  finding's `(file, line)` against the posted inline comments. Two distinct
+  findings at the same `(file, line)` collided: one could be flagged as "inline"
+  and then dropped from *both* the inline set and the summary body. The summary
+  now partitions by finding identity using the authoritative inline index set
+  carried on `ReviewResult.inline_finding_indices` (populated from the
+  `InlinePlan`), so every non-inline finding is rendered and none is lost.
+- **`github_issues` context query clamped to GitHub's 256-char limit.** An
+  over-long assembled search query (`repo:… is:issue <keywords>`) caused the
+  GitHub Search API to return HTTP 422 ("The search is longer than 256
+  characters"), silently skipping the GitHub Issues context section. The query
+  is now truncated to ≤256 chars at a word boundary (debug-logged when it
+  occurs).
+- **Corrected stale CLI help text.** `run`/`serve` help no longer claims reviews
+  are "always dry-run, no comments posted" — they post live when posting is
+  enabled (dry-run by default, controlled by `PR_INTELLIGENCE_DRY_RUN`).
+
+### Compatibility
+
+- New finding fields (`consequence`, `suggested_replacement`) and the
+  `inline_comments` / `inline_finding_indices` / `suppressed_nits` result fields
+  are all `#[serde(default)]` and remain OpenAI strict-mode compliant, so
+  older/looser model responses and pre-0.4.0 review logs still parse unchanged.
+
 ## [0.3.16] — 2026-06-18
 
 ### Changed
