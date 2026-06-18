@@ -482,6 +482,95 @@ fn enrichment_survives_inheritance_chain() {
 }
 
 #[test]
+fn initial_prompt_with_embedded_quote_round_trips() {
+    // A source initialPrompt containing an embedded double-quote must emit
+    // valid, parseable frontmatter and survive a compose→re-compose cycle
+    // verbatim (the embedded quote is escaped on emit, decoded on re-parse).
+    let tmp = TempDir::new().unwrap();
+    let original = r#"Run the "fast path" then stop."#;
+    write_agent(
+        tmp.path(),
+        "quoted",
+        &format!("---\nname: quoted\nrole: engineer\ninitialPrompt: {original}\n---\n\n# Quoted\n"),
+    );
+
+    let composed = compose_agent("quoted", tmp.path()).unwrap();
+    // Emitted line must escape the inner quotes — never a bare `"` that would
+    // prematurely close the YAML scalar.
+    assert!(
+        composed.contains(r#"initialPrompt: "Run the \"fast path\" then stop.""#),
+        "embedded quote must be escaped in emitted frontmatter; got:\n{composed}"
+    );
+
+    // Round-trip: feed the composed file back through compose_agent. The
+    // emitted camelCase key re-parses, the escapes decode, and the prompt is
+    // recovered unchanged.
+    write_agent(tmp.path(), "quoted2", &composed);
+    let (fm, _) = split_frontmatter(&composed).expect("composed frontmatter must re-parse");
+    assert_eq!(
+        fm.initial_prompt.as_deref(),
+        Some(original),
+        "initialPrompt must survive the compose→re-parse cycle verbatim"
+    );
+
+    // And a full re-compose of the round-tripped file emits the same line.
+    let recomposed = compose_agent("quoted2", tmp.path()).unwrap();
+    assert!(
+        recomposed.contains(r#"initialPrompt: "Run the \"fast path\" then stop.""#),
+        "re-composed frontmatter must be stable; got:\n{recomposed}"
+    );
+}
+
+#[test]
+fn initial_prompt_with_backslash_round_trips() {
+    // A backslash in the prompt must be escaped (`\` → `\\`) on emit and
+    // decoded on re-parse so a path-like or regex-like prompt survives.
+    let tmp = TempDir::new().unwrap();
+    let original = r#"Use the C:\path and the \d+ pattern."#;
+    write_agent(
+        tmp.path(),
+        "slash",
+        &format!("---\nname: slash\nrole: engineer\ninitialPrompt: {original}\n---\n\n# Slash\n"),
+    );
+    let composed = compose_agent("slash", tmp.path()).unwrap();
+    let (fm, _) = split_frontmatter(&composed).expect("composed frontmatter must re-parse");
+    assert_eq!(
+        fm.initial_prompt.as_deref(),
+        Some(original),
+        "backslash-bearing initialPrompt must round-trip verbatim; got:\n{composed}"
+    );
+}
+
+#[test]
+fn initial_prompt_role_default_round_trips() {
+    // The role-derived default prompt (no source initialPrompt) must also be
+    // stable across a compose→re-compose cycle, confirming the in-lower /
+    // out-camel key convention round-trips.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "eng",
+        "---\nname: eng\nrole: engineer\n---\n\n# Eng\n",
+    );
+    let composed = compose_agent("eng", tmp.path()).unwrap();
+    let (fm, _) = split_frontmatter(&composed).expect("composed frontmatter must re-parse");
+    assert_eq!(
+        fm.initial_prompt.as_deref(),
+        Some("Begin implementation. Read the task context and start coding immediately."),
+        "role default initialPrompt must re-parse unchanged; got:\n{composed}"
+    );
+    // Re-composing the round-tripped file yields identical frontmatter for the
+    // initialPrompt line (camelCase key, escaped scalar).
+    write_agent(tmp.path(), "eng2", &composed);
+    let recomposed = compose_agent("eng2", tmp.path()).unwrap();
+    let first_line = "initialPrompt: \"Begin implementation.";
+    assert!(
+        composed.contains(first_line) && recomposed.contains(first_line),
+        "initialPrompt line must be stable across the cycle"
+    );
+}
+
+#[test]
 fn case_insensitive_resolve_via_map() {
     // Write `BASE-QA.md` (UPPERCASE stem, as shipped in the bundle) and a
     // concrete `qa.md` that extends it via the lowercase name `base-qa`.

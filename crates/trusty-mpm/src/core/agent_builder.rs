@@ -153,7 +153,9 @@ struct Frontmatter {
 /// provisioned from either toolchain behaves identically.
 /// What: maps `intensive → opus`, `high/standard → sonnet`,
 /// `lightweight → haiku`; any missing or unrecognised tier falls back to the
-/// `standard` default (`sonnet`), per the HR-1 error contract.
+/// `standard` default (`sonnet`), per the HR-1 error contract. The bare names
+/// `opus`/`sonnet`/`haiku` are the harness's accepted short model identifiers
+/// (the same short forms the rest of trusty-mpm uses to name models).
 /// Test: `tier_model_mapping`, `tier_unknown_falls_back_to_sonnet` in
 /// agent_builder_tests.rs.
 fn tier_to_model(resource_tier: Option<&str>) -> &'static str {
@@ -211,6 +213,18 @@ fn default_initial_prompt(role: Option<&str>) -> Option<&'static str> {
 /// the whole document is the body.
 /// Test: `compose_base_only` (frontmatter present), bodies verified in
 /// `compose_engineer_chain`.
+///
+/// ## Key-case convention (in-lower / out-camel)
+///
+/// [`parse_kv_line`] lower-cases every key, so `initialPrompt` is read back as
+/// `initialprompt` here. [`merge_frontmatter`] deliberately *emits* the
+/// camelCase `initialPrompt` (the form Claude Code expects). The asymmetry is
+/// intentional and round-trip-safe: feeding a composed file back through
+/// `compose_agent` re-lower-cases the emitted `initialPrompt` to `initialprompt`
+/// and lands on this same struct field, so a compose→deploy→re-compose cycle is
+/// stable. The escaped scalar value is decoded via
+/// [`unescape_yaml_double_quoted`] so the original prompt text (including any
+/// embedded `"`/`\`) survives the cycle verbatim.
 fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), AgentBuildError> {
     let trimmed_start = raw.trim_start_matches(['\u{feff}']);
     let mut lines = trimmed_start.lines();
@@ -265,8 +279,12 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), AgentBuildError
         model: fields.remove("model"),
         extends: fields.remove("extends"),
         // `parse_kv_line` lower-cases keys, so `initialPrompt` arrives as
-        // `initialprompt`; match that normalised form.
-        initial_prompt: fields.remove("initialprompt"),
+        // `initialprompt`; match that normalised form. Decode the YAML
+        // double-quote escapes (`parse_kv_line` already stripped the single
+        // outer quote pair) so a re-composed prompt round-trips verbatim.
+        initial_prompt: fields
+            .remove("initialprompt")
+            .map(|v| unescape_yaml_double_quoted(&v)),
         resource_tier: fields.remove("resource_tier"),
     };
     Ok((fm, body))
@@ -284,6 +302,52 @@ fn first_line_len(s: &str) -> usize {
         Some(idx) => idx + 1,
         None => s.len(),
     }
+}
+
+/// Escape a string for emission inside a YAML double-quoted scalar.
+///
+/// Why: `merge_frontmatter` wraps the `initialPrompt` value in double-quotes.
+/// A raw `"` or `\` in the value would otherwise terminate the quote early or
+/// be misread as an escape, producing malformed YAML. claude-mpm parity
+/// requires the emitted frontmatter always be parseable.
+/// What: replaces `\` with `\\` and `"` with `\"` (backslash first, so the
+/// quote-escape's own backslash is not doubled). The exact inverse of
+/// [`unescape_yaml_double_quoted`].
+/// Test: `initial_prompt_with_embedded_quote_round_trips`,
+/// `initial_prompt_with_backslash_round_trips` in agent_builder_tests.rs.
+fn escape_yaml_double_quoted(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Reverse [`escape_yaml_double_quoted`] on a parsed scalar value.
+///
+/// Why: a value parsed back from emitted frontmatter still carries the `\"`
+/// and `\\` escapes after [`parse_kv_line`] strips the single outer quote pair.
+/// Decoding them here makes a compose→deploy→re-compose round-trip yield the
+/// original `initialPrompt` string unchanged.
+/// What: collapses `\\` → `\` and `\"` → `"`; any other `\x` sequence (and a
+/// trailing lone `\`) is left verbatim so non-escaped backslashes survive.
+/// Test: `initial_prompt_with_embedded_quote_round_trips`,
+/// `initial_prompt_with_backslash_round_trips` in agent_builder_tests.rs.
+fn unescape_yaml_double_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Render a single merged frontmatter block from a resolved chain.
@@ -355,10 +419,16 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
         out.push_str(&format!("resource_tier: {v}\n"));
     }
     if let Some(v) = &merged.initial_prompt {
-        // Quote the value: it contains spaces and punctuation, and downstream
-        // YAML parsers treat an unquoted `initialPrompt` sentence safely either
-        // way, but quoting keeps it a single scalar.
-        out.push_str(&format!("initialPrompt: \"{v}\"\n"));
+        // Emit a YAML double-quoted scalar. The value is escaped so a `"` or
+        // `\` inside the prompt cannot break out of the quotes and produce
+        // malformed YAML. `escape_yaml_double_quoted` is the exact inverse of
+        // the `unescape_yaml_double_quoted` decode applied in
+        // `split_frontmatter`, so a compose→deploy→re-compose round-trip is
+        // stable (see the in-lower/out-camel note on `split_frontmatter`).
+        out.push_str(&format!(
+            "initialPrompt: \"{}\"\n",
+            escape_yaml_double_quoted(v)
+        ));
     }
     out.push_str("---\n");
     out
