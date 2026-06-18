@@ -10,6 +10,10 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use super::banner::{
+    GLYPH_ACTIVE, GLYPH_UNREACHABLE, HELP_HINT, ProbeOutcome, USER_PALACE, compose_banner,
+    ensure_user_palace_with, probe_client, probe_memory, probe_search,
+};
 use super::events::{SlashCommand, handle_key, is_quit, parse_slash};
 use super::layout::{
     CATALOG_STALE_HINT, CONTROLLER_STATUS, DAEMON_REACHABLE, DAEMON_UNREACHABLE, INPUT_PROMPT,
@@ -544,5 +548,314 @@ async fn poll_marks_unreachable_clears_sessions() {
     assert_eq!(
         state.selected, 0,
         "clearing the list clamps the selection back to the controller row"
+    );
+}
+
+// ---- STUI-0 banner --------------------------------------------------------
+
+/// Why: §3.1 fixes the banner's first line to `trusty-mpm sessions v<version>`;
+/// the composition must embed the crate `CARGO_PKG_VERSION` verbatim so the
+/// operator sees which build is running.
+/// What: composes a banner and asserts the version line is present with the
+/// compile-time version.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_includes_name_and_version() {
+    let banner = compose_banner(
+        env!("CARGO_PKG_VERSION"),
+        &ProbeOutcome::active(None),
+        &ProbeOutcome::active(None),
+        Some(3),
+    );
+    let expected = format!("trusty-mpm sessions  v{}", env!("CARGO_PKG_VERSION"));
+    assert!(
+        banner.lines().next() == Some(expected.as_str()),
+        "banner must lead with the name + version line, got:\n{banner}"
+    );
+}
+
+/// Why: §3.1 pins the active glyph `●` and the word `active` for a reachable
+/// backplane; both memory and search lines must render them.
+/// What: composes an all-active banner and asserts each service line carries
+/// the active glyph + word.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_active_shows_glyphs() {
+    let banner = compose_banner(
+        "1.2.3",
+        &ProbeOutcome::active(None),
+        &ProbeOutcome::active(None),
+        Some(2),
+    );
+    assert!(
+        banner.contains(&format!("memory  {GLYPH_ACTIVE} active")),
+        "active memory must show `● active`, got:\n{banner}"
+    );
+    assert!(
+        banner.contains(&format!("search  {GLYPH_ACTIVE} active")),
+        "active search must show `● active`, got:\n{banner}"
+    );
+}
+
+/// Why: §3.1 error conditions require an unreachable service to render
+/// `○ unreachable` (a glyph distinct from active) without aborting — so the
+/// composer must emit it for a down probe.
+/// What: composes a banner with both services unreachable and asserts the
+/// unreachable glyph + word appear for each.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_unreachable_shows_glyphs() {
+    let banner = compose_banner(
+        "1.2.3",
+        &ProbeOutcome::unreachable(None),
+        &ProbeOutcome::unreachable(None),
+        Some(0),
+    );
+    assert!(
+        banner.contains(&format!("memory  {GLYPH_UNREACHABLE} unreachable")),
+        "down memory must show `○ unreachable`, got:\n{banner}"
+    );
+    assert!(
+        banner.contains(&format!("search  {GLYPH_UNREACHABLE} unreachable")),
+        "down search must show `○ unreachable`, got:\n{banner}"
+    );
+}
+
+/// Why: decision D4 confirms memory against the fixed `user` palace; the banner
+/// must surface that palace as a parenthetical note so the operator sees WHICH
+/// palace was checked.
+/// What: composes a banner whose memory outcome carries the `palace: user` note
+/// and asserts the rendered memory line includes it.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_active_shows_palace_note() {
+    let banner = compose_banner(
+        "0.1.0",
+        &ProbeOutcome::active(Some(format!("palace: {USER_PALACE}"))),
+        &ProbeOutcome::active(None),
+        Some(1),
+    );
+    assert!(
+        banner.contains(&format!("(palace: {USER_PALACE})")),
+        "memory line must note the `user` palace per D4, got:\n{banner}"
+    );
+}
+
+/// Why: §3.1 requires the startup line to point operators at `/help`.
+/// What: composes a banner and asserts the final line carries the `/help` hint.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_appends_help_hint() {
+    let banner = compose_banner(
+        "0.1.0",
+        &ProbeOutcome::active(None),
+        &ProbeOutcome::active(None),
+        Some(4),
+    );
+    let last = banner.lines().last().unwrap_or_default();
+    assert!(
+        last.ends_with(HELP_HINT),
+        "startup line must end with the /help hint, got: {last:?}"
+    );
+    assert!(
+        last.starts_with("4 active sessions"),
+        "startup line must lead with the active-session count, got: {last:?}"
+    );
+}
+
+/// Why: a single active session must read naturally (`1 active session`, not
+/// `1 active sessions`); the count line pluralises on the count.
+/// What: composes banners for counts 0, 1, and 5 and asserts the exact lead.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_pluralizes_count() {
+    let line_for = |n: usize| {
+        let banner = compose_banner(
+            "0.1.0",
+            &ProbeOutcome::active(None),
+            &ProbeOutcome::active(None),
+            Some(n),
+        );
+        banner.lines().last().unwrap_or_default().to_string()
+    };
+    assert!(line_for(0).starts_with("0 active sessions"));
+    assert!(line_for(1).starts_with("1 active session  ·"));
+    assert!(line_for(5).starts_with("5 active sessions"));
+}
+
+/// Why: when the daemon is unreachable at startup the count is unknown; the
+/// banner must say so rather than render a misleading `0 active sessions`.
+/// What: composes a banner with `active_count = None` and asserts the startup
+/// line reports `daemon unreachable` while still carrying the `/help` hint.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_handles_unknown_count() {
+    let banner = compose_banner(
+        "0.1.0",
+        &ProbeOutcome::unreachable(None),
+        &ProbeOutcome::unreachable(None),
+        None,
+    );
+    let last = banner.lines().last().unwrap_or_default();
+    assert!(
+        last.starts_with("daemon unreachable"),
+        "unknown count must read `daemon unreachable`, got: {last:?}"
+    );
+    assert!(
+        last.ends_with(HELP_HINT),
+        "the /help hint must remain even when the count is unknown, got: {last:?}"
+    );
+}
+
+/// Why: §3.1 makes probes fail-safe — a down search daemon yields `○ unreachable`
+/// and never panics or hangs the TUI.
+/// What: probes a guaranteed-dead loopback address and asserts the outcome is
+/// inactive.
+/// Test: this IS the test.
+#[tokio::test]
+async fn probe_unreachable_search_is_inactive() {
+    let outcome = probe_search(Some(&dead_loopback_url())).await;
+    assert!(
+        !outcome.active,
+        "an unreachable search daemon must probe inactive"
+    );
+}
+
+/// Why: §3.1 + D4 make the memory probe fail-safe — a down memory daemon yields
+/// `○ unreachable` with a reason and never panics.
+/// What: probes a guaranteed-dead loopback address and asserts the outcome is
+/// inactive and carries a reason note.
+/// Test: this IS the test.
+#[tokio::test]
+async fn probe_unreachable_memory_is_inactive() {
+    let outcome = probe_memory(Some(&dead_loopback_url())).await;
+    assert!(
+        !outcome.active,
+        "an unreachable memory daemon must probe inactive"
+    );
+    assert!(
+        outcome.note.is_some(),
+        "a degraded memory probe should carry a reason note"
+    );
+}
+
+/// Why: the print site composes the banner and prints it with `eprintln!`; if the
+/// composed banner itself ended with a newline AND `startup_line` also ended with
+/// one, the operator would see two blank lines. The contract is a single trailing
+/// newline so the print site yields exactly one blank separator.
+/// What: composes a banner and asserts it ends with exactly one `\n` (not two and
+/// not zero).
+/// Test: this IS the test.
+#[test]
+fn compose_banner_has_single_trailing_newline() {
+    let banner = compose_banner(
+        "0.1.0",
+        &ProbeOutcome::active(None),
+        &ProbeOutcome::active(None),
+        Some(2),
+    );
+    assert!(
+        banner.ends_with('\n'),
+        "composed banner must end with a newline, got:\n{banner:?}"
+    );
+    assert!(
+        !banner.ends_with("\n\n"),
+        "composed banner must NOT end with a double newline, got:\n{banner:?}"
+    );
+}
+
+/// Spawn a one-shot HTTP mock that answers the FIRST request with `status_line`
+/// and records whether a SECOND request (the would-be `POST` create) ever
+/// arrives, signalling that via the returned watch channel.
+///
+/// Why: `ensure_user_palace_with` must only POST a create on a real 404. To prove
+/// it does NOT create on a non-404 error, the test needs to observe whether a
+/// second connection (the POST) is attempted at all.
+/// What: binds an ephemeral port; the first accepted connection replies with
+/// `status_line`; if a second connection arrives it flips `post_seen` to `true`
+/// and replies `200 OK`. Returns the base URL and a receiver for `post_seen`.
+/// Test: used by `ensure_user_palace_does_not_create_on_non_404`.
+async fn spawn_palace_mock(
+    status_line: &'static str,
+) -> (String, tokio::sync::watch::Receiver<bool>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let (tx, rx) = tokio::sync::watch::channel(false);
+
+    tokio::spawn(async move {
+        // First request: the GET palace lookup → reply with the given status.
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let body = "{}";
+            let resp = format!(
+                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+        // Any SECOND request means a create POST was attempted — record it.
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let _ = tx.send(true);
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let resp =
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_string();
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+
+    (format!("http://{addr}"), rx)
+}
+
+/// Why: the review flagged that `ensure_user_palace` over-eagerly created the
+/// palace — any non-2xx GET (including a transient `500`/`503`) fell through to a
+/// create POST. The fix gates creation on a *real* 404; any other error status
+/// must return `false` WITHOUT attempting a write.
+/// What: stubs the palace GET to answer `500`, runs `ensure_user_palace_with`,
+/// and asserts it returns `false` AND that no second (POST) request was made.
+/// Test: this IS the test.
+#[tokio::test]
+async fn ensure_user_palace_does_not_create_on_non_404() {
+    let (base, post_seen) = spawn_palace_mock("HTTP/1.1 500 Internal Server Error").await;
+    let client = probe_client();
+    let created = ensure_user_palace_with(&client, &base).await;
+    assert!(
+        !created,
+        "a 500 from the palace GET must NOT confirm the palace as active"
+    );
+    // Give any erroneous POST a moment to land, then assert none was attempted.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !*post_seen.borrow(),
+        "a non-404 GET error must NOT trigger a create POST"
+    );
+}
+
+/// Why: the complement to the non-404 case — a genuine 404 means the palace is
+/// absent, so the banner SHOULD create it idempotently (D4). This pins the one
+/// status that is allowed to trigger a write.
+/// What: stubs the palace GET to answer `404` (and the create POST to answer
+/// `200`), runs `ensure_user_palace_with`, and asserts it returns `true` and that
+/// a second (POST) request was observed.
+/// Test: this IS the test.
+#[tokio::test]
+async fn ensure_user_palace_creates_only_on_404() {
+    let (base, post_seen) = spawn_palace_mock("HTTP/1.1 404 Not Found").await;
+    let client = probe_client();
+    let created = ensure_user_palace_with(&client, &base).await;
+    assert!(
+        created,
+        "a 404 GET followed by a 2xx create POST must confirm the palace"
+    );
+    assert!(
+        *post_seen.borrow(),
+        "a 404 GET must trigger exactly the create POST"
     );
 }

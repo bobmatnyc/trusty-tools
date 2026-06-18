@@ -15,6 +15,7 @@
 //! Test: the pure pieces (rows, state, events, layout text) are unit-tested in
 //! [`tests`]; [`run`] is the thin terminal glue exercised by launching the TUI.
 
+pub mod banner;
 pub mod events;
 pub mod layout;
 pub mod poll;
@@ -94,6 +95,21 @@ pub async fn run(url: String, interval_ms: u64) -> anyhow::Result<()> {
     tracing::info!(%url, interval_ms, "launching coordinator TUI");
     let mut client = DaemonClient::new(url);
 
+    // STUI-0: prime the fleet state with one poll BEFORE the alternate screen so
+    // the startup banner can report the active-session count (or `daemon
+    // unreachable` when the daemon is down). This is the same priming poll the
+    // run loop would otherwise do first; doing it here lets the banner and the
+    // first frame share one initial fetch.
+    let mut state = CoordinatorState::live();
+    coord_poll_daemon(&mut state, &mut client).await;
+    let active_count = state.daemon_reachable.then_some(state.sessions.len());
+
+    // STUI-0: render the Claude-Code-style banner (name + version, memory +
+    // search probes, active-session count + `/help` hint) to stderr before the
+    // alternate screen swallows the scrollback. Probes are fail-safe — a down
+    // backplane shows `○ unreachable`, never blocking the TUI (DOC-16 §3.1).
+    banner::print_startup_banner(None, None, active_count).await;
+
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -104,7 +120,7 @@ pub async fn run(url: String, interval_ms: u64) -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    run_loop(&mut terminal, &mut client, interval_ms).await
+    run_loop(&mut terminal, &mut client, state, interval_ms).await
     // `_guard` drops here (or during an unwind), restoring the terminal.
 }
 
@@ -112,8 +128,8 @@ pub async fn run(url: String, interval_ms: u64) -> anyhow::Result<()> {
 ///
 /// Why: kept separate from [`run`] so terminal setup/teardown wraps it cleanly
 /// and the loop body stays focused on poll → draw → poll-key → dispatch.
-/// What: seeds [`CoordinatorState::live`], primes it with one
-/// [`coord_poll_daemon`] so the list is populated before the first frame, then
+/// What: takes the already-primed [`CoordinatorState`] (the STUI-0 banner poll
+/// in [`run`] populated it so the list is ready before the first frame), then
 /// each iteration draws the frame, polls the keyboard for [`KEY_POLL`] and
 /// dispatches any key via [`handle_key`], and re-polls the daemon once at least
 /// `interval_ms` has elapsed since the last poll (tokio [`Instant`] timer).
@@ -123,14 +139,12 @@ pub async fn run(url: String, interval_ms: u64) -> anyhow::Result<()> {
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     client: &mut DaemonClient,
+    mut state: CoordinatorState,
     interval_ms: u64,
 ) -> anyhow::Result<()> {
     let interval = Duration::from_millis(interval_ms);
-    let mut state = CoordinatorState::live();
-
-    // Prime the list before the first frame so the operator never sees an empty
-    // list flash before the first interval tick.
-    coord_poll_daemon(&mut state, client).await;
+    // The state arrives already primed from `run`'s banner poll, so the operator
+    // never sees an empty list flash before the first interval tick.
     let mut last_poll = Instant::now();
 
     loop {
