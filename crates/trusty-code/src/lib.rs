@@ -180,6 +180,18 @@ pub mod logging;
 /// Test: `provider::*` submodule tests.
 pub mod provider;
 
+/// Project-context ingestion — load `CLAUDE.md` for prompt injection (#1033).
+///
+/// Why: A Claude-Code-compatible harness must give the PM and every sub-agent
+/// the same project-specific rules a human Claude Code session sees — the
+/// project-root `CLAUDE.md`. This module reads that file, bounds its size so a
+/// runaway file cannot blow the model context budget, and degrades gracefully
+/// when the file is absent.
+/// What: `load_project_context` (root then `.claude/` lookup, size-capped with a
+/// provenance note on truncation) and `MAX_CONTEXT_BYTES`.
+/// Test: `project_context::tests::*`.
+pub mod project_context;
+
 // ── Phase 4 orchestration layer (per #1028) ──
 
 /// Multi-turn agent loop driving an LLM through tool calls to completion.
