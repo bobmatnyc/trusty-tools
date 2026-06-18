@@ -41,6 +41,12 @@ pub struct TestDaemon {
     _tmpdir: TempDir,
     /// The background task serving the router; aborted on drop.
     handle: tokio::task::JoinHandle<()>,
+    /// This harness's own isolated daemon state. Held so `Drop` can enumerate
+    /// the sessions THIS daemon registered and reap their tmux hosts (#1459).
+    /// Because each `TestDaemon` owns a distinct `DaemonState`, every session in
+    /// this registry was created by this harness — so the reap is correctly
+    /// scoped and never touches `tmpm-` sessions owned by other live agents.
+    state: Arc<DaemonState>,
 }
 
 impl TestDaemon {
@@ -75,7 +81,9 @@ impl TestDaemon {
         setup(&paths);
 
         let state = Arc::new(DaemonState::with_paths(&paths));
-        let app = trusty_mpm::daemon::api::router(state);
+        // Clone the Arc so the harness retains a handle for `Drop`-time session
+        // reaping (#1459) while the router takes its own clone for serving.
+        let app = trusty_mpm::daemon::api::router(Arc::clone(&state));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -96,6 +104,7 @@ impl TestDaemon {
             paths,
             _tmpdir: tmpdir,
             handle,
+            state,
         }
     }
 
@@ -120,9 +129,50 @@ impl TestDaemon {
 }
 
 impl Drop for TestDaemon {
+    /// Why: aborting only the HTTP task left any `tmpm-` tmux session this daemon
+    /// spawned running forever — those orphans once saturated the host fork
+    /// limit (epic #1452, #1459). This `Drop` now also reaps the tmux hosts THIS
+    /// harness created.
+    /// What: aborts the server task, then best-effort kills the tmux session
+    /// named by every record in this daemon's OWN registry (each `TestDaemon`
+    /// owns an isolated `DaemonState`, so the registry contains only sessions
+    /// this harness created — the reap never touches unrelated `tmpm-` sessions).
+    /// A `tmpm-` prefix check is an extra belt-and-braces guard. tmux being
+    /// absent (CI) is fine: discovery fails and the loop is a no-op.
+    /// Test: covered indirectly by every e2e session scenario; the reaping
+    /// primitive itself is unit-tested in `session_manager::session_guard`.
     fn drop(&mut self) {
         // Stop serving so the port is released and the task does not leak.
         self.handle.abort();
+
+        // Best-effort reap of tmux sessions this harness's daemon created.
+        let created: Vec<String> = self
+            .state
+            .list_sessions()
+            .into_iter()
+            .map(|s| s.tmux_name)
+            .filter(|name| name.starts_with("tmpm-"))
+            .collect();
+
+        if created.is_empty() {
+            return;
+        }
+
+        match trusty_mpm::daemon::tmux::TmuxDriver::discover() {
+            Ok(driver) => {
+                for name in created {
+                    if let Err(e) = driver.kill_session(&name) {
+                        // stderr only — the daemon keeps stdout clean; a failure
+                        // here is non-fatal (the session may already be gone).
+                        eprintln!("TestDaemon::drop: best-effort kill of {name} failed: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                // No tmux on this host (e.g. CI) — nothing to reap.
+                eprintln!("TestDaemon::drop: tmux unavailable, skipping session reap: {e}");
+            }
+        }
     }
 }
 
