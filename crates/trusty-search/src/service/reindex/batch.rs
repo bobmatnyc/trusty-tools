@@ -598,6 +598,20 @@ pub(super) async fn emit_batch_error(
         .iter()
         .map(|p| to_corpus_relative_path(&ctx.root, p))
         .collect();
+    // Issue #1428: a batch parse/embed/commit failure was previously surfaced
+    // ONLY as an SSE `error` frame — nothing reached the daemon log, which is
+    // exactly the "no error logged" symptom on a GPU OOM / sidecar stall. Log
+    // the underlying cause at `error!` to stderr so the operator can always see
+    // WHY a batch failed (the `{:#}` alternate form expands the anyhow cause
+    // chain, e.g. "batch embed_batch failed: embed call timed out").
+    tracing::error!(
+        index_id = %ctx.index_id.0,
+        batch_files = to_index_paths.len(),
+        indexed = ctx.progress.indexed.load(Ordering::Acquire),
+        total_files = ctx.total,
+        "reindex[{}]: batch failed — {err:#}",
+        ctx.index_id.0,
+    );
     ctx.progress
         .errors
         .fetch_add(to_index_paths.len(), Ordering::Release);
