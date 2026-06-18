@@ -72,11 +72,16 @@ pub(super) async fn run_reindex(
     }
 
     // Arm the termination guard. Any early exit — panic, early return, or
-    // `.await` cancellation — fires `ReindexTerminationGuard::drop`, which
-    // broadcasts an error event and marks the status `Failed`. The guard is
-    // disarmed just after `emit_complete_event` confirms the normal terminal
-    // event has been sent.
-    let term_guard = ReindexTerminationGuard::new(Arc::clone(&progress));
+    // `.await` cancellation — fires `ReindexTerminationGuard::drop`, which logs
+    // the cause at `error!` (issue #1428: never silent), broadcasts an error
+    // event, and marks the status `Failed`. The guard is disarmed just after
+    // `emit_complete_event` confirms the normal terminal event has been sent.
+    // Stamping the index id makes the stderr line greppable per-index; the
+    // failure-reason slot lets us hand a specific cause (e.g. a captured
+    // producer-task panic) to `Drop`.
+    let term_guard =
+        ReindexTerminationGuard::new(Arc::clone(&progress)).with_index_id(handle.id.0.clone());
+    let failure_slot = term_guard.failure_reason_slot();
 
     let started = Instant::now();
     // Issue #602 — portable paths.
@@ -319,8 +324,9 @@ pub(super) async fn run_reindex(
     let producer_ctx = ctx.clone();
     let producer_mem_abort = mem_abort.clone();
     let producer_index_id = index_id.0.clone();
+    let total_batches = batches.len();
     let producer = tokio::spawn(async move {
-        for batch in batches {
+        for (batch_idx, batch) in batches.into_iter().enumerate() {
             if producer_mem_abort.load(AtomicOrdering::Acquire) {
                 let rss = current_rss_mb().unwrap_or(0);
                 tracing::warn!(
@@ -332,6 +338,16 @@ pub(super) async fn run_reindex(
                 );
                 break;
             }
+            // RUST_LOG=debug visibility into batch flush cadence — pinpoints the
+            // exact batch index where a deterministic mid-run halt occurs
+            // (issue #1428). Cheap: a single debug-gated log per batch.
+            tracing::debug!(
+                index_id = %producer_index_id,
+                batch_idx,
+                total_batches,
+                batch_files = batch.len(),
+                "reindex: producer preparing batch"
+            );
             let Some(ready) = prepare_and_parse_batch(&producer_ctx, &batch).await else {
                 continue;
             };
@@ -343,6 +359,11 @@ pub(super) async fn run_reindex(
 
     // Consumer loop: commits batches sequentially.
     while let Some(ready) = rx.recv().await {
+        tracing::debug!(
+            index_id = %index_id.0,
+            indexed = progress.indexed_count(),
+            "reindex: consumer committing batch"
+        );
         let outcome = commit_parsed_and_finalize(&ctx, ready).await;
         total_parse_ms = total_parse_ms.saturating_add(outcome.parse_ms);
         total_embed_ms = total_embed_ms.saturating_add(outcome.embed_ms);
@@ -363,7 +384,56 @@ pub(super) async fn run_reindex(
             break;
         }
     }
-    let _ = producer.await;
+    // Issue #1428: the producer's `JoinHandle` result was previously discarded
+    // (`let _ = producer.await`), so a PANIC inside the parse/embed producer
+    // task (e.g. an `unwrap` deep in the embed path, or an allocation failure
+    // under GPU/memory pressure) unwound silently — the consumer loop just saw
+    // the channel close and fell through to a "successful" finish. Capture the
+    // `JoinError` here: log it at `error!` (stderr) and record it in the guard's
+    // failure-reason slot so that if the run ends up failing, the operator sees
+    // the real cause rather than the generic "exited unexpectedly" message.
+    //
+    // Limitation: this handles a panic/cancellation *inside* the spawned producer
+    // task (surfaced as a `JoinError`). It does NOT cover `producer.await` itself
+    // panicking (e.g. the tokio runtime shutting down out from under the await):
+    // in that case the failure_slot is never written and the termination guard's
+    // `Drop` falls back to its generic "exited unexpectedly" message. That path
+    // is still non-silent (the guard logs at `error!`), just less specific.
+    if let Err(join_err) = producer.await {
+        if join_err.is_panic() {
+            // Index id lives in the `reindex[{}]:` message prefix only (no
+            // duplicate structured `index_id` field) to avoid double emission
+            // in JSON log backends; `reindex[...]: ... PANICKED` greps still
+            // match (issue #1428 review follow-up).
+            tracing::error!(
+                "reindex[{}]: parse/embed producer task PANICKED — the reindex \
+                 is incomplete; this usually indicates an embedder fault (e.g. \
+                 GPU OOM / sidecar stall). JoinError: {join_err}",
+                index_id.0,
+            );
+            ReindexTerminationGuard::set_failure_reason(
+                &failure_slot,
+                format!(
+                    "parse/embed producer task panicked ({join_err}) — reindex \
+                     incomplete; check the daemon log for the panic backtrace \
+                     and the embedder (GPU OOM / sidecar stall is the common cause)"
+                ),
+            );
+        } else {
+            // Cancellation (e.g. runtime shutdown) — still non-silent. Index id
+            // is in the `reindex[{}]:` message prefix only (no duplicate
+            // structured field) per the #1428 review follow-up.
+            tracing::error!(
+                "reindex[{}]: parse/embed producer task was cancelled — reindex \
+                 incomplete. JoinError: {join_err}",
+                index_id.0,
+            );
+            ReindexTerminationGuard::set_failure_reason(
+                &failure_slot,
+                format!("parse/embed producer task cancelled ({join_err}) — reindex incomplete"),
+            );
+        }
+    }
 
     // Delegate post-loop work: prune, KG rebuild, corpus swap, terminal event, GC.
     let finish_ctx = FinishCtx {

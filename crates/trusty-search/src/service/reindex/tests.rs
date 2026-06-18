@@ -1219,6 +1219,90 @@ fn reindex_guard_fires_on_early_return() {
         msg.contains("\"error\""),
         "broadcast message must contain event:error; got: {msg}"
     );
+    // Issue #1428: the generic frame must carry the `fatal` marker so SSE
+    // clients can distinguish a terminal failure from a per-file error.
+    assert!(
+        msg.contains("\"fatal\":true"),
+        "guard error frame must be marked fatal; got: {msg}"
+    );
+}
+
+/// Issue #1428: when the runner records a specific failure reason, the guard's
+/// `Drop` must surface THAT reason (not the generic fallback) in the SSE frame,
+/// and the index id must appear in the payload.
+///
+/// Why: the original silent-failure symptom was a generic
+/// "exited unexpectedly" message with no underlying cause. Capturing a producer
+/// panic (or any known fault) into the failure-reason slot lets the operator
+/// see the real cause both in the daemon log and on the SSE stream.
+///
+/// What: arm a guard with an index id, write a specific reason into its slot,
+/// drop it armed, and assert the broadcast frame contains the reason + id.
+///
+/// Test: this test.
+#[test]
+fn reindex_guard_uses_captured_failure_reason() {
+    let progress = Arc::new(ReindexProgress::new());
+    let mut rx = progress.sender.subscribe();
+
+    {
+        let guard = ReindexTerminationGuard::new(Arc::clone(&progress)).with_index_id("my-index");
+        let slot = guard.failure_reason_slot();
+        ReindexTerminationGuard::set_failure_reason(
+            &slot,
+            "parse/embed producer task panicked (GPU OOM)",
+        );
+        // Drop without disarming.
+    }
+
+    assert_eq!(
+        progress.status.load(),
+        ReindexStatus::Failed,
+        "status must be Failed after an armed guard drops"
+    );
+    let msg = rx
+        .try_recv()
+        .expect("guard must have broadcast an error event");
+    assert!(
+        msg.contains("parse/embed producer task panicked (GPU OOM)"),
+        "guard must surface the captured failure reason; got: {msg}"
+    );
+    assert!(
+        msg.contains("my-index"),
+        "guard error frame must carry the index id; got: {msg}"
+    );
+}
+
+/// Issue #1428: a freshly-armed guard with no recorded reason falls back to the
+/// generic message but is STILL non-silent (status Failed + fatal frame).
+///
+/// Why: not every early exit has a captured cause (e.g. a raw `.await`
+/// cancellation). The fallback path must still set Failed and emit a fatal
+/// frame so the failure is never silent.
+///
+/// What: arm a guard, drop it without recording a reason, assert the fallback
+/// message and the Failed status.
+///
+/// Test: this test.
+#[test]
+fn reindex_guard_failure_reason_is_none_by_default() {
+    let progress = Arc::new(ReindexProgress::new());
+    let mut rx = progress.sender.subscribe();
+
+    {
+        let _guard = ReindexTerminationGuard::new(Arc::clone(&progress)).with_index_id("idx-x");
+    }
+
+    assert_eq!(progress.status.load(), ReindexStatus::Failed);
+    let msg = rx.try_recv().expect("guard must broadcast on drop");
+    assert!(
+        msg.contains("exited unexpectedly"),
+        "fallback message expected when no reason recorded; got: {msg}"
+    );
+    assert!(
+        msg.contains("\"fatal\":true"),
+        "fallback frame must still be fatal; got: {msg}"
+    );
 }
 
 /// A disarmed `ReindexTerminationGuard` must NOT emit an error event on drop.
