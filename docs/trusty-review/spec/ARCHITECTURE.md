@@ -1,6 +1,6 @@
 # trusty-review — Architecture
 
-> **Status:** Current (v0.1.0 · 2026-06-01)
+> **Status:** Current (reconciled to `main` · 2026-06-18)
 > **Derived from:** spec docs 01, 09, 10 + source audit of `crates/trusty-review/src/`
 
 ---
@@ -16,15 +16,20 @@ Triggers
 
 trusty-review (crates/trusty-review/)
   ├── axum router           — service::build_router() [http-server feature]
+  ├── MCP server            — mcp::tools (review_pr / review_diff / review_health) ✅
   ├── Review pipeline       — pipeline::runner::run_review()
-  │     ├── diff module     — load, truncate, identifier extraction
-  │     ├── grade module    — severity-anchored deterministic grade derivation
-  │     ├── prompt module   — reviewer system prompt + context assembly
-  │     ├── parser module   — verdict + findings extraction from LLM response
-  │     └── output module   — log file writing + stdout rendering
+  │     ├── diff module     — load, truncate, DiffAnalyzer Stage A/B/C ✅
+  │     ├── context gate    — preflight_context() REQUIRED-dep gate ✅
+  │     ├── verify module   — per-finding LLM verification round ✅
+  │     ├── grade module    — severity-anchored deterministic grade derivation ✅
+  │     ├── mapreduce/      — per-file map-reduce (Phases 1-2 of #680) ✅
+  │     ├── prompt module   — 3-layer prompt composition (voice + principles + context) ✅
+  │     ├── parser module   — verdict + findings extraction (fail-closed #1241) ✅
+  │     └── output module   — log file writing + review footer (#728) ✅
   ├── LLM layer             — llm::LlmProvider trait (Bedrock | OpenRouter)
-  ├── Profile pipeline      — profile:: (longitudinal contributor profiling)
-  └── Integrations          — GitHub client, search/analyze HTTP clients
+  ├── Profile pipeline      — profile:: (longitudinal contributor profiling) ✅
+  ├── Dedup store           — store::dedup (three-layer redb claim store) ✅
+  └── Integrations          — GitHub client, search/analyze, JIRA/Confluence/Issues/conformance ✅
 
 Workspace dependencies (HTTP, REQUIRED for a real review — #590)
   ├── trusty-search :7878   — REQUIRED (code context retrieval)
@@ -54,6 +59,7 @@ crates/trusty-review/
     ├── config/
     │   ├── mod.rs          ReviewConfig, Provider enum; env+file resolution
     │   ├── constants.rs    confidence thresholds, pipeline tuning constants
+    │   ├── mapreduce.rs    MapReduceConfig + select_review_mode() [Phases 1-2 of #680] ✅
     │   └── role_models.rs  RoleModels, RoleConfig, FileModels, RoleCliOverrides
     ├── llm/
     │   ├── mod.rs          LlmProvider trait, LlmRequest/Response, build_provider()
@@ -66,26 +72,48 @@ crates/trusty-review/
     │   │   └── tests.rs
     │   ├── openrouter.rs   OpenRouterProvider (wraps trusty_common::chat)
     │   └── openrouter_tests.rs
+    ├── mcp/                MCP server (review_pr / review_diff / review_health tools) ✅
+    │   ├── mod.rs
+    │   └── tools.rs        MCP tool implementations — all route through run_review()
     ├── models/
-    │   └── mod.rs          Verdict, Effort, VerifyOutcome, Finding, ReviewResult
+    │   └── mod.rs          Verdict, Effort, VerifyOutcome, Finding, ReviewResult, ReviewStatus
     ├── pipeline/
     │   ├── mod.rs          re-exports; submodule map
+    │   ├── context_gate.rs preflight_context(), GateOutcome (#590) ✅
     │   ├── diff.rs         DiffSource, diff loading, truncation, identifier extraction
+    │   ├── diff_analyzer/  Stage A/B/C noise filter ✅
+    │   │   ├── mod.rs      DiffAnalyzer::analyze(), FilterConfig
+    │   │   ├── file_filter.rs  Stage A — FileFilter (deterministic, file-level)
+    │   │   ├── hunk_filter.rs  Stage B — HunkFilter (deterministic, hunk-level)
+    │   │   ├── hunk_classifier.rs  Stage C — HunkClassifier (LLM per-hunk)
+    │   │   └── models.rs   FilteredDiff, FilteredFile, FilteredHunk, FileDisposition
     │   ├── grade.rs        derive_verdict() — severity-anchored grade derivation
+    │   ├── mapreduce/      per-file map-reduce (Phases 1-2 of #680) ✅
+    │   │   ├── mod.rs      re-export facade
+    │   │   └── split.rs    MapUnit, split_into_units() — per-file diff splitter
     │   ├── prompt.rs       reviewer_system_prompt(), build_review_prompt()
     │   ├── parser.rs       parse_review_response() → ParsedReview
-    │   ├── output.rs       write_review_log(), print_review_result(), log_json_path()
+    │   ├── output.rs       write_review_log(), print_review_result(), review footer (#728)
     │   ├── runner.rs       ReviewDeps, ReviewInput, run_review() — top-level orchestration
+    │   ├── runner_context.rs  gather_context(), gather_external_context_md()
+    │   ├── verify.rs       maybe_verify(), run_verification_round() — per-finding LLM verification ✅
     │   ├── parser_tests.rs
     │   └── prompt_tests.rs
     ├── integrations/
     │   ├── mod.rs
+    │   ├── apex_context.rs fetch_apex_context() — APEX indexed path ✅
     │   ├── search_client.rs  HttpSearchClient (trusty-search :7878)
     │   ├── analyze_client.rs HttpAnalyzeClient (trusty-analyze :7879)
+    │   ├── context/        context orchestrator (JIRA / Confluence / GitHub Issues / conformance) ✅
+    │   │   ├── mod.rs
+    │   │   ├── jira.rs     JIRA ticket context source
+    │   │   ├── confluence.rs Confluence design-doc context source
+    │   │   ├── github_issues.rs GitHub Issues context source
+    │   │   └── conformance.rs intent/method-conformance source
     │   └── github/
     │       ├── mod.rs      GithubClient
     │       ├── auth.rs     GitHub App JWT + installation token + PAT fallback
-    │       ├── pr.rs       fetch_pr_diff(), fetch_pr_files(), fetch_pr_meta()
+    │       ├── pr.rs       fetch_pr_diff(), fetch_pr_files(), fetch_pr_meta(), post_review()
     │       ├── firewall.rs assert_no_push_operation() — hard-coded push firewall
     │       └── webhook.rs  webhook signature verification
     ├── profile/
@@ -99,6 +127,8 @@ crates/trusty-review/
     │   ├── reporter.rs     Reporter — profile output (JSON + Markdown)
     │   ├── reporter_github.rs optional GitHub issue creation
     │   └── error.rs        ProfileError (thiserror)
+    ├── store/
+    │   └── dedup.rs        three-layer dedup claim store (redb) ✅
     └── service/            [http-server feature only]
         ├── mod.rs          build_router(), serve(), DEFAULT_PORT=7880
         ├── handlers.rs     AppState, handle_health(), handle_status(), handle_review()
