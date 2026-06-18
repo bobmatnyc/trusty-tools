@@ -504,14 +504,29 @@ pub async fn get_session(
         .ok_or(DaemonError::SessionNotFound { id })
 }
 
-/// `DELETE /sessions/:id` — deregister a session.
+/// `DELETE /sessions/:id` — deregister a session AND kill its tmux host.
+///
+/// Why: a DELETE must actually tear the session down — dropping only the
+/// registry entry leaks a live `tmpm-*` tmux session on every call (the
+/// `full_user_cycle` leak this closes, epic #1452, #1454). Every session is
+/// owned by exactly one Session object; deleting it kills the tmux host too.
+/// What: parses the UUID, removes the legacy registry entry (404 if absent),
+/// then best-effort kills the tmux session by the entry's `tmux_name` and
+/// reconciles the SessionManager store by decommissioning any managed record
+/// that shares that exact `tmux_name`. Both teardown steps are best-effort:
+/// the session may already be gone, so a kill/decommission failure is logged
+/// (to stderr via `tracing` — never stdout, which carries MCP framing) and does
+/// NOT fail the HTTP response. The registry removal having succeeded is the
+/// contract the caller relies on.
+/// Test: `full_user_cycle` asserts the tmux session is gone after DELETE when
+/// tmux is available; `remove_session_kills_tmux_host` covers the kill call.
 #[utoipa::path(
     delete,
     path = "/sessions/{id}",
     tag = "sessions",
     params(("id" = String, Path, description = "Session UUID")),
     responses(
-        (status = 200, description = "Session removed"),
+        (status = 200, description = "Session removed and tmux host killed"),
         (status = 404, description = "No session with that id"),
     )
 )]
@@ -520,9 +535,53 @@ pub async fn remove_session(
     Path(id): Path<String>,
 ) -> Result<Json<RemoveSessionResponse>, DaemonError> {
     let session = parse_id(&id)?;
-    match state.remove_session(session) {
-        Some(_) => Ok(Json(RemoveSessionResponse { removed: id })),
-        None => Err(DaemonError::SessionNotFound { id }),
+    let removed = state
+        .remove_session(session)
+        .ok_or_else(|| DaemonError::SessionNotFound { id: id.clone() })?;
+
+    // Best-effort teardown: kill the owning tmux host so the session does not
+    // leak, then reconcile the SessionManager store for any record that shares
+    // the same tmux name. Neither step fails the response — the registry entry
+    // is already gone, which is the contract the DELETE promises.
+    let tmux_name = removed.tmux_name.clone();
+    TmuxService::kill_best_effort(&tmux_name);
+    reconcile_managed_store_on_delete(&state, &tmux_name).await;
+
+    Ok(Json(RemoveSessionResponse { removed: id }))
+}
+
+/// Decommission any SessionManager record that shares `tmux_name`, best-effort.
+///
+/// Why: the legacy `DaemonState` registry and the `SessionManager` store are two
+/// registries that can both track a session under the same tmux name. A DELETE
+/// against the legacy registry must not leave the managed store pointing at a
+/// now-dead tmux host, or the orphan-GC and `ls` would show a phantom (#1454).
+/// What: lists the managed store, finds records whose `tmux_name` matches and
+/// that are not already terminal (Stopped/Decommissioned), and decommissions
+/// each. Every step is best-effort: a store-read or decommission failure is
+/// logged to stderr via `tracing` and swallowed so the HTTP DELETE still
+/// succeeds. Idempotent — already-terminal records are skipped.
+/// Test: exercised by `full_user_cycle`; the managed-store decommission path
+/// itself is unit-tested in `session_manager::tests`.
+async fn reconcile_managed_store_on_delete(state: &Arc<DaemonState>, tmux_name: &str) {
+    let mgr = state.session_manager().await;
+    for record in mgr.list().await {
+        if record.tmux_name != tmux_name {
+            continue;
+        }
+        if matches!(
+            record.state,
+            crate::session_manager::ManagedSessionState::Stopped
+                | crate::session_manager::ManagedSessionState::Decommissioned
+        ) {
+            continue;
+        }
+        if let Err(e) = mgr.decommission(&record.id).await {
+            tracing::warn!(
+                name = %tmux_name,
+                "DELETE reconcile: decommission of managed record failed (may already be gone): {e}"
+            );
+        }
     }
 }
 
