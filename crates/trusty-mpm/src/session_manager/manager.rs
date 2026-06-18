@@ -320,7 +320,22 @@ impl SessionManager {
             runtime,
         };
 
-        self.store.write().await.upsert(record.clone()).await?;
+        // Persist the record. On failure the freshly-created tmux session has
+        // NO registry owner — the armed `tmux_guard` above reaps it on the early
+        // return below, preventing the orphan (#1457). The reap itself happens
+        // silently in the guard's `Drop`; log here first so the rollback is
+        // visible in the daemon's stderr logs alongside the other lifecycle
+        // events (never stdout — that carries MCP JSON-RPC framing).
+        if let Err(e) = self.store.write().await.upsert(record.clone()).await {
+            warn!(
+                id = %id,
+                name = %tmux_name,
+                "registry upsert failed; rolling back (reaping) the orphaned tmux session: {e}"
+            );
+            // Returning here drops the still-armed `tmux_guard`, which kills the
+            // session. The original store error propagates unchanged.
+            return Err(ManagedError::from(e));
+        }
 
         // The record is durably persisted; the store/registry now owns the
         // session's lifetime. Disarm so the guard's drop is a no-op and the
