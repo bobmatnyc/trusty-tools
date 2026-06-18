@@ -151,6 +151,10 @@ pub(super) fn attach_inline_comments(result: &mut ReviewResult, raw_diff: &str) 
     let commentable = CommentableLines::from_unified_diff(raw_diff);
     let plan = build_inline_plan(&result.findings, &commentable);
     result.suppressed_nits = plan.suppressed_nits;
+    // Carry the authoritative inline/summary partition by finding identity so the
+    // summary body never drops a finding that shares a (file, line) with an inline
+    // one (#1414 silent-omission fix).
+    result.inline_finding_indices = plan.inline_indices;
     result.inline_comments = plan
         .comments
         .into_iter()

@@ -31,12 +31,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   section (linter-enforced style, speculative/hypothetical concerns, restating
   the diff, and consequence-free preferences).
 
+### Fixed
+
+- **Summary body no longer silently drops same-line findings (#1414).** The
+  review summary previously decided which findings to render by matching each
+  finding's `(file, line)` against the posted inline comments. Two distinct
+  findings at the same `(file, line)` collided: one could be flagged as "inline"
+  and then dropped from *both* the inline set and the summary body. The summary
+  now partitions by finding identity using the authoritative inline index set
+  carried on `ReviewResult.inline_finding_indices` (populated from the
+  `InlinePlan`), so every non-inline finding is rendered and none is lost.
+- **`github_issues` context query clamped to GitHub's 256-char limit.** An
+  over-long assembled search query (`repo:… is:issue <keywords>`) caused the
+  GitHub Search API to return HTTP 422 ("The search is longer than 256
+  characters"), silently skipping the GitHub Issues context section. The query
+  is now truncated to ≤256 chars at a word boundary (debug-logged when it
+  occurs).
+- **Corrected stale CLI help text.** `run`/`serve` help no longer claims reviews
+  are "always dry-run, no comments posted" — they post live when posting is
+  enabled (dry-run by default, controlled by `PR_INTELLIGENCE_DRY_RUN`).
+
 ### Compatibility
 
 - New finding fields (`consequence`, `suggested_replacement`) and the
-  `inline_comments` / `suppressed_nits` result fields are all `#[serde(default)]`
-  and remain OpenAI strict-mode compliant, so older/looser model responses and
-  pre-0.4.0 review logs still parse unchanged.
+  `inline_comments` / `inline_finding_indices` / `suppressed_nits` result fields
+  are all `#[serde(default)]` and remain OpenAI strict-mode compliant, so
+  older/looser model responses and pre-0.4.0 review logs still parse unchanged.
 
 ## [0.3.16] — 2026-06-18
 

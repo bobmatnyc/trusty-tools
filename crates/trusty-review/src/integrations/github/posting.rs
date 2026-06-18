@@ -80,21 +80,27 @@ impl VerdictBlock {
 /// Test: `body_contains_signature`.
 pub const REVIEW_SIGNATURE: &str = "<!-- trusty-review -->";
 
-/// Return whether a finding was posted as an inline comment (#1414).
+/// Return the findings that did NOT land inline, in original order (#1414).
 ///
-/// Why: the summary body must list only the findings that did NOT land inline —
-/// otherwise every finding appears twice (inline AND in the summary list).  A
-/// finding is "inline" when an `InlineCommentOut` shares its file + line.
-/// What: matches on `(file, Some(line))` against `result.inline_comments`.
-/// Test: `body_omits_inline_findings_from_summary`.
-fn finding_is_inline(result: &ReviewResult, f: &crate::models::Finding) -> bool {
-    match f.line {
-        Some(line) => result
-            .inline_comments
-            .iter()
-            .any(|c| c.path == f.file && c.line == line),
-        None => false,
-    }
+/// Why: the summary body must render exactly the findings that were not placed
+/// inline.  Earlier this was derived by matching each finding's `(file, line)`
+/// against `inline_comments` — but two distinct findings can share an anchor, so
+/// a finding that did *not* get an inline comment could be flagged inline and
+/// silently dropped from BOTH the inline set and the summary (data loss).  The
+/// `InlinePlan` already partitions findings authoritatively; its inline index set
+/// is carried on the result, so we partition by identity (index), never coordinate.
+/// What: returns every `findings[i]` whose index `i` is NOT in
+/// `result.inline_finding_indices`.  Order is preserved.
+/// Test: `summary_keeps_same_line_non_inline_finding`,
+/// `body_omits_inline_findings_from_summary`.
+fn summary_findings(result: &ReviewResult) -> Vec<&crate::models::Finding> {
+    result
+        .findings
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !result.inline_finding_indices.contains(i))
+        .map(|(_, f)| f)
+        .collect()
 }
 
 /// Build the markdown summary body for a PR review (#1414).
@@ -138,11 +144,7 @@ pub fn build_review_comment_body(result: &ReviewResult) -> String {
 
     // Counts header: how many findings landed inline vs. in this summary.
     let inline_count = result.inline_comments.len();
-    let summary_findings: Vec<&crate::models::Finding> = result
-        .findings
-        .iter()
-        .filter(|f| !finding_is_inline(result, f))
-        .collect();
+    let summary_findings = summary_findings(result);
     if inline_count > 0 {
         md.push_str(&format!(
             "**Findings:** {} total — {inline_count} inline, {} below.\n\n",
@@ -411,7 +413,7 @@ mod tests {
         // A finding that was posted inline must not be duplicated in the summary
         // findings list; an off-diff finding (no matching inline comment) stays.
         let mut result = sample_result();
-        // The sole finding is at src/db.rs:42 → mark it inline.
+        // The sole finding (index 0) is at src/db.rs:42 → mark it inline.
         result
             .inline_comments
             .push(crate::models::InlineCommentOut {
@@ -419,6 +421,7 @@ mod tests {
                 line: 42,
                 body: "**security** — SQL injection".to_string(),
             });
+        result.inline_finding_indices = vec![0];
         let body = build_review_comment_body(&result);
         // Counts header reflects the inline placement.
         assert!(
@@ -429,6 +432,54 @@ mod tests {
         assert!(
             !body.contains("**General / off-diff findings"),
             "no off-diff section when the only finding went inline: {body}"
+        );
+    }
+
+    #[test]
+    fn summary_keeps_same_line_non_inline_finding() {
+        // Two DISTINCT findings at the SAME file+line: one is placed inline, the
+        // other is NOT.  The non-inline one must appear in the summary body — it
+        // must never be silently dropped just because it shares a coordinate with
+        // an inline finding (the #1414 silent-omission regression this fix closes).
+        let mut result = sample_result(); // findings[0] @ src/db.rs:42
+        let mut second = Finding::new(
+            "src/db.rs",
+            "performance",
+            "N+1 query in the same hot path",
+            "Batch the lookups",
+            0.80,
+            Effort::Medium,
+        );
+        second.line = Some(42); // SAME (file, line) as findings[0]
+        result.findings.push(second); // findings[1]
+
+        // Only findings[0] became an inline comment; findings[1] fell back.
+        result
+            .inline_comments
+            .push(crate::models::InlineCommentOut {
+                path: "src/db.rs".to_string(),
+                line: 42,
+                body: "**security** — SQL injection".to_string(),
+            });
+        result.inline_finding_indices = vec![0];
+
+        let body = build_review_comment_body(&result);
+
+        // The non-inline finding (index 1) must be rendered in the summary body.
+        assert!(
+            body.contains("N+1 query in the same hot path"),
+            "the non-inline same-line finding must appear in the summary body \
+             (never silently dropped): {body}"
+        );
+        // The off-diff / summary section header must be present and report 1 finding.
+        assert!(
+            body.contains("**General / off-diff findings (1):**"),
+            "summary section must list exactly the one non-inline finding: {body}"
+        );
+        // Counts header: 2 total — 1 inline, 1 below. Neither finding is lost.
+        assert!(
+            body.contains("2 total — 1 inline, 1 below"),
+            "counts header must account for every finding: {body}"
         );
     }
 

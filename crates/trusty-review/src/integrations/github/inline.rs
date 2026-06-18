@@ -220,7 +220,11 @@ pub struct InlineComment {
 /// and lets dry-run render the same structure the live path would post.
 /// What: `comments` are the inline comments to attach to the review;
 /// `summary_findings` are findings that could not be anchored inline (off-diff or
-/// no line) and must be rendered into the review summary body; `suppressed_nits`
+/// no line) and must be rendered into the review summary body; `inline_indices`
+/// records the index (into the original `findings` slice) of every finding that
+/// became an inline comment, so downstream code can partition by finding identity
+/// rather than by `(file, line)` coordinate (two distinct findings can share the
+/// same anchor — coordinate matching silently drops one); `suppressed_nits`
 /// is the count of low-severity findings rolled up past the inline cap (#1420).
 /// Test: `build_inline_plan_*` tests in `inline_tests.rs`.
 #[derive(Debug, Clone, Default)]
@@ -229,6 +233,14 @@ pub struct InlinePlan {
     pub comments: Vec<InlineComment>,
     /// Findings that fall back to the summary body (no anchorable line).
     pub summary_findings: Vec<Finding>,
+    /// Indices (into the input `findings` slice) of findings placed inline.
+    ///
+    /// Why: the summary body must render exactly the findings that did NOT land
+    /// inline.  Identifying those by `(file, line)` coordinate is lossy — two
+    /// distinct findings at the same anchor collide and one is silently dropped
+    /// from both the inline set and the summary.  Carrying the authoritative
+    /// inline index set makes the partition by identity, never by coordinate.
+    pub inline_indices: Vec<usize>,
     /// Count of low-severity nits suppressed past the inline cap (#1420).
     pub suppressed_nits: usize,
 }
@@ -277,7 +289,7 @@ pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -
     let mut plan = InlinePlan::default();
     let mut inline_nits = 0usize;
 
-    for finding in findings {
+    for (idx, finding) in findings.iter().enumerate() {
         let anchor = finding
             .line
             .filter(|l| commentable.contains(&finding.file, *l));
@@ -302,6 +314,9 @@ pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -
             line,
             body: render_finding_comment(finding),
         });
+        // Record identity (not coordinate) of the inline-placed finding so the
+        // summary body can exclude exactly these — never a same-anchor sibling.
+        plan.inline_indices.push(idx);
     }
 
     plan

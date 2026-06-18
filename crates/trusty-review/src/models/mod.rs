@@ -378,6 +378,18 @@ pub struct ReviewResult {
     /// result deserialising with an empty list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inline_comments: Vec<InlineCommentOut>,
+    /// Indices (into `findings`) of the findings that were placed inline (#1414).
+    ///
+    /// Why: the summary body must render exactly the findings that did NOT land
+    /// inline.  Deriving that set by matching `(file, line)` against
+    /// `inline_comments` is lossy — two distinct findings at the same anchor
+    /// collide and one is silently omitted from *both* the inline set and the
+    /// summary (data loss).  Carrying the authoritative inline index set from the
+    /// `InlinePlan` lets the renderer partition by finding identity, so no finding
+    /// is ever dropped.  `#[serde(default)]` + skip-if-empty keeps pre-existing
+    /// serialised results deserialising unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline_finding_indices: Vec<usize>,
     /// Count of low-severity nits suppressed past the inline cap (#1420).
     ///
     /// Why: the nit-volume cap rolls overflow nits into one summary line rather
@@ -448,6 +460,7 @@ impl ReviewResult {
             grade: None,
             findings: Vec::new(),
             inline_comments: Vec::new(),
+            inline_finding_indices: Vec::new(),
             suppressed_nits: 0,
             model: String::new(),
             input_tokens: 0,

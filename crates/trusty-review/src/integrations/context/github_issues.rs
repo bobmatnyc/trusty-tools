@@ -80,10 +80,18 @@ fn cap_query(q: &str) -> &str {
         .unwrap_or(q.len());
     let candidate = &q[..hard_cut_byte];
     // Prefer to break at the last whitespace so we don't split mid-token.
-    match candidate.rfind(|c: char| c.is_whitespace()) {
+    let capped = match candidate.rfind(|c: char| c.is_whitespace()) {
         Some(ws_byte) if ws_byte > 0 => &q[..ws_byte],
         _ => candidate, // fallback: hard char-boundary cut
-    }
+    };
+    tracing::debug!(
+        source = SOURCE_NAME,
+        original_chars = q.chars().count(),
+        capped_chars = capped.chars().count(),
+        limit = GITHUB_QUERY_MAX_CHARS,
+        "truncated GitHub issue-search query to stay within the Search API limit"
+    );
+    capped
 }
 
 // ─── Auth seam (reuses #582 dual-mode auth) ─────────────────────────────────

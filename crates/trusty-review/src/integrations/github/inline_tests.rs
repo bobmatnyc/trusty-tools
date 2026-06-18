@@ -141,6 +141,30 @@ fn build_inline_plan_preserves_order_and_splits() {
     assert_eq!(plan.summary_findings.len(), 1);
     assert_eq!(plan.comments[0].line, 11);
     assert_eq!(plan.comments[1].line, 2);
+    // The inline index set records identity (original indices 0 and 2), not the
+    // off-diff finding at index 1 — this is the authoritative partition the
+    // summary body uses to avoid coordinate-based silent omission (#1414).
+    assert_eq!(plan.inline_indices, vec![0, 2]);
+}
+
+#[test]
+fn build_inline_plan_same_line_distinct_findings_keep_distinct_indices() {
+    // Two distinct findings at the SAME (file, line): both are anchorable, so both
+    // go inline here and get distinct indices.  The key property is that
+    // `inline_indices` keys on identity (index), never the shared coordinate — so a
+    // consumer can tell exactly which findings were placed, with no collision.
+    let c = CommentableLines::from_unified_diff(sample_diff());
+    let findings = vec![
+        finding_at("src/db.rs", Some(11)),
+        finding_at("src/db.rs", Some(11)),
+    ];
+    let plan = build_inline_plan(&findings, &c);
+    assert_eq!(plan.comments.len(), 2);
+    assert_eq!(
+        plan.inline_indices,
+        vec![0, 1],
+        "distinct same-line findings get distinct indices, not a collapsed coordinate"
+    );
 }
 
 #[test]
