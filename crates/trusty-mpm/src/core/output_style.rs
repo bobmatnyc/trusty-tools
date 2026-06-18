@@ -360,13 +360,37 @@ pub fn maybe_inject_active_style(
 /// Test: side-effecting (loads real config, spawns `claude`); the pure core is
 /// covered by `maybe_inject_*`.
 pub fn apply_output_style_to_prompt(
-    _project_dir: &Path,
+    project_dir: &Path,
     explicit: Option<&str>,
     prompt: String,
 ) -> String {
-    let config = MpmConfig::load_default();
     let native = claude_supports_native_output_style();
-    maybe_inject_active_style(&config, explicit, prompt, native)
+    apply_output_style_to_prompt_with_native(project_dir, explicit, prompt, native)
+}
+
+/// Apply the output-style injection decision with the `native_supported` flag
+/// supplied explicitly (no live `claude --version` probe).
+///
+/// Why: [`apply_output_style_to_prompt`] spawns `claude --version`, which makes
+/// every caller (and every test that exercises a launch-prompt path) depend on
+/// whether `claude` is installed on the host — the exact host-dependence that
+/// broke `prepare_session_stash_reflects_override` on CI (issue #1409). This
+/// seam lets tests pin the decision BOTH ways while production still does real
+/// version detection (and fails safe to injection) via the wrapper above.
+/// What: loads [`MpmConfig::load_default`] and delegates to the pure
+/// [`maybe_inject_active_style`] core with the caller-supplied `native_supported`
+/// flag. `_project_dir` is accepted for symmetry / future project-scoped overrides.
+/// Test: `output_style_tests.rs` covers the pure core directly; the
+/// stash/launch invariant under both flag values is covered by
+/// `prepare_session_stash_reflects_override` in `session_launch/tests.rs`.
+pub fn apply_output_style_to_prompt_with_native(
+    _project_dir: &Path,
+    explicit: Option<&str>,
+    prompt: String,
+    native_supported: bool,
+) -> String {
+    let config = MpmConfig::load_default();
+    maybe_inject_active_style(&config, explicit, prompt, native_supported)
 }
 
 #[cfg(test)]

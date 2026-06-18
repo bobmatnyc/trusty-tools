@@ -496,13 +496,17 @@ pub(crate) fn compose_session_instructions(
     };
     let output = build_instructions(&input)?;
 
-    // The single source of truth for the live PM prompt is `resolve_pm_prompt`.
-    // Writing it to the stash AND returning it as the display string ensures that
-    // `tm sessions instructions` always shows exactly what `claude` received (the
-    // #382 fix). Previously this function returned `output.merged` for display,
-    // which came from the old pipeline (INSTRUCTIONS.md + delegation + CLAUDE.md)
-    // and differed from the stash, causing the visible divergence.
-    let resolved_prompt = trusty_mpm::core::instruction_overrides::resolve_pm_prompt(project_dir);
+    // The single source of truth for the live PM prompt is
+    // `build_system_prompt_for`, NOT the bare `resolve_pm_prompt`. The launcher
+    // applies HR-4 output-style version-fallback injection on top of the resolved
+    // prompt (issue #1409), so `tm sessions instructions` must show — and the
+    // stash must hold — that SAME injected text. Writing the pre-injection
+    // `resolve_pm_prompt` here made the display/stash diverge from the real launch
+    // prompt whenever `claude` was absent/old (injection fires), the same #382
+    // divergence this function was written to prevent. Routing through
+    // `build_system_prompt_for` keeps display, stash, and launch identical
+    // regardless of Claude Code version.
+    let resolved_prompt = trusty_mpm::core::session_launch::build_system_prompt_for(project_dir);
     let stash_dir = project_dir.join(".trusty-mpm");
     std::fs::create_dir_all(&stash_dir)?;
     let stash = stash_dir.join("last-instructions.md");

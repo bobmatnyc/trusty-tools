@@ -97,39 +97,72 @@ fn prepare_session_stash_reflects_override() {
     // Why: the inspectable stash (`last-instructions.md`) must reflect the
     // SAME override-resolved prompt the launch path uses, so `tm session
     // instructions` shows what was actually delivered (issue #381 / #382).
-    // Use a dedicated tmp_home for FrameworkPaths so parallel test runs
-    // never race on the shared ~/.claude/agents manifest (issue: parallel
-    // test isolation — each test needs its own claude_agents_dir).
-    let tmp_home = tempdir().unwrap();
-    let tmp = tempdir().unwrap();
-    let project = tmp.path();
-    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    //
+    // Determinism (issue #1409): HR-4 added output-style injection at the
+    // `build_system_prompt_for_with_style` seam, gated on whether `claude` is
+    // installed/new enough. We therefore route through the native-pinned seams
+    // (`prepare_session_with_style_and_native` /
+    // `build_system_prompt_for_with_style_and_native`) and assert the invariant
+    // under BOTH `native_supported = true` (no injection) AND `false`
+    // (injection fires). This removes the dependence on the host's `claude` that
+    // made this test pass locally but FAIL on CI (where `claude` is absent → the
+    // launch prompt was injected but the stash was not, so the two diverged).
+    for native_supported in [true, false] {
+        // A fresh tmp_home/project per iteration so the second run does not read
+        // back a stash written by the first. Dedicated tmp_home keeps parallel
+        // runs from racing on the shared ~/.claude/agents manifest.
+        let tmp_home = tempdir().unwrap();
+        let tmp = tempdir().unwrap();
+        let project = tmp.path();
+        let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    let override_dir = project.join(".trusty-mpm");
-    std::fs::create_dir_all(&override_dir).unwrap();
-    std::fs::write(
-        override_dir.join("WORKFLOW.md"),
-        "# Custom Workflow\n\nSTASH_OVERRIDE_MARKER\n",
-    )
-    .unwrap();
+        let override_dir = project.join(".trusty-mpm");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(
+            override_dir.join("WORKFLOW.md"),
+            "# Custom Workflow\n\nSTASH_OVERRIDE_MARKER\n",
+        )
+        .unwrap();
 
-    let report = prepare_session(&fw, project).expect("prep succeeds");
-    let stash = std::fs::read_to_string(&report.stash).expect("stash readable");
+        let report = prepare_session_with_style_and_native(&fw, project, None, native_supported)
+            .expect("prep succeeds");
+        let stash = std::fs::read_to_string(&report.stash).expect("stash readable");
 
-    assert!(
-        stash.contains("STASH_OVERRIDE_MARKER"),
-        "stash must reflect the WORKFLOW.md override"
-    );
-    assert!(
-        !stash.contains("# PM Workflow Configuration"),
-        "bundled workflow heading must be replaced in the stash"
-    );
-    assert!(
-        stash.contains("# BASE_PM Framework Floor"),
-        "stash must still carry the BASE_PM floor"
-    );
-    // The stash must equal the live prompt for this project.
-    assert_eq!(stash, build_system_prompt_for(project));
+        assert!(
+            stash.contains("STASH_OVERRIDE_MARKER"),
+            "stash must reflect the WORKFLOW.md override (native_supported={native_supported})"
+        );
+        assert!(
+            !stash.contains("# PM Workflow Configuration"),
+            "bundled workflow heading must be replaced in the stash (native_supported={native_supported})"
+        );
+        assert!(
+            stash.contains("# BASE_PM Framework Floor"),
+            "stash must still carry the BASE_PM floor (native_supported={native_supported})"
+        );
+        // The CORE INVARIANT: the persisted stash must equal the exact prompt the
+        // launcher would deliver under the SAME injection decision — in both
+        // claude-present (native) and claude-absent (injected) environments.
+        assert_eq!(
+            stash,
+            build_system_prompt_for_with_style_and_native(project, None, native_supported),
+            "stash must equal the launch prompt (native_supported={native_supported})"
+        );
+        // When injection fires, the stash must actually carry the injected style
+        // block; when native is supported it must NOT — proving the flag drives
+        // the stash content, not the host.
+        if native_supported {
+            assert!(
+                !stash.contains(crate::core::output_style::INJECTED_STYLE_HEADING),
+                "native-capable: stash must NOT carry the injected style block"
+            );
+        } else {
+            assert!(
+                stash.contains(crate::core::output_style::INJECTED_STYLE_HEADING),
+                "native-incapable: stash MUST carry the injected style block"
+            );
+        }
+    }
 }
 
 #[test]

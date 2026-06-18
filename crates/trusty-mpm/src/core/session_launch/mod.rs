@@ -97,10 +97,12 @@ pub enum PrepError {
 /// call this before sending `claude` into the tmux pane.
 /// What: deploys composed agents from the framework agent source to
 /// `~/.claude/agents/`, runs [`build_instructions`] for `project_dir` (which
-/// loads or creates the project `CLAUDE.md`), writes the *override-resolved* PM
-/// prompt (from [`crate::core::instruction_overrides::resolve_pm_prompt`]) to
+/// loads or creates the project `CLAUDE.md`), writes the launch prompt — the
+/// exact override-resolved AND output-style-injected text produced by
+/// [`build_system_prompt_for_with_style`] — to
 /// `<project_dir>/.trusty-mpm/last-instructions.md` so the inspectable stash
-/// matches the live launch prompt, and returns a [`PrepReport`].
+/// matches the live launch prompt byte-for-byte (issue #1409), and returns a
+/// [`PrepReport`].
 /// Test: `prepare_session_writes_claude_md_and_stash`, `prepare_session_is_idempotent`,
 /// `prepare_session_stash_reflects_override`.
 pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepReport, PrepError> {
@@ -126,6 +128,33 @@ pub fn prepare_session_with_style(
     project_dir: &Path,
     explicit_style: Option<&str>,
 ) -> Result<PrepReport, PrepError> {
+    // Probe the live Claude Code version ONCE and thread the decision through the
+    // stash write so the stashed prompt matches what the launcher will inject
+    // (issue #1409). Real detection, fail-safe to injection.
+    let native = crate::core::output_style::claude_supports_native_output_style();
+    prepare_session_with_style_and_native(fw, project_dir, explicit_style, native)
+}
+
+/// Prepare a session with the `native_supported` output-style decision supplied
+/// explicitly (no live `claude --version` probe).
+///
+/// Why: the stash (`last-instructions.md`) must equal the launch prompt
+/// byte-for-byte, and that prompt depends on whether Claude Code supports native
+/// output styles. Probing `claude --version` inside `prepare_session` couples the
+/// stash invariant to the host, which broke `prepare_session_stash_reflects_override`
+/// on CI (issue #1409). This seam pins the decision so tests can assert the
+/// invariant deterministically under BOTH `native_supported = true` and `false`;
+/// [`prepare_session_with_style`] supplies real detection in production.
+/// What: identical to [`prepare_session_with_style`] except the stash is written
+/// from [`build_system_prompt_for_with_style_and_native`] using the supplied flag,
+/// so the stash always reflects the exact injected (or non-injected) launch prompt.
+/// Test: `prepare_session_stash_reflects_override`.
+pub fn prepare_session_with_style_and_native(
+    fw: &FrameworkPaths,
+    project_dir: &Path,
+    explicit_style: Option<&str>,
+    native_supported: bool,
+) -> Result<PrepReport, PrepError> {
     // Deploy composed agents — Claude Code reads `~/.claude/agents/` at startup.
     let deploy = deploy_agents(&fw.agent_source_dir(), &fw.claude_agents_dir())
         .map_err(|err| PrepError::Deploy(err.to_string()))?;
@@ -145,13 +174,25 @@ pub fn prepare_session_with_style(
     };
     let instructions = build_instructions(&input)?;
 
-    // Stash the *override-resolved* PM prompt — the exact text the launch path
-    // passes to `claude --append-system-prompt-file` — so `tm session
-    // instructions` shows what was actually used, including any project-level
-    // overrides under `<project>/.trusty-mpm/`. Resolving via the single
-    // `resolve_pm_prompt` function keeps the stash and the live prompt from
-    // diverging (issue #381 / the #382 concern).
-    let resolved_prompt = crate::core::instruction_overrides::resolve_pm_prompt(project_dir);
+    // Stash the EXACT text the launch path passes to
+    // `claude --append-system-prompt-file` — including the HR-4 output-style
+    // injection — so `tm session instructions` shows what was actually used,
+    // including any project-level overrides under `<project>/.trusty-mpm/`.
+    //
+    // This MUST go through the same `build_system_prompt_for_with_style` seam the
+    // launcher uses (issue #1409): that seam resolves the override-layered prompt
+    // via `resolve_pm_prompt` AND applies the output-style version-fallback
+    // injection. Writing the bare `resolve_pm_prompt` text here (pre-injection)
+    // while the launcher injects later made the stash diverge from reality
+    // whenever `claude` was absent/old (native unsupported → injection fires),
+    // breaking the stash/launch invariant in a host-dependent way. Routing both
+    // through the single seam keeps them identical regardless of Claude version
+    // (issue #381 / the #382 concern).
+    let resolved_prompt = build_system_prompt_for_with_style_and_native(
+        project_dir,
+        explicit_style,
+        native_supported,
+    );
     let stash_dir = project_dir.join(".trusty-mpm");
     std::fs::create_dir_all(&stash_dir).map_err(|source| PrepError::Io {
         path: stash_dir.clone(),
@@ -353,6 +394,36 @@ pub fn build_system_prompt_for_with_style(
     project_dir: &Path,
     explicit_style: Option<&str>,
 ) -> String {
+    let native = crate::core::output_style::claude_supports_native_output_style();
+    build_system_prompt_for_with_style_and_native(project_dir, explicit_style, native)
+}
+
+/// Build the launch prompt with the `native_supported` output-style decision
+/// supplied explicitly (no live `claude --version` probe).
+///
+/// Why: the public [`build_system_prompt_for_with_style`] probes
+/// `claude --version`, so any test (or caller) that exercises the launch prompt
+/// is silently coupled to whether `claude` is installed on the host — the
+/// host-dependence that broke `prepare_session_stash_reflects_override` on CI
+/// (issue #1409). This seam pins the decision so the stash/launch invariant can
+/// be asserted deterministically under BOTH `native_supported = true` (no
+/// injection) and `false` (injection fires). Production code keeps real
+/// detection via the wrapper above.
+/// What: resolves the override-layered PM prompt via
+/// [`crate::core::instruction_overrides::resolve_pm_prompt`], then applies the
+/// injection decision with the caller-supplied flag via
+/// [`crate::core::output_style::apply_output_style_to_prompt_with_native`].
+/// Test: `prepare_session_stash_reflects_override`.
+pub fn build_system_prompt_for_with_style_and_native(
+    project_dir: &Path,
+    explicit_style: Option<&str>,
+    native_supported: bool,
+) -> String {
     let prompt = crate::core::instruction_overrides::resolve_pm_prompt(project_dir);
-    crate::core::output_style::apply_output_style_to_prompt(project_dir, explicit_style, prompt)
+    crate::core::output_style::apply_output_style_to_prompt_with_native(
+        project_dir,
+        explicit_style,
+        prompt,
+        native_supported,
+    )
 }
