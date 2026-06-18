@@ -13,11 +13,14 @@ use std::path::{Path, PathBuf};
 
 use super::PrepError;
 
-/// Claude Code output style applied to launched sessions.
+/// Default Claude Code output style applied to launched sessions.
 ///
-/// Why: the Claude Code status bar renders `style:<outputStyle>`; launched
-/// trusty-mpm sessions should advertise themselves as `trusty-mpm`.
-pub(super) const OUTPUT_STYLE: &str = "trusty-mpm";
+/// Why: the Claude Code status bar renders `style:<outputStyle>`; when no style
+/// is configured, launched trusty-mpm sessions advertise the professional
+/// default `trusty-mpm`. HR-4 lets the operator select a different bundled style
+/// (teaching/research); [`write_output_style`] takes the resolved active id and
+/// falls back to this constant when none is supplied.
+pub(super) const OUTPUT_STYLE: &str = crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID;
 
 /// trusty-mpm-specific spinner tips shown during Claude Code loading.
 ///
@@ -149,32 +152,43 @@ pub(super) fn trusty_search_mcp_value(index_id: Option<&str>) -> serde_json::Val
 pub(super) const GLOBAL_TRUSTY_MEMORY_EVENTS: &[&str] =
     &["UserPromptSubmit", "SessionStart", "PostToolUse", "Stop"];
 
-/// Deploy the bundled `trusty-mpm` output style under `<home>/.claude/output-styles/`.
+/// Deploy ALL bundled output styles under `<home>/.claude/output-styles/`.
 ///
-/// Why: [`write_output_style`] only sets `"outputStyle": "trusty-mpm"` in the
-/// project settings; Claude Code honours that name only when a matching style
-/// file exists in `~/.claude/output-styles/`. This places that file. `home` is
+/// Why: [`write_output_style`] sets `"outputStyle": "<active>"` in the project
+/// settings; Claude Code honours that name only when a matching style file
+/// exists in `~/.claude/output-styles/`. HR-4 bundles three styles
+/// (professional / teaching / research) and the operator may select any of
+/// them, so ALL of them must be on disk for the selection to resolve. `home` is
 /// passed in (rather than resolved here) so tests can target a temp directory
 /// instead of the operator's real home.
-/// What: creates `<home>/.claude/output-styles/` if absent, then writes the
-/// bundled [`crate::core::bundle::OUTPUT_STYLE`] asset, always overwriting so
-/// framework upgrades to the style propagate on the next launch. Returns the
-/// path written.
-/// Test: `deploy_output_style_writes_file`, `deploy_output_style_overwrites`.
+/// What: creates `<home>/.claude/output-styles/` if absent, then writes every
+/// entry in [`crate::core::bundle::OUTPUT_STYLES`] to its `file_name`, always
+/// overwriting so framework upgrades to the styles propagate on the next launch.
+/// Returns the path of the default (professional) style for the [`PrepReport`].
+/// Test: `deploy_output_style_writes_file`, `deploy_output_style_overwrites`,
+/// `deploy_output_style_writes_all_styles`.
 pub(super) fn deploy_output_style(home: &Path) -> Result<PathBuf, PrepError> {
     let style_dir = home.join(".claude").join("output-styles");
     std::fs::create_dir_all(&style_dir).map_err(|source| PrepError::Io {
         path: style_dir.clone(),
         source,
     })?;
-    let style_path = style_dir.join("trusty-mpm.md");
-    std::fs::write(&style_path, crate::core::bundle::OUTPUT_STYLE).map_err(|source| {
-        PrepError::Io {
+
+    let mut default_path: Option<PathBuf> = None;
+    for style in crate::core::bundle::OUTPUT_STYLES {
+        let style_path = style_dir.join(style.file_name);
+        std::fs::write(&style_path, style.content).map_err(|source| PrepError::Io {
             path: style_path.clone(),
             source,
+        })?;
+        if style.id == crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID {
+            default_path = Some(style_path);
         }
-    })?;
-    Ok(style_path)
+    }
+
+    // The default style is always in the registry; fall back to its conventional
+    // path defensively so the return type never has to be optional.
+    Ok(default_path.unwrap_or_else(|| style_dir.join("trusty-mpm.md")))
 }
 
 /// Merge trusty-mpm output-style and spinner-tip settings into the project's
@@ -187,14 +201,21 @@ pub(super) fn deploy_output_style(home: &Path) -> Result<PathBuf, PrepError> {
 /// same file drives the loading-spinner tips, so trusty-mpm-specific tips are
 /// written alongside to override the operator's generic claude-mpm tips.
 /// What: reads an existing `<project>/.claude/settings.json` (preserving all
-/// other keys), sets `outputStyle` to [`OUTPUT_STYLE`], enables
-/// `spinnerTipsEnabled`, sets `spinnerTipsOverride.tips` to [`SPINNER_TIPS`],
-/// and writes it back pretty-printed. Creates the file and `.claude/` directory
-/// when absent.
+/// other keys), sets `outputStyle` to `active_style` (the resolved active id;
+/// `None` → [`OUTPUT_STYLE`] default), enables `spinnerTipsEnabled`, sets
+/// `spinnerTipsOverride.tips` to [`SPINNER_TIPS`], and writes it back
+/// pretty-printed. Creates the file and `.claude/` directory when absent. The
+/// caller resolves+validates the id (via
+/// [`crate::core::output_style::resolve_active_style`]); an empty/whitespace id
+/// is treated as "unset" and falls back to the default here defensively.
 /// Test: `prepare_session_sets_output_style`,
 /// `write_output_style_preserves_existing_keys`,
-/// `write_output_style_sets_spinner_tips`.
-pub(super) fn write_output_style(project_dir: &Path) -> Result<(), PrepError> {
+/// `write_output_style_sets_spinner_tips`,
+/// `write_output_style_sets_active_style`.
+pub(super) fn write_output_style(
+    project_dir: &Path,
+    active_style: Option<&str>,
+) -> Result<(), PrepError> {
     let claude_dir = project_dir.join(".claude");
     std::fs::create_dir_all(&claude_dir).map_err(|source| PrepError::Io {
         path: claude_dir.clone(),
@@ -212,7 +233,11 @@ pub(super) fn write_output_style(project_dir: &Path) -> Result<(), PrepError> {
         Err(_) => serde_json::Value::Object(serde_json::Map::new()),
     };
 
-    settings["outputStyle"] = serde_json::Value::String(OUTPUT_STYLE.to_string());
+    let style = active_style
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(OUTPUT_STYLE);
+    settings["outputStyle"] = serde_json::Value::String(style.to_string());
     settings["spinnerTipsEnabled"] = serde_json::Value::Bool(true);
     settings["spinnerTipsOverride"] = serde_json::json!({ "tips": SPINNER_TIPS });
 

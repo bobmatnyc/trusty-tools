@@ -26,11 +26,13 @@ use crate::formatters::banner::{
 /// is unreachable), writes the system-prompt file, prints the banner, creates a
 /// detached tmux session running `claude`, and `attach`es to it (blocking until
 /// the user detaches/exits).
-/// Test: `cli_parses_launch`, `cli_parses_launch_with_dir`.
+/// Test: `cli_parses_launch`, `cli_parses_launch_with_dir`,
+/// `cli_parses_launch_with_style`.
 pub(crate) async fn launch(
     client: &reqwest::Client,
     url: &str,
     dir: Option<String>,
+    style: Option<String>,
 ) -> anyhow::Result<()> {
     // 1. Resolve the target directory (absolute, so the banner is unambiguous).
     //    `resolve_dir` already defaults to the process cwd when `dir` is None.
@@ -60,7 +62,9 @@ pub(crate) async fn launch(
     //    plain `claude` process behaves as a trusty-mpm PM session. A prep
     //    failure is logged but not fatal — the session can still launch.
     let fw = trusty_mpm::core::paths::FrameworkPaths::default();
-    if let Err(err) = trusty_mpm::core::session_launch::prepare_session(&fw, &path) {
+    if let Err(err) =
+        trusty_mpm::core::session_launch::prepare_session_with_style(&fw, &path, style.as_deref())
+    {
         eprintln!("warning: session preparation failed: {err}");
     }
 
@@ -124,7 +128,10 @@ pub(crate) async fn launch(
     // `claude` reads it at startup. The prompt is resolved *for this project
     // directory* so any override files under `<project>/.trusty-mpm/` take
     // effect (issue #381); `build_system_prompt_for` always yields a prompt.
-    let prompt = trusty_mpm::core::session_launch::build_system_prompt_for(&path);
+    let prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_style(
+        &path,
+        style.as_deref(),
+    );
     let prompt_path = trusty_mpm::core::model_inject::write_prompt_file(&prompt);
     if prompt_path.is_none() {
         eprintln!("warning: failed to write system prompt file; launching without prompt");

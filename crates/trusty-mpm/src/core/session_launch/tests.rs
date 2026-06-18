@@ -97,39 +97,72 @@ fn prepare_session_stash_reflects_override() {
     // Why: the inspectable stash (`last-instructions.md`) must reflect the
     // SAME override-resolved prompt the launch path uses, so `tm session
     // instructions` shows what was actually delivered (issue #381 / #382).
-    // Use a dedicated tmp_home for FrameworkPaths so parallel test runs
-    // never race on the shared ~/.claude/agents manifest (issue: parallel
-    // test isolation — each test needs its own claude_agents_dir).
-    let tmp_home = tempdir().unwrap();
-    let tmp = tempdir().unwrap();
-    let project = tmp.path();
-    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    //
+    // Determinism (issue #1409): HR-4 added output-style injection at the
+    // `build_system_prompt_for_with_style` seam, gated on whether `claude` is
+    // installed/new enough. We therefore route through the native-pinned seams
+    // (`prepare_session_with_style_and_native` /
+    // `build_system_prompt_for_with_style_and_native`) and assert the invariant
+    // under BOTH `native_supported = true` (no injection) AND `false`
+    // (injection fires). This removes the dependence on the host's `claude` that
+    // made this test pass locally but FAIL on CI (where `claude` is absent → the
+    // launch prompt was injected but the stash was not, so the two diverged).
+    for native_supported in [true, false] {
+        // A fresh tmp_home/project per iteration so the second run does not read
+        // back a stash written by the first. Dedicated tmp_home keeps parallel
+        // runs from racing on the shared ~/.claude/agents manifest.
+        let tmp_home = tempdir().unwrap();
+        let tmp = tempdir().unwrap();
+        let project = tmp.path();
+        let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
 
-    let override_dir = project.join(".trusty-mpm");
-    std::fs::create_dir_all(&override_dir).unwrap();
-    std::fs::write(
-        override_dir.join("WORKFLOW.md"),
-        "# Custom Workflow\n\nSTASH_OVERRIDE_MARKER\n",
-    )
-    .unwrap();
+        let override_dir = project.join(".trusty-mpm");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(
+            override_dir.join("WORKFLOW.md"),
+            "# Custom Workflow\n\nSTASH_OVERRIDE_MARKER\n",
+        )
+        .unwrap();
 
-    let report = prepare_session(&fw, project).expect("prep succeeds");
-    let stash = std::fs::read_to_string(&report.stash).expect("stash readable");
+        let report = prepare_session_with_style_and_native(&fw, project, None, native_supported)
+            .expect("prep succeeds");
+        let stash = std::fs::read_to_string(&report.stash).expect("stash readable");
 
-    assert!(
-        stash.contains("STASH_OVERRIDE_MARKER"),
-        "stash must reflect the WORKFLOW.md override"
-    );
-    assert!(
-        !stash.contains("# PM Workflow Configuration"),
-        "bundled workflow heading must be replaced in the stash"
-    );
-    assert!(
-        stash.contains("# BASE_PM Framework Floor"),
-        "stash must still carry the BASE_PM floor"
-    );
-    // The stash must equal the live prompt for this project.
-    assert_eq!(stash, build_system_prompt_for(project));
+        assert!(
+            stash.contains("STASH_OVERRIDE_MARKER"),
+            "stash must reflect the WORKFLOW.md override (native_supported={native_supported})"
+        );
+        assert!(
+            !stash.contains("# PM Workflow Configuration"),
+            "bundled workflow heading must be replaced in the stash (native_supported={native_supported})"
+        );
+        assert!(
+            stash.contains("# BASE_PM Framework Floor"),
+            "stash must still carry the BASE_PM floor (native_supported={native_supported})"
+        );
+        // The CORE INVARIANT: the persisted stash must equal the exact prompt the
+        // launcher would deliver under the SAME injection decision — in both
+        // claude-present (native) and claude-absent (injected) environments.
+        assert_eq!(
+            stash,
+            build_system_prompt_for_with_style_and_native(project, None, native_supported),
+            "stash must equal the launch prompt (native_supported={native_supported})"
+        );
+        // When injection fires, the stash must actually carry the injected style
+        // block; when native is supported it must NOT — proving the flag drives
+        // the stash content, not the host.
+        if native_supported {
+            assert!(
+                !stash.contains(crate::core::output_style::INJECTED_STYLE_HEADING),
+                "native-capable: stash must NOT carry the injected style block"
+            );
+        } else {
+            assert!(
+                stash.contains(crate::core::output_style::INJECTED_STYLE_HEADING),
+                "native-incapable: stash MUST carry the injected style block"
+            );
+        }
+    }
 }
 
 #[test]
@@ -180,6 +213,89 @@ fn prepare_session_sets_output_style() {
 }
 
 #[test]
+fn prepare_session_writes_configured_style() {
+    // Why: HR-4 — when `[style] active` is set in the framework config, the
+    // launched session's settings.json must carry that id.
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    // Seed `<root>/config.toml` with a teaching-mode selection.
+    std::fs::create_dir_all(&fw.root).unwrap();
+    std::fs::write(
+        fw.config_toml(),
+        "[style]\nactive = \"trusty-mpm-teacher\"\n",
+    )
+    .unwrap();
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        value["outputStyle"],
+        serde_json::json!("trusty-mpm-teacher")
+    );
+}
+
+#[test]
+fn prepare_session_explicit_style_overrides_config() {
+    // Why: HR-4 — an explicit `--style` override beats the config `[style] active`
+    // key for that launch.
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    std::fs::create_dir_all(&fw.root).unwrap();
+    std::fs::write(
+        fw.config_toml(),
+        "[style]\nactive = \"trusty-mpm-teacher\"\n",
+    )
+    .unwrap();
+
+    crate::core::session_launch::prepare_session_with_style(
+        &fw,
+        project,
+        Some("trusty-mpm-research"),
+    )
+    .expect("prep succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        value["outputStyle"],
+        serde_json::json!("trusty-mpm-research")
+    );
+}
+
+#[test]
+fn prepare_session_unknown_style_falls_back_to_default() {
+    // Why: DOC-17 — an unknown configured style must not fail the launch; it
+    // falls back to the professional default.
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    std::fs::create_dir_all(&fw.root).unwrap();
+    std::fs::write(fw.config_toml(), "[style]\nactive = \"does-not-exist\"\n").unwrap();
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["outputStyle"], serde_json::json!("trusty-mpm"));
+}
+
+#[test]
 fn write_output_style_preserves_existing_keys() {
     // Why: merging the style must not clobber an operator's other settings.
     let tmp = tempdir().unwrap();
@@ -192,13 +308,48 @@ fn write_output_style_preserves_existing_keys() {
     )
     .unwrap();
 
-    write_output_style(project).expect("write succeeds");
+    write_output_style(project, None).expect("write succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(claude_dir.join("settings.json")).unwrap())
             .unwrap();
     assert_eq!(value["outputStyle"], serde_json::json!("trusty-mpm"));
     assert_eq!(value["theme"], serde_json::json!("dark"));
+}
+
+#[test]
+fn write_output_style_sets_active_style() {
+    // Why: HR-4 — an explicitly resolved active style id must be written into
+    // settings.json so a native-capable Claude Code applies it.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    write_output_style(project, Some("trusty-mpm-research")).expect("write succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        value["outputStyle"],
+        serde_json::json!("trusty-mpm-research")
+    );
+}
+
+#[test]
+fn write_output_style_empty_falls_back_to_default() {
+    // Why: a blank/whitespace id must not blank the outputStyle key; it falls
+    // back to the professional default.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    write_output_style(project, Some("   ")).expect("write succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["outputStyle"], serde_json::json!("trusty-mpm"));
 }
 
 #[test]
@@ -209,7 +360,7 @@ fn write_output_style_sets_spinner_tips() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    write_output_style(project).expect("write succeeds");
+    write_output_style(project, None).expect("write succeeds");
 
     let value: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
@@ -951,6 +1102,25 @@ fn deploy_output_style_overwrites() {
     assert_eq!(first, second);
     let written = std::fs::read_to_string(&second).unwrap();
     assert_eq!(written, crate::core::bundle::OUTPUT_STYLE);
+}
+
+#[test]
+fn deploy_output_style_writes_all_styles() {
+    // Why: HR-4 — the operator may select any of the three bundled styles, so
+    // ALL of them must land in ~/.claude/output-styles/ for the selection to
+    // resolve in Claude Code.
+    let home = tempdir().unwrap();
+    deploy_output_style(home.path()).expect("deploy succeeds");
+
+    let dir = home.path().join(".claude").join("output-styles");
+    for style in crate::core::bundle::OUTPUT_STYLES {
+        let path = dir.join(style.file_name);
+        assert!(path.exists(), "{} must be deployed", style.file_name);
+        let written = std::fs::read_to_string(&path).expect("style file readable");
+        assert_eq!(written, style.content, "{} content matches", style.id);
+    }
+    // Sanity: exactly the three bundled styles are written.
+    assert_eq!(crate::core::bundle::OUTPUT_STYLES.len(), 3);
 }
 
 #[test]

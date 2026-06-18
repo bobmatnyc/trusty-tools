@@ -60,6 +60,8 @@ fn constants_are_non_empty() {
     assert!(!MPM_SKILLS_MANAGER_AGENT.trim().is_empty());
     assert!(!EXAMPLE_SKILL.trim().is_empty());
     assert!(!OUTPUT_STYLE.trim().is_empty());
+    assert!(!OUTPUT_STYLE_TEACHER.trim().is_empty());
+    assert!(!OUTPUT_STYLE_RESEARCH.trim().is_empty());
     // Phase 1 (#770) guidance skills
     assert!(!MPM_DELEGATION_PATTERNS.trim().is_empty());
     assert!(!MPM_VERIFICATION_PROTOCOLS.trim().is_empty());
@@ -80,6 +82,46 @@ fn output_style_has_matching_frontmatter_name() {
     // `name:` in the style file's frontmatter; a mismatch silently falls
     // back to the operator's default style.
     assert!(OUTPUT_STYLE.contains("name: trusty-mpm"));
+}
+
+#[test]
+fn output_style_registry_has_three_distinct_ids() {
+    // HR-4 bundles exactly three styles with distinct ids and file names.
+    assert_eq!(OUTPUT_STYLES.len(), 3);
+    let mut ids: Vec<&str> = OUTPUT_STYLES.iter().map(|s| s.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 3, "style ids must be distinct");
+
+    let mut files: Vec<&str> = OUTPUT_STYLES.iter().map(|s| s.file_name).collect();
+    files.sort_unstable();
+    files.dedup();
+    assert_eq!(files.len(), 3, "style file names must be distinct");
+}
+
+#[test]
+fn output_style_registry_ids_match_frontmatter() {
+    // Each registry id MUST equal the file's frontmatter `name:`, or Claude Code
+    // silently falls back to the operator's default style.
+    for style in OUTPUT_STYLES {
+        assert!(!style.content.trim().is_empty(), "{} non-empty", style.id);
+        assert!(
+            style.content.contains(&format!("name: {}", style.id)),
+            "{} frontmatter name must match registry id",
+            style.id
+        );
+    }
+}
+
+#[test]
+fn output_style_registry_default_resolves() {
+    // The default id is present and points at the professional style.
+    let default = OUTPUT_STYLES
+        .iter()
+        .find(|s| s.id == DEFAULT_OUTPUT_STYLE_ID)
+        .expect("default style must be in the registry");
+    assert_eq!(default.content, OUTPUT_STYLE);
+    assert_eq!(default.file_name, "trusty-mpm.md");
 }
 
 #[test]
