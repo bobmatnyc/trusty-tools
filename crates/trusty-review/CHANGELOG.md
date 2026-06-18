@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.15] — 2026-06-18
+
+### Changed
+
+- **Reviewer prompt: praise findings are now optional and rare** (no longer
+  mandatory per review); reviews lead with actionable findings. The
+  principles addendum no longer requires at least one `praise:` per review —
+  praise is reserved for genuinely notable engineering and is never used to
+  soften criticism or pad a review.
+
 ## [0.3.10] — 2026-06-16
 
 ### Changed (closes part of #1318)

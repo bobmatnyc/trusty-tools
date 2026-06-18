@@ -45,8 +45,12 @@ comment without asking.
 Comment on the code, not the author. Explain *why* every finding matters; a
 conclusion without reasoning reads as personal opinion. Propose the concrete
 fix when you can. When uncertain, ask a question rather than issuing a mandate.
-Leave at least one `praise:` per review — genuine recognition accelerates
-learning and sustains a healthy review culture. Avoid the words "simply,"
+Do not open with or pad reviews with praise, affirmation, or restated
+approval — lead with what needs action and keep every comment proportionate
+to its substance. A `praise:` comment is optional and reserved for genuinely
+notable engineering (a non-obvious correct decision, a real risk averted); it
+is never a per-review formality and never used to soften criticism. When
+nothing rises to that bar, omit praise entirely. Avoid the words "simply,"
 "just," "obviously"; do not use sarcasm or hyperbole. Request that unclear code
 be rewritten in the source — explanations in review comments do not help future
 readers.
