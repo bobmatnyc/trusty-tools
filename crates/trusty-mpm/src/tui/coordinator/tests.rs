@@ -12,7 +12,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::banner::{
     GLYPH_ACTIVE, GLYPH_UNREACHABLE, HELP_HINT, ProbeOutcome, USER_PALACE, compose_banner,
-    probe_memory, probe_search,
+    ensure_user_palace_with, probe_client, probe_memory, probe_search,
 };
 use super::events::{SlashCommand, handle_key, is_quit, parse_slash};
 use super::layout::{
@@ -736,5 +736,126 @@ async fn probe_unreachable_memory_is_inactive() {
     assert!(
         outcome.note.is_some(),
         "a degraded memory probe should carry a reason note"
+    );
+}
+
+/// Why: the print site composes the banner and prints it with `eprintln!`; if the
+/// composed banner itself ended with a newline AND `startup_line` also ended with
+/// one, the operator would see two blank lines. The contract is a single trailing
+/// newline so the print site yields exactly one blank separator.
+/// What: composes a banner and asserts it ends with exactly one `\n` (not two and
+/// not zero).
+/// Test: this IS the test.
+#[test]
+fn compose_banner_has_single_trailing_newline() {
+    let banner = compose_banner(
+        "0.1.0",
+        &ProbeOutcome::active(None),
+        &ProbeOutcome::active(None),
+        Some(2),
+    );
+    assert!(
+        banner.ends_with('\n'),
+        "composed banner must end with a newline, got:\n{banner:?}"
+    );
+    assert!(
+        !banner.ends_with("\n\n"),
+        "composed banner must NOT end with a double newline, got:\n{banner:?}"
+    );
+}
+
+/// Spawn a one-shot HTTP mock that answers the FIRST request with `status_line`
+/// and records whether a SECOND request (the would-be `POST` create) ever
+/// arrives, signalling that via the returned watch channel.
+///
+/// Why: `ensure_user_palace_with` must only POST a create on a real 404. To prove
+/// it does NOT create on a non-404 error, the test needs to observe whether a
+/// second connection (the POST) is attempted at all.
+/// What: binds an ephemeral port; the first accepted connection replies with
+/// `status_line`; if a second connection arrives it flips `post_seen` to `true`
+/// and replies `200 OK`. Returns the base URL and a receiver for `post_seen`.
+/// Test: used by `ensure_user_palace_does_not_create_on_non_404`.
+async fn spawn_palace_mock(
+    status_line: &'static str,
+) -> (String, tokio::sync::watch::Receiver<bool>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let (tx, rx) = tokio::sync::watch::channel(false);
+
+    tokio::spawn(async move {
+        // First request: the GET palace lookup → reply with the given status.
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let body = "{}";
+            let resp = format!(
+                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+        // Any SECOND request means a create POST was attempted — record it.
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let _ = tx.send(true);
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let resp =
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}".to_string();
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+
+    (format!("http://{addr}"), rx)
+}
+
+/// Why: the review flagged that `ensure_user_palace` over-eagerly created the
+/// palace — any non-2xx GET (including a transient `500`/`503`) fell through to a
+/// create POST. The fix gates creation on a *real* 404; any other error status
+/// must return `false` WITHOUT attempting a write.
+/// What: stubs the palace GET to answer `500`, runs `ensure_user_palace_with`,
+/// and asserts it returns `false` AND that no second (POST) request was made.
+/// Test: this IS the test.
+#[tokio::test]
+async fn ensure_user_palace_does_not_create_on_non_404() {
+    let (base, post_seen) = spawn_palace_mock("HTTP/1.1 500 Internal Server Error").await;
+    let client = probe_client();
+    let created = ensure_user_palace_with(&client, &base).await;
+    assert!(
+        !created,
+        "a 500 from the palace GET must NOT confirm the palace as active"
+    );
+    // Give any erroneous POST a moment to land, then assert none was attempted.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !*post_seen.borrow(),
+        "a non-404 GET error must NOT trigger a create POST"
+    );
+}
+
+/// Why: the complement to the non-404 case — a genuine 404 means the palace is
+/// absent, so the banner SHOULD create it idempotently (D4). This pins the one
+/// status that is allowed to trigger a write.
+/// What: stubs the palace GET to answer `404` (and the create POST to answer
+/// `200`), runs `ensure_user_palace_with`, and asserts it returns `true` and that
+/// a second (POST) request was observed.
+/// Test: this IS the test.
+#[tokio::test]
+async fn ensure_user_palace_creates_only_on_404() {
+    let (base, post_seen) = spawn_palace_mock("HTTP/1.1 404 Not Found").await;
+    let client = probe_client();
+    let created = ensure_user_palace_with(&client, &base).await;
+    assert!(
+        created,
+        "a 404 GET followed by a 2xx create POST must confirm the palace"
+    );
+    assert!(
+        *post_seen.borrow(),
+        "a 404 GET must trigger exactly the create POST"
     );
 }

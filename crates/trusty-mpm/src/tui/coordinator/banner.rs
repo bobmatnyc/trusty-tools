@@ -198,15 +198,18 @@ fn service_line(label: &str, outcome: &ProbeOutcome) -> String {
 /// misleading `0`. A pure helper keeps the pluralisation and the unknown-count
 /// branch testable offline.
 /// What: renders `<n> active session(s)` (singular at `1`) when the count is
-/// known, or `daemon unreachable` when `None`, then `  ·  <HELP_HINT>`.
-/// Test: `compose_banner_pluralizes_count`, `compose_banner_handles_unknown_count`.
+/// known, or `daemon unreachable` when `None`, then `  ·  <HELP_HINT>`, and
+/// terminates with a single trailing newline so the composed banner ends cleanly
+/// (the print site adds exactly one blank separator, never two).
+/// Test: `compose_banner_pluralizes_count`, `compose_banner_handles_unknown_count`,
+/// `compose_banner_has_single_trailing_newline`.
 fn startup_line(active_count: Option<usize>) -> String {
     let lead = match active_count {
         Some(1) => "1 active session".to_string(),
         Some(n) => format!("{n} active sessions"),
         None => "daemon unreachable".to_string(),
     };
-    format!("{lead}  ·  {HELP_HINT}")
+    format!("{lead}  ·  {HELP_HINT}\n")
 }
 
 /// Probe trusty-search health for the startup banner (fail-safe).
@@ -215,12 +218,14 @@ fn startup_line(active_count: Option<usize>) -> String {
 /// failure must degrade to `○ unreachable` (the TUI still opens), never abort.
 /// What: GETs `<base>/health` with a short timeout; any transport or non-2xx
 /// response yields [`ProbeOutcome::unreachable`]. `base` defaults to
-/// [`DEFAULT_SEARCH_URL`] when `None`.
+/// [`DEFAULT_SEARCH_URL`] when `None`. Builds a single bounded client and reuses
+/// it for the health check.
 /// Test: `probe_unreachable_search_is_inactive` drives the dead-daemon branch;
 /// the live path is exercised by launching the TUI against a running daemon.
 pub async fn probe_search(base: Option<&str>) -> ProbeOutcome {
     let base = base.unwrap_or(DEFAULT_SEARCH_URL);
-    if health_ok(base).await {
+    let client = probe_client();
+    if health_ok_with(&client, base).await {
         ProbeOutcome::active(None)
     } else {
         ProbeOutcome::unreachable(None)
@@ -235,7 +240,8 @@ pub async fn probe_search(base: Option<&str>) -> ProbeOutcome {
 /// palace assertion degrades to `○ unreachable` with a reason note, and the TUI
 /// still opens.
 /// What: GETs `<base>/health`; on success, GETs `<base>/api/v1/palaces/user` and,
-/// if absent, POSTs `<base>/api/v1/palaces` with `{"name":"user"}` to create it.
+/// only on a real 404, POSTs `<base>/api/v1/palaces` with `{"name":"user"}` to
+/// create it. Builds a single bounded client and threads it into both helpers.
 /// Returns [`ProbeOutcome::active`] with note `palace: user` when memory is live
 /// and the palace is present/creatable, else [`ProbeOutcome::unreachable`] with a
 /// short reason. `base` defaults to [`DEFAULT_MEMORY_URL`] when `None`.
@@ -243,10 +249,11 @@ pub async fn probe_search(base: Option<&str>) -> ProbeOutcome {
 /// the live + palace-assertion path is exercised against a running daemon.
 pub async fn probe_memory(base: Option<&str>) -> ProbeOutcome {
     let base = base.unwrap_or(DEFAULT_MEMORY_URL);
-    if !health_ok(base).await {
+    let client = probe_client();
+    if !health_ok_with(&client, base).await {
         return ProbeOutcome::unreachable(Some("memory daemon down".to_string()));
     }
-    if ensure_user_palace(base).await {
+    if ensure_user_palace_with(&client, base).await {
         ProbeOutcome::active(Some(format!("palace: {USER_PALACE}")))
     } else {
         ProbeOutcome::unreachable(Some(format!("{USER_PALACE} palace unavailable")))
@@ -260,49 +267,67 @@ pub async fn probe_memory(base: Option<&str>) -> ProbeOutcome {
 /// What: a `reqwest::Client` with [`PROBE_TIMEOUT`], falling back to the default
 /// client if the builder somehow fails (it cannot in practice).
 /// Test: covered indirectly by the probe tests.
-fn probe_client() -> reqwest::Client {
+pub(super) fn probe_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(PROBE_TIMEOUT)
         .build()
         .unwrap_or_default()
 }
 
-/// GET `<base>/health` and report whether it answered 2xx.
+/// GET `<base>/health` with the shared client and report whether it answered 2xx.
 ///
 /// Why: both probes share the same health check; a daemon that is down, slow, or
 /// returns an error status all collapse to "not healthy" so the banner degrades
-/// cleanly.
-/// What: issues a bounded GET to `<base>/health` and returns `true` only on a
-/// 2xx response.
+/// cleanly. Taking the client by reference lets each probe build exactly one
+/// client and reuse it across the health check and any follow-up request.
+/// What: issues a bounded GET to `<base>/health` via `client` and returns `true`
+/// only on a 2xx response.
 /// Test: covered by `probe_unreachable_*` (dead daemon → `false`).
-async fn health_ok(base: &str) -> bool {
-    let client = probe_client();
+async fn health_ok_with(client: &reqwest::Client, base: &str) -> bool {
     matches!(
         client.get(format!("{base}/health")).send().await,
         Ok(resp) if resp.status().is_success()
     )
 }
 
-/// Ensure the fixed `user` palace exists at `base`, creating it if absent (D4).
+/// Ensure the fixed `user` palace exists at `base`, creating it ONLY on a 404 (D4).
 ///
 /// Why: D4 makes memory "active" only when the `user` palace is present; the
 /// banner asserts it idempotently so first-run operators get a confirmed memory
-/// line without a manual provisioning step.
-/// What: GETs `<base>/api/v1/palaces/user`; on a 2xx it already exists. On a 404
-/// (or any non-2xx) it POSTs `<base>/api/v1/palaces` with `{"name":"user"}` and
-/// reports whether the create answered 2xx. Any transport error yields `false`.
-/// Test: covered indirectly by `probe_memory`; the live assertion path runs
-/// against a running daemon.
-async fn ensure_user_palace(base: &str) -> bool {
-    let client = probe_client();
-    if let Ok(resp) = client
+/// line without a manual provisioning step. Crucially, creation must be gated on
+/// a *real* 404 — a transient `500`/`503` (or any other non-2xx) means the
+/// daemon's state is unknown, so blindly POSTing a create would be wrong (it
+/// could race a half-up daemon or mask a real outage). Those cases degrade to
+/// `false` (memory renders `○ unreachable`) instead of attempting a write.
+/// What: GETs `<base>/api/v1/palaces/user` with the shared `client` and branches
+/// on the status: a 2xx means the palace already exists → `true`; a 404 means it
+/// is genuinely absent → POST `<base>/api/v1/palaces` with `{"name":"user"}` and
+/// return whether the create answered 2xx; any other status (5xx, etc.) →
+/// `false` without creating; a transport error → `false`.
+/// Test: `ensure_user_palace_creates_only_on_404` exercises the status branching
+/// against a stub server; the live assertion path runs against a running daemon.
+pub(super) async fn ensure_user_palace_with(client: &reqwest::Client, base: &str) -> bool {
+    let resp = match client
         .get(format!("{base}/api/v1/palaces/{USER_PALACE}"))
         .send()
         .await
-        && resp.status().is_success()
     {
+        Ok(resp) => resp,
+        // Transport error (daemon unreachable): do not attempt a create.
+        Err(_) => return false,
+    };
+
+    let status = resp.status();
+    if status.is_success() {
+        // Palace already exists.
         return true;
     }
+    if status != reqwest::StatusCode::NOT_FOUND {
+        // Any non-404 (5xx, etc.): state is unknown — do NOT create.
+        return false;
+    }
+
+    // Genuine 404 → the palace is absent, so create it.
     matches!(
         client
             .post(format!("{base}/api/v1/palaces"))
@@ -323,9 +348,10 @@ async fn ensure_user_palace(base: &str) -> bool {
 /// are fail-safe, so a down service slows startup by at most one [`PROBE_TIMEOUT`]
 /// and never aborts.
 /// What: probes memory + search concurrently, composes the banner with the
-/// crate `CARGO_PKG_VERSION` and `active_count`, and writes it to stderr followed
-/// by a blank line. `memory_url` / `search_url` default to the canonical local
-/// addresses when `None`.
+/// crate `CARGO_PKG_VERSION` and `active_count`, and writes it to stderr. The
+/// composed banner ends with a single trailing newline (from `startup_line`), so
+/// `eprintln!` adds exactly one blank separator after it — not two. `memory_url`
+/// / `search_url` default to the canonical local addresses when `None`.
 /// Test: composition is unit-tested via [`compose_banner`]; this print-only glue
 /// is exercised by launching the TUI.
 pub async fn print_startup_banner(
@@ -335,5 +361,5 @@ pub async fn print_startup_banner(
 ) {
     let (memory, search) = tokio::join!(probe_memory(memory_url), probe_search(search_url));
     let banner = compose_banner(env!("CARGO_PKG_VERSION"), &memory, &search, active_count);
-    eprintln!("{banner}\n");
+    eprintln!("{banner}");
 }
