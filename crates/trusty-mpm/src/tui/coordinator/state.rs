@@ -11,6 +11,8 @@
 //! Test: `super::tests` covers `clamp_selection` boundary cases (empty list,
 //! single row, selection past end) and the history ring.
 
+use super::nav::ListNav;
+
 /// Maximum number of submitted inputs retained in the history ring.
 ///
 /// Why: the input box recalls prior submissions with ↑/↓ (like the dashboard's
@@ -82,8 +84,34 @@ pub struct CoordinatorState {
     history_cursor: Option<usize>,
     /// Placeholder managed-session rows (Child #2 swaps in the live feed).
     pub sessions: Vec<SessionEntry>,
-    /// Selected row index across the unified list (`0` = controller bullet).
-    pub selected: usize,
+    /// Numbered-list navigation: the selected row index AND the scroll offset,
+    /// preserved across the timer re-polls (STUI-1).
+    ///
+    /// Why: STUI-1 (#1278) replaces the old bare `selected: usize` with a
+    /// [`ListState`](ratatui::widgets::ListState)-backed model so the list scrolls
+    /// (≥ 5 visible rows), supports Page-Up/Page-Down, and — critically —
+    /// preserves the selection + scroll offset across the timer re-polls Child #2
+    /// introduced. Held as a [`ListNav`] so the render path can hand the wrapped
+    /// `ListState` straight to `render_stateful_widget`.
+    /// What: row 0 is the controller; sessions follow. Movement and clamping go
+    /// through [`Self::select_up`] / [`Self::select_down`] / [`Self::page_up`] /
+    /// [`Self::page_down`] / [`Self::clamp_selection`], which delegate to `nav`.
+    /// Test: `nav_*` and `clamp_selection_*` in `super::tests`.
+    pub nav: ListNav,
+    /// Set when a list-mutating action (create/kill/stop/resume) just succeeded
+    /// and the operator should see the fleet refreshed without waiting for the
+    /// next timer tick (STUI-1 AC: "immediate re-poll after a mutation").
+    ///
+    /// Why: a poll only happens on the `--interval-ms` cadence; after the
+    /// operator changes the fleet they expect the list to reflect it now, not up
+    /// to a whole interval later. The run loop reads this flag each tick and, when
+    /// set, re-polls immediately and resets its interval timer. The flag is the
+    /// seam the (still-stubbed) slash-command dispatch will pull once #1278's
+    /// sibling STUI-6 wires mutations.
+    /// What: set by [`Self::request_repoll`]; consumed (read-and-cleared) by
+    /// [`Self::take_repoll`].
+    /// Test: `request_repoll_sets_and_take_clears`.
+    needs_repoll: bool,
     /// Whether the daemon answered its last health probe.
     ///
     /// Why: Child #2 polls the coordinator-context endpoint on a timer and must
@@ -166,52 +194,95 @@ impl CoordinatorState {
         1 + self.sessions.len()
     }
 
-    /// Clamp [`Self::selected`] into `0..row_count`.
+    /// The selected row index across the unified list (`0` = controller bullet).
+    ///
+    /// Why: callers that used to read the old `selected: usize` field (the
+    /// renderer's active-row branch, `selected_session`) need the index; routing
+    /// them through one accessor keeps the [`ListNav`] the single source of truth.
+    /// What: returns [`ListNav::selected`].
+    /// Test: `selection_movement_saturates`, `nav_default_selects_controller_row`.
+    pub fn selected(&self) -> usize {
+        self.nav.selected()
+    }
+
+    /// Focus a specific row by index, clamped into `0..row_count`.
+    ///
+    /// Why: STUI-1 lets the operator jump straight to a numbered session (and the
+    /// post-mutation / focus paths need a way to set the selection directly rather
+    /// than stepping it). Routing through one clamped setter keeps every selection
+    /// change inside the list bounds.
+    /// What: re-syncs `nav` to the current row count (so the bound is live) then
+    /// selects `min(row, row_count - 1)`.
+    /// Test: `select_row_clamps_into_bounds`.
+    pub fn select_row(&mut self, row: usize) {
+        self.nav.sync_len(self.row_count());
+        self.nav.select(row);
+    }
+
+    /// Re-clamp the selection + scroll offset into `0..row_count` after a poll.
     ///
     /// Why: the live list shrinks between polls (sessions end); a stale index
-    /// would render — and later index — out of bounds. Mirrors
-    /// `DashboardState::clamp_selection`, but over the controller-plus-sessions
-    /// row space so row 0 (the controller) is always valid.
-    /// What: pins `selected` to `row_count - 1`; `row_count` is always ≥ 1
-    /// because the controller row always exists, so the index never underflows.
+    /// would render — and later index — out of bounds. STUI-1 additionally
+    /// requires the selection AND scroll offset to be PRESERVED across a refresh
+    /// when still valid, so this delegates to [`ListNav::sync_len`] rather than a
+    /// bare index pin: a grown or unchanged list keeps the cursor exactly where
+    /// the operator left it; only a shrink clamps inward.
+    /// What: calls `self.nav.sync_len(self.row_count())`. `row_count` is always
+    /// ≥ 1 because the controller row always exists, so the index never
+    /// underflows.
     /// Test: `clamp_selection_empty_list`, `clamp_selection_single_row`,
-    /// `clamp_selection_past_end`.
+    /// `clamp_selection_past_end`, `clamp_selection_preserves_valid_selection`.
     pub fn clamp_selection(&mut self) {
-        let max = self.row_count() - 1;
-        if self.selected > max {
-            self.selected = max;
-        }
+        self.nav.sync_len(self.row_count());
     }
 
     /// Move the selection up one row (saturating at the controller, row 0).
     ///
     /// Why: ↑ / `k` move the highlight toward the controller.
-    /// What: decrements `selected`, saturating at 0.
+    /// What: delegates to [`ListNav::up`].
     /// Test: `selection_movement_saturates`.
     pub fn select_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
+        self.nav.up();
     }
 
     /// Move the selection down one row (saturating at the last session).
     ///
     /// Why: ↓ / `j` move the highlight toward the newest session.
-    /// What: increments `selected` while it is below the last row.
+    /// What: re-syncs the row count (so `nav` knows the live bound) then
+    /// delegates to [`ListNav::down`].
     /// Test: `selection_movement_saturates`.
     pub fn select_down(&mut self) {
-        let max = self.row_count() - 1;
-        if self.selected < max {
-            self.selected += 1;
-        }
+        self.nav.sync_len(self.row_count());
+        self.nav.down();
+    }
+
+    /// Jump the selection up by one page (saturating at the controller, row 0).
+    ///
+    /// Why: Page-Up traverses a long fleet quickly (STUI-1 AC).
+    /// What: delegates to [`ListNav::page_up`].
+    /// Test: `page_scroll_moves_by_page_and_saturates`.
+    pub fn page_up(&mut self) {
+        self.nav.page_up();
+    }
+
+    /// Jump the selection down by one page (saturating at the last session).
+    ///
+    /// Why: Page-Down is the symmetric fast-scroll toward the newest session.
+    /// What: re-syncs the row count then delegates to [`ListNav::page_down`].
+    /// Test: `page_scroll_moves_by_page_and_saturates`.
+    pub fn page_down(&mut self) {
+        self.nav.sync_len(self.row_count());
+        self.nav.page_down();
     }
 
     /// True when the controller bullet (row 0) is the active selection.
     ///
     /// Why: the layout renders the controller's right column as a synthetic
     /// status and a session's as its summary; the renderer branches on this.
-    /// What: `selected == 0`.
+    /// What: `self.selected() == 0`.
     /// Test: `controller_is_selected_at_row_zero`.
     pub fn controller_selected(&self) -> bool {
-        self.selected == 0
+        self.selected() == 0
     }
 
     /// The session under the current selection, if a session (not the
@@ -223,9 +294,32 @@ impl CoordinatorState {
     /// What: returns `sessions[selected - 1]` when `selected > 0`, else `None`.
     /// Test: `selected_session_offsets_by_controller_row`.
     pub fn selected_session(&self) -> Option<&SessionEntry> {
-        self.selected
+        self.selected()
             .checked_sub(1)
             .and_then(|idx| self.sessions.get(idx))
+    }
+
+    /// Request an immediate daemon re-poll on the next run-loop tick (STUI-1).
+    ///
+    /// Why: after a list-mutating action (create/kill/stop/resume) the operator
+    /// expects the fleet to refresh now, not up to a whole `--interval-ms` later.
+    /// Setting a flag — rather than polling inline — keeps the mutation path free
+    /// of async/IO and lets the single run-loop own all daemon calls.
+    /// What: sets the private `needs_repoll` flag.
+    /// Test: `request_repoll_sets_and_take_clears`.
+    pub fn request_repoll(&mut self) {
+        self.needs_repoll = true;
+    }
+
+    /// Read-and-clear the immediate-re-poll request.
+    ///
+    /// Why: the run loop checks this each tick; a take-style consume guarantees a
+    /// single requested re-poll fires exactly once and is not re-triggered every
+    /// subsequent tick.
+    /// What: returns the current `needs_repoll` value and resets it to `false`.
+    /// Test: `request_repoll_sets_and_take_clears`.
+    pub fn take_repoll(&mut self) -> bool {
+        std::mem::take(&mut self.needs_repoll)
     }
 
     /// Append a character to the input buffer (a printable keystroke).

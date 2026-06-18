@@ -45,6 +45,26 @@ pub enum SlashCommand {
     Unknown(String),
 }
 
+impl SlashCommand {
+    /// Whether dispatching this command mutates the fleet (create/kill/stop/resume).
+    ///
+    /// Why: STUI-1 requires an immediate daemon re-poll after a *list-mutating*
+    /// action so the operator sees the change now rather than up to a whole
+    /// `--interval-ms` later. Read-only commands (`/help`, `/sessions`,
+    /// `/attach`) must NOT force a refresh — they change no daemon state — so the
+    /// re-poll trigger keys off this predicate rather than firing on every
+    /// submission.
+    /// What: returns `true` for [`SlashCommand::New`], [`SlashCommand::Kill`],
+    /// [`SlashCommand::Stop`], and [`SlashCommand::Resume`]; `false` otherwise.
+    /// Test: `mutating_commands_are_classified`.
+    pub fn is_mutating(&self) -> bool {
+        matches!(
+            self,
+            SlashCommand::New | SlashCommand::Kill | SlashCommand::Stop | SlashCommand::Resume
+        )
+    }
+}
+
 /// Parse a submitted input line into a [`SlashCommand`], if it is one.
 ///
 /// Why: Enter on a `/`-prefixed line should be classified as a command rather
@@ -96,12 +116,17 @@ pub fn is_quit(key: &KeyEvent, input_empty: bool) -> bool {
 /// pure `&mut state` function (no terminal, no IO) makes every branch — quit,
 /// selection, editing, submit — unit-testable with synthetic [`KeyEvent`]s.
 /// What: Ctrl-C / bare `q` set `should_exit`; ↑/↓ and `k`/`j` move the
-/// selection when the input is empty (↑/↓ recall history when it is not);
-/// printable keys edit the buffer; Backspace deletes; Esc clears; Enter submits
-/// (echoing to history — Child #1 does not dispatch). Returns any submitted line
-/// so the caller can record a last-action note; slash lines are returned too
-/// (the caller may `parse_slash` them) but are not acted on here.
-/// Test: `handle_key_*` branch tests in `super::tests`.
+/// selection one row when the input is empty (↑/↓ recall history when it is
+/// not); Page-Up/Page-Down jump the selection by a page (STUI-1) regardless of
+/// the buffer; printable keys edit the buffer; Backspace deletes; Esc clears;
+/// Enter submits (echoing to history — Child #1 does not dispatch). When the
+/// submitted line is a *mutating* slash command ([`SlashCommand::is_mutating`])
+/// it also requests an immediate daemon re-poll (STUI-1) so the fleet refreshes
+/// now rather than on the next timer tick. Returns any submitted line so the
+/// caller can record a last-action note; slash lines are returned too (the
+/// caller may `parse_slash` them) but are not otherwise dispatched here.
+/// Test: `handle_key_*` branch tests in `super::tests`, incl.
+/// `handle_key_enter_mutating_command_requests_repoll`.
 pub fn handle_key(state: &mut CoordinatorState, key: KeyEvent) -> Option<String> {
     let input_empty = state.input.is_empty();
     if is_quit(&key, input_empty) {
@@ -110,6 +135,17 @@ pub fn handle_key(state: &mut CoordinatorState, key: KeyEvent) -> Option<String>
     }
 
     match key.code {
+        // Page scrolling works regardless of the input buffer — Page-Up/Page-Down
+        // are list-navigation keys with no text-editing meaning, so hijacking them
+        // mid-message is unambiguous.
+        KeyCode::PageUp => {
+            state.page_up();
+            None
+        }
+        KeyCode::PageDown => {
+            state.page_down();
+            None
+        }
         KeyCode::Up | KeyCode::Char('k') if input_empty => {
             state.select_up();
             None
@@ -136,7 +172,25 @@ pub fn handle_key(state: &mut CoordinatorState, key: KeyEvent) -> Option<String>
             state.clear_input();
             None
         }
-        KeyCode::Enter => state.submit_input(),
+        KeyCode::Enter => {
+            let submitted = state.submit_input();
+            // STUI-1: a mutating slash command (create/kill/stop/resume) must
+            // refresh the fleet immediately rather than waiting for the next
+            // timer tick. We wire the re-poll TRIGGER here now (the run loop
+            // already consumes `take_repoll`); the command's actual daemon
+            // dispatch is still stubbed.
+            //
+            // TODO(STUI-6): replace this parse-and-flag with the real dispatch —
+            // the create/kill/stop/resume handlers will call
+            // `state.request_repoll()` only *after* a successful mutation, so a
+            // failed/rejected command no longer forces a spurious refresh.
+            if let Some(line) = submitted.as_deref()
+                && parse_slash(line).is_some_and(|cmd| cmd.is_mutating())
+            {
+                state.request_repoll();
+            }
+            submitted
+        }
         KeyCode::Char(c) => {
             state.push_char(c);
             None
