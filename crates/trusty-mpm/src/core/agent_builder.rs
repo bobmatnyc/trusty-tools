@@ -138,6 +138,68 @@ struct Frontmatter {
     description: Option<String>,
     model: Option<String>,
     extends: Option<String>,
+    /// Auto-submitted first turn when the agent is spawned (claude-mpm parity).
+    initial_prompt: Option<String>,
+    /// Resource tier (`intensive`/`high`/`standard`/`lightweight`) used to
+    /// derive a default `model` when none is explicitly set.
+    resource_tier: Option<String>,
+}
+
+/// Resolve the default `model` for a `resource_tier` (HR-1 deploy enrichment).
+///
+/// Why: external/source agents may declare a `resource_tier` without an explicit
+/// `model`; the harness must still deploy them with a correct model assignment.
+/// The mapping mirrors claude-mpm's `RESOURCE_TIER_DEFAULTS` so a harness
+/// provisioned from either toolchain behaves identically.
+/// What: maps `intensive → opus`, `high/standard → sonnet`,
+/// `lightweight → haiku`; any missing or unrecognised tier falls back to the
+/// `standard` default (`sonnet`), per the HR-1 error contract.
+/// Test: `tier_model_mapping`, `tier_unknown_falls_back_to_sonnet` in
+/// agent_builder_tests.rs.
+fn tier_to_model(resource_tier: Option<&str>) -> &'static str {
+    match resource_tier {
+        Some("intensive") => "opus",
+        Some("lightweight") => "haiku",
+        // `high`, `standard`, missing, and any unrecognised tier → sonnet.
+        _ => "sonnet",
+    }
+}
+
+/// Resolve the default `initialPrompt` for an agent `role` (HR-1 enrichment).
+///
+/// Why: claude-mpm injects a self-starting first turn per agent type so a
+/// delegated agent begins work without an extra round-trip. trusty-mpm uses the
+/// `role` field as the type discriminator. Interactive/special-purpose agents
+/// are intentionally excluded so they wait for human or PM direction.
+/// What: returns a per-role default prompt, or `None` when the role is excluded
+/// or unknown (an unknown role simply gets no injected prompt).
+/// Test: `initial_prompt_injected_by_role`, `initial_prompt_excluded_role` in
+/// agent_builder_tests.rs.
+fn default_initial_prompt(role: Option<&str>) -> Option<&'static str> {
+    match role {
+        Some("engineer") | Some("data-engineer") => {
+            Some("Begin implementation. Read the task context and start coding immediately.")
+        }
+        Some("qa") => {
+            Some("Begin verification. Read the task context and start testing immediately.")
+        }
+        Some("ops") | Some("version-control") => {
+            Some("Begin operations. Read the task context and execute immediately.")
+        }
+        Some("research") | Some("code-analyzer") => Some(
+            "Begin investigation. Analyze the task context, search for relevant files, \
+             and report findings.",
+        ),
+        Some("documentation") => {
+            Some("Begin documentation. Read the task context and start writing immediately.")
+        }
+        Some("security") => {
+            Some("Begin security analysis. Read the task context and start scanning immediately.")
+        }
+        // Interactive / special-purpose roles (base, ticketing, prompt-engineer,
+        // memory-manager, agent/skill managers) and unknown roles get none.
+        _ => None,
+    }
 }
 
 /// Split a source document into its frontmatter map and body.
@@ -202,6 +264,10 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), AgentBuildError
         description: fields.remove("description"),
         model: fields.remove("model"),
         extends: fields.remove("extends"),
+        // `parse_kv_line` lower-cases keys, so `initialPrompt` arrives as
+        // `initialprompt`; match that normalised form.
+        initial_prompt: fields.remove("initialprompt"),
+        resource_tier: fields.remove("resource_tier"),
     };
     Ok((fm, body))
 }
@@ -224,10 +290,17 @@ fn first_line_len(s: &str) -> usize {
 ///
 /// Why: the composed file needs exactly one frontmatter block; child fields
 /// must win over base fields so a concrete agent's `model`/`description`
-/// survive.
-/// What: folds the chain base-first, overlaying each file's set fields, and
-/// emits the populated keys in a stable order.
-/// Test: `compose_engineer_chain` asserts the merged `name`/`model`.
+/// survive. Deploy-time enrichments (HR-1) are applied here so every composed
+/// agent carries a tier-derived `model` default and a self-starting
+/// `initialPrompt` without editing each source file.
+/// What: folds the chain base-first, overlaying each file's set fields, then
+/// (a) fills `model` from `resource_tier` when no explicit `model` was set
+/// (explicit always wins), and (b) fills `initialPrompt` from the agent `role`
+/// when the source declared none and the role is not excluded. Emits the
+/// populated keys in a stable order.
+/// Test: `compose_engineer_chain` (merge), `tier_model_mapping`,
+/// `explicit_model_wins_over_tier`, `initial_prompt_injected_by_role`,
+/// `initial_prompt_explicit_wins` in agent_builder_tests.rs.
 fn merge_frontmatter(chain: &[Frontmatter]) -> String {
     let mut merged = Frontmatter::default();
     for fm in chain {
@@ -243,6 +316,26 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
         if fm.model.is_some() {
             merged.model = fm.model.clone();
         }
+        if fm.initial_prompt.is_some() {
+            merged.initial_prompt = fm.initial_prompt.clone();
+        }
+        if fm.resource_tier.is_some() {
+            merged.resource_tier = fm.resource_tier.clone();
+        }
+    }
+
+    // HR-1 Part C: derive `model` from `resource_tier` only when no explicit
+    // `model` survived the merge. Explicit model always wins.
+    if merged.model.is_none() && merged.resource_tier.is_some() {
+        merged.model = Some(tier_to_model(merged.resource_tier.as_deref()).to_string());
+    }
+
+    // HR-1 Part B: inject a role-derived `initialPrompt` when the source set
+    // none. A source-declared `initialPrompt` (now in `merged`) always wins.
+    if merged.initial_prompt.is_none()
+        && let Some(prompt) = default_initial_prompt(merged.role.as_deref())
+    {
+        merged.initial_prompt = Some(prompt.to_string());
     }
 
     let mut out = String::from("---\n");
@@ -257,6 +350,15 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
     }
     if let Some(v) = &merged.model {
         out.push_str(&format!("model: {v}\n"));
+    }
+    if let Some(v) = &merged.resource_tier {
+        out.push_str(&format!("resource_tier: {v}\n"));
+    }
+    if let Some(v) = &merged.initial_prompt {
+        // Quote the value: it contains spaces and punctuation, and downstream
+        // YAML parsers treat an unquoted `initialPrompt` sentence safely either
+        // way, but quoting keeps it a single scalar.
+        out.push_str(&format!("initialPrompt: \"{v}\"\n"));
     }
     out.push_str("---\n");
     out

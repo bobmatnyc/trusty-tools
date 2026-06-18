@@ -326,6 +326,67 @@ mod tests {
     }
 
     #[test]
+    fn deploy_injects_initial_prompt_and_tier_model() {
+        // A deployed agent that declares a `resource_tier` but no `model`, and
+        // an engineer `role` but no `initialPrompt`, must land on disk with both
+        // deploy-time enrichments applied (HR-1).
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        fs::write(
+            src.path().join("base-engineer.md"),
+            "---\nname: base-engineer\nrole: base-engineer\n---\n\n# Base Eng\n\nBASE ENG CONTENT\n",
+        )
+        .unwrap();
+        fs::write(
+            src.path().join("heavy-eng.md"),
+            "---\nname: heavy-eng\nrole: engineer\nextends: base-engineer\nresource_tier: intensive\n---\n\n# Heavy\n\nLEAF CONTENT\n",
+        )
+        .unwrap();
+
+        deploy_agents(src.path(), tgt.path()).unwrap();
+
+        let deployed = fs::read_to_string(tgt.path().join("heavy-eng.md")).unwrap();
+        assert!(
+            deployed.contains("model: opus"),
+            "intensive tier must inject opus on deploy; got:\n{deployed}"
+        );
+        assert!(
+            deployed.contains(r#"initialPrompt: "Begin implementation."#),
+            "engineer role must inject implementation initialPrompt on deploy; got:\n{deployed}"
+        );
+        // Inherited base content survives composition + deploy.
+        assert!(deployed.contains("BASE ENG CONTENT"));
+        assert!(deployed.contains("LEAF CONTENT"));
+    }
+
+    #[test]
+    fn deploy_preserves_explicit_model_and_prompt() {
+        // Explicit `model` and explicit `initialPrompt` in the source must
+        // survive deploy unchanged (explicit always wins over enrichment).
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        fs::write(
+            src.path().join("pinned.md"),
+            "---\nname: pinned\nrole: engineer\nresource_tier: intensive\nmodel: haiku\ninitialPrompt: Custom start.\n---\n\n# Pinned\n",
+        )
+        .unwrap();
+
+        deploy_agents(src.path(), tgt.path()).unwrap();
+
+        let deployed = fs::read_to_string(tgt.path().join("pinned.md")).unwrap();
+        assert!(
+            deployed.contains("model: haiku"),
+            "explicit model wins:\n{deployed}"
+        );
+        assert!(!deployed.contains("model: opus"));
+        assert!(
+            deployed.contains(r#"initialPrompt: "Custom start.""#),
+            "explicit prompt wins:\n{deployed}"
+        );
+        assert!(!deployed.contains("Begin implementation."));
+    }
+
+    #[test]
     fn deploy_content_file_is_atomic() {
         // After a successful deploy no stale .tmp file should remain in the
         // target directory — the atomic rename must have completed.
