@@ -68,6 +68,27 @@ pub struct SessionSummary {
     pub active_delegations: u32,
     /// Last [`SESSION_OUTPUT_LINES`] lines captured from the session's pane.
     pub recent_output: Vec<String>,
+    /// The latest daemon-cached LLM summary for this session, if one exists.
+    ///
+    /// Why: the sessions TUI renders a per-session summary bullet (DOC-16 §4.3)
+    /// and must not pay for N fresh LLM calls per poll (#1275). This is the
+    /// *cached* summary the activity monitor last produced for `/activity` — read
+    /// synchronously, never inferred here. `None` when no summary exists yet or
+    /// inference is unconfigured (the degraded placeholder is never surfaced, D1).
+    /// What: an optional single-line summary string.
+    /// Test: `context_summary_absent_without_cache`, `session_summary_serializes_new_fields`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_summary: Option<String>,
+    /// Whether an inference call for this session is currently in flight.
+    ///
+    /// Why: the TUI blinks the session's bullet while it is actively summarizing
+    /// (DOC-16 §3.3, D1). This is the honest in-progress signal — true only while
+    /// a real classifier call runs, `false` otherwise (including when inference is
+    /// unconfigured so no call ever starts).
+    /// What: a boolean in-flight flag.
+    /// Test: `context_summary_absent_without_cache`, `session_summary_serializes_new_fields`.
+    #[serde(default)]
+    pub summarizing: bool,
 }
 
 /// One hook event inside a [`CoordinatorContext`].
@@ -123,10 +144,21 @@ fn status_word(status: SessionStatus) -> String {
 /// What: lists every session, derives a routing prefix and a status word for
 /// each, and (for non-`Stopped` sessions) captures the last
 /// [`SESSION_OUTPUT_LINES`] pane lines via [`TmuxService::capture`] — which
-/// degrades to an empty list when tmux is absent. Also folds the daemon's
-/// recent hook events down to [`EventSummary`] rows.
-/// Test: `context_builds_from_state` (tmux-absent path).
+/// degrades to an empty list when tmux is absent. Enriches each session with the
+/// daemon-cached `last_summary` and live `summarizing` flag read synchronously
+/// from the shared [`ActivityMonitor`](crate::activity::monitor::ActivityMonitor)
+/// sidecar — NO fresh LLM call is made here, so the per-poll cost stays O(sessions)
+/// map lookups regardless of session count (#1275, DOC-16 §6.2). Also folds the
+/// daemon's recent hook events down to [`EventSummary`] rows.
+/// Test: `context_builds_from_state` (tmux-absent path),
+/// `context_summary_absent_without_cache` (sidecar read), and the monitor-level
+/// `cached_summary_reflects_llm_verdict` (the value the sidecar surfaces).
 pub fn build_coordinator_context(state: &DaemonState) -> CoordinatorContext {
+    // The activity monitor owns the per-session summary cache populated by the
+    // `/activity` route. Reading its sidecar is a cheap, synchronous, no-network
+    // lookup — exactly what a per-poll context build needs (it must NOT fan out
+    // N LLM calls). Accessing it lazily constructs the shared monitor once.
+    let monitor = state.activity_monitor();
     let sessions = state
         .list_sessions()
         .into_iter()
@@ -139,8 +171,11 @@ pub fn build_coordinator_context(state: &DaemonState) -> CoordinatorContext {
                 let raw = TmuxService::capture(&session, SESSION_OUTPUT_LINES);
                 raw.lines().map(str::to_string).collect()
             };
+            let session_id = session.id.0.to_string();
             SessionSummary {
-                id: session.id.0.to_string(),
+                last_summary: monitor.cached_summary(&session_id),
+                summarizing: monitor.is_summarizing(&session_id),
+                id: session_id,
                 name: session.tmux_name.clone(),
                 prefix: derive_prefix(&session.tmux_name),
                 workdir: session.workdir.clone(),
@@ -275,6 +310,8 @@ mod tests {
             status: "Active".to_string(),
             active_delegations: 0,
             recent_output: Vec::new(),
+            last_summary: None,
+            summarizing: false,
         }
     }
 
@@ -390,5 +427,53 @@ mod tests {
         let context = build_coordinator_context(&state);
         assert!(context.sessions.is_empty());
         assert!(context.recent_events.is_empty());
+    }
+
+    /// Construct a minimal Active session for context-builder tests.
+    ///
+    /// Why: the coordinator tests need a registered session without depending on
+    /// the private `state::tests` helper.
+    /// What: a Tmux-model session with an Active status.
+    /// Test: used by `context_summary_absent_without_cache`.
+    fn active_session() -> crate::core::session::Session {
+        use crate::core::session::{ControlModel, Session, SessionId, SessionStatus};
+        let mut s = Session::new(SessionId::new(), "/tmp/p", ControlModel::Tmux, None);
+        s.tmux_name = "tmpm-demo".to_string();
+        s.status = SessionStatus::Active;
+        s
+    }
+
+    #[test]
+    fn context_summary_absent_without_cache() {
+        // A registered session with no prior activity check has no cached
+        // summary and is not summarizing — the regression-safe default that an
+        // unconfigured-inference daemon also produces (D1). This also proves
+        // build_coordinator_context reads the shared monitor sidecar without
+        // panicking and without a fresh LLM call.
+        let state = DaemonState::new();
+        state.register_session(active_session());
+
+        let context = build_coordinator_context(&state);
+        assert_eq!(context.sessions.len(), 1);
+        assert_eq!(context.sessions[0].last_summary, None);
+        assert!(!context.sessions[0].summarizing);
+    }
+
+    #[test]
+    fn session_summary_serializes_new_fields() {
+        // When a summary is present it serializes; when absent it is skipped, and
+        // `summarizing` always serializes (defaulting to false).
+        let mut s = summary("tmpm-demo");
+        s.last_summary = Some("Refactoring the parser".to_string());
+        s.summarizing = true;
+        let json = serde_json::to_string(&s).expect("serialize");
+        assert!(json.contains("\"last_summary\":\"Refactoring the parser\""));
+        assert!(json.contains("\"summarizing\":true"));
+
+        // Absent summary is skipped from the wire (keeps the payload tight).
+        let bare = summary("tmpm-demo");
+        let bare_json = serde_json::to_string(&bare).expect("serialize");
+        assert!(!bare_json.contains("last_summary"));
+        assert!(bare_json.contains("\"summarizing\":false"));
     }
 }
