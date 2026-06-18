@@ -44,6 +44,9 @@ pub(crate) async fn coord_poll_daemon(state: &mut CoordinatorState, client: &mut
         state.daemon_reachable = client.is_healthy().await;
     }
     if state.daemon_reachable {
+        // Read the additive HR-3 catalog-staleness flag off the SAME health
+        // surface; a failure or older daemon degrades to "no updates" (false).
+        state.catalog_stale = client.catalog_stale().await;
         match client.coordinator_context().await {
             Ok(context) => {
                 state.sessions = context
@@ -58,6 +61,9 @@ pub(crate) async fn coord_poll_daemon(state: &mut CoordinatorState, client: &mut
             }
         }
     } else {
+        // Daemon down: clear the session rows AND the staleness hint so neither
+        // shows stale information.
+        state.catalog_stale = false;
         state.sessions.clear();
     }
     state.clamp_selection();

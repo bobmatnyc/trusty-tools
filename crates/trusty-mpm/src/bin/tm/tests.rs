@@ -190,7 +190,10 @@ fn cli_meta_requires_action() {
 fn cli_parses_launch() {
     let cli = Cli::try_parse_from(["trusty-mpm", "launch"]).unwrap();
     match cli.command {
-        Command::Launch { dir } => assert_eq!(dir, None),
+        Command::Launch { dir, style } => {
+            assert_eq!(dir, None);
+            assert_eq!(style, None);
+        }
         other => panic!("expected launch, got {other:?}"),
     }
 }
@@ -199,7 +202,24 @@ fn cli_parses_launch() {
 fn cli_parses_launch_with_dir() {
     let cli = Cli::try_parse_from(["trusty-mpm", "launch", "/work/p"]).unwrap();
     match cli.command {
-        Command::Launch { dir } => assert_eq!(dir.as_deref(), Some("/work/p")),
+        Command::Launch { dir, style } => {
+            assert_eq!(dir.as_deref(), Some("/work/p"));
+            assert_eq!(style, None);
+        }
+        other => panic!("expected launch, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_launch_with_style() {
+    // HR-4: `--style <id>` selects the active output style for this launch.
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "launch", "--style", "trusty-mpm-teacher"]).unwrap();
+    match cli.command {
+        Command::Launch { dir, style } => {
+            assert_eq!(dir, None);
+            assert_eq!(style.as_deref(), Some("trusty-mpm-teacher"));
+        }
         other => panic!("expected launch, got {other:?}"),
     }
 }
@@ -1030,6 +1050,48 @@ fn cli_parses_catalog_ls() {
             action: CatalogAction::Ls { json },
         } => assert!(!json),
         other => panic!("expected catalog ls, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_catalog_status() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "catalog", "status", "--json"]).unwrap();
+    match cli.command {
+        Command::Catalog {
+            action: CatalogAction::Status { json },
+        } => assert!(json),
+        other => panic!("expected catalog status, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_catalog_apply() {
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "catalog", "apply", "--force", "--prune"]).unwrap();
+    match cli.command {
+        Command::Catalog {
+            action: CatalogAction::Apply { force, prune },
+        } => {
+            assert!(force);
+            assert!(prune);
+        }
+        other => panic!("expected catalog apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_catalog_apply_defaults() {
+    // Without flags, both `force` and `prune` default to false (no surprise
+    // network refetch, no surprise removals).
+    let cli = Cli::try_parse_from(["trusty-mpm", "catalog", "apply"]).unwrap();
+    match cli.command {
+        Command::Catalog {
+            action: CatalogAction::Apply { force, prune },
+        } => {
+            assert!(!force);
+            assert!(!prune);
+        }
+        other => panic!("expected catalog apply, got {other:?}"),
     }
 }
 

@@ -71,6 +71,29 @@ pub fn deploy_agents(
     source_dir: &Path,
     target_dir: &Path,
 ) -> Result<DeployResult, AgentBuildError> {
+    // Default policy: deploy every agent in the source directory.
+    deploy_agents_filtered(source_dir, target_dir, |_name| true)
+}
+
+/// Deploy agents from `source_dir`, restricting to those `select` accepts.
+///
+/// Why: HR-2 manifests describe an agent *set* (include/exclude globs), so the
+/// session-launch path must be able to deploy a subset of the source agents
+/// without copying the whole directory. Factoring the selection into a predicate
+/// keeps the manifest logic in `session_launch` while reusing the identical
+/// compose/ownership/atomic-write machinery here.
+/// What: identical to [`deploy_agents`] except a source agent whose stem (the
+/// `.md`-stripped name) the `select` predicate rejects is skipped entirely — it
+/// is neither composed nor written, and an already-deployed managed copy is left
+/// in place (deselecting an agent does not remove a previously deployed file;
+/// that is an HR-3 concern). [`deploy_agents`] delegates here with an accept-all
+/// predicate, so existing behavior is unchanged.
+/// Test: `deploy_filtered_respects_predicate`.
+pub fn deploy_agents_filtered(
+    source_dir: &Path,
+    target_dir: &Path,
+    select: impl Fn(&str) -> bool,
+) -> Result<DeployResult, AgentBuildError> {
     let mut result = DeployResult::default();
 
     // No source directory means nothing to deploy — an empty result, not an
@@ -102,7 +125,12 @@ pub fn deploy_agents(
             continue;
         };
         if entry.file_type()?.is_file() && is_agent_file(name) {
-            names.push(name.trim_end_matches(".md").to_string());
+            let stem = name.trim_end_matches(".md").to_string();
+            // Honour the manifest's agent-set selection (HR-2). A deselected
+            // agent is skipped before compose, so it is never written.
+            if select(&stem) {
+                names.push(stem);
+            }
         }
     }
     names.sort_unstable();
@@ -384,6 +412,24 @@ mod tests {
             "explicit prompt wins:\n{deployed}"
         );
         assert!(!deployed.contains("Begin implementation."));
+    }
+
+    #[test]
+    fn deploy_filtered_respects_predicate() {
+        // HR-2: a selection predicate must restrict which source agents deploy.
+        // Only the accepted agent lands; the rejected one is never written.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_sources(src.path()); // base-agent.md + engineer.md
+
+        let result =
+            deploy_agents_filtered(src.path(), tgt.path(), |name| name == "engineer").unwrap();
+
+        // engineer.md deployed; base-agent.md filtered out and not written.
+        assert!(result.deployed.contains(&"engineer.md".to_string()));
+        assert!(!result.deployed.contains(&"base-agent.md".to_string()));
+        assert!(tgt.path().join("engineer.md").exists());
+        assert!(!tgt.path().join("base-agent.md").exists());
     }
 
     #[test]

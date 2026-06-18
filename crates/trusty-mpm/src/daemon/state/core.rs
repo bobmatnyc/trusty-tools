@@ -327,6 +327,20 @@ impl DaemonState {
         }
     }
 
+    /// The framework root directory this daemon was configured with.
+    ///
+    /// Why: the `GET /health` catalog-staleness check (HR-3) resolves the harness
+    /// manifest and the deployed-content manifests under this root; exposing it
+    /// lets the handler build a [`crate::core::paths::FrameworkPaths`] anchored to
+    /// the SAME root the daemon uses (a temp dir in tests, `~/.trusty-mpm` in
+    /// production) instead of recomputing the default.
+    /// What: returns the resolved framework root path.
+    /// Test: `health_reports_catalog_unknown_without_catalog` builds state
+    /// `with_root` a tempdir and asserts the handler reads it.
+    pub fn framework_root(&self) -> &std::path::Path {
+        &self.framework_root
+    }
+
     /// Return the shared activity monitor, constructing it on first access.
     ///
     /// Why: the `/sessions/managed/{id}/activity` handler needs a single,

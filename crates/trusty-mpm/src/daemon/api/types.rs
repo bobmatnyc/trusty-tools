@@ -22,6 +22,32 @@ use crate::core::session::Session;
 use crate::daemon::optimizer::OptimizerConfig;
 use crate::daemon::tmux::{AdoptedSession, SessionSnapshot};
 
+/// Response of `GET /health`.
+///
+/// Why: HR-3 / DOC-17 requires the daemon to SURFACE catalog staleness so the
+/// TUI can show an indicator and the operator can decide to rebuild. The probe
+/// stays a liveness check (`status: "ok"`) and additionally carries the
+/// cheap, offline catalog-staleness signal computed from the already-synced
+/// catalog checkout vs the deployed checksum manifests — it never blocks on a
+/// network pull.
+/// What: `status` is the liveness word; `catalog_stale` is true when deployed
+/// content drifts from the synced catalog; `catalog_unknown` is true when the
+/// catalog has never been synced (distinct from "fresh"); `catalog_changes` is a
+/// small human summary of WHAT changed (empty unless stale).
+/// Test: `health_reports_catalog_unknown_without_catalog`,
+/// `health_reports_ok_status`.
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct HealthResponse {
+    /// Liveness word — `"ok"` while the daemon is up.
+    pub status: String,
+    /// True when deployed agents/skills drift from the synced catalog (HR-3).
+    pub catalog_stale: bool,
+    /// True when the catalog has never been synced (nothing to compare).
+    pub catalog_unknown: bool,
+    /// Short human summary of changed artifacts (empty unless `catalog_stale`).
+    pub catalog_changes: Vec<String>,
+}
+
 /// Response of `GET /sessions`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SessionsResponse {

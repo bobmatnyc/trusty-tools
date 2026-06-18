@@ -171,7 +171,8 @@ pub use skills_inner::{
     MPM_VERIFICATION_PROTOCOLS,
 };
 
-/// Claude Code output style deployed to `~/.claude/output-styles/trusty-mpm.md`.
+/// Default (professional) Claude Code output style deployed to
+/// `~/.claude/output-styles/trusty-mpm.md`.
 ///
 /// Why: launched sessions set `"outputStyle": "trusty-mpm"` in the project
 /// `.claude/settings.json`; Claude Code only honours that name if a matching
@@ -179,6 +180,74 @@ pub use skills_inner::{
 /// outside the framework-root [`ALL`] table (which installs under
 /// `~/.trusty-mpm/framework/`, not `~/.claude/`).
 pub const OUTPUT_STYLE: &str = include_str!("../assets/output-styles/trusty-mpm.md");
+
+/// Teaching-mode Claude Code output style (id `trusty-mpm-teacher`).
+///
+/// Why: HR-4 bundles three styles so an operator can pick a communication mode;
+/// this variant narrates the orchestration reasoning while keeping the
+/// mandatory-delegation floor intact.
+pub const OUTPUT_STYLE_TEACHER: &str =
+    include_str!("../assets/output-styles/trusty-mpm-teacher.md");
+
+/// Research-mode Claude Code output style (id `trusty-mpm-research`).
+///
+/// Why: HR-4 bundles three styles; this variant front-loads investigation and
+/// demands evidence before any change, again keeping the delegation floor.
+pub const OUTPUT_STYLE_RESEARCH: &str =
+    include_str!("../assets/output-styles/trusty-mpm-research.md");
+
+/// The default output-style id used when none is configured/selected.
+///
+/// Why: callers (config resolution, settings writer) need a single source of
+/// truth for the professional default so they cannot drift.
+/// What: the frontmatter `name:` of [`OUTPUT_STYLE`].
+/// Test: `bundle_tests::output_style_registry_default_resolves`.
+pub const DEFAULT_OUTPUT_STYLE_ID: &str = "trusty-mpm";
+
+/// One entry in the bundled output-style registry.
+///
+/// Why: the multi-style launch path (HR-4) must map a configured/selected style
+/// id to its bundled content and the file name it deploys to; bundling the id,
+/// file name, and content together keeps those three facts from drifting.
+/// What: the style id (matching the file's frontmatter `name:`), the file name
+/// written under `~/.claude/output-styles/`, and the embedded content.
+/// Test: `bundle_tests::output_style_registry_ids_match_frontmatter`.
+#[derive(Debug, Clone, Copy)]
+pub struct BundledStyle {
+    /// Style id — matches the frontmatter `name:` and the `outputStyle` settings
+    /// key Claude Code resolves against `~/.claude/output-styles/<file_name>`.
+    pub id: &'static str,
+    /// File name written under `~/.claude/output-styles/`.
+    pub file_name: &'static str,
+    /// Embedded Markdown content of the style.
+    pub content: &'static str,
+}
+
+/// All bundled output styles, default first.
+///
+/// Why: `deploy_output_style` writes every entry, and the style resolver looks
+/// up a configured/selected id against this table; a single ordered slice keeps
+/// both behaviours consistent.
+/// What: the professional (`trusty-mpm`), teaching (`trusty-mpm-teacher`), and
+/// research (`trusty-mpm-research`) styles.
+/// Test: `bundle_tests::output_style_registry_has_three_distinct_ids`.
+pub const OUTPUT_STYLES: &[BundledStyle] = &[
+    BundledStyle {
+        id: DEFAULT_OUTPUT_STYLE_ID,
+        file_name: "trusty-mpm.md",
+        content: OUTPUT_STYLE,
+    },
+    BundledStyle {
+        id: "trusty-mpm-teacher",
+        file_name: "trusty-mpm-teacher.md",
+        content: OUTPUT_STYLE_TEACHER,
+    },
+    BundledStyle {
+        id: "trusty-mpm-research",
+        file_name: "trusty-mpm-research.md",
+        content: OUTPUT_STYLE_RESEARCH,
+    },
+];
 
 // BundledArtifact, InstallPolicy, and ALL are defined in bundle_all.rs.
 // They are included here so they can access the constants above via `use super::*`.

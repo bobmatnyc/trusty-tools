@@ -209,6 +209,35 @@ fn coordinator_context_deserializes() {
     assert_eq!(context.sessions.len(), 1);
     assert_eq!(context.sessions[0].prefix, "aipowerranking");
     assert_eq!(context.sessions[0].active_delegations, 3);
+    // This payload is what an OLDER daemon (pre-#1275) emits — no summary
+    // fields. `#[serde(default)]` makes the client tolerant: absent → None/false.
+    assert_eq!(context.sessions[0].last_summary, None);
+    assert!(!context.sessions[0].summarizing);
+}
+
+#[test]
+fn coordinator_session_carries_summary_fields() {
+    // A current daemon (#1275) emits `last_summary` + `summarizing`; the client
+    // deserializes both so the TUI can render the bullet and blink (DOC-16 §6.2).
+    let json = serde_json::json!({
+        "sessions": [{
+            "id": "00000000-0000-0000-0000-000000000000",
+            "name": "tmpm-aipowerranking",
+            "prefix": "aipowerranking",
+            "workdir": "/tmp/proj",
+            "status": "Active",
+            "active_delegations": 0,
+            "recent_output": [],
+            "last_summary": "Writing the parser tests",
+            "summarizing": true,
+        }],
+    });
+    let context: CoordinatorContext = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        context.sessions[0].last_summary.as_deref(),
+        Some("Writing the parser tests")
+    );
+    assert!(context.sessions[0].summarizing);
 }
 
 #[test]
@@ -236,4 +265,29 @@ fn pair_status_deserializes() {
     let status: PairStatus = serde_json::from_value(json).unwrap();
     assert!(status.paired);
     assert_eq!(status.chat_id, Some(12345678));
+}
+
+#[test]
+fn catalog_stale_health_body_wire_shape() {
+    // The HR-3 `catalog_stale` flag must round-trip from the `/health` body, and
+    // a body MISSING the field (an older daemon) must default to `false` so
+    // `DaemonClient::catalog_stale` degrades to "no updates" instead of erroring.
+    // This mirrors the private `HealthBody` the client parses.
+    #[derive(serde::Deserialize)]
+    struct HealthBody {
+        #[serde(default)]
+        catalog_stale: bool,
+    }
+
+    let stale: HealthBody =
+        serde_json::from_value(serde_json::json!({"status":"ok","catalog_stale":true})).unwrap();
+    assert!(stale.catalog_stale);
+
+    let fresh: HealthBody =
+        serde_json::from_value(serde_json::json!({"status":"ok","catalog_stale":false})).unwrap();
+    assert!(!fresh.catalog_stale);
+
+    // Legacy daemon: no `catalog_stale` field present → defaults to false.
+    let legacy: HealthBody = serde_json::from_value(serde_json::json!({"status":"ok"})).unwrap();
+    assert!(!legacy.catalog_stale, "missing field defaults to false");
 }

@@ -30,6 +30,8 @@ fn coordinator_session_maps_status() {
         status: "Paused".into(),
         active_delegations: 2,
         recent_output: Vec::new(),
+        // #1275 summary fields default here (additive wire change).
+        ..Default::default()
     };
     let row = coordinator_session_to_row(session);
     assert_eq!(row.tmux_name, "tmpm-foo");

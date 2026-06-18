@@ -101,6 +101,33 @@ pub fn daemon_indicator(state: &CoordinatorState) -> &'static str {
     }
 }
 
+/// The status-bar hint shown when the daemon reports the catalog is stale (HR-3).
+///
+/// Why: DOC-17 §HR-3 requires a non-intrusive "update available" signal plus a
+/// hint at the rebuild action; naming the literal here single-sources it between
+/// the renderer and its test. The trailing command names the apply path so the
+/// operator knows HOW to act on the offer.
+/// What: the literal `catalog: ↑updates available (tm catalog apply)`.
+/// Test: `catalog_indicator_reflects_staleness`.
+pub const CATALOG_STALE_HINT: &str = "catalog: ↑updates available (tm catalog apply)";
+
+/// The catalog-staleness hint for the current state, if any.
+///
+/// Why: the status bar only shows the rebuild offer when there IS an update, and
+/// only when the daemon is reachable (a down daemon's flag is meaningless). A
+/// pure helper keeps that branch out of [`render`] and testable without a
+/// terminal.
+/// What: returns `Some(`[`CATALOG_STALE_HINT`]`)` when the daemon is reachable
+/// AND `catalog_stale`, else `None`.
+/// Test: `catalog_indicator_reflects_staleness`.
+pub fn catalog_indicator(state: &CoordinatorState) -> Option<&'static str> {
+    if state.daemon_reachable && state.catalog_stale {
+        Some(CATALOG_STALE_HINT)
+    } else {
+        None
+    }
+}
+
 /// Build the unified session-list items: controller row 0, then sessions.
 ///
 /// Why: the list always leads with the controller bullet and renders the
@@ -179,11 +206,16 @@ pub fn render(frame: &mut Frame, state: &CoordinatorState) {
     frame.render_widget(list, chunks[1]);
 
     // Status / key bar (bottom): key hints on the left, the live daemon-
-    // reachability indicator on the right.
+    // reachability indicator on the right, plus the HR-3 catalog-staleness hint
+    // when the daemon reports an available update.
+    let catalog_segment = catalog_indicator(state)
+        .map(|hint| format!("  ·  {hint}"))
+        .unwrap_or_default();
     let status = Paragraph::new(Line::from(format!(
-        "{}  ·  {}",
+        "{}  ·  {}{}",
         status_bar_text(),
-        daemon_indicator(state)
+        daemon_indicator(state),
+        catalog_segment
     )))
     .style(
         Style::default()

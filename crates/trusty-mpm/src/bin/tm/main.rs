@@ -234,7 +234,7 @@ async fn main() -> anyhow::Result<()> {
             auto_resume,
             no_classify,
         } => commands::supervisor::run_supervisor(addr, interval, auto_resume, no_classify).await,
-        Command::Launch { dir } => launch(&client, &url, dir).await,
+        Command::Launch { dir, style } => launch(&client, &url, dir, style).await,
         Command::Connect { dir } => connect(&client, &url, dir).await,
         Command::Attach { target, json } => attach_cmd(&client, &url, &target, json).await,
         Command::Optimizer { action } => optimizer(&client, &url, action).await,
