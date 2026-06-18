@@ -59,6 +59,19 @@ pub(crate) enum MetaInstructionError {
 /// Reusing [`resolve_pm_prompt`] (rather than re-implementing the layering) is
 /// the single source of truth #1048 requires, so the two launch paths can never
 /// diverge.
+///
+/// This thin passthrough is *deliberate* and must be kept: it is the stable API
+/// boundary the WI-4 metaharness orchestrator consumes. Future readers should not
+/// "simplify" it away by inlining [`resolve_pm_prompt`] at the call sites — the
+/// indirection is the seam that lets prompt assembly evolve (e.g. add caching or
+/// metaharness-specific layering) without churning the orchestrator.
+///
+/// Prompt resolution here is **infallible by design**: [`resolve_pm_prompt`]
+/// returns a plain `String`, degrading gracefully when override files are missing,
+/// empty, or unreadable (it falls back to the bundled defaults rather than
+/// erroring). That is why this function — and [`pm_agent_config`] — return owned
+/// values rather than a `Result`; a missing/broken override is a normal,
+/// non-fatal condition, not an error to propagate.
 /// What: Delegates verbatim to
 /// [`resolve_pm_prompt`](trusty_mpm::core::instruction_overrides::resolve_pm_prompt),
 /// which reads any override files under `<project_dir>/.trusty-mpm/` and appends
@@ -102,34 +115,38 @@ pub(crate) fn load_agent_prompt(agent_name: &str) -> Result<String, MetaInstruct
 /// including the matching closing `---` fence and returns the remaining body;
 /// otherwise returns `raw` unchanged (an asset without frontmatter is already a
 /// body).
-/// Test: `loaded_prompt_omits_frontmatter`, `strip_frontmatter_passes_through_bodyless`.
+/// Test: `loaded_prompt_omits_frontmatter`, `strip_frontmatter_passes_through_bodyless`,
+/// `strip_frontmatter_handles_crlf`, `strip_frontmatter_handles_fence_only_no_trailing_newline`,
+/// `strip_frontmatter_handles_lf`, `strip_frontmatter_passes_through_no_frontmatter`.
 fn strip_frontmatter(raw: &str) -> &str {
-    // The opening fence must be the very first line (a line that is exactly `---`,
-    // ignoring a trailing CR for CRLF files). If it is not, there is no
-    // frontmatter and the whole input is already a body.
-    let first_line = raw.lines().next().unwrap_or("");
-    if first_line.trim_end_matches('\r') != "---" {
+    // Work entirely in byte offsets against the *original* string so CRLF and LF
+    // inputs are handled identically and the returned slice always borrows from
+    // `raw`. `split_inclusive('\n')` is the only iterator we use because, unlike
+    // `lines()`, it preserves line terminators — so the cumulative byte length of
+    // the lines it yields exactly reconstructs `raw`, keeping our offsets honest.
+
+    // The opening fence must be the very first line: a line whose content (after
+    // dropping its `\n` and any trailing `\r`) is exactly `---`. Anything else
+    // means there is no frontmatter and the whole input is already a body.
+    let mut lines = raw.split_inclusive('\n');
+    let Some(first_line) = lines.next() else {
+        return raw; // empty input
+    };
+    if first_line.trim_end_matches(['\r', '\n']) != "---" {
         return raw;
     }
-    // Skip past the opening fence line, then scan for the closing `---` fence
-    // line. `split_inclusive('\n')` keeps line terminators so byte offsets line
-    // up with the original string, letting us return a borrowed body slice.
-    let mut consumed = first_line.len();
-    // Account for the opening fence's own newline (LF or CRLF) if present.
-    consumed += raw[consumed..]
-        .strip_prefix("\r\n")
-        .map(|_| 2)
-        .or_else(|| raw[consumed..].strip_prefix('\n').map(|_| 1))
-        .unwrap_or(0);
 
-    let mut offset = consumed;
-    for line in raw[consumed..].split_inclusive('\n') {
+    // Scan the remaining lines for the closing `---` fence. `offset` tracks the
+    // byte position of the *start* of each candidate line within `raw`; once we
+    // find the closing fence, the body begins immediately after it.
+    let mut offset = first_line.len();
+    for line in lines {
         if line.trim_end_matches(['\r', '\n']) == "---" {
-            // Body begins immediately after this closing fence line.
             return &raw[offset + line.len()..];
         }
         offset += line.len();
     }
+
     // Unterminated frontmatter — treat the whole thing as a body (robustness).
     raw
 }
@@ -145,6 +162,14 @@ fn strip_frontmatter(raw: &str) -> &str {
 /// (when `Some`) and the given tool allowlist applied. The PM is constrained to a
 /// delegate + read-only surface by its `allowed` list, mirroring the MPM protocol
 /// where the PM orchestrates and sub-agents act.
+///
+/// This function is **infallible by design** (returns `AgentConfig`, not a
+/// `Result`): the only fallible-looking step, prompt resolution via
+/// [`assemble_pm_prompt`]/[`resolve_pm_prompt`], degrades gracefully — a
+/// missing or unreadable `.trusty-mpm/` override falls back to the bundled base
+/// prompt rather than erroring. There is therefore no IO error to propagate, so
+/// the infallible signature is intentional (contrast with [`sub_agent_config`],
+/// which *can* fail on an unknown agent slug).
 /// Test: `pm_config_carries_assembled_prompt_and_allowlist`.
 pub(crate) fn pm_agent_config(
     pm_name: &str,
@@ -224,12 +249,11 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
-    use super::super::agents::{ENGINEER_AGENT_NAME, PM_AGENT_NAME};
-
-    /// The PM tool surface used in tests (mirrors the WI-4 demo PM allowlist).
-    const PM_TOOLS: &[&str] = &["delegate_to_agent", "read_file"];
-    /// The engineer tool surface used in tests.
-    const ENGINEER_TOOLS: &[&str] = &["read_file", "write_file", "edit", "bash"];
+    // Import the canonical tool allowlists from the agents module rather than
+    // re-declaring them here. Re-declaring local copies risks silent divergence
+    // from `agents::{PM_TOOLS, ENGINEER_TOOLS}` (the single source of truth for
+    // each agent's capability grant); importing them keeps the tests honest.
+    use super::super::agents::{ENGINEER_AGENT_NAME, ENGINEER_TOOLS, PM_AGENT_NAME, PM_TOOLS};
 
     /// Write `<project>/.trusty-mpm/<name>` with `content`, creating dirs.
     fn write_override(project: &Path, name: &str, content: &str) {
@@ -333,6 +357,51 @@ mod tests {
         let body = strip_frontmatter(doc);
         assert!(body.starts_with("# Body"));
         assert!(!body.contains("name: x"));
+    }
+
+    /// (c) Normal LF frontmatter: the body after the closing fence is returned
+    /// verbatim (no leading newline from the fence's own terminator).
+    #[test]
+    fn strip_frontmatter_handles_lf() {
+        let doc = "---\nname: x\n---\n# Body\n\ncontent\n";
+        assert_eq!(strip_frontmatter(doc), "# Body\n\ncontent\n");
+    }
+
+    /// (a) CRLF frontmatter: the same `\r\n`-terminated input strips identically,
+    /// preserving the CRLF body verbatim. This is the case the offset arithmetic
+    /// previously made fragile/non-obvious.
+    #[test]
+    fn strip_frontmatter_handles_crlf() {
+        let doc = "---\r\nname: x\r\nrole: y\r\n---\r\n# Body\r\n\r\ncontent\r\n";
+        assert_eq!(strip_frontmatter(doc), "# Body\r\n\r\ncontent\r\n");
+    }
+
+    /// (b) A file that is just the opening/closing fence pair with no trailing
+    /// newline after the second `---` yields an empty body (everything was
+    /// frontmatter), not the original string. Covers the EOF-at-fence edge.
+    #[test]
+    fn strip_frontmatter_handles_fence_only_no_trailing_newline() {
+        // Opening fence, one key, closing fence as the final bytes (no `\n`).
+        let doc = "---\nname: x\n---";
+        assert_eq!(strip_frontmatter(doc), "");
+
+        // Degenerate empty frontmatter (`---\n---`) is likewise all-frontmatter.
+        let empty = "---\n---";
+        assert_eq!(strip_frontmatter(empty), "");
+    }
+
+    /// (d) No frontmatter at all: the input is returned unchanged, including when
+    /// the first line merely *contains* dashes but is not exactly `---`.
+    #[test]
+    fn strip_frontmatter_passes_through_no_frontmatter() {
+        let plain = "# Title\n\nbody\n";
+        assert_eq!(strip_frontmatter(plain), plain);
+
+        let near_miss = "----\nname: x\n----\n# Body\n";
+        assert_eq!(strip_frontmatter(near_miss), near_miss);
+
+        // Empty input is trivially body-only.
+        assert_eq!(strip_frontmatter(""), "");
     }
 
     /// The PM config carries the assembled prompt + the model + the allowlist.
