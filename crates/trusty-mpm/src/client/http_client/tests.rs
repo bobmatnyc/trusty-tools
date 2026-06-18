@@ -209,6 +209,35 @@ fn coordinator_context_deserializes() {
     assert_eq!(context.sessions.len(), 1);
     assert_eq!(context.sessions[0].prefix, "aipowerranking");
     assert_eq!(context.sessions[0].active_delegations, 3);
+    // This payload is what an OLDER daemon (pre-#1275) emits — no summary
+    // fields. `#[serde(default)]` makes the client tolerant: absent → None/false.
+    assert_eq!(context.sessions[0].last_summary, None);
+    assert!(!context.sessions[0].summarizing);
+}
+
+#[test]
+fn coordinator_session_carries_summary_fields() {
+    // A current daemon (#1275) emits `last_summary` + `summarizing`; the client
+    // deserializes both so the TUI can render the bullet and blink (DOC-16 §6.2).
+    let json = serde_json::json!({
+        "sessions": [{
+            "id": "00000000-0000-0000-0000-000000000000",
+            "name": "tmpm-aipowerranking",
+            "prefix": "aipowerranking",
+            "workdir": "/tmp/proj",
+            "status": "Active",
+            "active_delegations": 0,
+            "recent_output": [],
+            "last_summary": "Writing the parser tests",
+            "summarizing": true,
+        }],
+    });
+    let context: CoordinatorContext = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        context.sessions[0].last_summary.as_deref(),
+        Some("Writing the parser tests")
+    );
+    assert!(context.sessions[0].summarizing);
 }
 
 #[test]

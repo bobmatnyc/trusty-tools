@@ -280,6 +280,25 @@ pub struct CoordinatorSession {
     /// Recent lines captured from the session's pane.
     #[serde(default)]
     pub recent_output: Vec<String>,
+    /// The latest daemon-cached LLM summary for this session, if one exists.
+    ///
+    /// Why: the sessions TUI renders a per-session summary bullet (DOC-16 §4.3)
+    /// from the daemon's cached summary (#1275). `#[serde(default)]` keeps the
+    /// client tolerant of an OLDER daemon that omits the field — it deserializes
+    /// to `None` rather than failing.
+    /// What: an optional single-line summary string.
+    /// Test: `coordinator_session_tolerates_missing_summary_fields`.
+    #[serde(default)]
+    pub last_summary: Option<String>,
+    /// Whether an inference call for this session is currently in flight.
+    ///
+    /// Why: the TUI blinks the bullet while a session is actively summarizing
+    /// (DOC-16 §3.3, D1). `#[serde(default)]` defaults this to `false` against an
+    /// older daemon that does not emit it (never blink — §3.3 error condition).
+    /// What: a boolean in-flight flag.
+    /// Test: `coordinator_session_tolerates_missing_summary_fields`.
+    #[serde(default)]
+    pub summarizing: bool,
 }
 
 /// Snapshot returned by `GET /api/v1/sessions/context`.

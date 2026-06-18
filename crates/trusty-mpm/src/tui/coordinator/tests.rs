@@ -381,6 +381,9 @@ fn coord_session(id: &str, prefix: &str, status: &str, recent: &[&str]) -> Coord
         status: status.to_string(),
         active_delegations: 0,
         recent_output: recent.iter().map(|s| s.to_string()).collect(),
+        // #1275 fields are not exercised by these DOC-13 mapping tests; default
+        // them (None / false) so the wire-shape change stays additive here.
+        ..Default::default()
     }
 }
 
