@@ -180,6 +180,18 @@ pub mod logging;
 /// Test: `provider::*` submodule tests.
 pub mod provider;
 
+/// Project-context ingestion — load `CLAUDE.md` for prompt injection (#1033).
+///
+/// Why: A Claude-Code-compatible harness must give the PM and every sub-agent
+/// the same project-specific rules a human Claude Code session sees — the
+/// project-root `CLAUDE.md`. This module reads that file, bounds its size so a
+/// runaway file cannot blow the model context budget, and degrades gracefully
+/// when the file is absent.
+/// What: `load_project_context` (root then `.claude/` lookup, size-capped with a
+/// provenance note on truncation) and `MAX_CONTEXT_BYTES`.
+/// Test: `project_context::tests::*`.
+pub mod project_context;
+
 // ── Phase 4 orchestration layer (per #1028) ──
 
 /// Multi-turn agent loop driving an LLM through tool calls to completion.
@@ -209,6 +221,18 @@ pub mod agent_loop;
 /// Test: `runner::tests::*` (stubbed-PM delegation, return-to-PM output,
 /// `tools.allowed` enforcement, usage roll-up) — all offline.
 pub mod runner;
+
+/// `tcode run-task` end-to-end execution layer (#1034, #1035).
+///
+/// Why: This is the orchestration closer that makes the `tcode` binary run a task
+/// for real — load project context, assemble the PM prompt, run the PM loop, let
+/// it delegate to the engineer in-process, capture the diff + transcript + usage,
+/// and render a human or JSON report with meaningful exit codes. The LLM client is
+/// injected so the whole path is testable offline with a scripted mock.
+/// What: `RunTaskParams`, `execute_run_task`, `RunReport`, `ExitCode`, and the
+/// transcript types (`TurnRecord`, `SharedTranscript`, `RecordingLlmClient`).
+/// Test: `run_task::tests::*` (all offline, mocked LLM).
+pub mod run_task;
 
 /// System-prompt assembly layer implementing the parity spec.
 ///

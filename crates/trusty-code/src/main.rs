@@ -2,23 +2,32 @@
 //!
 //! Why: provides the `tcode` binary that operators, agents, and TUI frontends
 //! use to interact with the per-project MPM orchestration harness. Phase 0
-//! defines the CLI surface (subcommands + flags) so that callers can depend on
-//! a stable interface while the underlying implementation is extracted from
-//! open-mpm across Phases 1–N of epic #587.
+//! defines the CLI surface (subcommands + flags); the `run-task` path is now a
+//! full PM→engineer execution (epic #1039 / #1034).
 //!
-//! What: thin clap CLI with subcommands. `run-task` is functional as of Phase 6;
-//! `serve` and `run-workflow` remain stubs.
+//! What: thin clap CLI. `run-task` resolves the agents dir, validates the agent
+//! name + project path, builds the real OpenRouter `LlmClient` from env, and
+//! delegates to `trusty_code::run_task::execute_run_task`, then prints a human or
+//! `--json` report and exits with the report's meaningful exit code. `serve` and
+//! `run-workflow` remain stubs.
 //!
 //! Test: `cargo run -p trusty-code -- --version` must exit 0 and print the
-//! crate version. `tcode run-task <agent> <task> --project <path>` must
-//! locate the agent config, validate it, and report readiness.
+//! crate version. The execution path is covered by `trusty_code::run_task::tests`
+//! (offline, mocked LLM); the binary handler is a thin wrapper over that.
 
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::Arc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::info;
+
+use trusty_code::llm::{LlmClient, LlmClientConfig, LlmClientTrait};
+use trusty_code::run_task::{ExitCode, RunTaskParams, execute_run_task};
+
+/// Environment variable that overrides the engineer model for a single run (#1035).
+const ENGINEER_MODEL_ENV: &str = "TCODE_ENGINEER_MODEL";
 
 /// tcode — per-project Claude-Code-compatible MPM orchestration harness.
 #[derive(Parser)]
@@ -36,7 +45,7 @@ struct Cli {
 /// Top-level subcommands for `tcode`.
 ///
 /// Why: defines the stable CLI surface for all Phase 0+ callers. Stubs are
-/// replaced by real implementations as each phase of #587 lands.
+/// replaced by real implementations as each phase of #587/#1039 lands.
 /// What: clap enum; each variant maps to one subcommand.
 /// Test: `tcode --help` lists all variants; functional commands exit 0.
 #[derive(Subcommand)]
@@ -51,13 +60,14 @@ enum Command {
         project: PathBuf,
     },
 
-    /// Delegate a single task to a named agent and print the result.
+    /// Delegate a single task to a named agent and run it end-to-end.
     ///
     /// Loads the agent config from `<project>/.claude/agents/<agent>.toml`,
-    /// validates it, and reports the agent's capabilities. In a future phase
-    /// this will spawn the agent subprocess and return its result.
+    /// assembles its system prompt (with project `CLAUDE.md` context), runs the
+    /// PM through the agent loop, lets it delegate to the python-engineer
+    /// in-process, and prints the resulting diff, transcript, and usage.
     RunTask {
-        /// Agent name as declared in `.claude/agents/<name>.toml`.
+        /// Agent name as declared in `.claude/agents/<name>.toml` (e.g. `pm`).
         agent: String,
 
         /// Free-form task description passed to the agent's system prompt.
@@ -67,6 +77,16 @@ enum Command {
         /// Defaults to the current working directory.
         #[arg(long, short, value_name = "PATH", default_value = ".")]
         project: PathBuf,
+
+        /// Emit a machine-readable JSON report on stdout instead of human text.
+        #[arg(long)]
+        json: bool,
+
+        /// Override the python-engineer's model for this run only (#1035).
+        /// Falls back to the `TCODE_ENGINEER_MODEL` env var, then the agent
+        /// config's own model.
+        #[arg(long, value_name = "SLUG")]
+        engineer_model: Option<String>,
     },
 
     /// Execute a named MPM workflow end-to-end.
@@ -83,8 +103,10 @@ enum Command {
     },
 }
 
-fn main() -> Result<()> {
-    // Initialise tracing to stderr (never stdout — stdout is the API transport).
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialise tracing to stderr (never stdout — stdout is the API transport,
+    // and `--json` mode requires stdout to carry only the JSON report).
     trusty_code::logging::init_tracing();
 
     let cli = Cli::parse();
@@ -102,7 +124,9 @@ fn main() -> Result<()> {
             agent,
             task,
             project,
-        } => run_task(&agent, &task, &project),
+            json,
+            engineer_model,
+        } => run_task(&agent, &task, &project, json, engineer_model).await,
 
         Command::RunWorkflow { name, project } => {
             eprintln!(
@@ -116,7 +140,7 @@ fn main() -> Result<()> {
 
 /// Validate that `agent_name` contains only safe filesystem characters.
 ///
-/// Why: The LLM supplies `agent_name` which is joined into a filesystem path
+/// Why: The agent name is joined into a filesystem path
 /// (`<agents_dir>/<agent_name>.toml`). Without this guard a crafted name such
 /// as `../../etc/passwd` escapes the agents directory and enables path
 /// traversal. Restricting to `[a-zA-Z0-9_-]` is safe, predictable, and covers
@@ -140,100 +164,118 @@ fn validate_agent_name(agent_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Execute `tcode run-task`: validate agent config and report readiness.
+/// Execute `tcode run-task`: run the PM→engineer pipeline and print the report.
 ///
-/// Why: Phase 6 establishes the public API entry point for single-task
-/// dispatch so callers and integration tests have a stable interface to target
-/// before the subprocess runner is wired in (Phase 3b/5).
-/// What: Locates the project `.claude/agents/<agent>.toml`, loads and validates
-/// the config, then prints a JSON-structured status line to stdout. Exits 0 on
-/// success, non-zero on error.
-/// Test: `cargo run -p trusty-code -- run-task engineer "write a test"
-///        --project /path/to/project` exits 0 when engineer.toml exists.
-fn run_task(agent_name: &str, task: &str, project: &Path) -> Result<()> {
-    // Guard against path traversal via LLM-supplied agent_name.
+/// Why: This is the binary-layer wrapper over the library orchestrator. It owns
+/// only the concerns that are genuinely CLI-shaped — argument validation, env
+/// key/model resolution, output mode, and process exit codes — and delegates all
+/// orchestration to `trusty_code::run_task::execute_run_task` (which is fully
+/// unit-tested offline). When `--json` is set, only the JSON report is written to
+/// stdout; logs always go to stderr.
+/// What: Validates the agent name and project path (traversal guards), locates the
+/// agents dir, resolves the engineer-model override (CLI flag > `TCODE_ENGINEER_MODEL`
+/// env), builds the real `LlmClient` from `OPENROUTER_API_KEY`, runs
+/// `execute_run_task`, prints the human or JSON report, and exits with the
+/// report's `ExitCode`. A missing API key is a config error (exit 2).
+/// Test: Orchestration (incl. the model swap) is covered by `run_task::tests`; the
+/// wrapper is exercised manually via `tcode run-task pm "<task>" --project <path>`.
+async fn run_task(
+    agent_name: &str,
+    task: &str,
+    project: &Path,
+    json: bool,
+    engineer_model_flag: Option<String>,
+) -> Result<()> {
     if let Err(e) = validate_agent_name(agent_name) {
         eprintln!("tcode run-task: {e}");
-        process::exit(1);
+        process::exit(ExitCode::ConfigError.code());
     }
 
-    // Resolve canonical project root.
-    let project_root = project
-        .canonicalize()
-        .unwrap_or_else(|_| project.to_path_buf());
+    // Resolve canonical project root (path-traversal-safe: canonicalize collapses
+    // any `..` so the project root is a real, existing directory).
+    let project_root = match project.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "tcode run-task: invalid --project path '{}': {e}",
+                project.display()
+            );
+            process::exit(ExitCode::ConfigError.code());
+        }
+    };
 
-    // Locate the agents directory — prefer `.claude/agents`, fall back to
-    // `.open-mpm/agents` for open-mpm-compatible projects.
     let agents_dir = locate_agents_dir(&project_root);
+
+    // Engineer-model override (#1035): CLI flag wins, then the env var; an empty
+    // value is treated as "unset" so it falls through to the agent config model.
+    let engineer_model = engineer_model_flag
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var(ENGINEER_MODEL_ENV)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        });
 
     info!(
         agent = agent_name,
         project = %project_root.display(),
         agents_dir = %agents_dir.display(),
-        "tcode run-task: locating agent config"
+        json,
+        engineer_model = engineer_model.as_deref().unwrap_or("(agent default)"),
+        "tcode run-task: starting"
     );
 
-    // Discover available agents for helpful error messages.
-    let available = trusty_code::agents::discover_agents(&agents_dir);
-    let available_names: Vec<&str> = available.iter().map(|(n, _)| n.as_str()).collect();
+    // Build the real OpenRouter client from env. A missing key is a config error.
+    let llm: Arc<dyn LlmClientTrait> = match build_llm_client() {
+        Ok(client) => client,
+        Err(e) => {
+            eprintln!("tcode run-task: {e}");
+            process::exit(ExitCode::ConfigError.code());
+        }
+    };
 
-    // Locate the agent's TOML.
-    let agent_toml = agents_dir.join(format!("{agent_name}.toml"));
-    if !agent_toml.exists() {
-        let available_str = if available_names.is_empty() {
-            "(none found)".to_string()
-        } else {
-            available_names.join(", ")
-        };
-        eprintln!(
-            "tcode run-task: unknown agent '{agent_name}'. \
-             Available agents: {available_str}. \
-             Check that {agent_toml} exists.",
-            agent_toml = agent_toml.display()
-        );
-        process::exit(1);
+    let params = RunTaskParams {
+        agent: agent_name.to_string(),
+        task: task.to_string(),
+        project: project_root,
+        agents_dir,
+        engineer_model,
+    };
+
+    let report = execute_run_task(params, llm).await;
+
+    // Print the report. In `--json` mode stdout carries only the JSON document.
+    if json {
+        println!("{}", report.render_json());
+    } else {
+        println!("{}", report.render_human());
     }
 
-    // Load and validate the config.
-    let cfg = trusty_code::agents::AgentConfig::load(&agent_toml).unwrap_or_else(|e| {
-        eprintln!("tcode run-task: failed to load agent config: {e}");
-        process::exit(1);
-    });
+    process::exit(report.exit.code());
+}
 
-    let model = cfg
-        .agent
-        .model
-        .as_deref()
-        .or(cfg.llm.model_override.as_deref())
-        .unwrap_or("(default)");
-
-    // Char-safe truncation: slicing bytes at offset 80 panics when a multi-byte
-    // UTF-8 character straddles the boundary. Collecting the first 80 chars is
-    // always valid regardless of the Unicode content of the task string.
-    let task_preview: String = task.chars().take(80).collect();
-
-    info!(
-        agent = agent_name,
-        model,
-        task_preview = task_preview.as_str(),
-        "tcode run-task: agent config validated"
-    );
-
-    // Emit a structured status line so machine callers can parse it.
-    // In a future phase this transitions to actually spawning the agent.
-    println!(
-        "{}",
-        serde_json::json!({
-            "status": "ready",
-            "agent": agent_name,
-            "model": model,
-            "task_len": task.len(),
-            "config": agent_toml.display().to_string(),
-            "note": "subprocess dispatch not yet wired (#587 Phase 3b/5)"
-        })
-    );
-
-    Ok(())
+/// Build the real OpenRouter `LlmClient` from `OPENROUTER_API_KEY`.
+///
+/// Why: The binary is the only place that reads the API key from the environment
+/// (library code never touches `std::env` for secrets). Attribution headers help
+/// OpenRouter dashboards label tcode traffic.
+/// What: Reads the key via `LlmClientConfig::from_env`, attaches referer/title,
+/// and constructs the client. Returns a descriptive error when the key is unset.
+/// Test: Exercised manually (a live run requires a real key); the offline tests
+/// inject a mock client instead.
+fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>> {
+    let config = LlmClientConfig::from_env()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "OPENROUTER_API_KEY is required for run-task ({e}). \
+                 Export it before running, e.g. `export OPENROUTER_API_KEY=sk-or-...`."
+            )
+        })?
+        .with_referer("https://github.com/bobmatnyc/trusty-tools")
+        .with_title("trusty-code run-task");
+    let client = LlmClient::from_config(config)
+        .map_err(|e| anyhow::anyhow!("failed to build LLM client: {e}"))?;
+    Ok(Arc::new(client))
 }
 
 /// Locate the agents directory for the given project root.
@@ -263,8 +305,9 @@ mod tests {
 
     /// A path-traversal agent name is rejected.
     ///
-    /// Why: Guards the `agents_dir.join(format!("{agent_name}.toml"))` call in
-    /// `run_task` against LLM-supplied names that escape the agents directory.
+    /// Why: Guards the `agents_dir.join(format!("{agent_name}.toml"))` path
+    /// construction in the run-task pipeline against names that escape the agents
+    /// directory.
     /// What: Asserts that `../../etc/passwd` and similar strings fail validation.
     /// Test: This test.
     #[test]
@@ -298,10 +341,11 @@ mod tests {
     /// A well-formed agent name is accepted.
     ///
     /// Why: Verifies the allowlist does not over-reject legitimate names.
-    /// What: Asserts that common agent names (`engineer`, `qa-agent`, etc.) pass.
+    /// What: Asserts that common agent names (`pm`, `qa-agent`, etc.) pass.
     /// Test: This test.
     #[test]
     fn validate_agent_name_accepts_valid() {
+        assert!(validate_agent_name("pm").is_ok());
         assert!(validate_agent_name("engineer").is_ok());
         assert!(validate_agent_name("qa-agent").is_ok());
         assert!(validate_agent_name("python_engineer").is_ok());
