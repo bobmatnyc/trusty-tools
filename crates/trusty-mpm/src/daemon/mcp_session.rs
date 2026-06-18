@@ -143,7 +143,13 @@ pub async fn session_activity(
     let id = parse_managed_id(session_id)?;
     let mgr = state.session_manager().await;
     let record = mgr.get(&id).await.map_err(managed_err)?;
-    let raw_pane = mgr.capture_pane(&id, lines).await.unwrap_or_default();
+    // `lines` arrives as u32 from the MCP `session_activity` contract; the
+    // `capture_pane` param is `usize` (aligned with the observe path). u32→usize
+    // never narrows on supported platforms; saturate defensively just in case.
+    let raw_pane = mgr
+        .capture_pane(&id, usize::try_from(lines).unwrap_or(usize::MAX))
+        .await
+        .unwrap_or_default();
     let runtime_active = mgr.tmux_driver().session_exists(&record.tmux_name);
     Ok(json!({
         "id": record.id.to_string(),

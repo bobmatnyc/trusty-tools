@@ -21,6 +21,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::core::names::{name_from_dir, name_from_uuid};
+use crate::core::sm::control::Submit;
 
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::store::{SessionStore, StoreError};
@@ -77,8 +78,54 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// Send literal text followed by Enter to the session named `name`.
     fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError>;
 
+    /// Send literal text to `name` WITHOUT a trailing Enter (#1461).
+    ///
+    /// Why: the harness-agnostic [`Submit::NoSubmit`](crate::core::sm::control::Submit::NoSubmit)
+    /// intent must type into the pane without committing the line (e.g. staging a
+    /// partial command a human will edit). Splitting this out keeps `send_line`
+    /// (literal + Enter) and this (literal only) as distinct, testable primitives.
+    /// What: sends `text` literally. The default returns an explicit
+    /// `TmuxUnavailable` error rather than silently falling back to `send_line`:
+    /// delegating to `send_line` would append an Enter and SUBMIT a line the
+    /// caller asked NOT to submit (`Submit::NoSubmit`) — a silent-wrong-behavior
+    /// trap. Any driver actually used with `inject(.., NoSubmit)` MUST override
+    /// this (the real `RealTmuxDriver` does); an un-overriding driver fails loudly.
+    /// Test: `RealTmuxDriver` override is asserted via `core::tmux` argv tests;
+    /// the no-submit dispatch is asserted by `inject_dispatch_nosubmit_sends_literal_only`.
+    fn send_keys_literal(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+        Err(ManagedError::TmuxUnavailable(
+            "send_keys_literal not implemented for this driver".into(),
+        ))
+    }
+
+    /// Send an interrupt (Ctrl-C) to the session named `name` (#1461).
+    ///
+    /// Why: the [`Submit::Interrupt`](crate::core::sm::control::Submit::Interrupt)
+    /// intent stops a running task in place (the clean precursor to relaunching a
+    /// runtime). Exposing it on the trait keeps the interrupt path runtime-neutral.
+    /// What: sends the runtime's interrupt. The default returns an explicit
+    /// `TmuxUnavailable` error rather than a silent no-op `Ok(())`: Interrupt is
+    /// the verb used to STOP a running task, so a silent no-op would leave the
+    /// task running while the caller believes it was interrupted — a dangerous
+    /// silent-wrong-behavior trap. Any driver actually used with
+    /// `inject(.., Interrupt)` MUST override this (the real `RealTmuxDriver` sends
+    /// `C-c`); an un-overriding driver fails loudly.
+    /// Test: `RealTmuxDriver` override via `core::tmux::send_keys_keyname_argv`;
+    /// dispatch asserted by `inject_dispatch_interrupt_sends_ctrl_c`.
+    fn send_interrupt(&self, _name: &str) -> Result<(), ManagedError> {
+        Err(ManagedError::TmuxUnavailable(
+            "send_interrupt not implemented for this driver".into(),
+        ))
+    }
+
     /// Capture the last `lines` of pane output for the session named `name`.
-    fn capture(&self, name: &str, lines: u32) -> Result<String, ManagedError>;
+    ///
+    /// `lines` is `usize` to match the harness-agnostic
+    /// [`SessionControl::observe`](crate::core::sm::control::SessionControl::observe)
+    /// contract end-to-end; the single `usize → u32` narrowing the underlying
+    /// tmux `-S` argv requires is confined to the real-tmux driver edge, so no
+    /// caller in the observe path needs a `try_from`.
+    fn capture(&self, name: &str, lines: usize) -> Result<String, ManagedError>;
 
     /// Return all live tmux session names on the host.
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError>;
@@ -395,6 +442,83 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Inject text into a live session, committed per [`Submit`] (#1461).
+    ///
+    /// Why: the harness-agnostic `inject_text` verb needs ONE manager helper that
+    /// dispatches the three keystroke intents onto the [`ManagedTmuxDriver`] seam
+    /// so the `SessionControl` impl stays a thin mapping. It reuses the same
+    /// Stopped/Decommissioned guard as [`send_input`](Self::send_input) so input
+    /// is never sent to a dead pane.
+    /// What: looks up the record, rejects Stopped/Decommissioned sessions, then
+    /// dispatches: [`Submit::Enter`] → `send_line` (literal + Enter),
+    /// [`Submit::NoSubmit`] → `send_keys_literal` (literal only),
+    /// [`Submit::Interrupt`] → `send_interrupt` (Ctrl-C). Bumps
+    /// `last_activity_at` ONLY for `Enter`/`NoSubmit`: an `Interrupt` (Ctrl-C) is
+    /// a STOP signal, not forward progress, so treating it as activity would
+    /// mislead the idle/orphan-GC reconciliation into believing a stalled session
+    /// is still working.
+    /// Test: `inject_dispatch_enter_sends_literal_then_enter`,
+    /// `inject_dispatch_nosubmit_sends_literal_only`,
+    /// `inject_dispatch_interrupt_sends_ctrl_c` in tests/session_control_api.rs.
+    pub async fn inject(
+        &self,
+        id: &ManagedSessionId,
+        text: &str,
+        submit: Submit,
+    ) -> Result<(), ManagedError> {
+        let mut record = self.get(id).await?;
+        if matches!(
+            record.state,
+            ManagedSessionState::Stopped | ManagedSessionState::Decommissioned
+        ) {
+            return Err(ManagedError::TmuxUnavailable(format!(
+                "session {} is {}; cannot inject input",
+                record.tmux_name, record.state
+            )));
+        }
+        let result = match submit {
+            Submit::Enter => self.tmux.send_line(&record.tmux_name, text),
+            Submit::NoSubmit => self.tmux.send_keys_literal(&record.tmux_name, text),
+            Submit::Interrupt => self.tmux.send_interrupt(&record.tmux_name),
+        };
+        result.map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        // Interrupt is a STOP signal, not activity — do not bump last_activity_at.
+        if matches!(submit, Submit::Enter | Submit::NoSubmit) {
+            record.last_activity_at = Some(Utc::now());
+        }
+        self.store.write().await.upsert(record).await?;
+        Ok(())
+    }
+
+    /// Observe a session's raw surface — LLM-FREE (#1461).
+    ///
+    /// Why: every harness needs a cheap, deterministic read of what a session is
+    /// actually showing (pane + liveness + any pending escalation) WITHOUT an LLM
+    /// key. This bundles the three reads the managed activity route already does
+    /// into one manager helper so `SessionControl::observe` is a thin mapping.
+    /// What: captures the last `lines` pane rows (empty string if the pane is
+    /// gone), probes `runtime_active` via `session_exists`, and reads the record's
+    /// `pending_decision` / `proposed_default`. Never calls the LLM.
+    /// Test: `observe_returns_raw_pane_without_llm`, `observe_reports_runtime_active`.
+    pub async fn observe(
+        &self,
+        id: &ManagedSessionId,
+        lines: usize,
+    ) -> Result<crate::core::sm::control::RawObservation, ManagedError> {
+        let record = self.get(id).await?;
+        let raw_pane = self
+            .tmux
+            .capture(&record.tmux_name, lines)
+            .unwrap_or_default();
+        let runtime_active = self.tmux.session_exists(&record.tmux_name);
+        Ok(crate::core::sm::control::RawObservation {
+            raw_pane,
+            runtime_active,
+            pending_decision: record.pending_decision,
+            proposed_default: record.proposed_default,
+        })
+    }
+
     /// Stop the runtime of a managed session, keeping the workspace intact.
     ///
     /// Why: a session ENDURES beyond its running runtime. `stop` terminates the
@@ -689,7 +813,7 @@ impl SessionManager {
     pub async fn capture_pane(
         &self,
         id: &ManagedSessionId,
-        lines: u32,
+        lines: usize,
     ) -> Result<String, ManagedError> {
         let record = self.get(id).await?;
         self.tmux

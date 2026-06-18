@@ -22,9 +22,11 @@ use trusty_common::mcp::{Request, Response, error_codes};
 use super::SmDispatcher;
 use super::control::{LaunchParams, SessionControl, SessionControlError};
 use super::methods::{CODE_NOT_FOUND, CODE_UNAVAILABLE};
+use crate::activity::cache::ActivityState;
 use crate::core::sm::SessionManagerConfig;
 use crate::core::sm::agent::SessionManagerAgent;
 use crate::core::sm::agent::mock::{MockChatProvider, MockResolver};
+use crate::core::sm::control::{RawObservation, Submit, Summary};
 
 // ── Mock session control ────────────────────────────────────────────────────────
 
@@ -83,6 +85,33 @@ impl SessionControl for MockSessionControl {
             ));
         }
         Ok(json!({ "ok": true }))
+    }
+    async fn inject_text(
+        &self,
+        _id: &str,
+        _text: &str,
+        _submit: Submit,
+    ) -> Result<(), SessionControlError> {
+        Ok(())
+    }
+    async fn observe(
+        &self,
+        _id: &str,
+        _lines: usize,
+    ) -> Result<RawObservation, SessionControlError> {
+        Ok(RawObservation {
+            raw_pane: String::new(),
+            runtime_active: true,
+            pending_decision: None,
+            proposed_default: None,
+        })
+    }
+    async fn summarize(&self, _id: &str) -> Result<Summary, SessionControlError> {
+        Ok(Summary {
+            state: ActivityState::Unknown,
+            summary: None,
+            confidence: 0.0,
+        })
     }
 }
 
@@ -911,6 +940,40 @@ impl SessionControl for EvidenceControl {
     }
     async fn kill(&self, _id: &str) -> Result<Value, SessionControlError> {
         Ok(json!({ "ok": true }))
+    }
+    async fn inject_text(
+        &self,
+        id: &str,
+        text: &str,
+        _submit: crate::core::sm::control::Submit,
+    ) -> Result<(), SessionControlError> {
+        self.sends
+            .lock()
+            .expect("lock")
+            .push((id.to_string(), text.to_string()));
+        Ok(())
+    }
+    async fn observe(
+        &self,
+        _id: &str,
+        _lines: usize,
+    ) -> Result<crate::core::sm::control::RawObservation, SessionControlError> {
+        Ok(crate::core::sm::control::RawObservation {
+            raw_pane: self.evidence.clone(),
+            runtime_active: true,
+            pending_decision: None,
+            proposed_default: None,
+        })
+    }
+    async fn summarize(
+        &self,
+        _id: &str,
+    ) -> Result<crate::core::sm::control::Summary, SessionControlError> {
+        Ok(crate::core::sm::control::Summary {
+            state: crate::activity::cache::ActivityState::Unknown,
+            summary: None,
+            confidence: 0.0,
+        })
     }
 }
 

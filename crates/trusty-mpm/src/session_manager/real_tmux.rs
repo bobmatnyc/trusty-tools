@@ -63,7 +63,27 @@ impl ManagedTmuxDriver for RealTmuxDriver {
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
 
-    fn capture(&self, name: &str, lines: u32) -> Result<String, ManagedError> {
+    /// Type literal text with NO trailing Enter (overrides the trait default so
+    /// the production path actually omits the newline; #1461).
+    fn send_keys_literal(&self, name: &str, text: &str) -> Result<(), ManagedError> {
+        self.driver
+            .send_keys_literal(&TmuxTarget::session(name), text)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
+    /// Send Ctrl-C to the session (overrides the no-op trait default; #1461).
+    fn send_interrupt(&self, name: &str) -> Result<(), ManagedError> {
+        self.driver
+            .send_interrupt(&TmuxTarget::session(name))
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
+    fn capture(&self, name: &str, lines: usize) -> Result<String, ManagedError> {
+        // The tmux `-S -<n>` argv takes a u32; this driver edge is the single
+        // narrowing point so the rest of the observe path stays `usize`. An
+        // out-of-range request is saturated to u32::MAX (capturing the whole
+        // scrollback) rather than erroring — more pane than asked for is benign.
+        let lines = u32::try_from(lines).unwrap_or(u32::MAX);
         self.driver
             .capture(&TmuxTarget::session(name), Some(lines))
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
@@ -102,7 +122,7 @@ impl ManagedTmuxDriver for NoopTmuxDriver {
         Err(ManagedError::TmuxUnavailable("tmux not installed".into()))
     }
 
-    fn capture(&self, _name: &str, _lines: u32) -> Result<String, ManagedError> {
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
         Ok(String::new())
     }
 

@@ -79,7 +79,9 @@ pub use context::{
     ConversationStore, ConversationStoreError, Round, SmContextEngine, SmContextError,
     SmConversation, ToolTrace,
 };
-pub use control::{LaunchParams, SessionControl, SessionControlError};
+pub use control::{
+    LaunchParams, RawObservation, SessionControl, SessionControlError, Submit, Summary,
+};
 pub use goals::{
     GOAL_TAG, Goal, GoalCache, GoalMemory, GoalStatus, SessionLink, SessionTaskState,
     SessionUpdate, SmGoalError, SmGoalResult, SmGoalStore,
