@@ -1,6 +1,6 @@
 # trusty-review — Components
 
-> **Status:** Current (v0.1.0 · 2026-06-01)
+> **Status:** Current (reconciled to `main` · 2026-06-18)
 > **Derived from:** spec docs 02, 03, 04, 05, 06, 08 + source audit
 
 ---
@@ -315,13 +315,27 @@ fetches (`complexity_hotspots()`, `smells()`) still fail-soft to empty results s
 a transient per-query error degrades the context partially rather than re-deciding
 the hard require/skip policy.
 
-### 6.4 JIRA client (designed, not in v0.1)
+### 6.4 JIRA context source (`integrations/context/jira.rs`) ✅
 
 Ticket ID extraction: `\b([A-Z][A-Z0-9]+-\d+)\b` from PR title + description.
 
 Fallback chain: (1) JIRA REST `GET /rest/api/3/issue/{id}` if `ATLASSIAN_*` configured, (2) keyword vector search against knowledge index, (3) semantic search on PR title+description. All fail-open.
 
 Env vars: `ATLASSIAN_URL`, `ATLASSIAN_EMAIL`, `ATLASSIAN_API_TOKEN`.
+
+**Note:** Full tracker issue upsert-per-PR (one GitHub issue per PR carrying the verdict) remains 🔵, tracked in #550.
+
+### 6.4a Confluence context source (`integrations/context/confluence.rs`) ✅
+
+Fetches linked design docs and spec pages from Confluence when `ATLASSIAN_*` is configured. Fail-open. Used by spec-grounding requirement (#1419, see COMPONENTS §13 and PRD §9.6).
+
+### 6.4b GitHub Issues context source (`integrations/context/github_issues.rs`) ✅
+
+Fetches GitHub Issues linked to the PR (via issue references in body and JIRA-extracted keys). Fail-open.
+
+### 6.4c Intent/method-conformance context source (`integrations/context/conformance.rs`) ✅
+
+Checks whether the PR diff's behavior conforms to the intent and method contract declared in the linked ticket or design spec. Fail-open; contributes a named context block to the reviewer prompt.
 
 ### 6.5 Slack client (designed, not in v0.1)
 
@@ -534,9 +548,11 @@ Compiled only under the `http-server` feature (default ON).
 
 ---
 
-## 11. Diff summarizer (designed, not in v0.1)
+## 11. Diff summarizer (Stage A/B/C implemented; map-reduce Phases 1-2 implemented; Phases 3-6 tracked in #680)
 
 **Purpose:** Token-budgeted, noise-stripped, anti-regression-protected view of a PR diff. Prevents fixture/i18n churn from poisoning the review context budget (lesson L12).
+
+**Status (2026-06-18):** Stage A (FileFilter), Stage B (HunkFilter), and Stage C (HunkClassifier) are ✅ implemented in `pipeline/diff_analyzer/`. The noisy-file collapse at the diff-fetch stage is also ✅ implemented (`NOISY_FILE_PATTERNS` in `pipeline/diff.rs`). `MAX_DIFF_CHARS` was raised to 160,000 chars in #624/#627.
 
 Three-stage pipeline (deterministic-first, LLM-last):
 
@@ -562,10 +578,49 @@ Tracked in issue #551.
 
 ---
 
-## 12. Persistence (`designed for v0.2`)
+## 11.1 Map-reduce mode (Phases 1–2 implemented; Phases 3–6 tracked in #680)
 
-**Dedup claim store:** redb (workspace standard; preferred over SQLite for dep hygiene). Table keyed on `(owner, repo, pr_number, head_sha)`. Atomic insert-or-fail claim; stale claims (> `DEDUP_STALE_SECS` = 7200s) purged on each attempt; claim released in a `Drop`-equivalent guard. Cross-process safe for multi-worker server deployments.
+The research document `docs/trusty-review/research/map-reduce-review-design-2026-06-03.md`
+contains the full design. Status per phase:
 
-**Review log:** Filesystem JSON + Markdown (current v0.1 implementation). `ReviewLog` trait planned so an alternative backend (redb, object storage) can be plugged later.
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 1 | `config/mapreduce.rs` + `select_review_mode` (`auto`/`always`/`never` knob) | ✅ Implemented |
+| 2 | `pipeline/mapreduce/split.rs` — `MapUnit`, per-file splitter, hunk sub-chunking | ✅ Implemented |
+| 3 | `pipeline/mapreduce/map.rs` — bounded fan-out `run_map_stage` | 🔵 #680 |
+| 4 | `pipeline/mapreduce/reduce.rs` — dedup + precedence + synthesis `run_reduce_stage` | 🔵 #680 |
+| 5 | Wire map-reduce into `run_review`; `ReviewResult.mapreduce` stats field | 🔵 #680 |
+| 6 | Enable `auto` by default; regression snapshot | 🔵 #680 |
 
-Tracked in issue #549.
+---
+
+## 12. Persistence
+
+**Dedup claim store** (`store/dedup.rs`): ✅ Implemented. redb (workspace standard; preferred over SQLite for dep hygiene). Table keyed on `(owner, repo, pr_number, head_sha)`. Atomic insert-or-fail claim; stale claims (> `DEDUP_STALE_SECS` = 7200s) purged on each attempt; claim released in a `Drop`-equivalent guard. Cross-process safe for multi-worker server deployments. Used by `pipeline/runner.rs`.
+
+**In-process dedup** (`pipeline/runner.rs`): ✅ Implemented. A per-process `DashMap` or equivalent prevents concurrent in-flight reviews for the same `(owner, repo, pr_number)`.
+
+**Per-SHA dedup** (`pipeline/runner.rs`): ✅ Implemented. `head_sha` is compared against the persisted last-reviewed SHA to skip identical re-reviews.
+
+**Review log:** ✅ Filesystem JSON + Markdown implemented. `ReviewLog` trait (pluggable backend) planned; tracked in #549.
+
+---
+
+## 13. Best-practice & Duetto-alignment component requirements (epic #1413)
+
+This section maps the normative requirements from PRD.md §9 to the specific
+components they affect. See PRD.md §9 for the full rationale and MUST/SHOULD
+language. Each entry below names the subsystem(s) that must change.
+
+| Req | Ticket | Affected subsystem(s) |
+|-----|--------|-----------------------|
+| §9.1 — Inline per-line review comments | #1414 | `integrations/github/pr.rs` (batched `reviews` API call with `comments[]`); `pipeline/output.rs` (comment assembly) |
+| §9.2 — One-click `suggestion` blocks | #1415 | `pipeline/output.rs` (suggestion block formatting); reviewer prompt (`pipeline/prompt.rs`) |
+| §9.3 — Consequence field + uncertainty hedging | #1416 | `models/mod.rs` (optional `consequence: Option<String>` on `Finding`); `pipeline/prompt.rs` (rubric update) |
+| §9.4 — Conventional-Comments labels + praise-first + bias-to-merge | #1417 | `pipeline/prompt.rs` (rubric + bias instruction); `pipeline/output.rs` (label prefix formatting) |
+| §9.5 — Test-plan & AC conformance | #1418 | `pipeline/prompt.rs` (test-plan check instruction); `integrations/context/jira.rs` (AC extraction) |
+| §9.6 — Spec-grounding + Confluence linked-spec fetch | #1419 | `pipeline/prompt.rs` (grounding instruction); `integrations/context/confluence.rs` (already ✅; spec-fetch activation path); `config/mod.rs` (`TRUSTY_REVIEW_SPEC_FETCH` knob) |
+| §9.7 — "What NOT to flag" guardrails + nit cap/rollup + re-review suppression | #1420 | `pipeline/prompt.rs` (guardrail section); `config/constants.rs` (`TRUSTY_REVIEW_MAX_NITS`); `pipeline/output.rs` (rollup); `store/dedup.rs` + prior-review log (re-review suppression, cross-ref #584) |
+| §9.8 — Review outcome feedback loop | #1421 | `integrations/github/` (Reactions API); new `store/signals.rs` (positive/negative signal store); `pipeline/runner.rs` (auto-suppression heuristic) |
+| §9.9 — Calibration harness recall/precision | #1422 | `regression-testing/` directory; depends on GitHub org Project #19 corpus; cross-ref #553 (`eval` CLI) |
+| §9.10 — Prior-PR / change-history context source | #1423 | `integrations/context/prior_pr.rs` (new source); `pipeline/runner_context.rs` (wire into `gather_external_context_md`) |

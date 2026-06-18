@@ -1,8 +1,21 @@
 # trusty-review — Specification Set
 
 > **Status:** Current · Living Document
-> **Last reviewed:** 2026-06-01
+> **Last reviewed:** 2026-06-18
 > **Derived from:** source audit of `crates/trusty-review/src/` (v0.1.0) + spec docs 01–10 + open issue backlog
+>
+> **2026-06-18 reconciliation note:** The v0.1.0 status markers in PRD.md and
+> COMPONENTS.md were audited against `main` and updated to reflect the actual
+> implementation state. Several features previously marked 🔵 (designed-not-built)
+> or absent are now marked ✅ (implemented): per-finding LLM verification round,
+> verifier liveness gate + `verification_model_error` alarm, JIRA/Confluence/GitHub
+> Issues/conformance context sources, APEX indexed path, 3-layer prompt composition,
+> 3-layer dedup (in-process + per-SHA + redb), live GitHub PR review comment posting,
+> review footer (#728), fail-closed on parse/truncation (#1241), MCP server
+> (`review_pr`/`review_diff`/`review_health`), full longitudinal contributor profile
+> pipeline, map-reduce Phases 1–2 (config + per-file splitter, #680). The new §9
+> in PRD.md (Best-practice & Duetto-alignment requirements, epic #1413) was also
+> added in this reconciliation pass.
 
 This directory holds the canonical product and engineering specification for the
 `trusty-review` crate (`crates/trusty-review/`). It is the single authoritative
@@ -53,12 +66,15 @@ Every requirement and component is framed as **Implemented / Partial / Designed 
 ## Open issues (unfinished tail)
 
 The critical path:
-- [#552](https://github.com/bobmatnyc/trusty-tools/issues/552) — full 16-stage pipeline + verification round
-- [#549](https://github.com/bobmatnyc/trusty-tools/issues/549) — data models + persistence (redb dedup claim)
-- [#554](https://github.com/bobmatnyc/trusty-tools/issues/554) — deployment, observability, alarms, systemd
-- [#550](https://github.com/bobmatnyc/trusty-tools/issues/550) — JIRA, Slack, Confluence, GitHub Projects integrations
-- [#551](https://github.com/bobmatnyc/trusty-tools/issues/551) — diff summarizer Stage A/B/C
+- [#552](https://github.com/bobmatnyc/trusty-tools/issues/552) — full 16-stage pipeline (eligibility, repo-config, copilot-mode, suppression, relevance gate)
+- [#549](https://github.com/bobmatnyc/trusty-tools/issues/549) — `ReviewLog` trait (pluggable persistence backend)
+- [#554](https://github.com/bobmatnyc/trusty-tools/issues/554) — deployment, observability, verdict-distribution metrics, systemd
+- [#550](https://github.com/bobmatnyc/trusty-tools/issues/550) — remaining sinks: Slack, GitHub Projects, tracker issue upsert-per-PR
+- [#584](https://github.com/bobmatnyc/trusty-tools/issues/584) — suppression / per-repo config file (`.github/code-intelligence.yml`)
+- [#586](https://github.com/bobmatnyc/trusty-tools/issues/586) — configurable threshold TOML
+- [#680](https://github.com/bobmatnyc/trusty-tools/issues/680) — map-reduce Phases 3–6 (fan-out, reduce, wire-in, enable by default)
 - [#569](https://github.com/bobmatnyc/trusty-tools/issues/569) — per-PR review personalization from contributor profile (post-#552)
+- [#1413](https://github.com/bobmatnyc/trusty-tools/issues/1413) — epic: best-practice & Duetto-alignment improvements (#1414–#1423)
 
 ## Related documentation
 
