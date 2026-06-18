@@ -20,10 +20,10 @@ mod tests;
 
 use std::path::{Path, PathBuf};
 
-use crate::core::agent_deployer::{DeployResult, deploy_agents};
+use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered};
 use crate::core::instruction_pipeline::{PipelineInput, PipelineOutput, build_instructions};
 use crate::core::paths::FrameworkPaths;
-use crate::core::skill_deployer::{DeployStats, deploy_skills};
+use crate::core::skill_deployer::{DeployStats, deploy_skills_filtered};
 use settings::{
     deploy_output_style, inject_trusty_memory_mcp, inject_trusty_search_mcp,
     preseed_workspace_trust_home, register_project_index, remove_global_trusty_memory_hooks,
@@ -155,13 +155,46 @@ pub fn prepare_session_with_style_and_native(
     explicit_style: Option<&str>,
     native_supported: bool,
 ) -> Result<PrepReport, PrepError> {
+    // Load the user config ONCE and thread it through both the manifest
+    // resolution / catalog-root path AND the style resolution path below. Reading
+    // `config.toml` a second time mid-function (the old `MpmConfig::load` just
+    // before style resolution) was a redundant filesystem read for the same data.
+    let config = crate::core::config::MpmConfig::load(&fw.root);
+
+    // Resolve the effective harness manifest (HR-2 / DOC-17) and materialize the
+    // provisioning plan it implies. The NORMATIVE precedence is
+    // project override > user config > catalog manifest > compiled-in default;
+    // the compiled-in default reproduces today's provisioning exactly, so an
+    // absent manifest is a zero-regression no-op. The plan tells us WHICH agents
+    // and skills to deploy, from WHICH source (bundled vs synced catalog), which
+    // MCP servers to inject, and the manifest's default output style. The
+    // existing deploy machinery still does the deployment.
+    //
+    // The catalog root comes from the ONE shared helper (`catalog_root_for`) the
+    // `tm catalog` CLI also uses, so the manifest path the resolver reads is the
+    // same `<framework>/catalog` checkout `CatalogSync` populates — honouring the
+    // `[manifest]` config / `TRUSTY_MPM_CATALOG_*` env catalog-source overrides.
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
+    let manifest_sources =
+        crate::core::manifest::ManifestSources::resolve(project_dir, &fw.root, &catalog_root);
+    let manifest = crate::core::manifest::resolve_manifest(&manifest_sources);
+    let plan = crate::core::manifest::HarnessPlan::from_manifest(&manifest, fw, &catalog_root);
+
     // Deploy composed agents — Claude Code reads `~/.claude/agents/` at startup.
-    let deploy = deploy_agents(&fw.agent_source_dir(), &fw.claude_agents_dir())
-        .map_err(|err| PrepError::Deploy(err.to_string()))?;
+    // The manifest's agent-set selection (include/exclude) restricts WHICH source
+    // agents deploy; the default manifest selects all of them.
+    let deploy = deploy_agents_filtered(&plan.agent_source, &fw.claude_agents_dir(), |name| {
+        plan.agent_selected(name)
+    })
+    .map_err(|err| PrepError::Deploy(err.to_string()))?;
 
     // Deploy skill files — Claude Code reads `~/.claude/skills/` at startup.
-    // Skills carry no inheritance, so this is a manifest-tracked content copy.
-    let skill_deploy = deploy_skills(&fw.skill_source_dir(), &fw.claude_skills_dir())
+    // Skills carry no inheritance, so this is a manifest-tracked content copy;
+    // the manifest's skill-set selection restricts WHICH source skills deploy.
+    let skill_deploy =
+        deploy_skills_filtered(&plan.skill_source, &fw.claude_skills_dir(), |name| {
+            plan.skill_selected(name)
+        })
         .map_err(|err| PrepError::SkillDeploy(err.to_string()))?;
 
     // Compose the effective launch instructions (framework + delegation
@@ -173,6 +206,20 @@ pub fn prepare_session_with_style_and_native(
         claude_md_path: project_dir.join("CLAUDE.md"),
     };
     let instructions = build_instructions(&input)?;
+
+    // Resolve the EFFECTIVE output style, folding the manifest's default in as
+    // the lowest precedence below the existing HR-4 sources. Precedence:
+    // explicit `--style` flag > `[style] active` config key > manifest `[style]
+    // active` > professional default. We compute this as a single `Option<&str>`
+    // and pass it as the `explicit` argument to both the prompt-injection seam
+    // and the settings.json resolver — when neither the flag nor the config sets
+    // a style, the manifest's value applies; otherwise the higher source wins
+    // exactly as before (zero regression for the flag/config paths). `config` was
+    // loaded ONCE at the top of this function.
+    let effective_style: Option<String> = explicit_style
+        .map(str::to_owned)
+        .or_else(|| config.style.active.clone())
+        .or_else(|| plan.style.clone());
 
     // Stash the EXACT text the launch path passes to
     // `claude --append-system-prompt-file` — including the HR-4 output-style
@@ -190,7 +237,7 @@ pub fn prepare_session_with_style_and_native(
     // (issue #381 / the #382 concern).
     let resolved_prompt = build_system_prompt_for_with_style_and_native(
         project_dir,
-        explicit_style,
+        effective_style.as_deref(),
         native_supported,
     );
     let stash_dir = project_dir.join(".trusty-mpm");
@@ -204,24 +251,26 @@ pub fn prepare_session_with_style_and_native(
         source,
     })?;
 
-    // Resolve the active output style (HR-4): explicit `--style` override >
-    // `[style] active` config key > professional default. An unknown id is
-    // logged and falls back to the default rather than failing the launch
-    // (DOC-17). The resolved id is written into `.claude/settings.json` so a
-    // native-capable Claude Code (>= 1.0.83) applies it directly; older builds
-    // pick it up via prompt injection at the `build_system_prompt_for` seam.
-    let config = crate::core::config::MpmConfig::load(&fw.root);
-    let active_style_id =
-        match crate::core::output_style::resolve_active_style(&config, explicit_style) {
-            Ok(style) => style.id,
-            Err(err) => {
-                tracing::warn!(
-                    %err,
-                    "falling back to the default output style for settings.json"
-                );
-                crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID
-            }
-        };
+    // Resolve the active output style for settings.json using the same
+    // EFFECTIVE style computed above (HR-4 sources + the HR-2 manifest default).
+    // An unknown id is logged and falls back to the professional default rather
+    // than failing the launch (DOC-17). The resolved id is written into
+    // `.claude/settings.json` so a native-capable Claude Code (>= 1.0.83) applies
+    // it directly; older builds pick it up via prompt injection at the
+    // `build_system_prompt_for` seam.
+    let active_style_id = match crate::core::output_style::resolve_active_style(
+        &config,
+        effective_style.as_deref(),
+    ) {
+        Ok(style) => style.id,
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                "falling back to the default output style for settings.json"
+            );
+            crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID
+        }
+    };
 
     // Set the Claude Code output style so the launched session's status bar
     // reads `style:<active_style_id>`. A failure here is non-fatal: the session
@@ -243,10 +292,15 @@ pub fn prepare_session_with_style_and_native(
 
     // Inject the `trusty-memory` MCP server into the project's `.mcp.json` so
     // the launched `claude` process can reach the memory tools (`memory_recall`,
-    // `memory_store`, …). Non-fatal: the session still launches, it just lacks
-    // the memory tools.
-    if let Err(err) = inject_trusty_memory_mcp(project_dir) {
-        tracing::warn!("failed to inject trusty-memory MCP server: {err}");
+    // `memory_store`, …). Gated by the manifest's `[mcp] trusty_memory` toggle
+    // (default on). Non-fatal: the session still launches, it just lacks the
+    // memory tools.
+    if plan.inject_trusty_memory {
+        if let Err(err) = inject_trusty_memory_mcp(project_dir) {
+            tracing::warn!("failed to inject trusty-memory MCP server: {err}");
+        }
+    } else {
+        tracing::debug!("manifest disables trusty-memory MCP injection");
     }
 
     // Register + pin the project's trusty-search index (issue #1373). Derive
@@ -259,9 +313,14 @@ pub fn prepare_session_with_style_and_native(
     // is handled inside `register_project_index` (logged, non-fatal) and still
     // returns the id so the stub is pinned; a `None` id (empty derivation) falls
     // back to the unpinned stub. Either way the session launches.
-    let pinned_index = register_project_index(project_dir);
-    if let Err(err) = inject_trusty_search_mcp(project_dir, pinned_index.as_deref()) {
-        tracing::warn!("failed to inject trusty-search MCP server: {err}");
+    // Gated by the manifest's `[mcp] trusty_search` toggle (default on).
+    if plan.inject_trusty_search {
+        let pinned_index = register_project_index(project_dir);
+        if let Err(err) = inject_trusty_search_mcp(project_dir, pinned_index.as_deref()) {
+            tracing::warn!("failed to inject trusty-search MCP server: {err}");
+        }
+    } else {
+        tracing::debug!("manifest disables trusty-search MCP injection");
     }
 
     // Pre-seed per-directory trust for this workspace in `~/.claude.json`

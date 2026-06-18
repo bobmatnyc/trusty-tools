@@ -9,4 +9,4 @@
 
 pub mod catalog_sync;
 
-pub use catalog_sync::{CatalogError, CatalogSync, CatalogSyncResult};
+pub use catalog_sync::{CatalogError, CatalogSync, CatalogSyncResult, catalog_root_for};

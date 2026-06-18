@@ -34,6 +34,7 @@ pub mod instruction_overrides;
 pub mod instruction_pipeline;
 pub mod ipc;
 pub mod llm_overseer;
+pub mod manifest;
 pub mod memory;
 pub mod model_inject;
 pub mod names;

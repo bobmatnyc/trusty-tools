@@ -506,12 +506,18 @@ async fn handle_simple_ok(resp: reqwest::Response, verb: &str) -> anyhow::Result
 /// Catalog operations are local (no daemon round-trip).
 /// Test: `cli_parses_catalog_sync`, `cli_parses_catalog_ls`.
 pub(crate) async fn catalog(action: CatalogAction) -> anyhow::Result<()> {
-    let catalog_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve home directory"))?
-        .join(".trusty-mpm")
-        .join("catalog");
-    let sync =
-        trusty_mpm::content::CatalogSync::new(trusty_mpm::provisioner::RealGitBackend, catalog_dir);
+    // Resolve the framework root (`~/.trusty-mpm`) and build the CatalogSync from
+    // the SHARED `for_framework` constructor so this CLI roots the catalog at the
+    // exact same `<framework>/catalog` checkout `session_launch` reads its manifest
+    // from (no independent `home/.trusty-mpm/catalog` recompute). Honour the
+    // `[manifest]` config catalog-source overrides (HR-2): config > env > default.
+    let framework_root = trusty_mpm::core::paths::FrameworkPaths::default().root;
+    let config = trusty_mpm::core::config::MpmConfig::load_default();
+    let sync = trusty_mpm::content::CatalogSync::for_framework(
+        trusty_mpm::provisioner::RealGitBackend,
+        &framework_root,
+        Some(&config.manifest),
+    );
     match action {
         CatalogAction::Sync { force } => {
             let result = sync.sync(force)?;
