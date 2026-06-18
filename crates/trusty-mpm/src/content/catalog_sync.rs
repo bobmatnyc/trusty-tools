@@ -89,14 +89,45 @@ impl<G: GitBackend> CatalogSync<G> {
     /// What: stores all config; no I/O at construction time.
     /// Test: used in every CatalogSync unit test.
     pub fn new(git: G, catalog_dir: PathBuf) -> Self {
-        let ttl_hours = std::env::var("TRUSTY_MPM_CATALOG_TTL_HOURS")
+        Self::with_config(git, catalog_dir, None)
+    }
+
+    /// Construct a CatalogSync resolving repo/ref/TTL with the HR-2 precedence:
+    /// `[manifest]` config > `TRUSTY_MPM_CATALOG_*` env > compiled-in default.
+    ///
+    /// Why: HR-2 adds a persistent, file-based way to control the catalog source
+    /// (a user fork, a pinned ref, a shorter TTL) via the `[manifest]` section of
+    /// `config.toml`, on top of the existing env knobs. Threading the optional
+    /// config through one constructor keeps the precedence in a single place and
+    /// preserves the env-only behavior of [`new`] (which passes `None`).
+    /// What: for each of repo, ref, and TTL, takes the config value when set,
+    /// else the env var, else the compiled-in default.
+    /// Test: `catalog_config_overrides_env_and_default`.
+    pub fn with_config(
+        git: G,
+        catalog_dir: PathBuf,
+        config: Option<&crate::core::config::ManifestConfig>,
+    ) -> Self {
+        let env_ttl = std::env::var("TRUSTY_MPM_CATALOG_TTL_HOURS")
             .ok()
-            .and_then(|v| v.parse::<u64>().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        let ttl_hours = config
+            .and_then(|c| c.ttl_hours)
+            .or(env_ttl)
             .unwrap_or(DEFAULT_TTL_HOURS);
-        let repo_url = std::env::var("TRUSTY_MPM_CATALOG_REPO")
-            .unwrap_or_else(|_| DEFAULT_CATALOG_REPO.to_owned());
-        let git_ref = std::env::var("TRUSTY_MPM_CATALOG_REF")
-            .unwrap_or_else(|_| DEFAULT_CATALOG_REF.to_owned());
+
+        let env_repo = std::env::var("TRUSTY_MPM_CATALOG_REPO").ok();
+        let repo_url = config
+            .and_then(|c| c.repo.clone())
+            .or(env_repo)
+            .unwrap_or_else(|| DEFAULT_CATALOG_REPO.to_owned());
+
+        let env_ref = std::env::var("TRUSTY_MPM_CATALOG_REF").ok();
+        let git_ref = config
+            .and_then(|c| c.git_ref.clone())
+            .or(env_ref)
+            .unwrap_or_else(|| DEFAULT_CATALOG_REF.to_owned());
+
         Self {
             git,
             catalog_dir,
@@ -263,6 +294,38 @@ impl<G: GitBackend> CatalogSync<G> {
     /// Test: catalog_ls_lists_skills.
     pub fn list_skills(&self) -> Vec<String> {
         list_skill_names(&self.catalog_subdir("skills"))
+    }
+
+    /// Path to the harness manifest inside the synced catalog (HR-2).
+    ///
+    /// Why: HR-2 sources the catalog-layer harness manifest from the synced
+    /// claude-mpm checkout; the session-launch resolver
+    /// (`crate::core::manifest::ManifestSources`) reads this exact path as its
+    /// lowest-of-the-overrides precedence layer. Exposing it on `CatalogSync`
+    /// keeps the catalog repo/ref/TTL configuration (the env knobs threaded into
+    /// `new`) as the single source of truth for WHERE the catalog manifest lives.
+    /// What: `<catalog_dir>/repo/.claude/manifest.toml` — the conventional
+    /// location of a `manifest.toml` committed at the catalog repo's `.claude/`
+    /// root. The file need not exist; the resolver tolerates absence.
+    /// Test: `catalog_manifest_path_points_at_repo_dotclaude`.
+    pub fn manifest_path(&self) -> PathBuf {
+        self.catalog_dir
+            .join("repo")
+            .join(".claude")
+            .join("manifest.toml")
+    }
+
+    /// The catalog root directory (`~/.trusty-mpm/catalog/` in production).
+    ///
+    /// Why: `crate::core::manifest::ManifestSources::resolve` and
+    /// `HarnessPlan::from_manifest` derive the catalog manifest path and the
+    /// catalog agent/skill source dirs from this root; exposing it lets a caller
+    /// thread the *configured* catalog root (which honours the env knobs) into
+    /// manifest resolution instead of recomputing the join.
+    /// What: returns the `catalog_dir` this `CatalogSync` was constructed with.
+    /// Test: `catalog_root_returns_catalog_dir`.
+    pub fn catalog_root(&self) -> &Path {
+        &self.catalog_dir
     }
 }
 
@@ -436,6 +499,49 @@ mod tests {
             skills.contains(&"auto-bug-reporter".to_owned()),
             "skills: {skills:?}"
         );
+    }
+
+    #[test]
+    fn catalog_config_overrides_env_and_default() {
+        // HR-2: a `[manifest]` config value must win over the env var and the
+        // compiled-in default. Config has highest precedence, so this holds
+        // regardless of whether the env vars happen to be set in the test host.
+        let root = TempDir::new().unwrap();
+        let cfg = crate::core::config::ManifestConfig {
+            repo: Some("https://github.com/me/fork".to_owned()),
+            git_ref: Some("dev".to_owned()),
+            ttl_hours: Some(2),
+        };
+        let sync =
+            CatalogSync::with_config(FakeGitBackend::new(), root.path().to_owned(), Some(&cfg));
+        assert_eq!(sync.repo_url, "https://github.com/me/fork");
+        assert_eq!(sync.git_ref, "dev");
+        assert_eq!(sync.ttl_secs, 2 * 3600);
+    }
+
+    #[test]
+    fn catalog_manifest_path_points_at_repo_dotclaude() {
+        // HR-2: the catalog-layer manifest path must be
+        // <catalog>/repo/.claude/manifest.toml so it lines up with the synced
+        // claude-mpm repo layout the resolver reads.
+        let root = TempDir::new().unwrap();
+        let sync = make_sync(&root);
+        assert_eq!(
+            sync.manifest_path(),
+            root.path()
+                .join("repo")
+                .join(".claude")
+                .join("manifest.toml")
+        );
+    }
+
+    #[test]
+    fn catalog_root_returns_catalog_dir() {
+        // The catalog root accessor must return the constructed catalog_dir so a
+        // caller can thread the configured root into manifest resolution.
+        let root = TempDir::new().unwrap();
+        let sync = make_sync(&root);
+        assert_eq!(sync.catalog_root(), root.path());
     }
 
     #[test]

@@ -1182,3 +1182,207 @@ fn prepare_session_is_idempotent() {
         "CLAUDE.md already exists on the second run"
     );
 }
+
+// ──────────────────────────────────────────────
+// HR-2 — Manifest-driven harness provisioning
+// ──────────────────────────────────────────────
+
+/// Seed two bundled agent source files (a base + a leaf) under `fw.agents` so
+/// the deploy step has deterministic content to filter.
+///
+/// Why: the manifest integration tests must assert WHICH agents deploy; seeding
+/// a known two-agent set makes the include/exclude assertions deterministic
+/// regardless of whether the host has the optional `agents/` submodule.
+/// What: writes `base-engineer.md` and `rust-engineer.md` (the latter extends
+/// the former) into the framework's bundled agent source dir.
+/// Test: used by `prepare_session_manifest_*`.
+fn seed_bundled_agents(fw: &crate::core::paths::FrameworkPaths) {
+    std::fs::create_dir_all(&fw.agents).unwrap();
+    std::fs::write(
+        fw.agents.join("base-engineer.md"),
+        "---\nname: base-engineer\nrole: base-engineer\n---\n\n# Base Eng\n\nBASE.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        fw.agents.join("rust-engineer.md"),
+        "---\nname: rust-engineer\nrole: engineer\nextends: base-engineer\n---\n\n# Rust\n\nLEAF.\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn prepare_session_default_deploys_all_seeded_agents() {
+    // Why: HR-2 must be regression-safe — with NO manifest present, the
+    // compiled-in default reproduces today's behavior, deploying every bundled
+    // agent. This proves "absent manifest = unchanged provisioning".
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    // Force the bundled source so the test does not depend on an `agents/`
+    // submodule resolved from the running binary's location.
+    let mut fw = fw;
+    fw.trusty_mpm_root = None;
+    seed_bundled_agents(&fw);
+
+    let report = prepare_session(&fw, project).expect("prep succeeds");
+
+    // Both seeded agents deploy (default manifest selects all).
+    assert!(
+        report
+            .deploy
+            .deployed
+            .contains(&"base-engineer.md".to_string())
+    );
+    assert!(
+        report
+            .deploy
+            .deployed
+            .contains(&"rust-engineer.md".to_string())
+    );
+    assert!(fw.claude_agents_dir().join("rust-engineer.md").exists());
+}
+
+#[test]
+fn prepare_session_manifest_filters_agent_set() {
+    // Why: HR-2 — a project manifest's `[agents] include` must restrict WHICH
+    // agents the harness deploys.
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    fw.trusty_mpm_root = None;
+    seed_bundled_agents(&fw);
+
+    // Project override manifest: only deploy rust-engineer.
+    let manifest_dir = project.join(".trusty-mpm");
+    std::fs::create_dir_all(&manifest_dir).unwrap();
+    std::fs::write(
+        manifest_dir.join("manifest.toml"),
+        "[agents]\ninclude = [\"rust-engineer\"]\n",
+    )
+    .unwrap();
+
+    let report = prepare_session(&fw, project).expect("prep succeeds");
+
+    assert!(
+        report
+            .deploy
+            .deployed
+            .contains(&"rust-engineer.md".to_string()),
+        "included agent must deploy"
+    );
+    assert!(
+        !report
+            .deploy
+            .deployed
+            .contains(&"base-engineer.md".to_string()),
+        "excluded-by-omission agent must NOT deploy"
+    );
+    assert!(!fw.claude_agents_dir().join("base-engineer.md").exists());
+}
+
+#[test]
+fn prepare_session_manifest_disables_mcp_server() {
+    // Why: HR-2 — a manifest `[mcp] trusty_search = false` must suppress the
+    // trusty-search MCP injection while leaving trusty-memory intact.
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    fw.trusty_mpm_root = None;
+
+    let manifest_dir = project.join(".trusty-mpm");
+    std::fs::create_dir_all(&manifest_dir).unwrap();
+    std::fs::write(
+        manifest_dir.join("manifest.toml"),
+        "[mcp]\ntrusty_search = false\n",
+    )
+    .unwrap();
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    let mcp_path = project.join(".mcp.json");
+    assert!(
+        mcp_path.exists(),
+        ".mcp.json must exist (trusty-memory wrote it)"
+    );
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
+    assert!(
+        value["mcpServers"].get("trusty-search").is_none(),
+        "manifest disabled trusty-search; it must not be injected"
+    );
+    assert!(
+        value["mcpServers"].get("trusty-memory").is_some(),
+        "trusty-memory stays injected"
+    );
+}
+
+#[test]
+fn prepare_session_manifest_sets_default_style() {
+    // Why: HR-2 — a manifest `[style] active` sets the default output style when
+    // no `--style` flag and no `[style] active` config key override it.
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    fw.trusty_mpm_root = None;
+
+    let manifest_dir = project.join(".trusty-mpm");
+    std::fs::create_dir_all(&manifest_dir).unwrap();
+    std::fs::write(
+        manifest_dir.join("manifest.toml"),
+        "[style]\nactive = \"trusty-mpm-research\"\n",
+    )
+    .unwrap();
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        value["outputStyle"],
+        serde_json::json!("trusty-mpm-research")
+    );
+}
+
+#[test]
+fn prepare_session_config_style_overrides_manifest() {
+    // Why: HR-2 precedence — the `[style] active` CONFIG key must win over the
+    // manifest's `[style] active` (config > manifest > default).
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let mut fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    fw.trusty_mpm_root = None;
+
+    // Config selects teacher; manifest selects research. Config must win.
+    std::fs::create_dir_all(&fw.root).unwrap();
+    std::fs::write(
+        fw.config_toml(),
+        "[style]\nactive = \"trusty-mpm-teacher\"\n",
+    )
+    .unwrap();
+    let manifest_dir = project.join(".trusty-mpm");
+    std::fs::create_dir_all(&manifest_dir).unwrap();
+    std::fs::write(
+        manifest_dir.join("manifest.toml"),
+        "[style]\nactive = \"trusty-mpm-research\"\n",
+    )
+    .unwrap();
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        value["outputStyle"],
+        serde_json::json!("trusty-mpm-teacher"),
+        "config [style] active must override the manifest's style"
+    );
+}

@@ -103,6 +103,29 @@ pub struct SkillsConfig {
     pub sources: Vec<String>,
 }
 
+/// `[manifest]` section — harness-manifest catalog source (HR-2 / DOC-17).
+///
+/// Why: HR-2 sources the catalog-layer harness manifest from a configurable
+/// claude-mpm checkout. The repo/ref/TTL are already controllable via the
+/// `TRUSTY_MPM_CATALOG_REPO` / `_REF` / `_TTL_HOURS` env vars
+/// (`crate::content::CatalogSync`); this section gives operators a persistent,
+/// file-based way to express the same choice (e.g. point at a user fork) without
+/// exporting env vars on every launch. It is read by the catalog-sync
+/// construction path; absent values fall back to the env vars, then the
+/// compiled-in defaults.
+/// What: an optional catalog repo URL, git ref, and TTL (hours). All `None` by
+/// default, so an absent section changes nothing.
+/// Test: `config_manifest_section_parses`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ManifestConfig {
+    /// Catalog repo URL (overrides `TRUSTY_MPM_CATALOG_REPO`'s default).
+    pub repo: Option<String>,
+    /// Catalog git ref (overrides `TRUSTY_MPM_CATALOG_REF`'s default).
+    pub git_ref: Option<String>,
+    /// Catalog cache TTL in hours (overrides `TRUSTY_MPM_CATALOG_TTL_HOURS`).
+    pub ttl_hours: Option<u64>,
+}
+
 /// `[pm]` section — PM-layer toggles.
 ///
 /// Why: the circuit-breaker and other PM-layer features need user-facing
@@ -152,6 +175,10 @@ pub struct MpmConfig {
     /// `[skills]` — skill source configuration.
     #[serde(default)]
     pub skills: SkillsConfig,
+
+    /// `[manifest]` — harness-manifest catalog source (HR-2 / DOC-17).
+    #[serde(default)]
+    pub manifest: ManifestConfig,
 
     /// `[pm]` — PM-layer feature toggles.
     #[serde(default)]
@@ -449,6 +476,30 @@ engineer = "haiku"
             crate::core::sm::config::SessionManagerConfig::default()
         );
         assert!(!cfg.session_manager.enabled);
+    }
+
+    #[test]
+    fn config_manifest_section_parses() {
+        // HR-2: the [manifest] section must parse the catalog source overrides,
+        // and an absent section must leave them all None (no behavior change).
+        let dir = tempfile::TempDir::new().unwrap();
+        let toml = r#"
+[manifest]
+repo = "https://github.com/me/my-fork"
+git_ref = "dev"
+ttl_hours = 6
+"#;
+        let cfg = load_from_str(dir.path(), toml);
+        assert_eq!(
+            cfg.manifest.repo.as_deref(),
+            Some("https://github.com/me/my-fork")
+        );
+        assert_eq!(cfg.manifest.git_ref.as_deref(), Some("dev"));
+        assert_eq!(cfg.manifest.ttl_hours, Some(6));
+
+        // Absent section → all None.
+        let empty = MpmConfig::load(tempfile::TempDir::new().unwrap().path());
+        assert_eq!(empty.manifest, ManifestConfig::default());
     }
 
     #[test]

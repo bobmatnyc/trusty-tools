@@ -72,6 +72,28 @@ fn skill_stem(filename: &str) -> &str {
 /// Test: `deploy_new_skill`, `deploy_skips_user_modified`,
 /// `deploy_unchanged_no_write`, `deploy_user_owned_skipped`.
 pub fn deploy_skills(source: &Path, dest: &Path) -> Result<DeployStats, Error> {
+    // Default policy: deploy every skill in the source directory.
+    deploy_skills_filtered(source, dest, |_name| true)
+}
+
+/// Deploy skills from `source`, restricting to those `select` accepts.
+///
+/// Why: HR-2 manifests describe a skill *set* (include/exclude globs); the
+/// session-launch path must deploy a subset of the source skills without copying
+/// the whole directory. Factoring the selection into a predicate keeps the
+/// manifest logic in `session_launch` while reusing the identical
+/// ownership/atomic-write machinery here.
+/// What: identical to [`deploy_skills`] except a source skill whose stem (the
+/// `.md`-stripped name) `select` rejects is skipped before any write.
+/// [`deploy_skills`] delegates here with an accept-all predicate, so existing
+/// behavior is unchanged. Deselecting a skill does not remove a previously
+/// deployed copy (an HR-3 concern).
+/// Test: `deploy_filtered_respects_predicate`.
+pub fn deploy_skills_filtered(
+    source: &Path,
+    dest: &Path,
+    select: impl Fn(&str) -> bool,
+) -> Result<DeployStats, Error> {
     let mut stats = DeployStats::default();
 
     // No source directory means nothing to deploy — an empty result, not an
@@ -92,7 +114,11 @@ pub fn deploy_skills(source: &Path, dest: &Path) -> Result<DeployStats, Error> {
             continue;
         };
         if entry.file_type()?.is_file() && is_skill_file(name) {
-            names.push(name.to_string());
+            // Honour the manifest's skill-set selection (HR-2). The stem is the
+            // `.md`-stripped name used as the skill id and target dir name.
+            if select(skill_stem(name)) {
+                names.push(name.to_string());
+            }
         }
     }
     names.sort_unstable();
@@ -189,6 +215,22 @@ mod tests {
 
         let manifest = SkillManifest::load(tgt.path());
         assert!(manifest.is_managed("tm-doctor"));
+    }
+
+    #[test]
+    fn deploy_filtered_respects_predicate() {
+        // HR-2: a selection predicate restricts which source skills deploy.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_sources(src.path()); // tm-doctor.md + example-skill.md
+
+        let stats =
+            deploy_skills_filtered(src.path(), tgt.path(), |name| name == "example-skill").unwrap();
+
+        assert!(stats.deployed.contains(&"example-skill".to_string()));
+        assert!(!stats.deployed.contains(&"tm-doctor".to_string()));
+        assert!(tgt.path().join("example-skill").join("SKILL.md").exists());
+        assert!(!tgt.path().join("tm-doctor").exists());
     }
 
     #[test]

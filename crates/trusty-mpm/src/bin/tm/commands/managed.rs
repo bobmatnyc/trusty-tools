@@ -510,8 +510,14 @@ pub(crate) async fn catalog(action: CatalogAction) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("cannot resolve home directory"))?
         .join(".trusty-mpm")
         .join("catalog");
-    let sync =
-        trusty_mpm::content::CatalogSync::new(trusty_mpm::provisioner::RealGitBackend, catalog_dir);
+    // Honour the `[manifest]` config catalog-source overrides (HR-2): config >
+    // env > default. Load the user config to thread its `[manifest]` section in.
+    let config = trusty_mpm::core::config::MpmConfig::load_default();
+    let sync = trusty_mpm::content::CatalogSync::with_config(
+        trusty_mpm::provisioner::RealGitBackend,
+        catalog_dir,
+        Some(&config.manifest),
+    );
     match action {
         CatalogAction::Sync { force } => {
             let result = sync.sync(force)?;
