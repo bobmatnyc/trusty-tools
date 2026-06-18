@@ -77,6 +77,36 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// Send literal text followed by Enter to the session named `name`.
     fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError>;
 
+    /// Send literal text to `name` WITHOUT a trailing Enter (#1461).
+    ///
+    /// Why: the harness-agnostic [`Submit::NoSubmit`](crate::core::sm::control::Submit::NoSubmit)
+    /// intent must type into the pane without committing the line (e.g. staging a
+    /// partial command a human will edit). Splitting this out keeps `send_line`
+    /// (literal + Enter) and this (literal only) as distinct, testable primitives.
+    /// What: sends `text` literally; the default routes through `send_line` for
+    /// drivers that do not distinguish the two — the real tmux driver overrides
+    /// this to omit the Enter. Default keeps the six existing impls compiling
+    /// untouched.
+    /// Test: `RealTmuxDriver` override is asserted via `core::tmux` argv tests;
+    /// the no-submit dispatch is asserted by `inject_dispatch_nosubmit_sends_literal_only`.
+    fn send_keys_literal(&self, name: &str, text: &str) -> Result<(), ManagedError> {
+        self.send_line(name, text)
+    }
+
+    /// Send an interrupt (Ctrl-C) to the session named `name` (#1461).
+    ///
+    /// Why: the [`Submit::Interrupt`](crate::core::sm::control::Submit::Interrupt)
+    /// intent stops a running task in place (the clean precursor to relaunching a
+    /// runtime). Exposing it on the trait keeps the interrupt path runtime-neutral.
+    /// What: sends the runtime's interrupt; the default is a no-op `Ok(())` so the
+    /// existing impls compile untouched — the real tmux driver overrides this to
+    /// send `C-c`.
+    /// Test: `RealTmuxDriver` override via `core::tmux::send_keys_keyname_argv`;
+    /// dispatch asserted by `inject_dispatch_interrupt_sends_ctrl_c`.
+    fn send_interrupt(&self, _name: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+
     /// Capture the last `lines` of pane output for the session named `name`.
     fn capture(&self, name: &str, lines: u32) -> Result<String, ManagedError>;
 
@@ -393,6 +423,77 @@ impl SessionManager {
         record.last_activity_at = Some(Utc::now());
         self.store.write().await.upsert(record).await?;
         Ok(())
+    }
+
+    /// Inject text into a live session, committed per [`Submit`] (#1461).
+    ///
+    /// Why: the harness-agnostic `inject_text` verb needs ONE manager helper that
+    /// dispatches the three keystroke intents onto the [`ManagedTmuxDriver`] seam
+    /// so the `SessionControl` impl stays a thin mapping. It reuses the same
+    /// Stopped/Decommissioned guard as [`send_input`](Self::send_input) so input
+    /// is never sent to a dead pane.
+    /// What: looks up the record, rejects Stopped/Decommissioned sessions, then
+    /// dispatches: [`Submit::Enter`] → `send_line` (literal + Enter),
+    /// [`Submit::NoSubmit`] → `send_keys_literal` (literal only),
+    /// [`Submit::Interrupt`] → `send_interrupt` (Ctrl-C). Updates `last_activity_at`.
+    /// Test: `inject_dispatch_enter_sends_literal_then_enter`,
+    /// `inject_dispatch_nosubmit_sends_literal_only`,
+    /// `inject_dispatch_interrupt_sends_ctrl_c` in tests/session_control_api.rs.
+    pub async fn inject(
+        &self,
+        id: &ManagedSessionId,
+        text: &str,
+        submit: crate::core::sm::control::Submit,
+    ) -> Result<(), ManagedError> {
+        use crate::core::sm::control::Submit;
+        let mut record = self.get(id).await?;
+        if matches!(
+            record.state,
+            ManagedSessionState::Stopped | ManagedSessionState::Decommissioned
+        ) {
+            return Err(ManagedError::TmuxUnavailable(format!(
+                "session {} is {}; cannot inject input",
+                record.tmux_name, record.state
+            )));
+        }
+        let result = match submit {
+            Submit::Enter => self.tmux.send_line(&record.tmux_name, text),
+            Submit::NoSubmit => self.tmux.send_keys_literal(&record.tmux_name, text),
+            Submit::Interrupt => self.tmux.send_interrupt(&record.tmux_name),
+        };
+        result.map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        record.last_activity_at = Some(Utc::now());
+        self.store.write().await.upsert(record).await?;
+        Ok(())
+    }
+
+    /// Observe a session's raw surface — LLM-FREE (#1461).
+    ///
+    /// Why: every harness needs a cheap, deterministic read of what a session is
+    /// actually showing (pane + liveness + any pending escalation) WITHOUT an LLM
+    /// key. This bundles the three reads the managed activity route already does
+    /// into one manager helper so `SessionControl::observe` is a thin mapping.
+    /// What: captures the last `lines` pane rows (empty string if the pane is
+    /// gone), probes `runtime_active` via `session_exists`, and reads the record's
+    /// `pending_decision` / `proposed_default`. Never calls the LLM.
+    /// Test: `observe_returns_raw_pane_without_llm`, `observe_reports_runtime_active`.
+    pub async fn observe(
+        &self,
+        id: &ManagedSessionId,
+        lines: u32,
+    ) -> Result<crate::core::sm::control::RawObservation, ManagedError> {
+        let record = self.get(id).await?;
+        let raw_pane = self
+            .tmux
+            .capture(&record.tmux_name, lines)
+            .unwrap_or_default();
+        let runtime_active = self.tmux.session_exists(&record.tmux_name);
+        Ok(crate::core::sm::control::RawObservation {
+            raw_pane,
+            runtime_active,
+            pending_decision: record.pending_decision,
+            proposed_default: record.proposed_default,
+        })
     }
 
     /// Stop the runtime of a managed session, keeping the workspace intact.

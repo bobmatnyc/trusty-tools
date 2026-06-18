@@ -24,7 +24,10 @@ use async_trait::async_trait;
 // Re-export the relocated trait + types so `sm_stdio`'s public surface
 // (`pub use control::{DaemonSessionControl, LaunchParams, SessionControl,
 // SessionControlError}`) is unchanged after the SM-8 move to core.
-pub use crate::core::sm::control::{LaunchParams, SessionControl, SessionControlError};
+use crate::activity::cache::ActivityState;
+pub use crate::core::sm::control::{
+    LaunchParams, RawObservation, SessionControl, SessionControlError, Submit, Summary,
+};
 
 use crate::daemon::managed_routes::{SpawnParams, record_to_json, resume_managed, spawn_managed};
 use crate::daemon::state::DaemonState;
@@ -185,5 +188,132 @@ impl SessionControl for DaemonSessionControl {
         let mgr = self.state.session_manager().await;
         mgr.decommission(&id).await.map_err(Self::map_managed_err)?;
         Ok(serde_json::json!({ "ok": true }))
+    }
+
+    /// Inject text via the manager, dispatched per [`Submit`] (#1461).
+    ///
+    /// Why: the production wiring of the harness-agnostic write verb. It forwards
+    /// to [`SessionManager::inject`], which dispatches the keystroke intent onto
+    /// the real tmux driver (literal+Enter / literal / C-c).
+    /// What: parses the id, then calls `inject`, mapping a manager failure onto
+    /// `Backend` (the pane/tmux failure class).
+    /// Test: forwards to `SessionManager::inject` (covered by the inject-dispatch
+    /// tests against a recording driver in tests/session_control_api.rs).
+    async fn inject_text(
+        &self,
+        session_id: &str,
+        text: &str,
+        submit: Submit,
+    ) -> Result<(), SessionControlError> {
+        let id = Self::parse_id(session_id)?;
+        let mgr = self.state.session_manager().await;
+        mgr.inject(&id, text, submit)
+            .await
+            .map_err(|e| SessionControlError::Backend(e.to_string()))
+    }
+
+    /// Observe the session's raw surface — LLM-FREE (#1461).
+    ///
+    /// Why: the production wiring of the always-available read verb. It forwards
+    /// to [`SessionManager::observe`], which never touches the LLM.
+    /// What: parses the id and returns the [`RawObservation`] (pane + liveness +
+    /// pending fields). `NotFound` is preserved for a genuinely-absent session.
+    /// Test: `observe_returns_raw_pane_without_llm`, `observe_reports_runtime_active`.
+    async fn observe(
+        &self,
+        session_id: &str,
+        lines: usize,
+    ) -> Result<RawObservation, SessionControlError> {
+        let id = Self::parse_id(session_id)?;
+        let mgr = self.state.session_manager().await;
+        mgr.observe(&id, lines as u32)
+            .await
+            .map_err(Self::map_managed_err)
+    }
+
+    /// Summarize the session via the activity monitor — LLM-OPTIONAL (#1461).
+    ///
+    /// Why: the production wiring of the optional inference verb. It reuses the
+    /// SAME shared [`crate::activity::monitor::ActivityMonitor`] the `/activity`
+    /// route uses, so the content-hash cache and the missing-key degrade are
+    /// inherited verbatim — repeated polls on unchanged panes are cheap, and an
+    /// unconfigured host returns `Unknown`/`None` instead of erroring.
+    /// What: captures the pane (LLM-free), runs `ActivityMonitor::check` (which
+    /// converts `MissingApiKey` to an `Unknown` verdict non-erroring), and maps
+    /// the verdict onto a [`Summary`] — dropping the placeholder summary text to
+    /// `None` whenever the state is `Unknown` (degraded), per the LLM-optional
+    /// contract.
+    /// Test: `summarize_degrades_to_unknown_without_key`, `summarize_returns_fake_verdict`,
+    /// `summarize_serves_cached_verdict` (the last two via a fake-classifier monitor).
+    async fn summarize(&self, session_id: &str) -> Result<Summary, SessionControlError> {
+        let id = Self::parse_id(session_id)?;
+        let mgr = self.state.session_manager().await;
+        // Capture is LLM-free and tolerant of a gone pane (empty string).
+        let pane_text = mgr.capture_pane(&id, 60).await.unwrap_or_default();
+        let monitor = self.state.activity_monitor();
+        // `check` already degrades MissingApiKey → Unknown verdict (no error).
+        let result = monitor
+            .check(session_id, &pane_text)
+            .await
+            .map_err(|e| SessionControlError::Backend(e.to_string()))?;
+        Ok(verdict_to_summary(result.verdict))
+    }
+}
+
+/// Map an [`crate::activity::cache::ActivityVerdict`] onto a [`Summary`] (#1461).
+///
+/// Why: the LLM-optional contract says a degraded (`Unknown`) verdict must carry
+/// `summary = None` — the placeholder text ("OPENROUTER_API_KEY not configured")
+/// is NOT a real summary. Centralising the mapping keeps that rule in one place
+/// and mirrors the activity sidecar, which also never stores an `Unknown` summary.
+/// What: copies `state`/`confidence`; sets `summary = Some(text)` only when the
+/// state is anything other than `Unknown`.
+/// Test: `summarize_degrades_to_unknown_without_key` (None) and
+/// `summarize_returns_fake_verdict` (Some) in tests/session_control_api.rs.
+fn verdict_to_summary(verdict: crate::activity::cache::ActivityVerdict) -> Summary {
+    let summary = if verdict.state == ActivityState::Unknown {
+        None
+    } else {
+        Some(verdict.summary)
+    };
+    Summary {
+        state: verdict.state,
+        summary,
+        confidence: verdict.confidence,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::activity::cache::ActivityVerdict;
+
+    #[test]
+    fn verdict_to_summary_drops_unknown_summary_to_none() {
+        // The degraded placeholder (Unknown + "OPENROUTER_API_KEY not configured")
+        // must map to summary=None so the LLM-optional contract holds.
+        let v = ActivityVerdict {
+            state: ActivityState::Unknown,
+            summary: "OPENROUTER_API_KEY not configured".into(),
+            confidence: 0.0,
+        };
+        let s = verdict_to_summary(v);
+        assert_eq!(s.state, ActivityState::Unknown);
+        assert_eq!(s.summary, None);
+        assert_eq!(s.confidence, 0.0);
+    }
+
+    #[test]
+    fn verdict_to_summary_keeps_real_summary() {
+        // A genuine (non-Unknown) verdict keeps its summary text and confidence.
+        let v = ActivityVerdict {
+            state: ActivityState::Working,
+            summary: "writing code".into(),
+            confidence: 0.87,
+        };
+        let s = verdict_to_summary(v);
+        assert_eq!(s.state, ActivityState::Working);
+        assert_eq!(s.summary.as_deref(), Some("writing code"));
+        assert_eq!(s.confidence, 0.87);
     }
 }

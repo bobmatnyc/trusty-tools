@@ -63,6 +63,21 @@ impl ManagedTmuxDriver for RealTmuxDriver {
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
 
+    /// Type literal text with NO trailing Enter (overrides the trait default so
+    /// the production path actually omits the newline; #1461).
+    fn send_keys_literal(&self, name: &str, text: &str) -> Result<(), ManagedError> {
+        self.driver
+            .send_keys_literal(&TmuxTarget::session(name), text)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
+    /// Send Ctrl-C to the session (overrides the no-op trait default; #1461).
+    fn send_interrupt(&self, name: &str) -> Result<(), ManagedError> {
+        self.driver
+            .send_interrupt(&TmuxTarget::session(name))
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
     fn capture(&self, name: &str, lines: u32) -> Result<String, ManagedError> {
         self.driver
             .capture(&TmuxTarget::session(name), Some(lines))

@@ -199,6 +199,23 @@ impl TmuxDriver {
         Ok(())
     }
 
+    /// Send literal text to a session/pane WITHOUT a trailing Enter.
+    ///
+    /// Why: the harness-agnostic no-submit inject intent (#1461) types into the
+    /// pane but leaves the line uncommitted (vs. [`send_line`](Self::send_line),
+    /// which appends Enter). Keeping it a separate one-shot avoids the second
+    /// `Enter` send-keys call.
+    /// What: a single `send-keys -l` invocation (literal, no key-name follow-up).
+    /// Test: `core::tmux::send_keys_literal_argv` covers the argv shape.
+    pub fn send_keys_literal(&self, target: &TmuxTarget, text: &str) -> Result<()> {
+        self.run(&TmuxCommand::SendKeys {
+            target: target.clone(),
+            keys: text.to_string(),
+            literal: true,
+        })?;
+        Ok(())
+    }
+
     /// Send a Ctrl-C interrupt to a session/pane.
     ///
     /// Why: restarting Claude Code in place means interrupting the running

@@ -19,7 +19,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::core::sm::control::{LaunchParams, SessionControl, SessionControlError};
+use crate::activity::cache::ActivityState;
+use crate::core::sm::control::{
+    LaunchParams, RawObservation, SessionControl, SessionControlError, Submit, Summary,
+};
 
 /// A scriptable, recording mock [`SessionControl`] (test-only).
 ///
@@ -117,5 +120,52 @@ impl SessionControl for MockSessionControl {
 
     async fn kill(&self, _session_id: &str) -> Result<Value, SessionControlError> {
         Ok(json!({ "ok": true }))
+    }
+
+    /// Record an injected text as a `(session_id, text)` send, regardless of the
+    /// [`Submit`] mode, so the delegation tests can assert delivery (#1461).
+    async fn inject_text(
+        &self,
+        session_id: &str,
+        text: &str,
+        _submit: Submit,
+    ) -> Result<(), SessionControlError> {
+        self.sends
+            .lock()
+            .expect("lock")
+            .push((session_id.to_string(), text.to_string()));
+        Ok(())
+    }
+
+    /// Return a deterministic raw observation derived from the scripted `get`
+    /// body (the same OBSERVE input), with no LLM (#1461).
+    async fn observe(
+        &self,
+        _session_id: &str,
+        _lines: usize,
+    ) -> Result<RawObservation, SessionControlError> {
+        let body = self.get_body.lock().expect("lock").clone();
+        let raw_pane = body
+            .get("session")
+            .and_then(|s| s.get("pane"))
+            .and_then(|p| p.as_str())
+            .unwrap_or_default()
+            .to_string();
+        Ok(RawObservation {
+            raw_pane,
+            runtime_active: true,
+            pending_decision: None,
+            proposed_default: None,
+        })
+    }
+
+    /// Return a degraded `Unknown` summary (the mock has no LLM) so callers see
+    /// the LLM-optional contract honored (#1461).
+    async fn summarize(&self, _session_id: &str) -> Result<Summary, SessionControlError> {
+        Ok(Summary {
+            state: ActivityState::Unknown,
+            summary: None,
+            confidence: 0.0,
+        })
     }
 }
