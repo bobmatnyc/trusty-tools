@@ -29,6 +29,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -447,6 +448,16 @@ fn spawn_wire(dispatcher: Arc<SmDispatcher>) -> WireClient {
     }
 }
 
+/// Max wall-clock a single `sm.*` wire call waits for its response line.
+///
+/// Why: `WireClient::call` reads the response on a real async wire; if the
+/// dispatcher hangs/deadlocks (or writes no response) the read would block
+/// forever and the test would only fail at the CI job timeout with no
+/// actionable message. Bounding the read turns a hang into a descriptive panic.
+/// What: 10s — generous for an offline, mock-backed turn yet far below any CI
+/// job timeout. Test: enforced in `WireClient::call`.
+const WIRE_CALL_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A parent-side JSON-RPC client over the SM stdio wire (test driver).
 ///
 /// Why: stands in for `claude-mpm` driving `tm sm serve --stdio` — it frames one
@@ -483,10 +494,14 @@ impl WireClient {
             .expect("write request line");
         self.tx.flush().await.expect("flush request");
 
-        let resp_line = self
-            .rx
-            .next_line()
+        let resp_line = tokio::time::timeout(WIRE_CALL_TIMEOUT, self.rx.next_line())
             .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "sm wire call '{method}' timed out after {}s — dispatcher hung or wrote no response",
+                    WIRE_CALL_TIMEOUT.as_secs()
+                )
+            })
             .expect("read response line")
             .unwrap_or_else(|| panic!("no response line for {method} (wire closed early)"));
         let resp: Value = serde_json::from_str(&resp_line).expect("response is valid JSON");
@@ -511,10 +526,9 @@ impl WireClient {
             ..
         } = self;
         drop(tx);
-        if let Some(task) = loop_task {
-            let joined = task.await.expect("loop task joins");
-            joined.expect("stdio loop returns Ok on EOF");
-        }
+        let task = loop_task.expect("loop task present");
+        let joined = task.await.expect("loop task joins");
+        joined.expect("stdio loop returns Ok on EOF");
     }
 }
 
@@ -525,10 +539,12 @@ impl WireClient {
 /// error payload if `error` is present; otherwise returns `result`. Test: used
 /// throughout the smoke bodies.
 fn result_of(resp: &Value, step: &str) -> Value {
+    // A valid JSON-RPC success response carries NO `error` key at all — not even
+    // `error: null`. Asserting absence (rather than absent-or-null) prevents a
+    // malformed `{"error": null, …}` from masquerading as success.
     assert!(
-        resp.get("error").map(Value::is_null).unwrap_or(true),
-        "step `{step}` returned a JSON-RPC error: {:?}",
-        resp.get("error")
+        resp.get("error").is_none(),
+        "step `{step}` did not return a clean success response (expected no `error` key): {resp:?}"
     );
     resp.get("result")
         .cloned()
@@ -659,6 +675,16 @@ async fn sm_e2e_delegation_chain_over_wire() {
     };
 
     // The SM's only LLM call in the loop is DECOMPOSE; script a delegate decision.
+    //
+    // Decision-parsing contract this test depends on: `SessionManagerAgent` /
+    // `SmDispatcher` parse this RAW assistant message as a structured DECOMPOSE
+    // decision — `action: "delegate"` ⇒ each `tasks[]` entry becomes a launched
+    // session — then run the SM-8 loop (launch → deliver → observe → verify) and
+    // mark the goal `done` once the §3.5 verification gate passes. If that parsing
+    // contract changes (field names, the raw-JSON-vs-tool-call shape, or the
+    // gate), this scripted reply stops decoding to a delegate decision and the
+    // `goal_done == true` assertion below fails — making the contract break
+    // visible here rather than silently downstream.
     let decision =
         r#"{"action":"delegate","tasks":[{"workdir":"/repo","prompt":"open the login PR"}]}"#;
     let dispatcher = Arc::new(build_dispatcher(decision, control.clone(), tmp.path()));
