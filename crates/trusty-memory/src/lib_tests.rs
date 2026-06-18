@@ -375,6 +375,37 @@ async fn load_palaces_from_disk_rehydrates_registry() {
     assert!(ids.contains(&"beta".to_string()));
 }
 
+/// Why (issue #1487): the HTTP daemon must open palace redb files as a
+/// writer so a second instance fails loud instead of silently degrading to
+/// read-only snapshot mode. `AppState::with_writer_intent()` is the builder
+/// `run_serve` calls on the daemon path; this asserts it actually flips the
+/// registry's open intent to `Writer`, while a plain `AppState::new`
+/// (used by CLI / tests) stays `ReadOnlyClient`.
+/// What: builds a default `AppState` and asserts `ReadOnlyClient`, then a
+/// `with_writer_intent()` `AppState` and asserts `Writer`.
+/// Test: this test itself.
+#[tokio::test]
+async fn with_writer_intent_marks_registry_writer() {
+    use trusty_common::memory_core::store::OpenIntent;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+
+    let default_state = AppState::new(root.clone());
+    assert_eq!(
+        default_state.registry.open_intent(),
+        OpenIntent::ReadOnlyClient,
+        "default AppState registry must be read-only (CLI / test paths)"
+    );
+
+    let writer_state = AppState::new(root).with_writer_intent();
+    assert_eq!(
+        writer_state.registry.open_intent(),
+        OpenIntent::Writer,
+        "with_writer_intent() must flip the daemon registry to Writer"
+    );
+}
+
 /// Why: existing installs (and the legacy standalone `trusty-memory` repo)
 /// nest palaces one level deeper under a `palaces/` subdirectory. When that
 /// subdirectory exists, `resolve_palace_registry_dir` must descend into it

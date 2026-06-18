@@ -85,20 +85,29 @@ fn canonical_key(path: &Path) -> PathBuf {
 /// open mode so callers can switch the HNSW store into read-only mode
 /// when the live file was locked.
 ///
-/// Why: mirrors `KgStoreRedb::open` with the same TOCTOU retry strategy
-/// (issue #1152 / issue #59). See that function for the full rationale.
-/// What: Cache-check → `try_open_or_snapshot(ReadOnlyClient)` → up to 4
-/// retries with exponential backoff (2/10/50/100 ms) on in-process TOCTOU
-/// races. Cross-process lock conflicts fall back to a read-only snapshot;
-/// writes against that snapshot are rejected via `READ_ONLY_ERROR_MSG`.
+/// Why: mirrors `KgStoreRedb::open_with_intent` with the same TOCTOU retry
+/// strategy (issue #1152 / #59) and the same Writer fail-loud contract
+/// (issue #1487). See those functions for the full rationale.
+/// What: Cache-check → `try_open_or_snapshot(intent)`. For `ReadOnlyClient`,
+/// up to 4 retries with exponential backoff (2/10/50/100 ms) absorb in-process
+/// TOCTOU races and cross-process lock conflicts fall back to a read-only
+/// snapshot (writes rejected via `READ_ONLY_ERROR_MSG`). For `Writer`, the
+/// bounded handoff retry lives inside `try_open_or_snapshot`, so this function
+/// makes a single attempt and never double-retries; a persistent conflict
+/// fails loud rather than degrading to snapshot mode.
 /// Test: Indirectly via `trusty-memory`'s
-/// `default_palace_used_when_arg_omitted`.
-fn open_or_get_cached_db(path: &Path) -> Result<Arc<VectorDbState>> {
+/// `default_palace_used_when_arg_omitted`, plus
+/// `writer_intent_open_fails_loud_on_locked_vector_file`.
+fn open_or_get_cached_db(path: &Path, intent: OpenIntent) -> Result<Arc<VectorDbState>> {
     const RETRIES: u8 = 4;
     const RETRY_SLEEP_MS: [u64; 4] = [2, 10, 50, 100];
+    // Writer → 0 extra attempts (handoff retry lives in `try_open_or_snapshot`).
+    // ReadOnlyClient → RETRIES in-process TOCTOU retries (issue #1152). The
+    // `u8::from(bool)` keeps this a single non-`if` expression (fmt-stable).
+    let max_attempts = RETRIES * u8::from(intent != OpenIntent::Writer);
 
     let mut last_err: Option<anyhow::Error> = None;
-    for attempt in 0..=RETRIES {
+    for attempt in 0..=max_attempts {
         {
             let mut cache = vector_db_cache().lock().expect("vector_db_cache poisoned");
             let key = canonical_key(path);
@@ -110,11 +119,13 @@ fn open_or_get_cached_db(path: &Path) -> Result<Arc<VectorDbState>> {
             cache.remove(&key);
         }
 
-        // ReadOnlyClient: cross-process lock conflicts fall back to a
-        // read-only snapshot (issue #59 behaviour). Writes are rejected
-        // via the `READ_ONLY_ERROR_MSG` guard. In-process TOCTOU races
-        // (async `KgWriter` abort) are resolved by the retry loop.
-        match try_open_or_snapshot(path, OpenIntent::ReadOnlyClient)
+        // Pass the caller's intent: `ReadOnlyClient` cross-process lock
+        // conflicts fall back to a read-only snapshot (issue #59), with writes
+        // rejected via `READ_ONLY_ERROR_MSG`; `Writer` conflicts fail loud
+        // after the bounded handoff window (issue #1487). In-process TOCTOU
+        // races (async `KgWriter` abort) are resolved by the retry loop for
+        // the read-only path.
+        match try_open_or_snapshot(path, intent)
             .with_context(|| format!("open vector redb at {}", path.display()))
         {
             Ok((db, snapshot_guard, mode)) => {
@@ -131,7 +142,7 @@ fn open_or_get_cached_db(path: &Path) -> Result<Arc<VectorDbState>> {
             }
             Err(e) => {
                 last_err = Some(e);
-                if attempt < RETRIES {
+                if attempt < max_attempts {
                     // Exponential backoff: let any concurrent in-process
                     // `Database::drop` (or async `KgWriter` abort) finish
                     // releasing the OS file lock before retrying.
@@ -248,6 +259,24 @@ impl UsearchStore {
     /// Test: `persist_and_reload` exercises the open path twice on the
     /// same logical path.
     pub fn new(path: PathBuf, dim: usize) -> Result<Self> {
+        Self::new_with_intent(path, dim, OpenIntent::ReadOnlyClient)
+    }
+
+    /// Open or create an HNSW index with the caller's open intent.
+    ///
+    /// Why (issue #1487): the HTTP daemon (sole writer) must open the vector
+    /// redb with [`OpenIntent::Writer`] so a second instance fails LOUD after
+    /// the bounded handoff window instead of silently serving a read-only
+    /// snapshot and rejecting every `upsert`/`remove` for its lifetime.
+    /// CLI / stdio / test callers keep [`OpenIntent::ReadOnlyClient`] for the
+    /// snapshot read-fallback (issue #59).
+    /// What: Translates `path` to `<path>.redb`, opens (or creates) the redb
+    /// file with `intent`, opens an `HnswStore` against it (read-only when the
+    /// snapshot fallback fired), and runs the one-shot legacy migration for
+    /// read-write opens.
+    /// Test: `persist_and_reload` (ReadOnlyClient default) and
+    /// `writer_intent_open_fails_loud_on_locked_vector_file` (Writer path).
+    pub fn new_with_intent(path: PathBuf, dim: usize, intent: OpenIntent) -> Result<Self> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -257,12 +286,13 @@ impl UsearchStore {
         }
 
         let redb_path = redb_path_for(&path);
-        let db_state = open_or_get_cached_db(&redb_path)
+        let db_state = open_or_get_cached_db(&redb_path, intent)
             .with_context(|| format!("open vector redb at {}", redb_path.display()))?;
         let read_only = db_state.mode.is_read_only();
-        let inner = HnswStore::open_with_mode(db_state.db.clone(), dim, read_only)
-            .with_context(|| format!("open HnswStore at {}", redb_path.display()))?;
-        let inner = Arc::new(inner);
+        let inner = Arc::new(
+            HnswStore::open_with_mode(db_state.db.clone(), dim, read_only)
+                .with_context(|| format!("open HnswStore at {}", redb_path.display()))?,
+        );
 
         // One-shot migration from the legacy `.usearch` file, if any. The
         // closure is split out so the feature gate stays isolated. Skip
@@ -737,6 +767,54 @@ mod tests {
         assert!(
             snap.is_read_only(),
             "snapshot store must report is_read_only()"
+        );
+    }
+
+    /// Why (issue #1487): the HTTP daemon opens the vector store with
+    /// `OpenIntent::Writer`. When a second live instance already holds the
+    /// redb write lock, the Writer open MUST fail loud (after the bounded
+    /// handoff window) and MUST NOT return a read-only snapshot handle —
+    /// otherwise every `upsert`/`remove` would be silently rejected for the
+    /// daemon's lifetime (the original bug).
+    /// What: Seeds the vector file, drops the store so the cache expires,
+    /// holds the redb file lock with a raw handle, then calls
+    /// `UsearchStore::new_with_intent(.., Writer)`. The call must return `Err`
+    /// naming the lock conflict — never an `Ok` snapshot handle.
+    /// Test: this test.
+    #[tokio::test]
+    async fn writer_intent_open_fails_loud_on_locked_vector_file() {
+        let dir = tempdir().unwrap();
+        let logical = dir.path().join("test.usearch");
+
+        // Populate and drop so the cache entry expires.
+        {
+            let primary = UsearchStore::new(logical.clone(), 384).unwrap();
+            primary
+                .upsert(Uuid::new_v4(), unit_vec(384, 1))
+                .await
+                .unwrap();
+        }
+
+        // Hold the redb file lock with a raw `Database::create`.
+        let redb_path = redb_path_for(&logical);
+        let _live = redb::Database::create(&redb_path).expect("lock vector redb");
+
+        // Writer open must fail loud, never snapshot.
+        let result = UsearchStore::new_with_intent(logical.clone(), 384, OpenIntent::Writer);
+        // Match rather than `unwrap_err()` so we don't require UsearchStore: Debug.
+        let err = match result {
+            Ok(_) => panic!(
+                "Writer open on a locked vector redb must fail loud, not return a snapshot handle"
+            ),
+            Err(e) => e,
+        };
+        // Use the alternate `{:#}` form so the full anyhow context chain
+        // (the `open_or_get_cached_db` wrapper + the root lock message) is
+        // rendered, not just the outermost context line.
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("still locked") || msg.contains("write access"),
+            "Writer error must name the lock conflict; got: {msg}"
         );
     }
 

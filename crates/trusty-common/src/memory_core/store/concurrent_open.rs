@@ -54,6 +54,40 @@ pub enum OpenIntent {
     ReadOnlyClient,
 }
 
+/// Number of `Database::create` attempts the `Writer` path makes before it
+/// gives up and fails loud on a persistent `DatabaseAlreadyOpen`.
+///
+/// Why (issue #1487): a graceful launchd handoff
+/// (`bootout` old → `bootstrap` new) briefly overlaps two daemons — the old
+/// one may still hold the redb `flock(LOCK_EX)` for a few hundred
+/// milliseconds while the new one starts. A naive fail-loud on the very
+/// first `DatabaseAlreadyOpen` would make the fresh daemon exit non-zero,
+/// triggering launchd's `KeepAlive { SuccessfulExit: false }` respawn — i.e.
+/// restart flapping. Retrying for a short, bounded window absorbs the
+/// handoff without masking a *persistent* conflict (a second live daemon).
+/// What: 5 attempts. Combined with [`WRITER_RETRY_SLEEP_MS`] the total wait
+/// is bounded at ~1.55 s — long enough to outlast a normal flock handoff,
+/// short enough that a genuine conflict still fails loud quickly.
+/// Test: `writer_intent_fails_on_locked_file` (persistent conflict still
+/// errors) and `writer_intent_retries_then_succeeds_when_lock_released`
+/// (transient conflict succeeds within the window).
+pub(crate) const WRITER_RETRY_ATTEMPTS: u8 = 5;
+
+/// Per-attempt backoff (milliseconds) for the `Writer` retry loop.
+///
+/// Why (issue #1487): exponential backoff spreads the 5 attempts across a
+/// ~1.55 s window (0 + 50 + 100 + 400 + 1000) so the common case (handoff
+/// finishes in <500 ms) succeeds on attempt 2 or 3 without waiting the full
+/// budget, while a still-held lock is re-probed a few more times before we
+/// declare a hard conflict. The first attempt has no preceding sleep, so the
+/// uncontended open returns immediately.
+/// What: One sleep value per attempt *after* the first
+/// (`WRITER_RETRY_ATTEMPTS - 1 == 4` entries). The sleep at index `i` is
+/// applied before attempt `i + 1`.
+/// Test: `writer_retry_sleep_table_matches_attempt_count` asserts the table
+/// length stays in lock-step with [`WRITER_RETRY_ATTEMPTS`].
+pub(crate) const WRITER_RETRY_SLEEP_MS: [u64; 4] = [50, 100, 400, 1000];
+
 /// Whether a redb file was opened directly (read/write) or via a snapshot
 /// (read-only).
 ///
@@ -196,20 +230,26 @@ fn snapshot_path_for(original: &Path) -> PathBuf {
 /// the same palace at all — every recall fails with "open palace …".
 /// With this helper, a read-only client detects lock contention and
 /// transparently switches to a snapshot copy so reads can proceed.
-/// Issue #1152 (Tier 3): a daemon/writer that gets `DatabaseAlreadyOpen`
-/// must NOT silently open a snapshot — it would service all its writes
-/// against a throw-away copy while the real daemon continues writing to
-/// the live file. Writer contexts receive a loud `Err` instead.
-/// What: First attempts `Database::create(path)`. On
+/// Issue #1152 (Tier 3) / #1487: a daemon/writer that gets
+/// `DatabaseAlreadyOpen` must NOT silently open a snapshot — it would service
+/// all its writes against a throw-away copy while the real daemon continues
+/// writing to the live file. Writer contexts receive a loud `Err` instead,
+/// but only after a short bounded retry window (issue #1487) that absorbs the
+/// brief flock overlap of a graceful launchd handoff without flapping.
+/// What: Attempts `Database::create(path)`. On
 /// `DatabaseError::DatabaseAlreadyOpen` the behaviour depends on `intent`.
 /// ReadOnlyClient: copies `path` to a per-process snapshot and opens that
-/// (existing read-only fallback for issue #59). Writer: returns `Err`
-/// immediately with a clear message and ERROR log so the daemon fails
-/// loudly rather than diverging. Returns the open database, a
-/// `SnapshotGuard` that removes the snapshot file when dropped, and the
-/// `OpenMode` so the caller can reject writes when running on a snapshot.
-/// Test: `snapshot_fallback_when_locked` (ReadOnlyClient path) and
-/// `writer_intent_fails_on_locked_file` (Writer path, issue #1152).
+/// (existing read-only fallback for issue #59). Writer: retries up to
+/// [`WRITER_RETRY_ATTEMPTS`] times with exponential backoff
+/// ([`WRITER_RETRY_SLEEP_MS`]); if the lock is still held after the window,
+/// returns `Err` with a clear, actionable message and an ERROR log — never a
+/// snapshot. Returns the open database, a `SnapshotGuard` that removes the
+/// snapshot file when dropped, and the `OpenMode` so the caller can reject
+/// writes when running on a snapshot.
+/// Test: `snapshot_fallback_when_locked` (ReadOnlyClient path),
+/// `writer_intent_fails_on_locked_file` (Writer persistent-conflict path),
+/// and `writer_intent_retries_then_succeeds_when_lock_released` (Writer
+/// transient-conflict path, issue #1487).
 pub fn try_open_or_snapshot(
     path: &Path,
     intent: OpenIntent,
@@ -244,53 +284,123 @@ pub fn try_open_or_snapshot(
             Ok((Arc::new(db), SnapshotGuard::noop(), OpenMode::Recreated))
         }
         Err(DatabaseError::DatabaseAlreadyOpen) => match intent {
-            // Issue #1152, Tier 3: a writer that hits the lock must fail loud,
-            // not silently diverge by writing to a snapshot copy.
-            OpenIntent::Writer => {
-                tracing::error!(
-                    path = %path.display(),
-                    "redb file is already locked by another process but this process \
-                     requires write access (OpenIntent::Writer). Refusing to open a \
-                     read-only snapshot — another daemon is running and holds the write \
-                     lock. Stop the other daemon first or ensure only one writer is \
-                     active at a time."
-                );
-                Err(anyhow::anyhow!(
-                    "palace redb file {} is already locked by another process; \
-                     this daemon requires write access and cannot safely proceed. \
-                     Stop the other daemon or run `trusty-memory stop` first.",
-                    path.display()
-                ))
-            }
+            // Issue #1152, Tier 3 + #1487: a writer that hits the lock must
+            // fail loud (never a snapshot), but only after a short bounded
+            // retry to absorb a graceful launchd handoff's flock overlap.
+            OpenIntent::Writer => open_writer_with_handoff_retry(path),
             // Original fallback for read-only clients (issue #59).
-            OpenIntent::ReadOnlyClient => {
-                let snap = snapshot_path_for(path);
-                // Snapshot paths are per-call unique (pid + monotonic
-                // counter), so no stale-file cleanup is needed here.
-                std::fs::copy(path, &snap).with_context(|| {
-                    format!(
-                        "snapshot {} -> {} for read-only fallback",
-                        path.display(),
-                        snap.display()
-                    )
-                })?;
-                let db = Database::create(&snap).with_context(|| {
-                    format!(
-                        "open redb snapshot at {} (fallback for locked {})",
-                        snap.display(),
-                        path.display()
-                    )
-                })?;
-                tracing::info!(
-                    original = %path.display(),
-                    snapshot = %snap.display(),
-                    "redb file locked by another process; opened read-only snapshot"
-                );
-                Ok((Arc::new(db), SnapshotGuard::new(snap), OpenMode::Snapshot))
-            }
+            OpenIntent::ReadOnlyClient => open_read_only_snapshot(path),
         },
         Err(e) => Err(anyhow::anyhow!("open redb at {}: {e}", path.display())),
     }
+}
+
+/// Open `path` exclusively for a writer, retrying through a brief
+/// `DatabaseAlreadyOpen` window before failing loud.
+///
+/// Why (issue #1487): a graceful daemon restart (`launchctl bootout` the old
+/// instance, then `bootstrap` the new one) briefly overlaps two processes;
+/// the old daemon can still hold the redb `flock` for a few hundred
+/// milliseconds. Failing on the first `DatabaseAlreadyOpen` would make the
+/// new daemon exit non-zero and trigger launchd's respawn-on-failure, i.e.
+/// flapping. Retrying for a bounded window
+/// ([`WRITER_RETRY_ATTEMPTS`] × [`WRITER_RETRY_SLEEP_MS`]) lets the handoff
+/// complete. A *persistent* lock (a second live daemon) still fails loud at
+/// the end of the window — it MUST NOT degrade to a snapshot.
+/// What: Re-attempts `Database::create(path)` with exponential backoff. On
+/// success returns `OpenMode::ReadWrite`; if every attempt sees
+/// `DatabaseAlreadyOpen`, logs an ERROR and returns a clear `Err` naming the
+/// conflict and the path. Any *other* error (incompatible format, I/O) is
+/// surfaced immediately without retry.
+/// Test: `writer_intent_fails_on_locked_file`,
+/// `writer_intent_retries_then_succeeds_when_lock_released`.
+fn open_writer_with_handoff_retry(path: &Path) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
+    // Attempt 0 already failed with DatabaseAlreadyOpen at the call site, so
+    // re-probe through the remaining window. We re-run the *first* create here
+    // too (after the initial backoff) to keep the loop self-contained and the
+    // attempt accounting honest.
+    for attempt in 0..WRITER_RETRY_ATTEMPTS {
+        if attempt > 0 {
+            // Sleep before every attempt after the first; index is attempt-1
+            // because the first retry uses the smallest backoff.
+            let sleep_ms = WRITER_RETRY_SLEEP_MS[(attempt - 1) as usize];
+            backoff_sleep_ms(sleep_ms);
+        }
+        match Database::create(path) {
+            Ok(db) => {
+                if attempt > 0 {
+                    tracing::info!(
+                        path = %path.display(),
+                        attempt = attempt + 1,
+                        "acquired redb write lock after a transient conflict \
+                         (graceful daemon handoff absorbed; issue #1487)"
+                    );
+                }
+                return Ok((Arc::new(db), SnapshotGuard::noop(), OpenMode::ReadWrite));
+            }
+            Err(DatabaseError::DatabaseAlreadyOpen) => {
+                // Still held — keep probing until the window is exhausted.
+                continue;
+            }
+            // A non-lock error (I/O, incompatible format that slipped past the
+            // caller's branch) is not a handoff race; fail immediately.
+            Err(e) => return Err(anyhow::anyhow!("open redb at {}: {e}", path.display())),
+        }
+    }
+
+    tracing::error!(
+        path = %path.display(),
+        attempts = WRITER_RETRY_ATTEMPTS,
+        "redb file is still locked by another process after the write-lock handoff \
+         retry window but this process requires write access (OpenIntent::Writer). \
+         Refusing to open a read-only snapshot — another live trusty-memory instance \
+         holds the write lock. Stop the other daemon first or ensure only one writer \
+         is active at a time."
+    );
+    Err(anyhow::anyhow!(
+        "palace redb file {} is still locked by another live trusty-memory instance \
+         after {} write-lock acquisition attempts; this daemon requires write access \
+         and refuses to degrade to read-only/snapshot mode. Stop the other daemon or \
+         run `trusty-memory stop` first.",
+        path.display(),
+        WRITER_RETRY_ATTEMPTS,
+    ))
+}
+
+/// Open a process-local read-only snapshot copy of a locked redb file.
+///
+/// Why (issue #59): a read-only stdio MCP client must still serve `recall`,
+/// `kg_query`, and `palace_info` while the HTTP daemon holds the exclusive
+/// `flock`. Copying the file to a per-process snapshot lets redb's lock check
+/// succeed against the copy.
+/// What: Copies `path` to a per-call-unique snapshot path, opens it as a
+/// fresh redb database, and returns it in `OpenMode::Snapshot` with a
+/// `SnapshotGuard` that deletes the copy on drop.
+/// Test: `snapshot_fallback_when_locked`, `snapshot_guard_removes_file_on_drop`.
+fn open_read_only_snapshot(path: &Path) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
+    let snap = snapshot_path_for(path);
+    // Snapshot paths are per-call unique (pid + monotonic counter), so no
+    // stale-file cleanup is needed here.
+    std::fs::copy(path, &snap).with_context(|| {
+        format!(
+            "snapshot {} -> {} for read-only fallback",
+            path.display(),
+            snap.display()
+        )
+    })?;
+    let db = Database::create(&snap).with_context(|| {
+        format!(
+            "open redb snapshot at {} (fallback for locked {})",
+            snap.display(),
+            path.display()
+        )
+    })?;
+    tracing::info!(
+        original = %path.display(),
+        snapshot = %snap.display(),
+        "redb file locked by another process; opened read-only snapshot"
+    );
+    Ok((Arc::new(db), SnapshotGuard::new(snap), OpenMode::Snapshot))
 }
 
 /// Sleep for `ms` milliseconds in a way that is safe from both sync and async
@@ -358,32 +468,88 @@ mod tests {
         drop(guard); // snapshot file removed here
     }
 
-    /// Why (issue #1152, Tier 3): a daemon / writer that hits
-    /// `DatabaseAlreadyOpen` must return `Err` immediately rather than
-    /// silently opening a snapshot — writing to a snapshot copy would
-    /// diverge from the live file and corrupt the user's palace data.
-    /// What: Opens `db.redb` in this process (acquiring the lock), then
-    /// calls `try_open_or_snapshot` with `Writer`. The second call must
-    /// return `Err`.
+    /// Why (issue #1152, Tier 3 + #1487): a daemon / writer that hits a
+    /// *persistent* `DatabaseAlreadyOpen` (a second live daemon, not a
+    /// transient handoff) must return `Err` rather than silently opening a
+    /// snapshot — writing to a snapshot copy would diverge from the live file
+    /// and corrupt the user's palace data. The error must arrive only after
+    /// the bounded retry window is exhausted (issue #1487), never degrading
+    /// to snapshot mode.
+    /// What: Opens `db.redb` in this process (acquiring the lock) and HOLDS it
+    /// for the whole test, then calls `try_open_or_snapshot` with `Writer`.
+    /// The call must return `Err` (after retrying the full window) with a
+    /// message naming the lock conflict.
     /// Test: this test.
     #[test]
     fn writer_intent_fails_on_locked_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("db.redb");
 
-        // First open holds the flock.
+        // First open holds the flock for the duration of the call below.
         let _live = Database::create(&path).expect("first open");
 
-        // Writer intent must not fall back to a snapshot — must be Err.
+        // Writer intent must not fall back to a snapshot — must be Err after
+        // the retry window since the lock is never released.
         let result = try_open_or_snapshot(&path, OpenIntent::Writer);
         assert!(
             result.is_err(),
-            "Writer intent must return Err on lock contention, not silently snapshot"
+            "Writer intent must return Err on persistent lock contention, not silently snapshot"
         );
         let msg = format!("{}", result.unwrap_err());
         assert!(
-            msg.contains("already locked") || msg.contains("write access"),
+            msg.contains("still locked") || msg.contains("write access"),
             "error message must explain the lock conflict; got: {msg}"
+        );
+    }
+
+    /// Why (issue #1487): the `Writer` retry window must absorb a transient
+    /// lock — when the holding handle is released *within* the backoff window,
+    /// the writer open must eventually SUCCEED in `ReadWrite` mode (never a
+    /// snapshot). This guards the restart-handoff behaviour: a graceful
+    /// `bootout`→`bootstrap` overlap resolves into a clean writer open.
+    /// What: Holds the flock on `db.redb`, spawns a thread that drops the lock
+    /// after ~120 ms (inside the ~1.55 s retry window), then calls
+    /// `try_open_or_snapshot` with `Writer`. The open must return `ReadWrite`.
+    /// Test: this test.
+    #[test]
+    fn writer_intent_retries_then_succeeds_when_lock_released() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db.redb");
+
+        // Hold the flock, then release it from a background thread after a
+        // short delay that lands well inside the writer retry window.
+        let live = Database::create(&path).expect("first open");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            drop(live); // releases the OS flock
+        });
+
+        // Writer intent should retry past the initial DatabaseAlreadyOpen and
+        // succeed once the background thread drops the lock.
+        let (_db, _guard, mode) = try_open_or_snapshot(&path, OpenIntent::Writer)
+            .expect("Writer open should succeed after the lock is released within the window");
+        assert_eq!(
+            mode,
+            OpenMode::ReadWrite,
+            "Writer must acquire the live lock (ReadWrite), never degrade to Snapshot"
+        );
+        assert!(!mode.is_read_only());
+
+        releaser.join().expect("releaser thread");
+    }
+
+    /// Why (issue #1487): the per-attempt backoff table must stay in lock-step
+    /// with the attempt count — one sleep precedes every attempt after the
+    /// first. A drift between the two would either skip a backoff or index
+    /// out of bounds.
+    /// What: Asserts `WRITER_RETRY_SLEEP_MS.len() == WRITER_RETRY_ATTEMPTS - 1`.
+    /// Test: this test.
+    #[test]
+    fn writer_retry_sleep_table_matches_attempt_count() {
+        assert_eq!(
+            WRITER_RETRY_SLEEP_MS.len(),
+            (WRITER_RETRY_ATTEMPTS - 1) as usize,
+            "one backoff value must precede every attempt after the first"
         );
     }
 

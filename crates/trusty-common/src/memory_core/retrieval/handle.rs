@@ -15,6 +15,7 @@ use crate::memory_core::decay::DecayConfig;
 use crate::memory_core::dream::extract_keywords;
 use crate::memory_core::filter::{FilterReject, classify};
 use crate::memory_core::palace::{Drawer, DrawerType, Palace, PalaceId, RoomType};
+use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::kg::KnowledgeGraph;
 use crate::memory_core::store::l1_cache::L1Cache;
 use crate::memory_core::store::palace_store::PalaceStore;
@@ -199,6 +200,25 @@ impl PalaceHandle {
     /// Test: `registry_create_and_open` creates a palace, drops the registry,
     /// and re-opens it.
     pub fn open(palace: &Palace) -> Result<Arc<PalaceHandle>> {
+        Self::open_with_intent(palace, OpenIntent::ReadOnlyClient)
+    }
+
+    /// Open a palace from disk with the caller's redb open intent.
+    ///
+    /// Why (issue #1487): the HTTP daemon is the sole writer and must open its
+    /// palaces with [`OpenIntent::Writer`] so a second daemon instance fails
+    /// loud (after the bounded handoff window) instead of silently opening a
+    /// read-only snapshot and rejecting every write for its lifetime. CLI,
+    /// stdio MCP, and test callers keep [`OpenIntent::ReadOnlyClient`] so they
+    /// can still serve reads from a snapshot while the daemon holds the lock.
+    /// What: Same hydration pipeline as [`PalaceHandle::open`], but passes
+    /// `intent` down to `UsearchStore::new_with_intent` and
+    /// `KnowledgeGraph::open_with_intent`. When `Writer` and a second live
+    /// daemon already holds the lock, this returns `Err` (no handle), so the
+    /// daemon process fails to start rather than serving in a broken state.
+    /// Test: `registry_create_and_open` (default read-only path) and
+    /// `writer_intent_open_fails_loud_on_locked_palace` in the store tests.
+    pub fn open_with_intent(palace: &Palace, intent: OpenIntent) -> Result<Arc<PalaceHandle>> {
         let data_dir = &palace.data_dir;
         std::fs::create_dir_all(data_dir)
             .with_context(|| format!("create palace data dir {}", data_dir.display()))?;
@@ -211,12 +231,12 @@ impl PalaceHandle {
             .with_context(|| format!("load L1 cache for {}", palace.id))?;
 
         let vector_path = data_dir.join("index.usearch");
-        let vector_store = UsearchStore::new(vector_path, 384)
+        let vector_store = UsearchStore::new_with_intent(vector_path, 384, intent)
             .with_context(|| format!("open vector store for {}", palace.id))?;
 
         let kg_path = data_dir.join("kg.db");
-        let kg =
-            KnowledgeGraph::open(&kg_path).with_context(|| format!("open KG for {}", palace.id))?;
+        let kg = KnowledgeGraph::open_with_intent(&kg_path, intent)
+            .with_context(|| format!("open KG for {}", palace.id))?;
 
         // Load full drawer table from SQLite (the persistent source of truth).
         // Fall back to an empty list on error so a corrupt table doesn't make

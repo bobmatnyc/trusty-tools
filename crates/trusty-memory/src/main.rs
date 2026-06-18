@@ -760,39 +760,26 @@ async fn run_serve(
         tracing::warn!("default-palace name migration skipped: {e:#}");
     }
 
+    // Build the daemon AppState once — the builder chain is identical for the
+    // fixed-port and dynamic/foreground HTTP paths. Issue #1487:
+    // `with_writer_intent()` MUST come first (it replaces the registry) and
+    // run before `spawn_startup_tasks` hydration so palace redb files open as
+    // `Writer` — a second daemon instance then fails loud instead of silently
+    // degrading to read-only snapshot mode. Bug-reporting #478 wires the
+    // ErrorStore; #156/#193 opt into the BM25 lexical lane when enabled.
+    let state = AppState::new(data_root)
+        .with_writer_intent()
+        .with_default_palace(palace)
+        .with_log_buffer(log_buffer)
+        .with_error_store(error_store)
+        .with_bm25_client_from_env();
+    spawn_startup_tasks(&state);
     if let Some(addr) = http {
-        let state = AppState::new(data_root)
-            .with_default_palace(palace)
-            .with_log_buffer(log_buffer)
-            // Bug-reporting #478: wire the bug-capture ErrorStore into AppState
-            // so Phase 2 HTTP / MCP endpoints can query it. The store is an
-            // Arc-backed clone of the same ring the BugCaptureLayer writes to.
-            .with_error_store(error_store)
-            // Issue #156 + #193: opt in to the BM25 lexical lane (and its
-            // spawn supervisor) when TRUSTY_BM25_DAEMON=1. The builder is
-            // a no-op when the env var is unset so existing deployments
-            // see no behavioural change.
-            .with_bm25_client_from_env();
-        spawn_startup_tasks(&state);
         run_http(state, addr).await
+    } else if foreground {
+        run_http_foreground(state).await
     } else {
-        let state = AppState::new(data_root)
-            .with_default_palace(palace)
-            .with_log_buffer(log_buffer)
-            // Bug-reporting #478: wire the bug-capture ErrorStore into AppState
-            // so Phase 2 HTTP / MCP endpoints can query it.
-            .with_error_store(error_store)
-            // Issue #156 + #193: opt in to the BM25 lexical lane (and its
-            // spawn supervisor) when TRUSTY_BM25_DAEMON=1. The builder is
-            // a no-op when the env var is unset so existing deployments
-            // see no behavioural change.
-            .with_bm25_client_from_env();
-        spawn_startup_tasks(&state);
-        if foreground {
-            run_http_foreground(state).await
-        } else {
-            run_http_dynamic(state).await
-        }
+        run_http_dynamic(state).await
     }
 }
 
