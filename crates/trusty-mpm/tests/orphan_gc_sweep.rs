@@ -77,6 +77,7 @@ fn sweep_reaps_only_untracked_idle_managed_session_after_debounce() {
     let tracked = TrackedNames {
         legacy: ["tmpm-a-tracked-active".to_string()].into_iter().collect(),
         managed: ["tmpm-b-tracked-idle".to_string()].into_iter().collect(),
+        degraded: false,
     };
 
     let driver = RecordingDriver::new();
@@ -138,6 +139,75 @@ fn sweep_never_reaps_foreign_session() {
         "foreign sessions must never be reaped, killed: {:?}",
         driver.killed()
     );
+}
+
+/// A DEGRADED tracked-names snapshot (a registry could not be fully read) must
+/// make `run_sweep` reap NOTHING — even an otherwise-reapable untracked idle
+/// managed pane seen on multiple consecutive passes — because the protected set
+/// is incomplete and its "absence from both registries" can no longer be
+/// trusted. This is the #1458 fail-closed safety gate: a store-read failure
+/// aborts the reap phase rather than risking a kill off a partial snapshot.
+#[test]
+fn sweep_skips_reap_on_degraded_snapshot() {
+    // (d) untracked idle bare-shell managed pane: the ONLY kind that is ever
+    // reapable on a *complete* snapshot. Here the snapshot is degraded, so it
+    // must survive every pass.
+    let panes = vec![pane("tmpm-d-untracked-idle", "zsh")];
+    let degraded = TrackedNames {
+        legacy: Default::default(),
+        managed: Default::default(),
+        degraded: true,
+    };
+
+    let driver = RecordingDriver::new();
+    let probe = AlwaysIdleProbe;
+    let mut gc = OrphanGc::new();
+
+    // Many passes off a degraded snapshot — never a single kill.
+    for _ in 0..5 {
+        let reaped = run_sweep(&mut gc, &panes, &degraded, &probe, &driver);
+        assert_eq!(reaped, 0, "a degraded snapshot must reap nothing");
+    }
+    assert!(
+        driver.killed().is_empty(),
+        "no session may be reaped off an incomplete registry snapshot, killed: {:?}",
+        driver.killed()
+    );
+}
+
+/// A degraded snapshot must also RESET the debounce: an orphan that was a
+/// candidate on a prior *trustworthy* pass cannot be reaped on the very next
+/// trustworthy pass if a degraded pass intervened — it must again be seen
+/// orphaned on two consecutive trustworthy passes. This preserves the full
+/// two-pass safety margin across a transient registry-read failure.
+#[test]
+fn degraded_pass_resets_debounce_between_trustworthy_passes() {
+    let panes = vec![pane("tmpm-d-untracked-idle", "zsh")];
+    let complete = TrackedNames::default();
+    let degraded = TrackedNames {
+        degraded: true,
+        ..TrackedNames::default()
+    };
+
+    let driver = RecordingDriver::new();
+    let probe = AlwaysIdleProbe;
+    let mut gc = OrphanGc::new();
+
+    // Pass 1 (trustworthy): first sighting — candidate, not reaped.
+    assert_eq!(run_sweep(&mut gc, &panes, &complete, &probe, &driver), 0);
+    // Pass 2 (degraded): aborts and clears the debounce history.
+    assert_eq!(run_sweep(&mut gc, &panes, &degraded, &probe, &driver), 0);
+    // Pass 3 (trustworthy): debounce was reset, so this is a *first* sighting
+    // again — must NOT reap despite the candidate having been seen before.
+    assert_eq!(
+        run_sweep(&mut gc, &panes, &complete, &probe, &driver),
+        0,
+        "a degraded pass must restart the two-pass debounce"
+    );
+    // Pass 4 (trustworthy): now seen orphaned on two consecutive trustworthy
+    // passes → finally reaped, proving the gate only *delays*, never breaks, GC.
+    assert_eq!(run_sweep(&mut gc, &panes, &complete, &probe, &driver), 1);
+    assert_eq!(driver.killed(), vec!["tmpm-d-untracked-idle".to_string()]);
 }
 
 /// A live-child probe spares an otherwise-orphan-looking session (mid-spawn).

@@ -130,14 +130,29 @@ pub enum KeepReason {
 /// name sets into one struct keeps [`classify_session`]'s signature small and
 /// makes the "tracked" check a single membership test against the union.
 /// What: `legacy` holds `DaemonState`'s in-memory `tmux_name`s; `managed` holds
-/// the `SessionManager` store's `tmux_name`s.
-/// Test: used throughout the `tests` submodule.
+/// the `SessionManager` store's `tmux_name`s. `degraded` records that at least
+/// one registry could NOT be fully enumerated this pass (e.g. a store read
+/// error) — the protected set is therefore *incomplete* and the sweep must not
+/// reap on it.
+/// Test: used throughout the `tests` submodule; the degraded path is asserted by
+/// `sweep_skips_reap_on_degraded_snapshot` in `tests/orphan_gc_sweep.rs`.
 #[derive(Debug, Default, Clone)]
 pub struct TrackedNames {
     /// tmux names known to the old-style `DaemonState` session registry.
     pub legacy: HashSet<String>,
     /// tmux names known to the new-style `SessionManager` store.
     pub managed: HashSet<String>,
+    /// True when the protected set is INCOMPLETE (a registry read failed).
+    ///
+    /// Why: the orphan criterion is "absent from BOTH registries". If we could
+    /// not fully read a registry, a tracked session may be *missing* from this
+    /// snapshot, so treating its absence as "untracked" would fail OPEN and risk
+    /// reaping live work. When `degraded` is set, the sweep skips its reap phase
+    /// entirely (reaps nothing) and resets the debounce — mirroring the existing
+    /// "tmux list error → reap nothing" path. Defaults to `false` (complete) so
+    /// every existing `TrackedNames::default()` / literal construction is, as
+    /// before, a fully-trusted snapshot.
+    pub degraded: bool,
 }
 
 impl TrackedNames {
@@ -300,6 +315,22 @@ impl OrphanGc {
         Self::default()
     }
 
+    /// Forget the previous pass's reap candidates, restarting the debounce.
+    ///
+    /// Why: when a sweep is aborted because the inputs are untrustworthy (a
+    /// degraded tracked-names snapshot, or a tmux-list failure handled by the
+    /// caller), the candidate set carried from the *previous* pass must NOT be
+    /// allowed to clear the next pass's debounce — otherwise an orphan could be
+    /// reaped on the first trustworthy sweep after a degraded one, collapsing the
+    /// two-pass safety margin. Clearing the history forces any candidate to be
+    /// observed orphaned on two consecutive *trustworthy* passes again.
+    /// What: empties `prev_candidates`.
+    /// Test: `reset_debounce_clears_prev_candidates` (pure) and the `run_sweep`
+    /// degraded tests in `tests/orphan_gc_sweep.rs`.
+    pub fn reset_debounce(&mut self) {
+        self.prev_candidates.clear();
+    }
+
     /// Plan one sweep over `panes`, applying the two-pass debounce.
     ///
     /// Why: keeping the planning pure (no tmux kills) makes the debounce logic
@@ -437,13 +468,19 @@ fn interpret_pgrep(pid: u32, result: std::io::Result<std::process::Output>) -> b
 /// (1) enumerate live managed panes, (2) gather both registries' tracked names,
 /// (3) plan with debounce, and (4) actually kill the cleared orphans — with
 /// every kill logged at `info!` and the pass summarised at `debug!`.
-/// What: takes the already-gathered `panes` and `tracked` sets plus a `driver`,
-/// plans via `gc.plan_sweep`, kills each `to_reap` name through the driver
-/// (logging each at `info!` with its reason), and returns the count reaped. A
-/// failed kill is logged at `warn!` and does not abort the sweep.
+/// What: takes the already-gathered `panes` and `tracked` sets plus a `driver`.
+/// If `tracked.degraded` is set — a registry could not be fully read, so the
+/// protected set is INCOMPLETE — the sweep SKIPS its reap phase entirely (reaps
+/// nothing, logs at `warn!`) and resets the debounce so an orphan cannot be
+/// reaped on the very next pass off a degraded snapshot; this mirrors the
+/// existing "tmux list error → reap nothing" path. Otherwise it plans via
+/// `gc.plan_sweep`, kills each `to_reap` name through the driver (logging each at
+/// `info!` with its reason), and returns the count reaped. A failed kill is
+/// logged at `warn!` and does not abort the sweep.
 /// Test: `tests/orphan_gc_sweep.rs` drives this with a fake `ManagedTmuxDriver`
 /// and asserts only the untracked-idle managed session is killed (and only on
-/// the second pass).
+/// the second pass), plus `sweep_skips_reap_on_degraded_snapshot` proving a
+/// degraded snapshot reaps NOTHING even for an otherwise-reapable orphan.
 pub fn run_sweep(
     gc: &mut OrphanGc,
     panes: &[PaneInfo],
@@ -451,6 +488,17 @@ pub fn run_sweep(
     probe: &dyn ChildLivenessProbe,
     driver: &dyn crate::session_manager::ManagedTmuxDriver,
 ) -> usize {
+    // Fail-closed: an incomplete protected set means a tracked session might be
+    // missing from `tracked`, so its absence cannot be trusted as "untracked".
+    // Skip the reap phase and clear the debounce so we never reap off a degraded
+    // snapshot — neither this pass nor (via a stale candidate set) the next.
+    if tracked.degraded {
+        gc.reset_debounce();
+        warn!(
+            "orphan-GC: tracked-names snapshot incomplete (registry read failed); skipping reap this sweep"
+        );
+        return 0;
+    }
     let plan = gc.plan_sweep(panes, tracked, probe);
     let mut reaped = 0usize;
     for name in &plan.to_reap {
@@ -503,6 +551,7 @@ mod tests {
         TrackedNames {
             legacy: legacy.iter().map(|s| s.to_string()).collect(),
             managed: managed.iter().map(|s| s.to_string()).collect(),
+            degraded: false,
         }
     }
 
@@ -530,21 +579,32 @@ mod tests {
 
     #[test]
     fn pgrep_has_child_for_live_parent() {
-        // The current test process spawns a long-lived `sleep` child; the real
+        // The current test process spawns a short-lived `sleep` child; the real
         // pgrep probe must see it (proving the production probe is no longer a
         // no-op). If `pgrep` is unavailable the probe fails CLOSED (also `true`),
         // so this assertion holds on every supported CI target either way.
-        use std::process::Command;
-        let mut child = Command::new("sleep")
-            .arg("30")
+        use std::process::{Child, Command};
+
+        // RAII guard: kills+reaps the child on drop, so neither a failed assert
+        // (panic-unwind) nor an early return can ever leak the `sleep` process.
+        struct ChildGuard(Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let child = Command::new("sleep")
+            .arg("3")
             .spawn()
             .expect("spawn sleep child");
+        let _guard = ChildGuard(child);
+
         let me = std::process::id();
         let saw_child = ProcessTreeProbe.has_live_child(Some(me));
-        // Clean up before asserting so a failure never leaks the process.
-        let _ = child.kill();
-        let _ = child.wait();
         assert!(saw_child, "probe must see a live child of the test process");
+        // `_guard` drops here (and on any panic above), killing+reaping `sleep`.
     }
 
     /// Build a synthetic `Output` with the given Unix exit code and stdout.
@@ -730,22 +790,51 @@ mod tests {
 
     #[test]
     fn debounce_resets_when_candidate_disappears() {
-        // If a candidate vanishes (e.g. became tracked) between passes, the
-        // debounce clock restarts — it must be seen twice in a row again.
+        // If a name stops being a reap candidate (e.g. it became tracked) between
+        // passes, the debounce clock restarts — it must be seen as a candidate on
+        // two consecutive passes again before it can be reaped.
         let orphan = vec![pane("tmpm-flaky", "zsh")];
         let mut gc = OrphanGc::new();
         // Pass 1: orphan present (1st sighting).
         let _ = gc.plan_sweep(&orphan, &TrackedNames::default(), &AlwaysIdleProbe);
-        // Pass 2: orphan gone (became tracked) — debounce set cleared of it.
+        // Pass 2: the pane is STILL present, but it is now tracked (the tracked
+        // set changed, not the pane) — so it is no longer a reap candidate and
+        // the debounce history is cleared of it. Nothing may be reaped this pass.
         let tracked = tracked_with(&[], &["tmpm-flaky"]);
         let p2 = gc.plan_sweep(&orphan, &tracked, &AlwaysIdleProbe);
-        assert!(p2.to_reap.is_empty());
-        // Pass 3: orphan reappears (1st sighting again) — still not reaped.
+        assert!(
+            p2.to_reap.is_empty(),
+            "a now-tracked pane must not be reaped, got {:?}",
+            p2.to_reap
+        );
+        // Pass 3: it becomes an orphan candidate again — but this is a *fresh*
+        // 1st sighting after the reset, so it still must not be reaped.
         let p3 = gc.plan_sweep(&orphan, &TrackedNames::default(), &AlwaysIdleProbe);
         assert!(
             p3.to_reap.is_empty(),
-            "reappearing candidate must restart the debounce, got {:?}",
+            "a candidate that lapsed must restart the debounce, got {:?}",
             p3.to_reap
+        );
+    }
+
+    #[test]
+    fn reset_debounce_clears_prev_candidates() {
+        // After a first sighting records a candidate, an explicit reset must wipe
+        // the debounce history so the very next sighting is treated as a *first*
+        // one again (never reaped). This is the mechanism `run_sweep` uses to
+        // fail closed on a degraded tracked-names snapshot.
+        let orphan = vec![pane("tmpm-flaky", "zsh")];
+        let mut gc = OrphanGc::new();
+        // 1st sighting → candidate remembered, nothing reaped.
+        let _ = gc.plan_sweep(&orphan, &TrackedNames::default(), &AlwaysIdleProbe);
+        // Reset wipes the remembered candidate.
+        gc.reset_debounce();
+        // Next sighting is therefore a fresh 1st sighting → still not reaped.
+        let after = gc.plan_sweep(&orphan, &TrackedNames::default(), &AlwaysIdleProbe);
+        assert!(
+            after.to_reap.is_empty(),
+            "reset must restart the debounce, got {:?}",
+            after.to_reap
         );
     }
 }

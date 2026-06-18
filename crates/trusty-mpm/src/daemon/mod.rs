@@ -258,7 +258,10 @@ fn parse_orphan_gc_interval(raw: Option<&str>) -> u64 {
 /// [`tmux::TmuxDriver::list_managed_panes`]) and both registries' tracked names
 /// (via [`DaemonState::gather_tracked_names`]), then calls
 /// [`orphan_gc::run_sweep`]. A tmux-listing failure skips the pass (reaps
-/// nothing) rather than risking a wrong kill.
+/// nothing) rather than risking a wrong kill; likewise, if
+/// [`DaemonState::gather_tracked_names`] returns a *degraded* snapshot (a
+/// registry read failed, so the protected set is incomplete), `run_sweep`
+/// skips its reap phase for that tick — both paths fail CLOSED.
 /// Test: the reconciliation rule and debounce are unit-tested in
 /// [`orphan_gc`]; the end-to-end sweep is covered by `tests/orphan_gc_sweep.rs`.
 async fn orphan_gc_loop(state: Arc<DaemonState>) {

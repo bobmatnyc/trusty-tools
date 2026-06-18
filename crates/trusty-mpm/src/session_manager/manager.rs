@@ -642,10 +642,18 @@ impl SessionManager {
     /// an untracked orphan (fail-closed: better to keep a stray than risk
     /// reaping a tracked one).
     /// What: reads all records and returns the set of their `tmux_name`s. A store
-    /// read error degrades to an empty set with a `warn!`, which the GC's own
-    /// fail-closed gates then treat as "nothing protected by the store" — safe
-    /// because the legacy registry and the per-pane idleness gate still apply.
-    /// Test: `manager_known_tmux_names_collects_all` in tests.rs.
+    /// read error is **propagated as `Err`** — it is NOT swallowed into an empty
+    /// set. An empty (but successful) read means "the store tracks nothing"; an
+    /// `Err` means "we could not determine what the store tracks". Conflating the
+    /// two would fail OPEN: a session known ONLY to this store (absent from the
+    /// legacy registry) would look untracked → idle → reapable, violating the
+    /// GC's fail-closed contract. The caller
+    /// ([`crate::daemon::state::DaemonState::gather_tracked_names`]) turns this
+    /// `Err` into a *degraded* [`crate::daemon::orphan_gc::TrackedNames`] snapshot
+    /// that makes the sweep skip its reap phase entirely.
+    /// Test: `manager_known_tmux_names_collects_all` (happy path) in tests.rs;
+    /// the error path is exercised end-to-end by `gather_tracked_names` degraded
+    /// tests and by `run_sweep` against a degraded snapshot.
     ///
     /// Note: this is a read-only scan but still takes the store's WRITE lock,
     /// because [`SessionStore::all`] requires `&mut self`: it calls
@@ -655,14 +663,11 @@ impl SessionManager {
     /// reload — risking a stale set that omits a just-registered session and so
     /// lets the orphan-GC mistake it for an untracked orphan. The write lock is
     /// the fail-closed choice here; the lock is held only for the brief reload.
-    pub async fn known_tmux_names(&self) -> std::collections::HashSet<String> {
-        match self.store.write().await.all().await {
-            Ok(records) => records.into_iter().map(|r| r.tmux_name).collect(),
-            Err(e) => {
-                warn!("orphan-GC: store read for known names failed: {e}");
-                std::collections::HashSet::new()
-            }
-        }
+    pub async fn known_tmux_names(
+        &self,
+    ) -> Result<std::collections::HashSet<String>, ManagedError> {
+        let records = self.store.write().await.all().await?;
+        Ok(records.into_iter().map(|r| r.tmux_name).collect())
     }
 
     /// Return a clone of the shared tmux driver Arc.

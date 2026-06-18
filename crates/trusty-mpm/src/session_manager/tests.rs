@@ -178,7 +178,10 @@ async fn manager_known_tmux_names_collects_all() {
         .await
         .expect("create 2");
 
-    let names = mgr.known_tmux_names().await;
+    let names = mgr
+        .known_tmux_names()
+        .await
+        .expect("store read should succeed on the happy path");
     assert!(names.contains(&r1.tmux_name), "missing {}", r1.tmux_name);
     assert!(names.contains(&r2.tmux_name), "missing {}", r2.tmux_name);
     assert_eq!(names.len(), 2);
