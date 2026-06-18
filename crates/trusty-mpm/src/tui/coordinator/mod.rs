@@ -5,7 +5,11 @@
 //! built alongside (not on top of) the existing `tui/dashboard` — keeping it
 //! separate avoids touching the at-cap dashboard/health files. Child #1 landed
 //! the skeleton (layout, selection, input editing, panic-safe terminal); Child
-//! #2 wires live session-list polling + daemon-down handling.
+//! #2 wired live session-list polling + daemon-down handling; STUI-1 (#1278)
+//! adds the numbered, scrollable list (ratatui `ListState`), Page-Up/Page-Down,
+//! selection + scroll-offset preservation across refreshes, and the
+//! immediate-re-poll-after-mutation hook (see [`nav`] and
+//! [`state::CoordinatorState::request_repoll`]).
 //! What: thin façade re-exporting the submodules and exposing [`run`], the
 //! `tm sessions tui` entry point. [`run`] polls the daemon's
 //! coordinator-context endpoint on the `--interval-ms` cadence and maps each
@@ -18,6 +22,7 @@
 pub mod banner;
 pub mod events;
 pub mod layout;
+pub mod nav;
 pub mod poll;
 pub mod rows;
 pub mod state;
@@ -148,13 +153,22 @@ async fn run_loop(
     let mut last_poll = Instant::now();
 
     loop {
-        terminal.draw(|frame| layout::render(frame, &state))?;
+        terminal.draw(|frame| layout::render(frame, &mut state))?;
 
         // NOTE: `event::poll` blocks this async task for up to `KEY_POLL`. This
         // mirrors the existing dashboard event loop (`tui/event_loop.rs`); we are
-        // intentionally not diverging one screen. Converting the whole TUI to
-        // `crossterm::event::EventStream` + `tokio::select!` is tracked as a
-        // separate follow-up.
+        // intentionally not diverging one screen.
+        //
+        // EventStream-based live refresh (STUI-8 spike): the daemon DOES expose
+        // SSE, but only for *hook events* (`GET /events`,
+        // `GET /sessions/{id}/events`) — there is NO push endpoint that emits the
+        // `CoordinatorContext` snapshot this list renders. Wiring a live push
+        // would therefore require a new daemon-side coordinator-context stream,
+        // which is out of scope for STUI-1. Timer polling on `interval_ms`
+        // (below) remains the refresh mechanism; the post-mutation
+        // `take_repoll` hook gives operators an immediate refresh without it.
+        // Converting the input pump to `crossterm::event::EventStream` +
+        // `tokio::select!` is tracked as a separate follow-up.
         if event::poll(KEY_POLL)?
             && let Event::Key(key) = event::read()?
         {
@@ -164,8 +178,22 @@ async fn run_loop(
             }
         }
 
-        // Throttle the data refresh: only re-poll the daemon every interval_ms.
-        if last_poll.elapsed() >= interval {
+        // Immediate re-poll after a mutation (STUI-1): a list-mutating action sets
+        // `needs_repoll` so the operator sees the fleet refreshed now rather than
+        // up to a whole interval later. Consuming the flag also resets the timer
+        // so the next scheduled poll is a full interval out from this one. The
+        // trigger is already wired: `handle_key` flags a re-poll when the operator
+        // submits a mutating slash command (`/new`, `/kill`, `/stop`, `/resume`).
+        //
+        // TODO(STUI-6): once real slash-command dispatch lands, move the
+        // `request_repoll()` call so it fires only *after* a successful mutation
+        // (a rejected command should not force a refresh); this branch is the
+        // consumer either way.
+        if state.take_repoll() {
+            coord_poll_daemon(&mut state, client).await;
+            last_poll = Instant::now();
+        } else if last_poll.elapsed() >= interval {
+            // Throttle the data refresh: only re-poll the daemon every interval_ms.
             coord_poll_daemon(&mut state, client).await;
             last_poll = Instant::now();
         }

@@ -17,10 +17,11 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::Line,
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, HighlightSpacing, List, ListItem, Paragraph},
 };
 
-use super::rows::{active_row_two_col, controller_bullet_row, session_row};
+use super::nav::MIN_VISIBLE_ROWS;
+use super::rows::{active_row_two_col, controller_bullet_row, numbered_session_row};
 use super::state::CoordinatorState;
 
 /// The prompt prefix shown in the input box.
@@ -37,8 +38,7 @@ pub const INPUT_PROMPT: &str = "coordinator › ";
 /// skeleton shows the (stubbed) command names plus the keys Child #1 implements.
 /// What: a one-line hint string drawn reversed at the bottom.
 /// Test: `status_bar_lists_keys`.
-pub const STATUS_BAR_HINT: &str =
-    "/new /sessions /attach /stop /resume /kill /help  ·  ↵ send  ·  ↑↓/jk select  ·  q quit";
+pub const STATUS_BAR_HINT: &str = "/new /sessions /attach /stop /resume /kill /help  ·  ↵ send  ·  ↑↓/jk select  ·  PgUp/PgDn scroll  ·  q quit";
 
 /// The synthetic right-column status shown for the controller bullet.
 ///
@@ -128,25 +128,32 @@ pub fn catalog_indicator(state: &CoordinatorState) -> Option<&'static str> {
     }
 }
 
-/// Build the unified session-list items: controller row 0, then sessions.
+/// Build the unified, numbered session-list items: controller row 0, then
+/// numbered sessions (1, 2, 3, …).
 ///
-/// Why: the list always leads with the controller bullet and renders the
-/// selected row in the two-column form; building the `ListItem`s here (from the
-/// pure row-builders) keeps `render` short and the row content testable.
-/// What: returns one [`ListItem`] per row — the controller at index 0 (its
-/// right column the synthetic status), then each session, with the selected row
-/// expanded to `[id] │ [summary]` via [`active_row_two_col`].
+/// Why: STUI-1 (#1278) requires a NUMBERED list whose selected session expands
+/// to the two-column `[id] │ [summary]` form. Building the `ListItem`s here (from
+/// the pure row-builders) keeps `render` short and the row content testable; the
+/// row highlight itself is applied by the `List` widget's `highlight_style` in
+/// [`render`] (driven by `state.nav`), so this only owns the per-row TEXT.
+/// What: returns one [`ListItem`] per row — the controller at index 0 (its right
+/// column the synthetic status), then each session prefixed with its 1-based
+/// list number via [`numbered_session_row`], with the selected session expanded
+/// to `N. [id] │ [summary]` via [`active_row_two_col`].
 /// Test: row *content* is covered by the `super::rows` tests; ordering here is
 /// exercised by launching the TUI.
 fn session_list_items(state: &CoordinatorState) -> Vec<ListItem<'static>> {
+    let selected = state.selected();
     let mut items: Vec<ListItem<'static>> = vec![ListItem::new(build_controller_row(state))];
     for (idx, session) in state.sessions.iter().enumerate() {
-        // Row 0 is the controller, so session `idx` lives at selection `idx + 1`.
-        let selected = state.selected == idx + 1;
-        let line: Line<'static> = if selected {
+        // Row 0 is the controller, so session `idx` lives at selection `idx + 1`
+        // and is shown to the operator as list number `idx + 1`.
+        let number = idx + 1;
+        let is_selected = selected == number;
+        let line: Line<'static> = if is_selected {
             active_row_two_col(&session.short_id, &session.summary)
         } else {
-            session_row(&session.short_id, &session.prefix, &session.status)
+            numbered_session_row(number, &session.short_id, &session.prefix, &session.status)
         };
         items.push(ListItem::new(line));
     }
@@ -167,18 +174,27 @@ fn build_controller_row(state: &CoordinatorState) -> Line<'static> {
 ///
 /// Why: the single entry point the event loop calls each tick; composing the
 /// vertical layout in one place matches the dashboard's `render` convention.
-/// What: a vertical [`Layout`] — a 3-row input box, a flexing session list, and
-/// a 1-row status bar; the session list pins the controller at row 0 and
-/// highlights the selected row in two columns.
+/// STUI-1 makes the list a STATEFUL, scrolling widget — it takes `&mut state` so
+/// it can hand `state.nav`'s wrapped [`ListState`](ratatui::widgets::ListState)
+/// to `render_stateful_widget`, which both reads the preserved selection/offset
+/// and nudges the offset to keep the selection visible within the live viewport.
+/// What: a vertical [`Layout`] — a 3-row input box, a flexing session list whose
+/// middle region is floored at [`MIN_VISIBLE_ROWS`] rows plus the two border
+/// rows, and a 1-row status bar; the session list pins the controller at row 0,
+/// numbers the sessions, highlights the selected row via `highlight_style`, and
+/// expands the selected session to two columns.
 /// Test: the text/content helpers are unit-tested; this terminal-touching path
 /// is exercised by launching the TUI.
-pub fn render(frame: &mut Frame, state: &CoordinatorState) {
+pub fn render(frame: &mut Frame, state: &mut CoordinatorState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // input box (top)
-            Constraint::Min(4),    // session list (middle)
-            Constraint::Length(1), // status / key bar (bottom)
+            // The list floors at five visible rows + the two border rows so the
+            // STUI-1 "minimum 5 visible rows" contract holds; it flexes larger on
+            // a taller terminal and ratatui scrolls within whatever height it gets.
+            Constraint::Min((MIN_VISIBLE_ROWS + 2) as u16), // session list (middle)
+            Constraint::Length(1),                          // status / key bar (bottom)
         ])
         .split(frame.area());
 
@@ -192,32 +208,47 @@ pub fn render(frame: &mut Frame, state: &CoordinatorState) {
         .block(Block::default().borders(Borders::ALL));
     frame.render_widget(input, chunks[0]);
 
-    // Session list (middle): controller bullet pinned as row 0.
+    // Compose the immutable pieces (items, title, status text) BEFORE borrowing
+    // `state.nav` mutably for the stateful render, so the borrows do not overlap.
+    let items = session_list_items(state);
     let title = Line::from(format!("SESSIONS ({})", state.sessions.len()));
-    let list = List::new(session_list_items(state)).block(
-        Block::default().borders(Borders::ALL).title(
-            title.style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ),
-    );
-    frame.render_widget(list, chunks[1]);
-
-    // Status / key bar (bottom): key hints on the left, the live daemon-
-    // reachability indicator on the right, plus the HR-3 catalog-staleness hint
-    // when the daemon reports an available update.
     let catalog_segment = catalog_indicator(state)
         .map(|hint| format!("  ·  {hint}"))
         .unwrap_or_default();
-    let status = Paragraph::new(Line::from(format!(
+    let status_text = format!(
         "{}  ·  {}{}",
         status_bar_text(),
         daemon_indicator(state),
         catalog_segment
-    )))
-    .style(
+    );
+
+    // Session list (middle): controller bullet pinned as row 0, numbered sessions
+    // below, the selected row highlighted, scrolling driven by `state.nav`.
+    let list = List::new(items)
+        .block(
+            Block::default().borders(Borders::ALL).title(
+                title.style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD),
+        )
+        // Keep every row aligned whether or not it is the selection (mirrors the
+        // health screen's collections list).
+        .highlight_spacing(HighlightSpacing::Always);
+    frame.render_stateful_widget(list, chunks[1], state.nav.state_mut());
+
+    // Status / key bar (bottom): key hints on the left, the live daemon-
+    // reachability indicator on the right, plus the HR-3 catalog-staleness hint
+    // when the daemon reports an available update.
+    let status = Paragraph::new(Line::from(status_text)).style(
         Style::default()
             .add_modifier(Modifier::BOLD)
             .add_modifier(Modifier::REVERSED),

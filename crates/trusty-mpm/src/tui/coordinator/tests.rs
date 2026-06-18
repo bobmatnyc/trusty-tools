@@ -19,10 +19,11 @@ use super::layout::{
     CATALOG_STALE_HINT, CONTROLLER_STATUS, DAEMON_REACHABLE, DAEMON_UNREACHABLE, INPUT_PROMPT,
     STATUS_BAR_HINT, catalog_indicator, daemon_indicator, input_line, status_bar_text,
 };
+use super::nav::{ListNav, MIN_VISIBLE_ROWS, PAGE_JUMP};
 use super::poll::{coord_poll_daemon, coord_session_to_entry};
 use super::rows::{
     COLUMN_SEPARATOR, CONTROLLER_GLYPH, SESSION_GLYPH, active_row_two_col, controller_bullet_row,
-    session_row, session_short_id,
+    numbered_session_row, session_row, session_short_id,
 };
 use super::state::{CoordinatorState, INPUT_HISTORY_LIMIT, SessionEntry};
 use crate::client::{CoordinatorSession, DaemonClient};
@@ -89,11 +90,179 @@ fn active_row_two_col_splits_on_bar() {
 }
 
 #[test]
+fn numbered_session_row_prefixes_number() {
+    // STUI-1: the list is numbered (1, 2, 3, …); the row text must lead with the
+    // 1-based list number while still carrying the standard session spans.
+    let text = line_text(&numbered_session_row(
+        3,
+        "4f9ca1b2",
+        "aipowerranking",
+        "Active",
+    ));
+    assert!(
+        text.trim_start().starts_with("3."),
+        "expected a leading list number `3.`: {text}"
+    );
+    // The bullet, id, prefix, and status are still present after the number.
+    assert!(text.contains(SESSION_GLYPH), "missing bullet: {text}");
+    assert!(text.contains("4f9ca1b2"), "missing short id: {text}");
+    assert!(text.contains("aipowerranking"), "missing prefix: {text}");
+    assert!(text.contains("Active"), "missing status: {text}");
+}
+
+#[test]
 fn session_short_id_truncates() {
     assert_eq!(session_short_id("4f9ca1b2deadbeef"), "4f9ca1b2");
     // Shorter-than-8 ids are returned whole.
     assert_eq!(session_short_id("abc"), "abc");
     assert_eq!(session_short_id(""), "");
+}
+
+// ---- nav: pure ListNav navigation (STUI-1) --------------------------------
+
+#[test]
+fn min_visible_rows_is_five() {
+    // The spec fixes a five-row floor for the list viewport.
+    assert_eq!(MIN_VISIBLE_ROWS, 5);
+    // Page scrolling jumps by a page (== the visible-row floor in the pure model).
+    assert_eq!(PAGE_JUMP, MIN_VISIBLE_ROWS);
+}
+
+#[test]
+fn nav_default_selects_controller_row() {
+    // The list always has at least the controller row; row 0 is selected and the
+    // offset starts at the top.
+    let nav = ListNav::default();
+    assert_eq!(nav.selected(), 0);
+    assert_eq!(nav.offset(), 0);
+}
+
+#[test]
+fn nav_up_down_saturate() {
+    // A 4-row list (len 4): down saturates at row 3, up saturates at row 0.
+    let mut nav = ListNav::default();
+    nav.sync_len(4);
+    nav.up(); // already at 0
+    assert_eq!(nav.selected(), 0, "up saturates at the top");
+    nav.down();
+    nav.down();
+    nav.down();
+    assert_eq!(nav.selected(), 3, "stepped to the last row");
+    nav.down(); // saturates
+    assert_eq!(nav.selected(), 3, "down saturates at the last row");
+    nav.up();
+    assert_eq!(nav.selected(), 2);
+}
+
+#[test]
+fn nav_select_clamps_into_bounds() {
+    // `select` past the end clamps to the last valid row.
+    let mut nav = ListNav::default();
+    nav.sync_len(3); // rows 0..=2
+    nav.select(99);
+    assert_eq!(nav.selected(), 2, "select clamps to the last row");
+    nav.select(1);
+    assert_eq!(nav.selected(), 1, "an in-bounds select is honoured");
+}
+
+#[test]
+fn page_down_jumps_by_page_size() {
+    // A long list (len 20): Page-Down advances by exactly PAGE_JUMP rows.
+    let mut nav = ListNav::default();
+    nav.sync_len(20);
+    nav.page_down();
+    assert_eq!(nav.selected(), PAGE_JUMP, "page down jumps by a page");
+}
+
+#[test]
+fn page_up_jumps_by_page_size() {
+    let mut nav = ListNav::default();
+    nav.sync_len(20);
+    nav.select(2 * PAGE_JUMP);
+    nav.page_up();
+    assert_eq!(nav.selected(), PAGE_JUMP, "page up jumps back by a page");
+}
+
+#[test]
+fn page_down_saturates_at_bottom() {
+    // A short list (len 3): Page-Down cannot move past the last row.
+    let mut nav = ListNav::default();
+    nav.sync_len(3); // rows 0..=2
+    nav.page_down();
+    assert_eq!(nav.selected(), 2, "page down saturates at the last row");
+}
+
+#[test]
+fn page_up_saturates_at_top() {
+    let mut nav = ListNav::default();
+    nav.sync_len(20);
+    nav.select(2); // within one page of the top
+    nav.page_up();
+    assert_eq!(nav.selected(), 0, "page up saturates at the top");
+}
+
+#[test]
+fn nav_sync_len_preserves_selection_and_offset() {
+    // A refresh that GROWS (or keeps) the list must leave the selection AND the
+    // scroll offset exactly where the operator left them.
+    let mut nav = ListNav::default();
+    nav.sync_len(20);
+    nav.select(12);
+    // Force a non-zero offset by scrolling the viewport via the render seam.
+    *nav.state_mut().offset_mut() = 8;
+    assert_eq!(nav.selected(), 12);
+    assert_eq!(nav.offset(), 8);
+
+    // Grow the list: cursor + offset are untouched (both still in bounds).
+    nav.sync_len(25);
+    assert_eq!(nav.selected(), 12, "grown list preserves the selection");
+    assert_eq!(nav.offset(), 8, "grown list preserves the scroll offset");
+
+    // Unchanged length: still preserved.
+    nav.sync_len(25);
+    assert_eq!(nav.selected(), 12);
+    assert_eq!(nav.offset(), 8);
+}
+
+#[test]
+fn nav_sync_len_clamps_on_shrink() {
+    // A refresh that SHRINKS the list past the cursor/offset must clamp both
+    // inward so neither indexes past the new end.
+    let mut nav = ListNav::default();
+    nav.sync_len(20);
+    nav.select(18);
+    *nav.state_mut().offset_mut() = 15;
+
+    // Shrink to 5 rows (0..=4): selection and offset clamp to the last row.
+    nav.sync_len(5);
+    assert_eq!(
+        nav.selected(),
+        4,
+        "selection clamps to the last row on shrink"
+    );
+    assert!(
+        nav.offset() <= 4,
+        "offset clamps within the shrunk list: {}",
+        nav.offset()
+    );
+
+    // Shrink to the controller-only list (len 1): everything pins to row 0.
+    nav.sync_len(1);
+    assert_eq!(nav.selected(), 0);
+    assert_eq!(nav.offset(), 0);
+}
+
+#[test]
+fn nav_sync_len_floors_at_one_row() {
+    // The controller row always exists, so a zero row_count still yields len 1
+    // and a valid row-0 selection (never an underflow).
+    let mut nav = ListNav::default();
+    nav.sync_len(0);
+    assert_eq!(
+        nav.selected(),
+        0,
+        "an empty list still has the controller row"
+    );
 }
 
 // ---- state: selection clamp (boundary cases) ------------------------------
@@ -103,9 +272,9 @@ fn clamp_selection_empty_list() {
     // Empty session list: only the controller row exists (row 0).
     let mut state = CoordinatorState::default();
     assert_eq!(state.row_count(), 1);
-    state.selected = 9;
+    state.select_row(9);
     state.clamp_selection();
-    assert_eq!(state.selected, 0, "clamp to the sole controller row");
+    assert_eq!(state.selected(), 0, "clamp to the sole controller row");
 }
 
 #[test]
@@ -116,43 +285,122 @@ fn clamp_selection_single_row() {
         .sessions
         .push(SessionEntry::new("id", "p", "Active", "s"));
     assert_eq!(state.row_count(), 2);
-    state.selected = 1;
+    state.select_row(1);
     state.clamp_selection();
-    assert_eq!(state.selected, 1, "valid selection is preserved");
-    state.selected = 5;
+    assert_eq!(state.selected(), 1, "valid selection is preserved");
+    state.select_row(5);
     state.clamp_selection();
-    assert_eq!(state.selected, 1, "past-end clamps to last session");
+    assert_eq!(state.selected(), 1, "past-end clamps to last session");
 }
 
 #[test]
 fn clamp_selection_past_end() {
     let mut state = CoordinatorState::skeleton(); // controller + 2 sessions
     assert_eq!(state.row_count(), 3);
-    state.selected = 99;
+    state.select_row(99);
     state.clamp_selection();
-    assert_eq!(state.selected, 2, "clamps to the last valid row index");
+    assert_eq!(state.selected(), 2, "clamps to the last valid row index");
 }
 
 #[test]
 fn selection_movement_saturates() {
     let mut state = CoordinatorState::skeleton(); // rows 0..=2
     state.select_up(); // already at 0
-    assert_eq!(state.selected, 0);
+    assert_eq!(state.selected(), 0);
     state.select_down();
-    assert_eq!(state.selected, 1);
+    assert_eq!(state.selected(), 1);
     state.select_down();
-    assert_eq!(state.selected, 2);
+    assert_eq!(state.selected(), 2);
     state.select_down(); // saturates at last
-    assert_eq!(state.selected, 2);
+    assert_eq!(state.selected(), 2);
     state.select_up();
-    assert_eq!(state.selected, 1);
+    assert_eq!(state.selected(), 1);
+}
+
+#[test]
+fn select_row_clamps_into_bounds() {
+    // `select_row` re-syncs the live row count then clamps into 0..row_count.
+    let mut state = CoordinatorState::skeleton(); // controller + 2 sessions → rows 0..=2
+    state.select_row(1);
+    assert_eq!(state.selected(), 1, "an in-bounds row is honoured");
+    state.select_row(99);
+    assert_eq!(
+        state.selected(),
+        2,
+        "past-end select clamps to the last row"
+    );
+}
+
+#[test]
+fn clamp_selection_preserves_valid_selection() {
+    // STUI-1: a refresh that leaves the selection in bounds must NOT move it back
+    // to the controller — the operator stays on the row they chose.
+    let mut state = CoordinatorState::skeleton(); // rows 0..=2
+    state.select_row(2);
+    // Simulate a poll that keeps the same number of rows.
+    state.clamp_selection();
+    assert_eq!(
+        state.selected(),
+        2,
+        "a still-valid selection survives the refresh"
+    );
+
+    // A poll that GROWS the list also preserves the selection.
+    state
+        .sessions
+        .push(SessionEntry::new("new", "p", "Active", "s"));
+    state.clamp_selection();
+    assert_eq!(state.selected(), 2, "grown list keeps the cursor in place");
+}
+
+#[test]
+fn page_scroll_moves_by_page_and_saturates() {
+    // Build a controller + enough sessions that a page jump does not hit the end.
+    let mut state = CoordinatorState::live();
+    for i in 0..20 {
+        state
+            .sessions
+            .push(SessionEntry::new(format!("id{i}"), "p", "Active", "s"));
+    }
+    // rows 0..=20 (controller + 20 sessions).
+    state.page_down();
+    assert_eq!(state.selected(), PAGE_JUMP, "page down jumps by a page");
+    state.page_down();
+    assert_eq!(
+        state.selected(),
+        2 * PAGE_JUMP,
+        "second page down jumps again"
+    );
+    state.page_up();
+    assert_eq!(state.selected(), PAGE_JUMP, "page up jumps back by a page");
+    // Page-up from within a page of the top saturates at the controller row.
+    state.select_row(2);
+    state.page_up();
+    assert_eq!(
+        state.selected(),
+        0,
+        "page up saturates at the controller row"
+    );
+}
+
+#[test]
+fn request_repoll_sets_and_take_clears() {
+    // STUI-1: a mutation requests a re-poll; the run loop consumes it exactly once.
+    let mut state = CoordinatorState::live();
+    assert!(!state.take_repoll(), "no re-poll requested initially");
+    state.request_repoll();
+    assert!(state.take_repoll(), "the requested re-poll fires once");
+    assert!(
+        !state.take_repoll(),
+        "a consumed re-poll does not re-fire on the next tick"
+    );
 }
 
 #[test]
 fn controller_is_selected_at_row_zero() {
     let mut state = CoordinatorState::skeleton();
     assert!(state.controller_selected());
-    state.selected = 1;
+    state.select_row(1);
     assert!(!state.controller_selected());
 }
 
@@ -163,9 +411,9 @@ fn selected_session_offsets_by_controller_row() {
         state.selected_session().is_none(),
         "row 0 is the controller"
     );
-    state.selected = 1;
+    state.select_row(1);
     assert_eq!(state.selected_session().unwrap().prefix, "aipowerranking");
-    state.selected = 2;
+    state.select_row(2);
     assert_eq!(state.selected_session().unwrap().prefix, "genealogy");
 }
 
@@ -173,7 +421,7 @@ fn selected_session_offsets_by_controller_row() {
 fn default_state_has_placeholder_rows() {
     let state = CoordinatorState::skeleton();
     assert_eq!(state.sessions.len(), 2);
-    assert_eq!(state.selected, 0);
+    assert_eq!(state.selected(), 0);
 }
 
 // ---- state: input + history ring ------------------------------------------
@@ -276,6 +524,20 @@ fn parse_slash_ignores_plain_text() {
 }
 
 #[test]
+fn mutating_commands_are_classified() {
+    // STUI-1: only fleet-mutating commands force an immediate re-poll.
+    assert!(SlashCommand::New.is_mutating());
+    assert!(SlashCommand::Kill.is_mutating());
+    assert!(SlashCommand::Stop.is_mutating());
+    assert!(SlashCommand::Resume.is_mutating());
+    // Read-only commands must NOT trigger a refresh.
+    assert!(!SlashCommand::Help.is_mutating());
+    assert!(!SlashCommand::Sessions.is_mutating());
+    assert!(!SlashCommand::Attach.is_mutating());
+    assert!(!SlashCommand::Unknown("frob".to_string()).is_mutating());
+}
+
+#[test]
 fn parse_slash_bare_slash_is_not_a_command() {
     // A lone `/` (or `/` followed only by whitespace) has no command word, so it
     // must NOT classify as `Unknown("")` — it falls through to chat as `None`.
@@ -319,13 +581,13 @@ fn q_in_message_is_not_quit() {
 fn handle_key_moves_selection_when_input_empty() {
     let mut state = CoordinatorState::skeleton();
     handle_key(&mut state, key(KeyCode::Down));
-    assert_eq!(state.selected, 1);
+    assert_eq!(state.selected(), 1);
     handle_key(&mut state, key(KeyCode::Char('j')));
-    assert_eq!(state.selected, 2);
+    assert_eq!(state.selected(), 2);
     handle_key(&mut state, key(KeyCode::Char('k')));
-    assert_eq!(state.selected, 1);
+    assert_eq!(state.selected(), 1);
     handle_key(&mut state, key(KeyCode::Up));
-    assert_eq!(state.selected, 0);
+    assert_eq!(state.selected(), 0);
 }
 
 #[test]
@@ -335,6 +597,55 @@ fn handle_key_enter_submits_and_returns_line() {
     let submitted = handle_key(&mut state, key(KeyCode::Enter));
     assert_eq!(submitted.as_deref(), Some("spin up a session"));
     assert_eq!(state.history.len(), 1);
+}
+
+#[test]
+fn handle_key_page_keys_scroll_regardless_of_buffer() {
+    // STUI-1: Page-Up/Page-Down move the selection even with text in the buffer
+    // (they have no text-editing meaning).
+    let mut state = CoordinatorState::live();
+    for i in 0..20 {
+        state
+            .sessions
+            .push(SessionEntry::new(format!("id{i}"), "p", "Active", "s"));
+    }
+    state.input = "half-typed".to_string(); // a non-empty buffer
+    handle_key(&mut state, key(KeyCode::PageDown));
+    assert_eq!(
+        state.selected(),
+        PAGE_JUMP,
+        "page down scrolls even mid-message"
+    );
+    handle_key(&mut state, key(KeyCode::PageUp));
+    assert_eq!(state.selected(), 0, "page up scrolls back even mid-message");
+    assert_eq!(state.input, "half-typed", "page keys never edit the buffer");
+}
+
+#[test]
+fn handle_key_enter_mutating_command_requests_repoll() {
+    // STUI-1: submitting a mutating slash command flags an immediate re-poll;
+    // a plain chat line or a read-only command does not.
+    let mut state = CoordinatorState::live();
+    state.input = "/new repo=x".to_string();
+    let submitted = handle_key(&mut state, key(KeyCode::Enter));
+    assert_eq!(submitted.as_deref(), Some("/new repo=x"));
+    assert!(
+        state.take_repoll(),
+        "a mutating slash command requests a re-poll"
+    );
+
+    // A read-only command does NOT request a re-poll.
+    state.input = "/help".to_string();
+    handle_key(&mut state, key(KeyCode::Enter));
+    assert!(
+        !state.take_repoll(),
+        "a read-only command must not force a refresh"
+    );
+
+    // Plain chat does NOT request a re-poll.
+    state.input = "just chatting".to_string();
+    handle_key(&mut state, key(KeyCode::Enter));
+    assert!(!state.take_repoll(), "plain chat must not force a refresh");
 }
 
 #[test]
@@ -440,7 +751,7 @@ fn live_state_starts_empty_and_unreachable() {
         !state.daemon_reachable,
         "daemon presumed down until first poll"
     );
-    assert_eq!(state.selected, 0, "controller selected at start");
+    assert_eq!(state.selected(), 0, "controller selected at start");
 }
 
 #[test]
@@ -532,7 +843,7 @@ async fn poll_marks_unreachable_clears_sessions() {
         SessionEntry::new("4f9ca1b2", "aipowerranking", "Active", "Running tests"),
         SessionEntry::new("7b2ec0d1", "genealogy", "Idle", "Idle"),
     ];
-    state.selected = 2; // selection sits on the last session
+    state.select_row(2); // selection sits on the last session
 
     let mut client = DaemonClient::new(dead_loopback_url());
     coord_poll_daemon(&mut state, &mut client).await;
@@ -546,7 +857,8 @@ async fn poll_marks_unreachable_clears_sessions() {
         "a daemon-down poll must clear stale session rows"
     );
     assert_eq!(
-        state.selected, 0,
+        state.selected(),
+        0,
         "clearing the list clamps the selection back to the controller row"
     );
 }

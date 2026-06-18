@@ -95,6 +95,31 @@ pub fn session_row(short_id: &str, prefix: &str, status: &str) -> Line<'static> 
     ])
 }
 
+/// Build a numbered, non-selected managed-session row: `N. ○ <id> <prefix> …`.
+///
+/// Why: STUI-1 (#1278) renders the list NUMBERED (1, 2, 3, …) so an operator can
+/// refer to a session by its list position; the number is purely a display index
+/// (1-based), distinct from the session id. Prefixing it here keeps the numbering
+/// rule in the pure row layer where it is unit-testable, and keeps [`session_row`]
+/// available for the un-numbered controller-adjacent rendering paths.
+/// What: returns a [`Line`] of `<n>. ` (dimmed) followed by the standard
+/// [`session_row`] spans (`○ <short-id> <prefix>   <status>`). The number is
+/// right-padded to two columns so single- and double-digit numbers align.
+/// Test: `numbered_session_row_prefixes_number`.
+pub fn numbered_session_row(
+    number: usize,
+    short_id: &str,
+    prefix: &str,
+    status: &str,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!("{number:>2}. "),
+        Style::default().fg(Color::DarkGray),
+    )];
+    spans.extend(session_row(short_id, prefix, status).spans);
+    Line::from(spans)
+}
+
 /// Build the selected session's two-column active row: `[id] │ [summary]`.
 ///
 /// Why: the headline feature of the coordinator list is that the *active* row
