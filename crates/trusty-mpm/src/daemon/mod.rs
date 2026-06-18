@@ -113,17 +113,120 @@ pub async fn serve_http(
         info!("orphan-GC disabled via TRUSTY_MPM_ORPHAN_GC");
     }
 
-    let app = api::router(state);
+    let app = api::router(Arc::clone(&state));
     info!("daemon listening; press Ctrl-C to stop");
     // `into_make_service_with_connect_info` makes the peer `SocketAddr` available
     // to handlers via `ConnectInfo` — the loopback-only `POST /rpc` gate (#1221)
     // depends on it. Without connect-info the `ConnectInfo` extractor would 500.
+    //
+    // `with_graceful_shutdown` lets the daemon reap every live tmux session it
+    // owns before the process exits (#1455). Without it the `reap_loop` /
+    // `orphan_gc_loop` tasks are simply abandoned on SIGTERM and the sessions
+    // they track leak. The shutdown future first drains in-flight requests, then
+    // walks BOTH registries and kills each live session, fail-open per session.
+    let reaper_state = Arc::clone(&state);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        reap_all_live_sessions(reaper_state).await;
+    })
     .await?;
     Ok(())
+}
+
+/// Block until the process receives a shutdown signal (SIGINT or SIGTERM).
+///
+/// Why: the graceful-shutdown reaper (#1455) must fire on the SAME signals the
+/// daemon is stopped with. `tm restart` / `launchctl bootout` deliver SIGTERM;
+/// trapping only Ctrl-C (SIGINT) would skip the reap on the common stop path and
+/// leak every live session. This mirrors the binary's `wait_for_shutdown_signal`
+/// so the library boot path (used by external in-process consumers) reaps too.
+/// What: on Unix, races `ctrl_c()` against a SIGTERM stream; if registering the
+/// SIGTERM handler fails it falls back to awaiting Ctrl-C alone. On non-Unix
+/// (no SIGTERM) it simply awaits Ctrl-C.
+/// Test: signal delivery is environment-bound and not unit-tested; the reap it
+/// triggers is covered by `reap_all_live_sessions`'s own behaviour.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("failed to register SIGTERM handler: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Kill every live tmux session owned by the daemon across BOTH registries.
+///
+/// Why: on graceful shutdown no session may be left fire-and-forget (#1452,
+/// #1455). The periodic `reap_loop` / `orphan_gc_loop` tasks are abandoned when
+/// the process exits, so a dedicated shutdown sweep is the last line that keeps
+/// the host clean of leaked `tmpm-*` sessions.
+/// What: discovers tmux once (a no-op early-return if tmux is unavailable —
+/// nothing to kill), then collects the `tmux_name` of every entry in the legacy
+/// [`DaemonState`] registry and every non-terminal record in the
+/// [`SessionManager`](crate::session_manager::SessionManager) store, de-dupes,
+/// and issues a best-effort `kill_session` for each. One kill failing (the
+/// session may already be gone) never aborts the rest — every name is attempted.
+/// Idempotent: re-running it after a clean sweep simply finds nothing live.
+/// Logs a one-line summary (count reaped) at info level to stderr.
+/// Test: `reap_all_live_sessions_is_safe_when_empty` (empty/ tmux-absent no-op);
+/// the per-session kill loop reuses the unit-tested `kill_session` seam.
+async fn reap_all_live_sessions(state: Arc<DaemonState>) {
+    let Ok(driver) = tmux::TmuxDriver::discover() else {
+        info!("graceful shutdown: tmux unavailable; no sessions to reap");
+        return;
+    };
+
+    // Union the tmux names from both registries so a session tracked by EITHER
+    // is reaped. De-dupe via a set: the same name can appear in both.
+    let mut names: std::collections::HashSet<String> = state
+        .list_sessions()
+        .into_iter()
+        .map(|s| s.tmux_name)
+        .collect();
+
+    let mgr = state.session_manager().await;
+    for record in mgr.list().await {
+        if matches!(
+            record.state,
+            crate::session_manager::ManagedSessionState::Decommissioned
+        ) {
+            continue;
+        }
+        names.insert(record.tmux_name);
+    }
+
+    let mut reaped = 0usize;
+    for name in names {
+        match driver.kill_session(&name) {
+            Ok(()) => reaped += 1,
+            Err(e) => {
+                // Fail-open: a kill failing (already gone, or never had a host)
+                // must not stop us reaping the rest. stderr only via tracing.
+                tracing::warn!(
+                    "graceful shutdown: kill_session({name}) failed (may already be gone): {e}"
+                );
+            }
+        }
+    }
+    info!("graceful shutdown: reaped {reaped} live session(s)");
 }
 
 /// Spawn a background axum server for a secondary listener (e.g. Tailscale).
@@ -319,6 +422,28 @@ pub async fn run_mcp(state: Arc<DaemonState>) -> anyhow::Result<()> {
         async move { crate::mcp::dispatch(&backend, req).await }
     })
     .await
+}
+
+#[cfg(test)]
+mod shutdown_reaper_tests {
+    use super::{DaemonState, reap_all_live_sessions};
+    use std::sync::Arc;
+
+    /// The shutdown reaper is a safe no-op on an empty daemon.
+    ///
+    /// Why: graceful shutdown must never panic, whether or not tmux is present
+    /// and whether or not any session is tracked (#1455). With no registered
+    /// sessions there is nothing to kill, so the sweep must complete cleanly —
+    /// returning early when tmux is unavailable, or reaping zero when it is.
+    /// What: builds a fresh in-memory `DaemonState` (no sessions) and runs the
+    /// reaper, asserting only that it returns without panicking.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn reap_all_live_sessions_is_safe_when_empty() {
+        let state: Arc<DaemonState> = DaemonState::shared();
+        // Must not panic regardless of tmux availability on the host.
+        reap_all_live_sessions(state).await;
+    }
 }
 
 #[cfg(test)]

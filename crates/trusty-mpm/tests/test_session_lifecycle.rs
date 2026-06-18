@@ -14,6 +14,25 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use trusty_mpm::daemon::state::DaemonState;
+use trusty_mpm::daemon::tmux::TmuxDriver;
+
+/// True when a tmux session named `name` is live on this host.
+///
+/// Why: the #1454 assertion ("DELETE killed the tmux host") is only meaningful
+/// where tmux exists; this lets the test create a real host, then prove it is
+/// gone after DELETE, while still passing on tmux-less CI.
+/// What: lists live tmux sessions via the daemon driver and reports whether
+/// `name` is present; any discovery/listing error is treated as "not present".
+/// Test: exercised by `full_user_cycle` when tmux is available.
+fn tmux_session_live(name: &str) -> bool {
+    match TmuxDriver::discover() {
+        Ok(driver) => driver
+            .list_sessions()
+            .map(|sessions| sessions.iter().any(|s| s.name == name))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
 
 /// A live daemon for this test, bound to a random loopback port.
 ///
@@ -113,6 +132,21 @@ async fn full_user_cycle() {
     // resolves strictly by UUID, so keep the id for the stop step.
     let id = created["id"].as_str().expect("id present").to_string();
     assert!(!id.is_empty());
+
+    // Create a REAL tmux host for this session (when tmux is available) so the
+    // #1454 assertion below can prove DELETE actually killed it. Without this
+    // the API never spins up a tmux session (no `workdir` was supplied), so the
+    // kill would be a vacuous no-op and the leak this test guards would slip by.
+    let tmux_available = TmuxDriver::is_available();
+    if tmux_available && let Ok(driver) = TmuxDriver::discover() {
+        driver
+            .create_session(&name, Some("/tmp"))
+            .expect("create real tmux host for the session");
+        assert!(
+            tmux_session_live(&name),
+            "precondition: tmux host {name} must be live after create"
+        );
+    }
 
     // 2. List sessions — exactly one, in a live state.
     let listed: Value = client
@@ -242,4 +276,19 @@ async fn full_user_cycle() {
             .is_empty(),
         "session must be gone after stop"
     );
+
+    // 11. #1454: DELETE must have KILLED the tmux host, not just dropped the
+    //     registry entry. When tmux is available the host we created in step 1
+    //     must now be gone. Best-effort cleanup if (regression) it lingers, so a
+    //     failing run does not leak a session into the next test.
+    if tmux_available {
+        let still_live = tmux_session_live(&name);
+        if still_live && let Ok(driver) = TmuxDriver::discover() {
+            let _ = driver.kill_session(&name);
+        }
+        assert!(
+            !still_live,
+            "tmux host {name} must be killed by DELETE /sessions/{{id}} (#1454)"
+        );
+    }
 }

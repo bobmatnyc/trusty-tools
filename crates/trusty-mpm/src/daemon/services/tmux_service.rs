@@ -84,6 +84,37 @@ impl TmuxService {
         }
     }
 
+    /// Kill the tmux session named `tmux_name`, best-effort.
+    ///
+    /// Why: `DELETE /sessions/{id}` must KILL the owning tmux session, not merely
+    /// drop the registry entry — otherwise every delete leaks a live `tmpm-*`
+    /// session (epic #1452, #1454). The kill is best-effort because the session
+    /// may already be gone (the operator killed it by hand, the reaper got it
+    /// first, or it never had a tmux host on this box). Failing the HTTP response
+    /// on a kill error would surface a confusing 5xx for the common "already
+    /// gone" case, so the policy mirrors `stop`/`decommission`: log and move on.
+    /// What: discovers tmux and issues a single `kill_session`; any failure
+    /// (tmux absent, or the kill itself) is logged to stderr via `tracing` and
+    /// swallowed. Logging only — never to stdout, which carries MCP JSON-RPC
+    /// framing. Returns nothing: there is no actionable error for the caller.
+    /// Test: `kill_best_effort_without_tmux_is_noop` (tmux-absent path) and the
+    /// `full_user_cycle` integration test asserts the session is gone after a
+    /// DELETE when tmux is available.
+    pub fn kill_best_effort(tmux_name: &str) {
+        match TmuxDriver::discover() {
+            Ok(driver) => {
+                if let Err(e) = driver.kill_session(tmux_name) {
+                    tracing::warn!(
+                        "tmux kill_session failed for {tmux_name} (may already be gone): {e}"
+                    );
+                }
+            }
+            Err(_) => {
+                tracing::info!("tmux unavailable; kill for {tmux_name} skipped");
+            }
+        }
+    }
+
     /// List every tmux session on the host, origin-tagged.
     ///
     /// Why: the dashboard offers to adopt external sessions; it needs the full
@@ -310,6 +341,14 @@ mod tests {
         // tmux is generally absent in CI; capture must degrade to "" not panic.
         let session = Session::new(SessionId::new(), "/tmp/p", ControlModel::Tmux, None);
         let _ = TmuxService::capture(&session, 10);
+    }
+
+    #[test]
+    fn kill_best_effort_is_noop_for_unknown_session() {
+        // Killing a session that does not exist (or with tmux absent in CI) must
+        // be a silent no-op, never a panic — the DELETE handler relies on this
+        // to never fail the HTTP response on a best-effort tmux kill (#1454).
+        TmuxService::kill_best_effort("tmpm-definitely-no-such-session-xyz");
     }
 
     #[test]
