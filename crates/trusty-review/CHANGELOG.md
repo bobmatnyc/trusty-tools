@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.16] — 2026-06-18
+
+### Changed
+
+- Reviewer prompt: praise from an automated reviewer is held to a higher bar
+  than human praise — included only when clearly justified.
+
 ## [0.3.15] — 2026-06-18
 
 ### Changed
