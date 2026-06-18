@@ -1038,14 +1038,29 @@ impl AppState {
     /// reads-only. CLI, stdio-proxy, and test code paths never call this, so
     /// they keep the snapshot read-fallback (issue #59).
     /// What: Replaces `self.registry` with a fresh `PalaceRegistry` carrying
-    /// `OpenIntent::Writer`. Safe because `AppState::new` builds an empty
-    /// registry with no hydrated handles yet, and this builder runs during
-    /// startup before `spawn_startup_tasks` hydrates any palace.
-    /// Test: `with_writer_intent_marks_registry_writer` in `lib_tests`.
+    /// `OpenIntent::Writer`.
+    ///
+    /// Invariant: MUST be called on a fresh, unhydrated, unshared registry —
+    /// during startup, before `spawn_startup_tasks`/`load_palaces_from_disk`
+    /// registers any `PalaceHandle` and before the `AppState` (hence its
+    /// `Arc<PalaceRegistry>`) is cloned to a handler. Replacing the registry
+    /// discards the prior `Arc`; doing so after hydration would silently drop
+    /// live handles (data loss), and doing so after the state is shared would
+    /// leave other clones on the stale read-only registry. The guard is a
+    /// `debug_assert!` on the strongest cheap signals the registry exposes —
+    /// `is_empty()` (no handles hydrated) and `Arc::strong_count == 1` (not yet
+    /// shared) — so an ordering violation fails fast as the programmer error it
+    /// is (the call site is startup-only and fixed). Release builds elide the
+    /// assert; the real call site (`run_serve`) always satisfies it.
+    /// Test: `with_writer_intent_marks_registry_writer` and
+    /// `with_writer_intent_panics_on_hydrated_registry` in `lib_tests`.
     #[must_use]
     pub fn with_writer_intent(mut self) -> Self {
-        self.registry =
-            Arc::new(trusty_common::memory_core::PalaceRegistry::new().with_writer_intent());
+        // Fail fast on an ordering bug: a hydrated registry (`!is_empty`) or a
+        // shared one (`strong_count > 1`) would silently drop live handles or
+        // strand other clones on the stale read-only registry (issue #1487).
+        debug_assert!(self.registry.is_empty() && Arc::strong_count(&self.registry) == 1);
+        self.registry = Arc::new(PalaceRegistry::new().with_writer_intent());
         self
     }
 

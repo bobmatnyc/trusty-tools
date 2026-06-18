@@ -406,6 +406,51 @@ async fn with_writer_intent_marks_registry_writer() {
     );
 }
 
+/// Why (issue #1487 hardening): `with_writer_intent` replaces the registry
+/// `Arc`, so it must only ever run on a fresh, unhydrated registry — calling
+/// it after palaces are loaded would silently drop the hydrated handles. The
+/// `debug_assert!` invariant guard makes that ordering violation a loud,
+/// fail-fast programmer error in debug/test builds instead of silent data loss.
+/// What: persists a palace to disk, hydrates a fresh `AppState`'s registry via
+/// `load_palaces_from_disk`, then calls `with_writer_intent` and asserts it
+/// panics on the `is_empty()` invariant (the strongest cheap guard).
+/// Test: this test itself (via `#[should_panic]`).
+#[tokio::test]
+#[should_panic(expected = "is_empty()")]
+async fn with_writer_intent_panics_on_hydrated_registry() {
+    use trusty_common::memory_core::{Palace, PalaceId, PalaceRegistry};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+
+    // Persist one palace to disk via the same path the palace_create tool uses.
+    {
+        let writer = PalaceRegistry::new();
+        let palace = Palace {
+            id: PalaceId::new("hydrated"),
+            name: "hydrated".to_string(),
+            description: None,
+            created_at: chrono::Utc::now(),
+            data_dir: root.join("hydrated"),
+        };
+        writer
+            .create_palace(&root, palace)
+            .expect("persist palace to disk");
+    }
+
+    // Hydrate a fresh AppState's registry from disk so it is no longer empty.
+    let state = AppState::new(root);
+    let count = state
+        .load_palaces_from_disk()
+        .await
+        .expect("load_palaces_from_disk");
+    assert_eq!(count, 1, "precondition: registry must be hydrated");
+
+    // Calling the builder on a hydrated registry must trip the debug_assert!
+    // invariant guard rather than silently dropping the live handle.
+    let _ = state.with_writer_intent();
+}
+
 /// Why: existing installs (and the legacy standalone `trusty-memory` repo)
 /// nest palaces one level deeper under a `palaces/` subdirectory. When that
 /// subdirectory exists, `resolve_palace_registry_dir` must descend into it

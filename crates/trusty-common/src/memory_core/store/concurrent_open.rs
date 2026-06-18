@@ -68,6 +68,15 @@ pub enum OpenIntent {
 /// What: 5 attempts. Combined with [`WRITER_RETRY_SLEEP_MS`] the total wait
 /// is bounded at ~1.55 s — long enough to outlast a normal flock handoff,
 /// short enough that a genuine conflict still fails loud quickly.
+///
+/// Storage note: the ~1.55 s window is tuned for a local SSD, where a graceful
+/// launchd `bootout` releases the flock in a few hundred milliseconds. On
+/// NFS/SMB/network-mounted palace directories, flock release can be
+/// substantially slower (lease revocation, client-side caching), so a
+/// legitimate handoff may outlast this window and the new daemon could
+/// fail-loud spuriously. Operators running palaces on network storage may need
+/// to raise this (and/or extend [`WRITER_RETRY_SLEEP_MS`]). The defaults are
+/// intentionally conservative for the common local-disk case.
 /// Test: `writer_intent_fails_on_locked_file` (persistent conflict still
 /// errors) and `writer_intent_retries_then_succeeds_when_lock_released`
 /// (transient conflict succeeds within the window).
@@ -84,6 +93,11 @@ pub(crate) const WRITER_RETRY_ATTEMPTS: u8 = 5;
 /// What: One sleep value per attempt *after* the first
 /// (`WRITER_RETRY_ATTEMPTS - 1 == 4` entries). The sleep at index `i` is
 /// applied before attempt `i + 1`.
+///
+/// Storage note: these slots assume local-SSD flock semantics (see
+/// [`WRITER_RETRY_ATTEMPTS`]). On NFS/SMB/network-mounted palace dirs a
+/// graceful bootout's flock release can take longer than this table's ~1.55 s
+/// total, so operators on network storage may need larger values here.
 /// Test: `writer_retry_sleep_table_matches_attempt_count` asserts the table
 /// length stays in lock-step with [`WRITER_RETRY_ATTEMPTS`].
 pub(crate) const WRITER_RETRY_SLEEP_MS: [u64; 4] = [50, 100, 400, 1000];
@@ -315,14 +329,24 @@ pub fn try_open_or_snapshot(
 /// Test: `writer_intent_fails_on_locked_file`,
 /// `writer_intent_retries_then_succeeds_when_lock_released`.
 fn open_writer_with_handoff_retry(path: &Path) -> Result<(Arc<Database>, SnapshotGuard, OpenMode)> {
-    // Attempt 0 already failed with DatabaseAlreadyOpen at the call site, so
-    // re-probe through the remaining window. We re-run the *first* create here
-    // too (after the initial backoff) to keep the loop self-contained and the
-    // attempt accounting honest.
+    // Control flow (issue #1487): the call site already saw one
+    // `DatabaseAlreadyOpen` before delegating here. This loop performs
+    // [`WRITER_RETRY_ATTEMPTS`] (= 5) *real* `Database::create` attempts on top
+    // of that initial failure:
+    //   - attempt 0 fires IMMEDIATELY with no preceding sleep — an instant
+    //     re-probe that catches a lock already released between the call site's
+    //     failure and now;
+    //   - attempts 1..=4 each sleep `WRITER_RETRY_SLEEP_MS[attempt - 1]`
+    //     (50, 100, 400, 1000 ms) *before* the create, so all four backoff
+    //     slots are consumed exactly once, in order.
+    // Total worst-case wait across the loop is 0 + 50 + 100 + 400 + 1000 =
+    // ~1.55 s. The loop body does the create *after* the (conditional) sleep,
+    // so the final attempt (4) is not followed by a trailing sleep — the loop
+    // exits straight into the fail-loud path once attempt 4 also sees the lock.
     for attempt in 0..WRITER_RETRY_ATTEMPTS {
         if attempt > 0 {
             // Sleep before every attempt after the first; index is attempt-1
-            // because the first retry uses the smallest backoff.
+            // because the first retry uses the smallest backoff slot.
             let sleep_ms = WRITER_RETRY_SLEEP_MS[(attempt - 1) as usize];
             backoff_sleep_ms(sleep_ms);
         }
@@ -508,8 +532,12 @@ mod tests {
     /// snapshot). This guards the restart-handoff behaviour: a graceful
     /// `bootout`→`bootstrap` overlap resolves into a clean writer open.
     /// What: Holds the flock on `db.redb`, spawns a thread that drops the lock
-    /// after ~120 ms (inside the ~1.55 s retry window), then calls
+    /// after ~400 ms (comfortably inside the ~1.55 s retry window), then calls
     /// `try_open_or_snapshot` with `Writer`. The open must return `ReadWrite`.
+    /// The 400 ms release is deliberately larger than the first backoff slot
+    /// (50 ms) so the success is observed on a later retry, yet leaves >1 s of
+    /// slack before the window closes — margin against slow-CI scheduling jitter
+    /// while staying fully deterministic (release always precedes the deadline).
     /// Test: this test.
     #[test]
     fn writer_intent_retries_then_succeeds_when_lock_released() {
@@ -517,10 +545,11 @@ mod tests {
         let path = dir.path().join("db.redb");
 
         // Hold the flock, then release it from a background thread after a
-        // short delay that lands well inside the writer retry window.
+        // delay that lands well inside the writer retry window with ample
+        // margin for slow CI (release at ~400 ms vs the ~1.55 s deadline).
         let live = Database::create(&path).expect("first open");
         let releaser = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(120));
+            std::thread::sleep(std::time::Duration::from_millis(400));
             drop(live); // releases the OS flock
         });
 
