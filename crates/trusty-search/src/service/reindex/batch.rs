@@ -604,8 +604,11 @@ pub(super) async fn emit_batch_error(
     // the underlying cause at `error!` to stderr so the operator can always see
     // WHY a batch failed (the `{:#}` alternate form expands the anyhow cause
     // chain, e.g. "batch embed_batch failed: embed call timed out").
+    // The index id is carried in the human-readable `reindex[{}]:` prefix only
+    // (not also as a structured `index_id` field) to avoid double emission in
+    // JSON log backends — operator greps like `reindex[...]: batch failed` still
+    // match the message string (issue #1428 review follow-up).
     tracing::error!(
-        index_id = %ctx.index_id.0,
         batch_files = to_index_paths.len(),
         indexed = ctx.progress.indexed.load(Ordering::Acquire),
         total_files = ctx.total,

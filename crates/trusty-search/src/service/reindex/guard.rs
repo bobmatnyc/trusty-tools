@@ -107,11 +107,20 @@ impl ReindexTerminationGuard {
     /// abort) replace the generic "exited unexpectedly" message with the real
     /// cause, which `Drop` then both logs and broadcasts.
     /// What: writes `Some(reason)` into the shared slot (last writer wins).
+    /// Recovers a poisoned mutex via `into_inner` so the cause is never lost —
+    /// this whole path exists to handle panics, the exact thing that poisons the
+    /// lock, so silently no-op'ing on poison would defeat its purpose (issue
+    /// #1428 review follow-up).
     /// Test: `reindex_guard_uses_captured_failure_reason`.
     pub fn set_failure_reason(slot: &FailureReasonSlot, reason: impl Into<String>) {
-        if let Ok(mut guard) = slot.lock() {
-            *guard = Some(reason.into());
-        }
+        let mut guard = slot.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                "reindex: failure-reason mutex was poisoned — recovering inner \
+                 value so the captured cause is not lost"
+            );
+            poisoned.into_inner()
+        });
+        *guard = Some(reason.into());
     }
 
     /// Disarm the guard — call this after successfully emitting the terminal
@@ -133,7 +142,22 @@ impl Drop for ReindexTerminationGuard {
         }
         // The task is exiting without having emitted a terminal event. Pull the
         // most specific cause the runner recorded; fall back to a generic hint.
-        let captured = self.failure_reason.lock().ok().and_then(|g| g.clone());
+        // Recover a poisoned mutex via `into_inner` rather than silently treating
+        // it as "no captured reason": this `Drop` runs precisely on the panic
+        // paths that poison the lock, so swallowing the reason would discard the
+        // real cause the runner recorded just before unwinding (issue #1428
+        // review follow-up).
+        let captured = self
+            .failure_reason
+            .lock()
+            .unwrap_or_else(|poisoned| {
+                tracing::warn!(
+                    "reindex: failure-reason mutex was poisoned in Drop — \
+                     recovering inner value so the captured cause is not lost"
+                );
+                poisoned.into_inner()
+            })
+            .clone();
         let detail = captured.unwrap_or_else(|| {
             "reindex task exited unexpectedly (panic or cancellation) — \
              check daemon logs for details"
@@ -143,11 +167,14 @@ impl Drop for ReindexTerminationGuard {
         // Issue #1428: ALWAYS log at `error!` to stderr so a `status=error`
         // reindex can never again be silent in the daemon log. Logs go to
         // stderr only (daemon stdout is reserved for MCP JSON-RPC framing).
+        // Index id is carried in the human-readable `reindex[{}]:` prefix only
+        // (no duplicate structured `index_id` field) so JSON log backends don't
+        // double-emit it; `reindex[...]: terminated` greps still match (issue
+        // #1428 review follow-up).
         if self.index_id.is_empty() {
             tracing::error!("reindex: terminated without a completion event — {detail}");
         } else {
             tracing::error!(
-                index_id = %self.index_id,
                 "reindex[{}]: terminated without a completion event — {detail}",
                 self.index_id,
             );
