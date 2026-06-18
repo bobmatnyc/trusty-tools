@@ -237,3 +237,28 @@ fn pair_status_deserializes() {
     assert!(status.paired);
     assert_eq!(status.chat_id, Some(12345678));
 }
+
+#[test]
+fn catalog_stale_health_body_wire_shape() {
+    // The HR-3 `catalog_stale` flag must round-trip from the `/health` body, and
+    // a body MISSING the field (an older daemon) must default to `false` so
+    // `DaemonClient::catalog_stale` degrades to "no updates" instead of erroring.
+    // This mirrors the private `HealthBody` the client parses.
+    #[derive(serde::Deserialize)]
+    struct HealthBody {
+        #[serde(default)]
+        catalog_stale: bool,
+    }
+
+    let stale: HealthBody =
+        serde_json::from_value(serde_json::json!({"status":"ok","catalog_stale":true})).unwrap();
+    assert!(stale.catalog_stale);
+
+    let fresh: HealthBody =
+        serde_json::from_value(serde_json::json!({"status":"ok","catalog_stale":false})).unwrap();
+    assert!(!fresh.catalog_stale);
+
+    // Legacy daemon: no `catalog_stale` field present → defaults to false.
+    let legacy: HealthBody = serde_json::from_value(serde_json::json!({"status":"ok"})).unwrap();
+    assert!(!legacy.catalog_stale, "missing field defaults to false");
+}

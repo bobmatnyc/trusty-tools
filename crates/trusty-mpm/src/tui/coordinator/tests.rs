@@ -12,8 +12,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::events::{SlashCommand, handle_key, is_quit, parse_slash};
 use super::layout::{
-    CONTROLLER_STATUS, DAEMON_REACHABLE, DAEMON_UNREACHABLE, INPUT_PROMPT, STATUS_BAR_HINT,
-    daemon_indicator, input_line, status_bar_text,
+    CATALOG_STALE_HINT, CONTROLLER_STATUS, DAEMON_REACHABLE, DAEMON_UNREACHABLE, INPUT_PROMPT,
+    STATUS_BAR_HINT, catalog_indicator, daemon_indicator, input_line, status_bar_text,
 };
 use super::poll::{coord_poll_daemon, coord_session_to_entry};
 use super::rows::{
@@ -444,6 +444,30 @@ fn daemon_indicator_reflects_reachability() {
     assert_eq!(daemon_indicator(&state), DAEMON_REACHABLE);
     // The two indicators are visually distinct.
     assert_ne!(DAEMON_REACHABLE, DAEMON_UNREACHABLE);
+}
+
+#[test]
+fn catalog_indicator_reflects_staleness() {
+    // The HR-3 rebuild offer shows ONLY when the daemon is reachable AND reports
+    // the catalog is stale; otherwise the status bar stays clean.
+    let mut state = CoordinatorState::live();
+    // Down daemon, no flag → nothing.
+    assert_eq!(catalog_indicator(&state), None);
+
+    // Stale flag but daemon DOWN → still nothing (a down daemon's flag is moot).
+    state.catalog_stale = true;
+    assert_eq!(catalog_indicator(&state), None);
+
+    // Reachable + stale → the rebuild-offer hint appears.
+    state.daemon_reachable = true;
+    assert_eq!(catalog_indicator(&state), Some(CATALOG_STALE_HINT));
+
+    // Reachable + fresh → nothing.
+    state.catalog_stale = false;
+    assert_eq!(catalog_indicator(&state), None);
+
+    // The hint names the apply command so the offer is actionable.
+    assert!(CATALOG_STALE_HINT.contains("tm catalog apply"));
 }
 
 // ---- Child #2: live polling — daemon-down branch (async) ------------------

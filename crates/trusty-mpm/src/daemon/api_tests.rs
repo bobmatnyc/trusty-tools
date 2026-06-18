@@ -13,8 +13,27 @@ fn state_with_session() -> (Arc<DaemonState>, SessionId) {
 }
 
 #[tokio::test]
-async fn health_endpoint_responds() {
-    assert_eq!(health().await, "ok");
+async fn health_reports_ok_status() {
+    // The liveness word stays `ok` — the HR-3 staleness fields are additive.
+    let state = DaemonState::shared();
+    let Json(body) = health(State(state)).await;
+    assert_eq!(body.status, "ok");
+}
+
+#[tokio::test]
+async fn health_reports_catalog_unknown_without_catalog() {
+    // With a fresh framework root and no synced catalog, the staleness check must
+    // report `catalog_unknown` (NOT stale, NOT an error) — DOC-17's degrade rule.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root(tmp.path().to_path_buf()));
+    let Json(body) = health(State(state)).await;
+    assert_eq!(body.status, "ok");
+    assert!(
+        body.catalog_unknown,
+        "no catalog synced → unknown: {body:?}"
+    );
+    assert!(!body.catalog_stale, "unknown must not be stale");
+    assert!(body.catalog_changes.is_empty());
 }
 
 #[tokio::test]

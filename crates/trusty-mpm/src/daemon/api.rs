@@ -199,15 +199,36 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .with_state(state)
 }
 
-/// Liveness probe — always returns `ok` while the daemon is up.
+/// Liveness probe plus the HR-3 catalog-staleness signal.
+///
+/// Why: liveness alone is not enough for an autonomous runner — DOC-17 §HR-3
+/// requires `/health` to SURFACE whether the deployed harness content has drifted
+/// from the synced catalog so the TUI can show an indicator and the operator can
+/// rebuild. The check is a cheap, offline SHA compare (no network pull on the
+/// hot path), and an unreachable/never-synced catalog degrades to `unknown`
+/// (never `stale`, never an error) per the spec's "never block" rule.
+/// What: returns `status: "ok"` with `catalog_stale`/`catalog_unknown` flags and
+/// a small `catalog_changes` summary, computed via
+/// [`crate::core::update_check::detect_for_framework`] anchored at the daemon's
+/// framework root.
+/// Test: `health_reports_ok_status`, `health_reports_catalog_unknown_without_catalog`.
 #[utoipa::path(
     get,
     path = "/health",
     tag = "config",
-    responses((status = 200, description = "Daemon is alive", body = String))
+    responses((status = 200, description = "Daemon is alive", body = HealthResponse))
 )]
-pub async fn health() -> &'static str {
-    "ok"
+pub async fn health(State(state): State<Arc<DaemonState>>) -> Json<HealthResponse> {
+    let fw = crate::core::paths::FrameworkPaths::from_root(state.framework_root());
+    // The daemon-wide baseline uses the framework root as the "project" so only
+    // the user/catalog/default manifest layers apply (no per-project override).
+    let report = crate::core::update_check::detect_for_framework(&fw, state.framework_root());
+    Json(HealthResponse {
+        status: "ok".to_owned(),
+        catalog_stale: report.stale,
+        catalog_unknown: report.unknown,
+        catalog_changes: report.summary_lines(),
+    })
 }
 
 /// Query parameters for `GET /sessions`.

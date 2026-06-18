@@ -114,6 +114,34 @@ impl FrameworkPaths {
         }
     }
 
+    /// Resolve the framework layout from a known framework ROOT (`…/.trusty-mpm`).
+    ///
+    /// Why: the daemon holds only the resolved framework root (`base/.trusty-mpm`),
+    /// not the base/home it was derived from. The HR-3 `/health` staleness check
+    /// must rebuild a `FrameworkPaths` whose `.root` equals that exact root — so
+    /// the deployed-content (`<base>/.claude/...`) and catalog paths line up with
+    /// what the launcher used. Passing the root to [`under`](Self::under) directly
+    /// would double-nest (`…/.trusty-mpm/.trusty-mpm`); this constructor inverts
+    /// the `base.join(".trusty-mpm")` `under` performs by taking the root's parent
+    /// as the base, reproducing the original layout exactly.
+    /// What: when `root` ends in `.trusty-mpm`, delegates to
+    /// [`under`](Self::under)`(root.parent())`; otherwise (a test root that is not
+    /// home-nested) treats `root` itself as the base so the type is still
+    /// constructible. Either way the resulting `.root` is the requested directory
+    /// when it is `.trusty-mpm`-named.
+    /// Test: `from_root_reproduces_under`, `from_root_handles_non_nested`.
+    pub fn from_root(root: impl AsRef<Path>) -> Self {
+        let root = root.as_ref();
+        if root.file_name().and_then(|n| n.to_str()) == Some(FRAMEWORK_DIR_NAME)
+            && let Some(base) = root.parent()
+        {
+            return Self::under(base);
+        }
+        // The root is not `.trusty-mpm`-nested (e.g. a bare test tempdir). Treat
+        // it as the base; subdirectories nest under `<root>/.trusty-mpm` as usual.
+        Self::under(root)
+    }
+
     /// Path of the token-optimizer policy file (`hooks/optimizer.toml`).
     ///
     /// Why: the daemon reads this at startup and on file-change to build its
@@ -286,6 +314,25 @@ mod tests {
             PathBuf::from("/base/.trusty-mpm/framework/instructions")
         );
         assert_eq!(paths.registry, PathBuf::from("/base/.trusty-mpm/registry"));
+    }
+
+    #[test]
+    fn from_root_reproduces_under() {
+        // A `.trusty-mpm`-named root must rebuild the exact layout `under` would
+        // have produced for the parent base (no double-nesting).
+        let under = FrameworkPaths::under("/base");
+        let from_root = FrameworkPaths::from_root("/base/.trusty-mpm");
+        assert_eq!(from_root.root, under.root);
+        assert_eq!(from_root.claude_agents, under.claude_agents);
+        assert_eq!(from_root.agents, under.agents);
+    }
+
+    #[test]
+    fn from_root_handles_non_nested() {
+        // A bare (non-`.trusty-mpm`) root is treated as the base, so subdirs nest
+        // under `<root>/.trusty-mpm` — the type is always constructible.
+        let from_root = FrameworkPaths::from_root("/tmp/testroot");
+        assert_eq!(from_root.root, PathBuf::from("/tmp/testroot/.trusty-mpm"));
     }
 
     #[test]
