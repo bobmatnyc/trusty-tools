@@ -43,15 +43,12 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
     // known low-value auto-capture patterns (e.g. `Tool use: Bash`,
     // `Claude Code session ended: …`). Logged at debug so operators
     // can audit when investigating missing writes.
-    if blocklist_gate(&raw_text) {
-        tracing::debug!(
-            palace = %palace,
-            "content gate: skipped (blocked pattern)",
-        );
-        return Ok(skipped_envelope(
-            palace,
-            "content gate: skipped (blocked pattern)",
-        ));
+    if let Some(pattern) = blocklist_gate(&raw_text) {
+        // Issue #1481: name the matched pattern so callers can see exactly
+        // what tripped the gate instead of an opaque "blocked pattern".
+        let reason = format!("content gate: skipped (blocked pattern: {pattern:?})");
+        tracing::debug!(palace = %palace, pattern = %pattern, "{reason}");
+        return Ok(skipped_envelope(palace, &reason));
     }
     // Issue #215: content gate — drop very short standalone content
     // unless the caller supplied a `context` wrapper. When skipped,
@@ -153,15 +150,11 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
     // known low-value auto-capture patterns. Same filter as
     // `memory_remember` so the gate is uniform across the write
     // surface.
-    if blocklist_gate(&raw_content) {
-        tracing::debug!(
-            palace = %palace,
-            "content gate: skipped (blocked pattern)",
-        );
-        return Ok(skipped_envelope(
-            palace,
-            "content gate: skipped (blocked pattern)",
-        ));
+    if let Some(pattern) = blocklist_gate(&raw_content) {
+        // Issue #1481: name the matched pattern (see memory_remember).
+        let reason = format!("content gate: skipped (blocked pattern: {pattern:?})");
+        tracing::debug!(palace = %palace, pattern = %pattern, "{reason}");
+        return Ok(skipped_envelope(palace, &reason));
     }
     // Issue #215: same content gate as `memory_remember`. A `context`
     // arg can be passed to wrap a one-word answer; otherwise short

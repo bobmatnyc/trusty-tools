@@ -458,9 +458,13 @@ impl PalaceHandle {
             opts.filter
                 .apply(&content, opts.enforce_min_tokens)
                 .map_err(|reject| match reject {
+                    // Issue #1481: `PotentialSecret` carries the offending token
+                    // in its Display impl, so the same `{reject}` bubble names
+                    // the trigger for the caller to remediate.
                     FilterReject::TooShort { .. }
                     | FilterReject::NoisePattern { .. }
-                    | FilterReject::NonAlphabetic { .. } => anyhow::anyhow!("{reject}"),
+                    | FilterReject::NonAlphabetic { .. }
+                    | FilterReject::PotentialSecret { .. } => anyhow::anyhow!("{reject}"),
                 })?;
         }
 

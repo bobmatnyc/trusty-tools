@@ -1021,47 +1021,59 @@ async fn dispatch_unknown_tool_errors() {
 /// (`Tool use: Bash`, `Tool use: Edit File: …`) because those entries
 /// have no standalone semantic value.
 /// What: passes the literal prefix and a realistic example through
-/// the gate and asserts `true` (blocked).
+/// the gate and asserts a match is returned (blocked).
 /// Test: itself.
 #[test]
 fn blocklist_gate_blocks_tool_use() {
-    assert!(blocklist_gate("Tool use: Bash"));
-    assert!(blocklist_gate(
-        "Tool use: Edit File: /Users/me/Projects/foo/bar.rs"
-    ));
+    assert!(blocklist_gate("Tool use: Bash").is_some());
+    assert!(blocklist_gate("Tool use: Edit File: /Users/me/Projects/foo/bar.rs").is_some());
     // Leading whitespace should not let it through.
-    assert!(blocklist_gate("   Tool use: Read"));
+    assert!(blocklist_gate("   Tool use: Read").is_some());
 }
 
 /// Why: session-lifecycle events are auto-emitted by Claude Code and
 /// should not pollute the palace.
-/// What: passes the prefix through the gate and asserts `true`.
+/// What: passes the prefix through the gate and asserts a match.
 /// Test: itself.
 #[test]
 fn blocklist_gate_blocks_session_ended() {
-    assert!(blocklist_gate(
-        "Claude Code session ended: 1d2c3b4a-0000-0000-0000-000000000000"
-    ));
-    assert!(blocklist_gate("Claude Code session started"));
+    assert!(
+        blocklist_gate("Claude Code session ended: 1d2c3b4a-0000-0000-0000-000000000000").is_some()
+    );
+    assert!(blocklist_gate("Claude Code session started").is_some());
 }
 
 /// Why: normal user content (with no blocklist substring) must pass
 /// the gate untouched so the regular content gate (issue #215) gets
 /// to make the next decision.
-/// What: passes normal prose / facts through and asserts `false`.
+/// What: passes normal prose / facts through and asserts no match.
 /// Test: itself.
 #[test]
 fn blocklist_gate_passes_normal_content() {
-    assert!(!blocklist_gate("User prefers snake_case for python"));
-    assert!(!blocklist_gate(
-        "Quokkas are the happiest marsupials in Australia"
-    ));
-    assert!(!blocklist_gate("Note: refactor the dispatcher next sprint"));
+    assert!(blocklist_gate("User prefers snake_case for python").is_none());
+    assert!(blocklist_gate("Quokkas are the happiest marsupials in Australia").is_none());
+    assert!(blocklist_gate("Note: refactor the dispatcher next sprint").is_none());
     // Substring-only — a tool-use mention inside legitimate prose is
     // still blocked. This is intentional: the prefix is rare enough
     // outside the auto-capture path that the false-positive rate is
     // acceptable, and a future regex upgrade can tighten it.
-    assert!(blocklist_gate("I used Tool use: Bash here"));
+    assert!(blocklist_gate("I used Tool use: Bash here").is_some());
+}
+
+/// Why (issue #1481): a blocked write must name *which* pattern tripped the
+/// gate so the caller can identify and remove it, replacing the previous
+/// opaque "blocked pattern" envelope.
+/// What: asserts the gate returns the exact matched pattern string for a
+/// tool-use capture and `None` for clean prose.
+/// Test: itself.
+#[test]
+fn blocklist_gate_names_matched_pattern() {
+    assert_eq!(blocklist_gate("Tool use: Bash"), Some("Tool use: "));
+    assert_eq!(
+        blocklist_gate("Claude Code session ended: abc"),
+        Some("Claude Code session")
+    );
+    assert_eq!(blocklist_gate("an ordinary engineering note"), None);
 }
 
 /// Why: the dedup gate must reject a fresh write whose content is a
@@ -1276,6 +1288,94 @@ async fn dispatch_remember_blocks_blocklist_pattern() {
         .expect("memory_list");
     let drawers = listed["drawers"].as_array().expect("drawers array");
     assert!(drawers.is_empty(), "no drawer should be written");
+}
+
+/// Why (issue #1481): a legitimate engineering memory that references git
+/// commit SHAs must be STORED, not silently dropped. This is the exact repro
+/// from the bug report driven end-to-end through the MCP dispatch surface.
+/// What: `memory_remember` a prose string containing two short SHAs and a PR
+/// number, then `memory_list` and assert the drawer landed with its content
+/// intact (no `status: skipped`).
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_remember_stores_git_sha_prose() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "shas"}))
+        .await
+        .expect("palace_create");
+
+    let res = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "shas",
+            "text": "Shipped via PR #1466 squash 0fda534e -> merge 4c536992, CI green.",
+        }),
+    )
+    .await
+    .expect("memory_remember (git sha prose)");
+    assert_eq!(
+        res["status"], "stored",
+        "git-SHA prose must be stored, not skipped; got {res:?}"
+    );
+    assert!(res["drawer_id"].as_str().is_some());
+
+    let listed = dispatch_tool(
+        &state,
+        "memory_list",
+        json!({"palace": "shas", "limit": 10}),
+    )
+    .await
+    .expect("memory_list");
+    let drawers = listed["drawers"].as_array().expect("drawers array");
+    assert_eq!(drawers.len(), 1, "exactly one drawer should land");
+    assert!(
+        drawers[0]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("4c536992"),
+        "stored content must preserve the SHA; got {drawers:?}"
+    );
+}
+
+/// Why (issue #1481): genuine credentials must still be blocked even after the
+/// git-SHA allowlist lands, and the skip/error must name the trigger so the
+/// caller can remediate.
+/// What: `memory_remember` a prose string carrying a high-entropy mixed-case
+/// credential token and assert the call errors with a message that names the
+/// (redacted) secret token. No drawer should land.
+/// Test: itself.
+#[tokio::test]
+async fn dispatch_remember_blocks_real_secret() {
+    let (state, _tmp) = test_state();
+    let _ = dispatch_tool(&state, "palace_create", json!({"name": "sec"}))
+        .await
+        .expect("palace_create");
+
+    let err = dispatch_tool(
+        &state,
+        "memory_remember",
+        json!({
+            "palace": "sec",
+            "text": "deploy uses token AbCd1234EfGh5678IjKl9012 for the prod webhook auth", // pragma: allowlist secret
+        }),
+    )
+    .await
+    .expect_err("a real secret must be rejected");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("secret") && msg.contains("AbCd"),
+        "rejection must name the redacted secret token; got: {msg}"
+    );
+
+    let listed = dispatch_tool(&state, "memory_list", json!({"palace": "sec", "limit": 10}))
+        .await
+        .expect("memory_list");
+    let drawers = listed["drawers"].as_array().expect("drawers array");
+    assert!(
+        drawers.is_empty(),
+        "no drawer should be written for a secret"
+    );
 }
 
 /// Why (issue #231): the bounded BM25 indexer channel must drop excess
