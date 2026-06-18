@@ -225,12 +225,15 @@ async fn manager_create_success_does_not_reap_session() {
     assert_eq!(mgr.get(&record.id).await.unwrap().id, record.id);
 }
 
-/// When the store write FAILS, the orphaned tmux session must be reaped (#1453).
+/// When the store write FAILS, the orphaned tmux session must be reaped
+/// (#1453, #1457).
 ///
 /// Why: this is the exact failure that produced 159 orphans (#1452). If
 /// `create_session` succeeds but the subsequent `store.upsert` fails, the tmux
 /// session has no owner in the registry — the armed `TmuxSessionGuard` must drop
-/// and kill it so it cannot accumulate as an orphan.
+/// and kill it so it cannot accumulate as an orphan. #1457 additionally logs the
+/// rollback at warn so it is visible in the daemon's stderr; this test pins the
+/// reap behaviour the log narrates.
 /// What: makes the store's backing `sessions.json` a NON-EMPTY directory so the
 /// atomic `rename(tmp, sessions.json)` inside `save()` fails, drives a create,
 /// asserts the create returns a `Store` error AND that the fake driver recorded
