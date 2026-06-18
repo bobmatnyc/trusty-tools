@@ -7,6 +7,19 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.26.1] — 2026-06-18
+
+### Fixed (closes #1428)
+
+- **Surface silent reindex failures — termination guard now always logs the
+  underlying cause at `error!` to stderr (incl. GPU-OOM) and emits an SSE
+  error frame with `fatal:true`.** Previously, any error that caused the
+  reindex task to terminate early was swallowed silently: the SSE stream
+  closed without an `error` event, leaving the client with no indication of
+  what went wrong. Producer `JoinError` is now captured and surfaced;
+  `RUST_LOG=debug` tracing added around batch flush/commit for diagnostics.
+
+
 ## [0.26.0] — 2026-06-17
 
 ### Added (closes #1373)
