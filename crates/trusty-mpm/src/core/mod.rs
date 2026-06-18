@@ -53,6 +53,7 @@ pub mod skill_manifest;
 pub mod sm;
 pub mod tmux;
 pub mod trusty_tools_config;
+pub mod update_check;
 pub mod workspace_scan;
 
 pub use connect::{ResolveResult, SessionSummary, resolve_target};

@@ -1054,6 +1054,48 @@ fn cli_parses_catalog_ls() {
 }
 
 #[test]
+fn cli_parses_catalog_status() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "catalog", "status", "--json"]).unwrap();
+    match cli.command {
+        Command::Catalog {
+            action: CatalogAction::Status { json },
+        } => assert!(json),
+        other => panic!("expected catalog status, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_catalog_apply() {
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "catalog", "apply", "--force", "--prune"]).unwrap();
+    match cli.command {
+        Command::Catalog {
+            action: CatalogAction::Apply { force, prune },
+        } => {
+            assert!(force);
+            assert!(prune);
+        }
+        other => panic!("expected catalog apply, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_catalog_apply_defaults() {
+    // Without flags, both `force` and `prune` default to false (no surprise
+    // network refetch, no surprise removals).
+    let cli = Cli::try_parse_from(["trusty-mpm", "catalog", "apply"]).unwrap();
+    match cli.command {
+        Command::Catalog {
+            action: CatalogAction::Apply { force, prune },
+        } => {
+            assert!(!force);
+            assert!(!prune);
+        }
+        other => panic!("expected catalog apply, got {other:?}"),
+    }
+}
+
+#[test]
 fn cli_parses_ticket() {
     // Why: the minimal form `tm ticket <issue#>` must parse with the `gh`
     // backend as the default and an empty notes list (#1237).

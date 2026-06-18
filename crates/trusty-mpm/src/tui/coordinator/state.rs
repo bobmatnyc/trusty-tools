@@ -96,6 +96,18 @@ pub struct CoordinatorState {
     /// daemon-down flip to `false`; the daemon-up flip needs a live daemon and is
     /// exercised manually.
     pub daemon_reachable: bool,
+    /// Whether the daemon reports the deployed catalog content is stale (HR-3).
+    ///
+    /// Why: DOC-17 §HR-3 requires the operator surface to show that an update is
+    /// available so they can rebuild. The coordinator poll reads the additive
+    /// `catalog_stale` field off `GET /health` and the status bar renders a small
+    /// `catalog: ↑updates available` hint when it is set. Defaults to `false`
+    /// (no update) until the first health poll reports otherwise.
+    /// What: set by [`super::poll::coord_poll_daemon`] from the health probe.
+    /// Test: `poll_marks_unreachable_clears_sessions` confirms it stays `false`
+    /// on a dead daemon; the rendered hint is covered by
+    /// `catalog_indicator_reflects_staleness` in `super::tests`.
+    pub catalog_stale: bool,
     /// Set when the operator asks to quit; the event loop exits on the next tick.
     pub should_exit: bool,
 }

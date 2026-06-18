@@ -552,6 +552,69 @@ pub(crate) async fn catalog(action: CatalogAction) -> anyhow::Result<()> {
                 }
             }
         }
+        CatalogAction::Status { json } => {
+            // HR-3: report staleness without mutating anything. The framework root
+            // is the daemon-wide baseline "project" (no per-project override).
+            let report = trusty_mpm::core::update_check::detect_for_framework(
+                &trusty_mpm::core::paths::FrameworkPaths::default(),
+                &framework_root,
+            );
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "stale": report.stale,
+                        "unknown": report.unknown,
+                        "changes": report.summary_lines(),
+                    })
+                );
+            } else if report.unknown {
+                println!("catalog: unknown (never synced — run `tm catalog sync`)");
+            } else if report.stale {
+                println!("catalog: stale ({} change(s)):", report.changes.len());
+                for line in report.summary_lines() {
+                    println!("  {line}");
+                }
+                println!("run `tm catalog apply` to redeploy the updated content");
+            } else {
+                println!("catalog: up to date");
+            }
+        }
+        CatalogAction::Apply { force, prune } => {
+            // HR-3: accept the rebuild offer — sync, redeploy the selected set,
+            // optionally prune deselected managed files.
+            let report = trusty_mpm::core::update_check::apply_catalog(
+                trusty_mpm::provisioner::RealGitBackend,
+                &trusty_mpm::core::paths::FrameworkPaths::default(),
+                &framework_root,
+                force,
+                prune,
+            )?;
+            let synced = if report.fetched {
+                "synced catalog"
+            } else {
+                "catalog cache fresh"
+            };
+            println!(
+                "{synced}; redeployed {} agent(s), {} skill(s)",
+                report.agents_deployed.len(),
+                report.skills_deployed.len()
+            );
+            if !report.agents_skipped.is_empty() || !report.skills_skipped.is_empty() {
+                println!(
+                    "  skipped (user-modified/unchanged): {} agent(s), {} skill(s)",
+                    report.agents_skipped.len(),
+                    report.skills_skipped.len()
+                );
+            }
+            if prune && (!report.agents_pruned.is_empty() || !report.skills_pruned.is_empty()) {
+                println!(
+                    "  pruned (deselected): {} agent(s), {} skill(s)",
+                    report.agents_pruned.len(),
+                    report.skills_pruned.len()
+                );
+            }
+        }
     }
     Ok(())
 }

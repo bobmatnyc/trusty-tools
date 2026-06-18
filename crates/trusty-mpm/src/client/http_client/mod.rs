@@ -167,6 +167,38 @@ impl DaemonClient {
         matches!(self.http.get(&url).send().await, Ok(r) if r.status().is_success())
     }
 
+    /// Fetch the daemon's catalog-staleness flag from `GET /health` (HR-3).
+    ///
+    /// Why: the coordinator TUI shows an "updates available" indicator when the
+    /// deployed harness content has drifted from the synced catalog (DOC-17
+    /// §HR-3). It already polls health on its timer; reading the additive
+    /// `catalog_stale` field reuses that one probe rather than adding a request.
+    /// What: GETs `/health`, parses the JSON body, and returns `catalog_stale`.
+    /// Any transport/parse failure (or an older daemon returning the legacy
+    /// string body) yields `false` so the indicator degrades to "no updates"
+    /// rather than erroring — staleness never blocks the TUI.
+    /// Test: `coord_poll_daemon` integration is exercised against a live daemon;
+    /// the parse contract (incl. the missing-field default) is covered by
+    /// `catalog_stale_health_body_wire_shape`.
+    pub async fn catalog_stale(&self) -> bool {
+        let url = format!("{}/health", self.base);
+        let Ok(resp) = self.http.get(&url).send().await else {
+            return false;
+        };
+        if !resp.status().is_success() {
+            return false;
+        }
+        #[derive(Deserialize)]
+        struct HealthBody {
+            #[serde(default)]
+            catalog_stale: bool,
+        }
+        resp.json::<HealthBody>()
+            .await
+            .map(|b| b.catalog_stale)
+            .unwrap_or(false)
+    }
+
     /// Pause a session via `POST /sessions/{id}/pause`.
     ///
     /// Why: the dashboard's `p` key pauses the selected session in place.

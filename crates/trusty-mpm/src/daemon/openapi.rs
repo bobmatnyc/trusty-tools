@@ -71,6 +71,7 @@ use utoipa::OpenApi;
         super::api::doctor,
     ),
     components(schemas(
+        super::api::HealthResponse,
         crate::core::session::Session,
         crate::core::session::SessionStatus,
         crate::core::session::SessionId,
