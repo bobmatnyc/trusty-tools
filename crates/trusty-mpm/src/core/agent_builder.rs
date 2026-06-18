@@ -138,6 +138,70 @@ struct Frontmatter {
     description: Option<String>,
     model: Option<String>,
     extends: Option<String>,
+    /// Auto-submitted first turn when the agent is spawned (claude-mpm parity).
+    initial_prompt: Option<String>,
+    /// Resource tier (`intensive`/`high`/`standard`/`lightweight`) used to
+    /// derive a default `model` when none is explicitly set.
+    resource_tier: Option<String>,
+}
+
+/// Resolve the default `model` for a `resource_tier` (HR-1 deploy enrichment).
+///
+/// Why: external/source agents may declare a `resource_tier` without an explicit
+/// `model`; the harness must still deploy them with a correct model assignment.
+/// The mapping mirrors claude-mpm's `RESOURCE_TIER_DEFAULTS` so a harness
+/// provisioned from either toolchain behaves identically.
+/// What: maps `intensive → opus`, `high/standard → sonnet`,
+/// `lightweight → haiku`; any missing or unrecognised tier falls back to the
+/// `standard` default (`sonnet`), per the HR-1 error contract. The bare names
+/// `opus`/`sonnet`/`haiku` are the harness's accepted short model identifiers
+/// (the same short forms the rest of trusty-mpm uses to name models).
+/// Test: `tier_model_mapping`, `tier_unknown_falls_back_to_sonnet` in
+/// agent_builder_tests.rs.
+fn tier_to_model(resource_tier: Option<&str>) -> &'static str {
+    match resource_tier {
+        Some("intensive") => "opus",
+        Some("lightweight") => "haiku",
+        // `high`, `standard`, missing, and any unrecognised tier → sonnet.
+        _ => "sonnet",
+    }
+}
+
+/// Resolve the default `initialPrompt` for an agent `role` (HR-1 enrichment).
+///
+/// Why: claude-mpm injects a self-starting first turn per agent type so a
+/// delegated agent begins work without an extra round-trip. trusty-mpm uses the
+/// `role` field as the type discriminator. Interactive/special-purpose agents
+/// are intentionally excluded so they wait for human or PM direction.
+/// What: returns a per-role default prompt, or `None` when the role is excluded
+/// or unknown (an unknown role simply gets no injected prompt).
+/// Test: `initial_prompt_injected_by_role`, `initial_prompt_excluded_role` in
+/// agent_builder_tests.rs.
+fn default_initial_prompt(role: Option<&str>) -> Option<&'static str> {
+    match role {
+        Some("engineer") | Some("data-engineer") => {
+            Some("Begin implementation. Read the task context and start coding immediately.")
+        }
+        Some("qa") => {
+            Some("Begin verification. Read the task context and start testing immediately.")
+        }
+        Some("ops") | Some("version-control") => {
+            Some("Begin operations. Read the task context and execute immediately.")
+        }
+        Some("research") | Some("code-analyzer") => Some(
+            "Begin investigation. Analyze the task context, search for relevant files, \
+             and report findings.",
+        ),
+        Some("documentation") => {
+            Some("Begin documentation. Read the task context and start writing immediately.")
+        }
+        Some("security") => {
+            Some("Begin security analysis. Read the task context and start scanning immediately.")
+        }
+        // Interactive / special-purpose roles (base, ticketing, prompt-engineer,
+        // memory-manager, agent/skill managers) and unknown roles get none.
+        _ => None,
+    }
 }
 
 /// Split a source document into its frontmatter map and body.
@@ -149,6 +213,18 @@ struct Frontmatter {
 /// the whole document is the body.
 /// Test: `compose_base_only` (frontmatter present), bodies verified in
 /// `compose_engineer_chain`.
+///
+/// ## Key-case convention (in-lower / out-camel)
+///
+/// [`parse_kv_line`] lower-cases every key, so `initialPrompt` is read back as
+/// `initialprompt` here. [`merge_frontmatter`] deliberately *emits* the
+/// camelCase `initialPrompt` (the form Claude Code expects). The asymmetry is
+/// intentional and round-trip-safe: feeding a composed file back through
+/// `compose_agent` re-lower-cases the emitted `initialPrompt` to `initialprompt`
+/// and lands on this same struct field, so a compose→deploy→re-compose cycle is
+/// stable. The escaped scalar value is decoded via
+/// [`unescape_yaml_double_quoted`] so the original prompt text (including any
+/// embedded `"`/`\`) survives the cycle verbatim.
 fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), AgentBuildError> {
     let trimmed_start = raw.trim_start_matches(['\u{feff}']);
     let mut lines = trimmed_start.lines();
@@ -202,6 +278,14 @@ fn split_frontmatter(raw: &str) -> Result<(Frontmatter, String), AgentBuildError
         description: fields.remove("description"),
         model: fields.remove("model"),
         extends: fields.remove("extends"),
+        // `parse_kv_line` lower-cases keys, so `initialPrompt` arrives as
+        // `initialprompt`; match that normalised form. Decode the YAML
+        // double-quote escapes (`parse_kv_line` already stripped the single
+        // outer quote pair) so a re-composed prompt round-trips verbatim.
+        initial_prompt: fields
+            .remove("initialprompt")
+            .map(|v| unescape_yaml_double_quoted(&v)),
+        resource_tier: fields.remove("resource_tier"),
     };
     Ok((fm, body))
 }
@@ -220,14 +304,67 @@ fn first_line_len(s: &str) -> usize {
     }
 }
 
+/// Escape a string for emission inside a YAML double-quoted scalar.
+///
+/// Why: `merge_frontmatter` wraps the `initialPrompt` value in double-quotes.
+/// A raw `"` or `\` in the value would otherwise terminate the quote early or
+/// be misread as an escape, producing malformed YAML. claude-mpm parity
+/// requires the emitted frontmatter always be parseable.
+/// What: replaces `\` with `\\` and `"` with `\"` (backslash first, so the
+/// quote-escape's own backslash is not doubled). The exact inverse of
+/// [`unescape_yaml_double_quoted`].
+/// Test: `initial_prompt_with_embedded_quote_round_trips`,
+/// `initial_prompt_with_backslash_round_trips` in agent_builder_tests.rs.
+fn escape_yaml_double_quoted(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Reverse [`escape_yaml_double_quoted`] on a parsed scalar value.
+///
+/// Why: a value parsed back from emitted frontmatter still carries the `\"`
+/// and `\\` escapes after [`parse_kv_line`] strips the single outer quote pair.
+/// Decoding them here makes a compose→deploy→re-compose round-trip yield the
+/// original `initialPrompt` string unchanged.
+/// What: collapses `\\` → `\` and `\"` → `"`; any other `\x` sequence (and a
+/// trailing lone `\`) is left verbatim so non-escaped backslashes survive.
+/// Test: `initial_prompt_with_embedded_quote_round_trips`,
+/// `initial_prompt_with_backslash_round_trips` in agent_builder_tests.rs.
+fn unescape_yaml_double_quoted(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Render a single merged frontmatter block from a resolved chain.
 ///
 /// Why: the composed file needs exactly one frontmatter block; child fields
 /// must win over base fields so a concrete agent's `model`/`description`
-/// survive.
-/// What: folds the chain base-first, overlaying each file's set fields, and
-/// emits the populated keys in a stable order.
-/// Test: `compose_engineer_chain` asserts the merged `name`/`model`.
+/// survive. Deploy-time enrichments (HR-1) are applied here so every composed
+/// agent carries a tier-derived `model` default and a self-starting
+/// `initialPrompt` without editing each source file.
+/// What: folds the chain base-first, overlaying each file's set fields, then
+/// (a) fills `model` from `resource_tier` when no explicit `model` was set
+/// (explicit always wins), and (b) fills `initialPrompt` from the agent `role`
+/// when the source declared none and the role is not excluded. Emits the
+/// populated keys in a stable order.
+/// Test: `compose_engineer_chain` (merge), `tier_model_mapping`,
+/// `explicit_model_wins_over_tier`, `initial_prompt_injected_by_role`,
+/// `initial_prompt_explicit_wins` in agent_builder_tests.rs.
 fn merge_frontmatter(chain: &[Frontmatter]) -> String {
     let mut merged = Frontmatter::default();
     for fm in chain {
@@ -243,6 +380,26 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
         if fm.model.is_some() {
             merged.model = fm.model.clone();
         }
+        if fm.initial_prompt.is_some() {
+            merged.initial_prompt = fm.initial_prompt.clone();
+        }
+        if fm.resource_tier.is_some() {
+            merged.resource_tier = fm.resource_tier.clone();
+        }
+    }
+
+    // HR-1 Part C: derive `model` from `resource_tier` only when no explicit
+    // `model` survived the merge. Explicit model always wins.
+    if merged.model.is_none() && merged.resource_tier.is_some() {
+        merged.model = Some(tier_to_model(merged.resource_tier.as_deref()).to_string());
+    }
+
+    // HR-1 Part B: inject a role-derived `initialPrompt` when the source set
+    // none. A source-declared `initialPrompt` (now in `merged`) always wins.
+    if merged.initial_prompt.is_none()
+        && let Some(prompt) = default_initial_prompt(merged.role.as_deref())
+    {
+        merged.initial_prompt = Some(prompt.to_string());
     }
 
     let mut out = String::from("---\n");
@@ -257,6 +414,21 @@ fn merge_frontmatter(chain: &[Frontmatter]) -> String {
     }
     if let Some(v) = &merged.model {
         out.push_str(&format!("model: {v}\n"));
+    }
+    if let Some(v) = &merged.resource_tier {
+        out.push_str(&format!("resource_tier: {v}\n"));
+    }
+    if let Some(v) = &merged.initial_prompt {
+        // Emit a YAML double-quoted scalar. The value is escaped so a `"` or
+        // `\` inside the prompt cannot break out of the quotes and produce
+        // malformed YAML. `escape_yaml_double_quoted` is the exact inverse of
+        // the `unescape_yaml_double_quoted` decode applied in
+        // `split_frontmatter`, so a compose→deploy→re-compose round-trip is
+        // stable (see the in-lower/out-camel note on `split_frontmatter`).
+        out.push_str(&format!(
+            "initialPrompt: \"{}\"\n",
+            escape_yaml_double_quoted(v)
+        ));
     }
     out.push_str("---\n");
     out

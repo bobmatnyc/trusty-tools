@@ -261,6 +261,315 @@ fn bedrock_model_id_round_trips() {
 // composition succeeds. On a case-SENSITIVE filesystem this would fail
 // with the old direct-path code but passes with the new map-based lookup.
 
+// ── HR-1 deploy-time enrichment tests (issue #1406) ──────────────────────────
+
+#[test]
+fn tier_model_mapping() {
+    // An agent declaring `resource_tier: intensive` with no explicit `model`
+    // must receive the tier-derived default (`opus`). Mirrors claude-mpm's
+    // RESOURCE_TIER_DEFAULTS.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "heavy",
+        "---\nname: heavy\nrole: engineer\nresource_tier: intensive\n---\n\n# Heavy\n",
+    );
+    let composed = compose_agent("heavy", tmp.path()).unwrap();
+    assert!(
+        composed.contains("model: opus"),
+        "intensive tier must map to opus; got:\n{composed}"
+    );
+    // The tier itself is preserved for downstream consumers.
+    assert!(composed.contains("resource_tier: intensive"));
+}
+
+#[test]
+fn tier_lightweight_maps_to_haiku() {
+    // `lightweight` → haiku.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "light",
+        "---\nname: light\nrole: ops\nresource_tier: lightweight\n---\n\n# Light\n",
+    );
+    let composed = compose_agent("light", tmp.path()).unwrap();
+    assert!(
+        composed.contains("model: haiku"),
+        "lightweight tier must map to haiku; got:\n{composed}"
+    );
+}
+
+#[test]
+fn tier_high_and_standard_map_to_sonnet() {
+    // Both `high` and `standard` map to sonnet.
+    let tmp = TempDir::new().unwrap();
+    for (name, tier) in [("hi", "high"), ("std", "standard")] {
+        write_agent(
+            tmp.path(),
+            name,
+            &format!("---\nname: {name}\nrole: engineer\nresource_tier: {tier}\n---\n\n# {name}\n"),
+        );
+        let composed = compose_agent(name, tmp.path()).unwrap();
+        assert!(
+            composed.contains("model: sonnet"),
+            "{tier} tier must map to sonnet; got:\n{composed}"
+        );
+    }
+}
+
+#[test]
+fn tier_unknown_falls_back_to_sonnet() {
+    // An unrecognised tier falls back to the standard default (sonnet), per the
+    // HR-1 error contract.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "weird",
+        "---\nname: weird\nrole: engineer\nresource_tier: galaxy-brain\n---\n\n# Weird\n",
+    );
+    let composed = compose_agent("weird", tmp.path()).unwrap();
+    assert!(
+        composed.contains("model: sonnet"),
+        "unknown tier must fall back to sonnet; got:\n{composed}"
+    );
+}
+
+#[test]
+fn explicit_model_wins_over_tier() {
+    // An explicit `model` must override the tier-derived default — explicit
+    // always wins, even when the tier would map to something else.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "pinned",
+        "---\nname: pinned\nrole: engineer\nresource_tier: intensive\nmodel: haiku\n---\n\n# Pinned\n",
+    );
+    let composed = compose_agent("pinned", tmp.path()).unwrap();
+    assert!(
+        composed.contains("model: haiku"),
+        "explicit model must win over tier-derived opus; got:\n{composed}"
+    );
+    assert!(
+        !composed.contains("model: opus"),
+        "tier-derived model must not appear when explicit model is set"
+    );
+}
+
+#[test]
+fn no_tier_no_model_emits_no_model() {
+    // With neither tier nor explicit model, no `model:` line is synthesised —
+    // the enrichment only fires when a tier is present.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "bare",
+        "---\nname: bare\nrole: base\n---\n\n# Bare\n",
+    );
+    let composed = compose_agent("bare", tmp.path()).unwrap();
+    assert!(
+        !composed.contains("model:"),
+        "no model should be emitted without tier or explicit model; got:\n{composed}"
+    );
+}
+
+#[test]
+fn initial_prompt_injected_by_role() {
+    // An engineer-role agent that declares no initialPrompt must receive the
+    // engineer default at compose time.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "eng",
+        "---\nname: eng\nrole: engineer\nmodel: sonnet\n---\n\n# Eng\n",
+    );
+    let composed = compose_agent("eng", tmp.path()).unwrap();
+    assert!(
+        composed.contains(r#"initialPrompt: "Begin implementation."#),
+        "engineer role must get the implementation initialPrompt; got:\n{composed}"
+    );
+}
+
+#[test]
+fn initial_prompt_role_qa_and_ops() {
+    // qa and ops roles get their type-specific prompts.
+    let tmp = TempDir::new().unwrap();
+    write_agent(tmp.path(), "q", "---\nname: q\nrole: qa\n---\n\n# Q\n");
+    write_agent(tmp.path(), "o", "---\nname: o\nrole: ops\n---\n\n# O\n");
+    let q = compose_agent("q", tmp.path()).unwrap();
+    let o = compose_agent("o", tmp.path()).unwrap();
+    assert!(
+        q.contains(r#"initialPrompt: "Begin verification."#),
+        "qa prompt:\n{q}"
+    );
+    assert!(
+        o.contains(r#"initialPrompt: "Begin operations."#),
+        "ops prompt:\n{o}"
+    );
+}
+
+#[test]
+fn initial_prompt_excluded_role() {
+    // Special-purpose / interactive roles (e.g. `base`, `ticketing`) must NOT
+    // get an injected initialPrompt — they wait for direction.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "mgr",
+        "---\nname: mgr\nrole: base\nmodel: sonnet\n---\n\n# Mgr\n",
+    );
+    let composed = compose_agent("mgr", tmp.path()).unwrap();
+    assert!(
+        !composed.contains("initialPrompt:"),
+        "excluded role must not get an initialPrompt; got:\n{composed}"
+    );
+}
+
+#[test]
+fn initial_prompt_explicit_wins() {
+    // A source-declared initialPrompt must survive verbatim and override the
+    // role-derived default.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "custom",
+        "---\nname: custom\nrole: engineer\ninitialPrompt: Do the special thing first.\n---\n\n# Custom\n",
+    );
+    let composed = compose_agent("custom", tmp.path()).unwrap();
+    assert!(
+        composed.contains(r#"initialPrompt: "Do the special thing first.""#),
+        "explicit initialPrompt must win; got:\n{composed}"
+    );
+    assert!(
+        !composed.contains("Begin implementation."),
+        "role default must not appear when an explicit prompt is set"
+    );
+}
+
+#[test]
+fn enrichment_survives_inheritance_chain() {
+    // tier and role come from the child; the enrichment must apply to the fully
+    // composed chain, and base content must still be present.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "base-agent",
+        "---\nname: base-agent\nrole: base\n---\n\n# Base\n\nBASE GUARANTEE\n",
+    );
+    write_agent(
+        tmp.path(),
+        "base-engineer",
+        "---\nname: base-engineer\nrole: base-engineer\nextends: base-agent\n---\n\n# Base Eng\n\nENG GUARANTEE\n",
+    );
+    write_agent(
+        tmp.path(),
+        "leaf",
+        "---\nname: leaf\nrole: engineer\nextends: base-engineer\nresource_tier: intensive\n---\n\n# Leaf\n\nLEAF GUARANTEE\n",
+    );
+    let composed = compose_agent("leaf", tmp.path()).unwrap();
+    // Enrichments applied from the merged (child-wins) frontmatter.
+    assert!(
+        composed.contains("model: opus"),
+        "tier→model on chain:\n{composed}"
+    );
+    assert!(
+        composed.contains(r#"initialPrompt: "Begin implementation."#),
+        "role-derived prompt on chain:\n{composed}"
+    );
+    // Inherited base content still present.
+    assert!(composed.contains("BASE GUARANTEE"));
+    assert!(composed.contains("ENG GUARANTEE"));
+    assert!(composed.contains("LEAF GUARANTEE"));
+}
+
+#[test]
+fn initial_prompt_with_embedded_quote_round_trips() {
+    // A source initialPrompt containing an embedded double-quote must emit
+    // valid, parseable frontmatter and survive a compose→re-compose cycle
+    // verbatim (the embedded quote is escaped on emit, decoded on re-parse).
+    let tmp = TempDir::new().unwrap();
+    let original = r#"Run the "fast path" then stop."#;
+    write_agent(
+        tmp.path(),
+        "quoted",
+        &format!("---\nname: quoted\nrole: engineer\ninitialPrompt: {original}\n---\n\n# Quoted\n"),
+    );
+
+    let composed = compose_agent("quoted", tmp.path()).unwrap();
+    // Emitted line must escape the inner quotes — never a bare `"` that would
+    // prematurely close the YAML scalar.
+    assert!(
+        composed.contains(r#"initialPrompt: "Run the \"fast path\" then stop.""#),
+        "embedded quote must be escaped in emitted frontmatter; got:\n{composed}"
+    );
+
+    // Round-trip: feed the composed file back through compose_agent. The
+    // emitted camelCase key re-parses, the escapes decode, and the prompt is
+    // recovered unchanged.
+    write_agent(tmp.path(), "quoted2", &composed);
+    let (fm, _) = split_frontmatter(&composed).expect("composed frontmatter must re-parse");
+    assert_eq!(
+        fm.initial_prompt.as_deref(),
+        Some(original),
+        "initialPrompt must survive the compose→re-parse cycle verbatim"
+    );
+
+    // And a full re-compose of the round-tripped file emits the same line.
+    let recomposed = compose_agent("quoted2", tmp.path()).unwrap();
+    assert!(
+        recomposed.contains(r#"initialPrompt: "Run the \"fast path\" then stop.""#),
+        "re-composed frontmatter must be stable; got:\n{recomposed}"
+    );
+}
+
+#[test]
+fn initial_prompt_with_backslash_round_trips() {
+    // A backslash in the prompt must be escaped (`\` → `\\`) on emit and
+    // decoded on re-parse so a path-like or regex-like prompt survives.
+    let tmp = TempDir::new().unwrap();
+    let original = r#"Use the C:\path and the \d+ pattern."#;
+    write_agent(
+        tmp.path(),
+        "slash",
+        &format!("---\nname: slash\nrole: engineer\ninitialPrompt: {original}\n---\n\n# Slash\n"),
+    );
+    let composed = compose_agent("slash", tmp.path()).unwrap();
+    let (fm, _) = split_frontmatter(&composed).expect("composed frontmatter must re-parse");
+    assert_eq!(
+        fm.initial_prompt.as_deref(),
+        Some(original),
+        "backslash-bearing initialPrompt must round-trip verbatim; got:\n{composed}"
+    );
+}
+
+#[test]
+fn initial_prompt_role_default_round_trips() {
+    // The role-derived default prompt (no source initialPrompt) must also be
+    // stable across a compose→re-compose cycle, confirming the in-lower /
+    // out-camel key convention round-trips.
+    let tmp = TempDir::new().unwrap();
+    write_agent(
+        tmp.path(),
+        "eng",
+        "---\nname: eng\nrole: engineer\n---\n\n# Eng\n",
+    );
+    let composed = compose_agent("eng", tmp.path()).unwrap();
+    let (fm, _) = split_frontmatter(&composed).expect("composed frontmatter must re-parse");
+    assert_eq!(
+        fm.initial_prompt.as_deref(),
+        Some("Begin implementation. Read the task context and start coding immediately."),
+        "role default initialPrompt must re-parse unchanged; got:\n{composed}"
+    );
+    // Re-composing the round-tripped file yields identical frontmatter for the
+    // initialPrompt line (camelCase key, escaped scalar).
+    write_agent(tmp.path(), "eng2", &composed);
+    let recomposed = compose_agent("eng2", tmp.path()).unwrap();
+    let first_line = "initialPrompt: \"Begin implementation.";
+    assert!(
+        composed.contains(first_line) && recomposed.contains(first_line),
+        "initialPrompt line must be stable across the cycle"
+    );
+}
+
 #[test]
 fn case_insensitive_resolve_via_map() {
     // Write `BASE-QA.md` (UPPERCASE stem, as shipped in the bundle) and a

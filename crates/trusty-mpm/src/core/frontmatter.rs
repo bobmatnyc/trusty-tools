@@ -20,10 +20,18 @@
 /// model ids — so splitting on the first colon and preserving the rest is the
 /// only correct interpretation.
 /// What: splits `line` on the first `':'`, lower-cases and trims the key, trims
-/// the value and strips one layer of surrounding `"` or `'` quotes. Returns
-/// `None` when the line is blank, a comment (`#`), a fence (`---`), or has no
-/// colon at all.
+/// the value and strips a single balanced layer of surrounding `"` or `'`
+/// quotes. Returns `None` when the line is blank, a comment (`#`), a fence
+/// (`---`), or has no colon at all.
 /// Test: `frontmatter::tests::parse_kv_*` in this file.
+///
+/// Quote handling: only ONE balanced outer pair is removed (a leading and
+/// matching trailing quote of the same kind). A greedy strip of every outer
+/// quote would corrupt values whose escaped content ends in a quote — e.g.
+/// an emitted YAML scalar `"He said \"hi\""` — by also eating the inner
+/// `\"`. Stripping exactly one pair leaves the inner escapes intact so a
+/// caller (see `agent_builder::split_frontmatter`) can unescape them and
+/// recover the original string verbatim.
 pub fn parse_kv_line(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim();
 
@@ -42,12 +50,31 @@ pub fn parse_kv_line(line: &str) -> Option<(String, String)> {
         return None;
     }
 
-    let value = raw_value
-        .trim()
-        .trim_matches(|c| c == '"' || c == '\'')
-        .to_string();
+    let value = strip_one_quote_pair(raw_value.trim()).to_string();
 
     Some((key, value))
+}
+
+/// Strip at most one balanced pair of surrounding `"` or `'` quotes.
+///
+/// Why: emitted YAML double-quoted scalars escape inner quotes as `\"`; a
+/// greedy quote-trim would consume those inner quotes when they sit adjacent
+/// to the closing fence (e.g. `"...\""`). Removing exactly one matching outer
+/// pair preserves the escaped body for downstream unescaping.
+/// What: returns the slice between a matching leading/trailing quote of the
+/// same kind, or the input unchanged when it is not wrapped in a balanced pair.
+/// Test: `parse_kv_strips_double_quotes`, `parse_kv_strips_single_quotes`,
+/// `parse_kv_keeps_inner_escaped_quotes` in this file.
+fn strip_one_quote_pair(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
 }
 
 #[cfg(test)]
@@ -121,6 +148,16 @@ mod tests {
         let (k, v) = parse_kv_line("description: 'Implements features.'").unwrap();
         assert_eq!(k, "description");
         assert_eq!(v, "Implements features.");
+    }
+
+    #[test]
+    fn parse_kv_keeps_inner_escaped_quotes() {
+        // Only ONE balanced outer pair is stripped; inner escaped quotes
+        // (`\"`) from an emitted YAML scalar must survive for the caller to
+        // unescape. A greedy trim would have eaten the trailing `\"`.
+        let (k, v) = parse_kv_line(r#"initialprompt: "He said \"hi\"""#).unwrap();
+        assert_eq!(k, "initialprompt");
+        assert_eq!(v, r#"He said \"hi\""#);
     }
 
     #[test]
