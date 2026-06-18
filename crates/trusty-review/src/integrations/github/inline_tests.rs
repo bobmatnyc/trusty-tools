@@ -154,3 +154,56 @@ fn render_finding_comment_includes_kind_and_fix() {
     );
     assert!(body.contains("_Fix:_"), "fix line present: {body}");
 }
+
+// ── #1415: committable suggestion blocks ─────────────────────────────────────
+
+#[test]
+fn render_emits_suggestion_block() {
+    // A finding with concrete replacement code emits a ```suggestion block.
+    let mut f = finding_at("src/db.rs", Some(11));
+    f.suggested_replacement = Some("let sql = bind(\"SELECT ?\", input);".to_string());
+    let body = render_finding_comment(&f);
+    assert!(
+        body.contains("```suggestion\n"),
+        "must open a suggestion fence: {body}"
+    );
+    assert!(
+        body.contains("let sql = bind(\"SELECT ?\", input);"),
+        "must contain the replacement code: {body}"
+    );
+    // When a committable block is shown, the prose `_Fix:_` line is not also shown.
+    assert!(
+        !body.contains("_Fix:_"),
+        "committable block replaces the prose fix: {body}"
+    );
+}
+
+#[test]
+fn render_falls_back_to_prose_fix() {
+    // No suggested_replacement → prose `_Fix:_`, no suggestion block.
+    let f = finding_at("src/db.rs", Some(11));
+    let body = render_finding_comment(&f);
+    assert!(!body.contains("```suggestion"), "no block: {body}");
+    assert!(body.contains("_Fix:_"), "prose fix present: {body}");
+}
+
+#[test]
+fn suggestion_with_fence_is_rejected() {
+    // A replacement containing a ``` fence must degrade to prose, never break the
+    // suggestion block.
+    let mut f = finding_at("src/db.rs", Some(11));
+    f.suggested_replacement = Some("```rust\nlet x = 1;\n```".to_string());
+    let body = render_finding_comment(&f);
+    assert!(
+        !body.contains("```suggestion"),
+        "fenced replacement must not emit a suggestion block: {body}"
+    );
+    assert!(body.contains("_Fix:_"), "degrades to prose: {body}");
+}
+
+#[test]
+fn empty_replacement_is_not_committable() {
+    assert!(!suggestion_is_committable(""));
+    assert!(!suggestion_is_committable("   "));
+    assert!(suggestion_is_committable("let x = 1;"));
+}

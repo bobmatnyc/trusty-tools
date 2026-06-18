@@ -244,11 +244,16 @@ pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -
 /// Render one finding as inline-comment markdown.
 ///
 /// Why: an inline comment must read as a single, self-contained, actionable note:
-/// a clear lead line and the proposed fix.  Centralising the rendering keeps the
-/// inline and (future) summary renderings consistent.
-/// What: builds `**<kind>** — <description>` followed by a `_Fix:_ <suggestion>`
-/// line when the finding carries a suggestion.
-/// Test: `render_finding_comment_includes_kind_and_fix`.
+/// a clear lead line, the fix as a *committable* GitHub ```suggestion block when
+/// the finding carries concrete replacement code (#1415) or as prose otherwise.
+/// Centralising the rendering keeps the inline and (future) summary renderings
+/// consistent.
+/// What: builds `**<kind>** — <description>`, then appends either a fenced
+/// ```suggestion block (when [`suggestion_replacement`] accepts the finding's
+/// `suggested_replacement`) or a `_Fix:_ <prose>` line.  A malformed or non-code
+/// replacement degrades to prose, never a broken suggestion block.
+/// Test: `render_finding_comment_includes_kind_and_fix`,
+/// `render_emits_suggestion_block`, `render_falls_back_to_prose_fix`.
 pub fn render_finding_comment(finding: &Finding) -> String {
     let mut out = String::with_capacity(256);
     out.push_str(&format!(
@@ -256,11 +261,61 @@ pub fn render_finding_comment(finding: &Finding) -> String {
         finding.kind,
         finding.description.trim()
     ));
-    let suggestion = finding.suggestion.trim();
-    if !suggestion.is_empty() {
-        out.push_str(&format!("\n_Fix:_ {suggestion}\n"));
+
+    // Fix: committable suggestion block when concrete (#1415), else prose.
+    if let Some(replacement) = suggestion_replacement(finding) {
+        out.push_str("\n```suggestion\n");
+        out.push_str(&replacement);
+        out.push_str("\n```\n");
+    } else {
+        let suggestion = finding.suggestion.trim();
+        if !suggestion.is_empty() {
+            out.push_str(&format!("\n_Fix:_ {suggestion}\n"));
+        }
     }
     out
+}
+
+/// Extract a committable replacement block from a finding's `suggested_replacement`.
+///
+/// Why: a GitHub ```suggestion block must contain the *exact* replacement lines —
+/// not prose, not a multi-hunk patch.  Emitting prose inside a suggestion fence
+/// produces a broken one-click-apply that corrupts the file, so we only emit the
+/// block when the structured field looks like a safe, fence-free replacement and
+/// otherwise degrade to a prose `_Fix:_` line.
+/// What: returns `Some(lines)` when the finding's `suggested_replacement` is
+/// present and [`suggestion_is_committable`] accepts it, else `None`.  The returned
+/// string is the verbatim replacement text (leading/trailing blank lines trimmed).
+/// Test: `render_emits_suggestion_block`, `render_falls_back_to_prose_fix`,
+/// `suggestion_with_fence_is_rejected`.
+fn suggestion_replacement(finding: &Finding) -> Option<String> {
+    let raw = finding.suggested_replacement.as_deref()?;
+    let s = raw.trim_matches('\n');
+    if suggestion_is_committable(s) {
+        Some(s.to_string())
+    } else {
+        None
+    }
+}
+
+/// Decide whether a replacement string is a safe committable suggestion block.
+///
+/// Why: malformed replacements must degrade to prose, never break posting — a
+/// triple-backtick fence inside the replacement would close the ```suggestion
+/// block early, and an empty replacement is not committable code.
+/// What: rejects empty strings and any string containing a ``` fence; accepts
+/// everything else as a literal replacement block.
+/// Test: `suggestion_with_fence_is_rejected`, `code_suggestion_is_committable`.
+pub fn suggestion_is_committable(suggestion: &str) -> bool {
+    let s = suggestion.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // A ``` fence inside the replacement would prematurely close the block.
+    if s.contains("```") {
+        return false;
+    }
+    true
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────

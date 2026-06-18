@@ -472,6 +472,7 @@ fn review_schema_is_openai_strict_compliant() {
             "file",
             "line",
             "severity",
+            "suggested_replacement",
             "title"
         ]
         .into_iter()

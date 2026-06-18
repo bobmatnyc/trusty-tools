@@ -475,4 +475,56 @@ fn parse_finding_without_category_defaults_correctness() {
         FindingCategory::Correctness,
         "a finding with no category must default to Correctness (back-compat)"
     );
+    // A finding with no `suggested_replacement` defaults to None (#1415 back-compat).
+    assert!(
+        result.findings[0].suggested_replacement.is_none(),
+        "absent suggested_replacement must default to None"
+    );
+}
+
+/// A finding's `suggested_replacement` is carried through the parser (#1415).
+///
+/// Why: the committable-suggestion renderer reads `Finding.suggested_replacement`;
+/// it must survive the JSON → internal conversion, and an empty value must
+/// normalise to `None` so the renderer never emits an empty suggestion block.
+/// What: parses one finding with concrete replacement code and one with an empty
+/// string, asserting the first is `Some` and the second is `None`.
+/// Test: this test itself.
+#[test]
+fn parse_finding_carries_suggested_replacement() {
+    let body = r#"{
+        "verdict":"REQUEST_CHANGES",
+        "summary":"Bug.",
+        "findings":[
+            {
+                "title":"SQLi",
+                "body":"Interpolated SQL.",
+                "severity":"high",
+                "confidence":0.9,
+                "file":"src/db.rs",
+                "line":42,
+                "suggested_replacement":"let sql = bind(\"SELECT ?\", input);"
+            },
+            {
+                "title":"Nit",
+                "body":"Naming.",
+                "severity":"low",
+                "confidence":0.5,
+                "file":"src/db.rs",
+                "line":43,
+                "suggested_replacement":"   "
+            }
+        ]
+    }"#;
+    let result = parse_review_response(body);
+    assert_eq!(result.findings.len(), 2);
+    assert_eq!(
+        result.findings[0].suggested_replacement.as_deref(),
+        Some("let sql = bind(\"SELECT ?\", input);"),
+        "concrete replacement must be carried through"
+    );
+    assert!(
+        result.findings[1].suggested_replacement.is_none(),
+        "whitespace-only replacement must normalise to None"
+    );
 }

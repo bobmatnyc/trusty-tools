@@ -224,8 +224,18 @@ pub struct Finding {
     pub kind: String,
     /// Human-readable description of the issue.
     pub description: String,
-    /// Proposed fix or remediation suggestion.
+    /// Proposed fix or remediation suggestion (prose).
     pub suggestion: String,
+    /// Exact replacement code for a committable GitHub `suggestion` block (#1415).
+    ///
+    /// Why: a one-click-appliable GitHub ```suggestion block must contain the
+    /// *exact* replacement lines for the anchored location — not prose.  Keeping
+    /// it in a dedicated field (separate from the prose `suggestion`) lets the
+    /// renderer emit a committable block only when the model provides concrete
+    /// replacement code, and degrade to prose otherwise.  `#[serde(default)]` +
+    /// skip-if-none keeps every pre-#1415 finding deserialising with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_replacement: Option<String>,
     /// Confidence score in `[0.0, 1.0]`.  Clamped at construction time.
     pub confidence: f32,
     /// Estimated remediation effort.
@@ -267,6 +277,7 @@ impl Finding {
             kind: kind.into(),
             description: description.into(),
             suggestion: suggestion.into(),
+            suggested_replacement: None,
             confidence: confidence.clamp(0.0, 1.0),
             effort,
             category: FindingCategory::Correctness,
