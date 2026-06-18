@@ -157,6 +157,26 @@ pub struct InstructionLayers {
     pub domain: Option<bool>,
 }
 
+impl InstructionLayers {
+    /// Field-by-field merge: each `Some` toggle in `higher` wins, `None` inherits.
+    ///
+    /// Why: `[instructions]` is a struct of independent toggles; whole-section
+    /// replacement would let a partial higher-layer override (e.g. only
+    /// `domain = false`) silently reset the other layers to `None`. Merging per
+    /// field preserves the lower layer's toggles the higher layer did not mention.
+    /// What: for each of `system`/`contextual`/`domain`, takes `higher`'s value
+    /// when it is `Some`, else falls through to `self`'s value.
+    /// Test: `instruction_layers_field_merge`.
+    #[must_use]
+    pub fn merge(self, higher: InstructionLayers) -> InstructionLayers {
+        InstructionLayers {
+            system: higher.system.or(self.system),
+            contextual: higher.contextual.or(self.contextual),
+            domain: higher.domain.or(self.domain),
+        }
+    }
+}
+
 /// `[style]` — the active output-style selection.
 ///
 /// Why: DOC-17 lists the output style (professional/teaching/research) as a
@@ -189,6 +209,25 @@ pub struct McpServers {
     /// Inject the `trusty-search` MCP server (pinned to the project index).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusty_search: Option<bool>,
+}
+
+impl McpServers {
+    /// Field-by-field merge: each `Some` toggle in `higher` wins, `None` inherits.
+    ///
+    /// Why: `[mcp]` is a struct of independent toggles. The old whole-section
+    /// replacement meant a partial override like `[mcp] trusty_search = false`
+    /// reset `trusty_memory` back to `None` (losing a lower layer's explicit
+    /// `true`). Merging per field keeps the unmentioned toggle's lower-layer value.
+    /// What: for each of `trusty_memory`/`trusty_search`, takes `higher`'s value
+    /// when it is `Some`, else falls through to `self`'s value.
+    /// Test: `manifest_merge_mcp_field_level`.
+    #[must_use]
+    pub fn merge(self, higher: McpServers) -> McpServers {
+        McpServers {
+            trusty_memory: higher.trusty_memory.or(self.trusty_memory),
+            trusty_search: higher.trusty_search.or(self.trusty_search),
+        }
+    }
 }
 
 /// `[models]` — model-tier defaults for the harness.
@@ -244,23 +283,55 @@ impl HarnessManifest {
     /// overrides only the keys it sets, leaving the rest of `self` intact. This
     /// is the core of the NORMATIVE precedence
     /// (project override > user config > catalog > default).
-    /// What: for each top-level section, a `Some` value in `higher` replaces the
-    /// corresponding section in `self`; a `None` in `higher` keeps `self`'s value.
-    /// `version` follows the same rule. Section replacement is whole-section (not
-    /// recursive) so an override file states a complete section when it touches
-    /// one — the simplest rule that keeps precedence unambiguous.
-    /// Test: `manifest_merge_overrides`, `manifest_merge_keeps_lower_when_absent`.
+    /// What: each section merges according to its documented mode:
+    ///
+    /// - **Field-by-field** (`[mcp]`, `[instructions]`): these are small structs
+    ///   of independent `Option<bool>` toggles, so a higher layer's `Some` wins
+    ///   *per field* while a `None` field inherits the lower layer. This means a
+    ///   partial override like `[mcp] trusty_search = false` no longer resets the
+    ///   other toggle (e.g. `trusty_memory`) back to `None` (see [`McpServers::merge`],
+    ///   [`InstructionLayers::merge`]).
+    /// - **Whole-section replacement** (`[agents]`, `[skills]`, `[style]`,
+    ///   `[models]`): a `Some` section in `higher` replaces the whole section in
+    ///   `self`. This is intentional for the list-like include/exclude sections,
+    ///   where a higher layer states a complete agent/skill set rather than
+    ///   field-merging two lists; `[style]`/`[models]` follow the same simple rule.
+    ///
+    /// `version` is a scalar: `higher` wins when set.
+    /// Test: `manifest_merge_overrides`, `manifest_merge_keeps_lower_when_absent`,
+    /// `manifest_merge_mcp_field_level`.
     #[must_use]
     pub fn merge(self, higher: HarnessManifest) -> HarnessManifest {
         HarnessManifest {
             version: higher.version.or(self.version),
+            // Whole-section replacement (list-like / scalar sections).
             agents: higher.agents.or(self.agents),
             skills: higher.skills.or(self.skills),
-            instructions: higher.instructions.or(self.instructions),
             style: higher.style.or(self.style),
-            mcp: higher.mcp.or(self.mcp),
             models: higher.models.or(self.models),
+            // Field-by-field merge (independent toggle structs).
+            instructions: merge_optional(self.instructions, higher.instructions, |lo, hi| {
+                lo.merge(hi)
+            }),
+            mcp: merge_optional(self.mcp, higher.mcp, |lo, hi| lo.merge(hi)),
         }
+    }
+}
+
+/// Merge two `Option<T>` sections, folding field-by-field when both are present.
+///
+/// Why: the field-level sections (`[mcp]`, `[instructions]`) need "higher wins
+/// per field, lower inherited" semantics, but only when BOTH layers set the
+/// section; when only one is present that one wins wholesale. Factoring the
+/// `None`-handling here keeps [`HarnessManifest::merge`] readable.
+/// What: returns `higher.merge(lower)` when both are `Some`; otherwise the single
+/// present value (or `None`). `f` performs the per-field fold as `f(lower, higher)`.
+/// Test: covered via `manifest_merge_mcp_field_level` and
+/// `instruction_layers_field_merge`.
+fn merge_optional<T>(lower: Option<T>, higher: Option<T>, f: impl FnOnce(T, T) -> T) -> Option<T> {
+    match (lower, higher) {
+        (Some(lo), Some(hi)) => Some(f(lo, hi)),
+        (lo, hi) => hi.or(lo),
     }
 }
 
@@ -279,26 +350,66 @@ pub fn selection_matches(name: &str, include: &[String], exclude: &[String]) -> 
     included && !excluded
 }
 
-/// Match `name` against a simple glob `pattern`.
+/// Match `name` against a simple glob `pattern` supporting any number of `*`.
 ///
 /// Why: manifests express agent/skill sets compactly (`"*-engineer"`,
-/// `"rust-*"`); a tiny matcher avoids pulling in a glob crate for one wildcard.
-/// What: supports an exact match, a `*` (match-all), a `prefix*` (starts-with),
-/// a `*suffix` (ends-with), and a single interior `*` (`a*b`). Any other pattern
-/// is compared for equality.
+/// `"rust-*"`, `"*-engineer-*"`); a tiny matcher avoids pulling in a glob crate
+/// for the one wildcard. The earlier `split_once('*')` implementation only split
+/// on the FIRST `*`, so a multi-`*` pattern (`"*-engineer-*"`, `"a*b*c"`) was
+/// mis-parsed — the leftover `*` was treated as a literal in the suffix, silently
+/// producing wrong matches instead of the documented behavior. This version
+/// handles an arbitrary number of `*`.
+/// What: splits `pattern` on every `*` into literal segments and matches them in
+/// order against `name`. A leading `*` (empty first segment) means "no prefix
+/// anchor"; a trailing `*` (empty last segment) means "no suffix anchor". With no
+/// `*` the pattern is an exact equality check; a bare `*` matches everything.
+/// Interior segments must appear in order, left to right, without overlapping.
 /// Test: `glob_matching`.
 fn glob_matches(pattern: &str, name: &str) -> bool {
+    // Fast paths: no wildcard → exact equality; a bare `*` → match all.
+    if !pattern.contains('*') {
+        return pattern == name;
+    }
     if pattern == "*" {
         return true;
     }
-    match pattern.split_once('*') {
-        None => pattern == name,
-        Some((prefix, suffix)) => {
-            name.len() >= prefix.len() + suffix.len()
-                && name.starts_with(prefix)
-                && name.ends_with(suffix)
+
+    // Split on every `*`. `segments` are the literal runs between wildcards;
+    // empty leading/trailing segments encode "no anchor" on that side.
+    let segments: Vec<&str> = pattern.split('*').collect();
+    let anchored_start = !segments.first().is_none_or(|s| s.is_empty());
+    let anchored_end = !segments.last().is_none_or(|s| s.is_empty());
+
+    // Walk the non-empty segments left-to-right, consuming `name` as we match.
+    let mut rest = name;
+    let non_empty: Vec<&str> = segments.iter().copied().filter(|s| !s.is_empty()).collect();
+    for (idx, seg) in non_empty.iter().enumerate() {
+        let is_first = idx == 0;
+        let is_last = idx == non_empty.len() - 1;
+
+        if is_first && anchored_start {
+            // The first segment must be a prefix of `name`.
+            match rest.strip_prefix(seg) {
+                Some(tail) => rest = tail,
+                None => return false,
+            }
+        } else if is_last && anchored_end {
+            // The final segment must be a suffix of whatever remains.
+            return rest.ends_with(seg);
+        } else {
+            // A floating interior (or unanchored) segment: find its next
+            // occurrence and advance past it.
+            match rest.find(seg) {
+                Some(pos) => rest = &rest[pos + seg.len()..],
+                None => return false,
+            }
         }
     }
+
+    // All segments matched. If the end was anchored we already returned on the
+    // last segment; reaching here means the end was unanchored (trailing `*`),
+    // which matches any remaining tail.
+    true
 }
 
 #[cfg(test)]
@@ -425,6 +536,69 @@ active = "trusty-mpm-research"
     }
 
     #[test]
+    fn manifest_merge_mcp_field_level() {
+        // A partial `[mcp]` override (only trusty_search) must NOT discard the
+        // lower layer's other toggle (trusty_memory) — field-level merge.
+        let lower = HarnessManifest {
+            mcp: Some(McpServers {
+                trusty_memory: Some(true),
+                trusty_search: Some(true),
+            }),
+            ..HarnessManifest::default()
+        };
+        let higher = HarnessManifest {
+            mcp: Some(McpServers {
+                trusty_memory: None,
+                trusty_search: Some(false),
+            }),
+            ..HarnessManifest::default()
+        };
+
+        let merged = lower.merge(higher);
+        let mcp = merged.mcp.expect("mcp section present");
+        assert_eq!(
+            mcp.trusty_memory,
+            Some(true),
+            "the unmentioned toggle must survive the partial override"
+        );
+        assert_eq!(
+            mcp.trusty_search,
+            Some(false),
+            "the overridden toggle must take the higher layer's value"
+        );
+    }
+
+    #[test]
+    fn instruction_layers_field_merge() {
+        // A partial `[instructions]` override must merge field-by-field too.
+        let lower = HarnessManifest {
+            instructions: Some(InstructionLayers {
+                system: Some(true),
+                contextual: Some(true),
+                domain: Some(true),
+            }),
+            ..HarnessManifest::default()
+        };
+        let higher = HarnessManifest {
+            instructions: Some(InstructionLayers {
+                system: None,
+                contextual: None,
+                domain: Some(false),
+            }),
+            ..HarnessManifest::default()
+        };
+
+        let layers = lower.merge(higher).instructions.expect("layers present");
+        assert_eq!(layers.system, Some(true), "system inherited from lower");
+        assert_eq!(
+            layers.contextual,
+            Some(true),
+            "contextual inherited from lower"
+        );
+        assert_eq!(layers.domain, Some(false), "domain overridden by higher");
+    }
+
+    #[test]
     fn selection_matches() {
         // Empty include → match all; exclude wins over include.
         assert!(super::selection_matches("anything", &[], &[]));
@@ -436,6 +610,14 @@ active = "trusty-mpm-research"
         let glob_inc = vec!["*-engineer".to_string()];
         assert!(super::selection_matches("rust-engineer", &glob_inc, &[]));
         assert!(!super::selection_matches("rust-ops", &glob_inc, &[]));
+        // Multi-`*` glob include (regression: was mis-matched by split_once).
+        let multi_inc = vec!["*-engineer-*".to_string()];
+        assert!(super::selection_matches(
+            "rust-engineer-ops",
+            &multi_inc,
+            &[]
+        ));
+        assert!(!super::selection_matches("rust-engineer", &multi_inc, &[]));
         // Exclude wins.
         let exc = vec!["rust-engineer".to_string()];
         assert!(!super::selection_matches("rust-engineer", &[], &exc));
@@ -449,13 +631,46 @@ active = "trusty-mpm-research"
 
     #[test]
     fn glob_matching() {
+        // Bare `*` matches everything.
         assert!(super::glob_matches("*", "anything"));
+        assert!(super::glob_matches("*", ""));
+
+        // Exact (no wildcard) is equality.
         assert!(super::glob_matches("rust-engineer", "rust-engineer"));
         assert!(!super::glob_matches("rust-engineer", "qa"));
+        assert!(!super::glob_matches("rust-engineer", "rust-engineer-2"));
+
+        // Trailing `*` = prefix; leading `*` = suffix.
         assert!(super::glob_matches("*-engineer", "rust-engineer"));
+        assert!(!super::glob_matches("*-engineer", "rust-engineer-ops"));
+        assert!(super::glob_matches("engineer-*", "engineer-rust"));
+        assert!(!super::glob_matches("engineer-*", "rust-engineer"));
         assert!(super::glob_matches("rust-*", "rust-engineer"));
+
+        // Single interior `*` = prefix + suffix.
         assert!(super::glob_matches("a*b", "axxb"));
+        assert!(super::glob_matches("a*b", "ab"), "interior * matches empty");
         assert!(!super::glob_matches("a*b", "axx"));
+
+        // Multi-`*` patterns: the previously-broken cases.
+        // `*-engineer-*` = "contains -engineer-".
+        assert!(super::glob_matches("*-engineer-*", "rust-engineer-ops"));
+        assert!(super::glob_matches("*-engineer-*", "x-engineer-y"));
+        assert!(
+            !super::glob_matches("*-engineer-*", "rust-engineer"),
+            "no trailing segment after -engineer- → no match"
+        );
+        // `a*b*c` = a-prefix, then b, then c-suffix in order.
+        assert!(super::glob_matches("a*b*c", "aXbYc"));
+        assert!(super::glob_matches("a*b*c", "abc"));
+        assert!(
+            !super::glob_matches("a*b*c", "acb"),
+            "segments must appear in order"
+        );
+        assert!(
+            !super::glob_matches("a*b*c", "aXbY"),
+            "missing the trailing c suffix"
+        );
     }
 
     #[test]

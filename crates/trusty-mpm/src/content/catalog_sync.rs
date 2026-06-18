@@ -20,6 +20,25 @@ use crate::provisioner::GitBackend;
 
 /// Default TTL for the catalog cache: 24 hours.
 const DEFAULT_TTL_HOURS: u64 = 24;
+/// Subdirectory (under the framework root) that holds the synced catalog.
+const CATALOG_SUBDIR: &str = "catalog";
+
+/// The canonical catalog root directory for a given framework root.
+///
+/// Why: BEFORE this helper, two launch paths computed the catalog root
+/// independently — `session_launch::prepare_session` used `fw.root.join("catalog")`
+/// while the `tm catalog` CLI used `dirs::home_dir().join(".trusty-mpm/catalog")`.
+/// They agree in production but the duplication invited drift, and nothing tied
+/// the manifest path the launcher reads to the checkout `CatalogSync` actually
+/// populates. Centralizing the join here makes "where the catalog lives" a single
+/// definition both paths share.
+/// What: returns `<framework_root>/catalog`. The framework root is `~/.trusty-mpm`
+/// in production ([`crate::core::paths::FrameworkPaths::root`]); in tests it is a
+/// tempdir root, so the catalog stays hermetic.
+/// Test: `catalog_root_for_joins_subdir`.
+pub fn catalog_root_for(framework_root: &Path) -> PathBuf {
+    framework_root.join(CATALOG_SUBDIR)
+}
 /// Default claude-mpm repository URL.
 const DEFAULT_CATALOG_REPO: &str = "https://github.com/bobmatnyc/claude-mpm";
 /// Sentinel file written after a successful sync.
@@ -135,6 +154,26 @@ impl<G: GitBackend> CatalogSync<G> {
             git_ref,
             ttl_secs: ttl_hours * 3600,
         }
+    }
+
+    /// Construct a CatalogSync rooted at the framework's canonical catalog dir,
+    /// threading the `[manifest]` config through `with_config`.
+    ///
+    /// Why: this is the single constructor BOTH launch paths share so the catalog
+    /// root, repo, ref, and TTL come from one place. `session_launch` derives the
+    /// manifest path and source dirs from `catalog_root()`; the `tm catalog` CLI
+    /// drives `sync`. Building both from the same framework root + config means the
+    /// manifest the launcher reads is the same checkout the CLI populates.
+    /// What: computes the root via [`catalog_root_for`] and delegates to
+    /// [`with_config`](Self::with_config) so the repo/ref/TTL precedence
+    /// (`[manifest]` config > `TRUSTY_MPM_CATALOG_*` env > default) is preserved.
+    /// Test: `for_framework_uses_catalog_root`.
+    pub fn for_framework(
+        git: G,
+        framework_root: &Path,
+        config: Option<&crate::core::config::ManifestConfig>,
+    ) -> Self {
+        Self::with_config(git, catalog_root_for(framework_root), config)
     }
 
     /// Construct with explicit repo_url and git_ref (for testing).
@@ -542,6 +581,26 @@ mod tests {
         let root = TempDir::new().unwrap();
         let sync = make_sync(&root);
         assert_eq!(sync.catalog_root(), root.path());
+    }
+
+    #[test]
+    fn catalog_root_for_joins_subdir() {
+        // The shared root helper must place the catalog under <framework>/catalog
+        // so both launch paths agree on the location.
+        let fw_root = std::path::Path::new("/home/.trusty-mpm");
+        assert_eq!(
+            super::catalog_root_for(fw_root),
+            std::path::PathBuf::from("/home/.trusty-mpm/catalog")
+        );
+    }
+
+    #[test]
+    fn for_framework_uses_catalog_root() {
+        // `for_framework` must root the sync at <framework>/catalog (the same root
+        // `catalog_root_for` yields) so the CLI and launcher share one checkout.
+        let fw_root = TempDir::new().unwrap();
+        let sync = CatalogSync::for_framework(FakeGitBackend::new(), fw_root.path(), None);
+        assert_eq!(sync.catalog_root(), fw_root.path().join("catalog"));
     }
 
     #[test]

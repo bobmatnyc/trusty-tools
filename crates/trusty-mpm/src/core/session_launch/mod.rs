@@ -155,6 +155,12 @@ pub fn prepare_session_with_style_and_native(
     explicit_style: Option<&str>,
     native_supported: bool,
 ) -> Result<PrepReport, PrepError> {
+    // Load the user config ONCE and thread it through both the manifest
+    // resolution / catalog-root path AND the style resolution path below. Reading
+    // `config.toml` a second time mid-function (the old `MpmConfig::load` just
+    // before style resolution) was a redundant filesystem read for the same data.
+    let config = crate::core::config::MpmConfig::load(&fw.root);
+
     // Resolve the effective harness manifest (HR-2 / DOC-17) and materialize the
     // provisioning plan it implies. The NORMATIVE precedence is
     // project override > user config > catalog manifest > compiled-in default;
@@ -163,7 +169,12 @@ pub fn prepare_session_with_style_and_native(
     // and skills to deploy, from WHICH source (bundled vs synced catalog), which
     // MCP servers to inject, and the manifest's default output style. The
     // existing deploy machinery still does the deployment.
-    let catalog_root = fw.root.join("catalog");
+    //
+    // The catalog root comes from the ONE shared helper (`catalog_root_for`) the
+    // `tm catalog` CLI also uses, so the manifest path the resolver reads is the
+    // same `<framework>/catalog` checkout `CatalogSync` populates — honouring the
+    // `[manifest]` config / `TRUSTY_MPM_CATALOG_*` env catalog-source overrides.
+    let catalog_root = crate::content::catalog_root_for(&fw.root);
     let manifest_sources =
         crate::core::manifest::ManifestSources::resolve(project_dir, &fw.root, &catalog_root);
     let manifest = crate::core::manifest::resolve_manifest(&manifest_sources);
@@ -203,8 +214,8 @@ pub fn prepare_session_with_style_and_native(
     // and pass it as the `explicit` argument to both the prompt-injection seam
     // and the settings.json resolver — when neither the flag nor the config sets
     // a style, the manifest's value applies; otherwise the higher source wins
-    // exactly as before (zero regression for the flag/config paths).
-    let config = crate::core::config::MpmConfig::load(&fw.root);
+    // exactly as before (zero regression for the flag/config paths). `config` was
+    // loaded ONCE at the top of this function.
     let effective_style: Option<String> = explicit_style
         .map(str::to_owned)
         .or_else(|| config.style.active.clone())

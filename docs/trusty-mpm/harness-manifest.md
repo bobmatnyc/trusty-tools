@@ -24,6 +24,15 @@ A higher layer overrides only the **sections it sets**; every other section fall
 through to the layer below. A missing or malformed layer is logged and skipped —
 a launch is **never** blocked by an unreadable manifest.
 
+**Per-section merge mode.** How a *set* section combines with the layer below
+depends on the section:
+
+| Section | Merge mode | Rationale |
+|---|---|---|
+| `[mcp]`, `[instructions]` | **Field-by-field** | Small structs of independent toggles; a higher layer's `Some` wins *per field*, a `None` field inherits the lower layer. So `[mcp] trusty_search = false` alone leaves `trusty_memory` untouched. |
+| `[agents]`, `[skills]` | **Whole-section replacement** | The include/exclude lists are a complete set; a higher layer states the full agent/skill selection rather than field-merging two lists. |
+| `[style]`, `[models]` | **Whole-section replacement** | Simple scalar/group sections; the higher layer's section wins outright. |
+
 The catalog source (repo URL, git ref, TTL) is configurable via the
 `[manifest]` section of `~/.trusty-mpm/config.toml` (highest), the
 `TRUSTY_MPM_CATALOG_REPO` / `_REF` / `_TTL_HOURS` env vars, then the compiled-in
@@ -108,6 +117,16 @@ with it:
 
 The manifest decides *which* content; the established compose / ownership /
 atomic-write machinery still performs the deployment.
+
+> **⚠️ Deselecting does not prune already-deployed files.** Removing an agent or
+> skill from a manifest's selection only stops `prepare_session` from *(re)deploying*
+> that file on the next launch — it does **not** delete a copy that a previous launch
+> already wrote into `~/.claude/agents/` (or the skills dir). So if you launched once
+> with `rust-engineer` included and then drop it from `include`, the stale
+> `~/.claude/agents/rust-engineer.md` remains on disk and Claude Code will still load
+> it. User-visible implication: tightening a selection has no effect until the
+> previously-deployed files are removed by hand. Automatic pruning (reconciling the
+> deployed set against the resolved manifest) is an **HR-3** concern, not HR-2.
 
 ## Scope
 

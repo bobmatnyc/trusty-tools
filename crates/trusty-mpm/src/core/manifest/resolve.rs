@@ -59,6 +59,11 @@ impl ManifestSources {
     /// `<framework_root>/manifest.toml`, and
     /// `<catalog_root>/repo/.claude/manifest.toml`. Each path is recorded
     /// unconditionally; the resolver tolerates absent files.
+    ///
+    /// Note: the USER manifest is `<framework_root>/manifest.toml` — a sibling of
+    /// `<framework_root>/config.toml` (i.e. `~/.trusty-mpm/manifest.toml` in
+    /// production). This co-location with `config.toml` is intentional: both are
+    /// user-level, framework-rooted files, so an operator finds them in one place.
     /// Test: `manifest_sources_resolve_canonical_paths`.
     pub fn resolve(project_dir: &Path, framework_root: &Path, catalog_root: &Path) -> Self {
         Self {
@@ -267,12 +272,41 @@ mod tests {
             catalog: Some(catalog),
         };
         let m = resolve_manifest(&sources);
-        // catalog disabled search; default (memory=true) is preserved because the
-        // whole-section replacement carried only trusty_search=false … but the
-        // [mcp] section is replaced wholesale, so memory falls back to None →
-        // consumer treats None as the default-on. We assert search is the
-        // overridden value.
-        assert_eq!(m.mcp.unwrap().trusty_search, Some(false));
+        // The catalog disables search. Because `[mcp]` now merges FIELD-BY-FIELD
+        // (not whole-section), the default's `trusty_memory = true` is PRESERVED
+        // even though the catalog layer only mentioned `trusty_search`.
+        let mcp = m.mcp.expect("mcp section present");
+        assert_eq!(mcp.trusty_search, Some(false), "catalog disabled search");
+        assert_eq!(
+            mcp.trusty_memory,
+            Some(true),
+            "field-level merge keeps the default's trusty_memory toggle"
+        );
+    }
+
+    #[test]
+    fn resolve_partial_mcp_preserves_other_toggle() {
+        // A partial project `[mcp]` override (only trusty_search) must leave the
+        // default's trusty_memory toggle intact through the full resolver — the
+        // field-level merge regression (whole-section replacement used to null it).
+        let tmp = TempDir::new().unwrap();
+        let project = write(
+            &tmp.path().join("p"),
+            "manifest.toml",
+            "[mcp]\ntrusty_search = false\n",
+        );
+        let sources = ManifestSources {
+            project: Some(project),
+            user: None,
+            catalog: None,
+        };
+        let mcp = resolve_manifest(&sources).mcp.expect("mcp present");
+        assert_eq!(mcp.trusty_search, Some(false));
+        assert_eq!(
+            mcp.trusty_memory,
+            Some(true),
+            "project partial [mcp] must not reset the default's trusty_memory"
+        );
     }
 
     #[test]
