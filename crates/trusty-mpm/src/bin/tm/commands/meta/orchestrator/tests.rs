@@ -115,7 +115,7 @@ fn stop(text: &str, p: u32, c: u32) -> Value {
 async fn orchestrator_runs_full_delegation_cycle() {
     let project = tempfile::tempdir().expect("project tempdir");
     let agents = tempfile::tempdir().expect("agents tempdir");
-    write_agent_configs(agents.path()).expect("write agent configs");
+    write_agent_configs(agents.path(), project.path()).expect("write agent configs");
 
     // Call order the orchestrator drives:
     //  1. PM loop call 1   -> delegate_to_agent(python-engineer, task)
@@ -323,7 +323,7 @@ async fn orchestrator_live_demo() {
 
     let project = tempfile::tempdir().expect("project tempdir");
     let agents = tempfile::tempdir().expect("agents tempdir");
-    write_agent_configs(agents.path()).expect("write agent configs");
+    write_agent_configs(agents.path(), project.path()).expect("write agent configs");
 
     let orchestrator = Orchestrator::new(
         llm,
