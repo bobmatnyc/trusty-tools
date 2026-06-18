@@ -290,6 +290,27 @@ impl Finding {
     }
 }
 
+// ─── InlineCommentOut ───────────────────────────────────────────────────────────
+
+/// A serialisable inline review comment anchored to a PR diff line (#1414).
+///
+/// Why: the runner builds the inline-comment set from the findings + diff, and it
+/// must be carried on the `ReviewResult` so (a) the live poster can attach it to
+/// the GitHub review and (b) the dry-run / MCP response can preview exactly what
+/// would be posted.  It is a flat, owned projection (no borrows, serde-friendly)
+/// distinct from the posting-layer's internal `InlineComment` type.
+/// What: `path` + `line` are the new-side anchor; `body` is the rendered markdown.
+/// Test: `inline_comment_out_serde_roundtrip`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InlineCommentOut {
+    /// Changed file path (new side), e.g. `src/db.rs`.
+    pub path: String,
+    /// New-side line number the comment anchors to.
+    pub line: u32,
+    /// Rendered inline-comment markdown body.
+    pub body: String,
+}
+
 // ─── ReviewResult ─────────────────────────────────────────────────────────────
 
 /// The complete output of a PR review pass.
@@ -325,6 +346,17 @@ pub struct ReviewResult {
     pub grade: Option<String>,
     /// Extracted findings.
     pub findings: Vec<Finding>,
+    /// Per-line inline review comments that were (or, in dry-run, would be)
+    /// posted to the PR diff (#1414).
+    ///
+    /// Why: when posting findings as inline per-line comments, the dry-run /MCP
+    /// response must show the exact set of would-be inline comments so a caller
+    /// can preview what live mode would attach to the diff.  Storing them on the
+    /// result is the single source of truth for both the live POST and the
+    /// dry-run preview.  `#[serde(default)]` keeps every pre-#1414 serialised
+    /// result deserialising with an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inline_comments: Vec<InlineCommentOut>,
 
     // ── Telemetry ─────────────────────────────────────────────────────────
     /// Model id used for the main reviewer call.
@@ -386,6 +418,7 @@ impl ReviewResult {
             verdict: Verdict::Unknown,
             grade: None,
             findings: Vec::new(),
+            inline_comments: Vec::new(),
             model: String::new(),
             input_tokens: 0,
             output_tokens: 0,
@@ -634,6 +667,43 @@ mod tests {
         let f: Finding = serde_json::from_str(json).expect("legacy finding must deserialise");
         assert_eq!(f.category, FindingCategory::Correctness);
         assert_eq!(f.kind, "logic-error");
+    }
+
+    /// `InlineCommentOut` survives a serde round-trip (#1414).
+    ///
+    /// Why: the dry-run / MCP response serialises `ReviewResult.inline_comments`;
+    /// the projection must round-trip so callers can preview would-be comments.
+    /// What: serialises an `InlineCommentOut`, deserialises it, asserts equality.
+    /// Test: this test itself.
+    #[test]
+    fn inline_comment_out_serde_roundtrip() {
+        let c = InlineCommentOut {
+            path: "src/db.rs".to_string(),
+            line: 42,
+            body: "**security** — SQL injection".to_string(),
+        };
+        let json = serde_json::to_string(&c).expect("serialise");
+        let back: InlineCommentOut = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(back, c);
+    }
+
+    /// A pre-#1414 `ReviewResult` JSON (no `inline_comments`) still deserialises.
+    ///
+    /// Why: `inline_comments` is `#[serde(default)]` so older review logs keep
+    /// loading with an empty inline-comment list.
+    /// What: builds a result, serialises with no comments (skipped when empty),
+    /// re-parses, asserts the field defaults to empty.
+    /// Test: this test itself.
+    #[test]
+    fn review_result_without_inline_comments_defaults_empty() {
+        let result = ReviewResult::new("o", "r", 1, "t", "u");
+        let json = serde_json::to_string(&result).expect("serialise");
+        assert!(
+            !json.contains("inline_comments"),
+            "empty inline_comments is skipped in serialisation"
+        );
+        let back: ReviewResult = serde_json::from_str(&json).expect("deserialise");
+        assert!(back.inline_comments.is_empty());
     }
 
     #[test]

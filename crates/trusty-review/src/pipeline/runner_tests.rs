@@ -946,3 +946,44 @@ async fn run_review_verification_disabled_skips_round() {
 async fn run_review_live_post_and_dedup_skip_integration() {
     // Placeholder for a future live integration test against a fixture PR.
 }
+
+/// `attach_inline_comments` maps on-diff findings to inline comments and leaves
+/// off-diff findings for the summary body (#1414).
+///
+/// Why: this is the runner-side glue that turns findings + the raw diff into the
+/// `inline_comments` set; a regression would either post off-diff anchors (which
+/// GitHub rejects, failing the whole review) or never post any inline comment.
+/// What: builds a result with one on-diff finding (line 1, present in the hunk)
+/// and one off-diff finding (line 999), calls `attach_inline_comments`, asserts
+/// exactly one inline comment for the on-diff finding.
+/// Test: this test itself (no network).
+#[test]
+fn attach_inline_comments_maps_on_diff() {
+    use crate::models::{Effort, Finding};
+    use crate::pipeline::runner_helpers::attach_inline_comments;
+
+    let raw_diff = "\
+diff --git a/src/db.rs b/src/db.rs
+--- a/src/db.rs
++++ b/src/db.rs
+@@ -1,1 +1,2 @@
+ fn a() {}
++fn b() {}
+";
+    let mut result = crate::models::ReviewResult::new("o", "r", 1, "t", "u");
+    let mut on_diff = Finding::new("src/db.rs", "bug", "desc", "fix", 0.9, Effort::Medium);
+    on_diff.line = Some(2); // the added `fn b()` line on the new side.
+    let mut off_diff = Finding::new("src/db.rs", "bug2", "desc2", "fix2", 0.9, Effort::Medium);
+    off_diff.line = Some(999);
+    result.findings = vec![on_diff, off_diff];
+
+    attach_inline_comments(&mut result, raw_diff);
+
+    assert_eq!(
+        result.inline_comments.len(),
+        1,
+        "only the on-diff finding becomes an inline comment"
+    );
+    assert_eq!(result.inline_comments[0].path, "src/db.rs");
+    assert_eq!(result.inline_comments[0].line, 2);
+}
