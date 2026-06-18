@@ -378,6 +378,14 @@ pub struct ReviewResult {
     /// result deserialising with an empty list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inline_comments: Vec<InlineCommentOut>,
+    /// Count of low-severity nits suppressed past the inline cap (#1420).
+    ///
+    /// Why: the nit-volume cap rolls overflow nits into one summary line rather
+    /// than spamming inline comments; the count must reach the body renderer (and
+    /// the dry-run / MCP response) so the suppression is acknowledged, not silent.
+    /// `#[serde(default)]` + skip-if-zero keeps pre-#1420 results unchanged.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub suppressed_nits: usize,
 
     // ── Telemetry ─────────────────────────────────────────────────────────
     /// Model id used for the main reviewer call.
@@ -440,6 +448,7 @@ impl ReviewResult {
             grade: None,
             findings: Vec::new(),
             inline_comments: Vec::new(),
+            suppressed_nits: 0,
             model: String::new(),
             input_tokens: 0,
             output_tokens: 0,
@@ -468,6 +477,16 @@ impl ReviewResult {
         self.latency_ms = resp.latency_ms;
         self.review_body = resp.text.clone();
     }
+}
+
+/// Serde skip-predicate: true when a `usize` is zero (#1420).
+///
+/// Why: `#[serde(skip_serializing_if)]` needs a path to a predicate; this keeps
+/// `suppressed_nits: 0` out of serialised results so pre-#1420 logs are unchanged.
+/// What: returns `*n == 0`.
+/// Test: covered transitively by `review_result_serde_roundtrip`.
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Return a simple ISO-8601 UTC timestamp without depending on chrono.

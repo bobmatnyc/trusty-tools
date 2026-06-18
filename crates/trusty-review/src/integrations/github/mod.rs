@@ -22,8 +22,8 @@ pub mod webhook;
 pub use auth::{AuthStrategy, RunMode, mint_app_jwt, resolve_token_for_mode};
 pub use firewall::{GH_ALLOW_PUSH, assert_no_push_operation};
 pub use inline::{
-    CommentableLines, InlineComment, InlinePlan, UNCERTAINTY_THRESHOLD, build_inline_plan,
-    render_finding_comment, suggestion_is_committable,
+    CommentableLines, InlineComment, InlinePlan, MAX_INLINE_NITS, UNCERTAINTY_THRESHOLD,
+    build_inline_plan, render_finding_comment, suggestion_is_committable,
 };
 pub use posting::{PostedReview, post_pr_review};
 pub use pr::{PrMetadata, PrRef, PrUser, fetch_pr_diff, fetch_pr_metadata};

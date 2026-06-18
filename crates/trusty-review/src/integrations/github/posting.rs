@@ -180,6 +180,15 @@ pub fn build_review_comment_body(result: &ReviewResult) -> String {
         md.push('\n');
     }
 
+    // Suppressed-nit rollup (#1420): one honest line instead of inline nit spam.
+    if result.suppressed_nits > 0 {
+        let plural = if result.suppressed_nits == 1 { "" } else { "s" };
+        md.push_str(&format!(
+            "_+{} more minor nit{plural} suppressed to keep this review focused._\n\n",
+            result.suppressed_nits
+        ));
+    }
+
     // Embedded structured block — fenced JSON, mirroring code-intelligence.
     let block = VerdictBlock::from_result(result);
     match serde_json::to_string_pretty(&block) {
@@ -439,6 +448,28 @@ mod tests {
         assert_eq!(payload[0]["line"], 42);
         assert_eq!(payload[0]["side"], "RIGHT");
         assert!(payload[0]["body"].as_str().unwrap().contains("bind param"));
+    }
+
+    #[test]
+    fn body_renders_suppressed_nit_rollup() {
+        // The suppressed-nit count surfaces as one summary line (#1420).
+        let mut result = sample_result();
+        result.suppressed_nits = 7;
+        let body = build_review_comment_body(&result);
+        assert!(
+            body.contains("+7 more minor nits suppressed"),
+            "rollup line must appear: {body}"
+        );
+    }
+
+    #[test]
+    fn body_no_rollup_when_zero_suppressed() {
+        let result = sample_result(); // suppressed_nits defaults to 0
+        let body = build_review_comment_body(&result);
+        assert!(
+            !body.contains("suppressed"),
+            "no rollup line when nothing suppressed: {body}"
+        );
     }
 
     #[test]

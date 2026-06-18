@@ -282,3 +282,90 @@ fn uncertainty_threshold_is_point_six() {
     // Lock the documented threshold so a silent change is caught.
     assert_eq!(UNCERTAINTY_THRESHOLD, 0.6);
 }
+
+// ── #1420: nit-volume cap + rollup ───────────────────────────────────────────
+
+/// A diff that adds `n` lines to src/big.rs so each nit gets a distinct anchor.
+fn diff_with_n_added(n: u32) -> String {
+    let mut s = String::from("+++ b/src/big.rs\n");
+    s.push_str(&format!("@@ -0,0 +1,{n} @@\n"));
+    for i in 0..n {
+        s.push_str(&format!("+line {i}\n"));
+    }
+    s
+}
+
+fn nit_at(line: u32) -> Finding {
+    let mut f = Finding::new(
+        "src/big.rs",
+        "nit",
+        "minor style",
+        "tweak",
+        0.9,
+        Effort::Low,
+    );
+    f.line = Some(line);
+    f
+}
+
+#[test]
+fn nit_cap_keeps_first_n_inline() {
+    let diff = diff_with_n_added(20);
+    let c = CommentableLines::from_unified_diff(&diff);
+    // Exactly MAX_INLINE_NITS nits → all inline, none suppressed.
+    let findings: Vec<Finding> = (1..=MAX_INLINE_NITS as u32).map(nit_at).collect();
+    let plan = build_inline_plan(&findings, &c);
+    assert_eq!(plan.comments.len(), MAX_INLINE_NITS);
+    assert_eq!(plan.suppressed_nits, 0);
+    assert!(plan.suppressed_nits_line().is_none());
+}
+
+#[test]
+fn nit_cap_rolls_up_overflow() {
+    let diff = diff_with_n_added(30);
+    let c = CommentableLines::from_unified_diff(&diff);
+    // MAX_INLINE_NITS + 7 nits → first N inline, 7 rolled up.
+    let total = MAX_INLINE_NITS as u32 + 7;
+    let findings: Vec<Finding> = (1..=total).map(nit_at).collect();
+    let plan = build_inline_plan(&findings, &c);
+    assert_eq!(plan.comments.len(), MAX_INLINE_NITS, "cap inline nits at N");
+    assert_eq!(plan.suppressed_nits, 7, "overflow rolled up");
+    let line = plan.suppressed_nits_line().expect("rollup line");
+    assert!(line.contains("+7 more minor nits suppressed"), "{line}");
+}
+
+#[test]
+fn nit_cap_does_not_suppress_high_severity() {
+    let diff = diff_with_n_added(30);
+    let c = CommentableLines::from_unified_diff(&diff);
+    // 10 nits (over the cap) interleaved with 3 medium findings; only nits cap.
+    let mut findings: Vec<Finding> = (1..=10).map(nit_at).collect();
+    for line in [11, 12, 13] {
+        let mut f = Finding::new("src/big.rs", "bug", "real", "fix", 0.9, Effort::Medium);
+        f.line = Some(line);
+        findings.push(f);
+    }
+    let plan = build_inline_plan(&findings, &c);
+    // 5 nits inline + 3 medium inline = 8; 5 nits suppressed.
+    assert_eq!(plan.comments.len(), MAX_INLINE_NITS + 3);
+    assert_eq!(plan.suppressed_nits, 5);
+}
+
+#[test]
+fn suppressed_nits_line_singular() {
+    let diff = diff_with_n_added(30);
+    let c = CommentableLines::from_unified_diff(&diff);
+    let total = MAX_INLINE_NITS as u32 + 1;
+    let findings: Vec<Finding> = (1..=total).map(nit_at).collect();
+    let plan = build_inline_plan(&findings, &c);
+    assert_eq!(plan.suppressed_nits, 1);
+    let line = plan.suppressed_nits_line().expect("rollup line");
+    assert!(line.contains("+1 more minor nit suppressed"), "{line}");
+    assert!(!line.contains("nits"), "singular form: {line}");
+}
+
+#[test]
+fn max_inline_nits_is_five() {
+    // Lock the documented cap so a silent change is caught.
+    assert_eq!(MAX_INLINE_NITS, 5);
+}

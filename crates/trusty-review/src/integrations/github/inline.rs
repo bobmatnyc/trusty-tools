@@ -27,7 +27,7 @@
 
 use std::collections::HashSet;
 
-use crate::models::Finding;
+use crate::models::{Effort, Finding};
 
 // ─── Tuning constants ─────────────────────────────────────────────────────────
 
@@ -40,6 +40,19 @@ use crate::models::Finding;
 /// What: findings with `confidence < UNCERTAINTY_THRESHOLD` get a hedging prefix.
 /// Test: `low_confidence_finding_is_hedged`, `high_confidence_finding_is_asserted`.
 pub const UNCERTAINTY_THRESHOLD: f32 = 0.6;
+
+/// Maximum low-severity (nit) findings posted inline before the rest roll up (#1420).
+///
+/// Why: a review flooded with low-severity nits trains authors to ignore the feed
+/// and buries the real issues (the principles layer's "keep signal-to-noise high"
+/// rule).  Capping inline nits at a small N and rolling the overflow into one
+/// summary line keeps the inline feed high-signal.
+/// What: at most `MAX_INLINE_NITS` `Effort::Low` findings are emitted inline; the
+/// remainder increment [`InlinePlan::suppressed_nits`].  Higher-severity findings
+/// are never subject to the cap.
+/// Test: `nit_cap_rolls_up_overflow`, `nit_cap_keeps_first_n_inline`,
+/// `nit_cap_does_not_suppress_high_severity`.
+pub const MAX_INLINE_NITS: usize = 5;
 
 // ─── Commentable-line index ───────────────────────────────────────────────────
 
@@ -207,7 +220,8 @@ pub struct InlineComment {
 /// and lets dry-run render the same structure the live path would post.
 /// What: `comments` are the inline comments to attach to the review;
 /// `summary_findings` are findings that could not be anchored inline (off-diff or
-/// no line) and must be rendered into the review summary body.
+/// no line) and must be rendered into the review summary body; `suppressed_nits`
+/// is the count of low-severity findings rolled up past the inline cap (#1420).
 /// Test: `build_inline_plan_*` tests in `inline_tests.rs`.
 #[derive(Debug, Clone, Default)]
 pub struct InlinePlan {
@@ -215,37 +229,79 @@ pub struct InlinePlan {
     pub comments: Vec<InlineComment>,
     /// Findings that fall back to the summary body (no anchorable line).
     pub summary_findings: Vec<Finding>,
+    /// Count of low-severity nits suppressed past the inline cap (#1420).
+    pub suppressed_nits: usize,
+}
+
+impl InlinePlan {
+    /// One-line rollup sentence for suppressed nits, or `None` when none (#1420).
+    ///
+    /// Why: overflow nits must be acknowledged in the summary so the author knows
+    /// feedback was withheld for signal — silently dropping them is worse than one
+    /// honest line.
+    /// What: returns e.g. `"+7 more minor nits suppressed to keep this review focused."`
+    /// when `suppressed_nits > 0`, else `None`.
+    /// Test: `nit_cap_rolls_up_overflow`.
+    pub fn suppressed_nits_line(&self) -> Option<String> {
+        if self.suppressed_nits == 0 {
+            None
+        } else {
+            Some(format!(
+                "+{} more minor nit{} suppressed to keep this review focused.",
+                self.suppressed_nits,
+                if self.suppressed_nits == 1 { "" } else { "s" }
+            ))
+        }
+    }
 }
 
 // ─── Mapping: findings → inline plan ──────────────────────────────────────────
 
 /// Map a review's findings to an [`InlinePlan`] against the diff's commentable lines.
 ///
-/// Why: this is the heart of #1414 — it decides, per finding, whether it can land
-/// inline (its `(file, line)` is in the diff) or must fall back to the summary
-/// body, so an off-diff finding never fails the whole post.
+/// Why: this is the heart of #1414 + #1420 — it decides, per finding, whether it
+/// can land inline (its `(file, line)` is in the diff) or must fall back to the
+/// summary body, and it enforces the nit-volume cap so low-severity findings cannot
+/// flood the inline feed.
 /// What: iterates findings; a finding with a `line` that is a commentable anchor
 /// becomes an [`InlineComment`] (body via [`render_finding_comment`]); a finding
-/// with no line, or an off-diff line, goes to `summary_findings`.  Ordering of
-/// inputs is preserved.
+/// with no line, or an off-diff line, goes to `summary_findings`.  Among the
+/// anchorable findings, `Effort::Low` (nit) findings beyond [`MAX_INLINE_NITS`]
+/// inline placements are not emitted inline — they increment `suppressed_nits`
+/// instead.  Higher-severity findings are never suppressed.  Input order is
+/// preserved.
 /// Test: `build_inline_plan_maps_on_diff_finding`,
-/// `build_inline_plan_off_diff_falls_back`, `build_inline_plan_no_line_falls_back`.
+/// `build_inline_plan_off_diff_falls_back`, `build_inline_plan_no_line_falls_back`,
+/// `nit_cap_rolls_up_overflow`, `nit_cap_does_not_suppress_high_severity`.
 pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -> InlinePlan {
     let mut plan = InlinePlan::default();
+    let mut inline_nits = 0usize;
 
     for finding in findings {
         let anchor = finding
             .line
             .filter(|l| commentable.contains(&finding.file, *l));
 
-        match anchor {
-            Some(line) => plan.comments.push(InlineComment {
-                path: finding.file.clone(),
-                line,
-                body: render_finding_comment(finding),
-            }),
-            None => plan.summary_findings.push(finding.clone()),
+        let Some(line) = anchor else {
+            // No usable diff anchor → summary body (never fails the post).
+            plan.summary_findings.push(finding.clone());
+            continue;
+        };
+
+        // Nit-volume cap (#1420): only Effort::Low findings are subject to it.
+        if finding.effort == Effort::Low {
+            if inline_nits >= MAX_INLINE_NITS {
+                plan.suppressed_nits += 1;
+                continue;
+            }
+            inline_nits += 1;
         }
+
+        plan.comments.push(InlineComment {
+            path: finding.file.clone(),
+            line,
+            body: render_finding_comment(finding),
+        });
     }
 
     plan

@@ -140,8 +140,9 @@ pub(super) fn abort_dry(
 /// place that knows the true PR diff positions GitHub will accept.
 /// What: parses `raw_diff` into a `CommentableLines` index, builds the inline plan
 /// from `result.findings`, and stores the inline comments as `InlineCommentOut` on
-/// the result.  Findings that fall back to the summary stay in `result.findings`
-/// (the body renders the non-inline ones).  A no-op when there are no findings.
+/// the result plus the suppressed-nit count (#1420).  Findings that fall back to the
+/// summary stay in `result.findings` (the body renders the non-inline ones).  A
+/// no-op when there are no findings.
 /// Test: `attach_inline_comments_maps_on_diff` (runner_tests.rs).
 pub(super) fn attach_inline_comments(result: &mut ReviewResult, raw_diff: &str) {
     if result.findings.is_empty() {
@@ -149,6 +150,7 @@ pub(super) fn attach_inline_comments(result: &mut ReviewResult, raw_diff: &str) 
     }
     let commentable = CommentableLines::from_unified_diff(raw_diff);
     let plan = build_inline_plan(&result.findings, &commentable);
+    result.suppressed_nits = plan.suppressed_nits;
     result.inline_comments = plan
         .comments
         .into_iter()

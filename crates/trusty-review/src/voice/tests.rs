@@ -200,6 +200,35 @@ fn principles_contains_key_concepts() {
     );
 }
 
+/// Principles addendum carries the "do NOT flag" guardrails (#1420).
+///
+/// Why: the what-not-to-flag section is the prompt half of the nit-volume work;
+/// it must be present so the model stops emitting style/speculative/restating/
+/// preference findings.
+/// What: asserts the guardrail header and its key prohibitions appear.
+/// Test: no network.
+#[test]
+fn principles_contains_do_not_flag_guardrails() {
+    let p = principles_addendum();
+    assert!(
+        p.contains("Do NOT flag"),
+        "principles must carry the do-not-flag section"
+    );
+    let lower = p.to_lowercase();
+    assert!(
+        lower.contains("fmt/clippy") || lower.contains("linters"),
+        "must mention linter-enforced style nits"
+    );
+    assert!(
+        lower.contains("speculative") || lower.contains("hypothetical"),
+        "must mention speculative/hypothetical concerns"
+    );
+    assert!(
+        lower.contains("restat") || lower.contains("narrat"),
+        "must mention restating what the diff does"
+    );
+}
+
 // ── VoiceLoader — bundled fixtures ────────────────────────────────────────────
 
 /// The bundled duetto voice loads correctly and has expected content.
