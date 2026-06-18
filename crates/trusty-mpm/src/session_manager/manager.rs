@@ -634,6 +634,42 @@ impl SessionManager {
         &self.data_dir
     }
 
+    /// Collect every tmux session name the store knows about.
+    ///
+    /// Why: the orphan-GC must never reap a session this store tracks. It treats
+    /// the store's `tmux_name`s as a protected set — including `Decommissioned`
+    /// tombstones, so a name the store has *any* record of is never mistaken for
+    /// an untracked orphan (fail-closed: better to keep a stray than risk
+    /// reaping a tracked one).
+    /// What: reads all records and returns the set of their `tmux_name`s. A store
+    /// read error is **propagated as `Err`** — it is NOT swallowed into an empty
+    /// set. An empty (but successful) read means "the store tracks nothing"; an
+    /// `Err` means "we could not determine what the store tracks". Conflating the
+    /// two would fail OPEN: a session known ONLY to this store (absent from the
+    /// legacy registry) would look untracked → idle → reapable, violating the
+    /// GC's fail-closed contract. The caller
+    /// ([`crate::daemon::state::DaemonState::gather_tracked_names`]) turns this
+    /// `Err` into a *degraded* [`crate::daemon::orphan_gc::TrackedNames`] snapshot
+    /// that makes the sweep skip its reap phase entirely.
+    /// Test: `manager_known_tmux_names_collects_all` (happy path) in tests.rs;
+    /// the error path is exercised end-to-end by `gather_tracked_names` degraded
+    /// tests and by `run_sweep` against a degraded snapshot.
+    ///
+    /// Note: this is a read-only scan but still takes the store's WRITE lock,
+    /// because [`SessionStore::all`] requires `&mut self`: it calls
+    /// `reload_if_changed()` first (since #1219) to pick up records another
+    /// process wrote, which mutates the in-memory map. Using `read()` would not
+    /// compile, and the read-only `cached_all()` alternative would skip that
+    /// reload — risking a stale set that omits a just-registered session and so
+    /// lets the orphan-GC mistake it for an untracked orphan. The write lock is
+    /// the fail-closed choice here; the lock is held only for the brief reload.
+    pub async fn known_tmux_names(
+        &self,
+    ) -> Result<std::collections::HashSet<String>, ManagedError> {
+        let records = self.store.write().await.all().await?;
+        Ok(records.into_iter().map(|r| r.tmux_name).collect())
+    }
+
     /// Return a clone of the shared tmux driver Arc.
     ///
     /// Why: the spawn handler needs to hand the driver to `ClaudeCodeAdapter`

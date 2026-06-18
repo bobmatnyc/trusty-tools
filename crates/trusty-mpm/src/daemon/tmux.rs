@@ -252,6 +252,65 @@ impl TmuxDriver {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    /// Enumerate every pane as a structured [`orphan_gc::PaneInfo`] row.
+    ///
+    /// Why: the orphan-GC must reconcile live tmux against the registries, and
+    /// to decide whether a session is idle it needs each pane's
+    /// `pane_current_command` (and, for the belt-and-braces liveness check, the
+    /// pane's shell PID). `list-panes -a` reports all of that across every
+    /// session in a single tmux call.
+    /// What: runs
+    /// `tmux list-panes -a -F "#{session_name}\t#{pane_current_command}\t#{pane_pid}"`
+    /// and parses each row into a [`orphan_gc::PaneInfo`]. A tab delimiter avoids
+    /// colliding with the colons in session names. An empty tmux server (`no
+    /// server running`) yields an empty `Vec` rather than an error, so a quiet
+    /// host reaps nothing rather than failing the sweep.
+    /// Test: row parsing covered by `parses_managed_pane_row`; the live listing
+    /// path is exercised by the `#[ignore]` integration test.
+    pub fn list_managed_panes(&self) -> Result<Vec<crate::daemon::orphan_gc::PaneInfo>> {
+        let output = Command::new(&self.tmux_path)
+            .args([
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name}\t#{pane_current_command}\t#{pane_pid}",
+            ])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("no server running") || stderr.contains("no sessions") {
+                return Ok(Vec::new());
+            }
+            return Err(Error::Protocol(format!("tmux list-panes -a: {stderr}")));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout
+            .lines()
+            .filter(|l| !l.is_empty())
+            .filter_map(Self::parse_managed_pane_row)
+            .collect())
+    }
+
+    /// Parse one `session_name\tpane_current_command\tpane_pid` row.
+    ///
+    /// Why: keeping the parse separate from the subprocess call makes it
+    /// unit-testable without spawning tmux.
+    /// What: splits on the tab delimiter; a row missing the session name is
+    /// dropped (`None`); a missing or unparsable PID degrades to `None` PID
+    /// rather than dropping the whole row (the command is the primary signal).
+    /// Test: `parses_managed_pane_row`.
+    fn parse_managed_pane_row(line: &str) -> Option<crate::daemon::orphan_gc::PaneInfo> {
+        let mut parts = line.splitn(3, '\t');
+        let session_name = parts.next().filter(|s| !s.is_empty())?.to_string();
+        let pane_current_command = parts.next().unwrap_or("").trim().to_string();
+        let pane_pid = parts.next().and_then(|s| s.trim().parse::<u32>().ok());
+        Some(crate::daemon::orphan_gc::PaneInfo {
+            session_name,
+            pane_current_command,
+            pane_pid,
+        })
+    }
+
     /// List every tmux session, tagged with its [`SessionOrigin`].
     ///
     /// Why: the universal-session dashboard manages *all* tmux sessions, not
@@ -403,6 +462,22 @@ mod tests {
 
         let detached = SessionInfo::parse("s:1:0").unwrap();
         assert!(!detached.attached);
+    }
+
+    #[test]
+    fn parses_managed_pane_row() {
+        let row = TmuxDriver::parse_managed_pane_row("tmpm-brave-otter\tclaude\t12345").unwrap();
+        assert_eq!(row.session_name, "tmpm-brave-otter");
+        assert_eq!(row.pane_current_command, "claude");
+        assert_eq!(row.pane_pid, Some(12345));
+
+        // Missing/garbage PID degrades to None but keeps the row (command is key).
+        let no_pid = TmuxDriver::parse_managed_pane_row("tmpm-x\tzsh\t").unwrap();
+        assert_eq!(no_pid.pane_pid, None);
+        assert_eq!(no_pid.pane_current_command, "zsh");
+
+        // Empty session name is dropped entirely.
+        assert!(TmuxDriver::parse_managed_pane_row("\tzsh\t1").is_none());
     }
 
     #[test]

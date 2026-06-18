@@ -253,6 +253,51 @@ impl DaemonState {
         }
     }
 
+    /// Gather the tmux names tracked by BOTH session registries.
+    ///
+    /// Why: the orphan-GC's safety hinges on "absent from BOTH registries". The
+    /// old-style in-memory `DaemonState` registry and the new-style
+    /// `SessionManager` store each track sessions the daemon owns; the GC must
+    /// union them so a session tracked by *either* is protected from reaping.
+    /// What: collects every `tmux_name` from `self.sessions` into the `legacy`
+    /// set and every store-known name (via
+    /// [`SessionManager::known_tmux_names`](crate::session_manager::SessionManager::known_tmux_names))
+    /// into the `managed` set, returning the combined
+    /// [`crate::daemon::orphan_gc::TrackedNames`]. If the store read FAILS, the
+    /// `managed` set cannot be trusted to be complete, so the snapshot is marked
+    /// `degraded` (and `managed` left empty): the orphan-GC then skips its reap
+    /// phase entirely rather than fail OPEN by treating a store-tracked session as
+    /// an untracked orphan. This mirrors the GC's "tmux list error → reap nothing"
+    /// safety stance for the registry-read error case.
+    /// Test: `gather_tracked_names_unions_both` (happy path) and
+    /// `gather_tracked_names_degraded_on_store_error`; the `orphan_gc` pure-logic
+    /// tests cover the consuming `classify_session` / `run_sweep`.
+    pub async fn gather_tracked_names(&self) -> crate::daemon::orphan_gc::TrackedNames {
+        let legacy: std::collections::HashSet<String> = self
+            .sessions
+            .iter()
+            .map(|e| e.value().tmux_name.clone())
+            .collect();
+        match self.session_manager().await.known_tmux_names().await {
+            Ok(managed) => crate::daemon::orphan_gc::TrackedNames {
+                legacy,
+                managed,
+                degraded: false,
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "orphan-GC: store read for known names failed: {e}; \
+                     marking tracked-names snapshot degraded (sweep will not reap)"
+                );
+                crate::daemon::orphan_gc::TrackedNames {
+                    legacy,
+                    managed: std::collections::HashSet::new(),
+                    degraded: true,
+                }
+            }
+        }
+    }
+
     // ---- projects -------------------------------------------------------
 
     /// Register a project by its working-directory path.

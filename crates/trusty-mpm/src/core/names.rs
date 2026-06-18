@@ -37,7 +37,29 @@ const NOUNS: &[&str] = &[
 ///
 /// Why: the full `trusty-mpm-` prefix plus two words would push names past the
 /// ~25-char budget; `tmpm-` keeps the result short while staying recognizable.
-const PREFIX: &str = "tmpm-";
+/// Exposed so the orphan-GC (and any other reconciler) can recognise a
+/// trusty-mpm-managed tmux session by its name without hardcoding the literal.
+pub const PREFIX: &str = "tmpm-";
+
+/// Legacy long-form prefix for sessions created before the `tmpm-` switch.
+///
+/// Why: older tmux sessions are still named `trusty-mpm-<uuid>`; the orphan-GC
+/// must treat them as managed too so it can reap their orphans, and must never
+/// mistake them for unmanaged third-party sessions.
+pub const LEGACY_PREFIX: &str = "trusty-mpm-";
+
+/// True if `name` is a trusty-mpm-managed tmux session name.
+///
+/// Why: the orphan-GC's very first safety gate is "is this even ours?" — only
+/// names carrying a managed prefix are ever eligible for reaping. Centralising
+/// the check keeps the prefix convention in one place shared with
+/// [`crate::core::external_session::SessionOrigin::classify`].
+/// What: returns `true` when `name` starts with [`PREFIX`] (`tmpm-`) or the
+/// [`LEGACY_PREFIX`] (`trusty-mpm-`).
+/// Test: `managed_prefix_matches`, `managed_prefix_rejects_foreign`.
+pub fn is_managed_session_name(name: &str) -> bool {
+    name.starts_with(PREFIX) || name.starts_with(LEGACY_PREFIX)
+}
 
 /// Derive a stable, human-memorable session name from a UUID.
 ///
@@ -141,6 +163,25 @@ mod tests {
     fn deterministic() {
         let id = Uuid::parse_str("367c6c51-1025-419c-b6d6-be9a753e8914").unwrap();
         assert_eq!(name_from_uuid(&id), name_from_uuid(&id));
+    }
+
+    #[test]
+    fn managed_prefix_matches() {
+        assert!(is_managed_session_name("tmpm-brave-otter"));
+        assert!(is_managed_session_name("trusty-mpm-deadbeef"));
+        // Any generated name is, by construction, managed.
+        let id = Uuid::parse_str("367c6c51-1025-419c-b6d6-be9a753e8914").unwrap();
+        assert!(is_managed_session_name(&name_from_uuid(&id)));
+    }
+
+    #[test]
+    fn managed_prefix_rejects_foreign() {
+        // A bare shell session a developer started by hand must never match.
+        assert!(!is_managed_session_name("work"));
+        assert!(!is_managed_session_name("0"));
+        // The prefix must be a true prefix, not a substring.
+        assert!(!is_managed_session_name("my-tmpm-thing"));
+        assert!(!is_managed_session_name("not-trusty-mpm-x"));
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub mod mcp_console;
 pub mod mcp_session;
 pub mod openapi;
 pub mod optimizer;
+pub mod orphan_gc;
 pub mod overseer_compose;
 pub mod pairing_store;
 pub mod services;
@@ -103,6 +104,15 @@ pub async fn serve_http(
     // Spawn the periodic dead-session reaper.
     tokio::spawn(reap_loop(Arc::clone(&state)));
 
+    // Orphan-GC: clean accumulated leaked managed sessions. Runs ONE sweep now
+    // (boot cleanup of orphans inherited across restarts) and then periodically.
+    // Default ON; set TRUSTY_MPM_ORPHAN_GC=0 to disable entirely.
+    if orphan_gc_enabled() {
+        tokio::spawn(orphan_gc_loop(Arc::clone(&state)));
+    } else {
+        info!("orphan-GC disabled via TRUSTY_MPM_ORPHAN_GC");
+    }
+
     let app = api::router(state);
     info!("daemon listening; press Ctrl-C to stop");
     // `into_make_service_with_connect_info` makes the peer `SocketAddr` available
@@ -172,6 +182,127 @@ async fn reap_loop(state: Arc<DaemonState>) {
     }
 }
 
+/// Default interval between orphan-GC sweeps, in seconds.
+const ORPHAN_GC_INTERVAL_SECS: u64 = 60;
+
+/// Whether the orphan-GC is enabled (default ON).
+///
+/// Why: operators need an escape hatch to disable the reaper entirely (e.g. on a
+/// host where session tracking is known-incomplete and false positives would be
+/// catastrophic). Defaulting ON keeps the self-healing behaviour without opt-in.
+/// What: reads `TRUSTY_MPM_ORPHAN_GC` and delegates to the pure
+/// [`parse_orphan_gc_enabled`]; a thin wrapper so the parsing is testable
+/// without mutating process-global env.
+/// Test: parsing covered by `parse_orphan_gc_enabled_*` below.
+fn orphan_gc_enabled() -> bool {
+    parse_orphan_gc_enabled(std::env::var("TRUSTY_MPM_ORPHAN_GC").ok().as_deref())
+}
+
+/// Pure parse of the `TRUSTY_MPM_ORPHAN_GC` raw value into an on/off decision.
+///
+/// Why: env vars are process-global, so testing the policy by mutating them is
+/// racy under the multi-threaded test harness. Taking the raw value as a
+/// parameter makes the decision a pure function that needs no env mutation.
+/// What: returns `false` only for an explicit `0`/`false`/`off`/`no`
+/// (case-insensitive, trimmed); `true` for any other value, including `None`
+/// (unset) — i.e. default ON.
+/// Test: `parse_orphan_gc_enabled_default_and_overrides`.
+fn parse_orphan_gc_enabled(raw: Option<&str>) -> bool {
+    match raw {
+        Some(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            !matches!(v.as_str(), "0" | "false" | "off" | "no")
+        }
+        None => true,
+    }
+}
+
+/// Resolve the orphan-GC sweep interval, honouring an env override.
+///
+/// Why: long-running hosts may want a slower (or faster) cadence than the
+/// 60-second default; the debounce is expressed in *passes*, so the interval
+/// also sets the effective grace window (a fresh orphan survives ≥ one interval).
+/// What: reads `TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS` and delegates to the pure
+/// [`parse_orphan_gc_interval`]; a thin wrapper so the parsing is testable
+/// without mutating process-global env.
+/// Test: parsing covered by `parse_orphan_gc_interval_*` below.
+fn orphan_gc_interval_secs() -> u64 {
+    parse_orphan_gc_interval(
+        std::env::var("TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure parse of the `TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS` raw value to seconds.
+///
+/// Why: as with [`parse_orphan_gc_enabled`], keeping the parsing pure avoids
+/// racy process-global env mutation in tests.
+/// What: parses `raw` as a positive `u64`, falling back to
+/// [`ORPHAN_GC_INTERVAL_SECS`] when `None`, unparsable, or non-positive (a zero
+/// interval would busy-loop).
+/// Test: `parse_orphan_gc_interval_override`.
+fn parse_orphan_gc_interval(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(ORPHAN_GC_INTERVAL_SECS)
+}
+
+/// Periodically reconcile live tmux against the registries and reap orphans.
+///
+/// Why: leaked `tmpm-*` tmux sessions (from crashes or pre-RAII builds) must be
+/// cleaned up self-healingly. One sweep runs immediately at boot to clear
+/// accumulated orphans, then the loop runs on the configured interval.
+/// What: owns a single [`orphan_gc::OrphanGc`] so the two-pass debounce persists
+/// across sweeps; each tick gathers the live managed panes (via
+/// [`tmux::TmuxDriver::list_managed_panes`]) and both registries' tracked names
+/// (via [`DaemonState::gather_tracked_names`]), then calls
+/// [`orphan_gc::run_sweep`]. A tmux-listing failure skips the pass (reaps
+/// nothing) rather than risking a wrong kill; likewise, if
+/// [`DaemonState::gather_tracked_names`] returns a *degraded* snapshot (a
+/// registry read failed, so the protected set is incomplete), `run_sweep`
+/// skips its reap phase for that tick — both paths fail CLOSED.
+/// Test: the reconciliation rule and debounce are unit-tested in
+/// [`orphan_gc`]; the end-to-end sweep is covered by `tests/orphan_gc_sweep.rs`.
+async fn orphan_gc_loop(state: Arc<DaemonState>) {
+    let interval_secs = orphan_gc_interval_secs();
+    info!(
+        interval_secs,
+        "orphan-GC enabled; running startup sweep then periodic reconciliation"
+    );
+    let mut gc = orphan_gc::OrphanGc::new();
+    let probe = orphan_gc::ProcessTreeProbe;
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+    loop {
+        tick.tick().await;
+        let Ok(driver) = tmux::TmuxDriver::discover() else {
+            continue;
+        };
+        let panes = match driver.list_managed_panes() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("orphan-GC: list_managed_panes failed: {e}");
+                continue;
+            }
+        };
+        // NOTE: `gather_tracked_names()` and `session_manager()` are acquired in
+        // separate awaits, so this snapshot is intentionally NON-atomic — a
+        // session could register in the gap between the two. That race is safe:
+        // the two-pass debounce in `OrphanGc` means a just-registered session
+        // missed by this sweep is only ever a reap *candidate* this pass and
+        // must be seen orphaned again next sweep before it can be reaped, by
+        // which point `gather_tracked_names()` will include it. No lock spanning
+        // both calls is needed.
+        let tracked = state.gather_tracked_names().await;
+        let mgr = state.session_manager().await;
+        let mtmux = mgr.tmux_driver();
+        let reaped = orphan_gc::run_sweep(&mut gc, &panes, &tracked, &probe, mtmux.as_ref());
+        if reaped > 0 {
+            info!("orphan-GC reaped {reaped} orphaned managed session(s)");
+        }
+    }
+}
+
 /// Run the MCP server over stdio so a Claude Code session can call the
 /// orchestration tools (`session_list`, `agent_delegate`, ...).
 ///
@@ -188,4 +319,48 @@ pub async fn run_mcp(state: Arc<DaemonState>) -> anyhow::Result<()> {
         async move { crate::mcp::dispatch(&backend, req).await }
     })
     .await
+}
+
+#[cfg(test)]
+mod orphan_gc_config_tests {
+    use super::{ORPHAN_GC_INTERVAL_SECS, parse_orphan_gc_enabled, parse_orphan_gc_interval};
+
+    /// `TRUSTY_MPM_ORPHAN_GC` defaults ON and only explicit falsey values disable.
+    ///
+    /// Tests the PURE parser with raw values — no process-global env mutation,
+    /// so it is safe to run in parallel with any sibling test (the #1458 review
+    /// fix for env-var test flakiness).
+    #[test]
+    fn parse_orphan_gc_enabled_default_and_overrides() {
+        assert!(parse_orphan_gc_enabled(None), "unset must default ON");
+
+        for off in ["0", "false", "off", "no", "OFF", " false "] {
+            assert!(!parse_orphan_gc_enabled(Some(off)), "{off:?} must disable");
+        }
+        for on in ["1", "true", "yes", "anything", "  "] {
+            assert!(
+                parse_orphan_gc_enabled(Some(on)),
+                "{on:?} must keep enabled"
+            );
+        }
+    }
+
+    /// The interval override parses positive seconds and falls back otherwise.
+    ///
+    /// Tests the PURE parser with raw values — no env mutation (see #1458).
+    #[test]
+    fn parse_orphan_gc_interval_override() {
+        assert_eq!(parse_orphan_gc_interval(None), ORPHAN_GC_INTERVAL_SECS);
+        assert_eq!(parse_orphan_gc_interval(Some("30")), 30);
+        assert_eq!(parse_orphan_gc_interval(Some("  45 ")), 45);
+
+        // Zero and garbage fall back to the default (a zero interval would busy-loop).
+        for bad in ["0", "nonsense", "-5", ""] {
+            assert_eq!(
+                parse_orphan_gc_interval(Some(bad)),
+                ORPHAN_GC_INTERVAL_SECS,
+                "{bad:?}"
+            );
+        }
+    }
 }
