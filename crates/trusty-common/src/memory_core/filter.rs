@@ -39,8 +39,6 @@ const DEFAULT_REJECT_PATTERNS: &[&str] = &[
     // Tool use/result framing emitted by hook capture.
     r"(?i)^tool use:",
     r"(?i)^tool result:",
-    // Bare 40-hex git commit SHA.
-    r"^[0-9a-f]{40}$",
     // Conventional commit message.
     r"(?i)^(feat|fix|chore|refactor|test|docs|perf|build|ci|style|revert)(\([^)]*\))?:",
     // Progress logs ("Running cargo test...").
@@ -48,6 +46,35 @@ const DEFAULT_REJECT_PATTERNS: &[&str] = &[
     // File path only.
     r"^[/~][^\s]*\.(rs|py|ts|js|tsx|jsx|toml|json|md|yaml|yml)$",
 ];
+
+// Issue #1481: the bare-40-hex git-SHA reject pattern (`^[0-9a-f]{40}$`) was
+// removed from `DEFAULT_REJECT_PATTERNS` above. A standalone git commit SHA is
+// a legitimate engineering memory ("the regression landed in
+// 0fda534e0fda534e0fda534e0fda534e0fda534e"), not noise. Git-SHA-shaped tokens
+// are now explicitly allowlisted by [`is_git_sha_like`] across every gate so
+// they never trip the noise, secret, or non-alphabetic heuristics.
+
+/// Lower bound on git-SHA-shaped hex token length recognised by
+/// [`is_git_sha_like`].
+///
+/// Why (issue #1481): git lets you abbreviate a commit to as few as 7 hex
+/// characters and still resolve it unambiguously in most repos, so engineering
+/// prose routinely references `0fda534`-style short SHAs. Treating 7 as the
+/// floor matches git's own default abbreviation length.
+/// What: inclusive minimum hex-digit count for a token to count as a SHA.
+/// Test: `git_sha_like_recognises_short_and_full`.
+pub const GIT_SHA_MIN_LEN: usize = 7;
+
+/// Upper bound on git-SHA-shaped hex token length recognised by
+/// [`is_git_sha_like`].
+///
+/// Why (issue #1481): SHA-1 object ids are 40 hex chars and SHA-256 object ids
+/// (git's newer object format) are 64. We cap at 40 per the issue spec — a
+/// pure-hex run of exactly git-SHA length is the safe case to allowlist, while
+/// arbitrarily long hex blobs stay subject to the secret/non-alpha heuristics.
+/// What: inclusive maximum hex-digit count for a token to count as a SHA.
+/// Test: `git_sha_like_rejects_overlong_and_nonhex`.
+pub const GIT_SHA_MAX_LEN: usize = 40;
 
 /// Rejection reasons surfaced to the caller.
 ///
@@ -73,6 +100,23 @@ pub enum FilterReject {
          a human-readable summary instead, or pass force=true to override."
     )]
     NonAlphabetic { ratio: f32 },
+    /// Content contains a token that looks like a high-entropy secret
+    /// (API key, access token, long base64 blob) rather than a git SHA.
+    ///
+    /// Why (issue #1481): the content gate must keep blocking genuine
+    /// credentials so they never land in palace storage, while NOT blocking
+    /// the safe case of git-SHA-shaped hex tokens. This variant names the
+    /// offending token (truncated) so the caller can identify and remediate
+    /// exactly what tripped the gate instead of seeing an opaque "blocked
+    /// pattern".
+    /// What: carries a short, redacted preview of the triggering token.
+    /// Test: `reject_messages_are_actionable`, `secret_token_is_blocked`.
+    #[error(
+        "Content rejected: contains a likely secret/credential token \
+         (`{token}`). Remove or redact the secret before storing; git commit \
+         SHAs are allowed and will not trigger this."
+    )]
+    PotentialSecret { token: String },
 }
 
 /// Tunable gate configuration.
@@ -185,11 +229,23 @@ impl FilterConfig {
                 });
             }
         }
+        // Issue #1481: block genuine high-entropy secrets (API keys, access
+        // tokens, long base64) before the token/non-alpha heuristics so the
+        // caller gets the most specific, actionable diagnosis. Git-SHA-shaped
+        // hex tokens are explicitly allowlisted inside `find_secret_token` and
+        // never reach this branch.
+        if let Some(token) = find_secret_token(trimmed) {
+            return Err(FilterReject::PotentialSecret { token });
+        }
         let tokens = count_meaningful_tokens(content);
         if enforce_min_tokens && tokens < self.min_tokens as usize {
             return Err(FilterReject::TooShort { tokens });
         }
-        let ratio = non_alphabetic_ratio(trimmed);
+        // Issue #1481: compute the non-alpha ratio over a SHA-masked view so a
+        // legitimate engineering memory that quotes one or more git commit
+        // SHAs ("merge 4c536992 -> 0fda534e") is not misclassified as raw
+        // code/JSON purely because hex digits and arrows push the raw ratio up.
+        let ratio = non_alphabetic_ratio(&mask_git_shas(trimmed));
         if ratio > self.max_non_alpha_ratio {
             return Err(FilterReject::NonAlphabetic {
                 ratio: ratio * 100.0,
@@ -235,6 +291,155 @@ pub fn non_alphabetic_ratio(s: &str) -> f32 {
         return 0.0;
     }
     non_alpha as f32 / total as f32
+}
+
+/// True when `token` is shaped like an (abbreviated or full) git commit SHA:
+/// a pure-hex run of [`GIT_SHA_MIN_LEN`]..=[`GIT_SHA_MAX_LEN`] characters.
+///
+/// Why (issue #1481): a git SHA is the canonical safe high-entropy token —
+/// engineering memories constantly reference commits, PRs, and merges by SHA.
+/// Treating it as a secret silently dropped legitimate knowledge. Recognising
+/// the shape lets every gate allowlist it while still blocking real
+/// credentials (which are never pure lowercase/uppercase hex of SHA length).
+/// What: returns `true` iff every char is an ASCII hex digit and the length is
+/// within the git-SHA band. Case-insensitive (`0FDA534E` and `0fda534e` both
+/// match) so quoted SHAs from different tools are all allowlisted.
+/// Test: `git_sha_like_recognises_short_and_full`,
+/// `git_sha_like_rejects_overlong_and_nonhex`.
+pub fn is_git_sha_like(token: &str) -> bool {
+    let len = token.len();
+    (GIT_SHA_MIN_LEN..=GIT_SHA_MAX_LEN).contains(&len)
+        && token.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Replace every git-SHA-shaped whitespace token in `s` with a fixed
+/// alphabetic placeholder so downstream ratio heuristics ignore them.
+///
+/// Why (issue #1481): the non-alphabetic ratio gate would otherwise count the
+/// hex digits (and the surrounding `->`, `#`, `,` punctuation common in commit
+/// references) against an otherwise-prose memory, occasionally tipping it over
+/// the `max_non_alpha_ratio` and rejecting it as "raw code". Masking the SHAs
+/// (the intended-safe tokens) keeps prose-with-SHAs on the prose side of the
+/// line while leaving genuinely code-shaped content untouched.
+/// What: splits on whitespace and joins back, swapping any [`is_git_sha_like`]
+/// token for the word "sha". Non-SHA tokens (including real secrets, which are
+/// caught earlier) pass through unchanged.
+/// Test: exercised via `git_sha_prose_is_accepted` and
+/// `non_alpha_masking_ignores_shas`.
+fn mask_git_shas(s: &str) -> String {
+    s.split_whitespace()
+        .map(|tok| {
+            // Strip common trailing/leading punctuation so `4c536992,` and
+            // `(0fda534e)` still register as SHAs for masking purposes.
+            let stripped = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+            if is_git_sha_like(stripped) {
+                "sha"
+            } else {
+                tok
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Scan `content` for the first whitespace token that looks like a genuine
+/// high-entropy secret (API key, access token, long base64/JWT-ish blob),
+/// explicitly allowlisting git-SHA-shaped hex tokens.
+///
+/// Why (issue #1481): credentials must never be stored, but git SHAs (the most
+/// common "high-entropy-looking" token in engineering prose) must be. A pure
+/// detector keyed only on entropy/length would block both; this function adds
+/// the SHA allowlist and keys "secret" on the character-class mix that real
+/// credentials exhibit (mixed upper+lower+digit, or known credential prefixes,
+/// or symbol-bearing base64) which a SHA never does.
+/// What: returns `Some(<redacted preview>)` for the first secret-looking token,
+/// else `None`. The preview shows the leading characters and masks the tail so
+/// the secret itself is not echoed back verbatim. Tokens are stripped of
+/// surrounding punctuation before classification.
+/// Test: `secret_token_is_blocked`, `git_sha_prose_is_accepted`,
+/// `base64_blob_is_blocked`, `known_key_prefixes_are_blocked`.
+pub fn find_secret_token(content: &str) -> Option<String> {
+    for raw in content.split_whitespace() {
+        let tok =
+            raw.trim_matches(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_')));
+        if looks_like_secret(tok) {
+            return Some(redact_token(tok));
+        }
+    }
+    None
+}
+
+/// Known credential prefixes that should always be treated as secrets.
+///
+/// Why (issue #1481): provider-issued keys (OpenAI `sk-`, GitHub `ghp_`/`gho_`,
+/// AWS `AKIA`, Slack `xoxb-`) have distinctive prefixes that make them
+/// unambiguously secret regardless of their entropy profile. Matching the
+/// prefix is cheaper and more precise than entropy alone.
+/// What: lowercased prefix list checked case-insensitively in
+/// [`looks_like_secret`].
+/// Test: `known_key_prefixes_are_blocked`.
+const SECRET_PREFIXES: &[&str] = &[
+    "sk-",
+    "ghp_",
+    "gho_",
+    "ghs_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+];
+
+/// Heuristic: is `token` a likely secret/credential (and not a git SHA)?
+///
+/// Why (issue #1481): see [`find_secret_token`]. This is the core decision —
+/// it must say "no" to git SHAs and "yes" to credentials.
+/// What: returns `false` immediately for [`is_git_sha_like`] tokens (the
+/// allowlist), then returns `true` when the token (a) carries a known
+/// credential prefix, or (b) is long (≥ 20 chars) AND mixes character classes
+/// in a way SHAs cannot — i.e. contains both letters and digits with at least
+/// one uppercase letter, or contains a base64/url-safe symbol (`+ / =`). Pure
+/// lowercase-hex (SHA-shaped or longer all-hex) and ordinary words are not
+/// secrets.
+/// Test: `secret_token_is_blocked`, `base64_blob_is_blocked`,
+/// `git_sha_like_is_not_secret`, `ordinary_words_are_not_secret`.
+fn looks_like_secret(token: &str) -> bool {
+    // Allowlist git SHAs first — the whole point of issue #1481.
+    if is_git_sha_like(token) {
+        return false;
+    }
+    let lower = token.to_ascii_lowercase();
+    if SECRET_PREFIXES.iter().any(|p| lower.starts_with(p)) {
+        return true;
+    }
+    // Below the length floor, entropy is too low to confidently flag.
+    if token.len() < 20 {
+        return false;
+    }
+    let has_lower = token.chars().any(|c| c.is_ascii_lowercase());
+    let has_upper = token.chars().any(|c| c.is_ascii_uppercase());
+    let has_digit = token.chars().any(|c| c.is_ascii_digit());
+    let has_b64_sym = token.chars().any(|c| matches!(c, '+' | '/' | '='));
+    // base64/url-safe blob: long and carries a base64-only symbol.
+    if has_b64_sym && (has_lower || has_upper || has_digit) {
+        return true;
+    }
+    // Mixed-case alphanumeric of credential length: SHAs are single-case hex,
+    // so requiring BOTH cases plus a digit excludes them while catching the
+    // typical `AKIA…`, `AbCd12…`, JWT-segment shapes.
+    has_lower && has_upper && has_digit
+}
+
+/// Produce a short, non-reversible preview of a flagged secret token.
+///
+/// Why (issue #1481): the rejection message must name *which* token tripped the
+/// gate (so the caller can find and remove it) without echoing the full secret
+/// back into logs or responses.
+/// What: returns the first up-to-4 characters followed by `…` and the token
+/// length, e.g. `sk-A…(48 chars)`. Short tokens (≤ 4 chars never reach here
+/// because the secret heuristic requires length) are returned verbatim.
+/// Test: `redact_token_masks_tail`.
+fn redact_token(token: &str) -> String {
+    let head: String = token.chars().take(4).collect();
+    format!("{head}…({} chars)", token.len())
 }
 
 /// Classify drawer content into a `DrawerType` using cheap heuristics.
@@ -310,7 +515,9 @@ mod tests {
         let cases = [
             "Tool use: search_files",
             "Tool result: ok",
-            "abcdef0123456789abcdef0123456789abcdef01", // pragma: allowlist secret
+            // NOTE (issue #1481): a bare 40-hex git SHA is NO LONGER rejected —
+            // it is a legitimate engineering memory. See
+            // `bare_git_sha_is_no_longer_rejected` below.
             "feat(memory): add filter",
             "fix: handle nulls",
             "Running cargo test...",
@@ -320,6 +527,21 @@ mod tests {
         for c in cases {
             assert!(cfg.apply(c, false).is_err(), "expected reject for: {c}");
         }
+    }
+
+    /// Why (issue #1481): regression lock — the previous behaviour rejected a
+    /// bare 40-hex git SHA as noise, silently dropping a valid memory. The
+    /// allowlist must keep it accepted.
+    /// What: asserts `apply` accepts a bare full SHA.
+    /// Test: itself.
+    #[test]
+    fn bare_git_sha_is_no_longer_rejected() {
+        let cfg = FilterConfig::default();
+        // pragma: allowlist secret (test fixture: a bare git SHA, not a credential)
+        assert!(
+            cfg.apply("abcdef0123456789abcdef0123456789abcdef01", false) // pragma: allowlist secret
+                .is_ok()
+        );
     }
 
     #[test]
@@ -419,6 +641,132 @@ mod tests {
         assert!(noise.to_string().contains("low-signal"));
         let na = FilterReject::NonAlphabetic { ratio: 85.0 };
         assert!(na.to_string().contains("force=true"));
+        // Issue #1481: the secret rejection must name the offending token.
+        let secret = FilterReject::PotentialSecret {
+            token: "sk-A…(48 chars)".to_string(),
+        };
+        let msg = secret.to_string();
+        assert!(msg.contains("sk-A"), "secret reject must name token: {msg}");
+        assert!(
+            msg.contains("secret"),
+            "secret reject must say 'secret': {msg}"
+        );
+    }
+
+    // ---- Issue #1481: git-SHA allowlist + secret detection ----
+
+    #[test]
+    fn git_sha_like_recognises_short_and_full() {
+        // 7-char abbreviation (git's default) through full 40-char SHA-1.
+        assert!(is_git_sha_like("0fda534"));
+        assert!(is_git_sha_like("4c536992"));
+        assert!(is_git_sha_like("0fda534e0fda534e0fda534e0fda534e0fda534e"));
+        // Case-insensitive: uppercase hex is still a SHA.
+        assert!(is_git_sha_like("0FDA534E"));
+    }
+
+    #[test]
+    fn git_sha_like_rejects_overlong_and_nonhex() {
+        // 6 chars is below git's abbreviation floor.
+        assert!(!is_git_sha_like("0fda53"));
+        // 41 chars exceeds SHA-1 length.
+        assert!(!is_git_sha_like(
+            "0fda534e0fda534e0fda534e0fda534e0fda534e0"
+        ));
+        // Non-hex characters.
+        assert!(!is_git_sha_like("0fda534g"));
+        assert!(!is_git_sha_like("hello123"));
+    }
+
+    #[test]
+    fn git_sha_prose_is_accepted() {
+        // The exact repro from issue #1481 must be stored, not skipped.
+        let cfg = FilterConfig::default();
+        let repro = "Shipped via PR #1466 squash 0fda534e -> merge 4c536992, CI green.";
+        assert!(
+            cfg.apply(repro, true).is_ok(),
+            "git-SHA prose must pass the gate; got {:?}",
+            cfg.apply(repro, true)
+        );
+        // A bare full SHA on its own is also legitimate now.
+        assert!(
+            cfg.apply("0fda534e0fda534e0fda534e0fda534e0fda534e", false)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn git_sha_like_is_not_secret() {
+        assert!(find_secret_token("merge 4c536992 into main").is_none());
+        assert!(find_secret_token("0fda534e0fda534e0fda534e0fda534e0fda534e").is_none());
+    }
+
+    #[test]
+    fn secret_token_is_blocked() {
+        // A real high-entropy, mixed-case+digit credential token must still
+        // be rejected, and the reject must name the (redacted) trigger.
+        let cfg = FilterConfig::default();
+        let content = "Use this token AbCd1234EfGh5678IjKl9012 to authenticate the deploy webhook"; // pragma: allowlist secret
+        match cfg.apply(content, true) {
+            Err(FilterReject::PotentialSecret { token }) => {
+                assert!(token.contains("AbCd"), "should name token: {token}");
+                assert!(token.contains("chars"), "should redact tail: {token}");
+            }
+            other => panic!("expected PotentialSecret, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn base64_blob_is_blocked() {
+        let content =
+            "config blob: aGVsbG8rd29ybGQvZm9vK2Jhcj09bG9uZ2Jhc2U2NA== embedded in the note"; // pragma: allowlist secret
+        assert!(matches!(
+            FilterConfig::default().apply(content, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ));
+    }
+
+    #[test]
+    fn known_key_prefixes_are_blocked() {
+        for tok in [
+            "sk-abcdef0123456789abcdef01",              // pragma: allowlist secret
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789", // pragma: allowlist secret
+            "xoxb-1234-5678-abcdEFGH",                  // pragma: allowlist secret
+        ] {
+            assert!(
+                looks_like_secret(tok),
+                "prefix token should be a secret: {tok}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_words_are_not_secret() {
+        for tok in [
+            "authentication",
+            "configuration",
+            "refactoring",
+            "snake_case",
+        ] {
+            assert!(!looks_like_secret(tok), "ordinary word flagged: {tok}");
+        }
+    }
+
+    #[test]
+    fn non_alpha_masking_ignores_shas() {
+        // Masking turns SHAs into "sha" so the ratio reflects the prose only.
+        let masked = mask_git_shas("merge 4c536992 -> 0fda534e done");
+        assert!(masked.contains("sha"));
+        assert!(!masked.contains("4c536992"));
+    }
+
+    #[test]
+    fn redact_token_masks_tail() {
+        let r = redact_token("AbCd1234EfGh5678IjKl9012"); // pragma: allowlist secret
+        assert!(r.starts_with("AbCd"));
+        assert!(r.contains("…"));
+        assert!(r.contains("chars"));
+        assert!(!r.contains("9012"), "tail must be masked: {r}");
     }
 
     #[test]

@@ -154,21 +154,29 @@ pub(crate) const DEDUP_SCAN_LIMIT: usize = 50;
 /// Test: `dedup_skips_near_duplicate`, `dedup_allows_different_content`.
 pub(crate) const DEDUP_SIMILARITY_THRESHOLD: f64 = 0.92;
 
-/// Blocklist gate: returns true when the content should be silently
-/// skipped because it matches a known low-value auto-capture pattern.
+/// Blocklist gate: returns the matched pattern when the content should be
+/// silently skipped because it matches a known low-value auto-capture pattern.
 ///
 /// Why (issue #220): Centralises the pattern-match logic so both
 /// `memory_remember` and `memory_note` go through the same filter. Trims
 /// leading whitespace before matching so indented variants still hit.
-/// What: returns `true` iff `content.contains(pat)` for any pattern in
-/// `BLOCKLIST_PATTERNS`. Trimming uses `str::trim_start` to keep the
-/// substring check predictable (the suffixes after the prefix can vary).
+/// Why (issue #1481): returns *which* pattern matched (instead of a bare
+/// `bool`) so the caller can name the trigger in the skip envelope rather than
+/// emitting an opaque "blocked pattern" — callers need to know what to remove.
+/// What: returns `Some(pat)` for the first pattern in `BLOCKLIST_PATTERNS`
+/// where `content.contains(pat)`, else `None`. Trimming uses `str::trim_start`
+/// to keep the substring check predictable (the suffixes after the prefix can
+/// vary).
 /// Test: `blocklist_gate_blocks_tool_use`,
 /// `blocklist_gate_blocks_session_ended`,
-/// `blocklist_gate_passes_normal_content`.
-pub(crate) fn blocklist_gate(content: &str) -> bool {
+/// `blocklist_gate_passes_normal_content`,
+/// `blocklist_gate_names_matched_pattern`.
+pub(crate) fn blocklist_gate(content: &str) -> Option<&'static str> {
     let trimmed = content.trim_start();
-    BLOCKLIST_PATTERNS.iter().any(|pat| trimmed.contains(pat))
+    BLOCKLIST_PATTERNS
+        .iter()
+        .copied()
+        .find(|pat| trimmed.contains(pat))
 }
 
 /// Dedup gate: returns true when the new content is a near-duplicate of a
