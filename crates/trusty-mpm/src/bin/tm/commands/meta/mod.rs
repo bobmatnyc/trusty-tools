@@ -21,6 +21,7 @@
 //! `agents`/`transcript`/`orchestrator`; CLI parsing in `tests.rs`.
 
 mod agents;
+mod instructions;
 mod orchestrator;
 mod registry;
 mod transcript;
@@ -147,7 +148,7 @@ async fn run_demo(project: &Path) -> anyhow::Result<()> {
     let llm = std::sync::Arc::new(client);
 
     let agents_dir = meta_agents_dir(project);
-    agents::write_agent_configs(&agents_dir)
+    agents::write_agent_configs(&agents_dir, project)
         .context("failed to materialise bundled agent configs")?;
 
     let task = demo_task();
