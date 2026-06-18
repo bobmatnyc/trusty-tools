@@ -163,6 +163,13 @@ pub struct MpmConfig {
     /// defaults and leave the legacy overseer path untouched.
     #[serde(default)]
     pub session_manager: SessionManagerConfig,
+
+    /// `[style]` — active output-style selection (HR-4 / DOC-17).
+    ///
+    /// Absent section → professional default (`trusty-mpm`). See
+    /// [`crate::core::output_style::StyleConfig`].
+    #[serde(default)]
+    pub style: crate::core::output_style::StyleConfig,
 }
 
 // ──────────────────────────────────────────────

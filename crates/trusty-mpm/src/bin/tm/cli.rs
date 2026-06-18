@@ -193,6 +193,12 @@ pub(crate) enum Command {
     Launch {
         /// Project directory to launch in (defaults to the current directory).
         dir: Option<String>,
+        /// Active output style id for this launch (HR-4). Overrides the
+        /// `[style] active` config key. Bundled ids: `trusty-mpm` (default),
+        /// `trusty-mpm-teacher`, `trusty-mpm-research`. An unknown id falls back
+        /// to the default.
+        #[arg(long)]
+        style: Option<String>,
     },
     /// Start or attach to a session without running the deployment sequence.
     ///

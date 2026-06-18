@@ -37,6 +37,7 @@ pub mod llm_overseer;
 pub mod memory;
 pub mod model_inject;
 pub mod names;
+pub mod output_style;
 pub mod overseer;
 pub mod overseer_config;
 pub mod paths;
