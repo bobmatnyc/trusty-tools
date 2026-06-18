@@ -646,6 +646,15 @@ impl SessionManager {
     /// fail-closed gates then treat as "nothing protected by the store" — safe
     /// because the legacy registry and the per-pane idleness gate still apply.
     /// Test: `manager_known_tmux_names_collects_all` in tests.rs.
+    ///
+    /// Note: this is a read-only scan but still takes the store's WRITE lock,
+    /// because [`SessionStore::all`] requires `&mut self`: it calls
+    /// `reload_if_changed()` first (since #1219) to pick up records another
+    /// process wrote, which mutates the in-memory map. Using `read()` would not
+    /// compile, and the read-only `cached_all()` alternative would skip that
+    /// reload — risking a stale set that omits a just-registered session and so
+    /// lets the orphan-GC mistake it for an untracked orphan. The write lock is
+    /// the fail-closed choice here; the lock is held only for the brief reload.
     pub async fn known_tmux_names(&self) -> std::collections::HashSet<String> {
         match self.store.write().await.all().await {
             Ok(records) => records.into_iter().map(|r| r.tmux_name).collect(),

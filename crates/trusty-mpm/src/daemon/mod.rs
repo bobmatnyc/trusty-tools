@@ -190,16 +190,30 @@ const ORPHAN_GC_INTERVAL_SECS: u64 = 60;
 /// Why: operators need an escape hatch to disable the reaper entirely (e.g. on a
 /// host where session tracking is known-incomplete and false positives would be
 /// catastrophic). Defaulting ON keeps the self-healing behaviour without opt-in.
-/// What: reads `TRUSTY_MPM_ORPHAN_GC`; returns `false` only for an explicit
-/// `0`/`false`/`off`/`no` (case-insensitive), `true` otherwise (including unset).
-/// Test: `orphan_gc_enabled_*` unit tests below.
+/// What: reads `TRUSTY_MPM_ORPHAN_GC` and delegates to the pure
+/// [`parse_orphan_gc_enabled`]; a thin wrapper so the parsing is testable
+/// without mutating process-global env.
+/// Test: parsing covered by `parse_orphan_gc_enabled_*` below.
 fn orphan_gc_enabled() -> bool {
-    match std::env::var("TRUSTY_MPM_ORPHAN_GC") {
-        Ok(v) => {
+    parse_orphan_gc_enabled(std::env::var("TRUSTY_MPM_ORPHAN_GC").ok().as_deref())
+}
+
+/// Pure parse of the `TRUSTY_MPM_ORPHAN_GC` raw value into an on/off decision.
+///
+/// Why: env vars are process-global, so testing the policy by mutating them is
+/// racy under the multi-threaded test harness. Taking the raw value as a
+/// parameter makes the decision a pure function that needs no env mutation.
+/// What: returns `false` only for an explicit `0`/`false`/`off`/`no`
+/// (case-insensitive, trimmed); `true` for any other value, including `None`
+/// (unset) — i.e. default ON.
+/// Test: `parse_orphan_gc_enabled_default_and_overrides`.
+fn parse_orphan_gc_enabled(raw: Option<&str>) -> bool {
+    match raw {
+        Some(v) => {
             let v = v.trim().to_ascii_lowercase();
             !matches!(v.as_str(), "0" | "false" | "off" | "no")
         }
-        Err(_) => true,
+        None => true,
     }
 }
 
@@ -208,13 +222,28 @@ fn orphan_gc_enabled() -> bool {
 /// Why: long-running hosts may want a slower (or faster) cadence than the
 /// 60-second default; the debounce is expressed in *passes*, so the interval
 /// also sets the effective grace window (a fresh orphan survives ≥ one interval).
-/// What: parses `TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS` as a positive `u64`, falling
-/// back to [`ORPHAN_GC_INTERVAL_SECS`] when unset or unparsable.
-/// Test: `orphan_gc_interval_*` unit tests below.
+/// What: reads `TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS` and delegates to the pure
+/// [`parse_orphan_gc_interval`]; a thin wrapper so the parsing is testable
+/// without mutating process-global env.
+/// Test: parsing covered by `parse_orphan_gc_interval_*` below.
 fn orphan_gc_interval_secs() -> u64 {
-    std::env::var("TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
+    parse_orphan_gc_interval(
+        std::env::var("TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure parse of the `TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS` raw value to seconds.
+///
+/// Why: as with [`parse_orphan_gc_enabled`], keeping the parsing pure avoids
+/// racy process-global env mutation in tests.
+/// What: parses `raw` as a positive `u64`, falling back to
+/// [`ORPHAN_GC_INTERVAL_SECS`] when `None`, unparsable, or non-positive (a zero
+/// interval would busy-loop).
+/// Test: `parse_orphan_gc_interval_override`.
+fn parse_orphan_gc_interval(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(ORPHAN_GC_INTERVAL_SECS)
 }
@@ -253,6 +282,14 @@ async fn orphan_gc_loop(state: Arc<DaemonState>) {
                 continue;
             }
         };
+        // NOTE: `gather_tracked_names()` and `session_manager()` are acquired in
+        // separate awaits, so this snapshot is intentionally NON-atomic — a
+        // session could register in the gap between the two. That race is safe:
+        // the two-pass debounce in `OrphanGc` means a just-registered session
+        // missed by this sweep is only ever a reap *candidate* this pass and
+        // must be seen orphaned again next sweep before it can be reaped, by
+        // which point `gather_tracked_names()` will include it. No lock spanning
+        // both calls is needed.
         let tracked = state.gather_tracked_names().await;
         let mgr = state.session_manager().await;
         let mtmux = mgr.tmux_driver();
@@ -283,49 +320,44 @@ pub async fn run_mcp(state: Arc<DaemonState>) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod orphan_gc_config_tests {
-    use super::{ORPHAN_GC_INTERVAL_SECS, orphan_gc_enabled, orphan_gc_interval_secs};
+    use super::{ORPHAN_GC_INTERVAL_SECS, parse_orphan_gc_enabled, parse_orphan_gc_interval};
 
     /// `TRUSTY_MPM_ORPHAN_GC` defaults ON and only explicit falsey values disable.
     ///
-    /// Note: env vars are process-global; this test sets and restores the var
-    /// sequentially within one function so it does not race a sibling test.
+    /// Tests the PURE parser with raw values — no process-global env mutation,
+    /// so it is safe to run in parallel with any sibling test (the #1458 review
+    /// fix for env-var test flakiness).
     #[test]
-    fn orphan_gc_enabled_default_and_overrides() {
-        const KEY: &str = "TRUSTY_MPM_ORPHAN_GC";
-        // SAFETY: single-threaded mutation within this test; restored at the end.
-        unsafe { std::env::remove_var(KEY) };
-        assert!(orphan_gc_enabled(), "unset must default ON");
+    fn parse_orphan_gc_enabled_default_and_overrides() {
+        assert!(parse_orphan_gc_enabled(None), "unset must default ON");
 
         for off in ["0", "false", "off", "no", "OFF", " false "] {
-            unsafe { std::env::set_var(KEY, off) };
-            assert!(!orphan_gc_enabled(), "{off:?} must disable");
+            assert!(!parse_orphan_gc_enabled(Some(off)), "{off:?} must disable");
         }
-        for on in ["1", "true", "yes", "anything"] {
-            unsafe { std::env::set_var(KEY, on) };
-            assert!(orphan_gc_enabled(), "{on:?} must keep enabled");
+        for on in ["1", "true", "yes", "anything", "  "] {
+            assert!(
+                parse_orphan_gc_enabled(Some(on)),
+                "{on:?} must keep enabled"
+            );
         }
-        unsafe { std::env::remove_var(KEY) };
     }
 
     /// The interval override parses positive seconds and falls back otherwise.
+    ///
+    /// Tests the PURE parser with raw values — no env mutation (see #1458).
     #[test]
-    fn orphan_gc_interval_override() {
-        const KEY: &str = "TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS";
-        unsafe { std::env::remove_var(KEY) };
-        assert_eq!(orphan_gc_interval_secs(), ORPHAN_GC_INTERVAL_SECS);
-
-        unsafe { std::env::set_var(KEY, "30") };
-        assert_eq!(orphan_gc_interval_secs(), 30);
+    fn parse_orphan_gc_interval_override() {
+        assert_eq!(parse_orphan_gc_interval(None), ORPHAN_GC_INTERVAL_SECS);
+        assert_eq!(parse_orphan_gc_interval(Some("30")), 30);
+        assert_eq!(parse_orphan_gc_interval(Some("  45 ")), 45);
 
         // Zero and garbage fall back to the default (a zero interval would busy-loop).
-        for bad in ["0", "nonsense", "-5"] {
-            unsafe { std::env::set_var(KEY, bad) };
+        for bad in ["0", "nonsense", "-5", ""] {
             assert_eq!(
-                orphan_gc_interval_secs(),
+                parse_orphan_gc_interval(Some(bad)),
                 ORPHAN_GC_INTERVAL_SECS,
                 "{bad:?}"
             );
         }
-        unsafe { std::env::remove_var(KEY) };
     }
 }

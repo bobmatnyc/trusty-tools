@@ -26,6 +26,7 @@
 //! by `tests/orphan_gc_sweep.rs` against a fake [`ManagedTmuxDriver`].
 
 use std::collections::HashSet;
+use std::process::Command;
 
 use tracing::{debug, info, warn};
 
@@ -39,10 +40,17 @@ use crate::core::names::is_managed_session_name;
 /// allowlist (rather than a denylist of "agent" commands) fails closed: any
 /// command we do not recognise as a bare shell is treated as ACTIVE and KEPT.
 /// What: the set of `pane_current_command` values tmux reports for an idle pane,
-/// covering login (`-zsh`/`-bash`) and non-login (`zsh`/`bash`/`sh`) shells plus
-/// the bare `login` process macOS shows briefly.
+/// covering login (`-zsh`/`-bash`/…) and non-login (`zsh`/`bash`/`sh`/…) forms
+/// of the common interactive shells — `zsh`, `bash`, `sh`, `fish`, `dash`,
+/// `tcsh`, `csh`, `ksh` — plus the bare `login` process macOS shows briefly.
+/// Including the less-common shells keeps a developer running e.g. `fish` from
+/// tripping the WarnUntrackedActive path on every sweep.
 /// Test: `idle_shell_commands_recognised`, `active_command_not_idle`.
-const IDLE_SHELL_COMMANDS: &[&str] = &["zsh", "bash", "sh", "-zsh", "-bash", "-sh", "login"];
+const IDLE_SHELL_COMMANDS: &[&str] = &[
+    "zsh", "bash", "sh", "fish", "dash", "tcsh", "csh", "ksh", //
+    "-zsh", "-bash", "-sh", "-fish", "-dash", "-tcsh", "-csh", "-ksh", //
+    "login",
+];
 
 /// True if `pane_command` indicates an idle pane (a bare shell, no agent).
 ///
@@ -158,12 +166,16 @@ impl TrackedNames {
 /// Test: [`AlwaysIdleProbe`] (below) drives the unit tests; the live probe is
 /// covered by `crate::core::process` tests.
 pub trait ChildLivenessProbe {
-    /// True if `pane_pid` has a live agent (`claude`/…) child process.
+    /// True if `pane_pid` has any live child process.
     ///
-    /// A `None` PID, or any uncertainty, MUST return `false` only when we are
-    /// confident the pane is truly idle — implementations should err toward
-    /// `true` (has a live child → KEEP) on any doubt, since this gate exists to
-    /// protect live work.
+    /// Fail-closed contract: this gate exists to protect live work, so the ONLY
+    /// time an implementation may return `false` is when it is *confident* the
+    /// pane has no live children. A `None` PID is the one unambiguous case —
+    /// there is no process tree to inspect, and the idleness gate (`is_idle_shell`)
+    /// already ran — so `None` returns `false`. For a present PID, any
+    /// uncertainty (the probe tool is missing, errors, or its output cannot be
+    /// parsed) MUST return `true` (treat as "might have a child" → KEEP), never
+    /// reaping on doubt.
     fn has_live_child(&self, pane_pid: Option<u32>) -> bool;
 }
 
@@ -344,32 +356,78 @@ impl OrphanGc {
     }
 }
 
-/// Real [`ChildLivenessProbe`] backed by the OS process tree.
+/// Real [`ChildLivenessProbe`] backed by the OS process tree via `pgrep`.
 ///
-/// Why: the production GC needs the second-gate liveness check to use real
-/// process inspection; isolating it behind the trait keeps `classify_session`
-/// testable while this thin adapter wires the real walk.
-/// What: delegates to [`crate::core::process::is_process_alive`] on the pane PID
-/// — a pane whose shell PID is already dead cannot have a live child, and a
-/// pane already reporting a bare-shell command has, by definition, no agent
-/// foreground process. We conservatively report "no live child" only when the
-/// shell PID itself is gone; a present shell PID with a bare-shell command is
-/// genuinely idle.
-/// Test: `crate::core::process` covers `is_process_alive`; this adapter is
-/// side-effect-only glue.
+/// Why: the "no live agent child" gate is only a real safety net if it actually
+/// inspects the process tree. A pane can momentarily report a bare shell while
+/// an agent child is mid-spawn underneath it; reaping then would kill live work.
+/// This probe asks the OS directly whether the pane's shell PID has any child.
+/// What: runs `pgrep -P <pane_pid>` (the SAME mechanism
+/// [`crate::core::process`] already uses to find `claude` children) and reports
+/// a live child when the command exits `0` with at least one PID on stdout.
+///
+/// Cross-platform contract: `pgrep -P <pid>` is present and behaves identically
+/// on both of our CI targets — macOS (BSD `pgrep`) and Linux (procps `pgrep`):
+/// exit status `0` and one PID per line when children exist, exit status `1`
+/// and empty stdout when none do. No other platform is supported or tested.
+///
+/// Fail-closed: a `None` PID returns `false` (nothing to inspect; the idleness
+/// gate already classified the pane as a bare shell). For a present PID, ANY
+/// uncertainty — `pgrep` missing, a spawn/IO error, or unparsable output — is
+/// treated as "might have a child" and returns `true`, so the session is KEPT.
+/// We never reap on probe uncertainty.
+/// Test: `process_tree_probe_none_pid_is_idle` (the only `false` path) and
+/// `process_tree_probe_self_has_no_managed_child`/`..._fails_closed` below.
 pub struct ProcessTreeProbe;
 
 impl ChildLivenessProbe for ProcessTreeProbe {
     fn has_live_child(&self, pane_pid: Option<u32>) -> bool {
-        // We only reach this probe when the pane is ALREADY a bare shell (gate 3
-        // ran first). In that state there is no agent foreground process, so the
-        // only way an agent could still be live is a backgrounded child — which
-        // we deliberately do not chase here to keep the probe cheap. Reporting
-        // `false` (idle) is therefore correct for a confirmed-shell pane. The
-        // hook is kept so a future, richer probe can be slotted in without
-        // touching `classify_session`.
-        let _ = pane_pid;
-        false
+        let Some(pid) = pane_pid else {
+            // No process tree to inspect; the idleness gate already ran.
+            return false;
+        };
+        pgrep_has_child(pid)
+    }
+}
+
+/// True if `pid` has at least one live child, per `pgrep -P <pid>`.
+///
+/// Why: factored out of [`ProcessTreeProbe::has_live_child`] so the production
+/// probe is a single thin spawn over the pure [`interpret_pgrep`] decision.
+/// What: spawns `pgrep -P <pid>` and delegates the verdict to
+/// [`interpret_pgrep`], which fails CLOSED (returns `true` → KEEP) on any
+/// spawn/IO error.
+/// Test: `pgrep_has_child_for_live_parent` exercises the live-spawn path; the
+/// fail-closed and no-child branches are covered by [`interpret_pgrep`]'s tests.
+fn pgrep_has_child(pid: u32) -> bool {
+    let result = Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output();
+    interpret_pgrep(pid, result)
+}
+
+/// Decide whether `pgrep -P <pid>` output indicates a live child — fail-closed.
+///
+/// Why: isolating the verdict from the spawn keeps the safety-critical
+/// fail-closed rule a pure function, unit-testable with synthesised outputs and
+/// errors and with no process-global env mutation.
+/// What: `Ok(output)` with a success exit and at least one parsable PID on
+/// stdout → `true` (has a child). A clean non-zero exit (pgrep's exit-1
+/// "no match") → `false` (the OS confidently reports no children). An `Err`
+/// (pgrep missing or un-spawnable) → `true`, failing CLOSED so the caller KEEPs
+/// the session rather than reaping on probe uncertainty.
+/// Test: `interpret_pgrep_match`, `interpret_pgrep_no_match`,
+/// `interpret_pgrep_fails_closed_on_error`.
+fn interpret_pgrep(pid: u32, result: std::io::Result<std::process::Output>) -> bool {
+    match result {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.trim().parse::<u32>().is_ok()),
+        Ok(_) => false,
+        Err(e) => {
+            warn!(pid, error = %e, "orphan-GC: pgrep child probe failed; keeping session");
+            true
+        }
     }
 }
 
@@ -451,10 +509,79 @@ mod tests {
     #[test]
     fn idle_shell_commands_recognised() {
         for c in [
-            "zsh", "bash", "sh", "-zsh", "-bash", "-sh", "login", "  zsh  ",
+            // POSIX-y shells (login + non-login forms).
+            "zsh", "bash", "sh", "-zsh", "-bash", "-sh", //
+            // Less-common shells a developer might run (added in #1458 review).
+            "fish", "dash", "tcsh", "csh", "ksh", //
+            "-fish", "-dash", "-tcsh", "-csh", "-ksh", //
+            // The bare macOS login process, plus a whitespace-padded case.
+            "login", "  zsh  ",
         ] {
             assert!(is_idle_shell(c), "{c:?} should be idle");
         }
+    }
+
+    #[test]
+    fn process_tree_probe_none_pid_is_idle() {
+        // A pane with no shell PID has no process tree to inspect; the idleness
+        // gate already classified it as a bare shell, so report "no child".
+        assert!(!ProcessTreeProbe.has_live_child(None));
+    }
+
+    #[test]
+    fn pgrep_has_child_for_live_parent() {
+        // The current test process spawns a long-lived `sleep` child; the real
+        // pgrep probe must see it (proving the production probe is no longer a
+        // no-op). If `pgrep` is unavailable the probe fails CLOSED (also `true`),
+        // so this assertion holds on every supported CI target either way.
+        use std::process::Command;
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep child");
+        let me = std::process::id();
+        let saw_child = ProcessTreeProbe.has_live_child(Some(me));
+        // Clean up before asserting so a failure never leaks the process.
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(saw_child, "probe must see a live child of the test process");
+    }
+
+    /// Build a synthetic `Output` with the given Unix exit code and stdout.
+    #[cfg(unix)]
+    fn fake_output(code: i32, stdout: &str) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn interpret_pgrep_match() {
+        // Exit 0 with a PID line = the parent has a live child → KEEP.
+        assert!(interpret_pgrep(123, Ok(fake_output(0, "456\n"))));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn interpret_pgrep_no_match() {
+        // pgrep's exit-1 "no match" with empty stdout = no child → reapable.
+        assert!(!interpret_pgrep(123, Ok(fake_output(1, ""))));
+        // Defensive: even a "success" exit with no parsable PID is "no child".
+        assert!(!interpret_pgrep(123, Ok(fake_output(0, "  \n"))));
+    }
+
+    #[test]
+    fn interpret_pgrep_fails_closed_on_error() {
+        // A spawn/IO error (e.g. pgrep not on PATH) must fail CLOSED → KEEP.
+        let err = std::io::Error::new(std::io::ErrorKind::NotFound, "pgrep missing");
+        assert!(
+            interpret_pgrep(123, Err(err)),
+            "probe error must keep the session, never reap on uncertainty"
+        );
     }
 
     #[test]
