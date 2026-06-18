@@ -89,6 +89,12 @@ struct LlmFinding {
     /// Finding axis: `"correctness"` (default) or `"method-conformance"` (#1359).
     #[serde(default)]
     category: FindingCategory,
+    /// Brief failure consequence — what goes wrong if unaddressed (#1416).
+    ///
+    /// `#[serde(default)]` → `""` so models that omit it — and every pre-#1416
+    /// fixture — still parse.
+    #[serde(default)]
+    consequence: String,
     /// Exact replacement code for a committable GitHub `suggestion` block (#1415).
     ///
     /// `#[serde(default)]` → `None` so models that omit it — and every pre-#1415
@@ -321,6 +327,8 @@ fn convert_llm_finding(f: LlmFinding) -> Finding {
     let mut finding = Finding::new(file, f.title, f.body, String::new(), f.confidence, effort)
         .with_category(category);
     finding.line = line;
+    // Carry the failure consequence through for the inline comment (#1416).
+    finding.consequence = f.consequence;
     // Carry the committable replacement code through for a GitHub suggestion
     // block (#1415); normalise empty/whitespace-only strings to None.
     finding.suggested_replacement = f.suggested_replacement.filter(|s| !s.trim().is_empty());

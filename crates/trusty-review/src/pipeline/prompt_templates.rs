@@ -93,7 +93,17 @@ Every other finding uses `category` = "correctness" (the default).
   Each finding has: title, body (detailed description), severity (low/medium/high/critical),
   confidence (0.0–1.0), file (source file path), line (null if not applicable),
   category ("correctness" by default, or "method-conformance" per the rule above),
-  suggested_replacement (see below).
+  consequence (see below), suggested_replacement (see below).
+
+`consequence`: a brief statement of the FAILURE MECHANISM — what concretely goes
+wrong in practice if this finding is not addressed (e.g. "panics on empty input",
+"silently drops the last row", "leaks the DB connection under load"). One short
+phrase, not a restatement of the issue. Empty string when there is no concrete
+consequence.
+
+`confidence`: be honest — use a LOW value (< 0.6) when you are not sure the
+finding is real; the review will hedge low-confidence findings rather than assert
+them.
 
 `suggested_replacement`: when — and ONLY when — the fix is a concrete code
 replacement for the specific line(s) at `line`, provide the EXACT replacement
@@ -195,7 +205,17 @@ coverage floor after your response based on the configured policy.
   Each finding has: title, body (detailed description), severity (low/medium/high/critical),
   confidence (0.0–1.0), file (source file path), line (null if not applicable),
   category ("correctness" by default, or "method-conformance" per the rule above),
-  suggested_replacement (see below).
+  consequence (see below), suggested_replacement (see below).
+
+`consequence`: a brief statement of the FAILURE MECHANISM — what concretely goes
+wrong in practice if this finding is not addressed (e.g. "panics on empty input",
+"silently drops the last row", "leaks the DB connection under load"). One short
+phrase, not a restatement of the issue. Empty string when there is no concrete
+consequence.
+
+`confidence`: be honest — use a LOW value (< 0.6) when you are not sure the
+finding is real; the review will hedge low-confidence findings rather than assert
+them.
 
 `suggested_replacement`: when — and ONLY when — the fix is a concrete code
 replacement for the specific line(s) at `line`, provide the EXACT replacement

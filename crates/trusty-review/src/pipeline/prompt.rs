@@ -145,6 +145,14 @@ pub fn review_response_schema() -> ResponseSchema {
                             "enum": ["correctness", "method-conformance"],
                             "description": "Almost always \"correctness\". Use \"method-conformance\" ONLY when the diff explicitly contradicts a method/approach/constraint the ticket or spec stated in the \"Intended method (ticket/spec)\" context — never for a missing method (advisory gap) or a stale-spec conflict."
                         },
+                        // `consequence` (#1416) is a plain required string;
+                        // pre-#1416 models / lenient providers that omit it funnel
+                        // through serde where `LlmFinding.consequence` is
+                        // `#[serde(default)]` → "". Empty is fine (renderer skips it).
+                        "consequence": {
+                            "type": "string",
+                            "description": "Brief failure mechanism: what goes wrong in practice if this is NOT addressed (e.g. \"panics on empty input\", \"leaks the connection under load\"). One short phrase. Empty string if there is no concrete consequence."
+                        },
                         // `suggested_replacement` (#1415) is nullable (like `line`)
                         // so it can be `null` while still satisfying OpenAI strict
                         // mode (every property must be in `required`).  Non-strict

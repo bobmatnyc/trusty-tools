@@ -480,6 +480,40 @@ fn parse_finding_without_category_defaults_correctness() {
         result.findings[0].suggested_replacement.is_none(),
         "absent suggested_replacement must default to None"
     );
+    // A finding with no `consequence` defaults to "" (#1416 back-compat).
+    assert!(
+        result.findings[0].consequence.is_empty(),
+        "absent consequence must default to empty string"
+    );
+}
+
+/// A finding's `consequence` is carried through the parser (#1416).
+///
+/// Why: the inline-comment renderer reads `Finding.consequence`; it must survive
+/// the JSON → internal conversion so the "_Why it matters:_" line renders.
+/// What: parses a finding carrying a `consequence`, asserts it is preserved.
+/// Test: this test itself.
+#[test]
+fn parse_finding_carries_consequence() {
+    let body = r#"{
+        "verdict":"REQUEST_CHANGES",
+        "summary":"Bug.",
+        "findings":[{
+            "title":"Unwrap",
+            "body":"Unchecked unwrap on parse.",
+            "severity":"high",
+            "confidence":0.9,
+            "file":"src/x.rs",
+            "line":7,
+            "consequence":"panics on malformed input"
+        }]
+    }"#;
+    let result = parse_review_response(body);
+    assert_eq!(result.findings.len(), 1);
+    assert_eq!(
+        result.findings[0].consequence, "panics on malformed input",
+        "consequence must be carried through"
+    );
 }
 
 /// A finding's `suggested_replacement` is carried through the parser (#1415).

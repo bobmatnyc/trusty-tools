@@ -469,6 +469,7 @@ fn review_schema_is_openai_strict_compliant() {
             "body",
             "category",
             "confidence",
+            "consequence",
             "file",
             "line",
             "severity",

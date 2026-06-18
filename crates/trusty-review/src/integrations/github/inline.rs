@@ -29,6 +29,18 @@ use std::collections::HashSet;
 
 use crate::models::Finding;
 
+// ─── Tuning constants ─────────────────────────────────────────────────────────
+
+/// Confidence below which a finding is hedged rather than asserted (#1416).
+///
+/// Why: an automated reviewer that asserts a low-confidence guess as fact erodes
+/// author trust; hedging ("This may…") signals the uncertainty honestly without
+/// dropping the finding.  0.6 is the midpoint between "plausible" and "likely" on
+/// the LLM's own 0.0–1.0 confidence scale.
+/// What: findings with `confidence < UNCERTAINTY_THRESHOLD` get a hedging prefix.
+/// Test: `low_confidence_finding_is_hedged`, `high_confidence_finding_is_asserted`.
+pub const UNCERTAINTY_THRESHOLD: f32 = 0.6;
+
 // ─── Commentable-line index ───────────────────────────────────────────────────
 
 /// Index of `(file, new-side line)` pairs that are valid inline-comment anchors.
@@ -244,23 +256,37 @@ pub fn build_inline_plan(findings: &[Finding], commentable: &CommentableLines) -
 /// Render one finding as inline-comment markdown.
 ///
 /// Why: an inline comment must read as a single, self-contained, actionable note:
-/// a clear lead line, the fix as a *committable* GitHub ```suggestion block when
-/// the finding carries concrete replacement code (#1415) or as prose otherwise.
+/// a clear lead line, *why it matters* (the consequence, #1416), and the fix as a
+/// *committable* GitHub ```suggestion block when the finding carries concrete
+/// replacement code (#1415) or as prose otherwise.  Low-confidence findings are
+/// hedged rather than asserted (#1416) so the reviewer never overstates a guess.
 /// Centralising the rendering keeps the inline and (future) summary renderings
 /// consistent.
-/// What: builds `**<kind>** — <description>`, then appends either a fenced
+/// What: builds `**<kind>** — <description>` (hedged with "This may…" when
+/// `confidence < UNCERTAINTY_THRESHOLD`), appends a `_Why it matters:_ <consequence>`
+/// line when the finding carries a consequence, then appends either a fenced
 /// ```suggestion block (when [`suggestion_replacement`] accepts the finding's
 /// `suggested_replacement`) or a `_Fix:_ <prose>` line.  A malformed or non-code
 /// replacement degrades to prose, never a broken suggestion block.
 /// Test: `render_finding_comment_includes_kind_and_fix`,
-/// `render_emits_suggestion_block`, `render_falls_back_to_prose_fix`.
+/// `render_emits_suggestion_block`, `render_falls_back_to_prose_fix`,
+/// `render_includes_consequence`, `low_confidence_finding_is_hedged`.
 pub fn render_finding_comment(finding: &Finding) -> String {
     let mut out = String::with_capacity(256);
-    out.push_str(&format!(
-        "**{}** — {}\n",
-        finding.kind,
-        finding.description.trim()
-    ));
+
+    // Lead line: kind + description, hedged for low confidence (#1416).
+    let hedged = if finding.confidence < UNCERTAINTY_THRESHOLD {
+        hedge_description(&finding.description)
+    } else {
+        finding.description.trim().to_string()
+    };
+    out.push_str(&format!("**{}** — {}\n", finding.kind, hedged));
+
+    // Consequence: what goes wrong if unaddressed (#1416).
+    let consequence = finding.consequence.trim();
+    if !consequence.is_empty() {
+        out.push_str(&format!("\n_Why it matters:_ {consequence}\n"));
+    }
 
     // Fix: committable suggestion block when concrete (#1415), else prose.
     if let Some(replacement) = suggestion_replacement(finding) {
@@ -274,6 +300,32 @@ pub fn render_finding_comment(finding: &Finding) -> String {
         }
     }
     out
+}
+
+/// Prefix a description with a hedging phrase when not already hedged (#1416).
+///
+/// Why: low-confidence findings should *read* as tentative; mechanically prefixing
+/// a hedge is more reliable than asking the LLM to self-hedge.
+/// What: if the description already opens with a hedging word (may/might/possibly/
+/// could/perhaps), returns it trimmed unchanged; otherwise lowercases the first
+/// letter and prepends "This may be an issue: ".  Empty descriptions pass through.
+/// Test: `low_confidence_finding_is_hedged`, `already_hedged_not_double_hedged`.
+fn hedge_description(description: &str) -> String {
+    let trimmed = description.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    const HEDGES: &[&str] = &[
+        "may ", "might ", "possibly", "could ", "perhaps", "this may",
+    ];
+    if HEDGES.iter().any(|h| lower.starts_with(h)) {
+        return trimmed.to_string();
+    }
+    let mut chars = trimmed.chars();
+    let first = chars.next().unwrap_or(' ').to_ascii_lowercase();
+    let rest: String = chars.collect();
+    format!("This may be an issue: {first}{rest}")
 }
 
 /// Extract a committable replacement block from a finding's `suggested_replacement`.

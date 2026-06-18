@@ -224,6 +224,15 @@ pub struct Finding {
     pub kind: String,
     /// Human-readable description of the issue.
     pub description: String,
+    /// Brief "what goes wrong if unaddressed" — the failure mechanism (#1416).
+    ///
+    /// Why: a finding that states the failure consequence (not just the issue) is
+    /// far more actionable — it tells the author *why it matters* and helps them
+    /// prioritise.  Kept as its own field so the renderer can place it distinctly
+    /// (a `_Why it matters:_` line) rather than burying it in the description.
+    /// `#[serde(default)]` (empty string) keeps every pre-#1416 finding parsing.
+    #[serde(default)]
+    pub consequence: String,
     /// Proposed fix or remediation suggestion (prose).
     pub suggestion: String,
     /// Exact replacement code for a committable GitHub `suggestion` block (#1415).
@@ -276,6 +285,7 @@ impl Finding {
             line: None,
             kind: kind.into(),
             description: description.into(),
+            consequence: String::new(),
             suggestion: suggestion.into(),
             suggested_replacement: None,
             confidence: confidence.clamp(0.0, 1.0),

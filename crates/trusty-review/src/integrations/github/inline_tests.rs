@@ -207,3 +207,78 @@ fn empty_replacement_is_not_committable() {
     assert!(!suggestion_is_committable("   "));
     assert!(suggestion_is_committable("let x = 1;"));
 }
+
+// ── #1416: consequence + uncertainty signalling ──────────────────────────────
+
+#[test]
+fn render_includes_consequence() {
+    let mut f = finding_at("src/db.rs", Some(11));
+    f.consequence = "panics on empty input".to_string();
+    let body = render_finding_comment(&f);
+    assert!(
+        body.contains("_Why it matters:_ panics on empty input"),
+        "consequence line must appear: {body}"
+    );
+}
+
+#[test]
+fn render_omits_consequence_when_empty() {
+    let f = finding_at("src/db.rs", Some(11)); // consequence defaults to ""
+    let body = render_finding_comment(&f);
+    assert!(
+        !body.contains("_Why it matters:_"),
+        "no consequence line when empty: {body}"
+    );
+}
+
+#[test]
+fn low_confidence_finding_is_hedged() {
+    // Confidence below the threshold → the description is hedged ("This may…").
+    let mut f = finding_at("src/db.rs", Some(11));
+    f.confidence = 0.4;
+    let body = render_finding_comment(&f);
+    assert!(
+        body.to_lowercase().contains("this may be an issue"),
+        "low-confidence finding must be hedged: {body}"
+    );
+}
+
+#[test]
+fn high_confidence_finding_is_asserted() {
+    // Confidence at/above the threshold → asserted, not hedged.
+    let mut f = finding_at("src/db.rs", Some(11));
+    f.confidence = 0.9;
+    let body = render_finding_comment(&f);
+    assert!(
+        !body.to_lowercase().contains("this may be an issue"),
+        "high-confidence finding must not be hedged: {body}"
+    );
+    // The bare description still appears.
+    assert!(body.contains("SQL injection"), "{body}");
+}
+
+#[test]
+fn already_hedged_not_double_hedged() {
+    // A low-confidence finding whose description already hedges is not re-hedged.
+    let mut f = Finding::new(
+        "src/db.rs",
+        "logic",
+        "May overflow for large inputs",
+        "clamp it",
+        0.3,
+        Effort::Low,
+    );
+    f.line = Some(11);
+    let body = render_finding_comment(&f);
+    assert!(
+        !body.contains("This may be an issue: may overflow"),
+        "already-hedged description must not be double-hedged: {body}"
+    );
+    assert!(body.contains("May overflow for large inputs"), "{body}");
+}
+
+#[test]
+fn uncertainty_threshold_is_point_six() {
+    // Lock the documented threshold so a silent change is caught.
+    assert_eq!(UNCERTAINTY_THRESHOLD, 0.6);
+}
