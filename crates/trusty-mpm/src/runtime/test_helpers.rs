@@ -61,7 +61,7 @@ impl ManagedTmuxDriver for FakeTmux {
         Ok(())
     }
 
-    fn capture(&self, _name: &str, _lines: u32) -> Result<String, ManagedError> {
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
         Ok(String::new())
     }
 

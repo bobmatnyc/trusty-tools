@@ -89,7 +89,7 @@ impl ManagedTmuxDriver for RecordingDriver {
         self.interrupt_calls.lock().unwrap().push(name.to_owned());
         Ok(())
     }
-    fn capture(&self, _name: &str, _lines: u32) -> Result<String, ManagedError> {
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
         Ok(self.capture_body.lock().unwrap().clone())
     }
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
@@ -197,6 +197,56 @@ async fn inject_dispatch_interrupt_sends_ctrl_c() {
         driver.literal_calls.lock().unwrap().is_empty(),
         "Interrupt must NOT call send_keys_literal"
     );
+}
+
+#[tokio::test]
+async fn inject_activity_bump_only_for_enter_and_nosubmit_not_interrupt() {
+    // Advisory follow-up (#1461): an Interrupt (Ctrl-C) is a STOP signal, not
+    // forward progress. A freshly-created record has `last_activity_at == None`;
+    // Enter/NoSubmit must set it, Interrupt must leave it untouched so the
+    // idle/orphan-GC reconciliation is not misled into thinking a stalled
+    // session is still working.
+    let dir = TempDir::new().unwrap();
+
+    // Interrupt: last_activity_at stays None.
+    {
+        let (mgr, _driver, id) = make_session(&dir).await;
+        assert!(
+            mgr.get(&id).await.unwrap().last_activity_at.is_none(),
+            "precondition: a fresh record has no activity timestamp"
+        );
+        mgr.inject(&id, "ignored", Submit::Interrupt)
+            .await
+            .expect("inject interrupt");
+        assert!(
+            mgr.get(&id).await.unwrap().last_activity_at.is_none(),
+            "Interrupt is a STOP signal and must NOT bump last_activity_at"
+        );
+    }
+
+    // Enter: last_activity_at becomes Some.
+    {
+        let (mgr, _driver, id) = make_session(&dir).await;
+        mgr.inject(&id, "go", Submit::Enter)
+            .await
+            .expect("inject enter");
+        assert!(
+            mgr.get(&id).await.unwrap().last_activity_at.is_some(),
+            "Enter is forward progress and MUST bump last_activity_at"
+        );
+    }
+
+    // NoSubmit: last_activity_at becomes Some.
+    {
+        let (mgr, _driver, id) = make_session(&dir).await;
+        mgr.inject(&id, "partial", Submit::NoSubmit)
+            .await
+            .expect("inject nosubmit");
+        assert!(
+            mgr.get(&id).await.unwrap().last_activity_at.is_some(),
+            "NoSubmit is forward progress and MUST bump last_activity_at"
+        );
+    }
 }
 
 // ── observe (LLM-free) ───────────────────────────────────────────────────────

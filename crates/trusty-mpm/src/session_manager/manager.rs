@@ -119,7 +119,13 @@ pub trait ManagedTmuxDriver: Send + Sync {
     }
 
     /// Capture the last `lines` of pane output for the session named `name`.
-    fn capture(&self, name: &str, lines: u32) -> Result<String, ManagedError>;
+    ///
+    /// `lines` is `usize` to match the harness-agnostic
+    /// [`SessionControl::observe`](crate::core::sm::control::SessionControl::observe)
+    /// contract end-to-end; the single `usize → u32` narrowing the underlying
+    /// tmux `-S` argv requires is confined to the real-tmux driver edge, so no
+    /// caller in the observe path needs a `try_from`.
+    fn capture(&self, name: &str, lines: usize) -> Result<String, ManagedError>;
 
     /// Return all live tmux session names on the host.
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError>;
@@ -446,7 +452,11 @@ impl SessionManager {
     /// What: looks up the record, rejects Stopped/Decommissioned sessions, then
     /// dispatches: [`Submit::Enter`] → `send_line` (literal + Enter),
     /// [`Submit::NoSubmit`] → `send_keys_literal` (literal only),
-    /// [`Submit::Interrupt`] → `send_interrupt` (Ctrl-C). Updates `last_activity_at`.
+    /// [`Submit::Interrupt`] → `send_interrupt` (Ctrl-C). Bumps
+    /// `last_activity_at` ONLY for `Enter`/`NoSubmit`: an `Interrupt` (Ctrl-C) is
+    /// a STOP signal, not forward progress, so treating it as activity would
+    /// mislead the idle/orphan-GC reconciliation into believing a stalled session
+    /// is still working.
     /// Test: `inject_dispatch_enter_sends_literal_then_enter`,
     /// `inject_dispatch_nosubmit_sends_literal_only`,
     /// `inject_dispatch_interrupt_sends_ctrl_c` in tests/session_control_api.rs.
@@ -472,7 +482,10 @@ impl SessionManager {
             Submit::Interrupt => self.tmux.send_interrupt(&record.tmux_name),
         };
         result.map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
-        record.last_activity_at = Some(Utc::now());
+        // Interrupt is a STOP signal, not activity — do not bump last_activity_at.
+        if matches!(submit, Submit::Enter | Submit::NoSubmit) {
+            record.last_activity_at = Some(Utc::now());
+        }
         self.store.write().await.upsert(record).await?;
         Ok(())
     }
@@ -490,7 +503,7 @@ impl SessionManager {
     pub async fn observe(
         &self,
         id: &ManagedSessionId,
-        lines: u32,
+        lines: usize,
     ) -> Result<crate::core::sm::control::RawObservation, ManagedError> {
         let record = self.get(id).await?;
         let raw_pane = self
@@ -800,7 +813,7 @@ impl SessionManager {
     pub async fn capture_pane(
         &self,
         id: &ManagedSessionId,
-        lines: u32,
+        lines: usize,
     ) -> Result<String, ManagedError> {
         let record = self.get(id).await?;
         self.tmux

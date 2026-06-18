@@ -63,7 +63,7 @@ impl ManagedTmuxDriver for RecordingTmux {
             .push((name.to_owned(), text.to_owned()));
         Ok(())
     }
-    fn capture(&self, _name: &str, _lines: u32) -> Result<String, ManagedError> {
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
         Ok(String::new())
     }
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {

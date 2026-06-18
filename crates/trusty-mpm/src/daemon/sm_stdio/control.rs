@@ -225,8 +225,6 @@ impl SessionControl for DaemonSessionControl {
         lines: usize,
     ) -> Result<RawObservation, SessionControlError> {
         let id = Self::parse_id(session_id)?;
-        let lines = u32::try_from(lines)
-            .map_err(|_| SessionControlError::Backend(format!("lines out of range: {lines}")))?;
         let mgr = self.state.session_manager().await;
         mgr.observe(&id, lines).await.map_err(Self::map_managed_err)
     }
@@ -314,6 +312,9 @@ mod tests {
         let s = verdict_to_summary(v);
         assert_eq!(s.state, ActivityState::Working);
         assert_eq!(s.summary.as_deref(), Some("writing code"));
-        assert_eq!(s.confidence, 0.87);
+        // Approx comparison: `confidence` is an f64 carried through the verdict,
+        // so an exact `==` is fragile to float representation. 1e-6 is far
+        // tighter than any meaningful confidence delta.
+        assert!((s.confidence - 0.87).abs() < 1e-6);
     }
 }

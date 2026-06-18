@@ -78,7 +78,12 @@ impl ManagedTmuxDriver for RealTmuxDriver {
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
 
-    fn capture(&self, name: &str, lines: u32) -> Result<String, ManagedError> {
+    fn capture(&self, name: &str, lines: usize) -> Result<String, ManagedError> {
+        // The tmux `-S -<n>` argv takes a u32; this driver edge is the single
+        // narrowing point so the rest of the observe path stays `usize`. An
+        // out-of-range request is saturated to u32::MAX (capturing the whole
+        // scrollback) rather than erroring — more pane than asked for is benign.
+        let lines = u32::try_from(lines).unwrap_or(u32::MAX);
         self.driver
             .capture(&TmuxTarget::session(name), Some(lines))
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
@@ -117,7 +122,7 @@ impl ManagedTmuxDriver for NoopTmuxDriver {
         Err(ManagedError::TmuxUnavailable("tmux not installed".into()))
     }
 
-    fn capture(&self, _name: &str, _lines: u32) -> Result<String, ManagedError> {
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
         Ok(String::new())
     }
 
