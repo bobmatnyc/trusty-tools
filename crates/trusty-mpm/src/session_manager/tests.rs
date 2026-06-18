@@ -141,6 +141,49 @@ async fn manager_create_record() {
     assert_eq!(listed[0].id, record.id);
 }
 
+/// `known_tmux_names` must surface every stored session's tmux name so the
+/// orphan-GC treats them all as protected (never an untracked orphan).
+///
+/// Why: the GC's safety depends on the store reporting its tracked names
+/// completely; a name missing here would make a live, tracked session look like
+/// an orphan and risk a false kill.
+/// What: creates two sessions and asserts both their tmux names appear in the
+/// returned set.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_known_tmux_names_collects_all() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let r1 = mgr
+        .create(
+            "task one".into(),
+            Some(PathBuf::from("/tmp/k1")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create 1");
+    let r2 = mgr
+        .create(
+            "task two".into(),
+            Some(PathBuf::from("/tmp/k2")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create 2");
+
+    let names = mgr.known_tmux_names().await;
+    assert!(names.contains(&r1.tmux_name), "missing {}", r1.tmux_name);
+    assert!(names.contains(&r2.tmux_name), "missing {}", r2.tmux_name);
+    assert_eq!(names.len(), 2);
+}
+
 /// A SUCCESSFUL create must DISARM the ownership guard so the freshly-created
 /// tmux session is NOT reaped at the end of the request scope (#1453).
 ///

@@ -253,6 +253,29 @@ impl DaemonState {
         }
     }
 
+    /// Gather the tmux names tracked by BOTH session registries.
+    ///
+    /// Why: the orphan-GC's safety hinges on "absent from BOTH registries". The
+    /// old-style in-memory `DaemonState` registry and the new-style
+    /// `SessionManager` store each track sessions the daemon owns; the GC must
+    /// union them so a session tracked by *either* is protected from reaping.
+    /// What: collects every `tmux_name` from `self.sessions` into the `legacy`
+    /// set and every store-known name (via
+    /// [`SessionManager::known_tmux_names`](crate::session_manager::SessionManager::known_tmux_names))
+    /// into the `managed` set, returning the combined
+    /// [`crate::daemon::orphan_gc::TrackedNames`].
+    /// Test: `gather_tracked_names_unions_both` (handler-level) and the
+    /// `orphan_gc` pure-logic tests cover the consuming `classify_session`.
+    pub async fn gather_tracked_names(&self) -> crate::daemon::orphan_gc::TrackedNames {
+        let legacy: std::collections::HashSet<String> = self
+            .sessions
+            .iter()
+            .map(|e| e.value().tmux_name.clone())
+            .collect();
+        let managed = self.session_manager().await.known_tmux_names().await;
+        crate::daemon::orphan_gc::TrackedNames { legacy, managed }
+    }
+
     // ---- projects -------------------------------------------------------
 
     /// Register a project by its working-directory path.

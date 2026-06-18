@@ -634,6 +634,28 @@ impl SessionManager {
         &self.data_dir
     }
 
+    /// Collect every tmux session name the store knows about.
+    ///
+    /// Why: the orphan-GC must never reap a session this store tracks. It treats
+    /// the store's `tmux_name`s as a protected set — including `Decommissioned`
+    /// tombstones, so a name the store has *any* record of is never mistaken for
+    /// an untracked orphan (fail-closed: better to keep a stray than risk
+    /// reaping a tracked one).
+    /// What: reads all records and returns the set of their `tmux_name`s. A store
+    /// read error degrades to an empty set with a `warn!`, which the GC's own
+    /// fail-closed gates then treat as "nothing protected by the store" — safe
+    /// because the legacy registry and the per-pane idleness gate still apply.
+    /// Test: `manager_known_tmux_names_collects_all` in tests.rs.
+    pub async fn known_tmux_names(&self) -> std::collections::HashSet<String> {
+        match self.store.write().await.all().await {
+            Ok(records) => records.into_iter().map(|r| r.tmux_name).collect(),
+            Err(e) => {
+                warn!("orphan-GC: store read for known names failed: {e}");
+                std::collections::HashSet::new()
+            }
+        }
+    }
+
     /// Return a clone of the shared tmux driver Arc.
     ///
     /// Why: the spawn handler needs to hand the driver to `ClaudeCodeAdapter`

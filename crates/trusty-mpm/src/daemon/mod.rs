@@ -26,6 +26,7 @@ pub mod mcp_console;
 pub mod mcp_session;
 pub mod openapi;
 pub mod optimizer;
+pub mod orphan_gc;
 pub mod overseer_compose;
 pub mod pairing_store;
 pub mod services;
@@ -103,6 +104,15 @@ pub async fn serve_http(
     // Spawn the periodic dead-session reaper.
     tokio::spawn(reap_loop(Arc::clone(&state)));
 
+    // Orphan-GC: clean accumulated leaked managed sessions. Runs ONE sweep now
+    // (boot cleanup of orphans inherited across restarts) and then periodically.
+    // Default ON; set TRUSTY_MPM_ORPHAN_GC=0 to disable entirely.
+    if orphan_gc_enabled() {
+        tokio::spawn(orphan_gc_loop(Arc::clone(&state)));
+    } else {
+        info!("orphan-GC disabled via TRUSTY_MPM_ORPHAN_GC");
+    }
+
     let app = api::router(state);
     info!("daemon listening; press Ctrl-C to stop");
     // `into_make_service_with_connect_info` makes the peer `SocketAddr` available
@@ -172,6 +182,87 @@ async fn reap_loop(state: Arc<DaemonState>) {
     }
 }
 
+/// Default interval between orphan-GC sweeps, in seconds.
+const ORPHAN_GC_INTERVAL_SECS: u64 = 60;
+
+/// Whether the orphan-GC is enabled (default ON).
+///
+/// Why: operators need an escape hatch to disable the reaper entirely (e.g. on a
+/// host where session tracking is known-incomplete and false positives would be
+/// catastrophic). Defaulting ON keeps the self-healing behaviour without opt-in.
+/// What: reads `TRUSTY_MPM_ORPHAN_GC`; returns `false` only for an explicit
+/// `0`/`false`/`off`/`no` (case-insensitive), `true` otherwise (including unset).
+/// Test: `orphan_gc_enabled_*` unit tests below.
+fn orphan_gc_enabled() -> bool {
+    match std::env::var("TRUSTY_MPM_ORPHAN_GC") {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            !matches!(v.as_str(), "0" | "false" | "off" | "no")
+        }
+        Err(_) => true,
+    }
+}
+
+/// Resolve the orphan-GC sweep interval, honouring an env override.
+///
+/// Why: long-running hosts may want a slower (or faster) cadence than the
+/// 60-second default; the debounce is expressed in *passes*, so the interval
+/// also sets the effective grace window (a fresh orphan survives ≥ one interval).
+/// What: parses `TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS` as a positive `u64`, falling
+/// back to [`ORPHAN_GC_INTERVAL_SECS`] when unset or unparsable.
+/// Test: `orphan_gc_interval_*` unit tests below.
+fn orphan_gc_interval_secs() -> u64 {
+    std::env::var("TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(ORPHAN_GC_INTERVAL_SECS)
+}
+
+/// Periodically reconcile live tmux against the registries and reap orphans.
+///
+/// Why: leaked `tmpm-*` tmux sessions (from crashes or pre-RAII builds) must be
+/// cleaned up self-healingly. One sweep runs immediately at boot to clear
+/// accumulated orphans, then the loop runs on the configured interval.
+/// What: owns a single [`orphan_gc::OrphanGc`] so the two-pass debounce persists
+/// across sweeps; each tick gathers the live managed panes (via
+/// [`tmux::TmuxDriver::list_managed_panes`]) and both registries' tracked names
+/// (via [`DaemonState::gather_tracked_names`]), then calls
+/// [`orphan_gc::run_sweep`]. A tmux-listing failure skips the pass (reaps
+/// nothing) rather than risking a wrong kill.
+/// Test: the reconciliation rule and debounce are unit-tested in
+/// [`orphan_gc`]; the end-to-end sweep is covered by `tests/orphan_gc_sweep.rs`.
+async fn orphan_gc_loop(state: Arc<DaemonState>) {
+    let interval_secs = orphan_gc_interval_secs();
+    info!(
+        interval_secs,
+        "orphan-GC enabled; running startup sweep then periodic reconciliation"
+    );
+    let mut gc = orphan_gc::OrphanGc::new();
+    let probe = orphan_gc::ProcessTreeProbe;
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+    loop {
+        tick.tick().await;
+        let Ok(driver) = tmux::TmuxDriver::discover() else {
+            continue;
+        };
+        let panes = match driver.list_managed_panes() {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("orphan-GC: list_managed_panes failed: {e}");
+                continue;
+            }
+        };
+        let tracked = state.gather_tracked_names().await;
+        let mgr = state.session_manager().await;
+        let mtmux = mgr.tmux_driver();
+        let reaped = orphan_gc::run_sweep(&mut gc, &panes, &tracked, &probe, mtmux.as_ref());
+        if reaped > 0 {
+            info!("orphan-GC reaped {reaped} orphaned managed session(s)");
+        }
+    }
+}
+
 /// Run the MCP server over stdio so a Claude Code session can call the
 /// orchestration tools (`session_list`, `agent_delegate`, ...).
 ///
@@ -188,4 +279,53 @@ pub async fn run_mcp(state: Arc<DaemonState>) -> anyhow::Result<()> {
         async move { crate::mcp::dispatch(&backend, req).await }
     })
     .await
+}
+
+#[cfg(test)]
+mod orphan_gc_config_tests {
+    use super::{ORPHAN_GC_INTERVAL_SECS, orphan_gc_enabled, orphan_gc_interval_secs};
+
+    /// `TRUSTY_MPM_ORPHAN_GC` defaults ON and only explicit falsey values disable.
+    ///
+    /// Note: env vars are process-global; this test sets and restores the var
+    /// sequentially within one function so it does not race a sibling test.
+    #[test]
+    fn orphan_gc_enabled_default_and_overrides() {
+        const KEY: &str = "TRUSTY_MPM_ORPHAN_GC";
+        // SAFETY: single-threaded mutation within this test; restored at the end.
+        unsafe { std::env::remove_var(KEY) };
+        assert!(orphan_gc_enabled(), "unset must default ON");
+
+        for off in ["0", "false", "off", "no", "OFF", " false "] {
+            unsafe { std::env::set_var(KEY, off) };
+            assert!(!orphan_gc_enabled(), "{off:?} must disable");
+        }
+        for on in ["1", "true", "yes", "anything"] {
+            unsafe { std::env::set_var(KEY, on) };
+            assert!(orphan_gc_enabled(), "{on:?} must keep enabled");
+        }
+        unsafe { std::env::remove_var(KEY) };
+    }
+
+    /// The interval override parses positive seconds and falls back otherwise.
+    #[test]
+    fn orphan_gc_interval_override() {
+        const KEY: &str = "TRUSTY_MPM_ORPHAN_GC_INTERVAL_SECS";
+        unsafe { std::env::remove_var(KEY) };
+        assert_eq!(orphan_gc_interval_secs(), ORPHAN_GC_INTERVAL_SECS);
+
+        unsafe { std::env::set_var(KEY, "30") };
+        assert_eq!(orphan_gc_interval_secs(), 30);
+
+        // Zero and garbage fall back to the default (a zero interval would busy-loop).
+        for bad in ["0", "nonsense", "-5"] {
+            unsafe { std::env::set_var(KEY, bad) };
+            assert_eq!(
+                orphan_gc_interval_secs(),
+                ORPHAN_GC_INTERVAL_SECS,
+                "{bad:?}"
+            );
+        }
+        unsafe { std::env::remove_var(KEY) };
+    }
 }
