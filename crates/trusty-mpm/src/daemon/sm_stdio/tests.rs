@@ -22,9 +22,11 @@ use trusty_common::mcp::{Request, Response, error_codes};
 use super::SmDispatcher;
 use super::control::{LaunchParams, SessionControl, SessionControlError};
 use super::methods::{CODE_NOT_FOUND, CODE_UNAVAILABLE};
+use crate::activity::cache::ActivityState;
 use crate::core::sm::SessionManagerConfig;
 use crate::core::sm::agent::SessionManagerAgent;
 use crate::core::sm::agent::mock::{MockChatProvider, MockResolver};
+use crate::core::sm::control::{RawObservation, Submit, Summary};
 
 // ── Mock session control ────────────────────────────────────────────────────────
 
@@ -88,7 +90,7 @@ impl SessionControl for MockSessionControl {
         &self,
         _id: &str,
         _text: &str,
-        _submit: crate::core::sm::control::Submit,
+        _submit: Submit,
     ) -> Result<(), SessionControlError> {
         Ok(())
     }
@@ -96,20 +98,17 @@ impl SessionControl for MockSessionControl {
         &self,
         _id: &str,
         _lines: usize,
-    ) -> Result<crate::core::sm::control::RawObservation, SessionControlError> {
-        Ok(crate::core::sm::control::RawObservation {
+    ) -> Result<RawObservation, SessionControlError> {
+        Ok(RawObservation {
             raw_pane: String::new(),
             runtime_active: true,
             pending_decision: None,
             proposed_default: None,
         })
     }
-    async fn summarize(
-        &self,
-        _id: &str,
-    ) -> Result<crate::core::sm::control::Summary, SessionControlError> {
-        Ok(crate::core::sm::control::Summary {
-            state: crate::activity::cache::ActivityState::Unknown,
+    async fn summarize(&self, _id: &str) -> Result<Summary, SessionControlError> {
+        Ok(Summary {
+            state: ActivityState::Unknown,
             summary: None,
             confidence: 0.0,
         })

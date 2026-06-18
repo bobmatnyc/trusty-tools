@@ -21,6 +21,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::core::names::{name_from_dir, name_from_uuid};
+use crate::core::sm::control::Submit;
 
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::store::{SessionStore, StoreError};
@@ -83,14 +84,18 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// intent must type into the pane without committing the line (e.g. staging a
     /// partial command a human will edit). Splitting this out keeps `send_line`
     /// (literal + Enter) and this (literal only) as distinct, testable primitives.
-    /// What: sends `text` literally; the default routes through `send_line` for
-    /// drivers that do not distinguish the two — the real tmux driver overrides
-    /// this to omit the Enter. Default keeps the six existing impls compiling
-    /// untouched.
+    /// What: sends `text` literally. The default returns an explicit
+    /// `TmuxUnavailable` error rather than silently falling back to `send_line`:
+    /// delegating to `send_line` would append an Enter and SUBMIT a line the
+    /// caller asked NOT to submit (`Submit::NoSubmit`) — a silent-wrong-behavior
+    /// trap. Any driver actually used with `inject(.., NoSubmit)` MUST override
+    /// this (the real `RealTmuxDriver` does); an un-overriding driver fails loudly.
     /// Test: `RealTmuxDriver` override is asserted via `core::tmux` argv tests;
     /// the no-submit dispatch is asserted by `inject_dispatch_nosubmit_sends_literal_only`.
-    fn send_keys_literal(&self, name: &str, text: &str) -> Result<(), ManagedError> {
-        self.send_line(name, text)
+    fn send_keys_literal(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+        Err(ManagedError::TmuxUnavailable(
+            "send_keys_literal not implemented for this driver".into(),
+        ))
     }
 
     /// Send an interrupt (Ctrl-C) to the session named `name` (#1461).
@@ -98,13 +103,19 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// Why: the [`Submit::Interrupt`](crate::core::sm::control::Submit::Interrupt)
     /// intent stops a running task in place (the clean precursor to relaunching a
     /// runtime). Exposing it on the trait keeps the interrupt path runtime-neutral.
-    /// What: sends the runtime's interrupt; the default is a no-op `Ok(())` so the
-    /// existing impls compile untouched — the real tmux driver overrides this to
-    /// send `C-c`.
+    /// What: sends the runtime's interrupt. The default returns an explicit
+    /// `TmuxUnavailable` error rather than a silent no-op `Ok(())`: Interrupt is
+    /// the verb used to STOP a running task, so a silent no-op would leave the
+    /// task running while the caller believes it was interrupted — a dangerous
+    /// silent-wrong-behavior trap. Any driver actually used with
+    /// `inject(.., Interrupt)` MUST override this (the real `RealTmuxDriver` sends
+    /// `C-c`); an un-overriding driver fails loudly.
     /// Test: `RealTmuxDriver` override via `core::tmux::send_keys_keyname_argv`;
     /// dispatch asserted by `inject_dispatch_interrupt_sends_ctrl_c`.
     fn send_interrupt(&self, _name: &str) -> Result<(), ManagedError> {
-        Ok(())
+        Err(ManagedError::TmuxUnavailable(
+            "send_interrupt not implemented for this driver".into(),
+        ))
     }
 
     /// Capture the last `lines` of pane output for the session named `name`.
@@ -443,9 +454,8 @@ impl SessionManager {
         &self,
         id: &ManagedSessionId,
         text: &str,
-        submit: crate::core::sm::control::Submit,
+        submit: Submit,
     ) -> Result<(), ManagedError> {
-        use crate::core::sm::control::Submit;
         let mut record = self.get(id).await?;
         if matches!(
             record.state,

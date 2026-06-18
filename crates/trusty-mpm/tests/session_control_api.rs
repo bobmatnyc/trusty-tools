@@ -204,8 +204,10 @@ async fn inject_dispatch_interrupt_sends_ctrl_c() {
 #[tokio::test]
 async fn observe_returns_raw_pane_without_llm() {
     // observe is ALWAYS available with no LLM configured: it returns whatever the
-    // driver captured verbatim. We explicitly clear the key to prove no inference.
-    unsafe { std::env::remove_var("OPENROUTER_API_KEY") };
+    // driver captured verbatim. `observe` is LLM-FREE — it never touches the
+    // classifier — so no env manipulation is needed (and `std::env::remove_var`
+    // is UB under the multi-threaded test runner). The raw pane + runtime_active
+    // are returned regardless of any key.
     let dir = TempDir::new().unwrap();
     let (mgr, driver, id) = make_session(&dir).await;
     *driver.capture_body.lock().unwrap() = "line 1\nline 2\nPR: https://x/1".into();

@@ -225,10 +225,10 @@ impl SessionControl for DaemonSessionControl {
         lines: usize,
     ) -> Result<RawObservation, SessionControlError> {
         let id = Self::parse_id(session_id)?;
+        let lines = u32::try_from(lines)
+            .map_err(|_| SessionControlError::Backend(format!("lines out of range: {lines}")))?;
         let mgr = self.state.session_manager().await;
-        mgr.observe(&id, lines as u32)
-            .await
-            .map_err(Self::map_managed_err)
+        mgr.observe(&id, lines).await.map_err(Self::map_managed_err)
     }
 
     /// Summarize the session via the activity monitor — LLM-OPTIONAL (#1461).
