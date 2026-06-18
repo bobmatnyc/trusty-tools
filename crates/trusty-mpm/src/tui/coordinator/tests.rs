@@ -10,6 +10,10 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use super::banner::{
+    GLYPH_ACTIVE, GLYPH_UNREACHABLE, HELP_HINT, ProbeOutcome, USER_PALACE, compose_banner,
+    probe_memory, probe_search,
+};
 use super::events::{SlashCommand, handle_key, is_quit, parse_slash};
 use super::layout::{
     CATALOG_STALE_HINT, CONTROLLER_STATUS, DAEMON_REACHABLE, DAEMON_UNREACHABLE, INPUT_PROMPT,
@@ -544,5 +548,193 @@ async fn poll_marks_unreachable_clears_sessions() {
     assert_eq!(
         state.selected, 0,
         "clearing the list clamps the selection back to the controller row"
+    );
+}
+
+// ---- STUI-0 banner --------------------------------------------------------
+
+/// Why: §3.1 fixes the banner's first line to `trusty-mpm sessions v<version>`;
+/// the composition must embed the crate `CARGO_PKG_VERSION` verbatim so the
+/// operator sees which build is running.
+/// What: composes a banner and asserts the version line is present with the
+/// compile-time version.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_includes_name_and_version() {
+    let banner = compose_banner(
+        env!("CARGO_PKG_VERSION"),
+        &ProbeOutcome::active(None),
+        &ProbeOutcome::active(None),
+        Some(3),
+    );
+    let expected = format!("trusty-mpm sessions  v{}", env!("CARGO_PKG_VERSION"));
+    assert!(
+        banner.lines().next() == Some(expected.as_str()),
+        "banner must lead with the name + version line, got:\n{banner}"
+    );
+}
+
+/// Why: §3.1 pins the active glyph `●` and the word `active` for a reachable
+/// backplane; both memory and search lines must render them.
+/// What: composes an all-active banner and asserts each service line carries
+/// the active glyph + word.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_active_shows_glyphs() {
+    let banner = compose_banner(
+        "1.2.3",
+        &ProbeOutcome::active(None),
+        &ProbeOutcome::active(None),
+        Some(2),
+    );
+    assert!(
+        banner.contains(&format!("memory  {GLYPH_ACTIVE} active")),
+        "active memory must show `● active`, got:\n{banner}"
+    );
+    assert!(
+        banner.contains(&format!("search  {GLYPH_ACTIVE} active")),
+        "active search must show `● active`, got:\n{banner}"
+    );
+}
+
+/// Why: §3.1 error conditions require an unreachable service to render
+/// `○ unreachable` (a glyph distinct from active) without aborting — so the
+/// composer must emit it for a down probe.
+/// What: composes a banner with both services unreachable and asserts the
+/// unreachable glyph + word appear for each.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_unreachable_shows_glyphs() {
+    let banner = compose_banner(
+        "1.2.3",
+        &ProbeOutcome::unreachable(None),
+        &ProbeOutcome::unreachable(None),
+        Some(0),
+    );
+    assert!(
+        banner.contains(&format!("memory  {GLYPH_UNREACHABLE} unreachable")),
+        "down memory must show `○ unreachable`, got:\n{banner}"
+    );
+    assert!(
+        banner.contains(&format!("search  {GLYPH_UNREACHABLE} unreachable")),
+        "down search must show `○ unreachable`, got:\n{banner}"
+    );
+}
+
+/// Why: decision D4 confirms memory against the fixed `user` palace; the banner
+/// must surface that palace as a parenthetical note so the operator sees WHICH
+/// palace was checked.
+/// What: composes a banner whose memory outcome carries the `palace: user` note
+/// and asserts the rendered memory line includes it.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_active_shows_palace_note() {
+    let banner = compose_banner(
+        "0.1.0",
+        &ProbeOutcome::active(Some(format!("palace: {USER_PALACE}"))),
+        &ProbeOutcome::active(None),
+        Some(1),
+    );
+    assert!(
+        banner.contains(&format!("(palace: {USER_PALACE})")),
+        "memory line must note the `user` palace per D4, got:\n{banner}"
+    );
+}
+
+/// Why: §3.1 requires the startup line to point operators at `/help`.
+/// What: composes a banner and asserts the final line carries the `/help` hint.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_appends_help_hint() {
+    let banner = compose_banner(
+        "0.1.0",
+        &ProbeOutcome::active(None),
+        &ProbeOutcome::active(None),
+        Some(4),
+    );
+    let last = banner.lines().last().unwrap_or_default();
+    assert!(
+        last.ends_with(HELP_HINT),
+        "startup line must end with the /help hint, got: {last:?}"
+    );
+    assert!(
+        last.starts_with("4 active sessions"),
+        "startup line must lead with the active-session count, got: {last:?}"
+    );
+}
+
+/// Why: a single active session must read naturally (`1 active session`, not
+/// `1 active sessions`); the count line pluralises on the count.
+/// What: composes banners for counts 0, 1, and 5 and asserts the exact lead.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_pluralizes_count() {
+    let line_for = |n: usize| {
+        let banner = compose_banner(
+            "0.1.0",
+            &ProbeOutcome::active(None),
+            &ProbeOutcome::active(None),
+            Some(n),
+        );
+        banner.lines().last().unwrap_or_default().to_string()
+    };
+    assert!(line_for(0).starts_with("0 active sessions"));
+    assert!(line_for(1).starts_with("1 active session  ·"));
+    assert!(line_for(5).starts_with("5 active sessions"));
+}
+
+/// Why: when the daemon is unreachable at startup the count is unknown; the
+/// banner must say so rather than render a misleading `0 active sessions`.
+/// What: composes a banner with `active_count = None` and asserts the startup
+/// line reports `daemon unreachable` while still carrying the `/help` hint.
+/// Test: this IS the test.
+#[test]
+fn compose_banner_handles_unknown_count() {
+    let banner = compose_banner(
+        "0.1.0",
+        &ProbeOutcome::unreachable(None),
+        &ProbeOutcome::unreachable(None),
+        None,
+    );
+    let last = banner.lines().last().unwrap_or_default();
+    assert!(
+        last.starts_with("daemon unreachable"),
+        "unknown count must read `daemon unreachable`, got: {last:?}"
+    );
+    assert!(
+        last.ends_with(HELP_HINT),
+        "the /help hint must remain even when the count is unknown, got: {last:?}"
+    );
+}
+
+/// Why: §3.1 makes probes fail-safe — a down search daemon yields `○ unreachable`
+/// and never panics or hangs the TUI.
+/// What: probes a guaranteed-dead loopback address and asserts the outcome is
+/// inactive.
+/// Test: this IS the test.
+#[tokio::test]
+async fn probe_unreachable_search_is_inactive() {
+    let outcome = probe_search(Some(&dead_loopback_url())).await;
+    assert!(
+        !outcome.active,
+        "an unreachable search daemon must probe inactive"
+    );
+}
+
+/// Why: §3.1 + D4 make the memory probe fail-safe — a down memory daemon yields
+/// `○ unreachable` with a reason and never panics.
+/// What: probes a guaranteed-dead loopback address and asserts the outcome is
+/// inactive and carries a reason note.
+/// Test: this IS the test.
+#[tokio::test]
+async fn probe_unreachable_memory_is_inactive() {
+    let outcome = probe_memory(Some(&dead_loopback_url())).await;
+    assert!(
+        !outcome.active,
+        "an unreachable memory daemon must probe inactive"
+    );
+    assert!(
+        outcome.note.is_some(),
+        "a degraded memory probe should carry a reason note"
     );
 }
