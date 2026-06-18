@@ -26,6 +26,9 @@ use tracing::info;
 use trusty_code::llm::{LlmClient, LlmClientConfig, LlmClientTrait};
 use trusty_code::run_task::{ExitCode, RunTaskParams, execute_run_task};
 
+/// Environment variable that overrides the engineer model for a single run (#1035).
+const ENGINEER_MODEL_ENV: &str = "TCODE_ENGINEER_MODEL";
+
 /// tcode — per-project Claude-Code-compatible MPM orchestration harness.
 #[derive(Parser)]
 #[command(
@@ -78,6 +81,12 @@ enum Command {
         /// Emit a machine-readable JSON report on stdout instead of human text.
         #[arg(long)]
         json: bool,
+
+        /// Override the python-engineer's model for this run only (#1035).
+        /// Falls back to the `TCODE_ENGINEER_MODEL` env var, then the agent
+        /// config's own model.
+        #[arg(long, value_name = "SLUG")]
+        engineer_model: Option<String>,
     },
 
     /// Execute a named MPM workflow end-to-end.
@@ -116,7 +125,8 @@ async fn main() -> Result<()> {
             task,
             project,
             json,
-        } => run_task(&agent, &task, &project, json).await,
+            engineer_model,
+        } => run_task(&agent, &task, &project, json, engineer_model).await,
 
         Command::RunWorkflow { name, project } => {
             eprintln!(
@@ -163,12 +173,19 @@ fn validate_agent_name(agent_name: &str) -> Result<()> {
 /// unit-tested offline). When `--json` is set, only the JSON report is written to
 /// stdout; logs always go to stderr.
 /// What: Validates the agent name and project path (traversal guards), locates the
-/// agents dir, builds the real `LlmClient` from `OPENROUTER_API_KEY`, runs
+/// agents dir, resolves the engineer-model override (CLI flag > `TCODE_ENGINEER_MODEL`
+/// env), builds the real `LlmClient` from `OPENROUTER_API_KEY`, runs
 /// `execute_run_task`, prints the human or JSON report, and exits with the
 /// report's `ExitCode`. A missing API key is a config error (exit 2).
-/// Test: Orchestration is covered by `run_task::tests`; the wrapper is exercised
-/// manually via `tcode run-task pm "<task>" --project <path>`.
-async fn run_task(agent_name: &str, task: &str, project: &Path, json: bool) -> Result<()> {
+/// Test: Orchestration (incl. the model swap) is covered by `run_task::tests`; the
+/// wrapper is exercised manually via `tcode run-task pm "<task>" --project <path>`.
+async fn run_task(
+    agent_name: &str,
+    task: &str,
+    project: &Path,
+    json: bool,
+    engineer_model_flag: Option<String>,
+) -> Result<()> {
     if let Err(e) = validate_agent_name(agent_name) {
         eprintln!("tcode run-task: {e}");
         process::exit(ExitCode::ConfigError.code());
@@ -189,11 +206,22 @@ async fn run_task(agent_name: &str, task: &str, project: &Path, json: bool) -> R
 
     let agents_dir = locate_agents_dir(&project_root);
 
+    // Engineer-model override (#1035): CLI flag wins, then the env var; an empty
+    // value is treated as "unset" so it falls through to the agent config model.
+    let engineer_model = engineer_model_flag
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var(ENGINEER_MODEL_ENV)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        });
+
     info!(
         agent = agent_name,
         project = %project_root.display(),
         agents_dir = %agents_dir.display(),
         json,
+        engineer_model = engineer_model.as_deref().unwrap_or("(agent default)"),
         "tcode run-task: starting"
     );
 
@@ -211,6 +239,7 @@ async fn run_task(agent_name: &str, task: &str, project: &Path, json: bool) -> R
         task: task.to_string(),
         project: project_root,
         agents_dir,
+        engineer_model,
     };
 
     let report = execute_run_task(params, llm).await;

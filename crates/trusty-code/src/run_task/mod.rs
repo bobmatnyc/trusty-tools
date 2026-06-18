@@ -50,7 +50,8 @@ const ENGINEER_BASH_TIMEOUT_SECS: u64 = 120;
 /// Why: Bundling the inputs keeps `execute_run_task`'s signature stable as flags
 /// are added and lets the binary layer construct one value from clap.
 /// What: `agent` is the top-level (PM) agent name; `task` is the request; `project`
-/// is the canonical project root; `agents_dir` is where `<agent>.toml` live.
+/// is the canonical project root; `agents_dir` is where `<agent>.toml` live;
+/// `engineer_model` is the optional per-run engineer model override (#1035).
 /// Test: `run_task::tests` build these directly.
 #[derive(Debug, Clone)]
 pub struct RunTaskParams {
@@ -62,6 +63,9 @@ pub struct RunTaskParams {
     pub project: PathBuf,
     /// Directory holding `<agent>.toml` configs.
     pub agents_dir: PathBuf,
+    /// Optional per-run engineer model override (#1035). `None` routes the
+    /// engineer via its own config model.
+    pub engineer_model: Option<String>,
 }
 
 /// Execute a `run-task` end-to-end and return the rendered report.
@@ -196,20 +200,66 @@ impl RegistryFactory for ProjectToolFactory {
     }
 }
 
-/// Apply the per-run engineer-model override to the runner, if any.
+/// Apply the per-run engineer-model override to the runner, if any (#1035).
 ///
-/// Why: The engineer routes to its own configured model by default. The per-run
-/// override seam (#1035) lives here so `build_engineer_runner` stays agnostic to
-/// how (or whether) a model is pinned. In this milestone the seam is a
-/// pass-through; #1035 fills it with a model-pinning decorator.
-/// What: Returns the runner unchanged. The `_params` argument is the hook #1035
-/// reads `engineer_model` from.
-/// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer` (default routing).
+/// Why: The engineer routes to its own configured model by default. A per-run
+/// `--engineer-model` (or `TCODE_ENGINEER_MODEL`) must reroute *only* the engineer
+/// for that single run — the model-comparison harness varies the engineer model
+/// while the PM model stays fixed. Keeping the override here lets
+/// `build_engineer_runner` stay agnostic to whether a model is pinned.
+/// What: When `params.engineer_model` is `Some`, wraps the runner in a
+/// `ModelPinningRunner` that injects `RunContext.model` on every delegation;
+/// otherwise returns the runner unchanged.
+/// Test: `run_task::tests::engineer_model_swap_routes_engineer`,
+/// `two_runs_route_engineer_to_distinct_slugs`.
 fn apply_engineer_model_override(
     runner: Arc<dyn AgentRunner>,
-    _params: &RunTaskParams,
+    params: &RunTaskParams,
 ) -> Arc<dyn AgentRunner> {
-    runner
+    match &params.engineer_model {
+        Some(model) => Arc::new(ModelPinningRunner {
+            inner: runner,
+            model: model.clone(),
+        }),
+        None => runner,
+    }
+}
+
+/// An `AgentRunner` decorator that pins a fixed model for every delegation (#1035).
+///
+/// Why: `DelegateToAgentTool::execute` calls `runner.run` with a default
+/// `RunContext`, so the per-run `--engineer-model` override cannot be threaded
+/// through the tool itself. This decorator injects `RunContext.model` and forwards
+/// to `run_with_context`, so the engineer's loop routes to the pinned slug while
+/// the PM model stays fixed.
+/// What: Holds the inner runner and the pinned model; both `run` and
+/// `run_with_context` set `ctx.model` before delegating.
+/// Test: `run_task::tests::engineer_model_swap_routes_engineer`.
+struct ModelPinningRunner {
+    inner: Arc<dyn AgentRunner>,
+    model: String,
+}
+
+#[async_trait]
+impl AgentRunner for ModelPinningRunner {
+    async fn run(&self, agent_name: &str, task: &str) -> Result<AgentOutput> {
+        let ctx = RunContext {
+            model: Some(self.model.clone()),
+            ..Default::default()
+        };
+        self.inner.run_with_context(agent_name, task, &ctx).await
+    }
+
+    async fn run_with_context(
+        &self,
+        agent_name: &str,
+        task: &str,
+        ctx: &RunContext,
+    ) -> Result<AgentOutput> {
+        let mut ctx = ctx.clone();
+        ctx.model = Some(self.model.clone());
+        self.inner.run_with_context(agent_name, task, &ctx).await
+    }
 }
 
 /// Drain the shared transcript into an owned `Vec`.

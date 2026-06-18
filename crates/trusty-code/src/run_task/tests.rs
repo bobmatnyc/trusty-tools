@@ -12,8 +12,8 @@
 //! dir; tests assert on the returned `RunReport`.
 //! Test: this module is itself the test surface.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -24,17 +24,19 @@ use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
 
 // ── Scripted offline LLM ───────────────────────────────────────────────────────
 
-/// Replays a fixed queue of responses in call order.
+/// Replays a fixed queue of responses and records every request's model.
 ///
 /// Why: Deterministic, offline substitute for the network client shared by the
-/// PM and engineer loops. The transcript recorder captures each turn's model from
-/// the response side, so the tests assert routing via `report.transcript`.
-/// What: Holds JSON-deserialised responses and an atomic cursor. Exhaustion yields
-/// a transport-style error so a runaway loop fails loudly rather than hanging.
+/// PM and engineer loops. Recording the per-request model lets the #1035 tests
+/// assert which slug drove the engineer's turns (alongside the transcript).
+/// What: Holds JSON-deserialised responses, an atomic cursor, and a log of the
+/// models seen. Exhaustion yields a transport-style error so a runaway loop fails
+/// loudly rather than hanging.
 /// Test: Used by every test below.
 struct ScriptedLlm {
     responses: Vec<ChatResponse>,
     cursor: AtomicUsize,
+    models: Mutex<Vec<String>>,
 }
 
 impl ScriptedLlm {
@@ -46,14 +48,23 @@ impl ScriptedLlm {
         Self {
             responses,
             cursor: AtomicUsize::new(0),
+            models: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Every model slug the client was asked to use, in call order.
+    fn models_seen(&self) -> Vec<String> {
+        self.models.lock().expect("models lock").clone()
     }
 }
 
 #[async_trait]
 impl LlmClientTrait for ScriptedLlm {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
-        let _ = req;
+        self.models
+            .lock()
+            .expect("models lock")
+            .push(req.model.clone());
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         match self.responses.get(idx) {
             Some(resp) => Ok(resp.clone()),
@@ -149,14 +160,15 @@ fn agents_dir(engineer_model: &str) -> TempDir {
 
 /// Build the standard params for a run against the given dirs.
 ///
-/// The `_engineer_model` slot is the #1035 hook; it is unused in the #1034 tests
-/// (the engineer routes via its own config model) and wired up in #1035.
-fn params(agents: &TempDir, project: &TempDir, _engineer_model: Option<&str>) -> RunTaskParams {
+/// The `engineer_model` slot carries the per-run `--engineer-model` override
+/// (#1035); `None` routes the engineer via its own config model.
+fn params(agents: &TempDir, project: &TempDir, engineer_model: Option<&str>) -> RunTaskParams {
     RunTaskParams {
         agent: "pm".into(),
         task: "write hello.py".into(),
         project: project.path().to_path_buf(),
         agents_dir: agents.path().to_path_buf(),
+        engineer_model: engineer_model.map(str::to_string),
     }
 }
 
@@ -298,6 +310,7 @@ async fn missing_pm_config_is_config_error() {
             task: "anything".into(),
             project: project.path().to_path_buf(),
             agents_dir: empty_agents.path().to_path_buf(),
+            engineer_model: None,
         },
         llm,
     )
@@ -362,4 +375,99 @@ async fn report_json_is_parseable() {
     assert_eq!(parsed["status"], "success");
     assert!(parsed["diff"].as_str().unwrap().contains("j.py"));
     assert!(parsed["transcript"].as_array().unwrap().len() >= 2);
+}
+
+// ── #1035: per-run engineer model swap ──────────────────────────────────────────
+
+/// `engineer_model` override routes the engineer's turns to the given slug while
+/// the PM model stays fixed.
+///
+/// Why: The #1035 acceptance criterion — a per-run `--engineer-model` reroutes
+/// only the engineer; the PM model is unchanged.
+/// What: Engineer config pins `deepseek/deepseek-chat`, but the run overrides it
+/// to `anthropic/claude-haiku-4-5`. Assert the engineer transcript turns carry the
+/// override slug and the PM turns carry the PM model.
+/// Test: this test.
+#[tokio::test]
+async fn engineer_model_swap_routes_engineer() {
+    let agents = agents_dir("deepseek/deepseek-chat");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        delegate_response("create s.py"),
+        write_file_response("s.py", "z=3"),
+        stop_response("engineer done"),
+        stop_response("pm done"),
+    ]));
+
+    let report = execute_run_task(
+        params(&agents, &project, Some("anthropic/claude-haiku-4-5")),
+        llm,
+    )
+    .await;
+
+    // Engineer turns must carry the OVERRIDE slug, not the config slug.
+    let eng_models: Vec<&str> = report
+        .transcript
+        .iter()
+        .filter(|t| t.role == "python-engineer")
+        .map(|t| t.model.as_str())
+        .collect();
+    assert!(!eng_models.is_empty(), "expected engineer turns");
+    assert!(
+        eng_models
+            .iter()
+            .all(|m| *m == "anthropic/claude-haiku-4-5"),
+        "engineer turns must route to the override slug, got: {eng_models:?}"
+    );
+
+    // PM turns must keep the PM model.
+    let pm_models: Vec<&str> = report
+        .transcript
+        .iter()
+        .filter(|t| t.role == "pm")
+        .map(|t| t.model.as_str())
+        .collect();
+    assert!(
+        pm_models.iter().all(|m| *m == "openai/gpt-4o-mini"),
+        "PM turns must keep the PM model, got: {pm_models:?}"
+    );
+}
+
+/// Two runs with different `--engineer-model` slugs route the engineer to each.
+///
+/// Why: Criterion (a) of #1035 — distinct slugs route distinctly across runs.
+/// What: Run twice with two different override slugs; assert each run's engineer
+/// turns carry its own slug.
+/// Test: this test.
+#[tokio::test]
+async fn two_runs_route_engineer_to_distinct_slugs() {
+    for slug in ["openai/gpt-4o", "anthropic/claude-sonnet-4-6"] {
+        let agents = agents_dir("deepseek/deepseek-chat");
+        let project = tempfile::tempdir().expect("project tempdir");
+        let llm = Arc::new(ScriptedLlm::from_json(&[
+            delegate_response("create m.py"),
+            write_file_response("m.py", "v=1"),
+            stop_response("engineer done"),
+            stop_response("pm done"),
+        ]));
+
+        let report = execute_run_task(params(&agents, &project, Some(slug)), llm.clone()).await;
+
+        let eng_models: Vec<String> = report
+            .transcript
+            .iter()
+            .filter(|t| t.role == "python-engineer")
+            .map(|t| t.model.clone())
+            .collect();
+        assert!(
+            eng_models.iter().all(|m| m == slug),
+            "engineer must route to {slug}, got: {eng_models:?}"
+        );
+        // Confirm the model log on the scripted client also saw the slug.
+        assert!(
+            llm.models_seen().iter().any(|m| m == slug),
+            "scripted client must have seen {slug}"
+        );
+    }
 }
