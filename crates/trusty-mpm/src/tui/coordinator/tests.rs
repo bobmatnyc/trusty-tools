@@ -508,6 +508,10 @@ fn parse_slash_recognises_known_commands() {
     assert_eq!(parse_slash("/stop"), Some(SlashCommand::Stop));
     assert_eq!(parse_slash("/resume"), Some(SlashCommand::Resume));
     assert_eq!(parse_slash("/kill"), Some(SlashCommand::Kill));
+    // `/health` and its operator aliases all classify as the health verb.
+    assert_eq!(parse_slash("/health"), Some(SlashCommand::Health));
+    assert_eq!(parse_slash("/healthcheck"), Some(SlashCommand::Health));
+    assert_eq!(parse_slash("/ping"), Some(SlashCommand::Health));
     // Case-insensitive on the verb.
     assert_eq!(parse_slash("/HELP"), Some(SlashCommand::Help));
 }
@@ -1208,6 +1212,11 @@ fn route_slash_maps_to_command() {
         Dispatch::Command(TrustyCommand::ManagedList)
     );
     assert_eq!(route("/help", None), Dispatch::Command(TrustyCommand::Help));
+    // `/health` is a no-target ops verb routing straight to TrustyCommand::Health.
+    assert_eq!(
+        route("/health", None),
+        Dispatch::Command(TrustyCommand::Health)
+    );
     assert_eq!(
         route("/stop red-owl", None),
         Dispatch::Command(TrustyCommand::ManagedRuntimeStop {
@@ -1538,4 +1547,33 @@ fn render_result_renders_help() {
     assert_eq!(lines.len(), 2);
     assert_eq!(line_text(&lines[0]), "line one");
     assert_eq!(line_text(&lines[1]), "line two");
+}
+
+#[test]
+fn render_result_renders_health() {
+    use crate::client::HealthReport;
+    // A reachable daemon renders a heading + catalog + fleet detail lines.
+    let up = render_result(&CommandResult::Health(HealthReport {
+        reachable: true,
+        url: "http://127.0.0.1:7880".into(),
+        status: "ok".into(),
+        catalog_stale: false,
+        catalog_unknown: false,
+        managed_total: 2,
+        managed_pending_decisions: 0,
+    }));
+    let up_joined = up.iter().map(line_text).collect::<Vec<_>>().join("\n");
+    assert!(up_joined.contains("daemon ok"));
+    assert!(up_joined.contains("up to date"));
+    assert!(up_joined.contains("2 session(s)"));
+
+    // A dead daemon renders a single unreachable line.
+    let down = render_result(&CommandResult::Health(HealthReport {
+        reachable: false,
+        url: "http://127.0.0.1:0".into(),
+        status: "unreachable".into(),
+        ..HealthReport::default()
+    }));
+    assert_eq!(down.len(), 1);
+    assert!(line_text(&down[0]).contains("unreachable"));
 }

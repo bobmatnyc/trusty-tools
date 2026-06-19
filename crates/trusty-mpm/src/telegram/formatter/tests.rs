@@ -266,3 +266,34 @@ fn snapshot_escapes_html() {
     let text = TelegramFormatter::format(&result);
     assert!(text.contains("&lt;script&gt;"));
 }
+
+#[test]
+fn format_health_up_and_down() {
+    use crate::client::HealthReport;
+    // A reachable daemon renders the liveness line, catalog state, and fleet counts.
+    let up = CommandResult::Health(HealthReport {
+        reachable: true,
+        url: "http://127.0.0.1:7880".into(),
+        status: "ok".into(),
+        catalog_stale: true,
+        catalog_unknown: false,
+        managed_total: 3,
+        managed_pending_decisions: 1,
+    });
+    let up_text = TelegramFormatter::format(&up);
+    assert!(up_text.contains("daemon"));
+    assert!(up_text.contains("updates available"));
+    assert!(up_text.contains("3 session(s)"));
+    assert!(up_text.contains("1 awaiting a decision"));
+
+    // A dead daemon renders only the unreachable line (no misleading zero fleet).
+    let down = CommandResult::Health(HealthReport {
+        reachable: false,
+        url: "http://127.0.0.1:0".into(),
+        status: "unreachable".into(),
+        ..HealthReport::default()
+    });
+    let down_text = TelegramFormatter::format(&down);
+    assert!(down_text.contains("unreachable"));
+    assert!(!down_text.contains("fleet:"));
+}

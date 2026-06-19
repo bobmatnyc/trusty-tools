@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 
 mod sm_tools;
 
-pub use sm_tools::{render_sm_tools, sm_session_verbs};
+pub use sm_tools::{render_sm_tools, sm_ops_verbs, sm_session_verbs};
 
 /// How a catalog entry relates to the typed [`TrustyCommand`] surface.
 ///
@@ -297,6 +297,17 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "decommission a managed session (terminal; removes workspace)",
         kind: SpecKind::Command,
     },
+    // ── Ops / diagnostics ───────────────────────────────────────────────────
+    CommandSpec {
+        name: "health",
+        // `status` is intentionally NOT an alias — it is already the
+        // project-session status verb, so reusing it would collide. `healthcheck`
+        // and `ping` are the natural operator spellings.
+        aliases: &["healthcheck", "ping"],
+        args: "",
+        summary: "report daemon health (reachability, catalog freshness, fleet)",
+        kind: SpecKind::Command,
+    },
     CommandSpec {
         name: "help",
         aliases: &[],
@@ -386,9 +397,45 @@ mod tests {
             "managed-stop",
             "managed-resume",
             "managed-decommission",
+            "health",
             "help",
         ] {
             assert!(names.contains(&expected), "catalog missing `{expected}`");
+        }
+    }
+
+    #[test]
+    fn health_verb_has_expected_aliases_and_no_status_collision() {
+        // `health` carries the operator-friendly spellings but NEVER `status`,
+        // which is already the project-session status verb (a collision).
+        let health = catalog()
+            .iter()
+            .find(|c| c.name == "health")
+            .expect("catalog has a health verb");
+        assert!(health.aliases.contains(&"healthcheck"));
+        assert!(health.aliases.contains(&"ping"));
+        assert!(
+            !health.aliases.contains(&"status"),
+            "`status` must not alias health — it is the session status verb"
+        );
+        assert_eq!(health.kind, SpecKind::Command);
+    }
+
+    #[test]
+    fn catalog_has_no_duplicate_command_names_or_aliases() {
+        // Every dispatchable verb's canonical name AND each alias must be unique
+        // across the catalog, so a parsed token resolves to exactly one verb.
+        use std::collections::HashSet;
+        let mut seen: HashSet<&str> = HashSet::new();
+        for spec in catalog().iter().filter(|c| c.kind == SpecKind::Command) {
+            assert!(
+                seen.insert(spec.name),
+                "duplicate verb name `{}`",
+                spec.name
+            );
+            for alias in spec.aliases {
+                assert!(seen.insert(alias), "duplicate alias `{alias}`");
+            }
         }
     }
 
@@ -424,6 +471,7 @@ mod tests {
             "/managed-stop",
             "/managed-resume",
             "/managed-decommission",
+            "/health",
             "/help",
         ] {
             assert!(text.contains(cmd), "help text missing {cmd}");

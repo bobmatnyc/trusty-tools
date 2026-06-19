@@ -85,6 +85,38 @@ pub struct RecommendationSummary {
     pub message: String,
 }
 
+/// A daemon health snapshot for the `health` verb.
+///
+/// Why: the `health` verb must report a genuinely useful, transport-free picture
+/// of the stack in one shape every adapter can render — whether the daemon is
+/// reachable, what its `/health` probe reports (liveness + catalog freshness),
+/// and a quick fleet summary (how many managed sessions, how many are blocked on
+/// an operator decision). A dead daemon is conveyed by `reachable: false` rather
+/// than an error, so the result is always renderable.
+/// What: `reachable` is false when the daemon could not be reached at all (the
+/// remaining fields then carry their defaults); `status` is the daemon's liveness
+/// word (`"ok"`, or `"unreachable"` when down); `catalog_stale`/`catalog_unknown`
+/// mirror the `/health` flags; `managed_total` counts managed sessions and
+/// `managed_pending_decisions` counts those blocked on a pending decision.
+/// Test: covered by the executor's `execute_health_*` tests.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HealthReport {
+    /// Whether the daemon was reachable at all (false → the daemon is down).
+    pub reachable: bool,
+    /// Daemon URL the probe targeted.
+    pub url: String,
+    /// Liveness word from `GET /health` (`"unreachable"` when the daemon is down).
+    pub status: String,
+    /// True when deployed agents/skills drift from the synced catalog (HR-3).
+    pub catalog_stale: bool,
+    /// True when the catalog has never been synced (nothing to compare).
+    pub catalog_unknown: bool,
+    /// Total number of managed sessions (0 when unreachable).
+    pub managed_total: usize,
+    /// How many managed sessions are blocked on a pending operator decision.
+    pub managed_pending_decisions: usize,
+}
+
 /// The structured, UI-agnostic outcome of executing a [`crate::TrustyCommand`].
 ///
 /// Why: keeping the result structured (not a string) lets each UI format it in
@@ -209,6 +241,8 @@ pub enum CommandResult {
     },
     /// `/help` — the command list text.
     Help(String),
+    /// `/health` — a daemon health snapshot (reachability + catalog + fleet).
+    Health(HealthReport),
 
     // ── Managed session-manager outcomes (`/api/v1/sessions/managed/*`) ──────
     /// `managed-new` — a managed session was spawned.

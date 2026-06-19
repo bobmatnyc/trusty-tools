@@ -85,6 +85,12 @@ fn cli_parses_doctor() {
 }
 
 #[test]
+fn cli_parses_health() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "health"]).unwrap();
+    assert!(matches!(cli.command, Command::Health));
+}
+
+#[test]
 fn cli_parses_project_init() {
     let cli = Cli::try_parse_from(["trusty-mpm", "project", "init"]).unwrap();
     match cli.command {

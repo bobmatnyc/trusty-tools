@@ -49,6 +49,8 @@ pub enum SlashCommand {
     Activity,
     /// `/get` (aliases `/status`, `/managed-get`) — fetch a session's record.
     Get,
+    /// `/health` (aliases `/healthcheck`, `/ping`) — report daemon health.
+    Health,
     /// A leading-`/` token that matched none of the known commands.
     Unknown(String),
 }
@@ -109,6 +111,7 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
         "answer" | "approve" | "managed-answer" => SlashCommand::Answer,
         "activity" | "managed-activity" => SlashCommand::Activity,
         "get" | "status" | "managed-get" => SlashCommand::Get,
+        "health" | "healthcheck" | "ping" => SlashCommand::Health,
         other => SlashCommand::Unknown(other.to_string()),
     };
     Some(cmd)

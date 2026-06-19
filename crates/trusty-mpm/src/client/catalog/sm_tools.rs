@@ -73,6 +73,30 @@ const SM_SESSION_VERBS: &[CommandSpec] = &[
     },
 ];
 
+/// The action-loop OPS verbs — advertised + executable, but NOT in `SM_TOOLS.md`.
+///
+/// Why: the action-capable coordinator chat (#1496) must be able to run a daemon
+/// `health` check inline, but `health` is an OPERATOR/ops diagnostic — it does
+/// NOT belong in the SM's session-control / memory / goals prompt tables that
+/// `render_sm_tools()` emits. Keeping ops verbs in a SEPARATE slice that
+/// `render_sm_tools()` does NOT render lets the action loop advertise and execute
+/// `health` while the committed `SM_TOOLS.md` asset stays byte-identical (the
+/// parity test needs no asset regen). These verbs carry the namespaced
+/// `sessions.*` spelling so the action-loop prompt and dispatch stay uniform with
+/// [`SM_SESSION_VERBS`].
+/// What: the ops verb slice the action loop appends to [`SM_SESSION_VERBS`] —
+/// currently just `sessions.health`.
+/// Test: `sm_ops_verbs_exposes_health`; `chat_action_tests.rs` asserts the prompt
+/// lists `sessions.health` and that it dispatches; the SM-tools parity test proves
+/// these are NOT rendered into `SM_TOOLS.md`.
+const SM_OPS_VERBS: &[CommandSpec] = &[CommandSpec {
+    name: "sessions.health",
+    aliases: &[],
+    args: "",
+    summary: "Report daemon health: reachability, catalog freshness, and a fleet summary",
+    kind: SpecKind::SmOnly,
+}];
+
 /// The SM memory verbs (prompt table only).
 const SM_MEMORY_VERBS: &[CommandSpec] = &[
     CommandSpec {
@@ -140,6 +164,20 @@ const SM_GOAL_VERBS: &[CommandSpec] = &[
 /// `chat_action.rs` tests assert the rendered prompt lists these verbs.
 pub fn sm_session_verbs() -> &'static [CommandSpec] {
     SM_SESSION_VERBS
+}
+
+/// The action-loop OPS verbs (advertised + executable; NOT in `SM_TOOLS.md`).
+///
+/// Why: the action-capable chat (#1496) advertises and executes ops diagnostics
+/// like `health` IN ADDITION to the session-control verbs, but those ops verbs
+/// must not pollute the SM prompt's three tables. Exposing them as a separate
+/// slice that `render_sm_tools()` ignores keeps the committed `SM_TOOLS.md`
+/// byte-identical (no asset regen) while the action loop still gains the verb.
+/// What: returns the [`SM_OPS_VERBS`] slice — currently `sessions.health`.
+/// Test: `sm_ops_verbs_exposes_health` (this module); `chat_action_tests.rs`
+/// asserts the prompt lists and dispatches it.
+pub fn sm_ops_verbs() -> &'static [CommandSpec] {
+    SM_OPS_VERBS
 }
 
 /// Render one prompt-table row for a [`CommandSpec`].
@@ -272,6 +310,33 @@ mod tests {
             "sessions.kill",
         ] {
             assert!(names.contains(&expected), "missing SM verb `{expected}`");
+        }
+    }
+
+    #[test]
+    fn sm_ops_verbs_exposes_health() {
+        // The action-loop ops slice must advertise `sessions.health` so the
+        // self-aware chat can run a health check inline.
+        let names: Vec<&str> = sm_ops_verbs().iter().map(|c| c.name).collect();
+        assert!(
+            names.contains(&"sessions.health"),
+            "missing ops health verb"
+        );
+    }
+
+    #[test]
+    fn render_sm_tools_omits_ops_verbs() {
+        // The ops verbs are deliberately NOT rendered into SM_TOOLS.md, so adding
+        // `health` requires no asset regen — the parity test stays green. This
+        // guard pins that decision: if a future change starts rendering ops verbs
+        // into the prompt, this fails and forces a conscious asset regen.
+        let rendered = render_sm_tools();
+        for spec in SM_OPS_VERBS {
+            assert!(
+                !rendered.contains(spec.name),
+                "ops verb `{}` leaked into SM_TOOLS.md render (would need asset regen)",
+                spec.name
+            );
         }
     }
 

@@ -20,7 +20,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::client::{CommandResult, ManagedSessionView};
+use crate::client::{CommandResult, HealthReport, ManagedSessionView};
 
 /// The style for an error line in the output log.
 ///
@@ -106,11 +106,43 @@ pub fn render_result(result: &CommandResult) -> Vec<Line<'static>> {
             "{action} {name} [{state}] ({})",
             short(id)
         ))],
+        CommandResult::Health(report) => render_health(report),
         // The coordinator does not invoke the legacy project-session/pairing
         // family, but the formatter stays total: render a compact, debug-style
         // fallback so any unexpected variant is still visible rather than blank.
         other => vec![Line::from(format!("{other:?}"))],
     }
+}
+
+/// Render a [`HealthReport`] as a heading plus detail lines.
+///
+/// Why: the `/health` reply in the TUI output log should lead with daemon up/down
+/// (the heading style), then the catalog and fleet detail.
+/// What: an "daemon ok/unreachable" heading; when reachable, detail lines for the
+/// catalog freshness and the fleet counts; when down, an error-styled line only.
+/// Test: `render_result_renders_health` in `super::tests`.
+fn render_health(report: &HealthReport) -> Vec<Line<'static>> {
+    if !report.reachable {
+        return vec![Line::from(Span::styled(
+            format!("✗ daemon unreachable ({})", report.url),
+            error_style(),
+        ))];
+    }
+    let catalog = if report.catalog_unknown {
+        "catalog: never synced"
+    } else if report.catalog_stale {
+        "catalog: updates available"
+    } else {
+        "catalog: up to date"
+    };
+    vec![
+        heading_line(format!("daemon {} ({})", report.status, report.url)),
+        detail_line(catalog.to_string()),
+        detail_line(format!(
+            "fleet: {} session(s), {} awaiting a decision",
+            report.managed_total, report.managed_pending_decisions
+        )),
+    ]
 }
 
 /// Render the managed-session list as a heading plus one row per session.

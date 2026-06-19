@@ -102,6 +102,8 @@ pub(crate) enum Command {
     Events,
     /// Run a full system diagnostic of the trusty-mpm stack.
     Doctor,
+    /// Report daemon health: reachability, catalog freshness, and a fleet summary.
+    Health,
     /// Launch the ratatui multi-session TUI dashboard.
     Tui {
         /// Base URL of the trusty-mpm daemon.
