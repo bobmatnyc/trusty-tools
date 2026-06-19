@@ -390,6 +390,40 @@ mod tests {
         );
     }
 
+    /// Why (issue #1487): the HTTP daemon opens with `OpenIntent::Writer`.
+    /// When a second live instance already holds the redb write lock, the
+    /// Writer open MUST fail loud (after the bounded handoff window) and MUST
+    /// NOT degrade to a read-only snapshot — otherwise the daemon would
+    /// silently reject every write for its lifetime (the original bug).
+    /// What: Seeds a palace file, drops the seeding store so the cache entry
+    /// expires, holds the file lock with a raw `Database::create`, then calls
+    /// `KgStoreRedb::open_with_intent(.., Writer)`. The call must return `Err`
+    /// whose message names the lock conflict — never an `Ok` snapshot handle.
+    /// Test: this test.
+    #[test]
+    fn writer_intent_open_fails_loud_on_locked_file() {
+        use crate::memory_core::store::concurrent_open::OpenIntent;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        // Touch the file so it has the redb header, then expire the cache.
+        drop(KgStoreRedb::open(&path).unwrap());
+        let _live = lock_redb_file(&path);
+
+        let result = KgStoreRedb::open_with_intent(&path, OpenIntent::Writer);
+        // Match rather than `unwrap_err()` so we don't require KgStoreRedb: Debug.
+        let err = match result {
+            Ok(_) => {
+                panic!("Writer open on a locked file must fail loud, not return a snapshot handle")
+            }
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("still locked") || msg.contains("write access"),
+            "Writer error must name the lock conflict; got: {msg}"
+        );
+    }
+
     /// Why: Cached in-process handles to the same canonical path must be
     /// usable concurrently — multiple tasks holding cloned `KgStoreRedb`
     /// handles must each be able to issue reads simultaneously without

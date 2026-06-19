@@ -15,6 +15,7 @@
 use crate::memory_core::community::KnowledgeGap;
 use crate::memory_core::palace::{Palace, PalaceId};
 use crate::memory_core::retrieval::PalaceHandle;
+use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::palace_store::PalaceStore;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -67,6 +68,18 @@ pub struct PalaceRegistry {
     /// readers should treat that as an empty list, not an error.
     /// Test: `gaps_cache_round_trip` in this module.
     gaps_cache: Arc<DashMap<PalaceId, Vec<KnowledgeGap>>>,
+    /// Redb open intent applied to every palace this registry opens.
+    ///
+    /// Why (issue #1487): the HTTP daemon is the sole writer and must open
+    /// palace redb files with [`OpenIntent::Writer`] so a second daemon
+    /// instance fails loud instead of silently degrading to a read-only
+    /// snapshot. All other registries (CLI, stdio MCP, tests) default to
+    /// [`OpenIntent::ReadOnlyClient`] to preserve the snapshot read-fallback
+    /// (issue #59). The daemon opts in via [`PalaceRegistry::with_writer_intent`].
+    /// What: `Copy` enum carried by value; threaded into `open_palace`,
+    /// `create_palace`, and the eager `open` hydration path.
+    /// Test: `with_writer_intent_sets_writer_open_intent`.
+    open_intent: OpenIntent,
 }
 
 impl Default for PalaceRegistry {
@@ -99,7 +112,41 @@ impl PalaceRegistry {
         Self {
             handles: Arc::new(Mutex::new(LruCache::new(cap))),
             gaps_cache: Arc::new(DashMap::new()),
+            // Default to read-only-client intent so CLI / stdio / test
+            // registries keep the issue-#59 snapshot read-fallback. The HTTP
+            // daemon overrides this via `with_writer_intent` (issue #1487).
+            open_intent: OpenIntent::ReadOnlyClient,
         }
+    }
+
+    /// Mark this registry as the sole writer: open every palace with
+    /// [`OpenIntent::Writer`].
+    ///
+    /// Why (issue #1487): the HTTP daemon must fail loud when another live
+    /// daemon already holds a palace's redb write lock, rather than silently
+    /// opening a read-only snapshot and rejecting every write for its
+    /// lifetime (the original bug — a rogue second listener served read-only
+    /// and the legitimate `memory_remember` was lost). Calling this on the
+    /// daemon's registry threads `Writer` intent down to every
+    /// `PalaceHandle::open_with_intent`.
+    /// What: Consuming builder that sets `open_intent = OpenIntent::Writer`
+    /// and returns `self`. All `Arc`-shared state is preserved.
+    /// Test: `with_writer_intent_sets_writer_open_intent`.
+    #[must_use]
+    pub fn with_writer_intent(mut self) -> Self {
+        self.open_intent = OpenIntent::Writer;
+        self
+    }
+
+    /// The redb open intent this registry applies to every palace it opens.
+    ///
+    /// Why: Lets the daemon assert (in tests / diagnostics) that it really is
+    /// running as the writer, and lets callers branch if needed.
+    /// What: Returns the `Copy` `OpenIntent` value.
+    /// Test: `with_writer_intent_sets_writer_open_intent`.
+    #[must_use]
+    pub fn open_intent(&self) -> OpenIntent {
+        self.open_intent
     }
 
     /// Insert a new palace handle, replacing any prior entry with the same id.
@@ -264,7 +311,10 @@ impl PalaceRegistry {
         let palace_dir = data_root.join(palace_id.as_str());
         let palace = PalaceStore::load_palace(&palace_dir)
             .with_context(|| format!("load palace metadata for {palace_id}"))?;
-        let handle = PalaceHandle::open(&palace)?;
+        // Issue #1487: honour the registry's open intent. On the HTTP daemon
+        // (`Writer`) a second live instance holding the lock makes this fail
+        // loud rather than returning a snapshot-mode (read-only) handle.
+        let handle = PalaceHandle::open_with_intent(&palace, self.open_intent)?;
         self.register_arc(handle.clone());
         Ok(handle)
     }
@@ -287,7 +337,10 @@ impl PalaceRegistry {
             .with_context(|| format!("create palace dir {}", palace_dir.display()))?;
         PalaceStore::save_palace(&palace)
             .with_context(|| format!("save palace metadata for {}", palace.id))?;
-        let handle = PalaceHandle::open(&palace)?;
+        // Issue #1487: honour the registry's open intent (Writer on the HTTP
+        // daemon) so a freshly-created palace is opened under the same
+        // fail-loud contract as a re-opened one.
+        let handle = PalaceHandle::open_with_intent(&palace, self.open_intent)?;
         self.register_arc(handle.clone());
         Ok(handle)
     }
@@ -330,7 +383,12 @@ impl PalaceRegistry {
         let palaces = PalaceStore::list_palaces(data_root)
             .with_context(|| format!("list palaces under {}", data_root.display()))?;
         for palace in palaces {
-            match PalaceHandle::open(&palace) {
+            // Use the registry's configured intent (issue #1487). The eager
+            // hydration constructor builds a `ReadOnlyClient` registry via
+            // `Self::new()`, so this preserves the historical snapshot-fallback
+            // behaviour while staying correct if a future caller hydrates a
+            // writer registry.
+            match PalaceHandle::open_with_intent(&palace, registry.open_intent) {
                 Ok(handle) => registry.register_arc(handle),
                 Err(e) => {
                     tracing::warn!(palace = %palace.id, "skipping palace during registry open: {e:#}");
@@ -361,6 +419,30 @@ mod tests {
         reg.register(make_handle("alpha", dir.path()));
         let h = reg.get(&PalaceId::new("alpha")).expect("registered");
         assert_eq!(h.id.as_str(), "alpha");
+    }
+
+    /// Why (issue #1487): a default registry must open palaces as a read-only
+    /// client (preserving the snapshot fallback for CLI / stdio / tests),
+    /// while a registry built with `with_writer_intent` must open as a writer
+    /// (fail-loud on a held lock) — this is what the HTTP daemon relies on.
+    /// What: Asserts the default `open_intent()` is `ReadOnlyClient` and that
+    /// `with_writer_intent()` flips it to `Writer`.
+    /// Test: this test.
+    #[test]
+    fn with_writer_intent_sets_writer_open_intent() {
+        let default_reg = PalaceRegistry::new();
+        assert_eq!(
+            default_reg.open_intent(),
+            OpenIntent::ReadOnlyClient,
+            "default registry must open palaces read-only (snapshot fallback)"
+        );
+
+        let writer_reg = PalaceRegistry::new().with_writer_intent();
+        assert_eq!(
+            writer_reg.open_intent(),
+            OpenIntent::Writer,
+            "with_writer_intent() must mark the registry as a writer"
+        );
     }
 
     /// Why: Issue #180 — palace deletion must invalidate the in-memory
