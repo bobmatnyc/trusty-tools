@@ -364,6 +364,114 @@ async fn pair_confirm_unknown_code_errors() {
 }
 
 #[tokio::test]
+async fn execute_managed_list_against_test_daemon() {
+    // With no managed sessions provisioned, `managed-list` returns an empty
+    // (but well-formed) list against the live managed route — never an error.
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor.execute(TrustyCommand::ManagedList).await {
+        CommandResult::ManagedSessions(list) => assert!(list.is_empty()),
+        other => panic!("expected ManagedSessions, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_managed_get_unknown_errors() {
+    // A target that resolves against no managed session is a renderable error,
+    // not a panic.
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor
+        .execute(TrustyCommand::ManagedGet {
+            target: "no-such-managed".into(),
+        })
+        .await
+    {
+        CommandResult::Error(msg) => assert!(msg.contains("not found")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_managed_answer_unknown_errors() {
+    // The corrected decision-answer path: answering an unknown managed session
+    // resolves to a not-found error (it never falls through to a synthetic hook).
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor
+        .execute(TrustyCommand::ManagedAnswer {
+            target: "no-such-managed".into(),
+            answer: "yes".into(),
+        })
+        .await
+    {
+        CommandResult::Error(msg) => assert!(msg.contains("not found")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_managed_answer_empty_errors() {
+    // An empty answer is rejected before any HTTP call.
+    let executor = CommandExecutor::new("http://unused");
+    match executor
+        .execute(TrustyCommand::ManagedAnswer {
+            target: "x".into(),
+            answer: "   ".into(),
+        })
+        .await
+    {
+        CommandResult::Error(msg) => assert!(msg.contains("answer")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_managed_lifecycle_unknown_errors() {
+    // stop / resume / decommission of an unknown managed target all error.
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    for cmd in [
+        TrustyCommand::ManagedRuntimeStop {
+            target: "no-such".into(),
+        },
+        TrustyCommand::ManagedResume {
+            target: "no-such".into(),
+        },
+        TrustyCommand::ManagedDecommission {
+            target: "no-such".into(),
+        },
+    ] {
+        match executor.execute(cmd).await {
+            CommandResult::Error(msg) => assert!(msg.contains("not found")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn execute_managed_verbs_error_when_daemon_unreachable() {
+    // Every target-taking managed verb surfaces an unreachable daemon as a
+    // renderable Error rather than panicking.
+    let executor = CommandExecutor::new("http://127.0.0.1:0");
+    let cmds = [
+        TrustyCommand::ManagedGet { target: "x".into() },
+        TrustyCommand::ManagedActivity { target: "x".into() },
+        TrustyCommand::ManagedAttachCmd { target: "x".into() },
+        TrustyCommand::ManagedSend {
+            target: "x".into(),
+            text: "hi".into(),
+        },
+    ];
+    for cmd in cmds {
+        match executor.execute(cmd).await {
+            CommandResult::Error(_) => {}
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn pair_request_then_confirm_succeeds() {
     // The full handshake: request a code, confirm it, then status is paired.
     let (_state, url) = spawn_test_daemon().await;

@@ -209,6 +209,138 @@ pub enum CommandResult {
     },
     /// `/help` — the command list text.
     Help(String),
+
+    // ── Managed session-manager outcomes (`/api/v1/sessions/managed/*`) ──────
+    /// `managed-new` — a managed session was spawned.
+    ///
+    /// Why: the operator needs the new session's identity and the exact tmux
+    /// command to attach to it immediately after a spawn.
+    /// What: the new session's id, friendly name, lifecycle state, runtime
+    /// backend, and the attach command string.
+    ManagedSpawned {
+        /// Managed session id (UUID string).
+        id: String,
+        /// tmux session name.
+        name: String,
+        /// Current lifecycle state word.
+        state: String,
+        /// Runtime backend (`claude-code` | `tcode`).
+        runtime: String,
+        /// tmux attach command string.
+        attach_cmd: String,
+    },
+    /// `managed-list` — the managed session-manager session list.
+    ManagedSessions(Vec<ManagedSessionView>),
+    /// `managed-get` — one managed session's record.
+    ManagedSession(ManagedSessionView),
+    /// `managed-send` — text was injected into a managed session's pane.
+    ManagedSent {
+        /// The resolved managed session id.
+        id: String,
+        /// tmux session name the text was sent to.
+        tmux_name: String,
+    },
+    /// `managed-answer` — a pending decision was answered.
+    ///
+    /// Why: confirms the real `.../answer` endpoint accepted the operator's
+    /// decision so the harness unblocks.
+    /// What: the resolved session id, the answer injected, and the tmux name.
+    ManagedAnswered {
+        /// The resolved managed session id.
+        id: String,
+        /// The answer text that was injected.
+        answer: String,
+        /// tmux session name the answer was sent to.
+        tmux_name: String,
+    },
+    /// `managed-activity` — a managed session's activity snapshot.
+    ManagedActivity {
+        /// The resolved managed session id.
+        id: String,
+        /// Classified activity state (`unknown` when no classifier ran).
+        state: String,
+        /// Human-readable summary of what the session is doing.
+        summary: String,
+        /// Raw pane content (last lines).
+        raw_pane: String,
+        /// Whether the tmux runtime is currently alive.
+        runtime_active: bool,
+        /// A pending decision question, if surfaced.
+        pending_decision: Option<String>,
+    },
+    /// `managed-attach` — the tmux command to attach to a managed session.
+    ManagedAttachCmd {
+        /// The resolved managed session id.
+        id: String,
+        /// tmux attach command string.
+        attach_cmd: String,
+    },
+    /// `managed-stop`/`managed-resume`/`managed-decommission` — the updated
+    /// lifecycle state after a runtime transition.
+    ///
+    /// Why: all three terminal/lifecycle verbs report the same shape — the
+    /// session's id, name, and new state — so a UI renders them uniformly.
+    /// What: the resolved id, friendly name, the new lifecycle state, and the
+    /// human-readable verb that produced it (`stopped`/`resumed`/`decommissioned`).
+    ManagedLifecycle {
+        /// The resolved managed session id.
+        id: String,
+        /// tmux session name.
+        name: String,
+        /// New lifecycle state word.
+        state: String,
+        /// The verb applied (`stopped` | `resumed` | `decommissioned`).
+        action: String,
+    },
+
     /// Any failure rendered as a message rather than a panic.
     Error(String),
+}
+
+/// A flat, UI-agnostic view of a managed session.
+///
+/// Why: the managed list/get results render the same flat summary every adapter
+/// consumes; a dedicated view keeps the UIs off the wire DTO
+/// ([`crate::client::ManagedSessionSummary`]) so a wire-shape change does not
+/// ripple into every formatter.
+/// What: the identity and lifecycle fields the UIs render, plus the pending
+/// decision a session may be blocked on.
+/// Test: covered by the executor's `managed_*` tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedSessionView {
+    /// Managed session id (UUID string).
+    pub id: String,
+    /// tmux session name.
+    pub name: String,
+    /// Lifecycle state word.
+    pub state: String,
+    /// Provisioned workspace path, if any.
+    pub workspace_path: Option<String>,
+    /// Repository URL the session was provisioned from.
+    pub repo_url: Option<String>,
+    /// Git branch or ref checked out.
+    pub branch: Option<String>,
+    /// A pending decision question, if surfaced.
+    pub pending_decision: Option<String>,
+    /// Proposed default answer to the pending decision.
+    pub proposed_default: Option<String>,
+}
+
+impl From<crate::client::ManagedSessionSummary> for ManagedSessionView {
+    /// Why: the executor maps the wire DTO to the UI view at the dispatch seam
+    /// so adapters never see the transport shape.
+    /// What: moves the shared fields across one-to-one.
+    /// Test: covered by `execute_managed_list_against_test_daemon`.
+    fn from(s: crate::client::ManagedSessionSummary) -> Self {
+        Self {
+            id: s.id,
+            name: s.name,
+            state: s.state,
+            workspace_path: s.workspace_path,
+            repo_url: s.repo_url,
+            branch: s.branch,
+            pending_decision: s.pending_decision,
+            proposed_default: s.proposed_default,
+        }
+    }
 }
