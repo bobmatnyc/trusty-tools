@@ -118,5 +118,6 @@ pub(crate) fn coord_session_to_entry(s: CoordinatorSession) -> SessionEntry {
         .find(|line| !line.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| s.status.clone());
-    SessionEntry::new(session_short_id(&s.id), s.prefix, s.status, summary)
+    let short_id = session_short_id(&s.id);
+    SessionEntry::with_id(s.id, short_id, s.prefix, s.status, summary)
 }

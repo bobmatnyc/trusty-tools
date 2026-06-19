@@ -14,19 +14,23 @@ use super::banner::{
     GLYPH_ACTIVE, GLYPH_UNREACHABLE, HELP_HINT, ProbeOutcome, USER_PALACE, compose_banner,
     ensure_user_palace_with, probe_client, probe_memory, probe_search,
 };
+use super::dispatch::{Dispatch, route};
 use super::events::{SlashCommand, handle_key, is_quit, parse_slash};
+use super::layout::output_tail;
 use super::layout::{
     CATALOG_STALE_HINT, CONTROLLER_STATUS, DAEMON_REACHABLE, DAEMON_UNREACHABLE, INPUT_PROMPT,
     STATUS_BAR_HINT, catalog_indicator, daemon_indicator, input_line, status_bar_text,
 };
 use super::nav::{ListNav, MIN_VISIBLE_ROWS, PAGE_JUMP};
 use super::poll::{coord_poll_daemon, coord_session_to_entry};
+use super::render::render_result;
 use super::rows::{
     COLUMN_SEPARATOR, CONTROLLER_GLYPH, SESSION_GLYPH, active_row_two_col, controller_bullet_row,
     numbered_session_row, session_row, session_short_id,
 };
-use super::state::{CoordinatorState, INPUT_HISTORY_LIMIT, SessionEntry};
-use crate::client::{CoordinatorSession, DaemonClient};
+use super::state::{CoordinatorState, INPUT_HISTORY_LIMIT, OUTPUT_LOG_LIMIT, SessionEntry};
+use crate::client::result::ManagedSessionView;
+use crate::client::{CommandResult, CoordinatorSession, DaemonClient, TrustyCommand};
 
 /// Render a ratatui `Line` to a flat string for content assertions.
 fn line_text(line: &ratatui::text::Line<'_>) -> String {
@@ -1170,4 +1174,368 @@ async fn ensure_user_palace_creates_only_on_404() {
         *post_seen.borrow(),
         "a 404 GET must trigger exactly the create POST"
     );
+}
+
+// ---- Phase 1C: slash → TrustyCommand mapping + aliases --------------------
+
+#[test]
+fn parse_slash_recognises_aliases() {
+    // The documented CommandSpec aliases resolve to the same SlashCommand as
+    // their canonical verb.
+    assert_eq!(parse_slash("/spawn"), Some(SlashCommand::New));
+    assert_eq!(parse_slash("/list"), Some(SlashCommand::Sessions));
+    assert_eq!(parse_slash("/managed-list"), Some(SlashCommand::Sessions));
+    assert_eq!(parse_slash("/managed-stop x"), Some(SlashCommand::Stop));
+    assert_eq!(parse_slash("/decommission x"), Some(SlashCommand::Kill));
+    assert_eq!(
+        parse_slash("/managed-decommission x"),
+        Some(SlashCommand::Kill)
+    );
+    assert_eq!(parse_slash("/approve x"), Some(SlashCommand::Answer));
+    assert_eq!(parse_slash("/status x"), Some(SlashCommand::Get));
+    assert_eq!(parse_slash("/managed-send x hi"), Some(SlashCommand::Send));
+    assert_eq!(
+        parse_slash("/managed-activity x"),
+        Some(SlashCommand::Activity)
+    );
+}
+
+#[test]
+fn route_slash_maps_to_command() {
+    // A read-only verb with an explicit target maps to its TrustyCommand.
+    assert_eq!(
+        route("/sessions", None),
+        Dispatch::Command(TrustyCommand::ManagedList)
+    );
+    assert_eq!(route("/help", None), Dispatch::Command(TrustyCommand::Help));
+    assert_eq!(
+        route("/stop red-owl", None),
+        Dispatch::Command(TrustyCommand::ManagedRuntimeStop {
+            target: "red-owl".to_string()
+        })
+    );
+    assert_eq!(
+        route("/kill red-owl", None),
+        Dispatch::Command(TrustyCommand::ManagedDecommission {
+            target: "red-owl".to_string()
+        })
+    );
+    assert_eq!(
+        route("/resume red-owl", None),
+        Dispatch::Command(TrustyCommand::ManagedResume {
+            target: "red-owl".to_string()
+        })
+    );
+    assert_eq!(
+        route("/attach red-owl", None),
+        Dispatch::Command(TrustyCommand::ManagedAttachCmd {
+            target: "red-owl".to_string()
+        })
+    );
+    assert_eq!(
+        route("/get red-owl", None),
+        Dispatch::Command(TrustyCommand::ManagedGet {
+            target: "red-owl".to_string()
+        })
+    );
+    assert_eq!(
+        route("/activity red-owl", None),
+        Dispatch::Command(TrustyCommand::ManagedActivity {
+            target: "red-owl".to_string()
+        })
+    );
+}
+
+#[test]
+fn route_targetless_verb_borrows_focus() {
+    // With no explicit target, a target-only verb borrows the focused session.
+    assert_eq!(
+        route("/stop", Some("focus-id")),
+        Dispatch::Command(TrustyCommand::ManagedRuntimeStop {
+            target: "focus-id".to_string()
+        })
+    );
+}
+
+#[test]
+fn route_slash_explicit_target_overrides_focus() {
+    // An explicit argument wins over the focused session.
+    assert_eq!(
+        route("/kill other", Some("focus-id")),
+        Dispatch::Command(TrustyCommand::ManagedDecommission {
+            target: "other".to_string()
+        })
+    );
+}
+
+#[test]
+fn route_missing_target_hints() {
+    // No explicit target and no focus → a hint, not a command.
+    match route("/stop", None) {
+        Dispatch::Hint(msg) => assert!(msg.contains("no session selected"), "{msg}"),
+        other => panic!("expected hint, got {other:?}"),
+    }
+}
+
+#[test]
+fn route_unknown_command_hints() {
+    match route("/frobnicate now", None) {
+        Dispatch::Hint(msg) => assert!(msg.contains("unknown command"), "{msg}"),
+        other => panic!("expected hint, got {other:?}"),
+    }
+}
+
+#[test]
+fn route_new_requires_repo_ref_task() {
+    match route("/new just-a-repo", None) {
+        Dispatch::Hint(msg) => assert!(msg.contains("usage"), "{msg}"),
+        other => panic!("expected usage hint, got {other:?}"),
+    }
+}
+
+#[test]
+fn route_new_builds_managed_new() {
+    assert_eq!(
+        route("/new https://x/r.git main do the thing", None),
+        Dispatch::Command(TrustyCommand::ManagedNew {
+            repo_url: "https://x/r.git".to_string(),
+            git_ref: "main".to_string(),
+            task: "do the thing".to_string(),
+            name_hint: None,
+            runtime: None,
+        })
+    );
+}
+
+#[test]
+fn route_send_uses_focus_for_target() {
+    // /send with a focus: the WHOLE arg string is the text, target is the focus.
+    assert_eq!(
+        route("/send run the tests", Some("focus-id")),
+        Dispatch::Command(TrustyCommand::ManagedSend {
+            target: "focus-id".to_string(),
+            text: "run the tests".to_string()
+        })
+    );
+}
+
+#[test]
+fn route_send_explicit_target() {
+    // /send without a focus: first token is the target, the rest is the text.
+    assert_eq!(
+        route("/send red-owl run the tests", None),
+        Dispatch::Command(TrustyCommand::ManagedSend {
+            target: "red-owl".to_string(),
+            text: "run the tests".to_string()
+        })
+    );
+}
+
+#[test]
+fn route_send_missing_text_hints() {
+    match route("/send", Some("focus-id")) {
+        Dispatch::Hint(msg) => assert!(msg.contains("text is required"), "{msg}"),
+        other => panic!("expected hint, got {other:?}"),
+    }
+}
+
+#[test]
+fn route_answer_routes_to_managed_answer() {
+    assert_eq!(
+        route("/answer yes proceed", Some("focus-id")),
+        Dispatch::Command(TrustyCommand::ManagedAnswer {
+            target: "focus-id".to_string(),
+            answer: "yes proceed".to_string()
+        })
+    );
+}
+
+// ---- Phase 1C: free-text routing decision ---------------------------------
+
+#[test]
+fn route_free_text_sends_to_focus() {
+    // A non-slash line with a focused session routes as a send to that session.
+    assert_eq!(
+        route("run the integration suite", Some("focus-id")),
+        Dispatch::Command(TrustyCommand::ManagedSend {
+            target: "focus-id".to_string(),
+            text: "run the integration suite".to_string()
+        })
+    );
+}
+
+#[test]
+fn route_free_text_no_focus_echoes() {
+    // No focused session → keep the historical echo/no-op behaviour.
+    assert_eq!(route("just chatting", None), Dispatch::Echo);
+    // An empty line is always an echo no-op.
+    assert_eq!(route("   ", Some("focus-id")), Dispatch::Echo);
+}
+
+// ---- Phase 1C: focused session target -------------------------------------
+
+#[test]
+fn focused_target_is_none_on_controller() {
+    let mut state = CoordinatorState::live();
+    state.sessions.push(SessionEntry::with_id(
+        "full-id-1",
+        "fullid",
+        "p",
+        "Active",
+        "s",
+    ));
+    // Row 0 (controller) selected by default → no focused session.
+    assert_eq!(state.selected(), 0);
+    assert_eq!(state.focused_target(), None);
+}
+
+#[test]
+fn focused_target_returns_selected_session_id() {
+    let mut state = CoordinatorState::live();
+    state.sessions.push(SessionEntry::with_id(
+        "full-id-1",
+        "fullid",
+        "p",
+        "Active",
+        "s",
+    ));
+    state.select_row(1); // focus the first session
+    // The full id, not the short display id, is used for routing.
+    assert_eq!(state.focused_target(), Some("full-id-1"));
+}
+
+#[test]
+fn focused_session_target_prefers_full_id() {
+    // with_id carries the full id distinct from the short display id.
+    let entry = SessionEntry::with_id("0123456789ab", "01234567", "p", "Active", "s");
+    assert_eq!(entry.id, "0123456789ab");
+    assert_eq!(entry.short_id, "01234567");
+}
+
+// ---- Phase 1C: output log -------------------------------------------------
+
+#[test]
+fn output_log_records_and_is_bounded() {
+    let mut state = CoordinatorState::live();
+    state.push_output(ratatui::text::Line::from("first"));
+    state.push_output_lines(vec![
+        ratatui::text::Line::from("a"),
+        ratatui::text::Line::from("b"),
+    ]);
+    assert_eq!(state.output.len(), 3);
+    // Overflow drops the oldest lines, keeping the cap.
+    for i in 0..OUTPUT_LOG_LIMIT + 10 {
+        state.push_output(ratatui::text::Line::from(format!("line {i}")));
+    }
+    assert_eq!(state.output.len(), OUTPUT_LOG_LIMIT);
+}
+
+#[test]
+fn output_tail_keeps_most_recent() {
+    let mut state = CoordinatorState::live();
+    for i in 0..10 {
+        state.push_output(ratatui::text::Line::from(format!("line {i}")));
+    }
+    let tail = output_tail(&state, 3);
+    assert_eq!(tail.len(), 3);
+    assert_eq!(line_text(&tail[2]), "line 9", "last line is the newest");
+    assert_eq!(line_text(&tail[0]), "line 7");
+    // Requesting more rows than exist returns the whole log (no panic).
+    assert_eq!(output_tail(&state, 100).len(), 10);
+}
+
+// ---- Phase 1C: CommandResult renderer -------------------------------------
+
+fn managed_view(id: &str, name: &str, state: &str) -> ManagedSessionView {
+    ManagedSessionView {
+        id: id.to_string(),
+        name: name.to_string(),
+        state: state.to_string(),
+        workspace_path: None,
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+    }
+}
+
+#[test]
+fn render_error_is_red() {
+    let lines = render_result(&CommandResult::Error("daemon unreachable".to_string()));
+    assert_eq!(lines.len(), 1);
+    let text = line_text(&lines[0]);
+    assert!(text.contains("daemon unreachable"), "{text}");
+    assert!(text.starts_with('✗'), "{text}");
+}
+
+#[test]
+fn render_result_lists_managed_sessions() {
+    let views = vec![
+        managed_view("aaaa00001111", "tmpm-red", "Running"),
+        managed_view("bbbb22223333", "tmpm-owl", "Stopped"),
+    ];
+    let lines = render_result(&CommandResult::ManagedSessions(views));
+    let head = line_text(&lines[0]);
+    assert!(head.contains("managed sessions (2)"), "{head}");
+    let row = line_text(&lines[1]);
+    assert!(row.contains("aaaa0000"), "short id: {row}");
+    assert!(row.contains("tmpm-red"), "name: {row}");
+    assert!(row.contains("Running"), "state: {row}");
+}
+
+#[test]
+fn render_result_empty_sessions_shows_none() {
+    let lines = render_result(&CommandResult::ManagedSessions(vec![]));
+    assert!(line_text(&lines[0]).contains("(0)"));
+    assert!(line_text(&lines[1]).contains("none"));
+}
+
+#[test]
+fn render_result_renders_lifecycle() {
+    let lines = render_result(&CommandResult::ManagedLifecycle {
+        id: "0123456789ab".to_string(),
+        name: "tmpm-red".to_string(),
+        state: "Stopped".to_string(),
+        action: "stopped".to_string(),
+    });
+    let text = line_text(&lines[0]);
+    assert!(text.starts_with('✓'), "{text}");
+    assert!(text.contains("stopped"), "{text}");
+    assert!(text.contains("tmpm-red"), "{text}");
+    assert!(text.contains("01234567"), "short id only: {text}");
+}
+
+#[test]
+fn render_result_renders_sent() {
+    let lines = render_result(&CommandResult::ManagedSent {
+        id: "0123456789ab".to_string(),
+        tmux_name: "tmpm-red".to_string(),
+    });
+    let text = line_text(&lines[0]);
+    assert!(text.contains("tmpm-red"), "{text}");
+    assert!(text.contains("01234567"), "{text}");
+}
+
+#[test]
+fn render_result_renders_activity() {
+    let lines = render_result(&CommandResult::ManagedActivity {
+        id: "0123456789ab".to_string(),
+        state: "working".to_string(),
+        summary: "running tests".to_string(),
+        raw_pane: "...".to_string(),
+        runtime_active: true,
+        pending_decision: Some("allow rm?".to_string()),
+    });
+    assert!(line_text(&lines[0]).contains("working"));
+    assert!(line_text(&lines[0]).contains("alive"));
+    assert!(lines.iter().any(|l| line_text(l).contains("running tests")));
+    assert!(lines.iter().any(|l| line_text(l).contains("allow rm?")));
+}
+
+#[test]
+fn render_result_renders_help() {
+    let lines = render_result(&CommandResult::Help("line one\nline two".to_string()));
+    assert_eq!(lines.len(), 2);
+    assert_eq!(line_text(&lines[0]), "line one");
+    assert_eq!(line_text(&lines[1]), "line two");
 }

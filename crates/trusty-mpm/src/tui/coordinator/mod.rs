@@ -20,10 +20,12 @@
 //! [`tests`]; [`run`] is the thin terminal glue exercised by launching the TUI.
 
 pub mod banner;
+pub mod dispatch;
 pub mod events;
 pub mod layout;
 pub mod nav;
 pub mod poll;
+pub mod render;
 pub mod rows;
 pub mod state;
 
@@ -40,9 +42,11 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
 
-use crate::client::DaemonClient;
-use events::handle_key;
+use crate::client::{CommandExecutor, DaemonClient};
+use dispatch::{Dispatch, route};
+use events::{handle_key, parse_slash};
 use poll::coord_poll_daemon;
+use render::render_result;
 use state::CoordinatorState;
 
 /// RAII guard that restores the terminal on drop — including during a panic.
@@ -172,7 +176,12 @@ async fn run_loop(
         if event::poll(KEY_POLL)?
             && let Event::Key(key) = event::read()?
         {
-            handle_key(&mut state, key);
+            // `handle_key` mutates the buffer/selection and, on Enter, returns the
+            // submitted line. Phase 1C routes that line through the chat-core
+            // executor (the old stub merely echoed it).
+            if let Some(line) = handle_key(&mut state, key) {
+                dispatch_submitted_line(&mut state, client, &line).await;
+            }
             if state.should_exit {
                 return Ok(());
             }
@@ -196,6 +205,49 @@ async fn run_loop(
             // Throttle the data refresh: only re-poll the daemon every interval_ms.
             coord_poll_daemon(&mut state, client).await;
             last_poll = Instant::now();
+        }
+    }
+}
+
+/// Route one submitted input line through chat-core and append the result.
+///
+/// Why: this is the Phase 1C dispatch seam — it replaces the old echo-only stub.
+/// Keeping it OUT of [`dispatch::route`] (which is pure) isolates the async/IO
+/// half: build the executor for the client's current URL, await the command, and
+/// append the rendered result to the output log. Running it inline in the loop
+/// (rather than on a background task) keeps the render thread's view of `state`
+/// single-owned — the executor call is brief and the loop already awaits the
+/// daemon for polling, so there is no separate thread to block.
+/// What: echoes `line` into the output log, routes it via [`route`] against the
+/// focused session, and for a [`Dispatch::Command`] runs it through a
+/// [`CommandExecutor`] (built for `client.base_url()` so it tracks the TUI's
+/// self-healed URL) and appends [`render_result`]'s lines. A [`Dispatch::Hint`]
+/// appends the hint; a [`Dispatch::Echo`] records nothing further. After a
+/// SUCCESSFUL mutating command it requests an immediate re-poll so the list
+/// reflects the change now.
+/// Test: the routing decision is unit-tested in [`dispatch`] and the rendering in
+/// [`render`]; this async glue is exercised by launching the TUI.
+async fn dispatch_submitted_line(state: &mut CoordinatorState, client: &DaemonClient, line: &str) {
+    // Echo the operator's own input so the log reads as a transcript.
+    state.push_output(ratatui::text::Line::from(format!("› {line}")));
+
+    let focused = state.focused_target().map(str::to_string);
+    match route(line, focused.as_deref()) {
+        Dispatch::Echo => {}
+        Dispatch::Hint(msg) => {
+            state.push_output(ratatui::text::Line::from(msg));
+        }
+        Dispatch::Command(cmd) => {
+            // Mutating verbs (create/kill/stop/resume) should refresh the list,
+            // but only when they actually succeed — keyed off the parsed verb.
+            let is_mutating = parse_slash(line).is_some_and(|c| c.is_mutating());
+            let executor = CommandExecutor::new(client.base_url().to_string());
+            let result = executor.execute(cmd).await;
+            let succeeded = !matches!(result, crate::client::CommandResult::Error(_));
+            state.push_output_lines(render_result(&result));
+            if is_mutating && succeeded {
+                state.request_repoll();
+            }
         }
     }
 }
