@@ -61,7 +61,8 @@ async fn telegram_pair(url: &str) -> anyhow::Result<()> {
             println!("In Telegram, send to your bot:");
             println!("  /pair {code}");
             println!();
-            println!("Or click: https://t.me/trusty_mpm_bot?start={code}");
+            let username = trusty_mpm::telegram::bot_username();
+            println!("Or click: https://t.me/{username}?start={code}");
         }
         CommandResult::Error(msg) => eprintln!("pairing failed: {msg}"),
         other => eprintln!("unexpected pairing result: {other:?}"),
