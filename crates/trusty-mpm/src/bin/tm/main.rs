@@ -270,8 +270,10 @@ async fn main() -> anyhow::Result<()> {
         Command::Issue { cmd, system } => commands::issue::issue(cmd, system),
         Command::Watch { cmd } => dispatch_watch(&client, &url, cmd).await,
         // #1045: the metaharness boots standalone (no daemon, no HTTP client).
-        // The handler is async because `meta run --demo` (#1030, WI-4) drives a
-        // live in-process PM → engineer agent loop.
+        // The handler is async because `meta run` (#1049/#1051) launches a real
+        // `claude` tmux session and `--demo` polls for it to exit. A demo
+        // verification failure/timeout returns `Err`, which `main` maps to a
+        // non-zero process exit (the #1051 acceptance criterion).
         Command::Meta { action } => commands::meta::meta(action).await,
     };
 

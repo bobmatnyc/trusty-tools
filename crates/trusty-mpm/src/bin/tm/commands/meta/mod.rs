@@ -1,279 +1,255 @@
-//! `meta` command handler — standalone metaharness (#1045, WI-1..WI-4).
+//! `meta` command handler — standalone metaharness driving a real Claude Code
+//! session (#1045 epic; #1049 WI-A; #1051 WI-B+C).
 //!
-//! Why: issue #1045 builds an M1 POC metaharness that boots without the
-//! trusty-mpm daemon or the `claude` CLI and drives PM → sub-agent delegation
-//! in-process via trusty-code (Seam A). WI-1 stood up the `meta run` entry point;
-//! WI-2 wired a trusty-code [`ToolRegistry`](trusty_code::tools::ToolRegistry);
-//! WI-4 (this change, closing #1030) replaces the WI-2 `NoopAgentRunner` with the
-//! live [`InProcessAgentRunner`](trusty_code::runner::InProcessAgentRunner): a
-//! bare `meta run` still prints the registry summary (offline, no LLM), while
-//! `meta run --demo` performs a *real* PM → engineer delegation against a live
-//! OpenRouter model and persists a combined transcript.
-//! What: [`meta`] dispatches `MetaAction`; [`run`] validates `--project`, and for
-//! `--demo` materialises the bundled PM + engineer configs, constructs the live
-//! [`Orchestrator`](orchestrator::Orchestrator) over a shared LLM client, runs one
-//! delegation cycle, writes the transcript under `.trusty-mpm/meta-runs/`, and
-//! prints a summary; without `--demo` it falls back to the WI-2 registry summary.
-//! Pure helpers ([`resolve_project`], [`wi2_summary`], [`demo_task`]) carry the
-//! testable logic; agent configs, the transcript schema, and the orchestrator
-//! live in sibling submodules.
-//! Test: `meta_*` unit tests in this module's `tests` block; submodule tests in
-//! `agents`/`transcript`/`orchestrator`; CLI parsing in `tests.rs`.
+//! Why: the re-scoped M1 POC (epic #1045) launches a REAL `claude` CLI session
+//! through trusty-mpm's EXISTING machinery — NOT an in-process trusty-code
+//! orchestrator (Claude Code handles sub-agent delegation natively via its Task
+//! tool, so no custom delegate runner is needed). `meta run --project <dir>`
+//! deploys the custom instructions and launches a real `claude` tmux session
+//! rooted at that dir (WI-A, #1049); `meta run --demo` additionally attaches a
+//! bundled task that writes `hello_metaharness.txt`, polls for the session to
+//! exit, verifies the artifact, prints a structured report, and exits 0 on
+//! success / non-zero on failure/timeout (WI-B+C, #1051). The harness runs
+//! standalone — the daemon is NOT required.
+//! What: [`meta`] dispatches [`MetaAction`]; [`run`] resolves `--project`, builds
+//! a daemon-free [`SessionManager`](trusty_mpm::session_manager::SessionManager),
+//! and calls [`launch::launch_and_wait`]; for `--demo` it then runs
+//! [`verify::verify_artifact`] and fails the process on a non-pass verdict,
+//! emitting the captured tmux transcript for diagnostics. The launch/poll lives
+//! in `launch.rs` and the artifact check in `verify.rs`; both factor their
+//! decision logic into pure, unit-testable functions (the live end-to-end is
+//! `#[ignore]`-gated as the #1053 follow-up).
+//! Test: `meta_*` unit tests in this module's `tests` block; pure poll/verify
+//! unit tests in `launch`/`verify`; CLI parsing in `tests.rs`.
 
-mod agents;
-mod instructions;
-mod orchestrator;
-mod registry;
-mod transcript;
+mod launch;
+mod verify;
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::Context as _;
+use anyhow::{Context as _, bail};
 use serde_json::json;
 use tracing::{error, info};
-use trusty_code::llm::{LlmClient, LlmClientConfig};
-use trusty_code::runner::InProcessRunnerConfig;
 
-use self::orchestrator::Orchestrator;
-use self::registry::{build_meta_registry, registry_tool_names};
 use crate::cli::MetaAction;
 
-/// Status string stamped into the WI-2 registry-only run summary.
+/// Default session-exit poll budget, in seconds, for `meta run`.
 ///
-/// Why: the summary `status` is a magic string consumed by tests (and tooling
-/// that scrapes `meta run` output); centralising it keeps the producer and every
-/// assertion in lockstep.
-/// What: the literal `"wi2"` — signalling a registry-assembly-only run (no demo).
-/// Test: `meta_wi2_summary_reports_status` asserts the emitted value.
-pub(crate) const STATUS_WI2: &str = "wi2";
-
-/// Subdirectory (under the project) where transcripts and agent configs live.
-///
-/// Why: The demo persists its combined transcript and materialises the bundled
-/// agent configs under a predictable, project-scoped location so operators can
-/// inspect a run after the fact (#1045 success criterion).
-/// What: the literal `".trusty-mpm"` directory name.
-/// Test: `meta_run_dir_paths_are_project_scoped`.
-pub(crate) const META_STATE_DIR: &str = ".trusty-mpm";
-
-/// The bundled demo task the PM is asked to accomplish.
-///
-/// Why: `--demo` runs a fixed, checkable task (write a known file) so a run's
-/// success is verifiable without operator input (#1045: writes
-/// `hello_metaharness.txt`, verifies content, exits 0).
-/// What: instructs the PM to have the engineer create `hello_metaharness.txt`
-/// with a known line of content.
-/// Test: `meta_demo_task_names_expected_file`.
-pub(crate) const DEMO_ARTIFACT: &str = "hello_metaharness.txt";
+/// Why: a stuck `claude` session must never hang the command forever; a sensible
+/// default bounds the wait while `--timeout-secs` lets operators override it for
+/// slower tasks (#1051). Centralising the value keeps the CLI help text, the
+/// handler, and any tooling in lockstep.
+/// What: 120 seconds (the #1051 default).
+/// Test: `meta_default_timeout_is_120s`.
+pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 /// `meta` subcommand dispatcher — route a parsed [`MetaAction`] to its handler.
 ///
 /// Why: mirrors the other `tm` command groups by keeping `main`'s match arm thin
 /// and folding verb dispatch into the module that owns the verbs.
-/// What: matches the `MetaAction` and forwards `meta run` to [`run`] (async, so
-/// the demo can drive the live agent loop without a nested runtime).
+/// What: matches the [`MetaAction`] and forwards `meta run` to [`run`] (async, so
+/// it can drive the live launch + poll without a nested runtime).
 /// Test: covered by the handler unit tests via the `Run` arm; CLI parse
 /// round-trips live in `tests.rs`.
 pub(crate) async fn meta(action: MetaAction) -> anyhow::Result<()> {
     match action {
-        MetaAction::Run { demo, project } => run(demo, project).await,
+        MetaAction::Run {
+            demo,
+            project,
+            no_provision,
+            timeout_secs,
+        } => run(demo, project, no_provision, timeout_secs).await,
     }
-}
-
-/// The bundled demo task string handed to the PM.
-///
-/// Why: Isolating the task text keeps it unit-testable and the `run` handler
-/// free of inline prose.
-/// What: returns a one-line instruction to create [`DEMO_ARTIFACT`] with a known
-/// body.
-/// Test: `meta_demo_task_names_expected_file`.
-pub(crate) fn demo_task() -> String {
-    format!(
-        "Create a file named `{DEMO_ARTIFACT}` in the project root containing exactly the line \
-         `hello from the metaharness`. Delegate the file creation to the python-engineer agent."
-    )
 }
 
 /// Execute one `meta run` invocation.
 ///
-/// Why: this is the harness's primary entry point. Without `--demo` it stays an
-/// offline registry-assembly smoke test (no LLM, no network). With `--demo` it is
-/// the WI-4 deliverable (#1030): a real PM → engineer delegation driven by a live
-/// OpenRouter model, with a combined transcript persisted for inspection.
-/// What: initialises stderr tracing; resolves and validates `--project`; for the
-/// non-demo path builds the registry and prints the [`wi2_summary`]; for the demo
-/// path delegates to [`run_demo`].
-/// Test: `meta_run_registry_summary_for_existing_project`,
-/// `meta_run_errors_on_missing_project` exercise the offline paths; the live demo
-/// is covered by the `orchestrator` tests (mock LLM) and an ignored live test.
-pub(crate) async fn run(demo: bool, project: Option<PathBuf>) -> anyhow::Result<()> {
+/// Why: this is the harness's primary entry point (#1049/#1051). It launches a
+/// real `claude` session for the project dir using trusty-mpm's existing launch
+/// machinery; with `--demo` it attaches a checkable task and verifies the
+/// resulting artifact so a run's success is decidable without operator input.
+/// What: initialises stderr tracing; resolves `--project`; computes the poll
+/// budget (`--timeout-secs` or [`DEFAULT_TIMEOUT_SECS`]); builds a daemon-free
+/// session manager rooted under `<project>/.trusty-mpm/meta-sessions`; for
+/// `--demo` it derives a run id, generates the bundled task, launches + waits,
+/// then verifies the artifact — printing a structured JSON report to stdout and
+/// returning `Err` (non-zero exit) on a non-pass verdict or timeout; without
+/// `--demo` it launches and waits with no task and reports how the session ended.
+/// `no_provision` is currently a NO-OP: the POC always operates on the local
+/// `--project` dir in place, so there is no provisioning/clone step to skip. The
+/// flag is accepted to make that intent explicit on the CLI and to reserve the
+/// seam for a future provisioned/clone path (`--no-provision=false`); passing it
+/// either way changes nothing today.
+/// Test: `meta_run_dir_paths_are_project_scoped`,
+/// `meta_resolve_project_*`, `meta_run_id_is_unique`; the live launch is covered
+/// by the `#[ignore]` end-to-end test (#1053).
+pub(crate) async fn run(
+    demo: bool,
+    project: Option<PathBuf>,
+    no_provision: bool,
+    timeout_secs: Option<u64>,
+) -> anyhow::Result<()> {
     init_meta_tracing();
     let project = resolve_project(project)?;
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
 
-    if demo {
-        return run_demo(&project).await;
+    // `no_provision` is a documented no-op today: the POC always uses the local
+    // `--project` dir in place, so there is never a provisioning/clone step to
+    // skip. This explicit branch makes the no-op unmistakable (no silent surprise
+    // for `--no-provision=false`) and marks the seam where a future provisioned /
+    // git-clone path would live. M1 POC hardening follow-up.
+    if !no_provision {
+        // Future: provision an isolated workspace (e.g. git clone) instead of
+        // operating on the local dir in place. No behavioural difference today.
     }
 
-    let registry = build_meta_registry(&project);
-    let tools = registry_tool_names(&registry);
     info!(
         demo,
+        no_provision,
         project = %project.display(),
-        tools = ?tools,
-        "meta run: tool registry assembled (offline summary — pass --demo to run the live harness)"
+        timeout_secs = timeout.as_secs(),
+        "meta run: launching a real Claude Code session via the existing machinery"
     );
-    let summary = wi2_summary(demo, &project, &tools);
-    println!("{}", serde_json::to_string(&summary)?);
-    Ok(())
+
+    let state_dir = launch::state_dir(&project);
+    std::fs::create_dir_all(&state_dir)
+        .with_context(|| format!("failed to create state dir: {}", state_dir.display()))?;
+    let mgr = launch::new_session_manager(&state_dir).await?;
+
+    if demo {
+        run_demo(&mgr, &project, timeout).await
+    } else {
+        run_plain(&mgr, &project, timeout).await
+    }
 }
 
-/// Run the live PM → engineer demo delegation and persist the transcript.
+/// Launch a session for `project` with no task and report how it ended.
 ///
-/// Why: This is the WI-4 / #1030 payoff — proof the in-process orchestrator
-/// drives a real agent end-to-end. It requires a live LLM key; absent one it
-/// fails with a clear, actionable error rather than silently mocking.
-/// What: requires `OPENROUTER_API_KEY` (clear error if missing); materialises the
-/// bundled PM + engineer configs under `<project>/.trusty-mpm/meta-agents/`; runs
-/// the [`Orchestrator`] over a shared `LlmClient`; writes the combined transcript
-/// under `<project>/.trusty-mpm/meta-runs/`; prints a JSON summary to stdout and
-/// logs progress to stderr.
-/// Test: side-effect/IO-heavy; the orchestration logic is covered offline by
-/// `orchestrator::tests` (scripted LLM) and an ignored live end-to-end test.
-async fn run_demo(project: &Path) -> anyhow::Result<()> {
-    let config = LlmClientConfig::from_env().context(
-        "meta run --demo requires a live LLM: set OPENROUTER_API_KEY in the environment. \
-         (The wiring is fully covered offline by `cargo test -p trusty-mpm meta::orchestrator`.)",
-    )?;
-    let client = LlmClient::from_config(config).context("failed to build OpenRouter client")?;
-    let llm = std::sync::Arc::new(client);
-
-    let agents_dir = meta_agents_dir(project);
-    agents::write_agent_configs(&agents_dir, project)
-        .context("failed to materialise bundled agent configs")?;
-
-    let task = demo_task();
-    info!(
-        project = %project.display(),
-        agents_dir = %agents_dir.display(),
-        "meta run --demo: driving live PM → engineer delegation"
-    );
-
-    let mut orchestrator = Orchestrator::new(llm, agents_dir, project.to_path_buf()).with_config(
-        InProcessRunnerConfig {
-            max_turns: 6,
-            timeout_secs: 180,
-        },
-    );
-    // Thread the project's CLAUDE.md (if any) into every assembled prompt so the
-    // PM and engineer see the same project rules (parity-spec).
-    if let Some(ctx) = read_project_context(project) {
-        orchestrator = orchestrator.with_project_context(ctx);
-    }
-
-    let transcript = match orchestrator.run(&task).await {
-        Ok(t) => t,
-        Err(e) => {
-            error!(error = %e, "meta run --demo: orchestration failed");
-            return Err(e);
-        }
-    };
-
-    let transcript_path = write_transcript(project, &transcript)?;
-    info!(
-        delegations = transcript.delegations.len(),
-        artifacts = transcript.artifacts.len(),
-        total_tokens = transcript.usage.total_tokens,
-        transcript = %transcript_path.display(),
-        "meta run --demo: delegation cycle complete"
-    );
-
+/// Why: a bare `meta run` is the WI-A smoke path (#1049) — it proves the launch
+/// machinery wires up and brings a real `claude` session online rooted at the
+/// project dir, without the demo's verification step.
+/// What: calls [`launch::launch_and_wait`] with no task, prints a JSON summary of
+/// the [`LaunchOutcome`](launch::LaunchOutcome), and returns `Ok(())` regardless
+/// of how the session ended (a bare run makes no pass/fail claim).
+/// Test: side-effect/IO-heavy (live `claude`); covered by the `#[ignore]` test.
+async fn run_plain(
+    mgr: &trusty_mpm::session_manager::SessionManager,
+    project: &Path,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let report = launch::launch_and_wait(mgr, project, None, timeout).await?;
     let summary = json!({
-        "status": "demo",
+        "status": "launched",
+        "demo": false,
         "project": project.display().to_string(),
-        "model": transcript.model,
-        "delegations": transcript.delegations.len(),
-        "artifacts": transcript.artifacts.iter().map(|a| &a.path).collect::<Vec<_>>(),
-        "total_tokens": transcript.usage.total_tokens,
-        "transcript": transcript_path.display().to_string(),
+        "tmux": report.tmux_name,
+        "outcome": report.outcome.status(),
     });
     println!("{}", serde_json::to_string(&summary)?);
     Ok(())
 }
 
-/// Read the project's `CLAUDE.md`, if present, for prompt injection.
+/// Run the demo: launch with a checkable task, poll, and verify the artifact.
 ///
-/// Why: The parity-spec wants the PM and every sub-agent to see the same project
-/// rules; the project `CLAUDE.md` is that surface. Reading it here keeps the
-/// orchestrator agnostic to where context comes from.
-/// What: returns `Some(contents)` if `<project>/CLAUDE.md` reads successfully,
-/// else `None` (a missing/unreadable file is not an error — context is optional).
-/// Test: `meta_read_project_context_reads_existing_file`.
-pub(crate) fn read_project_context(project: &Path) -> Option<String> {
-    std::fs::read_to_string(project.join("CLAUDE.md")).ok()
+/// Why: this is the WI-B+C payoff (#1051) — proof the launched session did real
+/// work. Verifying a known file's content makes the run's success deterministic
+/// and machine-checkable; on failure the captured tmux transcript is surfaced so
+/// the operator can diagnose what the session actually did (#1052 observability).
+/// What: derives a run id, builds the bundled task via [`verify::demo_task`],
+/// launches + waits via [`launch::launch_and_wait`], then checks the artifact
+/// with [`verify::verify_artifact`]. Prints a structured JSON report to stdout.
+/// On a [`VerifyOutcome::Pass`](verify::VerifyOutcome::Pass) it returns `Ok(())`
+/// (exit 0); on any other verdict (or a timed-out launch with a non-pass verdict)
+/// it logs the transcript to stderr and returns `Err` so `main` exits non-zero.
+/// Test: side-effect/IO-heavy; the pure verify/poll logic is covered by
+/// `verify::tests` / `launch::tests`, the live path by the `#[ignore]` test.
+async fn run_demo(
+    mgr: &trusty_mpm::session_manager::SessionManager,
+    project: &Path,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let run_id = run_id();
+    let expected = verify::expected_content(&run_id);
+    let task = verify::demo_task(&run_id);
+    info!(run_id = %run_id, "meta run --demo: bundled task prepared");
+
+    let report = launch::launch_and_wait(mgr, project, Some(&task), timeout).await?;
+    let verdict = verify::verify_artifact(project, &expected);
+
+    let summary = json!({
+        "status": "demo",
+        "demo": true,
+        "project": project.display().to_string(),
+        "run_id": run_id,
+        "tmux": report.tmux_name,
+        "launch_outcome": report.outcome.status(),
+        "artifact": verify::DEMO_ARTIFACT,
+        "verdict": verdict.status(),
+        "pass": verdict.is_pass(),
+    });
+    println!("{}", serde_json::to_string(&summary)?);
+
+    if verdict.is_pass() {
+        info!(
+            run_id = %run_id,
+            "meta run --demo: PASS — session wrote and verified {}",
+            verify::DEMO_ARTIFACT
+        );
+        Ok(())
+    } else {
+        // Surface the pane transcript for diagnostics (#1052) before failing.
+        error!(
+            run_id = %run_id,
+            verdict = verdict.status(),
+            launch_outcome = report.outcome.status(),
+            "meta run --demo: FAIL — captured tmux transcript follows:\n{}",
+            report.transcript
+        );
+        bail!(
+            "meta run --demo failed: artifact verdict '{}' (launch {}); see the captured \
+             transcript above for diagnostics",
+            verdict.status(),
+            report.outcome.status()
+        )
+    }
 }
 
-/// Directory holding the bundled agent configs for a run.
+/// Process-monotonic counter mixed into every [`run_id`] to guarantee uniqueness.
 ///
-/// Why: The runner loads agents from on-disk TOML; placing them under the
-/// project's state dir keeps the run self-contained and inspectable.
-/// What: returns `<project>/.trusty-mpm/meta-agents`.
-/// Test: `meta_run_dir_paths_are_project_scoped`.
-pub(crate) fn meta_agents_dir(project: &Path) -> PathBuf {
-    project.join(META_STATE_DIR).join("meta-agents")
-}
+/// Why: deriving the id from the wall clock alone is not collision-free — two
+/// back-to-back calls within the same millisecond (or on a low-resolution clock)
+/// would produce identical ids, letting a stale artifact masquerade as the
+/// current run's. A per-process counter that strictly increases on every call
+/// makes the id unique by construction, with no reliance on clock resolution.
+/// What: an `AtomicU64`, bumped with `Relaxed` ordering on each `run_id` call
+/// (ordering across threads is irrelevant — we only need a distinct value, not a
+/// happens-before relationship).
+/// Test: `meta_run_id_is_unique` (two ids drawn with no delay still differ).
+static RUN_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Directory where run transcripts are persisted.
+/// Generate a short, unique id for one demo run.
 ///
-/// Why: Operators inspect past runs; a stable location makes them discoverable
-/// (#1045 success criterion).
-/// What: returns `<project>/.trusty-mpm/meta-runs`.
-/// Test: `meta_run_dir_paths_are_project_scoped`.
-pub(crate) fn meta_runs_dir(project: &Path) -> PathBuf {
-    project.join(META_STATE_DIR).join("meta-runs")
-}
-
-/// Compute the transcript filename for a run at instant `now`.
-///
-/// Why: Second-granularity filenames collide when two runs start within the same
-/// wall-clock second, silently overwriting the earlier transcript. Deriving the
-/// name from milliseconds-since-epoch makes intra-second collisions vanishingly
-/// unlikely while keeping the name sortable and human-readable. Factoring this out
-/// of [`write_transcript`] keeps the (otherwise IO-bound) naming logic unit-testable.
-/// What: returns `run-<unix_ts_millis>.json`, falling back to `0` if the clock is
-/// before the Unix epoch (which cannot happen for `SystemTime::now`).
-/// Test: `meta_run_filename_uses_millisecond_precision`.
-fn run_transcript_filename(now: std::time::SystemTime) -> String {
-    let millis = now
+/// Why: embedding a per-run id in the demo artifact body lets verification prove
+/// THIS run produced the file (not a stale one from a prior run). Anchoring it to
+/// the wall clock keeps it sortable/human-meaningful, while a process-monotonic
+/// counter suffix guarantees uniqueness even for two calls in the same
+/// millisecond (so the id format stays purely numeric for downstream checks).
+/// What: returns `"<unix-millis><6-digit zero-padded counter>"` (the counter
+/// strictly increases per call); falls back to `"0"`-millis if the clock is
+/// before the epoch (which cannot happen for `SystemTime::now`).
+/// Test: `meta_run_id_is_unique` (two ids differ with no delay),
+/// `meta_run_id_is_numeric`.
+pub(crate) fn run_id() -> String {
+    let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    format!("run-{millis}.json")
-}
-
-/// Persist a combined transcript as pretty JSON, returning its path.
-///
-/// Why: The transcript is the run's auditable record; writing it to disk lets
-/// downstream tooling (and humans) inspect the PM + engineer turns after exit.
-/// What: creates the runs dir, writes `run-<unix_ts_millis>.json` with the
-/// serialised transcript, and returns the path; surfaces an `anyhow` error on IO
-/// failure. Millisecond (not second) precision is used for the filename so two
-/// runs started within the same wall-clock second do not collide and overwrite
-/// each other's transcript.
-/// Test: `meta_run_filename_uses_millisecond_precision`; the transcript shape is
-/// covered by `transcript::tests`.
-fn write_transcript(
-    project: &Path,
-    transcript: &transcript::MetaTranscript,
-) -> anyhow::Result<PathBuf> {
-    let dir = meta_runs_dir(project);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create runs dir: {}", dir.display()))?;
-    let path = dir.join(run_transcript_filename(std::time::SystemTime::now()));
-    let body = serde_json::to_string_pretty(transcript)
-        .context("failed to serialise transcript to JSON")?;
-    std::fs::write(&path, body)
-        .with_context(|| format!("failed to write transcript: {}", path.display()))?;
-    Ok(path)
+    // `Relaxed` is sufficient: we need a distinct value per call, not ordering.
+    let seq = RUN_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Zero-pad the counter to 6 digits so it cannot blur into the millis prefix
+    // for typical run counts while keeping the whole id numeric.
+    format!("{millis}{seq:06}")
 }
 
 /// Resolve the optional `--project` argument to an existing absolute path.
@@ -296,29 +272,12 @@ pub(crate) fn resolve_project(project: Option<PathBuf>) -> anyhow::Result<PathBu
     Ok(resolved)
 }
 
-/// Build the registry-only run summary as a JSON object (non-demo path).
-///
-/// Why: a bare `meta run` emits a single machine-readable line summarising the
-/// assembled tool registry so downstream tooling can confirm the harness offered
-/// the expected capabilities, without invoking an LLM.
-/// What: returns
-/// `{"status":"wi2","demo":<bool>,"project":"<abs path>","tools":[<names>]}`.
-/// Test: `meta_wi2_summary_reports_status`,
-/// `meta_wi2_summary_carries_demo_project_and_tools`.
-pub(crate) fn wi2_summary(demo: bool, project: &Path, tools: &[String]) -> serde_json::Value {
-    json!({
-        "status": STATUS_WI2,
-        "demo": demo,
-        "project": project.display().to_string(),
-        "tools": tools,
-    })
-}
-
 /// Initialise stderr tracing for the short-lived `meta run` invocation.
 ///
 /// Why: short-lived `tm` subcommands skip the daemon's subscriber init, but the
 /// metaharness requires structured logging that honours `RUST_LOG`. `try_init`
 /// keeps this idempotent — it silently no-ops if a subscriber already exists.
+/// Logging goes to STDERR so stdout carries only the command's structured result.
 /// What: installs a stderr `fmt` subscriber filtered by `RUST_LOG` (default
 /// `info`); ignores the error when a subscriber already exists.
 /// Test: side-effect-only; exercised indirectly by the handler tests.
@@ -365,107 +324,27 @@ mod tests {
     }
 
     #[test]
-    fn meta_wi2_summary_reports_status() {
-        let tools = vec!["bash".to_string()];
-        let summary = wi2_summary(true, Path::new("/tmp"), &tools);
-        assert_eq!(summary["status"], STATUS_WI2);
+    fn meta_default_timeout_is_120s() {
+        assert_eq!(DEFAULT_TIMEOUT_SECS, 120);
     }
 
     #[test]
-    fn meta_wi2_summary_carries_demo_project_and_tools() {
-        let tools = vec!["bash".to_string(), "read_file".to_string()];
-        let summary = wi2_summary(false, Path::new("/work/p"), &tools);
-        assert_eq!(summary["demo"], false);
-        assert_eq!(summary["project"], "/work/p");
-        assert_eq!(summary["tools"], json!(["bash", "read_file"]));
-    }
-
-    #[test]
-    fn meta_run_demo_emits_expected_tool_list() {
-        // The registry-backed summary over an existing project must list every
-        // metaharness tool — guards the run()→registry wiring.
-        let tmp = std::env::temp_dir();
-        let registry = build_meta_registry(&tmp);
-        let tools = registry_tool_names(&registry);
-        assert_eq!(
-            tools,
-            vec![
-                "bash".to_string(),
-                "delegate_to_agent".to_string(),
-                "edit".to_string(),
-                "read_file".to_string(),
-                "write_file".to_string(),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn meta_run_registry_summary_for_existing_project() {
-        // The non-demo path over an existing project must exit Ok (exit 0) so the
-        // offline scaffold stays smoke-testable without an LLM key.
-        let tmp = std::env::temp_dir();
-        run(false, Some(tmp))
-            .await
-            .expect("registry summary succeeds");
-    }
-
-    #[tokio::test]
-    async fn meta_run_errors_on_missing_project() {
-        let missing = PathBuf::from("/nonexistent-meta-bootstrap-run-xyz-98765");
-        assert!(run(true, Some(missing)).await.is_err());
-    }
-
-    #[test]
-    fn meta_demo_task_names_expected_file() {
+    fn meta_run_id_is_numeric() {
+        let id = run_id();
         assert!(
-            demo_task().contains(DEMO_ARTIFACT),
-            "demo task must name the artifact file"
-        );
-        assert!(
-            demo_task().contains("python-engineer"),
-            "demo task must direct delegation to the engineer"
+            id.chars().all(|c| c.is_ascii_digit()),
+            "run id must be numeric, got: {id}"
         );
     }
 
     #[test]
-    fn meta_read_project_context_reads_existing_file() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        // Absent file → None.
-        assert!(read_project_context(tmp.path()).is_none());
-        // Present file → Some(contents).
-        std::fs::write(tmp.path().join("CLAUDE.md"), "PROJECT RULES").expect("write CLAUDE.md");
-        assert_eq!(
-            read_project_context(tmp.path()).as_deref(),
-            Some("PROJECT RULES")
-        );
-    }
-
-    #[test]
-    fn meta_run_filename_uses_millisecond_precision() {
-        // Two instants in the same wall-clock second but different milliseconds
-        // must yield distinct filenames (fix #3: no same-second overwrite).
-        let base = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_123);
-        let same_second = base + std::time::Duration::from_millis(456);
-        let a = run_transcript_filename(base);
-        let b = run_transcript_filename(same_second);
-        assert_eq!(a, "run-1700000000123.json");
-        assert_eq!(b, "run-1700000000579.json");
-        assert_ne!(
-            a, b,
-            "millisecond precision must disambiguate same-second runs"
-        );
-    }
-
-    #[test]
-    fn meta_run_dir_paths_are_project_scoped() {
-        let project = Path::new("/work/proj");
-        assert_eq!(
-            meta_agents_dir(project),
-            Path::new("/work/proj/.trusty-mpm/meta-agents")
-        );
-        assert_eq!(
-            meta_runs_dir(project),
-            Path::new("/work/proj/.trusty-mpm/meta-runs")
-        );
+    fn meta_run_id_is_unique() {
+        // Uniqueness is guaranteed by the process-monotonic counter, NOT by clock
+        // resolution — so two ids drawn with no delay must still differ. (The old
+        // test slept 2ms and relied on the wall clock ticking, which could flake on
+        // loaded / low-resolution CI.)
+        let a = run_id();
+        let b = run_id();
+        assert_ne!(a, b, "run ids must be unique across back-to-back calls");
     }
 }

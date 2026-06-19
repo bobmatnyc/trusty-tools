@@ -136,14 +136,23 @@ fn cli_project_requires_action() {
 
 #[test]
 fn cli_parses_meta_run() {
-    // Bare `meta run` defaults to no demo and no explicit project (#1045 WI-1).
+    // Bare `meta run` defaults to no demo, no explicit project, no-provision off,
+    // and no explicit timeout (#1049/#1051).
     let cli = Cli::try_parse_from(["trusty-mpm", "meta", "run"]).unwrap();
     match cli.command {
         Command::Meta {
-            action: MetaAction::Run { demo, project },
+            action:
+                MetaAction::Run {
+                    demo,
+                    project,
+                    no_provision,
+                    timeout_secs,
+                },
         } => {
             assert!(!demo);
             assert_eq!(project, None);
+            assert!(!no_provision);
+            assert_eq!(timeout_secs, None);
         }
         other => panic!("expected meta run, got {other:?}"),
     }
@@ -155,7 +164,7 @@ fn cli_parses_meta_run_demo() {
     let cli = Cli::try_parse_from(["trusty-mpm", "meta", "run", "--demo"]).unwrap();
     match cli.command {
         Command::Meta {
-            action: MetaAction::Run { demo, project },
+            action: MetaAction::Run { demo, project, .. },
         } => {
             assert!(demo);
             assert_eq!(project, None);
@@ -171,12 +180,36 @@ fn cli_parses_meta_run_project() {
         Cli::try_parse_from(["trusty-mpm", "meta", "run", "--demo", "--project", "/tmp"]).unwrap();
     match cli.command {
         Command::Meta {
-            action: MetaAction::Run { demo, project },
+            action: MetaAction::Run { demo, project, .. },
         } => {
             assert!(demo);
             assert_eq!(project.as_deref(), Some(std::path::Path::new("/tmp")));
         }
         other => panic!("expected meta run --project, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_meta_run_no_provision() {
+    // `meta run --no-provision` sets the clone-skip flag (#1049).
+    let cli = Cli::try_parse_from(["trusty-mpm", "meta", "run", "--no-provision"]).unwrap();
+    match cli.command {
+        Command::Meta {
+            action: MetaAction::Run { no_provision, .. },
+        } => assert!(no_provision),
+        other => panic!("expected meta run --no-provision, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_meta_run_timeout() {
+    // `meta run --timeout-secs 30` overrides the poll budget (#1051).
+    let cli = Cli::try_parse_from(["trusty-mpm", "meta", "run", "--timeout-secs", "30"]).unwrap();
+    match cli.command {
+        Command::Meta {
+            action: MetaAction::Run { timeout_secs, .. },
+        } => assert_eq!(timeout_secs, Some(30)),
+        other => panic!("expected meta run --timeout-secs, got {other:?}"),
     }
 }
 
