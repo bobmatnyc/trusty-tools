@@ -70,13 +70,24 @@ impl CommandExecutor {
     /// hook, so the harness actually unblocks. A project session (not in the
     /// managed list) keeps its lightweight existence-check-and-acknowledge
     /// behavior — there is no managed decision to answer.
+    ///
+    /// Round-trip discipline (1A review follow-up): the managed answer needs the
+    /// session's `proposed_default`, so a managed approve/deny is resolved
+    /// against the managed list and answered in ONE managed round-trip — the
+    /// project `GET /sessions` list is fetched ONLY when the managed list does
+    /// not contain the target (a genuine project session), never speculatively.
+    /// The managed list must be consulted first because managed precedence is a
+    /// correctness rule (a real harness decision outranks a project-session
+    /// acknowledgement); the families share the id/name space, so there is no
+    /// cheaper local discriminator that would let us skip it.
     /// What: resolves `session_id` against the managed list first; on a match it
     /// posts the derived answer (the session's `proposed_default`, else `"yes"`,
-    /// for approve; `"no"` for deny) to the answer endpoint. Otherwise it
-    /// confirms the project session exists and returns Approved/Denied. An
-    /// unknown session is an `Error`.
+    /// for approve; `"no"` for deny) to the answer endpoint and returns —
+    /// without the project fetch. Otherwise it confirms the project session
+    /// exists and returns Approved/Denied. An unknown session is an `Error`.
     /// Test: `execute_approve_known_session`, `execute_approve_unknown_session_errors`,
-    /// `execute_managed_answer_approve_routes_to_answer_endpoint`.
+    /// `execute_approve_managed_skips_project_fetch`,
+    /// `execute_approve_errors_when_managed_list_unreachable`.
     pub(super) async fn decide(&self, session_id: &str, approved: bool) -> CommandResult {
         // Prefer the managed answer endpoint: if this id/name is a managed
         // session, the operator's approve/deny is a real decision answer.
@@ -92,14 +103,9 @@ impl CommandExecutor {
             Err(e) => return CommandResult::Error(format!("daemon unreachable: {e}")),
         };
         if let Some(found) = resolve_target(&managed, session_id) {
-            let answer = if approved {
-                found
-                    .proposed_default
-                    .clone()
-                    .unwrap_or_else(|| "yes".to_string())
-            } else {
-                "no".to_string()
-            };
+            // Managed match: answer in a single managed round-trip. The project
+            // `GET /sessions` fetch below is intentionally NOT reached here.
+            let answer = decide_answer(approved, found.proposed_default.as_deref());
             return match self
                 .client()
                 .answer_managed_session(&found.id, &answer)
@@ -114,9 +120,10 @@ impl CommandExecutor {
                 Err(e) => CommandResult::Error(format!("answer failed: {e}")),
             };
         }
-        // Fall back to the project-session path: confirm the session exists,
-        // then acknowledge. (No synthetic hook — the managed path above is the
-        // only real decision channel.)
+        // Managed miss → this is (at most) a project session. Only NOW do we
+        // pay for the project list to confirm it exists, then acknowledge. (No
+        // synthetic hook — the managed path above is the only real decision
+        // channel.)
         let exists = match self.client().sessions().await {
             Ok(rows) => rows.iter().any(|s| s.id.0.to_string() == session_id),
             Err(e) => return CommandResult::Error(format!("daemon unreachable: {e}")),
@@ -415,6 +422,24 @@ fn target_of(row: &SessionRow) -> String {
     } else {
         row.tmux_name.clone()
     }
+}
+
+/// Derive the answer text a managed approve/deny posts to `.../answer`.
+///
+/// Why: `/approve` accepts the harness's proposed default when it has one (so the
+/// operator confirms exactly what the session asked for), falling back to a plain
+/// `"yes"`; `/deny` is always `"no"`. Extracting this keeps the decision-answer
+/// derivation pure and unit-testable without a live daemon round-trip.
+/// What: returns `proposed_default` (when `approved` and present), else `"yes"`
+/// for an approve, else `"no"` for a deny.
+/// Test: `decide_answer_prefers_proposed_default`.
+pub(crate) fn decide_answer(approved: bool, proposed_default: Option<&str>) -> String {
+    if !approved {
+        return "no".to_string();
+    }
+    proposed_default
+        .map(str::to_string)
+        .unwrap_or_else(|| "yes".to_string())
 }
 
 /// Truncate captured output to [`MAX_OUTPUT_CHARS`] on a character boundary.

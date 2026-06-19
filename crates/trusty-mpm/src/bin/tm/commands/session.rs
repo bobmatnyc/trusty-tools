@@ -4,7 +4,11 @@
 //! breakers, pause, resume, run, output, instructions) form a cohesive group
 //! that benefits from a dedicated file.
 //! What: the `session` dispatcher function and its private helpers
-//! `resolve_session_id`, `compose_session_instructions`.
+//! `emit_managed_alias_notice`, `compose_session_instructions`. The managed
+//! verbs (`new`/`ls`/`send`/`answer`/`attach`/`stop`/`resume`/`decommission`)
+//! route through the shared chat-core layer (`commands::managed_route`); the
+//! id-or-name resolution for both managed and project sessions goes through the
+//! one canonical `client::resolve_target`.
 //! Test: `cli_parses_session_*`, `compose_session_instructions_*` in `tests.rs`.
 
 use serde::Deserialize;
@@ -116,12 +120,14 @@ pub(crate) async fn session(
         }
         SessionAction::Stop { id_or_name } => {
             // #1218: `stop` is managed-aware. If the argument resolves to a
-            // MANAGED session (by id or friendly name), route to the managed
-            // runtime-stop endpoint; otherwise fall back to the project-session
-            // DELETE path. This keeps one intuitive verb that does the right
-            // thing for both families (the #842 driver skill documents `stop`).
+            // MANAGED session (by id or friendly name) via the canonical
+            // chat-core resolver, route to the managed runtime-stop endpoint;
+            // otherwise fall back to the project-session DELETE path. This keeps
+            // one intuitive verb that does the right thing for both families (the
+            // #842 driver skill documents `stop`).
             if let Some(managed_id) =
-                crate::commands::managed::resolve_managed_id(client, url, &id_or_name).await
+                crate::commands::managed_route::resolve_managed_match(client, url, &id_or_name)
+                    .await
             {
                 crate::commands::managed::session_stop(client, url, managed_id).await?;
             } else {
@@ -223,7 +229,13 @@ pub(crate) async fn session(
             print!("{resolved_prompt}");
         }
         SessionAction::Events { id_or_name } => {
-            let id = match resolve_session_id(client, url, &id_or_name).await? {
+            let id = match crate::commands::managed_route::resolve_project_session_id(
+                client,
+                url,
+                &id_or_name,
+            )
+            .await?
+            {
                 Some(id) => id,
                 None => {
                     println!("session '{id_or_name}' not found");
@@ -300,10 +312,12 @@ pub(crate) async fn session(
         }
         SessionAction::Resume { id_or_name } => {
             // #1218: `resume` is managed-aware (mirrors `Stop`). A managed
-            // session id/name routes to the managed resume endpoint; anything
-            // else falls back to the project-session pause/resume path.
+            // session id/name routes (via the canonical chat-core resolver) to
+            // the managed resume endpoint; anything else falls back to the
+            // project-session pause/resume path.
             if let Some(managed_id) =
-                crate::commands::managed::resolve_managed_id(client, url, &id_or_name).await
+                crate::commands::managed_route::resolve_managed_match(client, url, &id_or_name)
+                    .await
             {
                 crate::commands::managed::session_resume(client, url, managed_id).await?;
             } else {
@@ -376,88 +390,66 @@ pub(crate) async fn session(
                 print_compression_stats(&body);
             }
         }
-        // ── Managed session-manager MVP actions (delegate to `managed`) ──────
-        SessionAction::New {
-            repo,
-            git_ref,
-            task,
-            name_hint,
-            runtime,
-        } => {
-            crate::commands::managed::session_new(
-                client, url, repo, git_ref, task, name_hint, runtime,
-            )
-            .await?
+        // ── Managed session-manager actions ──────────────────────────────────
+        // `--json` ls keeps the raw daemon-JSON passthrough (chat-core returns a
+        // structured result, not the verbatim wire bytes scripts expect).
+        SessionAction::Ls { json: true } => {
+            crate::commands::managed::session_ls(client, url, true).await?
         }
-        SessionAction::Ls { json } => {
-            crate::commands::managed::session_ls(client, url, json).await?
-        }
+        // `activity` stays on the raw path: its CLI output carries confidence,
+        // token, cache, and latency detail that `CommandResult::ManagedActivity`
+        // does not model, so routing it through chat-core would regress output.
         SessionAction::Activity { id } => {
             crate::commands::managed::session_activity(client, url, id).await?
         }
-        SessionAction::Send { id, text } => {
-            crate::commands::managed::session_send(client, url, id, text).await?
-        }
-        SessionAction::Answer { id, answer } => {
-            crate::commands::managed::session_answer(client, url, id, answer).await?
-        }
-        SessionAction::Attach { id } => {
-            crate::commands::managed::session_attach(client, url, id).await?
-        }
-        SessionAction::ManagedStop { id } => {
-            crate::commands::managed::session_managed_stop(client, url, id).await?
-        }
-        SessionAction::RuntimeStop { id } => {
-            crate::commands::managed::session_runtime_stop(client, url, id).await?
-        }
-        SessionAction::ManagedResume { id } => {
-            crate::commands::managed::session_managed_resume(client, url, id).await?
-        }
-        SessionAction::Decommission { id } => {
-            crate::commands::managed::session_decommission(client, url, id).await?
-        }
         SessionAction::PruneIdle { dry_run, json } => {
             crate::commands::prune::prune_idle(client, url, dry_run, json).await?
+        }
+        // The deprecated verbose aliases emit their deprecation notice, then
+        // route through chat-core exactly like their canonical verb (#1205).
+        action @ (SessionAction::ManagedStop { .. }
+        | SessionAction::RuntimeStop { .. }
+        | SessionAction::ManagedResume { .. }) => {
+            emit_managed_alias_notice(&action);
+            // `to_command` maps every one of these aliases; `run` therefore
+            // always handles it.
+            crate::commands::managed_route::run(client, url, &action).await?;
+        }
+        // Every remaining managed verb (`new`/`ls`/`send`/`answer`/`attach`/
+        // `decommission`) routes through the shared chat-core layer. `run`
+        // returns `false` only for non-managed variants, which the arms above
+        // already handled — so an unrouted variant here is a wiring bug.
+        action => {
+            debug_assert!(
+                crate::commands::managed_route::to_command(&action).is_some(),
+                "unrouted session action reached the managed fallthrough: {action:?}"
+            );
+            crate::commands::managed_route::run(client, url, &action).await?;
         }
     }
     Ok(())
 }
 
-/// Resolve a session id-or-name to its UUID string via `GET /sessions`.
+/// Emit the deprecation notice for a renamed managed lifecycle alias (#1205).
 ///
-/// Why: `session events` calls `GET /sessions/{id}/events`, which requires a
-/// UUID; operators may pass a friendly `tmpm-<adj>-<noun>` name instead, so the
-/// name must be resolved against the live session list first.
-/// What: fetches `GET /sessions`, matching `id.0` or `tmux_name` against the
-/// argument; returns `Some(uuid)` on a hit, `None` when no session matches.
-/// Test: covered indirectly by `cli_parses_session_events`.
-pub(crate) async fn resolve_session_id(
-    client: &reqwest::Client,
-    url: &str,
-    id_or_name: &str,
-) -> anyhow::Result<Option<String>> {
-    #[derive(Deserialize)]
-    struct Body {
-        sessions: Vec<serde_json::Value>,
+/// Why: `managed-stop`/`runtime-stop`/`managed-resume` were renamed to the
+/// cleaner `stop`/`resume` family; the old spellings still parse but every
+/// invocation must nudge the operator toward the canonical verb. Centralizing the
+/// old→new mapping here keeps the routing arm a thin match.
+/// What: writes `warning: '<old>' is deprecated; use '<new>'` to stderr for the
+/// three deprecated aliases; a no-op for any other action.
+/// Test: the message text is asserted by `deprecation_notice_format`; the alias
+/// parse paths by `cli_parses_session_managed_stop`/`_runtime_stop`/`_managed_resume`.
+fn emit_managed_alias_notice(action: &SessionAction) {
+    let pair = match action {
+        SessionAction::ManagedStop { .. } => Some(("managed-stop", "stop")),
+        SessionAction::RuntimeStop { .. } => Some(("runtime-stop", "stop")),
+        SessionAction::ManagedResume { .. } => Some(("managed-resume", "resume")),
+        _ => None,
+    };
+    if let Some((old, new)) = pair {
+        crate::commands::managed::deprecation_notice(old, new);
     }
-    let body: Body = client
-        .get(format!("{url}/sessions"))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let found = body.sessions.iter().find_map(|s| {
-        // `SessionId` is a single-field newtype: serde serializes it as a bare
-        // UUID string, so `id` is read directly (not as `{"0": ...}`).
-        let uuid = s.get("id").and_then(|v| v.as_str());
-        let name = s.get("tmux_name").and_then(|v| v.as_str());
-        match uuid {
-            Some(u) if u == id_or_name || name == Some(id_or_name) => Some(u.to_string()),
-            _ => None,
-        }
-    });
-    Ok(found)
 }
 
 /// Run the instruction merge pipeline and stash the override-resolved PM prompt.

@@ -1,15 +1,21 @@
-//! Managed session-manager CLI handlers (session-manager MVP).
+//! Managed session-manager CLI handlers — the verbs NOT routed through chat-core.
 //!
-//! Why: the session-manager MVP adds operator commands (`tm sessions new/ls/
-//! activity/send/answer/attach/managed-stop` and `tm catalog sync/ls`) that talk
-//! to the daemon's `/api/v1/sessions/managed/*` surface. Keeping these handlers
-//! in their own file keeps `session.rs` under the SLOC cap.
+//! Why: Phase 1B (refs #1283) routed the managed operator verbs
+//! (`new`/`ls`/`send`/`answer`/`attach`/`stop`/`resume`/`decommission`) through
+//! the shared chat-core layer (`commands::managed_route`), retiring this file's
+//! bespoke resolvers (`classify_managed_target`/`resolve_managed_id`). What
+//! remains here are the handlers chat-core does not (yet) cover faithfully: the
+//! `--json` `ls` raw passthrough, the token/cache-rich `activity` render, the
+//! id-direct `stop`/`resume`/`decommission` helpers reused by the managed-aware
+//! `Stop`/`Resume` verbs and `prune`, the `deprecation_*` helpers, and the local
+//! `catalog` command. Keeping them in their own file keeps `session.rs` under the
+//! SLOC cap.
 //! What: thin async functions that issue HTTP requests via `reqwest` and render
 //! the JSON responses; plus the local `catalog` handler that drives `CatalogSync`.
-//! Test: `cli_parses_session_new`, `cli_parses_catalog_sync` exercise the parse
-//! path; the HTTP round-trip is covered by `tests/session_manager_mvp.rs`.
+//! Test: `cli_parses_catalog_sync` exercises the parse path; the HTTP round-trip
+//! is covered by `tests/session_manager_mvp.rs`.
 
-use trusty_mpm::client::{DaemonClient, ManagedSessionSummary, ManagedSpawnRequest};
+use trusty_mpm::client::ManagedSessionSummary;
 
 use crate::cli::CatalogAction;
 
@@ -36,108 +42,6 @@ pub(crate) fn deprecation_message(old: &str, new: &str) -> String {
 /// still parse; the message text is asserted by `deprecation_notice_format`.
 pub(crate) fn deprecation_notice(old: &str, new: &str) {
     eprintln!("{}", deprecation_message(old, new));
-}
-
-/// Decide whether an id-or-name refers to a MANAGED session, returning its UUID.
-///
-/// Why: the canonical `tm sessions stop`/`resume` verbs must operate on managed
-/// sessions (the documented #842 driver-skill behavior) while still serving the
-/// older local/project-session family. #1218: those verbs were routing every
-/// argument to the project-sessions API, so managed UUIDs came back "not found".
-/// This classifier is the pure decision that makes the verbs managed-aware: if
-/// the argument matches a managed session by id or friendly name, the caller
-/// routes to the managed endpoint; otherwise it falls back to project-sessions.
-/// What: scans the managed-session list, matching `id_or_name` against each
-/// session's `id` (UUID) or `name`; returns `Some(id)` on the first hit, else
-/// `None`. Matching the canonical UUID (not the input) lets a friendly-name
-/// argument resolve to the id the managed endpoints require.
-/// Test: `classify_managed_target_*` in `tests.rs`.
-pub(crate) fn classify_managed_target(
-    sessions: &[ManagedSessionSummary],
-    id_or_name: &str,
-) -> Option<String> {
-    sessions
-        .iter()
-        .find(|s| s.id == id_or_name || s.name == id_or_name)
-        .map(|s| s.id.clone())
-}
-
-/// Resolve an id-or-name to a MANAGED session id by querying the daemon.
-///
-/// Why: `tm sessions stop`/`resume` need to know — before choosing an endpoint —
-/// whether the argument is a managed session (#1218). Fetching the managed list
-/// and applying [`classify_managed_target`] keeps that decision in one place and
-/// off the project-session path.
-/// What: calls [`DaemonClient::list_managed_sessions`] and returns
-/// `classify_managed_target(&sessions, id_or_name)`. Any transport/parse failure
-/// yields `None` (treated as "not managed") so the caller transparently falls
-/// back to the project-session path rather than erroring.
-/// Test: HTTP wiring covered by the integration test; the matching logic by
-/// `classify_managed_target_*`.
-pub(crate) async fn resolve_managed_id(
-    client: &reqwest::Client,
-    url: &str,
-    id_or_name: &str,
-) -> Option<String> {
-    let sessions = daemon_client(client, url)
-        .list_managed_sessions()
-        .await
-        .ok()?;
-    classify_managed_target(&sessions, id_or_name)
-}
-
-/// Build a [`DaemonClient`] from the CLI's `(client, url)` pair.
-///
-/// Why: the managed CLI handlers keep their `(client: &reqwest::Client, url:
-/// &str)` signatures so their callers in `session.rs`/`prune.rs` are untouched,
-/// but their bodies now delegate to the shared typed [`DaemonClient`] (the
-/// convergence target for STUI #1272 / TELUI #1433). This helper centralizes the
-/// construction so every handler reuses the daemon base consistently.
-/// What: returns `DaemonClient::with_client(client.clone(), url)`, REUSING the
-/// caller's configured `reqwest::Client` (TLS/timeout/proxy/pool) rather than
-/// minting a fresh default one. Cloning is cheap — `reqwest::Client` is an `Arc`
-/// internally — so the caller's pool and settings are preserved.
-/// Test: exercised transitively by every managed handler's integration coverage.
-fn daemon_client(client: &reqwest::Client, url: &str) -> DaemonClient {
-    DaemonClient::with_client(client.clone(), url.to_string())
-}
-
-/// `tm sessions new` — spawn a managed session from a repo + ref.
-///
-/// Why: the operator-facing entry point to provision an isolated workspace and
-/// start a harness in it, optionally selecting the runtime backend.
-/// What: POSTs repo/ref/task/name_hint/runtime to `/api/v1/sessions/managed` and
-/// prints the new session id, state, runtime, and attach command. `runtime`
-/// defaults to `claude-code`; pass `--runtime tcode` for the direct-API backend.
-/// Test: arg parsing covered by `cli_parses_session_new`; HTTP path covered by
-/// `tests/session_manager_mvp.rs`.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn session_new(
-    client: &reqwest::Client,
-    url: &str,
-    repo: String,
-    git_ref: String,
-    task: String,
-    name_hint: Option<String>,
-    runtime: trusty_mpm::runtime::RuntimeKind,
-) -> anyhow::Result<()> {
-    let resp = daemon_client(client, url)
-        .spawn_managed_session(&ManagedSpawnRequest {
-            repo_url: repo,
-            git_ref,
-            task,
-            name_hint,
-            // Send the canonical wire spelling (`claude-code`/`tcode`) so the
-            // daemon's `FromStr` accepts it; the CLI already validated the value.
-            runtime: Some(runtime.as_str().to_string()),
-        })
-        .await?;
-    println!(
-        "spawned {} ({}) [{}] runtime={}",
-        resp.name, resp.id, resp.state, resp.runtime
-    );
-    println!("  attach: {}", resp.attach_cmd);
-    Ok(())
 }
 
 /// `tm sessions ls` — list managed sessions.
@@ -242,116 +146,6 @@ pub(crate) async fn session_activity(
     Ok(())
 }
 
-/// `tm sessions send <id> <text>` — inject text into a managed session's pane.
-///
-/// Why: send a message to the harness without attaching to tmux.
-/// What: POSTs `/api/v1/sessions/managed/{id}/send`.
-/// Test: HTTP path covered by the integration test.
-pub(crate) async fn session_send(
-    client: &reqwest::Client,
-    url: &str,
-    id: String,
-    text: String,
-) -> anyhow::Result<()> {
-    let resp = client
-        .post(format!("{url}/api/v1/sessions/managed/{id}/send"))
-        .json(&serde_json::json!({ "text": text }))
-        .send()
-        .await?;
-    handle_simple_ok(resp, "sent").await
-}
-
-/// `tm sessions answer <id> <answer>` — answer a pending decision.
-///
-/// Why: resolve a decision the harness is blocked on.
-/// What: POSTs `/api/v1/sessions/managed/{id}/answer`.
-/// Test: HTTP path covered by the integration test.
-pub(crate) async fn session_answer(
-    client: &reqwest::Client,
-    url: &str,
-    id: String,
-    answer: String,
-) -> anyhow::Result<()> {
-    let resp = client
-        .post(format!("{url}/api/v1/sessions/managed/{id}/answer"))
-        .json(&serde_json::json!({ "answer": answer }))
-        .send()
-        .await?;
-    handle_simple_ok(resp, "answered").await
-}
-
-/// `tm sessions attach <id>` — print the tmux attach command.
-///
-/// Why: operators need the exact `tmux attach` command to take over a pane.
-/// What: GETs `/api/v1/sessions/managed/{id}/attach-cmd`.
-/// Test: HTTP path covered by the integration test.
-pub(crate) async fn session_attach(
-    client: &reqwest::Client,
-    url: &str,
-    id: String,
-) -> anyhow::Result<()> {
-    let resp = client
-        .get(format!("{url}/api/v1/sessions/managed/{id}/attach-cmd"))
-        .send()
-        .await?;
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        println!("not found");
-        return Ok(());
-    }
-    let body: trusty_mpm::client::ManagedAttachCmdResponse =
-        resp.error_for_status()?.json().await?;
-    println!("{}", body.attach_cmd);
-    Ok(())
-}
-
-/// `tm sessions managed-stop <id>` — stop runtime only (keep workspace, deprecated alias).
-///
-/// Why: backward-compatible alias for `session_stop`; existing scripts that call
-/// `managed-stop` keep working but get a deprecation nudge toward `stop` (#1205).
-/// What: emits the deprecation notice, then POSTs
-/// `/api/v1/sessions/managed/{id}/runtime-stop` via `session_stop`.
-/// Test: HTTP path covered by the integration test; parse by
-/// `cli_parses_session_managed_stop`.
-pub(crate) async fn session_managed_stop(
-    client: &reqwest::Client,
-    url: &str,
-    id: String,
-) -> anyhow::Result<()> {
-    deprecation_notice("managed-stop", "stop");
-    session_stop(client, url, id).await
-}
-
-/// `tm sessions runtime-stop <id>` — stop runtime only (deprecated alias).
-///
-/// Why: `runtime-stop` was renamed to `stop` (#1205); the old spelling still
-/// parses but emits a deprecation notice steering operators to `stop`.
-/// What: emits the deprecation notice, then delegates to `session_stop`.
-/// Test: parse by `cli_parses_session_runtime_stop`; HTTP path via `session_stop`.
-pub(crate) async fn session_runtime_stop(
-    client: &reqwest::Client,
-    url: &str,
-    id: String,
-) -> anyhow::Result<()> {
-    deprecation_notice("runtime-stop", "stop");
-    session_stop(client, url, id).await
-}
-
-/// `tm sessions managed-resume <id>` — resume a stopped session (deprecated alias).
-///
-/// Why: `managed-resume` was renamed to `resume` (#1205); the old spelling still
-/// parses but emits a deprecation notice steering operators to `resume`.
-/// What: emits the deprecation notice, then delegates to `session_resume`.
-/// Test: parse by `cli_parses_session_managed_resume`; HTTP path via
-/// `session_resume`.
-pub(crate) async fn session_managed_resume(
-    client: &reqwest::Client,
-    url: &str,
-    id: String,
-) -> anyhow::Result<()> {
-    deprecation_notice("managed-resume", "resume");
-    session_resume(client, url, id).await
-}
-
 /// `tm sessions stop <id>` — stop the runtime of a managed session, keep the workspace.
 ///
 /// Why: a session ENDURES beyond its runtime; `stop` kills only the tmux session
@@ -431,22 +225,6 @@ pub(crate) async fn session_decommission(
     }
     resp.error_for_status()?;
     println!("decommissioned {id} (workspace removed; tombstone record kept)");
-    Ok(())
-}
-
-/// Render a uniform success/not-found message for the send/answer endpoints.
-///
-/// Why: both endpoints share the same 404-or-OK response shape; centralizing the
-/// rendering avoids duplication.
-/// What: prints "not found" on 404, the success verb otherwise.
-/// Test: covered indirectly by send/answer integration coverage.
-async fn handle_simple_ok(resp: reqwest::Response, verb: &str) -> anyhow::Result<()> {
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        println!("not found");
-        return Ok(());
-    }
-    resp.error_for_status()?;
-    println!("{verb}");
     Ok(())
 }
 

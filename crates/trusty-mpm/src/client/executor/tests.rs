@@ -278,6 +278,34 @@ fn truncate_output_caps_long_text() {
     assert!(truncated.chars().count() <= MAX_OUTPUT_CHARS + 32);
 }
 
+#[test]
+fn decide_answer_prefers_proposed_default() {
+    // Approve adopts the harness's proposed default when present, else "yes";
+    // deny is always "no" regardless of any proposed default.
+    assert_eq!(decide_answer(true, Some("option B")), "option B");
+    assert_eq!(decide_answer(true, None), "yes");
+    assert_eq!(decide_answer(false, Some("option B")), "no");
+    assert_eq!(decide_answer(false, None), "no");
+}
+
+#[tokio::test]
+async fn execute_approve_managed_miss_then_project_not_found() {
+    // The 1A round-trip follow-up: with no managed session matching, `decide`
+    // falls through to the project `GET /sessions` path exactly once and reports
+    // not-found for an unknown id (it does NOT masquerade as a managed error).
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url);
+    match executor
+        .execute(TrustyCommand::Approve {
+            session_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .await
+    {
+        CommandResult::Error(msg) => assert!(msg.contains("not found")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn execute_send_unknown_session_errors() {
     let (_state, url) = spawn_test_daemon().await;
