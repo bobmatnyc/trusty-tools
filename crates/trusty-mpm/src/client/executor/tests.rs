@@ -228,6 +228,39 @@ async fn execute_status_no_events() {
     }
 }
 
+#[tokio::test]
+async fn execute_health_against_test_daemon() {
+    // Against a live daemon the `health` verb reports reachable=true, a status
+    // word, and a fleet summary (empty fleet → zero counts) — never an error.
+    let (_state, url) = spawn_test_daemon().await;
+    let executor = CommandExecutor::new(url.clone());
+    match executor.execute(TrustyCommand::Health).await {
+        CommandResult::Health(report) => {
+            assert!(report.reachable, "daemon should be reachable");
+            assert!(!report.status.is_empty());
+            assert_eq!(report.url, url);
+            assert_eq!(report.managed_total, 0);
+            assert_eq!(report.managed_pending_decisions, 0);
+        }
+        other => panic!("expected Health, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_health_dead_daemon_renders() {
+    // A dead daemon must render as a Health result with reachable=false — never a
+    // panic and never a transport Error.
+    let executor = CommandExecutor::new("http://127.0.0.1:0");
+    match executor.execute(TrustyCommand::Health).await {
+        CommandResult::Health(report) => {
+            assert!(!report.reachable, "dead daemon must be reachable=false");
+            assert_eq!(report.status, "unreachable");
+            assert_eq!(report.managed_total, 0);
+        }
+        other => panic!("expected Health, got {other:?}"),
+    }
+}
+
 #[test]
 fn resolve_session_exact_and_prefix() {
     use crate::client::http_client::SessionRow;

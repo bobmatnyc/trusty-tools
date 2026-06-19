@@ -8,7 +8,7 @@
 //! [`TelegramFormatter::keyboard_for`] the optional inline keyboard.
 //! Test: `cargo test -p trusty-mpm-telegram` covers each variant's rendering.
 
-use crate::client::{CommandResult, DiscoveredProjectSummary, ManagedSessionView};
+use crate::client::{CommandResult, DiscoveredProjectSummary, HealthReport, ManagedSessionView};
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
 #[cfg(test)]
@@ -271,6 +271,7 @@ impl TelegramFormatter {
                 html_escape(state),
             ),
             CommandResult::Help(text) => text.clone(),
+            CommandResult::Health(report) => format_health(report),
             CommandResult::Error(msg) => format!("❌ {msg}"),
         }
     }
@@ -455,6 +456,39 @@ fn format_doctor_report(report: &crate::client::DoctorReport) -> String {
         status_word(report.overall),
     ));
     text
+}
+
+/// Render a [`HealthReport`] as a glanceable Telegram health summary.
+///
+/// Why: the `/health` reply must read at a glance on a phone — daemon up/down
+/// first, then catalog freshness and a one-line fleet summary.
+/// What: leads with a ✅/❌ liveness line (using `reachable`/`status`); when the
+/// daemon is up, appends the catalog-freshness line and the managed fleet counts
+/// (total + how many are blocked on a decision). A down daemon renders just the
+/// liveness line — no fleet (which would all be zero/misleading).
+/// Test: `format_health_up_and_down` in `tests.rs`.
+fn format_health(report: &HealthReport) -> String {
+    if !report.reachable {
+        return format!(
+            "❌ <b>daemon unreachable</b>\n<code>{}</code>",
+            html_escape(&report.url),
+        );
+    }
+    let catalog = if report.catalog_unknown {
+        "catalog: never synced"
+    } else if report.catalog_stale {
+        "catalog: ⚠️ updates available"
+    } else {
+        "catalog: up to date"
+    };
+    format!(
+        "✅ <b>daemon {}</b>\n<code>{}</code>\n{}\nfleet: {} session(s), {} awaiting a decision",
+        html_escape(&report.status),
+        html_escape(&report.url),
+        catalog,
+        report.managed_total,
+        report.managed_pending_decisions,
+    )
 }
 
 /// The emoji icon for a doctor [`CheckStatus`](crate::core::doctor::CheckStatus).

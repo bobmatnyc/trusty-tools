@@ -505,3 +505,25 @@ fn managed_session_urls_use_managed_route_family() {
         "http://127.0.0.1:7880/sessions/abc/resume"
     );
 }
+
+#[test]
+fn health_snapshot_deserializes() {
+    // The `/health` body deserializes into HealthSnapshot; the catalog flags
+    // default when absent so an older daemon returning only `status` still parses.
+    let full: HealthSnapshot = serde_json::from_value(serde_json::json!({
+        "status": "ok",
+        "catalog_stale": true,
+        "catalog_unknown": false,
+        "catalog_changes": ["agents/foo"],
+    }))
+    .expect("full health body parses");
+    assert_eq!(full.status, "ok");
+    assert!(full.catalog_stale);
+    assert!(!full.catalog_unknown);
+
+    let minimal: HealthSnapshot =
+        serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("minimal body parses");
+    assert_eq!(minimal.status, "ok");
+    assert!(!minimal.catalog_stale);
+    assert!(!minimal.catalog_unknown);
+}

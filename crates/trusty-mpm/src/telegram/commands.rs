@@ -83,6 +83,9 @@ pub enum TelegramCommand {
     /// Run a full system diagnostic.
     #[command(description = "Run full system diagnostic")]
     Doctor,
+    /// Report daemon health.
+    #[command(description = "Report daemon health (reachability, catalog, fleet)")]
+    Health,
     /// Show all commands.
     #[command(description = "Show all commands")]
     Help,
@@ -124,6 +127,7 @@ impl From<TelegramCommand> for TrustyCommand {
             },
             TelegramCommand::Start(_) => TrustyCommand::Start,
             TelegramCommand::Doctor => TrustyCommand::Doctor,
+            TelegramCommand::Health => TrustyCommand::Health,
             TelegramCommand::Help => TrustyCommand::Help,
         }
     }
@@ -204,6 +208,11 @@ mod tests {
             TrustyCommand::from(TelegramCommand::Doctor),
             TrustyCommand::Doctor
         );
+        // `/health` maps one-to-one onto the health verb.
+        assert_eq!(
+            TrustyCommand::from(TelegramCommand::Health),
+            TrustyCommand::Health
+        );
         // `/connect <path>` threads the project path through, no session name.
         assert_eq!(
             TrustyCommand::from(TelegramCommand::Connect("/work/p".into())),
@@ -216,9 +225,10 @@ mod tests {
 
     #[test]
     fn bot_commands_lists_every_command() {
-        // teloxide's generated descriptor must enumerate all nineteen commands.
+        // teloxide's generated descriptor must enumerate all twenty commands.
         let descriptions = TelegramCommand::bot_commands();
-        assert_eq!(descriptions.len(), 19);
+        assert_eq!(descriptions.len(), 20);
+        assert!(descriptions.iter().any(|c| c.command == "/health"));
         assert!(descriptions.iter().any(|c| c.command == "/sessions"));
         assert!(descriptions.iter().any(|c| c.command == "/connect"));
         assert!(descriptions.iter().any(|c| c.command == "/pair"));

@@ -553,3 +553,26 @@ pub struct ManagedActivityResponse {
     #[serde(default)]
     pub proposed_default: Option<String>,
 }
+
+/// The daemon's `GET /health` snapshot.
+///
+/// Why: the `health` verb reports the daemon's liveness word and the
+/// catalog-freshness flags (HR-3 / DOC-17) in one typed shape, rather than the
+/// bare boolean [`super::DaemonClient::is_healthy`] returns. Mirroring the
+/// daemon's `HealthResponse` field names keeps the wire contract type-checked.
+/// What: `status` is the liveness word (`"ok"` while up); `catalog_stale` is true
+/// when deployed agents/skills drift from the synced catalog; `catalog_unknown`
+/// is true when the catalog has never been synced. All non-`status` fields
+/// default so an older daemon that returns only `status` still parses.
+/// Test: `health_snapshot_deserializes` in `tests.rs`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HealthSnapshot {
+    /// Liveness word — `"ok"` while the daemon is up.
+    pub status: String,
+    /// True when deployed content drifts from the synced catalog (HR-3).
+    #[serde(default)]
+    pub catalog_stale: bool,
+    /// True when the catalog has never been synced (nothing to compare).
+    #[serde(default)]
+    pub catalog_unknown: bool,
+}

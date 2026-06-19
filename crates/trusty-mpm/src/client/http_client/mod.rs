@@ -20,7 +20,7 @@ mod types;
 
 pub use types::{
     BreakerRow, ChatMessage, ConfigRecommendation, CoordinatorChatOutcome, CoordinatorContext,
-    CoordinatorSession, DiscoveredProjectRow, EventRow, LastSeen, LlmChatOutcome,
+    CoordinatorSession, DiscoveredProjectRow, EventRow, HealthSnapshot, LastSeen, LlmChatOutcome,
     ManagedActivityResponse, ManagedAnswerRequest, ManagedAnswerResponse, ManagedAttachCmdResponse,
     ManagedListResponse, ManagedSendInputRequest, ManagedSendInputResponse, ManagedSessionSummary,
     ManagedSpawnRequest, ManagedSpawnResponse, OverseerSnapshot, PairConfirm, PairRequest,
@@ -216,6 +216,31 @@ impl DaemonClient {
             .await
             .map(|b| b.catalog_stale)
             .unwrap_or(false)
+    }
+
+    /// Fetch the daemon's full `GET /health` snapshot.
+    ///
+    /// Why: the `health` verb needs more than the liveness boolean
+    /// [`Self::is_healthy`] returns — it surfaces the daemon's liveness word and
+    /// the catalog-freshness flags (HR-3) in one probe. Reading them as a typed
+    /// struct keeps the verb off raw JSON indexing.
+    /// What: GETs `/health`, returns the parsed [`HealthSnapshot`]. `Err` on any
+    /// transport or decode failure so the caller renders the daemon as
+    /// unreachable rather than panicking. Missing fields default (an older daemon
+    /// returning only `status` still parses).
+    /// Test: `health_snapshot_deserializes` covers the wire shape; the executor's
+    /// `execute_health_*` tests exercise the live and dead-daemon paths.
+    pub async fn health_snapshot(&self) -> anyhow::Result<HealthSnapshot> {
+        let url = format!("{}/health", self.base);
+        let snapshot = self
+            .http
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(snapshot)
     }
 
     /// Pause a session via `POST /sessions/{id}/pause`.

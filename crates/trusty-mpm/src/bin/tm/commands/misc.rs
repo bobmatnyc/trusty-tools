@@ -107,6 +107,47 @@ pub(crate) async fn doctor(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `health` subcommand — report daemon health through chat-core.
+///
+/// Why: the operator (and scripts) want a quick "is the daemon up, is the catalog
+/// fresh, how big is the fleet?" probe. Routing it through the shared
+/// [`CommandExecutor`] (rather than a bespoke `reqwest` call here) means the CLI
+/// shares the exact `health` dispatch with every other adapter — a single source
+/// of truth per the chat-core nucleus.
+/// What: runs [`TrustyCommand::Health`] through the executor and prints a compact,
+/// scriptable summary. A dead daemon prints `daemon: unreachable` and is NOT an
+/// error exit (the probe succeeded in determining the daemon is down).
+/// Test: `cli_parses_health` covers parsing; the executor's `execute_health_*`
+/// tests cover the live and dead-daemon report paths.
+pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
+    use trusty_mpm::client::{CommandExecutor, CommandResult, TrustyCommand};
+
+    let executor = CommandExecutor::new(url.to_string());
+    match executor.execute(TrustyCommand::Health).await {
+        CommandResult::Health(report) if !report.reachable => {
+            println!("daemon: unreachable ({})", report.url);
+        }
+        CommandResult::Health(report) => {
+            let catalog = if report.catalog_unknown {
+                "never synced"
+            } else if report.catalog_stale {
+                "updates available"
+            } else {
+                "up to date"
+            };
+            println!("daemon: {} ({})", report.status, report.url);
+            println!("catalog: {catalog}");
+            println!(
+                "fleet: {} session(s), {} awaiting a decision",
+                report.managed_total, report.managed_pending_decisions
+            );
+        }
+        CommandResult::Error(msg) => eprintln!("health failed: {msg}"),
+        other => eprintln!("health: unexpected result {other:?}"),
+    }
+    Ok(())
+}
+
 /// Render a [`CheckStatus`] as a status icon for terminal output.
 ///
 /// Why: the `tm doctor` table marks each check with a glanceable symbol; one

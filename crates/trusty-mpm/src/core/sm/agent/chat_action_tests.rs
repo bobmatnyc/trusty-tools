@@ -127,6 +127,53 @@ fn prompt_lists_every_catalog_verb() {
     assert!(prompt.contains("INLINE"), "must state verbs run inline");
 }
 
+/// Why: the PRIMARY fix — the action loop must ADVERTISE `sessions.health` so the
+/// self-aware coordinator chat knows it can run a health check inline (#1496).
+/// What: asserts the instruction block lists the ops `sessions.health` verb.
+/// Test: this is the test.
+#[test]
+fn prompt_lists_health_ops_verb() {
+    let prompt = action_instructions();
+    assert!(
+        prompt.contains("sessions.health"),
+        "action prompt must advertise the executable `sessions.health` verb"
+    );
+}
+
+/// Why: the PRIMARY fix — `sessions.health` must EXECUTE inline in the action loop
+/// (not just be advertised), synthesizing a fleet summary from the control surface.
+/// What: dispatches `sessions.health` against the mock and asserts the synthesized
+/// reachable=true / status=ok / zero-count shape.
+/// Test: this is the test.
+#[tokio::test]
+async fn execute_health_reports_fleet() {
+    let control: Arc<dyn SessionControl> = Arc::new(MockSessionControl::default());
+    let out = execute_verb(&control, "sessions.health", &json!({}))
+        .await
+        .expect("health dispatches");
+    assert_eq!(out.get("reachable").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(out.get("status").and_then(|v| v.as_str()), Some("ok"));
+    assert_eq!(out.get("managed_total").and_then(|v| v.as_u64()), Some(0));
+    assert_eq!(
+        out.get("managed_pending_decisions")
+            .and_then(|v| v.as_u64()),
+        Some(0)
+    );
+}
+
+/// Why: the unknown-verb error must now name `sessions.health` among the valid set
+/// so a model that mistypes it can recover by picking the real ops verb.
+/// What: triggers the unknown-verb error and asserts `sessions.health` is listed.
+/// Test: this is the test.
+#[tokio::test]
+async fn unknown_verb_error_lists_health() {
+    let control: Arc<dyn SessionControl> = Arc::new(MockSessionControl::default());
+    let err = execute_verb(&control, "sessions.bogus", &json!({}))
+        .await
+        .expect_err("unknown verb errors");
+    assert!(err.to_string().contains("sessions.health"));
+}
+
 /// Why: `sessions.list` must dispatch to `SessionControl::list`.
 /// What: executes the verb and asserts the mock's list body comes back.
 /// Test: this is the test.

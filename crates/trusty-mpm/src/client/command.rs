@@ -223,6 +223,17 @@ pub enum TrustyCommand {
         target: String,
     },
 
+    /// Report daemon health: reachability + catalog freshness + fleet summary.
+    ///
+    /// Why: operators (and the action-capable coordinator chat) routinely ask
+    /// "run a health check" / "is the daemon up?". Before this verb there was no
+    /// catalog entry for it, so the coordinator chat deflected. `Health` is the
+    /// one dispatchable health probe every adapter shares.
+    /// What: takes no arguments; the executor probes `GET /health` and the managed
+    /// list, returning a [`super::result::CommandResult::Health`]. A dead daemon
+    /// yields a `Health { reachable: false, .. }` result, never a panic.
+    Health,
+
     /// Show the command list.
     Help,
 }

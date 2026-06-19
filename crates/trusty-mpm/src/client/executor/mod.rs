@@ -20,6 +20,7 @@ use super::command::{TrustyCommand, help_text};
 use super::http_client::DaemonClient;
 use super::result::CommandResult;
 
+mod health;
 mod managed;
 mod pairing;
 mod sessions;
@@ -123,6 +124,7 @@ impl CommandExecutor {
             TrustyCommand::Launch { project, .. } => self.launch(&project).await,
             TrustyCommand::Connect { project, .. } => self.connect(&project).await,
             TrustyCommand::Doctor => self.doctor().await,
+            TrustyCommand::Health => self.health().await,
             TrustyCommand::CoordinatorChat { message } => self.coordinator_chat(&message).await,
             // ── Managed session-manager verbs ───────────────────────────────
             TrustyCommand::ManagedNew {

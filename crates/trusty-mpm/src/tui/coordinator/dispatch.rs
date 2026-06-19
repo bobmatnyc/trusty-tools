@@ -97,6 +97,7 @@ fn route_slash(cmd: SlashCommand, line: &str, focused: Option<&str>) -> Dispatch
     let args = args.trim();
     match cmd {
         SlashCommand::Help => Dispatch::Command(TrustyCommand::Help),
+        SlashCommand::Health => Dispatch::Command(TrustyCommand::Health),
         SlashCommand::Sessions => Dispatch::Command(TrustyCommand::ManagedList),
         SlashCommand::New => route_new(args),
         SlashCommand::Attach => target_only(args, focused, |t| TrustyCommand::ManagedAttachCmd {

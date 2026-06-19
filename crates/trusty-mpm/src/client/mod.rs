@@ -27,14 +27,14 @@ pub use command::TrustyCommand;
 pub use executor::CommandExecutor;
 pub use http_client::{
     BreakerRow, ChatMessage, ConfigRecommendation, CoordinatorChatOutcome, CoordinatorContext,
-    CoordinatorSession, DaemonClient, DiscoveredProjectRow, EventRow, LastSeen, LlmChatOutcome,
-    ManagedActivityResponse, ManagedAnswerRequest, ManagedAnswerResponse, ManagedAttachCmdResponse,
-    ManagedListResponse, ManagedSendInputRequest, ManagedSendInputResponse, ManagedSessionSummary,
-    ManagedSpawnRequest, ManagedSpawnResponse, OverseerSnapshot, PairConfirm, PairRequest,
-    PairStatus, SessionRow, TmuxSessionRow,
+    CoordinatorSession, DaemonClient, DiscoveredProjectRow, EventRow, HealthSnapshot, LastSeen,
+    LlmChatOutcome, ManagedActivityResponse, ManagedAnswerRequest, ManagedAnswerResponse,
+    ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
+    ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest, ManagedSpawnResponse,
+    OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow, TmuxSessionRow,
 };
 pub use resolver::{Resolvable, resolve_target};
 pub use result::{
-    CommandResult, DecisionCounts, DiscoveredProjectSummary, ManagedSessionView,
+    CommandResult, DecisionCounts, DiscoveredProjectSummary, HealthReport, ManagedSessionView,
     RecommendationSummary, SessionSummary, TmuxSessionSummary,
 };

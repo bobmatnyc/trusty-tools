@@ -23,7 +23,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::client::catalog::sm_session_verbs;
+use crate::client::catalog::{sm_ops_verbs, sm_session_verbs};
 use crate::core::sm::control::{LaunchParams, SessionControl, SessionControlError};
 
 /// The sentinel `action` value the model emits to END the action loop.
@@ -266,7 +266,10 @@ pub fn action_instructions() -> String {
          {\"action\":\"final\",\"message\":\"<operator-facing reply>\"}\n\n\
          The verbs available to you (call by exact name):\n",
     );
-    for spec in sm_session_verbs() {
+    // The advertised surface is the session-control verbs PLUS the ops verbs
+    // (e.g. `sessions.health`). Both are rendered from the catalog single source
+    // of truth so the prompt can never advertise a verb the loop cannot execute.
+    for spec in sm_session_verbs().iter().chain(sm_ops_verbs()) {
         out.push_str(&format!(
             "- `{}` — {}\n",
             spec.prompt_signature(),
@@ -315,6 +318,7 @@ pub async fn execute_verb(
         "sessions.stop" => control.stop(require_session_id(args)?).await,
         "sessions.resume" => control.resume(require_session_id(args)?).await,
         "sessions.kill" => control.kill(require_session_id(args)?).await,
+        "sessions.health" => health_via(control).await,
         "sessions.launch" => {
             let workdir = args
                 .get("workdir")
@@ -372,12 +376,62 @@ fn str_arg(args: &Value, key: &str) -> Option<String> {
 }
 
 /// A comma-joined list of valid verb names for the unknown-verb error.
+///
+/// Why: the error fed back to the model must name every executable verb — the
+/// session-control verbs AND the ops verbs (`sessions.health`) — so it can
+/// recover by picking a real one.
+/// What: joins the catalog names of [`sm_session_verbs`] then [`sm_ops_verbs`].
+/// Test: `execute_unknown_verb_errors` (the set is named in the error).
 fn valid_verb_names() -> String {
     sm_session_verbs()
         .iter()
+        .chain(sm_ops_verbs())
         .map(|c| c.name)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// Synthesize a `sessions.health` result from the in-process control surface.
+///
+/// Why: `sessions.health` runs IN-PROCESS through the same [`SessionControl`] the
+/// other action verbs use (no HTTP loopback back to the daemon). The narrow
+/// control trait has no dedicated health method, so health is derived from the
+/// always-available `list` call: if the list resolves, the daemon's
+/// session-manager is reachable and we can summarise the fleet; if it errors, the
+/// control surface is degraded and we report that — never panicking.
+/// What: calls `control.list()`. On success returns
+/// `{ reachable: true, status: "ok", managed_total, managed_pending_decisions }`,
+/// counting sessions whose record carries a `pending_decision`. On error returns
+/// `{ reachable: false, status: "degraded", error }` so the model sees the failure
+/// rather than a thrown error (the action loop also tolerates an `Err`, but a
+/// structured "down" result is more useful to feed back).
+/// Test: `chat_action_tests.rs::execute_health_reports_fleet`.
+async fn health_via(control: &Arc<dyn SessionControl>) -> Result<Value, SessionControlError> {
+    match control.list().await {
+        Ok(listing) => {
+            let sessions = listing.get("sessions").and_then(Value::as_array);
+            let managed_total = sessions.map(Vec::len).unwrap_or(0);
+            let managed_pending_decisions = sessions
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter(|s| s.get("pending_decision").is_some_and(|v| !v.is_null()))
+                        .count()
+                })
+                .unwrap_or(0);
+            Ok(serde_json::json!({
+                "reachable": true,
+                "status": "ok",
+                "managed_total": managed_total,
+                "managed_pending_decisions": managed_pending_decisions,
+            }))
+        }
+        Err(e) => Ok(serde_json::json!({
+            "reachable": false,
+            "status": "degraded",
+            "error": e.to_string(),
+        })),
+    }
 }
 
 #[cfg(test)]
