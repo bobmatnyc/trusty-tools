@@ -489,3 +489,45 @@ async fn pair_request_then_confirm_succeeds() {
         other => panic!("expected PairState, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn execute_approve_errors_when_managed_list_unreachable() {
+    // Regression for the swallowed-daemon-error fix: `decide()` fetches the
+    // managed list first. When that fetch fails (daemon down), the operator
+    // must see a transport error, NOT a misleading "session not found" from a
+    // silent fall-through to the project-session path.
+    let executor = CommandExecutor::new("http://127.0.0.1:0");
+    match executor
+        .execute(TrustyCommand::Approve {
+            session_id: uuid::Uuid::new_v4().to_string(),
+        })
+        .await
+    {
+        CommandResult::Error(msg) => {
+            assert!(
+                msg.contains("daemon unreachable"),
+                "expected a daemon-unreachable error, got: {msg}"
+            );
+            assert!(
+                !msg.contains("not found"),
+                "must not masquerade a transport failure as not-found: {msg}"
+            );
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[test]
+fn is_session_id_detects_uuid_vs_name() {
+    // A canonical id (UUID) is treated as an id so `managed_get` can skip the
+    // list round-trip; a friendly name or prefix is not.
+    assert!(super::managed::is_session_id(
+        &uuid::Uuid::new_v4().to_string()
+    ));
+    assert!(super::managed::is_session_id(
+        "367c6c51-1025-419c-b6d6-be9a753e8914"
+    ));
+    assert!(!super::managed::is_session_id("brave-otter"));
+    assert!(!super::managed::is_session_id("brave"));
+    assert!(!super::managed::is_session_id(""));
+}

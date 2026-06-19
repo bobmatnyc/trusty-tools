@@ -88,12 +88,22 @@ impl CommandExecutor {
     /// record (rather than reusing the list row) so the detail view reflects the
     /// freshest state.
     /// What: resolves `target`, GETs the per-session endpoint, and returns a
-    /// [`ManagedSessionView`].
+    /// [`ManagedSessionView`]. When `target` already parses as a UUID it is an
+    /// id, so the list fetch in [`resolve_managed`] is skipped and the
+    /// per-session endpoint is hit directly; friendly names/prefixes still go
+    /// through the list-based resolver.
     /// Test: `execute_managed_get_unknown_errors`.
     pub(super) async fn managed_get(&self, target: &str) -> CommandResult {
-        let id = match self.resolve_managed(target).await {
-            Ok(s) => s.id,
-            Err(err) => return err,
+        // Skip the redundant list round-trip when the caller already gave us an
+        // id: a UUID can only be a canonical id, so resolving it against the
+        // list would fetch the whole catalog only to look up a value we hold.
+        let id = if is_session_id(target) {
+            target.to_string()
+        } else {
+            match self.resolve_managed(target).await {
+                Ok(s) => s.id,
+                Err(err) => return err,
+            }
         };
         match self.client().get_managed_session(&id).await {
             Ok(summary) => CommandResult::ManagedSession(ManagedSessionView::from(summary)),
@@ -232,4 +242,15 @@ fn lifecycle(summary: ManagedSessionSummary, action: &str) -> CommandResult {
         state: summary.state,
         action: action.to_string(),
     }
+}
+
+/// Whether `target` is already a canonical managed-session id (a UUID).
+///
+/// Why: managed ids are UUIDs while friendly names/prefixes are not; detecting
+/// an id lets `managed_get` skip the list round-trip and hit the per-session
+/// endpoint directly. Friendly names still need the list to resolve.
+/// What: returns `true` when `target` parses as a `uuid::Uuid`.
+/// Test: `is_session_id_detects_uuid_vs_name` in `tests.rs`.
+pub(super) fn is_session_id(target: &str) -> bool {
+    uuid::Uuid::parse_str(target).is_ok()
 }

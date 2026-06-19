@@ -80,9 +80,18 @@ impl CommandExecutor {
     pub(super) async fn decide(&self, session_id: &str, approved: bool) -> CommandResult {
         // Prefer the managed answer endpoint: if this id/name is a managed
         // session, the operator's approve/deny is a real decision answer.
-        if let Ok(managed) = self.client().list_managed_sessions().await
-            && let Some(found) = resolve_target(&managed, session_id)
-        {
+        //
+        // A daemon transport error must NOT be swallowed: previously an
+        // `if let Ok(..)` silently fell through to the project-session path,
+        // turning an unreachable daemon into a misleading "not found". Match
+        // the result explicitly — surface the transport error, and only fall
+        // through to the project path when the managed list was fetched
+        // successfully but did not contain the target.
+        let managed = match self.client().list_managed_sessions().await {
+            Ok(managed) => managed,
+            Err(e) => return CommandResult::Error(format!("daemon unreachable: {e}")),
+        };
+        if let Some(found) = resolve_target(&managed, session_id) {
             let answer = if approved {
                 found
                     .proposed_default

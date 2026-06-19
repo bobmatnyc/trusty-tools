@@ -103,7 +103,6 @@ impl CommandExecutor {
             TrustyCommand::Send { session, prompt } => self.send(&session, &prompt).await,
             TrustyCommand::Launch { project, .. } => self.launch(&project).await,
             TrustyCommand::Connect { project, .. } => self.connect(&project).await,
-            TrustyCommand::Start => self.pair_state().await,
             TrustyCommand::Doctor => self.doctor().await,
             TrustyCommand::CoordinatorChat { message } => self.coordinator_chat(&message).await,
             // ── Managed session-manager verbs ───────────────────────────────
@@ -133,7 +132,9 @@ impl CommandExecutor {
                 self.managed_decommission(&target).await
             }
             // ── Pairing (state query only; confirm needs a chat id) ──────────
-            TrustyCommand::Pair { code: None } => self.pair_state().await,
+            // `Start` (the bot's entry command) and a bare `Pair` (no code) both
+            // mean "show me the current pairing state", so they share one arm.
+            TrustyCommand::Start | TrustyCommand::Pair { code: None } => self.pair_state().await,
             TrustyCommand::Pair { code: Some(_) } => {
                 // A code-carrying pair requires the caller's chat id, which is
                 // not part of the command; UIs route those to `pair_confirm`.
