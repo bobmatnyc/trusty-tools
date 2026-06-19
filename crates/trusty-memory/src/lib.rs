@@ -1024,6 +1024,46 @@ impl AppState {
         self
     }
 
+    /// Builder-style: mark this daemon as the sole palace writer so palace
+    /// redb files open with `OpenIntent::Writer` (issue #1487).
+    ///
+    /// Why: The HTTP daemon owns the write lock on every palace's `kg.redb`
+    /// and `index.usearch.redb`. Before this fix, when a *second* daemon
+    /// instance opened the same store it silently degraded to a read-only
+    /// snapshot and rejected every `memory_remember` for its lifetime —
+    /// effectively silent data loss when an MCP client routed a write to the
+    /// rogue instance. Opening as `Writer` makes the second instance fail
+    /// loud (after a short handoff-retry window that absorbs a graceful
+    /// launchd `bootout`→`bootstrap` overlap) instead of serving broken
+    /// reads-only. CLI, stdio-proxy, and test code paths never call this, so
+    /// they keep the snapshot read-fallback (issue #59).
+    /// What: Replaces `self.registry` with a fresh `PalaceRegistry` carrying
+    /// `OpenIntent::Writer`.
+    ///
+    /// Invariant: MUST be called on a fresh, unhydrated, unshared registry —
+    /// during startup, before `spawn_startup_tasks`/`load_palaces_from_disk`
+    /// registers any `PalaceHandle` and before the `AppState` (hence its
+    /// `Arc<PalaceRegistry>`) is cloned to a handler. Replacing the registry
+    /// discards the prior `Arc`; doing so after hydration would silently drop
+    /// live handles (data loss), and doing so after the state is shared would
+    /// leave other clones on the stale read-only registry. The guard is a
+    /// `debug_assert!` on the strongest cheap signals the registry exposes —
+    /// `is_empty()` (no handles hydrated) and `Arc::strong_count == 1` (not yet
+    /// shared) — so an ordering violation fails fast as the programmer error it
+    /// is (the call site is startup-only and fixed). Release builds elide the
+    /// assert; the real call site (`run_serve`) always satisfies it.
+    /// Test: `with_writer_intent_marks_registry_writer` and
+    /// `with_writer_intent_panics_on_hydrated_registry` in `lib_tests`.
+    #[must_use]
+    pub fn with_writer_intent(mut self) -> Self {
+        // Fail fast on an ordering bug: a hydrated registry (`!is_empty`) or a
+        // shared one (`strong_count > 1`) would silently drop live handles or
+        // strand other clones on the stale read-only registry (issue #1487).
+        debug_assert!(self.registry.is_empty() && Arc::strong_count(&self.registry) == 1);
+        self.registry = Arc::new(PalaceRegistry::new().with_writer_intent());
+        self
+    }
+
     /// Builder-style: attach the bug-capture `ErrorStore` handle (bug-reporting #478).
     ///
     /// Why: Phase 2 MCP / HTTP endpoints need a handle to the in-memory error

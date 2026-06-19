@@ -21,6 +21,7 @@ pub mod redb_open;
 pub mod vector;
 
 pub use chat_sessions::{ChatSession, ChatSessionMeta, ChatSessionStore};
+pub use concurrent_open::{OpenIntent, OpenMode};
 pub use kg::{KnowledgeGraph, Triple};
 pub use l1_cache::{L1Cache, L1CacheError};
 pub use palace_store::{PalaceStore, PalaceStoreError};

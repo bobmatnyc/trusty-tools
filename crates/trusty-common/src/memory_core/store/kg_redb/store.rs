@@ -32,16 +32,40 @@ pub struct KgStoreRedb {
 }
 
 impl KgStoreRedb {
-    /// Open or create the redb database at `path`.
+    /// Open or create the redb database at `path` with read-only-client intent.
     ///
-    /// Why: Creating the file plus initializing every table must be idempotent
-    /// so daemon restarts succeed without manual setup. redb's
-    /// `Database::create` opens an existing file or creates a fresh one.
-    /// What: Opens the file, then in a single write transaction touches every
-    /// table so the file always carries a stable schema even when no data has
-    /// been written.
+    /// Why: Preserves the historical zero-config signature for the many
+    /// CLI / read / test call sites. Snapshot-fallback on a cross-process
+    /// lock (issue #59) is the right behaviour for those callers.
+    /// What: Delegates to [`KgStoreRedb::open_with_intent`] with
+    /// [`OpenIntent::ReadOnlyClient`].
     /// Test: `open_then_reopen_persists_state`.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_intent(path, OpenIntent::ReadOnlyClient)
+    }
+
+    /// Open or create the redb database at `path` with the caller's intent.
+    ///
+    /// Why (issue #1487): the HTTP daemon is the sole writer and must open
+    /// with [`OpenIntent::Writer`] so a second instance fails LOUD (after a
+    /// bounded handoff-retry window) instead of silently degrading to a
+    /// read-only snapshot and rejecting every write for its lifetime.
+    /// Read-only clients (stdio MCP, CLI, tests) keep
+    /// [`OpenIntent::ReadOnlyClient`] so they can serve reads from a snapshot
+    /// while the daemon holds the live lock.
+    /// What: Creating the file plus initializing every table must be
+    /// idempotent so daemon restarts succeed without manual setup. redb's
+    /// `Database::create` opens an existing file or creates a fresh one. For
+    /// `ReadOnlyClient`, a short in-process TOCTOU retry loop (issue #1152)
+    /// absorbs an aborting async writer dropping the lock. For `Writer`, the
+    /// bounded handoff retry lives inside `try_open_or_snapshot` itself, so
+    /// this function makes a single intent-passing call and does not double-
+    /// retry. Opens the file, then in a single write transaction touches
+    /// every table so the file always carries a stable schema even when no
+    /// data has been written.
+    /// Test: `open_then_reopen_persists_state`,
+    /// `writer_intent_open_fails_loud_on_locked_file`.
+    pub fn open_with_intent(path: &Path, intent: OpenIntent) -> Result<Self> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -69,15 +93,21 @@ impl KgStoreRedb {
         //
         // Retry schedule: exponential backoff 2/10/50/100 ms. Total max wait
         // 162 ms — invisible at daemon startup, sufficient for async-drop.
-        // A genuine cross-process lock conflict (another daemon is still up)
-        // falls through to a snapshot on the first attempt; the daemon-level
-        // `single_instance_check` in `main.rs` is the right place to reject
-        // that scenario loudly.
+        // This outer loop ONLY covers the in-process TOCTOU race for the
+        // `ReadOnlyClient` path. For the `Writer` path the authoritative
+        // bounded handoff retry lives inside `try_open_or_snapshot`
+        // (issue #1487), so we make a single attempt here and never
+        // double-retry — otherwise the ~1.55 s writer window would be
+        // multiplied 5×.
         const RETRIES: u8 = 4;
         const RETRY_SLEEP_MS: [u64; 4] = [2, 10, 50, 100];
+        // Writer → 0 extra attempts (handoff retry lives in `try_open_or_snapshot`).
+        // ReadOnlyClient → RETRIES in-process TOCTOU retries (issue #1152). The
+        // `u8::from(bool)` keeps this a single non-`if` expression (fmt-stable).
+        let max_attempts = RETRIES * u8::from(intent != OpenIntent::Writer);
 
         let mut last_err: Option<anyhow::Error> = None;
-        for attempt in 0..=RETRIES {
+        for attempt in 0..=max_attempts {
             // Check in-process cache first — avoids re-opening the same
             // redb file from two code paths within one process.
             {
@@ -99,7 +129,7 @@ impl KgStoreRedb {
             // snapshot are rejected via `READ_ONLY_ERROR_MSG`. In-process TOCTOU
             // races resolve on the next retry cycle (the aborting task drops
             // the lock within the exponential-backoff window).
-            match try_open_or_snapshot(path, OpenIntent::ReadOnlyClient) {
+            match try_open_or_snapshot(path, intent) {
                 Ok((db, snapshot_guard, mode)) => {
                     // Touch every table in a single write txn so they exist
                     // on disk even before the first write. Skip in snapshot
@@ -145,7 +175,7 @@ impl KgStoreRedb {
                 }
                 Err(e) => {
                     last_err = Some(e);
-                    if attempt < RETRIES {
+                    if attempt < max_attempts {
                         // Exponential backoff: let any concurrent in-process
                         // `Database::drop` (or async `KgWriter` abort) finish
                         // releasing the OS file lock before retrying.

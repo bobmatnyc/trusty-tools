@@ -10,6 +10,7 @@
 
 use super::adjacency::{Adjacency, hydrate_adjacency};
 use super::types::{KgEdge, Triple, UndirectedSnapshot};
+use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::kg_redb::KgStoreRedb;
 use crate::memory_core::store::kg_writer::KgWriter;
 use anyhow::{Context, Result};
@@ -79,14 +80,33 @@ fn migrate_from_sqlite_if_needed(_data_dir: &Path, _redb_store: &KgStoreRedb) ->
 }
 
 impl KnowledgeGraph {
-    /// Open or create the redb-backed KG at the path derived from `path`.
+    /// Open or create the redb-backed KG with read-only-client intent.
     ///
-    /// Why: Callers continue to pass the legacy `<data_dir>/kg.db` path. We
-    /// translate that to `<data_dir>/kg.redb` and open the redb file there.
+    /// Why: Preserves the historical zero-config signature for CLI / read /
+    /// test callers, which want the snapshot read-fallback on a cross-process
+    /// lock (issue #59).
+    /// What: Delegates to [`KnowledgeGraph::open_with_intent`] with
+    /// [`OpenIntent::ReadOnlyClient`].
     /// Test: `open_creates_schema`.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with_intent(path, OpenIntent::ReadOnlyClient)
+    }
+
+    /// Open or create the redb-backed KG with the caller's open intent.
+    ///
+    /// Why (issue #1487): the HTTP daemon opens with [`OpenIntent::Writer`]
+    /// so a second instance fails loud instead of silently degrading to a
+    /// read-only snapshot. Callers continue to pass the legacy
+    /// `<data_dir>/kg.db` path; we translate that to `<data_dir>/kg.redb`.
+    /// What: Opens the redb store with `intent`, runs the (no-op) legacy
+    /// migration hook, hydrates the in-memory adjacency, and spawns the
+    /// coalescing writer actor for read-write palaces opened inside a tokio
+    /// runtime (read-only / snapshot palaces and sync test contexts get a
+    /// `bypass` handle).
+    /// Test: `open_creates_schema`.
+    pub fn open_with_intent(path: &Path, intent: OpenIntent) -> Result<Self> {
         let redb_path = redb_path_for(path);
-        let store = KgStoreRedb::open(&redb_path)
+        let store = KgStoreRedb::open_with_intent(&redb_path, intent)
             .with_context(|| format!("open KG redb at {}", redb_path.display()))?;
         if let Some(data_dir) = redb_path.parent() {
             migrate_from_sqlite_if_needed(data_dir, &store)
