@@ -38,7 +38,16 @@ pub const INPUT_PROMPT: &str = "coordinator › ";
 /// skeleton shows the (stubbed) command names plus the keys Child #1 implements.
 /// What: a one-line hint string drawn reversed at the bottom.
 /// Test: `status_bar_lists_keys`.
-pub const STATUS_BAR_HINT: &str = "/new /sessions /attach /stop /resume /kill /help  ·  ↵ send  ·  ↑↓/jk select  ·  PgUp/PgDn scroll  ·  q quit";
+pub const STATUS_BAR_HINT: &str = "/new /sessions /send /stop /resume /kill /attach /help  ·  ↵ send  ·  ↑↓/jk select  ·  PgUp/PgDn scroll  ·  q quit";
+
+/// The fixed height (in rows, incl. the two border rows) of the output pane.
+///
+/// Why: the output log needs a stable region that does not starve the session
+/// list on a short terminal; a fixed height keeps the layout predictable while
+/// the pane shows the most recent log lines (the tail).
+/// What: 8 rows — 6 visible log lines plus the top/bottom borders.
+/// Test: covered indirectly by `output_tail_keeps_most_recent`.
+pub const OUTPUT_PANE_HEIGHT: u16 = 8;
 
 /// The synthetic right-column status shown for the controller bullet.
 ///
@@ -128,6 +137,21 @@ pub fn catalog_indicator(state: &CoordinatorState) -> Option<&'static str> {
     }
 }
 
+/// The most recent `rows` lines of the output log (its tail), cloned for render.
+///
+/// Why: the output pane is fixed-height, so it shows the newest lines (a true
+/// scrollback view would need its own scroll state — out of scope for Phase 1C).
+/// A pure tail-slicer keeps the "keep the most recent N" rule testable without a
+/// terminal.
+/// What: returns a clone of the last `rows` lines of `state.output` (all of them
+/// when the log is shorter than `rows`), oldest-first so they render top-to-bottom.
+/// Test: `output_tail_keeps_most_recent`.
+pub fn output_tail(state: &CoordinatorState, rows: usize) -> Vec<Line<'static>> {
+    let len = state.output.len();
+    let start = len.saturating_sub(rows);
+    state.output[start..].to_vec()
+}
+
 /// Build the unified, numbered session-list items: controller row 0, then
 /// numbered sessions (1, 2, 3, …).
 ///
@@ -194,7 +218,11 @@ pub fn render(frame: &mut Frame, state: &mut CoordinatorState) {
             // STUI-1 "minimum 5 visible rows" contract holds; it flexes larger on
             // a taller terminal and ratatui scrolls within whatever height it gets.
             Constraint::Min((MIN_VISIBLE_ROWS + 2) as u16), // session list (middle)
-            Constraint::Length(1),                          // status / key bar (bottom)
+            // Output/scrollback log: the rendered command results + echoed input.
+            // Floored small so a short terminal still shows the list; it grows on a
+            // taller terminal and shows the tail of the log.
+            Constraint::Length(OUTPUT_PANE_HEIGHT), // output log
+            Constraint::Length(1),                  // status / key bar (bottom)
         ])
         .split(frame.area());
 
@@ -245,6 +273,20 @@ pub fn render(frame: &mut Frame, state: &mut CoordinatorState) {
         .highlight_spacing(HighlightSpacing::Always);
     frame.render_stateful_widget(list, chunks[1], state.nav.state_mut());
 
+    // Output log: the rendered command results + echoed input, showing the tail
+    // (the most recent lines) within the fixed-height pane.
+    let visible_rows = chunks[2].height.saturating_sub(2) as usize; // minus borders
+    let output = Paragraph::new(output_tail(state, visible_rows)).block(
+        Block::default().borders(Borders::ALL).title(
+            Line::from("OUTPUT").style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ),
+    );
+    frame.render_widget(output, chunks[2]);
+
     // Status / key bar (bottom): key hints on the left, the live daemon-
     // reachability indicator on the right, plus the HR-3 catalog-staleness hint
     // when the daemon reports an available update.
@@ -253,5 +295,5 @@ pub fn render(frame: &mut Frame, state: &mut CoordinatorState) {
             .add_modifier(Modifier::BOLD)
             .add_modifier(Modifier::REVERSED),
     );
-    frame.render_widget(status, chunks[2]);
+    frame.render_widget(status, chunks[3]);
 }

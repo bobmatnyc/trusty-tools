@@ -11,7 +11,19 @@
 //! Test: `super::tests` covers `clamp_selection` boundary cases (empty list,
 //! single row, selection past end) and the history ring.
 
+use ratatui::text::Line;
+
 use super::nav::ListNav;
+
+/// Maximum number of output-log lines retained for the scrollback pane.
+///
+/// Why: the coordinator echoes submitted lines and rendered command results into
+/// an output log; bounding it keeps memory flat over a long session (mirrors the
+/// input-history ring's bound).
+/// What: the cap [`CoordinatorState::push_output`] enforces by dropping the
+/// oldest lines beyond it.
+/// Test: `output_log_is_bounded`.
+pub const OUTPUT_LOG_LIMIT: usize = 500;
 
 /// Maximum number of submitted inputs retained in the history ring.
 ///
@@ -32,6 +44,15 @@ pub const INPUT_HISTORY_LIMIT: usize = 50;
 /// Test: rows are consumed by the row-builders, themselves unit-tested.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEntry {
+    /// Full session id (UUID string) used to route commands at this session.
+    ///
+    /// Why: free-text and target-less slash commands route at the *focused*
+    /// session; the executor resolves a target by exact id/name/prefix against
+    /// the live managed list, so carrying the canonical id (not just the 8-hex
+    /// [`Self::short_id`]) makes that routing unambiguous.
+    /// What: the full UUID from the daemon's coordinator context.
+    /// Test: `focused_session_target_prefers_full_id` in `super::tests`.
+    pub id: String,
     /// Short (8-hex) session id shown in the list's left column.
     pub short_id: String,
     /// Routing prefix (`aipowerranking`) shown after the id.
@@ -45,11 +66,13 @@ pub struct SessionEntry {
 }
 
 impl SessionEntry {
-    /// Construct a placeholder session entry.
+    /// Construct a placeholder session entry whose `id` mirrors its `short_id`.
     ///
-    /// Why: the skeleton seeds a couple of illustrative rows; a constructor
-    /// keeps that seeding terse and the field order explicit.
-    /// What: moves the four owned strings into a [`SessionEntry`].
+    /// Why: the skeleton and the existing tests seed rows by short id; keeping
+    /// this four-arg constructor (id == short_id) avoids churning every call
+    /// site while [`Self::with_id`] is the precise form the live poll uses.
+    /// What: moves the four owned strings into a [`SessionEntry`], reusing the
+    /// short id as the routing id.
     /// Test: indirectly via `default_state_has_placeholder_rows`.
     pub fn new(
         short_id: impl Into<String>,
@@ -57,7 +80,26 @@ impl SessionEntry {
         status: impl Into<String>,
         summary: impl Into<String>,
     ) -> Self {
+        let short_id = short_id.into();
+        Self::with_id(short_id.clone(), short_id, prefix, status, summary)
+    }
+
+    /// Construct a session entry carrying both the full and short ids.
+    ///
+    /// Why: the live poll knows the session's full UUID (needed for routing) and
+    /// derives the 8-hex display id; the two differ, so the constructor takes
+    /// both rather than re-deriving one from the other at the call site.
+    /// What: moves the five owned strings into a [`SessionEntry`].
+    /// Test: `coord_session_to_entry_derives_short_id` (id carried through).
+    pub fn with_id(
+        id: impl Into<String>,
+        short_id: impl Into<String>,
+        prefix: impl Into<String>,
+        status: impl Into<String>,
+        summary: impl Into<String>,
+    ) -> Self {
         Self {
+            id: id.into(),
             short_id: short_id.into(),
             prefix: prefix.into(),
             status: status.into(),
@@ -138,6 +180,17 @@ pub struct CoordinatorState {
     pub catalog_stale: bool,
     /// Set when the operator asks to quit; the event loop exits on the next tick.
     pub should_exit: bool,
+    /// The output/scrollback log: submitted lines and rendered command results.
+    ///
+    /// Why: Phase 1C dispatches slash commands and free-text through the chat-core
+    /// executor and must SHOW the structured result (DOC-13 §5.2). The old stub
+    /// echoed submissions into the recall ring only; this is the visible log the
+    /// layout's output pane renders, holding the operator's echoed input and the
+    /// styled lines [`super::render::render_result`] produces.
+    /// What: a bounded ([`OUTPUT_LOG_LIMIT`]) vec of styled lines, oldest first.
+    /// Appended via [`Self::push_output`] / [`Self::push_output_lines`].
+    /// Test: `output_log_records_and_is_bounded`.
+    pub output: Vec<Line<'static>>,
 }
 
 impl CoordinatorState {
@@ -297,6 +350,56 @@ impl CoordinatorState {
         self.selected()
             .checked_sub(1)
             .and_then(|idx| self.sessions.get(idx))
+    }
+
+    /// The routing target of the focused session, if a session (not the
+    /// controller) is selected.
+    ///
+    /// Why: free-text and target-less slash commands route at the *focused*
+    /// session. "Focused" is the existing selection/highlight state: row 0 is the
+    /// controller (no target), any other row is a session. The executor resolves a
+    /// target by exact id, so this returns the full session id rather than the
+    /// short display id.
+    /// What: returns `Some(id)` of [`Self::selected_session`] when a session is
+    /// selected, else `None` (controller selected → no focused session).
+    /// Test: `focused_target_is_none_on_controller`,
+    /// `focused_target_returns_selected_session_id`.
+    pub fn focused_target(&self) -> Option<&str> {
+        self.selected_session().map(|s| s.id.as_str())
+    }
+
+    /// Append one already-styled line to the output log (bounded).
+    ///
+    /// Why: the dispatch path echoes the operator's input and appends rendered
+    /// results; a single bounded appender keeps the log from growing without limit.
+    /// What: pushes `line`, dropping the oldest lines beyond [`OUTPUT_LOG_LIMIT`].
+    /// Test: `output_log_records_and_is_bounded`.
+    pub fn push_output(&mut self, line: Line<'static>) {
+        self.output.push(line);
+        self.trim_output();
+    }
+
+    /// Append several styled lines to the output log (bounded).
+    ///
+    /// Why: a rendered [`crate::client::CommandResult`] is multiple lines; appending
+    /// them in one call keeps the trim-to-bound check off the per-line hot path.
+    /// What: extends the log with `lines`, then trims to [`OUTPUT_LOG_LIMIT`].
+    /// Test: `output_log_records_and_is_bounded`.
+    pub fn push_output_lines(&mut self, lines: impl IntoIterator<Item = Line<'static>>) {
+        self.output.extend(lines);
+        self.trim_output();
+    }
+
+    /// Drop the oldest output lines beyond [`OUTPUT_LOG_LIMIT`].
+    ///
+    /// Why: keeps the scrollback bounded; factored out so both appenders share it.
+    /// What: drains the leading overflow when the log exceeds the cap.
+    /// Test: `output_log_records_and_is_bounded`.
+    fn trim_output(&mut self) {
+        if self.output.len() > OUTPUT_LOG_LIMIT {
+            let overflow = self.output.len() - OUTPUT_LOG_LIMIT;
+            self.output.drain(0..overflow);
+        }
     }
 
     /// Request an immediate daemon re-poll on the next run-loop tick (STUI-1).

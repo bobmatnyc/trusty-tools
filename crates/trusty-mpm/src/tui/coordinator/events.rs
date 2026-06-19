@@ -27,20 +27,28 @@ use super::state::CoordinatorState;
 /// `parse_slash_classifies_unknown`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SlashCommand {
-    /// `/help` — list commands + keybindings (overlay; Child #4).
+    /// `/help` — list commands + keybindings.
     Help,
-    /// `/new` — open the new-session form (Child #4).
+    /// `/new` (alias `/spawn`) — spawn a managed session (`ManagedNew`).
     New,
-    /// `/sessions` — open the session picker (Child #4).
+    /// `/sessions` (alias `/list`, `/managed-list`) — list managed sessions.
     Sessions,
-    /// `/attach` — show/copy the tmux attach command (Child #5).
+    /// `/attach` (alias `/managed-attach`) — show the tmux attach command.
     Attach,
-    /// `/stop` — stop a session's runtime (Child #5).
+    /// `/stop` (alias `/managed-stop`) — stop a session's runtime.
     Stop,
-    /// `/resume` — resume a stopped session (Child #5).
+    /// `/resume` (alias `/managed-resume`) — resume a stopped session.
     Resume,
-    /// `/kill` — decommission a session (Child #5).
+    /// `/kill` (aliases `/decommission`, `/managed-decommission`) — decommission.
     Kill,
+    /// `/send` (alias `/managed-send`) — inject text into a session's pane.
+    Send,
+    /// `/answer` (aliases `/approve`, `/managed-answer`) — answer a decision.
+    Answer,
+    /// `/activity` (alias `/managed-activity`) — inspect a session's activity.
+    Activity,
+    /// `/get` (aliases `/status`, `/managed-get`) — fetch a session's record.
+    Get,
     /// A leading-`/` token that matched none of the known commands.
     Unknown(String),
 }
@@ -51,11 +59,14 @@ impl SlashCommand {
     /// Why: STUI-1 requires an immediate daemon re-poll after a *list-mutating*
     /// action so the operator sees the change now rather than up to a whole
     /// `--interval-ms` later. Read-only commands (`/help`, `/sessions`,
-    /// `/attach`) must NOT force a refresh — they change no daemon state — so the
-    /// re-poll trigger keys off this predicate rather than firing on every
-    /// submission.
+    /// `/attach`, `/get`, `/activity`) must NOT force a refresh — they change no
+    /// list-visible daemon state — so the re-poll trigger keys off this predicate
+    /// rather than firing on every submission.
     /// What: returns `true` for [`SlashCommand::New`], [`SlashCommand::Kill`],
-    /// [`SlashCommand::Stop`], and [`SlashCommand::Resume`]; `false` otherwise.
+    /// [`SlashCommand::Stop`], and [`SlashCommand::Resume`] (the verbs that add or
+    /// remove rows or flip a session's lifecycle state); `false` otherwise. `Send`
+    /// and `Answer` inject into a pane without changing the list shape, so they are
+    /// non-mutating for re-poll purposes.
     /// Test: `mutating_commands_are_classified`.
     pub fn is_mutating(&self) -> bool {
         matches!(
@@ -74,7 +85,9 @@ impl SlashCommand {
 /// is a bare `/` with no command word (e.g. `/` or `/   `) — a lone slash is not
 /// a command, so it falls through to chat rather than yielding
 /// `Unknown("")`. Otherwise lowercases the first whitespace-delimited token
-/// (sans the `/`) and maps it to the matching [`SlashCommand`], falling back to
+/// (sans the `/`) and maps it — and its documented aliases (`/spawn`→`New`,
+/// `/list`→`Sessions`, `/status`→`Get`, `/approve`→`Answer`, the `managed-*`
+/// spellings, …) — to the matching [`SlashCommand`], falling back to
 /// [`SlashCommand::Unknown`] carrying that token.
 /// Test: `parse_slash_recognises_known_commands`,
 /// `parse_slash_classifies_unknown`, `parse_slash_ignores_plain_text`,
@@ -86,12 +99,16 @@ pub fn parse_slash(input: &str) -> Option<SlashCommand> {
     let word = rest.split_whitespace().next()?.to_lowercase();
     let cmd = match word.as_str() {
         "help" => SlashCommand::Help,
-        "new" => SlashCommand::New,
-        "sessions" => SlashCommand::Sessions,
-        "attach" => SlashCommand::Attach,
-        "stop" => SlashCommand::Stop,
-        "resume" => SlashCommand::Resume,
-        "kill" => SlashCommand::Kill,
+        "new" | "spawn" => SlashCommand::New,
+        "sessions" | "list" | "managed-list" => SlashCommand::Sessions,
+        "attach" | "managed-attach" => SlashCommand::Attach,
+        "stop" | "managed-stop" => SlashCommand::Stop,
+        "resume" | "managed-resume" => SlashCommand::Resume,
+        "kill" | "decommission" | "managed-decommission" => SlashCommand::Kill,
+        "send" | "managed-send" => SlashCommand::Send,
+        "answer" | "approve" | "managed-answer" => SlashCommand::Answer,
+        "activity" | "managed-activity" => SlashCommand::Activity,
+        "get" | "status" | "managed-get" => SlashCommand::Get,
         other => SlashCommand::Unknown(other.to_string()),
     };
     Some(cmd)
