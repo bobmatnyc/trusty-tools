@@ -229,6 +229,11 @@ pub(crate) async fn launch_and_wait(
     // is typed into the pane the same way `SessionManager::send_input` does. A
     // brief settle gives `claude` time to reach its input prompt before we type.
     if let Some(task) = task {
+        // TODO(M1 POC hardening follow-up): this fixed 3s settle assumes `claude`
+        // reaches its interactive input prompt within 3s before we type the task.
+        // A readiness check (poll the pane for the prompt) plus a more robust
+        // task-delivery seam is a tracked follow-up; an issue number will be
+        // attached separately.
         tokio::time::sleep(Duration::from_secs(3)).await;
         if let Err(e) = mgr.send_input(&record.id, task).await {
             warn!(tmux = %record.tmux_name, "meta run: failed to inject demo task: {e}");
@@ -249,6 +254,11 @@ pub(crate) async fn launch_and_wait(
         if poll_decision(start.elapsed(), timeout) == PollDecision::TimedOut {
             break LaunchOutcome::TimedOut;
         }
+        // TODO(M1 POC hardening follow-up): the effective timeout can overshoot
+        // the requested budget by up to one POLL_INTERVAL, since we sleep a full
+        // interval before re-checking the deadline. Acceptable for the POC; a
+        // tighter deadline-aware sleep is a tracked follow-up (issue number to be
+        // attached separately).
         tokio::time::sleep(POLL_INTERVAL).await;
     };
     info!(

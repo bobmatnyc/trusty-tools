@@ -396,8 +396,9 @@ pub(crate) enum Command {
     /// polls for the session to exit, and verifies the demo artifact.
     /// What: a `run` sub-subcommand that accepts `--demo` (attach + verify the
     /// bundled demo task), `--project <PATH>` (the working directory the harness
-    /// operates in), `--no-provision` (skip the git-clone workspace step for a
-    /// local dir), and `--timeout-secs <N>` (session-exit poll budget).
+    /// operates in), `--no-provision` (a current no-op reserving the future
+    /// provisioned/clone seam — the POC always uses the local dir in place), and
+    /// `--timeout-secs <N>` (session-exit poll budget).
     /// Test: `cli_parses_meta_run`, `cli_parses_meta_run_demo`,
     /// `cli_parses_meta_run_project`, `cli_parses_meta_run_no_provision`,
     /// `cli_parses_meta_run_timeout`, `cli_meta_requires_action` in `tests.rs`.
@@ -432,8 +433,9 @@ pub(crate) enum MetaAction {
     /// success and non-zero on failure/timeout.
     /// What: `--demo` attaches + verifies the bundled demo task; `--project
     /// <PATH>` sets the working directory (defaults to the cwd); `--no-provision`
-    /// skips the git-clone workspace step and uses the dir in place;
-    /// `--timeout-secs <N>` bounds the session-exit poll (default
+    /// is a CURRENT NO-OP (the POC always uses the `--project` dir in place, so
+    /// there is no provisioning/clone step to skip — the flag reserves that future
+    /// seam); `--timeout-secs <N>` bounds the session-exit poll (default
     /// [`super::commands::meta::DEFAULT_TIMEOUT_SECS`]).
     /// Test: `cli_parses_meta_run*` in `tests.rs`; handler behaviour in the
     /// `commands::meta` unit tests.
@@ -446,11 +448,12 @@ pub(crate) enum MetaAction {
         #[arg(long)]
         project: Option<std::path::PathBuf>,
 
-        /// Use the local `--project` dir directly, skipping the git-clone step.
+        /// Use the local `--project` dir in place (CURRENTLY A NO-OP).
         ///
-        /// Defaults to enabled-in-effect for an existing local dir; this flag
-        /// makes the intent explicit and is a no-op clone-skip today (the POC
-        /// always operates on a local dir).
+        /// The POC always operates on the local `--project` dir directly, so
+        /// there is no provisioning / git-clone step to skip — passing this flag
+        /// (or not) changes nothing today. It is kept to make the in-place intent
+        /// explicit and to reserve the seam for a future provisioned/clone path.
         #[arg(long)]
         no_provision: bool,
 

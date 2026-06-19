@@ -76,8 +76,11 @@ pub(crate) async fn meta(action: MetaAction) -> anyhow::Result<()> {
 /// then verifies the artifact — printing a structured JSON report to stdout and
 /// returning `Err` (non-zero exit) on a non-pass verdict or timeout; without
 /// `--demo` it launches and waits with no task and reports how the session ended.
-/// `no_provision` is accepted for explicitness — the POC always operates on a
-/// local dir in place, so the git-clone step is already skipped.
+/// `no_provision` is currently a NO-OP: the POC always operates on the local
+/// `--project` dir in place, so there is no provisioning/clone step to skip. The
+/// flag is accepted to make that intent explicit on the CLI and to reserve the
+/// seam for a future provisioned/clone path (`--no-provision=false`); passing it
+/// either way changes nothing today.
 /// Test: `meta_run_dir_paths_are_project_scoped`,
 /// `meta_resolve_project_*`, `meta_run_id_is_unique`; the live launch is covered
 /// by the `#[ignore]` end-to-end test (#1053).
@@ -90,6 +93,16 @@ pub(crate) async fn run(
     init_meta_tracing();
     let project = resolve_project(project)?;
     let timeout = Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
+
+    // `no_provision` is a documented no-op today: the POC always uses the local
+    // `--project` dir in place, so there is never a provisioning/clone step to
+    // skip. This explicit branch makes the no-op unmistakable (no silent surprise
+    // for `--no-provision=false`) and marks the seam where a future provisioned /
+    // git-clone path would live. M1 POC hardening follow-up.
+    if !no_provision {
+        // Future: provision an isolated workspace (e.g. git clone) instead of
+        // operating on the local dir in place. No behavioural difference today.
+    }
 
     info!(
         demo,
@@ -202,19 +215,41 @@ async fn run_demo(
     }
 }
 
+/// Process-monotonic counter mixed into every [`run_id`] to guarantee uniqueness.
+///
+/// Why: deriving the id from the wall clock alone is not collision-free — two
+/// back-to-back calls within the same millisecond (or on a low-resolution clock)
+/// would produce identical ids, letting a stale artifact masquerade as the
+/// current run's. A per-process counter that strictly increases on every call
+/// makes the id unique by construction, with no reliance on clock resolution.
+/// What: an `AtomicU64`, bumped with `Relaxed` ordering on each `run_id` call
+/// (ordering across threads is irrelevant — we only need a distinct value, not a
+/// happens-before relationship).
+/// Test: `meta_run_id_is_unique` (two ids drawn with no delay still differ).
+static RUN_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Generate a short, unique id for one demo run.
 ///
 /// Why: embedding a per-run id in the demo artifact body lets verification prove
-/// THIS run produced the file (not a stale one from a prior run). Deriving it
-/// from the wall clock keeps it dependency-light and sortable.
-/// What: returns the current Unix-millis as a string, or `"0"` if the clock is
+/// THIS run produced the file (not a stale one from a prior run). Anchoring it to
+/// the wall clock keeps it sortable/human-meaningful, while a process-monotonic
+/// counter suffix guarantees uniqueness even for two calls in the same
+/// millisecond (so the id format stays purely numeric for downstream checks).
+/// What: returns `"<unix-millis><6-digit zero-padded counter>"` (the counter
+/// strictly increases per call); falls back to `"0"`-millis if the clock is
 /// before the epoch (which cannot happen for `SystemTime::now`).
-/// Test: `meta_run_id_is_unique` (two ids differ), `meta_run_id_is_numeric`.
+/// Test: `meta_run_id_is_unique` (two ids differ with no delay),
+/// `meta_run_id_is_numeric`.
 pub(crate) fn run_id() -> String {
-    std::time::SystemTime::now()
+    let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis().to_string())
-        .unwrap_or_else(|_| "0".to_string())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    // `Relaxed` is sufficient: we need a distinct value per call, not ordering.
+    let seq = RUN_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Zero-pad the counter to 6 digits so it cannot blur into the millis prefix
+    // for typical run counts while keeping the whole id numeric.
+    format!("{millis}{seq:06}")
 }
 
 /// Resolve the optional `--project` argument to an existing absolute path.
@@ -304,11 +339,12 @@ mod tests {
 
     #[test]
     fn meta_run_id_is_unique() {
-        // Two ids drawn a millisecond apart must differ so artifact bodies do not
-        // collide across back-to-back runs.
+        // Uniqueness is guaranteed by the process-monotonic counter, NOT by clock
+        // resolution — so two ids drawn with no delay must still differ. (The old
+        // test slept 2ms and relied on the wall clock ticking, which could flake on
+        // loaded / low-resolution CI.)
         let a = run_id();
-        std::thread::sleep(Duration::from_millis(2));
         let b = run_id();
-        assert_ne!(a, b, "run ids must be unique across runs");
+        assert_ne!(a, b, "run ids must be unique across back-to-back calls");
     }
 }
