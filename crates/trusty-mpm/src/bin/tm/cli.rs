@@ -387,17 +387,20 @@ pub(crate) enum Command {
     /// Standalone metaharness — PM + sub-agent delegation without the daemon (#1045).
     ///
     /// Why: the M1 POC (issue #1045) builds a self-contained metaharness that
-    /// boots without the trusty-mpm daemon or the `claude` CLI, driving PM →
-    /// sub-agent delegation in-process via trusty-code (Seam A). The `meta`
-    /// command group is the operator entry point for that harness. As of WI-4
-    /// (#1030) `meta run --demo` performs a real PM → engineer delegation against
-    /// a live OpenRouter model and persists a combined transcript; a bare
-    /// `meta run` stays offline and prints the assembled tool-registry summary.
-    /// What: a `run` sub-subcommand that accepts `--demo` (drive the live demo
-    /// delegation) and `--project <PATH>` (the working directory the harness
-    /// operates in). The demo requires `OPENROUTER_API_KEY`.
+    /// boots without the trusty-mpm daemon, driving a REAL Claude Code (`claude`
+    /// CLI) session through trusty-mpm's existing launch machinery (#1049/#1051).
+    /// The `meta` command group is the operator entry point for that harness.
+    /// `meta run --project <dir>` deploys the custom instructions (agents, skills,
+    /// CLAUDE.md, PM prompt, MCP) and launches a real `claude` tmux session rooted
+    /// at that directory; `meta run --demo` additionally attaches a bundled task,
+    /// polls for the session to exit, and verifies the demo artifact.
+    /// What: a `run` sub-subcommand that accepts `--demo` (attach + verify the
+    /// bundled demo task), `--project <PATH>` (the working directory the harness
+    /// operates in), `--no-provision` (skip the git-clone workspace step for a
+    /// local dir), and `--timeout-secs <N>` (session-exit poll budget).
     /// Test: `cli_parses_meta_run`, `cli_parses_meta_run_demo`,
-    /// `cli_parses_meta_run_project`, `cli_meta_requires_action` in `tests.rs`.
+    /// `cli_parses_meta_run_project`, `cli_parses_meta_run_no_provision`,
+    /// `cli_parses_meta_run_timeout`, `cli_meta_requires_action` in `tests.rs`.
     Meta {
         /// Metaharness action to run.
         #[command(subcommand)]
@@ -411,32 +414,49 @@ pub(crate) enum Command {
 /// will add sibling verbs (e.g. inspecting transcripts under
 /// `.trusty-mpm/meta-runs/`); modelling it as a sub-subcommand enum from the
 /// start keeps that surface extensible without a breaking CLI change.
-/// What: a single `Run` variant carrying the `--demo` flag and the optional
-/// `--project <PATH>` working-directory argument.
+/// What: a single `Run` variant carrying the `--demo` flag, the optional
+/// `--project <PATH>` working-directory argument, the `--no-provision` flag, and
+/// the `--timeout-secs <N>` session-exit poll budget.
 /// Test: `cli_parses_meta_run`, `cli_parses_meta_run_demo`,
-/// `cli_parses_meta_run_project`, `cli_meta_requires_action` in `tests.rs`.
+/// `cli_parses_meta_run_project`, `cli_parses_meta_run_no_provision`,
+/// `cli_parses_meta_run_timeout`, `cli_meta_requires_action` in `tests.rs`.
 #[derive(Debug, Subcommand)]
 pub(crate) enum MetaAction {
     /// Boot the metaharness for a single run.
     ///
-    /// Why: this is the harness's primary entry point — it boots the PM,
-    /// delegates one task to a sub-agent, captures a combined transcript, and
-    /// exits. With `--demo` (#1030, WI-4) it drives a live PM → engineer
-    /// delegation against a real model; without it, it prints the offline
-    /// tool-registry summary.
-    /// What: `--demo` runs the bundled demo task (requires `OPENROUTER_API_KEY`)
-    /// and writes a transcript under `<project>/.trusty-mpm/meta-runs/`;
-    /// `--project <PATH>` sets the working directory (defaults to the cwd).
+    /// Why: this is the harness's primary entry point — it deploys the custom
+    /// instructions and launches a REAL `claude` tmux session rooted at the
+    /// project dir (#1049). With `--demo` (#1051) it additionally attaches a
+    /// bundled task instructing the session to write `hello_metaharness.txt`,
+    /// polls for the session to exit, and verifies the artifact, exiting 0 on
+    /// success and non-zero on failure/timeout.
+    /// What: `--demo` attaches + verifies the bundled demo task; `--project
+    /// <PATH>` sets the working directory (defaults to the cwd); `--no-provision`
+    /// skips the git-clone workspace step and uses the dir in place;
+    /// `--timeout-secs <N>` bounds the session-exit poll (default
+    /// [`super::commands::meta::DEFAULT_TIMEOUT_SECS`]).
     /// Test: `cli_parses_meta_run*` in `tests.rs`; handler behaviour in the
     /// `commands::meta` unit tests.
     Run {
-        /// Drive the live demo delegation (requires OPENROUTER_API_KEY).
+        /// Attach + verify the bundled demo task (writes hello_metaharness.txt).
         #[arg(long)]
         demo: bool,
 
         /// Working directory the metaharness operates in (defaults to the cwd).
         #[arg(long)]
         project: Option<std::path::PathBuf>,
+
+        /// Use the local `--project` dir directly, skipping the git-clone step.
+        ///
+        /// Defaults to enabled-in-effect for an existing local dir; this flag
+        /// makes the intent explicit and is a no-op clone-skip today (the POC
+        /// always operates on a local dir).
+        #[arg(long)]
+        no_provision: bool,
+
+        /// Seconds to wait for the launched session to exit before timing out.
+        #[arg(long)]
+        timeout_secs: Option<u64>,
     },
 }
 
