@@ -12,6 +12,7 @@
 //! deserialization; live HTTP is exercised by the executor tests against an
 //! in-process test daemon and by the daemon's own API tests.
 
+mod managed;
 mod session_connect;
 #[cfg(test)]
 mod tests;
@@ -19,8 +20,11 @@ mod types;
 
 pub use types::{
     BreakerRow, ChatMessage, ConfigRecommendation, CoordinatorChatOutcome, CoordinatorContext,
-    CoordinatorSession, DiscoveredProjectRow, EventRow, LastSeen, LlmChatOutcome, OverseerSnapshot,
-    PairConfirm, PairRequest, PairStatus, SessionRow, TmuxSessionRow,
+    CoordinatorSession, DiscoveredProjectRow, EventRow, LastSeen, LlmChatOutcome,
+    ManagedActivityResponse, ManagedAnswerRequest, ManagedAnswerResponse, ManagedAttachCmdResponse,
+    ManagedListResponse, ManagedSendInputRequest, ManagedSendInputResponse, ManagedSessionSummary,
+    ManagedSpawnRequest, ManagedSpawnResponse, OverseerSnapshot, PairConfirm, PairRequest,
+    PairStatus, SessionRow, TmuxSessionRow,
 };
 
 use serde::Deserialize;

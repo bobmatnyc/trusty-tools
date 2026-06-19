@@ -25,7 +25,10 @@ pub use executor::CommandExecutor;
 pub use http_client::{
     BreakerRow, ChatMessage, ConfigRecommendation, CoordinatorChatOutcome, CoordinatorContext,
     CoordinatorSession, DaemonClient, DiscoveredProjectRow, EventRow, LastSeen, LlmChatOutcome,
-    OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow, TmuxSessionRow,
+    ManagedActivityResponse, ManagedAnswerRequest, ManagedAnswerResponse, ManagedAttachCmdResponse,
+    ManagedListResponse, ManagedSendInputRequest, ManagedSendInputResponse, ManagedSessionSummary,
+    ManagedSpawnRequest, ManagedSpawnResponse, OverseerSnapshot, PairConfirm, PairRequest,
+    PairStatus, SessionRow, TmuxSessionRow,
 };
 pub use result::{
     CommandResult, DecisionCounts, DiscoveredProjectSummary, RecommendationSummary, SessionSummary,
