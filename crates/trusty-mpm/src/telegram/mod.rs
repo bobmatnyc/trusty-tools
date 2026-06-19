@@ -46,6 +46,47 @@ type ChatHistories = Arc<Mutex<HashMap<i64, Vec<ChatMessage>>>>;
 const LLM_NOT_CONFIGURED: &str =
     "LLM chat not configured — set OPENROUTER_API_KEY in .env.local and enable the overseer";
 
+/// Environment variable that overrides the Telegram bot's `@username`.
+const BOT_USERNAME_ENV: &str = "TELEGRAM_BOT_USERNAME";
+
+/// Default bot `@username` used when [`BOT_USERNAME_ENV`] is unset/empty.
+///
+/// This is the real, currently-deployed bot. The username drives two things:
+/// the `t.me/<username>?start=<code>` pairing deep-link, and teloxide's
+/// `/command@<username>` stripping when commands are addressed to the bot in
+/// group chats.
+const DEFAULT_BOT_USERNAME: &str = "t_sess_bot";
+
+/// Resolve the Telegram bot's `@username` for deep-links and command parsing.
+///
+/// Why: the bot username is deployment-specific (the real bot is `t_sess_bot`,
+/// not the historical hardcoded `trusty_mpm_bot`); operators must be able to
+/// point the tool at their own bot without recompiling. It is needed both to
+/// build the `t.me/<username>?start=<code>` pairing link and to let teloxide
+/// strip a `@<username>` suffix from commands addressed to the bot in groups.
+/// What: reads [`BOT_USERNAME_ENV`] and falls back to [`DEFAULT_BOT_USERNAME`]
+/// when it is unset or empty (delegates the pure choice to [`resolve_username`]).
+/// Test: `resolve_username_*` unit tests cover the pure resolution logic.
+pub fn bot_username() -> String {
+    resolve_username(std::env::var(BOT_USERNAME_ENV).ok())
+}
+
+/// Pure resolution core for [`bot_username`].
+///
+/// Why: factoring the choice out of the env read keeps it testable without
+/// mutating global process environment (which races across parallel tests).
+/// What: returns the trimmed `env_val` when it is `Some` and non-empty after
+/// trimming; otherwise returns [`DEFAULT_BOT_USERNAME`].
+/// Test: `resolve_username_uses_env_when_set`,
+/// `resolve_username_falls_back_when_unset`,
+/// `resolve_username_falls_back_when_empty`.
+fn resolve_username(env_val: Option<String>) -> String {
+    match env_val {
+        Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => DEFAULT_BOT_USERNAME.to_string(),
+    }
+}
+
 /// Poll interval for the per-session event push-alert loop.
 const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -243,7 +284,7 @@ async fn on_message(
         return Ok(());
     }
 
-    let command = match TelegramCommand::parse(text, "trusty_mpm_bot") {
+    let command = match TelegramCommand::parse(text, &bot_username()) {
         Ok(cmd) => cmd,
         Err(_) => {
             // Not a slash command — route the free text to LLM chat (unless the
@@ -538,6 +579,27 @@ mod tests {
     fn resolve_token_missing_is_none() {
         let value = read_dotenv_key(Path::new("/no/such/.env"), "TELEGRAM_BOT_TOKEN");
         assert!(value.is_none());
+    }
+
+    #[test]
+    fn resolve_username_uses_env_when_set() {
+        // An explicit value wins over the default and is trimmed.
+        assert_eq!(resolve_username(Some("my_bot".into())), "my_bot");
+        assert_eq!(resolve_username(Some("  my_bot  ".into())), "my_bot");
+    }
+
+    #[test]
+    fn resolve_username_falls_back_when_unset() {
+        // No env var → the real deployed bot default.
+        assert_eq!(resolve_username(None), DEFAULT_BOT_USERNAME);
+        assert_eq!(resolve_username(None), "t_sess_bot");
+    }
+
+    #[test]
+    fn resolve_username_falls_back_when_empty() {
+        // Empty or whitespace-only env value is treated as unset.
+        assert_eq!(resolve_username(Some(String::new())), DEFAULT_BOT_USERNAME);
+        assert_eq!(resolve_username(Some("   ".into())), DEFAULT_BOT_USERNAME);
     }
 
     #[test]
