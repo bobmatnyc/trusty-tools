@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 
 mod sm_tools;
 
-pub use sm_tools::render_sm_tools;
+pub use sm_tools::{render_sm_tools, sm_session_verbs};
 
 /// How a catalog entry relates to the typed [`TrustyCommand`] surface.
 ///
@@ -81,7 +81,7 @@ impl CommandSpec {
     /// What: renders `name(args)`; an empty `args` yields `name()`. Operator-facing
     /// angle brackets (`<id>`) are stripped so the prompt reads as a method call.
     /// Test: `sm_tools_md_matches_catalog_render`, `prompt_signature_renders_callable_verbs`.
-    pub(super) fn prompt_signature(&self) -> String {
+    pub fn prompt_signature(&self) -> String {
         if self.args.is_empty() {
             format!("{}()", self.name)
         } else {

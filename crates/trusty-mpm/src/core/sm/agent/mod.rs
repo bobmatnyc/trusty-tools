@@ -24,6 +24,8 @@
 //! `agent/chat_tests.rs` covers the composed turn, degraded mode, and recall.
 
 mod chat;
+mod chat_action;
+mod chat_action_protocol;
 mod delegate;
 mod health;
 
@@ -42,6 +44,7 @@ use super::providers::TierResolver;
 use super::memory::SmMemory;
 
 pub use chat::{SmAgentError, SmChatOutcome};
+pub use chat_action::SmChatActionOutcome;
 pub use health::{SmHealth, SmModelTiers};
 
 /// The Session Manager orchestrator (SM-7: real conversational chat turn).

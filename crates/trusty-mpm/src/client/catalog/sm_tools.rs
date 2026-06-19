@@ -123,6 +123,25 @@ const SM_GOAL_VERBS: &[CommandSpec] = &[
     },
 ];
 
+/// The SM session-control verbs, exposed as the action-loop's verb catalog.
+///
+/// Why: the action-capable coordinator chat (#1283) advertises the inline verb
+/// surface in its prompt and maps each chosen verb onto a `SessionControl`
+/// method. Both the advertised list AND the executable mapping must stay driven
+/// by this single catalog slice so a new verb is described in exactly one place
+/// and the prompt can never advertise a verb the loop cannot execute (or omit one
+/// it can). Re-exporting the SAME slice that renders the `SM_TOOLS.md` table keeps
+/// the chat-action prompt and the SM-STDIO tool table aligned.
+/// What: returns the [`SM_SESSION_VERBS`] slice — `sessions.launch`,
+/// `sessions.list`, `sessions.get`, `sessions.send`, `sessions.stop`,
+/// `sessions.resume`, `sessions.kill` — each carrying its callable signature via
+/// [`CommandSpec::prompt_signature`].
+/// Test: `sm_session_verbs_exposes_catalog_slice` (this module);
+/// `chat_action.rs` tests assert the rendered prompt lists these verbs.
+pub fn sm_session_verbs() -> &'static [CommandSpec] {
+    SM_SESSION_VERBS
+}
+
 /// Render one prompt-table row for a [`CommandSpec`].
 fn render_table_row(spec: &CommandSpec) -> String {
     format!("| `{}` | {} |", spec.prompt_signature(), spec.summary)
@@ -235,6 +254,25 @@ mod tests {
             "SM_TOOLS.md is out of sync with catalog::render_sm_tools(); \
              regenerate it (the catalog is authoritative)"
         );
+    }
+
+    #[test]
+    fn sm_session_verbs_exposes_catalog_slice() {
+        // The action-loop verb catalog must be the SAME slice that renders the
+        // SM_TOOLS.md session-control table — one source of truth for the
+        // advertised AND executable verb surface.
+        let names: Vec<&str> = sm_session_verbs().iter().map(|c| c.name).collect();
+        for expected in [
+            "sessions.launch",
+            "sessions.list",
+            "sessions.get",
+            "sessions.send",
+            "sessions.stop",
+            "sessions.resume",
+            "sessions.kill",
+        ] {
+            assert!(names.contains(&expected), "missing SM verb `{expected}`");
+        }
     }
 
     #[test]

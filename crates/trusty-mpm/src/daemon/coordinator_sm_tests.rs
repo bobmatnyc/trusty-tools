@@ -63,6 +63,7 @@ async fn sm_chat_returns_reply_and_cost() {
             message: "plan the migration".into(),
             history: Vec::new(),
             conv_id: Some("endpoint-conv".into()),
+            actions: None,
         }),
     )
     .await
@@ -91,6 +92,7 @@ async fn sm_chat_degraded_is_503() {
             message: "anything".into(),
             history: Vec::new(),
             conv_id: None,
+            actions: None,
         }),
     )
     .await
@@ -126,11 +128,87 @@ async fn disabled_sm_falls_back_to_legacy_503() {
             message: "what is happening?".into(),
             history: Vec::new(),
             conv_id: None,
+            actions: None,
         }),
     )
     .await
     .unwrap_err();
     assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+/// Why: Phase 2 (#1283) — `actions: true` routes the SM branch through the
+/// ACTION-CAPABLE loop. With the model emitting a `final` answer immediately (no
+/// verb), the in-process control is never invoked, so the handler test stays
+/// hermetic while still proving the action BRANCH was taken: it parses the action
+/// JSON into the `final` message (the text path would echo the raw JSON verbatim)
+/// and emits the additive `cost`/`conv_id`. Because no verb ran, `actions_taken`
+/// is `None` (an empty `[]` is never serialized — presence means "verbs ran").
+/// What: posts with `actions: Some(true)` and a provider whose reply is a `final`
+/// action JSON; asserts the action path was taken (parsed `reply`, `cost`,
+/// `conv_id`) and that `actions_taken` is `None` when no verb ran.
+/// Test: this is the test.
+#[tokio::test]
+async fn coordinator_chat_action_path_returns_actions_taken() {
+    let tmp = TempDir::new().unwrap();
+    let provider = MockChatProvider::new(r#"{"action":"final","message":"nothing to do"}"#, 0.002);
+    let state = state_with_sm(Arc::new(MockResolver::with_provider(provider)), &tmp);
+
+    let resp = coordinator_chat(
+        State(state),
+        Json(CoordinatorChatRequest {
+            message: "check sessions".into(),
+            history: Vec::new(),
+            conv_id: Some("act-conv".into()),
+            actions: Some(true),
+        }),
+    )
+    .await
+    .expect("action path succeeds");
+
+    // The action path PARSED the JSON into the `final` message; the text path would
+    // instead echo the raw JSON verbatim — so this proves the action branch ran.
+    assert_eq!(resp.reply, "nothing to do");
+    assert_eq!(resp.cost, Some(0.002));
+    assert_eq!(resp.conv_id.as_deref(), Some("act-conv"));
+    // No verb ran this turn, so the audit field is omitted (None), not `Some([])`.
+    assert!(
+        resp.actions_taken.is_none(),
+        "no verb ran: actions_taken must be None, not Some([])"
+    );
+}
+
+/// Why: NO REGRESSION — `actions` absent (or `false`) must preserve the EXACT
+/// text-only `sm.chat` path: the raw reply text is returned verbatim (NOT parsed
+/// as an action) and `actions_taken` is absent (`None`).
+/// What: posts the same provider reply WITHOUT `actions: true`; asserts the raw
+/// JSON-looking reply is returned verbatim and `actions_taken` is `None`.
+/// Test: this is the test.
+#[tokio::test]
+async fn coordinator_chat_actions_absent_is_text_only() {
+    let tmp = TempDir::new().unwrap();
+    // A reply that WOULD parse as an action — the text path must NOT interpret it.
+    let provider = MockChatProvider::new(r#"{"action":"final","message":"x"}"#, 0.007);
+    let state = state_with_sm(Arc::new(MockResolver::with_provider(provider)), &tmp);
+
+    let resp = coordinator_chat(
+        State(state),
+        Json(CoordinatorChatRequest {
+            message: "plain chat".into(),
+            history: Vec::new(),
+            conv_id: Some("text-conv".into()),
+            actions: None,
+        }),
+    )
+    .await
+    .expect("text path succeeds");
+
+    // The text path returns the raw provider text verbatim, unparsed.
+    assert_eq!(resp.reply, r#"{"action":"final","message":"x"}"#);
+    assert_eq!(resp.cost, Some(0.007));
+    assert!(
+        resp.actions_taken.is_none(),
+        "text path must not populate actions_taken"
+    );
 }
 
 /// Why: D0.1 — the `/api/v1/session-manager/chat` alias must resolve to the SAME
@@ -219,6 +297,7 @@ fn doc13_tui_contract_is_preserved() {
         command_output: None,
         cost: None,
         conv_id: None,
+        actions_taken: None,
     };
     let json: Value = serde_json::to_value(&resp).unwrap();
     assert_eq!(json["reply"], "ok");

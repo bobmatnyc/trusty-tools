@@ -51,6 +51,14 @@ pub struct CoordinatorChatRequest {
     /// the same SM conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conv_id: Option<String>,
+    /// Opt in to ACTION-CAPABLE chat (Phase 2, #1283): the SM may invoke managed-
+    /// session verbs INLINE within this turn via the in-process `SessionControl`.
+    ///
+    /// Optional and additive: absent/`false` preserves the exact text-only SM
+    /// `chat` path (and the legacy/@prefix paths). Only `Some(true)` routes the SM
+    /// branch through the inline-action loop.
+    #[serde(default)]
+    pub actions: Option<bool>,
 }
 
 /// Response of `POST /api/v1/sessions/chat`.
@@ -83,6 +91,13 @@ pub struct CoordinatorChatResponse {
     /// the same rolling context. Additive (SM-7); present only on the SM path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conv_id: Option<String>,
+    /// The verbs the SM invoked inline this turn (Phase 2, #1283), in order, for
+    /// the operator's audit trail. Additive: `None` (skipped) on the text-only,
+    /// legacy, and prefix paths AND on the action path when NO verb ran — so its
+    /// presence means "verbs ran" and `[]` is never serialized. `Some([...])` only
+    /// when `actions: true` routed the SM branch and at least one verb executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions_taken: Option<Vec<String>>,
 }
 
 /// `GET /api/v1/sessions/context` — a cross-session activity snapshot.
@@ -160,6 +175,7 @@ pub async fn coordinator_chat(
             command_output: Some(output),
             cost: None,
             conv_id: None,
+            actions_taken: None,
         }));
     }
 
@@ -172,6 +188,14 @@ pub async fn coordinator_chat(
     // notice; any other SM error is a genuine 500.
     let sm = state.session_manager_agent();
     if sm.is_enabled() && sm.has_runtime() {
+        // Phase 2 (#1283): when the caller opts in with `actions: true`, route the
+        // SM turn through the ACTION-CAPABLE loop — the SM may invoke managed-
+        // session verbs inline via the IN-PROCESS `DaemonSessionControl` (never
+        // over HTTP back to this daemon, so no loopback). Absent/`false` preserves
+        // the exact text-only `sm.chat` path below.
+        if body.actions == Some(true) {
+            return route_through_action_loop(&sm, &state, &body).await;
+        }
         return route_through_session_manager(&sm, &body).await;
     }
 
@@ -202,6 +226,7 @@ pub async fn coordinator_chat(
         command_output: None,
         cost: None,
         conv_id: None,
+        actions_taken: None,
     }))
 }
 
@@ -231,6 +256,55 @@ async fn route_through_session_manager(
             command_output: None,
             cost: Some(outcome.cost_usd),
             conv_id: Some(outcome.conv_id),
+            actions_taken: None,
+        })),
+        Err(SmAgentError::Degraded(notice)) => Err(DaemonError::ServiceUnavailable(notice)),
+        Err(e) => Err(DaemonError::Internal(e.to_string())),
+    }
+}
+
+/// Drive one ACTION-CAPABLE Session Manager chat turn and map it to the wire
+/// response (Phase 2, #1283).
+///
+/// Why: the `actions: true` path lets the SM invoke managed-session verbs INLINE.
+/// Execution goes through the IN-PROCESS [`DaemonSessionControl`] (the same
+/// helpers the HTTP `…/managed/*` routes use), NOT chat-core's HTTP-backed
+/// executor — so the daemon never loops back over HTTP onto itself. Isolating
+/// this branch keeps [`coordinator_chat`] readable and gives the error mapping
+/// (graceful degraded → 503; real failure → 500) one home, mirroring
+/// [`route_through_session_manager`].
+/// What: constructs `DaemonSessionControl::new(state.clone())` as
+/// `Arc<dyn SessionControl>`, calls
+/// [`SessionManagerAgent::chat_with_actions`](crate::core::sm::SessionManagerAgent::chat_with_actions)
+/// with the message + optional `conv_id`; on success fills `reply`, the additive
+/// `cost`, `conv_id`, and the audit `actions_taken` — `Some([...])` only when at
+/// least one verb ran, else `None` so an empty `[]` is never serialized (leaving
+/// the routed/output fields `None`); on [`SmAgentError::Degraded`] returns a 503;
+/// on any other error a 500.
+/// Test: `coordinator_chat_action_path_returns_actions_taken`,
+/// `coordinator_chat_actions_absent_is_text_only` in the SM-path suite.
+async fn route_through_action_loop(
+    sm: &crate::core::sm::SessionManagerAgent,
+    state: &Arc<DaemonState>,
+    body: &CoordinatorChatRequest,
+) -> Result<Json<CoordinatorChatResponse>, DaemonError> {
+    use crate::core::sm::{SessionControl, SmAgentError};
+    use crate::daemon::sm_stdio::DaemonSessionControl;
+
+    let control: Arc<dyn SessionControl> = Arc::new(DaemonSessionControl::new(state.clone()));
+    match sm
+        .chat_with_actions(&body.message, body.conv_id.as_deref(), &control)
+        .await
+    {
+        Ok(outcome) => Ok(Json(CoordinatorChatResponse {
+            reply: outcome.reply,
+            routed_to_session: None,
+            command_output: None,
+            cost: Some(outcome.cost_usd),
+            conv_id: Some(outcome.conv_id),
+            // Presence means "verbs ran": omit the field (None) when none ran so
+            // `[]` is never serialized; `skip_serializing_if` then drops it.
+            actions_taken: Some(outcome.actions_taken).filter(|v| !v.is_empty()),
         })),
         Err(SmAgentError::Degraded(notice)) => Err(DaemonError::ServiceUnavailable(notice)),
         Err(e) => Err(DaemonError::Internal(e.to_string())),

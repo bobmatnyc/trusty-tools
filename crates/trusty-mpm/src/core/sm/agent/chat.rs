@@ -244,7 +244,7 @@ impl SessionManagerAgent {
     /// lost. A persistence error (disk) propagates as [`SmAgentError::Context`].
     /// Test: `chat_tests.rs::chat_records_round`,
     /// `chat_records_round_when_no_provider_for_compaction`.
-    async fn record_round(
+    pub(super) async fn record_round(
         &self,
         runtime: &super::AgentRuntime,
         engine: &mut SmContextEngine,
@@ -343,7 +343,7 @@ pub(crate) fn degraded_notice() -> String {
 /// other variant → [`SmAgentError::Inference`].
 /// Test: `chat_tests.rs::chat_without_provider_is_degraded`,
 /// `chat_unknown_provider_is_inference_error`.
-fn map_resolve_error(err: SmLlmError) -> SmAgentError {
+pub(super) fn map_resolve_error(err: SmLlmError) -> SmAgentError {
     if err.is_degraded() {
         SmAgentError::Degraded(degraded_notice())
     } else {
