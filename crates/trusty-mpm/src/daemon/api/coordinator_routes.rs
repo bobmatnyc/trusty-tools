@@ -93,8 +93,9 @@ pub struct CoordinatorChatResponse {
     pub conv_id: Option<String>,
     /// The verbs the SM invoked inline this turn (Phase 2, #1283), in order, for
     /// the operator's audit trail. Additive: `None` (skipped) on the text-only,
-    /// legacy, and prefix paths; present only when `actions: true` routed the SM
-    /// branch through the inline-action loop.
+    /// legacy, and prefix paths AND on the action path when NO verb ran — so its
+    /// presence means "verbs ran" and `[]` is never serialized. `Some([...])` only
+    /// when `actions: true` routed the SM branch and at least one verb executed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actions_taken: Option<Vec<String>>,
 }
@@ -276,10 +277,11 @@ async fn route_through_session_manager(
 /// `Arc<dyn SessionControl>`, calls
 /// [`SessionManagerAgent::chat_with_actions`](crate::core::sm::SessionManagerAgent::chat_with_actions)
 /// with the message + optional `conv_id`; on success fills `reply`, the additive
-/// `cost`, `conv_id`, and the audit `actions_taken` (leaving the routed/output
-/// fields `None`); on [`SmAgentError::Degraded`] returns a 503; on any other error
-/// a 500.
-/// Test: `coordinator_chat_action_path_executes_verbs`,
+/// `cost`, `conv_id`, and the audit `actions_taken` — `Some([...])` only when at
+/// least one verb ran, else `None` so an empty `[]` is never serialized (leaving
+/// the routed/output fields `None`); on [`SmAgentError::Degraded`] returns a 503;
+/// on any other error a 500.
+/// Test: `coordinator_chat_action_path_returns_actions_taken`,
 /// `coordinator_chat_actions_absent_is_text_only` in the SM-path suite.
 async fn route_through_action_loop(
     sm: &crate::core::sm::SessionManagerAgent,
@@ -300,7 +302,9 @@ async fn route_through_action_loop(
             command_output: None,
             cost: Some(outcome.cost_usd),
             conv_id: Some(outcome.conv_id),
-            actions_taken: Some(outcome.actions_taken),
+            // Presence means "verbs ran": omit the field (None) when none ran so
+            // `[]` is never serialized; `skip_serializing_if` then drops it.
+            actions_taken: Some(outcome.actions_taken).filter(|v| !v.is_empty()),
         })),
         Err(SmAgentError::Degraded(notice)) => Err(DaemonError::ServiceUnavailable(notice)),
         Err(e) => Err(DaemonError::Internal(e.to_string())),

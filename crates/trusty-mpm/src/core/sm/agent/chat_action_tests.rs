@@ -59,6 +59,33 @@ fn parse_prose_is_final() {
     );
 }
 
+/// Why: FIX 4 — `next_balanced_object`'s `depth` decrement must not underflow on a
+/// stray unmatched `}` (a `saturating_sub` guard). The parser must never panic and
+/// must still extract a valid object when one follows the stray brace.
+/// What: parses inputs with leading/trailing stray `}`; asserts no panic and that a
+/// real object is still recovered (else the prose fallback).
+/// Test: this is the test.
+#[test]
+fn parse_handles_stray_closing_brace_without_panic() {
+    // A bare stray brace + prose: no object → prose fallback, no panic.
+    let d = parse_action("} stray");
+    assert_eq!(
+        d,
+        Decided::Final {
+            message: "} stray".to_string()
+        }
+    );
+
+    // A valid object followed by a stray `}`: the object must still be extracted.
+    let d = parse_action(r#"{"action":"final","message":"ok"} junk }"#);
+    assert_eq!(
+        d,
+        Decided::Final {
+            message: "ok".to_string()
+        }
+    );
+}
+
 /// Why: the model often wraps its JSON in a ```json fence; the parser must still
 /// extract the verb-call.
 /// What: parses a fenced verb-call and asserts the verb name.

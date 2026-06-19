@@ -222,7 +222,9 @@ fn next_balanced_object(text: &str, from: usize) -> Option<(String, usize)> {
             '"' => in_string = true,
             '{' => depth += 1,
             '}' => {
-                depth -= 1;
+                // `saturating_sub` defends against an unmatched `}` (depth already
+                // zero) underflowing `usize` in debug builds on pathological input.
+                depth = depth.saturating_sub(1);
                 if depth == 0 {
                     let end = start + offset + ch.len_utf8();
                     return Some((text[start..end].to_string(), end));

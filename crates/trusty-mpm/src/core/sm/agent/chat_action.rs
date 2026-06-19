@@ -47,6 +47,18 @@ const MAX_ACTION_ITERATIONS: usize = 8;
 /// Generation cap for one action-loop reply (mirrors the chat turn's ceiling).
 const ACTION_MAX_TOKENS: u32 = 4_096;
 
+/// Max chars of a single verb result rendered into the fed-back transcript.
+///
+/// Why: a verb result (e.g. a large `sessions.list`) is embedded raw into the
+/// transcript line that is fed back to the model on the next iteration. An
+/// unbounded result would grow the prompt on every iteration and can overflow the
+/// model's context window. Capping each rendered result bounds total transcript
+/// growth to `MAX_ACTION_ITERATIONS × ACTION_RESULT_MAX_CHARS`.
+/// What: results longer than this are truncated on a char boundary with a clear
+/// `… [truncated N chars]` marker appended.
+/// Test: `chat_action_loop_tests.rs::large_verb_result_is_truncated`.
+const ACTION_RESULT_MAX_CHARS: usize = 2_000;
+
 /// The result of one action-capable SM chat turn (#1283).
 ///
 /// Why: the endpoint needs the reply, the conversation id (so a follow-up can
@@ -133,6 +145,8 @@ impl SessionManagerAgent {
         let mut final_reply: Option<String> = None;
 
         for iteration in 0..MAX_ACTION_ITERATIONS {
+            let is_final_iteration = iteration + 1 == MAX_ACTION_ITERATIONS;
+
             let mut turns = base_turns.clone();
             if !transcript.is_empty() {
                 turns.push(ChatMessage {
@@ -144,9 +158,11 @@ impl SessionManagerAgent {
                     ),
                 });
             }
-            // The last allowed iteration must produce an answer, not another verb —
-            // tell the model to stop calling verbs so the guard yields a real reply.
-            if iteration + 1 == MAX_ACTION_ITERATIONS {
+            // On the last allowed iteration, tell the model to stop calling verbs so
+            // it has the chance to yield a real `final` reply. This is only a HINT —
+            // a misbehaving model may still emit a verb-call, which is handled below
+            // by NOT executing it (see the `is_final_iteration` branch).
+            if is_final_iteration {
                 turns.push(ChatMessage {
                     role: "user".to_string(),
                     content: "You have reached the action limit for this turn. Do NOT \
@@ -180,6 +196,14 @@ impl SessionManagerAgent {
                     break;
                 }
                 Decided::Verb { verb, args } => {
+                    // The action cap is HARD: on the final iteration we must NOT
+                    // execute another verb (that would run one step beyond the cap).
+                    // A verb-call here means the model ignored the stop-hint, so we
+                    // break to the forced-summary path without executing it — the cap
+                    // bounds verbs at exactly MAX_ACTION_ITERATIONS - 1 executions.
+                    if is_final_iteration {
+                        break;
+                    }
                     let (label, result_line) = run_one_verb(control, &verb, &args).await;
                     actions_taken.push(label);
                     transcript.push(result_line);
@@ -187,9 +211,10 @@ impl SessionManagerAgent {
             }
         }
 
-        // The guard guarantees a final answer on the last iteration; if the model
-        // still failed to produce one, synthesize a transcript summary rather than
-        // spin or panic.
+        // If the loop ended without a `final` answer — either the model never
+        // emitted one, or it emitted a verb-call on the capped final iteration
+        // (which we refuse to execute) — synthesize a transcript summary rather than
+        // spin or panic. This ALWAYS yields an operator-facing reply.
         let reply = final_reply.unwrap_or_else(|| forced_summary(&transcript));
 
         // Record the round (message + final reply) so the action turn persists
@@ -213,10 +238,12 @@ impl SessionManagerAgent {
 /// one home. A verb error is NOT fatal: it is fed back to the model (so it can
 /// recover or answer) and recorded in the audit trail, never panicking.
 /// What: runs [`execute_verb`]; on success returns `(label, "<verb> -> <json>")`;
-/// on error returns `(label, "<verb> -> error: <e>")`. The label appends the
-/// session id (when present in args) so the operator sees the target.
+/// on error returns `(label, "<verb> -> error: <e>")`. The rendered result is
+/// bounded by [`truncate_result`] so a large verb output cannot grow the prompt
+/// unbounded. The label appends the session id (when present in args) so the
+/// operator sees the target.
 /// Test: `chat_action_tests.rs::loop_executes_verb_then_answers`,
-/// `verb_error_is_fed_back_not_fatal`.
+/// `chat_action_loop_tests.rs::large_verb_result_is_truncated`.
 async fn run_one_verb(
     control: &Arc<dyn SessionControl>,
     verb: &str,
@@ -227,9 +254,36 @@ async fn run_one_verb(
         _ => verb.to_string(),
     };
     match execute_verb(control, verb, args).await {
-        Ok(result) => (label, format!("{verb} -> {result}")),
-        Err(e) => (label, format!("{verb} -> error: {e}")),
+        Ok(result) => (
+            label,
+            format!("{verb} -> {}", truncate_result(&result.to_string())),
+        ),
+        Err(e) => (
+            label,
+            format!("{verb} -> error: {}", truncate_result(&e.to_string())),
+        ),
     }
+}
+
+/// Bound a rendered verb result to [`ACTION_RESULT_MAX_CHARS`] on a char boundary.
+///
+/// Why: each verb result is fed back into the next iteration's prompt; without a
+/// cap a single large result (a long `sessions.list`) grows the prompt unbounded
+/// and can overflow the model's context window on later iterations.
+/// What: returns `rendered` unchanged when it is within the cap; otherwise returns
+/// the first [`ACTION_RESULT_MAX_CHARS`] characters (split on a char boundary so
+/// multibyte input never panics) followed by a `… [truncated N chars]` marker
+/// where `N` is the number of characters dropped.
+/// Test: `chat_action_loop_tests.rs::large_verb_result_is_truncated`,
+/// `truncate_result_keeps_short_input` and `truncate_result_is_char_safe`.
+fn truncate_result(rendered: &str) -> String {
+    let total = rendered.chars().count();
+    if total <= ACTION_RESULT_MAX_CHARS {
+        return rendered.to_string();
+    }
+    let kept: String = rendered.chars().take(ACTION_RESULT_MAX_CHARS).collect();
+    let dropped = total - ACTION_RESULT_MAX_CHARS;
+    format!("{kept}… [truncated {dropped} chars]")
 }
 
 /// Synthesize a final reply from the transcript when the model produced none.

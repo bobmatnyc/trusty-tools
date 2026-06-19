@@ -16,12 +16,16 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
+use crate::activity::cache::ActivityState;
 use crate::core::sm::agent::SessionManagerAgent;
 use crate::core::sm::agent::delegate::mock_control::MockSessionControl;
 use crate::core::sm::config::{SessionManagerConfig, SmInferenceConfig};
-use crate::core::sm::control::SessionControl;
+use crate::core::sm::control::{
+    LaunchParams, RawObservation, SessionControl, SessionControlError, Submit, Summary,
+};
 use crate::core::sm::providers::{
     LlmProvider, LlmRequest, LlmResponse, ProviderKind, ResolvedCall, SmLlmError, SmModelTier,
     TierResolver, resolve_tier_model,
@@ -204,9 +208,15 @@ async fn loop_send_records_target_and_label() {
 }
 
 /// Why: the max-iteration guard must terminate a model that ALWAYS emits a verb-
-/// call — the loop must not spin unbounded inside the HTTP handler.
+/// call — the loop must not spin unbounded inside the HTTP handler — AND the cap
+/// is HARD: the capped final iteration must NOT execute one more verb (the bug the
+/// guard used to have). The transcript/audit must therefore grow on every
+/// non-final iteration and stop exactly at the cap, yet a final reply is still
+/// returned via the forced summary.
 /// What: scripts a single always-repeated verb-call (the queue repeats its last);
-/// asserts the loop terminates with a non-empty reply and a bounded call count.
+/// asserts the provider was called up to 8 times, that exactly 7 verbs executed
+/// (`MAX_ACTION_ITERATIONS - 1` — none on the final, capped iteration), and that a
+/// non-empty reply is still produced.
 /// Test: this is the test.
 #[tokio::test]
 async fn max_iterations_guard_terminates() {
@@ -225,6 +235,13 @@ async fn max_iterations_guard_terminates() {
         provider.call_count() <= 8,
         "call count {} exceeded the guard",
         provider.call_count()
+    );
+    // The cap is HARD: the final (8th) iteration's verb-call is NOT executed, so
+    // exactly 7 verbs ran. This proves actions_taken does NOT grow on the last step.
+    assert_eq!(
+        outcome.actions_taken.len(),
+        7,
+        "the capped final iteration must not execute an extra verb"
     );
     assert!(!outcome.reply.is_empty(), "guard must yield a final reply");
 }
@@ -284,4 +301,98 @@ async fn inert_agent_is_degraded() {
         .await
         .expect_err("inert agent is degraded");
     assert!(matches!(err, SmAgentError::Degraded(_)));
+}
+
+/// A mock [`SessionControl`] whose `list` returns a very large JSON result.
+///
+/// Why: FIX 2 — a large verb result must be truncated before it is fed back into
+/// the next iteration's prompt. Only `list` needs to be huge here; every other
+/// verb is unused by the truncation test.
+/// What: `list` returns a `{"blob": "<10k 'x'>"}` body; all other verbs return a
+/// trivial `ok`/empty result so the trait is satisfied.
+/// Test: `large_verb_result_is_truncated`.
+struct HugeListControl;
+
+#[async_trait]
+impl SessionControl for HugeListControl {
+    async fn launch(&self, _params: LaunchParams) -> Result<Value, SessionControlError> {
+        Ok(json!({ "session_id": "s-1" }))
+    }
+    async fn list(&self) -> Result<Value, SessionControlError> {
+        Ok(json!({ "blob": "x".repeat(10_000) }))
+    }
+    async fn get(&self, _session_id: &str) -> Result<Value, SessionControlError> {
+        Ok(json!({ "ok": true }))
+    }
+    async fn send(&self, _session_id: &str, _text: &str) -> Result<Value, SessionControlError> {
+        Ok(json!({ "ok": true }))
+    }
+    async fn stop(&self, _session_id: &str) -> Result<Value, SessionControlError> {
+        Ok(json!({ "ok": true }))
+    }
+    async fn resume(&self, _session_id: &str) -> Result<Value, SessionControlError> {
+        Ok(json!({ "ok": true }))
+    }
+    async fn kill(&self, _session_id: &str) -> Result<Value, SessionControlError> {
+        Ok(json!({ "ok": true }))
+    }
+    async fn inject_text(
+        &self,
+        _session_id: &str,
+        _text: &str,
+        _submit: Submit,
+    ) -> Result<(), SessionControlError> {
+        Ok(())
+    }
+    async fn observe(
+        &self,
+        _session_id: &str,
+        _lines: usize,
+    ) -> Result<RawObservation, SessionControlError> {
+        Ok(RawObservation {
+            raw_pane: String::new(),
+            runtime_active: true,
+            pending_decision: None,
+            proposed_default: None,
+        })
+    }
+    async fn summarize(&self, _session_id: &str) -> Result<Summary, SessionControlError> {
+        Ok(Summary {
+            state: ActivityState::Unknown,
+            summary: None,
+            confidence: 0.0,
+        })
+    }
+}
+
+/// Why: FIX 2 — a verb whose result is very large must NOT embed the raw result in
+/// the fed-back transcript; it must be truncated with a clear marker so the prompt
+/// cannot grow unbounded and overflow the context window.
+/// What: scripts an always-repeated `sessions.list` against [`HugeListControl`]
+/// (10k chars); the loop never gets a `final`, so the forced summary contains the
+/// transcript lines. Asserts the reply carries the `[truncated N chars]` marker and
+/// does NOT contain the full 10k-char blob.
+/// Test: this is the test.
+#[tokio::test]
+async fn large_verb_result_is_truncated() {
+    let tmp = TempDir::new().unwrap();
+    let (agent, _p) = agent_with([r#"{"action":"sessions.list","args":{}}"#], tmp.path());
+    let control: Arc<dyn SessionControl> = Arc::new(HugeListControl);
+
+    let outcome = agent
+        .chat_with_actions("dump everything", Some("c4"), &control)
+        .await
+        .expect("loop terminates via forced summary");
+
+    // The forced summary embeds the (truncated) transcript lines.
+    assert!(
+        outcome.reply.contains("[truncated"),
+        "expected a truncation marker in: {}",
+        outcome.reply
+    );
+    // The full 10k blob must never appear verbatim (it was capped well below 10k).
+    assert!(
+        !outcome.reply.contains(&"x".repeat(10_000)),
+        "the raw oversized result must not be embedded verbatim"
+    );
 }

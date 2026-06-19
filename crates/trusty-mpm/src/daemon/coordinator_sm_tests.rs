@@ -137,13 +137,15 @@ async fn disabled_sm_falls_back_to_legacy_503() {
 }
 
 /// Why: Phase 2 (#1283) — `actions: true` routes the SM branch through the
-/// ACTION-CAPABLE loop, which returns the additive `actions_taken` audit field.
-/// With the model emitting a `final` answer immediately (no verb), the in-process
-/// control is never invoked, so the handler test stays hermetic while still
-/// proving the action branch is wired and `actions_taken` is populated (here,
-/// empty — no verb ran).
+/// ACTION-CAPABLE loop. With the model emitting a `final` answer immediately (no
+/// verb), the in-process control is never invoked, so the handler test stays
+/// hermetic while still proving the action BRANCH was taken: it parses the action
+/// JSON into the `final` message (the text path would echo the raw JSON verbatim)
+/// and emits the additive `cost`/`conv_id`. Because no verb ran, `actions_taken`
+/// is `None` (an empty `[]` is never serialized — presence means "verbs ran").
 /// What: posts with `actions: Some(true)` and a provider whose reply is a `final`
-/// action JSON; asserts `reply`, `cost`, and `actions_taken: Some([])`.
+/// action JSON; asserts the action path was taken (parsed `reply`, `cost`,
+/// `conv_id`) and that `actions_taken` is `None` when no verb ran.
 /// Test: this is the test.
 #[tokio::test]
 async fn coordinator_chat_action_path_returns_actions_taken() {
@@ -163,11 +165,16 @@ async fn coordinator_chat_action_path_returns_actions_taken() {
     .await
     .expect("action path succeeds");
 
+    // The action path PARSED the JSON into the `final` message; the text path would
+    // instead echo the raw JSON verbatim — so this proves the action branch ran.
     assert_eq!(resp.reply, "nothing to do");
     assert_eq!(resp.cost, Some(0.002));
     assert_eq!(resp.conv_id.as_deref(), Some("act-conv"));
-    // The action path always returns the audit field (empty here: no verb ran).
-    assert_eq!(resp.actions_taken, Some(Vec::new()));
+    // No verb ran this turn, so the audit field is omitted (None), not `Some([])`.
+    assert!(
+        resp.actions_taken.is_none(),
+        "no verb ran: actions_taken must be None, not Some([])"
+    );
 }
 
 /// Why: NO REGRESSION — `actions` absent (or `false`) must preserve the EXACT
