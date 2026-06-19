@@ -32,7 +32,7 @@ mod tests;
 // `executor::MAX_OUTPUT_CHARS`). Only the test module consumes these names, so
 // the re-export is test-gated to avoid an unused-import warning in lib builds.
 #[cfg(test)]
-pub(crate) use sessions::{MAX_OUTPUT_CHARS, resolve_session, truncate_output};
+pub(crate) use sessions::{MAX_OUTPUT_CHARS, decide_answer, resolve_session, truncate_output};
 
 /// Translates [`TrustyCommand`]s into daemon HTTP calls.
 ///
@@ -56,6 +56,25 @@ impl CommandExecutor {
     pub fn new(daemon_url: impl Into<String>) -> Self {
         Self {
             client: DaemonClient::new(daemon_url),
+        }
+    }
+
+    /// Build an executor targeting `daemon_url`, REUSING an existing
+    /// `reqwest::Client`.
+    ///
+    /// Why: the `tm` CLI already owns a configured `reqwest::Client` (timeouts,
+    /// pool) and threads a `(client, url)` pair through every handler. Routing
+    /// the CLI's managed verbs through chat-core must not silently drop that
+    /// configuration by minting a fresh default client — so the executor adopts
+    /// the caller's client verbatim (cloning is cheap; `reqwest::Client` is an
+    /// `Arc` internally).
+    /// What: wraps [`DaemonClient::with_client`] so the executor shares the
+    /// caller's HTTP transport.
+    /// Test: `with_client_reuses_passed_client` covers the `DaemonClient` seam;
+    /// the CLI dispatch tests exercise this constructor end-to-end.
+    pub fn with_client(client: reqwest::Client, daemon_url: impl Into<String>) -> Self {
+        Self {
+            client: DaemonClient::with_client(client, daemon_url),
         }
     }
 
