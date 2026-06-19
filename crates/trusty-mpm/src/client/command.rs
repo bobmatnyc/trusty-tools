@@ -1,14 +1,20 @@
 //! UI-agnostic command model.
 //!
 //! Why: the Telegram bot, the TUI, and the CLI all express the same operator
-//! intents — list sessions, check status, approve a request, pair the bot. A
-//! single typed command keeps every UI's dispatch exhaustive and lets the one
-//! [`super::executor::CommandExecutor`] translate intent into daemon HTTP calls.
+//! intents — list sessions, check status, approve a request, pair the bot, drive
+//! the managed session-manager fleet. A single typed command keeps every UI's
+//! dispatch exhaustive and lets the one [`super::executor::CommandExecutor`]
+//! translate intent into daemon HTTP calls. The managed-verb variants
+//! (`Managed*`) cover the full `/api/v1/sessions/managed/*` surface so any
+//! adapter (CLI today; STUI #1272, TELUI #1433, Web/Slack next) can express
+//! every operation through this one enum.
 //! What: [`TrustyCommand`] enumerates every remote-management action. UI crates
 //! convert their own native command representation into a `TrustyCommand` and
-//! hand it to the executor.
-//! Test: `cargo test -p trusty-mpm-client` covers the executor; conversions are
-//! tested in the UI crates.
+//! hand it to the executor. The command catalog ([`super::catalog`]) is the
+//! single source of truth for the names, aliases, and help prose; this enum is
+//! the typed target each catalog entry maps to.
+//! Test: `cargo test -p trusty-mpm` covers the executor and the catalog parity;
+//! conversions are tested in the UI crates and in `telegram::commands`.
 
 use std::path::PathBuf;
 
@@ -17,9 +23,11 @@ use std::path::PathBuf;
 /// Why: a typed command is the shared contract between every UI and the
 /// executor — UIs parse their input into one of these, the executor maps each
 /// to daemon calls.
-/// What: the full set of remote-management actions trusty-mpm supports,
-/// including the bot-pairing handshake.
-/// Test: see the executor tests in `executor.rs`.
+/// What: the full set of remote-management actions trusty-mpm supports — the
+/// legacy project-session/pairing/overseer family AND the managed
+/// session-manager verb set (`Managed*`).
+/// Test: see the executor tests in `executor/tests.rs` and the catalog parity
+/// test in `catalog/sm_tools.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustyCommand {
     /// List all managed sessions.
@@ -136,69 +144,103 @@ pub enum TrustyCommand {
         /// The message to send to the coordinator.
         message: String,
     },
+
+    // ── Managed session-manager verbs (`/api/v1/sessions/managed/*`) ─────────
+    //
+    // These mirror the typed `DaemonClient` managed methods one-to-one and the
+    // `SessionControl` verb names (launch/list/get/send/stop/resume/kill) so the
+    // intent layer, the prompt catalog, and the wire surface never diverge.
+    /// Spawn a managed session from a repo + ref + task (`sessions.launch`).
+    ///
+    /// Why: the managed analogue of `Launch` — provision an isolated git
+    /// workspace and start a harness in it. Distinct from the project-session
+    /// `Launch`/`Connect` family, which operate on an existing directory.
+    /// What: the repo URL, git ref, task description, and optional name/runtime
+    /// hints POSTed to `POST /api/v1/sessions/managed`.
+    ManagedNew {
+        /// Repository URL to provision the session workspace from.
+        repo_url: String,
+        /// Git branch or ref to check out.
+        git_ref: String,
+        /// Human-readable task description for the session.
+        task: String,
+        /// Optional name hint overriding the auto-generated tmux session name.
+        name_hint: Option<String>,
+        /// Optional runtime selector (`claude-code` | `tcode`).
+        runtime: Option<String>,
+    },
+    /// List every managed session (`sessions.list`).
+    ManagedList,
+    /// Fetch one managed session's record (`sessions.get`).
+    ManagedGet {
+        /// Managed session id or friendly name.
+        target: String,
+    },
+    /// Inject text into a managed session's pane (`sessions.send`).
+    ManagedSend {
+        /// Managed session id or friendly name.
+        target: String,
+        /// Text to inject into the session's tmux pane.
+        text: String,
+    },
+    /// Answer a managed session's pending decision (`sessions.send` decision).
+    ///
+    /// Why: the correctness-correct decision path — unblocks a harness waiting
+    /// on an operator decision via the real `.../answer` endpoint, NOT a
+    /// synthetic hook. `/approve`/`/deny` on a managed session resolve here.
+    /// What: the target session and the answer text to inject.
+    ManagedAnswer {
+        /// Managed session id or friendly name.
+        target: String,
+        /// The answer text to inject for the pending decision.
+        answer: String,
+    },
+    /// Inspect a managed session's activity (`sessions.get` observe).
+    ManagedActivity {
+        /// Managed session id or friendly name.
+        target: String,
+    },
+    /// Fetch a managed session's tmux attach command.
+    ManagedAttachCmd {
+        /// Managed session id or friendly name.
+        target: String,
+    },
+    /// Stop a managed session's runtime, preserving the workspace
+    /// (`sessions.stop`).
+    ManagedRuntimeStop {
+        /// Managed session id or friendly name.
+        target: String,
+    },
+    /// Resume a stopped managed session (`sessions.resume`).
+    ManagedResume {
+        /// Managed session id or friendly name.
+        target: String,
+    },
+    /// Decommission a managed session — terminal, removes the workspace
+    /// (`sessions.kill`).
+    ManagedDecommission {
+        /// Managed session id or friendly name.
+        target: String,
+    },
+
     /// Show the command list.
     Help,
 }
 
 /// The `/help` text listing every command.
 ///
-/// Why: a single source of truth for the help body shared by every UI.
-/// What: returns the multi-line help string.
-/// Test: `help_text_lists_every_command`.
+/// Why: a single source of truth for the help body shared by every UI; it is
+/// rendered from the [`super::catalog`] registry so it can never drift from the
+/// typed command set.
+/// What: returns the catalog-rendered multi-line help string.
+/// Test: `super::catalog::tests` asserts the catalog covers every command.
 pub fn help_text() -> &'static str {
-    "trusty-mpm bot commands:\n\
-     /sessions — list managed sessions\n\
-     /status <id> — detailed session status\n\
-     /approve <id> — approve a pending permission request\n\
-     /deny <id> — deny a pending permission request\n\
-     /overseer — show overseer status\n\
-     /tmux — list all tmux sessions\n\
-     /projects — discover projects from Claude Code config\n\
-     /discover — auto-discover tmux sessions running Claude Code\n\
-     /adopt <session> — adopt an external tmux session\n\
-     /config <path> — analyze Claude Code config for a project\n\
-     /snapshot <session> — capture a tmux pane\n\
-     /kill <id> — kill a session\n\
-     /send <session> <prompt> — send a prompt to a Claude Code session\n\
-     /connect <path> — connect to or start a session (no deployment)\n\
-     /alerts — show alert subscriptions\n\
-     /pair <code> — pair this bot with your daemon\n\
-     /start — pairing status and onboarding\n\
-     /doctor — run full system diagnostic\n\
-     /help — this message"
+    super::catalog::help_text()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn help_text_lists_every_command() {
-        let text = help_text();
-        for cmd in [
-            "/sessions",
-            "/status",
-            "/approve",
-            "/deny",
-            "/overseer",
-            "/tmux",
-            "/projects",
-            "/discover",
-            "/adopt",
-            "/config",
-            "/snapshot",
-            "/kill",
-            "/send",
-            "/connect",
-            "/alerts",
-            "/pair",
-            "/start",
-            "/doctor",
-            "/help",
-        ] {
-            assert!(text.contains(cmd), "help text missing {cmd}");
-        }
-    }
 
     #[test]
     fn pair_command_distinguishes_code_and_status() {
@@ -207,5 +249,43 @@ mod tests {
         };
         let status = TrustyCommand::Pair { code: None };
         assert_ne!(with_code, status);
+    }
+
+    #[test]
+    fn managed_variants_round_trip_by_value() {
+        // The managed verbs carry their fields by value; equality is structural
+        // so adapters can build, compare, and pattern-match them losslessly.
+        let spawn = TrustyCommand::ManagedNew {
+            repo_url: "https://example/r.git".into(),
+            git_ref: "main".into(),
+            task: "do the thing".into(),
+            name_hint: Some("api".into()),
+            runtime: Some("tcode".into()),
+        };
+        assert_eq!(spawn.clone(), spawn);
+        let answer = TrustyCommand::ManagedAnswer {
+            target: "tmpm-red-owl".into(),
+            answer: "yes".into(),
+        };
+        assert_eq!(
+            answer,
+            TrustyCommand::ManagedAnswer {
+                target: "tmpm-red-owl".into(),
+                answer: "yes".into(),
+            }
+        );
+        assert_ne!(
+            TrustyCommand::ManagedResume { target: "a".into() },
+            TrustyCommand::ManagedRuntimeStop { target: "a".into() },
+        );
+    }
+
+    #[test]
+    fn help_text_is_catalog_rendered() {
+        // The help body is the catalog rendering — it must list managed verbs.
+        let text = help_text();
+        assert!(text.contains("/managed-list"));
+        assert!(text.contains("/managed-decommission"));
+        assert!(text.contains("/sessions"));
     }
 }
