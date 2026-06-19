@@ -206,15 +206,20 @@ impl TelegramFormatter {
                 runtime,
                 attach_cmd,
             } => format!(
-                "✅ Spawned <b>{name}</b> (<code>{}</code>) [{state}] runtime={runtime}\n\
-                 attach: <code>{attach_cmd}</code>",
+                "✅ Spawned <b>{}</b> (<code>{}</code>) [{}] runtime={}\n\
+                 attach: <code>{}</code>",
+                html_escape(name),
                 short_id(id),
+                html_escape(state),
+                html_escape(runtime),
+                html_escape(attach_cmd),
             ),
             CommandResult::ManagedSessions(sessions) => format_managed_sessions(sessions),
             CommandResult::ManagedSession(view) => format_managed_session(view),
             CommandResult::ManagedSent { id, tmux_name } => {
                 format!(
-                    "📨 Sent to managed <code>{tmux_name}</code> ({})",
+                    "📨 Sent to managed <code>{}</code> ({})",
+                    html_escape(tmux_name),
                     short_id(id)
                 )
             }
@@ -223,7 +228,8 @@ impl TelegramFormatter {
                 answer,
                 tmux_name,
             } => format!(
-                "✅ Answered decision on <code>{tmux_name}</code> ({}) → <code>{}</code>",
+                "✅ Answered decision on <code>{}</code> ({}) → <code>{}</code>",
+                html_escape(tmux_name),
                 short_id(id),
                 html_escape(answer),
             ),
@@ -239,20 +245,31 @@ impl TelegramFormatter {
                     .map(|d| format!("\n⚠️ pending: {}", html_escape(d)))
                     .unwrap_or_default();
                 format!(
-                    "<b>Activity {} [{state}]</b>\n{}{decision}",
+                    "<b>Activity {} [{}]</b>\n{}{decision}",
                     short_id(id),
+                    html_escape(state),
                     html_escape(summary),
                 )
             }
             CommandResult::ManagedAttachCmd { id, attach_cmd } => {
-                format!("<b>Attach {}</b>\n<code>{attach_cmd}</code>", short_id(id),)
+                format!(
+                    "<b>Attach {}</b>\n<code>{}</code>",
+                    short_id(id),
+                    html_escape(attach_cmd),
+                )
             }
             CommandResult::ManagedLifecycle {
                 id,
                 name,
                 state,
                 action,
-            } => format!("✅ {name} ({}) {action} → {state}", short_id(id)),
+            } => format!(
+                "✅ {} ({}) {} → {}",
+                html_escape(name),
+                short_id(id),
+                html_escape(action),
+                html_escape(state),
+            ),
             CommandResult::Help(text) => text.clone(),
             CommandResult::Error(msg) => format!("❌ {msg}"),
         }
@@ -374,7 +391,7 @@ pub fn format_managed_sessions(sessions: &[ManagedSessionView]) -> String {
             "\n• <code>{}</code> {} [{}]{flag}",
             short_id(&s.id),
             html_escape(&s.name),
-            s.state,
+            html_escape(&s.state),
         ));
     }
     text
@@ -391,14 +408,18 @@ pub fn format_managed_session(view: &ManagedSessionView) -> String {
         "<b>{}</b> (<code>{}</code>) [{}]",
         html_escape(&view.name),
         short_id(&view.id),
-        view.state,
+        html_escape(&view.state),
     );
     if let Some(ws) = &view.workspace_path {
         text.push_str(&format!("\n📁 <code>{}</code>", html_escape(ws)));
     }
     if let Some(repo) = &view.repo_url {
         let branch = view.branch.as_deref().unwrap_or("");
-        text.push_str(&format!("\n🔗 {} {branch}", html_escape(repo)));
+        text.push_str(&format!(
+            "\n🔗 {} {}",
+            html_escape(repo),
+            html_escape(branch)
+        ));
     }
     if let Some(d) = &view.pending_decision {
         let def = view.proposed_default.as_deref().unwrap_or("");

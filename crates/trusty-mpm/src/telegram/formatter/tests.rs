@@ -215,6 +215,49 @@ fn format_doctor_report_lists_each_check() {
 }
 
 #[test]
+fn managed_arms_escape_daemon_sourced_fields() {
+    // Why: daemon-sourced names/states (repo/tmux/session names) may contain
+    // HTML-significant characters; un-escaped `<`/`>`/`&` make Telegram reject
+    // or misrender the message. These arms must run every interpolated
+    // daemon-sourced field through `html_escape`, matching the other formatters.
+    let raw = "a<b>&c";
+    let escaped = "a&lt;b&gt;&amp;c";
+
+    let spawned = CommandResult::ManagedSpawned {
+        id: "abcd1234-5678".into(),
+        name: raw.into(),
+        state: raw.into(),
+        runtime: raw.into(),
+        attach_cmd: raw.into(),
+    };
+    let spawned_text = TelegramFormatter::format(&spawned);
+    assert!(
+        spawned_text.contains(escaped),
+        "ManagedSpawned must escape daemon fields: {spawned_text}"
+    );
+    assert!(
+        !spawned_text.contains("a<b>&c"),
+        "ManagedSpawned must not emit raw chars: {spawned_text}"
+    );
+
+    let lifecycle = CommandResult::ManagedLifecycle {
+        id: "abcd1234-5678".into(),
+        name: raw.into(),
+        state: raw.into(),
+        action: raw.into(),
+    };
+    let lifecycle_text = TelegramFormatter::format(&lifecycle);
+    assert!(
+        lifecycle_text.contains(escaped),
+        "ManagedLifecycle must escape daemon fields: {lifecycle_text}"
+    );
+    assert!(
+        !lifecycle_text.contains("a<b>&c"),
+        "ManagedLifecycle must not emit raw chars: {lifecycle_text}"
+    );
+}
+
+#[test]
 fn snapshot_escapes_html() {
     let result = CommandResult::Snapshot {
         session: "s".into(),

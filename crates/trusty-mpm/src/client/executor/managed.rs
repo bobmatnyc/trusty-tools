@@ -91,7 +91,11 @@ impl CommandExecutor {
     /// [`ManagedSessionView`]. When `target` already parses as a UUID it is an
     /// id, so the list fetch in [`resolve_managed`] is skipped and the
     /// per-session endpoint is hit directly; friendly names/prefixes still go
-    /// through the list-based resolver.
+    /// through the list-based resolver. Note the resulting asymmetry: the UUID
+    /// fast-path bypasses the list and therefore relies on the per-session
+    /// endpoint enforcing the same access control the list endpoint applies —
+    /// fine for this local/single-user daemon, but a constraint to revisit
+    /// before any multi-tenant deployment.
     /// Test: `execute_managed_get_unknown_errors`.
     pub(super) async fn managed_get(&self, target: &str) -> CommandResult {
         // Skip the redundant list round-trip when the caller already gave us an
