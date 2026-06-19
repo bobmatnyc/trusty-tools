@@ -236,7 +236,10 @@ pub(crate) async fn coordinator_send(
     message: &str,
 ) {
     state.push_chat(ChatMessage::user(message));
-    match client.coordinator_chat(message, &state.coord_history).await {
+    match client
+        .coordinator_chat(message, &state.coord_history, false)
+        .await
+    {
         Ok(Some(outcome)) => {
             let reply = match outcome.command_output {
                 Some(output) => format!("{}\n{output}", outcome.reply),

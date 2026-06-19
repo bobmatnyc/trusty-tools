@@ -33,11 +33,11 @@ use alerts::{AlertConfig, LastSeen};
 use commands::TelegramCommand;
 use formatter::TelegramFormatter;
 
-/// Per-chat LLM conversation history, keyed by Telegram `chat_id`.
+/// Per-chat coordinator conversation history, keyed by Telegram `chat_id`.
 ///
-/// Why: free-text (non-command) messages route to the daemon's LLM chat, which
-/// is stateless about conversations — the bot holds the rolling history per
-/// chat and threads it through each turn.
+/// Why: free-text (non-command) messages route to the action-capable
+/// coordinator, which is stateless about conversations — the bot holds the
+/// rolling history per chat and threads it through each turn.
 /// What: an `Arc<Mutex<…>>` of chat-id → message-history so every teloxide
 /// handler task shares one conversation store.
 type ChatHistories = Arc<Mutex<HashMap<i64, Vec<ChatMessage>>>>;
@@ -287,10 +287,11 @@ async fn on_message(
     let command = match TelegramCommand::parse(text, &bot_username()) {
         Ok(cmd) => cmd,
         Err(_) => {
-            // Not a slash command — route the free text to LLM chat (unless the
-            // message is empty, in which case there is nothing to ask).
+            // Not a slash command — route the free text to the action-capable
+            // coordinator so natural language can DRIVE the fleet (#1283), unless
+            // the message is empty, in which case there is nothing to ask.
             if !text.trim().is_empty() {
-                let reply = llm_chat_reply(&executor, &histories, msg.chat.id.0, text).await;
+                let reply = action_chat_reply(&executor, &histories, msg.chat.id.0, text).await;
                 bot.send_message(msg.chat.id, reply)
                     .parse_mode(ParseMode::Html)
                     .await?;
@@ -341,16 +342,26 @@ async fn dispatch_command(
     }
 }
 
-/// Route a free-text message to the daemon's LLM chat and render the reply.
+/// Route a free-text message to the action-capable coordinator and render it.
 ///
-/// Why: messages that are not slash commands are treated as conversation; the
-/// bot holds the per-chat history and threads it through `POST /llm/chat`.
-/// What: loads this chat's history, calls [`DaemonClient::llm_chat`], stores the
-/// updated history on success, and returns the assistant reply (HTML-escaped).
-/// When the daemon reports LLM chat is not configured (`503`) it returns the
-/// [`LLM_NOT_CONFIGURED`] hint; a transport failure returns an error line.
-/// Test: `llm_chat_reply_reports_unconfigured` covers the not-configured path.
-async fn llm_chat_reply(
+/// Why: messages that are not slash commands are treated as conversation that
+/// can DRIVE the managed fleet — routing them through the coordinator with
+/// `actions: true` lets the session-manager invoke managed-session verbs inline
+/// (#1283), so "spin up a session for repo X" actually does it rather than
+/// merely describing it. The bot holds the per-chat history and threads it
+/// through `POST /api/v1/sessions/chat`; the coordinator is stateless about
+/// conversations, so the user turn and the assistant reply are appended here.
+/// What: loads this chat's history, calls
+/// [`DaemonClient::coordinator_chat`](crate::client::DaemonClient::coordinator_chat)
+/// with `actions = true`, appends the user/assistant turns to the stored history
+/// on success, and returns the HTML-escaped reply. When the coordinator routed a
+/// `@prefix:` command its captured pane output is appended; when one or more
+/// verbs executed, a compact italic `ran: …` footer is appended so the operator
+/// sees what ran. A `503` returns the [`LLM_NOT_CONFIGURED`] hint; a transport
+/// failure returns an error line.
+/// Test: `action_chat_reply_reports_unconfigured` covers the not-configured
+/// path; `action_footer_lists_verbs` covers the footer rendering.
+async fn action_chat_reply(
     executor: &CommandExecutor,
     histories: &ChatHistories,
     chat_id: i64,
@@ -360,17 +371,53 @@ async fn llm_chat_reply(
         let guard = histories.lock().expect("chat history mutex poisoned");
         guard.get(&chat_id).cloned().unwrap_or_default()
     };
-    match executor.client().llm_chat(text, &history).await {
+    match executor
+        .client()
+        .coordinator_chat(text, &history, true)
+        .await
+    {
         Ok(Some(outcome)) => {
-            histories
-                .lock()
-                .expect("chat history mutex poisoned")
-                .insert(chat_id, outcome.history);
-            formatter::html_escape(&outcome.reply)
+            // The coordinator keeps no conversation state of its own, so persist
+            // this turn (user message + assistant reply) for the next message.
+            {
+                let mut guard = histories.lock().expect("chat history mutex poisoned");
+                let entry = guard.entry(chat_id).or_default();
+                entry.push(ChatMessage::user(text));
+                entry.push(ChatMessage::assistant(&outcome.reply));
+            }
+            let mut body = formatter::html_escape(&outcome.reply);
+            if let Some(output) = outcome.command_output.as_deref()
+                && !output.is_empty()
+            {
+                body.push('\n');
+                body.push_str(&formatter::html_escape(output));
+            }
+            if let Some(footer) = action_footer(outcome.actions_taken.as_deref()) {
+                body.push_str(&footer);
+            }
+            body
         }
         Ok(None) => LLM_NOT_CONFIGURED.to_string(),
         Err(e) => format!("❌ chat: daemon error: {e}"),
     }
+}
+
+/// Build a compact "ran: …" footer listing the verbs the coordinator executed.
+///
+/// Why: when free-text drives the fleet, the operator must see the audit trail
+/// of what actually ran — silent side effects are dangerous on a remote surface.
+/// What: returns `Some("\n\n<i>ran: a, b</i>")` (HTML-escaped, comma-joined) when
+/// `actions` is `Some` and non-empty; `None` otherwise (text-only turns add no
+/// footer). A `Some(&[])` is treated as "nothing ran" and yields `None`.
+/// Test: `action_footer_lists_verbs`, `action_footer_absent_when_empty`.
+fn action_footer(actions: Option<&[String]>) -> Option<String> {
+    let verbs = actions.filter(|v| !v.is_empty())?;
+    let joined = verbs
+        .iter()
+        .map(|v| formatter::html_escape(v))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("\n\n<i>ran: {joined}</i>"))
 }
 
 /// teloxide callback-query handler for inline-keyboard buttons.
@@ -640,16 +687,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_chat_reply_reports_unconfigured() {
-        // A default test daemon has no OpenRouter key, so a free-text message
-        // gets the not-configured hint rather than a model reply.
+    async fn action_chat_reply_reports_unconfigured() {
+        // A default test daemon has the SM disabled and no OpenRouter key, so a
+        // free-text message routed through the action-capable coordinator gets
+        // the not-configured hint rather than a model reply.
         let (_state, url) = spawn_test_daemon().await;
         let executor = CommandExecutor::new(url);
         let histories: ChatHistories = Arc::new(Mutex::new(HashMap::new()));
-        let reply = llm_chat_reply(&executor, &histories, 42, "hello there").await;
+        let reply = action_chat_reply(&executor, &histories, 42, "hello there").await;
         assert_eq!(reply, LLM_NOT_CONFIGURED);
         // No history is stored when chat is unconfigured.
         assert!(histories.lock().unwrap().get(&42).is_none());
+    }
+
+    #[test]
+    fn action_footer_lists_verbs() {
+        // A non-empty audit trail renders as a compact italic footer so the
+        // operator sees exactly which verbs the free-text turn executed.
+        let verbs = vec!["sessions.health".to_string(), "sessions.list".to_string()];
+        let footer = action_footer(Some(&verbs)).expect("footer for non-empty verbs");
+        assert_eq!(footer, "\n\n<i>ran: sessions.health, sessions.list</i>");
+    }
+
+    #[test]
+    fn action_footer_absent_when_empty() {
+        // No verbs ran (None) or an empty list both suppress the footer — a
+        // text-only turn must not advertise side effects.
+        assert!(action_footer(None).is_none());
+        assert!(action_footer(Some(&[])).is_none());
     }
 
     #[tokio::test]

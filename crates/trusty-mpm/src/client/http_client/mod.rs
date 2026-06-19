@@ -707,22 +707,29 @@ impl DaemonClient {
     /// Why: the coordinator is the operator's one conversational surface over
     /// every session — a `@prefix:` message routes a command at a named
     /// session, a plain message is answered by the LLM with full session
-    /// context. The UI owns the rolling chat history and threads it through.
-    /// What: POSTs `{ message, history }` to `/api/v1/sessions/chat`; returns
+    /// context, and when `actions` is `true` the session-manager may invoke
+    /// managed-session verbs INLINE (#1283) so natural language can DRIVE the
+    /// fleet, not merely describe it. The UI owns the rolling chat history and
+    /// threads it through.
+    /// What: POSTs `{ message, history, actions }` to `/api/v1/sessions/chat`;
+    /// the `actions` flag opts into the action-capable SM branch. Returns
     /// `Ok(Some(outcome))` on success, `Ok(None)` when the daemon answers `503`
     /// (LLM not configured for a non-prefixed message), and `Err` on transport
-    /// failure.
-    /// Test: `coordinator_chat_outcome_deserializes` covers the wire shape.
+    /// failure. On the action path the outcome's `actions_taken` lists any verbs
+    /// that ran.
+    /// Test: `coordinator_chat_outcome_deserializes`,
+    /// `coordinator_chat_serializes_actions_flag` cover the wire shape.
     pub async fn coordinator_chat(
         &self,
         message: &str,
         history: &[ChatMessage],
+        actions: bool,
     ) -> anyhow::Result<Option<CoordinatorChatOutcome>> {
         let url = format!("{}/api/v1/sessions/chat", self.base);
         let resp = self
             .http
             .post(&url)
-            .json(&serde_json::json!({ "message": message, "history": history }))
+            .json(&coordinator_chat_body(message, history, actions))
             .send()
             .await?;
         if resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
@@ -764,6 +771,27 @@ impl DaemonClient {
         let report = request.send().await?.error_for_status()?.json().await?;
         Ok(report)
     }
+}
+
+/// Build the `POST /api/v1/sessions/chat` request body.
+///
+/// Why: extracting the body shape from [`DaemonClient::coordinator_chat`] makes
+/// the `actions` opt-in serializable and unit-testable without a live HTTP
+/// round-trip — the wire contract is what the daemon's
+/// `CoordinatorChatRequest` reads, so it must be pinned by a test.
+/// What: returns a JSON object with `message`, `history`, and the `actions`
+/// boolean (the flag that routes the action-capable SM branch when `true`).
+/// Test: `coordinator_chat_serializes_actions_flag`.
+pub(crate) fn coordinator_chat_body(
+    message: &str,
+    history: &[ChatMessage],
+    actions: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "message": message,
+        "history": history,
+        "actions": actions,
+    })
 }
 
 /// Render a tmux snapshot JSON value as a flat text block.
