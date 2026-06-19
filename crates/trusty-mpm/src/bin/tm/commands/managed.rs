@@ -93,12 +93,13 @@ pub(crate) async fn resolve_managed_id(
 /// but their bodies now delegate to the shared typed [`DaemonClient`] (the
 /// convergence target for STUI #1272 / TELUI #1433). This helper centralizes the
 /// construction so every handler reuses the daemon base consistently.
-/// What: returns `DaemonClient::new(url)`. The passed `reqwest::Client` is
-/// intentionally unused — `DaemonClient` owns its own pooled client — but the
-/// parameter is retained so the handler signatures stay stable for callers.
+/// What: returns `DaemonClient::with_client(client.clone(), url)`, REUSING the
+/// caller's configured `reqwest::Client` (TLS/timeout/proxy/pool) rather than
+/// minting a fresh default one. Cloning is cheap — `reqwest::Client` is an `Arc`
+/// internally — so the caller's pool and settings are preserved.
 /// Test: exercised transitively by every managed handler's integration coverage.
-fn daemon_client(_client: &reqwest::Client, url: &str) -> DaemonClient {
-    DaemonClient::new(url.to_string())
+fn daemon_client(client: &reqwest::Client, url: &str) -> DaemonClient {
+    DaemonClient::with_client(client.clone(), url.to_string())
 }
 
 /// `tm sessions new` — spawn a managed session from a repo + ref.
@@ -150,21 +151,21 @@ pub(crate) async fn session_ls(
     url: &str,
     json: bool,
 ) -> anyhow::Result<()> {
-    // `--json` echoes the daemon's response body verbatim (byte-for-byte), so it
-    // reads the raw text rather than re-serializing the typed list — preserving
-    // exact field order and whitespace for scripts that parse the output.
+    // Fetch the response body ONCE. `--json` echoes that raw text verbatim
+    // (byte-for-byte — preserving exact field order/whitespace for scripts);
+    // the table path deserializes the SAME text rather than issuing a second GET.
+    let raw = client
+        .get(format!("{url}/api/v1/sessions/managed"))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
     if json {
-        let raw = client
-            .get(format!("{url}/api/v1/sessions/managed"))
-            .send()
-            .await?
-            .error_for_status()?
-            .text()
-            .await?;
         println!("{raw}");
         return Ok(());
     }
-    let sessions = daemon_client(client, url).list_managed_sessions().await?;
+    let sessions = serde_json::from_str::<trusty_mpm::client::ManagedListResponse>(&raw)?.sessions;
     if sessions.is_empty() {
         println!("no managed sessions");
     }

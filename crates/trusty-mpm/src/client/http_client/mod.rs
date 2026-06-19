@@ -50,9 +50,24 @@ impl DaemonClient {
     /// What: stores the base URL and a fresh pooled `reqwest::Client`.
     /// Test: `base_url_is_stored`.
     pub fn new(base: impl Into<String>) -> Self {
+        Self::with_client(reqwest::Client::new(), base)
+    }
+
+    /// Build a client targeting `base`, REUSING an existing `reqwest::Client`.
+    ///
+    /// Why: callers that already configured a `reqwest::Client` (custom TLS,
+    /// timeouts, proxy, connection pool) must not have that configuration
+    /// silently dropped by [`Self::new`] minting a fresh default client. Reusing
+    /// the caller's client is cheap — `reqwest::Client` is an `Arc` internally,
+    /// so cloning shares the same pool and settings.
+    /// What: stores `base` and adopts the passed `client` verbatim as the HTTP
+    /// transport.
+    /// Test: `with_client_reuses_passed_client` asserts the base is stored and
+    /// the client is adopted.
+    pub fn with_client(client: reqwest::Client, base: impl Into<String>) -> Self {
         Self {
             base: base.into(),
-            http: reqwest::Client::new(),
+            http: client,
         }
     }
 

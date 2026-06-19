@@ -366,9 +366,9 @@ pub struct ManagedSessionSummary {
     /// Git branch or ref checked out.
     #[serde(default)]
     pub branch: Option<String>,
-    /// Creation timestamp (RFC 3339).
+    /// Creation timestamp (RFC 3339), `None` when the daemon omits it.
     #[serde(default)]
-    pub created_at: String,
+    pub created_at: Option<String>,
     /// Last-activity timestamp (RFC 3339), if any.
     #[serde(default)]
     pub last_activity_at: Option<String>,
@@ -440,9 +440,9 @@ pub struct ManagedSpawnResponse {
     pub branch: Option<String>,
     /// Current lifecycle state.
     pub state: String,
-    /// Creation timestamp (RFC 3339).
+    /// Creation timestamp (RFC 3339), `None` when the daemon omits it.
     #[serde(default)]
-    pub created_at: String,
+    pub created_at: Option<String>,
     /// tmux attach command string.
     #[serde(default)]
     pub attach_cmd: String,

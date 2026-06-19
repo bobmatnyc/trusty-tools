@@ -7,6 +7,16 @@ fn base_url_is_stored() {
 }
 
 #[test]
+fn with_client_reuses_passed_client() {
+    // Why: callers that configured a `reqwest::Client` (TLS/timeout/proxy/pool)
+    // must keep that configuration; `with_client` adopts the passed client
+    // verbatim instead of minting a fresh default one.
+    let configured = reqwest::Client::new();
+    let client = DaemonClient::with_client(configured, "http://127.0.0.1:7880");
+    assert_eq!(client.base_url(), "http://127.0.0.1:7880");
+}
+
+#[test]
 fn set_base_url_repoints_client() {
     // Why: a long-lived UI must follow the daemon to a new ephemeral port
     // after a restart; `set_base_url` is what makes that re-pointing possible.
@@ -314,6 +324,7 @@ fn managed_session_summary_deserializes() {
     assert_eq!(s.id, "00000000-0000-0000-0000-000000000001");
     assert_eq!(s.name, "tmpm-brave-otter");
     assert_eq!(s.state, "running");
+    assert_eq!(s.created_at.as_deref(), Some("2026-06-19T00:00:00Z"));
     assert_eq!(s.pending_decision.as_deref(), Some("overwrite?"));
 
     // Minimal body: only the always-present fields.
@@ -321,6 +332,8 @@ fn managed_session_summary_deserializes() {
     let s: ManagedSessionSummary = serde_json::from_value(lean).unwrap();
     assert_eq!(s.id, "x");
     assert!(s.workspace_path.is_none());
+    // An absent `created_at` deserializes to `None`, not an empty string.
+    assert!(s.created_at.is_none());
     assert!(s.pending_decision.is_none());
 }
 
@@ -383,8 +396,17 @@ fn managed_spawn_response_deserializes() {
     });
     let r: ManagedSpawnResponse = serde_json::from_value(json).unwrap();
     assert_eq!(r.id, "id-1");
+    assert_eq!(r.created_at.as_deref(), Some("2026-06-19T00:00:00Z"));
     assert_eq!(r.attach_cmd, "tmux attach-session -t tmpm-x");
     assert_eq!(r.runtime, "claude-code");
+
+    // An absent `created_at` deserializes to `None`, while `attach_cmd` and
+    // `runtime` remain plain strings defaulting to empty.
+    let lean = serde_json::json!({"id": "id-2", "name": "tmpm-y", "state": "running"});
+    let r: ManagedSpawnResponse = serde_json::from_value(lean).unwrap();
+    assert!(r.created_at.is_none());
+    assert_eq!(r.attach_cmd, "");
+    assert_eq!(r.runtime, "");
 }
 
 #[test]
