@@ -73,7 +73,9 @@ pub mod providers;
 /// Test: `prune::tests`.
 pub mod prune;
 
-pub use agent::{SessionManagerAgent, SmAgentError, SmChatOutcome, SmHealth, SmModelTiers};
+pub use agent::{
+    SessionManagerAgent, SmAgentError, SmChatActionOutcome, SmChatOutcome, SmHealth, SmModelTiers,
+};
 pub use config::{SessionManagerConfig, SmInferenceConfig, SmMemoryConfig, SmRoundsConfig};
 pub use context::{
     ConversationStore, ConversationStoreError, Round, SmContextEngine, SmContextError,

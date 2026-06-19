@@ -522,6 +522,7 @@ async fn coordinator_chat_without_overseer_is_503() {
             message: "what is happening?".into(),
             history: Vec::new(),
             conv_id: None,
+            actions: None,
         }),
     )
     .await
@@ -546,6 +547,7 @@ async fn coordinator_chat_routes_prefixed_message() {
             message: "@coordtest: echo hi".into(),
             history: Vec::new(),
             conv_id: None,
+            actions: None,
         }),
     )
     .await
