@@ -9,7 +9,7 @@
 //! Test: `cli_parses_session_new`, `cli_parses_catalog_sync` exercise the parse
 //! path; the HTTP round-trip is covered by `tests/session_manager_mvp.rs`.
 
-use serde::Deserialize;
+use trusty_mpm::client::{DaemonClient, ManagedSessionSummary, ManagedSpawnRequest};
 
 use crate::cli::CatalogAction;
 
@@ -38,21 +38,6 @@ pub(crate) fn deprecation_notice(old: &str, new: &str) {
     eprintln!("{}", deprecation_message(old, new));
 }
 
-/// A managed-session summary as returned by the daemon list/get endpoints.
-///
-/// Why: the CLI renders a stable subset of fields; deriving Deserialize on a
-/// dedicated struct decouples the CLI from the daemon's internal record shape.
-/// What: mirrors `daemon::managed_routes::SessionSummary`.
-/// Test: rendered by `ls`; round-trip covered by the integration test.
-#[derive(Debug, Deserialize)]
-pub(crate) struct ManagedSummary {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    state: String,
-    #[serde(default)]
-    pending_decision: Option<String>,
-}
-
 /// Decide whether an id-or-name refers to a MANAGED session, returning its UUID.
 ///
 /// Why: the canonical `tm sessions stop`/`resume` verbs must operate on managed
@@ -68,7 +53,7 @@ pub(crate) struct ManagedSummary {
 /// argument resolve to the id the managed endpoints require.
 /// Test: `classify_managed_target_*` in `tests.rs`.
 pub(crate) fn classify_managed_target(
-    sessions: &[ManagedSummary],
+    sessions: &[ManagedSessionSummary],
     id_or_name: &str,
 ) -> Option<String> {
     sessions
@@ -83,10 +68,10 @@ pub(crate) fn classify_managed_target(
 /// whether the argument is a managed session (#1218). Fetching the managed list
 /// and applying [`classify_managed_target`] keeps that decision in one place and
 /// off the project-session path.
-/// What: GETs `/api/v1/sessions/managed`, deserializes the session list, and
-/// returns `classify_managed_target(&sessions, id_or_name)`. A non-200 response
-/// or a body that fails to parse yields `None` (treated as "not managed") so the
-/// caller transparently falls back to the project-session path rather than erroring.
+/// What: calls [`DaemonClient::list_managed_sessions`] and returns
+/// `classify_managed_target(&sessions, id_or_name)`. Any transport/parse failure
+/// yields `None` (treated as "not managed") so the caller transparently falls
+/// back to the project-session path rather than erroring.
 /// Test: HTTP wiring covered by the integration test; the matching logic by
 /// `classify_managed_target_*`.
 pub(crate) async fn resolve_managed_id(
@@ -94,20 +79,27 @@ pub(crate) async fn resolve_managed_id(
     url: &str,
     id_or_name: &str,
 ) -> Option<String> {
-    #[derive(Deserialize)]
-    struct ListResp {
-        sessions: Vec<ManagedSummary>,
-    }
-    let resp = client
-        .get(format!("{url}/api/v1/sessions/managed"))
-        .send()
+    let sessions = daemon_client(client, url)
+        .list_managed_sessions()
         .await
         .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let body: ListResp = resp.json().await.ok()?;
-    classify_managed_target(&body.sessions, id_or_name)
+    classify_managed_target(&sessions, id_or_name)
+}
+
+/// Build a [`DaemonClient`] from the CLI's `(client, url)` pair.
+///
+/// Why: the managed CLI handlers keep their `(client: &reqwest::Client, url:
+/// &str)` signatures so their callers in `session.rs`/`prune.rs` are untouched,
+/// but their bodies now delegate to the shared typed [`DaemonClient`] (the
+/// convergence target for STUI #1272 / TELUI #1433). This helper centralizes the
+/// construction so every handler reuses the daemon base consistently.
+/// What: returns `DaemonClient::with_client(client.clone(), url)`, REUSING the
+/// caller's configured `reqwest::Client` (TLS/timeout/proxy/pool) rather than
+/// minting a fresh default one. Cloning is cheap — `reqwest::Client` is an `Arc`
+/// internally — so the caller's pool and settings are preserved.
+/// Test: exercised transitively by every managed handler's integration coverage.
+fn daemon_client(client: &reqwest::Client, url: &str) -> DaemonClient {
+    DaemonClient::with_client(client.clone(), url.to_string())
 }
 
 /// `tm sessions new` — spawn a managed session from a repo + ref.
@@ -129,30 +121,16 @@ pub(crate) async fn session_new(
     name_hint: Option<String>,
     runtime: trusty_mpm::runtime::RuntimeKind,
 ) -> anyhow::Result<()> {
-    #[derive(Deserialize)]
-    struct SpawnResp {
-        id: String,
-        name: String,
-        state: String,
-        attach_cmd: String,
-        #[serde(default)]
-        runtime: String,
-    }
-    let resp: SpawnResp = client
-        .post(format!("{url}/api/v1/sessions/managed"))
-        .json(&serde_json::json!({
-            "repo_url": repo,
-            "ref": git_ref,
-            "task": task,
-            "name_hint": name_hint,
+    let resp = daemon_client(client, url)
+        .spawn_managed_session(&ManagedSpawnRequest {
+            repo_url: repo,
+            git_ref,
+            task,
+            name_hint,
             // Send the canonical wire spelling (`claude-code`/`tcode`) so the
             // daemon's `FromStr` accepts it; the CLI already validated the value.
-            "runtime": runtime.as_str(),
-        }))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
+            runtime: Some(runtime.as_str().to_string()),
+        })
         .await?;
     println!(
         "spawned {} ({}) [{}] runtime={}",
@@ -173,6 +151,9 @@ pub(crate) async fn session_ls(
     url: &str,
     json: bool,
 ) -> anyhow::Result<()> {
+    // Fetch the response body ONCE. `--json` echoes that raw text verbatim
+    // (byte-for-byte — preserving exact field order/whitespace for scripts);
+    // the table path deserializes the SAME text rather than issuing a second GET.
     let raw = client
         .get(format!("{url}/api/v1/sessions/managed"))
         .send()
@@ -184,15 +165,11 @@ pub(crate) async fn session_ls(
         println!("{raw}");
         return Ok(());
     }
-    #[derive(Deserialize)]
-    struct ListResp {
-        sessions: Vec<ManagedSummary>,
-    }
-    let body: ListResp = serde_json::from_str(&raw)?;
-    if body.sessions.is_empty() {
+    let sessions = serde_json::from_str::<trusty_mpm::client::ManagedListResponse>(&raw)?.sessions;
+    if sessions.is_empty() {
         println!("no managed sessions");
     }
-    for s in &body.sessions {
+    for s in &sessions {
         let pending = s
             .pending_decision
             .as_deref()
@@ -217,26 +194,10 @@ pub(crate) async fn session_activity(
     url: &str,
     id: String,
 ) -> anyhow::Result<()> {
-    #[derive(Deserialize)]
-    struct ActivityResp {
-        raw_pane: String,
-        runtime_active: bool,
-        state: String,
-        summary: String,
-        confidence: f32,
-        cache_hit: bool,
-        input_tokens: u32,
-        output_tokens: u32,
-        latency_ms: u64,
-        total_input_tokens: u64,
-        total_output_tokens: u64,
-        #[serde(default)]
-        classification: Option<String>,
-        #[serde(default)]
-        pending_decision: Option<String>,
-        #[serde(default)]
-        proposed_default: Option<String>,
-    }
+    // The raw request is retained here (rather than the typed `DaemonClient`
+    // method) only to preserve the 404 → "not found" output contract; the
+    // response body is deserialized into the SHARED `ManagedActivityResponse`,
+    // dropping the former ad-hoc local struct.
     let resp = client
         .get(format!("{url}/api/v1/sessions/managed/{id}/activity"))
         .send()
@@ -245,7 +206,7 @@ pub(crate) async fn session_activity(
         println!("not found");
         return Ok(());
     }
-    let a: ActivityResp = resp.error_for_status()?.json().await?;
+    let a: trusty_mpm::client::ManagedActivityResponse = resp.error_for_status()?.json().await?;
     let runtime_str = if a.runtime_active {
         "running"
     } else {
@@ -337,11 +298,8 @@ pub(crate) async fn session_attach(
         println!("not found");
         return Ok(());
     }
-    #[derive(Deserialize)]
-    struct AttachResp {
-        attach_cmd: String,
-    }
-    let body: AttachResp = resp.error_for_status()?.json().await?;
+    let body: trusty_mpm::client::ManagedAttachCmdResponse =
+        resp.error_for_status()?.json().await?;
     println!("{}", body.attach_cmd);
     Ok(())
 }
@@ -446,13 +404,7 @@ pub(crate) async fn session_resume(
         println!("cannot resume: {msg}");
         return Ok(());
     }
-    #[derive(Deserialize)]
-    struct ResumeResp {
-        id: String,
-        name: String,
-        state: String,
-    }
-    let body: ResumeResp = resp.error_for_status()?.json().await?;
+    let body: ManagedSessionSummary = resp.error_for_status()?.json().await?;
     println!("resumed {} ({}) [{}]", body.name, body.id, body.state);
     Ok(())
 }

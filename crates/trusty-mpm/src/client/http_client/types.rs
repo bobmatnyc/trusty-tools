@@ -333,3 +333,223 @@ pub struct CoordinatorChatOutcome {
     #[serde(default)]
     pub command_output: Option<String>,
 }
+
+// ── Managed session-manager wire types (`/api/v1/sessions/managed/*`) ───────────
+//
+// These mirror the daemon-side DTOs in `crate::daemon::managed_routes` field-for-
+// field so serde round-trips across the HTTP boundary. The struct names carry a
+// `Managed` prefix to avoid colliding with the existing `client::result::
+// SessionSummary` re-export; serde keys (not Rust type names) are what the wire
+// contract pins, so the prefix is cosmetic.
+
+/// One managed session as returned by the list/get endpoints.
+///
+/// Why: every managed-session UI (the `tm` CLI today, STUI #1272 and TELUI #1433
+/// next) renders the same flat, string-typed summary; a shared client type keeps
+/// them off the daemon's internal record shape and off hand-rolled structs.
+/// What: mirrors `daemon::managed_routes::SessionSummary` field-for-field.
+/// Test: `managed_session_summary_deserializes`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedSessionSummary {
+    /// Managed session id (UUID string).
+    pub id: String,
+    /// tmux session name.
+    pub name: String,
+    /// Lifecycle state word.
+    pub state: String,
+    /// Provisioned workspace path, if any.
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+    /// Repository URL the session was provisioned from.
+    #[serde(default)]
+    pub repo_url: Option<String>,
+    /// Git branch or ref checked out.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Creation timestamp (RFC 3339), `None` when the daemon omits it.
+    #[serde(default)]
+    pub created_at: Option<String>,
+    /// Last-activity timestamp (RFC 3339), if any.
+    #[serde(default)]
+    pub last_activity_at: Option<String>,
+    /// A pending decision question, if surfaced.
+    #[serde(default)]
+    pub pending_decision: Option<String>,
+    /// Proposed default answer to the pending decision.
+    #[serde(default)]
+    pub proposed_default: Option<String>,
+}
+
+/// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).
+///
+/// Why: the list endpoint nests the sessions under a `sessions` key; a typed
+/// wrapper deserializes it without an ad-hoc local struct at the call site.
+/// What: mirrors `daemon::managed_routes::ListSessionsResponse`.
+/// Test: `managed_list_response_deserializes`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedListResponse {
+    /// All managed sessions as summaries.
+    #[serde(default)]
+    pub sessions: Vec<ManagedSessionSummary>,
+}
+
+/// Request body for `POST /api/v1/sessions/managed` (spawn).
+///
+/// Why: spawning a managed session requires the repo, ref, and task; an optional
+/// name hint and runtime selector tune the tmux name and backend.
+/// What: mirrors `daemon::managed_routes::SpawnRequest`; `git_ref` serializes as
+/// `ref` to match the daemon's `#[serde(rename = "ref")]`.
+/// Test: `managed_spawn_request_serializes`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ManagedSpawnRequest {
+    /// Repository URL to provision the session workspace from.
+    pub repo_url: String,
+    /// Git branch or ref to check out (wire key `ref`).
+    #[serde(rename = "ref")]
+    pub git_ref: String,
+    /// Human-readable task description for the session.
+    pub task: String,
+    /// Optional name hint overriding the auto-generated tmux session name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_hint: Option<String>,
+    /// Optional runtime selector (`"claude-code"` | `"tcode"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+}
+
+/// Response body for `POST /api/v1/sessions/managed` (spawn).
+///
+/// Why: the caller needs the new session's identity, state, runtime, and attach
+/// command immediately after spawn.
+/// What: mirrors `daemon::managed_routes::SpawnResponse`.
+/// Test: `managed_spawn_response_deserializes`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedSpawnResponse {
+    /// Managed session id (UUID string).
+    pub id: String,
+    /// tmux session name.
+    pub name: String,
+    /// Provisioned workspace path, if any.
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+    /// Repository URL the session was provisioned from.
+    #[serde(default)]
+    pub repo_url: Option<String>,
+    /// Git branch or ref checked out.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Current lifecycle state.
+    pub state: String,
+    /// Creation timestamp (RFC 3339), `None` when the daemon omits it.
+    #[serde(default)]
+    pub created_at: Option<String>,
+    /// tmux attach command string.
+    #[serde(default)]
+    pub attach_cmd: String,
+    /// Runtime backend hosting the session (`"claude-code"` | `"tcode"`).
+    #[serde(default)]
+    pub runtime: String,
+}
+
+/// Request body for `POST /api/v1/sessions/managed/{id}/send`.
+///
+/// Why: inject operator/agent text into a session's tmux pane.
+/// What: mirrors `daemon::managed_routes::SendInputRequest`.
+/// Test: `managed_send_request_serializes`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ManagedSendInputRequest {
+    /// Text to inject into the session's tmux pane.
+    pub text: String,
+}
+
+/// Response body for `POST /api/v1/sessions/managed/{id}/send`.
+///
+/// Why: confirm the inject succeeded without echoing the full record.
+/// What: mirrors `daemon::managed_routes::SendInputResponse`.
+/// Test: `managed_send_response_deserializes`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedSendInputResponse {
+    /// True when the text was injected.
+    pub sent: bool,
+    /// tmux session name the text was sent to.
+    #[serde(default)]
+    pub tmux_name: String,
+}
+
+/// Request body for `POST /api/v1/sessions/managed/{id}/answer`.
+///
+/// Why: inject an answer to a pending decision the harness is blocked on.
+/// What: mirrors `daemon::managed_routes::AnswerRequest`.
+/// Test: `managed_answer_request_serializes`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ManagedAnswerRequest {
+    /// The answer text to inject for the pending decision.
+    pub answer: String,
+}
+
+/// Response body for `POST /api/v1/sessions/managed/{id}/answer`.
+///
+/// Why: confirm the answer was injected.
+/// What: mirrors `daemon::managed_routes::AnswerResponse`.
+/// Test: `managed_answer_response_deserializes`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedAnswerResponse {
+    /// True when the answer was injected.
+    pub injected: bool,
+    /// tmux session name the answer was sent to.
+    #[serde(default)]
+    pub tmux_name: String,
+}
+
+/// Response body for `GET /api/v1/sessions/managed/{id}/attach-cmd`.
+///
+/// Why: the operator needs the exact tmux command to attach to the pane.
+/// What: mirrors `daemon::managed_routes::AttachCmdResponse`.
+/// Test: `managed_attach_cmd_response_deserializes`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedAttachCmdResponse {
+    /// tmux attach command string.
+    pub attach_cmd: String,
+}
+
+/// Response body for `GET /api/v1/sessions/managed/{id}/activity`.
+///
+/// Why: surface a session's full activity picture without attaching and without
+/// requiring an LLM key — the raw pane and structured lifecycle fields are always
+/// present; the LLM overlay is populated only when a classifier ran.
+/// What: mirrors `daemon::managed_routes::ActivityResponse` field-for-field.
+/// Test: `managed_activity_response_deserializes`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedActivityResponse {
+    /// Raw pane content (last 60 lines). Always present.
+    pub raw_pane: String,
+    /// Whether the tmux runtime session is currently alive.
+    pub runtime_active: bool,
+    /// Activity state from LLM classification, or `"unknown"`.
+    pub state: String,
+    /// Human-readable summary of what the session is doing.
+    pub summary: String,
+    /// Confidence of the classification (0.0–1.0); 0.0 when no classifier ran.
+    pub confidence: f32,
+    /// True when the verdict was served from the content-hash cache.
+    pub cache_hit: bool,
+    /// Input token count for this check (0 on cache hit or no classifier).
+    pub input_tokens: u32,
+    /// Output token count for this check (0 on cache hit or no classifier).
+    pub output_tokens: u32,
+    /// Latency in milliseconds for this check.
+    pub latency_ms: u64,
+    /// Cumulative input tokens across all checks for this session.
+    pub total_input_tokens: u64,
+    /// Cumulative output tokens across all checks for this session.
+    pub total_output_tokens: u64,
+    /// LLM classification result, `None` when no classifier ran.
+    #[serde(default)]
+    pub classification: Option<String>,
+    /// A pending decision question, if surfaced.
+    #[serde(default)]
+    pub pending_decision: Option<String>,
+    /// Proposed default answer to the pending decision.
+    #[serde(default)]
+    pub proposed_default: Option<String>,
+}

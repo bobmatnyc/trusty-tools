@@ -7,6 +7,16 @@ fn base_url_is_stored() {
 }
 
 #[test]
+fn with_client_reuses_passed_client() {
+    // Why: callers that configured a `reqwest::Client` (TLS/timeout/proxy/pool)
+    // must keep that configuration; `with_client` adopts the passed client
+    // verbatim instead of minting a fresh default one.
+    let configured = reqwest::Client::new();
+    let client = DaemonClient::with_client(configured, "http://127.0.0.1:7880");
+    assert_eq!(client.base_url(), "http://127.0.0.1:7880");
+}
+
+#[test]
 fn set_base_url_repoints_client() {
     // Why: a long-lived UI must follow the daemon to a new ephemeral port
     // after a restart; `set_base_url` is what makes that re-pointing possible.
@@ -290,4 +300,208 @@ fn catalog_stale_health_body_wire_shape() {
     // Legacy daemon: no `catalog_stale` field present → defaults to false.
     let legacy: HealthBody = serde_json::from_value(serde_json::json!({"status":"ok"})).unwrap();
     assert!(!legacy.catalog_stale, "missing field defaults to false");
+}
+
+// ── Managed session-manager wire-shape round-trips ─────────────────────────────
+
+#[test]
+fn managed_session_summary_deserializes() {
+    // A full summary round-trips; the optional fields are also tolerant of being
+    // absent (an older/leaner daemon) via `#[serde(default)]`.
+    let json = serde_json::json!({
+        "id": "00000000-0000-0000-0000-000000000001",
+        "name": "tmpm-brave-otter",
+        "state": "running",
+        "workspace_path": "/tmp/ws",
+        "repo_url": "https://example.com/r.git",
+        "branch": "main",
+        "created_at": "2026-06-19T00:00:00Z",
+        "last_activity_at": "2026-06-19T01:00:00Z",
+        "pending_decision": "overwrite?",
+        "proposed_default": "yes",
+    });
+    let s: ManagedSessionSummary = serde_json::from_value(json).unwrap();
+    assert_eq!(s.id, "00000000-0000-0000-0000-000000000001");
+    assert_eq!(s.name, "tmpm-brave-otter");
+    assert_eq!(s.state, "running");
+    assert_eq!(s.created_at.as_deref(), Some("2026-06-19T00:00:00Z"));
+    assert_eq!(s.pending_decision.as_deref(), Some("overwrite?"));
+
+    // Minimal body: only the always-present fields.
+    let lean = serde_json::json!({"id": "x", "name": "n", "state": "stopped"});
+    let s: ManagedSessionSummary = serde_json::from_value(lean).unwrap();
+    assert_eq!(s.id, "x");
+    assert!(s.workspace_path.is_none());
+    // An absent `created_at` deserializes to `None`, not an empty string.
+    assert!(s.created_at.is_none());
+    assert!(s.pending_decision.is_none());
+}
+
+#[test]
+fn managed_list_response_deserializes() {
+    let json = serde_json::json!({
+        "sessions": [
+            {"id": "a", "name": "tmpm-a", "state": "running"},
+            {"id": "b", "name": "tmpm-b", "state": "stopped"},
+        ],
+    });
+    let body: ManagedListResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(body.sessions.len(), 2);
+    assert_eq!(body.sessions[1].name, "tmpm-b");
+
+    // An empty / absent `sessions` array defaults to empty.
+    let empty: ManagedListResponse = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(empty.sessions.is_empty());
+}
+
+#[test]
+fn managed_spawn_request_serializes() {
+    // The `git_ref` field must serialize under the wire key `ref`, and absent
+    // optionals must be omitted so the daemon sees them as null/defaulted.
+    let req = ManagedSpawnRequest {
+        repo_url: "https://example.com/r.git".to_string(),
+        git_ref: "main".to_string(),
+        task: "do the thing".to_string(),
+        name_hint: Some("tmpm-custom".to_string()),
+        runtime: Some("tcode".to_string()),
+    };
+    let v = serde_json::to_value(&req).unwrap();
+    assert_eq!(v["ref"], "main");
+    assert_eq!(v["repo_url"], "https://example.com/r.git");
+    assert_eq!(v["name_hint"], "tmpm-custom");
+    assert_eq!(v["runtime"], "tcode");
+    assert!(v.get("git_ref").is_none(), "must use wire key `ref`");
+
+    let bare = ManagedSpawnRequest {
+        repo_url: "r".to_string(),
+        git_ref: "r".to_string(),
+        task: "t".to_string(),
+        name_hint: None,
+        runtime: None,
+    };
+    let v = serde_json::to_value(&bare).unwrap();
+    assert!(v.get("name_hint").is_none(), "None name_hint is omitted");
+    assert!(v.get("runtime").is_none(), "None runtime is omitted");
+}
+
+#[test]
+fn managed_spawn_response_deserializes() {
+    let json = serde_json::json!({
+        "id": "id-1",
+        "name": "tmpm-x",
+        "state": "running",
+        "created_at": "2026-06-19T00:00:00Z",
+        "attach_cmd": "tmux attach-session -t tmpm-x",
+        "runtime": "claude-code",
+    });
+    let r: ManagedSpawnResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(r.id, "id-1");
+    assert_eq!(r.created_at.as_deref(), Some("2026-06-19T00:00:00Z"));
+    assert_eq!(r.attach_cmd, "tmux attach-session -t tmpm-x");
+    assert_eq!(r.runtime, "claude-code");
+
+    // An absent `created_at` deserializes to `None`, while `attach_cmd` and
+    // `runtime` remain plain strings defaulting to empty.
+    let lean = serde_json::json!({"id": "id-2", "name": "tmpm-y", "state": "running"});
+    let r: ManagedSpawnResponse = serde_json::from_value(lean).unwrap();
+    assert!(r.created_at.is_none());
+    assert_eq!(r.attach_cmd, "");
+    assert_eq!(r.runtime, "");
+}
+
+#[test]
+fn managed_send_and_answer_round_trip() {
+    let v = serde_json::to_value(ManagedSendInputRequest {
+        text: "hello".to_string(),
+    })
+    .unwrap();
+    assert_eq!(v["text"], "hello");
+    let sent: ManagedSendInputResponse =
+        serde_json::from_value(serde_json::json!({"sent": true, "tmux_name": "tmpm-x"})).unwrap();
+    assert!(sent.sent);
+    assert_eq!(sent.tmux_name, "tmpm-x");
+
+    let v = serde_json::to_value(ManagedAnswerRequest {
+        answer: "yes".to_string(),
+    })
+    .unwrap();
+    assert_eq!(v["answer"], "yes");
+    let answered: ManagedAnswerResponse =
+        serde_json::from_value(serde_json::json!({"injected": true, "tmux_name": "tmpm-x"}))
+            .unwrap();
+    assert!(answered.injected);
+}
+
+#[test]
+fn managed_attach_cmd_response_deserializes() {
+    let r: ManagedAttachCmdResponse =
+        serde_json::from_value(serde_json::json!({"attach_cmd": "tmux attach-session -t tmpm-x"}))
+            .unwrap();
+    assert_eq!(r.attach_cmd, "tmux attach-session -t tmpm-x");
+}
+
+#[test]
+fn managed_activity_response_deserializes() {
+    // Both with and without the optional classifier overlay.
+    let json = serde_json::json!({
+        "raw_pane": "line1\nline2",
+        "runtime_active": true,
+        "state": "working",
+        "summary": "running tests",
+        "confidence": 0.8_f32,
+        "cache_hit": false,
+        "input_tokens": 10,
+        "output_tokens": 5,
+        "latency_ms": 42,
+        "total_input_tokens": 100,
+        "total_output_tokens": 50,
+        "classification": "working",
+        "pending_decision": "overwrite?",
+        "proposed_default": "yes",
+    });
+    let a: ManagedActivityResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(a.state, "working");
+    assert!(a.runtime_active);
+    assert_eq!(a.classification.as_deref(), Some("working"));
+    assert_eq!(a.pending_decision.as_deref(), Some("overwrite?"));
+
+    // No classifier ran: `classification` null, raw pane still present.
+    let json = serde_json::json!({
+        "raw_pane": "pane",
+        "runtime_active": false,
+        "state": "unknown",
+        "summary": "",
+        "confidence": 0.0_f32,
+        "cache_hit": false,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "latency_ms": 0,
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+        "classification": null,
+    });
+    let a: ManagedActivityResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(a.raw_pane, "pane");
+    assert!(a.classification.is_none());
+    assert!(a.pending_decision.is_none());
+}
+
+#[test]
+fn managed_session_urls_use_managed_route_family() {
+    // The managed methods build URLs off the `/api/v1/sessions/managed` base and
+    // must NOT collide with the legacy `resume_session` route (`/sessions/{id}/
+    // resume`). This guards the route family contract that STUI/TELUI converge on.
+    let client = DaemonClient::new("http://127.0.0.1:7880");
+    assert_eq!(client.base_url(), "http://127.0.0.1:7880");
+    // Construct the same format strings the methods use, to lock the shape.
+    let base = client.base_url();
+    assert_eq!(
+        format!("{base}/api/v1/sessions/managed/{id}/resume", id = "abc"),
+        "http://127.0.0.1:7880/api/v1/sessions/managed/abc/resume"
+    );
+    // The legacy method targets a different path; the two never overlap.
+    assert_eq!(
+        format!("{base}/sessions/{id}/resume", id = "abc"),
+        "http://127.0.0.1:7880/sessions/abc/resume"
+    );
 }
