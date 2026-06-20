@@ -69,6 +69,7 @@ use utoipa::OpenApi;
         super::api::pair_status,
         super::api::pair_reset,
         super::api::doctor,
+        super::api::web_chat_page,
     ),
     components(schemas(
         super::api::HealthResponse,

@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<!--
+  Why: the Web control surface (DOC-20 §6 Phase 2, ONB-3) — a browser chat page
+       that drives managed sessions through the EXISTING action-capable chat
+       endpoint. It embeds no session logic; it is a thin presentation layer over
+       POST /api/v1/sessions/chat with `actions: true`.
+  What: a single self-contained page (no build step, no external assets) that
+       POSTs the operator's message to the chat-core endpoint, renders the SM
+       `reply`, and surfaces the `actions_taken` audit trail. `conv_id` is echoed
+       back and resent so the rolling SM context continues across turns.
+  Test: served by `web_chat_page` (see web_routes.rs); the daemon route tests pin
+       status + content-type + key markers in this body.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>trusty-mpm — Session Manager chat</title>
+  <style>
+    :root {
+      --bg: #0e1116; --panel: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e; --accent: #2f81f7;
+      --user: #1f6feb33; --sm: #23863633; --action: #3d2d00;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI",
+      Roboto, Helvetica, Arial, sans-serif; background: var(--bg);
+      color: var(--text); display: flex; flex-direction: column; height: 100vh;
+    }
+    header {
+      padding: 12px 16px; border-bottom: 1px solid var(--border);
+      background: var(--panel); display: flex; align-items: center; gap: 12px;
+    }
+    header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+    header .conv { color: var(--muted); font-size: 12px; margin-left: auto; }
+    #log { flex: 1; overflow-y: auto; padding: 16px; }
+    .msg { max-width: 760px; margin: 0 auto 12px; padding: 10px 14px;
+      border-radius: 8px; border: 1px solid var(--border); white-space: pre-wrap;
+      word-wrap: break-word; }
+    .msg.user { background: var(--user); }
+    .msg.sm { background: var(--sm); }
+    .msg.error { background: #f8514933; border-color: #f85149; }
+    .role { font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
+      color: var(--muted); margin-bottom: 4px; }
+    .actions { max-width: 760px; margin: -6px auto 12px; padding: 8px 14px;
+      border-radius: 8px; background: var(--action); border: 1px solid #5a4500;
+      font-size: 13px; }
+    .actions ul { margin: 4px 0 0; padding-left: 18px; }
+    .meta { color: var(--muted); font-size: 11px; margin-top: 4px; }
+    form { display: flex; gap: 8px; padding: 12px 16px;
+      border-top: 1px solid var(--border); background: var(--panel); }
+    #input { flex: 1; resize: none; background: var(--bg); color: var(--text);
+      border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+      font: inherit; }
+    #send { background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+      padding: 0 18px; font-weight: 600; cursor: pointer; }
+    #send:disabled { opacity: .5; cursor: default; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>trusty-mpm — Session Manager</h1>
+    <span class="conv" id="conv">new conversation</span>
+  </header>
+  <div id="log" aria-live="polite">
+    <div class="msg sm">
+      <div class="role">session manager</div>Ask me to spawn, list, send to, or stop managed sessions. I can run those actions inline and show you the audit trail.</div>
+  </div>
+  <form id="form">
+    <textarea id="input" rows="2" placeholder="Message the session manager…" autofocus></textarea>
+    <button id="send" type="submit">Send</button>
+  </form>
+  <script>
+    "use strict";
+    // Why: continue one SM rolling-context conversation across turns. Echoed by
+    // the endpoint and resent so the SM keeps its compressed history.
+    let convId = null;
+    const log = document.getElementById("log");
+    const form = document.getElementById("form");
+    const input = document.getElementById("input");
+    const sendBtn = document.getElementById("send");
+    const convLabel = document.getElementById("conv");
+
+    function append(role, cls, text) {
+      const el = document.createElement("div");
+      el.className = "msg " + cls;
+      const r = document.createElement("div");
+      r.className = "role";
+      r.textContent = role;
+      el.appendChild(r);
+      el.appendChild(document.createTextNode(text));
+      log.appendChild(el);
+      log.scrollTop = log.scrollHeight;
+      return el;
+    }
+
+    function appendActions(actions, meta) {
+      const el = document.createElement("div");
+      el.className = "actions";
+      el.appendChild(document.createTextNode("Actions taken:"));
+      const ul = document.createElement("ul");
+      for (const a of actions) {
+        const li = document.createElement("li");
+        li.textContent = a;
+        ul.appendChild(li);
+      }
+      el.appendChild(ul);
+      if (meta) {
+        const m = document.createElement("div");
+        m.className = "meta";
+        m.textContent = meta;
+        el.appendChild(m);
+      }
+      log.appendChild(el);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    async function submit(message) {
+      append("you", "user", message);
+      sendBtn.disabled = true;
+      try {
+        const body = { message, actions: true };
+        if (convId) body.conv_id = convId;
+        const resp = await fetch("/api/v1/sessions/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+          const t = await resp.text();
+          append("error", "error", "HTTP " + resp.status + ": " + t);
+          return;
+        }
+        const data = await resp.json();
+        if (data.conv_id) {
+          convId = data.conv_id;
+          convLabel.textContent = "conv " + convId.slice(0, 8);
+        }
+        append("session manager", "sm", data.reply || "(no reply)");
+        if (Array.isArray(data.actions_taken) && data.actions_taken.length) {
+          let meta = "";
+          if (typeof data.cost === "number") meta = "cost $" + data.cost.toFixed(4);
+          appendActions(data.actions_taken, meta);
+        }
+      } catch (e) {
+        append("error", "error", String(e));
+      } finally {
+        sendBtn.disabled = false;
+        input.focus();
+      }
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const message = input.value.trim();
+      if (!message) return;
+      input.value = "";
+      submit(message);
+    });
+    // Enter sends; Shift+Enter inserts a newline.
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        form.requestSubmit();
+      }
+    });
+  </script>
+</body>
+</html>

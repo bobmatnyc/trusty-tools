@@ -1,6 +1,6 @@
 use super::*;
 use crate::core::session::{ControlModel, Session, SessionStatus};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use serial_test::serial;
 
 fn state_with_session() -> (Arc<DaemonState>, SessionId) {
@@ -518,6 +518,7 @@ async fn coordinator_chat_without_overseer_is_503() {
     let state = DaemonState::shared();
     let err = coordinator_chat(
         State(state),
+        HeaderMap::new(),
         Json(CoordinatorChatRequest {
             message: "what is happening?".into(),
             history: Vec::new(),
@@ -543,6 +544,7 @@ async fn coordinator_chat_routes_prefixed_message() {
 
     let resp = coordinator_chat(
         State(state),
+        HeaderMap::new(),
         Json(CoordinatorChatRequest {
             message: "@coordtest: echo hi".into(),
             history: Vec::new(),
