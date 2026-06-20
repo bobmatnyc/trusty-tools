@@ -782,7 +782,7 @@ impl DaemonClient {
 /// What: returns a JSON object with `message`, `history`, and the `actions`
 /// boolean (the flag that routes the action-capable SM branch when `true`).
 /// Test: `coordinator_chat_serializes_actions_flag`.
-pub(crate) fn coordinator_chat_body(
+fn coordinator_chat_body(
     message: &str,
     history: &[ChatMessage],
     actions: bool,
