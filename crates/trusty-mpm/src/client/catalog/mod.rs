@@ -297,6 +297,13 @@ const COMMANDS: &[CommandSpec] = &[
         summary: "decommission a managed session (terminal; removes workspace)",
         kind: SpecKind::Command,
     },
+    CommandSpec {
+        name: "managed-adopt",
+        aliases: &[],
+        args: "<tmux_name> <cwd>",
+        summary: "adopt an existing tmux session into the managed store",
+        kind: SpecKind::Command,
+    },
     // ── Ops / diagnostics ───────────────────────────────────────────────────
     CommandSpec {
         name: "health",
@@ -397,6 +404,7 @@ mod tests {
             "managed-stop",
             "managed-resume",
             "managed-decommission",
+            "managed-adopt",
             "health",
             "help",
         ] {
@@ -471,6 +479,7 @@ mod tests {
             "/managed-stop",
             "/managed-resume",
             "/managed-decommission",
+            "/managed-adopt",
             "/health",
             "/help",
         ] {

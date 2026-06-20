@@ -280,8 +280,10 @@ pub fn action_instructions() -> String {
         "\nArgument conventions: pass a session id as `args.session_id`; \
          `sessions.send` also takes `args.text`; `sessions.launch` takes \
          `args.workdir` (required) plus optional `args.model`, `args.prompt`, \
-         `args.goal_id`. When you have gathered enough to answer, emit the `final` \
-         shape — do not keep calling verbs once you can answer.",
+         `args.goal_id`; `sessions.adopt` takes `args.tmux_name` and `args.cwd` \
+         (both required) plus optional `args.task`, `args.runtime`. When you have \
+         gathered enough to answer, emit the `final` shape — do not keep calling \
+         verbs once you can answer.",
     );
     out
 }
@@ -319,6 +321,32 @@ pub async fn execute_verb(
         "sessions.resume" => control.resume(require_session_id(args)?).await,
         "sessions.kill" => control.kill(require_session_id(args)?).await,
         "sessions.health" => health_via(control).await,
+        "sessions.adopt" => {
+            let tmux_name = args
+                .get("tmux_name")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| {
+                    SessionControlError::Backend(
+                        "sessions.adopt requires args.tmux_name".to_string(),
+                    )
+                })?;
+            let cwd = args
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| {
+                    SessionControlError::Backend("sessions.adopt requires args.cwd".to_string())
+                })?;
+            control
+                .adopt(
+                    tmux_name,
+                    cwd,
+                    str_arg(args, "task").as_deref(),
+                    str_arg(args, "runtime").as_deref(),
+                )
+                .await
+        }
         "sessions.launch" => {
             let workdir = args
                 .get("workdir")

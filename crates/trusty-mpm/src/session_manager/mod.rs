@@ -8,6 +8,7 @@
 //! Test: each sub-module carries its own unit tests; manager integration is
 //! tested in `manager::tests`.
 
+pub mod adopt;
 pub mod manager;
 pub mod record;
 pub mod session_guard;

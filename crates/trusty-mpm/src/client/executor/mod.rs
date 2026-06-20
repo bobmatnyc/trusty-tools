@@ -152,6 +152,12 @@ impl CommandExecutor {
             TrustyCommand::ManagedDecommission { target } => {
                 self.managed_decommission(&target).await
             }
+            TrustyCommand::ManagedAdopt {
+                tmux_name,
+                cwd,
+                task,
+                runtime,
+            } => self.managed_adopt(tmux_name, cwd, task, runtime).await,
             // ── Pairing (state query only; confirm needs a chat id) ──────────
             // `Start` (the bot's entry command) and a bare `Pair` (no code) both
             // mean "show me the current pairing state", so they share one arm.

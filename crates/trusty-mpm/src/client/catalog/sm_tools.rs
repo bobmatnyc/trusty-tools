@@ -85,17 +85,28 @@ const SM_SESSION_VERBS: &[CommandSpec] = &[
 /// `sessions.*` spelling so the action-loop prompt and dispatch stay uniform with
 /// [`SM_SESSION_VERBS`].
 /// What: the ops verb slice the action loop appends to [`SM_SESSION_VERBS`] —
-/// currently just `sessions.health`.
-/// Test: `sm_ops_verbs_exposes_health`; `chat_action_tests.rs` asserts the prompt
-/// lists `sessions.health` and that it dispatches; the SM-tools parity test proves
-/// these are NOT rendered into `SM_TOOLS.md`.
-const SM_OPS_VERBS: &[CommandSpec] = &[CommandSpec {
-    name: "sessions.health",
-    aliases: &[],
-    args: "",
-    summary: "Report daemon health: reachability, catalog freshness, and a fleet summary",
-    kind: SpecKind::SmOnly,
-}];
+/// `sessions.health` plus `sessions.adopt` (#1433), kept OUT of `SM_TOOLS.md` for
+/// the same minimal-surface reason: adopting an existing pane is an operator/ops
+/// action, not part of the SM's session-control prompt tables.
+/// Test: `sm_ops_verbs_exposes_health`, `sm_ops_verbs_exposes_adopt`;
+/// `chat_action_tests.rs` asserts the prompt lists these and that they dispatch;
+/// the SM-tools parity test proves they are NOT rendered into `SM_TOOLS.md`.
+const SM_OPS_VERBS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "sessions.health",
+        aliases: &[],
+        args: "",
+        summary: "Report daemon health: reachability, catalog freshness, and a fleet summary",
+        kind: SpecKind::SmOnly,
+    },
+    CommandSpec {
+        name: "sessions.adopt",
+        aliases: &[],
+        args: "tmux_name, cwd, task?, runtime?",
+        summary: "Adopt an existing unmanaged tmux session into the managed store",
+        kind: SpecKind::SmOnly,
+    },
+];
 
 /// The SM memory verbs (prompt table only).
 const SM_MEMORY_VERBS: &[CommandSpec] = &[
@@ -322,6 +333,14 @@ mod tests {
             names.contains(&"sessions.health"),
             "missing ops health verb"
         );
+    }
+
+    #[test]
+    fn sm_ops_verbs_exposes_adopt() {
+        // The action-loop ops slice must advertise `sessions.adopt` so the
+        // self-aware chat can adopt an existing tmux session inline (#1433).
+        let names: Vec<&str> = sm_ops_verbs().iter().map(|c| c.name).collect();
+        assert!(names.contains(&"sessions.adopt"), "missing ops adopt verb");
     }
 
     #[test]

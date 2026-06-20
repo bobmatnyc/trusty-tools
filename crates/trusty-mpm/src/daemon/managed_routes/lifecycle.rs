@@ -75,6 +75,22 @@ pub async fn spawn_managed(
         Some(raw) => raw.parse::<RuntimeKind>().map_err(|e| e.to_string())?,
     };
 
+    let session_id = ManagedSessionId::new();
+
+    // Step 0.5 — LOCAL-PATH FAST PATH (#1433): if `repo_url` is an existing local
+    // absolute directory, treat it AS the session workspace and SKIP the git
+    // clone entirely. This lets `sessions.launch` (which maps `workdir → repo_url`)
+    // drive a session against a directory the operator already has on disk — e.g.
+    // `workdir=/Users/masa/Projects/trusty-tools` — without cloning a remote.
+    //
+    // Detection heuristic (documented): the string is an ABSOLUTE path that EXISTS
+    // and is a DIRECTORY on the daemon host. Anything else (a `https://…` /
+    // `git@…` URL, a relative path, a non-existent path) falls through to the
+    // existing clone-based provisioning below, so remote-URL callers are unaffected.
+    if is_local_workdir(&params.repo_url) {
+        return spawn_managed_local(state, &session_id, &params, runtime).await;
+    }
+
     // Step 1: pre-generate the id + provision an isolated workspace.
     //
     // #1220: the workspace root defaults to `~/trusty-mpm-projects/` (overridable
@@ -85,7 +101,6 @@ pub async fn spawn_managed(
     // GitHub identity we fall back to the legacy single-slug `provision` path so a
     // bare/non-GitHub URL still provisions cleanly.
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
-    let session_id = ManagedSessionId::new();
     let prepared = match trusty_common::github_path::parse_github_path(&params.repo_url) {
         Some(gh) => {
             let project_dir = crate::core::trusty_tools_config::workspace_subpath(&config, &gh);
@@ -181,6 +196,108 @@ pub async fn spawn_managed(
             name = %record.tmux_name,
             path = %prepared.path.display(),
             "managed session spawned successfully"
+        );
+    }
+
+    Ok(mgr.get(&record.id).await.unwrap_or(record))
+}
+
+/// Whether `s` names an EXISTING local directory usable as a session workspace
+/// directly, i.e. without a git clone (#1433).
+///
+/// Why: the local-path spawn fast path must reliably distinguish "an absolute
+/// directory the operator already has on disk" from "a remote repo URL to clone".
+/// A URL (`https://…`, `git@…:…`) is never an absolute filesystem path, a relative
+/// path is rejected (ambiguous against the daemon's cwd), and a non-existent path
+/// falls through to clone — so this errs toward the safe existing behaviour.
+/// What: returns `true` iff `s` is an ABSOLUTE path that EXISTS and is a directory.
+/// Test: `is_local_workdir_detects_absolute_dir`,
+/// `is_local_workdir_rejects_url_relative_and_missing` in tests/local_spawn.rs.
+pub fn is_local_workdir(s: &str) -> bool {
+    let p = std::path::Path::new(s);
+    p.is_absolute() && p.exists() && p.is_dir()
+}
+
+/// Spawn a managed session rooted at an EXISTING local directory — NO clone (#1433).
+///
+/// Why: the local-path fast path of [`spawn_managed`]. When `repo_url` is already
+/// an on-disk directory, there is nothing to provision: the directory IS the
+/// workspace. This mirrors the clone path's create→front-gate→spawn ritual but
+/// uses the local path verbatim as the session cwd and records no `repo_url`
+/// (there is no remote) so `resume` re-spawns in the same local directory.
+/// What: in order — (1) creates the tmux session rooted at the local path via
+/// `create_with_id` (with `cwd = workspace_path = <local path>`, `repo_url = None`,
+/// `branch = None`); (2) runs the same FRONT gate (fail-open, non-GitHub →
+/// auto-proceed); (3) marks the record `Active`; (4) spawns the runtime in the
+/// pane (a spawn failure marks the record errored but is not fatal). Returns the
+/// final record.
+/// Test: `local_path_spawn_uses_path_as_cwd_and_skips_clone` in tests/local_spawn.rs
+/// asserts the chosen cwd equals the local path and NO clone backend was invoked.
+async fn spawn_managed_local(
+    state: &Arc<DaemonState>,
+    session_id: &ManagedSessionId,
+    params: &SpawnParams,
+    runtime: RuntimeKind,
+) -> Result<SessionRecord, String> {
+    let workspace = std::path::PathBuf::from(&params.repo_url);
+    info!(
+        id = %session_id,
+        path = %workspace.display(),
+        "spawn_managed: local-path workdir detected — using it directly, skipping git clone"
+    );
+
+    let mgr = state.session_manager().await;
+    let record = mgr
+        .create_with_id(
+            *session_id,
+            params.task.clone(),
+            Some(workspace.clone()),
+            params.name_hint.clone(),
+            Some(workspace.clone()),
+            // No remote — this is a local directory, not a cloned repo.
+            None,
+            None,
+            runtime,
+        )
+        .await
+        .map_err(|e| {
+            warn!(id = %session_id, "spawn_managed (local): session create failed: {e}");
+            e.to_string()
+        })?;
+
+    // Same FRONT gate as the clone path. With `repo_url` being a local path it has
+    // no GitHub identity, so `front_gate_or_escalate` fails open (auto-proceeds).
+    if let Some(record) =
+        front_gate_or_escalate(&mgr, &record, &params.repo_url, &params.task).await?
+    {
+        return Ok(record);
+    }
+
+    if let Err(e) = mgr
+        .set_workspace(&record.id, workspace.clone(), ManagedSessionState::Active)
+        .await
+    {
+        warn!(id = %record.id, "spawn_managed (local): set_workspace failed: {e}");
+    }
+
+    let tmux_arc = mgr.tmux_driver();
+    let adapter = build_adapter(record.runtime, tmux_arc);
+    if let Err(e) = adapter.spawn(&record.tmux_name, &workspace, &params.task) {
+        warn!(
+            id = %record.id,
+            name = %record.tmux_name,
+            runtime = %record.runtime.as_str(),
+            "spawn_managed (local): runtime adapter spawn failed: {e}"
+        );
+        let _ = mgr
+            .mark_errored(&record.id, &format!("spawn failed: {e}"))
+            .await;
+    } else {
+        info!(
+            id = %record.id,
+            name = %record.tmux_name,
+            path = %workspace.display(),
+            "managed session spawned successfully (local-path, no clone)"
         );
     }
 

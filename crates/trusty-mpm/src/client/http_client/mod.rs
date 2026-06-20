@@ -21,10 +21,10 @@ mod types;
 pub use types::{
     BreakerRow, ChatMessage, ConfigRecommendation, CoordinatorChatOutcome, CoordinatorContext,
     CoordinatorSession, DiscoveredProjectRow, EventRow, HealthSnapshot, LastSeen, LlmChatOutcome,
-    ManagedActivityResponse, ManagedAnswerRequest, ManagedAnswerResponse, ManagedAttachCmdResponse,
-    ManagedListResponse, ManagedSendInputRequest, ManagedSendInputResponse, ManagedSessionSummary,
-    ManagedSpawnRequest, ManagedSpawnResponse, OverseerSnapshot, PairConfirm, PairRequest,
-    PairStatus, SessionRow, TmuxSessionRow,
+    ManagedActivityResponse, ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest,
+    ManagedAnswerResponse, ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
+    ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest, ManagedSpawnResponse,
+    OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow, TmuxSessionRow,
 };
 
 use serde::Deserialize;

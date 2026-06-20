@@ -445,6 +445,61 @@ fn managed_spawn_response_deserializes() {
 }
 
 #[test]
+fn managed_adopt_request_serializes() {
+    // Required fields are always present; absent optionals are omitted so the
+    // daemon defaults them (#1433).
+    let req = ManagedAdoptRequest {
+        tmux_name: "tmpm-hand-started".to_string(),
+        cwd: "/Users/op/work/proj".to_string(),
+        task: Some("drive it".to_string()),
+        runtime: Some("claude-code".to_string()),
+    };
+    let v = serde_json::to_value(&req).unwrap();
+    assert_eq!(v["tmux_name"], "tmpm-hand-started");
+    assert_eq!(v["cwd"], "/Users/op/work/proj");
+    assert_eq!(v["task"], "drive it");
+    assert_eq!(v["runtime"], "claude-code");
+
+    let bare = ManagedAdoptRequest {
+        tmux_name: "my-cli-session".to_string(),
+        cwd: "/x".to_string(),
+        task: None,
+        runtime: None,
+    };
+    let v = serde_json::to_value(&bare).unwrap();
+    assert_eq!(v["tmux_name"], "my-cli-session");
+    assert!(v.get("task").is_none(), "None task is omitted");
+    assert!(v.get("runtime").is_none(), "None runtime is omitted");
+}
+
+#[test]
+fn managed_adopt_response_deserializes() {
+    let json = serde_json::json!({
+        "id": "id-9",
+        "name": "tmpm-hand-started",
+        "state": "active",
+        "cwd": "/Users/op/work/proj",
+        "runtime": "claude-code",
+        "attach_cmd": "tmux attach-session -t tmpm-hand-started",
+    });
+    let r: ManagedAdoptResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(r.id, "id-9");
+    assert_eq!(r.name, "tmpm-hand-started");
+    assert_eq!(r.state, "active");
+    assert_eq!(r.cwd, "/Users/op/work/proj");
+    assert_eq!(r.runtime, "claude-code");
+    assert_eq!(r.attach_cmd, "tmux attach-session -t tmpm-hand-started");
+
+    // A lean response (only id/name/state) still deserializes; the defaulted
+    // string fields fall back to empty.
+    let lean = serde_json::json!({"id": "id-10", "name": "x", "state": "active"});
+    let r: ManagedAdoptResponse = serde_json::from_value(lean).unwrap();
+    assert_eq!(r.cwd, "");
+    assert_eq!(r.runtime, "");
+    assert_eq!(r.attach_cmd, "");
+}
+
+#[test]
 fn managed_send_and_answer_round_trip() {
     let v = serde_json::to_value(ManagedSendInputRequest {
         text: "hello".to_string(),

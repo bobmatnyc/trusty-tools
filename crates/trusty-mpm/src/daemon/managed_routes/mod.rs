@@ -32,7 +32,8 @@ pub use front_gate::{
     ConformanceGate, FrontGateOutcome, HeadlessApproval, IsrConformanceGate, run_front_gate,
 };
 pub use lifecycle::{
-    ResumeManagedError, SpawnParams, resume_managed, spawn_managed, spawn_runtime_for,
+    ResumeManagedError, SpawnParams, is_local_workdir, resume_managed, spawn_managed,
+    spawn_runtime_for,
 };
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
@@ -90,6 +91,55 @@ pub struct SpawnResponse {
     pub attach_cmd: String,
     /// Runtime backend that hosts the session (`"claude-code"` | `"tcode"`).
     pub runtime: String,
+}
+
+/// Request body for POST /api/v1/sessions/managed/adopt (#1433).
+///
+/// Why: adopting an EXISTING unmanaged tmux session connects the managed surface
+/// to a pane the operator already has. Unlike the stateless snapshot adopt at
+/// `POST /tmux/adopt` (which registers nothing), this REGISTERS a durable record.
+/// Because the pane's provenance is unknown to the daemon, the operator must
+/// supply the `cwd`; `task` is optional (empty → a generic description) and
+/// `runtime` is optional (absent → the default managed runtime).
+/// What: `tmux_name` (the live pane to adopt), the required `cwd`, an optional
+/// `task`, and an optional `runtime` selector (`"claude-code"` | `"tcode"`).
+/// Test: `adopt_existing_*` handler tests in tests/session_manager_mvp.rs.
+#[derive(Debug, Deserialize)]
+pub struct AdoptExistingRequest {
+    /// The live tmux session name to adopt (any name; need not be `tmpm-`).
+    pub tmux_name: String,
+    /// Working directory the adopted session runs in (REQUIRED — provenance is
+    /// unknown to the daemon, so the operator supplies it).
+    pub cwd: String,
+    /// Optional human-readable task description (empty/absent allowed).
+    #[serde(default)]
+    pub task: Option<String>,
+    /// Optional runtime selector (`"claude-code"` | `"tcode"`); absent → default.
+    #[serde(default)]
+    pub runtime: Option<String>,
+}
+
+/// Response body for POST /api/v1/sessions/managed/adopt (201 Created).
+///
+/// Why: the caller needs the new managed record's identity + the attach command
+/// to immediately drive or attach to the now-managed session.
+/// What: the same flat summary fields as [`SessionSummary`] plus the derived
+/// `attach_cmd`, mirroring [`SpawnResponse`].
+/// Test: `adopt_existing_registers_record` in tests/session_manager_mvp.rs.
+#[derive(Debug, Serialize)]
+pub struct AdoptExistingResponse {
+    /// Managed session id (UUID string).
+    pub id: String,
+    /// tmux session name that was adopted.
+    pub name: String,
+    /// Current lifecycle state (`active` immediately after adoption).
+    pub state: String,
+    /// Working directory the adopted session runs in.
+    pub cwd: String,
+    /// Runtime backend hosting the session (`"claude-code"` | `"tcode"`).
+    pub runtime: String,
+    /// tmux attach command string.
+    pub attach_cmd: String,
 }
 
 /// List response for GET /api/v1/sessions/managed.
@@ -383,6 +433,63 @@ pub async fn spawn_session(
             (StatusCode::CREATED, Json(resp)).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
+}
+
+/// POST /api/v1/sessions/managed/adopt — adopt an EXISTING tmux session (#1433).
+///
+/// Why: the operator already has a live, unmanaged tmux pane (a hand-started
+/// Claude Code, an externally-created session, or one whose record was lost) and
+/// wants to drive it through the full managed surface. This REGISTERS a durable
+/// `Active` record for that pane. It is deliberately distinct from the stateless
+/// `POST /tmux/adopt` snapshot endpoint, which captures a session's shape but
+/// registers NOTHING — that endpoint's semantics are unchanged.
+/// What: validates an optional runtime selector up front (400 on a bad value),
+/// then delegates to [`crate::session_manager::SessionManager::adopt_existing`].
+/// Maps its typed errors: `TmuxSessionMissing` → 404 (no such pane),
+/// `AlreadyAdopted` → 409 (already tracked), any other → 500. On success returns
+/// 201 Created with the new record + attach command.
+/// Test: `adopt_existing_registers_record`, `adopt_existing_missing_is_404`,
+/// `adopt_existing_double_is_409` in tests/session_manager_mvp.rs.
+pub async fn adopt_existing_session(
+    State(state): State<Arc<DaemonState>>,
+    Json(req): Json<AdoptExistingRequest>,
+) -> impl IntoResponse {
+    // Resolve the runtime selector up front so a typo is a 400, not a 500.
+    let runtime = match req.runtime.as_deref() {
+        None => RuntimeKind::default(),
+        Some(raw) => match raw.parse::<RuntimeKind>() {
+            Ok(rk) => rk,
+            Err(e) => {
+                warn!("adopt_existing: invalid runtime selector: {e}");
+                return (StatusCode::BAD_REQUEST, e.to_string()).into_response();
+            }
+        },
+    };
+
+    let task = req.task.unwrap_or_default();
+    let cwd = std::path::PathBuf::from(&req.cwd);
+
+    let mgr = state.session_manager().await;
+    match mgr.adopt_existing(&req.tmux_name, cwd, task, runtime).await {
+        Ok(record) => {
+            let resp = AdoptExistingResponse {
+                id: record.id.to_string(),
+                name: record.tmux_name.clone(),
+                state: record.state.to_string(),
+                cwd: record.cwd.to_string_lossy().to_string(),
+                runtime: record.runtime.as_str().to_owned(),
+                attach_cmd: attach_cmd_for(&record.tmux_name),
+            };
+            (StatusCode::CREATED, Json(resp)).into_response()
+        }
+        Err(crate::session_manager::ManagedError::TmuxSessionMissing(msg)) => {
+            (StatusCode::NOT_FOUND, msg).into_response()
+        }
+        Err(crate::session_manager::ManagedError::AlreadyAdopted(msg)) => {
+            (StatusCode::CONFLICT, msg).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
 

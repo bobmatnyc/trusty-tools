@@ -14,7 +14,7 @@
 //! Test: the `execute_managed_*` tests in `tests.rs` (wire-shape + dispatch).
 
 use super::CommandExecutor;
-use crate::client::http_client::{ManagedSessionSummary, ManagedSpawnRequest};
+use crate::client::http_client::{ManagedAdoptRequest, ManagedSessionSummary, ManagedSpawnRequest};
 use crate::client::resolver::resolve_target;
 use crate::client::result::{CommandResult, ManagedSessionView};
 
@@ -69,6 +69,47 @@ impl CommandExecutor {
                 attach_cmd: resp.attach_cmd,
             },
             Err(e) => CommandResult::Error(format!("spawn failed: {e}")),
+        }
+    }
+
+    /// `managed-adopt` — adopt an EXISTING tmux session into the managed store
+    /// (#1433).
+    ///
+    /// Why: connect the managed surface to a pane the operator already has so it
+    /// can be driven through observe/send/stop/resume. `cwd` is required because
+    /// the pane's provenance is unknown to the daemon.
+    /// What: validates `tmux_name`/`cwd` are non-empty, POSTs the adopt request,
+    /// and returns a [`CommandResult::ManagedAdopted`]; a transport/HTTP failure
+    /// (including the daemon's typed 404/409) becomes a renderable error.
+    /// Test: `execute_managed_adopt_*` in `tests.rs`.
+    pub(super) async fn managed_adopt(
+        &self,
+        tmux_name: String,
+        cwd: String,
+        task: Option<String>,
+        runtime: Option<String>,
+    ) -> CommandResult {
+        if tmux_name.trim().is_empty() {
+            return CommandResult::Error("adopt: tmux_name is required".to_string());
+        }
+        if cwd.trim().is_empty() {
+            return CommandResult::Error("adopt: cwd is required".to_string());
+        }
+        let req = ManagedAdoptRequest {
+            tmux_name,
+            cwd,
+            task,
+            runtime,
+        };
+        match self.client().adopt_managed_session(&req).await {
+            Ok(resp) => CommandResult::ManagedAdopted {
+                id: resp.id,
+                name: resp.name,
+                state: resp.state,
+                runtime: resp.runtime,
+                attach_cmd: resp.attach_cmd,
+            },
+            Err(e) => CommandResult::Error(format!("adopt failed: {e}")),
         }
     }
 

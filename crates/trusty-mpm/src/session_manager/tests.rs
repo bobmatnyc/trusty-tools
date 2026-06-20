@@ -1025,6 +1025,154 @@ async fn manager_get_reflects_out_of_process_write() {
     );
 }
 
+/// Adopting an EXISTING (driver-reports-live) tmux session must register a
+/// durable `Active` record carrying the supplied cwd/task/runtime (#1433).
+///
+/// Why: the explicit adopt path connects to a pane that already exists — it must
+/// NOT call `create_session` (no new pane) and must persist a queryable record.
+/// What: seeds a live tmux name on the fake driver, adopts it, and asserts the
+/// record is `Active`, NOT created via `create_session`, and is retrievable.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_adopt_existing_registers_active() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    // The pane already exists (operator started it outside trusty-mpm).
+    fake.seeded_names
+        .lock()
+        .unwrap()
+        .push("tmpm-hand-started".into());
+
+    let record = mgr
+        .adopt_existing(
+            "tmpm-hand-started",
+            PathBuf::from("/Users/op/work/proj"),
+            "drive my hand-started session".into(),
+            crate::runtime::RuntimeKind::default(),
+        )
+        .await
+        .expect("adopt existing");
+
+    assert_eq!(record.tmux_name, "tmpm-hand-started");
+    assert_eq!(record.state, ManagedSessionState::Active);
+    assert_eq!(record.cwd, PathBuf::from("/Users/op/work/proj"));
+    assert_eq!(record.task, "drive my hand-started session");
+
+    // Adoption must NOT spawn a new tmux session — the pane already exists.
+    assert!(
+        fake.create_cwd_calls.lock().unwrap().is_empty(),
+        "adopt_existing must NOT call create_session; calls: {:?}",
+        fake.create_cwd_calls.lock().unwrap()
+    );
+
+    // The record is durably queryable.
+    let got = mgr.get(&record.id).await.expect("get adopted");
+    assert_eq!(got.id, record.id);
+    assert_eq!(got.state, ManagedSessionState::Active);
+}
+
+/// Adopting a tmux name that does NOT exist on the host must error — you cannot
+/// adopt a pane that is not there (#1433).
+///
+/// Why: this is the inverse of `create`'s NameCollision guard. The error must be
+/// the dedicated `TmuxSessionMissing` variant so the HTTP layer maps it to a 404.
+/// What: adopts a name the driver does not report and asserts the typed error.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_adopt_existing_missing_tmux_errors() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let err = mgr
+        .adopt_existing(
+            "tmpm-not-here",
+            PathBuf::from("/tmp/x"),
+            String::new(),
+            crate::runtime::RuntimeKind::default(),
+        )
+        .await
+        .expect_err("adopting a nonexistent pane must fail");
+
+    assert!(
+        matches!(err, ManagedError::TmuxSessionMissing(ref n) if n == "tmpm-not-here"),
+        "expected TmuxSessionMissing, got {err:?}"
+    );
+}
+
+/// Adopting a tmux name the store ALREADY tracks must error — no double records
+/// for one pane (#1433).
+///
+/// Why: a second record for the same pane would split ownership and confuse every
+/// downstream verb. The dedicated `AlreadyAdopted` variant lets the HTTP layer map
+/// it to a 409 Conflict.
+/// What: adopts once (succeeds), then adopts the same live name again and asserts
+/// the second call returns `AlreadyAdopted`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_adopt_existing_double_adopt_errors() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    fake.seeded_names.lock().unwrap().push("tmpm-once".into());
+
+    mgr.adopt_existing(
+        "tmpm-once",
+        PathBuf::from("/tmp/once"),
+        String::new(),
+        crate::runtime::RuntimeKind::default(),
+    )
+    .await
+    .expect("first adopt succeeds");
+
+    let err = mgr
+        .adopt_existing(
+            "tmpm-once",
+            PathBuf::from("/tmp/once"),
+            String::new(),
+            crate::runtime::RuntimeKind::default(),
+        )
+        .await
+        .expect_err("second adopt of the same pane must fail");
+
+    assert!(
+        matches!(err, ManagedError::AlreadyAdopted(ref n) if n == "tmpm-once"),
+        "expected AlreadyAdopted, got {err:?}"
+    );
+}
+
+/// The explicit adopt path must allow NON-`tmpm-` names (unlike reconcile, which
+/// filters to the `tmpm-` prefix for safe automatic adoption) (#1433).
+///
+/// Why: an operator naming a pane explicitly knows what they are adopting; the
+/// `tmpm-` prefix filter exists only to make AUTOMATIC boot adoption safe. The
+/// explicit path must not reject a session just because it lacks the prefix.
+/// What: seeds a non-`tmpm-` live name, adopts it, and asserts success.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_adopt_existing_allows_non_tmpm_name() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    fake.seeded_names
+        .lock()
+        .unwrap()
+        .push("my-cli-session".into());
+
+    let record = mgr
+        .adopt_existing(
+            "my-cli-session",
+            PathBuf::from("/Users/op/repo"),
+            "adopt non-prefixed".into(),
+            crate::runtime::RuntimeKind::default(),
+        )
+        .await
+        .expect("non-tmpm names are adoptable on the explicit path");
+
+    assert_eq!(record.tmux_name, "my-cli-session");
+    assert_eq!(record.state, ManagedSessionState::Active);
+}
+
 /// Corrupt the manager's backing `sessions.json` so the next reload-on-read
 /// fails. Writing garbage (a) changes the file length so `reload_if_changed`
 /// detects a change and re-reads, and (b) makes `serde_json::from_str` fail with

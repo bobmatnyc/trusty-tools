@@ -467,6 +467,52 @@ pub struct ManagedSpawnResponse {
     pub runtime: String,
 }
 
+/// Request body for `POST /api/v1/sessions/managed/adopt` (#1433).
+///
+/// Why: adopting an EXISTING tmux session connects the managed surface to a pane
+/// the operator already has. The pane's provenance is unknown to the daemon, so
+/// `cwd` is REQUIRED; `task`/`runtime` are optional.
+/// What: mirrors `daemon::managed_routes::AdoptExistingRequest` field-for-field.
+/// Test: `managed_adopt_request_serializes` in `tests.rs`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ManagedAdoptRequest {
+    /// The live tmux session name to adopt (any name; need not be `tmpm-`).
+    pub tmux_name: String,
+    /// Working directory the adopted session runs in (required).
+    pub cwd: String,
+    /// Optional human-readable task description (empty/absent allowed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// Optional runtime selector (`"claude-code"` | `"tcode"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+}
+
+/// Response body for `POST /api/v1/sessions/managed/adopt` (201 Created, #1433).
+///
+/// Why: the caller needs the new managed record's identity, state, runtime, and
+/// attach command immediately after adoption.
+/// What: mirrors `daemon::managed_routes::AdoptExistingResponse`.
+/// Test: `managed_adopt_response_deserializes` in `tests.rs`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedAdoptResponse {
+    /// Managed session id (UUID string).
+    pub id: String,
+    /// tmux session name that was adopted.
+    pub name: String,
+    /// Current lifecycle state (`active` immediately after adoption).
+    pub state: String,
+    /// Working directory the adopted session runs in.
+    #[serde(default)]
+    pub cwd: String,
+    /// Runtime backend hosting the session (`"claude-code"` | `"tcode"`).
+    #[serde(default)]
+    pub runtime: String,
+    /// tmux attach command string.
+    #[serde(default)]
+    pub attach_cmd: String,
+}
+
 /// Request body for `POST /api/v1/sessions/managed/{id}/send`.
 ///
 /// Why: inject operator/agent text into a session's tmux pane.
