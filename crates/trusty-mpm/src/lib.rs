@@ -118,6 +118,17 @@ pub mod driver;
 /// N-session fleet sweep, and the HTTP handlers.
 pub mod supervisor;
 
+/// Project registry: models, on-disk persistence, and lifecycle management (#1519).
+///
+/// Why: operators and driver skills need to reference repositories by name rather
+/// than supplying full URLs on every session spawn. The registry persists known
+/// projects to `~/.trusty-mpm/projects.json`, seeds from `config.yaml`'s
+/// `projects:` list at startup, and auto-registers projects from session history.
+/// What: re-exports `Project`, `ProjectRegistry`, `derive_name_from_url`, and
+/// `ProjectStoreError` from the three submodules (record, store, registry).
+/// Test: each submodule carries inline unit tests run by `cargo test -p trusty-mpm`.
+pub mod project;
+
 // ── Feature-gated modules ────────────────────────────────────────────────────
 
 /// MCP server: six orchestration tools exposed to Claude Code sessions.

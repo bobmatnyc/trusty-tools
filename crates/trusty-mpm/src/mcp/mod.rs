@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use trusty_common::mcp::{Request, Response, error_codes};
 
+pub mod project_dispatch;
 pub mod session_dispatch;
 pub mod tools;
 
@@ -276,6 +277,49 @@ pub trait OrchestratorBackend: Send + Sync {
         auto_resume: Option<bool>,
         default_model: Option<&str>,
     ) -> Result<Value, String>;
+
+    // ── #1519 WI-2: project-registry tools ───────────────────────────────────
+
+    /// Back `project_list`: return a JSON array of all registered projects.
+    ///
+    /// Why: the driver skill and operators need a typed list of known projects
+    ///      to pick a repository for a new session without specifying the URL
+    ///      every time.
+    /// What: lists all entries in the project registry and returns them as a
+    ///      JSON array. An empty registry returns `[]`.
+    /// Test: `dispatch_project_list_tool` (mock).
+    async fn project_list(&self) -> Result<Value, String>;
+
+    /// Back `project_register`: upsert a project entry in the registry.
+    ///
+    /// Why: operators and the driver skill must be able to add or update a
+    ///      project without restarting the daemon or editing config.yaml.
+    ///      Registration is idempotent — calling with the same `name` updates
+    ///      the entry rather than duplicating it.
+    /// What: upserts the project keyed by `name` and returns the persisted
+    ///      project record as JSON.
+    /// Test: `dispatch_project_register_tool`,
+    ///       `dispatch_project_register_requires_name` (mock).
+    async fn project_register(
+        &self,
+        name: &str,
+        repo_url: &str,
+        default_branch: Option<&str>,
+        stack_hint: Option<&str>,
+        tags: Option<Vec<String>>,
+        description: Option<&str>,
+    ) -> Result<Value, String>;
+
+    /// Back `project_get`: look up a single project by name.
+    ///
+    /// Why: the driver skill needs a point-lookup to retrieve a project's
+    ///      `repo_url` and `default_branch` before spawning a session without
+    ///      listing all projects first.
+    /// What: returns the project record as JSON or a descriptive error when
+    ///      the name is not in the registry.
+    /// Test: `dispatch_project_get_tool`,
+    ///       `dispatch_project_get_missing_name` (mock).
+    async fn project_get(&self, name: &str) -> Result<Value, String>;
 }
 
 /// Route a JSON-RPC request to the backend, returning the MCP response.
@@ -411,11 +455,16 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
                 .config_write(template, auto_resume, default_model)
                 .await
         }
-        // #1221 + #1508: the eight session-lifecycle tools route through a sibling
-        // module so this match stays focused and `mod.rs` stays under the SLOC cap.
-        other => match session_dispatch::try_dispatch(backend, other, &args).await {
+        // #1519 WI-2: the three project-registry tools route through a sibling
+        // module before the session tools so both groups can extend independently.
+        other => match project_dispatch::try_dispatch(backend, other, &args).await {
             Some(result) => result,
-            None => Err(format!("unknown tool: {other}")),
+            // #1221 + #1508: the eight session-lifecycle tools route through a sibling
+            // module so this match stays focused and `mod.rs` stays under the SLOC cap.
+            None => match session_dispatch::try_dispatch(backend, other, &args).await {
+                Some(result) => result,
+                None => Err(format!("unknown tool: {other}")),
+            },
         },
     };
 

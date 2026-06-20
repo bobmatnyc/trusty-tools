@@ -165,6 +165,45 @@ impl OrchestratorBackend for MockBackend {
             "workspace_root": workspace_root_template.unwrap_or("/home/test/trusty-mpm-projects"),
         }))
     }
+
+    // ── #1519 WI-2: project-registry mock impls ───────────────────────────────
+    async fn project_list(&self) -> Result<Value, String> {
+        Ok(json!({
+            "projects": [
+                { "name": "trusty-tools", "repo_url": "https://github.com/o/trusty-tools", "default_branch": "main" }
+            ],
+            "count": 1,
+        }))
+    }
+    async fn project_register(
+        &self,
+        name: &str,
+        repo_url: &str,
+        default_branch: Option<&str>,
+        stack_hint: Option<&str>,
+        tags: Option<Vec<String>>,
+        description: Option<&str>,
+    ) -> Result<Value, String> {
+        Ok(json!({
+            "name": name,
+            "repo_url": repo_url,
+            "default_branch": default_branch.unwrap_or("main"),
+            "stack_hint": stack_hint,
+            "tags": tags.unwrap_or_default(),
+            "description": description,
+        }))
+    }
+    async fn project_get(&self, name: &str) -> Result<Value, String> {
+        if name == "trusty-tools" {
+            Ok(json!({
+                "name": "trusty-tools",
+                "repo_url": "https://github.com/o/trusty-tools",
+                "default_branch": "main",
+            }))
+        } else {
+            Err(format!("project `{name}` not found"))
+        }
+    }
 }
 
 fn call(name: &str, args: Value) -> Request {
@@ -191,8 +230,9 @@ async fn dispatch_initialize_returns_server_info() {
 
 #[tokio::test]
 async fn dispatch_tools_list_returns_full_catalog() {
-    // 9 pre-existing + 8 session-lifecycle + 5 console-facing tools = 22
-    // (#1222 + the two #1220 config tools + the two #1508 fleet-teardown tools).
+    // 9 pre-existing + 8 session-lifecycle + 5 console-facing + 3 project = 25
+    // (#1222 + the two #1220 config tools + the two #1508 fleet-teardown tools
+    // + the three #1519 project-registry tools).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -201,7 +241,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 22);
+    assert_eq!(tools.as_array().unwrap().len(), 25);
 }
 
 /// Why: the console Config tab calls `config_read`; dispatch must route it and
@@ -700,5 +740,138 @@ async fn dispatch_session_prune_requires_state() {
             .as_str()
             .unwrap()
             .contains("state")
+    );
+}
+
+// ── #1519 WI-2: project-registry dispatch tests ───────────────────────────────
+
+/// Why (#1519): `project_list` takes no args and must route to the backend,
+/// returning the projects array.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_list_tool() {
+    let resp = dispatch(&MockBackend, call("project_list", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("projects"), "expected 'projects' in: {text}");
+}
+
+/// Why (#1519): `project_register` must accept `name` + `repo_url` (required)
+/// and optional fields, and return the registered record.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_register_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "project_register",
+            json!({
+                "name": "my-repo",
+                "repo_url": "https://github.com/o/my-repo",
+                "default_branch": "develop",
+                "stack_hint": "rust",
+                "tags": ["backend"],
+                "description": "a repo"
+            }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("my-repo"), "expected 'my-repo' in: {text}");
+}
+
+/// Why (#1519): `project_register` must error when the required `name` arg is missing.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_register_requires_name() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "project_register",
+            json!({ "repo_url": "https://github.com/o/repo" }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("name")
+    );
+}
+
+/// Why (#1519): `project_register` must error when the required `repo_url` arg is missing.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_register_requires_repo_url() {
+    let resp = dispatch(
+        &MockBackend,
+        call("project_register", json!({ "name": "my-repo" })),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("repo_url")
+    );
+}
+
+/// Why (#1519): `project_get` must return the project for a known name.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_get_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call("project_get", json!({ "name": "trusty-tools" })),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("trusty-tools"),
+        "expected 'trusty-tools' in: {text}"
+    );
+}
+
+/// Why (#1519): `project_get` must surface an error for an unknown project name.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_get_missing_name() {
+    let resp = dispatch(
+        &MockBackend,
+        call("project_get", json!({ "name": "does-not-exist" })),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not found")
+    );
+}
+
+/// Why (#1519): `project_get` must error when the required `name` arg is missing.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_get_requires_name() {
+    let resp = dispatch(&MockBackend, call("project_get", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("name")
     );
 }

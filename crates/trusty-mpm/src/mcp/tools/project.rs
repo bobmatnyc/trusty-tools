@@ -1,0 +1,99 @@
+//! Project-registry MCP tool descriptors (#1519 WI-2).
+//!
+//! Why: the driver skill needs a typed, JSON-native surface to list, register,
+//! and look up projects in the registry — without scraping CLI text. Keeping
+//! these descriptors in their own file mirrors the pattern of `session.rs` and
+//! keeps each file well under the 500-SLOC production cap.
+//! What: [`project_tools`] returns the three `{ name, description, inputSchema }`
+//! descriptors — `project_list`, `project_register`, and `project_get`.
+//! Test: `super::tests::project_tools_present`,
+//! `super::tests::catalog_names_match_constant`.
+
+use serde_json::{Value, json};
+
+use super::tool;
+
+/// Build the three project-registry tool descriptors.
+///
+/// Why: project listing, registration, and lookup are the MCP surface the
+/// driver skill needs to interact with the project registry without CLI text
+/// scraping. Keeping them in their own builder keeps this file under the SLOC
+/// cap and gives the project tools an auditable home.
+/// What: returns the three descriptors in catalog order. `project_register`
+/// requires `name` and `repo_url` and accepts optional `default_branch`,
+/// `stack_hint`, `tags`, and `description`; `project_get` requires `name`;
+/// `project_list` takes no arguments. Every schema sets
+/// `additionalProperties: false`.
+/// Test: `super::tests::project_tools_present`.
+pub(super) fn project_tools() -> Vec<Value> {
+    vec![
+        tool(
+            "project_list",
+            "List all projects registered in the project registry. Returns a JSON \
+             array of project objects, each with `name`, `repo_url`, \
+             `default_branch`, and optional `stack_hint`, `tags`, and \
+             `description`.",
+            json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "project_register",
+            "Register or update a project in the project registry. Registration \
+             is idempotent — calling with the same `name` updates the existing \
+             entry rather than creating a duplicate. Returns the registered \
+             project record.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Short name used as the registry key (e.g. `trusty-tools`)."
+                    },
+                    "repo_url": {
+                        "type": "string",
+                        "description": "Full repository URL (e.g. `https://github.com/owner/trusty-tools`)."
+                    },
+                    "default_branch": {
+                        "type": "string",
+                        "description": "Default branch for session spawns. Defaults to `main` when omitted."
+                    },
+                    "stack_hint": {
+                        "type": "string",
+                        "description": "Optional technology-stack hint (e.g. `rust`, `python`)."
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional classification tags (e.g. [\"backend\", \"production\"])."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Optional free-form human-readable description."
+                    }
+                },
+                "required": ["name", "repo_url"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "project_get",
+            "Look up a single project by name. Returns the project record \
+             (`name`, `repo_url`, `default_branch`, and optional fields) or an \
+             error when the name is not found in the registry.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Project name to look up."
+                    }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }),
+        ),
+    ]
+}
