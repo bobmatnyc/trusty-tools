@@ -260,12 +260,33 @@ fn envelope_id_of_extracts_each_variant() {
 #[test]
 fn record_chat_turn_caps_history() {
     let mut entry: Vec<ChatMessage> = Vec::new();
-    // Push more than the cap; each call adds a user + assistant turn (2 msgs).
-    for i in 0..(MAX_CHAT_HISTORY_TURNS) {
+    // Each call adds a user + assistant turn (2 messages), so pushing
+    // MAX_CHAT_HISTORY_TURNS full pairs writes 2*MAX messages — strictly MORE
+    // than the cap. This guarantees the test fails if the cap were removed.
+    let turns = MAX_CHAT_HISTORY_TURNS;
+    let messages_pushed = 2 * turns;
+    for i in 0..turns {
         record_chat_turn(&mut entry, &format!("u{i}"), &format!("a{i}"));
     }
-    // Length is clamped to the cap, oldest dropped.
-    assert!(entry.len() <= MAX_CHAT_HISTORY_TURNS);
+    assert!(
+        messages_pushed > MAX_CHAT_HISTORY_TURNS,
+        "sanity: we must push MORE than the cap so this test is not vacuous"
+    );
+    // EXACT equality: the length is clamped precisely to the cap, not merely <=.
+    assert_eq!(entry.len(), MAX_CHAT_HISTORY_TURNS);
+    // The oldest non-evicted message: we pushed [u0,a0,...,u{N-1},a{N-1}] (2N
+    // msgs) and drained the front 2N-N = N messages, so the first survivor is
+    // the user turn at index N/2 (= MAX_CHAT_HISTORY_TURNS/2).
+    let first_retained_turn = MAX_CHAT_HISTORY_TURNS / 2;
+    assert_eq!(entry[0].role, "user");
+    assert_eq!(entry[0].content, format!("u{first_retained_turn}"));
+    // And everything older than that was evicted.
+    assert!(
+        !entry
+            .iter()
+            .any(|m| m.content == format!("u{}", first_retained_turn - 1)),
+        "the turn before the first retained one must have been evicted"
+    );
     // The most recent user message survived.
     let last_user = entry
         .iter()
@@ -275,6 +296,33 @@ fn record_chat_turn_caps_history() {
         last_user.as_deref(),
         Some(&format!("u{}", MAX_CHAT_HISTORY_TURNS - 1)[..])
     );
+}
+
+#[test]
+fn pid_file_guard_removes_on_drop() {
+    // Why: the guard must remove the PID file on EVERY exit path of `run`.
+    // Test: create a temp PID file, drop the guard, assert the file is gone.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("slack.pid");
+    std::fs::write(&path, "12345").expect("write pid");
+    assert!(path.exists(), "precondition: PID file exists before drop");
+    {
+        let _guard = PidFileGuard { path: path.clone() };
+    } // guard drops here
+    assert!(!path.exists(), "guard must remove the PID file on drop");
+}
+
+#[test]
+fn pid_file_guard_drop_missing_is_silent() {
+    // Why: a `tm slack stop` may have already removed the file before `run`
+    // returns; the guard's drop must be a no-op (best-effort), never a panic.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("slack.pid");
+    // No file written — drop must tolerate a missing file silently.
+    {
+        let _guard = PidFileGuard { path: path.clone() };
+    }
+    assert!(!path.exists(), "missing PID file stays absent, no panic");
 }
 
 #[test]

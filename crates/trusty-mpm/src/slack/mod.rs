@@ -224,6 +224,37 @@ fn write_pid_file() {
     }
 }
 
+/// RAII guard that best-effort removes the Slack PID file when dropped.
+///
+/// Why: [`run`] writes the PID file at startup so `tm slack stop` can signal
+/// exactly this process, but a clean exit (e.g. a permanent `disconnect`), an
+/// early `?` return, or a panic would otherwise leave a STALE PID file behind —
+/// a later `tm slack stop` could then SIGTERM a recycled, unrelated PID. Holding
+/// the path in a `Drop` guard removes the file on EVERY exit path of `run`.
+/// What: on drop, removes the file at `path`. Best-effort: a `NotFound` is
+/// expected (e.g. `tm slack stop` already removed it) and silent; any other
+/// removal error is logged to stderr and swallowed — cleanup must never panic.
+/// Test: `pid_file_guard_removes_on_drop`, `pid_file_guard_drop_missing_is_silent`.
+struct PidFileGuard {
+    /// The PID-file path to remove on drop.
+    path: std::path::PathBuf,
+}
+
+impl Drop for PidFileGuard {
+    fn drop(&mut self) {
+        match std::fs::remove_file(&self.path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    "could not remove Slack PID file {} on exit: {e}",
+                    self.path.display()
+                );
+            }
+        }
+    }
+}
+
 /// The result of a `tm slack stop` attempt, for a precise operator message.
 ///
 /// Why: `stop` must report honestly — it should NOT print "no process found" when
@@ -518,7 +549,10 @@ async fn action_chat_reply(
     text: &str,
 ) -> String {
     let history = {
-        let guard = histories.lock().expect("chat history mutex poisoned");
+        // Recover from poisoning: one handler panicking while holding the lock
+        // must not crash every subsequent handler. The history is advisory chat
+        // context, so the inner guard is safe to reuse.
+        let guard = histories.lock().unwrap_or_else(|e| e.into_inner());
         guard.get(channel).cloned().unwrap_or_default()
     };
     match executor
@@ -528,7 +562,9 @@ async fn action_chat_reply(
     {
         Ok(Some(outcome)) => {
             {
-                let mut guard = histories.lock().expect("chat history mutex poisoned");
+                // Recover from poisoning (see the read site above): a poisoned
+                // history must not crash the handler — reuse the inner guard.
+                let mut guard = histories.lock().unwrap_or_else(|e| e.into_inner());
                 let entry = guard.entry(channel.to_string()).or_default();
                 record_chat_turn(entry, text, &outcome.reply);
             }
@@ -731,8 +767,14 @@ pub async fn run(
     let executor = Arc::new(CommandExecutor::new(url));
     let histories: ChatHistories = Arc::new(Mutex::new(HashMap::new()));
 
-    // Record our PID so `tm slack stop` can signal exactly this process.
+    // Record our PID so `tm slack stop` can signal exactly this process, and
+    // hold a RAII guard so the file is removed on EVERY exit path (clean return,
+    // early `?`, or panic) — a stale PID file could otherwise misdirect a later
+    // `tm slack stop` SIGTERM at a recycled, unrelated PID.
     write_pid_file();
+    let _pid_guard = PidFileGuard {
+        path: pid_file_path(),
+    };
 
     tracing::info!("Slack adapter starting (Socket Mode)");
     let mut backoff = RECONNECT_BACKOFF_BASE;
