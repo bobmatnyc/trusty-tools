@@ -480,3 +480,30 @@ fn pairing_confirms_shared_disk_code() {
     let replay = DaemonState::with_root(root);
     assert!(!replay.confirm_pair_code(&code, 999));
 }
+
+#[test]
+fn concurrent_pairing_confirms() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().to_path_buf();
+
+    let minting = DaemonState::with_root(root.clone());
+    let code = minting.generate_pair_code();
+
+    let confirming1 = DaemonState::with_root(root.clone());
+    let confirming2 = DaemonState::with_root(root.clone());
+
+    let code_clone = code.clone();
+    let c1 = std::thread::spawn(move || {
+        confirming1.confirm_pair_code(&code_clone, 111)
+    });
+    let c2 = std::thread::spawn(move || {
+        confirming2.confirm_pair_code(&code, 222)
+    });
+
+    let res1 = c1.join().unwrap();
+    let res2 = c2.join().unwrap();
+
+    // Exactly one confirm should succeed due to the atomic claim.
+    assert!(res1 ^ res2, "exactly one concurrent confirm must win the atomic claim");
+}
+

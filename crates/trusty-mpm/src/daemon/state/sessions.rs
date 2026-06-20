@@ -74,7 +74,7 @@ impl DaemonState {
         // Prefer the shared on-disk pending code (the cross-instance source of
         // truth); fall back to the in-memory copy for the same-process case when
         // no disk write has happened (or the file is unreadable).
-        let disk_valid = pairing_store::load_pending(&self.framework_root)
+        let disk_valid = pairing_store::claim_pending(&self.framework_root)
             .is_some_and(|p| p.code == code && p.is_fresh(PAIR_CODE_TTL));
         let mem_valid = matches!(
             guard.as_ref(),
