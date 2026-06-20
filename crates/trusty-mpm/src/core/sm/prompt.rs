@@ -3,19 +3,21 @@
 //! Why: the SM carries its own role-specific system prompt, composed and
 //! delivered with the same discipline as the PM prompt
 //! ([`crate::core::instruction_pipeline`] /
-//! [`crate::core::instruction_overrides`]) but one level up. The four bundled
-//! assets under `src/assets/sm_instructions/` define the SM's behavior
-//! (identity, prohibitions SP1-SP7, allowlist, the 6-phase delegation loop, the
-//! BLOCKING verification gate, the tool/verb surface, and the non-overridable
-//! framework floor). Assembling them ad-hoc at each call site would invite the
+//! [`crate::core::instruction_overrides`]) but one level up. The five sections
+//! define the SM's behavior: identity, prohibitions SP1-SP7, allowlist; the
+//! canonical harness mental model (DOC-21); the 6-phase delegation loop; the
+//! BLOCKING verification gate; the tool/verb surface; and the non-overridable
+//! framework floor. Assembling them ad-hoc at each call site would invite the
 //! same ordering/content drift the PM pipeline was built to prevent.
-//! What: [`assemble_sm_prompt`] embeds the four assets via `include_str!` at
-//! compile time and joins them in the fixed order
-//! SM_INSTRUCTIONS -> SM_WORKFLOW -> SM_TOOLS -> BASE_SM, BASE_SM **always last**
-//! as the non-overridable floor. [`resolve_sm_prompt`] layers optional per-file
-//! overrides from an override directory (`~/.trusty-mpm/sm/`, see
-//! [`sm_override_dir`]) onto the bundled defaults, **always** appending the
-//! bundled BASE_SM floor last -- BASE_SM is never overridable.
+//! What: [`assemble_sm_prompt`] embeds the four bundled assets via `include_str!`
+//! at compile time and joins them with the shared harness-understanding content
+//! from `trusty_agents_common::harness_doc` in the fixed order
+//! SM_INSTRUCTIONS -> SM_HARNESS -> SM_WORKFLOW -> SM_TOOLS -> BASE_SM,
+//! BASE_SM **always last** as the non-overridable floor. [`resolve_sm_prompt`]
+//! layers optional per-file overrides from an override directory
+//! (`~/.trusty-mpm/sm/`, see [`sm_override_dir`]) onto the bundled defaults,
+//! **always** appending the bundled BASE_SM floor last -- BASE_SM is never
+//! overridable.
 //! Test: the `tests` module mirrors `instruction_overrides::tests` -- bundled
 //! content, per-file override replacement, the never-overridable BASE_SM floor
 //! invariant, and the missing/empty/unreadable fallbacks.
@@ -28,6 +30,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::core::instruction_pipeline::SECTION_SEPARATOR;
+use trusty_agents_common::harness_doc;
 
 // `pub(crate)` is deliberate: these bundled defaults are consumed only through
 // `assemble_sm_prompt` / `resolve_sm_prompt`, which own the ordering and the
@@ -64,30 +67,45 @@ pub const FILE_SM_INSTRUCTIONS: &str = "SM_INSTRUCTIONS.md";
 pub const FILE_SM_WORKFLOW: &str = "SM_WORKFLOW.md";
 /// Override file: replaces the bundled `SM_TOOLS` section.
 pub const FILE_SM_TOOLS: &str = "SM_TOOLS.md";
+/// Override file: replaces the bundled `SM_HARNESS` section (the shared
+/// harness-understanding content from `trusty-agents-common`).
+pub const FILE_SM_HARNESS: &str = "SM_HARNESS.md";
 
-/// Assemble the SM system prompt from the four bundled assets.
+/// Assemble the SM system prompt from the four bundled assets plus the shared
+/// harness-understanding content from `trusty_agents_common::harness_doc`.
 ///
 /// Why: the SM's provider request needs an identical, version-controlled system
 /// prompt every time; embedding the sources and joining them here removes any
 /// runtime dependency on an external install and keeps the ordering rule in one
 /// auditable place (mirrors [`assemble_system_prompt`]).
-/// What: joins the four bundled assets in the fixed order SM_INSTRUCTIONS ->
-/// SM_WORKFLOW -> SM_TOOLS -> BASE_SM, separated by the `---` rule. Each section
+/// What: joins the five sections in the fixed order SM_INSTRUCTIONS ->
+/// SM_HARNESS -> SM_WORKFLOW -> SM_TOOLS -> BASE_SM, separated by the `---`
+/// rule. The SM_HARNESS section is the full harness-understanding doc from
+/// `trusty_agents_common::harness_doc::harness_understanding()`. Each section
 /// is trimmed before joining -- byte-for-byte the same treatment
 /// [`resolve_sm_prompt`] applies -- so the two produce identical output when no
 /// override is present. BASE_SM is **always last** as the non-overridable
 /// framework floor.
 /// Test: `assemble_sm_prompt_contains_all_sections`,
 /// `assemble_sm_prompt_base_floor_is_last`,
+/// `assemble_sm_prompt_contains_harness_section`,
 /// `resolve_with_no_overrides_matches_assembled_sections` (exact equality).
 ///
 /// [`assemble_system_prompt`]: crate::core::instruction_pipeline::assemble_system_prompt
 pub fn assemble_sm_prompt() -> String {
-    [SM_INSTRUCTIONS, SM_WORKFLOW, SM_TOOLS, BASE_SM]
-        .iter()
-        .map(|s| s.trim())
-        .collect::<Vec<_>>()
-        .join(SECTION_SEPARATOR)
+    let harness = harness_doc::harness_understanding();
+    let harness_trimmed = harness.trim();
+    vec![
+        SM_INSTRUCTIONS.trim(),
+        harness_trimmed,
+        SM_WORKFLOW.trim(),
+        SM_TOOLS.trim(),
+        BASE_SM.trim(),
+    ]
+    .into_iter()
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(SECTION_SEPARATOR)
 }
 
 /// Resolve `~/.trusty-mpm/sm/`, the SM's override directory.
@@ -151,35 +169,51 @@ fn read_override(dir: &Path, name: &str) -> Option<String> {
 /// floor. Both the live prompt (the provider `system` message, SM-7) and any
 /// future inspectable stash call this one function so they can never diverge.
 ///
-/// What: for each of `SM_INSTRUCTIONS`, `SM_WORKFLOW`, and `SM_TOOLS`, uses the
-/// override file from `dir` when present and non-empty, else the bundled
-/// default. The bundled `BASE_SM` floor is **always** appended last and is
-/// **never** overridable -- even a `BASE_SM.md` placed in `dir` is ignored; the
-/// bundled floor is used. Sections are joined with [`SECTION_SEPARATOR`], the
-/// same rule [`assemble_sm_prompt`] uses, so the two never visually diverge.
+/// What: for each of `SM_INSTRUCTIONS`, `SM_HARNESS`, `SM_WORKFLOW`, and
+/// `SM_TOOLS`, uses the override file from `dir` when present and non-empty,
+/// else the bundled default (SM_HARNESS falls back to
+/// `harness_doc::harness_understanding()`). The bundled `BASE_SM` floor is
+/// **always** appended last and is **never** overridable -- even a `BASE_SM.md`
+/// placed in `dir` is ignored; the bundled floor is used. Sections are joined
+/// with [`SECTION_SEPARATOR`], the same rule [`assemble_sm_prompt`] uses, so
+/// the two never visually diverge. Order: SM_INSTRUCTIONS -> SM_HARNESS ->
+/// SM_WORKFLOW -> SM_TOOLS -> BASE_SM.
 ///
 /// Robustness: a missing override directory, missing files, empty files, and
 /// unreadable files all fall back to the bundled defaults without failing.
 ///
 /// Test: `no_overrides_uses_bundled`, `sm_instructions_override_replaces`,
-/// `workflow_override_replaces`, `tools_override_replaces`,
-/// `base_sm_floor_is_never_overridable`, and the robustness tests.
+/// `harness_override_replaces`, `workflow_override_replaces`,
+/// `tools_override_replaces`, `base_sm_floor_is_never_overridable`, and the
+/// robustness tests.
 pub fn resolve_sm_prompt(dir: &Path) -> String {
     let instructions = read_override(dir, FILE_SM_INSTRUCTIONS)
         .unwrap_or_else(|| SM_INSTRUCTIONS.trim().to_string());
+
+    // The harness section uses the shared trusty-agents-common content, with
+    // an optional override via SM_HARNESS.md in the override directory.
+    let harness_default = harness_doc::harness_understanding();
+    let harness =
+        read_override(dir, FILE_SM_HARNESS).unwrap_or_else(|| harness_default.trim().to_string());
+
     let workflow =
         read_override(dir, FILE_SM_WORKFLOW).unwrap_or_else(|| SM_WORKFLOW.trim().to_string());
     let tools = read_override(dir, FILE_SM_TOOLS).unwrap_or_else(|| SM_TOOLS.trim().to_string());
 
     // BASE_SM is the non-overridable floor: always the bundled one, always last.
-    let sections = [instructions, workflow, tools, BASE_SM.trim().to_string()];
-
-    sections
-        .iter()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(SECTION_SEPARATOR)
+    // Order: SM_INSTRUCTIONS -> SM_HARNESS -> SM_WORKFLOW -> SM_TOOLS -> BASE_SM
+    vec![
+        instructions,
+        harness,
+        workflow,
+        tools,
+        BASE_SM.trim().to_string(),
+    ]
+    .into_iter()
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join(SECTION_SEPARATOR)
 }
 
 /// Resolve the effective SM prompt for the production `~/.trusty-mpm/sm/`
@@ -214,15 +248,21 @@ mod tests {
     #[test]
     fn assemble_sm_prompt_contains_all_sections() {
         // Why: the assembled prompt IS the SM's behavior contract; every bundled
-        // section -- prohibitions, allowlist, 6-phase loop, verification gate,
-        // and the BASE_SM floor -- must be present and joined with the `---`
-        // rule.
+        // section -- prohibitions, allowlist, harness model, 6-phase loop,
+        // verification gate, and the BASE_SM floor -- must be present and joined
+        // with the `---` rule.
         let prompt = assemble_sm_prompt();
         // Identity + prohibitions table (SP1-SP7) + allowlist.
         assert!(prompt.contains("# Session Manager (SM) -- trusty-mpm"));
         assert!(prompt.contains("| SP1 |"));
         assert!(prompt.contains("| SP7 |"));
         assert!(prompt.contains("You MAY do directly (Allowlist)"));
+        // The harness-understanding section (DOC-21) canonical markers.
+        assert!(prompt.contains('✻'), "harness ✻ glyph must be present");
+        assert!(
+            prompt.contains("__HARNESS_EVENT__"),
+            "harness __HARNESS_EVENT__ must be present"
+        );
         // The 6-phase loop + verification gate.
         assert!(prompt.contains("# SM Workflow -- the delegation loop"));
         assert!(prompt.contains("1. **INTAKE.**"));
@@ -250,6 +290,43 @@ mod tests {
             .expect("workflow");
         assert!(workflow < tools, "workflow precedes tools");
         assert!(base > tools, "BASE_SM floor must be appended last");
+        // Verify harness section appears before BASE_SM floor
+        let harness_pos = prompt.find('✻').expect("harness ✻ glyph");
+        assert!(
+            harness_pos < base,
+            "harness section must precede BASE_SM floor"
+        );
+    }
+
+    #[test]
+    fn assemble_sm_prompt_contains_harness_section() {
+        let prompt = assemble_sm_prompt();
+        // The harness understanding section contains the Claude Code working glyph
+        // and the tcode event prefix as canonical markers (DOC-21).
+        assert!(
+            prompt.contains('✻'),
+            "assembled SM prompt must contain ✻ (harness understanding glyph marker)"
+        );
+        assert!(
+            prompt.contains("__HARNESS_EVENT__"),
+            "assembled SM prompt must contain __HARNESS_EVENT__ (tcode event marker)"
+        );
+    }
+
+    #[test]
+    fn harness_override_replaces() {
+        let tmp = TempDir::new().unwrap();
+        write_override(
+            tmp.path(),
+            FILE_SM_HARNESS,
+            "# Custom Harness Doc\n\nHARNESS_OVERRIDE_SENTINEL\n",
+        );
+        let prompt = resolve_sm_prompt(tmp.path());
+        assert!(prompt.contains("HARNESS_OVERRIDE_SENTINEL"));
+        assert!(prompt.contains("# Session Manager (SM) -- trusty-mpm"));
+        assert!(prompt.contains("# SM Workflow -- the delegation loop"));
+        assert!(prompt.contains("# SM Tools -- the verbs you may call"));
+        assert!(prompt.contains("# BASE_SM Framework Floor"));
     }
 
     #[test]
@@ -434,8 +511,16 @@ mod tests {
             resolved, assembled,
             "no-override resolve must be byte-identical to assemble"
         );
+        // The harness section itself contains internal `---` separators (it is a
+        // concatenation of 4 sub-documents), so the total split count is > 5.
+        // Assert at least 5 top-level sections are present (SM_INSTRUCTIONS +
+        // SM_HARNESS-body + SM_WORKFLOW + SM_TOOLS + BASE_SM, with the harness
+        // body contributing additional `---` delimiters from its sub-sections).
         let section_count = assembled.split(SECTION_SEPARATOR).count();
-        assert_eq!(section_count, 4, "four sections expected");
+        assert!(
+            section_count >= 5,
+            "at least five sections expected (got {section_count})"
+        );
     }
 
     #[test]
