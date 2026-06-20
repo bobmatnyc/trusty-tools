@@ -47,6 +47,13 @@ pub struct SpawnParams {
     pub name_hint: Option<String>,
     /// Optional runtime selector (`"claude-code"` | `"tcode"`).
     pub runtime: Option<String>,
+    /// Whether the spawned session is EPHEMERAL (a test/throwaway session) (#1508).
+    ///
+    /// Why: e2e harnesses (and any caller that knows it is creating a disposable
+    /// session) set this so the bulk-teardown and age-based reap paths may clean
+    /// the session up automatically. `None`/`Some(false)` → a normal, durable
+    /// session that the automatic paths never touch.
+    pub ephemeral: Option<bool>,
 }
 
 /// Spawn a managed session, shared by the HTTP handler and the MCP tool.
@@ -144,6 +151,7 @@ pub async fn spawn_managed(
             Some(params.repo_url.clone()),
             Some(params.git_ref.clone()),
             runtime,
+            params.ephemeral.unwrap_or(false),
         )
         .await
         .map_err(|e| {
@@ -262,6 +270,7 @@ async fn spawn_managed_local(
             None,
             None,
             runtime,
+            params.ephemeral.unwrap_or(false),
         )
         .await
         .map_err(|e| {

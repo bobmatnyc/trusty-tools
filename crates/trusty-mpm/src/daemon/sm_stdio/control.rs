@@ -121,6 +121,7 @@ impl SessionControl for DaemonSessionControl {
             task,
             name_hint: None,
             runtime: params.model,
+            ephemeral: params.ephemeral,
         };
         let record = spawn_managed(&self.state, spawn)
             .await
@@ -288,6 +289,9 @@ impl SessionControl for DaemonSessionControl {
                 std::path::PathBuf::from(cwd),
                 task.unwrap_or_default().to_string(),
                 runtime_kind,
+                // Chat/action-loop adoptions are durable operator sessions, never
+                // ephemeral — they must not be auto-reaped (#1508).
+                false,
             )
             .await
             .map_err(|e| match e {

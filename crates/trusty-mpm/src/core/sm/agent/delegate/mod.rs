@@ -381,6 +381,8 @@ impl SessionManagerAgent {
                 model: task.model.clone(),
                 prompt: Some(task.prompt.clone()),
                 goal_id: Some(goal_id.to_string()),
+                // Delegated goal-fan-out sessions are real work, never ephemeral.
+                ephemeral: None,
             };
             // Per-task best-effort: a single launch failure must NOT abort the whole
             // fan-out (which would orphan sessions already launched for earlier

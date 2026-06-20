@@ -217,6 +217,9 @@ pub async fn sm_sessions_launch(d: &SmDispatcher, params: &Value) -> Result<Valu
         model: opt_str(params, "model"),
         prompt: opt_str(params, "prompt"),
         goal_id: goal_id.clone(),
+        // #1508: honour an explicit `ephemeral` flag from the wire so a
+        // chat/test launch can mark its session disposable; absent → durable.
+        ephemeral: params.get("ephemeral").and_then(Value::as_bool),
     };
     let result = d.sessions.launch(launch).await.map_err(map_control_err)?;
 

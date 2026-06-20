@@ -403,6 +403,19 @@ async fn orphan_gc_loop(state: Arc<DaemonState>) {
         if reaped > 0 {
             info!("orphan-GC reaped {reaped} orphaned managed session(s)");
         }
+
+        // #1508: alongside the orphan sweep, auto-reap STALE EPHEMERAL sessions.
+        // Only `ephemeral == true` records older than `MAX_EPHEMERAL_AGE_HOURS`
+        // are in scope — real sessions default `ephemeral=false` and are
+        // unreachable here, so this never touches durable work. This is the
+        // backstop for an e2e test that panicked before its Drop-guard could tear
+        // its session down.
+        let max_age = chrono::Duration::hours(crate::session_manager::MAX_EPHEMERAL_AGE_HOURS);
+        match mgr.reap_aged_ephemeral(max_age).await {
+            Ok(n) if n > 0 => info!("ephemeral auto-reap decommissioned {n} stale session(s)"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("ephemeral auto-reap failed: {e}"),
+        }
     }
 }
 

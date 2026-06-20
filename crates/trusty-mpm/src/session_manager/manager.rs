@@ -248,6 +248,7 @@ impl SessionManager {
             repo_url,
             branch,
             crate::runtime::RuntimeKind::default(),
+            false,
         )
         .await
     }
@@ -263,10 +264,13 @@ impl SessionManager {
     /// What: identical to [`create`] except the id and runtime backend are
     /// supplied by the caller. Creates the tmux session at `cwd` via the driver,
     /// persists a [`SessionRecord`] in state `Provisioning` carrying `runtime`,
-    /// and returns it.
+    /// and returns it. The `ephemeral` flag (#1508) tags test/throwaway sessions
+    /// so the bulk-teardown and age-based reap paths may decommission them
+    /// automatically; real callers pass `false`.
     /// Test: `spawn_session_tmux_cwd_is_workspace` in session_manager/tests.rs;
     /// `handler_spawn_creates_tmux_at_workspace_cwd` in session_manager_mvp.rs;
-    /// `manager_create_persists_runtime` in session_manager/tests.rs.
+    /// `manager_create_persists_runtime` in session_manager/tests.rs;
+    /// `manager_create_persists_ephemeral_flag` in session_manager/tests.rs.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_with_id(
         &self,
@@ -278,6 +282,7 @@ impl SessionManager {
         repo_url: Option<String>,
         branch: Option<String>,
         runtime: crate::runtime::RuntimeKind,
+        ephemeral: bool,
     ) -> Result<SessionRecord, ManagedError> {
         let cwd = cwd.unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")));
         let tmux_name = if let Some(hint) = name_hint {
@@ -334,6 +339,7 @@ impl SessionManager {
             proposed_default: None,
             correlation,
             runtime,
+            ephemeral,
         };
 
         // Persist the record. On failure the freshly-created tmux session has
@@ -754,6 +760,9 @@ impl SessionManager {
                     // Externally-created tmux sessions have unknown provenance;
                     // assume the default (claude-code) backend.
                     runtime: crate::runtime::RuntimeKind::default(),
+                    // Adopted external sessions are NEVER ephemeral: their
+                    // provenance is unknown, so they must never be auto-reaped.
+                    ephemeral: false,
                 };
                 guard.upsert(external).await?;
                 report.external_adopted.push(name.clone());

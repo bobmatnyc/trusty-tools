@@ -1068,6 +1068,37 @@ pub(crate) enum SessionAction {
         #[arg(long)]
         json: bool,
     },
+    /// Tear down EVERY ephemeral (test/throwaway) managed session (#1508).
+    ///
+    /// Why: e2e harnesses (and any operator who tagged test sessions) need a
+    /// one-shot "clean up all my throwaway sessions" verb. REAL sessions default
+    /// `ephemeral=false` and are unreachable, so durable work is never harmed.
+    /// What: POSTs `/api/v1/sessions/managed/decommission-ephemeral` and prints the
+    /// count torn down.
+    /// Test: `cli_parses_session_decommission_ephemeral`.
+    DecommissionEphemeral,
+    /// Prune managed sessions by state + compact tombstones (#1508).
+    ///
+    /// Why: ONE tool to (a) tear down ephemeral/stopped sessions and (b) compact
+    /// the store by dropping decommissioned tombstones, so the legacy stale records
+    /// can be purged with the same verb that cleans up test sessions. The
+    /// fail-closed default never touches a RUNNING session.
+    /// What: POSTs `/api/v1/sessions/managed/prune` with the `--state` filter;
+    /// `--dry-run` reports what WOULD be pruned without mutating.
+    /// Test: `cli_parses_session_prune`.
+    Prune {
+        /// Which records to target: `ephemeral` | `stopped` | `decommissioned` | `all`.
+        #[arg(long)]
+        state: String,
+        /// Report what WOULD be pruned without killing, removing, or tombstoning
+        /// any record.
+        #[arg(long)]
+        dry_run: bool,
+        /// Also tear down RUNNING (`Active`/`Provisioning`) sessions. Off by
+        /// default — the fail-closed safety gate.
+        #[arg(long)]
+        include_active: bool,
+    },
 }
 
 /// Actions for the `overseer` subcommand.

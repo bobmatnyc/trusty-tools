@@ -208,6 +208,7 @@ pub(crate) async fn launch_and_wait(
             None,
             None,
             RuntimeKind::ClaudeCode,
+            false,
         )
         .await
         .context("failed to create the tmux session for the metaharness")?;

@@ -529,6 +529,7 @@ async fn handler_spawn_creates_tmux_at_workspace_cwd() {
             Some(repo_url.into()),
             Some(git_ref.into()),
             trusty_mpm::runtime::RuntimeKind::default(),
+            false,
         )
         .await
         .expect("create_with_id");
@@ -672,6 +673,7 @@ async fn tcode_session_spawns_and_accepts_commands() {
             Some("https://github.com/owner/repo".into()),
             Some("main".into()),
             RuntimeKind::Tcode,
+            false,
         )
         .await
         .expect("create_with_id");
@@ -805,6 +807,7 @@ async fn resume_managed_typed_invalid_state_is_conflict() {
             Some("https://example.com/r.git".to_string()),
             Some("main".to_string()),
             ResumeRuntimeKind::default(),
+            false,
         )
         .await
         .expect("seed session");
@@ -856,6 +859,7 @@ async fn front_gate_answer_unblocks_spawn() {
             Some("https://github.com/owner/repo".to_string()),
             Some("main".to_string()),
             ResumeRuntimeKind::default(),
+            false,
         )
         .await
         .expect("seed session");
@@ -962,5 +966,198 @@ fn cli_prune_idle_unreachable_exit_code() {
     assert!(
         stdout.contains("\"sm_available\": false"),
         "expected sm_available:false in JSON, got: {stdout}"
+    );
+}
+
+// ── #1508: HTTP route tests for the bulk-teardown + by-state prune endpoints ──
+//
+// These call the route handlers directly with axum's `State`/`Json` extractors
+// (the same pattern as the typed `resume_managed` tests above) against a hermetic
+// `DaemonState`, then decode the JSON response body. They seed real sessions via
+// `create_with_id` (so they exercise the genuine store + decommission engine) and
+// reap each tmux session on exit via `reap_on_drop`.
+
+/// Decode an axum `impl IntoResponse` into `(StatusCode, serde_json::Value)`.
+///
+/// Why: the prune route handlers return `impl IntoResponse`; a route test must
+/// inspect both the status and the JSON body. Centralising the body-read keeps
+/// each test focused on its assertion.
+/// What: converts the response, reads the full body to bytes, and parses it as
+/// JSON (an empty/non-JSON body yields `Value::Null`).
+/// Test: used by the `*_route_*` tests below.
+async fn decode_response(
+    resp: impl axum::response::IntoResponse,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    let resp = resp.into_response();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("read body");
+    let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, value)
+}
+
+/// POST …/decommission-ephemeral tears down ONLY ephemeral sessions (#1508).
+///
+/// Why: the HTTP surface must honour the same safety invariant as the engine —
+/// REAL (non-ephemeral) sessions are never touched by the bulk-teardown route.
+/// What: seeds two ephemeral and one durable session through the daemon's manager,
+/// calls [`decommission_ephemeral_route`], asserts the response reports
+/// `decommissioned == 2`, and confirms the durable session is left untouched.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_ephemeral_route_tears_down_only_ephemeral() {
+    use trusty_mpm::daemon::managed_routes::decommission_ephemeral_route;
+    use trusty_mpm::session_manager::ManagedSessionState;
+
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root(root.path().to_path_buf()));
+    let mgr = state.session_manager().await;
+
+    // Seed two ephemeral + one durable session. `create_with_id` starts each in
+    // Provisioning (running); the bulk-teardown intentionally includes running
+    // ephemerals, so both ephemeral records are torn down and the durable is not.
+    let mut seeded = Vec::new();
+    for (label, ephemeral) in [("eph-a", true), ("eph-b", true), ("durable", false)] {
+        let id = ResumeSessionId::new();
+        let ws = root.path().join(format!("{id}-{label}"));
+        let rec = mgr
+            .create_with_id(
+                id,
+                format!("route test {label}"),
+                Some(ws.clone()),
+                None,
+                Some(ws),
+                Some("https://example.com/r.git".to_string()),
+                Some("main".to_string()),
+                ResumeRuntimeKind::default(),
+                ephemeral,
+            )
+            .await
+            .expect("seed session");
+        seeded.push((rec, ephemeral));
+    }
+    // Reap every tmux session this test created, on success/failure/panic.
+    let _reapers: Vec<TmuxSessionGuard> = {
+        let mut v = Vec::new();
+        for (rec, _) in &seeded {
+            v.push(reap_on_drop(&state, &rec.tmux_name).await);
+        }
+        v
+    };
+
+    let (status, body) =
+        decode_response(decommission_ephemeral_route(axum::extract::State(state.clone())).await)
+            .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(
+        body["decommissioned"], 2,
+        "exactly the two ephemeral sessions are torn down, got {body}"
+    );
+
+    // The durable session must remain (NOT Decommissioned).
+    let durable = seeded
+        .iter()
+        .find(|(_, eph)| !eph)
+        .map(|(r, _)| r.id)
+        .expect("durable seeded");
+    assert_ne!(
+        mgr.get(&durable).await.expect("get durable").state,
+        ManagedSessionState::Decommissioned,
+        "the durable session must never be touched by the ephemeral teardown route"
+    );
+}
+
+/// POST …/prune with `dry_run` REPORTS candidates and mutates NOTHING (#1508).
+///
+/// Why: a dry-run is the operator's safe preview before a destructive purge; the
+/// route must echo the candidates without changing any record.
+/// What: seeds one ephemeral session, calls [`prune_managed_route`] with
+/// `state=ephemeral, dry_run=true`, asserts the body reports `dry_run:true` with
+/// one candidate, and confirms the session is still its original (non-terminal)
+/// state afterwards.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_route_dry_run_reports() {
+    use trusty_mpm::daemon::managed_routes::{PruneRequest, prune_managed_route};
+    use trusty_mpm::session_manager::ManagedSessionState;
+
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root(root.path().to_path_buf()));
+    let mgr = state.session_manager().await;
+
+    let id = ResumeSessionId::new();
+    let ws = root.path().join(format!("{id}-dryrun"));
+    let rec = mgr
+        .create_with_id(
+            id,
+            "dry-run candidate".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws),
+            Some("https://example.com/r.git".to_string()),
+            Some("main".to_string()),
+            ResumeRuntimeKind::default(),
+            true,
+        )
+        .await
+        .expect("seed ephemeral");
+    let _reaper = reap_on_drop(&state, &rec.tmux_name).await;
+    let before = mgr.get(&id).await.expect("get before").state;
+
+    let req = serde_json::from_value::<PruneRequest>(serde_json::json!({
+        "state": "ephemeral",
+        "dry_run": true,
+        // Provisioning is a running state; include it so the dry-run still lists
+        // the freshly-created candidate (a real purge would pass false here).
+        "include_active": true,
+    }))
+    .expect("build request");
+    let (status, body) = decode_response(
+        prune_managed_route(axum::extract::State(state.clone()), axum::Json(req)).await,
+    )
+    .await;
+
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(body["dry_run"], serde_json::json!(true));
+    assert_eq!(body["filter"], serde_json::json!("ephemeral"));
+    assert_eq!(
+        body["sessions"].as_array().map(|a| a.len()),
+        Some(1),
+        "dry-run lists the one ephemeral candidate, got {body}"
+    );
+    // Nothing was mutated: the session is still in its pre-prune state.
+    assert_eq!(
+        mgr.get(&id).await.expect("get after").state,
+        before,
+        "a dry-run must NOT change any record's state"
+    );
+    assert_ne!(before, ManagedSessionState::Decommissioned);
+}
+
+/// POST …/prune with an unknown `state` returns 400 (#1508).
+///
+/// Why: a typo'd filter must be a loud, actionable error — never a silent default
+/// to a destructive scope.
+/// What: posts `state=garbage` to [`prune_managed_route`] and asserts a
+/// `400 Bad Request`. No session is seeded — the parse rejection happens before
+/// any store access.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_route_rejects_bad_state() {
+    use trusty_mpm::daemon::managed_routes::{PruneRequest, prune_managed_route};
+
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root(root.path().to_path_buf()));
+
+    let req = serde_json::from_value::<PruneRequest>(serde_json::json!({ "state": "garbage" }))
+        .expect("build request");
+    let (status, _body) =
+        decode_response(prune_managed_route(axum::extract::State(state), axum::Json(req)).await)
+            .await;
+    assert_eq!(
+        status,
+        axum::http::StatusCode::BAD_REQUEST,
+        "an unknown prune filter must yield 400"
     );
 }

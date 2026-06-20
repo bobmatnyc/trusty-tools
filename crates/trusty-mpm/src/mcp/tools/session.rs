@@ -8,9 +8,10 @@
 //! existing [`crate::session_manager::SessionManager`] lifecycle ops that the
 //! HTTP `…/managed/*` routes already use, so the behaviour is identical across
 //! transports.
-//! What: [`session_tools`] returns the six `{ name, description, inputSchema }`
+//! What: [`session_tools`] returns the eight `{ name, description, inputSchema }`
 //! descriptors — `session_new`, `session_stop`, `session_resume`,
-//! `session_decommission`, `session_activity`, `session_send`. The shared
+//! `session_decommission`, `session_activity`, `session_send`, and the #1508
+//! fleet-wide `session_decommission_ephemeral` + `session_prune`. The shared
 //! [`tool`] builder is re-exported from the parent module.
 //! Test: `cargo test -p trusty-mpm` (in [`super`]) asserts the full catalog is
 //! well-formed and that each of these six names is present.
@@ -19,16 +20,20 @@ use serde_json::{Value, json};
 
 use super::tool;
 
-/// Build the six session-lifecycle tool descriptors.
+/// Build the eight session-lifecycle tool descriptors.
 ///
 /// Why: spawning, stopping, resuming, decommissioning, observing, and driving a
 /// managed session are the operations the driver skill needs; surfacing them as
-/// MCP tools removes the CLI-scraping defect. Keeping them in their own builder
-/// keeps `tools/core.rs` and this file each well under the 500-SLOC cap.
-/// What: returns the six descriptors in catalog order. `session_new` takes the
-/// repo/ref/task spawn inputs; the other five take a `session_id` (the managed
-/// UUID) plus operation-specific fields. Every schema sets
-/// `additionalProperties: false` so the driver gets a clear error on a typo.
+/// MCP tools removes the CLI-scraping defect. #1508 adds two fleet-wide teardown
+/// tools so a driver can clean up its throwaway test sessions and purge legacy
+/// tombstones without scraping the CLI. Keeping them in their own builder keeps
+/// `tools/core.rs` and this file each well under the 500-SLOC cap.
+/// What: returns the eight descriptors in catalog order. `session_new` takes the
+/// repo/ref/task spawn inputs (plus optional `ephemeral`); the per-session tools
+/// take a `session_id`; `session_decommission_ephemeral` takes no args; and
+/// `session_prune` takes a `state` filter plus `dry_run`/`include_active`. Every
+/// schema sets `additionalProperties: false` so the driver gets a clear error on a
+/// typo.
 /// Test: `super::tests::session_tools_present`,
 /// `super::tests::catalog_names_match_constant`.
 pub(super) fn session_tools() -> Vec<Value> {
@@ -64,6 +69,10 @@ pub(super) fn session_tools() -> Vec<Value> {
                         "type": "string",
                         "enum": ["claude-code", "tcode"],
                         "description": "Optional runtime backend; defaults to claude-code."
+                    },
+                    "ephemeral": {
+                        "type": "boolean",
+                        "description": "Tag this as an EPHEMERAL (test/throwaway) session eligible for bulk teardown and age-based auto-reap. Defaults to false (a durable session the automatic teardown paths never touch)."
                     }
                 },
                 "required": ["repo_url", "ref", "task"],
@@ -168,6 +177,49 @@ pub(super) fn session_tools() -> Vec<Value> {
                     }
                 },
                 "required": ["session_id", "text"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "session_decommission_ephemeral",
+            "Tear down EVERY ephemeral (test/throwaway) managed session in one \
+             shot: kill each runtime, remove its workspace, and tombstone the \
+             record. REAL sessions default `ephemeral=false` and are NEVER touched \
+             by this tool. Returns the count decommissioned. Use this from e2e \
+             harnesses or to clean up after a test run.",
+            json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "session_prune",
+            "Prune managed sessions by state and compact tombstones. `state` \
+             selects which records to target: `ephemeral` (test sessions), \
+             `stopped`, `decommissioned` (drop existing tombstones from the store), \
+             or `all` (every NON-running record). A RUNNING session is NEVER torn \
+             down unless `include_active` is true. With `dry_run` the tool REPORTS \
+             what would be pruned without mutating anything. This is the tool to \
+             purge legacy stale records that predate the ephemeral flag.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "state": {
+                        "type": "string",
+                        "enum": ["ephemeral", "stopped", "decommissioned", "all"],
+                        "description": "Which records to target."
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Report what WOULD be pruned without mutating anything (default false)."
+                    },
+                    "include_active": {
+                        "type": "boolean",
+                        "description": "Also tear down RUNNING (Active/Provisioning) sessions. Off by default — the fail-closed safety gate."
+                    }
+                },
+                "required": ["state"],
                 "additionalProperties": false
             }),
         ),

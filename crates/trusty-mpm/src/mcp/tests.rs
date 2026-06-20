@@ -5,7 +5,8 @@
 //! cap) live alongside it. Included via `#[path = "tests.rs"] mod tests;`.
 //! What: a `MockBackend` implementing every `OrchestratorBackend` method plus
 //! dispatch tests for the handshake, the core tools, the bug-reporting tools,
-//! and the six session-lifecycle tools.
+//! and the eight session-lifecycle tools (six per-session #1221 + the two
+//! fleet-wide #1508 teardown verbs).
 //! Test: this IS the test module.
 
 use super::*;
@@ -73,12 +74,14 @@ impl OrchestratorBackend for MockBackend {
         _task: &str,
         _name_hint: Option<&str>,
         runtime: Option<&str>,
+        ephemeral: Option<bool>,
     ) -> Result<Value, String> {
         Ok(json!({
             "id": "m-1",
             "repo_url": repo_url,
             "branch": git_ref,
             "runtime": runtime.unwrap_or("claude-code"),
+            "ephemeral": ephemeral.unwrap_or(false),
             "state": "active",
         }))
     }
@@ -96,6 +99,27 @@ impl OrchestratorBackend for MockBackend {
     }
     async fn session_send(&self, session_id: &str, text: &str) -> Result<Value, String> {
         Ok(json!({ "id": session_id, "sent": true, "text": text }))
+    }
+
+    // ── #1508: fleet-wide teardown mock impls ────────────────────────────────
+    async fn session_decommission_ephemeral(&self) -> Result<Value, String> {
+        Ok(json!({ "decommissioned": 3 }))
+    }
+    async fn session_prune(
+        &self,
+        state: &str,
+        dry_run: bool,
+        include_active: bool,
+    ) -> Result<Value, String> {
+        // Mirror the real engine's contract: reject an unknown filter spelling so
+        // the dispatch-level "rejects bad state" test exercises the error path.
+        crate::session_manager::PruneFilter::parse(state)?;
+        Ok(json!({
+            "dry_run": dry_run,
+            "filter": state,
+            "include_active": include_active,
+            "sessions": [],
+        }))
     }
 
     // ── #1222: console-facing mock impls ─────────────────────────────────────
@@ -167,8 +191,8 @@ async fn dispatch_initialize_returns_server_info() {
 
 #[tokio::test]
 async fn dispatch_tools_list_returns_full_catalog() {
-    // 9 pre-existing + 6 session-lifecycle + 5 console-facing tools = 20
-    // (#1222 + the two #1220 config tools).
+    // 9 pre-existing + 8 session-lifecycle + 5 console-facing tools = 22
+    // (#1222 + the two #1220 config tools + the two #1508 fleet-teardown tools).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -177,7 +201,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 20);
+    assert_eq!(tools.as_array().unwrap().len(), 22);
 }
 
 /// Why: the console Config tab calls `config_read`; dispatch must route it and
@@ -596,5 +620,85 @@ async fn dispatch_session_send_requires_text() {
             .as_str()
             .unwrap()
             .contains("text")
+    );
+}
+
+/// Why (#1508): the fleet-wide `session_decommission_ephemeral` tool takes no
+/// args and must route to the backend, returning the `decommissioned` count.
+/// This is the dispatch wiring that was missing — the descriptor was in the
+/// catalog but `try_dispatch` had no arm, so the tool returned "unknown tool".
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_decommission_ephemeral_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call("session_decommission_ephemeral", json!({})),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("decommissioned")
+    );
+}
+
+/// Why (#1508): `session_prune` must route its `state`/`dry_run`/`include_active`
+/// args to the backend and surface the `PruneOutcome` JSON.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_prune_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_prune",
+            json!({ "state": "ephemeral", "dry_run": true }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("ephemeral")
+    );
+}
+
+/// Why (#1508): `session_prune` must reject an unknown `state` spelling with a
+/// tool-error, mirroring the engine's `PruneFilter::parse` contract.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_prune_rejects_bad_state() {
+    let resp = dispatch(
+        &MockBackend,
+        call("session_prune", json!({ "state": "garbage" })),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unknown prune filter")
+    );
+}
+
+/// Why (#1508): `session_prune` must error when the required `state` arg is missing.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_prune_requires_state() {
+    let resp = dispatch(&MockBackend, call("session_prune", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("state")
     );
 }
