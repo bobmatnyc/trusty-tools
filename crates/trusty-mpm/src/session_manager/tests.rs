@@ -464,8 +464,8 @@ async fn manager_decommission_removes_workspace() {
     let (mgr, _fake) = make_manager(&dir).await;
 
     // Build a workspace path INSIDE a temp "managed root" dir so the
-    // path-containment guard passes. We set TRUSTY_MPM_WORKSPACE_ROOT to this
-    // temp dir to control what is_safe_to_remove considers the managed root.
+    // path-containment guard passes. `decommission_with_root` is called with
+    // the managed root injected directly — no env var mutation required.
     let managed_root = TempDir::new().unwrap();
     let workspace_path = managed_root
         .path()
@@ -476,43 +476,29 @@ async fn manager_decommission_removes_workspace() {
     // Write a sentinel file so we can verify the dir was removed.
     std::fs::write(workspace_path.join("sentinel.txt"), "exists").unwrap();
 
-    // Override the managed root to our temp dir so `is_safe_to_remove` sees it
-    // as the authoritative root during this test.
-    // SAFETY: this test runs in isolation; setting this env var only affects the
-    // current test process and is removed before the test exits.
-    unsafe {
-        std::env::set_var(
-            crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV,
-            managed_root.path().to_str().unwrap(),
-        );
-    }
-
+    // Create the session with `owned=true` (atomic: mirrors what `spawn_managed`
+    // does for clone-provisioned workspaces after Fix 1).
     let record = mgr
-        .create(
+        .create_with_id(
+            ManagedSessionId::new(),
             "task".into(),
             Some(workspace_path.clone()),
             None,
             Some(workspace_path.clone()),
             None,
             None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            true, // owned: SM provisioned via clone
         )
         .await
         .expect("create");
 
-    // Mark as SM-owned (simulating what the clone-provision path does via
-    // `set_workspace_owned`). Without this the decommission guard skips deletion.
-    mgr.set_workspace_owned(&record.id, true)
+    // Decommission using the injectable root — no unsafe env mutation.
+    let tombstone = mgr
+        .decommission_with_root(&record.id, managed_root.path())
         .await
-        .expect("set_workspace_owned");
-
-    // Decommission.
-    let tombstone = mgr.decommission(&record.id).await.expect("decommission");
-
-    // Clean up the env override regardless of assertions.
-    // SAFETY: same as above.
-    unsafe {
-        std::env::remove_var(crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV);
-    }
+        .expect("decommission");
 
     // State must be Decommissioned.
     assert_eq!(tombstone.state, ManagedSessionState::Decommissioned);
@@ -886,6 +872,7 @@ async fn spawn_session_tmux_cwd_is_workspace() {
             Some("main".into()),
             crate::runtime::RuntimeKind::default(),
             false,
+            false,
         )
         .await
         .expect("create_with_id");
@@ -978,6 +965,7 @@ async fn manager_create_persists_runtime() {
             None,
             None,
             crate::runtime::RuntimeKind::Tcode,
+            false,
             false,
         )
         .await
@@ -1404,6 +1392,7 @@ async fn manager_create_persists_ephemeral_flag() {
             None,
             crate::runtime::RuntimeKind::default(),
             true,
+            false,
         )
         .await
         .expect("create ephemeral");
@@ -1417,6 +1406,7 @@ async fn manager_create_persists_ephemeral_flag() {
             None,
             None,
             crate::runtime::RuntimeKind::default(),
+            false,
             false,
         )
         .await

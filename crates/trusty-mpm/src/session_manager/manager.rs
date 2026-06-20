@@ -250,6 +250,7 @@ impl SessionManager {
             branch,
             crate::runtime::RuntimeKind::default(),
             false,
+            false,
         )
         .await
     }
@@ -267,7 +268,9 @@ impl SessionManager {
     /// persists a [`SessionRecord`] in state `Provisioning` carrying `runtime`,
     /// and returns it. The `ephemeral` flag (#1508) tags test/throwaway sessions
     /// so the bulk-teardown and age-based reap paths may decommission them
-    /// automatically; real callers pass `false`.
+    /// automatically; real callers pass `false`. The `owned` flag (#1511) must be
+    /// `true` ONLY when the SM provisioned the workspace via git clone; local-path
+    /// spawn, adopt, and reconcile all pass `false` (safe default — never delete).
     /// Test: `spawn_session_tmux_cwd_is_workspace` in session_manager/tests.rs;
     /// `handler_spawn_creates_tmux_at_workspace_cwd` in session_manager_mvp.rs;
     /// `manager_create_persists_runtime` in session_manager/tests.rs;
@@ -284,6 +287,7 @@ impl SessionManager {
         branch: Option<String>,
         runtime: crate::runtime::RuntimeKind,
         ephemeral: bool,
+        owned: bool,
     ) -> Result<SessionRecord, ManagedError> {
         let cwd = cwd.unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")));
         let tmux_name = if let Some(hint) = name_hint {
@@ -341,10 +345,11 @@ impl SessionManager {
             correlation,
             runtime,
             ephemeral,
-            // Default to unowned: callers that provisioned the workspace via
-            // git clone MUST call `set_workspace_owned(id, true)` afterward.
-            // Local-path spawn (#1502) and adopt (#1433) never set this to true.
-            workspace_owned: false,
+            // Ownership is set atomically at creation: `true` ONLY when the SM
+            // provisioned the workspace via git clone; local-path spawn (#1502),
+            // adopt (#1433), and reconcile all pass `false` (safe default —
+            // prefer NOT deleting over accidental deletion).
+            workspace_owned: owned,
         };
 
         // Persist the record. On failure the freshly-created tmux session has

@@ -140,6 +140,10 @@ pub async fn spawn_managed(
     })?;
 
     // Step 2: create the tmux session rooted at the provisioned workspace.
+    // `owned=true` is set ATOMICALLY at record creation (#1511): the SM
+    // provisioned this directory via git clone, so decommission may remove it.
+    // Local-path spawn and adopt_existing pass `owned=false`; they are never
+    // eligible for automatic disk deletion.
     let mgr = state.session_manager().await;
     let record = mgr
         .create_with_id(
@@ -152,20 +156,13 @@ pub async fn spawn_managed(
             Some(params.git_ref.clone()),
             runtime,
             params.ephemeral.unwrap_or(false),
+            true, // owned: SM provisioned via git clone
         )
         .await
         .map_err(|e| {
             warn!(id = %session_id, "spawn_managed: session create failed: {e}");
             e.to_string()
         })?;
-
-    // Step 2a: mark the workspace as SM-owned (#1511). The SM provisioned
-    // this directory via git clone — decommission is allowed to remove it.
-    // Local-path spawn and adopt_existing never reach this path and therefore
-    // never set workspace_owned = true; they remain unowned → never deleted.
-    if let Err(e) = mgr.set_workspace_owned(&record.id, true).await {
-        warn!(id = %record.id, "spawn_managed: set_workspace_owned failed: {e}");
-    }
 
     // Step 2.5 — INTENT-CONFORMANCE FRONT GATE (#1360, spec §5.1).
     //
@@ -279,6 +276,7 @@ async fn spawn_managed_local(
             None,
             runtime,
             params.ephemeral.unwrap_or(false),
+            false, // owned: local-path spawn never owns the directory (#1511)
         )
         .await
         .map_err(|e| {

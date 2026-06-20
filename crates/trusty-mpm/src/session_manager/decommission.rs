@@ -4,13 +4,15 @@
 //! from `manager.rs` to keep that file under the 500-SLOC production cap,
 //! mirroring the pattern used by `adopt.rs` and `prune.rs`. The decommission
 //! logic is also a natural home for the ownership-tracking primitive.
-//! What: two inherent `impl SessionManager` methods —
-//! [`SessionManager::decommission`] (full teardown with the #1511 dual guard)
-//! and [`SessionManager::set_workspace_owned`] (marks a workspace as
-//! SM-provisioned after a git clone).
+//! What: public [`SessionManager::decommission`] (full teardown with the #1511
+//! dual guard), internal [`SessionManager::decommission_with_root`] (injectable
+//! managed-root for test isolation without env mutation), and
+//! [`SessionManager::set_workspace_owned`] (marks a workspace as SM-provisioned).
 //! Test: `manager_decommission_removes_workspace`,
 //! `manager_decommission_unowned_skips_deletion`,
 //! `workspace_owned_flag_round_trips_via_set` in `super::tests`.
+
+use std::path::Path;
 
 use tracing::{info, warn};
 
@@ -43,14 +45,33 @@ impl SessionManager {
     /// transitions the record to `Decommissioned` and returns successfully — the
     /// session becomes unreachable without deleting the user's directory.
     ///
-    /// What: kills the tmux session (best-effort), evaluates the two-condition
-    /// deletion gate, removes the workspace directory when it is safe to do so,
-    /// clears `workspace_path` on the record, marks it `Decommissioned`, persists.
+    /// What: delegates to [`decommission_with_root`](Self::decommission_with_root)
+    /// with the config-derived managed root so callers remain env-agnostic.
     /// Test: `manager_decommission_removes_workspace` — asserts the workspace dir
     /// is gone from disk and the record state is `Decommissioned`.
     /// `manager_decommission_unowned_skips_deletion` — asserts that decommissioning
     /// a local-path/adopt record does NOT delete the directory.
     pub async fn decommission(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
+        let config = TrustyToolsConfig::load();
+        let managed_root = workspace_root(&config);
+        self.decommission_with_root(id, &managed_root).await
+    }
+
+    /// Internal: decommission with an explicit managed root (test seam).
+    ///
+    /// Why: tests need to inject a temp directory as the managed root to keep the
+    /// containment guard working without mutating process-global env vars
+    /// (`TRUSTY_MPM_WORKSPACE_ROOT`). Env mutation is thread-unsafe and pollutes
+    /// parallel tests; injecting the root avoids that entirely.
+    /// What: identical teardown logic as the public `decommission` but resolves the
+    /// managed root from the caller-supplied `managed_root` instead of the config.
+    /// Test: called by `manager_decommission_removes_workspace` (which passes a
+    /// TempDir as the managed root, removing the need for `set_var`).
+    pub(crate) async fn decommission_with_root(
+        &self,
+        id: &ManagedSessionId,
+        managed_root: &Path,
+    ) -> Result<SessionRecord, ManagedError> {
         let mut record = self.get(id).await?;
 
         // Kill the runtime (best-effort).
@@ -72,36 +93,43 @@ impl SessionManager {
                      created by the session manager"
                 );
             } else {
-                // Owned: apply the belt-and-suspenders path-containment guard.
-                let config = TrustyToolsConfig::load();
-                let managed_root = workspace_root(&config);
-
-                if !is_safe_to_remove(ws, &managed_root) {
-                    warn!(
+                // Owned workspace: check existence first so a path that is
+                // already gone is not misreported as a containment failure.
+                if !ws.exists() {
+                    // Benign: the workspace was removed before decommission ran
+                    // (e.g. a prior partial teardown). The tombstone is still
+                    // written below; no further disk action is needed.
+                    tracing::debug!(
                         id = %id,
                         workspace = %ws.display(),
-                        root = %managed_root.display(),
-                        "decommission: skipping workspace removal — path fails \
-                         containment guard (outside managed root or unsafe path)"
-                    );
-                } else if ws.exists() {
-                    std::fs::remove_dir_all(ws).map_err(|e| {
-                        ManagedError::Io(std::io::Error::new(
-                            e.kind(),
-                            format!("remove workspace {:?}: {e}", ws),
-                        ))
-                    })?;
-                    info!(
-                        id = %id,
-                        workspace = %ws.display(),
-                        "decommission: owned workspace removed from disk"
+                        "decommission: owned workspace already absent — skipping removal"
                     );
                 } else {
-                    warn!(
-                        id = %id,
-                        workspace = %ws.display(),
-                        "decommission: workspace path absent (already removed?)"
-                    );
+                    // Workspace exists: apply the belt-and-suspenders
+                    // path-containment guard before touching the filesystem.
+                    // Only paths that exist but are OUTSIDE the managed root
+                    // (or are otherwise unsafe) reach this warning.
+                    if !is_safe_to_remove(ws, managed_root) {
+                        warn!(
+                            id = %id,
+                            workspace = %ws.display(),
+                            root = %managed_root.display(),
+                            "decommission: skipping workspace removal — path fails \
+                             containment guard (outside managed root or unsafe path)"
+                        );
+                    } else {
+                        std::fs::remove_dir_all(ws).map_err(|e| {
+                            ManagedError::Io(std::io::Error::new(
+                                e.kind(),
+                                format!("remove workspace {:?}: {e}", ws),
+                            ))
+                        })?;
+                        info!(
+                            id = %id,
+                            workspace = %ws.display(),
+                            "decommission: owned workspace removed from disk"
+                        );
+                    }
                 }
             }
         }

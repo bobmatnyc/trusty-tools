@@ -530,6 +530,7 @@ async fn handler_spawn_creates_tmux_at_workspace_cwd() {
             Some(git_ref.into()),
             trusty_mpm::runtime::RuntimeKind::default(),
             false,
+            false,
         )
         .await
         .expect("create_with_id");
@@ -674,6 +675,7 @@ async fn tcode_session_spawns_and_accepts_commands() {
             Some("main".into()),
             RuntimeKind::Tcode,
             false,
+            false,
         )
         .await
         .expect("create_with_id");
@@ -808,6 +810,7 @@ async fn resume_managed_typed_invalid_state_is_conflict() {
             Some("main".to_string()),
             ResumeRuntimeKind::default(),
             false,
+            false,
         )
         .await
         .expect("seed session");
@@ -859,6 +862,7 @@ async fn front_gate_answer_unblocks_spawn() {
             Some("https://github.com/owner/repo".to_string()),
             Some("main".to_string()),
             ResumeRuntimeKind::default(),
+            false,
             false,
         )
         .await
@@ -1032,6 +1036,7 @@ async fn decommission_ephemeral_route_tears_down_only_ephemeral() {
                 Some("main".to_string()),
                 ResumeRuntimeKind::default(),
                 ephemeral,
+                false,
             )
             .await
             .expect("seed session");
@@ -1099,6 +1104,7 @@ async fn prune_route_dry_run_reports() {
             Some("main".to_string()),
             ResumeRuntimeKind::default(),
             true,
+            false,
         )
         .await
         .expect("seed ephemeral");

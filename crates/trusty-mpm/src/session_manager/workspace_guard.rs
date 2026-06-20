@@ -34,9 +34,11 @@ use tracing::warn;
 /// `is_safe_to_remove_rejects_home`, `is_safe_to_remove_rejects_shallow_path`,
 /// `is_safe_to_remove_accepts_valid_child` in this module.
 pub(crate) fn is_safe_to_remove(workspace_path: &Path, managed_root: &Path) -> bool {
-    // Reject suspiciously shallow paths before trying to canonicalize them.
-    // A real SM-provisioned workspace always nests at least 3 segments under
-    // the root (e.g. <root>/<owner>/<repo>/<session-id>/).
+    // Reject suspiciously shallow ABSOLUTE paths before canonicalizing.
+    // This counts components from the filesystem root (e.g. `/` counts 1,
+    // `/tmp` counts 2) as a coarse guard against catastrophic paths like `/`
+    // or `/tmp` — NOT as a measure of depth relative to the managed root.
+    // The real containment check (canonicalize + starts_with) follows below.
     let component_count = workspace_path.components().count();
     if component_count < 3 {
         warn!(
