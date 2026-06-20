@@ -230,6 +230,36 @@ pub fn load_pending(root: &Path) -> Option<PendingPairCode> {
     }
 }
 
+/// Atomically claim and load the outstanding pending pairing code from `root`.
+///
+/// Why: confirming a code must be atomic so two concurrent `/pair` requests to
+/// different daemon processes cannot both read the file before either deletes it.
+/// What: renames `pending_pair.json` to a PID-specific temp file first; only the
+/// process that succeeds at the rename "wins" the claim. Returns `Some(pending)`
+/// if claimed and parseable; `None` otherwise. The temp file is deleted.
+/// Test: `concurrent_pairing_confirms`.
+pub fn claim_pending(root: &Path) -> Option<PendingPairCode> {
+    let path = pending_path(root);
+    let tmp = path.with_extension(format!("json.claim.{}", std::process::id()));
+
+    // Atomically claim ownership of the file by renaming it.
+    if std::fs::rename(&path, &tmp).is_err() {
+        return None;
+    }
+
+    let contents = std::fs::read_to_string(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    let contents = contents.ok()?;
+
+    match serde_json::from_str::<PendingPairCode>(&contents) {
+        Ok(pending) => Some(pending),
+        Err(e) => {
+            tracing::warn!("ignoring malformed {}: {e}", tmp.display());
+            None
+        }
+    }
+}
+
 /// Delete the outstanding pending pairing code under `root`.
 ///
 /// Why: a code is single-use — once confirmed (or explicitly invalidated) the
