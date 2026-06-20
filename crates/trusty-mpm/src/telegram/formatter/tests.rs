@@ -325,3 +325,115 @@ fn format_health_up_and_down() {
     assert!(down_text.contains("unreachable"));
     assert!(!down_text.contains("fleet:"));
 }
+
+// --- Issue #1514: HTML-escape for CommandResult::Help and ampersands ----------
+
+/// Help text angle-bracket placeholders must not appear raw in the output.
+///
+/// Why: `help_text()` contains lines like `/status <id> — Session status`;
+/// sending that under `ParseMode::Html` causes Telegram to reject `<id>` as an
+/// unsupported HTML start tag, silently dropping the reply (issue #1514).
+/// What: `TelegramFormatter::format` on a `CommandResult::Help` must escape
+/// `<` and `>` to `&lt;` and `&gt;`.
+/// Test: this function IS the test.
+#[test]
+fn help_escapes_angle_bracket_placeholders() {
+    // Simulate the real help_text which contains lines like `/status <id> — …`
+    let help = CommandResult::Help("/status <id> — Session status".into());
+    let text = TelegramFormatter::format(&help);
+    assert!(
+        text.contains("&lt;id&gt;"),
+        "angle-bracket placeholders must be escaped to &lt;/&gt;: {text}"
+    );
+    assert!(
+        !text.contains("<id>"),
+        "raw <id> must not appear in output (Telegram rejects it): {text}"
+    );
+}
+
+/// Intentional HTML formatting tags emitted by other variants must be preserved.
+///
+/// Why: the fix for #1514 escapes Help text but must NOT double-escape tags that
+/// other `CommandResult` arms write deliberately (e.g. `<b>`, `<code>`, `<pre>`).
+/// What: a `CommandResult::Sessions` reply is confirmed to still carry the
+/// intentional `<b>` tag without it being escaped to `&lt;b&gt;`.
+/// Test: this function IS the test.
+#[test]
+fn intentional_html_tags_are_preserved_in_other_variants() {
+    use crate::client::SessionSummary;
+    let result = CommandResult::Sessions(vec![SessionSummary {
+        id: "abc12345-0000".into(),
+        status: "active".into(),
+        workdir: "/tmp/safe".into(),
+    }]);
+    let text = TelegramFormatter::format(&result);
+    // The sessions formatter writes `<b>trusty-mpm sessions</b>` intentionally.
+    assert!(
+        text.contains("<b>trusty-mpm sessions</b>"),
+        "intentional <b> tags must be preserved, not escaped: {text}"
+    );
+    assert!(
+        !text.contains("&lt;b&gt;"),
+        "intentional <b> must not be double-escaped: {text}"
+    );
+}
+
+/// Ampersands in Help text must be escaped to `&amp;`.
+///
+/// Why: `&` is an HTML-significant character; sending `&foo` under
+/// `ParseMode::Html` causes Telegram to misparse or reject the message.
+/// What: `TelegramFormatter::format` on a `CommandResult::Help` that contains
+/// `&` must emit `&amp;` in its place.
+/// Test: this function IS the test.
+#[test]
+fn help_escapes_ampersand() {
+    let help = CommandResult::Help("options: -a & -b".into());
+    let text = TelegramFormatter::format(&help);
+    assert!(
+        text.contains("&amp;"),
+        "ampersand must be escaped to &amp;: {text}"
+    );
+    assert!(
+        !text.contains(" & "),
+        "raw & must not appear in formatted help output: {text}"
+    );
+}
+
+/// Error messages with HTML-significant chars must be escaped (issue #1514).
+///
+/// Why: error strings can originate from daemon internals and may contain
+/// `<stdin>`, path fragments with `&`, or other HTML-significant characters.
+/// Under `ParseMode::Html` Telegram rejects or silently drops messages with
+/// bare `<`, `>`, or `&` in the body — the same class of bug as the Help-arm
+/// fix for #1514. The `CommandResult::Error` arm must run `msg` through
+/// `html_escape` before interpolation.
+/// What: `TelegramFormatter::format` on a `CommandResult::Error` carrying a
+/// message with `<`, `>`, and `&` must emit the properly escaped entities and
+/// must NOT pass raw HTML-significant characters through to the output.
+/// Test: this function IS the test.
+#[test]
+fn error_escapes_html_significant_chars() {
+    let result = CommandResult::Error("<stdin> & co".into());
+    let text = TelegramFormatter::format(&result);
+    assert!(
+        text.contains("&lt;stdin&gt;"),
+        "< and > in error msg must be escaped to &lt;/&gt;: {text}"
+    );
+    assert!(
+        text.contains("&amp;"),
+        "& in error msg must be escaped to &amp;: {text}"
+    );
+    assert!(
+        !text.contains("<stdin>"),
+        "raw <stdin> must not appear in Error output (Telegram rejects it): {text}"
+    );
+    assert!(
+        !text.contains(" & "),
+        "raw & must not appear in Error output: {text}"
+    );
+    // The ❌ prefix must still be present.
+    assert!(
+        text.contains("❌"),
+        "Error prefix emoji must be preserved: {text}"
+    );
+}

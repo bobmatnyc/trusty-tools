@@ -32,10 +32,17 @@ impl TelegramFormatter {
     /// Render a [`CommandResult`] into an HTML message body.
     ///
     /// Why: every command's reply text is produced here so presentation is
-    /// consistent and testable.
+    /// consistent and testable. All dynamic / daemon-sourced text is run through
+    /// [`html_escape`] before interpolation so `ParseMode::Html` never encounters
+    /// bare `<`, `>`, or `&` characters — including the `<arg>` placeholders in
+    /// `CommandResult::Help` that previously caused Telegram to silently drop the
+    /// reply (issue #1514).
     /// What: matches each variant and returns an HTML-formatted string suitable
-    /// for teloxide's `ParseMode::Html`.
-    /// Test: `format_sessions_*`, `pair_code_command_formats_correctly`, etc.
+    /// for teloxide's `ParseMode::Html`. Intentional HTML tags (e.g. `<b>`,
+    /// `<code>`, `<pre>`) are written as literals; user/daemon-sourced content is
+    /// always HTML-escaped before insertion.
+    /// Test: `format_sessions_*`, `pair_code_command_formats_correctly`,
+    /// `help_escapes_angle_bracket_placeholders`, etc.
     pub fn format(result: &CommandResult) -> String {
         match result {
             CommandResult::Sessions(sessions) => {
@@ -291,9 +298,9 @@ impl TelegramFormatter {
                 html_escape(action),
                 html_escape(state),
             ),
-            CommandResult::Help(text) => text.clone(),
+            CommandResult::Help(text) => html_escape(text),
             CommandResult::Health(report) => format_health(report),
-            CommandResult::Error(msg) => format!("❌ {msg}"),
+            CommandResult::Error(msg) => format!("❌ {}", html_escape(msg)),
         }
     }
 
