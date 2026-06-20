@@ -58,6 +58,19 @@ pub use claude_config_routes::*;
 pub mod coordinator_routes;
 pub use coordinator_routes::*;
 
+/// The Web control-surface route (`GET /web`, DOC-20 §6 Phase 2 / ONB-3).
+///
+/// Why: ONB-3 names a Web control surface as a peer of the TUI/Telegram
+/// adapters. It is a *thin* presentation layer — a single static browser chat
+/// page that drives the EXISTING action-capable `POST /api/v1/sessions/chat`
+/// endpoint — so it embeds no session logic. Keeping it in a sibling module
+/// mirrors `coordinator_routes` and keeps `api.rs` focused.
+/// What: the `web_chat_page` handler (serves the embedded page); re-exported so
+/// `router` refers to it as `super::api::web_chat_page`.
+/// Test: `web_routes::web_chat_tests` drives the page and the `/web` route.
+pub mod web_routes;
+pub use web_routes::*;
+
 /// The loopback-only JSON-RPC dispatch endpoint (`POST /rpc`, #1221).
 ///
 /// Why: the `serve --stdio` bridge forwards MCP JSON-RPC envelopes to the durable
@@ -132,6 +145,10 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         // as the session context/chat endpoints; these are the canonical SM names.
         .route("/api/v1/session-manager/context", get(coordinator_context))
         .route("/api/v1/session-manager/chat", post(coordinator_chat))
+        // DOC-20 §6 Phase 2 / ONB-3: the Web control surface — a static browser
+        // chat page that drives the action-capable `/api/v1/sessions/chat`
+        // endpoint above. Thin adapter; no new session logic.
+        .route("/web", get(web_chat_page))
         .route("/tmux/sessions", get(list_tmux_sessions))
         .route("/tmux/sessions/{name}/snapshot", get(tmux_snapshot))
         .route("/tmux/adopt", post(adopt_tmux_session))
