@@ -161,3 +161,16 @@ pub mod tui;
 /// enabled by the `telegram` feature.
 #[cfg(feature = "telegram")]
 pub mod telegram;
+
+/// Slack remote-management bot (DOC-20 adapter, #1294).
+///
+/// Why: Slack is a peer control surface to the Telegram bot and the sessions TUI
+/// (DOC-18 §ONB-3) — an operator drives the managed fleet from Slack through the
+/// SAME chat-core nucleus (`CommandExecutor`), with NO duplicated session logic.
+/// What: a thin Socket-Mode adapter that parses Slack slash commands / messages
+/// into `TrustyCommand`, dispatches via `CommandExecutor`, renders results via
+/// `SlackFormatter`, and routes free text to the action-capable coordinator.
+/// Test: envelope parsing, command conversion, and result formatting are
+/// unit-tested; enabled by the `slack` feature.
+#[cfg(feature = "slack")]
+pub mod slack;

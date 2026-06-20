@@ -11,7 +11,8 @@
 use clap::Parser;
 
 use crate::cli::{
-    CatalogAction, Cli, Command, DEFAULT_URL, MetaAction, ProjectAction, SessionAction, TelegramCmd,
+    CatalogAction, Cli, Command, DEFAULT_URL, MetaAction, ProjectAction, SessionAction, SlackCmd,
+    TelegramCmd,
 };
 use crate::formatters::banner::{
     fallback_session_name, normalize_workdir, print_launch_banner,
@@ -666,6 +667,74 @@ fn cli_parses_telegram_start_alert_and_user_flags() {
             assert_eq!(allowed_user_id, Some(67890));
         }
         other => panic!("expected Telegram start, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_slack_stop() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "slack", "stop"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Slack {
+            cmd: SlackCmd::Stop
+        }
+    ));
+}
+
+#[test]
+fn cli_slack_requires_subcommand() {
+    // `slack` with no action is an error — it is a command group.
+    assert!(Cli::try_parse_from(["trusty-mpm", "slack"]).is_err());
+}
+
+#[test]
+fn cli_parses_slack_start_with_check() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "slack", "start", "--check"]).unwrap();
+    match cli.command {
+        Command::Slack {
+            cmd:
+                SlackCmd::Start {
+                    check,
+                    bot_token,
+                    app_token,
+                    ..
+                },
+        } => {
+            assert!(check);
+            assert_eq!(bot_token, None);
+            assert_eq!(app_token, None);
+        }
+        other => panic!("expected Slack start, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_slack_start_with_tokens() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "slack",
+        "start",
+        "--bot-token",
+        "xoxb-secret",
+        "--app-token",
+        "xapp-secret",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Slack {
+            cmd:
+                SlackCmd::Start {
+                    bot_token,
+                    app_token,
+                    check,
+                    ..
+                },
+        } => {
+            assert_eq!(bot_token.as_deref(), Some("xoxb-secret"));
+            assert_eq!(app_token.as_deref(), Some("xapp-secret"));
+            assert!(!check);
+        }
+        other => panic!("expected Slack start, got {other:?}"),
     }
 }
 

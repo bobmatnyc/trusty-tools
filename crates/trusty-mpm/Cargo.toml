@@ -18,8 +18,8 @@ description = "trusty-mpm: unified multi-agent orchestration platform (core, dae
 [features]
 default = ["cli", "daemon"]
 
-# `cli` gates the `tm` / `trusty-mpm` binary (embeds daemon + tui + telegram).
-cli = ["daemon", "tui", "telegram"]
+# `cli` gates the `tm` / `trusty-mpm` binary (embeds daemon + tui + telegram + slack).
+cli = ["daemon", "tui", "telegram", "slack"]
 
 # `daemon` gates the daemon library module and the `daemon` subcommand.
 # Activating `daemon` also pulls in `mcp` (the daemon implements OrchestratorBackend).
@@ -40,6 +40,12 @@ tui = ["dep:ratatui", "dep:crossterm"]
 
 # `telegram` gates the Telegram bot library module (`tm telegram`).
 telegram = ["dep:teloxide", "dep:tokio-util"]
+
+# `slack` gates the Slack bot library module (`tm slack`, DOC-20 adapter #1294).
+# Pulls the WebSocket client used for Slack Socket Mode plus the streaming
+# futures combinators it needs; kept opt-in (in `cli`'s default set, mirroring
+# `telegram`) so a `--no-default-features` build pays no Slack cost.
+slack = ["dep:tokio-tungstenite", "dep:futures-util"]
 
 # `bedrock` gates the Session Manager's AWS Bedrock provider (SM-2, DOC-14 §5.1).
 # NOT in `default`: it pulls the heavy `aws-sdk-bedrockruntime` stack, so the
@@ -190,6 +196,12 @@ crossterm = { workspace = true, optional = true }
 # telegram feature
 teloxide = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
+
+# slack feature (DOC-20 adapter #1294): Socket-Mode WebSocket client + stream
+# combinators. Same pinned version/features the trusty-agents crate already uses,
+# so no new Cargo.lock entries are introduced.
+tokio-tungstenite = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 
 # NOTE: trusty-mpm-gui is deliberately NOT a Cargo dependency. It is a
 # publish=false Tauri crate that cannot resolve on crates.io, so declaring it

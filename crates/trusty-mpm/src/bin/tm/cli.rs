@@ -122,6 +122,19 @@ pub(crate) enum Command {
         #[command(subcommand)]
         cmd: TelegramCmd,
     },
+    /// Manage the Slack remote-management bot (start, stop) — DOC-20 adapter #1294.
+    ///
+    /// Why: Slack is a peer control surface to the Telegram bot (DOC-18 §ONB-3),
+    /// driving the managed fleet through the SAME chat-core nucleus. It connects
+    /// in Socket Mode (no public webhook required), so the operator only needs a
+    /// Slack app with a bot token + app-level token.
+    /// What: `start` runs the Socket-Mode bot in the foreground; `stop` kills it.
+    /// Test: `cli_parses_slack_start`, `cli_parses_slack_stop`.
+    Slack {
+        /// Slack action to perform.
+        #[command(subcommand)]
+        cmd: SlackCmd,
+    },
     /// Install the bundled framework artifacts to `~/.trusty-mpm/framework/`.
     Install {
         /// Overwrite artifacts that already exist on disk.
@@ -748,6 +761,37 @@ pub(crate) enum TelegramCmd {
         check: bool,
     },
     /// Stop the Telegram bot process if running.
+    Stop,
+}
+
+/// Actions for the `slack` subcommand (DOC-20 adapter, #1294).
+///
+/// Why: the Slack bot mirrors the Telegram bot's lifecycle surface over the SAME
+/// chat-core nucleus. Pairing is NOT duplicated — Slack uses its own app-install
+/// flow (a bot token + app-level token), not the daemon pairing store — so only
+/// the `start`/`stop` lifecycle is exposed here.
+/// What: `Start` runs the Socket-Mode bot in the foreground; `Stop` kills it.
+/// Test: `cli_parses_slack_start`, `cli_parses_slack_stop`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum SlackCmd {
+    /// Start the Slack bot process (Socket Mode — no public webhook required).
+    Start {
+        /// Base URL of the trusty-mpm daemon.
+        #[arg(long, env = "TRUSTY_MPM_URL", default_value = DEFAULT_URL)]
+        url: String,
+        /// Slack bot token (`xoxb-…`). When omitted, resolved from `.env.local` /
+        /// `.env` / the `SLACK_BOT_TOKEN` environment variable.
+        #[arg(long)]
+        bot_token: Option<String>,
+        /// Slack app-level token (`xapp-…`, Socket Mode). When omitted, resolved
+        /// from `.env.local` / `.env` / the `SLACK_APP_TOKEN` environment variable.
+        #[arg(long)]
+        app_token: Option<String>,
+        /// Validate configuration and exit without connecting to Slack.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Stop the Slack bot process if running.
     Stop,
 }
 

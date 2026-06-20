@@ -5,7 +5,7 @@
 //! navigate.
 //! What: re-exports handler modules — `daemon`, `install`, `launch`,
 //! `managed`, `managed_route`, `meta`, `misc`, `project`, `services`,
-//! `session`, `supervisor`, `telegram`.
+//! `session`, `slack`, `supervisor`, `telegram`.
 //! Test: each module has its own unit tests; integration coverage lives in
 //! `tests.rs`.
 
@@ -23,6 +23,7 @@ pub(crate) mod repair;
 pub(crate) mod serve_stdio;
 pub(crate) mod services;
 pub(crate) mod session;
+pub(crate) mod slack;
 pub(crate) mod sm_serve;
 pub(crate) mod supervisor;
 pub(crate) mod telegram;

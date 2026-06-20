@@ -110,6 +110,9 @@ libc = "0.2"
 ratatui = "0.29"
 crossterm = "0.28"
 teloxide = { version = "0.13", features = ["macros"] }
+# Slack Socket-Mode WebSocket client (trusty-mpm `slack` feature, DOC-20 #1294).
+# Same pin/features trusty-agents already uses, so the lockfile is unchanged.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 # Progress bars / spinners. Shared rustup/cargo-style progress display lives in
 # the `trusty-progress` crate (#1315). Pinned to 0.17 to match the existing
 # local pins in trusty-search and tga; migrating those two crates to this
