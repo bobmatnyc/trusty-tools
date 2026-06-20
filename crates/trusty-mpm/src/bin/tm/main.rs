@@ -24,6 +24,7 @@ use commands::{
     repair::repair_deploy,
     services::services,
     session::session,
+    slack::slack,
     telegram::telegram,
 };
 
@@ -222,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Gui => launch_gui(),
         Command::Telegram { cmd } => telegram(&url, cmd).await,
+        Command::Slack { cmd } => slack(cmd).await,
         Command::Install { force } => install(force),
         Command::Hook => hook(&client, &url).await,
         Command::Daemon {
