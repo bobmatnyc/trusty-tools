@@ -441,3 +441,42 @@ fn pairing_reset_clears_disk() {
     assert_eq!(state.paired_chat_id(), None);
     assert!(crate::daemon::pairing_store::load(&root).is_none());
 }
+
+#[test]
+fn pairing_code_persists_to_disk() {
+    // Minting a code writes the shared pending_pair.json, the single source of
+    // truth that every confirm surface validates against (#1500).
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().to_path_buf();
+    let state = DaemonState::with_root(root.clone());
+    let code = state.generate_pair_code();
+    let pending = crate::daemon::pairing_store::load_pending(&root).expect("pending code on disk");
+    assert_eq!(pending.code, code);
+}
+
+#[test]
+fn pairing_confirms_shared_disk_code() {
+    // THE #1500 REGRESSION GUARD: a code minted on one DaemonState instance is
+    // confirmed on a DIFFERENT instance rooted at the same framework root, even
+    // though the second instance never held the code in its in-memory mutex.
+    // Before the shared on-disk pending store this returned false ("invalid
+    // code") and operators had to pre-seed pairing.json.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().to_path_buf();
+
+    let minting = DaemonState::with_root(root.clone());
+    let code = minting.generate_pair_code();
+
+    // A second, independent daemon instance (e.g. the ephemeral-port duplicate
+    // from #1499) shares the framework root but has an empty in-memory pair_code.
+    let confirming = DaemonState::with_root(root.clone());
+    assert!(
+        confirming.confirm_pair_code(&code, 31415),
+        "code minted on a sibling instance must validate via the shared store"
+    );
+    assert_eq!(confirming.paired_chat_id(), Some(31415));
+
+    // The shared pending code was consumed: a third instance cannot replay it.
+    let replay = DaemonState::with_root(root);
+    assert!(!replay.confirm_pair_code(&code, 999));
+}

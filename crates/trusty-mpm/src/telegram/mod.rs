@@ -17,6 +17,7 @@
 pub mod alerts;
 pub mod commands;
 pub mod formatter;
+pub mod supervisor;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -264,6 +265,48 @@ pub async fn run(
 
     shutdown.cancel();
     Ok(())
+}
+
+/// Run the Telegram bot under restart-on-exit supervision (#1499).
+///
+/// Why: the daemon auto-spawns the bot in the background; a bare spawn that logs
+/// once and ends on the first error (a 409 long-poll conflict, a network blip)
+/// left the Telegram surface silently dead until a full daemon restart. This
+/// wraps [`run`] in [`supervisor::supervise`] so a transient error self-heals
+/// with bounded exponential backoff, a permanent misconfiguration backs off and
+/// gives up loudly instead of tight-looping, and a daemon shutdown stops the bot
+/// promptly without blocking graceful shutdown.
+/// What: loops [`run`] via the supervisor, classifying each exit — `Ok(())` is a
+/// graceful stop, an error is classified by [`supervisor::classify_error`] into
+/// transient vs permanent. The `token`, `options`, and `url` are cloned per
+/// attempt so each restart gets a fresh bot. Returns when the bot stops
+/// gracefully, the permanent-failure budget is exhausted, or `shutdown` fires.
+/// Test: the restart/give-up/cancellation logic is covered by `supervisor::tests`
+/// against an injected factory; this thin adapter is exercised by running the
+/// daemon.
+pub async fn run_supervised(
+    url: String,
+    token: Option<String>,
+    options: BotOptions,
+    shutdown: CancellationToken,
+) {
+    let policy = supervisor::BackoffPolicy::default();
+    let factory = || {
+        let url = url.clone();
+        let token = token.clone();
+        let options = options.clone();
+        async move {
+            match run(url, token, false, options).await {
+                Ok(()) => supervisor::BotExit::Graceful,
+                Err(e) => {
+                    let exit = supervisor::classify_error(&e);
+                    tracing::warn!("telegram bot run returned an error: {e:#}");
+                    exit
+                }
+            }
+        }
+    };
+    supervisor::supervise(factory, policy, shutdown).await;
 }
 
 /// teloxide message handler: authorize, parse, execute, render, reply.
