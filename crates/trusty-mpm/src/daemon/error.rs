@@ -77,6 +77,18 @@ pub enum DaemonError {
     #[error("service unavailable: {0}")]
     ServiceUnavailable(String),
 
+    /// The request was rejected by a security guard (e.g. the cross-origin CSRF
+    /// guard on the browser-facing, action-capable chat endpoint).
+    ///
+    /// Why: distinct from [`OverseerBlocked`](Self::OverseerBlocked) (which is a
+    /// policy decision about a *session*), this is a transport-level rejection of
+    /// the *request itself* — it never reached business logic. A dedicated variant
+    /// keeps the operator message self-describing and maps cleanly to 403.
+    /// What: carries a human-readable reason; maps to HTTP 403 Forbidden.
+    /// Test: `error_status_codes_map`, and the origin-guard handler tests.
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     /// The request is syntactically valid but semantically un-fulfillable.
     ///
     /// Why: a precondition the daemon cannot satisfy (e.g. `POST /sessions`
@@ -101,7 +113,7 @@ impl DaemonError {
         match self {
             Self::SessionNotFound { .. } | Self::CheckpointNotFound { .. } => StatusCode::NOT_FOUND,
             Self::SessionNotActive { .. } => StatusCode::CONFLICT,
-            Self::OverseerBlocked { .. } => StatusCode::FORBIDDEN,
+            Self::OverseerBlocked { .. } | Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::InvalidRequest(_) | Self::InvalidPairCode => StatusCode::BAD_REQUEST,
             Self::TmuxUnavailable(_) | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -177,6 +189,10 @@ mod tests {
         assert_eq!(
             DaemonError::ServiceUnavailable("x".into()).status(),
             StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            DaemonError::Forbidden("x".into()).status(),
+            StatusCode::FORBIDDEN
         );
         assert_eq!(
             DaemonError::Unprocessable("x".into()).status(),

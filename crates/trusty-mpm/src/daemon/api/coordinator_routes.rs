@@ -13,8 +13,10 @@
 
 use std::sync::Arc;
 
+use axum::http::HeaderMap;
 use axum::{Json, extract::State};
 
+use crate::daemon::api::origin_guard::origin_allowed;
 use crate::daemon::coordinator::{
     CoordinatorContext, build_coordinator_context, coordinator_system_prompt, parse_session_prefix,
 };
@@ -156,8 +158,24 @@ pub async fn coordinator_context(
 )]
 pub async fn coordinator_chat(
     State(state): State<Arc<DaemonState>>,
+    headers: HeaderMap,
     Json(body): Json<CoordinatorChatRequest>,
 ) -> Result<Json<CoordinatorChatResponse>, DaemonError> {
+    // CSRF/origin guard for the browser surface (review #1503). The daemon binds
+    // loopback by default; the Web adapter (`GET /web`) drives THIS endpoint with
+    // `actions: true` from a browser, so a cross-origin page could otherwise POST
+    // here and trigger session actions. The guard rejects a request only when it
+    // carries a cross-origin `Origin` header — server-side callers (the Telegram
+    // adapter and TUI via reqwest, plus `curl`) send no `Origin` and always pass,
+    // so all existing behavior is preserved. Gating only the action-capable path
+    // keeps the read-only/text-only paths (and any non-browser `actions:false`
+    // caller) completely untouched.
+    if body.actions == Some(true) && !origin_allowed(&headers) {
+        return Err(DaemonError::Forbidden(
+            "cross-origin request to the action-capable chat endpoint is not allowed".to_string(),
+        ));
+    }
+
     let context = build_coordinator_context(&state);
 
     // A `@prefix:` message is a direct command — route it straight to the

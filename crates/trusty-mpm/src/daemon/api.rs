@@ -71,6 +71,19 @@ pub use coordinator_routes::*;
 pub mod web_routes;
 pub use web_routes::*;
 
+/// The CSRF/origin guard for the browser-facing, action-capable chat endpoint.
+///
+/// Why: the Web surface (`GET /web`) drives the state-mutating
+/// `POST /api/v1/sessions/chat` with `actions: true` from a browser; without an
+/// origin check a malicious cross-origin page could trigger session actions if
+/// the daemon were reachable off loopback. Keeping the policy in a sibling module
+/// makes it unit-testable in isolation and keeps `coordinator_routes` thin.
+/// What: re-exports [`origin_guard::origin_allowed`] so `coordinator_chat` can
+/// gate on it.
+/// Test: `origin_guard::origin_guard_tests`.
+pub mod origin_guard;
+pub use origin_guard::origin_allowed;
+
 /// The loopback-only JSON-RPC dispatch endpoint (`POST /rpc`, #1221).
 ///
 /// Why: the `serve --stdio` bridge forwards MCP JSON-RPC envelopes to the durable

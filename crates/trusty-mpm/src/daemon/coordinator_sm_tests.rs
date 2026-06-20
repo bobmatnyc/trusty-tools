@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::{Json, body::Body, http::Request};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -59,6 +59,7 @@ async fn sm_chat_returns_reply_and_cost() {
 
     let resp = coordinator_chat(
         State(state),
+        HeaderMap::new(),
         Json(CoordinatorChatRequest {
             message: "plan the migration".into(),
             history: Vec::new(),
@@ -88,6 +89,7 @@ async fn sm_chat_degraded_is_503() {
 
     let err = coordinator_chat(
         State(state),
+        HeaderMap::new(),
         Json(CoordinatorChatRequest {
             message: "anything".into(),
             history: Vec::new(),
@@ -124,6 +126,7 @@ async fn disabled_sm_falls_back_to_legacy_503() {
 
     let err = coordinator_chat(
         State(state),
+        HeaderMap::new(),
         Json(CoordinatorChatRequest {
             message: "what is happening?".into(),
             history: Vec::new(),
@@ -155,6 +158,7 @@ async fn coordinator_chat_action_path_returns_actions_taken() {
 
     let resp = coordinator_chat(
         State(state),
+        HeaderMap::new(),
         Json(CoordinatorChatRequest {
             message: "check sessions".into(),
             history: Vec::new(),
@@ -192,6 +196,7 @@ async fn coordinator_chat_actions_absent_is_text_only() {
 
     let resp = coordinator_chat(
         State(state),
+        HeaderMap::new(),
         Json(CoordinatorChatRequest {
             message: "plain chat".into(),
             history: Vec::new(),

@@ -40,6 +40,18 @@ const WEB_CHAT_HTML: &str = include_str!("web_chat.html");
 /// `content-type: text/html; charset=utf-8`). Always `200`; no state is touched,
 /// so it works even when the SM/LLM is unconfigured (the page surfaces the
 /// endpoint's `503` to the operator at send time).
+///
+/// Threat model (review #1503): this page drives the STATE-MUTATING, action-
+/// capable `POST /api/v1/sessions/chat` (`actions: true`), which can spawn/stop/
+/// mutate managed sessions. The daemon binds **loopback by default**, so the
+/// browser surface is normally only reachable from the same machine. If the
+/// daemon is ever bound to a non-loopback interface, the CSRF mitigation is the
+/// Origin guard on that POST handler
+/// ([`origin_allowed`](crate::daemon::api::origin_guard::origin_allowed)): a
+/// cross-origin browser POST is rejected with `403`, while same-origin/loopback
+/// requests and header-less server-side callers (Telegram/TUI via reqwest,
+/// `curl`) pass unchanged. This `GET /web` page itself is a read-only static
+/// asset and touches no state, so it carries no CSRF risk on its own.
 /// Test: `web_chat_page_serves_html`, and the router-level
 /// `web_route_returns_200_html` in `web_chat_tests`.
 #[utoipa::path(
