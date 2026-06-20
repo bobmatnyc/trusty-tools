@@ -511,15 +511,15 @@ mod tests {
             resolved, assembled,
             "no-override resolve must be byte-identical to assemble"
         );
-        // The harness section itself contains internal `---` separators (it is a
-        // concatenation of 4 sub-documents), so the total split count is > 5.
-        // Assert at least 5 top-level sections are present (SM_INSTRUCTIONS +
-        // SM_HARNESS-body + SM_WORKFLOW + SM_TOOLS + BASE_SM, with the harness
-        // body contributing additional `---` delimiters from its sub-sections).
+        // The harness block joins its four sub-sections with plain "\n\n" (not
+        // "---"), so it does NOT embed SECTION_SEPARATOR internally. The assembled
+        // SM prompt contains exactly 5 top-level sections separated by "---":
+        // SM_INSTRUCTIONS → SM_HARNESS → SM_WORKFLOW → SM_TOOLS → BASE_SM.
         let section_count = assembled.split(SECTION_SEPARATOR).count();
-        assert!(
-            section_count >= 5,
-            "at least five sections expected (got {section_count})"
+        assert_eq!(
+            section_count, 5,
+            "exactly five top-level sections expected (got {section_count}); \
+             the harness block must not embed the top-level separator"
         );
     }
 

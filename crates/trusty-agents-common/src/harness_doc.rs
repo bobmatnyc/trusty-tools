@@ -68,19 +68,23 @@ pub fn overseer() -> &'static str {
 
 /// Full harness-understanding document: all four sections concatenated in
 /// order (agnostic → mpm_session_manager → tcode → overseer), separated by
-/// `\n\n---\n\n`.
+/// a plain `"\n\n"`.
 ///
-/// Why: SM prompt assembly and tests need the full body; structured accessors
-///      satisfy consumers that only need one section.
+/// Why: SM prompt assembly joins top-level sections with `SECTION_SEPARATOR`
+///      (`"\n\n---\n\n"`). Using that same separator internally would cause
+///      the harness block to fragment into spurious top-level sections when
+///      the assembler splits on `---`. Each sub-section starts with its own
+///      `#`/`##` heading, so a plain double-newline is sufficient visual
+///      separation without colliding with the outer separator.
 /// What: Concatenates `agnostic()`, `mpm_session_manager()`, `tcode()`, and
-///       `overseer()` with a `\n\n---\n\n` separator.
+///       `overseer()` with a `"\n\n"` separator (not `---`).
 /// Test: `full_doc_contains_all_markers`, `full_doc_sum_of_parts`.
 pub fn harness_understanding() -> String {
     [agnostic(), mpm_session_manager(), tcode(), overseer()]
         .iter()
         .map(|s| s.trim())
         .collect::<Vec<_>>()
-        .join("\n\n---\n\n")
+        .join("\n\n")
 }
 
 #[cfg(test)]
@@ -167,17 +171,40 @@ mod tests {
 
     #[test]
     fn full_doc_sum_of_parts() {
-        // The full doc is a join of the four parts; every part's content must
-        // appear somewhere in the full doc.
+        // The full doc is a join of the four parts; every part's distinctive
+        // body content must appear in the full doc. Each anchor is chosen from
+        // the interior body of that section — unique to it and stable against
+        // heading or prefix changes.
         let doc = harness_understanding();
-        // Take first 50 chars of each trimmed part as a unique anchor
-        let parts = [agnostic(), mpm_session_manager(), tcode(), overseer()];
-        for part in &parts {
-            let anchor: String = part.trim().chars().take(50).collect();
-            assert!(
-                doc.contains(anchor.trim()),
-                "full doc missing content from part starting: {anchor:?}"
-            );
-        }
+
+        // AGNOSTIC: the canonical mental-model section (DOC-21 §1).
+        // "WHEN-TO-INTERVENE" is the unique label for the intervention protocol
+        // described only in the agnostic section.
+        assert!(
+            doc.contains("WHEN-TO-INTERVENE"),
+            "full doc must contain AGNOSTIC body phrase 'WHEN-TO-INTERVENE'"
+        );
+
+        // MPM_SM: session-manager specifics (DOC-21 SM Wiring section).
+        // "RawObservation" is the struct name unique to the SM two-tier model.
+        assert!(
+            doc.contains("RawObservation"),
+            "full doc must contain MPM_SM body phrase 'RawObservation'"
+        );
+
+        // TCODE: tcode-specific signals (DOC-21 tcode section).
+        // "structured NDJSON event lines" is the unique description of tcode's
+        // event emission that does not appear in the other three sections.
+        assert!(
+            doc.contains("structured NDJSON event lines"),
+            "full doc must contain TCODE body phrase 'structured NDJSON event lines'"
+        );
+
+        // OVERSEER: the t-code-as-overseer contract (DOC-21 Overseer section).
+        // "HarnessSource::Code" is the reserved source tag unique to this section.
+        assert!(
+            doc.contains("HarnessSource::Code"),
+            "full doc must contain OVERSEER body phrase 'HarnessSource::Code'"
+        );
     }
 }
