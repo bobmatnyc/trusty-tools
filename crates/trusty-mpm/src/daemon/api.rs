@@ -153,7 +153,9 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         // leaves (`context`, `chat`) avoid colliding with the managed-session
         // routes below.
         .route("/api/v1/sessions/context", get(coordinator_context))
-        .route("/api/v1/sessions/chat", post(coordinator_chat))
+        // Use the shared `COORDINATOR_CHAT_PATH` constant so the registered route
+        // and the browser Web adapter (`web_chat.html`) can never drift (#1503).
+        .route(COORDINATOR_CHAT_PATH, post(coordinator_chat))
         // DOC-14 D0.1: `/session-manager/*` aliases resolve to the SAME handlers
         // as the session context/chat endpoints; these are the canonical SM names.
         .route("/api/v1/session-manager/context", get(coordinator_context))

@@ -17,6 +17,20 @@ use axum::http::HeaderMap;
 use axum::{Json, extract::State};
 
 use crate::daemon::api::origin_guard::origin_allowed;
+
+/// The canonical registered path for the coordinator chat endpoint.
+///
+/// Why: this single constant is the ONE source of truth for the chat route path,
+/// shared by the router registration (`api::router`) and the browser Web adapter
+/// (`web_chat.html` is asserted against it). Sharing it kills the route/HTML
+/// drift class the #1503 review flagged — if the route path ever changes, the
+/// `web_chat_path_is_registered` test fails until the page is updated to match.
+/// What: the literal `/api/v1/sessions/chat` path the `coordinator_chat` handler
+/// is mounted at (its `/api/v1/session-manager/chat` alias maps to the same
+/// handler; both are registered in `api::router`).
+/// Test: `web_routes::web_chat_tests::web_chat_path_is_registered`, and the
+/// route-registration test `router_registers_coordinator_chat_path`.
+pub const COORDINATOR_CHAT_PATH: &str = "/api/v1/sessions/chat";
 use crate::daemon::coordinator::{
     CoordinatorContext, build_coordinator_context, coordinator_system_prompt, parse_session_prefix,
 };
@@ -162,15 +176,21 @@ pub async fn coordinator_chat(
     Json(body): Json<CoordinatorChatRequest>,
 ) -> Result<Json<CoordinatorChatResponse>, DaemonError> {
     // CSRF/origin guard for the browser surface (review #1503). The daemon binds
-    // loopback by default; the Web adapter (`GET /web`) drives THIS endpoint with
-    // `actions: true` from a browser, so a cross-origin page could otherwise POST
-    // here and trigger session actions. The guard rejects a request only when it
-    // carries a cross-origin `Origin` header — server-side callers (the Telegram
-    // adapter and TUI via reqwest, plus `curl`) send no `Origin` and always pass,
-    // so all existing behavior is preserved. Gating only the action-capable path
-    // keeps the read-only/text-only paths (and any non-browser `actions:false`
-    // caller) completely untouched.
-    if body.actions == Some(true) && !origin_allowed(&headers) {
+    // loopback by default; the Web adapter (`GET /web`) drives THIS endpoint from
+    // a browser, so a cross-origin page could otherwise POST here and trigger
+    // session actions. The guard rejects a request only when it carries a
+    // cross-origin `Origin` header — server-side callers (the Telegram adapter and
+    // TUI via reqwest, plus `curl`) send no `Origin` and always pass, so all
+    // existing behavior is preserved.
+    //
+    // Defense-in-depth (review #1503): the guard fires whenever actions are NOT
+    // explicitly disabled (`actions != Some(false)`), so an OMITTED or `null`
+    // `actions` field is guarded too. Rationale: a cross-origin browser attacker
+    // controls the body and would simply omit `actions` to dodge a guard keyed on
+    // `Some(true)`; since the SM path treats an absent `actions` as text-only it
+    // costs the legitimate browser nothing to be checked, while only an explicit
+    // `actions: false` (a deliberate text-only opt-out) skips the check.
+    if csrf_guard_applies(body.actions) && !origin_allowed(&headers) {
         return Err(DaemonError::Forbidden(
             "cross-origin request to the action-capable chat endpoint is not allowed".to_string(),
         ));
@@ -246,6 +266,24 @@ pub async fn coordinator_chat(
         conv_id: None,
         actions_taken: None,
     }))
+}
+
+/// Whether the CSRF/origin guard applies to a chat request, given its `actions`
+/// field.
+///
+/// Why: defense-in-depth (review #1503). A guard keyed strictly on
+/// `actions == Some(true)` is trivially bypassed — a cross-origin browser
+/// attacker controls the JSON body and would simply OMIT `actions` (or send
+/// `null`), which the SM path already treats as a chat turn. So the guard must
+/// fire whenever actions are not EXPLICITLY disabled. Pulling the decision into a
+/// pure `Option<bool> → bool` function makes the policy provable without a tokio
+/// runtime or a wired overseer (the handler-level tests need both).
+/// What: returns `true` for `None` (omitted/null) and `Some(true)`, and `false`
+/// ONLY for `Some(false)` — a deliberate text-only opt-out that skips the check.
+/// Test: `csrf_guard_tests::{guard_fires_when_actions_omitted,
+/// guard_fires_when_actions_true, guard_skips_when_actions_explicitly_false}`.
+fn csrf_guard_applies(actions: Option<bool>) -> bool {
+    actions != Some(false)
 }
 
 /// Drive one Session Manager chat turn and map it onto the wire response (SM-7).
@@ -326,5 +364,39 @@ async fn route_through_action_loop(
         })),
         Err(SmAgentError::Degraded(notice)) => Err(DaemonError::ServiceUnavailable(notice)),
         Err(e) => Err(DaemonError::Internal(e.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod csrf_guard_tests {
+    use super::csrf_guard_applies;
+
+    /// Why: the original guard fired only on `Some(true)`, so an attacker omitting
+    /// `actions` dodged it (review #1503). The hardened guard MUST fire on an
+    /// omitted/null `actions` field — this is the whole point of the fix.
+    /// What: `None` (omitted/null `actions`) → guard applies.
+    /// Test: this is the test.
+    #[test]
+    fn guard_fires_when_actions_omitted() {
+        assert!(csrf_guard_applies(None));
+    }
+
+    /// Why: the explicit action opt-in is the highest-risk path and must always be
+    /// guarded.
+    /// What: `Some(true)` → guard applies.
+    /// Test: this is the test.
+    #[test]
+    fn guard_fires_when_actions_true() {
+        assert!(csrf_guard_applies(Some(true)));
+    }
+
+    /// Why: a deliberate `actions: false` is a non-mutating text-only opt-out; the
+    /// guard skips it so a non-browser `actions:false` caller stays untouched (and
+    /// the read-only contract is preserved).
+    /// What: `Some(false)` → guard does NOT apply.
+    /// Test: this is the test.
+    #[test]
+    fn guard_skips_when_actions_explicitly_false() {
+        assert!(!csrf_guard_applies(Some(false)));
     }
 }

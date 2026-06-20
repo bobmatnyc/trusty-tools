@@ -84,12 +84,18 @@ fn header_str(headers: &HeaderMap, name: axum::http::HeaderName) -> Option<&str>
 /// stripped. Doing it by hand avoids pulling in a URL-parser dependency for one
 /// header.
 /// What: strips a leading `scheme://` (everything up to and including the first
-/// `://`) and returns the remainder, or `None` when there is no `://` (e.g. the
-/// literal `null`, which browsers send for opaque origins).
-/// Test: exercised indirectly via [`origin_allowed`] tests
-/// (`cross_origin_rejected` includes a `null` origin).
+/// `://`) AND any trailing `/path` component, returning just the `host[:port]`
+/// authority; returns `None` when there is no `://` (e.g. the literal `null`,
+/// which browsers send for opaque origins). The trailing-path strip means an
+/// `Origin` like `http://localhost:8765/` (a stray slash) is still treated as the
+/// `localhost:8765` authority rather than `localhost:8765/`, which would never
+/// match a `Host` and would wrongly be rejected.
+/// Test: exercised via [`origin_allowed`] tests (`cross_origin_rejected` includes
+/// a `null` origin; `same_origin_with_trailing_slash_allowed` covers the slash).
 fn authority_of(origin: &str) -> Option<&str> {
-    origin.split_once("://").map(|(_scheme, rest)| rest)
+    origin
+        .split_once("://")
+        .map(|(_scheme, rest)| rest.split('/').next().unwrap_or(rest))
 }
 
 /// Whether an authority (`host[:port]`) names the loopback interface.
@@ -181,6 +187,26 @@ mod origin_guard_tests {
         assert!(origin_allowed(&headers(
             Some("https://Daemon.Internal"),
             Some("daemon.internal")
+        )));
+    }
+
+    /// Why: some browsers/proxies can present an `Origin` with a trailing slash
+    /// (e.g. `http://daemon.internal:9000/`). Without stripping the path component
+    /// the authority would be `daemon.internal:9000/`, which never equals the
+    /// `Host` `daemon.internal:9000` — so a legitimate same-origin POST would be
+    /// wrongly rejected (review #1503). It must be treated as same-origin.
+    /// What: an `Origin` with a trailing slash whose authority matches the `Host`
+    /// is allowed; a loopback `Origin` with a trailing slash is also allowed.
+    /// Test: this is the test.
+    #[test]
+    fn same_origin_with_trailing_slash_allowed() {
+        assert!(origin_allowed(&headers(
+            Some("https://daemon.internal:9000/"),
+            Some("daemon.internal:9000")
+        )));
+        assert!(origin_allowed(&headers(
+            Some("http://127.0.0.1:8765/"),
+            Some("127.0.0.1:8765")
         )));
     }
 

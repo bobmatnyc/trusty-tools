@@ -85,7 +85,7 @@ mod web_chat_tests {
         assert!(!body.is_empty(), "embedded page must not be empty");
         assert!(body.contains("<!DOCTYPE html>"), "must be an HTML document");
         assert!(
-            body.contains("/api/v1/sessions/chat"),
+            body.contains(crate::daemon::api::coordinator_routes::COORDINATOR_CHAT_PATH),
             "page must POST to the chat-core endpoint"
         );
         assert!(
@@ -134,6 +134,35 @@ mod web_chat_tests {
         assert!(
             ctype.starts_with("text/html"),
             "expected text/html, got {ctype:?}"
+        );
+    }
+
+    /// Why: this is the EXACT drift the #1503 review feared — the browser page
+    /// POSTing to a path the router never registered (a silent 404). The fix
+    /// routes BOTH the router registration (`api::router`) and this page through
+    /// ONE shared constant, `COORDINATOR_CHAT_PATH`; this test pins the page's
+    /// `fetch("…")` literal to that constant. Because the router mounts the route
+    /// with the SAME constant (`.route(COORDINATOR_CHAT_PATH, …)`), agreement here
+    /// proves the page targets a registered route — turning a would-be runtime 404
+    /// into a test failure. Kept pure-string (no router/`DaemonState` build) so it
+    /// runs without the daemon-spawn blocking-runtime panic that the router-level
+    /// `web_route_returns_200_html` hits in the local test env.
+    /// What: asserts the embedded page contains `fetch("<COORDINATOR_CHAT_PATH>"`,
+    /// the verbatim shared constant the router registers.
+    /// Test: this is the test.
+    #[test]
+    fn web_chat_path_is_registered() {
+        use crate::daemon::api::coordinator_routes::COORDINATOR_CHAT_PATH;
+
+        // The page must call the shared constant verbatim. We locate the
+        // `fetch("…")` literal so a renamed/typo'd path in the HTML is caught.
+        // The router mounts this SAME constant, so a match proves the page POSTs to
+        // a registered route (no 404).
+        let needle = format!("fetch(\"{COORDINATOR_CHAT_PATH}\"");
+        assert!(
+            WEB_CHAT_HTML.contains(&needle),
+            "web_chat.html must fetch the shared COORDINATOR_CHAT_PATH ({COORDINATOR_CHAT_PATH:?}) \
+             that api::router registers; route/HTML drift would otherwise 404"
         );
     }
 }
