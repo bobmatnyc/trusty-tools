@@ -286,9 +286,12 @@ pub(crate) async fn session_prune(
         .send()
         .await?;
     if resp.status() == reqwest::StatusCode::BAD_REQUEST {
+        // Fail closed: a bad `--state` is a usage error, so surface it on STDERR
+        // and return an error → non-zero exit, so scripts/CI don't silently
+        // "succeed" on a rejected prune (#1508 review fix).
         let msg = resp.text().await.unwrap_or_default();
-        println!("error: {msg}");
-        return Ok(());
+        eprintln!("error: {msg}");
+        return Err(anyhow::anyhow!("prune rejected: {msg}"));
     }
     let body: serde_json::Value = resp.error_for_status()?.json().await?;
     let sessions = body

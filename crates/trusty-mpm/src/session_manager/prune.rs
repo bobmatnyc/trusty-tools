@@ -284,7 +284,13 @@ impl SessionManager {
     ) -> Result<PruneOutcome, ManagedError> {
         // Snapshot the full set ONCE (reloads-on-read so out-of-process writes are
         // seen). We then mutate per record below, each of which re-reads/saves.
-        let all = self.store.write().await.all().await?;
+        //
+        // Pick up any out-of-process write under a brief write lock (the reload is
+        // `&mut`), then drop it and take the read-only snapshot under a READ lock so
+        // the (in-memory) `cached_all()` clone never blocks concurrent store readers
+        // (#1508 review fix). `cached_all()` is `&self` and does no I/O.
+        self.store.write().await.reload_if_changed().await?;
+        let all = self.store.read().await.cached_all();
 
         // Select the in-scope records, applying the running-state safety gate.
         let targets: Vec<SessionRecord> = all
@@ -378,7 +384,11 @@ impl SessionManager {
     /// Test: `reap_aged_ephemeral_picks_old_ephemeral_only`.
     pub async fn reap_aged_ephemeral(&self, max_age: Duration) -> Result<usize, ManagedError> {
         let cutoff = Utc::now() - max_age;
-        let all = self.store.write().await.all().await?;
+        // Reload under a brief write lock (the reload is `&mut`), then snapshot under
+        // a READ lock via the in-memory, I/O-free `cached_all()` so the snapshot
+        // clone never blocks concurrent store readers (#1508 review fix).
+        self.store.write().await.reload_if_changed().await?;
+        let all = self.store.read().await.cached_all();
         let stale: Vec<SessionRecord> = all
             .into_iter()
             .filter(|r| {
