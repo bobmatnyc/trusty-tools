@@ -398,3 +398,42 @@ fn help_escapes_ampersand() {
         "raw & must not appear in formatted help output: {text}"
     );
 }
+
+/// Error messages with HTML-significant chars must be escaped (issue #1514).
+///
+/// Why: error strings can originate from daemon internals and may contain
+/// `<stdin>`, path fragments with `&`, or other HTML-significant characters.
+/// Under `ParseMode::Html` Telegram rejects or silently drops messages with
+/// bare `<`, `>`, or `&` in the body — the same class of bug as the Help-arm
+/// fix for #1514. The `CommandResult::Error` arm must run `msg` through
+/// `html_escape` before interpolation.
+/// What: `TelegramFormatter::format` on a `CommandResult::Error` carrying a
+/// message with `<`, `>`, and `&` must emit the properly escaped entities and
+/// must NOT pass raw HTML-significant characters through to the output.
+/// Test: this function IS the test.
+#[test]
+fn error_escapes_html_significant_chars() {
+    let result = CommandResult::Error("<stdin> & co".into());
+    let text = TelegramFormatter::format(&result);
+    assert!(
+        text.contains("&lt;stdin&gt;"),
+        "< and > in error msg must be escaped to &lt;/&gt;: {text}"
+    );
+    assert!(
+        text.contains("&amp;"),
+        "& in error msg must be escaped to &amp;: {text}"
+    );
+    assert!(
+        !text.contains("<stdin>"),
+        "raw <stdin> must not appear in Error output (Telegram rejects it): {text}"
+    );
+    assert!(
+        !text.contains(" & "),
+        "raw & must not appear in Error output: {text}"
+    );
+    // The ❌ prefix must still be present.
+    assert!(
+        text.contains("❌"),
+        "Error prefix emoji must be preserved: {text}"
+    );
+}

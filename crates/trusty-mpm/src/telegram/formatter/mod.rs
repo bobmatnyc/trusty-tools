@@ -300,7 +300,7 @@ impl TelegramFormatter {
             ),
             CommandResult::Help(text) => html_escape(text),
             CommandResult::Health(report) => format_health(report),
-            CommandResult::Error(msg) => format!("❌ {msg}"),
+            CommandResult::Error(msg) => format!("❌ {}", html_escape(msg)),
         }
     }
 
