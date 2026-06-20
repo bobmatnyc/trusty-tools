@@ -86,6 +86,34 @@ pub enum TelegramCommand {
     /// Report daemon health.
     #[command(description = "Report daemon health (reachability, catalog, fleet)")]
     Health,
+    /// Launch a managed session — `/launch <workdir> | <task...>`.
+    // The argument tail is split on the first `|`: the left side is the
+    // workdir/repo (mapped to `repo_url` with an empty `git_ref`), the right side
+    // is the task. A plain `//` comment keeps the syntax note out of the
+    // teloxide-generated description (Telegram caps it at 256 chars).
+    #[command(description = "Launch a managed session: /launch <workdir> | <task>")]
+    Launch(String),
+    /// List managed (fleet) sessions.
+    #[command(description = "List managed fleet sessions")]
+    Fleet,
+    /// Get one managed session — `/get <id|name>`.
+    #[command(description = "Get a managed session by id or name")]
+    Get(String),
+    /// Send text to a managed session — `/msend <id|name> <text>`.
+    #[command(description = "Send text to a managed session")]
+    Msend(String),
+    /// Answer a managed session's pending decision — `/answer <id|name> <text>`.
+    #[command(description = "Answer a managed session's pending decision")]
+    Answer(String),
+    /// Inspect a managed session's activity — `/activity <id|name>`.
+    #[command(description = "Inspect a managed session's activity")]
+    Activity(String),
+    /// Resume a stopped managed session — `/resume <id|name>`.
+    #[command(description = "Resume a stopped managed session")]
+    Resume(String),
+    /// Decommission a managed session — `/decommission <id|name>`.
+    #[command(description = "Decommission a managed session (terminal)")]
+    Decommission(String),
     /// Show all commands.
     #[command(description = "Show all commands")]
     Help,
@@ -128,8 +156,74 @@ impl From<TelegramCommand> for TrustyCommand {
             TelegramCommand::Start(_) => TrustyCommand::Start,
             TelegramCommand::Doctor => TrustyCommand::Doctor,
             TelegramCommand::Health => TrustyCommand::Health,
+            TelegramCommand::Launch(args) => {
+                let (repo_url, task) = split_launch_args(&args);
+                TrustyCommand::ManagedNew {
+                    repo_url,
+                    git_ref: String::new(),
+                    task,
+                    name_hint: None,
+                    runtime: None,
+                }
+            }
+            TelegramCommand::Fleet => TrustyCommand::ManagedList,
+            TelegramCommand::Get(target) => TrustyCommand::ManagedGet {
+                target: target.trim().to_string(),
+            },
+            TelegramCommand::Msend(args) => {
+                let (target, text) = split_target_args(&args);
+                TrustyCommand::ManagedSend { target, text }
+            }
+            TelegramCommand::Answer(args) => {
+                let (target, answer) = split_target_args(&args);
+                TrustyCommand::ManagedAnswer { target, answer }
+            }
+            TelegramCommand::Activity(target) => TrustyCommand::ManagedActivity {
+                target: target.trim().to_string(),
+            },
+            TelegramCommand::Resume(target) => TrustyCommand::ManagedResume {
+                target: target.trim().to_string(),
+            },
+            TelegramCommand::Decommission(target) => TrustyCommand::ManagedDecommission {
+                target: target.trim().to_string(),
+            },
             TelegramCommand::Help => TrustyCommand::Help,
         }
+    }
+}
+
+/// Split a `/launch` argument tail into `(workdir, task)` on the first `|`.
+///
+/// Why: launching a managed session needs a workspace and a task; Telegram hands
+/// the whole tail as one string, so `/launch <workdir> | <task...>` is parsed
+/// here. The pipe keeps multi-word workdirs and tasks unambiguous without a
+/// fixed token count.
+/// What: returns the trimmed text before the first `|` as the workdir and the
+/// trimmed remainder as the task. With no `|`, the whole tail is treated as the
+/// workdir and the task is empty — the executor then reports the missing task
+/// (never a panic), and the help text documents the usage.
+/// Test: `split_launch_args_splits_on_pipe`, `launch_command_converts`.
+fn split_launch_args(args: &str) -> (String, String) {
+    match args.split_once('|') {
+        Some((workdir, task)) => (workdir.trim().to_string(), task.trim().to_string()),
+        None => (args.trim().to_string(), String::new()),
+    }
+}
+
+/// Split a managed `target <text...>` argument tail into `(target, text)`.
+///
+/// Why: `/msend` and `/answer` carry the session id/name as the first token and
+/// the (possibly multi-word) payload as the remainder; teloxide hands the whole
+/// tail as one string, so the split happens here.
+/// What: returns the first whitespace-separated token as `target` and the
+/// trimmed remainder as the payload; both are empty strings when absent (the
+/// executor then reports the missing argument rather than panicking).
+/// Test: `split_target_args_separates_target_and_text`, `msend_command_converts`.
+fn split_target_args(args: &str) -> (String, String) {
+    let trimmed = args.trim();
+    match trimmed.split_once(char::is_whitespace) {
+        Some((target, text)) => (target.to_string(), text.trim().to_string()),
+        None => (trimmed.to_string(), String::new()),
     }
 }
 
@@ -225,9 +319,10 @@ mod tests {
 
     #[test]
     fn bot_commands_lists_every_command() {
-        // teloxide's generated descriptor must enumerate all twenty commands.
+        // teloxide's generated descriptor must enumerate all commands: the 20
+        // legacy ones plus the 8 managed-fleet verbs added for the drive surface.
         let descriptions = TelegramCommand::bot_commands();
-        assert_eq!(descriptions.len(), 20);
+        assert_eq!(descriptions.len(), 28);
         assert!(descriptions.iter().any(|c| c.command == "/health"));
         assert!(descriptions.iter().any(|c| c.command == "/sessions"));
         assert!(descriptions.iter().any(|c| c.command == "/connect"));
@@ -238,6 +333,112 @@ mod tests {
         assert!(descriptions.iter().any(|c| c.command == "/send"));
         assert!(descriptions.iter().any(|c| c.command == "/discover"));
         assert!(descriptions.iter().any(|c| c.command == "/doctor"));
+        // The managed-fleet drive verbs.
+        assert!(descriptions.iter().any(|c| c.command == "/launch"));
+        assert!(descriptions.iter().any(|c| c.command == "/fleet"));
+        assert!(descriptions.iter().any(|c| c.command == "/get"));
+        assert!(descriptions.iter().any(|c| c.command == "/msend"));
+        assert!(descriptions.iter().any(|c| c.command == "/answer"));
+        assert!(descriptions.iter().any(|c| c.command == "/activity"));
+        assert!(descriptions.iter().any(|c| c.command == "/resume"));
+        assert!(descriptions.iter().any(|c| c.command == "/decommission"));
+    }
+
+    #[test]
+    fn split_launch_args_splits_on_pipe() {
+        // `/launch <workdir> | <task...>` splits on the first pipe; both sides
+        // are trimmed and the task may be multi-word.
+        let (workdir, task) = split_launch_args("/work/repo | run the full test suite");
+        assert_eq!(workdir, "/work/repo");
+        assert_eq!(task, "run the full test suite");
+        // With no pipe, the whole tail is the workdir and the task is empty.
+        let (workdir, task) = split_launch_args("/work/repo");
+        assert_eq!(workdir, "/work/repo");
+        assert!(task.is_empty());
+    }
+
+    #[test]
+    fn split_target_args_separates_target_and_text() {
+        // The first token is the target; the remainder (multi-word) is the text.
+        let (target, text) = split_target_args("sess-1 please continue now");
+        assert_eq!(target, "sess-1");
+        assert_eq!(text, "please continue now");
+        // A target with no text yields an empty payload.
+        let (target, text) = split_target_args("sess-1");
+        assert_eq!(target, "sess-1");
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn launch_command_converts() {
+        // `/launch <workdir> | <task>` maps to ManagedNew with an empty git_ref.
+        assert_eq!(
+            TrustyCommand::from(TelegramCommand::Launch("/work/repo | build it".into())),
+            TrustyCommand::ManagedNew {
+                repo_url: "/work/repo".into(),
+                git_ref: String::new(),
+                task: "build it".into(),
+                name_hint: None,
+                runtime: None,
+            }
+        );
+    }
+
+    #[test]
+    fn fleet_command_converts() {
+        // `/fleet` lists the managed fleet — distinct from legacy `/sessions`.
+        assert_eq!(
+            TrustyCommand::from(TelegramCommand::Fleet),
+            TrustyCommand::ManagedList
+        );
+    }
+
+    #[test]
+    fn get_command_converts() {
+        assert_eq!(
+            TrustyCommand::from(TelegramCommand::Get(" sess-1 ".into())),
+            TrustyCommand::ManagedGet {
+                target: "sess-1".into()
+            }
+        );
+    }
+
+    #[test]
+    fn msend_command_converts() {
+        assert_eq!(
+            TrustyCommand::from(TelegramCommand::Msend("sess-1 build now".into())),
+            TrustyCommand::ManagedSend {
+                target: "sess-1".into(),
+                text: "build now".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn answer_command_converts() {
+        assert_eq!(
+            TrustyCommand::from(TelegramCommand::Answer("sess-1 yes proceed".into())),
+            TrustyCommand::ManagedAnswer {
+                target: "sess-1".into(),
+                answer: "yes proceed".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn activity_resume_decommission_convert() {
+        assert_eq!(
+            TrustyCommand::from(TelegramCommand::Activity("a".into())),
+            TrustyCommand::ManagedActivity { target: "a".into() }
+        );
+        assert_eq!(
+            TrustyCommand::from(TelegramCommand::Resume("b".into())),
+            TrustyCommand::ManagedResume { target: "b".into() }
+        );
+        assert_eq!(
+            TrustyCommand::from(TelegramCommand::Decommission("c".into())),
+            TrustyCommand::ManagedDecommission { target: "c".into() }
+        );
     }
 
     #[test]

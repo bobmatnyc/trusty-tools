@@ -267,6 +267,41 @@ fn coordinator_chat_outcome_deserializes() {
     let outcome: CoordinatorChatOutcome = serde_json::from_value(json).unwrap();
     assert_eq!(outcome.reply, "two sessions are active");
     assert!(outcome.routed_to_session.is_none());
+    // Additive action-path fields default to None when absent.
+    assert!(outcome.actions_taken.is_none());
+    assert!(outcome.conv_id.is_none());
+}
+
+#[test]
+fn coordinator_chat_outcome_deserializes_actions() {
+    // The action-capable path returns the audit trail and the conversation id.
+    let json = serde_json::json!({
+        "reply": "ran a health check and listed the fleet",
+        "actions_taken": ["sessions.health", "sessions.list"],
+        "conv_id": "conv-42",
+    });
+    let outcome: CoordinatorChatOutcome = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        outcome.actions_taken.as_deref(),
+        Some(["sessions.health".to_string(), "sessions.list".to_string()].as_slice())
+    );
+    assert_eq!(outcome.conv_id.as_deref(), Some("conv-42"));
+}
+
+#[test]
+fn coordinator_chat_serializes_actions_flag() {
+    // The request body must carry the `actions` boolean so the daemon can route
+    // the action-capable SM branch; history is threaded through verbatim.
+    let history = [ChatMessage::user("hi"), ChatMessage::assistant("hello")];
+    let body = coordinator_chat_body("spin up a session", &history, true);
+    assert_eq!(body["message"], "spin up a session");
+    assert_eq!(body["actions"], true);
+    assert_eq!(body["history"][0]["role"], "user");
+    assert_eq!(body["history"][1]["content"], "hello");
+
+    // The passive path serializes `actions: false`.
+    let passive = coordinator_chat_body("just chatting", &[], false);
+    assert_eq!(passive["actions"], false);
 }
 
 #[test]

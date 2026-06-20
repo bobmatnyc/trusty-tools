@@ -33,11 +33,11 @@ use alerts::{AlertConfig, LastSeen};
 use commands::TelegramCommand;
 use formatter::TelegramFormatter;
 
-/// Per-chat LLM conversation history, keyed by Telegram `chat_id`.
+/// Per-chat coordinator conversation history, keyed by Telegram `chat_id`.
 ///
-/// Why: free-text (non-command) messages route to the daemon's LLM chat, which
-/// is stateless about conversations — the bot holds the rolling history per
-/// chat and threads it through each turn.
+/// Why: free-text (non-command) messages route to the action-capable
+/// coordinator, which is stateless about conversations — the bot holds the
+/// rolling history per chat and threads it through each turn.
 /// What: an `Arc<Mutex<…>>` of chat-id → message-history so every teloxide
 /// handler task shares one conversation store.
 type ChatHistories = Arc<Mutex<HashMap<i64, Vec<ChatMessage>>>>;
@@ -45,6 +45,19 @@ type ChatHistories = Arc<Mutex<HashMap<i64, Vec<ChatMessage>>>>;
 /// The reply shown when LLM chat is requested but not configured.
 const LLM_NOT_CONFIGURED: &str =
     "LLM chat not configured — set OPENROUTER_API_KEY in .env.local and enable the overseer";
+
+/// Maximum number of `ChatMessage`s retained per chat in the rolling history.
+///
+/// Why: the coordinator is stateless about conversations, so the bot keeps the
+/// history client-side and re-sends it every turn. Without a bound this grows
+/// without limit for the life of the process — unbounded memory and an
+/// ever-larger prompt payload (cost + latency) on a long-lived chat. Capping to
+/// the most recent turns keeps memory flat and the context window relevant.
+/// What: 20 messages = the last 10 user/assistant exchanges; after appending a
+/// turn the front of the history is drained so its length never exceeds this.
+/// Test: `record_chat_turn_caps_history` pushes past the cap and asserts the
+/// length is clamped and the oldest messages are dropped.
+const MAX_CHAT_HISTORY_TURNS: usize = 20;
 
 /// Environment variable that overrides the Telegram bot's `@username`.
 const BOT_USERNAME_ENV: &str = "TELEGRAM_BOT_USERNAME";
@@ -287,10 +300,11 @@ async fn on_message(
     let command = match TelegramCommand::parse(text, &bot_username()) {
         Ok(cmd) => cmd,
         Err(_) => {
-            // Not a slash command — route the free text to LLM chat (unless the
-            // message is empty, in which case there is nothing to ask).
+            // Not a slash command — route the free text to the action-capable
+            // coordinator so natural language can DRIVE the fleet (#1283), unless
+            // the message is empty, in which case there is nothing to ask.
             if !text.trim().is_empty() {
-                let reply = llm_chat_reply(&executor, &histories, msg.chat.id.0, text).await;
+                let reply = action_chat_reply(&executor, &histories, msg.chat.id.0, text).await;
                 bot.send_message(msg.chat.id, reply)
                     .parse_mode(ParseMode::Html)
                     .await?;
@@ -341,16 +355,26 @@ async fn dispatch_command(
     }
 }
 
-/// Route a free-text message to the daemon's LLM chat and render the reply.
+/// Route a free-text message to the action-capable coordinator and render it.
 ///
-/// Why: messages that are not slash commands are treated as conversation; the
-/// bot holds the per-chat history and threads it through `POST /llm/chat`.
-/// What: loads this chat's history, calls [`DaemonClient::llm_chat`], stores the
-/// updated history on success, and returns the assistant reply (HTML-escaped).
-/// When the daemon reports LLM chat is not configured (`503`) it returns the
-/// [`LLM_NOT_CONFIGURED`] hint; a transport failure returns an error line.
-/// Test: `llm_chat_reply_reports_unconfigured` covers the not-configured path.
-async fn llm_chat_reply(
+/// Why: messages that are not slash commands are treated as conversation that
+/// can DRIVE the managed fleet — routing them through the coordinator with
+/// `actions: true` lets the session-manager invoke managed-session verbs inline
+/// (#1283), so "spin up a session for repo X" actually does it rather than
+/// merely describing it. The bot holds the per-chat history and threads it
+/// through `POST /api/v1/sessions/chat`; the coordinator is stateless about
+/// conversations, so the user turn and the assistant reply are appended here.
+/// What: loads this chat's history, calls
+/// [`DaemonClient::coordinator_chat`](crate::client::DaemonClient::coordinator_chat)
+/// with `actions = true`, appends the user/assistant turns to the stored history
+/// on success, and returns the HTML-escaped reply. When the coordinator routed a
+/// `@prefix:` command its captured pane output is appended; when one or more
+/// verbs executed, a compact italic `ran: …` footer is appended so the operator
+/// sees what ran. A `503` returns the [`LLM_NOT_CONFIGURED`] hint; a transport
+/// failure returns an error line.
+/// Test: `action_chat_reply_reports_unconfigured` covers the not-configured
+/// path; `action_footer_lists_verbs` covers the footer rendering.
+async fn action_chat_reply(
     executor: &CommandExecutor,
     histories: &ChatHistories,
     chat_id: i64,
@@ -360,17 +384,74 @@ async fn llm_chat_reply(
         let guard = histories.lock().expect("chat history mutex poisoned");
         guard.get(&chat_id).cloned().unwrap_or_default()
     };
-    match executor.client().llm_chat(text, &history).await {
+    match executor
+        .client()
+        .coordinator_chat(text, &history, true)
+        .await
+    {
         Ok(Some(outcome)) => {
-            histories
-                .lock()
-                .expect("chat history mutex poisoned")
-                .insert(chat_id, outcome.history);
-            formatter::html_escape(&outcome.reply)
+            // The coordinator keeps no conversation state of its own, so persist
+            // this turn (user message + assistant reply) for the next message.
+            {
+                let mut guard = histories.lock().expect("chat history mutex poisoned");
+                let entry = guard.entry(chat_id).or_default();
+                record_chat_turn(entry, text, &outcome.reply);
+            }
+            let mut body = formatter::html_escape(&outcome.reply);
+            if let Some(output) = outcome.command_output.as_deref()
+                && !output.is_empty()
+            {
+                body.push('\n');
+                body.push_str(&formatter::html_escape(output));
+            }
+            if let Some(footer) = action_footer(outcome.actions_taken.as_deref()) {
+                body.push_str(&footer);
+            }
+            body
         }
         Ok(None) => LLM_NOT_CONFIGURED.to_string(),
         Err(e) => format!("❌ chat: daemon error: {e}"),
     }
+}
+
+/// Append one conversation turn to a chat's rolling history, bounded.
+///
+/// Why: the coordinator is stateless, so the bot persists each turn client-side;
+/// this centralizes the two invariants that keep that store healthy — a sliding
+/// window cap ([`MAX_CHAT_HISTORY_TURNS`], so history can't grow without bound)
+/// and skipping empty assistant replies (an empty turn pollutes the context
+/// window and the re-sent prompt with a meaningless message).
+/// What: always pushes the user turn; pushes the assistant turn only when `reply`
+/// is non-empty; then drains the front of `entry` so its length is at most
+/// `MAX_CHAT_HISTORY_TURNS`, dropping the oldest messages first.
+/// Test: `record_chat_turn_caps_history` and `record_chat_turn_skips_empty_reply`.
+fn record_chat_turn(entry: &mut Vec<ChatMessage>, text: &str, reply: &str) {
+    entry.push(ChatMessage::user(text));
+    if !reply.is_empty() {
+        entry.push(ChatMessage::assistant(reply));
+    }
+    if entry.len() > MAX_CHAT_HISTORY_TURNS {
+        let overflow = entry.len() - MAX_CHAT_HISTORY_TURNS;
+        entry.drain(0..overflow);
+    }
+}
+
+/// Build a compact "ran: …" footer listing the verbs the coordinator executed.
+///
+/// Why: when free-text drives the fleet, the operator must see the audit trail
+/// of what actually ran — silent side effects are dangerous on a remote surface.
+/// What: returns `Some("\n\n<i>ran: a, b</i>")` (HTML-escaped, comma-joined) when
+/// `actions` is `Some` and non-empty; `None` otherwise (text-only turns add no
+/// footer). A `Some(&[])` is treated as "nothing ran" and yields `None`.
+/// Test: `action_footer_lists_verbs`, `action_footer_absent_when_empty`.
+fn action_footer(actions: Option<&[String]>) -> Option<String> {
+    let verbs = actions.filter(|v| !v.is_empty())?;
+    let joined = verbs
+        .iter()
+        .map(|v| formatter::html_escape(v))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("\n\n<i>ran: {joined}</i>"))
 }
 
 /// teloxide callback-query handler for inline-keyboard buttons.
@@ -561,134 +642,4 @@ async fn poll_overseer_alert(client: &reqwest::Client, daemon_url: &str) -> Opti
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_token_reads_dotenv() {
-        use std::io::Write;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".env");
-        let mut file = std::fs::File::create(&path).unwrap();
-        writeln!(file, "TELEGRAM_BOT_TOKEN=\"123:ABC\"").unwrap();
-        let value = read_dotenv_key(&path, "TELEGRAM_BOT_TOKEN");
-        assert_eq!(value.as_deref(), Some("123:ABC"));
-    }
-
-    #[test]
-    fn resolve_token_missing_is_none() {
-        let value = read_dotenv_key(Path::new("/no/such/.env"), "TELEGRAM_BOT_TOKEN");
-        assert!(value.is_none());
-    }
-
-    #[test]
-    fn resolve_username_uses_env_when_set() {
-        // An explicit value wins over the default and is trimmed.
-        assert_eq!(resolve_username(Some("my_bot".into())), "my_bot");
-        assert_eq!(resolve_username(Some("  my_bot  ".into())), "my_bot");
-    }
-
-    #[test]
-    fn resolve_username_falls_back_when_unset() {
-        // No env var → the real deployed bot default.
-        assert_eq!(resolve_username(None), DEFAULT_BOT_USERNAME);
-        assert_eq!(resolve_username(None), "t_sess_bot");
-    }
-
-    #[test]
-    fn resolve_username_falls_back_when_empty() {
-        // Empty or whitespace-only env value is treated as unset.
-        assert_eq!(resolve_username(Some(String::new())), DEFAULT_BOT_USERNAME);
-        assert_eq!(resolve_username(Some("   ".into())), DEFAULT_BOT_USERNAME);
-    }
-
-    #[test]
-    fn authorization_respects_allowed_user() {
-        let unrestricted = BotOptions::default();
-        assert!(is_authorized(&unrestricted, Some(7)));
-        assert!(is_authorized(&unrestricted, None));
-
-        let restricted = BotOptions {
-            allowed_user_id: Some(42),
-            alert_chat_id: None,
-        };
-        assert!(is_authorized(&restricted, Some(42)));
-        assert!(!is_authorized(&restricted, Some(99)));
-        assert!(!is_authorized(&restricted, None));
-    }
-
-    /// Spawn the daemon's real HTTP API on a random loopback port.
-    ///
-    /// Why: lets the bot's command dispatch be tested against the genuine
-    /// daemon routes without a live daemon, tmux, or external network.
-    /// What: builds `api::router(DaemonState::shared())`, binds an ephemeral
-    /// port, serves it on a background task, and returns the state plus base URL.
-    /// Test: used by the `dispatch_*` tests below.
-    async fn spawn_test_daemon() -> (std::sync::Arc<crate::daemon::state::DaemonState>, String) {
-        use crate::daemon::{api, state::DaemonState};
-        use std::future::IntoFuture;
-        // Root the daemon's persisted state at a throwaway temp directory so
-        // the test never reads (or writes) the operator's real pairing record.
-        // `keep` leaks the directory so it outlives the background server.
-        let root = tempfile::tempdir().unwrap().keep();
-        let state = std::sync::Arc::new(DaemonState::with_root(root));
-        let router = api::router(std::sync::Arc::clone(&state));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(axum::serve(listener, router).into_future());
-        (state, format!("http://{addr}"))
-    }
-
-    #[tokio::test]
-    async fn llm_chat_reply_reports_unconfigured() {
-        // A default test daemon has no OpenRouter key, so a free-text message
-        // gets the not-configured hint rather than a model reply.
-        let (_state, url) = spawn_test_daemon().await;
-        let executor = CommandExecutor::new(url);
-        let histories: ChatHistories = Arc::new(Mutex::new(HashMap::new()));
-        let reply = llm_chat_reply(&executor, &histories, 42, "hello there").await;
-        assert_eq!(reply, LLM_NOT_CONFIGURED);
-        // No history is stored when chat is unconfigured.
-        assert!(histories.lock().unwrap().get(&42).is_none());
-    }
-
-    #[tokio::test]
-    async fn dispatch_help_returns_help() {
-        let executor = CommandExecutor::new("http://unused");
-        let result = dispatch_command(TelegramCommand::Help, &executor, 1).await;
-        assert!(matches!(result, CommandResult::Help(_)));
-    }
-
-    #[tokio::test]
-    async fn dispatch_start_with_no_code_queries_state() {
-        // `/start` with no code is a pairing-status query against the daemon.
-        let (_state, url) = spawn_test_daemon().await;
-        let executor = CommandExecutor::new(url);
-        let result = dispatch_command(TelegramCommand::Start(String::new()), &executor, 1).await;
-        match result {
-            CommandResult::PairState { paired } => assert!(!paired),
-            other => panic!("expected PairState, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn dispatch_start_with_deep_link_code_confirms() {
-        // `/start <code>` (the `?start=` deep-link form) confirms the code.
-        let (state, url) = spawn_test_daemon().await;
-        let code = state.generate_pair_code();
-        let executor = CommandExecutor::new(url);
-        let result = dispatch_command(TelegramCommand::Start(code), &executor, 555).await;
-        match result {
-            CommandResult::PairSuccess { chat_info } => assert!(chat_info.contains("555")),
-            other => panic!("expected PairSuccess, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn dispatch_pair_with_bad_code_errors() {
-        let (_state, url) = spawn_test_daemon().await;
-        let executor = CommandExecutor::new(url);
-        let result = dispatch_command(TelegramCommand::Pair("ZZZZZZ".into()), &executor, 1).await;
-        assert!(matches!(result, CommandResult::Error(_)));
-    }
-}
+mod tests;

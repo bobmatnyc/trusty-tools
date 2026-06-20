@@ -317,11 +317,17 @@ pub struct CoordinatorContext {
 
 /// Outcome of a `POST /api/v1/sessions/chat` call.
 ///
-/// Why: a coordinator message resolves to either a routed command or an LLM
-/// answer; the caller renders both from this one shape.
+/// Why: a coordinator message resolves to either a routed command, an LLM
+/// answer, or — on the action-capable path (`actions: true`, #1283) — an LLM
+/// answer plus an audit trail of the managed verbs the session-manager invoked
+/// inline; the caller renders all three from this one shape.
 /// What: the `reply` text; `routed_to_session` and `command_output` are
-/// populated only when the message was routed to a session by `@prefix:`.
-/// Test: `coordinator_chat_outcome_deserializes`.
+/// populated only when the message was routed to a session by `@prefix:`;
+/// `actions_taken` lists the verbs executed this turn (only when `actions: true`
+/// routed the SM branch and at least one verb ran), and `conv_id` echoes the SM
+/// conversation id so a follow-up turn can continue the same rolling context.
+/// Test: `coordinator_chat_outcome_deserializes`,
+/// `coordinator_chat_outcome_deserializes_actions`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CoordinatorChatOutcome {
     /// The assistant reply, or a note about the routed command.
@@ -332,6 +338,16 @@ pub struct CoordinatorChatOutcome {
     /// Captured pane output from a routed command, if any.
     #[serde(default)]
     pub command_output: Option<String>,
+    /// The managed verbs the SM invoked inline this turn, in order, for the
+    /// operator's audit trail. Absent (`None`) on the text-only, legacy, and
+    /// prefix paths and when no verb ran; `Some([...])` only when at least one
+    /// verb executed on the `actions: true` path.
+    #[serde(default)]
+    pub actions_taken: Option<Vec<String>>,
+    /// The SM conversation id this turn used, echoed so a follow-up can continue
+    /// the same rolling context. Present only on the SM (action-capable) path.
+    #[serde(default)]
+    pub conv_id: Option<String>,
 }
 
 // ── Managed session-manager wire types (`/api/v1/sessions/managed/*`) ───────────

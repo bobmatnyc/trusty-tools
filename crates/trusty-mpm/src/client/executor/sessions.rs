@@ -381,7 +381,7 @@ impl CommandExecutor {
     /// What: calls `POST /api/v1/sessions/chat` with an empty history.
     /// Test: `coordinator_chat_outcome_deserializes` in the client tests.
     pub(super) async fn coordinator_chat(&self, message: &str) -> CommandResult {
-        match self.client().coordinator_chat(message, &[]).await {
+        match self.client().coordinator_chat(message, &[], false).await {
             Ok(Some(outcome)) => {
                 let reply = match outcome.command_output {
                     Some(output) => format!("{}\n{output}", outcome.reply),
