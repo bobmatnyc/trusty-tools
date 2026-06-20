@@ -185,7 +185,8 @@ pub struct SessionManager {
     /// Persisted session store; `pub(crate)` for test helpers that need to
     /// seed internal state without going through the public API.
     pub(crate) store: Arc<RwLock<SessionStore>>,
-    tmux: Arc<dyn ManagedTmuxDriver>,
+    /// tmux driver; `pub(crate)` for the decommission / adopt sibling modules.
+    pub(crate) tmux: Arc<dyn ManagedTmuxDriver>,
     data_dir: PathBuf,
 }
 
@@ -340,6 +341,10 @@ impl SessionManager {
             correlation,
             runtime,
             ephemeral,
+            // Default to unowned: callers that provisioned the workspace via
+            // git clone MUST call `set_workspace_owned(id, true)` afterward.
+            // Local-path spawn (#1502) and adopt (#1433) never set this to true.
+            workspace_owned: false,
         };
 
         // Persist the record. On failure the freshly-created tmux session has
@@ -634,50 +639,6 @@ impl SessionManager {
         Ok(record)
     }
 
-    /// Decommission a session: stop the runtime, remove the workspace from disk,
-    /// and mark the record `Decommissioned`.
-    ///
-    /// Why: the only full teardown operation. Unlike `stop`, this removes the
-    /// workspace directory from disk so no future `resume` is possible. A
-    /// tombstone record is kept in the store so `ls` can show history.
-    /// What: kills the tmux session (best-effort), removes the workspace directory
-    /// via `std::fs::remove_dir_all` when `workspace_path` is set, clears
-    /// `workspace_path` on the record, marks it `Decommissioned`, and persists.
-    /// Test: `manager_decommission_removes_workspace` — asserts the workspace dir
-    /// is gone from disk and the record state is `Decommissioned`.
-    pub async fn decommission(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
-        let mut record = self.get(id).await?;
-
-        // Kill the runtime (best-effort).
-        if self.tmux.session_exists(&record.tmux_name)
-            && let Err(e) = self.tmux.kill_session(&record.tmux_name)
-        {
-            warn!(name = %record.tmux_name, "decommission: kill_session failed: {e}");
-        }
-
-        // Remove the workspace directory from disk.
-        if let Some(ref ws) = record.workspace_path {
-            if ws.exists() {
-                std::fs::remove_dir_all(ws).map_err(|e| {
-                    ManagedError::Io(std::io::Error::new(
-                        e.kind(),
-                        format!("remove workspace {:?}: {e}", ws),
-                    ))
-                })?;
-                info!(id = %id, workspace = %ws.display(), "decommission: workspace removed from disk");
-            } else {
-                warn!(id = %id, workspace = %ws.display(), "decommission: workspace path absent (already removed?)");
-            }
-        }
-
-        // Tombstone: clear workspace_path, mark Decommissioned, persist.
-        record.workspace_path = None;
-        record.state = ManagedSessionState::Decommissioned;
-        self.store.write().await.upsert(record.clone()).await?;
-        info!(id = %id, name = %record.tmux_name, "managed session decommissioned");
-        Ok(record)
-    }
-
     /// Reconcile daemon state against live tmux sessions after a restart.
     ///
     /// Why: the daemon may have crashed or been restarted while sessions were
@@ -763,6 +724,10 @@ impl SessionManager {
                     // Adopted external sessions are NEVER ephemeral: their
                     // provenance is unknown, so they must never be auto-reaped.
                     ephemeral: false,
+                    // Externally-adopted sessions are NEVER SM-owned — the SM
+                    // did not create the workspace; decommission must not delete
+                    // it (#1511).
+                    workspace_owned: false,
                 };
                 guard.upsert(external).await?;
                 report.external_adopted.push(name.clone());

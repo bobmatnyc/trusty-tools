@@ -159,6 +159,14 @@ pub async fn spawn_managed(
             e.to_string()
         })?;
 
+    // Step 2a: mark the workspace as SM-owned (#1511). The SM provisioned
+    // this directory via git clone — decommission is allowed to remove it.
+    // Local-path spawn and adopt_existing never reach this path and therefore
+    // never set workspace_owned = true; they remain unowned → never deleted.
+    if let Err(e) = mgr.set_workspace_owned(&record.id, true).await {
+        warn!(id = %record.id, "spawn_managed: set_workspace_owned failed: {e}");
+    }
+
     // Step 2.5 — INTENT-CONFORMANCE FRONT GATE (#1360, spec §5.1).
     //
     // Between record-creation and `adapter.spawn`, resolve the ticket+spec intent

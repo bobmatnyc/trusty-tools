@@ -101,6 +101,9 @@ impl SessionManager {
             correlation: Default::default(),
             runtime,
             ephemeral,
+            // Adopted sessions point at a pre-existing pane: the SM did NOT
+            // create the workspace, so decommission must never delete it (#1511).
+            workspace_owned: false,
         };
 
         // ── Atomic already-adopted check + upsert under ONE held write guard ──────

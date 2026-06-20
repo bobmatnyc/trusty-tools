@@ -193,6 +193,25 @@ pub struct SessionRecord {
     /// tool for purging those legacy tombstones).
     #[serde(default)]
     pub ephemeral: bool,
+
+    /// Whether the SM **provisioned** (cloned/created) the `workspace_path` itself.
+    ///
+    /// Why (#1511): `decommission` previously `remove_dir_all`'d `workspace_path`
+    /// unconditionally, which deleted a real user repository when the #1502
+    /// local-path spawn set `workspace_path` to a pre-existing on-disk directory.
+    /// This flag marks ownership: `true` ONLY when the SM provisioned the directory
+    /// via a git clone (the normal `SpawnParams` + `WorkspaceProvisioner` path);
+    /// `false` for local-path spawn (#1502), explicit `adopt_existing` (#1433), and
+    /// every legacy record (safe default — prefer NOT deleting over accidental
+    /// deletion). The decommission path checks this flag BEFORE calling
+    /// `remove_dir_all`, so a local-path or adopted workspace is never deleted.
+    ///
+    /// `#[serde(default)]` (→ `false`) ensures every pre-#1511 record deserializes
+    /// as UNOWNED: legacy records are treated as not-owned → never auto-deleted,
+    /// which is the safe direction — a "lost" workspace can be cleaned up manually;
+    /// an accidentally deleted live repo cannot be un-deleted.
+    #[serde(default)]
+    pub workspace_owned: bool,
 }
 
 /// Error types for session record operations.
@@ -254,6 +273,7 @@ mod tests {
             correlation: Default::default(),
             runtime: Default::default(),
             ephemeral: false,
+            workspace_owned: false,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -282,6 +302,7 @@ mod tests {
             correlation: Default::default(),
             runtime: Default::default(),
             ephemeral: false,
+            workspace_owned: false,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -308,6 +329,7 @@ mod tests {
             correlation: Default::default(),
             runtime: Default::default(),
             ephemeral: false,
+            workspace_owned: false,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -359,6 +381,7 @@ mod tests {
             correlation: Default::default(),
             runtime: Default::default(),
             ephemeral: false,
+            workspace_owned: false,
         };
         record.runtime = crate::runtime::RuntimeKind::Tcode;
         let json = serde_json::to_string(&record).expect("serialize");
@@ -414,9 +437,65 @@ mod tests {
             correlation: Default::default(),
             runtime: Default::default(),
             ephemeral: true,
+            workspace_owned: false,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
         assert!(back.ephemeral, "ephemeral=true must round-trip");
+    }
+
+    #[test]
+    fn record_without_workspace_owned_field_defaults_to_false() {
+        // Why (#1511): every pre-#1511 record has no `workspace_owned` key; they
+        // MUST deserialize as unowned (false) so the decommission path never
+        // auto-deletes a workspace it did not provision. "Prefer not deleting" is
+        // the safe direction — a lost workspace can be cleaned up manually.
+        let legacy_json = serde_json::json!({
+            "id": ManagedSessionId::new(),
+            "tmux_name": "tmpm-legacy",
+            "cwd": "/tmp",
+            "task": "legacy task",
+            "state": "stopped",
+            "created_at": Utc::now().to_rfc3339(),
+            "last_activity_at": null,
+            "workspace_path": "/tmp/some-workspace",
+            "repo_url": null,
+            "branch": null,
+            "pending_decision": null,
+            "proposed_default": null
+        })
+        .to_string();
+        let back: SessionRecord = serde_json::from_str(&legacy_json).expect("deserialize legacy");
+        assert!(
+            !back.workspace_owned,
+            "a record with no `workspace_owned` key must default to false (unowned — safe)"
+        );
+    }
+
+    #[test]
+    fn record_round_trips_workspace_owned_true() {
+        // Why (#1511): a clone-provisioned session must persist workspace_owned=true
+        // so decommission knows it is safe to remove the workspace.
+        let record = SessionRecord {
+            id: ManagedSessionId::new(),
+            tmux_name: "tmpm-clone".into(),
+            cwd: PathBuf::from("/managed/root/owner/repo/abc"),
+            task: "fix bug".into(),
+            state: ManagedSessionState::Active,
+            created_at: Utc::now(),
+            last_activity_at: None,
+            workspace_path: Some(PathBuf::from("/managed/root/owner/repo/abc")),
+            repo_url: Some("https://github.com/owner/repo".into()),
+            branch: Some("fix/thing".into()),
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: true,
+        };
+        let json = serde_json::to_string(&record).expect("serialize");
+        let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.workspace_owned, "workspace_owned=true must round-trip");
     }
 }
