@@ -46,6 +46,12 @@ pub struct LaunchParams {
     pub prompt: Option<String>,
     /// Optional goal id to link the launched session to (§9.3).
     pub goal_id: Option<String>,
+    /// Whether the launched session is EPHEMERAL (a test/throwaway session) (#1508).
+    ///
+    /// Why: the chat-driven launch path must be able to mark a session disposable
+    /// so the bulk-teardown and age-based reap paths can clean it up. `None`/
+    /// `Some(false)` → a normal durable session the automatic paths never touch.
+    pub ephemeral: Option<bool>,
 }
 
 /// A failure surfaced by a [`SessionControl`] operation.

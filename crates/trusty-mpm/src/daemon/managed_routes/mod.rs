@@ -28,6 +28,7 @@ use crate::session_manager::{ManagedSessionId, SessionRecord};
 
 pub mod front_gate;
 mod lifecycle;
+pub mod prune;
 pub use front_gate::{
     ConformanceGate, FrontGateOutcome, HeadlessApproval, IsrConformanceGate, run_front_gate,
 };
@@ -35,6 +36,7 @@ pub use lifecycle::{
     ResumeManagedError, SpawnParams, is_local_workdir, resume_managed, spawn_managed,
     spawn_runtime_for,
 };
+pub use prune::{PruneRequest, decommission_ephemeral_route, prune_managed_route};
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
 
@@ -63,6 +65,11 @@ pub struct SpawnRequest {
     /// unaffected. Parsed via [`crate::runtime::RuntimeKind::from_str`]; an
     /// unrecognized value yields a `400 Bad Request`.
     pub runtime: Option<String>,
+    /// Optional ephemeral marker (#1508): `true` tags this as a test/throwaway
+    /// session eligible for bulk teardown + age-based auto-reap. Absent/null/false
+    /// → a normal durable session the automatic paths never touch.
+    #[serde(default)]
+    pub ephemeral: Option<bool>,
 }
 
 /// Response body for POST /api/v1/sessions/managed (spawn, 201 Created).
@@ -117,6 +124,12 @@ pub struct AdoptExistingRequest {
     /// Optional runtime selector (`"claude-code"` | `"tcode"`); absent → default.
     #[serde(default)]
     pub runtime: Option<String>,
+    /// Optional ephemeral marker (#1508): `true` tags this adoption as a
+    /// test/throwaway session eligible for bulk teardown + age-based auto-reap.
+    /// Absent/null/false → a durable operator adoption the automatic paths never
+    /// touch.
+    #[serde(default)]
+    pub ephemeral: Option<bool>,
 }
 
 /// Response body for POST /api/v1/sessions/managed/adopt (201 Created).
@@ -412,6 +425,7 @@ pub async fn spawn_session(
         task: req.task,
         name_hint: req.name_hint,
         runtime: req.runtime,
+        ephemeral: req.ephemeral,
     };
 
     match spawn_managed(&state, params).await {
@@ -471,7 +485,16 @@ pub async fn adopt_existing_session(
     let cwd = std::path::PathBuf::from(&req.cwd);
 
     let mgr = state.session_manager().await;
-    match mgr.adopt_existing(&req.tmux_name, cwd, task, runtime).await {
+    match mgr
+        .adopt_existing(
+            &req.tmux_name,
+            cwd,
+            task,
+            runtime,
+            req.ephemeral.unwrap_or(false),
+        )
+        .await
+    {
         Ok(record) => {
             let resp = AdoptExistingResponse {
                 id: record.id.to_string(),

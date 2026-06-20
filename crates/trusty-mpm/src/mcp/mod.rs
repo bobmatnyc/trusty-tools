@@ -137,6 +137,7 @@ pub trait OrchestratorBackend: Send + Sync {
         task: &str,
         name_hint: Option<&str>,
         runtime: Option<&str>,
+        ephemeral: Option<bool>,
     ) -> Result<Value, String>;
 
     /// Back `session_stop`: stop a session's runtime, keeping its workspace.
@@ -188,6 +189,36 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       confirmation with the tmux name. A missing id is an error string.
     /// Test: `dispatch_session_send_tool` (mock).
     async fn session_send(&self, session_id: &str, text: &str) -> Result<Value, String>;
+
+    // ── #1508: fleet-wide teardown tools ─────────────────────────────────────
+
+    /// Back `session_decommission_ephemeral`: bulk-tear-down every ephemeral session.
+    ///
+    /// Why: e2e harnesses and drivers need a typed, JSON-native "clean up all my
+    ///      throwaway test sessions" verb without scraping the CLI. REAL sessions
+    ///      default `ephemeral=false` and are unreachable, so durable work is safe.
+    /// What: decommissions every `ephemeral == true` session (kill runtime + remove
+    ///       workspace + tombstone) and returns `{ decommissioned: <count> }`.
+    /// Test: `dispatch_session_decommission_ephemeral_tool` (mock).
+    async fn session_decommission_ephemeral(&self) -> Result<Value, String>;
+
+    /// Back `session_prune`: by-state prune + tombstone compaction.
+    ///
+    /// Why: ONE fleet-wide tool to tear down ephemeral/stopped sessions AND compact
+    ///      the store by dropping decommissioned tombstones, so legacy stale records
+    ///      can be purged over MCP with the same engine that cleans up test sessions.
+    /// What: parses `state` (`ephemeral`|`stopped`|`decommissioned`|`all`); a RUNNING
+    ///       session is NEVER torn down unless `include_active`; with `dry_run`
+    ///       NOTHING is mutated. Returns the `PruneOutcome` JSON. An unknown `state`
+    ///       is an error string.
+    /// Test: `dispatch_session_prune_tool`, `dispatch_session_prune_rejects_bad_state`
+    ///       (mock).
+    async fn session_prune(
+        &self,
+        state: &str,
+        dry_run: bool,
+        include_active: bool,
+    ) -> Result<Value, String>;
 
     // ── #1222: console-facing tools ──────────────────────────────────────────
 
@@ -380,8 +411,8 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
                 .config_write(template, auto_resume, default_model)
                 .await
         }
-        // #1221: the six session-lifecycle tools route through a sibling module
-        // so this match stays focused and `mod.rs` stays under the SLOC cap.
+        // #1221 + #1508: the eight session-lifecycle tools route through a sibling
+        // module so this match stays focused and `mod.rs` stays under the SLOC cap.
         other => match session_dispatch::try_dispatch(backend, other, &args).await {
             Some(result) => result,
             None => Err(format!("unknown tool: {other}")),

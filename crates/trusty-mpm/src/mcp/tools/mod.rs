@@ -7,10 +7,10 @@
 //! ([`core`]) and the new session-lifecycle tools ([`session`]) — so this is a
 //! thin facade that re-exports both and concatenates their descriptors, keeping
 //! each leaf file well under the 500-SLOC production cap.
-//! What: [`tool_catalog`] builds the twenty MCP tool descriptors (nine core +
-//! six session + five console — #1222 / #1220); [`TOOL_CATALOG`] lists their names
-//! for tests and the startup log; [`tool`] is the shared descriptor builder used
-//! by every submodule.
+//! What: [`tool_catalog`] builds the twenty-two MCP tool descriptors (nine core +
+//! eight session + five console — #1222 / #1220 / #1508); [`TOOL_CATALOG`] lists
+//! their names for tests and the startup log; [`tool`] is the shared descriptor
+//! builder used by every submodule.
 //! Test: the `tests` module below asserts the catalog has the expected count,
 //! well-formed entries, and names matching [`TOOL_CATALOG`].
 
@@ -25,12 +25,13 @@ pub mod session;
 /// Why: tests, the daemon's startup log, and the loopback-`/rpc` audit all want
 /// the authoritative list without re-parsing the JSON schema. Keeping it exact
 /// resolves the #1221 review nit about ambiguous existing-vs-new counts: there
-/// are exactly NINE pre-existing tools and SIX new session-lifecycle tools.
-/// What: a static slice of the twenty tool names — the six orchestration
-/// tools, the three bug-reporting tools, the six session-lifecycle tools, then
-/// the five console-facing tools (#1222 + the two #1220 config tools).
+/// are exactly NINE pre-existing tools and EIGHT session-lifecycle tools (six
+/// per-session #1221 + the two fleet-wide #1508 teardown verbs).
+/// What: a static slice of the twenty-two tool names — the six orchestration
+/// tools, the three bug-reporting tools, the eight session-lifecycle tools, then
+/// the five console-facing tools (#1222 + the two #1220 config tools + #1508).
 /// Test: `catalog_names_match_constant`.
-pub const TOOL_CATALOG: [&str; 20] = [
+pub const TOOL_CATALOG: [&str; 22] = [
     // ── 9 pre-existing tools (core.rs) ───────────────────────────────────────
     "session_list",
     "session_status",
@@ -41,13 +42,16 @@ pub const TOOL_CATALOG: [&str; 20] = [
     "list_recent_errors",
     "preview_bug_report",
     "report_bug",
-    // ── 6 new session-lifecycle tools (#1221, session.rs) ────────────────────
+    // ── 8 session-lifecycle tools (#1221 + #1508, session.rs) ────────────────
     "session_new",
     "session_stop",
     "session_resume",
     "session_decommission",
     "session_activity",
     "session_send",
+    // #1508 bulk teardown + by-state prune.
+    "session_decommission_ephemeral",
+    "session_prune",
     // ── 5 console-facing tools (#1222 + #1220, console.rs) ───────────────────
     "console_metrics",
     "supervisor_status",
@@ -63,8 +67,8 @@ pub const TOOL_CATALOG: [&str; 20] = [
 /// keeps the schemas and the dispatch argument-parsing in lockstep across both
 /// the core and session-lifecycle tool groups.
 /// What: concatenates [`core::core_tools`] (nine descriptors),
-/// [`session::session_tools`] (six descriptors), and [`console::console_tools`]
-/// (five descriptors) in catalog order, returning twenty
+/// [`session::session_tools`] (eight descriptors), and [`console::console_tools`]
+/// (five descriptors) in catalog order, returning twenty-two
 /// `{ name, description, inputSchema }` objects.
 /// Test: `catalog_has_expected_tool_count` and `every_tool_has_input_schema`.
 pub fn tool_catalog() -> Vec<Value> {
@@ -94,9 +98,9 @@ mod tests {
 
     #[test]
     fn catalog_has_expected_tool_count() {
-        // 9 pre-existing + 6 session-lifecycle + 5 console-facing tools = 20.
-        assert_eq!(tool_catalog().len(), 20);
-        assert_eq!(TOOL_CATALOG.len(), 20);
+        // 9 pre-existing + 8 session-lifecycle + 5 console-facing tools = 22.
+        assert_eq!(tool_catalog().len(), 22);
+        assert_eq!(TOOL_CATALOG.len(), 22);
     }
 
     #[test]

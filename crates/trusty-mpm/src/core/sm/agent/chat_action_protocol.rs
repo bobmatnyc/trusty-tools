@@ -362,6 +362,9 @@ pub async fn execute_verb(
                 model: str_arg(args, "model"),
                 prompt: str_arg(args, "prompt"),
                 goal_id: str_arg(args, "goal_id"),
+                // #1508: an explicit `ephemeral` arg marks the launched session
+                // disposable; absent → a normal durable session.
+                ephemeral: args.get("ephemeral").and_then(Value::as_bool),
             };
             control.launch(params).await
         }

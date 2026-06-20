@@ -380,9 +380,18 @@ impl OrchestratorBackend for StateBackend {
         task: &str,
         name_hint: Option<&str>,
         runtime: Option<&str>,
+        ephemeral: Option<bool>,
     ) -> Result<Value, String> {
-        super::mcp_session::session_new(&self.state, repo_url, git_ref, task, name_hint, runtime)
-            .await
+        super::mcp_session::session_new(
+            &self.state,
+            repo_url,
+            git_ref,
+            task,
+            name_hint,
+            runtime,
+            ephemeral,
+        )
+        .await
     }
 
     async fn session_stop(&self, session_id: &str) -> Result<Value, String> {
@@ -403,6 +412,21 @@ impl OrchestratorBackend for StateBackend {
 
     async fn session_send(&self, session_id: &str, text: &str) -> Result<Value, String> {
         super::mcp_session::session_send(&self.state, session_id, text).await
+    }
+
+    // ── #1508: fleet-wide teardown tools (delegate to mcp_session) ───────────
+
+    async fn session_decommission_ephemeral(&self) -> Result<Value, String> {
+        super::mcp_session::session_decommission_ephemeral(&self.state).await
+    }
+
+    async fn session_prune(
+        &self,
+        state: &str,
+        dry_run: bool,
+        include_active: bool,
+    ) -> Result<Value, String> {
+        super::mcp_session::session_prune(&self.state, state, dry_run, include_active).await
     }
 
     // ── #1222: console-facing tools (delegate to mcp_console) ────────────────

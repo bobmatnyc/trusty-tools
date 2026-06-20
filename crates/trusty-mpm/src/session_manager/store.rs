@@ -364,6 +364,7 @@ mod tests {
             proposed_default: None,
             correlation: Default::default(),
             runtime: Default::default(),
+            ephemeral: false,
         }
     }
 

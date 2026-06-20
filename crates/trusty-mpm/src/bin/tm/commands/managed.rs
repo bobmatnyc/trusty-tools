@@ -228,6 +228,98 @@ pub(crate) async fn session_decommission(
     Ok(())
 }
 
+/// `tm sessions decommission-ephemeral` — bulk-tear-down every ephemeral session (#1508).
+///
+/// Why: e2e harnesses and operators need a one-shot "clean up all my throwaway
+/// test sessions" verb. REAL sessions default `ephemeral=false` and are
+/// unreachable, so durable work is never harmed.
+/// What: POSTs `/api/v1/sessions/managed/decommission-ephemeral` and prints the
+/// returned `decommissioned` count.
+/// Test: HTTP path covered by `decommission_ephemeral_route_tears_down_only_ephemeral`
+/// in tests/session_manager_mvp.rs; CLI parse by `cli_parses_session_decommission_ephemeral`.
+pub(crate) async fn session_decommission_ephemeral(
+    client: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<()> {
+    let resp = client
+        .post(format!(
+            "{url}/api/v1/sessions/managed/decommission-ephemeral"
+        ))
+        .send()
+        .await?;
+    let body: serde_json::Value = resp.error_for_status()?.json().await?;
+    let count = body
+        .get("decommissioned")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    println!("decommissioned {count} ephemeral session(s)");
+    Ok(())
+}
+
+/// `tm sessions prune --state <filter> [--dry-run] [--include-active]` — by-state prune (#1508).
+///
+/// Why: ONE tool to tear down ephemeral/stopped sessions AND compact the store by
+/// dropping decommissioned tombstones, so legacy stale records can be purged with
+/// the same verb that cleans up test sessions. The fail-closed default never
+/// touches a RUNNING session unless `--include-active` is passed.
+/// What: POSTs `/api/v1/sessions/managed/prune` with `{ state, dry_run,
+/// include_active }`; on success prints one line per affected session
+/// (`<action> <id> <name> [<prior-state>]`) and a summary count. A 400 (bad
+/// `--state`) prints the daemon's actionable error.
+/// Test: HTTP path covered by `prune_route_dry_run_reports` /
+/// `prune_route_rejects_bad_state` in tests/session_manager_mvp.rs; CLI parse by
+/// `cli_parses_session_prune`.
+pub(crate) async fn session_prune(
+    client: &reqwest::Client,
+    url: &str,
+    state: String,
+    dry_run: bool,
+    include_active: bool,
+) -> anyhow::Result<()> {
+    let resp = client
+        .post(format!("{url}/api/v1/sessions/managed/prune"))
+        .json(&serde_json::json!({
+            "state": state,
+            "dry_run": dry_run,
+            "include_active": include_active,
+        }))
+        .send()
+        .await?;
+    if resp.status() == reqwest::StatusCode::BAD_REQUEST {
+        let msg = resp.text().await.unwrap_or_default();
+        println!("error: {msg}");
+        return Ok(());
+    }
+    let body: serde_json::Value = resp.error_for_status()?.json().await?;
+    let sessions = body
+        .get("sessions")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for s in &sessions {
+        let action = s
+            .get("action")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let id = s
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let name = s
+            .get("tmux_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let prior = s
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        println!("{action} {id} {name} [{prior}]");
+    }
+    let verb = if dry_run { "would prune" } else { "pruned" };
+    println!("{verb} {} session(s) (filter={state})", sessions.len());
+    Ok(())
+}
+
 /// `tm catalog` — sync or list the claude-mpm agent/skill catalog.
 ///
 /// Why: the session-manager MVP deploys agents/skills from the claude-mpm repo;

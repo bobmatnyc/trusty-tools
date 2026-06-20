@@ -1,4 +1,5 @@
-//! Daemon-side implementation of the six session-lifecycle MCP tools (#1221).
+//! Daemon-side implementation of the eight session-lifecycle MCP tools
+//! (#1221 + the two fleet-wide #1508 teardown verbs).
 //!
 //! Why: the MCP `StateBackend` (in `mcp_backend.rs`) must service the new
 //! session-lifecycle tools, but inlining their bodies there would push that file
@@ -8,10 +9,12 @@
 //! reimplementation — so MCP and HTTP behave identically. This module holds the
 //! wrapping logic; `session_new` delegates to the shared
 //! [`crate::daemon::managed_routes::spawn_managed`] used by the HTTP handler too.
-//! What: six free async functions — `session_new`, `session_stop`,
-//! `session_resume`, `session_decommission`, `session_activity`, `session_send`
-//! — each taking `&Arc<DaemonState>` plus parsed arguments and returning the
-//! same JSON shapes the HTTP routes return, or a human-readable error string.
+//! What: eight free async functions — the six per-session ops (`session_new`,
+//! `session_stop`, `session_resume`, `session_decommission`, `session_activity`,
+//! `session_send`) plus the two fleet-wide #1508 verbs
+//! (`session_decommission_ephemeral`, `session_prune`) — each taking
+//! `&Arc<DaemonState>` plus parsed arguments and returning the same JSON shapes
+//! the HTTP routes return, or a human-readable error string.
 //! Test: `cargo test -p trusty-mpm daemon::mcp_session` plus the dispatch-level
 //! tests in `crate::mcp`.
 
@@ -21,7 +24,7 @@ use serde_json::{Value, json};
 
 use crate::daemon::managed_routes::{SpawnParams, record_to_json, spawn_managed};
 use crate::daemon::state::DaemonState;
-use crate::session_manager::{ManagedError, ManagedSessionId};
+use crate::session_manager::{ManagedError, ManagedSessionId, PruneFilter};
 
 /// Parse a managed-session id string into a [`ManagedSessionId`].
 ///
@@ -52,7 +55,9 @@ fn managed_err(e: ManagedError) -> String {
 /// [`spawn_managed`] helper so the MCP and HTTP spawn flows are identical.
 /// What: validates the optional `runtime` selector, provisions the workspace,
 /// creates the tmux host, launches the harness, and returns the new record as
-/// JSON (id, tmux name, workspace path, state, attach command, runtime).
+/// JSON (id, tmux name, workspace path, state, attach command, runtime). The
+/// optional `ephemeral` flag (#1508) tags a test/throwaway session for the
+/// bulk-teardown + auto-reap paths.
 /// Test: `session_new_invalid_runtime_errors` (unit, no tmux needed).
 pub async fn session_new(
     state: &Arc<DaemonState>,
@@ -61,6 +66,7 @@ pub async fn session_new(
     task: &str,
     name_hint: Option<&str>,
     runtime: Option<&str>,
+    ephemeral: Option<bool>,
 ) -> Result<Value, String> {
     let params = SpawnParams {
         repo_url: repo_url.to_string(),
@@ -68,6 +74,7 @@ pub async fn session_new(
         task: task.to_string(),
         name_hint: name_hint.map(str::to_string),
         runtime: runtime.map(str::to_string),
+        ephemeral,
     };
     let record = spawn_managed(state, params).await?;
     Ok(record_to_json(&record))
@@ -186,6 +193,51 @@ pub async fn session_send(
     }))
 }
 
+/// Bulk-tear-down every ephemeral session (`session_decommission_ephemeral` tool, #1508).
+///
+/// Why: gives the driver a typed "clean up all my throwaway test sessions" path
+/// over MCP, delegating to the SAME
+/// [`SessionManager::decommission_all_ephemeral`](crate::session_manager::SessionManager::decommission_all_ephemeral)
+/// engine the HTTP route and CLI use, so behaviour is identical across transports.
+/// REAL sessions default `ephemeral=false` and are unreachable — durable work is safe.
+/// What: decommissions every ephemeral session and returns `{ decommissioned: <count> }`.
+/// Test: `dispatch_session_decommission_ephemeral_tool` (mock) in `crate::mcp`.
+pub async fn session_decommission_ephemeral(state: &Arc<DaemonState>) -> Result<Value, String> {
+    let mgr = state.session_manager().await;
+    let count = mgr
+        .decommission_all_ephemeral()
+        .await
+        .map_err(managed_err)?;
+    Ok(json!({ "decommissioned": count }))
+}
+
+/// By-state prune + tombstone compaction (`session_prune` tool, #1508).
+///
+/// Why: the fleet-wide teardown tool exposed over MCP so the legacy stale records
+/// can be purged with the SAME
+/// [`SessionManager::prune_managed`](crate::session_manager::SessionManager::prune_managed)
+/// engine the HTTP route and CLI use.
+/// What: parses `state` (an unknown spelling is a `400`-style error string), then
+/// prunes with `dry_run`/`include_active` and returns the serialized
+/// [`crate::session_manager::PruneOutcome`]. A RUNNING session is NEVER torn down
+/// unless `include_active`; with `dry_run` nothing is mutated.
+/// Test: `dispatch_session_prune_tool`, `dispatch_session_prune_rejects_bad_state`
+/// (mock) in `crate::mcp`.
+pub async fn session_prune(
+    state: &Arc<DaemonState>,
+    filter: &str,
+    dry_run: bool,
+    include_active: bool,
+) -> Result<Value, String> {
+    let filter = PruneFilter::parse(filter)?;
+    let mgr = state.session_manager().await;
+    let outcome = mgr
+        .prune_managed(filter, dry_run, include_active)
+        .await
+        .map_err(managed_err)?;
+    serde_json::to_value(&outcome).map_err(|e| format!("failed to serialize prune outcome: {e}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +326,7 @@ mod tests {
             "t",
             None,
             Some("bogus"),
+            None,
         )
         .await
         .unwrap_err();

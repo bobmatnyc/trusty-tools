@@ -1,13 +1,15 @@
-//! Argument parsing + routing for the six session-lifecycle MCP tools (#1221).
+//! Argument parsing + routing for the eight session-lifecycle MCP tools
+//! (#1221 + #1508).
 //!
 //! Why: the session-lifecycle tools more than half-again the catalog; routing
 //! them inline in `mcp/mod.rs`'s `dispatch_tool_call` would push that file over
 //! the 500-SLOC production cap. Extracting the parse-and-call arms into a sibling
 //! module keeps `mod.rs` focused on the handshake + core tools and gives the
 //! session tools one auditable home.
-//! What: [`try_dispatch`] matches a tool name against the six session tools;
-//! when it matches it parses arguments (via the shared `required_str` helper),
-//! calls the corresponding [`super::OrchestratorBackend`] method, and returns
+//! What: [`try_dispatch`] matches a tool name against the eight session tools
+//! (six per-session #1221 + the two fleet-wide #1508 teardown verbs); when it
+//! matches it parses arguments (via the shared `required_str` helper), calls the
+//! corresponding [`super::OrchestratorBackend`] method, and returns
 //! `Some(result)`. A non-session tool name returns `None` so the caller can
 //! report "unknown tool".
 //! Test: the `super::tests` `dispatch_session_*` cases drive this module through
@@ -29,9 +31,11 @@ const DEFAULT_ACTIVITY_LINES: u32 = 60;
 ///
 /// Why: a single entry point lets `dispatch_tool_call` delegate every
 /// session-tool name in one arm, keeping the core dispatch match small.
-/// What: returns `Some(Result)` for the six session tool names (parsing args and
-/// calling the matching backend method), or `None` when `name` is not a session
-/// tool — signalling the caller to fall through to its "unknown tool" branch.
+/// What: returns `Some(Result)` for the eight session tool names — the six
+/// per-session ops plus the two fleet-wide #1508 verbs (`session_decommission_ephemeral`,
+/// `session_prune`) — parsing args and calling the matching backend method, or
+/// `None` when `name` is not a session tool — signalling the caller to fall
+/// through to its "unknown tool" branch.
 /// Errors from argument parsing are returned as `Some(Err(_))` so they surface
 /// to the client as a tool-error result, identical to the core tools.
 /// Test: exercised by every `dispatch_session_*` test in `super::tests`.
@@ -69,6 +73,22 @@ pub async fn try_dispatch<B: OrchestratorBackend>(
             (Ok(id), Ok(text)) => backend.session_send(&id, &text).await,
             (Err(e), _) | (_, Err(e)) => Err(e),
         },
+        // #1508 fleet-wide teardown tools — no per-session id required.
+        "session_decommission_ephemeral" => backend.session_decommission_ephemeral().await,
+        "session_prune" => match required_str(args, "state") {
+            Ok(state) => {
+                let dry_run = args
+                    .get("dry_run")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let include_active = args
+                    .get("include_active")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                backend.session_prune(&state, dry_run, include_active).await
+            }
+            Err(e) => Err(e),
+        },
         // Not a session tool — let the caller report "unknown tool".
         _ => return None,
     };
@@ -90,7 +110,8 @@ async fn session_new<B: OrchestratorBackend>(backend: &B, args: &Value) -> Resul
     let task = required_str(args, "task")?;
     let name_hint = args.get("name_hint").and_then(Value::as_str);
     let runtime = args.get("runtime").and_then(Value::as_str);
+    let ephemeral = args.get("ephemeral").and_then(Value::as_bool);
     backend
-        .session_new(&repo_url, &git_ref, &task, name_hint, runtime)
+        .session_new(&repo_url, &git_ref, &task, name_hint, runtime, ephemeral)
         .await
 }
