@@ -325,3 +325,76 @@ fn format_health_up_and_down() {
     assert!(down_text.contains("unreachable"));
     assert!(!down_text.contains("fleet:"));
 }
+
+// --- Issue #1514: HTML-escape for CommandResult::Help and ampersands ----------
+
+/// Help text angle-bracket placeholders must not appear raw in the output.
+///
+/// Why: `help_text()` contains lines like `/status <id> — Session status`;
+/// sending that under `ParseMode::Html` causes Telegram to reject `<id>` as an
+/// unsupported HTML start tag, silently dropping the reply (issue #1514).
+/// What: `TelegramFormatter::format` on a `CommandResult::Help` must escape
+/// `<` and `>` to `&lt;` and `&gt;`.
+/// Test: this function IS the test.
+#[test]
+fn help_escapes_angle_bracket_placeholders() {
+    // Simulate the real help_text which contains lines like `/status <id> — …`
+    let help = CommandResult::Help("/status <id> — Session status".into());
+    let text = TelegramFormatter::format(&help);
+    assert!(
+        text.contains("&lt;id&gt;"),
+        "angle-bracket placeholders must be escaped to &lt;/&gt;: {text}"
+    );
+    assert!(
+        !text.contains("<id>"),
+        "raw <id> must not appear in output (Telegram rejects it): {text}"
+    );
+}
+
+/// Intentional HTML formatting tags emitted by other variants must be preserved.
+///
+/// Why: the fix for #1514 escapes Help text but must NOT double-escape tags that
+/// other `CommandResult` arms write deliberately (e.g. `<b>`, `<code>`, `<pre>`).
+/// What: a `CommandResult::Sessions` reply is confirmed to still carry the
+/// intentional `<b>` tag without it being escaped to `&lt;b&gt;`.
+/// Test: this function IS the test.
+#[test]
+fn intentional_html_tags_are_preserved_in_other_variants() {
+    use crate::client::SessionSummary;
+    let result = CommandResult::Sessions(vec![SessionSummary {
+        id: "abc12345-0000".into(),
+        status: "active".into(),
+        workdir: "/tmp/safe".into(),
+    }]);
+    let text = TelegramFormatter::format(&result);
+    // The sessions formatter writes `<b>trusty-mpm sessions</b>` intentionally.
+    assert!(
+        text.contains("<b>trusty-mpm sessions</b>"),
+        "intentional <b> tags must be preserved, not escaped: {text}"
+    );
+    assert!(
+        !text.contains("&lt;b&gt;"),
+        "intentional <b> must not be double-escaped: {text}"
+    );
+}
+
+/// Ampersands in Help text must be escaped to `&amp;`.
+///
+/// Why: `&` is an HTML-significant character; sending `&foo` under
+/// `ParseMode::Html` causes Telegram to misparse or reject the message.
+/// What: `TelegramFormatter::format` on a `CommandResult::Help` that contains
+/// `&` must emit `&amp;` in its place.
+/// Test: this function IS the test.
+#[test]
+fn help_escapes_ampersand() {
+    let help = CommandResult::Help("options: -a & -b".into());
+    let text = TelegramFormatter::format(&help);
+    assert!(
+        text.contains("&amp;"),
+        "ampersand must be escaped to &amp;: {text}"
+    );
+    assert!(
+        !text.contains(" & "),
+        "raw & must not appear in formatted help output: {text}"
+    );
+}
