@@ -132,12 +132,85 @@ fn parse_envelope_hello_is_ignored() {
 }
 
 #[test]
-fn parse_envelope_disconnect_carries_no_id() {
+fn parse_envelope_disconnect_surfaces_reason() {
+    // A `disconnect` envelope now surfaces its reason so the loop can classify it
+    // (permanent → stop, transient → reconnect) rather than silently ignoring it.
     let raw = r#"{ "type": "disconnect", "reason": "refresh_requested" }"#;
     assert_eq!(
         parse_envelope(raw),
-        SlackEvent::Ignored { envelope_id: None }
+        SlackEvent::Disconnect {
+            reason: "refresh_requested".into()
+        }
     );
+    // A reason-less disconnect surfaces an empty reason (classified transient).
+    let raw = r#"{ "type": "disconnect" }"#;
+    assert_eq!(
+        parse_envelope(raw),
+        SlackEvent::Disconnect {
+            reason: String::new()
+        }
+    );
+}
+
+#[test]
+fn classify_disconnect_reason_permanent_vs_transient() {
+    // Permanent: the connection can never be re-established / creds are dead.
+    for reason in [
+        "app_deactivated",
+        "invalid_auth",
+        "account_inactive",
+        "token_revoked",
+        "token_expired",
+        "not_authed",
+        "missing_scope",
+        "no_permission",
+    ] {
+        assert_eq!(
+            classify_disconnect_reason(reason),
+            DisconnectKind::Permanent,
+            "expected `{reason}` to be permanent",
+        );
+    }
+    // Permanent reasons match case-insensitively and inside a wrapped error string
+    // (e.g. the `apps.connections.open failed: …` context).
+    assert_eq!(
+        classify_disconnect_reason("apps.connections.open failed: INVALID_AUTH"),
+        DisconnectKind::Permanent
+    );
+    // Transient: routine recycles and unknown reasons reconnect with backoff.
+    for reason in [
+        "refresh_requested",
+        "warning",
+        "link_disabled",
+        "",
+        "socket gone",
+    ] {
+        assert_eq!(
+            classify_disconnect_reason(reason),
+            DisconnectKind::Transient,
+            "expected `{reason}` to be transient",
+        );
+    }
+}
+
+#[test]
+fn next_backoff_doubles_and_caps() {
+    use std::time::Duration;
+    let cap = Duration::from_secs(60);
+    // Doubles below the cap.
+    assert_eq!(
+        next_backoff(Duration::from_secs(2), cap),
+        Duration::from_secs(4)
+    );
+    assert_eq!(
+        next_backoff(Duration::from_secs(4), cap),
+        Duration::from_secs(8)
+    );
+    // Saturates at the cap and never exceeds it.
+    assert_eq!(next_backoff(Duration::from_secs(40), cap), cap);
+    assert_eq!(next_backoff(cap, cap), cap);
+    // Never overflows near MAX.
+    assert_eq!(next_backoff(Duration::MAX, cap), cap);
 }
 
 #[test]
@@ -251,4 +324,51 @@ fn resolve_token_reads_dotenv() {
 fn resolve_token_missing_is_none() {
     let missing = std::path::Path::new("/nonexistent/.env.local");
     assert_eq!(read_dotenv_key(missing, "SLACK_BOT_TOKEN"), None);
+}
+
+#[test]
+fn pid_file_path_is_under_framework_root() {
+    // The PID file lives under the framework root so start (writer) and stop
+    // (reader) agree on one location.
+    let path = pid_file_path();
+    assert!(path.ends_with("slack.pid"));
+    assert!(
+        path.to_string_lossy()
+            .contains(crate::core::paths::FRAMEWORK_DIR_NAME)
+    );
+}
+
+#[test]
+fn stop_via_pid_file_missing_is_not_running() {
+    // No PID file → the bot is simply not running (not an error).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("slack.pid");
+    assert_eq!(stop_via_pid_file(&path), StopOutcome::NotRunning);
+}
+
+#[test]
+fn stop_via_pid_file_garbage_is_failed_and_removes_file() {
+    // A corrupt PID file is a real failure, and the file is cleaned up so the
+    // next start is not poisoned.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("slack.pid");
+    std::fs::write(&path, "not-a-pid").expect("write pid");
+    match stop_via_pid_file(&path) {
+        StopOutcome::Failed(_) => {}
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert!(!path.exists(), "corrupt PID file should be removed");
+}
+
+#[cfg(unix)]
+#[test]
+fn stop_via_pid_file_stale_pid_is_not_running() {
+    // A recorded PID that no longer exists is a stale file, not a failure; the
+    // file is still removed. We use PID 999999999 which is far beyond any live
+    // process (kill returns ESRCH → NotRunning).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("slack.pid");
+    std::fs::write(&path, "999999999").expect("write pid");
+    assert_eq!(stop_via_pid_file(&path), StopOutcome::NotRunning);
+    assert!(!path.exists(), "stale PID file should be removed");
 }

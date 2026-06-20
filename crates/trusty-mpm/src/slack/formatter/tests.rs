@@ -244,4 +244,18 @@ fn short_id_truncates_long_ids() {
     assert_eq!(short_id("abcdef0123456789"), "abcdef01…");
     // Already short ids pass through unchanged.
     assert_eq!(short_id("short"), "short");
+    // An id of exactly SHORT_ID_LEN chars has no 9th char → no ellipsis.
+    assert_eq!(short_id("12345678"), "12345678");
+}
+
+#[test]
+fn short_id_handles_multibyte() {
+    // A multi-byte UTF-8 id must truncate on a CHAR boundary, never panic on a
+    // byte slice (regression: `&id[..8]` panicked mid-codepoint).
+    let id = "日本語のセッションです"; // 11 chars, 3 bytes each
+    let out = short_id(id);
+    // First SHORT_ID_LEN (8) chars: 日本語のセッショ, then the ellipsis.
+    assert_eq!(out, "日本語のセッショ…");
+    // Char count of the head is SHORT_ID_LEN; the ellipsis is the only extra char.
+    assert_eq!(out.chars().count(), SHORT_ID_LEN + 1);
 }

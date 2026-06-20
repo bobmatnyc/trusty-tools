@@ -448,8 +448,8 @@ fn status_word(status: crate::core::doctor::CheckStatus) -> &'static str {
 /// What: returns the last `MAX_OUTPUT_LINES` lines joined with newlines.
 /// Test: covered by `format_snapshot_tails_output`.
 fn tail_lines(output: &str) -> String {
-    let tail: Vec<&str> = output.lines().rev().take(MAX_OUTPUT_LINES).collect();
-    tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+    let lines: Vec<&str> = output.lines().collect();
+    lines[lines.len().saturating_sub(MAX_OUTPUT_LINES)..].join("\n")
 }
 
 /// Wrap text in a Slack triple-backtick code fence.
@@ -465,13 +465,16 @@ fn code_block(text: &str) -> String {
 /// Shorten a session id for compact chat display.
 ///
 /// Why: full UUIDs do not read well in a channel.
-/// What: returns the first [`SHORT_ID_LEN`] chars plus an ellipsis, or the id
-/// unchanged when already short.
-/// Test: `short_id_truncates_long_ids`.
+/// What: returns the first [`SHORT_ID_LEN`] *chars* plus an ellipsis, or the id
+/// unchanged when already short. Char-based (not byte-slice) truncation so a
+/// multi-byte UTF-8 id can never panic on a non-char boundary.
+/// Test: `short_id_truncates_long_ids`, `short_id_handles_multibyte`.
 fn short_id(id: &str) -> String {
-    if id.len() > SHORT_ID_LEN {
-        format!("{}…", &id[..SHORT_ID_LEN])
+    let mut chars = id.chars();
+    let head: String = chars.by_ref().take(SHORT_ID_LEN).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
     } else {
-        id.to_string()
+        head
     }
 }

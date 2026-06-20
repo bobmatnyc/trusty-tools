@@ -61,6 +61,19 @@ const LLM_NOT_CONFIGURED: &str =
 /// Slack `apps.connections.open` endpoint (opens a Socket-Mode WebSocket URL).
 const CONNECTIONS_OPEN_URL: &str = "https://slack.com/api/apps.connections.open";
 
+/// Initial reconnect backoff after a transient socket drop.
+///
+/// Why: Slack recycles Socket-Mode connections routinely; the first reconnect
+/// should be near-immediate, with the delay growing only if drops persist.
+const RECONNECT_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Maximum reconnect backoff (cap for the exponential growth).
+///
+/// Why: an unbounded exponential would eventually stop retrying for minutes;
+/// capping at 60s keeps the bot responsive once Slack recovers while still
+/// backing off hard during an outage instead of hammering at 2s forever.
+const RECONNECT_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Slack `chat.postMessage` endpoint (posts a bot reply).
 const POST_MESSAGE_URL: &str = "https://slack.com/api/chat.postMessage";
 
@@ -98,11 +111,202 @@ pub enum SlackEvent {
         /// The channel id the reply should be posted to.
         channel: String,
     },
+    /// A `disconnect` control envelope: Slack is tearing down this socket.
+    ///
+    /// Why: Slack signals socket teardown with a `disconnect` envelope whose
+    /// `reason` distinguishes a routine recycle (`refresh_requested`, `warning`)
+    /// from a PERMANENT failure (`app_deactivated`, an auth/scope revocation). The
+    /// adapter must reconnect on the former and STOP on the latter rather than
+    /// hammering Slack forever — so the reason has to survive parsing.
+    /// What: carries the raw `reason` string (empty when Slack omitted it).
+    /// `disconnect` envelopes need no ACK, so this variant carries no id.
+    /// Test: `parse_envelope_disconnect_surfaces_reason`.
+    Disconnect {
+        /// The raw Slack `reason` (e.g. `refresh_requested`, `app_deactivated`).
+        reason: String,
+    },
     /// An envelope the adapter only needs to ACK (carries the id when present).
     Ignored {
         /// Socket-Mode envelope id to ACK, when the envelope carried one.
         envelope_id: Option<String>,
     },
+}
+
+/// Whether a Slack `disconnect`/connection failure is recoverable.
+///
+/// Why: the reconnect loop must distinguish a transient drop (reconnect with
+/// backoff) from a permanent failure (give up — reconnecting can never succeed
+/// and only hammers Slack), so the classification is a typed value, not a bool.
+/// What: `Transient` → reconnect; `Permanent` → stop the loop and return an error.
+/// Test: `classify_disconnect_reason_permanent_vs_transient`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisconnectKind {
+    /// A routine/recoverable disconnect — reconnect with backoff.
+    Transient,
+    /// A fatal disconnect (app deactivated, auth/scope revoked) — stop.
+    Permanent,
+}
+
+/// Classify a Slack `disconnect` reason (or connection error) as permanent or transient.
+///
+/// Why: Slack recycles Socket-Mode connections routinely (`refresh_requested`,
+/// `warning`, plain socket drops) — those MUST reconnect. But some reasons mean
+/// the connection can never be re-established (`app_deactivated`) or that the
+/// credentials are dead (`invalid_auth`, `account_inactive`, `token_revoked`,
+/// `token_expired`, `not_authed`, `missing_scope`); reconnecting on those is a
+/// hot loop against Slack and never recovers. Centralizing the rule keeps the
+/// loop's stop/continue decision testable without a live socket.
+/// What: returns [`DisconnectKind::Permanent`] for the known fatal reasons
+/// (case-insensitive, substring-matched so wrapped errors like
+/// `apps.connections.open failed: invalid_auth` still classify), else
+/// [`DisconnectKind::Transient`].
+/// Test: `classify_disconnect_reason_permanent_vs_transient`.
+pub fn classify_disconnect_reason(reason: &str) -> DisconnectKind {
+    /// Reasons that mean "reconnecting can never succeed" — STOP the loop.
+    const PERMANENT_REASONS: &[&str] = &[
+        "app_deactivated",
+        "invalid_auth",
+        "account_inactive",
+        "token_revoked",
+        "token_expired",
+        "not_authed",
+        "missing_scope",
+        "no_permission",
+    ];
+    let needle = reason.to_ascii_lowercase();
+    if PERMANENT_REASONS.iter().any(|r| needle.contains(r)) {
+        DisconnectKind::Permanent
+    } else {
+        DisconnectKind::Transient
+    }
+}
+
+/// The PID-file name (under `~/.trusty-mpm`) for the foreground Slack bot.
+///
+/// Why: `tm slack stop` must terminate exactly the bot `tm slack start` launched —
+/// not any process whose argv happens to contain "slack start" (the old
+/// `pkill -f "slack start"` could kill an editor, a grep, or an unrelated tool).
+/// A PID file records the one true process so `stop` signals precisely it.
+const SLACK_PID_FILE: &str = "slack.pid";
+
+/// Absolute path to the Slack bot PID file (`~/.trusty-mpm/slack.pid`).
+///
+/// Why: `start` (writer) and `stop` (reader) must agree on one location; deriving
+/// it from the shared [`FRAMEWORK_DIR_NAME`](crate::core::paths::FRAMEWORK_DIR_NAME)
+/// home root keeps it consistent with the rest of the framework's state files.
+/// What: `~/.trusty-mpm/slack.pid`, falling back to `./.trusty-mpm/slack.pid` when
+/// the home directory cannot be resolved (mirrors `FrameworkPaths::default`).
+/// Test: `pid_file_path_is_under_framework_root`.
+pub fn pid_file_path() -> std::path::PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    home.join(crate::core::paths::FRAMEWORK_DIR_NAME)
+        .join(SLACK_PID_FILE)
+}
+
+/// Record the current process id in the Slack PID file.
+///
+/// Why: so `tm slack stop` can signal exactly this foreground bot instead of
+/// pattern-matching process argv. Written once at startup, removed on stop.
+/// What: creates `~/.trusty-mpm` if needed and writes the current PID as text.
+/// A write failure is logged (stderr) and swallowed — an unwritable PID file must
+/// not prevent the bot from running; `stop` simply falls back to a manual kill.
+/// Test: `write_then_read_pid_file_round_trips` (against a temp path).
+fn write_pid_file() {
+    let path = pid_file_path();
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!("could not create Slack PID dir {}: {e}", parent.display());
+        return;
+    }
+    if let Err(e) = std::fs::write(&path, std::process::id().to_string()) {
+        tracing::warn!("could not write Slack PID file {}: {e}", path.display());
+    }
+}
+
+/// The result of a `tm slack stop` attempt, for a precise operator message.
+///
+/// Why: `stop` must report honestly — it should NOT print "no process found" when
+/// it actually hit an error (an unreadable PID file or a failed signal). The old
+/// `pkill` path conflated "no match" with "pkill itself errored"; a typed outcome
+/// keeps the three cases distinct.
+/// What: `Stopped(pid)` signalled a live bot; `NotRunning` found no PID file or a
+/// stale one (process already gone); `Failed(msg)` is a real error.
+/// Test: `stop_via_pid_file_*` cover the missing-file and stale-pid paths.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StopOutcome {
+    /// A running bot (this PID) was signalled to stop.
+    Stopped(u32),
+    /// No bot was running (no PID file, or the recorded PID is already gone).
+    NotRunning,
+    /// Stopping failed for a real reason (e.g. an unreadable PID file).
+    Failed(String),
+}
+
+/// Stop the foreground Slack bot recorded in the PID file at `path`.
+///
+/// Why: this is the precise replacement for `pkill -f "slack start"` — it signals
+/// exactly the process `tm slack start` recorded, so it can never kill an
+/// unrelated process, and it distinguishes "not running" from a genuine failure.
+/// Taking `path` as a parameter keeps it unit-testable against a temp file.
+/// What: reads the PID, sends `SIGTERM` to it (Unix), removes the PID file, and
+/// returns a [`StopOutcome`]. A missing PID file → `NotRunning`; a recorded PID
+/// that no longer exists → `NotRunning` (stale file, still cleaned up); an
+/// unreadable/garbage PID file or a signal error other than "no such process" →
+/// `Failed`.
+/// Test: `stop_via_pid_file_missing_is_not_running`,
+/// `stop_via_pid_file_stale_pid_is_not_running`.
+pub fn stop_via_pid_file(path: &Path) -> StopOutcome {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return StopOutcome::NotRunning,
+        Err(e) => return StopOutcome::Failed(format!("could not read PID file: {e}")),
+    };
+    let pid: u32 = match raw.trim().parse() {
+        Ok(pid) => pid,
+        Err(e) => {
+            // A corrupt PID file is unusable; remove it so the next start is clean.
+            let _ = std::fs::remove_file(path);
+            return StopOutcome::Failed(format!("PID file is not a valid pid: {e}"));
+        }
+    };
+    let outcome = signal_terminate(pid);
+    // Always clear the PID file once we have acted on it (stopped or stale).
+    let _ = std::fs::remove_file(path);
+    outcome
+}
+
+/// Send `SIGTERM` to `pid`, classifying the result.
+///
+/// Why: `stop_via_pid_file` must distinguish a successful signal from "the process
+/// is already gone" (a stale PID file, not an error) and from a real failure.
+/// Isolating the raw `kill(2)` call keeps that classification in one place.
+/// What: on Unix, calls `libc::kill(pid, SIGTERM)`; `ESRCH` (no such process) maps
+/// to [`StopOutcome::NotRunning`], any other errno to [`StopOutcome::Failed`], and
+/// success to [`StopOutcome::Stopped`]. On non-Unix it reports unsupported.
+/// Test: covered indirectly via `stop_via_pid_file_stale_pid_is_not_running`.
+fn signal_terminate(pid: u32) -> StopOutcome {
+    #[cfg(unix)]
+    {
+        // SAFETY: `kill` is async-signal-safe and merely posts a signal; passing a
+        // pid and a constant signal number has no memory-safety implications.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        if rc == 0 {
+            return StopOutcome::Stopped(pid);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            // The process is already gone — a stale PID file, not a failure.
+            StopOutcome::NotRunning
+        } else {
+            StopOutcome::Failed(format!("failed to signal pid {pid}: {err}"))
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        StopOutcome::Failed("stopping the Slack bot is only supported on Unix".to_string())
+    }
 }
 
 /// Resolve a secret the same way the Telegram adapter and LLM overseer do:
@@ -190,7 +394,17 @@ pub fn parse_envelope(raw: &str) -> SlackEvent {
             }
         }
         "events_api" => parse_events_api(&v, envelope_id),
-        // `hello`, `disconnect`, and anything else only needs an ACK (or none).
+        // A `disconnect` envelope carries a `reason` the loop must classify
+        // (permanent → stop, transient → reconnect); it needs no ACK.
+        "disconnect" => {
+            let reason = v
+                .get("reason")
+                .and_then(|r| r.as_str())
+                .unwrap_or("")
+                .to_string();
+            SlackEvent::Disconnect { reason }
+        }
+        // `hello` and anything else only needs an ACK (or none).
         _ => SlackEvent::Ignored { envelope_id },
     }
 }
@@ -372,7 +586,7 @@ async fn reply_for_event(
             let body = action_chat_reply(executor, histories, channel, text).await;
             Some((channel.clone(), body))
         }
-        SlackEvent::Ignored { .. } => None,
+        SlackEvent::Disconnect { .. } | SlackEvent::Ignored { .. } => None,
     }
 }
 
@@ -433,6 +647,38 @@ async fn post_message(http: &reqwest::Client, bot_token: &str, channel: &str, te
     }
 }
 
+/// Why one Socket-Mode connection ended, so [`run`] can decide to reconnect or stop.
+///
+/// Why: a connection can end three ways — a clean socket drop (reconnect), Slack
+/// asking us to recycle via a transient `disconnect` (reconnect), or a permanent
+/// `disconnect` reason such as `app_deactivated` (STOP — reconnecting can never
+/// succeed). Modelling the outcome as a typed value keeps [`run`]'s loop a thin
+/// match instead of string-sniffing an `anyhow::Error`.
+/// What: [`Dropped`](SocketOutcome::Dropped) and
+/// [`TransientDisconnect`](SocketOutcome::TransientDisconnect) reconnect with
+/// backoff; [`PermanentDisconnect`](SocketOutcome::PermanentDisconnect) stops.
+/// Test: classification is covered by `classify_disconnect_reason_permanent_vs_transient`.
+enum SocketOutcome {
+    /// The socket closed/errored (transient); reconnect after backoff.
+    Dropped(anyhow::Error),
+    /// Slack sent a transient `disconnect` reason; reconnect after backoff.
+    TransientDisconnect(String),
+    /// Slack sent a permanent `disconnect` reason; stop the loop.
+    PermanentDisconnect(String),
+}
+
+/// Compute the next reconnect backoff: double, capped at [`RECONNECT_BACKOFF_CAP`].
+///
+/// Why: capped exponential backoff is the difference between gracefully riding out
+/// a Slack outage and a 2s-interval hot loop; extracting the arithmetic makes the
+/// cap and doubling unit-testable without sleeping.
+/// What: returns `min(current * 2, cap)`. Saturating so a near-`MAX` duration can
+/// never overflow.
+/// Test: `next_backoff_doubles_and_caps`.
+fn next_backoff(current: std::time::Duration, cap: std::time::Duration) -> std::time::Duration {
+    current.saturating_mul(2).min(cap)
+}
+
 /// Run the Slack remote-management bot against `url` (the daemon).
 ///
 /// Why: shared entry point for `tm slack start`. Connects to Slack in Socket Mode
@@ -442,10 +688,15 @@ async fn post_message(http: &reqwest::Client, bot_token: &str, channel: &str, te
 /// requires a bot token (`chat.postMessage`) and an app token
 /// (`apps.connections.open`), opens a Socket-Mode WebSocket, and loops: parse each
 /// inbound frame, ACK it, compute a reply through the executor / coordinator, and
-/// post it. A socket error breaks the inner loop and reconnects.
-/// Test: `--check` mode is deterministic; the live loop is exercised against a
-/// real Slack app (deferred — see the PR body). The pure routing/parse logic is
-/// unit-tested.
+/// post it. A transient socket drop or `disconnect` reconnects with **capped
+/// exponential backoff** ([`RECONNECT_BACKOFF_BASE`] → [`RECONNECT_BACKOFF_CAP`],
+/// reset to base after a long-lived connection); a **permanent** `disconnect`
+/// reason (`app_deactivated`, `invalid_auth`, …) stops the loop and returns an
+/// error rather than hammering Slack forever.
+/// Test: `--check` mode is deterministic; the backoff arithmetic
+/// (`next_backoff_doubles_and_caps`) and reason classification
+/// (`classify_disconnect_reason_permanent_vs_transient`) are unit-tested; the live
+/// loop is exercised against a real Slack app (deferred — see the PR body).
 pub async fn run(
     url: String,
     bot_token: Option<String>,
@@ -480,13 +731,47 @@ pub async fn run(
     let executor = Arc::new(CommandExecutor::new(url));
     let histories: ChatHistories = Arc::new(Mutex::new(HashMap::new()));
 
+    // Record our PID so `tm slack stop` can signal exactly this process.
+    write_pid_file();
+
     tracing::info!("Slack adapter starting (Socket Mode)");
+    let mut backoff = RECONNECT_BACKOFF_BASE;
     loop {
-        let ws_url = open_socket_url(&http, &app_token).await?;
-        if let Err(e) = socket_loop(&http, &bot_token, &ws_url, &executor, &histories).await {
-            tracing::warn!("Slack socket dropped, reconnecting: {e}");
+        // A failure to even open the socket is classified too: a permanent auth
+        // error (`invalid_auth`, …) must stop, not hot-loop on `connections.open`.
+        let ws_url = match open_socket_url(&http, &app_token).await {
+            Ok(url) => url,
+            Err(e) => {
+                if classify_disconnect_reason(&e.to_string()) == DisconnectKind::Permanent {
+                    return Err(e.context("Slack connection permanently failed"));
+                }
+                tracing::warn!("apps.connections.open failed, retrying: {e}");
+                tokio::time::sleep(backoff).await;
+                backoff = next_backoff(backoff, RECONNECT_BACKOFF_CAP);
+                continue;
+            }
+        };
+
+        let connected_at = std::time::Instant::now();
+        match socket_loop(&http, &bot_token, &ws_url, &executor, &histories).await {
+            SocketOutcome::PermanentDisconnect(reason) => {
+                anyhow::bail!("Slack sent a permanent disconnect ({reason}); stopping");
+            }
+            SocketOutcome::TransientDisconnect(reason) => {
+                tracing::warn!("Slack disconnect ({reason}), reconnecting");
+            }
+            SocketOutcome::Dropped(e) => {
+                tracing::warn!("Slack socket dropped, reconnecting: {e}");
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Reset backoff after a connection that lived long enough to be healthy,
+        // so a single long-lived socket does not inherit an outage's long delay.
+        if connected_at.elapsed() >= RECONNECT_BACKOFF_CAP {
+            backoff = RECONNECT_BACKOFF_BASE;
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = next_backoff(backoff, RECONNECT_BACKOFF_CAP);
     }
 }
 
@@ -496,33 +781,49 @@ pub async fn run(
 /// readable and the I/O contained — each frame is parsed, ACKed, and answered.
 /// What: connects to `ws_url`, then for each text frame: parses it
 /// ([`parse_envelope`]), ACKs the envelope, computes a reply
-/// ([`reply_for_event`]), and posts it ([`post_message`]). Returns `Err` when the
-/// socket closes or errors so [`run`] can reconnect.
-/// Test: exercised against a live Slack app (deferred).
+/// ([`reply_for_event`]), and posts it ([`post_message`]). Returns a
+/// [`SocketOutcome`] so [`run`] can reconnect (drop / transient `disconnect`) or
+/// stop (permanent `disconnect`). A `disconnect` envelope is classified via
+/// [`classify_disconnect_reason`] and ends the connection immediately.
+/// Test: classification/backoff are unit-tested; the live socket is deferred.
 async fn socket_loop(
     http: &reqwest::Client,
     bot_token: &str,
     ws_url: &str,
     executor: &Arc<CommandExecutor>,
     histories: &ChatHistories,
-) -> anyhow::Result<()> {
-    let (ws, _) = tokio_tungstenite::connect_async(ws_url).await?;
+) -> SocketOutcome {
+    let (ws, _) = match tokio_tungstenite::connect_async(ws_url).await {
+        Ok(ws) => ws,
+        Err(e) => return SocketOutcome::Dropped(e.into()),
+    };
     let (mut write, mut read) = ws.split();
 
     while let Some(frame) = read.next().await {
-        let WsMessage::Text(raw) = frame? else {
-            continue;
+        let raw = match frame {
+            Ok(WsMessage::Text(raw)) => raw,
+            Ok(_) => continue,
+            Err(e) => return SocketOutcome::Dropped(e.into()),
         };
         let event = parse_envelope(&raw);
+        // A `disconnect` ends this connection; its reason decides stop vs reconnect.
+        if let SlackEvent::Disconnect { reason } = &event {
+            return match classify_disconnect_reason(reason) {
+                DisconnectKind::Permanent => SocketOutcome::PermanentDisconnect(reason.clone()),
+                DisconnectKind::Transient => SocketOutcome::TransientDisconnect(reason.clone()),
+            };
+        }
         // ACK first so Slack does not redeliver while we work.
-        if let Some(id) = envelope_id_of(&event) {
-            write.send(WsMessage::Text(ack_frame(&id))).await?;
+        if let Some(id) = envelope_id_of(&event)
+            && let Err(e) = write.send(WsMessage::Text(ack_frame(&id))).await
+        {
+            return SocketOutcome::Dropped(e.into());
         }
         if let Some((channel, body)) = reply_for_event(executor, histories, &event).await {
             post_message(http, bot_token, &channel, &body).await;
         }
     }
-    anyhow::bail!("socket closed")
+    SocketOutcome::Dropped(anyhow::anyhow!("socket closed"))
 }
 
 /// Extract the `envelope_id` to ACK for any [`SlackEvent`].
@@ -536,6 +837,7 @@ fn envelope_id_of(event: &SlackEvent) -> Option<String> {
     match event {
         SlackEvent::SlashCommand { envelope_id, .. } => Some(envelope_id.clone()),
         SlackEvent::Message { envelope_id, .. } => Some(envelope_id.clone()),
+        SlackEvent::Disconnect { .. } => None,
         SlackEvent::Ignored { envelope_id } => envelope_id.clone(),
     }
 }
