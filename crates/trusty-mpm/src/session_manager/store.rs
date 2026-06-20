@@ -365,6 +365,7 @@ mod tests {
             correlation: Default::default(),
             runtime: Default::default(),
             ephemeral: false,
+            workspace_owned: false,
         }
     }
 

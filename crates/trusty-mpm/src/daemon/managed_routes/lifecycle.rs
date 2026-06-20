@@ -140,6 +140,10 @@ pub async fn spawn_managed(
     })?;
 
     // Step 2: create the tmux session rooted at the provisioned workspace.
+    // `owned=true` is set ATOMICALLY at record creation (#1511): the SM
+    // provisioned this directory via git clone, so decommission may remove it.
+    // Local-path spawn and adopt_existing pass `owned=false`; they are never
+    // eligible for automatic disk deletion.
     let mgr = state.session_manager().await;
     let record = mgr
         .create_with_id(
@@ -152,6 +156,7 @@ pub async fn spawn_managed(
             Some(params.git_ref.clone()),
             runtime,
             params.ephemeral.unwrap_or(false),
+            true, // owned: SM provisioned via git clone
         )
         .await
         .map_err(|e| {
@@ -271,6 +276,7 @@ async fn spawn_managed_local(
             None,
             runtime,
             params.ephemeral.unwrap_or(false),
+            false, // owned: local-path spawn never owns the directory (#1511)
         )
         .await
         .map_err(|e| {

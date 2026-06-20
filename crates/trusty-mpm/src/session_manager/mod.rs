@@ -9,11 +9,13 @@
 //! tested in `manager::tests`.
 
 pub mod adopt;
+pub mod decommission;
 pub mod manager;
 pub mod prune;
 pub mod record;
 pub mod session_guard;
 pub mod store;
+pub mod workspace_guard;
 
 #[cfg(test)]
 mod tests;

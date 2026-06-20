@@ -445,40 +445,60 @@ async fn manager_resume_respawns_in_existing_workspace() {
     );
 }
 
-/// `decommission` must remove the workspace directory from disk and set state
-/// to `Decommissioned`, but keep a tombstone record.
+/// `decommission` removes an SM-OWNED workspace directory and sets state to
+/// `Decommissioned`, but keeps a tombstone record.
 ///
-/// Why: decommission is the ONLY teardown that removes disk artifacts; without
-/// it the workspace dir accumulates indefinitely.
-/// What: creates a session with a real temp workspace dir, decommissions it,
-/// asserts the workspace dir is gone from disk and the record state is
-/// `Decommissioned` with `workspace_path = None`.
+/// Why: decommission is the ONLY teardown that removes disk artifacts for
+/// SM-provisioned (clone-based) sessions. The workspace must only be deleted
+/// when `workspace_owned = true` AND the path is inside the managed root —
+/// this test exercises the owned path by pointing the workspace inside a temp
+/// dir that serves as the managed root (#1511).
+/// What: creates a session, marks it workspace_owned=true, uses a temp dir as
+/// the managed root (via env override), decommissions it, asserts the workspace
+/// dir is gone from disk and the record state is `Decommissioned` with
+/// `workspace_path = None`.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_decommission_removes_workspace() {
     let dir = TempDir::new().unwrap();
     let (mgr, _fake) = make_manager(&dir).await;
 
-    // Create a real temp workspace directory that we can check after decommission.
-    let workspace_dir = TempDir::new().unwrap();
-    let workspace_path = workspace_dir.path().to_owned();
+    // Build a workspace path INSIDE a temp "managed root" dir so the
+    // path-containment guard passes. `decommission_with_root` is called with
+    // the managed root injected directly — no env var mutation required.
+    let managed_root = TempDir::new().unwrap();
+    let workspace_path = managed_root
+        .path()
+        .join("owner")
+        .join("repo")
+        .join("abc-session-id");
+    std::fs::create_dir_all(&workspace_path).unwrap();
     // Write a sentinel file so we can verify the dir was removed.
     std::fs::write(workspace_path.join("sentinel.txt"), "exists").unwrap();
 
+    // Create the session with `owned=true` (atomic: mirrors what `spawn_managed`
+    // does for clone-provisioned workspaces after Fix 1).
     let record = mgr
-        .create(
+        .create_with_id(
+            ManagedSessionId::new(),
             "task".into(),
             Some(workspace_path.clone()),
             None,
             Some(workspace_path.clone()),
             None,
             None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            true, // owned: SM provisioned via clone
         )
         .await
         .expect("create");
 
-    // Decommission.
-    let tombstone = mgr.decommission(&record.id).await.expect("decommission");
+    // Decommission using the injectable root — no unsafe env mutation.
+    let tombstone = mgr
+        .decommission_with_root(&record.id, managed_root.path())
+        .await
+        .expect("decommission");
 
     // State must be Decommissioned.
     assert_eq!(tombstone.state, ManagedSessionState::Decommissioned);
@@ -540,6 +560,7 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
         correlation: Default::default(),
         runtime: Default::default(),
         ephemeral: false,
+        workspace_owned: false,
     };
     // A record whose tmux session will NOT be found (simulating reboot).
     let rebooted_record = SessionRecord {
@@ -558,6 +579,7 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
         correlation: Default::default(),
         runtime: Default::default(),
         ephemeral: false,
+        workspace_owned: false,
     };
     {
         let mut store = mgr.store.write().await;
@@ -618,6 +640,7 @@ async fn manager_reconcile_skips_decommissioned() {
         correlation: Default::default(),
         runtime: Default::default(),
         ephemeral: false,
+        workspace_owned: false,
     };
     {
         let mut store = mgr.store.write().await;
@@ -849,6 +872,7 @@ async fn spawn_session_tmux_cwd_is_workspace() {
             Some("main".into()),
             crate::runtime::RuntimeKind::default(),
             false,
+            false,
         )
         .await
         .expect("create_with_id");
@@ -941,6 +965,7 @@ async fn manager_create_persists_runtime() {
             None,
             None,
             crate::runtime::RuntimeKind::Tcode,
+            false,
             false,
         )
         .await
@@ -1333,6 +1358,7 @@ async fn seed_record(
         correlation: Default::default(),
         runtime: Default::default(),
         ephemeral,
+        workspace_owned: false,
     };
     mgr.store
         .write()
@@ -1366,6 +1392,7 @@ async fn manager_create_persists_ephemeral_flag() {
             None,
             crate::runtime::RuntimeKind::default(),
             true,
+            false,
         )
         .await
         .expect("create ephemeral");
@@ -1379,6 +1406,7 @@ async fn manager_create_persists_ephemeral_flag() {
             None,
             None,
             crate::runtime::RuntimeKind::default(),
+            false,
             false,
         )
         .await
@@ -1749,6 +1777,7 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
             correlation: Default::default(),
             runtime: Default::default(),
             ephemeral,
+            workspace_owned: false,
         };
         mgr.store.write().await.upsert(record).await.expect("seed");
     }
@@ -1782,5 +1811,126 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
         mgr.get(&old_durable).await.unwrap().state,
         ManagedSessionState::Active,
         "a non-ephemeral session is NEVER reaped by age"
+    );
+}
+
+// ── workspace-ownership guard tests (#1511) ──────────────────────────────────
+
+/// Decommissioning an UNOWNED record (local-path spawn, adopt) does NOT delete
+/// the workspace directory — only the session record is tombstoned.
+///
+/// Why (#1511): this is the core safety property. Before #1511, `decommission`
+/// unconditionally `remove_dir_all`'d `workspace_path`, which deleted a live
+/// user repo. With the `workspace_owned = false` guard, the directory must be
+/// preserved even though decommission completes successfully.
+/// What: creates a temp dir as the "workspace", builds an unowned record that
+/// points at it, decommissions the session, asserts the dir still exists on
+/// disk AND the record state is `Decommissioned`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_decommission_unowned_skips_deletion() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    // This dir represents a REAL user repo — it was not created by the SM.
+    let real_user_repo = TempDir::new().unwrap();
+    let repo_path = real_user_repo.path().to_owned();
+    // Write a sentinel file; if decommission deletes the dir this assert fails.
+    std::fs::write(repo_path.join("important_file.txt"), "do not delete").unwrap();
+
+    // Create the session record directly in the store, simulating a local-path
+    // spawn (#1502) that sets workspace_path to the real directory.
+    let id = ManagedSessionId::new();
+    let record = SessionRecord {
+        id,
+        tmux_name: format!("tmpm-local-{id}"),
+        cwd: repo_path.clone(),
+        task: "local task".into(),
+        state: ManagedSessionState::Stopped,
+        created_at: Utc::now(),
+        last_activity_at: None,
+        workspace_path: Some(repo_path.clone()),
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+        correlation: Default::default(),
+        runtime: Default::default(),
+        ephemeral: false,
+        // workspace_owned = false — the SM did NOT create this directory.
+        workspace_owned: false,
+    };
+    mgr.store.write().await.upsert(record).await.unwrap();
+
+    // Decommission must SUCCEED (return Ok) but NOT delete the directory.
+    let tombstone = mgr
+        .decommission(&id)
+        .await
+        .expect("decommission of an unowned record must succeed (skip deletion, not error)");
+
+    // The record must be tombstoned.
+    assert_eq!(
+        tombstone.state,
+        ManagedSessionState::Decommissioned,
+        "record state must be Decommissioned"
+    );
+
+    // The REAL directory must still exist — decommission must not have deleted it.
+    assert!(
+        repo_path.exists(),
+        "the unowned workspace directory must NOT be deleted by decommission (#1511)"
+    );
+    assert!(
+        repo_path.join("important_file.txt").exists(),
+        "the sentinel file inside the unowned workspace must still exist"
+    );
+}
+
+/// `set_workspace_owned` persists the flag so a subsequent `decommission` can
+/// read it back and make the correct deletion decision.
+///
+/// Why (#1511): the clone-provision path calls `set_workspace_owned(id, true)`
+/// after creating the tmux session; this test pins that the flag survives the
+/// store round-trip and is visible on `get`.
+/// What: creates a session with `workspace_owned = false`, calls
+/// `set_workspace_owned(id, true)`, reads the record back, asserts the flag is
+/// now `true`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn workspace_owned_flag_round_trips_via_set() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "clone task".into(),
+            Some(PathBuf::from("/tmp/ws")),
+            None,
+            Some(PathBuf::from("/tmp/ws")),
+            Some("https://github.com/owner/repo".into()),
+            Some("main".into()),
+        )
+        .await
+        .expect("create");
+
+    // Fresh record starts unowned (the default).
+    assert!(
+        !record.workspace_owned,
+        "a freshly created record must default to workspace_owned = false"
+    );
+
+    // Simulate what the clone-provision path does.
+    mgr.set_workspace_owned(&record.id, true)
+        .await
+        .expect("set_workspace_owned");
+
+    // Read back and assert.
+    let updated = mgr
+        .get(&record.id)
+        .await
+        .expect("get after set_workspace_owned");
+    assert!(
+        updated.workspace_owned,
+        "workspace_owned must be true after set_workspace_owned(true)"
     );
 }
