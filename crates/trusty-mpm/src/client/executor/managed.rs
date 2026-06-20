@@ -106,6 +106,7 @@ impl CommandExecutor {
                 id: resp.id,
                 name: resp.name,
                 state: resp.state,
+                cwd: resp.cwd,
                 runtime: resp.runtime,
                 attach_cmd: resp.attach_cmd,
             },

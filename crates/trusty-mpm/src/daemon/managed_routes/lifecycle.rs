@@ -91,7 +91,9 @@ pub async fn spawn_managed(
         return spawn_managed_local(state, &session_id, &params, runtime).await;
     }
 
-    // Step 1: pre-generate the id + provision an isolated workspace.
+    // Provision an isolated workspace under the pre-generated `session_id` (the id
+    // is generated ONCE above, before the local-path/clone branch split, so both
+    // branches register the same id).
     //
     // #1220: the workspace root defaults to `~/trusty-mpm-projects/` (overridable
     // via the `TRUSTY_MPM_WORKSPACE_ROOT` env var or the
@@ -210,12 +212,14 @@ pub async fn spawn_managed(
 /// A URL (`https://…`, `git@…:…`) is never an absolute filesystem path, a relative
 /// path is rejected (ambiguous against the daemon's cwd), and a non-existent path
 /// falls through to clone — so this errs toward the safe existing behaviour.
-/// What: returns `true` iff `s` is an ABSOLUTE path that EXISTS and is a directory.
+/// What: returns `true` iff `s` is an ABSOLUTE path that is a directory. `is_dir()`
+/// already implies existence in a single `stat` syscall (a missing path is not a
+/// dir) and follows symlinks, so a separate `exists()` probe is redundant.
 /// Test: `is_local_workdir_detects_absolute_dir`,
 /// `is_local_workdir_rejects_url_relative_and_missing` in tests/local_spawn.rs.
 pub fn is_local_workdir(s: &str) -> bool {
     let p = std::path::Path::new(s);
-    p.is_absolute() && p.exists() && p.is_dir()
+    p.is_absolute() && p.is_dir()
 }
 
 /// Spawn a managed session rooted at an EXISTING local directory — NO clone (#1433).

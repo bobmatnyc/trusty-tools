@@ -258,6 +258,34 @@ fn managed_arms_escape_daemon_sourced_fields() {
 }
 
 #[test]
+fn managed_adopted_renders_and_escapes_cwd() {
+    // Why: review #1502 — the adopt result must SURFACE the registered cwd so the
+    // operator can confirm the directory the daemon recorded for the adopted pane
+    // (the pane's provenance is otherwise unknown). The cwd is also daemon-sourced
+    // and must be HTML-escaped like every other interpolated field.
+    // What: format a `ManagedAdopted` carrying a cwd with HTML-significant chars
+    // and assert the escaped cwd appears (and no raw chars leak).
+    // Test: this function IS the test.
+    let adopted = CommandResult::ManagedAdopted {
+        id: "abcd1234-5678".into(),
+        name: "tmpm-hand-started".into(),
+        state: "active".into(),
+        cwd: "/Users/op/work/<proj>&x".into(),
+        runtime: "claude-code".into(),
+        attach_cmd: "tmux attach -t tmpm-hand-started".into(),
+    };
+    let text = TelegramFormatter::format(&adopted);
+    assert!(
+        text.contains("cwd: <code>/Users/op/work/&lt;proj&gt;&amp;x</code>"),
+        "ManagedAdopted must render the escaped cwd line: {text}"
+    );
+    assert!(
+        !text.contains("/Users/op/work/<proj>&x"),
+        "ManagedAdopted must not emit the raw cwd: {text}"
+    );
+}
+
+#[test]
 fn snapshot_escapes_html() {
     let result = CommandResult::Snapshot {
         session: "s".into(),

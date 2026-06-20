@@ -35,6 +35,17 @@ impl SessionManager {
     ///   [`ManagedError::TmuxSessionMissing`] when the pane does NOT exist (you
     ///   cannot adopt what is not there) and with [`ManagedError::AlreadyAdopted`]
     ///   when the store already tracks the name.
+    /// - **The already-adopted check and the upsert run under ONE held write lock.**
+    ///   Reading the store to test for the name and then upserting must be atomic —
+    ///   otherwise two concurrent `adopt_existing` calls for the same `tmux_name`
+    ///   could both observe "absent" before either writes, producing duplicate
+    ///   `Active` records (TOCTOU). We therefore take the store write guard ONCE,
+    ///   scan the live records through it (`all()` reloads-on-read so a record
+    ///   another process registered is also seen), reject a tracked name, and
+    ///   upsert — all without releasing the guard. The tmux `session_exists`
+    ///   liveness check stays OUTSIDE the lock (it touches tmux, not the store, and
+    ///   a stale pane between the check and the lock is the operator's race to lose,
+    ///   not a store-consistency hazard).
     /// - **No `create_session` call.** The pane already exists; the driver is only
     ///   consulted via `session_exists` to verify presence.
     /// - **`cwd` is REQUIRED** (a plain `PathBuf`): the pane's provenance is unknown
@@ -50,9 +61,11 @@ impl SessionManager {
     /// an `Active` [`SessionRecord`] carrying the supplied `cwd`/`task`/`runtime`
     /// (a fresh id, no workspace/repo/branch — provenance is unknown). Returns the
     /// new record.
-    /// Test: `manager_adopt_existing_registers_active`,
+    /// Test: `manager_adopt_existing_registers_active` (also asserts the returned
+    /// record's `cwd` matches the adopted cwd),
     /// `manager_adopt_existing_missing_tmux_errors`,
-    /// `manager_adopt_existing_double_adopt_errors`,
+    /// `manager_adopt_existing_double_adopt_errors` (the single-locked path still
+    /// rejects a second adopt of the same name),
     /// `manager_adopt_existing_allows_non_tmpm_name` in `super::tests`.
     pub async fn adopt_existing(
         &self,
@@ -62,16 +75,11 @@ impl SessionManager {
         runtime: crate::runtime::RuntimeKind,
     ) -> Result<SessionRecord, ManagedError> {
         // The pane MUST already exist — adoption connects, it does not spawn.
-        // `tmux_driver()` is the public accessor over the shared driver Arc.
+        // `tmux_driver()` is the public accessor over the shared driver Arc. This
+        // liveness check touches tmux (not the store), so it stays OUTSIDE the
+        // store write lock taken below.
         if !self.tmux_driver().session_exists(tmux_name) {
             return Err(ManagedError::TmuxSessionMissing(tmux_name.to_string()));
-        }
-
-        // Reject an already-tracked name so we never create a second record for the
-        // same pane. `known_tmux_names` reloads-on-read so a record another process
-        // registered is also seen.
-        if self.known_tmux_names().await?.contains(tmux_name) {
-            return Err(ManagedError::AlreadyAdopted(tmux_name.to_string()));
         }
 
         let record = SessionRecord {
@@ -91,7 +99,20 @@ impl SessionManager {
             runtime,
         };
 
-        self.store.write().await.upsert(record.clone()).await?;
+        // ── Atomic already-adopted check + upsert under ONE held write guard ──────
+        // Acquire the store write lock ONCE and keep it for both the existence
+        // scan and the upsert, so two concurrent adopts of the same `tmux_name`
+        // cannot both pass the "absent" test and create duplicate `Active` records
+        // (the TOCTOU the previous read-then-write split exposed). `all()` requires
+        // `&mut self` and reloads-on-read, so a record another process registered
+        // is also seen through this same guard.
+        {
+            let mut store = self.store.write().await;
+            if store.all().await?.iter().any(|r| r.tmux_name == tmux_name) {
+                return Err(ManagedError::AlreadyAdopted(tmux_name.to_string()));
+            }
+            store.upsert(record.clone()).await?;
+        }
         info!(
             id = %record.id,
             name = %tmux_name,

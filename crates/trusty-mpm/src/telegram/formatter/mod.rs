@@ -221,15 +221,18 @@ impl TelegramFormatter {
                 id,
                 name,
                 state,
+                cwd,
                 runtime,
                 attach_cmd,
             } => format!(
                 "✅ Adopted <b>{}</b> (<code>{}</code>) [{}] runtime={}\n\
+                 cwd: <code>{}</code>\n\
                  attach: <code>{}</code>",
                 html_escape(name),
                 short_id(id),
                 html_escape(state),
                 html_escape(runtime),
+                html_escape(cwd),
                 html_escape(attach_cmd),
             ),
             CommandResult::ManagedSessions(sessions) => format_managed_sessions(sessions),

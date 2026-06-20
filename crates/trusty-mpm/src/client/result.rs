@@ -315,7 +315,9 @@ pub enum CommandResult {
     /// Why: the operator needs the new managed session's identity and the exact
     /// tmux command to drive/attach immediately after adoption.
     /// What: the new record's id, friendly name, lifecycle state (`active`),
-    /// runtime backend, and the attach command string.
+    /// the registered working directory, runtime backend, and the attach command
+    /// string. `cwd` is surfaced so the operator can confirm the directory the
+    /// daemon recorded for the adopted pane (its provenance is otherwise unknown).
     ManagedAdopted {
         /// Managed session id (UUID string).
         id: String,
@@ -323,6 +325,8 @@ pub enum CommandResult {
         name: String,
         /// Current lifecycle state word (`active` immediately after adoption).
         state: String,
+        /// Working directory the daemon registered for the adopted session.
+        cwd: String,
         /// Runtime backend (`claude-code` | `tcode`).
         runtime: String,
         /// tmux attach command string.

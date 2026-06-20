@@ -75,3 +75,27 @@ fn is_local_workdir_rejects_existing_file() {
         "an existing FILE must not be treated as a local workdir: {path}"
     );
 }
+
+/// An absolute symlink pointing at a real directory IS a usable local workdir
+/// (review #1502: the `is_dir()`-only check follows symlinks correctly).
+///
+/// Why: replacing `exists() && is_dir()` with `is_dir()` must not regress the
+/// symlinked-directory case — `Path::is_dir()` follows symlinks, so a symlink to a
+/// directory resolves to a directory and is a valid workspace root.
+/// What: creates a real dir, an absolute symlink to it, and asserts the symlink
+/// path is detected as a local workdir.
+/// Test: this function IS the test.
+#[cfg(unix)]
+#[test]
+fn is_local_workdir_follows_symlinked_dir() {
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let real = tmp.path().join("real-dir");
+    std::fs::create_dir(&real).expect("create real dir");
+    let link = tmp.path().join("link-dir");
+    std::os::unix::fs::symlink(&real, &link).expect("create symlink");
+    let path = link.to_string_lossy().to_string();
+    assert!(
+        is_local_workdir(&path),
+        "a symlink to a directory must be a usable local workdir: {path}"
+    );
+}
