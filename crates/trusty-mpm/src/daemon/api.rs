@@ -76,9 +76,9 @@ pub use rpc::rpc_handler;
 /// lets `router` refer to them unqualified, mirroring the `coordinator_routes`
 /// wiring.
 use super::managed_routes::{
-    answer_session_decision, decommission_managed_session, get_attach_cmd, get_managed_session,
-    get_session_activity, list_managed_sessions, resume_managed_session, send_to_session,
-    spawn_session, stop_managed_session, stop_managed_session_runtime,
+    adopt_existing_session, answer_session_decision, decommission_managed_session, get_attach_cmd,
+    get_managed_session, get_session_activity, list_managed_sessions, resume_managed_session,
+    send_to_session, spawn_session, stop_managed_session, stop_managed_session_runtime,
 };
 
 /// Typed HTTP response bodies for every endpoint.
@@ -159,6 +159,14 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route(
             "/api/v1/sessions/managed",
             post(spawn_session).get(list_managed_sessions),
+        )
+        // #1433: adopt an EXISTING tmux session into the managed store. The literal
+        // `/adopt` segment is registered BEFORE the `/{id}` param route so it is
+        // never captured as an id (axum prefers literal matches, but ordering here
+        // makes the intent explicit). Distinct from the stateless `/tmux/adopt`.
+        .route(
+            "/api/v1/sessions/managed/adopt",
+            post(adopt_existing_session),
         )
         .route(
             "/api/v1/sessions/managed/{id}",

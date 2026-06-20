@@ -309,6 +309,29 @@ pub enum CommandResult {
         /// tmux attach command string.
         attach_cmd: String,
     },
+    /// `managed-adopt` — an existing tmux session was adopted into the managed
+    /// store (#1433).
+    ///
+    /// Why: the operator needs the new managed session's identity and the exact
+    /// tmux command to drive/attach immediately after adoption.
+    /// What: the new record's id, friendly name, lifecycle state (`active`),
+    /// the registered working directory, runtime backend, and the attach command
+    /// string. `cwd` is surfaced so the operator can confirm the directory the
+    /// daemon recorded for the adopted pane (its provenance is otherwise unknown).
+    ManagedAdopted {
+        /// Managed session id (UUID string).
+        id: String,
+        /// tmux session name that was adopted.
+        name: String,
+        /// Current lifecycle state word (`active` immediately after adoption).
+        state: String,
+        /// Working directory the daemon registered for the adopted session.
+        cwd: String,
+        /// Runtime backend (`claude-code` | `tcode`).
+        runtime: String,
+        /// tmux attach command string.
+        attach_cmd: String,
+    },
     /// `managed-stop`/`managed-resume`/`managed-decommission` — the updated
     /// lifecycle state after a runtime transition.
     ///

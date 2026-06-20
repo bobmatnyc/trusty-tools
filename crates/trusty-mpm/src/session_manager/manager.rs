@@ -58,6 +58,22 @@ pub enum ManagedError {
     /// The operation is not valid for the current session state.
     #[error("invalid state transition for session {0}: {1}")]
     InvalidState(String, String),
+
+    /// Adoption was requested for a tmux session that does not exist on the host.
+    ///
+    /// Why: adoption CONNECTS to a pre-existing, unmanaged pane — there is nothing
+    /// to drive if the pane is absent. This is the inverse of [`NameCollision`]:
+    /// `create` fails when a name exists, `adopt_existing` fails when it does NOT.
+    #[error("tmux session does not exist: {0} — adoption requires a live pane")]
+    TmuxSessionMissing(String),
+
+    /// Adoption was requested for a tmux session this store already tracks.
+    ///
+    /// Why: re-adopting a session the manager already owns would create a second,
+    /// conflicting record for the same pane. The operator should drive the existing
+    /// record instead.
+    #[error("tmux session already adopted/registered: {0}")]
+    AlreadyAdopted(String),
 }
 
 /// Trait seam over tmux operations used by the session manager.

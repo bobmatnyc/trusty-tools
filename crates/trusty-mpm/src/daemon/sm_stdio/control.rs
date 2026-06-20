@@ -256,6 +256,46 @@ impl SessionControl for DaemonSessionControl {
             .map_err(|e| SessionControlError::Backend(e.to_string()))?;
         Ok(verdict_to_summary(result.verdict))
     }
+
+    /// Adopt an existing tmux session via the in-process manager (#1433).
+    ///
+    /// Why: the production wiring of the explicit-adopt verb. It forwards to
+    /// [`crate::session_manager::SessionManager::adopt_existing`] so the stdio /
+    /// action-loop path and the HTTP `…/managed/adopt` route share one code path.
+    /// What: resolves an optional runtime selector (a bad value → `Backend`), then
+    /// adopts the named pane with the supplied `cwd`/`task`/`runtime`. Maps the
+    /// manager's `TmuxSessionMissing` to `NotFound` (no such pane) and every other
+    /// failure (already-adopted, store) to `Backend`. Returns `{ session_id }`.
+    /// Test: forwards to `adopt_existing` (covered by the manager unit tests); the
+    /// action-loop dispatch is covered by `chat_action_tests.rs`.
+    async fn adopt(
+        &self,
+        tmux_name: &str,
+        cwd: &str,
+        task: Option<&str>,
+        runtime: Option<&str>,
+    ) -> Result<serde_json::Value, SessionControlError> {
+        let runtime_kind = match runtime {
+            None => crate::runtime::RuntimeKind::default(),
+            Some(raw) => raw
+                .parse::<crate::runtime::RuntimeKind>()
+                .map_err(|e| SessionControlError::Backend(e.to_string()))?,
+        };
+        let mgr = self.state.session_manager().await;
+        let record = mgr
+            .adopt_existing(
+                tmux_name,
+                std::path::PathBuf::from(cwd),
+                task.unwrap_or_default().to_string(),
+                runtime_kind,
+            )
+            .await
+            .map_err(|e| match e {
+                ManagedError::TmuxSessionMissing(msg) => SessionControlError::NotFound(msg),
+                other => SessionControlError::Backend(other.to_string()),
+            })?;
+        Ok(serde_json::json!({ "session_id": record.id.to_string() }))
+    }
 }
 
 /// Map an [`crate::activity::cache::ActivityVerdict`] onto a [`Summary`] (#1461).

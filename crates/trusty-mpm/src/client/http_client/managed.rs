@@ -18,9 +18,9 @@ use anyhow::Context;
 
 use super::DaemonClient;
 use super::types::{
-    ManagedActivityResponse, ManagedAnswerRequest, ManagedAnswerResponse, ManagedAttachCmdResponse,
-    ManagedListResponse, ManagedSendInputRequest, ManagedSendInputResponse, ManagedSessionSummary,
-    ManagedSpawnRequest, ManagedSpawnResponse,
+    ManagedActivityResponse, ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest,
+    ManagedAnswerResponse, ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
+    ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest, ManagedSpawnResponse,
 };
 
 impl DaemonClient {
@@ -83,6 +83,35 @@ impl DaemonClient {
             .json()
             .await?;
         Ok(resp)
+    }
+
+    /// Adopt an EXISTING tmux session via `POST /api/v1/sessions/managed/adopt`
+    /// (#1433).
+    ///
+    /// Why: register a durable managed record for a pane the operator already has,
+    /// so it can be driven through the full managed surface. Distinct from the
+    /// stateless `POST /tmux/adopt` snapshot endpoint.
+    /// What: POSTs `req` and returns the daemon's [`ManagedAdoptResponse`]. The
+    /// daemon answers typed 404 (no such pane) / 409 (already adopted) / 400 (bad
+    /// runtime) errors; rather than swallow them, a non-success status is flattened
+    /// into an `anyhow` error carrying the HTTP status and the response body so the
+    /// caller can surface both.
+    /// Test: `managed_adopt_request_serializes` /
+    /// `managed_adopt_response_deserializes` cover the wire shapes; live HTTP via
+    /// `tests/session_manager_mvp.rs`.
+    pub async fn adopt_managed_session(
+        &self,
+        req: &ManagedAdoptRequest,
+    ) -> anyhow::Result<ManagedAdoptResponse> {
+        let url = format!("{}/api/v1/sessions/managed/adopt", self.base);
+        let resp = self.http.post(&url).json(req).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("adopt failed (HTTP {status}): {body}");
+        }
+        let adopted = resp.json().await.context("decoding adopt response body")?;
+        Ok(adopted)
     }
 
     /// Inject text into a session's pane via `POST .../{id}/send`.

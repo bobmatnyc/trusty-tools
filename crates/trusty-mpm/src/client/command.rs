@@ -222,6 +222,27 @@ pub enum TrustyCommand {
         /// Managed session id or friendly name.
         target: String,
     },
+    /// Adopt an EXISTING unmanaged tmux session into the managed store
+    /// (`sessions.adopt`, #1433).
+    ///
+    /// Why: connect the managed surface to a pane the operator already has (a
+    /// hand-started session, an externally-created one, or one whose record was
+    /// lost) so it can be driven through observe/send/stop/resume. Distinct from
+    /// the project-session `Adopt` (oversight-only, stateless): this REGISTERS a
+    /// durable managed record via `POST /api/v1/sessions/managed/adopt`.
+    /// What: the live `tmux_name` to adopt, the REQUIRED `cwd` (provenance is
+    /// unknown so the operator supplies it), an optional `task`, and an optional
+    /// `runtime` selector (`claude-code` | `tcode`).
+    ManagedAdopt {
+        /// The live tmux session name to adopt (any name; need not be `tmpm-`).
+        tmux_name: String,
+        /// Working directory the adopted session runs in (required).
+        cwd: String,
+        /// Optional human-readable task description (empty allowed).
+        task: Option<String>,
+        /// Optional runtime selector (`claude-code` | `tcode`).
+        runtime: Option<String>,
+    },
 
     /// Report daemon health: reachability + catalog freshness + fleet summary.
     ///

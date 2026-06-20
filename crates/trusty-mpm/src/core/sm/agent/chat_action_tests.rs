@@ -174,6 +174,94 @@ async fn unknown_verb_error_lists_health() {
     assert!(err.to_string().contains("sessions.health"));
 }
 
+/// Why: the action loop must ADVERTISE `sessions.adopt` so the self-aware chat
+/// knows it can adopt an existing tmux session inline (#1433).
+/// What: asserts the instruction block lists the ops `sessions.adopt` verb and its
+/// argument convention.
+/// Test: this is the test.
+#[test]
+fn prompt_lists_adopt_ops_verb() {
+    let prompt = action_instructions();
+    assert!(
+        prompt.contains("sessions.adopt"),
+        "action prompt must advertise the executable `sessions.adopt` verb"
+    );
+    assert!(
+        prompt.contains("args.tmux_name"),
+        "action prompt must document the adopt args"
+    );
+}
+
+/// Why: `sessions.adopt` must EXECUTE inline, parsing `tmux_name`/`cwd`/`task`/
+/// `runtime` and reaching `SessionControl::adopt` (#1433).
+/// What: dispatches `sessions.adopt` against the mock and asserts the args were
+/// parsed and forwarded, and a session id comes back.
+/// Test: this is the test.
+#[tokio::test]
+async fn execute_adopt_reads_args() {
+    let mock = Arc::new(MockSessionControl::default());
+    let control: Arc<dyn SessionControl> = mock.clone();
+    let out = execute_verb(
+        &control,
+        "sessions.adopt",
+        &json!({
+            "tmux_name": "tmpm-hand-started",
+            "cwd": "/Users/op/work/proj",
+            "task": "drive it",
+            "runtime": "claude-code"
+        }),
+    )
+    .await
+    .expect("adopt dispatches");
+    assert!(
+        out.get("session_id").and_then(|v| v.as_str()).is_some(),
+        "adopt must return a session_id"
+    );
+    let adopts = mock.adopts();
+    assert_eq!(adopts.len(), 1, "exactly one adopt recorded");
+    assert_eq!(adopts[0].0, "tmpm-hand-started");
+    assert_eq!(adopts[0].1, "/Users/op/work/proj");
+    assert_eq!(adopts[0].2.as_deref(), Some("drive it"));
+    assert_eq!(adopts[0].3.as_deref(), Some("claude-code"));
+}
+
+/// Why: `sessions.adopt` requires `tmux_name` and `cwd`; a missing one must feed a
+/// clear error back to the model rather than panicking (#1433).
+/// What: dispatches adopt with no args and asserts a Backend error naming the
+/// missing required field.
+/// Test: this is the test.
+#[tokio::test]
+async fn execute_adopt_requires_tmux_name_and_cwd() {
+    let control: Arc<dyn SessionControl> = Arc::new(MockSessionControl::default());
+
+    let err = execute_verb(&control, "sessions.adopt", &json!({ "cwd": "/x" }))
+        .await
+        .expect_err("missing tmux_name errors");
+    assert!(err.to_string().contains("tmux_name"));
+
+    let err = execute_verb(
+        &control,
+        "sessions.adopt",
+        &json!({ "tmux_name": "tmpm-x" }),
+    )
+    .await
+    .expect_err("missing cwd errors");
+    assert!(err.to_string().contains("cwd"));
+}
+
+/// Why: the unknown-verb error must name `sessions.adopt` among the valid set so a
+/// model that mistypes it can recover (#1433).
+/// What: triggers the unknown-verb error and asserts `sessions.adopt` is listed.
+/// Test: this is the test.
+#[tokio::test]
+async fn unknown_verb_error_lists_adopt() {
+    let control: Arc<dyn SessionControl> = Arc::new(MockSessionControl::default());
+    let err = execute_verb(&control, "sessions.bogus", &json!({}))
+        .await
+        .expect_err("unknown verb errors");
+    assert!(err.to_string().contains("sessions.adopt"));
+}
+
 /// Why: `sessions.list` must dispatch to `SessionControl::list`.
 /// What: executes the verb and asserts the mock's list body comes back.
 /// Test: this is the test.

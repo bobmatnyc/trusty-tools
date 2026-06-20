@@ -405,6 +405,44 @@ async fn execute_send_empty_prompt_errors() {
 }
 
 #[tokio::test]
+async fn execute_managed_adopt_requires_tmux_name() {
+    // Validation is pure — no daemon needed. An empty tmux_name is rejected with a
+    // renderable error before any HTTP call (#1433).
+    let executor = CommandExecutor::new("http://unused");
+    match executor
+        .execute(TrustyCommand::ManagedAdopt {
+            tmux_name: "  ".into(),
+            cwd: "/x".into(),
+            task: None,
+            runtime: None,
+        })
+        .await
+    {
+        CommandResult::Error(msg) => assert!(msg.contains("tmux_name")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn execute_managed_adopt_requires_cwd() {
+    // The cwd is required because the pane's provenance is unknown to the daemon;
+    // an empty cwd is rejected before any HTTP call (#1433).
+    let executor = CommandExecutor::new("http://unused");
+    match executor
+        .execute(TrustyCommand::ManagedAdopt {
+            tmux_name: "tmpm-x".into(),
+            cwd: "".into(),
+            task: None,
+            runtime: None,
+        })
+        .await
+    {
+        CommandResult::Error(msg) => assert!(msg.contains("cwd")),
+        other => panic!("expected Error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn pair_request_returns_code() {
     let (_state, url) = spawn_test_daemon().await;
     let executor = CommandExecutor::new(url);

@@ -214,6 +214,27 @@ impl TelegramFormatter {
                 html_escape(runtime),
                 html_escape(attach_cmd),
             ),
+            // #1433: adoption mirrors a spawn's identity shape; render it the same
+            // way (different verb prose). Added in the session-adopt branch — the
+            // Telegram engineer may relocate/restyle this arm on rebase.
+            CommandResult::ManagedAdopted {
+                id,
+                name,
+                state,
+                cwd,
+                runtime,
+                attach_cmd,
+            } => format!(
+                "✅ Adopted <b>{}</b> (<code>{}</code>) [{}] runtime={}\n\
+                 cwd: <code>{}</code>\n\
+                 attach: <code>{}</code>",
+                html_escape(name),
+                short_id(id),
+                html_escape(state),
+                html_escape(runtime),
+                html_escape(cwd),
+                html_escape(attach_cmd),
+            ),
             CommandResult::ManagedSessions(sessions) => format_managed_sessions(sessions),
             CommandResult::ManagedSession(view) => format_managed_session(view),
             CommandResult::ManagedSent { id, tmux_name } => {

@@ -24,6 +24,14 @@ use crate::core::sm::control::{
     LaunchParams, RawObservation, SessionControl, SessionControlError, Submit, Summary,
 };
 
+/// One recorded adoption: `(tmux_name, cwd, task, runtime)` (#1433).
+///
+/// Why: a named alias keeps the `adopts` log's type readable and satisfies the
+/// `clippy::type_complexity` lint (a 4-tuple of optionals is "very complex").
+/// What: the four `adopt` arguments the mock records for test assertions.
+/// Test: `chat_action_tests.rs::execute_adopt_reads_args`.
+type AdoptRecord = (String, String, Option<String>, Option<String>);
+
 /// A scriptable, recording mock [`SessionControl`] (test-only).
 ///
 /// Why: see the module docs — records launches/sends and returns a scripted
@@ -38,6 +46,8 @@ pub struct MockSessionControl {
     launches: Mutex<Vec<(String, LaunchParams)>>,
     /// Recorded task deliveries: `(session_id, text)` from `send` (#1299).
     sends: Mutex<Vec<(String, String)>>,
+    /// Recorded adoptions from `adopt` (#1433).
+    adopts: Mutex<Vec<AdoptRecord>>,
     /// The pane/record JSON each `get` returns (the OBSERVE input). Shared so a
     /// test can script evidence (or none).
     get_body: Mutex<Value>,
@@ -49,6 +59,7 @@ impl Default for MockSessionControl {
             next_id: AtomicUsize::new(0),
             launches: Mutex::new(Vec::new()),
             sends: Mutex::new(Vec::new()),
+            adopts: Mutex::new(Vec::new()),
             // Default observation: a running session with NO evidence — the gate
             // stays closed unless a test scripts evidence.
             get_body: Mutex::new(json!({ "session": { "state": "running" } })),
@@ -79,6 +90,11 @@ impl MockSessionControl {
     /// The recorded task deliveries `(session_id, text)` (test read, #1299).
     pub fn sends(&self) -> Vec<(String, String)> {
         self.sends.lock().expect("lock").clone()
+    }
+
+    /// The recorded adoptions `(tmux_name, cwd, task, runtime)` (test read, #1433).
+    pub fn adopts(&self) -> Vec<AdoptRecord> {
+        self.adopts.lock().expect("lock").clone()
     }
 }
 
@@ -167,5 +183,30 @@ impl SessionControl for MockSessionControl {
             summary: None,
             confidence: 0.0,
         })
+    }
+
+    /// Record an adoption and return a deterministic session id (#1433).
+    ///
+    /// Why: the action-loop dispatch test must assert that `sessions.adopt` parsed
+    /// `tmux_name`/`cwd`/`task`/`runtime` correctly and reached `adopt` — the
+    /// trait's default impl errors, so the mock overrides it to record + succeed.
+    /// What: records `(tmux_name, cwd, task, runtime)` and returns `{ session_id }`
+    /// minted from the same monotonic counter `launch` uses.
+    /// Test: `chat_action_tests.rs::execute_adopt_reads_args`.
+    async fn adopt(
+        &self,
+        tmux_name: &str,
+        cwd: &str,
+        task: Option<&str>,
+        runtime: Option<&str>,
+    ) -> Result<Value, SessionControlError> {
+        let n = self.next_id.fetch_add(1, Ordering::SeqCst) + 1;
+        self.adopts.lock().expect("lock").push((
+            tmux_name.to_string(),
+            cwd.to_string(),
+            task.map(str::to_string),
+            runtime.map(str::to_string),
+        ));
+        Ok(json!({ "session_id": format!("s-{n}") }))
     }
 }

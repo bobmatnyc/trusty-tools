@@ -230,4 +230,36 @@ pub trait SessionControl: Send + Sync {
     /// Test: `summarize_degrades_to_unknown_without_key`,
     /// `summarize_returns_fake_verdict`, `summarize_serves_cached_verdict`.
     async fn summarize(&self, session_id: &str) -> Result<Summary, SessionControlError>;
+
+    /// Adopt an EXISTING unmanaged tmux session into the managed store (#1433).
+    ///
+    /// Why: the action-capable coordinator chat (#1496) and the SM-STDIO surface
+    /// need to CONNECT to a pane the operator already has (a hand-started session,
+    /// an externally-created one, or one whose record was lost) and drive it
+    /// through the rest of this trait. It is the explicit counterpart to the
+    /// automatic boot-time adoption in
+    /// [`reconcile_on_boot`](crate::session_manager::SessionManager::reconcile_on_boot).
+    /// What: connects to the live pane named `tmux_name`, registering an `Active`
+    /// record with the supplied `cwd` (REQUIRED — provenance is unknown), an
+    /// optional `task`, and an optional `runtime` selector. Returns `{ session_id }`
+    /// on success.
+    ///
+    /// A DEFAULT impl returns [`SessionControlError::Backend`] so the only impls
+    /// that gain the verb are those that override it (the production
+    /// `DaemonSessionControl`); test mocks and any other impls keep compiling
+    /// unchanged without silently pretending to adopt.
+    /// Test: `DaemonSessionControl::adopt` via the managed integration tests; the
+    /// action-loop dispatch via `chat_action_tests.rs::execute_adopt_*`.
+    async fn adopt(
+        &self,
+        tmux_name: &str,
+        cwd: &str,
+        task: Option<&str>,
+        runtime: Option<&str>,
+    ) -> Result<serde_json::Value, SessionControlError> {
+        let _ = (tmux_name, cwd, task, runtime);
+        Err(SessionControlError::Backend(
+            "adopt is not supported by this control surface".to_string(),
+        ))
+    }
 }
