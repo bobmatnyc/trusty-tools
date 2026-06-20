@@ -165,7 +165,7 @@ impl PendingPairCode {
     /// Test: `pending_expiry_uses_issued_at`.
     pub fn is_fresh(&self, ttl: Duration) -> bool {
         let elapsed_ms = now_unix_ms().saturating_sub(self.issued_at_ms);
-        elapsed_ms < ttl.as_millis() as u64
+        elapsed_ms < u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX)
     }
 }
 
@@ -179,7 +179,7 @@ impl PendingPairCode {
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
 }
 

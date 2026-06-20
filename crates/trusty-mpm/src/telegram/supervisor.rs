@@ -72,9 +72,11 @@ pub fn classify_error(err: &anyhow::Error) -> BotExit {
 /// (base, base·factor, base·factor², … capped) self-heals a transient conflict
 /// in well under a second while a persistent fault settles to one attempt per
 /// `max` interval instead of thousands per second.
-/// What: holds the first delay, the per-step multiplier, and the ceiling, and
-/// computes the delay for a given consecutive-failure count via [`delay_for`].
-/// Test: `backoff_grows_and_caps`, `backoff_resets_to_base`.
+/// What: holds the first delay, the per-step multiplier, the ceiling, and the
+/// minimum run duration that counts as "healthy" (after which the consecutive
+/// transient-failure counter resets so backoff starts fresh). Computes the delay
+/// for a given consecutive-failure count via [`delay_for`].
+/// Test: `backoff_grows_and_caps`, `healthy_run_resets_transient_backoff`.
 #[derive(Debug, Clone, Copy)]
 pub struct BackoffPolicy {
     /// Delay before the first restart.
@@ -83,21 +85,33 @@ pub struct BackoffPolicy {
     pub factor: u32,
     /// Upper bound on any single delay.
     pub max: Duration,
+    /// Minimum run duration that counts as a "healthy" run. When a transient
+    /// exit follows a run that lasted at least this long, the supervisor resets
+    /// the consecutive-transient-failure counter so the next backoff starts at
+    /// `base` instead of staying pinned near `max`. Injectable so tests can use a
+    /// millisecond-scale threshold rather than sleeping for the production value.
+    pub healthy_run: Duration,
 }
 
 impl Default for BackoffPolicy {
-    /// The production schedule: 500ms → 1s → 2s → … capped at 30s.
+    /// The production schedule: 500ms → 1s → 2s → … capped at 30s, with a 60s
+    /// healthy-run threshold.
     ///
     /// Why: 500ms recovers a momentary `getUpdates` conflict almost immediately
     /// (the typical case when a second consumer is shutting down) while the 30s
-    /// cap keeps a stubborn fault to two attempts per minute.
-    /// What: `base = 500ms`, `factor = 2`, `max = 30s`.
+    /// cap keeps a stubborn fault to two attempts per minute. The 60s
+    /// healthy-run threshold (twice the backoff cap) means a bot that polled
+    /// successfully for at least a minute before exiting transiently is treated
+    /// as recovered: its next failure restarts the backoff at `base` rather than
+    /// inheriting an escalated exponent from long-past early failures.
+    /// What: `base = 500ms`, `factor = 2`, `max = 30s`, `healthy_run = 60s`.
     /// Test: `default_policy_is_bounded`.
     fn default() -> Self {
         Self {
             base: Duration::from_millis(500),
             factor: 2,
             max: Duration::from_secs(30),
+            healthy_run: Duration::from_secs(60),
         }
     }
 }
@@ -122,6 +136,27 @@ impl BackoffPolicy {
         }
         delay.min(self.max)
     }
+
+    /// The consecutive-transient-failure count after one more transient exit,
+    /// given how long the run that just exited lasted.
+    ///
+    /// Why: the backoff exponent must escalate while failures are rapid but must
+    /// NOT stay pinned near the cap for the daemon's whole life after a burst of
+    /// early flapping once the bot has recovered. Factoring the reset decision out
+    /// of the async [`supervise`] loop makes it pure and directly unit-testable
+    /// without sleeping or driving the tokio runtime.
+    /// What: returns `prior + 1` normally, but first resets `prior` to 0 when the
+    /// just-ended run lasted at least `healthy_run` (so the result is 1, mapping
+    /// `delay_for` back to `base`).
+    /// Test: `healthy_run_resets_transient_count`.
+    pub fn next_transient_count(&self, prior: u32, run_duration: Duration) -> u32 {
+        let effective_prior = if run_duration >= self.healthy_run {
+            0
+        } else {
+            prior
+        };
+        effective_prior.saturating_add(1)
+    }
 }
 
 /// Maximum consecutive *permanent* failures before the supervisor gives up.
@@ -139,18 +174,23 @@ const MAX_PERMANENT_FAILURES: u32 = 3;
 /// Why: see the module docs — a single transient error must not permanently kill
 /// the bot, and the supervisor must remain shutdown-safe (it must stop promptly
 /// when the daemon is shutting down and never block graceful shutdown).
-/// What: repeatedly calls `factory` to produce one bot attempt, races it against
-/// `shutdown`, and reacts to its [`BotExit`]:
+/// What: repeatedly calls `factory` to produce one bot attempt, times how long it
+/// ran, races it against `shutdown`, and reacts to its [`BotExit`]:
 /// - [`BotExit::Graceful`] → return (the bot stopped cleanly).
 /// - [`BotExit::Transient`] → log and restart after [`BackoffPolicy::delay_for`],
-///   resetting the permanent-failure counter.
+///   resetting the permanent-failure counter. If the run that just exited lasted
+///   at least [`BackoffPolicy::healthy_run`], the consecutive-transient counter is
+///   first reset to 0 so the bot's recovery is honoured and the next backoff
+///   starts at `base` rather than staying pinned near the cap for the daemon's
+///   whole life after an early flap.
 /// - [`BotExit::Permanent`] → log clearly and restart after the *capped* delay;
 ///   after [`MAX_PERMANENT_FAILURES`] in a row, give up and return.
 ///
 /// The backoff sleep itself is cancellable, so a shutdown during a backoff window
 /// returns immediately rather than waiting out the delay.
 /// Test: `restarts_after_transient_then_succeeds`, `gives_up_after_permanent_budget`,
-/// `stops_on_cancellation` and `backoff_sleep_is_cancellable`.
+/// `stops_on_cancellation`, `backoff_sleep_is_cancellable`, and
+/// `healthy_run_resets_transient_backoff`.
 pub async fn supervise<F, Fut>(factory: F, policy: BackoffPolicy, shutdown: CancellationToken)
 where
     F: Fn() -> Fut,
@@ -165,6 +205,10 @@ where
             return;
         }
 
+        // Time the attempt so a transient exit that follows a healthy-duration run
+        // can reset the backoff (see the `BotExit::Transient` arm below).
+        let started = tokio::time::Instant::now();
+
         // Run one attempt, but abandon it the instant shutdown is signalled so a
         // graceful stop is never blocked by an in-flight bot dispatcher.
         let exit = tokio::select! {
@@ -176,6 +220,8 @@ where
             exit = factory() => exit,
         };
 
+        let run_duration = started.elapsed();
+
         match exit {
             BotExit::Graceful => {
                 tracing::info!("telegram bot stopped gracefully — supervisor exiting");
@@ -183,7 +229,18 @@ where
             }
             BotExit::Transient => {
                 permanent_failures = 0;
-                transient_failures = transient_failures.saturating_add(1);
+                // A run that lasted at least `healthy_run` proves the bot recovered
+                // and polled successfully for a meaningful stretch; the helper folds
+                // that into a counter reset so backoff restarts at `base` instead of
+                // remaining pinned near the cap after early flapping.
+                let prior = transient_failures;
+                transient_failures = policy.next_transient_count(prior, run_duration);
+                if prior > 0 && transient_failures == 1 {
+                    tracing::info!(
+                        "telegram bot ran healthily for {run_duration:?} before exiting \
+                         transiently — resetting backoff to base"
+                    );
+                }
                 let delay = policy.delay_for(transient_failures);
                 tracing::warn!(
                     "telegram bot exited (transient, attempt {transient_failures}); \

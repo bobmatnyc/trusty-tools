@@ -36,6 +36,7 @@ fn backoff_grows_and_caps() {
         base: Duration::from_millis(500),
         factor: 2,
         max: Duration::from_secs(30),
+        healthy_run: Duration::from_secs(60),
     };
     // 0 and 1 failures both wait the base delay.
     assert_eq!(policy.delay_for(0), Duration::from_millis(500));
@@ -54,17 +55,137 @@ fn default_policy_is_bounded() {
     let p = BackoffPolicy::default();
     assert_eq!(p.base, Duration::from_millis(500));
     assert_eq!(p.max, Duration::from_secs(30));
+    assert_eq!(p.healthy_run, Duration::from_secs(60));
     // No computed delay ever exceeds the cap, even for an absurd failure count.
     assert!(p.delay_for(u32::MAX) <= p.max);
 }
 
+#[test]
+fn healthy_run_resets_transient_count() {
+    // The pure reset rule (#1499 follow-up): many short transient failures must
+    // escalate the consecutive-failure count (driving backoff up the geometric
+    // schedule), but a transient exit that follows a healthy-duration run must
+    // reset the count to 1 so the very next backoff is back at `base`.
+    let policy = BackoffPolicy {
+        base: Duration::from_millis(1),
+        factor: 2,
+        max: Duration::from_millis(8),
+        healthy_run: Duration::from_millis(50),
+    };
+    let short = Duration::from_millis(0);
+    let healthy = Duration::from_millis(50);
+
+    // Short runs escalate: 0 → 1 → 2 → … so the backoff exponent climbs.
+    assert_eq!(policy.next_transient_count(0, short), 1);
+    assert_eq!(policy.next_transient_count(1, short), 2);
+    assert_eq!(policy.next_transient_count(7, short), 8);
+    // Escalation pins the backoff at the cap once the exponent is high enough.
+    assert_eq!(policy.delay_for(8), policy.max);
+
+    // A transient exit after a healthy run resets the count to 1, regardless of
+    // how high the prior count had climbed …
+    assert_eq!(policy.next_transient_count(8, healthy), 1);
+    assert_eq!(policy.next_transient_count(u32::MAX, healthy), 1);
+    // … and a count of 1 maps backoff back to the floor (`base`), proving the
+    // delay is no longer pinned at the cap.
+    assert_eq!(policy.delay_for(1), policy.base);
+
+    // A run exactly at the threshold counts as healthy (>=, not >).
+    assert_eq!(
+        policy.next_transient_count(5, policy.healthy_run),
+        1,
+        "a run lasting exactly healthy_run must reset the counter"
+    );
+    // Just-under-threshold does NOT reset — it keeps escalating.
+    assert_eq!(
+        policy.next_transient_count(5, policy.healthy_run - Duration::from_millis(1)),
+        6,
+        "a sub-threshold run must keep the backoff escalating"
+    );
+}
+
+#[tokio::test]
+async fn healthy_run_resets_transient_backoff() {
+    // End-to-end proof through `supervise`: the bot flaps transiently several
+    // times with near-instant runs (escalating backoff), then runs "healthily"
+    // (longer than `healthy_run`) before exiting transiently once more, then
+    // stops gracefully. We assert on the OBSERVED gap between the start of the
+    // post-healthy restart and its predecessor: after the reset it must be ~base,
+    // not the escalated/capped delay the prior flaps had built up to.
+    let policy = BackoffPolicy {
+        base: Duration::from_millis(2),
+        factor: 4,
+        // A high cap so escalated delays are clearly distinguishable from `base`.
+        max: Duration::from_millis(400),
+        // Small enough that a deliberately delayed run trips it without a slow test.
+        healthy_run: Duration::from_millis(20),
+    };
+
+    // attempt index → exit. Indices 0,1,2 flap fast (escalating: delay_for(1)=2ms,
+    // delay_for(2)=8ms, delay_for(3)=32ms). Index 3 runs healthily then exits
+    // transiently (must reset → next delay back to base=2ms). Index 4 is graceful.
+    let starts: Arc<std::sync::Mutex<Vec<tokio::time::Instant>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let a = Arc::clone(&attempts);
+    let s = Arc::clone(&starts);
+    let healthy_for = policy.healthy_run;
+    let factory = move || {
+        let a = Arc::clone(&a);
+        let s = Arc::clone(&s);
+        async move {
+            let n = a.fetch_add(1, Ordering::SeqCst);
+            s.lock().unwrap().push(tokio::time::Instant::now());
+            if n == 3 {
+                // Run long enough to count as healthy, then exit transiently.
+                tokio::time::sleep(healthy_for + Duration::from_millis(5)).await;
+                BotExit::Transient
+            } else if n < 3 {
+                BotExit::Transient
+            } else {
+                BotExit::Graceful
+            }
+        }
+    };
+
+    supervise(factory, policy, CancellationToken::new()).await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 5);
+
+    let starts = starts.lock().unwrap();
+    assert_eq!(starts.len(), 5);
+
+    // Gap before attempt 3 (the healthy run's restart) reflects the ESCALATED
+    // backoff after three flaps: delay_for(3) = base*factor^2 = 2ms*16 = 32ms.
+    let escalated_gap = starts[3].duration_since(starts[2]);
+    assert!(
+        escalated_gap >= Duration::from_millis(25),
+        "pre-reset backoff should be escalated (>=~32ms), saw {escalated_gap:?}"
+    );
+
+    // Gap before attempt 4 = (healthy run duration ~25ms) + (post-reset backoff).
+    // The backoff component must be back at base (~2ms), NOT the prior escalated
+    // delay_for(4)=128ms. We subtract the known healthy run to isolate the backoff
+    // and assert it is small — proving the counter reset to the floor.
+    let post_healthy_total = starts[4].duration_since(starts[3]);
+    let backoff_component = post_healthy_total.saturating_sub(healthy_for);
+    assert!(
+        backoff_component < Duration::from_millis(20),
+        "post-healthy backoff must reset to ~base, isolated backoff was {backoff_component:?} \
+         (total {post_healthy_total:?})"
+    );
+}
+
 /// A fast policy with millisecond-scale delays so real backoff sleeps in the
-/// restart/give-up tests complete near-instantly.
+/// restart/give-up tests complete near-instantly. `healthy_run` is set well above
+/// the near-instant run durations these tests produce, so the healthy-run reset
+/// never fires unless a test deliberately delays its run (see
+/// `healthy_run_resets_transient_backoff`).
 fn fast_policy() -> BackoffPolicy {
     BackoffPolicy {
         base: Duration::from_millis(1),
         factor: 2,
         max: Duration::from_millis(8),
+        healthy_run: Duration::from_secs(60),
     }
 }
 
@@ -190,6 +311,7 @@ async fn backoff_sleep_is_cancellable() {
         base: Duration::from_secs(3600),
         factor: 2,
         max: Duration::from_secs(3600),
+        healthy_run: Duration::from_secs(60),
     };
 
     let factory = move || {
