@@ -92,22 +92,29 @@ pub(crate) async fn run_daemon(addr: SocketAddr, tailscale: bool, mcp: bool) -> 
     // Write lock file so clients can discover us.
     trusty_mpm::daemon::lock::write_lock(&base_url, tailscale_url.as_deref());
 
+    // Auto-start the Telegram bot alongside the daemon when a bot token is
+    // configured. `resolve_token` honours `.env.local` → `.env` → the process
+    // environment, so a single dotenv file configures both the daemon and the
+    // bot. Without a token the daemon runs normally; only a warning is logged.
+    // The returned token lets the shutdown handler stop the supervised bot
+    // promptly so it never blocks (or outlives) graceful shutdown (#1499).
+    let bot_shutdown = spawn_telegram_bot(&base_url);
+
     // Clean up the lock file on shutdown for BOTH Ctrl-C (SIGINT) and SIGTERM.
     // `tm restart` stops the old daemon with `pkill`, which sends SIGTERM — if we
     // only trapped SIGINT the lock file would leak with a dead PID, and the next
     // client's `resolve_daemon_url` would fall back to the default port (often
     // occupied by an unrelated process) and report "daemon unreachable".
-    tokio::spawn(async {
+    tokio::spawn(async move {
         wait_for_shutdown_signal().await;
+        // Stop the supervised Telegram bot first so it does not log a spurious
+        // restart while the process is on its way down.
+        if let Some(token) = bot_shutdown {
+            token.cancel();
+        }
         trusty_mpm::daemon::lock::remove_lock();
         std::process::exit(0);
     });
-
-    // Auto-start the Telegram bot alongside the daemon when a bot token is
-    // configured. `resolve_token` honours `.env.local` → `.env` → the process
-    // environment, so a single dotenv file configures both the daemon and the
-    // bot. Without a token the daemon runs normally; only a warning is logged.
-    spawn_telegram_bot(&base_url);
 
     trusty_mpm::daemon::serve_http(state, listener).await
 }
@@ -145,33 +152,47 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
-/// Spawn the Telegram bot as a background task when a token is configured.
+/// Spawn the SUPERVISED Telegram bot as a background task when a token is
+/// configured.
 ///
 /// Why: an operator who has set `TELEGRAM_BOT_TOKEN` expects the bot to come up
-/// with the daemon — not as a separate process they must remember to start.
+/// with the daemon — not as a separate process they must remember to start —
+/// AND to stay up. The previous bare spawn logged once and ended on the first
+/// error (a 409 long-poll conflict, a network blip), so the Telegram surface
+/// went silently dark until a full daemon restart (#1499). Wrapping the run loop
+/// in the supervisor makes a transient failure self-heal with bounded
+/// exponential backoff, makes a permanent misconfiguration back off and give up
+/// loudly instead of tight-looping, and keeps the bot shutdown-safe.
 /// What: resolves the token via `trusty_mpm::telegram::resolve_token` (which
-/// reads `.env.local`, then `.env`, then the environment). When a token is
-/// found the bot's `run` is spawned on a tokio task pointed at `base_url`; when
-/// absent a single warning is logged and the daemon continues.
+/// reads `.env.local`, then `.env`, then the environment). When a token is found
+/// the supervised bot loop ([`trusty_mpm::telegram::run_supervised`]) is spawned
+/// on a tokio task pointed at `base_url`, cancellable via the returned
+/// [`CancellationToken`] so graceful shutdown can stop it; when absent a single
+/// warning is logged and the daemon continues. Returns the token (or `None` when
+/// no bot was started) so the caller can cancel it on shutdown.
 /// Test: token resolution is covered by `trusty-mpm-telegram`'s
-/// `resolve_token_*` tests; the spawn path is exercised by running the daemon.
-fn spawn_telegram_bot(base_url: &str) {
+/// `resolve_token_*` tests; the restart/give-up/cancellation logic is covered by
+/// `telegram::supervisor::tests`; the spawn path is exercised by running the
+/// daemon.
+fn spawn_telegram_bot(base_url: &str) -> Option<tokio_util::sync::CancellationToken> {
     match trusty_mpm::telegram::resolve_token("TELEGRAM_BOT_TOKEN") {
         Some(token) => {
-            tracing::info!("TELEGRAM_BOT_TOKEN found — starting Telegram bot");
+            tracing::info!("TELEGRAM_BOT_TOKEN found — starting supervised Telegram bot");
             let url = base_url.to_string();
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            let bot_shutdown = shutdown.clone();
             tokio::spawn(async move {
                 let options = trusty_mpm::telegram::BotOptions::default();
-                if let Err(e) = trusty_mpm::telegram::run(url, Some(token), false, options).await {
-                    tracing::warn!("Telegram bot exited: {e}");
-                }
+                trusty_mpm::telegram::run_supervised(url, Some(token), options, bot_shutdown).await;
             });
+            Some(shutdown)
         }
         None => {
             tracing::warn!(
                 "TELEGRAM_BOT_TOKEN not set — Telegram bot not started \
                  (set it in .env.local to enable)"
             );
+            None
         }
     }
 }

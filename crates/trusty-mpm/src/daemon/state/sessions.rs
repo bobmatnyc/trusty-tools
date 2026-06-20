@@ -24,10 +24,17 @@ impl DaemonState {
     ///
     /// Why: `tm pair` asks the daemon for a short code the operator types into
     /// the Telegram bot; the daemon must remember it (and its issue time) so a
-    /// later `/pair` confirm can validate it within the TTL window.
+    /// later `/pair` confirm can validate it within the TTL window. The code is
+    /// ALSO persisted to a canonical file under the framework root so the confirm
+    /// surface validates against a single shared source of truth — without it a
+    /// code minted on one daemon instance was rejected as "invalid" when confirmed
+    /// against another instance's empty in-memory store (#1500).
     /// What: derives a six-character uppercase alphanumeric code from a fresh
-    /// UUID, stores it with the current instant, and returns the code.
-    /// Test: `pairing_round_trip`.
+    /// UUID, stores it both in memory (`pair_code`) and on disk
+    /// (`<framework_root>/pending_pair.json`), and returns the code. A failed disk
+    /// write is logged, not fatal — the in-memory copy still works for the
+    /// same-process case.
+    /// Test: `pairing_round_trip`, `pairing_code_persists_to_disk`.
     pub fn generate_pair_code(&self) -> String {
         let code: String = uuid::Uuid::new_v4()
             .simple()
@@ -38,6 +45,10 @@ impl DaemonState {
             .collect::<String>()
             .to_uppercase();
         *self.pair_code.lock() = Some((code.clone(), std::time::Instant::now()));
+        let pending = crate::daemon::pairing_store::PendingPairCode::new(code.clone());
+        if let Err(e) = crate::daemon::pairing_store::save_pending(&self.framework_root, &pending) {
+            tracing::warn!("failed to persist pending Telegram pairing code: {e}");
+        }
         code
     }
 
@@ -45,25 +56,42 @@ impl DaemonState {
     ///
     /// Why: the bot's `/pair <code>` flow validates the operator's code and, on
     /// success, binds the chat so push alerts have a destination — and the
-    /// binding must survive a daemon restart.
+    /// binding must survive a daemon restart. The code is validated against the
+    /// SHARED on-disk store (falling back to the in-memory copy) so a code minted
+    /// by any surface rooted at the same framework root is accepted, eliminating
+    /// the cross-instance mismatch that forced the `pairing.json` pre-seed
+    /// workaround (#1500).
     /// What: returns `true` and stores `chat_id` (in memory *and* persisted to
     /// `~/.trusty-mpm/pairing.json`) when `code` matches the outstanding code
-    /// and it is within [`PAIR_CODE_TTL`]; clears the code either way (a used or
-    /// expired code never validates twice). A failed disk write is logged, not
-    /// fatal — the in-memory pairing still takes effect.
-    /// Test: `pairing_round_trip`, `pairing_persists_to_disk`.
+    /// (on disk OR in memory) and it is within [`PAIR_CODE_TTL`]; clears the
+    /// pending code from BOTH stores either way (a used or expired code never
+    /// validates twice). A failed disk write is logged, not fatal.
+    /// Test: `pairing_round_trip`, `pairing_persists_to_disk`,
+    /// `pairing_confirms_shared_disk_code`.
     pub fn confirm_pair_code(&self, code: &str, chat_id: i64) -> bool {
+        use crate::daemon::pairing_store;
         let mut guard = self.pair_code.lock();
-        let valid = matches!(
+        // Prefer the shared on-disk pending code (the cross-instance source of
+        // truth); fall back to the in-memory copy for the same-process case when
+        // no disk write has happened (or the file is unreadable).
+        let disk_valid = pairing_store::load_pending(&self.framework_root)
+            .is_some_and(|p| p.code == code && p.is_fresh(PAIR_CODE_TTL));
+        let mem_valid = matches!(
             guard.as_ref(),
             Some((stored, issued))
                 if stored == code && issued.elapsed() < PAIR_CODE_TTL
         );
+        let valid = disk_valid || mem_valid;
+        // A confirm attempt always consumes the outstanding code from both
+        // stores so neither a used nor an expired code can validate twice.
         *guard = None;
+        if let Err(e) = pairing_store::clear_pending(&self.framework_root) {
+            tracing::warn!("failed to clear pending Telegram pairing code: {e}");
+        }
         if valid {
             *self.paired_chat_id.lock() = Some(chat_id);
-            let record = crate::daemon::pairing_store::PairingRecord::new(chat_id);
-            if let Err(e) = crate::daemon::pairing_store::save(&self.framework_root, &record) {
+            let record = pairing_store::PairingRecord::new(chat_id);
+            if let Err(e) = pairing_store::save(&self.framework_root, &record) {
                 tracing::warn!("failed to persist Telegram pairing: {e}");
             }
         }
@@ -73,14 +101,21 @@ impl DaemonState {
     /// Clear the Telegram pairing, in memory and on disk.
     ///
     /// Why: `POST /pair/reset` (or any explicit unpair) must drop the binding so
-    /// a restart does not resurrect it from `pairing.json`.
-    /// What: sets `paired_chat_id` to `None` and deletes the persisted record;
-    /// a failed delete is logged, not fatal.
+    /// a restart does not resurrect it from `pairing.json`. Any outstanding
+    /// pending CODE is dropped too so a reset truly returns the daemon to an
+    /// unpaired, no-code state.
+    /// What: sets `paired_chat_id` to `None`, clears the in-memory `pair_code`,
+    /// and deletes both the persisted record and the shared pending code; a
+    /// failed delete is logged, not fatal.
     /// Test: `pairing_reset_clears_disk`.
     pub fn clear_pairing(&self) {
         *self.paired_chat_id.lock() = None;
+        *self.pair_code.lock() = None;
         if let Err(e) = crate::daemon::pairing_store::clear(&self.framework_root) {
             tracing::warn!("failed to delete persisted Telegram pairing: {e}");
+        }
+        if let Err(e) = crate::daemon::pairing_store::clear_pending(&self.framework_root) {
+            tracing::warn!("failed to delete pending Telegram pairing code: {e}");
         }
     }
 
