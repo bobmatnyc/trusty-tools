@@ -413,8 +413,10 @@ async fn dispatch_command(
 /// on success, and returns the HTML-escaped reply. When the coordinator routed a
 /// `@prefix:` command its captured pane output is appended; when one or more
 /// verbs executed, a compact italic `ran: …` footer is appended so the operator
-/// sees what ran. A `503` returns the [`LLM_NOT_CONFIGURED`] hint; a transport
-/// failure returns an error line.
+/// sees what ran. When inference is unconfigured the SM returns a graceful
+/// degraded reply as HTTP 200 (not 503, per #1524) which is relayed to the
+/// operator; `Ok(None)` covers only the legacy non-SM path that still returns
+/// 503. A transport failure returns an error line.
 /// Test: `action_chat_reply_reports_unconfigured` covers the not-configured
 /// path; `action_footer_lists_verbs` covers the footer rendering.
 async fn action_chat_reply(
@@ -452,6 +454,11 @@ async fn action_chat_reply(
             }
             body
         }
+        // Why this branch is still reachable: `Ok(None)` maps from HTTP 503,
+        // which the legacy LlmOverseer path returns when the overseer is absent
+        // (SM disabled AND no OPENROUTER_API_KEY). The action-loop Degraded path
+        // now returns HTTP 200 with an explanatory reply (#1524), so it no longer
+        // reaches here — but the legacy fallback can still produce a 503.
         Ok(None) => LLM_NOT_CONFIGURED.to_string(),
         Err(e) => format!("❌ chat: daemon error: {e}"),
     }

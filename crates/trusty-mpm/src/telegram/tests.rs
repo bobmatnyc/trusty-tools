@@ -85,18 +85,78 @@ async fn spawn_test_daemon() -> (std::sync::Arc<crate::daemon::state::DaemonStat
     (state, format!("http://{addr}"))
 }
 
+/// Spawn a hermetic test daemon whose SM is enabled but wired to a degraded
+/// resolver (no inference provider), forcing the no-creds explanatory path.
+///
+/// Why: `spawn_test_daemon` calls `DaemonState::with_root → DaemonState::new`
+/// which reads the REAL `~/.trusty-mpm/config.toml`. On a developer machine
+/// with `[session_manager] enabled = true` and `OPENROUTER_API_KEY` set, that
+/// leaks live config into the test and routes the message to a real LLM call
+/// instead of the Degraded path. This variant injects a controlled SM agent that
+/// is always enabled but always reports Degraded (no inference credentials), so
+/// the action-coordinator path deterministically returns the explanatory 200
+/// reply regardless of the operator's local config or environment variables.
+/// What: builds `DaemonState::with_session_manager_agent` carrying an
+/// `enabled = true` agent backed by `MockResolver::degraded()`, serves the
+/// daemon router on a loopback port, and returns the state plus base URL.
+/// Test: used by `action_chat_reply_reports_unconfigured`.
+async fn spawn_test_daemon_degraded_sm()
+-> (std::sync::Arc<crate::daemon::state::DaemonState>, String) {
+    use crate::core::sm::SessionManagerAgent;
+    use crate::core::sm::agent::mock::MockResolver;
+    use crate::core::sm::config::SessionManagerConfig;
+    use crate::daemon::{api, state::DaemonState};
+    use std::future::IntoFuture;
+
+    let tmp = tempfile::tempdir().unwrap().keep();
+    let enabled_cfg = SessionManagerConfig {
+        enabled: true,
+        ..SessionManagerConfig::default()
+    };
+    let agent = std::sync::Arc::new(SessionManagerAgent::for_test(
+        enabled_cfg,
+        std::sync::Arc::new(MockResolver::degraded()),
+        tmp,
+    ));
+    let state = std::sync::Arc::new(DaemonState::with_session_manager_agent(agent));
+    let router = api::router(std::sync::Arc::clone(&state));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, router).into_future());
+    (state, format!("http://{addr}"))
+}
+
 #[tokio::test]
 async fn action_chat_reply_reports_unconfigured() {
-    // A default test daemon has the SM disabled and no OpenRouter key, so a
-    // free-text message routed through the action-capable coordinator gets
-    // the not-configured hint rather than a model reply.
-    let (_state, url) = spawn_test_daemon().await;
+    // When the SM is enabled but inference is not wired (no provider credentials),
+    // the action-coordinator returns HTTP 200 with an explanatory reply (#1524:
+    // graceful degradation replaces the previous opaque 503). The Telegram bot
+    // relays that explanatory text to the operator rather than surfacing an HTTP
+    // error — the new no-creds contract.
+    //
+    // Uses a hermetic daemon with a degraded SM resolver so the test is independent
+    // of the operator's ~/.trusty-mpm/config.toml and OPENROUTER_API_KEY env var.
+    let (_state, url) = spawn_test_daemon_degraded_sm().await;
     let executor = CommandExecutor::new(url);
     let histories: ChatHistories = Arc::new(Mutex::new(HashMap::new()));
     let reply = action_chat_reply(&executor, &histories, 42, "hello there").await;
-    assert_eq!(reply, LLM_NOT_CONFIGURED);
-    // No history is stored when chat is unconfigured.
-    assert!(histories.lock().unwrap().get(&42).is_none());
+    // The explanatory reply must tell the operator why inference is unavailable.
+    assert!(
+        reply.contains("inference"),
+        "reply must mention 'inference', got: {reply:?}"
+    );
+    assert!(
+        reply.contains("OPENROUTER_API_KEY")
+            || reply.contains("configured")
+            || reply.contains("credentials"),
+        "reply must hint at configuring credentials, got: {reply:?}"
+    );
+    // The explanatory turn IS recorded so follow-up messages see coherent history
+    // (coordinator returned Ok(Some(outcome)) with the notice as the reply text).
+    assert!(
+        histories.lock().unwrap().get(&42).is_some(),
+        "explanatory turn must be stored in chat history"
+    );
 }
 
 #[test]
