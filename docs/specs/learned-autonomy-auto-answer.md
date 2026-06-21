@@ -191,7 +191,7 @@ A decision auto-answer includes a concrete **undo handle** — a representation 
 5. `merged_release` — merged to main or released; undo via release revert / hotfix (manual, high-effort).
 6. `irreversible` — external side-effects (email sent, payment processed, external API call); no automatic undo.
 
-**Determination:** Undo cost is computed from `SessionCorrelation` (branch, PR state, release tags) + git history + action metadata. If the session has no correlation, undo cost is `unknown` → escalate (cautious default).
+**Determination:** Undo cost is computed from `SessionCorrelation` (branch, PR state, release tags) + git history + action metadata. If the session has no correlation, undo cost cannot be determined: `Option<UndoCostClass> = None` → escalate (cautious default).
 
 **Acceptance criteria:**
 - Every `AdjudicationResult::auto_answer` includes a non-empty undo_handle.
@@ -205,24 +205,7 @@ A decision auto-answer includes a concrete **undo handle** — a representation 
 
 **Requirement: Learning is per-user; corpus is keyed by user identity, action category, and undo-cost class.**
 
-The adjudicator does **not** learn globally; it learns per-user. A decision corpus record is a tuple:
-```rust
-pub struct DecisionRecord {
-    pub user_id: String,                              // owning user identity
-    pub action_category: ActionCategory,              // commit / push / file_overwrite / dependency_add / permission_grant
-    pub undo_cost_class: UndoCostClass,               // ordered enum
-    pub prompt_embedding: Vec<f32>,                   // semantic embedding of the decision prompt
-    pub prompt_text: String,                          // original prompt
-    pub human_answer: String,                         // what the human / prior user decided
-    pub answer_source: AnswerSource,                  // human | auto_answer_unadjudicated | auto_answer_learned
-    pub override_count: u32,                          // how many times the user overrode this auto-answer
-    pub confidence_at_time: f64,                      // LLM confidence when decided
-    pub disposition: Disposition,                     // what was decided
-    pub outcome: DecisionOutcome,                     // stood_unadjudicated | auto_answer | overridden | rolled_back
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-```
+The adjudicator does **not** learn globally; it learns per-user. See §5.2 for the canonical `DecisionRecord` schema definition.
 
 **Recall:** `adjudicate` calls `memory.recall_deep(prompt_embedding, user_id, action_category, undo_cost_class)` to fetch top-K user-scoped, category-matched, undo-class-adjacent corpus hits. The LLM sees the prompt + matching examples + overrides as weighted negative examples.
 
@@ -302,9 +285,9 @@ pub struct AutoAnswerDisposition {
 - **Thumbs up:** positive feedback → logs `override_count = 0` (affirm the corpus entry).
 - **Thumbs down:** negative feedback (user regrets) → increments `override_count`, marks as `rolled_back`, adds weighted correction to corpus.
 
-**Override flow (split by confidence proximity to tier ceiling):**
-- **Within-tier (confidence > ceiling - 0.05):** undo fires immediately, logs correction, notifies user inline.
-- **Near-ceiling (ceiling - 0.10 ≤ confidence ≤ ceiling - 0.05):** optional grace window (configurable, default: 30 seconds); if user does not undo within window, logs as `stood` (uncontradicted); if user taps undo, rolls back + corrects.
+**Override flow (split by confidence proximity to tier threshold floor):**
+- **Comfortably-within-tier (confidence ≥ threshold + 0.05):** undo fires immediately, logs correction, notifies user inline.
+- **Near-threshold (threshold ≤ confidence < threshold + 0.05):** optional grace window (configurable, default: 30 seconds); if user does not undo within window, logs as `stood` (uncontradicted); if user taps undo, rolls back + corrects. Higher confidence → immediate undo; lower (near-floor) confidence → grace window (cautious approach for decisions close to the tier threshold).
 
 **Acceptance criteria:**
 - Auto-answer is always displayed with confidence + undo button.
@@ -450,6 +433,11 @@ pub enum AnswerSource {
     AutoAnswerUnadjudicated, // from AUTONOMY_POLICY T1 / T2, pre-adjudicator
 }
 
+pub enum Disposition {
+    AutoAnswer,
+    Escalate,
+}
+
 pub struct AdjudicationOutcome {
     pub confidence: f64,
     pub reasoning: String,
@@ -463,7 +451,7 @@ pub struct AdjudicationOutcome {
 ```rust
 pub struct DecisionAdjudicator {
     memory: SmMemory,
-    lmm_resolver: SmLlmResolver,  // reuse SM's Orchestration tier
+    llm_resolver: SmLlmResolver,  // reuse SM's Orchestration tier
     config: AutonomyConfig,
     store: SessionStore,
 }
@@ -583,6 +571,8 @@ LLM decides: { answer: "auto", confidence: 0.94, reasoning: "… matches user's 
 7. **Learning from unadjudicated auto-answers:** Can an unadjudicated auto-answer (from AUTONOMY_POLICY T1 / T2, before this spec) count as a positive example if it goes un-overridden? Or should we only learn from explicit human answers? (Risks confirmation bias if we're not careful.)
 
 8. **Action category inference:** Should action category be inferred from the decision prompt via NLP / LLM, or hard-coded by the site that raises the decision (e.g., `set_pending_decision(…, category: ActionCategory::Commit)`)? Inference is more flexible; hard-coding is more auditable.
+
+9. **Positive-example feedback window (N days):** §4.4 states that an un-overridden auto-answer counts as a positive example "after N days". Define the concrete default duration (e.g., 7 days, 14 days, 30 days) for the feedback design, or move this to post-launch tuning if the window is still under design.
 
 ---
 
