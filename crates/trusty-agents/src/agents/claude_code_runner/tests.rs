@@ -12,6 +12,7 @@ use crate::agents::{
     AgentConfig, AgentInfo, LlmParams, RunnerKind, SystemPrompt, ToolChoice, ToolsConfig,
 };
 use crate::perf::TokenUsage;
+#[cfg(unix)]
 use crate::test_env::write_executable_script;
 use crate::tools::traits::{AgentOutput, AgentRunner, RunContext};
 use anyhow::Result;

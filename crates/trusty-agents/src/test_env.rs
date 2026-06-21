@@ -44,14 +44,13 @@ pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// Write a shell script to `dir/name`, flush and close the file handle, THEN
 /// set the execute bit — eliminating the ETXTBSY race (#1528).
 ///
-/// Why: On Linux, the kernel returns ETXTBSY (os error 26) when a process
-/// tries to exec a file that still has an open writable file descriptor.
-/// `std::fs::write` leaves no lingering handle, but calling `set_permissions`
-/// immediately after the write can still race under heavy CI load if another
-/// thread holds a cross-process lock on the inode. The safe pattern is:
-/// open → write → flush → **explicitly close the handle** → then chmod.
-/// Dropping the `File` before `set_permissions` guarantees the writable fd
-/// is gone before the kernel is asked to exec the file.
+/// Why: The Linux kernel rejects `execve` with ETXTBSY (os error 26) when
+/// ANY process holds an open writable fd to the target inode — including the
+/// writing process itself. Closing/dropping the `File` before `set_permissions`
+/// and before `spawn` removes that fd, satisfying the kernel's constraint.
+/// The safe pattern is: open → write → flush → **drop the `File`** → chmod
+/// → spawn. Without the explicit drop, the writable fd can still be open when
+/// `execve` is called, triggering ETXTBSY even under light load.
 /// What: Creates the file at `dir.join(name)`, writes `contents`, syncs,
 /// drops the file handle, sets mode 0o755, and returns the absolute path.
 /// Test: All tests in `subprocess::tests` and `agents::claude_code_runner::tests`

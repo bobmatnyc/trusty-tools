@@ -9,6 +9,7 @@
 use tokio::io::AsyncBufReadExt;
 
 use crate::ipc::{IpcMessage, parse_message};
+#[cfg(unix)]
 use crate::test_env::{spawn_script, write_executable_script};
 
 /// #147: A subprocess that writes a valid IpcMessage::Result to stdout and
