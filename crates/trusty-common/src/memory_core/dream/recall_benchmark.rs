@@ -38,7 +38,8 @@ use std::sync::Arc;
 /// benchmark; update the doc comment and tests accordingly.
 ///
 /// Test: `dream_recall_benchmark_returns_score_with_drawers` runs all
-/// queries against a seeded palace and asserts the score is in [0, 1].
+/// queries against a seeded palace and asserts the score is finite and
+/// non-negative.
 pub(super) const BENCHMARK_QUERIES: &[&str] = &[
     // Domain 1 — Tooling & build system
     "cargo build and test commands for the workspace",
@@ -67,13 +68,16 @@ pub(super) const BENCHMARK_QUERIES: &[&str] = &[
 /// propagating an error and aborting the dream cycle.
 ///
 /// What: For each query in `BENCHMARK_QUERIES`, embeds it via the shared
-/// embedder and queries the vector store for the top 3 hits.  The mean score
-/// across all queries × all (up to 3) hits is returned.  When no hits are
-/// found for *any* query (empty palace), returns `None`.
+/// embedder and queries the vector store for the top 3 hits.  Returns the
+/// mean top-3 native similarity score returned by the vector store; higher
+/// is better; exact range depends on the store's distance metric.  When no
+/// hits are found for *any* query (empty palace), returns `None`.
 ///
 /// Test: `dream_recall_benchmark_empty_palace_returns_none` asserts `None`
 /// on an empty palace; `dream_recall_benchmark_returns_score_with_drawers`
-/// seeds the palace and asserts a `Some(score)` in `[0.0, 1.0]`.
+/// seeds the palace and asserts a `Some(score)` that is finite and
+/// non-negative; the exact upper bound depends on the vector store's
+/// distance metric.
 pub(super) async fn run_benchmark(handle: &Arc<PalaceHandle>) -> Option<f64> {
     // Guard: if there are no drawers the vector store returns nothing useful.
     if handle.drawers.read().is_empty() {

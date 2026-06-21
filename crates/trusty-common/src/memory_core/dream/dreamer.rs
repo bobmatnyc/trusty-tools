@@ -224,8 +224,12 @@ impl Dreamer {
         // Count drawers before any pass so we can compute the compression ratio.
         let drawers_before = handle.drawers.read().len() as u64;
 
-        // Recall benchmark before consolidation — skip silently on failure.
-        let recall_score_before = run_benchmark(handle).await;
+        // Recall benchmark before consolidation — skip silently on failure or when disabled.
+        let recall_score_before = if self.config.recall_benchmark_enabled {
+            run_benchmark(handle).await
+        } else {
+            None
+        };
 
         let content_pruned = if self.config.content_prune_enabled {
             content_prune_pass(handle, started, budget, self.config.content_prune_min_words)
@@ -257,8 +261,12 @@ impl Dreamer {
         // ── Effectiveness metric: post-cycle snapshot (issue #1530) ───────────
         let drawers_after = handle.drawers.read().len() as u64;
 
-        // Recall benchmark after consolidation — skip silently on failure.
-        let recall_score_after = run_benchmark(handle).await;
+        // Recall benchmark after consolidation — skip silently on failure or when disabled.
+        let recall_score_after = if self.config.recall_benchmark_enabled {
+            run_benchmark(handle).await
+        } else {
+            None
+        };
 
         let mut stats = DreamStats {
             merged,

@@ -23,6 +23,10 @@ fn dream_config_defaults() {
         "content-quality pruning is on by default"
     );
     assert_eq!(cfg.content_prune_min_words, 4);
+    assert!(
+        cfg.recall_benchmark_enabled,
+        "recall benchmark is enabled by default"
+    );
 }
 
 /// Why: `touch` must reset the idle clock; with `idle_secs=0` `is_idle`
@@ -760,6 +764,25 @@ fn dream_compression_ratio_zero_drawers() {
     );
 }
 
+/// Why: The semantic consolidation phase can add canonical drawers, causing
+/// `drawers_after > drawers_before`. The ratio must be clamped to 0.0 and
+/// must not panic.
+/// What: Directly construct `DreamStats` with `drawers_after > drawers_before`
+/// and assert `compression_ratio == 0.0`.
+/// Test: This test itself.
+#[test]
+fn dream_compression_ratio_net_growth() {
+    let mut stats = DreamStats {
+        drawers_before: 5,
+        drawers_after: 8, // net growth
+        ..DreamStats::default()
+    };
+    stats.update_compression_ratio();
+    assert_eq!(
+        stats.compression_ratio, 0.0,
+        "net palace growth (after > before) must clamp compression_ratio to 0.0"
+    );
+}
 /// Why: `DreamStats` adds `f64` fields so the old `Eq` bound is gone;
 /// verify serde round-trips preserve all new fields faithfully.
 /// What: Construct a `DreamStats` with non-default effectiveness fields,
@@ -950,8 +973,8 @@ async fn dream_recall_benchmark_returns_score_with_drawers() {
     let result = super::recall_benchmark::run_benchmark(&handle).await;
     let score = result.expect("expected Some(score) with seeded drawers");
     assert!(
-        (0.0..=1.0).contains(&score),
-        "recall benchmark score must be in [0, 1]; got {score}"
+        score.is_finite() && score >= 0.0,
+        "recall benchmark score must be finite and non-negative; got {score}"
     );
 }
 
@@ -989,12 +1012,12 @@ async fn dream_cycle_records_recall_scores() {
     let before = stats.recall_score_before.unwrap();
     let after = stats.recall_score_after.unwrap();
     assert!(
-        (0.0..=1.0).contains(&before),
-        "recall_score_before={before} out of range"
+        before.is_finite() && before >= 0.0,
+        "recall_score_before={before} must be finite and non-negative"
     );
     assert!(
-        (0.0..=1.0).contains(&after),
-        "recall_score_after={after} out of range"
+        after.is_finite() && after >= 0.0,
+        "recall_score_after={after} must be finite and non-negative"
     );
 }
 
@@ -1044,6 +1067,53 @@ async fn dream_stats_effectiveness_fields_persisted() {
     assert_eq!(
         loaded.stats.recall_score_after, stats.recall_score_after,
         "recall_score_after must be persisted"
+    );
+}
+
+/// Why: The recall benchmark adds two full embed+search passes per cycle.
+/// When `recall_benchmark_enabled = false`, both passes must be skipped and
+/// both recall score fields must be `None`, while the cycle itself completes
+/// normally.
+/// What: Run `dream_cycle` with `recall_benchmark_enabled = false` on a
+/// seeded palace and assert both `recall_score_before` and
+/// `recall_score_after` are `None`.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_recall_benchmark_disabled() {
+    let handle = open_test_handle("dream-bench-disabled").await;
+    handle
+        .remember(
+            "recall benchmark opt-out test drawer".into(),
+            RoomType::General,
+            vec![],
+            0.6,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        recall_benchmark_enabled: false,
+        dedup_threshold: 0.999, // nothing removed
+        ..DreamConfig::default()
+    });
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(
+        stats.recall_score_before, None,
+        "recall_score_before must be None when benchmark is disabled"
+    );
+    assert_eq!(
+        stats.recall_score_after, None,
+        "recall_score_after must be None when benchmark is disabled"
+    );
+    // Cycle must still complete and report drawer counts.
+    assert_eq!(
+        stats.drawers_before, 1,
+        "drawers_before must still be counted"
+    );
+    assert_eq!(
+        stats.drawers_after, 1,
+        "drawers_after must still be counted"
     );
 }
 

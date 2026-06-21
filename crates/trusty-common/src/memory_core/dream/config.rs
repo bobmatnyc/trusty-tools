@@ -46,6 +46,19 @@ pub struct DreamConfig {
     /// When `true` and no OpenRouter key is available, the semantic phase uses
     /// the local model at `http://localhost:11434`.
     pub local_model_enabled: bool,
+    /// Whether to run the recall benchmark before and after each dream cycle.
+    ///
+    /// Why: The benchmark performs two full embed+search passes per cycle. On
+    /// resource-constrained deployments or very frequent dream cycles, this
+    /// overhead may be undesirable. Setting to `false` skips both passes and
+    /// leaves `recall_score_before`/`recall_score_after` as `None`.
+    /// What: When `false`, `dream_cycle` skips `run_benchmark` entirely; both
+    /// recall score fields in `DreamStats` are `None`. Defaults to `true` so
+    /// existing configs and behavior are unchanged.
+    /// Test: `dream_cycle_recall_benchmark_disabled` asserts that when
+    /// `recall_benchmark_enabled = false`, the cycle completes and both recall
+    /// scores are `None`.
+    pub recall_benchmark_enabled: bool,
 }
 
 impl Default for DreamConfig {
@@ -64,6 +77,7 @@ impl Default for DreamConfig {
             semantic: SemanticConsolidationConfig::default(),
             openrouter_api_key: String::new(),
             local_model_enabled: true,
+            recall_benchmark_enabled: true,
         }
     }
 }
@@ -130,10 +144,10 @@ pub struct DreamStats {
     /// admin dashboard. Serialised directly so `dream_stats.json` shows it
     /// without requiring clients to do arithmetic.
     /// What: `0.0` when `drawers_before == 0` (guard against divide-by-zero).
-    /// Otherwise `(drawers_before - drawers_after) / drawers_before`. Always
-    /// in `[0.0, 1.0]` because no dream pass *adds* more drawers than existed
-    /// (semantic phase adds canonicals, but they are counted in `drawers_after`
-    /// so the ratio captures net change).
+    /// Otherwise `(drawers_before - drawers_after) / drawers_before`. In
+    /// `[0.0, 1.0]`; 0.0 means no net shrinkage OR net growth (growth is
+    /// clamped to 0.0 via `saturating_sub`). Net growth can occur when the
+    /// semantic consolidation phase adds canonical drawers.
     /// Test: `dream_compression_ratio_math`, `dream_compression_ratio_zero_drawers`.
     #[serde(default)]
     pub compression_ratio: f64,
@@ -171,12 +185,23 @@ impl DreamStats {
     /// avoids duplicating the divide-by-zero guard.
     /// What: Sets `self.compression_ratio` to
     /// `(drawers_before - drawers_after) / drawers_before`, or `0.0` when
-    /// `drawers_before == 0`.
-    /// Test: `dream_compression_ratio_math`, `dream_compression_ratio_zero_drawers`.
+    /// `drawers_before == 0`. When `drawers_after > drawers_before` (net
+    /// growth), the ratio is clamped to `0.0` via `saturating_sub` and a
+    /// `tracing::warn!` is emitted so the growth is observable.
+    /// Test: `dream_compression_ratio_math`, `dream_compression_ratio_zero_drawers`,
+    /// `dream_compression_ratio_net_growth`.
     pub fn update_compression_ratio(&mut self) {
         self.compression_ratio = if self.drawers_before == 0 {
             0.0
         } else {
+            if self.drawers_after > self.drawers_before {
+                tracing::warn!(
+                    drawers_before = self.drawers_before,
+                    drawers_after = self.drawers_after,
+                    "dream cycle: net palace growth detected (more drawers after than before); \
+                     compression_ratio clamped to 0.0"
+                );
+            }
             let eliminated = self.drawers_before.saturating_sub(self.drawers_after);
             eliminated as f64 / self.drawers_before as f64
         };
