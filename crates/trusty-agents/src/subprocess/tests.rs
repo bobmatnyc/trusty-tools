@@ -6,11 +6,10 @@
 //! asserts the rescue path.
 //! Test: This module is itself the test coverage.
 
-use std::process::Stdio;
-
 use tokio::io::AsyncBufReadExt;
 
 use crate::ipc::{IpcMessage, parse_message};
+use crate::test_env::{spawn_script, write_executable_script};
 
 /// #147: A subprocess that writes a valid IpcMessage::Result to stdout and
 /// then exits with code 1 must be treated as success by the rescue logic in
@@ -27,28 +26,19 @@ use crate::ipc::{IpcMessage, parse_message};
 #[cfg(unix)]
 #[tokio::test]
 async fn rescue_valid_result_on_nonzero_exit() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
-    let script = tmp.path().join("fake-agent");
-    // Emit a valid IpcMessage::Result line then exit with code 1.
-    std::fs::write(
-        &script,
+    let script = write_executable_script(
+        tmp.path(),
+        "fake-agent",
         "#!/bin/sh\n\
          printf '%s\\n' \
          '{\"type\":\"result\",\"id\":\"test-id\",\"content\":\"agent output\",\"status\":\"success\"}'\n\
          exit 1\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     // Spawn the fake script and read exactly one NDJSON line from stdout.
-    let mut child = tokio::process::Command::new(&script)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
+    // `spawn_script` retries on ETXTBSY for belt-and-suspenders safety (#1528).
+    let mut child = spawn_script(&script).await.unwrap();
 
     let stdout = child.stdout.take().unwrap();
     let mut reader = tokio::io::BufReader::new(stdout);
@@ -90,27 +80,18 @@ async fn rescue_valid_result_on_nonzero_exit() {
 #[cfg(unix)]
 #[tokio::test]
 async fn nonzero_exit_without_result_still_errors() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
-    let script = tmp.path().join("fail-agent");
-    // Emit an IpcMessage::Error line then exit with code 2.
-    std::fs::write(
-        &script,
+    let script = write_executable_script(
+        tmp.path(),
+        "fail-agent",
         "#!/bin/sh\n\
          printf '%s\\n' \
          '{\"type\":\"error\",\"id\":\"test-id\",\"error\":\"crashed\",\"status\":\"error\"}'\n\
          exit 2\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
-    let mut child = tokio::process::Command::new(&script)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
+    // `spawn_script` retries on ETXTBSY for belt-and-suspenders safety (#1528).
+    let mut child = spawn_script(&script).await.unwrap();
 
     let stdout = child.stdout.take().unwrap();
     let mut reader = tokio::io::BufReader::new(stdout);
