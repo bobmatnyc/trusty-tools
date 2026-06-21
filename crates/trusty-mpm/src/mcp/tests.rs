@@ -204,6 +204,40 @@ impl OrchestratorBackend for MockBackend {
             Err(format!("project `{name}` not found"))
         }
     }
+
+    // ── #1517 WI-5: NL→repo resolver mock impl ───────────────────────────────
+    async fn project_resolve(&self, query: &str) -> Result<Value, String> {
+        if query == "trusty-tools" {
+            Ok(json!({
+                "primary": {
+                    "project": {
+                        "name": "trusty-tools",
+                        "repo_url": "https://github.com/o/trusty-tools",
+                        "default_branch": "main",
+                    },
+                    "confidence": 1.0,
+                    "reason": "exact name match",
+                },
+                "needs_disambiguation": false,
+                "matches": [{
+                    "project": {
+                        "name": "trusty-tools",
+                        "repo_url": "https://github.com/o/trusty-tools",
+                        "default_branch": "main",
+                    },
+                    "confidence": 1.0,
+                    "reason": "exact name match",
+                }],
+            }))
+        } else {
+            Ok(json!({
+                "primary": null,
+                "needs_disambiguation": false,
+                "matches": [],
+                "error": format!("no project matched query: {query:?}"),
+            }))
+        }
+    }
 }
 
 fn call(name: &str, args: Value) -> Request {
@@ -230,9 +264,9 @@ async fn dispatch_initialize_returns_server_info() {
 
 #[tokio::test]
 async fn dispatch_tools_list_returns_full_catalog() {
-    // 9 pre-existing + 8 session-lifecycle + 5 console-facing + 3 project = 25
+    // 9 pre-existing + 8 session-lifecycle + 5 console-facing + 4 project = 26
     // (#1222 + the two #1220 config tools + the two #1508 fleet-teardown tools
-    // + the three #1519 project-registry tools).
+    // + the three #1519 project-registry tools + #1517 WI-5 project_resolve).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -241,7 +275,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 25);
+    assert_eq!(tools.as_array().unwrap().len(), 26);
 }
 
 /// Why: the console Config tab calls `config_read`; dispatch must route it and
@@ -873,5 +907,81 @@ async fn dispatch_project_get_requires_name() {
             .as_str()
             .unwrap()
             .contains("name")
+    );
+}
+
+// ── #1517 WI-5: project_resolve dispatch tests ───────────────────────────────
+
+/// Why (#1517 WI-5): `project_resolve` must route a matching query to the
+/// backend and return a `primary` match with confidence and reason.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_resolve_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call("project_resolve", json!({ "query": "trusty-tools" })),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("trusty-tools"),
+        "expected 'trusty-tools' in: {text}"
+    );
+    assert!(
+        text.contains("confidence"),
+        "expected 'confidence' field in: {text}"
+    );
+}
+
+/// Why (#1517 WI-5): `project_resolve` must return a no-match response (not an
+/// error) when the query does not match any project; the `primary` field must be
+/// null and an `error` message must explain the failure.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_resolve_no_match() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "project_resolve",
+            json!({ "query": "zzz-unregistered-xyz" }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    // The resolver returns Ok with primary:null for no-match (not isError).
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    // Parse the JSON payload and assert the actual response shape.
+    let payload: serde_json::Value = serde_json::from_str(text)
+        .unwrap_or_else(|_| panic!("response text must be valid JSON, got: {text}"));
+    assert_eq!(
+        payload["primary"],
+        serde_json::Value::Null,
+        "primary must be null for a no-match response, got: {payload}"
+    );
+    let error_msg = payload["error"].as_str().unwrap_or_else(|| {
+        panic!("no-match response must carry an 'error' explanation, got: {payload}")
+    });
+    assert!(
+        error_msg.contains("zzz-unregistered-xyz"),
+        "error message must include the query, got: {error_msg}"
+    );
+}
+
+/// Why (#1517 WI-5): `project_resolve` must error at the dispatch layer when
+/// the required `query` arg is absent.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_resolve_requires_query() {
+    let resp = dispatch(&MockBackend, call("project_resolve", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("query")
     );
 }

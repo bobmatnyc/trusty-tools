@@ -488,6 +488,12 @@ impl OrchestratorBackend for StateBackend {
     async fn project_get(&self, name: &str) -> Result<Value, String> {
         super::mcp_project::project_get(&self.state, name).await
     }
+
+    // ── #1517 WI-5: NL→repo resolver (delegates to mcp_project) ─────────────
+
+    async fn project_resolve(&self, query: &str) -> Result<Value, String> {
+        super::mcp_project::project_resolve(&self.state, query).await
+    }
 }
 
 #[cfg(test)]

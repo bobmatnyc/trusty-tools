@@ -1,11 +1,12 @@
-//! Project-registry MCP tool descriptors (#1519 WI-2).
+//! Project-registry MCP tool descriptors (WI-2 + WI-5, #1519 / #1517).
 //!
 //! Why: the driver skill needs a typed, JSON-native surface to list, register,
-//! and look up projects in the registry — without scraping CLI text. Keeping
-//! these descriptors in their own file mirrors the pattern of `session.rs` and
-//! keeps each file well under the 500-SLOC production cap.
-//! What: [`project_tools`] returns the three `{ name, description, inputSchema }`
-//! descriptors — `project_list`, `project_register`, and `project_get`.
+//! look up, and NL-resolve projects in the registry — without scraping CLI text.
+//! Keeping these descriptors in their own file mirrors the pattern of `session.rs`
+//! and keeps each file well under the 500-SLOC production cap.
+//! What: [`project_tools`] returns the four `{ name, description, inputSchema }`
+//! descriptors — `project_list`, `project_register`, `project_get`, and
+//! `project_resolve`.
 //! Test: `super::tests::project_tools_present`,
 //! `super::tests::catalog_names_match_constant`.
 
@@ -13,17 +14,16 @@ use serde_json::{Value, json};
 
 use super::tool;
 
-/// Build the three project-registry tool descriptors.
+/// Build the four project-registry tool descriptors (WI-2 + WI-5).
 ///
-/// Why: project listing, registration, and lookup are the MCP surface the
-/// driver skill needs to interact with the project registry without CLI text
-/// scraping. Keeping them in their own builder keeps this file under the SLOC
-/// cap and gives the project tools an auditable home.
-/// What: returns the three descriptors in catalog order. `project_register`
-/// requires `name` and `repo_url` and accepts optional `default_branch`,
-/// `stack_hint`, `tags`, and `description`; `project_get` requires `name`;
-/// `project_list` takes no arguments. Every schema sets
-/// `additionalProperties: false`.
+/// Why: project listing, registration, lookup, and NL-resolution are the MCP
+/// surface the driver skill needs to interact with the project registry without
+/// CLI text scraping. Keeping them in their own builder keeps this file under
+/// the SLOC cap and gives the project tools an auditable home.
+/// What: returns the four descriptors in catalog order. `project_register`
+/// requires `name` and `repo_url` and accepts optional fields; `project_get`
+/// and `project_resolve` each require one string argument; `project_list` takes
+/// no arguments. Every schema sets `additionalProperties: false`.
 /// Test: `super::tests::project_tools_present`.
 pub(super) fn project_tools() -> Vec<Value> {
     vec![
@@ -92,6 +92,30 @@ pub(super) fn project_tools() -> Vec<Value> {
                     }
                 },
                 "required": ["name"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "project_resolve",
+            "Resolve a natural-language query to the best-matching registered \
+             project. Accepts free-text task descriptions, GitHub URLs, ticket \
+             IDs (e.g. PROJ-123), project names, keywords, or tags. Returns a \
+             `primary` match with confidence score and reason, a \
+             `needs_disambiguation` flag (true when multiple candidates score \
+             above the disambiguation floor), and a ranked `matches` list. \
+             Confidence is always in [0.0, 1.0]. On no match, `primary` is null \
+             and an `error` field explains the failure.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Free-text query: project name, GitHub URL, \
+                                        ticket ID, keyword, or any natural-language \
+                                        task description."
+                    }
+                },
+                "required": ["query"],
                 "additionalProperties": false
             }),
         ),
