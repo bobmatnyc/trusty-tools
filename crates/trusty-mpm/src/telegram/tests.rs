@@ -98,17 +98,22 @@ async fn spawn_test_daemon() -> (std::sync::Arc<crate::daemon::state::DaemonStat
 /// reply regardless of the operator's local config or environment variables.
 /// What: builds `DaemonState::with_session_manager_agent` carrying an
 /// `enabled = true` agent backed by `MockResolver::degraded()`, serves the
-/// daemon router on a loopback port, and returns the state plus base URL.
+/// daemon router on a loopback port, and returns the state, base URL, and the
+/// `TempDir` guard. The caller must bind the guard (e.g. `let (_state, url, _tmp)
+/// = …`) so the directory lives for the test's duration and is cleaned up on drop.
 /// Test: used by `action_chat_reply_reports_unconfigured`.
-async fn spawn_test_daemon_degraded_sm()
--> (std::sync::Arc<crate::daemon::state::DaemonState>, String) {
+async fn spawn_test_daemon_degraded_sm() -> (
+    std::sync::Arc<crate::daemon::state::DaemonState>,
+    String,
+    tempfile::TempDir,
+) {
     use crate::core::sm::SessionManagerAgent;
     use crate::core::sm::agent::mock::MockResolver;
     use crate::core::sm::config::SessionManagerConfig;
     use crate::daemon::{api, state::DaemonState};
     use std::future::IntoFuture;
 
-    let tmp = tempfile::tempdir().unwrap().keep();
+    let tmp = tempfile::tempdir().unwrap();
     let enabled_cfg = SessionManagerConfig {
         enabled: true,
         ..SessionManagerConfig::default()
@@ -116,14 +121,14 @@ async fn spawn_test_daemon_degraded_sm()
     let agent = std::sync::Arc::new(SessionManagerAgent::for_test(
         enabled_cfg,
         std::sync::Arc::new(MockResolver::degraded()),
-        tmp,
+        tmp.path().to_path_buf(),
     ));
     let state = std::sync::Arc::new(DaemonState::with_session_manager_agent(agent));
     let router = api::router(std::sync::Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(axum::serve(listener, router).into_future());
-    (state, format!("http://{addr}"))
+    (state, format!("http://{addr}"), tmp)
 }
 
 #[tokio::test]
@@ -136,7 +141,7 @@ async fn action_chat_reply_reports_unconfigured() {
     //
     // Uses a hermetic daemon with a degraded SM resolver so the test is independent
     // of the operator's ~/.trusty-mpm/config.toml and OPENROUTER_API_KEY env var.
-    let (_state, url) = spawn_test_daemon_degraded_sm().await;
+    let (_state, url, _tmp) = spawn_test_daemon_degraded_sm().await;
     let executor = CommandExecutor::new(url);
     let histories: ChatHistories = Arc::new(Mutex::new(HashMap::new()));
     let reply = action_chat_reply(&executor, &histories, 42, "hello there").await;
