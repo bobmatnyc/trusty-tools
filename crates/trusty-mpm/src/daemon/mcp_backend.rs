@@ -457,6 +457,37 @@ impl OrchestratorBackend for StateBackend {
     ) -> Result<Value, String> {
         super::mcp_console::config_write(workspace_root_template, auto_resume, default_model)
     }
+
+    // ── #1519 WI-2: project-registry tools (delegate to mcp_project) ─────────
+
+    async fn project_list(&self) -> Result<Value, String> {
+        super::mcp_project::project_list(&self.state).await
+    }
+
+    async fn project_register(
+        &self,
+        name: &str,
+        repo_url: &str,
+        default_branch: Option<&str>,
+        stack_hint: Option<&str>,
+        tags: Option<Vec<String>>,
+        description: Option<&str>,
+    ) -> Result<Value, String> {
+        super::mcp_project::project_register(
+            &self.state,
+            name,
+            repo_url,
+            default_branch,
+            stack_hint,
+            tags,
+            description,
+        )
+        .await
+    }
+
+    async fn project_get(&self, name: &str) -> Result<Value, String> {
+        super::mcp_project::project_get(&self.state, name).await
+    }
 }
 
 #[cfg(test)]

@@ -199,6 +199,19 @@ pub struct DaemonState {
             >,
         >,
     >,
+
+    /// Lazily-initialized project registry for the `project_*` MCP tools (#1519).
+    ///
+    /// Why: `ProjectRegistry::load` is async (it reads the on-disk store) and
+    /// cannot be called inside the synchronous `DaemonState` constructors. A
+    /// `OnceCell` defers construction to the first `project_*` MCP request and
+    /// caches the shared handle thereafter, following the same pattern as
+    /// `managed_sessions`.
+    /// What: holds `None` until [`Self::project_registry`] first runs, then the
+    /// shared `Arc<ProjectRegistry>`.
+    /// Test: `mcp_project` tests exercise the registry via the dispatch path.
+    pub(super) project_registry:
+        tokio::sync::OnceCell<std::sync::Arc<crate::project::ProjectRegistry>>,
 }
 
 impl Default for DaemonState {
@@ -252,6 +265,7 @@ impl DaemonState {
             event_tx,
             managed_sessions: tokio::sync::OnceCell::new(),
             activity_monitor: std::sync::OnceLock::new(),
+            project_registry: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -324,6 +338,7 @@ impl DaemonState {
             event_tx,
             managed_sessions: tokio::sync::OnceCell::new(),
             activity_monitor: std::sync::OnceLock::new(),
+            project_registry: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -485,5 +500,49 @@ impl DaemonState {
         // on this being absent.
         state.llm = None;
         state
+    }
+
+    /// Return the shared project registry, constructing it on first access (#1519).
+    ///
+    /// Why: `ProjectRegistry::load` is async and needs a data directory; deferring
+    /// construction to first use (like `session_manager()`) keeps the synchronous
+    /// `new()` constructors unblocked. At startup the daemon seeds the registry
+    /// from `config.yaml`'s `projects:` list and from session history.
+    /// What: on first call loads the registry from `<framework_root>/project-registry/`,
+    /// seeds it from config and session history, and caches the `Arc`. Subsequent
+    /// calls return the cached handle.
+    /// Test: `mcp_project` dispatch tests exercise this via the mock backend path.
+    pub async fn project_registry(&self) -> std::sync::Arc<crate::project::ProjectRegistry> {
+        self.project_registry
+            .get_or_init(|| async {
+                let data_dir = self.framework_root.join("project-registry");
+                let registry = match crate::project::ProjectRegistry::load(&data_dir).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::error!(
+                            "failed to load project registry at {}: {e}; using temp dir",
+                            data_dir.display()
+                        );
+                        let tmp = std::env::temp_dir().join("trusty-mpm-project-registry");
+                        let _ = std::fs::create_dir_all(&tmp);
+                        crate::project::ProjectRegistry::load(&tmp)
+                            .await
+                            .expect("temp-dir project registry must load")
+                    }
+                };
+                // Seed from config.yaml `projects:` list.
+                let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+                if !config.projects.is_empty() {
+                    registry.seed_from_config(&config.projects).await;
+                }
+                // Auto-register projects from existing session history.
+                if let Some(sm) = self.managed_sessions.get() {
+                    let records = sm.list().await;
+                    registry.auto_register_from_sessions(&records).await;
+                }
+                std::sync::Arc::new(registry)
+            })
+            .await
+            .clone()
     }
 }
