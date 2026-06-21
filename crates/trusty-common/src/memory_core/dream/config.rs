@@ -69,7 +69,18 @@ impl Default for DreamConfig {
 }
 
 /// Per-cycle dream telemetry.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Why: Operators need to see whether dreaming actually helps — raw action
+/// counts (merged, pruned) are necessary but not sufficient. The compression
+/// ratio captures structural change; the recall scores before/after capture
+/// whether retrieval quality improved or degraded after consolidation.
+/// What: Bundles counters for each dream phase plus effectiveness metrics
+/// (drawer compression ratio and mean recall benchmark scores). All new fields
+/// use `#[serde(default)]` for backward-compat with existing dream_stats.json
+/// files that predate this struct extension.
+/// Test: `dream_stats_serde_roundtrip_new_fields`, `dream_stats_backward_compat`,
+/// `dream_compression_ratio_math`, `dream_compression_ratio_zero_drawers`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DreamStats {
     pub merged: usize,
     pub pruned: usize,
@@ -94,6 +105,82 @@ pub struct DreamStats {
     #[serde(default)]
     pub semantic_cache_hits: usize,
     pub duration_ms: u64,
+
+    // ── Effectiveness metrics (issue #1530) ──────────────────────────────────
+    /// Total drawer count at the start of the dream cycle (before any passes).
+    ///
+    /// Why: Together with `drawers_after`, this gives the compression ratio —
+    /// how many drawers were eliminated relative to what existed before.
+    /// What: Snapshot of `handle.drawers.read().len()` taken at cycle entry.
+    /// Test: `dream_cycle_records_drawer_counts` asserts this > 0 after seeding.
+    #[serde(default)]
+    pub drawers_before: u64,
+
+    /// Total drawer count at the end of the dream cycle (after all passes).
+    ///
+    /// Why: Compared with `drawers_before` to compute `compression_ratio`.
+    /// What: Snapshot of `handle.drawers.read().len()` taken after all passes.
+    /// Test: `dream_cycle_records_drawer_counts`.
+    #[serde(default)]
+    pub drawers_after: u64,
+
+    /// Fraction of drawers eliminated: `(before - after) / before`.
+    ///
+    /// Why: A single number that summarises structural consolidation for the
+    /// admin dashboard. Serialised directly so `dream_stats.json` shows it
+    /// without requiring clients to do arithmetic.
+    /// What: `0.0` when `drawers_before == 0` (guard against divide-by-zero).
+    /// Otherwise `(drawers_before - drawers_after) / drawers_before`. Always
+    /// in `[0.0, 1.0]` because no dream pass *adds* more drawers than existed
+    /// (semantic phase adds canonicals, but they are counted in `drawers_after`
+    /// so the ratio captures net change).
+    /// Test: `dream_compression_ratio_math`, `dream_compression_ratio_zero_drawers`.
+    #[serde(default)]
+    pub compression_ratio: f64,
+
+    /// Mean top-3 retrieval score across the fixed benchmark query set,
+    /// measured *before* the dream cycle ran any consolidation passes.
+    ///
+    /// Why: Establishes a quality baseline so we can compare with
+    /// `recall_score_after`. A decrease post-dream signals the cycle
+    /// accidentally discarded high-signal drawers.
+    /// What: `None` when the palace is empty or the embedder is unavailable
+    /// (graceful skip). Serialised as a JSON `null` in that case.
+    /// Test: `dream_recall_benchmark_empty_palace_returns_none`,
+    /// `dream_recall_benchmark_returns_score_with_drawers`.
+    #[serde(default)]
+    pub recall_score_before: Option<f64>,
+
+    /// Mean top-3 retrieval score across the fixed benchmark query set,
+    /// measured *after* all dream consolidation passes completed.
+    ///
+    /// Why: Pair with `recall_score_before` to compute delta. If post-dream
+    /// score ≥ pre-dream score, the cycle improved or maintained quality.
+    /// What: Same semantics as `recall_score_before`. `None` on skip.
+    /// Test: `dream_recall_benchmark_returns_score_with_drawers`.
+    #[serde(default)]
+    pub recall_score_after: Option<f64>,
+}
+
+impl DreamStats {
+    /// Compute and set the compression ratio from `drawers_before` and
+    /// `drawers_after`.
+    ///
+    /// Why: Callers that update `drawers_before`/`drawers_after` independently
+    /// need a single place to sync the derived `compression_ratio` field. This
+    /// avoids duplicating the divide-by-zero guard.
+    /// What: Sets `self.compression_ratio` to
+    /// `(drawers_before - drawers_after) / drawers_before`, or `0.0` when
+    /// `drawers_before == 0`.
+    /// Test: `dream_compression_ratio_math`, `dream_compression_ratio_zero_drawers`.
+    pub fn update_compression_ratio(&mut self) {
+        self.compression_ratio = if self.drawers_before == 0 {
+            0.0
+        } else {
+            let eliminated = self.drawers_before.saturating_sub(self.drawers_after);
+            eliminated as f64 / self.drawers_before as f64
+        };
+    }
 }
 
 /// Persisted dream stats including the wall-clock timestamp of the run.

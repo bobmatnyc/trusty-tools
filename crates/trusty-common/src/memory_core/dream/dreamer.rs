@@ -14,6 +14,7 @@ use super::cycle::{
     semantic_consolidation_pass,
 };
 use super::guard::CompactionGuard;
+use super::recall_benchmark::run_benchmark;
 use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::semantic_consolidation::SemanticConsolidator;
 use anyhow::{Context, Result};
@@ -114,6 +115,9 @@ impl Dreamer {
                         semantically_consolidated = stats.semantically_consolidated,
                         semantic_llm_calls = stats.semantic_llm_calls,
                         duration_ms = stats.duration_ms,
+                        drawers_before = stats.drawers_before,
+                        drawers_after = stats.drawers_after,
+                        compression_ratio = stats.compression_ratio,
                         "dream cycle complete"
                     ),
                     Err(e) => tracing::warn!(palace = %handle.id, "dream cycle failed: {e:#}"),
@@ -171,6 +175,9 @@ impl Dreamer {
                         semantically_consolidated = stats.semantically_consolidated,
                         semantic_llm_calls = stats.semantic_llm_calls,
                         duration_ms = stats.duration_ms,
+                        drawers_before = stats.drawers_before,
+                        drawers_after = stats.drawers_after,
+                        compression_ratio = stats.compression_ratio,
                         "dream cycle complete"
                     ),
                     Err(e) => tracing::warn!(palace = %handle.id, "dream cycle failed: {e:#}"),
@@ -213,6 +220,13 @@ impl Dreamer {
         // panics alike.
         let _compaction_guard = CompactionGuard::new(handle.is_compacting.clone());
 
+        // ── Effectiveness metric: pre-cycle snapshot (issue #1530) ────────────
+        // Count drawers before any pass so we can compute the compression ratio.
+        let drawers_before = handle.drawers.read().len() as u64;
+
+        // Recall benchmark before consolidation — skip silently on failure.
+        let recall_score_before = run_benchmark(handle).await;
+
         let content_pruned = if self.config.content_prune_enabled {
             content_prune_pass(handle, started, budget, self.config.content_prune_min_words)
                 .await
@@ -240,7 +254,13 @@ impl Dreamer {
             tracing::warn!("dream flush failed: {e:#}");
         }
 
-        let stats = DreamStats {
+        // ── Effectiveness metric: post-cycle snapshot (issue #1530) ───────────
+        let drawers_after = handle.drawers.read().len() as u64;
+
+        // Recall benchmark after consolidation — skip silently on failure.
+        let recall_score_after = run_benchmark(handle).await;
+
+        let mut stats = DreamStats {
             merged,
             pruned,
             closets_updated,
@@ -250,7 +270,13 @@ impl Dreamer {
             semantic_llm_calls,
             semantic_cache_hits,
             duration_ms: started.elapsed().as_millis() as u64,
+            drawers_before,
+            drawers_after,
+            compression_ratio: 0.0, // populated below
+            recall_score_before,
+            recall_score_after,
         };
+        stats.update_compression_ratio();
 
         // WAL checkpoint — PASSIVE mode is non-blocking. Issue #36: without
         // periodic checkpointing the SQLite WAL grows unbounded over a
