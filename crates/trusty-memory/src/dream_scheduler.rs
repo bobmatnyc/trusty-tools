@@ -75,7 +75,9 @@ pub fn spawn_dream_scheduler(
     }
 
     let palace_ids = registry.list();
-    let count = palace_ids.len();
+    // Track only successfully-spawned loops; a palace evicted between list()
+    // and get() is silently skipped, so palace_ids.len() can overcount.
+    let mut spawned: usize = 0;
 
     for palace_id in palace_ids {
         let handle = match registry.get(&palace_id) {
@@ -93,22 +95,24 @@ pub fn spawn_dream_scheduler(
         };
 
         let config = DreamConfig::default();
+        let idle_secs = config.idle_secs;
         let dreamer = Arc::new(Dreamer::new(config));
         let rx = shutdown_rx.clone();
         dreamer.start_with_shutdown(handle, rx);
+        spawned += 1;
 
         info!(
             palace = %palace_id,
-            idle_secs = DreamConfig::default().idle_secs,
+            idle_secs,
             "dream_scheduler: spawned background dream loop"
         );
     }
 
     info!(
-        loops_spawned = count,
+        loops_spawned = spawned,
         "dream_scheduler: all per-palace loops running"
     );
-    count
+    spawned
 }
 
 /// Build the `(Sender, Receiver)` pair for the dream-scheduler shutdown signal.
@@ -161,7 +165,7 @@ pub fn spawn_shutdown_bridge(tx: watch::Sender<bool>) -> tokio::task::JoinHandle
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use serial_test::serial;
     use std::sync::Arc;
     use std::time::Duration;
     use trusty_common::memory_core::dream::DreamConfig;
@@ -195,21 +199,24 @@ mod tests {
     /// Why: spawn_dream_scheduler must return 0 when TRUSTY_DREAM_DISABLED is
     /// set, with no loops started.
     /// What: sets the env var, calls spawn_dream_scheduler, asserts the count.
+    ///       Uses `current_thread` flavor + `#[serial]` to eliminate the data
+    ///       race that the default multi-threaded runtime would introduce when
+    ///       multiple env-mutating tests run concurrently.
     /// Test: itself.
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
     async fn dream_scheduler_honors_disable_flag() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let registry = PalaceRegistry::new();
         register_temp_palace(&registry, tmp.path());
 
-        // Safety: env-var mutation; test runs in isolation.
+        // SAFETY: single-threaded tokio runtime + #[serial] ensures no other
+        // thread reads DREAM_DISABLED_ENV concurrently. Restore on every path.
         unsafe {
             std::env::set_var(DREAM_DISABLED_ENV, "1");
         }
-
         let (_tx, rx) = make_shutdown_watch();
         let spawned = spawn_dream_scheduler(&registry, rx);
-
         unsafe {
             std::env::remove_var(DREAM_DISABLED_ENV);
         }
@@ -223,10 +230,15 @@ mod tests {
     /// Why: spawn_dream_scheduler must spawn exactly one loop per palace in the
     /// registry and return the correct count.
     /// What: registers two palaces, calls spawn_dream_scheduler, asserts count=2.
+    ///       Uses `current_thread` flavor + `#[serial]` to eliminate the data
+    ///       race that the default multi-threaded runtime would introduce when
+    ///       multiple env-mutating tests run concurrently.
     /// Test: itself.
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
+    #[serial]
     async fn dream_scheduler_spawns_per_palace_loop() {
-        // Ensure the disable flag is NOT set.
+        // SAFETY: single-threaded tokio runtime + #[serial] ensures no other
+        // thread reads DREAM_DISABLED_ENV concurrently. Restore on every path.
         unsafe {
             std::env::remove_var(DREAM_DISABLED_ENV);
         }
@@ -311,42 +323,53 @@ mod tests {
         assert!(*rx.borrow(), "value should flip to true after send");
     }
 
-    /// Why: verify the activity counter increments correctly per loop spawned.
-    /// What: use an AtomicUsize to count cycle runs — even one within a short
-    /// window confirms the loop is actually executing.
+    /// Why: verify that dream_cycle actually executes and returns stats when
+    /// called on a real PalaceHandle — this guards against regressions where
+    /// the cycle silently no-ops or panics.
+    /// What: creates a fresh palace, constructs a Dreamer with idle_secs=0
+    /// (always considered idle), calls dream_cycle directly, and asserts the
+    /// returned DreamStats fields are accessible (the call returned Ok, not a
+    /// panic or error). Also verifies that PersistedDreamStats was written to
+    /// the palace's data_dir (i.e. `<data_root>/<palace_id>/`).
     /// Test: itself.
     #[tokio::test]
     async fn dream_scheduler_loops_actually_run_cycles() {
-        unsafe {
-            std::env::remove_var(DREAM_DISABLED_ENV);
-        }
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = PalaceRegistry::new();
+        let id = register_temp_palace(&registry, tmp.path());
+        let handle = registry.get(&id).expect("handle after create");
 
-        // We can't easily intercept dream_cycle calls from the scheduler
-        // without a mock PalaceHandle, so instead verify via the Dreamer API
-        // directly: is_idle should flip after idle_secs of inactivity.
         let config = DreamConfig {
-            idle_secs: 0, // 0 means max(1,0)=1 s sleep; idle immediately
+            idle_secs: 0, // always idle — cycle fires immediately
             ..DreamConfig::default()
         };
         let dreamer = Arc::new(Dreamer::new(config));
-        // Touch 2 seconds ago by manipulating the counter is not possible
-        // without pub(super) access, but is_idle() uses now-last >= idle_secs.
-        // With idle_secs=0 the dreamer considers itself immediately idle
-        // (0 >= 0 is true), so at least confirm the API doesn't panic.
-        assert!(
-            dreamer.is_idle(),
-            "with idle_secs=0, dreamer should be idle"
+
+        // Verify the dreamer is immediately idle with idle_secs=0.
+        assert!(dreamer.is_idle(), "idle_secs=0 should mean always idle");
+
+        // Call dream_cycle directly and assert it actually ran.
+        let stats = dreamer
+            .dream_cycle(&handle)
+            .await
+            .expect("dream_cycle should not error on a fresh empty palace");
+
+        // A real cycle returns Ok — the important assertion is that it didn't
+        // panic or error. duration_ms may be 0 on very fast machines.
+        let _ = stats.merged;
+        let _ = stats.pruned;
+        let _ = stats.duration_ms;
+
+        // PersistedDreamStats is written to handle.data_dir, which is
+        // `<data_root>/<palace_id>/` (not `<data_root>/` directly).
+        let palace_data_dir = tmp.path().join(id.as_str());
+        let persisted =
+            trusty_common::memory_core::dream::PersistedDreamStats::load(&palace_data_dir)
+                .expect("load persisted stats")
+                .expect("persisted stats should exist after a cycle");
+        assert_eq!(
+            persisted.stats.merged, stats.merged,
+            "persisted merged should match returned stats"
         );
-
-        // Confirm touch() resets the idle clock (within 1s of now).
-        dreamer.touch();
-        // After a touch, seconds elapsed is ~0 which is still >= 0,
-        // so idle_secs=0 means "always idle" regardless of touch.
-        // This test validates the API surface rather than timing.
-        let _ = dreamer.is_idle(); // no panic = pass
-
-        let cycles_run = Arc::new(AtomicUsize::new(0));
-        let cycles_clone = cycles_run.clone();
-        let _ = cycles_clone; // suppress unused warning — placeholder for future mock
     }
 }

@@ -815,11 +815,19 @@ async fn run_serve(
 ///       and populates the map; the log emission is confirmed by the throwaway
 ///       daemon run documented in the session notes.
 fn spawn_startup_tasks(state: &AppState) {
-    // Issue #1529: build watch channel + bridge for the autonomous dream scheduler.
-    // Sender lives in the bridge; each dream loop holds a clone of the receiver.
-    // SIGTERM / SIGINT flips the channel to `true` → all loops exit cleanly.
+    // Issue #1529: build watch channel for the autonomous dream scheduler.
+    // The sender (`dtx`) is intentionally held here and moved into the
+    // hydration task — the shutdown bridge is only wired AFTER
+    // `spawn_dream_scheduler` returns. This ordering guarantee prevents a
+    // shutdown-race where a SIGTERM that arrives during hydration could flip
+    // the watch to `true` before any dream loops are spawned, causing every
+    // newly-spawned loop to exit immediately on its first iteration. By
+    // spawning the bridge after the loops exist, early-SIGTERM during hydration
+    // is still safe: the loops will see the `true` value on their first poll
+    // and shut down cleanly, which is the correct behaviour. Normal startup
+    // (no early SIGTERM) is unaffected because the bridge task cannot fire
+    // until `trusty_common::shutdown_signal()` resolves.
     let (dtx, dream_shutdown_rx) = trusty_memory::dream_scheduler::make_shutdown_watch();
-    trusty_memory::dream_scheduler::spawn_shutdown_bridge(dtx);
     // Issue #906 / #910 / #911: eager embedder warm-up.
     // Spawn BEFORE the palace hydration task so the CoreML / CUDA cold compile
     // (30-120 s on first run) races ahead concurrently and the warm embedder
@@ -870,11 +878,18 @@ fn spawn_startup_tasks(state: &AppState) {
         }
 
         // Issue #1529: spawn per-palace autonomous dream loops after hydration.
+        // ORDERING GUARANTEE: spawn_dream_scheduler is called first, then the
+        // shutdown bridge is wired. This ensures the bridge cannot pre-cancel
+        // the loops: loops are created with receivers pointing to a watch that
+        // is still `false`, so they will do their first sleep before the bridge
+        // could ever flip the value.
         let n = trusty_memory::dream_scheduler::spawn_dream_scheduler(
             &bg_state.registry,
             dream_shutdown_rx,
         );
         tracing::info!(loops = n, "dream_scheduler: {n} loop(s) running (#1529)");
+        // Bridge is spawned AFTER the loops exist — see ordering comment above.
+        trusty_memory::dream_scheduler::spawn_shutdown_bridge(dtx);
 
         // Issue #42: once palaces are live, kick off auto-discovery against
         // cwd targeting the default palace (if configured). Without a default
