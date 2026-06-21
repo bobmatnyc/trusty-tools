@@ -12,6 +12,8 @@ use crate::agents::{
     AgentConfig, AgentInfo, LlmParams, RunnerKind, SystemPrompt, ToolChoice, ToolsConfig,
 };
 use crate::perf::TokenUsage;
+#[cfg(unix)]
+use crate::test_env::write_executable_script;
 use crate::tools::traits::{AgentOutput, AgentRunner, RunContext};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -192,13 +194,13 @@ fn find_claude_errors_when_not_in_path() {
 
 /// Mock-`claude` integration test: write a tiny shell script that emits
 /// a stream-json transcript and confirm we parse it into `AgentOutput`.
+///
+/// Uses `write_executable_script` to guarantee the write handle is closed
+/// before the execute bit is set, eliminating the ETXTBSY race (#1528).
 #[cfg(unix)]
 #[tokio::test]
 async fn run_parses_stream_json_result() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
-    let script = tmp.path().join("claude");
     // Script emits two non-result events (system init, assistant) then a
     // final result. Stderr swallows argv so we don't pollute test output.
     // Use `printf %s\\n` to emit each JSON object as one line without
@@ -206,15 +208,14 @@ async fn run_parses_stream_json_result() {
     // dash behave differently on macOS/Linux; printf is portable).
     // The result's `result` field embeds literal \n escapes so the
     // JSON parser sees them as newlines inside the string.
-    std::fs::write(
-        &script,
+    let script = write_executable_script(
+        tmp.path(),
+        "claude",
         "#!/bin/sh\n\
          printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"test\"}'\n\
          printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"thinking\"}]}}'\n\
          printf '%s\\n' '{\"type\":\"result\",\"result\":\"Hello from mock claude\\n\\n## Summary\\nMock OK\",\"is_error\":false}'\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let runner = ClaudeCodeAgentRunner { claude_bin: script };
     let cfg = test_agent_config("mock-agent", "anthropic/claude-sonnet-4-6", "test prompt");
@@ -232,14 +233,13 @@ async fn run_parses_stream_json_result() {
 /// #107: `RunContext.model` must take precedence over
 /// `cfg.agent.model` when passing `--model` to the `claude` CLI so a
 /// workflow phase's `model` actually reaches the CLI.
+///
+/// Uses `write_executable_script` to eliminate ETXTBSY race (#1528).
 #[cfg(unix)]
 #[tokio::test]
 async fn run_honors_ctx_model_override() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
     let argv_log = tmp.path().join("argv.txt");
-    let script = tmp.path().join("claude");
     // Record argv then emit a valid result so the runner doesn't error.
     let script_body = format!(
         "#!/bin/sh\n\
@@ -247,8 +247,7 @@ async fn run_honors_ctx_model_override() {
          printf '%s\\n' '{{\"type\":\"result\",\"result\":\"ok\",\"is_error\":false}}'\n",
         log = argv_log.display()
     );
-    std::fs::write(&script, script_body).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let script = write_executable_script(tmp.path(), "claude", &script_body);
 
     let runner = ClaudeCodeAgentRunner { claude_bin: script };
     // TOML says sonnet, ctx overrides to opus.
@@ -277,20 +276,18 @@ async fn run_honors_ctx_model_override() {
 
 /// When `is_error: true`, the runner returns an error whose message
 /// surfaces the CLI's complaint.
+///
+/// Uses `write_executable_script` to eliminate ETXTBSY race (#1528).
 #[cfg(unix)]
 #[tokio::test]
 async fn run_propagates_is_error() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
-    let script = tmp.path().join("claude");
-    std::fs::write(
-        &script,
+    let script = write_executable_script(
+        tmp.path(),
+        "claude",
         "#!/bin/sh\n\
          printf '%s\\n' '{\"type\":\"result\",\"result\":\"rate limit exceeded\",\"is_error\":true}'\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let runner = ClaudeCodeAgentRunner { claude_bin: script };
     let cfg = test_agent_config("mock-agent", "sonnet", "test");
@@ -304,21 +301,19 @@ async fn run_propagates_is_error() {
 /// #113: `error_max_turns` with a non-empty `result` is treated as
 /// success — the agent produced work, the CLI just happened to exhaust
 /// its turn budget before emitting a clean terminator.
+///
+/// Uses `write_executable_script` to eliminate ETXTBSY race (#1528).
 #[cfg(unix)]
 #[tokio::test]
 async fn run_recovers_from_max_turns_with_content() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
-    let script = tmp.path().join("claude");
-    std::fs::write(
-        &script,
+    let script = write_executable_script(
+        tmp.path(),
+        "claude",
         "#!/bin/sh\n\
          printf '%s\\n' '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"partial work\"}]}}'\n\
          printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"result\":\"partial work\",\"is_error\":true}'\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let runner = ClaudeCodeAgentRunner { claude_bin: script };
     let cfg = test_agent_config("mock-agent", "sonnet", "test");
@@ -331,20 +326,18 @@ async fn run_recovers_from_max_turns_with_content() {
 
 /// #113: `error_max_turns` with completely empty content must still
 /// propagate as an error — we don't want to hide a truly failed run.
+///
+/// Uses `write_executable_script` to eliminate ETXTBSY race (#1528).
 #[cfg(unix)]
 #[tokio::test]
 async fn run_max_turns_without_content_still_errors() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
-    let script = tmp.path().join("claude");
-    std::fs::write(
-        &script,
+    let script = write_executable_script(
+        tmp.path(),
+        "claude",
         "#!/bin/sh\n\
          printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"result\":\"\",\"is_error\":true}'\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let runner = ClaudeCodeAgentRunner { claude_bin: script };
     let cfg = test_agent_config("mock-agent", "sonnet", "test");
@@ -360,22 +353,20 @@ async fn run_max_turns_without_content_still_errors() {
 
 /// #113: Both `task` and `system prompt` are sanitized before being
 /// handed to the CLI; argv should not contain `finish_task`.
+///
+/// Uses `write_executable_script` to eliminate ETXTBSY race (#1528).
 #[cfg(unix)]
 #[tokio::test]
 async fn run_sanitizes_finish_task_from_cli_args() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
     let argv_log = tmp.path().join("argv.txt");
-    let script = tmp.path().join("claude");
     let script_body = format!(
         "#!/bin/sh\n\
          printf '%s\\n' \"$@\" > {log}\n\
          printf '%s\\n' '{{\"type\":\"result\",\"result\":\"ok\",\"is_error\":false}}'\n",
         log = argv_log.display()
     );
-    std::fs::write(&script, script_body).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let script = write_executable_script(tmp.path(), "claude", &script_body);
 
     let runner = ClaudeCodeAgentRunner { claude_bin: script };
     let cfg = test_agent_config(
@@ -450,20 +441,18 @@ async fn dispatcher_errors_when_claude_code_requested_but_unwired() {
 
 /// When the CLI exits without ever emitting a `result` event, the runner
 /// surfaces a clear error rather than hanging.
+///
+/// Uses `write_executable_script` to eliminate ETXTBSY race (#1528).
 #[cfg(unix)]
 #[tokio::test]
 async fn run_errors_when_no_result_event() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = tempfile::tempdir().unwrap();
-    let script = tmp.path().join("claude");
-    std::fs::write(
-        &script,
+    let script = write_executable_script(
+        tmp.path(),
+        "claude",
         "#!/bin/sh\n\
          printf '%s\\n' '{\"type\":\"system\",\"subtype\":\"init\"}'\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let runner = ClaudeCodeAgentRunner { claude_bin: script };
     let cfg = test_agent_config("mock-agent", "sonnet", "test");
