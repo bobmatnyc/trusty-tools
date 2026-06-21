@@ -561,7 +561,18 @@ LLM decides: { answer: "auto", confidence: 0.94, reasoning: "… matches user's 
 
 2. **Undo-cost classification:** Should undo cost be computed deterministically (purely from git state + action metadata) or with LLM help (prompt the LLM: "what's the reversibility cost of this action")? Trade-off: deterministic is safer + testable; LLM is more nuanced but slower + non-deterministic.
 
-3. **Numeric scales & per-tier defaults:** Are the suggested thresholds (T1: 0.85, T2: 0.92, T3: 0.96) the right starting point, or should we pilot with tighter margins? Do grace-window defaults (T1: none, T2: 30s, T3: 60s) make sense?
+3. **Numeric scales & per-tier defaults:** ✅ **RESOLVED (2026-06-21)** — Per Bob's confirmation, the suggested thresholds are final:
+   - **T1 (observe/style-only):** confidence ≥ 0.85
+   - **T2 (guarded auto-accept):** confidence ≥ 0.92
+   - **T3 (fallback-escalate):** confidence ≥ 0.96
+   - **T4 (human-escalate):** **Never auto-answer** (always escalate regardless of confidence)
+   
+   Grace-window defaults are also approved:
+   - T1: no grace window (immediate override)
+   - T2: 30 seconds
+   - T3: 60 seconds
+   
+   These are used as defaults in daemon config; individual tier enables/disables are supported.
 
 4. **Owning-user resolution:** When a session is created, how is `owning_user` determined? From the CLI caller (`--user bob`)? From the session-manager call context (auth token)? Can it change mid-session, or is it immutable?
 
