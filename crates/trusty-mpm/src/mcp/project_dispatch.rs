@@ -1,13 +1,14 @@
-//! Argument parsing + routing for the three project-registry MCP tools
-//! (#1519 WI-2).
+//! Argument parsing + routing for the project-registry MCP tools
+//! (WI-2 + WI-5, #1519 / #1517).
 //!
 //! Why: mirroring `session_dispatch.rs`, pulling the project-tool parse-and-call
 //! arms into a sibling module keeps `mcp/mod.rs` under the 500-SLOC production
 //! cap while giving the project tools an auditable home.
-//! What: [`try_dispatch`] matches a tool name against the three project tools
-//! (`project_list`, `project_register`, `project_get`); when it matches, parses
-//! arguments and calls the corresponding [`super::OrchestratorBackend`] method,
-//! returning `Some(result)`. A non-project tool name returns `None`.
+//! What: [`try_dispatch`] matches a tool name against the four project tools
+//! (`project_list`, `project_register`, `project_get`, `project_resolve`); when
+//! it matches, parses arguments and calls the corresponding
+//! [`super::OrchestratorBackend`] method, returning `Some(result)`. A
+//! non-project tool name returns `None`.
 //! Test: `super::tests::dispatch_project_*` cases drive this module through
 //! the public `dispatch` entry point with a mock backend.
 
@@ -32,6 +33,10 @@ pub async fn try_dispatch<B: OrchestratorBackend>(
         "project_register" => project_register(backend, args).await,
         "project_get" => match required_str(args, "name") {
             Ok(n) => backend.project_get(&n).await,
+            Err(e) => Err(e),
+        },
+        "project_resolve" => match required_str(args, "query") {
+            Ok(q) => backend.project_resolve(&q).await,
             Err(e) => Err(e),
         },
         _ => return None,

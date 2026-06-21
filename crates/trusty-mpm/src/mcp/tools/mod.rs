@@ -5,13 +5,14 @@
 //! makes the tool surface easy to audit and version. Since #1221 the catalog
 //! spans several concepts — the original orchestration/bug-reporting tools
 //! ([`core`]), the session-lifecycle tools ([`session`]), the console tools
-//! ([`console`]), and the project-registry tools ([`project`], #1519) — so this
-//! is a thin facade that re-exports all and concatenates their descriptors,
-//! keeping each leaf file well under the 500-SLOC production cap.
-//! What: [`tool_catalog`] builds the twenty-five MCP tool descriptors (nine core +
-//! eight session + five console + three project — #1222 / #1220 / #1508 / #1519);
-//! [`TOOL_CATALOG`] lists their names for tests and the startup log; [`tool`] is
-//! the shared descriptor builder used by every submodule.
+//! ([`console`]), and the project-registry + NL-resolver tools ([`project`],
+//! #1519 / #1517) — so this is a thin facade that re-exports all and
+//! concatenates their descriptors, keeping each leaf file well under the
+//! 500-SLOC production cap.
+//! What: [`tool_catalog`] builds the twenty-six MCP tool descriptors (nine core +
+//! eight session + five console + four project — #1222 / #1220 / #1508 / #1519 /
+//! #1517 WI-5); [`TOOL_CATALOG`] lists their names for tests and the startup
+//! log; [`tool`] is the shared descriptor builder used by every submodule.
 //! Test: the `tests` module below asserts the catalog has the expected count,
 //! well-formed entries, and names matching [`TOOL_CATALOG`].
 
@@ -27,11 +28,11 @@ pub mod session;
 /// Why: tests, the daemon's startup log, and the loopback-`/rpc` audit all want
 /// the authoritative list without re-parsing the JSON schema. Keeping it exact
 /// resolves the #1221 review nit about ambiguous existing-vs-new counts.
-/// What: a static slice of the twenty-five tool names — the nine core/bug tools,
+/// What: a static slice of the twenty-six tool names — the nine core/bug tools,
 /// the eight session-lifecycle tools, the five console-facing tools, and the
-/// three project-registry tools (#1519).
+/// four project-registry + NL-resolver tools (#1519 WI-2, #1517 WI-5).
 /// Test: `catalog_names_match_constant`.
-pub const TOOL_CATALOG: [&str; 25] = [
+pub const TOOL_CATALOG: [&str; 26] = [
     // ── 9 pre-existing tools (core.rs) ───────────────────────────────────────
     "session_list",
     "session_status",
@@ -59,10 +60,11 @@ pub const TOOL_CATALOG: [&str; 25] = [
     // #1220 config-convention tools: read/write ~/.trusty-tools/trusty-mpm/config.yaml
     "config_read",
     "config_write",
-    // ── 3 project-registry tools (#1519 WI-2, project.rs) ───────────────────
+    // ── 4 project-registry + NL-resolver tools (#1519 WI-2, #1517 WI-5) ─────
     "project_list",
     "project_register",
     "project_get",
+    "project_resolve",
 ];
 
 /// Build the MCP tool descriptor list returned by `tools/list`.
@@ -72,8 +74,9 @@ pub const TOOL_CATALOG: [&str; 25] = [
 /// tool groups.
 /// What: concatenates [`core::core_tools`] (nine descriptors),
 /// [`session::session_tools`] (eight descriptors), [`console::console_tools`]
-/// (five descriptors), and [`project::project_tools`] (three descriptors) in
-/// catalog order, returning twenty-five `{ name, description, inputSchema }` objects.
+/// (five descriptors), and [`project::project_tools`] (four descriptors, WI-5
+/// adds `project_resolve`) in catalog order, returning twenty-six
+/// `{ name, description, inputSchema }` objects.
 /// Test: `catalog_has_expected_tool_count` and `every_tool_has_input_schema`.
 pub fn tool_catalog() -> Vec<Value> {
     let mut tools = core::core_tools();
@@ -103,9 +106,10 @@ mod tests {
 
     #[test]
     fn catalog_has_expected_tool_count() {
-        // 9 pre-existing + 8 session-lifecycle + 5 console-facing + 3 project = 25.
-        assert_eq!(tool_catalog().len(), 25);
-        assert_eq!(TOOL_CATALOG.len(), 25);
+        // 9 pre-existing + 8 session-lifecycle + 5 console-facing + 4 project = 26.
+        // (WI-5 adds project_resolve to the 3 WI-2 tools → 4 total project tools)
+        assert_eq!(tool_catalog().len(), 26);
+        assert_eq!(TOOL_CATALOG.len(), 26);
     }
 
     #[test]
@@ -170,7 +174,12 @@ mod tests {
     fn project_tools_present() {
         let catalog = tool_catalog();
         let names: Vec<&str> = catalog.iter().filter_map(|t| t["name"].as_str()).collect();
-        for expected in ["project_list", "project_register", "project_get"] {
+        for expected in [
+            "project_list",
+            "project_register",
+            "project_get",
+            "project_resolve",
+        ] {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
     }

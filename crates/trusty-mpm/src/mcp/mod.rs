@@ -320,6 +320,17 @@ pub trait OrchestratorBackend: Send + Sync {
     /// Test: `dispatch_project_get_tool`,
     ///       `dispatch_project_get_missing_name` (mock).
     async fn project_get(&self, name: &str) -> Result<Value, String>;
+
+    /// Back `project_resolve`: resolve a NL query to the best-matching project.
+    ///
+    /// Why: operators and driver skills need to route free-text task descriptions,
+    ///      GitHub URLs, ticket IDs, and keywords to the correct registered project
+    ///      without knowing exact names or URLs.
+    /// What: runs the NL→project resolver over all registered projects, returning
+    ///      the primary match, confidence score, reason, all candidates, and a
+    ///      `needs_disambiguation` flag.
+    /// Test: `dispatch_project_resolve_tool` (mock).
+    async fn project_resolve(&self, query: &str) -> Result<Value, String>;
 }
 
 /// Route a JSON-RPC request to the backend, returning the MCP response.
