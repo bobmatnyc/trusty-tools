@@ -314,6 +314,51 @@ fn doc13_tui_contract_is_preserved() {
     assert!(json.get("routed_to_session").is_none());
 }
 
+/// Why: #1524 — when inference is unavailable (no API key), the action loop must
+/// return a clear 200 reply explaining the situation rather than an opaque 503.
+/// The operator opted in to actions but the SM cannot reason; the browser/Web
+/// adapter must show them WHY rather than rendering a raw HTTP error page.
+/// What: posts with `actions: Some(true)` and a DEGRADED resolver; asserts the
+/// response is `200` with a reply that names the missing credential and contains
+/// the word "inference".
+/// Test: this is the test.
+#[tokio::test]
+async fn coordinator_chat_action_no_creds_returns_explanatory_reply() {
+    let tmp = TempDir::new().unwrap();
+    let state = state_with_sm(Arc::new(MockResolver::degraded()), &tmp);
+
+    let resp = coordinator_chat(
+        State(state),
+        HeaderMap::new(),
+        Json(CoordinatorChatRequest {
+            message: "list sessions".into(),
+            history: Vec::new(),
+            conv_id: None,
+            actions: Some(true),
+        }),
+    )
+    .await
+    .expect("action loop no-creds must return Ok (200), not an error");
+
+    // The reply must explain the missing inference, not leave the browser confused.
+    assert!(
+        resp.reply.contains("inference"),
+        "reply must mention 'inference', got: {:?}",
+        resp.reply
+    );
+    assert!(
+        resp.reply.contains("OPENROUTER_API_KEY")
+            || resp.reply.contains("configured")
+            || resp.reply.contains("credentials"),
+        "reply must hint at configuring credentials, got: {:?}",
+        resp.reply
+    );
+    // No cost/conv_id when no turn was completed.
+    assert!(resp.cost.is_none(), "cost must be absent");
+    assert!(resp.conv_id.is_none(), "conv_id must be absent");
+    assert!(resp.actions_taken.is_none(), "no actions were taken");
+}
+
 /// Why: #1392 — the cross-session coordinator surface moved under the plural
 /// `/api/v1/sessions/*` namespace and the former `/api/v1/coordinator/*` paths
 /// were removed. This pins both halves of that contract at the router level so a

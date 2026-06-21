@@ -465,14 +465,25 @@ impl DaemonState {
     /// carrying an ENABLED agent wired to a mock resolver, so the endpoint routes
     /// through the SM with no network. The default `new()` builds a
     /// disabled-by-default agent from the real config; this swaps it for the
-    /// test agent.
-    /// What: builds default state, then replaces `session_manager_agent` with
-    /// `agent`.
-    /// Test: used by `api_tests` SM-path tests (`sm_chat_*`, alias tests).
+    /// test agent. We also clear the legacy `llm` overseer so a test running on a
+    /// developer machine with `OPENROUTER_API_KEY` set cannot accidentally route
+    /// through the real LLM on the legacy path — all tests using this constructor
+    /// are self-contained SM tests that never exercise the overseer fallback, so
+    /// removing it makes the hermetic claim in every caller actually true.
+    /// What: builds default state, replaces `session_manager_agent` with `agent`,
+    /// and clears `llm` so the legacy overseer fallback path returns 503.
+    /// Test: used by `api_tests` SM-path tests (`sm_chat_*`, alias tests,
+    /// `disabled_sm_falls_back_to_legacy_503`).
     #[cfg(test)]
     pub fn with_session_manager_agent(agent: Arc<crate::core::sm::SessionManagerAgent>) -> Self {
         let mut state = Self::new();
         state.session_manager_agent = agent;
+        // Clear the legacy LlmOverseer so tests are truly hermetic regardless of
+        // whether OPENROUTER_API_KEY is set in the environment. Tests that need
+        // the SM path never reach the legacy overseer, and the one test that
+        // checks the legacy 503 (`disabled_sm_falls_back_to_legacy_503`) relies
+        // on this being absent.
+        state.llm = None;
         state
     }
 }
