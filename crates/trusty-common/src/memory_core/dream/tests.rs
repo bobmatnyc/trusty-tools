@@ -23,6 +23,10 @@ fn dream_config_defaults() {
         "content-quality pruning is on by default"
     );
     assert_eq!(cfg.content_prune_min_words, 4);
+    assert!(
+        cfg.recall_benchmark_enabled,
+        "recall benchmark is enabled by default"
+    );
 }
 
 /// Why: `touch` must reset the idle clock; with `idle_secs=0` `is_idle`
@@ -716,6 +720,400 @@ async fn dream_cycle_semantic_consolidation_disabled_by_config() {
         call_count.load(std::sync::atomic::Ordering::Relaxed),
         0,
         "mock must not be called when semantic phase is disabled"
+    );
+}
+
+// ─── Effectiveness metrics tests (issue #1530) ───────────────────────────
+
+/// Why: The compression ratio is the key effectiveness signal; guard its
+/// arithmetic against common edge cases (normal case, zero drawers).
+/// What: Directly constructs `DreamStats` with known field values and
+/// asserts `update_compression_ratio` sets the expected ratio.
+/// Test: This test itself.
+#[test]
+fn dream_compression_ratio_math() {
+    let mut stats = DreamStats {
+        drawers_before: 10,
+        drawers_after: 7,
+        ..DreamStats::default()
+    };
+    stats.update_compression_ratio();
+    // (10 - 7) / 10 = 0.3
+    let diff = (stats.compression_ratio - 0.3_f64).abs();
+    assert!(
+        diff < 1e-10,
+        "expected 0.3, got {}",
+        stats.compression_ratio
+    );
+}
+
+/// Why: Guard the divide-by-zero path when the palace starts empty.
+/// What: `drawers_before = 0` must yield `compression_ratio = 0.0`.
+/// Test: This test itself.
+#[test]
+fn dream_compression_ratio_zero_drawers() {
+    let mut stats = DreamStats {
+        drawers_before: 0,
+        drawers_after: 0,
+        ..DreamStats::default()
+    };
+    stats.update_compression_ratio();
+    assert_eq!(
+        stats.compression_ratio, 0.0,
+        "zero drawers_before must produce 0.0 compression_ratio"
+    );
+}
+
+/// Why: The semantic consolidation phase can add canonical drawers, causing
+/// `drawers_after > drawers_before`. The ratio must be clamped to 0.0 and
+/// must not panic.
+/// What: Directly construct `DreamStats` with `drawers_after > drawers_before`
+/// and assert `compression_ratio == 0.0`.
+/// Test: This test itself.
+#[test]
+fn dream_compression_ratio_net_growth() {
+    let mut stats = DreamStats {
+        drawers_before: 5,
+        drawers_after: 8, // net growth
+        ..DreamStats::default()
+    };
+    stats.update_compression_ratio();
+    assert_eq!(
+        stats.compression_ratio, 0.0,
+        "net palace growth (after > before) must clamp compression_ratio to 0.0"
+    );
+}
+/// Why: `DreamStats` adds `f64` fields so the old `Eq` bound is gone;
+/// verify serde round-trips preserve all new fields faithfully.
+/// What: Construct a `DreamStats` with non-default effectiveness fields,
+/// serialize to JSON, deserialize back, and assert equality on each field.
+/// Test: This test itself.
+#[test]
+fn dream_stats_serde_roundtrip_new_fields() {
+    let original = DreamStats {
+        merged: 2,
+        pruned: 1,
+        drawers_before: 8,
+        drawers_after: 5,
+        compression_ratio: 0.375,
+        recall_score_before: Some(0.72),
+        recall_score_after: Some(0.81),
+        duration_ms: 1200,
+        ..DreamStats::default()
+    };
+    let json = serde_json::to_string(&original).expect("serialize");
+    let decoded: DreamStats = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(decoded.drawers_before, 8);
+    assert_eq!(decoded.drawers_after, 5);
+    let cr_diff = (decoded.compression_ratio - 0.375_f64).abs();
+    assert!(cr_diff < 1e-10, "compression_ratio round-trip failed");
+    assert_eq!(decoded.recall_score_before, Some(0.72));
+    assert_eq!(decoded.recall_score_after, Some(0.81));
+    assert_eq!(decoded.merged, 2);
+    assert_eq!(decoded.duration_ms, 1200);
+}
+
+/// Why: Old `dream_stats.json` files written before this PR lack the new
+/// fields. `#[serde(default)]` must allow them to deserialize without error,
+/// defaulting new fields to zero / None.
+/// What: Deserializes a JSON string that only contains the fields present
+/// before issue #1530, then asserts the new fields are at their defaults.
+/// Test: This test itself.
+#[test]
+fn dream_stats_backward_compat() {
+    // A dream_stats.json as written by the pre-#1530 code.
+    let legacy_json = r#"{
+        "merged": 3,
+        "pruned": 1,
+        "closets_updated": 12,
+        "compacted": 0,
+        "content_pruned": 2,
+        "semantically_consolidated": 0,
+        "semantic_llm_calls": 0,
+        "semantic_cache_hits": 0,
+        "duration_ms": 800
+    }"#;
+    let decoded: DreamStats =
+        serde_json::from_str(legacy_json).expect("backward-compat deserialize must succeed");
+    assert_eq!(decoded.merged, 3);
+    assert_eq!(decoded.drawers_before, 0, "missing field must default to 0");
+    assert_eq!(decoded.drawers_after, 0, "missing field must default to 0");
+    assert_eq!(
+        decoded.compression_ratio, 0.0,
+        "missing field must default to 0.0"
+    );
+    assert_eq!(
+        decoded.recall_score_before, None,
+        "missing Option field must default to None"
+    );
+    assert_eq!(
+        decoded.recall_score_after, None,
+        "missing Option field must default to None"
+    );
+}
+
+/// Why: After a dream cycle the stats must include drawer counts that
+/// reflect the actual palace state before and after consolidation passes.
+/// What: Seed one drawer, run a dream cycle with high dedup threshold so
+/// nothing is removed, and assert `drawers_before == drawers_after == 1`.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_records_drawer_counts() {
+    let handle = open_test_handle("dream-drawer-counts").await;
+    handle
+        .remember(
+            "drawer count baseline for effectiveness metrics".into(),
+            RoomType::General,
+            vec![],
+            0.6,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        dedup_threshold: 0.999, // nothing deduped
+        ..DreamConfig::default()
+    });
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(stats.drawers_before, 1, "expected 1 drawer before");
+    assert_eq!(
+        stats.drawers_after, 1,
+        "expected 1 drawer after (none removed)"
+    );
+    // Compression ratio: (1 - 1) / 1 = 0.0
+    assert_eq!(
+        stats.compression_ratio, 0.0,
+        "no drawers removed → ratio 0.0"
+    );
+}
+
+/// Why: When the dedup pass removes a drawer, `drawers_after < drawers_before`
+/// and the compression ratio must be non-zero.
+/// What: Insert two identical drawers, run a cycle, assert `compression_ratio > 0`.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_compression_ratio_nonzero_after_dedup() {
+    let handle = open_test_handle("dream-compress-nonzero").await;
+    handle
+        .remember(
+            "duplicate drawer for compression test".into(),
+            RoomType::General,
+            vec![],
+            0.7,
+        )
+        .await
+        .unwrap();
+    handle
+        .remember(
+            "duplicate drawer for compression test".into(),
+            RoomType::General,
+            vec![],
+            0.6,
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.drawers.read().len(), 2);
+
+    let dreamer = Dreamer::new(DreamConfig::default());
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(stats.drawers_before, 2, "two drawers before cycle");
+    assert_eq!(stats.drawers_after, 1, "one remaining after dedup");
+    // (2 - 1) / 2 = 0.5
+    let diff = (stats.compression_ratio - 0.5_f64).abs();
+    assert!(
+        diff < 1e-10,
+        "expected compression_ratio=0.5, got {}",
+        stats.compression_ratio
+    );
+}
+
+/// Why: An empty palace must not cause the recall benchmark to panic or
+/// return a misleading score. `run_benchmark` must return `None`.
+/// What: Run `run_benchmark` directly on an empty palace and assert `None`.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_recall_benchmark_empty_palace_returns_none() {
+    let handle = open_test_handle("dream-bench-empty").await;
+    // Palace is empty — no drawers seeded.
+    let result = super::recall_benchmark::run_benchmark(&handle).await;
+    assert_eq!(
+        result, None,
+        "empty palace must yield None from recall benchmark"
+    );
+}
+
+/// Why: With at least one drawer, the recall benchmark must return a score
+/// in the valid [0, 1] range.
+/// What: Seed two drawers, run the benchmark, assert `Some(score)` in range.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_recall_benchmark_returns_score_with_drawers() {
+    let handle = open_test_handle("dream-bench-score").await;
+    handle
+        .remember(
+            "cargo build and test commands for the Rust workspace".into(),
+            RoomType::Backend,
+            vec!["cargo".into()],
+            0.8,
+        )
+        .await
+        .unwrap();
+    handle
+        .remember(
+            "error handling with thiserror for libraries and anyhow for binaries".into(),
+            RoomType::Backend,
+            vec!["errors".into()],
+            0.7,
+        )
+        .await
+        .unwrap();
+
+    let result = super::recall_benchmark::run_benchmark(&handle).await;
+    let score = result.expect("expected Some(score) with seeded drawers");
+    assert!(
+        score.is_finite() && score >= 0.0,
+        "recall benchmark score must be finite and non-negative; got {score}"
+    );
+}
+
+/// Why: The dream cycle must record both pre- and post-cycle recall scores
+/// in the returned stats so they land in dream_stats.json.
+/// What: Seed a drawer, run the cycle, assert both score fields are Some.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_records_recall_scores() {
+    let handle = open_test_handle("dream-recall-scores").await;
+    handle
+        .remember(
+            "HNSW vector search and batch embedding performance patterns".into(),
+            RoomType::Backend,
+            vec!["hnsw".into(), "embedding".into()],
+            0.8,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        dedup_threshold: 0.999, // nothing removed
+        ..DreamConfig::default()
+    });
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert!(
+        stats.recall_score_before.is_some(),
+        "recall_score_before must be Some with a seeded palace"
+    );
+    assert!(
+        stats.recall_score_after.is_some(),
+        "recall_score_after must be Some with a seeded palace"
+    );
+    let before = stats.recall_score_before.unwrap();
+    let after = stats.recall_score_after.unwrap();
+    assert!(
+        before.is_finite() && before >= 0.0,
+        "recall_score_before={before} must be finite and non-negative"
+    );
+    assert!(
+        after.is_finite() && after >= 0.0,
+        "recall_score_after={after} must be finite and non-negative"
+    );
+}
+
+/// Why: Effectiveness fields must survive a round-trip through
+/// `PersistedDreamStats::save` → `PersistedDreamStats::load`.
+/// What: Run a cycle with seeded drawers, write to disk, read back, and
+/// assert all effectiveness fields match.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_stats_effectiveness_fields_persisted() {
+    let handle = open_test_handle("dream-persist-eff").await;
+    handle
+        .remember(
+            "unit test patterns and mock usage in Rust tests".into(),
+            RoomType::General,
+            vec!["testing".into()],
+            0.7,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        dedup_threshold: 0.999,
+        ..DreamConfig::default()
+    });
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    let data_dir = handle.data_dir.clone().expect("data_dir set");
+    let loaded = PersistedDreamStats::load(&data_dir)
+        .unwrap()
+        .expect("dream_stats.json must exist after cycle");
+
+    assert_eq!(
+        loaded.stats.drawers_before, stats.drawers_before,
+        "drawers_before must be persisted"
+    );
+    assert_eq!(
+        loaded.stats.drawers_after, stats.drawers_after,
+        "drawers_after must be persisted"
+    );
+    let cr_diff = (loaded.stats.compression_ratio - stats.compression_ratio).abs();
+    assert!(cr_diff < 1e-10, "compression_ratio must be persisted");
+    assert_eq!(
+        loaded.stats.recall_score_before, stats.recall_score_before,
+        "recall_score_before must be persisted"
+    );
+    assert_eq!(
+        loaded.stats.recall_score_after, stats.recall_score_after,
+        "recall_score_after must be persisted"
+    );
+}
+
+/// Why: The recall benchmark adds two full embed+search passes per cycle.
+/// When `recall_benchmark_enabled = false`, both passes must be skipped and
+/// both recall score fields must be `None`, while the cycle itself completes
+/// normally.
+/// What: Run `dream_cycle` with `recall_benchmark_enabled = false` on a
+/// seeded palace and assert both `recall_score_before` and
+/// `recall_score_after` are `None`.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_recall_benchmark_disabled() {
+    let handle = open_test_handle("dream-bench-disabled").await;
+    handle
+        .remember(
+            "recall benchmark opt-out test drawer".into(),
+            RoomType::General,
+            vec![],
+            0.6,
+        )
+        .await
+        .unwrap();
+
+    let dreamer = Dreamer::new(DreamConfig {
+        recall_benchmark_enabled: false,
+        dedup_threshold: 0.999, // nothing removed
+        ..DreamConfig::default()
+    });
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(
+        stats.recall_score_before, None,
+        "recall_score_before must be None when benchmark is disabled"
+    );
+    assert_eq!(
+        stats.recall_score_after, None,
+        "recall_score_after must be None when benchmark is disabled"
+    );
+    // Cycle must still complete and report drawer counts.
+    assert_eq!(
+        stats.drawers_before, 1,
+        "drawers_before must still be counted"
+    );
+    assert_eq!(
+        stats.drawers_after, 1,
+        "drawers_after must still be counted"
     );
 }
 

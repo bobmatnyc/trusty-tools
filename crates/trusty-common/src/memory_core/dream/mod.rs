@@ -13,6 +13,7 @@ mod cycle;
 mod dreamer;
 mod guard;
 mod helpers;
+mod recall_benchmark;
 
 #[cfg(test)]
 mod tests;
