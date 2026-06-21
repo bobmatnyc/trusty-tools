@@ -103,15 +103,19 @@ pub async fn project_get(state: &Arc<DaemonState>, name: &str) -> Result<Value, 
 /// and serialises the result as:
 /// ```json
 /// {
-///   "primary": { "name": "…", "repo_url": "…", … },
-///   "confidence": 0.95,
-///   "reason": "url match",
+///   "primary": {
+///     "project": { "name": "…", "repo_url": "…", … },
+///     "confidence": 0.95,
+///     "reason": "url match"
+///   },
 ///   "needs_disambiguation": false,
-///   "matches": [ … ]
+///   "matches": [
+///     { "project": { … }, "confidence": 0.95, "reason": "url match" }
+///   ]
 /// }
 /// ```
-/// On no-match or empty registry the `primary` field is absent and `error`
-/// explains the failure.
+/// On no-match or empty registry `primary` is `null` and `error` explains
+/// the failure.
 /// Test: `dispatch_project_resolve_tool` in `crate::mcp::tests`.
 pub async fn project_resolve(state: &Arc<DaemonState>, query: &str) -> Result<Value, String> {
     let registry = state.project_registry().await;

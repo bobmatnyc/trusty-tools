@@ -953,7 +953,21 @@ async fn dispatch_project_resolve_no_match() {
     // The resolver returns Ok with primary:null for no-match (not isError).
     assert_eq!(result["isError"], false);
     let text = result["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("null") || text.contains("error"), "{text}");
+    // Parse the JSON payload and assert the actual response shape.
+    let payload: serde_json::Value = serde_json::from_str(text)
+        .unwrap_or_else(|_| panic!("response text must be valid JSON, got: {text}"));
+    assert_eq!(
+        payload["primary"],
+        serde_json::Value::Null,
+        "primary must be null for a no-match response, got: {payload}"
+    );
+    let error_msg = payload["error"].as_str().unwrap_or_else(|| {
+        panic!("no-match response must carry an 'error' explanation, got: {payload}")
+    });
+    assert!(
+        error_msg.contains("zzz-unregistered-xyz"),
+        "error message must include the query, got: {error_msg}"
+    );
 }
 
 /// Why (#1517 WI-5): `project_resolve` must error at the dispatch layer when
