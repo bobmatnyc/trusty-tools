@@ -165,4 +165,47 @@ mod web_chat_tests {
              that api::router registers; route/HTML drift would otherwise 404"
         );
     }
+
+    /// Why: #1524 audit-trail behavior — the page must RENDER the `actions_taken`
+    /// array (not just contain the string). This test asserts the JS actually
+    /// checks `Array.isArray(data.actions_taken)` and iterates it — proving the
+    /// audit trail is rendered, not merely present as a dead string literal.
+    /// What: asserts the embedded JS uses `Array.isArray` on `actions_taken` and
+    /// iterates it with a loop that appends list items.
+    /// Test: this is the test.
+    #[test]
+    fn web_chat_renders_actions_taken_array() {
+        // The JS must guard with Array.isArray before iterating — a bare string
+        // check ("actions_taken") is insufficient to prove it renders the audit trail.
+        assert!(
+            WEB_CHAT_HTML.contains("Array.isArray(data.actions_taken)"),
+            "web_chat.html must check Array.isArray(data.actions_taken) before rendering"
+        );
+        // The loop must append list items — not just log or discard the array.
+        assert!(
+            WEB_CHAT_HTML.contains("appendActions(data.actions_taken"),
+            "web_chat.html must pass actions_taken to appendActions for rendering"
+        );
+    }
+
+    /// Why: #1524 conv_id continuity behavior — the page must STORE `conv_id` from
+    /// the response AND RE-SEND it on the next turn (session continuity). A bare
+    /// string presence check ("conv_id") does not prove the store-and-resend flow.
+    /// What: asserts (a) the JS stores the response conv_id in a variable, and (b)
+    /// re-sends it on the next POST.
+    /// Test: this is the test.
+    #[test]
+    fn web_chat_stores_and_resends_conv_id() {
+        // (a) The response conv_id must be stored: `if (data.conv_id) { convId = data.conv_id; … }`.
+        assert!(
+            WEB_CHAT_HTML.contains("convId = data.conv_id"),
+            "web_chat.html must store data.conv_id in convId for continuity"
+        );
+        // (b) The stored id must be re-sent on the next POST:
+        // `if (convId) body.conv_id = convId`.
+        assert!(
+            WEB_CHAT_HTML.contains("body.conv_id = convId"),
+            "web_chat.html must re-send convId as body.conv_id on the next turn"
+        );
+    }
 }

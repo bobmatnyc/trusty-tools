@@ -327,18 +327,29 @@ async fn route_through_session_manager(
 /// helpers the HTTP `…/managed/*` routes use), NOT chat-core's HTTP-backed
 /// executor — so the daemon never loops back over HTTP onto itself. Isolating
 /// this branch keeps [`coordinator_chat`] readable and gives the error mapping
-/// (graceful degraded → 503; real failure → 500) one home, mirroring
-/// [`route_through_session_manager`].
+/// (graceful degraded → `200` with an explanatory reply; real failure → 500) one
+/// home, mirroring [`route_through_session_manager`].
+///
+/// Graceful degradation (#1524): when inference is unavailable (no
+/// `OPENROUTER_API_KEY`, no Anthropic/Bedrock credentials) the SM returns
+/// [`SmAgentError::Degraded`]. Previously this propagated as a 503, which is
+/// unhelpful to the Web/browser caller — they OPTED IN to actions but the SM
+/// cannot reason. Instead, we return a `200` with a clear explanatory `reply` so
+/// the browser surfaces the message to the operator rather than rendering a raw
+/// HTTP error, and include `conv_id = None` (no rolling context was created). Any
+/// OTHER error is still a 500.
+///
 /// What: constructs `DaemonSessionControl::new(state.clone())` as
 /// `Arc<dyn SessionControl>`, calls
 /// [`SessionManagerAgent::chat_with_actions`](crate::core::sm::SessionManagerAgent::chat_with_actions)
 /// with the message + optional `conv_id`; on success fills `reply`, the additive
 /// `cost`, `conv_id`, and the audit `actions_taken` — `Some([...])` only when at
 /// least one verb ran, else `None` so an empty `[]` is never serialized (leaving
-/// the routed/output fields `None`); on [`SmAgentError::Degraded`] returns a 503;
-/// on any other error a 500.
+/// the routed/output fields `None`); on [`SmAgentError::Degraded`] returns a
+/// `200` with an operator-facing notice; on any other error a 500.
 /// Test: `coordinator_chat_action_path_returns_actions_taken`,
-/// `coordinator_chat_actions_absent_is_text_only` in the SM-path suite.
+/// `coordinator_chat_actions_absent_is_text_only`,
+/// `coordinator_chat_action_no_creds_returns_explanatory_reply` in the SM-path suite.
 async fn route_through_action_loop(
     sm: &crate::core::sm::SessionManagerAgent,
     state: &Arc<DaemonState>,
@@ -362,7 +373,25 @@ async fn route_through_action_loop(
             // `[]` is never serialized; `skip_serializing_if` then drops it.
             actions_taken: Some(outcome.actions_taken).filter(|v| !v.is_empty()),
         })),
-        Err(SmAgentError::Degraded(notice)) => Err(DaemonError::ServiceUnavailable(notice)),
+        // Graceful degradation (#1524): inference is unavailable — surface a
+        // clear operator-facing reply (200) rather than an opaque 503 so the
+        // browser/Web adapter can show it as a chat message. The operator needs
+        // to know WHY the action loop cannot run (no API key). We do NOT touch
+        // `conv_id` (None: no rolling context was committed on this turn). Only
+        // the no-creds/unconfigured-inference `Degraded` variant takes this path;
+        // every other error remains a 500.
+        Err(SmAgentError::Degraded(notice)) => Ok(Json(CoordinatorChatResponse {
+            reply: format!(
+                "inference is not configured; {notice}. \
+                 Set OPENROUTER_API_KEY (or Anthropic/Bedrock credentials) and restart \
+                 the daemon, or use the MCP/driver path instead.",
+            ),
+            routed_to_session: None,
+            command_output: None,
+            cost: None,
+            conv_id: None,
+            actions_taken: None,
+        })),
         Err(e) => Err(DaemonError::Internal(e.to_string())),
     }
 }

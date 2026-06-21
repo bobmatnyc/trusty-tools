@@ -268,4 +268,24 @@ pub trait SessionControl: Send + Sync {
             "adopt is not supported by this control surface".to_string(),
         ))
     }
+
+    /// Full terminal teardown of a session (#1524): kill runtime + tombstone record.
+    ///
+    /// Why: `sessions.decommission` is the action-loop's explicit "tear everything
+    /// down" verb — semantically stronger than `stop` (which keeps the workspace
+    /// resumable) and synonymous with the MCP `session_decommission` tool. A
+    /// DEFAULT impl delegates to [`kill`](Self::kill) so existing impls gain the
+    /// verb without change; only the production `DaemonSessionControl` (which
+    /// already calls `mgr.decommission` from `kill`) benefits.
+    /// What: delegates to `self.kill(session_id)`, which already calls
+    /// `SessionManager::decommission` in production. Returns `{ ok: true }`.
+    /// Test: `chat_action_tests.rs::execute_decommission_dispatches`.
+    async fn decommission(
+        &self,
+        session_id: &str,
+    ) -> Result<serde_json::Value, SessionControlError> {
+        // The production DaemonSessionControl::kill calls mgr.decommission, so
+        // this default is semantically correct for all real impls.
+        self.kill(session_id).await
+    }
 }

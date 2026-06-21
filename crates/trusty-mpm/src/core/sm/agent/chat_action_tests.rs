@@ -174,6 +174,159 @@ async fn unknown_verb_error_lists_health() {
     assert!(err.to_string().contains("sessions.health"));
 }
 
+/// Why: `sessions.decommission` (#1524) must be listed in the prompt so the
+/// self-aware coordinator knows it can perform terminal teardown inline.
+/// What: asserts the instruction block includes `sessions.decommission`.
+/// Test: this is the test.
+#[test]
+fn prompt_lists_decommission_ops_verb() {
+    let prompt = action_instructions();
+    assert!(
+        prompt.contains("sessions.decommission"),
+        "action prompt must advertise the executable `sessions.decommission` verb"
+    );
+}
+
+/// Why: `sessions.inject` (#1524) must be listed in the prompt so the self-aware
+/// coordinator knows it can inject text with submit semantics inline.
+/// What: asserts the instruction block includes `sessions.inject` and its submit
+/// convention.
+/// Test: this is the test.
+#[test]
+fn prompt_lists_inject_ops_verb() {
+    let prompt = action_instructions();
+    assert!(
+        prompt.contains("sessions.inject"),
+        "action prompt must advertise the executable `sessions.inject` verb"
+    );
+    assert!(
+        prompt.contains("args.submit"),
+        "action prompt must document the inject submit arg"
+    );
+}
+
+/// Why: `sessions.decommission` (#1524) must EXECUTE inline in the action loop —
+/// not just be advertised — calling `SessionControl::decommission`.
+/// What: dispatches `sessions.decommission` against the mock and asserts `ok: true`.
+/// Test: this is the test.
+#[tokio::test]
+async fn execute_decommission_dispatches() {
+    let control: Arc<dyn SessionControl> = Arc::new(MockSessionControl::default());
+    let out = execute_verb(
+        &control,
+        "sessions.decommission",
+        &json!({ "session_id": "abc-123" }),
+    )
+    .await
+    .expect("decommission dispatches");
+    assert_eq!(
+        out.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "decommission must return {{ok: true}}"
+    );
+}
+
+/// Why: `sessions.decommission` without a session_id must feed a clear error back
+/// to the model rather than panicking.
+/// What: dispatches with no args and asserts a NotFound error naming `session_id`.
+/// Test: this is the test.
+#[tokio::test]
+async fn execute_decommission_requires_session_id() {
+    let control: Arc<dyn SessionControl> = Arc::new(MockSessionControl::default());
+    let err = execute_verb(&control, "sessions.decommission", &json!({}))
+        .await
+        .expect_err("missing session_id errors");
+    assert!(err.to_string().contains("session_id"));
+}
+
+/// Why: `sessions.inject` (#1524) must EXECUTE inline: read `session_id` + `text`
+/// + optional `submit` and reach `SessionControl::inject_text`.
+/// What: dispatches with `submit` omitted (default `enter`) and asserts the mock
+/// recorded the send.
+/// Test: this is the test.
+#[tokio::test]
+async fn execute_inject_dispatches_with_default_submit() {
+    let mock = Arc::new(MockSessionControl::default());
+    let control: Arc<dyn SessionControl> = mock.clone();
+    let out = execute_verb(
+        &control,
+        "sessions.inject",
+        &json!({ "session_id": "sid-1", "text": "cargo test" }),
+    )
+    .await
+    .expect("inject dispatches");
+    assert_eq!(
+        out.get("ok").and_then(|v| v.as_bool()),
+        Some(true),
+        "inject must return {{ok: true}}"
+    );
+    // The mock records inject_text calls as sends.
+    let sends = mock.sends();
+    assert_eq!(sends.len(), 1, "exactly one inject recorded");
+    assert_eq!(sends[0].0, "sid-1");
+    assert_eq!(sends[0].1, "cargo test");
+}
+
+/// Why: `sessions.inject` with an explicit `submit` arg must parse the variant
+/// and forward it to `inject_text`; the mock records it identically to `send`.
+/// What: dispatches with `submit: "no_submit"` and asserts the text was injected.
+/// Test: this is the test.
+#[tokio::test]
+async fn execute_inject_accepts_no_submit_variant() {
+    let mock = Arc::new(MockSessionControl::default());
+    let control: Arc<dyn SessionControl> = mock.clone();
+    execute_verb(
+        &control,
+        "sessions.inject",
+        &json!({ "session_id": "sid-2", "text": "partial cmd", "submit": "no_submit" }),
+    )
+    .await
+    .expect("inject no_submit dispatches");
+    let sends = mock.sends();
+    assert_eq!(sends.len(), 1);
+    assert_eq!(sends[0].1, "partial cmd");
+}
+
+/// Why: `sessions.inject` without a `session_id` or `text` must error cleanly.
+/// What: tests both missing fields and asserts the error names the missing arg.
+/// Test: this is the test.
+#[tokio::test]
+async fn execute_inject_requires_session_id_and_text() {
+    let control: Arc<dyn SessionControl> = Arc::new(MockSessionControl::default());
+
+    let err = execute_verb(&control, "sessions.inject", &json!({ "text": "hi" }))
+        .await
+        .expect_err("missing session_id errors");
+    assert!(err.to_string().contains("session_id"));
+
+    let err = execute_verb(
+        &control,
+        "sessions.inject",
+        &json!({ "session_id": "sid-3" }),
+    )
+    .await
+    .expect_err("missing text errors");
+    assert!(err.to_string().contains("text"));
+}
+
+/// Why: the unknown-verb error must name the new ops verbs (`decommission`,
+/// `inject`) so a model that mistypes either can recover.
+/// What: triggers the unknown-verb error and asserts both are listed.
+/// Test: this is the test.
+#[tokio::test]
+async fn unknown_verb_error_lists_new_ops_verbs() {
+    let control: Arc<dyn SessionControl> = Arc::new(MockSessionControl::default());
+    let err = execute_verb(&control, "sessions.bogus", &json!({}))
+        .await
+        .expect_err("unknown verb errors");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("sessions.decommission"),
+        "error must list decommission"
+    );
+    assert!(msg.contains("sessions.inject"), "error must list inject");
+}
+
 /// Why: the action loop must ADVERTISE `sessions.adopt` so the self-aware chat
 /// knows it can adopt an existing tmux session inline (#1433).
 /// What: asserts the instruction block lists the ops `sessions.adopt` verb and its

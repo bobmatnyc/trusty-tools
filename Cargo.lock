@@ -10994,6 +10994,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "trusty-agents-common",
  "trusty-common",
  "trusty-review",
  "utoipa",
