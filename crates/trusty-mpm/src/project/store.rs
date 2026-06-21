@@ -124,9 +124,15 @@ impl ProjectStore {
     ///
     /// Why: both `load` and `reload_if_changed` need the same "read or treat
     /// absence as empty" logic; factoring it out keeps the two callers in lockstep.
+    /// Critically, only `NotFound` is treated as "file absent" — all other I/O
+    /// errors (permission denied, directory in place of file, I/O fault) are
+    /// propagated so the caller never silently overwrites `projects.json` with an
+    /// empty store on a transient error.
     /// What: if `path` exists reads and JSON-parses it, returning `(data, Some(sig))`
-    /// with the signature captured AFTER the read; if absent returns `(empty, None)`.
-    /// Test: `store_load_save_round_trip`, `store_reload_picks_up_external_write`.
+    /// with the signature captured AFTER the read; if absent (`NotFound`) returns
+    /// `(empty, None)`; propagates all other I/O errors as `ProjectStoreError::Io`.
+    /// Test: `store_load_save_round_trip`, `store_reload_picks_up_external_write`,
+    /// `store_not_found_starts_fresh`, `store_other_io_error_propagates`.
     async fn read_file(path: &Path) -> Result<(StoredData, Option<FileSig>), ProjectStoreError> {
         match fs::read_to_string(path).await {
             Ok(raw) => {
@@ -135,10 +141,11 @@ impl ProjectStore {
                 let sig = Self::sig_of(path).await.unwrap_or_default();
                 Ok((data, Some(sig)))
             }
-            Err(_) => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 debug!(path = %path.display(), "no project store file found; starting fresh");
                 Ok((StoredData::default(), None))
             }
+            Err(e) => Err(ProjectStoreError::Io(e)),
         }
     }
 
@@ -357,5 +364,61 @@ mod tests {
         let mut store2 = ProjectStore::load(dir.path()).await.expect("reload");
         let back = store2.get("full-project").await.expect("get");
         assert_eq!(back, full);
+    }
+
+    /// Verify that a NotFound path still starts with an empty store (happy-path
+    /// absence handling) and that a subsequent upsert+reload round-trips correctly.
+    ///
+    /// Why: the bug fix narrows the "start fresh" arm to NotFound only; this test
+    /// confirms that the intended absent-file path still works as before.
+    /// What: loads from a directory that contains no `projects.json`, asserts the
+    /// store is empty, then writes and reloads to confirm persistence works.
+    /// Test: this IS the test.
+    #[tokio::test]
+    async fn store_not_found_starts_fresh() {
+        let dir = TempDir::new().expect("tempdir");
+        // No projects.json exists yet — load must return an empty store.
+        let mut store = ProjectStore::load(dir.path())
+            .await
+            .expect("not-found should start fresh");
+        assert!(
+            store.all().await.expect("all").is_empty(),
+            "fresh store must be empty"
+        );
+
+        // Confirm we can round-trip through a save after starting fresh.
+        store
+            .upsert(make_project("theta"))
+            .await
+            .expect("upsert after fresh load");
+        let mut store2 = ProjectStore::load(dir.path()).await.expect("reload");
+        assert_eq!(store2.get("theta").await.expect("get theta").name, "theta");
+    }
+
+    /// Verify that a non-NotFound I/O error (e.g. a directory occupying the file
+    /// path) is propagated rather than silently treated as absent.
+    ///
+    /// Why: the data-loss bug caused any I/O error to be swallowed, so the next
+    /// `save()` would overwrite projects.json with an empty store. This test
+    /// exercises the fix by pointing `read_file` at a directory, which produces
+    /// `IsADirectory` (or equivalent) — not `NotFound`.
+    /// What: creates a directory at `projects.json`'s expected path, then calls
+    /// `ProjectStore::load`; asserts the result is an `Io` error, not `Ok`.
+    /// Test: this IS the test.
+    #[tokio::test]
+    async fn store_other_io_error_propagates() {
+        let dir = TempDir::new().expect("tempdir");
+        // Plant a directory where projects.json would live so read_to_string
+        // returns an OS error that is NOT NotFound.
+        let blocking_dir = dir.path().join("projects.json");
+        tokio::fs::create_dir_all(&blocking_dir)
+            .await
+            .expect("create blocking dir");
+
+        let result = ProjectStore::load(dir.path()).await;
+        assert!(
+            matches!(result, Err(ProjectStoreError::Io(_))),
+            "expected Io error when path is a directory, got: {result:?}"
+        );
     }
 }

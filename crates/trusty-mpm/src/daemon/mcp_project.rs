@@ -31,11 +31,12 @@ pub async fn project_list(state: &Arc<DaemonState>) -> Result<Value, String> {
         .list()
         .await
         .map_err(|e| format!("project_list: registry error: {e}"))?;
-    let values: Vec<Value> = projects
+    let values = projects
         .into_iter()
-        .map(|p| serde_json::to_value(p).unwrap_or(Value::Null))
-        .collect();
-    Ok(json!({ "projects": values, "count": values.len() }))
+        .map(|p| serde_json::to_value(p).map_err(|e| format!("project_list: serialize error: {e}")))
+        .collect::<Result<Vec<Value>, String>>()?;
+    let count = values.len();
+    Ok(json!({ "projects": values, "count": count }))
 }
 
 /// Register or update a project in the registry.
