@@ -159,17 +159,76 @@ async fn embed_turn(turn: &TurnRecord, api_key: &str) -> anyhow::Result<Vec<f32>
     Ok(embedding)
 }
 
-/// Simple lowercasing tokenizer used for BM25 indexing.
+/// Lowercasing, camelCase-aware tokenizer used for BM25 indexing.
 ///
-/// Why: BM25 wants a bag of normalized terms; we don't need stemming or
-/// stopword removal for short turn snippets.
-/// What: Lowercases, splits on non-alphanumerics, drops tokens ≤ 2 chars.
-/// Test: `tokenize_lowers_and_drops_short`.
+/// Why: BM25 wants a bag of normalized terms. Without camelCase splitting,
+/// `getUserProfile` is indexed as the single opaque token "getuserprofile",
+/// so a query for "get user" / "user profile" misses the document entirely
+/// (closes #1542). Splitting at camelCase / PascalCase boundaries adds the
+/// component terms without changing the contract for short-token dropping.
+/// What: Splits text on non-alphanumeric boundaries, then further splits
+/// each alphanumeric run at camelCase / PascalCase transitions. Lowercases
+/// every emitted token and drops tokens ≤ 2 chars. Deduplicates before
+/// returning so the BM25 term list is stable.
+/// Test: `tokenize_lowers_and_drops_short`, `tokenize_splits_camel_case`.
 pub fn tokenize(text: &str) -> Vec<String> {
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() > 2)
-        .map(String::from)
+    let mut tokens: Vec<String> = Vec::new();
+    for raw in text.split(|c: char| !c.is_alphanumeric()) {
+        if raw.len() > 2 {
+            tokens.push(raw.to_lowercase());
+        }
+        // Emit camelCase / PascalCase sub-parts (e.g. "getUserProfile" →
+        // "get", "user", "profile"). Parts ≤ 2 chars are dropped to match the
+        // outer filter so the existing short-token contract is preserved.
+        let parts = split_camel_case_indexer(raw);
+        if parts.len() > 1 {
+            for part in parts {
+                if part.len() > 2 {
+                    tokens.push(part.to_lowercase());
+                }
+            }
+        }
+    }
+    tokens.sort_unstable();
+    tokens.dedup();
+    tokens
+}
+
+/// Split an identifier at camelCase / PascalCase boundaries.
+///
+/// Why: Kept private; only `tokenize` above should call it. Extracted so the
+/// boundary logic is testable in isolation without bloating `tokenize`.
+/// What: Inserts split points at lowercase/digit → uppercase transitions
+/// (`codeIndexer` → `["code", "Indexer"]`) and at acronym-to-word transitions
+/// (`HTTPSClient` → `["HTTPS", "Client"]`). Returns the whole input verbatim
+/// when it has fewer than two characters.
+/// Test: Covered transitively by `tokenize_splits_camel_case`.
+fn split_camel_case_indexer(s: &str) -> Vec<&str> {
+    let bytes_len = s.len();
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    if chars.len() < 2 {
+        return vec![s];
+    }
+    let mut bounds: Vec<usize> = vec![0];
+    for i in 1..chars.len() {
+        let (idx, c) = chars[i];
+        let (_, prev) = chars[i - 1];
+        // lowercase / digit → uppercase: new word begins.
+        let lower_to_upper = (prev.is_lowercase() || prev.is_ascii_digit()) && c.is_uppercase();
+        // Acronym run followed by a new word: "HTTPSClient" splits before 'C'.
+        let acronym_to_word = prev.is_uppercase()
+            && c.is_uppercase()
+            && i + 1 < chars.len()
+            && chars[i + 1].1.is_lowercase();
+        if lower_to_upper || acronym_to_word {
+            bounds.push(idx);
+        }
+    }
+    bounds.push(bytes_len);
+    bounds
+        .windows(2)
+        .map(|w| &s[w[0]..w[1]])
+        .filter(|p| !p.is_empty())
         .collect()
 }
 
@@ -186,6 +245,53 @@ mod tests {
         // Short words (<=2 chars) and punctuation should not appear.
         assert!(!toks.iter().any(|t| t == "a"));
         assert!(!toks.iter().any(|t| t.is_empty()));
+    }
+
+    #[test]
+    fn tokenize_splits_camel_case() {
+        // Why: closes #1542 — BM25 recall gap when queries use word fragments
+        // of camelCase identifiers (e.g. "get user" should hit "getUserProfile").
+        // What: asserts that camelCase sub-parts are emitted alongside the raw
+        // lowercased token so both exact-identifier and word-fragment queries hit.
+        // Test: directly exercises `tokenize("getUserProfile")`.
+        let toks = tokenize("getUserProfile");
+        // Raw lowercased token must be present (exact-identifier match still wins).
+        assert!(
+            toks.iter().any(|t| t == "getuserprofile"),
+            "raw lowercased token missing: {toks:?}"
+        );
+        // camelCase parts (>2 chars) must also be present.
+        assert!(
+            toks.iter().any(|t| t == "get"),
+            "camelCase part 'get' missing: {toks:?}"
+        );
+        assert!(
+            toks.iter().any(|t| t == "user"),
+            "camelCase part 'user' missing: {toks:?}"
+        );
+        assert!(
+            toks.iter().any(|t| t == "profile"),
+            "camelCase part 'profile' missing: {toks:?}"
+        );
+        // Short-token filter must still apply: no empty or ≤2-char tokens.
+        assert!(
+            !toks.iter().any(|t| t.len() <= 2),
+            "short token leaked: {toks:?}"
+        );
+        // PascalCase: "GetUserProfile" should also split correctly.
+        let toks2 = tokenize("GetUserProfile");
+        assert!(
+            toks2.iter().any(|t| t == "get"),
+            "PascalCase split failed: {toks2:?}"
+        );
+        assert!(
+            toks2.iter().any(|t| t == "user"),
+            "PascalCase split failed: {toks2:?}"
+        );
+        assert!(
+            toks2.iter().any(|t| t == "profile"),
+            "PascalCase split failed: {toks2:?}"
+        );
     }
 
     #[test]
