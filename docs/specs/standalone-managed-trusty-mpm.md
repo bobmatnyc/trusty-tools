@@ -30,16 +30,19 @@ framework-path derivation (`crates/trusty-mpm/src/core/.../paths.rs`, `Framework
 > already-merged provisioner and session-launch core (DOC-14/DOC-17) and the multi-repo registry
 > (DOC-22). It specifies: (1) an alias→GitHub-URL registry and the `register` / `load` / `run` /
 > `path` / `ls` / `update` / `rm` command lifecycle; (2) the **Managed Configuration Standard** — a
-> per-project directory layout where **CLAUDE.md + agents + skills live project-local under
-> `repo/.claude/`** (standard Claude Code discovery) while **hooks + MCPs are supplied by tm via
-> explicit launch arguments** (`--settings <file>` for hooks, `--mcp-config <file>` for MCPs) rather
-> than placed in any discovery location — plus the **isolation invariant** that in managed mode
-> trusty-mpm writes **nothing** to the user's global `~/.claude/` or `~/.claude.json`;
+> per-project directory layout where **CLAUDE.md + project agents + project skills live project-local
+> under `repo/.claude/`** (standard Claude Code discovery) while the **global hooks + global
+> skills/slash-commands + global MCPs are supplied by tm out of a single tm-owned user-level config
+> dir** that tm points Claude Code at via a **required custom `CLAUDE_CONFIG_DIR`** (so the user's real
+> global `~/.claude` — which carries claude-mpm's own global hooks/MCPs — is **excluded entirely** and
+> cannot step on tm's) — plus the **isolation invariant** that in managed mode trusty-mpm writes
+> **nothing** to the user's real global `~/.claude/` or `~/.claude.json`;
 > (3) the **two-layer interaction model** — `tm` invoked directly is **always attended/interactive**
 > (the claude-mpm replacement), and **autonomy is provided exclusively by the session manager**, the
 > durable tmux fleet daemon that drives tm-managed projects under DOC-23; (4) first-class IDE attach
 > via stable, discoverable project dirs carrying project-local `.claude/` + `CLAUDE.md` (the IDE
-> inherits CLAUDE.md/agents/skills but **not** tm's hooks/MCPs, which require launching via `tm`).
+> inherits CLAUDE.md/project agents/skills but **not** tm's global hooks/MCPs — the IDE ignores
+> `CLAUDE_CONFIG_DIR`, so faithful sessions launch via `tm`).
 > It does **not** re-spec the session lifecycle, the provisioner internals, the harness runner, the
 > NL→repo resolver (DOC-22), or the autonomy tiers (DOC-23) — those are consumed as-is. This spec
 > defines the contract; implementing modules are the **what**; the **how** is left to phase planning.
@@ -59,8 +62,9 @@ any GitHub repo using a fully isolated **managed configuration**, so it never co
 user's own setup and can replace claude-mpm for daily work. Direct `tm` use is **always attended**;
 autonomy is the **session manager's** job, not `tm`'s (the two-layer model, §3). In scope: the alias
 registry, the `register/load/run/path/ls/update/rm` lifecycle, the Managed Configuration Standard
-(project-local CLAUDE.md/agents/skills + argument-supplied hooks/MCPs) and its isolation invariant,
-the attended `tm run` contract, and the IDE-attach contract.
+(project-local CLAUDE.md/project agents/skills + a single tm-global config dir holding global
+hooks/skills-slash-commands/MCPs, reached via a required custom `CLAUDE_CONFIG_DIR`) and its isolation
+invariant, the attended `tm run` contract, and the IDE-attach contract.
 
 **Out of scope** (consumed, not re-specified): the session lifecycle and `SessionRecord` (DOC-14);
 the provisioner clone mechanics (`WorkspaceProvisioner`); the harness runner (DOC-17); the NL→repo
@@ -79,7 +83,7 @@ implemented here).
 | SPEC-STANDALONE-MPM-05~draft | [`run` — attended-only (autonomy lives in the session manager)](#run--attended-only-autonomy-lives-in-the-session-manager-spec-standalone-mpm-05draft) | `tm::commands::run`, `core::session_launch` |
 | SPEC-STANDALONE-MPM-06~draft | [IDE Attach — stable, discoverable project dir](#ide-attach--stable-discoverable-project-dir-spec-standalone-mpm-06draft) | `tm::commands::path`, managed-config layout |
 | SPEC-STANDALONE-MPM-07~draft | [Supporting commands — `path` / `ls` / `update` / `rm`](#supporting-commands--path--ls--update--rm-spec-standalone-mpm-07draft) | `tm::commands::{path,ls,update,rm}` |
-| SPEC-STANDALONE-MPM-08~draft | [Per-project MCP wiring (memory / search / review)](#per-project-mcp-wiring-memory--search--review-spec-standalone-mpm-08draft) | `core::session_launch::settings` (inject_* ) |
+| SPEC-STANDALONE-MPM-08~draft | [Global MCP wiring (memory / search / review) in the tm-global config](#global-mcp-wiring-memory--search--review-spec-standalone-mpm-08draft) | `core::session_launch::settings` (inject_* ) |
 
 ---
 
@@ -176,9 +180,13 @@ invariant (§SPEC-STANDALONE-MPM-04).
 - **Inputs:** `tm load <alias>` (alias must be registered). Optional `--ref <git-ref>` to pin a
   branch/tag/sha (defaults to the repo default branch).
 - **Outputs:** clones the alias's URL into a **stable, persistent, alias-keyed** project directory
-  (the *managed project dir*; layout in §SPEC-STANDALONE-MPM-03), then generates the full managed
-  configuration: project-local `.claude/`, `.mcp.json`, `CLAUDE.md`, and deploys agents/skills/trust
-  into the **per-project** `CLAUDE_CONFIG_DIR` (never global). Prints the project dir path on success.
+  (the *managed project dir*; layout in §SPEC-STANDALONE-MPM-03), then generates the **project-local**
+  half of the managed configuration: `repo/.claude/` (project agents/skills + non-hook settings),
+  `repo/CLAUDE.md`, and the `.trusty-mpm/` metadata. The **global** half (global hooks +
+  skills/slash-commands + MCPs) is not regenerated here — it lives in the single tm-global config dir
+  established once at `tm install` / `tm config` time, which `run` reaches via the required
+  `CLAUDE_CONFIG_DIR` (§03(c)). `load` writes **nothing** to the user's real `~/.claude*`. Prints the
+  project dir path on success.
 - **Preconditions:** alias registered; network access to clone; writable managed-projects root.
 - **Postconditions:** the managed project dir exists, is a valid git checkout at `--ref`, and contains
   a complete managed configuration that satisfies the isolation invariant. **Idempotent:** re-running
@@ -207,7 +215,7 @@ than the session-scoped `provision` so the directory is durable.
 |--------|------|
 | `tm::commands::load` (new) | Orchestrates resolve → clone/fetch → config generation; idempotent. |
 | `provisioner::workspace::WorkspaceProvisioner::provision_in` | Clones into the caller-supplied stable project dir. |
-| `core::session_launch::prepare_session` (managed-mode variant) | Generates project-local config + per-project CLAUDE_CONFIG_DIR deploy. |
+| `core::session_launch::prepare_session` (managed-mode variant) | Generates the project-local config under `repo/` + `.trusty-mpm/` metadata; resolves the tm-global `CLAUDE_CONFIG_DIR` for `run`. |
 
 ---
 
@@ -218,116 +226,145 @@ than the session-scoped `provision` so the directory is durable.
 
 #### Behavior Contract (WHAT)
 
-The Managed Configuration is the complete, isolated config that trusty-mpm owns and writes for a
-loaded alias. It splits the five Claude Code customization surfaces into **two halves by mechanism**:
+The Managed Configuration is the complete, isolated config that trusty-mpm owns and writes. It splits
+the five Claude Code customization surfaces into **two halves by *where they live*** — a **single,
+shared tm-global config dir** (the user-level layer, established once) and the **per-project checkout**
+(the project layer, regenerated per `load`):
 
-- **Static, project-local half — picked up by standard Claude Code discovery.** `CLAUDE.md`,
-  `agents/`, and `skills/` live **inside the checkout** under `repo/` (`repo/CLAUDE.md`,
-  `repo/.claude/agents/`, `repo/.claude/skills/`). Any process started in `repo/` — `tm`, a plain
-  `claude`, or the IDE extension — discovers them automatically; no flags required.
-- **Dynamic, argument-supplied half — NOT in any discovery location.** `hooks` and `MCPs` are
-  **not** written to `repo/.claude/settings.json` or `repo/.mcp.json`. They are emitted into
-  tm-private config files under `.trusty-mpm/` and applied **only** when `tm` launches Claude Code,
-  via explicit launch arguments (verified Claude Code CLI flags, v2.1.185):
-  - `--settings <tm-settings.json>` — loads a settings file whose `hooks` block carries tm's hooks
-    (the same file may also carry trust / output-style keys, so no `~/.claude*` write is needed);
-  - `--mcp-config <tm-mcp.json>` — loads tm's MCP servers from a JSON file;
-  - `--strict-mcp-config` (optional) — restricts the session to **only** the `--mcp-config` servers,
-    ignoring any other MCP configuration, so tm's MCP set is hermetic.
+- **Project-local half — picked up by standard Claude Code discovery, per checkout.** `CLAUDE.md`,
+  **project** `agents/`, and **project** `skills/` live **inside the checkout** under `repo/`
+  (`repo/CLAUDE.md`, `repo/.claude/agents/`, `repo/.claude/skills/`). Any process started in `repo/`
+  — `tm`, a plain `claude`, or the IDE extension — discovers them automatically; no flags required.
+  This half is regenerated/refreshed by each `load`/`update`, exactly as today.
+- **tm-global half — a single user-level config dir, established once, reached via a *required*
+  custom `CLAUDE_CONFIG_DIR`.** The **global hooks**, **global skills / slash-commands**, and
+  **global MCP servers** (trusty-memory / search / review) live in **one** tm-owned user-level config
+  directory — **not** per project. `tm` launches Claude Code with
+  `CLAUDE_CONFIG_DIR=<tm-global-config-dir>` so Claude Code merges *that* dir as the user-level layer
+  **instead of the user's real `~/.claude`**. This is the **load-bearing isolation primitive**: the
+  maintainer's real `~/.claude` carries claude-mpm's own global hooks + MCPs, which Claude Code would
+  otherwise merge on top of project config and "step on" tm's; pointing `CLAUDE_CONFIG_DIR` at the
+  tm-global dir **excludes the real global entirely**. This dir is created and maintained **once**
+  (at `tm install` / `tm config` time), **not** regenerated per project.
 
-  Because hooks/MCPs ride on launch arguments (not discovery), they apply **only to tm-launched
-  sessions** — and a tm session is **exactly reproducible** by invoking `claude` with the same
-  `--settings`/`--mcp-config` arguments.
+Because the global hooks/skills-slash-commands/MCPs live in the tm-global config dir (the user-level
+layer selected by `CLAUDE_CONFIG_DIR`), they apply to **every** tm-launched session uniformly — and
+the **real** `~/.claude` (and its claude-mpm hooks/MCPs) is excluded, so there is **no bidirectional
+pollution**.
 
 It is defined by four parts:
 
-**(a) Per-project directory layout.** A managed project dir, alias-keyed and stable:
+**(a) Directory layout — one global config dir + per-alias project dirs.**
+
+The single tm-global config dir (established once; the user-level layer for *all* tm sessions):
+
+```
+~/.trusty-mpm/claude-config/             # the ONE tm-global CLAUDE_CONFIG_DIR (NOT per-project)
+├── settings.json                        # the ONE set of GLOBAL hooks (+ trust / output-style keys)
+├── skills/<name>/SKILL.md               # GLOBAL skills / slash-commands (shared across all aliases)
+├── .mcp.json (or settings MCP block)    # GLOBAL MCP servers: trusty-memory / search / review
+└── …                                    # whatever else Claude Code's user-level layer holds
+```
+
+Each managed project dir, alias-keyed and stable, holds only the **project-local** half:
 
 ```
 <managed-root>/<alias>/                  # e.g. ~/.trusty-mpm/projects/<alias>/  (or ~/trusty-mpm-projects/<alias>/)
 ├── repo/                                 # the git checkout (clone target; what the IDE opens)
 │   ├── .claude/
-│   │   ├── agents/<name>.md             # deployed agents — STANDARD DISCOVERY (IDE/plain-claude inherit)
-│   │   ├── skills/<name>/SKILL.md       # deployed skills — STANDARD DISCOVERY (+ manifests)
-│   │   ├── settings.json                # outputStyle, spinnerTips only (NO hooks here — see below)
+│   │   ├── agents/<name>.md             # deployed PROJECT agents — STANDARD DISCOVERY (IDE/plain-claude inherit)
+│   │   ├── skills/<name>/SKILL.md       # deployed PROJECT skills — STANDARD DISCOVERY (+ manifests)
+│   │   ├── settings.json                # outputStyle, spinnerTips only (global hooks live in tm-global dir)
 │   │   └── settings.local.json          # user-owned local overrides (trusty-mpm never clobbers)
 │   └── CLAUDE.md                         # project instructions — STANDARD DISCOVERY (created if absent)
-├── .trusty-mpm/                          # tm-PRIVATE; supplied via launch ARGUMENTS, not discovery
-│   ├── tm-settings.json                 # hooks block → passed as `--settings` ONLY by tm
-│   ├── tm-mcp.json                       # MCP servers (memory/search/review) → passed as `--mcp-config` ONLY by tm
-│   ├── last-instructions.md             # inspectable composed launch prompt
-│   └── managed.toml                     # marker: alias, url, ref, generated-by version, args-config paths
-└── claude-config/                        # OPTIONAL secondary CLAUDE_CONFIG_DIR (see (c)) —
-    └── …                                 #   only to fence GLOBAL trust/output-style writes, NOT load-bearing
+└── .trusty-mpm/                          # tm-PRIVATE per-project metadata
+    ├── last-instructions.md             # inspectable composed launch prompt
+    ├── tm-settings.json                 # OPTIONAL per-run --settings override / replication file
+    ├── tm-mcp.json                       # OPTIONAL per-run --mcp-config override / replication file
+    └── managed.toml                     # marker: alias, url, ref, generated-by version, tm-global-config-dir path
 ```
 
-**(b) Ownership.** trusty-mpm **owns and may overwrite**: `repo/.claude/agents/` and
-`repo/.claude/skills/` (deployed framework bundle), `repo/.claude/settings.json` (managed
-**non-hook** keys only — outputStyle, spinnerTips), `repo/CLAUDE.md` (refreshed but preserves
-user-added sections where feasible), and everything under `.trusty-mpm/` (including the
-argument-supplied `tm-settings.json` / `tm-mcp.json`) and any `claude-config/`. trusty-mpm **never**
-clobbers `repo/.claude/settings.local.json` or user source files in `repo/`.
+**(b) Ownership.** trusty-mpm **owns and may overwrite**: the entire tm-global config dir
+(`~/.trusty-mpm/claude-config/` — global hooks, global skills/slash-commands, global MCPs), plus, per
+checkout, `repo/.claude/agents/` and `repo/.claude/skills/` (deployed framework bundle of **project**
+agents/skills), `repo/.claude/settings.json` (managed **non-hook** keys only — outputStyle,
+spinnerTips), `repo/CLAUDE.md` (refreshed but preserves user-added sections where feasible), and
+everything under `.trusty-mpm/`. trusty-mpm **never** clobbers `repo/.claude/settings.local.json`,
+the user's **real** `~/.claude*`, or user source files in `repo/`.
 
-**(c) Argument-supplied config (the load-bearing mechanism) + optional `CLAUDE_CONFIG_DIR`.** The
-mechanism that makes hooks/MCPs tm-only is the **launch arguments**, not an env var: `tm` invokes
-`claude --settings .trusty-mpm/tm-settings.json --mcp-config .trusty-mpm/tm-mcp.json
-[--strict-mcp-config]` in `repo/`. `CLAUDE_CONFIG_DIR=<managed-root>/<alias>/claude-config` MAY be
-set **secondarily and optionally**, narrowly to prevent any residual *global* writes (e.g. trust into
-`~/.claude.json`, global output-styles) from escaping to the user's home — but the spec does **not**
-depend on it for the IDE-visible config or for hooks/MCPs (it is undocumented per A1 and ignored by
-the IDE extension per A3). See §SPEC-STANDALONE-MPM-04 for the invariant and §6 for the
-optionality note.
+**(c) The tm-global config dir via required `CLAUDE_CONFIG_DIR` (the load-bearing mechanism); arg
+files secondary.** The mechanism that delivers the global hooks/skills-slash-commands/MCPs **and**
+excludes the real `~/.claude` is the env var: `tm` invokes `claude` with
+`CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` and cwd `repo/`. This is **required and primary**.
+`CLAUDE_CONFIG_DIR` is **undocumented** (A1) so WI-1 must validate it against a pinned Claude Code
+version, and the VS Code/Cursor extension **ignores** it (A3) — so faithful sessions launch via `tm`.
+The verified `--settings <file>` / `--mcp-config <file>` flags (A8) are **secondary / supplementary**:
+they are useful for per-run overrides and for *manually replicating* a tm session with the **same
+arguments**, but they are **no longer** the primary delivery mechanism for hooks/MCPs (those ride in
+the tm-global config dir). When tm emits `.trusty-mpm/tm-settings.json` / `tm-mcp.json` at all, it is
+as an optional override/replication aid, not the load-bearing path. See §SPEC-STANDALONE-MPM-04 for
+the invariant and §6 for the longevity note.
 
-**(d) The marker file.** `.trusty-mpm/managed.toml` records `{alias, url, ref, settings_arg_path,
-mcp_config_arg_path, config_dir?, generated_by_version}` so `path`/`ls`/`update`/`rm` and an
+**(d) The marker file.** `.trusty-mpm/managed.toml` records `{alias, url, ref, claude_config_dir,
+settings_arg_path?, mcp_config_arg_path?, generated_by_version}` so `path`/`ls`/`update`/`rm` and an
 attaching IDE can discover the managed project — and so a human can replay the exact `tm` launch
-arguments — deterministically.
+(`CLAUDE_CONFIG_DIR` plus any optional override args) — deterministically.
 
-**Config model contrast (claude-mpm vs trusty-mpm).** claude-mpm uses **standard discovery for all
-five** customization surfaces: running `claude` in a source dir auto-discovers CLAUDE.md + agents +
-skills + hooks + MCPs from standard locations, with no custom config file. trusty-mpm uses **standard
-discovery for the three static surfaces** (CLAUDE.md + agents + skills, which therefore an IDE or a
-plain `claude` in `repo/` **do** inherit) **plus argument-supplied config files for the two dynamic
-surfaces** (hooks via `--settings`, MCPs via `--mcp-config`, which are applied **only** when `tm`
-launches the session). The practical consequence: a tm session can be **reproduced exactly** by
-invoking `claude` with the same `--settings`/`--mcp-config` arguments — and conversely, a session
-**not** launched through those arguments gets the static config but **none** of tm's hooks/MCPs.
+**Config model contrast (claude-mpm vs trusty-mpm).** claude-mpm uses the user's **real global
+`~/.claude` discovery for all five** customization surfaces: running `claude` in a source dir merges
+the real global CLAUDE.md/agents/skills/hooks/MCPs on top of project config — which is exactly why the
+maintainer's claude-mpm global hooks/MCPs would step on tm's. trusty-mpm instead points
+`CLAUDE_CONFIG_DIR` at a **tm-global config dir** that supplies the **global** surfaces (global hooks
++ global skills/slash-commands + global MCPs) while **excluding the real `~/.claude` entirely**, and
+layers the **project-local** `repo/.claude` (CLAUDE.md + project agents/skills, standard discovery) on
+top. Effective config = **tm-global (hooks + skills/slash-commands + MCPs) ⊕ project-local
+`repo/.claude` (CLAUDE.md + project agents/skills)**, real `~/.claude` excluded → no bidirectional
+pollution. The practical consequence: a tm session can be **reproduced** by launching `claude` with
+the same `CLAUDE_CONFIG_DIR` (and, optionally, the same `--settings`/`--mcp-config` override args) in
+`repo/`; conversely, a session launched **without** that `CLAUDE_CONFIG_DIR` (e.g. the IDE, which
+ignores it) gets the project-local config plus the **real** global — i.e. the step-on tm avoids.
 
-- **Inputs:** an alias + its resolved checkout (from `load`).
-- **Outputs:** the directory tree above, fully populated and isolation-compliant: static
-  CLAUDE.md/agents/skills under `repo/` (discoverable); hooks/MCPs in `.trusty-mpm/tm-settings.json`
-  and `.trusty-mpm/tm-mcp.json` (argument-supplied, not discoverable).
-- **Preconditions:** a valid checkout under `repo/`.
-- **Postconditions:** the layout is complete; the marker file records the `--settings` / `--mcp-config`
-  argument paths; the static half is discoverable in `repo/`; the dynamic half exists only as
-  tm-private argument files; no global `~/.claude*` path was written (§SPEC-STANDALONE-MPM-04).
+- **Inputs:** an alias + its resolved checkout (from `load`), plus the already-established tm-global
+  config dir (from `tm install` / `tm config`).
+- **Outputs:** the per-alias project tree above, fully populated and isolation-compliant: project-local
+  CLAUDE.md/agents/skills under `repo/` (discoverable); the global hooks/skills-slash-commands/MCPs
+  already present in the tm-global config dir (not regenerated per project).
+- **Preconditions:** a valid checkout under `repo/`, and an existing tm-global config dir.
+- **Postconditions:** the project layout is complete; the marker file records the tm-global
+  `CLAUDE_CONFIG_DIR` path (and any optional override-arg paths); the project-local half is
+  discoverable in `repo/`; the global half lives in the tm-global config dir; no **real** global
+  `~/.claude*` path was written (§SPEC-STANDALONE-MPM-04).
 - **Error conditions:** any failed write fails the generation step and reports the offending path;
-  a pre-existing non-managed dir at `<managed-root>/<alias>` without a marker file → refuse and
-  advise `tm rm`/`--force`.
+  a missing tm-global config dir → fail advising `tm install`/`tm config`; a pre-existing non-managed
+  dir at `<managed-root>/<alias>` without a marker file → refuse and advise `tm rm`/`--force`.
 
 #### Rationale (WHY)
 
-Splitting the five surfaces *by mechanism* — static (CLAUDE.md/agents/skills) into `repo/` for
-standard discovery, dynamic (hooks/MCPs) into argument-supplied files applied only at `tm` launch —
-is what makes the driver simultaneously *IDE-attachable* (the IDE opens `repo/` and inherits the
-static half with no flags) and *isolated/replicable* (hooks/MCPs apply only to tm-launched sessions
-and can be reproduced by re-passing the same `--settings`/`--mcp-config` arguments). This is the
-load-bearing design choice; the optional `CLAUDE_CONFIG_DIR` is a secondary fence for residual global
-writes only (§04, §6), deliberately **not** the central mechanism — because it is undocumented (A1)
-and the IDE extension ignores it (A3), the spec must not rest the IDE-visible config or hooks/MCPs on
-it. The marker file (which records the argument paths) gives every other verb a single source of
-truth and makes the standard auditable: a test can assert the tree's shape, that nothing escaped it,
-and that a replayed `claude --settings … --mcp-config …` reproduces the session. Splitting managed vs
-user-owned files (settings.json vs settings.local.json) preserves the user's ability to edit while
-letting `update` refresh framework artifacts safely.
+Splitting the surfaces *by where they live* — project-local (CLAUDE.md/project agents/skills) into
+`repo/` for standard discovery, and the **global** hooks/skills-slash-commands/MCPs into a **single**
+tm-global config dir selected by a **required** custom `CLAUDE_CONFIG_DIR` — is what makes the driver
+simultaneously *isolated* (the real `~/.claude` with claude-mpm's hooks/MCPs is excluded entirely, so
+the two never step on each other) and *simple* (the global layer is established **once**, not
+regenerated per project). `CLAUDE_CONFIG_DIR` is the **load-bearing** primitive: it is the only thing
+that swaps Claude Code's user-level layer away from the real `~/.claude`. Because it is undocumented
+(A1), WI-1 must validate it against a pinned Claude Code version; because the IDE extension ignores it
+(A3), faithful sessions launch via `tm` and IDE attach deliberately relies only on project-local
+discovery (§06). The `--settings`/`--mcp-config` flags (A8) are kept documented but **secondary** —
+useful for per-run overrides and for manually replicating a tm launch with the same arguments, not the
+primary delivery path. The marker file (which records the `CLAUDE_CONFIG_DIR` path) gives every other
+verb a single source of truth and makes the standard auditable: a test can assert the project tree's
+shape, that nothing escaped to the real `~/.claude*`, and that a session launched with the same
+`CLAUDE_CONFIG_DIR` reproduces the configuration. Splitting managed vs user-owned files
+(settings.json vs settings.local.json) preserves the user's ability to edit while letting `update`
+refresh framework artifacts safely.
 
 #### Implementing Modules
 
 | Module | Role |
 |--------|------|
-| `core::managed_config` (new) | Defines the layout, marker schema (incl. argument paths), ownership rules; entry point for generation + discovery. |
-| `core::session_launch::settings` | Deploys static agents/skills into `repo/.claude/`; writes the argument-supplied `.trusty-mpm/tm-settings.json` (hooks) and `.trusty-mpm/tm-mcp.json` (MCPs). |
-| `core::session_launch::prepare_session` | Composes instructions + drives the static deploy + emits the launch-argument config files. |
+| `core::managed_config` (new) | Defines the layout, marker schema (incl. the tm-global `CLAUDE_CONFIG_DIR` path), ownership rules; entry point for project-config generation + discovery. |
+| `core::session_launch::settings` | Deploys project agents/skills into `repo/.claude/`; establishes/maintains the single tm-global config dir (global hooks + skills/slash-commands + MCPs); optionally emits the secondary `.trusty-mpm/tm-settings.json` / `tm-mcp.json` override/replication files. |
+| `core::session_launch::prepare_session` | Composes instructions + drives the project-local deploy + resolves the tm-global `CLAUDE_CONFIG_DIR` for launch. |
 
 ---
 
@@ -338,47 +375,57 @@ letting `update` refresh framework artifacts safely.
 
 #### Behavior Contract (WHAT)
 
-- **Inputs:** any managed/standalone-mode operation (`load`, `run`, `update`).
-- **Outputs:** all agent/skill/output-style/trust/hook/MCP configuration is written **only** to the
-  project-local `repo/.claude/` (static: agents/skills, non-hook settings), the tm-private
-  argument-supplied files under `.trusty-mpm/` (dynamic: hooks → `tm-settings.json`, MCPs →
-  `tm-mcp.json`), and/or the **optional** per-project `claude-config/` (residual trust/output-style
-  fence only).
+- **Inputs:** any managed/standalone-mode operation (`tm install`/`tm config`, `load`, `run`,
+  `update`).
+- **Outputs:** all configuration is written **only** to (i) the single **tm-global config dir**
+  (`~/.trusty-mpm/claude-config/` — the global hooks, global skills/slash-commands, global MCPs;
+  selected at launch by the required `CLAUDE_CONFIG_DIR`) and (ii) the per-alias project-local
+  `repo/.claude/` (project agents/skills, non-hook settings) plus `.trusty-mpm/` metadata. trusty-mpm
+  writes **nothing** to the user's **real** `~/.claude/` or `~/.claude.json`.
 - **Preconditions:** the driver is in managed mode (the default for `register/load/run`).
 - **Postconditions — the invariant:** for the entire duration of a managed operation, trusty-mpm
-  writes **nothing** under `~/.claude/` (no `agents/`, `skills/`, `output-styles/`, `settings.json`)
-  and **nothing** to `~/.claude.json`. Specifically, the five current global write sites (§1.1) are,
-  in managed mode, re-targeted as follows:
+  writes **nothing** under the user's **real** `~/.claude/` (no `agents/`, `skills/`, `output-styles/`,
+  `settings.json`) and **nothing** to the real `~/.claude.json`. Isolation is achieved by (a) the
+  custom `CLAUDE_CONFIG_DIR` swapping Claude Code's user-level layer away from the real `~/.claude`
+  (excluding claude-mpm's global hooks/MCPs) and (b) all tm writes targeting only the tm-global config
+  dir and the project workspace. Specifically, the five current global write sites (§1.1) are, in
+  managed mode, re-targeted as follows:
   1. `deploy_agents_filtered` target → `repo/.claude/agents/` (project-local, standard discovery).
-  2. `deploy_skills_filtered` dest → `repo/.claude/skills/` (project-local, standard discovery).
-  3. `deploy_output_style` home → `repo/.claude/settings.json` (`outputStyle` key) or the optional
-     `<config_dir>/output-styles/`, **never** `~/.claude/output-styles/`.
-  4. `remove_global_trusty_memory_hooks` / hook composition → emits the `hooks` block into the
-     argument-supplied `.trusty-mpm/tm-settings.json` (passed via `--settings`), **never**
-     `~/.claude/settings.json`.
-  5. `preseed_workspace_trust_home` → seeds trust either in the argument-supplied settings file or
-     the optional config-dir's `.claude.json` equivalent, **never** `~/.claude.json`.
+  2. `deploy_skills_filtered` dest → `repo/.claude/skills/` (project agents) **or** the tm-global
+     config dir's `skills/` (global skills/slash-commands) — **never** the real `~/.claude/skills/`.
+  3. `deploy_output_style` home → `repo/.claude/settings.json` (`outputStyle` key) or the tm-global
+     config dir, **never** the real `~/.claude/output-styles/`.
+  4. `remove_global_trusty_memory_hooks` / hook composition → writes the **one** global `hooks` block
+     into the tm-global config dir's `settings.json` (loaded because `CLAUDE_CONFIG_DIR` selects that
+     dir as the user-level layer), **never** the real `~/.claude/settings.json`.
+  5. `preseed_workspace_trust_home` → seeds trust in the tm-global config dir's `.claude.json`
+     equivalent (under `CLAUDE_CONFIG_DIR`), **never** the real `~/.claude.json`.
 - **Error conditions:** if re-targeting cannot be honored (e.g. a deployer is hardwired to
-  `dirs::home_dir()`), the operation **must fail closed** rather than silently fall back to a global
-  write. A managed operation that would touch a `~/.claude*` path is a contract violation.
+  `dirs::home_dir()`), the operation **must fail closed** rather than silently fall back to a real
+  global write. A managed operation that would touch the user's real `~/.claude*` path is a contract
+  violation.
 
 #### Rationale (WHY)
 
 This is the core promise of the standalone driver: a user's own claude-mpm `~/.claude` setup must be
-untouched so the driver can run concurrently and *replace* it for daily work without fear. Fail-closed
-(not fall-back-to-global) is mandatory because a silent global write is exactly the collision we are
-eliminating — a degraded-but-isolated failure is acceptable; a working-but-global one is not. The
-invariant is mechanically testable (assert no writes outside `<managed-root>`), which is why it is its
-own ID and gets a dedicated integration-test work item (WI-7).
+untouched **and** excluded from the tm session, so the driver can run concurrently and *replace* it
+for daily work without the two stepping on each other. The required custom `CLAUDE_CONFIG_DIR` is what
+guarantees both directions — tm writes only to its tm-global config dir and the project workspace, and
+the real `~/.claude` (with claude-mpm's global hooks/MCPs) is never even loaded into the tm session.
+Fail-closed (not fall-back-to-real-global) is mandatory because a silent real-global write is exactly
+the collision we are eliminating — a degraded-but-isolated failure is acceptable; a
+working-but-globally-polluting one is not. The invariant is mechanically testable (assert no writes
+outside the tm-global config dir and `<managed-root>`), which is why it is its own ID and gets a
+dedicated integration-test work item (WI-7).
 
 #### Implementing Modules
 
 | Module | Role |
 |--------|------|
-| `core::agent_deployer::deploy_agents_filtered` | Accept an explicit target dir → `repo/.claude/agents/`; no `home_dir()` fallback in managed mode. |
-| `core::skill_deployer::deploy_skills_filtered` | Same: explicit dest → `repo/.claude/skills/`, no global fallback. |
-| `core::session_launch::settings` | Emit hooks into `.trusty-mpm/tm-settings.json` (for `--settings`); re-target output-style/trust to `repo/.claude/settings.json` or the optional config-dir. |
-| `core::managed_config` (new) | Supplies the argument-config paths (+ optional config-dir) and enforces the fail-closed guard. |
+| `core::agent_deployer::deploy_agents_filtered` | Accept an explicit target dir → `repo/.claude/agents/`; no real-`home_dir()` fallback in managed mode. |
+| `core::skill_deployer::deploy_skills_filtered` | Same: explicit dest → `repo/.claude/skills/` (project skills) or the tm-global config dir's `skills/` (global skills/slash-commands), no real-global fallback. |
+| `core::session_launch::settings` | Write the one global `hooks` block + global MCPs into the tm-global config dir; re-target output-style/trust to `repo/.claude/settings.json` or the tm-global config dir. |
+| `core::managed_config` (new) | Supplies the tm-global `CLAUDE_CONFIG_DIR` path (+ project paths) and enforces the fail-closed guard. |
 
 ---
 
@@ -409,16 +456,18 @@ session-manager spec and is **out of scope** here except for the seam: a managed
 
 - **Inputs:** `tm run <alias> [--task <t>]`. (No `--autonomous` flag — `tm run` is attended-only.)
 - **Outputs:** ensures the alias is loaded (calls `load` if needed; idempotent), then launches Claude
-  Code **attended/interactive** in `repo/` with the managed configuration — passing the dynamic
-  config via launch arguments `--settings .trusty-mpm/tm-settings.json --mcp-config
-  .trusty-mpm/tm-mcp.json [--strict-mcp-config]` (the static CLAUDE.md/agents/skills come from
-  standard discovery in `repo/`), optionally with `CLAUDE_CONFIG_DIR=<config_dir>` set as the
-  secondary global-write fence (§03(c), §04). The user drives the Claude Code session directly (this
-  is the claude-mpm replacement); `--task` may pre-seed the first prompt but the user retains
-  control; the process is foregrounded / attachable.
-- **Preconditions:** alias registered.
+  Code **attended/interactive** with `cwd = repo/` and **`CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config`
+  (the tm-global config dir, required)** so the global hooks + global skills/slash-commands + global
+  MCPs are supplied and the user's real `~/.claude` is excluded (§03(c), §04). The project-local
+  CLAUDE.md + project agents/skills come from standard discovery in `repo/`. Optionally, per-run
+  override args (`--settings .trusty-mpm/tm-settings.json` / `--mcp-config .trusty-mpm/tm-mcp.json`,
+  secondary) may be passed for overrides or replication. The user drives the Claude Code session
+  directly (this is the claude-mpm replacement); `--task` may pre-seed the first prompt but the user
+  retains control; the process is foregrounded / attachable.
+- **Preconditions:** alias registered; the tm-global config dir established (`tm install`/`tm config`).
 - **Postconditions:** an **attended, interactive** managed Claude Code session is running for the
-  alias with the isolation invariant intact and tm's hooks/MCPs applied via the launch arguments.
+  alias with the isolation invariant intact — global hooks/MCPs supplied via the tm-global
+  `CLAUDE_CONFIG_DIR`, the real `~/.claude` excluded, project-local config discovered from `repo/`.
 - **Error conditions:** unregistered alias → non-zero exit; load failure → propagates §02 errors.
 
 #### Rationale (WHY)
@@ -427,15 +476,17 @@ session-manager spec and is **out of scope** here except for the seam: a managed
 `tm` itself offers — autonomy is a property of the **orchestrator that drives `tm`** (the session
 manager, Layer 2), not of `tm`. Keeping the layers separate prevents surprise unattended
 commits/pushes from a hand-run `tm` and gives a single "just run it" interactive verb (`run` calls
-`load` unconditionally, leaning on §02 idempotency). Because the session is launched with explicit
-`--settings`/`--mcp-config` arguments, it is also exactly reproducible (§03).
+`load` unconditionally, leaning on §02 idempotency). Because the session is launched with the tm-global
+`CLAUDE_CONFIG_DIR` (and `cwd = repo/`), it is also reproducible (§03) — re-launching `claude` with the
+same `CLAUDE_CONFIG_DIR` in `repo/` reproduces the configuration; the optional `--settings`/`--mcp-config`
+override args make a replication command fully explicit.
 
 #### Implementing Modules
 
 | Module | Role |
 |--------|------|
-| `tm::commands::run` (new) | Resolves alias, ensures load, launches an **attended** Claude Code session with the `--settings` / `--mcp-config` launch arguments. |
-| `core::session_launch` | Launches Claude Code with the argument-supplied config (+ optional `CLAUDE_CONFIG_DIR`) for an interactive session. |
+| `tm::commands::run` (new) | Resolves alias, ensures load, launches an **attended** Claude Code session with the required `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` and `cwd = repo/` (optional `--settings`/`--mcp-config` override args). |
+| `core::session_launch` | Launches Claude Code with the tm-global `CLAUDE_CONFIG_DIR` (and optional override args) for an interactive session. |
 | Session manager (Layer 2, consumed; DOC-23) | The semi-autonomous orchestrator that *drives* tm-managed projects; **not** implemented by `tm run`. |
 
 ---
@@ -452,15 +503,17 @@ commits/pushes from a hand-run `tm` and gives a single "just run it" interactive
   (VS Code / Cursor) or a hand-launched `claude` should open.
 - **Preconditions:** alias loaded (a managed dir with a marker file exists).
 - **Postconditions — the IDE-attach contract:** opening `repo/` in an IDE or running a plain `claude`
-  in it inherits, **via standard project-local discovery**, the **static** half of the managed
+  in it inherits, **via standard project-local discovery**, the **project-local** half of the managed
   configuration — `repo/CLAUDE.md`, `repo/.claude/agents/`, `repo/.claude/skills/`, and the non-hook
-  `repo/.claude/settings.json` — because those take precedence over the user's `~/.claude` per Claude
+  `repo/.claude/settings.json` — because those take precedence over the user-level layer per Claude
   Code's settings hierarchy (Managed > CLI args > Local > Project > User). It does **NOT** inherit
-  tm's **hooks or MCPs**: those are supplied only via tm's launch arguments
-  (`--settings .trusty-mpm/tm-settings.json`, `--mcp-config .trusty-mpm/tm-mcp.json`) and are **not**
-  placed in any discovery location. To get tm's hooks/MCPs, the session must be launched via `tm`
-  (or by passing the same `--settings`/`--mcp-config` arguments to `claude`). Sessions are
-  **read-write**: the user and IDE may edit source and `settings.local.json` freely.
+  tm's **global hooks or global MCPs**: those live in the tm-global config dir selected by
+  `CLAUDE_CONFIG_DIR`, and the **VS Code / Cursor extension ignores `CLAUDE_CONFIG_DIR`** (A3) — so an
+  IDE-attached session instead loads the project-local config layered on the user's **real**
+  `~/.claude` (i.e. claude-mpm's global hooks/MCPs step on tm's). To get a faithful tm session
+  (tm-global hooks/MCPs, real `~/.claude` excluded), launch via `tm` (or `claude` with the same
+  `CLAUDE_CONFIG_DIR` set, where the harness honors it). Sessions are **read-write**: the user and IDE
+  may edit source and `settings.local.json` freely.
 - **Error conditions:** alias not loaded → non-zero exit advising `tm load <alias>`; missing/corrupt
   marker → non-zero exit.
 
@@ -469,12 +522,13 @@ commits/pushes from a hand-run `tm` and gives a single "just run it" interactive
 Project-local `CLAUDE.md` + `.claude/agents/` + `.claude/skills/` are the **portable, IDE-honored,
 statically-discovered** half of the managed config — they ride with the checkout and are respected by
 both the CLI and the VS Code extension. A stable, alias-keyed, discoverable `repo/` path is therefore
-the contract that makes IDE attach first-class for the static half: the user just opens `repo/`. The
-**dynamic** half (hooks/MCPs) is deliberately *not* IDE-inherited — it is argument-supplied so it
-applies only to tm-launched sessions; this is the price of making tm sessions reproducible and
-isolated, and the contract states it explicitly so the IDE/`tm` boundary is unambiguous (it does not
-rely on `CLAUDE_CONFIG_DIR`, which the extension ignores — see A3/§6). Read-write (not read-only)
-sessions are required for the driver to be a real daily tool.
+the contract that makes IDE attach first-class for the project-local half: the user just opens `repo/`.
+The **global** half (global hooks/skills-slash-commands/MCPs) is deliberately *not* IDE-inherited — it
+lives in the tm-global config dir reached via `CLAUDE_CONFIG_DIR`, which the **VS Code/Cursor extension
+ignores** (A3), so an IDE session instead picks up the user's real `~/.claude` (the step-on). This is
+the price of using `CLAUDE_CONFIG_DIR` as the isolation primitive, and the contract states it
+explicitly so the IDE/`tm` boundary is unambiguous: faithful, isolated sessions launch via `tm`.
+Read-write (not read-only) sessions are required for the driver to be a real daily tool.
 
 #### Implementing Modules
 
@@ -495,12 +549,16 @@ sessions are required for the driver to be a real daily tool.
 - **`tm ls [--json]`:** lists registered aliases with `{alias, url, ref, loaded?, repo_path}`. Output
   to stdout; `--json` for machine consumption. Never mutates.
 - **`tm update <alias> [--force]`:** `git fetch` + fast-forward the checkout **and** regenerate the
-  managed config (agents/skills/output-styles/instructions to the current framework bundle), in place,
-  isolation-invariant intact. `--force` allows resetting a dirty checkout (stashing or discarding per
-  flag semantics, documented at impl). Idempotent; equivalent to the refresh half of `load`.
+  **project-local** managed config (project agents/skills/output-styles/instructions to the current
+  framework bundle), in place, isolation-invariant intact. (The shared tm-global config dir — global
+  hooks/skills-slash-commands/MCPs — is maintained by `tm install`/`tm config`, not by per-alias
+  `update`.) `--force` allows resetting a dirty checkout (stashing or discarding per flag semantics,
+  documented at impl). Idempotent; equivalent to the refresh half of `load`.
 - **`tm rm <alias> [--purge]`:** deregisters the alias. Without `--purge`, leaves the managed project
   dir on disk (re-`register`+`load` re-adopts it). With `--purge`, removes the managed project dir
-  (the checkout + `claude-config/` + `.trusty-mpm/`) after confirmation. Never touches `~/.claude*`.
+  (the `repo/` checkout + `.trusty-mpm/`) after confirmation. It does **not** touch the shared
+  tm-global config dir (`~/.trusty-mpm/claude-config/`, owned by `tm install`/`tm config`) and never
+  touches the user's real `~/.claude*`.
 - **`tm path <alias>`:** defined in §SPEC-STANDALONE-MPM-06 (cross-referenced; the resolver is shared).
 - **Inputs/Outputs/Pre/Post/Errors:** each verb resolves the registry + marker; mutating verbs
   (`update`, `rm`) fail closed on a missing/corrupt marker rather than guessing; `ls` tolerates
@@ -523,48 +581,55 @@ second drift-prone code path.
 
 ---
 
-### Per-project MCP wiring (memory / search / review) {#SPEC-STANDALONE-MPM-08~draft}
+### Global MCP wiring (memory / search / review) in the tm-global config {#SPEC-STANDALONE-MPM-08~draft}
 
 **ID:** SPEC-STANDALONE-MPM-08~draft
 **Status:** Draft
 
 #### Behavior Contract (WHAT)
 
-- **Inputs:** a loaded alias's tm-private `.trusty-mpm/tm-mcp.json` (created/merged during
-  `load`/`update`), which `tm` passes via `--mcp-config` at launch.
-- **Outputs:** the argument-supplied `.trusty-mpm/tm-mcp.json` declares the trusty MCP servers for
-  this project: `trusty-memory` (`serve --stdio`), `trusty-search` (`serve`, optionally
-  `--index <id>` pinned to the project), and `trusty-review` (`review` stdio adapter) — each as a
-  `stdio` server entry. `tm` launches with `--mcp-config .trusty-mpm/tm-mcp.json` (optionally
-  `--strict-mcp-config` to make tm's set hermetic), so the managed session picks them up **only when
-  launched by `tm`** — **not** from a discovery-path `repo/.mcp.json` and **without** any global
-  `~/.claude.json` trust seed.
-- **Preconditions:** a managed project dir exists.
-- **Postconditions:** the three trusty servers are wired into the argument file and applied to the
-  tm-launched session; entries are **merged idempotently** (re-running `load`/`update` does not
-  duplicate or clobber user-added MCP servers). No global MCP/trust state is written; no discovery-path
-  `repo/.mcp.json` is required.
-- **Error conditions:** malformed pre-existing `.trusty-mpm/tm-mcp.json` → leave untouched and report
+- **Inputs:** the single **tm-global config dir** (`~/.trusty-mpm/claude-config/`), established/merged
+  at `tm install` / `tm config` time, which `tm` selects at launch via the required
+  `CLAUDE_CONFIG_DIR`.
+- **Outputs:** the tm-global config dir declares the trusty MCP servers **once, globally** for every
+  tm-launched session: `trusty-memory` (`serve --stdio`), `trusty-search` (`serve`, optionally
+  `--index <id>`), and `trusty-review` (`review` stdio adapter) — each as a `stdio` server entry in
+  the tm-global config's MCP block (`.mcp.json` or the settings MCP section under
+  `CLAUDE_CONFIG_DIR`). Because `tm` launches with `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config`,
+  the session picks them up **only when launched by `tm`** (or by `claude` with the same
+  `CLAUDE_CONFIG_DIR`) — **not** from a discovery-path `repo/.mcp.json` and **without** any write to
+  the user's **real** `~/.claude.json`.
+- **Preconditions:** the tm-global config dir exists (`tm install`/`tm config`).
+- **Postconditions:** the three trusty servers are wired into the tm-global config and applied to
+  every tm-launched session; entries are **merged idempotently** (re-running `tm config` does not
+  duplicate or clobber user-added MCP servers). No write to the real `~/.claude.json`; no
+  discovery-path `repo/.mcp.json` is required.
+- **Error conditions:** malformed pre-existing tm-global MCP config → leave untouched and report
   (mirrors the current safety stance of `preseed_workspace_trust`); a server binary absent on PATH →
   wire the entry anyway (runtime concern) but surface a `tm doctor`-style warning.
 
+> **Secondary override.** A per-run `.trusty-mpm/tm-mcp.json` passed via `--mcp-config` (optionally
+> with `--strict-mcp-config`) remains available as an **optional** per-session override/replication
+> aid (§03(c), A8) — but the global trusty triad lives in the tm-global config dir, not in a per-project
+> argument file.
+
 #### Rationale (WHY)
 
-Supplying MCPs via the `--mcp-config` launch argument (vs the current global `~/.claude.json` trust
-seed, and vs a discovery-path `repo/.mcp.json`) is what lets each managed project apply exactly its
-trusty servers **only to tm-launched sessions** in isolation, honoring §SPEC-STANDALONE-MPM-04 and
-keeping the IDE/plain-`claude` path free of tm's MCPs (§06). It also removes the last global write and
-makes the MCP set reproducible: re-passing the same `--mcp-config` argument replays it. Optional
-`--strict-mcp-config` guarantees the session sees *only* tm's servers. Adding `trusty-review`
-alongside memory/search rounds out the trusty triad. Idempotent merge preserves any MCP servers the
-user adds by hand to the argument file.
+Putting the trusty MCP servers in the **single** tm-global config dir (vs the current global
+`~/.claude.json` trust seed, and vs a discovery-path `repo/.mcp.json`) is what lets **every** managed
+session apply exactly the trusty triad **in isolation** — the tm-global config is the user-level layer
+selected by `CLAUDE_CONFIG_DIR`, so the real `~/.claude` MCPs are excluded, honoring
+§SPEC-STANDALONE-MPM-04 and keeping the IDE/plain-`claude` path free of tm's MCPs (§06). Maintaining
+the set **once** (at `tm config`) rather than regenerating a per-project arg file removes drift and the
+last real-global write. Adding `trusty-review` alongside memory/search rounds out the trusty triad.
+Idempotent merge preserves any MCP servers the user adds by hand to the tm-global config.
 
 #### Implementing Modules
 
 | Module | Role |
 |--------|------|
-| `core::session_launch::settings::inject_trusty_memory_mcp` / `inject_trusty_search_mcp` (+ new `inject_trusty_review_mcp`) | Merge server entries into `.trusty-mpm/tm-mcp.json` (the `--mcp-config` argument file). |
-| `core::session_launch::settings` (launch args) | Pass `--mcp-config .trusty-mpm/tm-mcp.json` (optionally `--strict-mcp-config`) at `tm` launch instead of seeding `~/.claude.json` or a discovery `.mcp.json`. |
+| `core::session_launch::settings::inject_trusty_memory_mcp` / `inject_trusty_search_mcp` (+ new `inject_trusty_review_mcp`) | Merge server entries **once** into the tm-global config dir's MCP block (selected at launch by `CLAUDE_CONFIG_DIR`). |
+| `core::session_launch::settings` (launch) | Launch with `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` (instead of seeding the real `~/.claude.json` or a discovery `.mcp.json`); optional `--mcp-config`/`--strict-mcp-config` per-run override. |
 
 ---
 
@@ -588,11 +653,11 @@ specs); a managed project produced by `load` is exactly the seam the session man
 
 | # | Assumption / Risk | Status | Mitigation / WI |
 |---|-------------------|--------|-----------------|
-| A1 | **`CLAUDE_CONFIG_DIR` redirects Claude Code's global config dir per-process.** Confirmed for the **CLI** (Claude Code v1.0.30+ supports it; behaves like `XDG_CONFIG_HOME`). **BUT it is officially undocumented** (not in `--help` or docs; multiple open issues request documentation). **De-emphasized:** the spec no longer rests the IDE-visible config or hooks/MCPs on it — those use the argument-supplied mechanism (A8). `CLAUDE_CONFIG_DIR` is now **optional/secondary**, used only to fence residual global trust/output-style writes. | **Secondary/optional; must still validate if used.** | **WI-1** validates the exact behavior against the pinned CC version *if* the optional fence is adopted; the load-bearing path no longer depends on it. |
+| A1 | **`CLAUDE_CONFIG_DIR` redirects Claude Code's user-level config dir per-process, *excluding* the real `~/.claude`.** Confirmed for the **CLI** (Claude Code v1.0.30+ supports it; behaves like `XDG_CONFIG_HOME`): pointing it at the tm-global config dir makes Claude Code merge **that** dir as the user-level layer instead of the real `~/.claude` (so the maintainer's claude-mpm global hooks/MCPs are excluded). **BUT it is officially undocumented** (not in `--help` or docs; multiple open issues request documentation). **This is the load-bearing isolation primitive — REQUIRED, primary:** the global hooks + skills/slash-commands + MCPs are delivered through it, and it is what prevents real-`~/.claude` step-on. | **Required/load-bearing; undocumented → must validate.** | **WI-1** validates the exact behavior (user-level swap + real-`~/.claude` exclusion) against the **pinned** Claude Code version; the whole isolation model depends on it. |
 | A2 | **`CLAUDE_CONFIG_DIR` does not suppress project-local `.claude/` creation.** Confirmed: a local `.claude/settings.local.json` may still be written in the workspace even with the var set. This is **acceptable** — the managed layout *wants* project-local files under `repo/`; we just must not assume the var centralizes everything. | **Confirmed (acceptable).** | Managed layout treats `repo/.claude/` as the statically-discovered half by design. |
-| A3 | **The VS Code / Cursor extension IGNORES `CLAUDE_CONFIG_DIR`** (reads/writes `~/.claude/` regardless). | **Confirmed risk — now moot for the load-bearing path.** | IDE-attach (§06) relies **only** on standard project-local discovery of `repo/CLAUDE.md` + `repo/.claude/agents/` + `repo/.claude/skills/`, which the extension *does* honor — **not** on the per-project config-dir. tm's hooks/MCPs are intentionally **not** IDE-inherited (argument-supplied, §06/A8). WI-1 documents this boundary. |
-| A4 | **Project-local `.claude/` precedence over user `~/.claude`.** Confirmed: precedence is Managed > CLI args > Local (`settings.local.json`) > Project (`.claude/`) > User (`~/.claude`); CLI args (`--settings` / `--mcp-config`) sit above project/user scope. | **Confirmed.** | Relied on by §03/§06/§08. |
-| A8 | **Claude Code CLI accepts argument-supplied settings + MCP config files (the load-bearing mechanism).** **Verified** against the installed CLI (v2.1.185, `claude --help`): `--settings <file-or-json>` ("Path to a settings JSON file … to load additional settings from" — the file carries the `hooks` block); `--mcp-config <configs...>` ("Load MCP servers from JSON files or strings (space-separated)"); `--strict-mcp-config` ("Only use MCP servers from `--mcp-config`, ignoring all other MCP configurations"). `--bare`/`--safe-mode` help text confirms hooks/MCPs are otherwise standard-discovery customizations. | **Verified (CLI v2.1.185).** | §03/§05/§06/§08 use these flags as the canonical mechanism; WI-1 re-confirms against the pinned CC version. |
+| A3 | **The VS Code / Cursor extension IGNORES `CLAUDE_CONFIG_DIR`** (reads/writes the real `~/.claude/` regardless). | **Confirmed risk — bounds the IDE path.** | Because the load-bearing primitive is `CLAUDE_CONFIG_DIR` (A1) and the IDE ignores it, an IDE-attached session loads project-local config layered on the **real** `~/.claude` (claude-mpm step-on) and does **not** get tm's global hooks/MCPs. IDE-attach (§06) therefore relies **only** on standard project-local discovery of `repo/CLAUDE.md` + `repo/.claude/agents/` + `repo/.claude/skills/`, which the extension *does* honor; faithful, isolated sessions launch via `tm`. WI-1 documents this boundary. |
+| A4 | **Project-local `.claude/` precedence over the user-level layer.** Confirmed: precedence is Managed > CLI args > Local (`settings.local.json`) > Project (`.claude/`) > User (the user-level layer — the real `~/.claude`, or the **tm-global config dir** when `CLAUDE_CONFIG_DIR` redirects it). | **Confirmed.** | Relied on by §03/§06/§08 — project-local `repo/.claude` overlays the tm-global user-level layer. |
+| A8 | **Claude Code CLI accepts argument-supplied settings + MCP config files (the *secondary* override mechanism).** **Verified** against the installed CLI (v2.1.185, `claude --help`): `--settings <file-or-json>` ("Path to a settings JSON file … to load additional settings from" — the file carries the `hooks` block); `--mcp-config <configs...>` ("Load MCP servers from JSON files or strings (space-separated)"); `--strict-mcp-config` ("Only use MCP servers from `--mcp-config`, ignoring all other MCP configurations"). `--bare`/`--safe-mode` help text confirms hooks/MCPs are otherwise standard-discovery customizations. **Reframed as secondary:** these flags are kept for per-run overrides and for *manually replicating* a tm launch (same arguments) — they are **no longer** the primary delivery mechanism for hooks/MCPs (that is the tm-global `CLAUDE_CONFIG_DIR`, A1). | **Verified (CLI v2.1.185); secondary.** | §03/§08 keep them documented as the optional override/replication path; WI-1 re-confirms against the pinned CC version. |
 | A5 | **Deployers are re-targetable away from `dirs::home_dir()`.** The agent/skill deployers already accept a target/dest dir; output-style/hook/trust helpers resolve `home_dir()` internally and must be parameterized. | **Verified (re-targetable; some helpers need a param).** | WI-2/WI-3 thread the config-dir through; WI-7 asserts no global writes. Fail-closed if a helper cannot be re-targeted (§04). |
 | A6 | Concurrent `load`/`update` on the same alias could race on the checkout/config. | Risk. | Per-alias advisory lock (file lock in the managed dir); document in impl. |
 | A7 | A user already has a non-managed dir where the managed root wants to write. | Risk. | Marker-file guard (§03): refuse without `--force`. |
@@ -604,17 +669,18 @@ specs); a managed project produced by `load` is exactly the seam the session man
 
 | WI | Scope | Work | Realizes | Depends on |
 |----|-------|------|----------|------------|
-| **WI-1** | **M** | **Formalize + validate the Managed Configuration Standard.** Confirm the argument-supplied mechanism against the pinned Claude Code version (`--settings` for hooks, `--mcp-config` for MCPs, `--strict-mcp-config`; verified on v2.1.185, A8); validate the **optional** `CLAUDE_CONFIG_DIR` fence (CLI honors it; IDE ignores it) only if adopted; pin a minimum CC version; write the standard doc (layout, marker schema incl. argument paths, ownership, isolation invariant, the static-discovery vs argument-supplied split) and a conformance checklist incl. session-replay via re-passed args. | SPEC-STANDALONE-MPM-03, -04 (assumptions A1–A4, A8) | — |
-| **WI-2** | **M** | **Project-local-scope the agent/skill/output-style deploys.** Thread an explicit target through `deploy_agents_filtered`, `deploy_skills_filtered` → `repo/.claude/agents/`, `repo/.claude/skills/` (standard discovery); `deploy_output_style` → `repo/.claude/settings.json` / optional config-dir; remove the `home_dir()` global fallback in managed mode (fail closed). | SPEC-STANDALONE-MPM-04 (sites 1–3) | WI-1 |
-| **WI-3** | **S** | **Emit hooks/trust into the argument-supplied config + scope the trust-seed.** Re-target hook composition (`remove_global_trusty_memory_hooks` + the managed hooks) to emit the `hooks` block into `.trusty-mpm/tm-settings.json` (the `--settings` argument file); re-target `preseed_workspace_trust_home` to that file or the optional config-dir; **stop** seeding `~/.claude.json`. | SPEC-STANDALONE-MPM-04 (sites 4–5), -08 | WI-1 |
+| **WI-1** | **M** | **Validate `CLAUDE_CONFIG_DIR` as the required isolation primitive + write the standard.** Confirm against a **pinned** Claude Code version that `CLAUDE_CONFIG_DIR` swaps the user-level layer to the tm-global config dir and **excludes the real `~/.claude`** (the load-bearing behavior, A1); confirm the IDE ignores it (A3) and document that boundary; re-confirm the **secondary** `--settings`/`--mcp-config` override flags (A8); pin a minimum CC version; write the standard doc (one tm-global config dir + per-alias project layout, marker schema incl. the `CLAUDE_CONFIG_DIR` path, ownership, isolation invariant, the project-local-discovery vs tm-global split) and a conformance checklist incl. session-replay via the same `CLAUDE_CONFIG_DIR`. | SPEC-STANDALONE-MPM-03, -04 (assumptions A1–A4, A8) | — |
+| **WI-9** | **M** | **Establish + maintain the single tm-global config dir (`tm install` / `tm config`).** Create and maintain `~/.trusty-mpm/claude-config/` holding the **one** set of global hooks, the global skills / slash-commands, and the global MCP servers (memory/search/review); idempotent merge that preserves user-added entries; this is established **once** (not per project) and is what `CLAUDE_CONFIG_DIR` selects at launch. | SPEC-STANDALONE-MPM-03, -04, -08 | WI-1 |
+| **WI-2** | **M** | **Project-local-scope the agent/skill/output-style deploys.** Thread an explicit target through `deploy_agents_filtered`, `deploy_skills_filtered` → `repo/.claude/agents/`, `repo/.claude/skills/` (project, standard discovery; global skills/slash-commands go to the tm-global config dir per WI-9); `deploy_output_style` → `repo/.claude/settings.json` / tm-global config dir; remove the real-`home_dir()` global fallback in managed mode (fail closed). | SPEC-STANDALONE-MPM-04 (sites 1–3) | WI-1 |
+| **WI-3** | **S** | **Emit the one global hooks block + trust into the tm-global config dir; stop the real-global writes.** Re-target hook composition (`remove_global_trusty_memory_hooks` + the managed hooks) to write the **single** global `hooks` block into the tm-global config dir's `settings.json` (selected by `CLAUDE_CONFIG_DIR`); re-target `preseed_workspace_trust_home` to the tm-global config dir's `.claude.json` equivalent; **stop** seeding the real `~/.claude.json`. | SPEC-STANDALONE-MPM-04 (sites 4–5), -08 | WI-1, WI-9 |
 | **WI-4** | **M** | **Standalone-driver registry + `register`/`ls`.** New registry file under the trusty-mpm config root; `tm register`, `tm ls`. Reuse/align with the DOC-22 project registry. | SPEC-STANDALONE-MPM-01, -07 (`ls`) | — |
-| **WI-5** | **L** | **`load` + managed-config generation.** Stable alias-keyed `provision_in` clone; full managed layout (`repo/` with statically-discovered CLAUDE.md/agents/skills + `.trusty-mpm/` argument files `tm-settings.json`/`tm-mcp.json` + optional `claude-config/` + marker recording the argument paths); idempotent refresh; `core::managed_config` module. | SPEC-STANDALONE-MPM-02, -03 | WI-1, WI-2, WI-3, WI-4 |
-| **WI-6** | **M** | **Attended `run` + `path`/`update`/`rm`.** Attended-only `tm run` launch that passes `--settings .trusty-mpm/tm-settings.json --mcp-config .trusty-mpm/tm-mcp.json [--strict-mcp-config]` (optionally `CLAUDE_CONFIG_DIR` as the secondary fence); **no `--autonomous` flag** (autonomy belongs to Layer 2 / the session manager); the supporting verbs over the marker. | SPEC-STANDALONE-MPM-05, -06, -07 | WI-5 |
-| **WI-7** | **M** | **Isolation-invariant integration tests.** Tests that run `load`/`run`/`update` against a sandboxed `$HOME` and assert **zero** writes outside `<managed-root>/<alias>` (no `~/.claude/`, no `~/.claude.json`); assert hooks/MCPs live only in the argument files and apply only when launched with the args (and that the static half is discoverable in `repo/`); idempotency tests for `load`/`update`; marker-guard + fail-closed tests. | SPEC-STANDALONE-MPM-04 (the invariant) | WI-5, WI-6 |
-| **WI-8** | **S** | **`trusty-review` MCP wiring into the argument file.** Add `inject_trusty_review_mcp`; assemble the trusty triad into `.trusty-mpm/tm-mcp.json` passed via `--mcp-config`. | SPEC-STANDALONE-MPM-08 | WI-3, WI-5 |
+| **WI-5** | **L** | **`load` + project-config generation (clone + project-local config; no per-project hook/MCP regen).** Stable alias-keyed `provision_in` clone; project-local layout (`repo/` with discoverable CLAUDE.md/project-agents/skills + `.trusty-mpm/` metadata + marker recording the tm-global `CLAUDE_CONFIG_DIR` path); idempotent refresh; `core::managed_config` module. `load` **no longer** regenerates per-project hooks/MCPs — those live in the tm-global config dir (WI-9). | SPEC-STANDALONE-MPM-02, -03 | WI-1, WI-2, WI-3, WI-4, WI-9 |
+| **WI-6** | **M** | **Attended `run` + `path`/`update`/`rm`.** Attended-only `tm run` launch with the **required** `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` and `cwd = repo/` (optional `--settings`/`--mcp-config` override args, secondary); **no `--autonomous` flag** (autonomy belongs to Layer 2 / the session manager); the supporting verbs over the marker. | SPEC-STANDALONE-MPM-05, -06, -07 | WI-5 |
+| **WI-7** | **M** | **Isolation-invariant integration tests.** Tests that run `load`/`run`/`update` against a sandboxed `$HOME` and assert **zero** writes to the real `~/.claude/` or `~/.claude.json` (all tm writes land in the tm-global config dir or `<managed-root>/<alias>`); assert global hooks/MCPs live only in the tm-global config dir and apply only when launched with `CLAUDE_CONFIG_DIR` set (and that the project-local half is discoverable in `repo/`); idempotency tests for `load`/`update` and `tm config`; marker-guard + fail-closed tests. | SPEC-STANDALONE-MPM-04 (the invariant) | WI-5, WI-6, WI-9 |
+| **WI-8** | **S** | **`trusty-review` MCP wiring into the tm-global config.** Add `inject_trusty_review_mcp`; assemble the trusty triad **once** into the tm-global config dir (WI-9) — applied via `CLAUDE_CONFIG_DIR`. | SPEC-STANDALONE-MPM-08 | WI-3, WI-9 |
 
-**Critical path:** WI-1 → (WI-2 ∥ WI-3 ∥ WI-4) → WI-5 → WI-6 → WI-7. WI-8 rides alongside WI-5/WI-6.
-**Parallelizable:** WI-2, WI-3, WI-4 after WI-1; WI-8 after WI-3.
+**Critical path:** WI-1 → WI-9 → (WI-2 ∥ WI-3 ∥ WI-4) → WI-5 → WI-6 → WI-7. WI-8 rides alongside WI-9/WI-5.
+**Parallelizable:** WI-2, WI-3, WI-4 after WI-1/WI-9; WI-8 after WI-9.
 **Out of scope (Layer 2):** session-manager-driven autonomy over tm-managed projects (DOC-23 /
 session-manager spec) — `tm run` itself stays attended-only.
 
@@ -622,19 +688,20 @@ session-manager spec) — `tm run` itself stays attended-only.
 
 1. **Managed root location.** `~/.trusty-mpm/projects/<alias>/` vs `~/trusty-mpm-projects/<alias>/`
    (more IDE-discoverable, outside a dotdir)? Pick one in WI-1; both honor the isolation invariant.
-2. **`CLAUDE_CONFIG_DIR` longevity (now secondary).** It is undocumented (A1) and is no longer the
-   load-bearing mechanism — hooks/MCPs ride on `--settings`/`--mcp-config` arguments (A8), and
-   CLAUDE.md/agents/skills ride on standard discovery in `repo/`. `CLAUDE_CONFIG_DIR` is retained
-   only as an **optional** fence for residual *global* writes (trust/output-style). If Anthropic
-   changes/removes it, only that secondary fence is affected (fallback: write those into the
-   argument-supplied settings file or a per-project `$HOME` shim). Track upstream issues; WI-1
-   records the pinned-version behavior if the fence is adopted.
+2. **`CLAUDE_CONFIG_DIR` longevity (load-bearing).** It is the **required, primary** isolation
+   primitive (A1) — the tm-global config dir (global hooks + skills/slash-commands + MCPs) is
+   delivered through it, and it is what excludes the real `~/.claude` step-on. It is **undocumented**,
+   so the whole isolation model rests on a behavior Anthropic could change. If that happens, the
+   fallback is to launch Claude Code under a per-session `$HOME` shim pointing at the tm-global config,
+   and/or fall back to the **secondary** `--settings`/`--mcp-config` override args (A8) for hooks/MCPs.
+   Track upstream issues; WI-1 pins and records the exact behavior against a pinned CC version.
 3. **IDE hooks/MCP parity (by design, not a gap).** An IDE-attached or plain-`claude` session in
-   `repo/` inherits the static half (CLAUDE.md/agents/skills) via discovery but **deliberately not**
-   tm's hooks/MCPs (those are argument-supplied and apply only to tm-launched sessions, §06). Is an
-   IDE-friendly way to opt into tm's hooks/MCPs wanted (e.g. a documented "launch via `tm`" or a
-   helper that prints the exact `--settings`/`--mcp-config` args), or is the tm-only contract
-   sufficient? Decide in WI-1/WI-6.
+   `repo/` inherits the project-local half (CLAUDE.md/project-agents/skills) via discovery but
+   **deliberately not** tm's global hooks/MCPs (those live in the tm-global config dir reached via
+   `CLAUDE_CONFIG_DIR`, which the IDE ignores, A3 — so the IDE instead sees the real `~/.claude`
+   step-on, §06). Is an IDE-friendly way to opt into tm's global hooks/MCPs wanted (e.g. a documented
+   "launch via `tm`", or a helper that prints the exact `CLAUDE_CONFIG_DIR` / override-arg invocation),
+   or is the tm-only contract sufficient? Decide in WI-1/WI-6.
 4. **Alias ↔ DOC-22 project registry unification.** Should the standalone alias registry *be* the
    DOC-22 named-project registry, or a thin layer over it? WI-4 decides; prefer one store.
 5. **Multi-checkout per alias.** One `repo/` per alias today. Worktree-per-task (multiple concurrent
@@ -656,9 +723,9 @@ session-manager spec) — `tm run` itself stays attended-only.
 - `crates/trusty-mpm/src/core/claude_config.rs` — `ClaudeConfigPaths` / `ClaudeConfigReader` (path model).
 - `crates/trusty-mpm/src/bin/tm/cli.rs`, `src/bin/tm/main.rs` — the `tm` command surface.
 - Claude Code settings precedence (Managed > CLI > Local > Project > User) and standard discovery of CLAUDE.md/agents/skills/hooks/MCPs — Claude Code docs.
-- **Verified Claude Code CLI flags (the argument-supplied mechanism), `claude --help`, v2.1.185:**
-  `--settings <file-or-json>` ("Path to a settings JSON file … to load additional settings from"; carries the `hooks` block);
+- `CLAUDE_CONFIG_DIR` behavior + VS Code-extension exclusion — Claude Code GitHub issues #3833, #30538, #33430 (undocumented; CLI-only; the **required, load-bearing** isolation primitive — it swaps the user-level layer to the tm-global config dir and excludes the real `~/.claude`; the IDE ignores it).
+- **Verified Claude Code CLI flags (the *secondary* override mechanism), `claude --help`, v2.1.185:**
+  `--settings <file-or-json>` ("Path to a settings JSON file … to load additional settings from"; can carry a `hooks` block);
   `--mcp-config <configs...>` ("Load MCP servers from JSON files or strings (space-separated)");
   `--strict-mcp-config` ("Only use MCP servers from `--mcp-config`, ignoring all other MCP configurations");
-  `--bare` / `--safe-mode` help text confirms hooks/MCPs are otherwise standard-discovery customizations.
-- `CLAUDE_CONFIG_DIR` behavior + VS Code-extension exclusion — Claude Code GitHub issues #3833, #30538, #33430 (undocumented; CLI-only; now the **optional/secondary** fence, not the load-bearing mechanism).
+  `--bare` / `--safe-mode` help text confirms hooks/MCPs are otherwise standard-discovery customizations. Used for per-run overrides / replication only; the primary hooks/MCP delivery is the tm-global `CLAUDE_CONFIG_DIR`.
