@@ -285,7 +285,20 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::LsAliases { json } => commands::standalone::ls_cmd(json),
         Command::Load { alias } => commands::standalone::load_cmd(&alias),
-        Command::Run { alias, task: _ } => commands::standalone::run_cmd(&alias),
+        Command::Run { alias, task } => {
+            // F5: --task is not yet implemented in the MVP standalone driver.
+            // Per spec (DOC-24), autonomous/task dispatch is the session-manager
+            // layer, not `tm run`. Warn clearly so the flag is not silently
+            // dropped without user awareness.
+            if let Some(ref t) = task {
+                eprintln!(
+                    "warning: --task '{t}' is not yet implemented in the standalone MVP \
+                     and will be ignored. Task dispatch is handled by the session-manager \
+                     layer (a future phase of DOC-24)."
+                );
+            }
+            commands::standalone::run_cmd(&alias)
+        }
         Command::Path { alias } => commands::standalone::path_cmd(&alias),
     };
 

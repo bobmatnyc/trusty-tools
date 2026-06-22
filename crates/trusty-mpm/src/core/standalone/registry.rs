@@ -15,13 +15,16 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Alias validation regex — only safe identifier characters are allowed.
+/// Compiled alias validation regex — compiled once at program start.
 ///
 /// Why: aliases appear in directory names and CLI output; tightly restricting
-/// the character set prevents path traversal and display ambiguity.
-/// What: matches `^[a-z0-9][a-z0-9._-]*$`.
+/// the character set prevents path traversal and display ambiguity. Compiling
+/// once avoids repeated `Regex::new` allocations on every `add` call.
+/// What: compiled regex matching `^[a-z0-9][a-z0-9._-]*$`.
 /// Test: `test_alias_validation` in this module.
-const ALIAS_PATTERN: &str = r"^[a-z0-9][a-z0-9._-]*$";
+static ALIAS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^[a-z0-9][a-z0-9._-]*$").expect("alias pattern is valid")
+});
 
 /// One entry in the standalone-driver registry.
 ///
@@ -104,11 +107,15 @@ impl ManagedRegistry {
     /// Load or create the registry at `<managed_root>/registry.json`.
     ///
     /// Why: all lifecycle verbs (register, load, run, ls, rm) call this as
-    /// their first step so they always operate on up-to-date state.
-    /// What: creates `managed_root` if absent, reads `registry.json` (starting
-    /// from an empty list when the file is absent or malformed), and returns
-    /// the populated [`ManagedRegistry`].
-    /// Test: `test_registry_add_and_list`.
+    /// their first step so they always operate on up-to-date state. A present
+    /// but malformed file returns an error rather than silently discarding all
+    /// aliases — that data-loss path is the bug fixed in #1548 review F1.
+    /// What: creates `managed_root` if absent; returns empty entries when the
+    /// file is missing (normal first run); returns `RegistryError::Json` when
+    /// the file is present but not valid JSON so callers can surface a clear
+    /// message to the user instead of wiping the registry.
+    /// Test: `test_registry_add_and_list`, `test_load_malformed_errors_not_empty`,
+    /// `test_load_missing_is_empty`.
     pub fn load(managed_root: &Path) -> Result<Self, RegistryError> {
         let path = managed_root.join("registry.json");
         std::fs::create_dir_all(managed_root).map_err(|source| RegistryError::Io {
@@ -116,7 +123,12 @@ impl ManagedRegistry {
             source,
         })?;
         let entries = match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str::<Vec<RegistryEntry>>(&text).unwrap_or_default(),
+            Ok(text) => {
+                // F1: present-but-malformed → propagate the parse error so the
+                // caller can surface "registry.json is malformed; fix or delete
+                // <path>" rather than silently overwriting with empty entries.
+                serde_json::from_str::<Vec<RegistryEntry>>(&text)?
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(source) => {
                 return Err(RegistryError::Io {
@@ -128,16 +140,27 @@ impl ManagedRegistry {
         Ok(Self { entries, path })
     }
 
-    /// Persist the registry to disk.
+    /// Persist the registry to disk atomically.
     ///
     /// Why: write-back semantics — the registry is mutated in memory and
     /// persisted only on explicit `save()` calls, giving callers control over
-    /// the order of mutations.
-    /// What: serializes `entries` to pretty-printed JSON and writes to `self.path`.
-    /// Test: exercised by every test that calls `add` or `remove`.
+    /// the order of mutations. Writing to a temp file then renaming (POSIX
+    /// atomic rename) prevents partial-write corruption on crash (F2 fix).
+    /// What: serializes `entries` to pretty-printed JSON, writes to a `.tmp`
+    /// sibling in the same directory, then `fs::rename`s it over the target so
+    /// the update is crash-safe.
+    /// Test: `test_atomic_save_round_trip`, plus every test that calls `add` or
+    /// `remove` exercises the write path indirectly.
     pub fn save(&self) -> Result<(), RegistryError> {
         let serialized = serde_json::to_string_pretty(&self.entries)?;
-        std::fs::write(&self.path, serialized).map_err(|source| RegistryError::Io {
+        // Write to a sibling temp file in the same directory so that `rename`
+        // is on the same filesystem and is therefore atomic on POSIX.
+        let tmp_path = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, &serialized).map_err(|source| RegistryError::Io {
+            path: tmp_path.clone(),
+            source,
+        })?;
+        std::fs::rename(&tmp_path, &self.path).map_err(|source| RegistryError::Io {
             path: self.path.clone(),
             source,
         })
@@ -241,13 +264,13 @@ impl ManagedRegistry {
 /// Validate an alias string against the allowed character set.
 ///
 /// Why: aliases appear in directory names; enforcing the regex prevents path
-/// traversal, whitespace, and ambiguous display.
+/// traversal, whitespace, and ambiguous display. Using the `LazyLock`-compiled
+/// `ALIAS_RE` avoids repeated `Regex::new` allocations on every call (F6 fix).
 /// What: returns `InvalidAlias` when the string does not match
 /// `^[a-z0-9][a-z0-9._-]*$`.
 /// Test: `test_alias_validation`.
 fn validate_alias(alias: &str) -> Result<(), RegistryError> {
-    let re = regex::Regex::new(ALIAS_PATTERN).expect("alias pattern is valid");
-    if !re.is_match(alias) {
+    if !ALIAS_RE.is_match(alias) {
         return Err(RegistryError::InvalidAlias {
             alias: alias.to_string(),
         });
@@ -318,5 +341,115 @@ mod tests {
         reg.add("proj", "https://github.com/org/a", false).unwrap();
         reg.add("proj", "https://github.com/org/a", false).unwrap();
         assert_eq!(reg.list().len(), 1);
+    }
+
+    // F1: a present-but-malformed registry.json must return an Err, not empty.
+    // A subsequent save() must NOT be called after a load error, so no data
+    // loss occurs.
+    #[test]
+    fn test_load_malformed_errors_not_empty() {
+        let (_dir, root) = tmp_root();
+        // Write a malformed (truncated) JSON file.
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("registry.json"), b"[{\"alias\":\"broken\"").unwrap();
+
+        let result = ManagedRegistry::load(&root);
+        assert!(
+            result.is_err(),
+            "load of malformed registry.json must return Err, not empty"
+        );
+        assert!(
+            matches!(result.unwrap_err(), RegistryError::Json(_)),
+            "error must be RegistryError::Json for a parse failure"
+        );
+
+        // The file must remain untouched (no data-loss overwrite happened).
+        let still_malformed = std::fs::read_to_string(root.join("registry.json")).unwrap();
+        assert!(
+            still_malformed.contains("broken"),
+            "malformed file must not be overwritten after a failed load"
+        );
+    }
+
+    // F1: a missing registry.json (first-run) should still succeed with empty.
+    #[test]
+    fn test_load_missing_is_empty() {
+        let (_dir, root) = tmp_root();
+        let reg = ManagedRegistry::load(&root).unwrap();
+        assert!(reg.list().is_empty(), "fresh load must have zero entries");
+    }
+
+    // F2: save + load must round-trip (atomic write correctness).
+    #[test]
+    fn test_atomic_save_round_trip() {
+        let (_dir, root) = tmp_root();
+        let mut reg = ManagedRegistry::load(&root).unwrap();
+        reg.add("alpha", "https://github.com/org/alpha", false)
+            .unwrap();
+        reg.add("beta", "https://github.com/org/beta", false)
+            .unwrap();
+        reg.save().unwrap();
+
+        // The .tmp sibling must not be left behind.
+        assert!(
+            !root.join("registry.json.tmp").exists(),
+            "no .tmp file should remain after a successful save"
+        );
+
+        let reg2 = ManagedRegistry::load(&root).unwrap();
+        let entries = reg2.list();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].alias, "alpha");
+        assert_eq!(entries[1].alias, "beta");
+    }
+
+    // F7: duplicate register without --force must error clearly.
+    #[test]
+    fn test_register_existing_alias_without_force_errors() {
+        let (_dir, root) = tmp_root();
+        let mut reg = ManagedRegistry::load(&root).unwrap();
+        reg.add("myproj", "https://github.com/org/a", false)
+            .unwrap();
+        reg.save().unwrap();
+
+        // Reload and try to register the same alias with a different URL.
+        let mut reg2 = ManagedRegistry::load(&root).unwrap();
+        let err = reg2
+            .add("myproj", "https://github.com/org/b", false)
+            .unwrap_err();
+        assert!(
+            matches!(err, RegistryError::DuplicateAlias { ref alias, .. } if alias == "myproj"),
+            "must return DuplicateAlias error when alias exists and --force is not set"
+        );
+        // The original URL must be preserved.
+        let reg3 = ManagedRegistry::load(&root).unwrap();
+        assert_eq!(reg3.get("myproj").unwrap().url, "https://github.com/org/a");
+    }
+
+    // F7: duplicate register WITH --force must succeed and overwrite.
+    #[test]
+    fn test_register_existing_alias_with_force_succeeds() {
+        let (_dir, root) = tmp_root();
+        let mut reg = ManagedRegistry::load(&root).unwrap();
+        reg.add("myproj", "https://github.com/org/a", false)
+            .unwrap();
+        reg.save().unwrap();
+
+        let mut reg2 = ManagedRegistry::load(&root).unwrap();
+        reg2.add("myproj", "https://github.com/org/b", true)
+            .unwrap();
+        reg2.save().unwrap();
+
+        let reg3 = ManagedRegistry::load(&root).unwrap();
+        assert_eq!(
+            reg3.list().len(),
+            1,
+            "still exactly one entry after force-overwrite"
+        );
+        assert_eq!(
+            reg3.get("myproj").unwrap().url,
+            "https://github.com/org/b",
+            "URL must be updated after --force overwrite"
+        );
     }
 }

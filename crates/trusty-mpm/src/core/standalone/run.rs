@@ -39,13 +39,16 @@ pub fn build_launch_command(repo_path: &Path, claude_config_dir: &Path) -> Comma
 ///
 /// Why: CLAUDE_CONFIG_DIR relocates `.credentials.json` away from `~/.claude/`
 /// (validated 2026-06-22 / v2.1.185, A9); without credentials the session
-/// launches but cannot make API calls. This guard lets `run_alias` warn the
-/// user early.
-/// What: returns `true` when `ANTHROPIC_API_KEY` is non-empty in the environment
+/// launches but cannot make API calls. This guard lets `run_alias` warn early.
+/// Accepting `api_key` as a parameter (rather than reading the env directly)
+/// removes the `unsafe set_var/remove_var` from tests and makes this unit-
+/// testable without env mutation under parallel test runners (F4 fix).
+/// What: returns `true` when `api_key` is `Some(s)` where `s` is non-empty
 /// OR `<claude_config_dir>/.credentials.json` exists.
-/// Test: `test_check_credentials_with_env_var`.
-pub fn check_credentials(claude_config_dir: &Path) -> bool {
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
+/// Test: `test_check_credentials_with_key_param`,
+/// `test_check_credentials_with_file`.
+pub fn check_credentials(claude_config_dir: &Path, api_key: Option<&str>) -> bool {
+    if let Some(key) = api_key
         && !key.trim().is_empty()
     {
         return true;
@@ -69,7 +72,10 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
     let repo_path = load_alias(alias, managed_root, claude_config_dir)
         .with_context(|| format!("failed to load alias '{alias}'"))?;
 
-    if !check_credentials(claude_config_dir) {
+    // Read the env var here at the call site so `check_credentials` remains
+    // pure and unit-testable without env mutation (F4 fix).
+    let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+    if !check_credentials(claude_config_dir, api_key.as_deref()) {
         eprintln!(
             "warning: no credentials found in {} and ANTHROPIC_API_KEY is not set.\n\
              The session will launch but cannot make API calls.\n\
@@ -150,23 +156,34 @@ mod tests {
         }
     }
 
+    // F4: check_credentials now accepts the key value as a parameter so tests
+    // never need unsafe env mutation (safe under parallel test runners).
     #[test]
-    fn test_check_credentials_with_env_var() {
+    fn test_check_credentials_with_key_param() {
         let tmp = TempDir::new().unwrap();
         let cfg = tmp.path().to_path_buf();
 
-        // No file, set env var.
-        // SAFETY: single-threaded test; no other threads read this var.
-        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-test-key") };
-        assert!(check_credentials(&cfg));
-        // SAFETY: same — undoing the set above.
-        unsafe { std::env::remove_var("ANTHROPIC_API_KEY") };
+        // Non-empty key → true even with no credentials file.
+        assert!(check_credentials(&cfg, Some("sk-test-key")));
 
-        // No file, no env var.
-        assert!(!check_credentials(&cfg));
+        // Empty / whitespace-only key → falls through to file check.
+        assert!(!check_credentials(&cfg, Some("")));
+        assert!(!check_credentials(&cfg, Some("   ")));
 
-        // File exists, no env var.
+        // None key, no file → false.
+        assert!(!check_credentials(&cfg, None));
+    }
+
+    #[test]
+    fn test_check_credentials_with_file() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().to_path_buf();
+
+        // No key, file exists → true.
         std::fs::write(cfg.join(".credentials.json"), r#"{"token":"t"}"#).unwrap();
-        assert!(check_credentials(&cfg));
+        assert!(check_credentials(&cfg, None));
+
+        // Both key and file → true.
+        assert!(check_credentials(&cfg, Some("sk-also-valid")));
     }
 }
