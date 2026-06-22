@@ -300,6 +300,7 @@ async fn main() -> anyhow::Result<()> {
             commands::standalone::run_cmd(&alias)
         }
         Command::Path { alias } => commands::standalone::path_cmd(&alias),
+        Command::Login => commands::standalone::login_cmd(),
     };
 
     // Top-level exit-code translation: a `tm sessions prune-idle` that found the

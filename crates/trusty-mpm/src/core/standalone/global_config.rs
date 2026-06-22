@@ -3,13 +3,31 @@
 //! Why: DOC-24 SPEC-STANDALONE-MPM-03 requires a single, shared user-level
 //! config directory that supplies the global hooks, global skills/slash-commands,
 //! and global MCP servers for ALL tm-launched sessions. Claude Code is pointed at
-//! it via the required `CLAUDE_CONFIG_DIR` env var; without it every session
-//! would be unauthenticated ("Not logged in"). This module creates that dir once
-//! and never regenerates it per project.
+//! it via the required `CLAUDE_CONFIG_DIR` env var.
+//! This module creates that dir once and never regenerates it per project.
 //! What: [`ensure_global_config_dir`] creates `<managed_root>/claude-config/`,
 //! writes a minimal `settings.json`, seeds `.credentials.json` from
-//! `~/.claude/.credentials.json` if it exists, and writes a minimal `.mcp.json`
-//! with trusty-memory and trusty-search server stubs.
+//! `~/.claude/.credentials.json` if it exists (NOTE: this file holds MCP OAuth
+//! tokens, NOT the primary session auth — see WI-10 for the auth model), and
+//! writes a minimal `.mcp.json` with trusty-memory and trusty-search server stubs.
+//!
+//! # WI-10 Auth Model
+//!
+//! Primary session auth (`claude` on a Claude Max/Pro plan) uses the macOS
+//! Keychain keyed by the `CLAUDE_CONFIG_DIR` path. Seeding `.credentials.json`
+//! does NOT establish that keychain entry — it only carries MCP OAuth tokens.
+//! The two supported auth paths are:
+//!
+//! 1. **Keychain (default):** run `tm login` once. That command launches
+//!    `claude auth login` under `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config`
+//!    so the OAuth flow creates a keychain entry for that path. All subsequent
+//!    `tm run` sessions authenticate on the Max/Pro plan automatically.
+//!
+//! 2. **API key (`--bare`):** set `ANTHROPIC_API_KEY` in the environment.
+//!    `tm run` detects the key and adds `--bare` to the `claude` invocation,
+//!    which bypasses keychain/OAuth and uses the API key directly. Useful for
+//!    CI and automation.
+//!
 //! Test: `test_global_config_dir_ensure_idempotent` in this module.
 
 use std::path::{Path, PathBuf};
@@ -48,6 +66,11 @@ pub fn ensure_global_config_dir(
 /// with explicit `src`/`dst` parameters makes real unit tests possible without
 /// `dirs::home_dir()` inside the hot path (F3 fix; previously the test
 /// replicated the logic inline rather than calling the production code).
+/// NOTE: `.credentials.json` carries MCP OAuth tokens (trusty-memory etc.),
+/// NOT the primary Claude Max/Pro session auth. Primary session auth requires
+/// a macOS Keychain entry keyed by the `CLAUDE_CONFIG_DIR` path — established
+/// via `tm login` (keychain path) or bypassed by `ANTHROPIC_API_KEY`+`--bare`
+/// (API-key path). See module-level WI-10 doc for details.
 /// What: copies `src` → `dst` when `dst` is missing OR `src` mtime is strictly
 /// newer than `dst`. When `src` is missing the function returns `Ok(())` and
 /// emits a warning. Any metadata error is treated as "copy to be safe".
@@ -62,8 +85,8 @@ pub(crate) fn seed_credentials_from(
 ) -> anyhow::Result<()> {
     if !src.exists() {
         eprintln!(
-            "warning: {} not found; \
-             set ANTHROPIC_API_KEY or run `tm install` to seed credentials",
+            "note: {} not found; MCP OAuth tokens will not be pre-seeded \
+             (primary auth is via `tm login` or ANTHROPIC_API_KEY, not this file)",
             src.display()
         );
         return Ok(());
@@ -88,17 +111,19 @@ pub(crate) fn seed_credentials_from(
     Ok(())
 }
 
-/// Copy `~/.claude/.credentials.json` into the tm-global config dir.
+/// Copy `~/.claude/.credentials.json` into the tm-global config dir (MCP tokens).
 ///
-/// Why: CLAUDE_CONFIG_DIR relocates the entire user-level layer including
-/// `.credentials.json` (validated 2026-06-22 / v2.1.185, A9). Without seeding
-/// the file the session is unauthenticated. Delegates to `seed_credentials_from`
-/// so the mtime-comparison and copy logic is unit-testable with explicit paths.
+/// Why: `.credentials.json` carries MCP OAuth tokens (trusty-memory, etc.) which
+/// are useful to pre-seed so managed sessions can reach those MCP servers. NOTE:
+/// this does NOT establish primary Claude Max/Pro session auth — that requires a
+/// macOS Keychain entry keyed by the `CLAUDE_CONFIG_DIR` path, established via
+/// `tm login` (keychain path). See module-level WI-10 auth model.
+/// Delegates to `seed_credentials_from` so the mtime-comparison and copy logic
+/// is unit-testable with explicit paths. Silently warns when the home dir or src
+/// is absent (non-blocking; primary auth is independent of this file).
 /// What: resolves `src = ~/.claude/.credentials.json` and
-/// `dst = <claude_config_dir>/.credentials.json`, then delegates to
-/// `seed_credentials_from`. Silently warns (no error) when home dir is
-/// unresolvable.
-/// Credential contents are never logged.
+/// `dst = <claude_config_dir>/.credentials.json`, delegates to
+/// `seed_credentials_from`. Credential contents are never logged.
 /// Test: `test_seed_credentials_skips_when_source_missing` exercises the
 /// missing-source path via `ensure_global_config_dir`. Direct logic is covered
 /// by the `seed_credentials_from` tests.

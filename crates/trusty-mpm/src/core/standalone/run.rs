@@ -3,13 +3,20 @@
 //! Why: `tm run <alias>` is the claude-mpm replacement — it ensures the alias
 //! is loaded, sets `CLAUDE_CONFIG_DIR` to the tm-global config dir (the
 //! load-bearing isolation primitive, DOC-24 SPEC-STANDALONE-MPM-05c), and
-//! launches `claude` in the project's `repo/` directory. This module is
-//! intentionally unit-testable: `build_launch_command` returns a configured
-//! `Command` without spawning it.
-//! What: three public functions — `build_launch_command` (pure, unit-testable),
-//! `check_credentials` (env check), and `run_alias` (orchestrator that calls
-//! load, checks credentials, builds and spawns the command).
+//! launches `claude` in the project's `repo/` directory. Auth follows the
+//! WI-10 two-path model: when `ANTHROPIC_API_KEY` is set, `claude` is launched
+//! with `--bare` (bypasses keychain/OAuth); otherwise, the session relies on
+//! the keychain entry created by `tm login`. This module is intentionally
+//! unit-testable: `build_launch_command` and `build_login_command` return
+//! configured `Command`s without spawning them.
+//! What: four public functions — `build_launch_command` (pure, unit-testable),
+//! `build_login_command` (pure, unit-testable), `check_credentials` (env check),
+//! and `run_alias` (orchestrator that calls load, checks auth, builds and spawns
+//! the command).
 //! Test: `test_build_launch_command_sets_env_and_cwd`,
+//! `test_build_launch_command_adds_bare_with_api_key`,
+//! `test_build_launch_command_no_bare_without_api_key`,
+//! `test_build_login_command_sets_env_and_invocation`,
 //! `test_check_credentials_with_env_var`.
 
 use std::path::{Path, PathBuf};
@@ -24,78 +31,156 @@ use super::registry::ManagedRegistry;
 ///
 /// Why: separating command construction from spawning makes the launch contract
 /// unit-testable without actually starting a process. The caller (or a test)
-/// can inspect program, current_dir, and env before spawning.
-/// What: returns a `Command` with program `"claude"`, cwd `repo_path`, and
-/// env `CLAUDE_CONFIG_DIR=<claude_config_dir>`. Does NOT spawn the process.
-/// Test: `test_build_launch_command_sets_env_and_cwd`.
-pub fn build_launch_command(repo_path: &Path, claude_config_dir: &Path) -> Command {
+/// can inspect program, current_dir, args, and env before spawning. The
+/// WI-10 two-path auth model is encoded here: when `api_key` is `Some(_)`, the
+/// `--bare` flag is added so Claude Code bypasses keychain/OAuth and uses the
+/// API key directly; otherwise the keychain entry created by `tm login` is used.
+/// What: returns a `Command` with program `"claude"`, cwd `repo_path`,
+/// env `CLAUDE_CONFIG_DIR=<claude_config_dir>`, and (when `api_key` is
+/// `Some(s)` with a non-empty `s`) the `--bare` arg. Does NOT spawn.
+/// Test: `test_build_launch_command_sets_env_and_cwd`,
+/// `test_build_launch_command_adds_bare_with_api_key`,
+/// `test_build_launch_command_no_bare_without_api_key`.
+pub fn build_launch_command(
+    repo_path: &Path,
+    claude_config_dir: &Path,
+    api_key: Option<&str>,
+) -> Command {
     let mut cmd = Command::new("claude");
     cmd.current_dir(repo_path);
+    cmd.env("CLAUDE_CONFIG_DIR", claude_config_dir);
+    // WI-10: when ANTHROPIC_API_KEY is set, add --bare so Claude Code bypasses
+    // keychain/OAuth reads and uses the API key directly. When the key is absent
+    // the session relies on the keychain entry created by `tm login`.
+    if let Some(key) = api_key
+        && !key.trim().is_empty()
+    {
+        cmd.arg("--bare");
+    }
+    cmd
+}
+
+/// Build the `claude auth login` `Command` for the tm-global config dir.
+///
+/// Why: `tm login` needs to run the OAuth login flow under
+/// `CLAUDE_CONFIG_DIR=<tm-global-config-dir>` so the resulting keychain entry
+/// is keyed to that dir and `tm run` sessions can authenticate on the user's
+/// Claude Max/Pro plan. Factoring out the command construction makes it
+/// unit-testable without launching a browser.
+/// What: returns a `Command` with program `"claude"`, args `["auth", "login"]`,
+/// and env `CLAUDE_CONFIG_DIR=<claude_config_dir>`. Inherits stdio so the user
+/// can complete the OAuth flow interactively. Does NOT spawn.
+/// Test: `test_build_login_command_sets_env_and_invocation`.
+pub fn build_login_command(claude_config_dir: &Path) -> Command {
+    let mut cmd = Command::new("claude");
+    cmd.args(["auth", "login"]);
     cmd.env("CLAUDE_CONFIG_DIR", claude_config_dir);
     cmd
 }
 
-/// Check whether valid credentials are available for the managed session.
+/// Determine whether the managed session will have a usable auth path.
 ///
-/// Why: CLAUDE_CONFIG_DIR relocates `.credentials.json` away from `~/.claude/`
-/// (validated 2026-06-22 / v2.1.185, A9); without credentials the session
-/// launches but cannot make API calls. This guard lets `run_alias` warn early.
+/// Why: CLAUDE_CONFIG_DIR (A9) relocates the entire `~/.claude/` tree including
+/// `.credentials.json`; a clean tm-global config dir is therefore unauthenticated.
+/// WI-10 defines two valid auth paths — `ANTHROPIC_API_KEY` (+`--bare`) and the
+/// keychain login created by `tm login`. This function encodes the same two-path
+/// check so `run_alias` can emit an informative warning when neither appears
+/// available, without blocking the launch (a keychain entry cannot be probed
+/// non-interactively).
 /// Accepting `api_key` as a parameter (rather than reading the env directly)
-/// removes the `unsafe set_var/remove_var` from tests and makes this unit-
-/// testable without env mutation under parallel test runners (F4 fix).
-/// What: returns `true` when `api_key` is `Some(s)` where `s` is non-empty
-/// OR `<claude_config_dir>/.credentials.json` exists.
+/// removes env mutation from tests and keeps this pure under parallel test
+/// runners (F4 fix).
+/// What: returns `AuthState::ApiKey` when `api_key` is `Some(s)` with a
+/// non-empty `s`; `AuthState::CredentialsFile` when
+/// `<claude_config_dir>/.credentials.json` exists; `AuthState::Unknown`
+/// otherwise (the keychain entry, if any, cannot be probed from Rust without
+/// spawning `claude auth status`, so we issue a hint instead of a hard failure).
 /// Test: `test_check_credentials_with_key_param`,
 /// `test_check_credentials_with_file`.
-pub fn check_credentials(claude_config_dir: &Path, api_key: Option<&str>) -> bool {
+#[derive(Debug, PartialEq, Eq)]
+pub enum AuthState {
+    /// ANTHROPIC_API_KEY is set — `--bare` will be used.
+    ApiKey,
+    /// `.credentials.json` exists in the tm-global config dir (MCP OAuth tokens
+    /// only, not primary session auth; kept for diagnostic purposes).
+    CredentialsFile,
+    /// Neither path is detectable non-interactively (keychain entry may still
+    /// exist from a prior `tm login` — issue a hint, not a hard failure).
+    Unknown,
+}
+
+/// Check which auth path is available for the managed session.
+///
+/// Why: see `AuthState` doc; encodes the WI-10 two-path check without probing
+/// the macOS keychain (requires spawning `claude auth status`).
+/// What: evaluates `api_key` then `.credentials.json` presence and returns the
+/// matching `AuthState`.
+/// Test: `test_check_credentials_with_key_param`, `test_check_credentials_with_file`.
+pub fn check_credentials(claude_config_dir: &Path, api_key: Option<&str>) -> AuthState {
     if let Some(key) = api_key
         && !key.trim().is_empty()
     {
-        return true;
+        return AuthState::ApiKey;
     }
-    claude_config_dir.join(".credentials.json").exists()
+    if claude_config_dir.join(".credentials.json").exists() {
+        return AuthState::CredentialsFile;
+    }
+    AuthState::Unknown
 }
 
 /// Load and run an interactive `claude` session for the given alias.
 ///
 /// Why: `tm run <alias>` is the primary daily-driver entry point. It calls
-/// `load_alias` unconditionally (idempotent), warns when credentials are
-/// absent, then spawns `claude` with inherited stdio so the user drives the
-/// session interactively.
-/// What: (1) ensures `load_alias` succeeds, (2) warns to stderr when no
-/// credential path is available (does NOT block — a session with
-/// ANTHROPIC_API_KEY still works), (3) calls `build_launch_command` and
-/// spawns it with `wait()`. The attended session's exit code is NOT treated
-/// as a tm error — the user ending an interactive session (e.g. typing `exit`
-/// or pressing Ctrl-C, which yields exit code 130) is normal, not a failure.
-/// Test: end-to-end path requires a real `claude` binary; unit-level coverage
-/// via `test_build_launch_command_sets_env_and_cwd`.
+/// `load_alias` unconditionally (idempotent), then applies the WI-10 two-path
+/// auth model: when `ANTHROPIC_API_KEY` is set the session launches with
+/// `--bare` (API-key path); otherwise it relies on the keychain entry created
+/// by `tm login` (keychain path). A best-effort stderr hint is emitted when
+/// neither a seeded `.credentials.json` nor `ANTHROPIC_API_KEY` is detected,
+/// pointing users to `tm login` — but we do not block, because a valid keychain
+/// entry cannot be probed without spawning `claude auth status`.
+/// What: (1) `load_alias` — idempotent, (2) reads `ANTHROPIC_API_KEY` and
+/// calls `check_credentials` for a hint, (3) builds the command with
+/// `build_launch_command` (which adds `--bare` when the key is set), (4)
+/// spawns and waits. The attended session's non-zero exit code is not treated
+/// as a tm error (Ctrl-C → 130, typing `exit` → 0/1, etc. are all normal).
+/// Test: end-to-end requires a real `claude` binary; auth-path logic is covered
+/// by `test_build_launch_command_adds_bare_with_api_key` and
+/// `test_build_launch_command_no_bare_without_api_key`.
 pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> anyhow::Result<()> {
     let repo_path = load_alias(alias, managed_root, claude_config_dir)
         .with_context(|| format!("failed to load alias '{alias}'"))?;
 
-    // Read the env var here at the call site so `check_credentials` remains
+    // Read ANTHROPIC_API_KEY at the call site so `check_credentials` remains
     // pure and unit-testable without env mutation (F4 fix).
     let api_key = std::env::var("ANTHROPIC_API_KEY").ok();
-    if !check_credentials(claude_config_dir, api_key.as_deref()) {
-        eprintln!(
-            "warning: no credentials found in {} and ANTHROPIC_API_KEY is not set.\n\
-             The session will launch but cannot make API calls.\n\
-             Seed credentials with `tm install` or export ANTHROPIC_API_KEY.",
-            claude_config_dir.display()
-        );
+
+    match check_credentials(claude_config_dir, api_key.as_deref()) {
+        AuthState::ApiKey => {
+            // API key present → --bare will be added by build_launch_command.
+        }
+        AuthState::CredentialsFile => {
+            // .credentials.json exists — likely MCP OAuth tokens; the primary
+            // keychain session auth was established by `tm login`.
+        }
+        AuthState::Unknown => {
+            // Cannot detect a keychain entry without spawning `claude auth
+            // status`; emit a non-blocking hint so the user knows about tm login.
+            eprintln!(
+                "hint: no ANTHROPIC_API_KEY and no .credentials.json found in {}.\n\
+                 If you haven't run `tm login` yet, do so once to authenticate\n\
+                 managed sessions on your Claude Max/Pro plan.\n\
+                 Alternatively, export ANTHROPIC_API_KEY to use the API-key path.",
+                claude_config_dir.display()
+            );
+        }
     }
 
-    let mut cmd = build_launch_command(&repo_path, claude_config_dir);
+    let mut cmd = build_launch_command(&repo_path, claude_config_dir, api_key.as_deref());
     cmd.status()
         .context("failed to spawn 'claude'; is it installed and on PATH?")?;
 
-    // The user ending an attended interactive session (e.g. Ctrl-C → exit 130
-    // or typing `exit`) commonly results in a non-zero exit code. That is not a
-    // tm error — we return Ok unconditionally here. If callers ever need to
-    // propagate the child's exit code as the process exit code they should call
-    // std::process::exit(code) directly; adding an error message here would be
-    // misleading to the user.
+    // A non-zero exit from an attended interactive session (Ctrl-C → 130,
+    // `/exit` → 0, etc.) is normal end-of-session, not a tm error.
     Ok(())
 }
 
@@ -132,7 +217,7 @@ mod tests {
         let repo = tmp.path().join("repo");
         let cfg = tmp.path().join("claude-config");
 
-        let cmd = build_launch_command(&repo, &cfg);
+        let cmd = build_launch_command(&repo, &cfg, None);
 
         // Verify program is "claude".
         assert_eq!(cmd.get_program(), "claude");
@@ -154,6 +239,84 @@ mod tests {
         }
     }
 
+    // WI-10: `--bare` MUST be present when api_key is supplied (API-key path).
+    #[test]
+    fn test_build_launch_command_adds_bare_with_api_key() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let cfg = tmp.path().join("claude-config");
+
+        let cmd = build_launch_command(&repo, &cfg, Some("sk-ant-test-key"));
+
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(
+            args.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
+            "expected --bare in args when api_key is set; got {args:?}"
+        );
+    }
+
+    // WI-10: `--bare` MUST NOT be present when no api_key (keychain path).
+    #[test]
+    fn test_build_launch_command_no_bare_without_api_key() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let cfg = tmp.path().join("claude-config");
+
+        // None key → no --bare
+        let cmd = build_launch_command(&repo, &cfg, None);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(
+            !args.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
+            "--bare must not be present when api_key is None; got {args:?}"
+        );
+
+        // Empty key → no --bare (treated same as None)
+        let cmd2 = build_launch_command(&repo, &cfg, Some(""));
+        let args2: Vec<_> = cmd2.get_args().collect();
+        assert!(
+            !args2.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
+            "--bare must not be present for empty api_key; got {args2:?}"
+        );
+
+        // Whitespace-only key → no --bare
+        let cmd3 = build_launch_command(&repo, &cfg, Some("   "));
+        let args3: Vec<_> = cmd3.get_args().collect();
+        assert!(
+            !args3.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
+            "--bare must not be present for whitespace-only key; got {args3:?}"
+        );
+    }
+
+    // WI-10: `tm login` command builder sets the correct program, args, and env.
+    #[test]
+    fn test_build_login_command_sets_env_and_invocation() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().join("claude-config");
+
+        let cmd = build_login_command(&cfg);
+
+        assert_eq!(cmd.get_program(), "claude");
+
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(
+            args,
+            vec![std::ffi::OsStr::new("auth"), std::ffi::OsStr::new("login")],
+            "expected [auth, login], got {args:?}"
+        );
+
+        let env_vars: Vec<_> = cmd.get_envs().collect();
+        let cfg_var = env_vars
+            .iter()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("CLAUDE_CONFIG_DIR"));
+        assert!(
+            cfg_var.is_some(),
+            "CLAUDE_CONFIG_DIR must be set on the login command"
+        );
+        if let Some((_, val)) = cfg_var {
+            assert_eq!(*val, Some(cfg.as_os_str()));
+        }
+    }
+
     // F4: check_credentials now accepts the key value as a parameter so tests
     // never need unsafe env mutation (safe under parallel test runners).
     #[test]
@@ -161,15 +324,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cfg = tmp.path().to_path_buf();
 
-        // Non-empty key → true even with no credentials file.
-        assert!(check_credentials(&cfg, Some("sk-test-key")));
+        // Non-empty key → ApiKey.
+        assert_eq!(
+            check_credentials(&cfg, Some("sk-test-key")),
+            AuthState::ApiKey
+        );
 
-        // Empty / whitespace-only key → falls through to file check.
-        assert!(!check_credentials(&cfg, Some("")));
-        assert!(!check_credentials(&cfg, Some("   ")));
+        // Empty / whitespace-only key → falls through to file/unknown check.
+        assert_eq!(check_credentials(&cfg, Some("")), AuthState::Unknown);
+        assert_eq!(check_credentials(&cfg, Some("   ")), AuthState::Unknown);
 
-        // None key, no file → false.
-        assert!(!check_credentials(&cfg, None));
+        // None key, no file → Unknown.
+        assert_eq!(check_credentials(&cfg, None), AuthState::Unknown);
     }
 
     #[test]
@@ -177,11 +343,14 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cfg = tmp.path().to_path_buf();
 
-        // No key, file exists → true.
+        // No key, file exists → CredentialsFile.
         std::fs::write(cfg.join(".credentials.json"), r#"{"token":"t"}"#).unwrap();
-        assert!(check_credentials(&cfg, None));
+        assert_eq!(check_credentials(&cfg, None), AuthState::CredentialsFile);
 
-        // Both key and file → true.
-        assert!(check_credentials(&cfg, Some("sk-also-valid")));
+        // Both key and file → ApiKey (API key takes precedence).
+        assert_eq!(
+            check_credentials(&cfg, Some("sk-also-valid")),
+            AuthState::ApiKey
+        );
     }
 }

@@ -1541,3 +1541,14 @@ fn cli_parses_watch_listen_with_interval() {
         other => panic!("expected watch listen, got {other:?}"),
     }
 }
+
+// WI-10: `tm login` must parse to Command::Login.
+#[test]
+fn cli_parses_login_standalone() {
+    // Why: `tm login` is the one-time keychain auth command (WI-10). It must
+    // parse cleanly to the Login variant with no required arguments.
+    // What: assert that `tm login` maps to Command::Login.
+    // Test: direct parse round-trip.
+    let cli = Cli::try_parse_from(["trusty-mpm", "login"]).unwrap();
+    assert!(matches!(cli.command, Command::Login));
+}
