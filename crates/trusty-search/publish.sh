@@ -1,103 +1,219 @@
 #!/usr/bin/env bash
-# publish.sh — Publish all trusty-* crates to crates.io in dependency order.
+# publish.sh — Publish the trusty-search crate to crates.io from the monorepo.
 #
-# PREREQUISITES:
-#   1. cargo login <token> has been run
-#   2. The crates.io account has a verified email address
-#      (https://crates.io/settings/profile)
-#   3. This script is run from the trusty-search workspace root
-#   4. The trusty-common repo is available at /tmp/trusty-common-publish
-#      (git clone https://github.com/bobmatnyc/trusty-common /tmp/trusty-common-publish)
+# Why:
+#   trusty-tools is a single Cargo workspace. The workspace-root `Cargo.toml`
+#   carries a `[patch.crates-io]` block that redirects several in-tree library
+#   crates (trusty-common, trusty-embedderd, trusty-bm25-daemon, trusty-console)
+#   to local PATH dependencies so day-to-day workspace builds resolve them from
+#   source. Those path patches MUST be stripped before `cargo publish` because
+#   crates.io rejects path-patched dependencies — publish has to resolve every
+#   dependency (including the `redb`/`redb2` 2.6+4.x pair used by the
+#   `migrate-redb` subcommand) from the live registry, exactly as a downstream
+#   consumer would. This script automates that strip → publish → restore cycle
+#   safely, so the workspace-root manifest is always left untouched afterward.
 #
-# PUBLISH ORDER:
-#   trusty-common  → trusty-embedder → trusty-mcp-core
-#   → trusty-search-core → trusty-search-service → trusty-search-mcp
-#   → trusty-search (root bin)
+# What:
+#   1. Computes the repo root via `git rev-parse` (NOT the crate dir).
+#   2. Temporarily removes the `[patch.crates-io]` block from the WORKSPACE-ROOT
+#      Cargo.toml (idempotent backup + trap-based restore on ANY exit).
+#   3. Runs `cargo publish -p trusty-search` (or `--dry-run`).
+#   4. Restores the workspace-root Cargo.toml verbatim, even on failure.
+#
+# Test:
+#   `bash crates/trusty-search/publish.sh --dry-run` from anywhere drives
+#   `cargo publish -p trusty-search --dry-run` to a successful package/verify
+#   (redb/redb2 resolve from crates.io) and leaves the root Cargo.toml unchanged
+#   (`git status --porcelain Cargo.toml` is empty afterward). A dry-run needs no
+#   crates.io token.
+#
+# PREREQUISITES (real publish only — dry-run needs none of these):
+#   1. `cargo login <token>` has been run (verified crates.io account).
+#   2. Every workspace lib that trusty-search depends on (e.g. trusty-common,
+#      trusty-embedderd) is ALREADY published at the version trusty-search pins.
+#      See `.claude/skills/cargo-publish/SKILL.md` for cross-crate ordering.
+#
+# USAGE:
+#   bash crates/trusty-search/publish.sh [--dry-run] [--help]
+#     --dry-run   Package + verify without uploading (no token required).
+#     (no flag)   Real publish to crates.io.
 
 set -euo pipefail
 
-WAIT=35  # seconds between publishes for crates.io index propagation
+CRATE="trusty-search"
+
+usage() {
+  # Self-contained usage text (a heredoc, NOT a slice of the script header).
+  # Slicing the header with `sed -n '2,40p'` was fragile: any edit that grew or
+  # reordered the leading comment block would leak raw bash or truncate the help.
+  cat <<'USAGE'
+publish.sh — Publish the trusty-search crate to crates.io from the monorepo.
+
+Strips the workspace-root [patch.crates-io] block (which redirects in-tree libs
+to local path deps) so cargo publish resolves every dependency from crates.io,
+runs the publish, and restores the manifest + lockfile verbatim on every exit.
+
+USAGE:
+  bash crates/trusty-search/publish.sh [--dry-run] [--help]
+    --dry-run   Package + verify without uploading (no crates.io token required).
+    -h, --help  Show this help and exit.
+    (no flag)   Real publish to crates.io.
+
+PREREQUISITES (real publish only — dry-run needs none of these):
+  1. `cargo login <token>` has been run (verified crates.io account).
+  2. Every workspace lib trusty-search depends on (trusty-common, trusty-embedderd,
+     …) is ALREADY published at the version trusty-search pins.
+     See .claude/skills/cargo-publish/SKILL.md for cross-crate ordering.
+USAGE
+  exit "${1:-0}"
+}
+
+DRY_RUN=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help) usage 0 ;;
+    *) echo "error: unknown argument: $arg" >&2; usage 1 ;;
+  esac
+done
 
 log() { echo "[$(date +%H:%M:%S)] $*"; }
-wait_for_index() { log "Waiting ${WAIT}s for crates.io index propagation..."; sleep "$WAIT"; }
 
 # ---------------------------------------------------------------------------
-# 1. Shared crates from trusty-common
+# Locate the workspace-root Cargo.toml (the ONLY place [patch.crates-io] lives).
 # ---------------------------------------------------------------------------
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+CARGO_TOML="$REPO_ROOT/Cargo.toml"
+CARGO_TOML_BACKUP="$REPO_ROOT/Cargo.toml.prepublish-backup"
+CARGO_LOCK="$REPO_ROOT/Cargo.lock"
+CARGO_LOCK_BACKUP="$REPO_ROOT/Cargo.lock.prepublish-backup"
 
-COMMON_DIR="/tmp/trusty-common-publish"
-if [[ ! -d "$COMMON_DIR" ]]; then
-  log "Cloning trusty-common..."
-  git clone https://github.com/bobmatnyc/trusty-common "$COMMON_DIR"
+if [[ ! -f "$CARGO_TOML" ]]; then
+  echo "error: workspace-root Cargo.toml not found at $CARGO_TOML" >&2
+  exit 1
 fi
 
-log "Publishing trusty-common v0.1.2..."
-(cd "$COMMON_DIR" && cargo publish -p trusty-common)
-wait_for_index
-
-log "Publishing trusty-embedder v0.1.0..."
-(cd "$COMMON_DIR" && cargo publish -p trusty-embedder)
-wait_for_index
-
-log "Publishing trusty-mcp-core v0.1.0..."
-(cd "$COMMON_DIR" && cargo publish -p trusty-mcp-core)
-wait_for_index
-
 # ---------------------------------------------------------------------------
-# 2. trusty-search workspace crates
-#    The [patch] block in Cargo.toml must be removed so Cargo resolves the
-#    shared crates from crates.io, not from a local path.
+# Strip / restore the [patch.crates-io] block.
+#
+# The block redirects in-tree libs to path deps; crates.io publish cannot
+# resolve path patches. We restore the manifest verbatim on EVERY exit (success,
+# failure, or Ctrl-C) via a trap, so the workspace is never left mutated.
+#
+# We back up Cargo.lock too: stripping the patch table forces cargo to re-resolve
+# the in-tree libs from the registry, which rewrites Cargo.lock (e.g. annotating
+# `trusty-common` with its explicit version). That rewrite is a publish-time
+# artifact, not an intended source change, so we restore the original lockfile
+# on exit as well — leaving the workspace exactly as we found it.
+#
+# Edge case: if Cargo.lock did NOT exist before we started, `cargo publish` may
+# CREATE one during resolution. There is then no backup to restore from, so the
+# trap must instead DELETE the newly-created lockfile — otherwise we leave a
+# stray, untracked Cargo.lock behind and the worktree is no longer "exactly as
+# found". `CARGO_LOCK_EXISTED` records the pre-existing state for the trap.
 # ---------------------------------------------------------------------------
+CARGO_LOCK_EXISTED=0
+[[ -f "$CARGO_LOCK" ]] && CARGO_LOCK_EXISTED=1
 
-WORKSPACE_ROOT="$(cd "$(dirname "$0")" && pwd)"
-CARGO_TOML="$WORKSPACE_ROOT/Cargo.toml"
-CARGO_TOML_BACKUP="$WORKSPACE_ROOT/Cargo.toml.prepublish-backup"
+restore_workspace() {
+  if [[ -f "$CARGO_TOML_BACKUP" ]]; then
+    mv -f "$CARGO_TOML_BACKUP" "$CARGO_TOML"
+    log "Restored workspace-root Cargo.toml ($CARGO_TOML)."
+  fi
+  if [[ -f "$CARGO_LOCK_BACKUP" ]]; then
+    mv -f "$CARGO_LOCK_BACKUP" "$CARGO_LOCK"
+    log "Restored workspace-root Cargo.lock ($CARGO_LOCK)."
+  elif [[ "$CARGO_LOCK_EXISTED" -eq 0 && -f "$CARGO_LOCK" ]]; then
+    # Cargo.lock was absent before but cargo created it during publish — remove
+    # the artifact so the worktree is left exactly as we found it.
+    rm -f "$CARGO_LOCK"
+    log "Removed publish-created Cargo.lock ($CARGO_LOCK) — none existed before."
+  fi
+}
+trap restore_workspace EXIT INT TERM
 
-log "Backing up Cargo.toml..."
+log "Backing up workspace-root Cargo.toml and Cargo.lock..."
 cp "$CARGO_TOML" "$CARGO_TOML_BACKUP"
+[[ "$CARGO_LOCK_EXISTED" -eq 1 ]] && cp "$CARGO_LOCK" "$CARGO_LOCK_BACKUP"
 
-log "Removing [patch] section from Cargo.toml for crates.io publish..."
-# Remove the [patch."https://github.com/bobmatnyc/trusty-common"] block
+log "Stripping [patch.crates-io] block from workspace-root Cargo.toml for publish..."
+# Remove the [patch.crates-io] table (and the comment lines immediately above it)
+# up to the next top-level table header or EOF. This drops BOTH the in-tree path
+# patches AND any future redb/redb2 patch entries, so cargo resolves everything
+# from crates.io. redb2 itself is a plain `package = "redb"` rename pinned to 2.6
+# and needs no patch entry — it resolves from the registry directly.
 python3 - "$CARGO_TOML" <<'PYEOF'
 import sys, re
 
 path = sys.argv[1]
 text = open(path).read()
 
-# Remove the patch block and the comment above it
-patched = re.sub(
-    r'\n# Local development override.*?\n\[patch\."https://github\.com/bobmatnyc/trusty-common"\]\n(?:.*\n)*?(?=\n\[|\Z)',
-    '\n',
-    text,
-    flags=re.MULTILINE
+# Match an optional run of comment AND/OR blank lines directly above the
+# [patch.crates-io] header, the header itself, and every line until the next
+# top-level table header ("[...]" at column 0) or end-of-file.
+#
+# The prefix group `(?:^(?:#.*)?\n)*` matches each leading line that is EITHER a
+# comment (`# ...`) OR blank (the `(?:#.*)?` is optional, so a bare `\n` also
+# matches). The previous `(?:^#.*\n)*` only allowed comment lines, so a BLANK
+# line separating the comment banner from the header — a very common Cargo.toml
+# layout — broke the match: the block survived, and `cargo publish` then either
+# failed or, worse, tried to publish a path-patched manifest.
+pattern = re.compile(
+    r'(?:^(?:#.*)?\n)*^\[patch\.crates-io\]\n(?:^(?!\[).*\n?)*',
+    flags=re.MULTILINE,
 )
-open(path, 'w').write(patched)
-print("Patch section removed.")
+new_text, n = pattern.subn('', text)
+if n == 0:
+    # FAIL LOUD: if the header is physically present but the regex stripped
+    # nothing, the patch block would survive into the publish — crates.io would
+    # reject it (or, worse, accept a path-patched manifest). A silent no-strip
+    # must NEVER let a publish proceed, so exit non-zero. The shell's `set -e`
+    # plus the EXIT trap then abort the run and restore the manifest verbatim.
+    if re.search(r'^\[patch\.crates-io\]', text, flags=re.MULTILINE):
+        print(
+            "error: [patch.crates-io] header is present but the strip regex "
+            "matched nothing — refusing to publish a path-patched manifest. "
+            "The patch-block layout is unexpected; fix the regex in publish.sh.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # Genuinely no patch block (already stripped / nothing to do) — benign.
+    print("WARNING: no [patch.crates-io] block found — nothing stripped.", file=sys.stderr)
+else:
+    open(path, 'w').write(new_text)
+    print(f"Stripped {n} [patch.crates-io] block(s).")
 PYEOF
 
-log "Publishing trusty-search-core v0.1.7..."
-cargo publish -p trusty-search-core
-wait_for_index
+# ---------------------------------------------------------------------------
+# Publish (or dry-run).
+# ---------------------------------------------------------------------------
+# `--allow-dirty` is REQUIRED here: stripping [patch.crates-io] from the
+# workspace-root Cargo.toml leaves an uncommitted edit, which `cargo publish`
+# otherwise refuses ("files in the working directory contain changes"). The edit
+# is transient — the EXIT trap restores the manifest the instant publish returns
+# — so allowing it is safe. The stripped patch table is workspace-build-only
+# metadata and never belongs in the published tarball regardless.
+PUBLISH_ARGS=(publish -p "$CRATE" --allow-dirty)
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  PUBLISH_ARGS+=(--dry-run)
+  log "Running DRY-RUN: cargo ${PUBLISH_ARGS[*]} (no upload, no token required)..."
+else
+  log "Publishing $CRATE to crates.io: cargo ${PUBLISH_ARGS[*]} ..."
+fi
 
-log "Publishing trusty-search-service v0.1.7..."
-cargo publish -p trusty-search-service
-wait_for_index
+# NOTE: we deliberately do NOT pass `--locked`. Stripping [patch.crates-io]
+# changes how the in-tree libs resolve (path patch → crates.io registry), which
+# legitimately rewrites Cargo.lock; `--locked` would abort that with
+# "cannot update the lock file ... because --locked was passed". Letting cargo
+# regenerate the lock against the registry is exactly what a downstream consumer
+# sees, so it is the correct publish-time resolution.
+# SKIP_UI_BUILD=1 avoids re-running the Svelte build in build.rs (the embedded
+# ui-dist/ is already committed; see crate CLAUDE.md).
+SKIP_UI_BUILD="${SKIP_UI_BUILD:-1}" cargo "${PUBLISH_ARGS[@]}"
 
-log "Publishing trusty-search-mcp v0.1.7..."
-cargo publish -p trusty-search-mcp
-wait_for_index
-
-log "Publishing trusty-search v0.1.57..."
-cargo publish -p trusty-search
-
-log "Restoring Cargo.toml with [patch] section..."
-mv "$CARGO_TOML_BACKUP" "$CARGO_TOML"
-
-log "Done! Published crates:"
-log "  https://crates.io/crates/trusty-common"
-log "  https://crates.io/crates/trusty-embedder"
-log "  https://crates.io/crates/trusty-mcp-core"
-log "  https://crates.io/crates/trusty-search-core"
-log "  https://crates.io/crates/trusty-search-service"
-log "  https://crates.io/crates/trusty-search-mcp"
-log "  https://crates.io/crates/trusty-search"
+# Restore happens via the EXIT trap.
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  log "Dry-run complete. No crate was uploaded."
+else
+  log "Done! Published: https://crates.io/crates/$CRATE"
+fi
