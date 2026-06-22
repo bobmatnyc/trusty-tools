@@ -158,9 +158,14 @@ pub(crate) fn path_cmd(alias: &str) -> anyhow::Result<()> {
 /// `ensure_global_config_dir`, then spawns `claude auth login` with
 /// `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` and inherited stdio so the
 /// user can complete the browser/OAuth flow. Prints guidance before and after.
+/// Returns an error (non-zero exit) when `claude auth login` fails or is
+/// cancelled so that `tm login && tm run …` does not proceed after a failed
+/// login.
 /// Test: command construction is unit-tested via
 /// `test_build_login_command_sets_env_and_invocation` in
-/// `core::standalone::run`. The interactive OAuth completion requires a human.
+/// `core::standalone::run`. Exit-code propagation is covered by reasoning: the
+/// `bail!` path is reached whenever `status.success()` is false. The interactive
+/// OAuth completion requires a human.
 pub(crate) fn login_cmd() -> anyhow::Result<()> {
     let root = managed_root()?;
     let cfg_dir = claude_config_dir()?;
@@ -184,12 +189,13 @@ pub(crate) fn login_cmd() -> anyhow::Result<()> {
              You can now run `tm run <alias>` — sessions will authenticate\n\
              on your Claude plan automatically (no ANTHROPIC_API_KEY needed)."
         );
+        Ok(())
     } else {
         eprintln!(
             "tm login: `claude auth login` exited with {status}.\n\
              If the OAuth flow was cancelled, run `tm login` again to retry.\n\
              Alternatively, export ANTHROPIC_API_KEY to use the API-key path instead."
         );
+        anyhow::bail!("claude auth login failed: {status}")
     }
-    Ok(())
 }

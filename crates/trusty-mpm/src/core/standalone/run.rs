@@ -20,7 +20,7 @@
 //! `test_check_credentials_with_env_var`.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use anyhow::Context;
 
@@ -35,9 +35,13 @@ use super::registry::ManagedRegistry;
 /// WI-10 two-path auth model is encoded here: when `api_key` is `Some(_)`, the
 /// `--bare` flag is added so Claude Code bypasses keychain/OAuth and uses the
 /// API key directly; otherwise the keychain entry created by `tm login` is used.
+/// Stdio is set to `Stdio::inherit()` explicitly so the attended interactive
+/// session is always connected to the terminal, even if a future caller switches
+/// from `.status()` to `.output()`.
 /// What: returns a `Command` with program `"claude"`, cwd `repo_path`,
-/// env `CLAUDE_CONFIG_DIR=<claude_config_dir>`, and (when `api_key` is
-/// `Some(s)` with a non-empty `s`) the `--bare` arg. Does NOT spawn.
+/// env `CLAUDE_CONFIG_DIR=<claude_config_dir>`, stdin/stdout/stderr set to
+/// `Stdio::inherit()`, and (when `api_key` is `Some(s)` with a non-empty `s`)
+/// the `--bare` arg. Does NOT spawn.
 /// Test: `test_build_launch_command_sets_env_and_cwd`,
 /// `test_build_launch_command_adds_bare_with_api_key`,
 /// `test_build_launch_command_no_bare_without_api_key`.
@@ -49,6 +53,9 @@ pub fn build_launch_command(
     let mut cmd = Command::new("claude");
     cmd.current_dir(repo_path);
     cmd.env("CLAUDE_CONFIG_DIR", claude_config_dir);
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
     // WI-10: when ANTHROPIC_API_KEY is set, add --bare so Claude Code bypasses
     // keychain/OAuth reads and uses the API key directly. When the key is absent
     // the session relies on the keychain entry created by `tm login`.
@@ -66,15 +73,20 @@ pub fn build_launch_command(
 /// `CLAUDE_CONFIG_DIR=<tm-global-config-dir>` so the resulting keychain entry
 /// is keyed to that dir and `tm run` sessions can authenticate on the user's
 /// Claude Max/Pro plan. Factoring out the command construction makes it
-/// unit-testable without launching a browser.
+/// unit-testable without launching a browser. Stdio inheritance is set
+/// explicitly (not left to the `.status()` default) so a future caller using
+/// `.output()` cannot silently suppress the interactive OAuth prompt.
 /// What: returns a `Command` with program `"claude"`, args `["auth", "login"]`,
-/// and env `CLAUDE_CONFIG_DIR=<claude_config_dir>`. Inherits stdio so the user
-/// can complete the OAuth flow interactively. Does NOT spawn.
+/// env `CLAUDE_CONFIG_DIR=<claude_config_dir>`, and stdin/stdout/stderr all
+/// set to `Stdio::inherit()`. Does NOT spawn.
 /// Test: `test_build_login_command_sets_env_and_invocation`.
 pub fn build_login_command(claude_config_dir: &Path) -> Command {
     let mut cmd = Command::new("claude");
     cmd.args(["auth", "login"]);
     cmd.env("CLAUDE_CONFIG_DIR", claude_config_dir);
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
     cmd
 }
 
