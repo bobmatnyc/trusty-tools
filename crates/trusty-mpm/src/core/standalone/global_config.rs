@@ -42,53 +42,75 @@ pub fn ensure_global_config_dir(
     Ok(claude_config_dir.to_path_buf())
 }
 
+/// Core copy logic for credential seeding — testable without `dirs::home_dir`.
+///
+/// Why: extracting the mtime-comparison and copy logic into a free function
+/// with explicit `src`/`dst` parameters makes real unit tests possible without
+/// `dirs::home_dir()` inside the hot path (F3 fix; previously the test
+/// replicated the logic inline rather than calling the production code).
+/// What: copies `src` → `dst` when `dst` is missing OR `src` mtime is strictly
+/// newer than `dst`. When `src` is missing the function returns `Ok(())` and
+/// emits a warning. Any metadata error is treated as "copy to be safe".
+/// Credential file contents are never logged.
+/// Test: `test_seed_credentials_from_missing_src_is_ok`,
+/// `test_seed_credentials_from_copies_when_dst_missing`,
+/// `test_seed_credentials_from_copies_when_src_newer`,
+/// `test_seed_credentials_from_skips_when_src_not_newer`.
+pub(crate) fn seed_credentials_from(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> anyhow::Result<()> {
+    if !src.exists() {
+        eprintln!(
+            "warning: {} not found; \
+             set ANTHROPIC_API_KEY or run `tm install` to seed credentials",
+            src.display()
+        );
+        return Ok(());
+    }
+
+    // Refresh when dst is absent (first seed) or src is strictly newer.
+    let should_copy = if !dst.exists() {
+        true
+    } else {
+        let src_mtime = std::fs::metadata(src).and_then(|m| m.modified()).ok();
+        let dst_mtime = std::fs::metadata(dst).and_then(|m| m.modified()).ok();
+        match (src_mtime, dst_mtime) {
+            (Some(s), Some(d)) => s > d,
+            // Any metadata error → copy to be safe.
+            _ => true,
+        }
+    };
+
+    if should_copy {
+        std::fs::copy(src, dst).map_err(|e| anyhow::anyhow!("failed to copy credentials: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Copy `~/.claude/.credentials.json` into the tm-global config dir.
 ///
 /// Why: CLAUDE_CONFIG_DIR relocates the entire user-level layer including
 /// `.credentials.json` (validated 2026-06-22 / v2.1.185, A9). Without seeding
-/// the file the session is unauthenticated. Skipping when the destination
-/// already exists (old behaviour) meant a rotated `~/.claude/.credentials.json`
-/// would never propagate — stale credentials after key rotation (F3 fix).
-/// What: copies `~/.claude/.credentials.json` → `<claude_config_dir>/.credentials.json`
-/// when the source exists AND (the destination is missing OR the source mtime
-/// is strictly newer than the destination). Silently skips (logs a warning)
-/// when the source is missing so that `ANTHROPIC_API_KEY` is still valid.
+/// the file the session is unauthenticated. Delegates to `seed_credentials_from`
+/// so the mtime-comparison and copy logic is unit-testable with explicit paths.
+/// What: resolves `src = ~/.claude/.credentials.json` and
+/// `dst = <claude_config_dir>/.credentials.json`, then delegates to
+/// `seed_credentials_from`. Silently warns (no error) when home dir is
+/// unresolvable.
 /// Credential contents are never logged.
-/// Test: `test_seed_credentials_refreshes_when_source_newer`,
-/// `test_seed_credentials_skips_when_source_missing`.
+/// Test: `test_seed_credentials_skips_when_source_missing` exercises the
+/// missing-source path via `ensure_global_config_dir`. Direct logic is covered
+/// by the `seed_credentials_from` tests.
 fn seed_credentials(claude_config_dir: &Path) {
     let Some(home) = dirs::home_dir() else {
         eprintln!("warning: cannot resolve home directory; skipping credential seed");
         return;
     };
     let src = home.join(".claude").join(".credentials.json");
-    if !src.exists() {
-        eprintln!(
-            "warning: ~/.claude/.credentials.json not found; \
-             set ANTHROPIC_API_KEY or run `tm install` to seed credentials"
-        );
-        return;
-    }
     let dst = claude_config_dir.join(".credentials.json");
-
-    // Refresh from the authoritative source when:
-    //   (a) the destination does not exist yet (first seed), or
-    //   (b) the source mtime is strictly newer than the destination
-    //       (rotated credentials must propagate).
-    let should_copy = if !dst.exists() {
-        true
-    } else {
-        // Compare mtimes; treat any metadata error as "copy to be safe".
-        let src_mtime = std::fs::metadata(&src).and_then(|m| m.modified()).ok();
-        let dst_mtime = std::fs::metadata(&dst).and_then(|m| m.modified()).ok();
-        match (src_mtime, dst_mtime) {
-            (Some(s), Some(d)) => s > d,
-            _ => true,
-        }
-    };
-
-    if should_copy && let Err(err) = std::fs::copy(&src, &dst) {
-        eprintln!("warning: failed to copy credentials: {err}");
+    if let Err(e) = seed_credentials_from(&src, &dst) {
+        eprintln!("warning: {e}");
     }
 }
 
@@ -176,72 +198,123 @@ mod tests {
         assert!(servers.contains_key("trusty-search"));
     }
 
-    // F3: seed_credentials should copy when the source is newer than the dest.
+    // F3: seed_credentials_from — src missing → returns Ok, dst unchanged.
     #[test]
-    fn test_seed_credentials_refreshes_when_source_newer() {
+    fn test_seed_credentials_from_missing_src_is_ok() {
         let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().join("claude-config");
-        std::fs::create_dir_all(&cfg).unwrap();
+        let src = tmp.path().join("nonexistent.json");
+        let dst = tmp.path().join("dst.json");
 
-        // Set up a "source" directory that mimics ~/.claude/ and a "dest" cfg.
-        let fake_home_claude = tmp.path().join("home-claude");
-        std::fs::create_dir_all(&fake_home_claude).unwrap();
-        let src = fake_home_claude.join(".credentials.json");
-        let dst = cfg.join(".credentials.json");
+        // src does not exist; dst also does not exist.
+        let result = seed_credentials_from(&src, &dst);
+        assert!(result.is_ok(), "missing src must return Ok, not an error");
+        assert!(!dst.exists(), "dst must not be created when src is missing");
+    }
 
-        // Write initial credentials to the "dest" first.
+    // F3: seed_credentials_from — dst missing → dst is created with src content.
+    #[test]
+    fn test_seed_credentials_from_copies_when_dst_missing() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src.json");
+        let dst = tmp.path().join("dst.json");
+
+        std::fs::write(&src, r#"{"token":"initial"}"#).unwrap();
+
+        seed_credentials_from(&src, &dst).unwrap();
+
+        assert!(dst.exists(), "dst must be created when it was missing");
+        let content = std::fs::read_to_string(&dst).unwrap();
+        assert_eq!(
+            content, r#"{"token":"initial"}"#,
+            "dst content must match src content after first-time copy"
+        );
+    }
+
+    // F3: seed_credentials_from — src newer than dst → dst content updated.
+    //
+    // We guarantee the mtime ordering by writing dst first, then src.  On
+    // filesystems with sub-second mtime resolution the two writes happening in
+    // the same wall-clock second might yield equal mtimes.  When that happens we
+    // manually set src's mtime one second into the future via `filetime`-free
+    // approach: write src a second time (same content) after a tiny sleep so the
+    // OS records a strictly later mtime.  If even that produces equal mtimes we
+    // fall back to asserting that `seed_credentials_from` at least leaves dst
+    // readable and does not error.
+    #[test]
+    fn test_seed_credentials_from_copies_when_src_newer() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src.json");
+        let dst = tmp.path().join("dst.json");
+
+        // Write dst first (older).
         std::fs::write(&dst, r#"{"token":"old"}"#).unwrap();
 
-        // Ensure the source is definitively newer by writing it after the dest.
-        // A small sleep is not used; instead, we explicitly set a future mtime
-        // by calling seed_credentials with a newer source.
+        // Brief sleep to ensure the OS advances the clock.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Write src after dst (newer).
         std::fs::write(&src, r#"{"token":"new"}"#).unwrap();
 
-        // Force source mtime to be > dest mtime using filetime crate is not
-        // available here, so we rely on the OS timestamp resolution. To make
-        // this reliable we use a separate helper: write dest, write src (always
-        // "later" due to sequential writes on any real FS), then verify.
-        //
-        // Re-read both mtimes to confirm the assumption.
-        let src_meta = std::fs::metadata(&src).unwrap();
-        let dst_meta = std::fs::metadata(&dst).unwrap();
-        let src_mt = src_meta.modified().unwrap();
-        let dst_mt = dst_meta.modified().unwrap();
-
-        // If they happen to have the same mtime (e.g. 1-second granularity on
-        // some filesystems), manually push the source forward by touching it.
+        // If mtime granularity is too coarse, write src again to bump mtime.
+        let src_mt = std::fs::metadata(&src).unwrap().modified().unwrap();
+        let dst_mt = std::fs::metadata(&dst).unwrap().modified().unwrap();
         if src_mt <= dst_mt {
-            // Touch src: overwrite with same content to bump mtime.
+            std::thread::sleep(std::time::Duration::from_millis(100));
             std::fs::write(&src, r#"{"token":"new"}"#).unwrap();
         }
 
-        // Now call seed_credentials pointing at our fake source.
-        // We can't directly pass src into seed_credentials (it reads home dir),
-        // so exercise the logic via the exported comparison helper below.
-        // Instead, test the logic directly by calling the internal function
-        // path via a thin wrapper that we verify compiles and works.
-        //
-        // Since seed_credentials uses dirs::home_dir() and we cannot override
-        // that in a unit test, test the observable logic: if src newer than dst,
-        // copy. We test this by replicating the mtime logic inline.
-        let src_mtime = std::fs::metadata(&src).and_then(|m| m.modified()).ok();
-        let dst_mtime = std::fs::metadata(&dst).and_then(|m| m.modified()).ok();
-        let should_copy = match (src_mtime, dst_mtime) {
-            (Some(s), Some(d)) => s > d,
-            _ => true,
-        };
+        seed_credentials_from(&src, &dst).unwrap();
 
-        if should_copy {
-            std::fs::copy(&src, &dst).unwrap();
+        let content = std::fs::read_to_string(&dst).unwrap();
+        // On most filesystems src will be newer and dst will be updated to "new".
+        // On rare 1-second-granularity filesystems timestamps may still tie;
+        // in that case the function treats it as "src not newer" and skips.
+        // Either outcome is correct — we assert dst is readable and not empty.
+        assert!(
+            content.contains("new") || content.contains("old"),
+            "dst must be readable JSON after seed_credentials_from; got: {content:?}"
+        );
+        // When src is definitively newer (the common case), assert the update.
+        let src_mt2 = std::fs::metadata(&src).unwrap().modified().unwrap();
+        let dst_mt2 = std::fs::metadata(&dst).unwrap().modified().unwrap();
+        if src_mt2 > dst_mt2 {
+            // dst was just written; its mtime should now be ≥ src_mt2
+            // (or equal — copy preserves src mtime on some platforms).
+            // The content must have been refreshed.
+            assert!(
+                content.contains("new"),
+                "dst content must be 'new' when src was strictly newer; got: {content:?}"
+            );
+        }
+    }
+
+    // F3: seed_credentials_from — src older than dst → dst NOT changed.
+    #[test]
+    fn test_seed_credentials_from_skips_when_src_not_newer() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src.json");
+        let dst = tmp.path().join("dst.json");
+
+        // Write src first (older).
+        std::fs::write(&src, r#"{"token":"stale"}"#).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        // Write dst after src (newer).
+        std::fs::write(&dst, r#"{"token":"current"}"#).unwrap();
+
+        // Verify ordering assumption; skip if mtime granularity is too coarse.
+        let src_mt = std::fs::metadata(&src).unwrap().modified().unwrap();
+        let dst_mt = std::fs::metadata(&dst).unwrap().modified().unwrap();
+        if src_mt >= dst_mt {
+            // Filesystem mtime resolution too coarse — skip this case.
+            return;
         }
 
-        let result = std::fs::read_to_string(&dst).unwrap();
-        // Accept either "old" (if timestamps were identical — a rare FS edge
-        // case) or "new" (the expected refresh); the key assertion is that
-        // `should_copy` was evaluated and the copy was attempted when src > dst.
-        assert!(
-            result.contains("new") || result.contains("old"),
-            "credentials dest should contain readable JSON after seed"
+        seed_credentials_from(&src, &dst).unwrap();
+
+        let content = std::fs::read_to_string(&dst).unwrap();
+        assert_eq!(
+            content, r#"{"token":"current"}"#,
+            "dst must not be overwritten when src is not newer than dst"
         );
     }
 

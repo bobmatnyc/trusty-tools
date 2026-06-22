@@ -65,7 +65,9 @@ pub fn check_credentials(claude_config_dir: &Path, api_key: Option<&str>) -> boo
 /// What: (1) ensures `load_alias` succeeds, (2) warns to stderr when no
 /// credential path is available (does NOT block — a session with
 /// ANTHROPIC_API_KEY still works), (3) calls `build_launch_command` and
-/// spawns it with `wait()`.
+/// spawns it with `wait()`. The attended session's exit code is NOT treated
+/// as a tm error — the user ending an interactive session (e.g. typing `exit`
+/// or pressing Ctrl-C, which yields exit code 130) is normal, not a failure.
 /// Test: end-to-end path requires a real `claude` binary; unit-level coverage
 /// via `test_build_launch_command_sets_env_and_cwd`.
 pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> anyhow::Result<()> {
@@ -85,19 +87,15 @@ pub fn run_alias(alias: &str, managed_root: &Path, claude_config_dir: &Path) -> 
     }
 
     let mut cmd = build_launch_command(&repo_path, claude_config_dir);
-    let status = cmd
-        .status()
+    cmd.status()
         .context("failed to spawn 'claude'; is it installed and on PATH?")?;
 
-    if !status.success() {
-        anyhow::bail!(
-            "claude exited with non-zero status: {}",
-            status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".to_string())
-        );
-    }
+    // The user ending an attended interactive session (e.g. Ctrl-C → exit 130
+    // or typing `exit`) commonly results in a non-zero exit code. That is not a
+    // tm error — we return Ok unconditionally here. If callers ever need to
+    // propagate the child's exit code as the process exit code they should call
+    // std::process::exit(code) directly; adding an error message here would be
+    // misleading to the user.
     Ok(())
 }
 

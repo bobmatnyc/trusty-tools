@@ -34,7 +34,9 @@ pub struct ManagedMarker {
     pub alias: String,
     /// The clone URL.
     pub url: String,
-    /// The git ref checked out (default `"main"`).
+    /// Sentinel for the branch/ref intent (currently always `"default"`, meaning
+    /// the remote's default branch was cloned without `-b`; branch selection is
+    /// a future enhancement — do not interpret this as a literal Git ref name).
     pub git_ref: String,
     /// Absolute path to the tm-global CLAUDE_CONFIG_DIR.
     pub claude_config_dir: String,
@@ -186,7 +188,14 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         let cfg = tmp.path().join("claude-config");
 
-        write_marker(&repo, "my-alias", "https://github.com/org/r", "main", &cfg).unwrap();
+        write_marker(
+            &repo,
+            "my-alias",
+            "https://github.com/org/r",
+            "default",
+            &cfg,
+        )
+        .unwrap();
 
         let toml_path = repo.join(".trusty-mpm").join("managed.toml");
         assert!(toml_path.exists());
@@ -194,6 +203,9 @@ mod tests {
         let marker: ManagedMarker = toml::from_str(&text).unwrap();
         assert_eq!(marker.alias, "my-alias");
         assert_eq!(marker.url, "https://github.com/org/r");
-        assert_eq!(marker.git_ref, "main");
+        assert_eq!(
+            marker.git_ref, "default",
+            "git_ref must be the 'default' sentinel, not a literal branch name"
+        );
     }
 }

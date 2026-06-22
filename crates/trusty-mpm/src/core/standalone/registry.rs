@@ -28,9 +28,9 @@ static ALIAS_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(||
 
 /// One entry in the standalone-driver registry.
 ///
-/// Why: stores the alias, clone URL, git ref, and creation timestamp so every
-/// lifecycle verb (`load`, `run`, `path`, `ls`, `rm`) can resolve the alias to
-/// its repository without further user input.
+/// Why: stores the alias, clone URL, git ref sentinel, and creation timestamp
+/// so every lifecycle verb (`load`, `run`, `path`, `ls`, `rm`) can resolve
+/// the alias to its repository without further user input.
 /// What: a flat struct serialized as a JSON object within the registry array.
 /// Test: round-tripped by `test_registry_add_and_list`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,7 +39,10 @@ pub struct RegistryEntry {
     pub alias: String,
     /// Clone-able URL (HTTPS or SSH form).
     pub url: String,
-    /// Git branch/ref to check out (default `"main"`).
+    /// Sentinel describing the branch/ref intent.  Currently always
+    /// `"default"`, meaning `clone_repo` clones the remote's default branch
+    /// without `-b`.  Branch selection is a future enhancement; this field
+    /// must not be interpreted as a literal Git ref name in MVP code.
     pub git_ref: String,
     /// RFC-3339 creation timestamp.
     pub created_at: String,
@@ -192,7 +195,10 @@ impl ManagedRegistry {
         self.entries.push(RegistryEntry {
             alias: alias.to_string(),
             url: url.to_string(),
-            git_ref: "main".to_string(),
+            // "default" is a sentinel meaning "clone the remote's default
+            // branch without -b".  Branch selection is not implemented in the
+            // MVP; the stored value must not be passed as a literal Git ref.
+            git_ref: "default".to_string(),
             created_at: now,
         });
         Ok(())
@@ -302,6 +308,10 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].alias, "my-project");
         assert_eq!(entries[0].url, "https://github.com/org/repo");
+        assert_eq!(
+            entries[0].git_ref, "default",
+            "git_ref must be the 'default' sentinel, not a literal branch name"
+        );
     }
 
     #[test]
