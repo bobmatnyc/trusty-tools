@@ -278,6 +278,15 @@ async fn main() -> anyhow::Result<()> {
         // verification failure/timeout returns `Err`, which `main` maps to a
         // non-zero process exit (the #1051 acceptance criterion).
         Command::Meta { action } => commands::meta::meta(action).await,
+
+        // DOC-24: standalone managed driver commands.
+        Command::Register { alias, url, force } => {
+            commands::standalone::register_cmd(&alias, &url, force)
+        }
+        Command::LsAliases { json } => commands::standalone::ls_cmd(json),
+        Command::Load { alias } => commands::standalone::load_cmd(&alias),
+        Command::Run { alias, task: _ } => commands::standalone::run_cmd(&alias),
+        Command::Path { alias } => commands::standalone::path_cmd(&alias),
     };
 
     // Top-level exit-code translation: a `tm sessions prune-idle` that found the

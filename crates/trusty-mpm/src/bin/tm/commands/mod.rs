@@ -25,6 +25,7 @@ pub(crate) mod services;
 pub(crate) mod session;
 pub(crate) mod slack;
 pub(crate) mod sm_serve;
+pub(crate) mod standalone;
 pub(crate) mod supervisor;
 pub(crate) mod telegram;
 pub(crate) mod ticket;
