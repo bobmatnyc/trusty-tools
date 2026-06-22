@@ -8,8 +8,11 @@
 //! What: [`ensure_global_config_dir`] creates `<managed_root>/claude-config/`,
 //! writes a minimal `settings.json`, seeds `.credentials.json` from
 //! `~/.claude/.credentials.json` if it exists (NOTE: this file holds MCP OAuth
-//! tokens, NOT the primary session auth — see WI-10 for the auth model), and
-//! writes a minimal `.mcp.json` with trusty-memory and trusty-search server stubs.
+//! tokens, NOT the primary session auth — see WI-10 for the auth model), writes
+//! a minimal `.mcp.json` with trusty-memory and trusty-search server stubs, and
+//! (WI-2) deploys bundled agents and skills from
+//! `<managed_root>/framework/{agents,skills}` into the managed config dir so
+//! that every tm-launched session starts with the full agent/skill set.
 //!
 //! # WI-10 Auth Model
 //!
@@ -28,20 +31,24 @@
 //!    which bypasses keychain/OAuth and uses the API key directly. Useful for
 //!    CI and automation.
 //!
-//! Test: `test_global_config_dir_ensure_idempotent` in this module.
+//! Test: `test_global_config_dir_ensure_idempotent` and
+//! `test_deploy_agents_and_skills_*` in this module.
 
 use std::path::{Path, PathBuf};
 
 /// Ensure the single tm-global config dir exists, seeding minimal content.
 ///
 /// Why: `tm run` calls this before launching `claude` so the CLAUDE_CONFIG_DIR
-/// always contains a valid `settings.json` and MCP config. Idempotent — safe to
-/// call on every launch.
+/// always contains a valid `settings.json`, MCP config, and (WI-2) the bundled
+/// agents and skills. Idempotent — safe to call on every launch.
 /// What: creates `<managed_root>/claude-config/`, writes `settings.json` (`{}`
 /// when absent), copies `~/.claude/.credentials.json` if found (silently skips
-/// otherwise), and writes `.mcp.json` with trusty-memory + trusty-search stubs
-/// (idempotent via the inject pattern).
-/// Test: `test_global_config_dir_ensure_idempotent`.
+/// otherwise), writes `.mcp.json` with trusty-memory + trusty-search stubs
+/// (idempotent via the inject pattern), then deploys bundled agents and skills
+/// via [`deploy_agents_and_skills`].
+/// Test: `test_global_config_dir_ensure_idempotent`,
+/// `test_deploy_agents_and_skills_populates_config_dir`,
+/// `test_deploy_agents_and_skills_missing_source_is_ok`.
 pub fn ensure_global_config_dir(
     managed_root: &Path,
     claude_config_dir: &Path,
@@ -55,9 +62,61 @@ pub fn ensure_global_config_dir(
 
     seed_credentials(claude_config_dir);
     ensure_mcp_config(claude_config_dir)?;
+    deploy_agents_and_skills(managed_root, claude_config_dir)?;
 
-    let _ = managed_root;
     Ok(claude_config_dir.to_path_buf())
+}
+
+/// Deploy bundled agents and skills into the managed CLAUDE_CONFIG_DIR (WI-2).
+///
+/// Why: managed `tm run` sessions use `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config/`
+/// which starts empty — without deploying the trusty-mpm agents and skills, sessions
+/// start with NO agent/skill set, defeating the purpose of the managed driver.
+/// This function populates `<claude_config_dir>/agents/` and
+/// `<claude_config_dir>/skills/` from the framework sources installed by `tm install`.
+/// What: calls [`crate::core::agent_deployer::deploy_agents`] and
+/// [`crate::core::skill_deployer::deploy_skills`] (the same deployers used by
+/// `tm install` for the real `~/.claude` dirs), each guarded by a source-dir
+/// existence check. If a source dir is missing (framework not yet installed),
+/// emits a hint to stderr and skips without error so `tm load`/`tm run`/`tm login`
+/// remain functional before `tm install` has been run. Errors from the deployers
+/// are surfaced as `anyhow::Error`.
+/// Test: `test_deploy_agents_and_skills_populates_config_dir` (happy-path),
+/// `test_deploy_agents_and_skills_missing_source_is_ok` (pre-install guard).
+// TODO(WI-2): output-style deployer — none exists yet (`output_style.rs` handles
+// prompt injection, not filesystem deployment into CLAUDE_CONFIG_DIR); follow-up
+// ticket needed to wire a style deployer here when one is implemented.
+fn deploy_agents_and_skills(managed_root: &Path, claude_config_dir: &Path) -> anyhow::Result<()> {
+    let agents_src = managed_root.join("framework").join("agents");
+    let skills_src = managed_root.join("framework").join("skills");
+    let agents_dest = claude_config_dir.join("agents");
+    let skills_dest = claude_config_dir.join("skills");
+
+    // Guard: if agents source dir is missing (tm install not yet run), skip and
+    // print a hint to stderr. Never error — tm load/run/login must stay functional
+    // before the framework is installed.
+    if !agents_src.exists() {
+        eprintln!(
+            "note: no bundled agents found at {}; run `tm install` to populate them",
+            agents_src.display()
+        );
+    } else {
+        crate::core::agent_deployer::deploy_agents(&agents_src, &agents_dest)
+            .map_err(|e| anyhow::anyhow!("failed to deploy agents into managed config dir: {e}"))?;
+    }
+
+    // Guard: same for skills.
+    if !skills_src.exists() {
+        eprintln!(
+            "note: no bundled skills found at {}; run `tm install` to populate them",
+            skills_src.display()
+        );
+    } else {
+        crate::core::skill_deployer::deploy_skills(&skills_src, &skills_dest)
+            .map_err(|e| anyhow::anyhow!("failed to deploy skills into managed config dir: {e}"))?;
+    }
+
+    Ok(())
 }
 
 /// Core copy logic for credential seeding — testable without `dirs::home_dir`.
@@ -360,5 +419,101 @@ mod tests {
         // doesn't exist. We cannot guarantee the source state in CI/dev, so
         // only assert that the function returns Ok (no panic).
         assert!(claude_config.join("settings.json").exists());
+    }
+
+    // WI-2: deploy_agents_and_skills — happy path: agent and skill source dirs
+    // exist; both must be deployed into the managed config dir.
+    #[test]
+    fn test_deploy_agents_and_skills_populates_config_dir() {
+        let tmp = TempDir::new().unwrap();
+        let managed_root = tmp.path().join("managed");
+        let claude_config = managed_root.join("claude-config");
+
+        // Write a fake agent source file under <managed_root>/framework/agents/.
+        let agents_src = managed_root.join("framework").join("agents");
+        std::fs::create_dir_all(&agents_src).unwrap();
+        std::fs::write(
+            agents_src.join("my-agent.md"),
+            "---\nname: my-agent\nrole: engineer\n---\n\n# My Agent\n\nAgent content.\n",
+        )
+        .unwrap();
+
+        // Write a fake skill source file under <managed_root>/framework/skills/.
+        let skills_src = managed_root.join("framework").join("skills");
+        std::fs::create_dir_all(&skills_src).unwrap();
+        std::fs::write(
+            skills_src.join("my-skill.md"),
+            "---\nname: my-skill\n---\n\n# My Skill\n\nSkill content.\n",
+        )
+        .unwrap();
+
+        ensure_global_config_dir(&managed_root, &claude_config).unwrap();
+
+        // Agent must land in <config_dir>/agents/my-agent.md.
+        let agent_path = claude_config.join("agents").join("my-agent.md");
+        assert!(
+            agent_path.exists(),
+            "agent must be deployed to config_dir/agents/my-agent.md"
+        );
+        let agent_content = std::fs::read_to_string(&agent_path).unwrap();
+        assert!(
+            agent_content.contains("Agent content."),
+            "deployed agent must contain the source content"
+        );
+
+        // Skill must land in <config_dir>/skills/my-skill/SKILL.md.
+        let skill_path = claude_config
+            .join("skills")
+            .join("my-skill")
+            .join("SKILL.md");
+        assert!(
+            skill_path.exists(),
+            "skill must be deployed to config_dir/skills/my-skill/SKILL.md"
+        );
+        let skill_content = std::fs::read_to_string(&skill_path).unwrap();
+        assert!(
+            skill_content.contains("Skill content."),
+            "deployed skill must contain the source content"
+        );
+
+        // Agent manifest must exist (written by deploy_agents).
+        assert!(
+            claude_config
+                .join("agents")
+                .join(".trusty-mpm-manifest.json")
+                .exists(),
+            "agent manifest must exist after deploy"
+        );
+    }
+
+    // WI-2: deploy_agents_and_skills — missing-source guard: when the framework
+    // source dirs do not exist (tm install not yet run), ensure_global_config_dir
+    // must succeed without error. Nothing is deployed — acceptable pre-install.
+    #[test]
+    fn test_deploy_agents_and_skills_missing_source_is_ok() {
+        let tmp = TempDir::new().unwrap();
+        let managed_root = tmp.path().join("managed");
+        let claude_config = managed_root.join("claude-config");
+
+        // Do NOT create framework/ — simulate a pre-install state.
+        let result = ensure_global_config_dir(&managed_root, &claude_config);
+        assert!(
+            result.is_ok(),
+            "missing framework source dirs must not cause an error: {result:?}"
+        );
+        // settings.json must still be seeded.
+        assert!(
+            claude_config.join("settings.json").exists(),
+            "settings.json must exist even when no framework is installed"
+        );
+        // agents/ and skills/ are simply absent — nothing was deployed.
+        assert!(
+            !claude_config.join("agents").exists(),
+            "agents dir must not be created when source is missing"
+        );
+        assert!(
+            !claude_config.join("skills").exists(),
+            "skills dir must not be created when source is missing"
+        );
     }
 }
