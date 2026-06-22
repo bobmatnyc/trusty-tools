@@ -4,14 +4,15 @@ Speech-to-text helpers for trusty-voice Phase 0.
 Why: Decoupling STT from the pipeline lets us swap providers (Deepgram → Whisper)
      without changing pipeline wiring and makes unit-testing trivial via mocks.
 What: Provides DeepgramTranscriber — a thin async wrapper around the Deepgram
-     Python SDK's pre-recorded (batch) transcription used in Phase 0.  Phase 1
+     Python SDK v7+ pre-recorded (batch) transcription used in Phase 0.  Phase 1
      will add streaming real-time transcription.
-Test: Inject a mock deepgram client; call transcribe_bytes; assert the extracted
-     transcript text matches the fixture response.
+Test: Inject a mock deepgram client via _client; call transcribe_bytes; assert the
+     extracted transcript text matches the fixture response.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -44,14 +45,24 @@ class TranscriptResult:
 
 
 class DeepgramTranscriber:
-    """Async wrapper around the Deepgram pre-recorded transcription API.
+    """Async wrapper around the Deepgram ≥7.x pre-recorded transcription API.
 
     Why: Phase 0 uses push-to-talk (record a buffer, then transcribe) rather
          than streaming, so the pre-recorded API is the simplest fit.
-    What: Holds the Deepgram client; exposes transcribe_bytes() which sends
-         raw audio bytes (WAV/PCM) and returns TranscriptResult.
-    Test: Pass a mock client whose listen.asyncprerecorded.v("1").transcribe_file()
-         returns a fixture; assert the returned TranscriptResult.text.
+    What: Holds the Deepgram async client; exposes transcribe_bytes() which posts
+         raw audio bytes (WAV/PCM) to client.listen.v1.media.transcribe_file()
+         and returns a TranscriptResult.
+    Test: Pass _client=mock_client whose listen.v1.media.transcribe_file() is an
+         AsyncMock returning a fixture; assert the returned TranscriptResult.text.
+
+    SDK compatibility note (deepgram-sdk ≥7):
+      - Constructor: AsyncDeepgramClient(api_key=<key>)   (keyword-only)
+      - Transcribe:  await client.listen.v1.media.transcribe_file(
+                         request=<bytes>,
+                         model=..., language=..., smart_format=..., punctuate=...
+                     )
+      - No PrerecordedOptions class; options are flat keyword args.
+      - Response:    ListenV1Response → .results.channels[0].alternatives[0].transcript
     """
 
     def __init__(
@@ -59,41 +70,55 @@ class DeepgramTranscriber:
         api_key: str,
         language: str = "en-US",
         model: str = "nova-2",
+        *,
+        _client: Any = None,  # injection point for tests (no network)
     ) -> None:
         """
-        Why: Defer import so tests can mock deepgram_sdk without installing it.
-        What: Creates a Deepgram AsyncClient; stores options.
-        Test: Monkeypatch deepgram_sdk.AsyncDeepgramClient before instantiating.
+        Why: Accept an optional mock client so tests never touch the real SDK or network.
+        What: Stores credentials and transcription options; creates a real
+             AsyncDeepgramClient lazily via _get_client() unless _client is injected.
+        Test: Pass _client=mock; construct; assert no import of real deepgram occurs.
         """
-        from deepgram import AsyncDeepgramClient, PrerecordedOptions  # type: ignore[import]
+        self._api_key = api_key
+        self._language = language
+        self._model = model
+        self._dg_client: Any = _client  # AsyncDeepgramClient, lazily created
 
-        self._client = AsyncDeepgramClient(api_key)
-        self._options = PrerecordedOptions(
-            model=model,
-            language=language,
-            smart_format=True,
-            punctuate=True,
-        )
+    def _get_client(self) -> Any:
+        """Lazily create the AsyncDeepgramClient.
+
+        Why: Defers SDK import so tests that inject _client never touch real Deepgram.
+        What: Imports deepgram.AsyncDeepgramClient, constructs with api_key=, caches.
+        Test: Monkeypatch deepgram before calling; assert _dg_client is set.
+        """
+        if self._dg_client is None:
+            from deepgram import AsyncDeepgramClient  # type: ignore[import]
+
+            self._dg_client = AsyncDeepgramClient(api_key=self._api_key)
+        return self._dg_client
 
     async def transcribe_bytes(
         self, audio_bytes: bytes, mimetype: str = "audio/wav"
     ) -> TranscriptResult:
-        """Transcribe a raw audio buffer via Deepgram pre-recorded API.
+        """Transcribe a raw audio buffer via Deepgram pre-recorded API (v7 SDK).
 
         Why: Cleanly separates the "send bytes → get text" contract from the
              SDK's nested response structure.
-        What: Posts audio_bytes to Deepgram; extracts the first transcript
-             alternative from the response.
-        Test: Patch self._client; assert mimetype is forwarded and text is
-              extracted from the fixture response shape.
+        What: Posts audio_bytes to client.listen.v1.media.transcribe_file();
+             extracts the first transcript alternative from the response.
+        Test: Inject a mock _client; assert transcribe_file is called with
+              request=audio_bytes and the expected option kwargs; assert the
+              returned TranscriptResult.text matches the fixture value.
         """
-        from deepgram import FileSource  # type: ignore[import]
-
-        payload: FileSource = {"buffer": audio_bytes, "mimetype": mimetype}
+        client = self._get_client()
 
         logger.debug("stt → sending %d bytes to Deepgram", len(audio_bytes))
-        response = await self._client.listen.asyncprerecorded.v("1").transcribe_file(
-            payload, self._options
+        response = await client.listen.v1.media.transcribe_file(
+            request=audio_bytes,
+            model=self._model,
+            language=self._language,
+            smart_format=True,
+            punctuate=True,
         )
 
         try:
@@ -106,10 +131,8 @@ class DeepgramTranscriber:
             confidence = 0.0
 
         raw: dict[str, Any] = {}
-        import contextlib
-
         with contextlib.suppress(Exception):
-            raw = response.to_dict()  # type: ignore[attr-defined]
+            raw = response.model_dump()  # ListenV1Response is a Pydantic v2 model
 
         logger.debug("stt ← transcript=%r confidence=%.2f", text, confidence)
         return TranscriptResult(text=text, confidence=confidence, raw=raw)

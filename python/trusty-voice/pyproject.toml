@@ -10,8 +10,9 @@ authors = [{ name = "Duetto Research" }]
 dependencies = [
     # Pipeline framework
     "pipecat-ai[deepgram,elevenlabs,silero]>=0.0.55",
-    # STT SDK (also pulled in by pipecat, but pinned explicitly for direct use)
-    "deepgram-sdk>=3.9.0",
+    # STT SDK — pinned to v7.x API (AsyncDeepgramClient + client.listen.v1.media).
+    # v3.x used PrerecordedOptions which was removed; v8+ may break again — pin major.
+    "deepgram-sdk>=7,<8",
     # TTS SDK
     "elevenlabs>=1.16.0",
     # HTTP client for daemon calls
