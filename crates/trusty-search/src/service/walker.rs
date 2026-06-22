@@ -551,8 +551,11 @@ pub fn walk_source_files(root: &Path) -> WalkResult {
 ///   skipped.
 /// - Filtered by [`SOURCE_EXTS`].
 /// - Belt-and-suspenders skip of any directory whose basename is in
-///   [`SKIP_DIRS`] (most are already gitignored, but defence in depth covers
-///   projects without a `.gitignore`).
+///   [`SKIP_DIRS`] or `opts.extra_skip_dirs`, matched ONLY against path
+///   components RELATIVE to the walk root (issue #1554: the root prefix
+///   itself is never tested so a repo stored at e.g. `/data/repos/myproject`
+///   is not silently excluded because `data` appears in
+///   [`DEFAULT_EXTRA_SKIP_DIRS`]).
 /// - Skips files matching [`should_skip_path`] (minified/binary/large).
 /// - When `opts.include_docs` is `false` (default), skips files matching
 ///   [`is_default_doc_excluded`] (Markdown, CHANGELOG, LICENSE, ...).
@@ -629,7 +632,20 @@ pub fn walk_source_files_with_options(root: &Path, opts: &WalkOptions) -> WalkRe
         // per-index `extra_skip_dirs` set (default: data/exports/output/
         // reports/snapshots/results) so data-export trees never reach the
         // indexer. Matched on basename only, identical to SKIP_DIRS semantics.
-        if path
+        //
+        // Fix #1554: strip the canonical root prefix BEFORE checking
+        // components so that directory names in the ROOT PATH ITSELF (e.g. a
+        // repo stored at `/data/repos/myproject`) never match the skip lists.
+        // Only path segments that are RELATIVE to the walk root should be
+        // tested — callers have no control over what parent directories their
+        // root lives under. `strip_prefix` always succeeds here because
+        // `WalkBuilder::new(&canonical_root)` only yields entries that begin
+        // with `canonical_root`; the `unwrap_or` is a belt-and-suspenders
+        // fallback (e.g. a symlinked entry whose resolved path escapes the
+        // root after `follow_links`) that preserves the pre-fix behaviour of
+        // checking the full path.
+        let rel = path.strip_prefix(&canonical_root).unwrap_or(path);
+        if rel
             .components()
             .filter_map(|c| c.as_os_str().to_str())
             .any(|seg| SKIP_DIRS.contains(&seg) || opts.extra_skip_dirs.iter().any(|d| d == seg))
@@ -1102,6 +1118,73 @@ mod tests {
         assert!(
             names.contains(&"kept.rs".to_string()),
             "empty extra_skip_dirs must NOT prune reports/: {names:?}"
+        );
+    }
+
+    /// Regression test for issue #1554: repos stored under a root path whose
+    /// absolute path CONTAINS a segment matching `extra_skip_dirs` or `SKIP_DIRS`
+    /// (e.g. `/data/repos/myproject`, where `data` is in `DEFAULT_EXTRA_SKIP_DIRS`)
+    /// must still have their files walked. Only path segments RELATIVE to the
+    /// walk root should be tested against the skip lists; the root prefix itself
+    /// must never be matched.
+    ///
+    /// Before the fix the component check ran over the full absolute path, so
+    /// any repo stored under e.g. `/data/…` returned 0 files — all walked
+    /// paths started with `/data/…` and the `data` segment hit `extra_skip_dirs`.
+    #[test]
+    fn test_walk_root_containing_skip_dir_name_still_indexes_files() {
+        // Why: reproduces the #1554 regression. A root path whose absolute form
+        // contains one of the DEFAULT_EXTRA_SKIP_DIRS names as a component
+        // (here `data`) must still produce a non-empty walk.
+        // What: creates a tempdir, nests it under a `data/` subdirectory (to
+        // mimic e.g. `/data/repos/myproject`), then walks from that inner root.
+        // Test: asserts that the walk finds source files rather than 0.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+
+        // Simulate a tree like: <tmp>/data/repos/myproject/src/main.rs
+        // `data` is in DEFAULT_EXTRA_SKIP_DIRS; it must NOT prune files when
+        // it appears in the WALK ROOT PATH, only when it appears under the root.
+        let project_dir = root.join("data").join("repos").join("myproject");
+        fs::create_dir_all(project_dir.join("src")).unwrap();
+        fs::write(project_dir.join("src").join("main.rs"), "fn main() {}").unwrap();
+        fs::write(project_dir.join("src").join("lib.py"), "x = 1").unwrap();
+
+        // Walk from the project root (which has "data" in its absolute path).
+        let result = walk_source_files(&project_dir);
+        assert!(
+            !result.files.is_empty(),
+            "walk must find files even when root path contains a skip-dir name \
+             (issue #1554): got 0 files for root {:?}",
+            project_dir
+        );
+        let names: Vec<String> = result
+            .files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        assert!(
+            names.contains(&"main.rs".to_string()),
+            "main.rs must be found under a root with 'data' in the path: {names:?}"
+        );
+        assert!(
+            names.contains(&"lib.py".to_string()),
+            "lib.py must be found under a root with 'data' in the path: {names:?}"
+        );
+
+        // Sanity: a `data/` SUBDIRECTORY *under* the root is still pruned.
+        let trapped_dir = project_dir.join("data");
+        fs::create_dir_all(&trapped_dir).unwrap();
+        fs::write(trapped_dir.join("trapped.rs"), "fn trapped() {}").unwrap();
+        let result2 = walk_source_files(&project_dir);
+        let names2: Vec<String> = result2
+            .files
+            .iter()
+            .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .collect();
+        assert!(
+            !names2.contains(&"trapped.rs".to_string()),
+            "data/ SUBDIR under root must still be pruned: {names2:?}"
         );
     }
 
