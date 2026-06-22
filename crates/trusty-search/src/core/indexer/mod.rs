@@ -43,6 +43,7 @@ pub(crate) mod migrations;
 mod persist;
 mod persist_hnsw;
 mod search;
+pub mod typeahead;
 mod types;
 
 /// Re-export for the reindex orchestrator's progress-interval gate.
@@ -68,6 +69,7 @@ pub(crate) use helpers::{
 };
 
 // Re-export types so callers outside this module see the same paths.
+pub use typeahead::{TypeaheadHit, TypeaheadMode, TypeaheadResponse};
 pub(crate) use types::ChunkSnapshot;
 pub use types::{CodeChunk, CommitTimings, ParsedBatch, SearchMode, SearchQuery, SearchStage};
 
