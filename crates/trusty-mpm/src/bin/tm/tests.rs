@@ -1550,5 +1550,5 @@ fn cli_parses_login_standalone() {
     // What: assert that `tm login` maps to Command::Login.
     // Test: direct parse round-trip.
     let cli = Cli::try_parse_from(["trusty-mpm", "login"]).unwrap();
-    assert!(matches!(cli.command, Command::Login));
+    assert!(matches!(cli.command, Command::Login { .. }));
 }

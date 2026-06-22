@@ -280,12 +280,26 @@ async fn main() -> anyhow::Result<()> {
         Command::Meta { action } => commands::meta::meta(action).await,
 
         // DOC-24: standalone managed driver commands.
-        Command::Register { alias, url, force } => {
-            commands::standalone::register_cmd(&alias, &url, force)
+        // Each command resolves ManagedPaths once at entry (closes #1566):
+        // --root flag > TRUSTY_MPM_ROOT env > XDG config file > default.
+        Command::Register {
+            alias,
+            url,
+            force,
+            root,
+        } => {
+            let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
+            commands::standalone::register_cmd(&paths, &alias, &url, force)
         }
-        Command::LsAliases { json } => commands::standalone::ls_cmd(json),
-        Command::Load { alias } => commands::standalone::load_cmd(&alias),
-        Command::Run { alias, task } => {
+        Command::LsAliases { json, root } => {
+            let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
+            commands::standalone::ls_cmd(&paths, json)
+        }
+        Command::Load { alias, root } => {
+            let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
+            commands::standalone::load_cmd(&paths, &alias)
+        }
+        Command::Run { alias, task, root } => {
             // F5: --task is not yet implemented in the MVP standalone driver.
             // Per spec (DOC-24), autonomous/task dispatch is the session-manager
             // layer, not `tm run`. Warn clearly so the flag is not silently
@@ -297,10 +311,17 @@ async fn main() -> anyhow::Result<()> {
                      layer (a future phase of DOC-24)."
                 );
             }
-            commands::standalone::run_cmd(&alias)
+            let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
+            commands::standalone::run_cmd(&paths, &alias)
         }
-        Command::Path { alias } => commands::standalone::path_cmd(&alias),
-        Command::Login => commands::standalone::login_cmd(),
+        Command::Path { alias, root } => {
+            let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
+            commands::standalone::path_cmd(&paths, &alias)
+        }
+        Command::Login { root } => {
+            let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
+            commands::standalone::login_cmd(&paths)
+        }
     };
 
     // Top-level exit-code translation: a `tm sessions prune-idle` that found the

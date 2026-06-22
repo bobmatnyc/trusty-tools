@@ -5,37 +5,16 @@
 //! these handlers in their own file preserves the existing handlers untouched
 //! and stays under the 500-SLOC cap.
 //! What: six thin handlers — `register_cmd`, `ls_cmd`, `load_cmd`, `run_cmd`,
-//! `path_cmd`, and `login_cmd` — each delegating to
-//! `trusty_mpm::core::standalone`. `login_cmd` (WI-10) launches
-//! `claude auth login` under the tm-global CLAUDE_CONFIG_DIR so the OAuth flow
-//! creates a keychain entry for that path, enabling future `tm run` sessions to
-//! authenticate on the user's Claude Max/Pro plan.
+//! `path_cmd`, and `login_cmd` — each accepting a `&ManagedPaths` resolved by
+//! `resolve_managed_paths` in `managed_root.rs` (closes #1566). `login_cmd`
+//! (WI-10) launches `claude auth login` under the tm-global CLAUDE_CONFIG_DIR
+//! so the OAuth flow creates a keychain entry for that path, enabling future
+//! `tm run` sessions to authenticate on the user's Claude Max/Pro plan.
 //! Test: exercised by `cli_parses_register`, `cli_parses_ls`, etc. in tests.rs.
 
 use anyhow::Context;
 
-/// Default managed root under the user's home directory.
-///
-/// Why: every handler resolves the managed root from the same place so paths
-/// are consistent across register/load/run/path/ls.
-/// What: returns `~/.trusty-mpm/` as the managed root `PathBuf`.
-/// Test: indirectly tested by every handler test.
-fn managed_root() -> anyhow::Result<std::path::PathBuf> {
-    dirs::home_dir()
-        .map(|h| h.join(".trusty-mpm"))
-        .context("cannot resolve home directory")
-}
-
-/// The tm-global CLAUDE_CONFIG_DIR used by all standalone sessions.
-///
-/// Why: all sessions launched by `tm run` share one CLAUDE_CONFIG_DIR so the
-/// global hooks/skills/MCPs are applied consistently and the real `~/.claude`
-/// is excluded.
-/// What: returns `~/.trusty-mpm/claude-config/`.
-/// Test: indirectly tested by `run_cmd`.
-fn claude_config_dir() -> anyhow::Result<std::path::PathBuf> {
-    Ok(managed_root()?.join("claude-config"))
-}
+use super::managed_root::ManagedPaths;
 
 /// Handle `tm register <alias> <url> [--force]`.
 ///
@@ -44,9 +23,14 @@ fn claude_config_dir() -> anyhow::Result<std::path::PathBuf> {
 /// What: validates the alias, calls `ManagedRegistry::add`, saves, and prints
 /// `registered <alias> → <url>` to stdout.
 /// Test: `cli_parses_register` in tests.rs; logic in registry tests.
-pub(crate) fn register_cmd(alias: &str, url: &str, force: bool) -> anyhow::Result<()> {
-    let root = managed_root()?;
-    let mut registry = trusty_mpm::core::standalone::registry::ManagedRegistry::load(&root)
+pub(crate) fn register_cmd(
+    paths: &ManagedPaths,
+    alias: &str,
+    url: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    let root = &paths.root;
+    let mut registry = trusty_mpm::core::standalone::registry::ManagedRegistry::load(root)
         .with_context(|| format!("failed to load registry from {}", root.display()))?;
     registry
         .add(alias, url, force)
@@ -63,9 +47,9 @@ pub(crate) fn register_cmd(alias: &str, url: &str, force: bool) -> anyhow::Resul
 /// What: lists all registry entries with loaded status; prints a human-readable
 /// table by default or a JSON array with `--json`.
 /// Test: `cli_parses_ls` in tests.rs.
-pub(crate) fn ls_cmd(json: bool) -> anyhow::Result<()> {
-    let root = managed_root()?;
-    let registry = trusty_mpm::core::standalone::registry::ManagedRegistry::load(&root)
+pub(crate) fn ls_cmd(paths: &ManagedPaths, json: bool) -> anyhow::Result<()> {
+    let root = &paths.root;
+    let registry = trusty_mpm::core::standalone::registry::ManagedRegistry::load(root)
         .with_context(|| format!("failed to load registry from {}", root.display()))?;
     let entries = registry.list();
 
@@ -77,7 +61,7 @@ pub(crate) fn ls_cmd(json: bool) -> anyhow::Result<()> {
                     "alias": e.alias,
                     "url": e.url,
                     "ref": e.git_ref,
-                    "loaded": registry.is_loaded(&e.alias, &root),
+                    "loaded": registry.is_loaded(&e.alias, root),
                     "repo_path": root.join("projects").join(&e.alias).join("repo"),
                 })
             })
@@ -89,7 +73,7 @@ pub(crate) fn ls_cmd(json: bool) -> anyhow::Result<()> {
         println!("{:<20} {:<10} URL", "ALIAS", "LOADED");
         println!("{}", "-".repeat(60));
         for e in &entries {
-            let loaded = if registry.is_loaded(&e.alias, &root) {
+            let loaded = if registry.is_loaded(&e.alias, root) {
                 "yes"
             } else {
                 "no"
@@ -106,11 +90,11 @@ pub(crate) fn ls_cmd(json: bool) -> anyhow::Result<()> {
 /// alias and generates the project-local managed configuration.
 /// What: calls `load_alias`, then prints the repo path to stdout.
 /// Test: `cli_parses_load` in tests.rs.
-pub(crate) fn load_cmd(alias: &str) -> anyhow::Result<()> {
-    let root = managed_root()?;
-    let cfg_dir = claude_config_dir()?;
-    trusty_mpm::core::standalone::global_config::ensure_global_config_dir(&root, &cfg_dir)?;
-    let repo_path = trusty_mpm::core::standalone::load::load_alias(alias, &root, &cfg_dir)
+pub(crate) fn load_cmd(paths: &ManagedPaths, alias: &str) -> anyhow::Result<()> {
+    let root = &paths.root;
+    let cfg_dir = &paths.claude_config_dir;
+    trusty_mpm::core::standalone::global_config::ensure_global_config_dir(root, cfg_dir)?;
+    let repo_path = trusty_mpm::core::standalone::load::load_alias(alias, root, cfg_dir)
         .with_context(|| format!("failed to load alias '{alias}'"))?;
     println!("{}", repo_path.display());
     Ok(())
@@ -123,11 +107,11 @@ pub(crate) fn load_cmd(alias: &str) -> anyhow::Result<()> {
 /// What: calls `run_alias` from the `run` module which loads if needed, checks
 /// credentials, and spawns `claude` with inherited stdio.
 /// Test: `cli_parses_run` in tests.rs; end-to-end requires `claude` binary.
-pub(crate) fn run_cmd(alias: &str) -> anyhow::Result<()> {
-    let root = managed_root()?;
-    let cfg_dir = claude_config_dir()?;
-    trusty_mpm::core::standalone::global_config::ensure_global_config_dir(&root, &cfg_dir)?;
-    trusty_mpm::core::standalone::run::run_alias(alias, &root, &cfg_dir)
+pub(crate) fn run_cmd(paths: &ManagedPaths, alias: &str) -> anyhow::Result<()> {
+    let root = &paths.root;
+    let cfg_dir = &paths.claude_config_dir;
+    trusty_mpm::core::standalone::global_config::ensure_global_config_dir(root, cfg_dir)?;
+    trusty_mpm::core::standalone::run::run_alias(alias, root, cfg_dir)
         .with_context(|| format!("failed to run alias '{alias}'"))
 }
 
@@ -137,9 +121,9 @@ pub(crate) fn run_cmd(alias: &str) -> anyhow::Result<()> {
 /// directory directly (DOC-24 SPEC-STANDALONE-MPM-06).
 /// What: resolves the alias's repo path via the marker file and prints it.
 /// Test: `cli_parses_path` in tests.rs.
-pub(crate) fn path_cmd(alias: &str) -> anyhow::Result<()> {
-    let root = managed_root()?;
-    let repo = trusty_mpm::core::standalone::run::resolve_repo_path(alias, &root)
+pub(crate) fn path_cmd(paths: &ManagedPaths, alias: &str) -> anyhow::Result<()> {
+    let root = &paths.root;
+    let repo = trusty_mpm::core::standalone::run::resolve_repo_path(alias, root)
         .with_context(|| format!("failed to resolve path for alias '{alias}'"))?;
     println!("{}", repo.display());
     Ok(())
@@ -156,7 +140,7 @@ pub(crate) fn path_cmd(alias: &str) -> anyhow::Result<()> {
 /// without repeating this step (keychain entry persists across sessions).
 /// What: ensures the tm-global config dir exists via
 /// `ensure_global_config_dir`, then spawns `claude auth login` with
-/// `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` and inherited stdio so the
+/// `CLAUDE_CONFIG_DIR=<root>/claude-config` and inherited stdio so the
 /// user can complete the browser/OAuth flow. Prints guidance before and after.
 /// Returns an error (non-zero exit) when `claude auth login` fails or is
 /// cancelled so that `tm login && tm run …` does not proceed after a failed
@@ -166,10 +150,10 @@ pub(crate) fn path_cmd(alias: &str) -> anyhow::Result<()> {
 /// `core::standalone::run`. Exit-code propagation is covered by reasoning: the
 /// `bail!` path is reached whenever `status.success()` is false. The interactive
 /// OAuth completion requires a human.
-pub(crate) fn login_cmd() -> anyhow::Result<()> {
-    let root = managed_root()?;
-    let cfg_dir = claude_config_dir()?;
-    trusty_mpm::core::standalone::global_config::ensure_global_config_dir(&root, &cfg_dir)?;
+pub(crate) fn login_cmd(paths: &ManagedPaths) -> anyhow::Result<()> {
+    let root = &paths.root;
+    let cfg_dir = &paths.claude_config_dir;
+    trusty_mpm::core::standalone::global_config::ensure_global_config_dir(root, cfg_dir)?;
 
     eprintln!(
         "tm login: one-time setup — authenticates managed `tm run` sessions\n\
@@ -179,7 +163,7 @@ pub(crate) fn login_cmd() -> anyhow::Result<()> {
         cfg_dir.display()
     );
 
-    let status = trusty_mpm::core::standalone::run::build_login_command(&cfg_dir)
+    let status = trusty_mpm::core::standalone::run::build_login_command(cfg_dir)
         .status()
         .context("failed to spawn 'claude auth login'; is `claude` installed and on PATH?")?;
 
