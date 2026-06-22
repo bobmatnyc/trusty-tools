@@ -49,9 +49,10 @@ class ElevenLabsSpeaker:
         self,
         api_key: str,
         # "Rachel" (21m00Tcm4TlvDq8ikWAM) was retired by ElevenLabs — do not
-        # revert to that id.  "River" (SAz9YHcvj6GT2YYXdXww) is a current
-        # premade conversational voice.
-        voice_id: str = "SAz9YHcvj6GT2YYXdXww",  # ElevenLabs "River"
+        # revert to that id.  "River" (SAz9YHcvj6GT2YYXdXww) was the previous
+        # default; replaced by "Lauren B" from the ElevenLabs Voice Library
+        # (refs #1561).
+        voice_id: str = "DODLEQrClDo8wCz460ld",  # ElevenLabs "Lauren B"
         model_id: str = "eleven_turbo_v2",
         *,
         _client: Any = None,  # injection point for tests
