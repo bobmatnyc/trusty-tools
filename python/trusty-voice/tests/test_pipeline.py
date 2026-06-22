@@ -11,11 +11,18 @@ Coverage:
 - run_once() handles DaemonError gracefully (returns error string, no raise)
 - TextOnlySpeaker prints to stdout
 - TextPassthroughTranscriber returns empty TranscriptResult
+
+REAL-SDK AUDIO-MODE CHECK (regression guard):
+- test_voice_pipeline_audio_mode_construction_no_import_error constructs
+  VoicePipeline with text_mode=False (audio mode), with pyaudio and MicRecorder
+  mocked but Deepgram + ElevenLabs SDK imports REAL.  This is the test that
+  would have caught BOTH the ElevenLabs and Deepgram ImportError bugs before
+  they reached production.
 """
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -211,3 +218,49 @@ async def test_pipeline_close() -> None:
     await pipeline.close()
     daemon.aclose.assert_called_once()
     speaker.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Real-SDK audio-mode construction guard
+# ---------------------------------------------------------------------------
+
+
+def test_voice_pipeline_audio_mode_construction_no_import_error() -> None:
+    """VoicePipeline(text_mode=False) constructs without ImportError using real SDKs.
+
+    Why: Both the ElevenLabs and Deepgram ImportErrors only manifested in audio
+         mode (text_mode=False) because the real SDK classes are only constructed
+         in that branch.  The text-mode tests (all above) never exercised those
+         imports.  This test constructs the pipeline in audio mode so that any
+         future SDK API change will fail here, not at runtime during a live demo.
+    What: Patches pyaudio.PyAudio and trusty_voice.audio.MicRecorder to avoid
+         hardware access.  Does NOT mock deepgram or elevenlabs — their imports
+         must succeed against the REAL installed packages.  Asserts construction
+         raises no ImportError.
+    Test: Run without audio hardware.  Fails if deepgram or elevenlabs API drifts.
+    """
+    mock_pa = MagicMock()
+    mock_mic = MagicMock()
+
+    with (
+        patch("pyaudio.PyAudio", return_value=mock_pa),
+        patch("trusty_voice.audio.MicRecorder", return_value=mock_mic),
+    ):
+        config = VoiceConfig(
+            deepgram_api_key="dummy-dg",  # pragma: allowlist secret
+            elevenlabs_api_key="dummy-el",  # pragma: allowlist secret
+            text_mode=False,
+        )
+        # This MUST NOT raise ImportError — if either SDK's API has drifted,
+        # DeepgramTranscriber.__init__ or ElevenLabsSpeaker._get_el_client()
+        # (called lazily) will fail here.
+        try:
+            pipeline = VoicePipeline(config=config)
+        except ImportError as exc:
+            raise AssertionError(
+                f"VoicePipeline(text_mode=False) raised ImportError — SDK API has drifted: {exc}"
+            ) from exc
+
+        # Verify both components were wired up
+        assert pipeline._transcriber is not None
+        assert pipeline._speaker is not None
