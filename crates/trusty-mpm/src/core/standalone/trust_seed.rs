@@ -12,7 +12,7 @@
 //!
 //! What: [`preseed_managed_trust`] merges `projects.<workspace>` trust keys and
 //! `enabledMcpjsonServers` into `<claude_config_dir>/.claude.json`. The MCP
-//! server list is derived from `ensure_mcp_config` output (the same two servers
+//! server list is derived from `ensure_mcp_config` output (the same three servers
 //! written into the managed `.mcp.json`).
 //! Test: `test_preseed_managed_trust_marks_directory`,
 //!   `test_preseed_managed_trust_is_idempotent`,
@@ -27,10 +27,13 @@ use std::path::Path;
 /// Why: `preseed_managed_trust` must pre-approve exactly the servers that
 /// `ensure_mcp_config` wires into the managed `.mcp.json`; deriving them from the
 /// same constant keeps the two in sync without re-parsing the file at trust-seed time.
-/// What: the sorted list of server names — `["trusty-memory", "trusty-search"]` —
-/// matching the keys written by `ensure_mcp_config` in `global_config.rs`.
+/// What: the sorted list of server names —
+/// `["trusty-memory", "trusty-review", "trusty-search"]` — matching the keys
+/// written by `ensure_mcp_config` in `global_config.rs`.
+/// `trusty-review` was added in WI-8 (refs #1548).
 /// Test: asserted in `test_preseed_managed_trust_enables_mcp_servers`.
-pub(super) const MANAGED_MCP_SERVERS: &[&str] = &["trusty-memory", "trusty-search"];
+pub(super) const MANAGED_MCP_SERVERS: &[&str] =
+    &["trusty-memory", "trusty-review", "trusty-search"];
 
 /// Pre-seed project trust and MCP-server approval into `<claude_config_dir>/.claude.json`.
 ///
@@ -50,7 +53,7 @@ pub(super) const MANAGED_MCP_SERVERS: &[&str] = &["trusty-memory", "trusty-searc
 /// proceeds from a fresh `{}`), then ensures `projects.<workspace>` carries
 /// `hasTrustDialogAccepted: true`, `hasCompletedProjectOnboarding: true`,
 /// `projectOnboardingSeenCount: 1` (if not already ≥ 1), and
-/// `enabledMcpjsonServers: ["trusty-memory","trusty-search"]`.
+/// `enabledMcpjsonServers: ["trusty-memory","trusty-review","trusty-search"]`.
 /// Writes back pretty-printed; idempotent: if all fields already match, the
 /// file is NOT rewritten. All other keys in the file are preserved.
 /// Test: `test_preseed_managed_trust_marks_directory`,
@@ -211,7 +214,8 @@ mod tests {
         );
     }
 
-    // WI-3 MCP-ENABLE: preseed_managed_trust must pre-approve the managed MCP servers.
+    // WI-3 MCP-ENABLE / WI-8: preseed_managed_trust must pre-approve the managed MCP
+    // servers, including trusty-review added in WI-8 (refs #1548).
     #[test]
     fn test_preseed_managed_trust_enables_mcp_servers() {
         let tmp = TempDir::new().unwrap();
@@ -237,6 +241,12 @@ mod tests {
         assert!(
             names.contains(&"trusty-search"),
             "trusty-search must be in enabledMcpjsonServers; got {names:?}"
+        );
+        // WI-8: trusty-review must appear in the pre-approved server list so
+        // managed sessions do not see the "New MCP servers found" dialog for it.
+        assert!(
+            names.contains(&"trusty-review"),
+            "trusty-review must be in enabledMcpjsonServers (WI-8); got {names:?}"
         );
     }
 

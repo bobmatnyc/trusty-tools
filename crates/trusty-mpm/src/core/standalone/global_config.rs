@@ -9,7 +9,7 @@
 //! writes a minimal `settings.json`, seeds `.credentials.json` from
 //! `~/.claude/.credentials.json` if it exists (NOTE: this file holds MCP OAuth
 //! tokens, NOT the primary session auth — see WI-10 for the auth model), writes
-//! a minimal `.mcp.json` with trusty-memory and trusty-search server stubs, and
+//! a minimal `.mcp.json` with trusty-memory, trusty-review, and trusty-search server stubs, and
 //! (WI-2) deploys bundled agents and skills from
 //! `<managed_root>/framework/{agents,skills}` into the managed config dir so
 //! that every tm-launched session starts with the full agent/skill set.
@@ -45,9 +45,9 @@ use std::path::{Path, PathBuf};
 /// when absent), merges the MPM hook triad into `settings.json` via
 /// [`super::hooks::ensure_managed_hooks`] (WI-3), copies
 /// `~/.claude/.credentials.json` if found (silently skips otherwise), writes
-/// `.mcp.json` with trusty-memory + trusty-search stubs (idempotent via the
-/// inject pattern), then deploys bundled agents and skills via
-/// [`deploy_agents_and_skills`].
+/// `.mcp.json` with trusty-memory, trusty-review, and trusty-search stubs
+/// (idempotent via the inject pattern; WI-8 adds trusty-review), then deploys
+/// bundled agents and skills via [`deploy_agents_and_skills`].
 /// Test: `test_global_config_dir_ensure_idempotent`,
 /// `test_deploy_agents_and_skills_populates_config_dir`,
 /// `test_deploy_agents_and_skills_missing_source_is_ok`.
@@ -227,15 +227,21 @@ fn seed_credentials(claude_config_dir: &Path) {
     }
 }
 
-/// Write a minimal `.mcp.json` with trusty-memory and trusty-search stubs.
+/// Write a minimal `.mcp.json` with trusty-memory, trusty-review, and trusty-search stubs.
 ///
 /// Why: the tm-global config dir must carry the global MCP server definitions
-/// so every tm-launched session can use memory and search tools without
-/// per-project wiring.
+/// so every tm-launched session can use memory, review, and search tools without
+/// per-project wiring. `trusty-review` was added in WI-8 (refs #1548).
 /// What: reads `<claude_config_dir>/.mcp.json` (starts from `{}` when absent),
-/// injects `trusty-memory` and `trusty-search` entries under `mcpServers` using
-/// the same idempotent merge used by `inject_mcp_server` in settings.rs.
-/// Test: `test_global_config_dir_ensure_idempotent`.
+/// injects `trusty-memory`, `trusty-review`, and `trusty-search` entries under
+/// `mcpServers` using the same idempotent merge used by `inject_mcp_server` in
+/// settings.rs.
+/// Secrets/env: trusty-review reads its config from the environment
+/// (OPENROUTER_API_KEY, AWS credentials, TRUSTY_SEARCH_URL etc.) — no secrets
+/// are injected here; the managed session inherits the daemon env, matching the
+/// pattern used for trusty-memory and trusty-search.
+/// Test: `test_global_config_dir_ensure_idempotent`,
+/// `test_mcp_config_contains_all_three_servers`.
 fn ensure_mcp_config(claude_config_dir: &Path) -> anyhow::Result<()> {
     let mcp_path = claude_config_dir.join(".mcp.json");
     let mut config = match std::fs::read_to_string(&mcp_path) {
@@ -261,6 +267,15 @@ fn ensure_mcp_config(claude_config_dir: &Path) -> anyhow::Result<()> {
         "command": "trusty-memory",
         "args": ["serve", "--stdio"]
     });
+    // WI-8 (refs #1548): trusty-review MCP server, stdio transport.
+    // trusty-review reads its LLM credentials (OPENROUTER_API_KEY, AWS credentials)
+    // and TRUSTY_SEARCH_URL from the environment — no secrets are injected here;
+    // the managed session inherits the daemon env, matching the memory/search pattern.
+    let review_entry = serde_json::json!({
+        "type": "stdio",
+        "command": "trusty-review",
+        "args": ["serve", "--stdio"]
+    });
     let search_entry = serde_json::json!({
         "type": "stdio",
         "command": "trusty-search",
@@ -270,6 +285,9 @@ fn ensure_mcp_config(claude_config_dir: &Path) -> anyhow::Result<()> {
     servers
         .entry("trusty-memory")
         .or_insert(memory_entry.clone());
+    servers
+        .entry("trusty-review")
+        .or_insert(review_entry.clone());
     servers
         .entry("trusty-search")
         .or_insert(search_entry.clone());
@@ -299,16 +317,112 @@ mod tests {
         assert!(claude_config.join("settings.json").exists());
     }
 
+    // WI-3 + WI-8: ensure_mcp_config must define all three managed MCP servers,
+    // including trusty-review added in WI-8 (refs #1548).
     #[test]
-    fn test_mcp_config_contains_both_servers() {
+    fn test_mcp_config_contains_all_three_servers() {
         let tmp = TempDir::new().unwrap();
         let cfg = tmp.path().to_path_buf();
         ensure_mcp_config(&cfg).unwrap();
         let text = std::fs::read_to_string(cfg.join(".mcp.json")).unwrap();
         let val: serde_json::Value = serde_json::from_str(&text).unwrap();
         let servers = val["mcpServers"].as_object().unwrap();
-        assert!(servers.contains_key("trusty-memory"));
-        assert!(servers.contains_key("trusty-search"));
+        assert!(
+            servers.contains_key("trusty-memory"),
+            "trusty-memory must be defined in .mcp.json"
+        );
+        assert!(
+            servers.contains_key("trusty-review"),
+            "trusty-review must be defined in .mcp.json (WI-8)"
+        );
+        assert!(
+            servers.contains_key("trusty-search"),
+            "trusty-search must be defined in .mcp.json"
+        );
+    }
+
+    // WI-8: trusty-review server entry must use stdio transport and the correct command/args.
+    #[test]
+    fn test_mcp_config_review_server_entry() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().to_path_buf();
+        ensure_mcp_config(&cfg).unwrap();
+        let text = std::fs::read_to_string(cfg.join(".mcp.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let review = &val["mcpServers"]["trusty-review"];
+        assert_eq!(
+            review["type"].as_str(),
+            Some("stdio"),
+            "trusty-review transport must be stdio"
+        );
+        assert_eq!(
+            review["command"].as_str(),
+            Some("trusty-review"),
+            "trusty-review command must be 'trusty-review'"
+        );
+        let args: Vec<&str> = review["args"]
+            .as_array()
+            .expect("args must be an array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            args,
+            vec!["serve", "--stdio"],
+            "trusty-review args must be [\"serve\", \"--stdio\"]"
+        );
+    }
+
+    // WI-8 ISOLATION: ensure_mcp_config must write the review entry without
+    // touching any file outside the given claude_config_dir.
+    #[serial_test::serial]
+    #[test]
+    fn test_mcp_config_review_no_home_write() {
+        /// RAII guard restoring $HOME on drop (including panic).
+        struct HomeGuard(Option<String>);
+        impl Drop for HomeGuard {
+            fn drop(&mut self) {
+                match self.0 {
+                    Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+                    None => unsafe { std::env::remove_var("HOME") },
+                }
+            }
+        }
+
+        let root = TempDir::new().unwrap();
+        let cfg = root.path().join("claude-config");
+        std::fs::create_dir_all(&cfg).unwrap();
+
+        let fake_home = TempDir::new().unwrap();
+        // SAFETY: test is serial; HomeGuard restores HOME even on panic.
+        let _home_guard = {
+            let prev = std::env::var("HOME").ok();
+            unsafe { std::env::set_var("HOME", fake_home.path()) };
+            HomeGuard(prev)
+        };
+
+        ensure_mcp_config(&cfg).unwrap();
+
+        // .mcp.json must exist inside cfg.
+        assert!(
+            cfg.join(".mcp.json").exists(),
+            "ensure_mcp_config must write .mcp.json inside the given dir"
+        );
+        // Nothing must land directly under root (outside cfg).
+        assert!(
+            !root.path().join(".mcp.json").exists(),
+            "ensure_mcp_config must NOT write .mcp.json outside the given dir (isolation)"
+        );
+        // $HOME must remain empty — no .claude.json or .claude/ created.
+        assert!(
+            !fake_home.path().join(".mcp.json").exists(),
+            "ensure_mcp_config must NOT write .mcp.json to $HOME (isolation)"
+        );
+        assert!(
+            !fake_home.path().join(".claude").exists(),
+            "ensure_mcp_config must NOT create $HOME/.claude/ (isolation)"
+        );
+        // _home_guard drops here and restores HOME.
     }
 
     // F3: seed_credentials_from — src missing → returns Ok, dst unchanged.
