@@ -1,0 +1,67 @@
+[project]
+name = "trusty-voice"
+version = "0.1.0"
+description = "Phase 0 push-to-talk voice interface for trusty-mpm agents (Pipecat + Deepgram STT + ElevenLabs TTS)"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Duetto Research" }]
+
+dependencies = [
+    # Pipeline framework
+    "pipecat-ai[deepgram,elevenlabs,silero]>=0.0.55",
+    # STT SDK (also pulled in by pipecat, but pinned explicitly for direct use)
+    "deepgram-sdk>=3.9.0",
+    # TTS SDK
+    "elevenlabs>=1.16.0",
+    # HTTP client for daemon calls
+    "httpx>=0.27.0",
+    # Audio I/O
+    "pyaudio>=0.2.14",
+    # Env management
+    "python-dotenv>=1.0.1",
+    # Structured logging
+    "structlog>=25.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "respx>=0.21.0",   # httpx mocking
+]
+
+[project.scripts]
+trusty-voice = "trusty_voice.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trusty_voice"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["src/trusty_voice"]
+omit = ["tests/*"]
