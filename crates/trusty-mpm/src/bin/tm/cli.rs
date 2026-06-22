@@ -399,6 +399,76 @@ pub(crate) enum Command {
         cmd: WatchCmd,
     },
 
+    /// Register a GitHub repo alias for the standalone managed driver (DOC-24).
+    ///
+    /// Why: declares an alias→URL mapping without cloning so users can register
+    /// their fleet cheaply and `tm load <alias>` lazily.
+    /// What: persists `{alias, url}` to `~/.trusty-mpm/registry.json` and
+    /// prints `registered <alias> → <url>`.
+    /// Test: `cli_parses_register`.
+    Register {
+        /// Short alias identifier (e.g. `my-project`).
+        alias: String,
+        /// Clone-able GitHub URL (HTTPS or SSH).
+        url: String,
+        /// Overwrite an existing alias with a different URL.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// List registered aliases with loaded status (DOC-24).
+    ///
+    /// Why: operators need a quick overview of their registered fleet and which
+    /// aliases are ready to `run`.
+    /// What: prints a table or JSON array of alias, URL, and loaded status.
+    /// Test: `cli_parses_ls_standalone`.
+    #[command(name = "ls")]
+    LsAliases {
+        /// Output as JSON array instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Clone or refresh the managed workspace for a registered alias (DOC-24).
+    ///
+    /// Why: `load` is the idempotent step that materializes a registered alias
+    /// into a fully-configured project directory.
+    /// What: clones the repo (or fast-forward-pulls if it exists), runs
+    /// `prepare_session`, writes the managed marker, and prints the repo path.
+    /// Test: `cli_parses_load_standalone`.
+    Load {
+        /// Registered alias to load.
+        alias: String,
+    },
+
+    /// Launch an interactive `claude` session for a managed alias (DOC-24).
+    ///
+    /// Why: `tm run` is the claude-mpm replacement — it launches Claude Code
+    /// with `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` so the global
+    /// hooks/MCPs are supplied and the real `~/.claude` is excluded.
+    /// What: loads the alias if needed, checks credentials, and spawns `claude`
+    /// with inherited stdio.
+    /// Test: `cli_parses_run_standalone`.
+    Run {
+        /// Registered alias to run.
+        alias: String,
+        /// Optional initial task to pre-seed (currently unused by MVP).
+        #[arg(long)]
+        task: Option<String>,
+    },
+
+    /// Print the stable repo path for a loaded alias (DOC-24 IDE-attach).
+    ///
+    /// Why: `tm path <alias>` lets IDEs, scripts, or `cd $(tm path <alias>)`
+    /// open the project directory without running a session.
+    /// What: prints the absolute path to `~/.trusty-mpm/projects/<alias>/repo/`
+    /// when the alias is loaded.
+    /// Test: `cli_parses_path_standalone`.
+    Path {
+        /// Registered and loaded alias.
+        alias: String,
+    },
+
     /// Standalone metaharness — PM + sub-agent delegation without the daemon (#1045).
     ///
     /// Why: the M1 POC (issue #1045) builds a self-contained metaharness that
