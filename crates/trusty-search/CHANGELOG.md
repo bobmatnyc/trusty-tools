@@ -1,26 +1,17 @@
 # Changelog
 
-All notable changes are documented in this file.
-
-Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
-
----
-## [Unreleased]
-
-### Added
-
-- typeahead endpoint + MCP tool (lexical default, opt-in blended) (closes #1557) ([#1559](https://github.com/bobmatnyc/trusty-tools/pull/1559)) ([`db16554`](https://github.com/bobmatnyc/trusty-tools/commit/db16554bbfb6d5bc1f42f3aeb29bf0c7b71b9510))
-
-### Fixed
-
-- make publish.sh monorepo- and redb2-aware (closes #1539) ([#1544](https://github.com/bobmatnyc/trusty-tools/pull/1544)) ([`495dd92`](https://github.com/bobmatnyc/trusty-tools/commit/495dd926b8bcef2834aba725a991d1cd96b59047))
-- anchor Makefile sync-ui paths to makefile dir so it works from workspace root (closes #1540) ([#1543](https://github.com/bobmatnyc/trusty-tools/pull/1543)) ([`a54c6aa`](https://github.com/bobmatnyc/trusty-tools/commit/a54c6aa42bb84a45878d9b1225a9635688dd76bf))
-# Changelog
-
 All notable changes to trusty-search are documented in this file.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versions correspond to `Cargo.toml` patch releases.
+
+---
+
+## [0.27.1] — 2026-06-22
+
+### Fixed
+
+- **restore non-empty file walk when root path contains a skip-dir name (closes #1554)** — the indexing walker skipped all files when the project root itself matched a skip-directory pattern (e.g. a project rooted at `.../node_modules/...`). The fix anchors the skip-pattern check to directory entries only, not the root, so reindex now walks all files correctly. ([#1568](https://github.com/bobmatnyc/trusty-tools/pull/1568)) ([`e25c8f0`](https://github.com/bobmatnyc/trusty-tools/commit/e25c8f02f3164e920a8f8a44418410621ff9a04f))
 
 ---
 
