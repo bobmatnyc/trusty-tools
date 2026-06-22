@@ -419,7 +419,12 @@ pub(crate) enum Command {
         /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
         /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
         /// default `~/.trusty-mpm`.
-        #[arg(long, env = "TRUSTY_MPM_ROOT")]
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here. The env var is
+        /// read as tier-2 inside `resolve_managed_paths`; binding it to this
+        /// arg would promote it to tier-1 (CLI-flag) and silently skip the
+        /// config-file tier whenever the env var is set.
+        #[arg(long)]
         root: Option<String>,
     },
 
@@ -439,7 +444,9 @@ pub(crate) enum Command {
         /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
         /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
         /// default `~/.trusty-mpm`.
-        #[arg(long, env = "TRUSTY_MPM_ROOT")]
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
+        #[arg(long)]
         root: Option<String>,
     },
 
@@ -458,7 +465,9 @@ pub(crate) enum Command {
         /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
         /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
         /// default `~/.trusty-mpm`.
-        #[arg(long, env = "TRUSTY_MPM_ROOT")]
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
+        #[arg(long)]
         root: Option<String>,
     },
 
@@ -481,7 +490,9 @@ pub(crate) enum Command {
         /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
         /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
         /// default `~/.trusty-mpm`.
-        #[arg(long, env = "TRUSTY_MPM_ROOT")]
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
+        #[arg(long)]
         root: Option<String>,
     },
 
@@ -500,7 +511,9 @@ pub(crate) enum Command {
         /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
         /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
         /// default `~/.trusty-mpm`.
-        #[arg(long, env = "TRUSTY_MPM_ROOT")]
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
+        #[arg(long)]
         root: Option<String>,
     },
 
@@ -524,7 +537,9 @@ pub(crate) enum Command {
         /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
         /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
         /// default `~/.trusty-mpm`.
-        #[arg(long, env = "TRUSTY_MPM_ROOT")]
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
+        #[arg(long)]
         root: Option<String>,
     },
 

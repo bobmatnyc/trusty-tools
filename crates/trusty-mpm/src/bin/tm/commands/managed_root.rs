@@ -227,48 +227,76 @@ mod tests {
     // time, making the usage safe in practice.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    // ── helpers ─────────────────────────────────────────────────────────────
+    // ── low-level unsafe helpers ─────────────────────────────────────────────
 
-    /// Set an env var while the caller holds `ENV_LOCK`.
+    /// Set an env var (caller must hold `ENV_LOCK`).
     ///
     /// Why: `std::env::set_var` is unsafe in Rust 2024; centralising the
     /// `unsafe` block here keeps the individual tests readable.
     /// What: calls `std::env::set_var` inside an unsafe block.
-    /// Test: used internally by `with_clean_env`.
+    /// Test: used internally by the RAII guard.
     fn set_env(key: &str, val: &str) {
         // SAFETY: we hold ENV_LOCK for the entire duration of every test that
         // calls this, ensuring no concurrent env mutations from other threads.
         unsafe { std::env::set_var(key, val) }
     }
 
-    /// Remove an env var while the caller holds `ENV_LOCK`.
+    /// Remove an env var (caller must hold `ENV_LOCK`).
     ///
     /// Why: mirrors `set_env` for removals.
     /// What: calls `std::env::remove_var` inside an unsafe block.
-    /// Test: used internally by `with_clean_env`.
+    /// Test: used internally by the RAII guard.
     fn remove_env(key: &str) {
         // SAFETY: same as set_env — ENV_LOCK guarantees no concurrent mutation.
         unsafe { std::env::remove_var(key) }
     }
 
-    /// Run `f` with `TRUSTY_MPM_ROOT` and `XDG_CONFIG_HOME` cleared, while
-    /// holding the global env lock so no two tests race on env state.
-    fn with_clean_env<F: FnOnce() -> R, R>(f: F) -> R {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved_root = std::env::var("TRUSTY_MPM_ROOT").ok();
-        let saved_xdg = std::env::var("XDG_CONFIG_HOME").ok();
-        remove_env("TRUSTY_MPM_ROOT");
-        remove_env("XDG_CONFIG_HOME");
-        let result = f();
-        match saved_root {
-            Some(v) => set_env("TRUSTY_MPM_ROOT", &v),
-            None => remove_env("TRUSTY_MPM_ROOT"),
+    // ── RAII env guard ───────────────────────────────────────────────────────
+
+    /// RAII guard that holds `ENV_LOCK` and restores `TRUSTY_MPM_ROOT` +
+    /// `XDG_CONFIG_HOME` on drop — even if the test panics.
+    ///
+    /// Why: the previous `with_clean_env` closure-based helper did not restore
+    /// env vars when the closure panicked, poisoning `ENV_LOCK` and leaving env
+    /// dirty for subsequent tests. A `Drop` impl restores state unconditionally.
+    /// What: acquires `ENV_LOCK`, saves the current values of both vars, clears
+    /// them; on `Drop` restores both vars to their saved state.
+    /// Test: every `test_resolve_*` test relies on this guard for isolation.
+    struct CleanEnvGuard {
+        saved_root: Option<String>,
+        saved_xdg: Option<String>,
+        // Hold the lock for the guard's lifetime.
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl CleanEnvGuard {
+        /// Acquire the lock, save both vars, and clear them.
+        fn new() -> Self {
+            let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let saved_root = std::env::var("TRUSTY_MPM_ROOT").ok();
+            let saved_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+            remove_env("TRUSTY_MPM_ROOT");
+            remove_env("XDG_CONFIG_HOME");
+            Self {
+                saved_root,
+                saved_xdg,
+                _lock,
+            }
         }
-        match saved_xdg {
-            Some(v) => set_env("XDG_CONFIG_HOME", &v),
-            None => remove_env("XDG_CONFIG_HOME"),
+    }
+
+    impl Drop for CleanEnvGuard {
+        fn drop(&mut self) {
+            // Restore both vars unconditionally, even on panic.
+            match &self.saved_root {
+                Some(v) => set_env("TRUSTY_MPM_ROOT", v),
+                None => remove_env("TRUSTY_MPM_ROOT"),
+            }
+            match &self.saved_xdg {
+                Some(v) => set_env("XDG_CONFIG_HOME", v),
+                None => remove_env("XDG_CONFIG_HOME"),
+            }
         }
-        result
     }
 
     // ── ManagedPaths ────────────────────────────────────────────────────────
@@ -313,10 +341,9 @@ mod tests {
 
     #[test]
     fn test_xdg_config_path_uses_xdg_home() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = CleanEnvGuard::new();
         set_env("XDG_CONFIG_HOME", "/custom/config");
         let path = xdg_config_path();
-        remove_env("XDG_CONFIG_HOME");
         assert_eq!(
             path,
             Some(PathBuf::from("/custom/config/trusty-mpm/config.toml"))
@@ -325,8 +352,8 @@ mod tests {
 
     #[test]
     fn test_xdg_config_path_falls_back_to_home_config() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        remove_env("XDG_CONFIG_HOME");
+        let _g = CleanEnvGuard::new();
+        // XDG_CONFIG_HOME was cleared by the guard; test the fallback path.
         let path = xdg_config_path();
         if let Some(home) = dirs::home_dir() {
             assert_eq!(
@@ -341,31 +368,28 @@ mod tests {
     #[test]
     fn test_resolve_default() {
         // Nothing set → default ~/.trusty-mpm
-        with_clean_env(|| {
-            let root = resolve_root(None).expect("resolve_root should succeed");
-            let home = dirs::home_dir().expect("home dir required");
-            assert_eq!(root, home.join(".trusty-mpm"));
-        });
+        let _g = CleanEnvGuard::new();
+        let root = resolve_root(None).expect("resolve_root should succeed");
+        let home = dirs::home_dir().expect("home dir required");
+        assert_eq!(root, home.join(".trusty-mpm"));
     }
 
     #[test]
     fn test_resolve_env_wins_over_default() {
         // TRUSTY_MPM_ROOT set → env value wins over default
-        with_clean_env(|| {
-            set_env("TRUSTY_MPM_ROOT", "/tmp/from-env");
-            let root = resolve_root(None).expect("resolve_root should succeed");
-            assert_eq!(root, PathBuf::from("/tmp/from-env"));
-        });
+        let _g = CleanEnvGuard::new();
+        set_env("TRUSTY_MPM_ROOT", "/tmp/from-env");
+        let root = resolve_root(None).expect("resolve_root should succeed");
+        assert_eq!(root, PathBuf::from("/tmp/from-env"));
     }
 
     #[test]
     fn test_resolve_flag_wins_over_env() {
         // CLI flag set + env set → flag wins
-        with_clean_env(|| {
-            set_env("TRUSTY_MPM_ROOT", "/tmp/from-env");
-            let root = resolve_root(Some("/tmp/from-flag")).expect("resolve_root should succeed");
-            assert_eq!(root, PathBuf::from("/tmp/from-flag"));
-        });
+        let _g = CleanEnvGuard::new();
+        set_env("TRUSTY_MPM_ROOT", "/tmp/from-env");
+        let root = resolve_root(Some("/tmp/from-flag")).expect("resolve_root should succeed");
+        assert_eq!(root, PathBuf::from("/tmp/from-flag"));
     }
 
     #[test]
@@ -377,12 +401,12 @@ mod tests {
         let cfg_path = cfg_dir.join("config.toml");
         std::fs::write(&cfg_path, "[standalone]\nroot = \"/tmp/from-config\"\n").unwrap();
 
-        with_clean_env(|| {
-            // Point XDG_CONFIG_HOME at our temp dir so resolve_root finds the file
-            set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
-            let root = resolve_root(None).expect("resolve_root should succeed");
-            assert_eq!(root, PathBuf::from("/tmp/from-config"));
-        });
+        let _g = CleanEnvGuard::new();
+        // Point XDG_CONFIG_HOME at our temp dir so resolve_root finds the file.
+        // TRUSTY_MPM_ROOT is absent (cleared by guard) → config file is tier-3.
+        set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
+        let root = resolve_root(None).expect("resolve_root should succeed");
+        assert_eq!(root, PathBuf::from("/tmp/from-config"));
     }
 
     #[test]
@@ -394,11 +418,10 @@ mod tests {
         let cfg_path = cfg_dir.join("config.toml");
         std::fs::write(&cfg_path, "[standalone]\nroot = \"/tmp/from-config\"\n").unwrap();
 
-        with_clean_env(|| {
-            set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
-            let root = resolve_root(Some("/tmp/from-flag")).expect("resolve_root should succeed");
-            assert_eq!(root, PathBuf::from("/tmp/from-flag"));
-        });
+        let _g = CleanEnvGuard::new();
+        set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
+        let root = resolve_root(Some("/tmp/from-flag")).expect("resolve_root should succeed");
+        assert_eq!(root, PathBuf::from("/tmp/from-flag"));
     }
 
     #[test]
@@ -410,25 +433,68 @@ mod tests {
         let cfg_path = cfg_dir.join("config.toml");
         std::fs::write(&cfg_path, "[standalone]\nroot = \"/tmp/from-config\"\n").unwrap();
 
-        with_clean_env(|| {
+        let _g = CleanEnvGuard::new();
+        set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
+        set_env("TRUSTY_MPM_ROOT", "/tmp/from-env");
+        let root = resolve_root(None).expect("resolve_root should succeed");
+        assert_eq!(root, PathBuf::from("/tmp/from-env"));
+    }
+
+    /// Prove that the env var does NOT skip config.toml: when env is set,
+    /// env wins; when env is absent, config.toml is consulted.
+    ///
+    /// This test guards against the regression described in review finding #1:
+    /// if `env = "TRUSTY_MPM_ROOT"` is ever added back to the clap `#[arg]`,
+    /// clap populates `root` from the env var before `main` calls
+    /// `resolve_managed_paths(root.as_deref())`, which would make the env var
+    /// look like a CLI flag (tier-1) and cause `resolve_managed_paths` to return
+    /// immediately, silently skipping config.toml. With the env var read only
+    /// inside `resolve_root` (tier-2), both branches below must pass.
+    #[test]
+    fn test_env_and_config_file_independent_tiers() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cfg_dir = tmp.path().join("trusty-mpm");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let cfg_path = cfg_dir.join("config.toml");
+        std::fs::write(&cfg_path, "[standalone]\nroot = \"/tmp/from-config\"\n").unwrap();
+
+        // Branch A: env set + config file present + no --root → env wins (tier 2)
+        {
+            let _g = CleanEnvGuard::new();
             set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
             set_env("TRUSTY_MPM_ROOT", "/tmp/from-env");
-            let root = resolve_root(None).expect("resolve_root should succeed");
-            assert_eq!(root, PathBuf::from("/tmp/from-env"));
-        });
+            let root = resolve_root(None).expect("resolve_root");
+            assert_eq!(
+                root,
+                PathBuf::from("/tmp/from-env"),
+                "env must win over config.toml when TRUSTY_MPM_ROOT is set"
+            );
+        } // guard drops here, restoring env
+
+        // Branch B: env absent + config file present + no --root → config wins (tier 3)
+        {
+            let _g = CleanEnvGuard::new();
+            set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
+            // TRUSTY_MPM_ROOT is NOT set (guard cleared it)
+            let root = resolve_root(None).expect("resolve_root");
+            assert_eq!(
+                root,
+                PathBuf::from("/tmp/from-config"),
+                "config.toml must be consulted when TRUSTY_MPM_ROOT is absent"
+            );
+        }
     }
 
     #[test]
     fn test_resolve_config_file_missing_is_ok() {
         // Absent config file falls through to default without error
         let tmp = tempfile::tempdir().expect("tempdir");
-        with_clean_env(|| {
-            // Point XDG_CONFIG_HOME at an empty temp dir (no config.toml exists)
-            set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
-            let root = resolve_root(None).expect("resolve_root should succeed");
-            let home = dirs::home_dir().expect("home dir required");
-            assert_eq!(root, home.join(".trusty-mpm"));
-        });
+        let _g = CleanEnvGuard::new();
+        // Point XDG_CONFIG_HOME at an empty temp dir (no config.toml exists)
+        set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
+        let root = resolve_root(None).expect("resolve_root should succeed");
+        let home = dirs::home_dir().expect("home dir required");
+        assert_eq!(root, home.join(".trusty-mpm"));
     }
 
     #[test]
@@ -440,36 +506,33 @@ mod tests {
         let cfg_path = cfg_dir.join("config.toml");
         std::fs::write(&cfg_path, "this is not valid toml :::").unwrap();
 
-        with_clean_env(|| {
-            set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
-            let root = resolve_root(None).expect("resolve_root should succeed");
-            let home = dirs::home_dir().expect("home dir required");
-            assert_eq!(root, home.join(".trusty-mpm"));
-        });
+        let _g = CleanEnvGuard::new();
+        set_env("XDG_CONFIG_HOME", tmp.path().to_str().unwrap());
+        let root = resolve_root(None).expect("resolve_root should succeed");
+        let home = dirs::home_dir().expect("home dir required");
+        assert_eq!(root, home.join(".trusty-mpm"));
     }
 
     #[test]
     fn test_resolve_tilde_in_env() {
         // Tilde in TRUSTY_MPM_ROOT env var is expanded
-        with_clean_env(|| {
-            set_env("TRUSTY_MPM_ROOT", "~/my-tm-root");
-            let root = resolve_root(None).expect("resolve_root should succeed");
-            let home = dirs::home_dir().expect("home dir required");
-            assert_eq!(root, home.join("my-tm-root"));
-        });
+        let _g = CleanEnvGuard::new();
+        set_env("TRUSTY_MPM_ROOT", "~/my-tm-root");
+        let root = resolve_root(None).expect("resolve_root should succeed");
+        let home = dirs::home_dir().expect("home dir required");
+        assert_eq!(root, home.join("my-tm-root"));
     }
 
     #[test]
     fn test_resolve_managed_paths_sets_claude_config_dir() {
         // resolve_managed_paths builds both root and claude_config_dir
-        with_clean_env(|| {
-            set_env("TRUSTY_MPM_ROOT", "/tmp/test-root");
-            let mp = resolve_managed_paths(None).expect("should resolve");
-            assert_eq!(mp.root, PathBuf::from("/tmp/test-root"));
-            assert_eq!(
-                mp.claude_config_dir,
-                PathBuf::from("/tmp/test-root/claude-config")
-            );
-        });
+        let _g = CleanEnvGuard::new();
+        set_env("TRUSTY_MPM_ROOT", "/tmp/test-root");
+        let mp = resolve_managed_paths(None).expect("should resolve");
+        assert_eq!(mp.root, PathBuf::from("/tmp/test-root"));
+        assert_eq!(
+            mp.claude_config_dir,
+            PathBuf::from("/tmp/test-root/claude-config")
+        );
     }
 }
