@@ -52,10 +52,11 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         // Read-only / query / introspection. Issue #138 added the per-lane
         // search tools (`search_lexical`, `search_semantic`, `search_kg`)
         // alongside the existing `search_all` (now polymorphic between
-        // cross-project fan-out and per-index hybrid).
+        // cross-project fan-out and per-index hybrid). Issue #1557 adds
+        // `typeahead` (lexical/blended autocomplete, read-only).
         "search_all" | "search" | "search_lexical" | "search_semantic" | "search_kg"
         | "search_similar" | "search_health" | "list_indexes" | "index_status" | "list_chunks"
-        | "chat" | "get_call_chain" | "grep" | "console_metrics" => &[SEARCH_READ],
+        | "chat" | "get_call_chain" | "grep" | "console_metrics" | "typeahead" => &[SEARCH_READ],
 
         // Mutating
         "index_file" | "remove_file" | "create_index" | "delete_index" | "reindex" => {

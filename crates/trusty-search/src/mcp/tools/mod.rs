@@ -34,6 +34,7 @@ pub(crate) mod http;
 pub(crate) mod index;
 pub(crate) mod misc;
 pub(crate) mod search;
+pub(crate) mod typeahead;
 pub(crate) mod types;
 
 pub use descriptors::{tool_descriptors, tool_descriptors_pinned};
@@ -312,6 +313,9 @@ impl McpServer {
             return result;
         }
         if let Some(result) = misc::dispatch_misc_tool(self, tool, args).await {
+            return result;
+        }
+        if let Some(result) = typeahead::dispatch_typeahead_tool(self, tool, args).await {
             return result;
         }
         Err(DispatchError::UnknownTool)
