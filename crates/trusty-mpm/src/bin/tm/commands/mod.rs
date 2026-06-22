@@ -14,6 +14,7 @@ pub(crate) mod install;
 pub(crate) mod issue;
 pub(crate) mod launch;
 pub(crate) mod managed;
+pub(crate) mod managed_root;
 pub(crate) mod managed_route;
 pub(crate) mod meta;
 pub(crate) mod misc;

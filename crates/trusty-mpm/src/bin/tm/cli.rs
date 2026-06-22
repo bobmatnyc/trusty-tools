@@ -403,7 +403,7 @@ pub(crate) enum Command {
     ///
     /// Why: declares an alias→URL mapping without cloning so users can register
     /// their fleet cheaply and `tm load <alias>` lazily.
-    /// What: persists `{alias, url}` to `~/.trusty-mpm/registry.json` and
+    /// What: persists `{alias, url}` to `<root>/registry.json` and
     /// prints `registered <alias> → <url>`.
     /// Test: `cli_parses_register`.
     Register {
@@ -414,6 +414,18 @@ pub(crate) enum Command {
         /// Overwrite an existing alias with a different URL.
         #[arg(long)]
         force: bool,
+        /// Override the managed root (default: `~/.trusty-mpm`).
+        ///
+        /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
+        /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
+        /// default `~/.trusty-mpm`.
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here. The env var is
+        /// read as tier-2 inside `resolve_managed_paths`; binding it to this
+        /// arg would promote it to tier-1 (CLI-flag) and silently skip the
+        /// config-file tier whenever the env var is set.
+        #[arg(long)]
+        root: Option<String>,
     },
 
     /// List registered aliases with loaded status (DOC-24).
@@ -427,6 +439,15 @@ pub(crate) enum Command {
         /// Output as JSON array instead of a table.
         #[arg(long)]
         json: bool,
+        /// Override the managed root (default: `~/.trusty-mpm`).
+        ///
+        /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
+        /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
+        /// default `~/.trusty-mpm`.
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
+        #[arg(long)]
+        root: Option<String>,
     },
 
     /// Clone or refresh the managed workspace for a registered alias (DOC-24).
@@ -439,12 +460,21 @@ pub(crate) enum Command {
     Load {
         /// Registered alias to load.
         alias: String,
+        /// Override the managed root (default: `~/.trusty-mpm`).
+        ///
+        /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
+        /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
+        /// default `~/.trusty-mpm`.
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
+        #[arg(long)]
+        root: Option<String>,
     },
 
     /// Launch an interactive `claude` session for a managed alias (DOC-24).
     ///
     /// Why: `tm run` is the claude-mpm replacement — it launches Claude Code
-    /// with `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` so the global
+    /// with `CLAUDE_CONFIG_DIR=<root>/claude-config` so the global
     /// hooks/MCPs are supplied and the real `~/.claude` is excluded.
     /// What: loads the alias if needed, checks credentials, and spawns `claude`
     /// with inherited stdio.
@@ -455,35 +485,63 @@ pub(crate) enum Command {
         /// Optional initial task to pre-seed (currently unused by MVP).
         #[arg(long)]
         task: Option<String>,
+        /// Override the managed root (default: `~/.trusty-mpm`).
+        ///
+        /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
+        /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
+        /// default `~/.trusty-mpm`.
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
+        #[arg(long)]
+        root: Option<String>,
     },
 
     /// Print the stable repo path for a loaded alias (DOC-24 IDE-attach).
     ///
     /// Why: `tm path <alias>` lets IDEs, scripts, or `cd $(tm path <alias>)`
     /// open the project directory without running a session.
-    /// What: prints the absolute path to `~/.trusty-mpm/projects/<alias>/repo/`
+    /// What: prints the absolute path to `<root>/projects/<alias>/repo/`
     /// when the alias is loaded.
     /// Test: `cli_parses_path_standalone`.
     Path {
         /// Registered and loaded alias.
         alias: String,
+        /// Override the managed root (default: `~/.trusty-mpm`).
+        ///
+        /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
+        /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
+        /// default `~/.trusty-mpm`.
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
+        #[arg(long)]
+        root: Option<String>,
     },
 
     /// One-time keychain login for managed `tm run` sessions (WI-10, DOC-24).
     ///
     /// Why: `CLAUDE_CONFIG_DIR` relocates the macOS Keychain entry used for
-    /// Claude Max/Pro OAuth (A9). A fresh `~/.trusty-mpm/claude-config/` has
-    /// no keychain entry, so `tm run` reports "Not logged in". `tm login` runs
+    /// Claude Max/Pro OAuth (A9). A fresh managed `claude-config/` has no
+    /// keychain entry, so `tm run` reports "Not logged in". `tm login` runs
     /// `claude auth login` under the tm-global `CLAUDE_CONFIG_DIR` so the
     /// OAuth flow creates a keychain entry for that path. This is a one-time
     /// setup — the entry persists across sessions on this machine.
     /// What: ensures the tm-global config dir exists, spawns
-    /// `claude auth login` with `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config`
+    /// `claude auth login` with `CLAUDE_CONFIG_DIR=<root>/claude-config`
     /// and inherited stdio, prints guidance before/after the OAuth flow.
     /// Alternative: set `ANTHROPIC_API_KEY` to use the API-key+`--bare` path
     /// instead (for CI/automation, no login required).
     /// Test: `cli_parses_login_standalone`.
-    Login,
+    Login {
+        /// Override the managed root (default: `~/.trusty-mpm`).
+        ///
+        /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
+        /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >
+        /// default `~/.trusty-mpm`.
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
+        #[arg(long)]
+        root: Option<String>,
+    },
 
     /// Standalone metaharness — PM + sub-agent delegation without the daemon (#1045).
     ///
