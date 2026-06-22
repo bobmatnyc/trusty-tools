@@ -1066,6 +1066,58 @@ fn cli_parses_session_prune_idle_defaults() {
 }
 
 #[test]
+fn cli_parses_session_decommission_ephemeral() {
+    // #1508: the bulk-teardown verb takes no arguments.
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "decommission-ephemeral"]).unwrap();
+    match cli.command {
+        Command::Session {
+            action: SessionAction::DecommissionEphemeral,
+        } => {}
+        other => panic!("expected session decommission-ephemeral, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_prune() {
+    // #1508: `prune` requires `--state` and accepts `--dry-run`/`--include-active`.
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "sessions",
+        "prune",
+        "--state",
+        "stopped",
+        "--dry-run",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Session {
+            action:
+                SessionAction::Prune {
+                    state,
+                    dry_run,
+                    include_active,
+                },
+        } => {
+            assert_eq!(state, "stopped");
+            assert!(dry_run);
+            assert!(
+                !include_active,
+                "include_active defaults to the fail-closed false"
+            );
+        }
+        other => panic!("expected session prune, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_session_prune_requires_state() {
+    // #1508: `--state` is mandatory — omitting it must be a parse error (the
+    // fail-closed CLI contract; we never default to a destructive filter).
+    let err = Cli::try_parse_from(["trusty-mpm", "sessions", "prune"]);
+    assert!(err.is_err(), "prune without --state must fail to parse");
+}
+
+#[test]
 fn deprecation_notice_format() {
     // The deprecation helper renders a stable, single-line message (#1205).
     // We assert the pure message builder since the eprintln side-effect itself

@@ -405,6 +405,20 @@ pub(crate) async fn session(
         SessionAction::PruneIdle { dry_run, json } => {
             crate::commands::prune::prune_idle(client, url, dry_run, json).await?
         }
+        // #1508: bulk teardown + by-state prune go through direct HTTP (like
+        // `PruneIdle`), not chat-core — they are fleet-wide store operations, not
+        // single-session intents.
+        SessionAction::DecommissionEphemeral => {
+            crate::commands::managed::session_decommission_ephemeral(client, url).await?
+        }
+        SessionAction::Prune {
+            state,
+            dry_run,
+            include_active,
+        } => {
+            crate::commands::managed::session_prune(client, url, state, dry_run, include_active)
+                .await?
+        }
         // The deprecated verbose aliases emit their deprecation notice, then
         // route through chat-core exactly like their canonical verb (#1205).
         action @ (SessionAction::ManagedStop { .. }

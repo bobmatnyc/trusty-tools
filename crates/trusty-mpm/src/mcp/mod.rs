@@ -24,6 +24,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use trusty_common::mcp::{Request, Response, error_codes};
 
+pub mod project_dispatch;
 pub mod session_dispatch;
 pub mod tools;
 
@@ -137,6 +138,7 @@ pub trait OrchestratorBackend: Send + Sync {
         task: &str,
         name_hint: Option<&str>,
         runtime: Option<&str>,
+        ephemeral: Option<bool>,
     ) -> Result<Value, String>;
 
     /// Back `session_stop`: stop a session's runtime, keeping its workspace.
@@ -188,6 +190,36 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       confirmation with the tmux name. A missing id is an error string.
     /// Test: `dispatch_session_send_tool` (mock).
     async fn session_send(&self, session_id: &str, text: &str) -> Result<Value, String>;
+
+    // ── #1508: fleet-wide teardown tools ─────────────────────────────────────
+
+    /// Back `session_decommission_ephemeral`: bulk-tear-down every ephemeral session.
+    ///
+    /// Why: e2e harnesses and drivers need a typed, JSON-native "clean up all my
+    ///      throwaway test sessions" verb without scraping the CLI. REAL sessions
+    ///      default `ephemeral=false` and are unreachable, so durable work is safe.
+    /// What: decommissions every `ephemeral == true` session (kill runtime + remove
+    ///       workspace + tombstone) and returns `{ decommissioned: <count> }`.
+    /// Test: `dispatch_session_decommission_ephemeral_tool` (mock).
+    async fn session_decommission_ephemeral(&self) -> Result<Value, String>;
+
+    /// Back `session_prune`: by-state prune + tombstone compaction.
+    ///
+    /// Why: ONE fleet-wide tool to tear down ephemeral/stopped sessions AND compact
+    ///      the store by dropping decommissioned tombstones, so legacy stale records
+    ///      can be purged over MCP with the same engine that cleans up test sessions.
+    /// What: parses `state` (`ephemeral`|`stopped`|`decommissioned`|`all`); a RUNNING
+    ///       session is NEVER torn down unless `include_active`; with `dry_run`
+    ///       NOTHING is mutated. Returns the `PruneOutcome` JSON. An unknown `state`
+    ///       is an error string.
+    /// Test: `dispatch_session_prune_tool`, `dispatch_session_prune_rejects_bad_state`
+    ///       (mock).
+    async fn session_prune(
+        &self,
+        state: &str,
+        dry_run: bool,
+        include_active: bool,
+    ) -> Result<Value, String>;
 
     // ── #1222: console-facing tools ──────────────────────────────────────────
 
@@ -245,6 +277,60 @@ pub trait OrchestratorBackend: Send + Sync {
         auto_resume: Option<bool>,
         default_model: Option<&str>,
     ) -> Result<Value, String>;
+
+    // ── #1519 WI-2: project-registry tools ───────────────────────────────────
+
+    /// Back `project_list`: return a JSON array of all registered projects.
+    ///
+    /// Why: the driver skill and operators need a typed list of known projects
+    ///      to pick a repository for a new session without specifying the URL
+    ///      every time.
+    /// What: lists all entries in the project registry and returns them as a
+    ///      JSON array. An empty registry returns `[]`.
+    /// Test: `dispatch_project_list_tool` (mock).
+    async fn project_list(&self) -> Result<Value, String>;
+
+    /// Back `project_register`: upsert a project entry in the registry.
+    ///
+    /// Why: operators and the driver skill must be able to add or update a
+    ///      project without restarting the daemon or editing config.yaml.
+    ///      Registration is idempotent — calling with the same `name` updates
+    ///      the entry rather than duplicating it.
+    /// What: upserts the project keyed by `name` and returns the persisted
+    ///      project record as JSON.
+    /// Test: `dispatch_project_register_tool`,
+    ///       `dispatch_project_register_requires_name` (mock).
+    async fn project_register(
+        &self,
+        name: &str,
+        repo_url: &str,
+        default_branch: Option<&str>,
+        stack_hint: Option<&str>,
+        tags: Option<Vec<String>>,
+        description: Option<&str>,
+    ) -> Result<Value, String>;
+
+    /// Back `project_get`: look up a single project by name.
+    ///
+    /// Why: the driver skill needs a point-lookup to retrieve a project's
+    ///      `repo_url` and `default_branch` before spawning a session without
+    ///      listing all projects first.
+    /// What: returns the project record as JSON or a descriptive error when
+    ///      the name is not in the registry.
+    /// Test: `dispatch_project_get_tool`,
+    ///       `dispatch_project_get_missing_name` (mock).
+    async fn project_get(&self, name: &str) -> Result<Value, String>;
+
+    /// Back `project_resolve`: resolve a NL query to the best-matching project.
+    ///
+    /// Why: operators and driver skills need to route free-text task descriptions,
+    ///      GitHub URLs, ticket IDs, and keywords to the correct registered project
+    ///      without knowing exact names or URLs.
+    /// What: runs the NL→project resolver over all registered projects, returning
+    ///      the primary match, confidence score, reason, all candidates, and a
+    ///      `needs_disambiguation` flag.
+    /// Test: `dispatch_project_resolve_tool` (mock).
+    async fn project_resolve(&self, query: &str) -> Result<Value, String>;
 }
 
 /// Route a JSON-RPC request to the backend, returning the MCP response.
@@ -380,11 +466,16 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
                 .config_write(template, auto_resume, default_model)
                 .await
         }
-        // #1221: the six session-lifecycle tools route through a sibling module
-        // so this match stays focused and `mod.rs` stays under the SLOC cap.
-        other => match session_dispatch::try_dispatch(backend, other, &args).await {
+        // #1519 WI-2: the three project-registry tools route through a sibling
+        // module before the session tools so both groups can extend independently.
+        other => match project_dispatch::try_dispatch(backend, other, &args).await {
             Some(result) => result,
-            None => Err(format!("unknown tool: {other}")),
+            // #1221 + #1508: the eight session-lifecycle tools route through a sibling
+            // module so this match stays focused and `mod.rs` stays under the SLOC cap.
+            None => match session_dispatch::try_dispatch(backend, other, &args).await {
+                Some(result) => result,
+                None => Err(format!("unknown tool: {other}")),
+            },
         },
     };
 

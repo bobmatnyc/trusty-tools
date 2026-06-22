@@ -88,6 +88,17 @@ pub mod session_registry;
 /// Test: `events::tests` is the comprehensive suite for this foundation type.
 pub mod events;
 
+/// Canonical harness-understanding instructions shared by all consumers (DOC-21).
+///
+/// Why: Both trusty-mpm's SM prompt and a future t-code overseer need the same
+///      harness mental model — session lifecycle, pane signals, decision protocol,
+///      and per-harness specifics. A single shared source prevents drift.
+/// What: Four structured accessors (`agnostic`, `mpm_session_manager`, `tcode`,
+///       `overseer`) plus a `harness_understanding` convenience that concatenates
+///       all sections. Content is bundled markdown compiled in via `include_str!`.
+/// Test: `harness_doc::tests` exercises every accessor and the full-doc combinator.
+pub mod harness_doc;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

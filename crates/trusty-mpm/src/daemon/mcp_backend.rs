@@ -380,9 +380,18 @@ impl OrchestratorBackend for StateBackend {
         task: &str,
         name_hint: Option<&str>,
         runtime: Option<&str>,
+        ephemeral: Option<bool>,
     ) -> Result<Value, String> {
-        super::mcp_session::session_new(&self.state, repo_url, git_ref, task, name_hint, runtime)
-            .await
+        super::mcp_session::session_new(
+            &self.state,
+            repo_url,
+            git_ref,
+            task,
+            name_hint,
+            runtime,
+            ephemeral,
+        )
+        .await
     }
 
     async fn session_stop(&self, session_id: &str) -> Result<Value, String> {
@@ -403,6 +412,21 @@ impl OrchestratorBackend for StateBackend {
 
     async fn session_send(&self, session_id: &str, text: &str) -> Result<Value, String> {
         super::mcp_session::session_send(&self.state, session_id, text).await
+    }
+
+    // ── #1508: fleet-wide teardown tools (delegate to mcp_session) ───────────
+
+    async fn session_decommission_ephemeral(&self) -> Result<Value, String> {
+        super::mcp_session::session_decommission_ephemeral(&self.state).await
+    }
+
+    async fn session_prune(
+        &self,
+        state: &str,
+        dry_run: bool,
+        include_active: bool,
+    ) -> Result<Value, String> {
+        super::mcp_session::session_prune(&self.state, state, dry_run, include_active).await
     }
 
     // ── #1222: console-facing tools (delegate to mcp_console) ────────────────
@@ -432,6 +456,43 @@ impl OrchestratorBackend for StateBackend {
         default_model: Option<&str>,
     ) -> Result<Value, String> {
         super::mcp_console::config_write(workspace_root_template, auto_resume, default_model)
+    }
+
+    // ── #1519 WI-2: project-registry tools (delegate to mcp_project) ─────────
+
+    async fn project_list(&self) -> Result<Value, String> {
+        super::mcp_project::project_list(&self.state).await
+    }
+
+    async fn project_register(
+        &self,
+        name: &str,
+        repo_url: &str,
+        default_branch: Option<&str>,
+        stack_hint: Option<&str>,
+        tags: Option<Vec<String>>,
+        description: Option<&str>,
+    ) -> Result<Value, String> {
+        super::mcp_project::project_register(
+            &self.state,
+            name,
+            repo_url,
+            default_branch,
+            stack_hint,
+            tags,
+            description,
+        )
+        .await
+    }
+
+    async fn project_get(&self, name: &str) -> Result<Value, String> {
+        super::mcp_project::project_get(&self.state, name).await
+    }
+
+    // ── #1517 WI-5: NL→repo resolver (delegates to mcp_project) ─────────────
+
+    async fn project_resolve(&self, query: &str) -> Result<Value, String> {
+        super::mcp_project::project_resolve(&self.state, query).await
     }
 }
 

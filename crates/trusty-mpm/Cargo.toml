@@ -119,6 +119,7 @@ path = "tests/services_integration.rs"
 # ── Always-on dependencies ─────────────────────────────────────────────────────
 # Required by the `core` and `client` library modules (compiled unconditionally).
 [dependencies]
+trusty-agents-common = { workspace = true }
 trusty-common = { workspace = true, features = [
     "mcp",
     "cli-help",

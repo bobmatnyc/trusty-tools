@@ -114,8 +114,18 @@ normal development operations.";
 ///
 /// Why: gives the daemon a model-driven oversight strategy, interchangeable
 /// with the deterministic one behind `dyn Overseer`.
-/// What: holds the resolved API key, the model id, and a `reqwest` blocking
-/// client; `enabled` is `true` only when an API key was found.
+/// What: holds the resolved API key, the model id, and lazily-initialized
+/// HTTP clients; `enabled` is `true` only when an API key was found.
+///
+/// The blocking client is intentionally lazy (`OnceLock`): constructing a
+/// `reqwest::blocking::Client` internally spawns a new `tokio::Runtime`, which
+/// panics when called from within an existing async runtime (e.g. a
+/// `#[tokio::test]` or an axum handler). By deferring construction to the
+/// first call of [`Self::evaluate`] — which is always invoked from a
+/// synchronous, non-async context via the [`Overseer`] trait — the panic is
+/// avoided entirely. The async `chat_client` has no such restriction and is
+/// built eagerly.
+///
 /// Test: `disabled_without_key`, `enabled_with_key`.
 #[derive(Debug)]
 pub struct LlmOverseer {
@@ -124,7 +134,15 @@ pub struct LlmOverseer {
     /// OpenRouter model id to query.
     model: String,
     /// Blocking HTTP client with the overseer timeout baked in.
-    client: reqwest::blocking::Client,
+    ///
+    /// Why: `reqwest::blocking::Client::builder().build()` internally creates
+    /// its own `tokio::Runtime`. Constructing it inside an existing async
+    /// runtime (e.g. during `DaemonState::new()` called from a
+    /// `#[tokio::test]`) panics with "Cannot drop a runtime in a context where
+    /// blocking is not allowed." Lazy initialization via `OnceLock` defers
+    /// construction to the first call of [`Self::evaluate`], which is always
+    /// on a synchronous thread (the `Overseer` trait has no async methods).
+    client: std::sync::OnceLock<reqwest::blocking::Client>,
     /// Async HTTP client used by the interactive `chat` path.
     ///
     /// Why: [`Self::evaluate`] runs on the synchronous hook path, but
@@ -140,16 +158,13 @@ impl LlmOverseer {
     /// Why: the daemon constructs this once at startup when `[llm] enabled =
     /// true`; it must resolve the API key from the operator's environment
     /// (preferring `.env.local`, then `.env`, then the real process env).
-    /// What: reads the key named by `api_key_env`, builds a timeout-bounded
-    /// `reqwest` blocking client, and stores the model id. An absent key is
-    /// not fatal — the overseer is simply reported disabled.
+    /// What: reads the key named by `api_key_env`, records the model id, and
+    /// eagerly builds only the async chat client. The blocking client used by
+    /// [`Self::evaluate`] is deferred to first use (see field doc). An absent
+    /// key is not fatal — the overseer is simply reported disabled.
     /// Test: `disabled_without_key`, `enabled_with_key`.
     pub fn new(model: impl Into<String>, api_key_env: &str) -> Self {
         let api_key = resolve_api_key(api_key_env);
-        let client = reqwest::blocking::Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .unwrap_or_default();
         let chat_client = reqwest::Client::builder()
             .timeout(CHAT_TIMEOUT)
             .build()
@@ -157,9 +172,27 @@ impl LlmOverseer {
         Self {
             api_key,
             model: model.into(),
-            client,
+            client: std::sync::OnceLock::new(),
             chat_client,
         }
+    }
+
+    /// Return a reference to the lazily-initialized blocking HTTP client.
+    ///
+    /// Why: the blocking client must not be built in async context (see struct
+    /// doc); this accessor initialises it on first call from a synchronous
+    /// thread and returns the cached instance on subsequent calls.
+    /// What: calls `OnceLock::get_or_init` with the same builder settings that
+    /// were previously in `new`.
+    /// Test: exercised indirectly by `evaluate` in `disabled_without_key` and
+    /// any test that calls `pre_tool_use` with an enabled overseer.
+    fn blocking_client(&self) -> &reqwest::blocking::Client {
+        self.client.get_or_init(|| {
+            reqwest::blocking::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .unwrap_or_default()
+        })
     }
 
     /// Send a user message and return the model's reply text.
@@ -238,7 +271,7 @@ impl LlmOverseer {
         });
 
         let response = self
-            .client
+            .blocking_client()
             .post(OPENROUTER_URL)
             .bearer_auth(&self.api_key)
             .json(&body)

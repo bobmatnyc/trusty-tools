@@ -47,6 +47,13 @@ pub struct SpawnParams {
     pub name_hint: Option<String>,
     /// Optional runtime selector (`"claude-code"` | `"tcode"`).
     pub runtime: Option<String>,
+    /// Whether the spawned session is EPHEMERAL (a test/throwaway session) (#1508).
+    ///
+    /// Why: e2e harnesses (and any caller that knows it is creating a disposable
+    /// session) set this so the bulk-teardown and age-based reap paths may clean
+    /// the session up automatically. `None`/`Some(false)` → a normal, durable
+    /// session that the automatic paths never touch.
+    pub ephemeral: Option<bool>,
 }
 
 /// Spawn a managed session, shared by the HTTP handler and the MCP tool.
@@ -133,6 +140,10 @@ pub async fn spawn_managed(
     })?;
 
     // Step 2: create the tmux session rooted at the provisioned workspace.
+    // `owned=true` is set ATOMICALLY at record creation (#1511): the SM
+    // provisioned this directory via git clone, so decommission may remove it.
+    // Local-path spawn and adopt_existing pass `owned=false`; they are never
+    // eligible for automatic disk deletion.
     let mgr = state.session_manager().await;
     let record = mgr
         .create_with_id(
@@ -144,6 +155,8 @@ pub async fn spawn_managed(
             Some(params.repo_url.clone()),
             Some(params.git_ref.clone()),
             runtime,
+            params.ephemeral.unwrap_or(false),
+            true, // owned: SM provisioned via git clone
         )
         .await
         .map_err(|e| {
@@ -262,6 +275,8 @@ async fn spawn_managed_local(
             None,
             None,
             runtime,
+            params.ephemeral.unwrap_or(false),
+            false, // owned: local-path spawn never owns the directory (#1511)
         )
         .await
         .map_err(|e| {

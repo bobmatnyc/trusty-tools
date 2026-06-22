@@ -445,40 +445,60 @@ async fn manager_resume_respawns_in_existing_workspace() {
     );
 }
 
-/// `decommission` must remove the workspace directory from disk and set state
-/// to `Decommissioned`, but keep a tombstone record.
+/// `decommission` removes an SM-OWNED workspace directory and sets state to
+/// `Decommissioned`, but keeps a tombstone record.
 ///
-/// Why: decommission is the ONLY teardown that removes disk artifacts; without
-/// it the workspace dir accumulates indefinitely.
-/// What: creates a session with a real temp workspace dir, decommissions it,
-/// asserts the workspace dir is gone from disk and the record state is
-/// `Decommissioned` with `workspace_path = None`.
+/// Why: decommission is the ONLY teardown that removes disk artifacts for
+/// SM-provisioned (clone-based) sessions. The workspace must only be deleted
+/// when `workspace_owned = true` AND the path is inside the managed root —
+/// this test exercises the owned path by pointing the workspace inside a temp
+/// dir that serves as the managed root (#1511).
+/// What: creates a session, marks it workspace_owned=true, uses a temp dir as
+/// the managed root (via env override), decommissions it, asserts the workspace
+/// dir is gone from disk and the record state is `Decommissioned` with
+/// `workspace_path = None`.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_decommission_removes_workspace() {
     let dir = TempDir::new().unwrap();
     let (mgr, _fake) = make_manager(&dir).await;
 
-    // Create a real temp workspace directory that we can check after decommission.
-    let workspace_dir = TempDir::new().unwrap();
-    let workspace_path = workspace_dir.path().to_owned();
+    // Build a workspace path INSIDE a temp "managed root" dir so the
+    // path-containment guard passes. `decommission_with_root` is called with
+    // the managed root injected directly — no env var mutation required.
+    let managed_root = TempDir::new().unwrap();
+    let workspace_path = managed_root
+        .path()
+        .join("owner")
+        .join("repo")
+        .join("abc-session-id");
+    std::fs::create_dir_all(&workspace_path).unwrap();
     // Write a sentinel file so we can verify the dir was removed.
     std::fs::write(workspace_path.join("sentinel.txt"), "exists").unwrap();
 
+    // Create the session with `owned=true` (atomic: mirrors what `spawn_managed`
+    // does for clone-provisioned workspaces after Fix 1).
     let record = mgr
-        .create(
+        .create_with_id(
+            ManagedSessionId::new(),
             "task".into(),
             Some(workspace_path.clone()),
             None,
             Some(workspace_path.clone()),
             None,
             None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            true, // owned: SM provisioned via clone
         )
         .await
         .expect("create");
 
-    // Decommission.
-    let tombstone = mgr.decommission(&record.id).await.expect("decommission");
+    // Decommission using the injectable root — no unsafe env mutation.
+    let tombstone = mgr
+        .decommission_with_root(&record.id, managed_root.path())
+        .await
+        .expect("decommission");
 
     // State must be Decommissioned.
     assert_eq!(tombstone.state, ManagedSessionState::Decommissioned);
@@ -539,6 +559,8 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
         proposed_default: None,
         correlation: Default::default(),
         runtime: Default::default(),
+        ephemeral: false,
+        workspace_owned: false,
     };
     // A record whose tmux session will NOT be found (simulating reboot).
     let rebooted_record = SessionRecord {
@@ -556,6 +578,8 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
         proposed_default: None,
         correlation: Default::default(),
         runtime: Default::default(),
+        ephemeral: false,
+        workspace_owned: false,
     };
     {
         let mut store = mgr.store.write().await;
@@ -615,6 +639,8 @@ async fn manager_reconcile_skips_decommissioned() {
         proposed_default: None,
         correlation: Default::default(),
         runtime: Default::default(),
+        ephemeral: false,
+        workspace_owned: false,
     };
     {
         let mut store = mgr.store.write().await;
@@ -845,6 +871,8 @@ async fn spawn_session_tmux_cwd_is_workspace() {
             Some("https://github.com/owner/repo".into()),
             Some("main".into()),
             crate::runtime::RuntimeKind::default(),
+            false,
+            false,
         )
         .await
         .expect("create_with_id");
@@ -937,6 +965,8 @@ async fn manager_create_persists_runtime() {
             None,
             None,
             crate::runtime::RuntimeKind::Tcode,
+            false,
+            false,
         )
         .await
         .expect("create_with_id");
@@ -1050,6 +1080,7 @@ async fn manager_adopt_existing_registers_active() {
             PathBuf::from("/Users/op/work/proj"),
             "drive my hand-started session".into(),
             crate::runtime::RuntimeKind::default(),
+            false,
         )
         .await
         .expect("adopt existing");
@@ -1090,6 +1121,7 @@ async fn manager_adopt_existing_missing_tmux_errors() {
             PathBuf::from("/tmp/x"),
             String::new(),
             crate::runtime::RuntimeKind::default(),
+            false,
         )
         .await
         .expect_err("adopting a nonexistent pane must fail");
@@ -1121,6 +1153,7 @@ async fn manager_adopt_existing_double_adopt_errors() {
         PathBuf::from("/tmp/once"),
         String::new(),
         crate::runtime::RuntimeKind::default(),
+        false,
     )
     .await
     .expect("first adopt succeeds");
@@ -1131,6 +1164,7 @@ async fn manager_adopt_existing_double_adopt_errors() {
             PathBuf::from("/tmp/once"),
             String::new(),
             crate::runtime::RuntimeKind::default(),
+            false,
         )
         .await
         .expect_err("second adopt of the same pane must fail");
@@ -1165,6 +1199,7 @@ async fn manager_adopt_existing_allows_non_tmpm_name() {
             PathBuf::from("/Users/op/repo"),
             "adopt non-prefixed".into(),
             crate::runtime::RuntimeKind::default(),
+            false,
         )
         .await
         .expect("non-tmpm names are adoptable on the explicit path");
@@ -1277,5 +1312,625 @@ async fn manager_get_returns_last_known_on_reload_error() {
             Err(ManagedError::SessionNotFound(_))
         ),
         "an unknown id must still yield SessionNotFound"
+    );
+}
+
+// ── #1508: ephemeral tagging, bulk teardown, by-state prune, compaction ─────────
+
+/// Seed a record DIRECTLY into the store with explicit state/ephemeral flags.
+///
+/// Why: the prune tests need records in arbitrary lifecycle states (Stopped,
+/// Decommissioned, …) and ephemeral flags without driving the full create/stop
+/// ritual; upserting a hand-built record is the cheapest way to set up the matrix.
+/// What: builds a `SessionRecord` with the given id/state/ephemeral and a
+/// workspace path that actually exists on disk (so a real decommission can remove
+/// it), upserts it, and returns the workspace path for assertions.
+/// Test: used by the prune tests below.
+async fn seed_record(
+    mgr: &SessionManager,
+    root: &TempDir,
+    id: ManagedSessionId,
+    state: ManagedSessionState,
+    ephemeral: bool,
+) -> PathBuf {
+    let ws = root.path().join(format!("ws-{id}"));
+    // Decommissioned tombstones carry NO workspace (it was already removed); every
+    // other state keeps a real on-disk dir so a teardown can remove it.
+    let workspace_path = if state == ManagedSessionState::Decommissioned {
+        None
+    } else {
+        std::fs::create_dir_all(&ws).expect("mk ws");
+        Some(ws.clone())
+    };
+    let record = SessionRecord {
+        id,
+        tmux_name: format!("tmpm-seed-{id}"),
+        cwd: root.path().to_path_buf(),
+        task: "seed".into(),
+        state,
+        created_at: Utc::now(),
+        last_activity_at: None,
+        workspace_path,
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+        correlation: Default::default(),
+        runtime: Default::default(),
+        ephemeral,
+        workspace_owned: false,
+    };
+    mgr.store
+        .write()
+        .await
+        .upsert(record)
+        .await
+        .expect("seed upsert");
+    ws
+}
+
+/// `create_with_id` persists the caller-supplied `ephemeral` flag (#1508).
+///
+/// Why: the flag is the foundation of the whole feature — it must round-trip
+/// through the create path onto the persisted record.
+/// What: creates one session with `ephemeral=true` and one with `false`, then
+/// reads each back and asserts the flag survived.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_create_persists_ephemeral_flag() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let eph = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "ephemeral task".into(),
+            Some(PathBuf::from("/tmp/eph")),
+            None,
+            None,
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            true,
+            false,
+        )
+        .await
+        .expect("create ephemeral");
+    let durable = mgr
+        .create_with_id(
+            ManagedSessionId::new(),
+            "durable task".into(),
+            Some(PathBuf::from("/tmp/dur")),
+            None,
+            None,
+            None,
+            None,
+            crate::runtime::RuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("create durable");
+
+    assert!(
+        mgr.get(&eph.id).await.unwrap().ephemeral,
+        "ephemeral flag persisted"
+    );
+    assert!(
+        !mgr.get(&durable.id).await.unwrap().ephemeral,
+        "durable stays false"
+    );
+}
+
+/// `adopt_existing` persists the caller-supplied `ephemeral` flag (#1508).
+///
+/// Why: the e2e harness adopts panes as ephemeral; the flag must reach the record.
+/// What: seeds a live pane, adopts it with `ephemeral=true`, asserts it persisted.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_adopt_existing_persists_ephemeral_flag() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+    fake.seeded_names
+        .lock()
+        .unwrap()
+        .push("tmpm-eph-adopt".into());
+
+    let record = mgr
+        .adopt_existing(
+            "tmpm-eph-adopt",
+            PathBuf::from("/tmp/adopt"),
+            "throwaway adopt".into(),
+            crate::runtime::RuntimeKind::default(),
+            true,
+        )
+        .await
+        .expect("adopt ephemeral");
+
+    assert!(
+        mgr.get(&record.id).await.unwrap().ephemeral,
+        "adopted ephemeral flag persisted"
+    );
+}
+
+/// `decommission_all_ephemeral` tears down ONLY ephemeral sessions (#1508).
+///
+/// Why: the core safety invariant — REAL (non-ephemeral) sessions must never be
+/// touched by the bulk-teardown path.
+/// What: seeds two ephemeral (Active + Stopped) and two durable (Active + Stopped)
+/// sessions, runs the bulk teardown, and asserts only the two ephemeral records
+/// became Decommissioned while the two durable records are untouched.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_all_ephemeral_ignores_non_ephemeral() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let eph_active = ManagedSessionId::new();
+    let eph_stopped = ManagedSessionId::new();
+    let dur_active = ManagedSessionId::new();
+    let dur_stopped = ManagedSessionId::new();
+    seed_record(&mgr, &dir, eph_active, ManagedSessionState::Active, true).await;
+    seed_record(&mgr, &dir, eph_stopped, ManagedSessionState::Stopped, true).await;
+    seed_record(&mgr, &dir, dur_active, ManagedSessionState::Active, false).await;
+    seed_record(&mgr, &dir, dur_stopped, ManagedSessionState::Stopped, false).await;
+
+    let count = mgr
+        .decommission_all_ephemeral()
+        .await
+        .expect("bulk teardown");
+    assert_eq!(count, 2, "exactly the two ephemeral sessions are torn down");
+
+    assert_eq!(
+        mgr.get(&eph_active).await.unwrap().state,
+        ManagedSessionState::Decommissioned
+    );
+    assert_eq!(
+        mgr.get(&eph_stopped).await.unwrap().state,
+        ManagedSessionState::Decommissioned
+    );
+    // Durable sessions are untouched.
+    assert_eq!(
+        mgr.get(&dur_active).await.unwrap().state,
+        ManagedSessionState::Active
+    );
+    assert_eq!(
+        mgr.get(&dur_stopped).await.unwrap().state,
+        ManagedSessionState::Stopped
+    );
+}
+
+/// The by-state Stopped prune NEVER touches a running (Active) session (#1508).
+///
+/// Why: clearing legacy stopped/decommissioned records must not risk reaping a
+/// live session. `include_active=false` is the fail-closed default.
+/// What: seeds an Active and a Stopped session, prunes `Stopped`, asserts only the
+/// Stopped one is decommissioned and the Active one is left running.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_by_state_never_touches_active() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let active = ManagedSessionId::new();
+    let stopped = ManagedSessionId::new();
+    seed_record(&mgr, &dir, active, ManagedSessionState::Active, false).await;
+    seed_record(&mgr, &dir, stopped, ManagedSessionState::Stopped, false).await;
+
+    let outcome = mgr
+        .prune_managed(crate::session_manager::PruneFilter::Stopped, false, false)
+        .await
+        .expect("prune stopped");
+    assert_eq!(outcome.count(), 1, "only the Stopped session is pruned");
+    assert_eq!(
+        mgr.get(&active).await.unwrap().state,
+        ManagedSessionState::Active,
+        "the Active session must be untouched"
+    );
+    assert_eq!(
+        mgr.get(&stopped).await.unwrap().state,
+        ManagedSessionState::Decommissioned
+    );
+}
+
+/// The Decommissioned prune COMPACTS the store (removes tombstones) (#1508).
+///
+/// Why: tombstones accumulated unbounded; the compaction pass must actually delete
+/// them from sessions.json so the file stops growing.
+/// What: seeds two Decommissioned tombstones + one Stopped session, prunes
+/// `Decommissioned`, and asserts both tombstones are GONE from the store while the
+/// Stopped session remains.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_decommissioned_compacts() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let t1 = ManagedSessionId::new();
+    let t2 = ManagedSessionId::new();
+    let stopped = ManagedSessionId::new();
+    seed_record(&mgr, &dir, t1, ManagedSessionState::Decommissioned, false).await;
+    seed_record(&mgr, &dir, t2, ManagedSessionState::Decommissioned, false).await;
+    seed_record(&mgr, &dir, stopped, ManagedSessionState::Stopped, false).await;
+
+    let outcome = mgr
+        .prune_managed(
+            crate::session_manager::PruneFilter::Decommissioned,
+            false,
+            false,
+        )
+        .await
+        .expect("compact");
+    assert_eq!(outcome.count(), 2, "both tombstones compacted");
+    assert!(
+        outcome
+            .sessions
+            .iter()
+            .all(|s| s.action == crate::session_manager::PruneAction::Removed),
+        "decommissioned prune reports Removed"
+    );
+
+    // Both tombstones are GONE from the store; the Stopped record survives.
+    assert!(matches!(
+        mgr.get(&t1).await,
+        Err(ManagedError::SessionNotFound(_))
+    ));
+    assert!(matches!(
+        mgr.get(&t2).await,
+        Err(ManagedError::SessionNotFound(_))
+    ));
+    assert_eq!(
+        mgr.list().await.len(),
+        1,
+        "only the Stopped session remains"
+    );
+}
+
+/// `All` targets every NON-running record (#1508).
+///
+/// Why: the legacy purge needs ONE sweep that tears down stopped/errored/ephemeral
+/// AND compacts decommissioned, while leaving running sessions alone.
+/// What: seeds Active + Stopped + Errored + Decommissioned, prunes `All`, and
+/// asserts the Active is untouched, Stopped/Errored became Decommissioned, and the
+/// pre-existing tombstone was removed.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_all_targets_non_running() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let active = ManagedSessionId::new();
+    let stopped = ManagedSessionId::new();
+    let errored = ManagedSessionId::new();
+    let tomb = ManagedSessionId::new();
+    seed_record(&mgr, &dir, active, ManagedSessionState::Active, false).await;
+    seed_record(&mgr, &dir, stopped, ManagedSessionState::Stopped, false).await;
+    seed_record(&mgr, &dir, errored, ManagedSessionState::Errored, false).await;
+    seed_record(&mgr, &dir, tomb, ManagedSessionState::Decommissioned, false).await;
+
+    let outcome = mgr
+        .prune_managed(crate::session_manager::PruneFilter::All, false, false)
+        .await
+        .expect("prune all");
+    assert_eq!(
+        outcome.count(),
+        3,
+        "stopped + errored + tombstone (not active)"
+    );
+
+    assert_eq!(
+        mgr.get(&active).await.unwrap().state,
+        ManagedSessionState::Active,
+        "running session is never touched by All"
+    );
+    assert_eq!(
+        mgr.get(&stopped).await.unwrap().state,
+        ManagedSessionState::Decommissioned
+    );
+    assert_eq!(
+        mgr.get(&errored).await.unwrap().state,
+        ManagedSessionState::Decommissioned
+    );
+    assert!(matches!(
+        mgr.get(&tomb).await,
+        Err(ManagedError::SessionNotFound(_))
+    ));
+}
+
+/// A dry-run reports candidates WITHOUT mutating anything (#1508).
+///
+/// Why: the operator must be able to preview a legacy purge before destroying
+/// records. `--dry-run` must be side-effect free.
+/// What: seeds a Stopped session, prunes `Stopped` with `dry_run=true`, asserts the
+/// outcome lists it but the record is STILL Stopped afterward.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_dry_run_reports_without_mutating() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let stopped = ManagedSessionId::new();
+    seed_record(&mgr, &dir, stopped, ManagedSessionState::Stopped, false).await;
+
+    let outcome = mgr
+        .prune_managed(crate::session_manager::PruneFilter::Stopped, true, false)
+        .await
+        .expect("dry run");
+    assert!(outcome.dry_run, "outcome flagged dry_run");
+    assert_eq!(outcome.count(), 1, "candidate reported");
+    // The record must be UNCHANGED after a dry run.
+    assert_eq!(
+        mgr.get(&stopped).await.unwrap().state,
+        ManagedSessionState::Stopped,
+        "dry run must not mutate the record"
+    );
+}
+
+/// `PruneFilter::parse` round-trips and rejects garbage (#1508).
+///
+/// Why: the CLI/HTTP/MCP surfaces all parse the same spellings; a typo must be a
+/// clear error, not a silent default.
+/// What: parses every valid spelling (asserting `as_str` round-trips) and asserts
+/// an unknown value errors.
+/// Test: this function IS the test.
+#[test]
+fn prune_filter_parse_round_trip() {
+    use crate::session_manager::PruneFilter;
+    for f in [
+        PruneFilter::Ephemeral,
+        PruneFilter::Stopped,
+        PruneFilter::Decommissioned,
+        PruneFilter::All,
+    ] {
+        assert_eq!(PruneFilter::parse(f.as_str()).unwrap(), f);
+    }
+    assert_eq!(
+        PruneFilter::parse("EPHEMERAL ").unwrap(),
+        PruneFilter::Ephemeral
+    );
+    assert!(PruneFilter::parse("bogus").is_err());
+}
+
+/// `PruneOutcome`/`PruneAction` serialize to the wire shape the HTTP+MCP surfaces
+/// expect (#1508).
+///
+/// Why: the dry-run/report JSON must carry `dry_run`, `filter`, and per-session
+/// `action` so callers can render a precise preview; a serde regression would
+/// silently change the wire contract.
+/// What: builds an outcome, serializes it, and asserts the key fields/strings.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn prune_outcome_serializes() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    seed_record(&mgr, &dir, id, ManagedSessionState::Stopped, true).await;
+
+    let outcome = mgr
+        .prune_managed(crate::session_manager::PruneFilter::Ephemeral, true, false)
+        .await
+        .expect("dry run");
+    let v = serde_json::to_value(&outcome).expect("serialize outcome");
+    assert_eq!(v["dry_run"], serde_json::json!(true));
+    assert_eq!(v["filter"], serde_json::json!("ephemeral"));
+    assert_eq!(
+        v["sessions"][0]["action"],
+        serde_json::json!("decommissioned")
+    );
+}
+
+/// `compact_record` deletes a tombstone from the store (#1508).
+///
+/// Why: the single-record compaction primitive must actually remove the record so
+/// the age-based reaper / prune can shrink sessions.json.
+/// What: seeds a Decommissioned tombstone, compacts it, asserts it is gone.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn compact_record_removes_from_store() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+    let id = ManagedSessionId::new();
+    seed_record(&mgr, &dir, id, ManagedSessionState::Decommissioned, false).await;
+
+    mgr.compact_record(&id).await.expect("compact");
+    assert!(matches!(
+        mgr.get(&id).await,
+        Err(ManagedError::SessionNotFound(_))
+    ));
+}
+
+/// Age-based auto-reap targets ONLY old EPHEMERAL sessions (#1508).
+///
+/// Why: the backstop must reclaim leaked test sessions older than the threshold
+/// WITHOUT ever touching a real (non-ephemeral) session or a young ephemeral one.
+/// What: seeds (a) an OLD ephemeral, (b) a YOUNG ephemeral, (c) an OLD durable, and
+/// reaps with a 1-hour threshold. Only (a) must be decommissioned.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    // Helper: seed a record with an explicit created_at + ephemeral flag.
+    async fn seed_aged(
+        mgr: &SessionManager,
+        root: &TempDir,
+        id: ManagedSessionId,
+        created_at: chrono::DateTime<Utc>,
+        ephemeral: bool,
+    ) {
+        let ws = root.path().join(format!("aged-{id}"));
+        std::fs::create_dir_all(&ws).expect("mk ws");
+        let record = SessionRecord {
+            id,
+            tmux_name: format!("tmpm-aged-{id}"),
+            cwd: root.path().to_path_buf(),
+            task: "aged".into(),
+            state: ManagedSessionState::Active,
+            created_at,
+            last_activity_at: None,
+            workspace_path: Some(ws),
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral,
+            workspace_owned: false,
+        };
+        mgr.store.write().await.upsert(record).await.expect("seed");
+    }
+
+    let old_eph = ManagedSessionId::new();
+    let young_eph = ManagedSessionId::new();
+    let old_durable = ManagedSessionId::new();
+    let two_hours_ago = Utc::now() - chrono::Duration::hours(2);
+    let now = Utc::now();
+    seed_aged(&mgr, &dir, old_eph, two_hours_ago, true).await;
+    seed_aged(&mgr, &dir, young_eph, now, true).await;
+    seed_aged(&mgr, &dir, old_durable, two_hours_ago, false).await;
+
+    let reaped = mgr
+        .reap_aged_ephemeral(chrono::Duration::hours(1))
+        .await
+        .expect("reap");
+    assert_eq!(reaped, 1, "only the OLD ephemeral session is reaped");
+
+    assert_eq!(
+        mgr.get(&old_eph).await.unwrap().state,
+        ManagedSessionState::Decommissioned,
+        "old ephemeral was reaped"
+    );
+    assert_eq!(
+        mgr.get(&young_eph).await.unwrap().state,
+        ManagedSessionState::Active,
+        "young ephemeral is below the age threshold"
+    );
+    assert_eq!(
+        mgr.get(&old_durable).await.unwrap().state,
+        ManagedSessionState::Active,
+        "a non-ephemeral session is NEVER reaped by age"
+    );
+}
+
+// ── workspace-ownership guard tests (#1511) ──────────────────────────────────
+
+/// Decommissioning an UNOWNED record (local-path spawn, adopt) does NOT delete
+/// the workspace directory — only the session record is tombstoned.
+///
+/// Why (#1511): this is the core safety property. Before #1511, `decommission`
+/// unconditionally `remove_dir_all`'d `workspace_path`, which deleted a live
+/// user repo. With the `workspace_owned = false` guard, the directory must be
+/// preserved even though decommission completes successfully.
+/// What: creates a temp dir as the "workspace", builds an unowned record that
+/// points at it, decommissions the session, asserts the dir still exists on
+/// disk AND the record state is `Decommissioned`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_decommission_unowned_skips_deletion() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    // This dir represents a REAL user repo — it was not created by the SM.
+    let real_user_repo = TempDir::new().unwrap();
+    let repo_path = real_user_repo.path().to_owned();
+    // Write a sentinel file; if decommission deletes the dir this assert fails.
+    std::fs::write(repo_path.join("important_file.txt"), "do not delete").unwrap();
+
+    // Create the session record directly in the store, simulating a local-path
+    // spawn (#1502) that sets workspace_path to the real directory.
+    let id = ManagedSessionId::new();
+    let record = SessionRecord {
+        id,
+        tmux_name: format!("tmpm-local-{id}"),
+        cwd: repo_path.clone(),
+        task: "local task".into(),
+        state: ManagedSessionState::Stopped,
+        created_at: Utc::now(),
+        last_activity_at: None,
+        workspace_path: Some(repo_path.clone()),
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+        correlation: Default::default(),
+        runtime: Default::default(),
+        ephemeral: false,
+        // workspace_owned = false — the SM did NOT create this directory.
+        workspace_owned: false,
+    };
+    mgr.store.write().await.upsert(record).await.unwrap();
+
+    // Decommission must SUCCEED (return Ok) but NOT delete the directory.
+    let tombstone = mgr
+        .decommission(&id)
+        .await
+        .expect("decommission of an unowned record must succeed (skip deletion, not error)");
+
+    // The record must be tombstoned.
+    assert_eq!(
+        tombstone.state,
+        ManagedSessionState::Decommissioned,
+        "record state must be Decommissioned"
+    );
+
+    // The REAL directory must still exist — decommission must not have deleted it.
+    assert!(
+        repo_path.exists(),
+        "the unowned workspace directory must NOT be deleted by decommission (#1511)"
+    );
+    assert!(
+        repo_path.join("important_file.txt").exists(),
+        "the sentinel file inside the unowned workspace must still exist"
+    );
+}
+
+/// `set_workspace_owned` persists the flag so a subsequent `decommission` can
+/// read it back and make the correct deletion decision.
+///
+/// Why (#1511): the clone-provision path calls `set_workspace_owned(id, true)`
+/// after creating the tmux session; this test pins that the flag survives the
+/// store round-trip and is visible on `get`.
+/// What: creates a session with `workspace_owned = false`, calls
+/// `set_workspace_owned(id, true)`, reads the record back, asserts the flag is
+/// now `true`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn workspace_owned_flag_round_trips_via_set() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "clone task".into(),
+            Some(PathBuf::from("/tmp/ws")),
+            None,
+            Some(PathBuf::from("/tmp/ws")),
+            Some("https://github.com/owner/repo".into()),
+            Some("main".into()),
+        )
+        .await
+        .expect("create");
+
+    // Fresh record starts unowned (the default).
+    assert!(
+        !record.workspace_owned,
+        "a freshly created record must default to workspace_owned = false"
+    );
+
+    // Simulate what the clone-provision path does.
+    mgr.set_workspace_owned(&record.id, true)
+        .await
+        .expect("set_workspace_owned");
+
+    // Read back and assert.
+    let updated = mgr
+        .get(&record.id)
+        .await
+        .expect("get after set_workspace_owned");
+    assert!(
+        updated.workspace_owned,
+        "workspace_owned must be true after set_workspace_owned(true)"
     );
 }

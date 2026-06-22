@@ -85,10 +85,13 @@ const SM_SESSION_VERBS: &[CommandSpec] = &[
 /// `sessions.*` spelling so the action-loop prompt and dispatch stay uniform with
 /// [`SM_SESSION_VERBS`].
 /// What: the ops verb slice the action loop appends to [`SM_SESSION_VERBS`] —
-/// `sessions.health` plus `sessions.adopt` (#1433), kept OUT of `SM_TOOLS.md` for
-/// the same minimal-surface reason: adopting an existing pane is an operator/ops
-/// action, not part of the SM's session-control prompt tables.
-/// Test: `sm_ops_verbs_exposes_health`, `sm_ops_verbs_exposes_adopt`;
+/// `sessions.health`, `sessions.adopt` (#1433), `sessions.decommission` (#1524 —
+/// full terminal teardown), and `sessions.inject` (#1524 — harness-agnostic write
+/// with submit semantics). Kept OUT of `SM_TOOLS.md` for the same minimal-surface
+/// reason: these are operator/ops actions, not part of the SM session-control
+/// prompt tables.
+/// Test: `sm_ops_verbs_exposes_health`, `sm_ops_verbs_exposes_adopt`,
+/// `sm_ops_verbs_exposes_decommission`, `sm_ops_verbs_exposes_inject`;
 /// `chat_action_tests.rs` asserts the prompt lists these and that they dispatch;
 /// the SM-tools parity test proves they are NOT rendered into `SM_TOOLS.md`.
 const SM_OPS_VERBS: &[CommandSpec] = &[
@@ -104,6 +107,20 @@ const SM_OPS_VERBS: &[CommandSpec] = &[
         aliases: &[],
         args: "tmux_name, cwd, task?, runtime?",
         summary: "Adopt an existing unmanaged tmux session into the managed store",
+        kind: SpecKind::SmOnly,
+    },
+    CommandSpec {
+        name: "sessions.decommission",
+        aliases: &[],
+        args: "session_id",
+        summary: "Full terminal teardown: kill runtime and tombstone the session record",
+        kind: SpecKind::SmOnly,
+    },
+    CommandSpec {
+        name: "sessions.inject",
+        aliases: &[],
+        args: "session_id, text, submit?",
+        summary: "Inject text into a session's pane; submit=enter|no_submit|interrupt (default: enter)",
         kind: SpecKind::SmOnly,
     },
 ];
@@ -341,6 +358,32 @@ mod tests {
         // self-aware chat can adopt an existing tmux session inline (#1433).
         let names: Vec<&str> = sm_ops_verbs().iter().map(|c| c.name).collect();
         assert!(names.contains(&"sessions.adopt"), "missing ops adopt verb");
+    }
+
+    /// Why: `sessions.decommission` (#1524) must be advertised as an ops verb so
+    /// the self-aware chat can tear down a session inline.
+    /// What: asserts the ops slice contains `sessions.decommission`.
+    /// Test: this is the test.
+    #[test]
+    fn sm_ops_verbs_exposes_decommission() {
+        let names: Vec<&str> = sm_ops_verbs().iter().map(|c| c.name).collect();
+        assert!(
+            names.contains(&"sessions.decommission"),
+            "missing ops decommission verb"
+        );
+    }
+
+    /// Why: `sessions.inject` (#1524) must be advertised as an ops verb so the
+    /// self-aware chat can inject text with explicit submit semantics.
+    /// What: asserts the ops slice contains `sessions.inject`.
+    /// Test: this is the test.
+    #[test]
+    fn sm_ops_verbs_exposes_inject() {
+        let names: Vec<&str> = sm_ops_verbs().iter().map(|c| c.name).collect();
+        assert!(
+            names.contains(&"sessions.inject"),
+            "missing ops inject verb"
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::client::catalog::{sm_ops_verbs, sm_session_verbs};
-use crate::core::sm::control::{LaunchParams, SessionControl, SessionControlError};
+use crate::core::sm::control::{LaunchParams, SessionControl, SessionControlError, Submit};
 
 /// The sentinel `action` value the model emits to END the action loop.
 const FINAL_ACTION: &str = "final";
@@ -281,9 +281,13 @@ pub fn action_instructions() -> String {
          `sessions.send` also takes `args.text`; `sessions.launch` takes \
          `args.workdir` (required) plus optional `args.model`, `args.prompt`, \
          `args.goal_id`; `sessions.adopt` takes `args.tmux_name` and `args.cwd` \
-         (both required) plus optional `args.task`, `args.runtime`. When you have \
-         gathered enough to answer, emit the `final` shape — do not keep calling \
-         verbs once you can answer.",
+         (both required) plus optional `args.task`, `args.runtime`; \
+         `sessions.inject` takes `args.session_id`, `args.text`, and optional \
+         `args.submit` (one of `enter` [default], `no_submit`, `interrupt`); \
+         `sessions.decommission` takes `args.session_id` and fully tears down the \
+         session (kill runtime + tombstone record). When you have gathered enough \
+         to answer, emit the `final` shape — do not keep calling verbs once you \
+         can answer.",
     );
     out
 }
@@ -320,6 +324,18 @@ pub async fn execute_verb(
         "sessions.stop" => control.stop(require_session_id(args)?).await,
         "sessions.resume" => control.resume(require_session_id(args)?).await,
         "sessions.kill" => control.kill(require_session_id(args)?).await,
+        "sessions.decommission" => control.decommission(require_session_id(args)?).await,
+        "sessions.inject" => {
+            let id = require_session_id(args)?;
+            let text = args.get("text").and_then(Value::as_str).ok_or_else(|| {
+                SessionControlError::Backend("sessions.inject requires args.text".to_string())
+            })?;
+            let submit = parse_submit_arg(args);
+            control
+                .inject_text(id, text, submit)
+                .await
+                .map(|()| serde_json::json!({ "ok": true }))
+        }
         "sessions.health" => health_via(control).await,
         "sessions.adopt" => {
             let tmux_name = args
@@ -362,6 +378,9 @@ pub async fn execute_verb(
                 model: str_arg(args, "model"),
                 prompt: str_arg(args, "prompt"),
                 goal_id: str_arg(args, "goal_id"),
+                // #1508: an explicit `ephemeral` arg marks the launched session
+                // disposable; absent → a normal durable session.
+                ephemeral: args.get("ephemeral").and_then(Value::as_bool),
             };
             control.launch(params).await
         }
@@ -401,6 +420,31 @@ fn str_arg(args: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|s| !s.trim().is_empty())
         .map(str::to_string)
+}
+
+/// Parse an optional `args.submit` field into a [`Submit`] variant (#1524).
+///
+/// Why: `sessions.inject` supports three keystroke intents (`enter`, `no_submit`,
+/// `interrupt`) via the `submit` arg. An absent/unrecognised value defaults to
+/// [`Submit::Enter`] (the most common case) so callers that just want to type and
+/// run a line need not specify the arg at all.
+/// What: reads `args.submit` as a string and maps the serde snake_case spellings
+/// (`"enter"`, `"no_submit"`, `"interrupt"`) to the corresponding [`Submit`]
+/// variant; anything else (absent, blank, unrecognised) → [`Submit::Enter`].
+/// Test: `chat_action_tests.rs::inject_submit_arg_defaults_to_enter`,
+/// `inject_submit_arg_no_submit`, `inject_submit_arg_interrupt`.
+fn parse_submit_arg(args: &Value) -> Submit {
+    match args
+        .get("submit")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+    {
+        "no_submit" => Submit::NoSubmit,
+        "interrupt" => Submit::Interrupt,
+        // Default: "enter" or absent/unrecognised → Enter.
+        _ => Submit::Enter,
+    }
 }
 
 /// A comma-joined list of valid verb names for the unknown-verb error.

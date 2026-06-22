@@ -172,6 +172,8 @@ async fn seed_sessions(
             proposed_default: None,
             correlation: Default::default(),
             runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: false,
         };
         store.upsert(rec).await.expect("seed upsert");
         ids.push(id);
@@ -297,6 +299,8 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
         proposed_default: None,
         correlation: Default::default(),
         runtime: Default::default(),
+        ephemeral: false,
+        workspace_owned: false,
     }
 }
 

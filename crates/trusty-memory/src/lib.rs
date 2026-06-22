@@ -79,6 +79,15 @@ pub mod activity;
 pub mod attribution;
 pub mod bm25_supervisor;
 pub mod bootstrap;
+/// Autonomous Dreamer scheduler — spawns per-palace dream loops on daemon startup.
+///
+/// Why: issue #1529 — `Dreamer::start_with_shutdown()` was fully implemented
+/// but never called. This module wires it into the daemon so each palace gets
+/// a background dream loop that fires every 5 minutes of idle time.
+/// What: exports `spawn_dream_scheduler`, `make_shutdown_watch`, and
+/// `spawn_shutdown_bridge`. Disable with `TRUSTY_DREAM_DISABLED=1`.
+/// Test: see unit tests inside this module.
+pub mod dream_scheduler;
 /// File-descriptor usage and limit reporting for `/health`.
 ///
 /// Why: expose `open_fds` / `fd_soft_limit` so operators can see the fd

@@ -58,9 +58,11 @@ impl SessionManager {
     ///   adopts ANY name the operator names. The reconcile filter is left untouched.
     ///
     /// What: verifies the pane exists, rejects an already-tracked name, then upserts
-    /// an `Active` [`SessionRecord`] carrying the supplied `cwd`/`task`/`runtime`
-    /// (a fresh id, no workspace/repo/branch — provenance is unknown). Returns the
-    /// new record.
+    /// an `Active` [`SessionRecord`] carrying the supplied `cwd`/`task`/`runtime`/
+    /// `ephemeral` (a fresh id, no workspace/repo/branch — provenance is unknown).
+    /// `ephemeral` (#1508) tags a throwaway adoption (e.g. an e2e test pane) so the
+    /// auto-reap paths may decommission it; operator adoptions pass `false`.
+    /// Returns the new record.
     /// Test: `manager_adopt_existing_registers_active` (also asserts the returned
     /// record's `cwd` matches the adopted cwd),
     /// `manager_adopt_existing_missing_tmux_errors`,
@@ -73,6 +75,7 @@ impl SessionManager {
         cwd: PathBuf,
         task: String,
         runtime: crate::runtime::RuntimeKind,
+        ephemeral: bool,
     ) -> Result<SessionRecord, ManagedError> {
         // The pane MUST already exist — adoption connects, it does not spawn.
         // `tmux_driver()` is the public accessor over the shared driver Arc. This
@@ -97,6 +100,10 @@ impl SessionManager {
             proposed_default: None,
             correlation: Default::default(),
             runtime,
+            ephemeral,
+            // Adopted sessions point at a pre-existing pane: the SM did NOT
+            // create the workspace, so decommission must never delete it (#1511).
+            workspace_owned: false,
         };
 
         // ── Atomic already-adopted check + upsert under ONE held write guard ──────

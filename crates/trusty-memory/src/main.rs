@@ -783,33 +783,51 @@ async fn run_serve(
     }
 }
 
-/// Why: startup tasks (palace hydration, alias discovery, pin scan) are the
-///      same regardless of whether HTTP binds to a fixed or dynamic port;
-///      keeping the logic in a single helper means a new startup task only has
-///      to be added in one place. Previously, `load_palaces_from_disk` was
-///      awaited synchronously before binding the HTTP listener — a single
-///      broken `kg.db` (stale WAL sidecar, corrupt file, permissions) could
-///      stall hydration for seconds per palace, deferring `/health` becoming
-///      reachable until every palace had been visited. The dashboard, MCP
-///      clients, and `launchctl` health-probes all interpret that as "the
-///      daemon is dead", so the launchd job thrashes and operators see no
-///      useful output. Spawning hydration as a background task lets the HTTP
-///      server bind immediately; palaces appear in `palace_list` and the
-///      dashboard as each one finishes opening. Per-palace failures are
-///      already logged and skipped inside `load_palaces_from_disk` so a
-///      single bad `kg.db` can never abort the daemon.
+/// Why: startup tasks (palace hydration, alias discovery, pin scan, and the
+///      issue-#1529 autonomous dream scheduler) are the same regardless of
+///      whether HTTP binds to a fixed or dynamic port; keeping the logic in
+///      a single helper means a new startup task only has to be added in one
+///      place. Previously, `load_palaces_from_disk` was awaited synchronously
+///      before binding the HTTP listener — a single broken `kg.db` (stale WAL
+///      sidecar, corrupt file, permissions) could stall hydration for seconds
+///      per palace, deferring `/health` becoming reachable until every palace
+///      had been visited. The dashboard, MCP clients, and `launchctl`
+///      health-probes all interpret that as "the daemon is dead", so the launchd
+///      job thrashes and operators see no useful output. Spawning hydration as a
+///      background task lets the HTTP server bind immediately; palaces appear in
+///      `palace_list` and the dashboard as each one finishes opening.
+///      Per-palace failures are already logged and skipped inside
+///      `load_palaces_from_disk` so a single bad `kg.db` can never abort the
+///      daemon.
 /// What: clones `state` (cheap — `AppState` derives `Clone` with `Arc`-wrapped
-///       internals) and spawns a background task that (1) hydrates persisted
-///       palaces from disk with timing logs, (2) once palaces are live,
-///       kicks off issue-#42 alias auto-discovery against the cwd targeting
-///       the default palace (if configured), and (3) runs the issue-#470
-///       single-pass pin scan and populates `AppState::pin_project_map`
-///       (scan-only — NO palace opens). Returns immediately — the spawned
-///       task runs concurrently with the HTTP listener bind.
+///       internals) and spawns a background task that:
+///       (1) hydrates persisted palaces from disk with timing logs;
+///       (2) once palaces are live, kicks off issue-#42 alias auto-discovery
+///           against the cwd targeting the default palace (if configured);
+///       (3) runs the issue-#470 single-pass pin scan and populates
+///           `AppState::pin_project_map` (scan-only — NO palace opens);
+///       (4) [issue #1529] spawns per-palace autonomous dream loops via
+///           `dream_scheduler::spawn_dream_scheduler` wired to a watch channel
+///           that the `spawn_shutdown_bridge` task flips on SIGTERM/SIGINT.
+///       Returns immediately — all spawned tasks run concurrently with the HTTP
+///       listener bind.
 /// Test: `spawn_startup_tasks_populates_pin_map` verifies the scan path runs
 ///       and populates the map; the log emission is confirmed by the throwaway
 ///       daemon run documented in the session notes.
 fn spawn_startup_tasks(state: &AppState) {
+    // Issue #1529: build watch channel for the autonomous dream scheduler.
+    // The sender (`dtx`) is intentionally held here and moved into the
+    // hydration task — the shutdown bridge is only wired AFTER
+    // `spawn_dream_scheduler` returns. This ordering guarantee prevents a
+    // shutdown-race where a SIGTERM that arrives during hydration could flip
+    // the watch to `true` before any dream loops are spawned, causing every
+    // newly-spawned loop to exit immediately on its first iteration. By
+    // spawning the bridge after the loops exist, early-SIGTERM during hydration
+    // is still safe: the loops will see the `true` value on their first poll
+    // and shut down cleanly, which is the correct behaviour. Normal startup
+    // (no early SIGTERM) is unaffected because the bridge task cannot fire
+    // until `trusty_common::shutdown_signal()` resolves.
+    let (dtx, dream_shutdown_rx) = trusty_memory::dream_scheduler::make_shutdown_watch();
     // Issue #906 / #910 / #911: eager embedder warm-up.
     // Spawn BEFORE the palace hydration task so the CoreML / CUDA cold compile
     // (30-120 s on first run) races ahead concurrently and the warm embedder
@@ -858,6 +876,21 @@ fn spawn_startup_tasks(state: &AppState) {
                 "background palace hydration failed: {e:#}"
             ),
         }
+
+        // Issue #1529: spawn per-palace autonomous dream loops after hydration.
+        // ORDERING GUARANTEE: spawn_dream_scheduler is called first, then the
+        // shutdown bridge is wired. This ensures the bridge cannot pre-cancel
+        // the loops: loops are created with receivers pointing to a watch that
+        // is still `false`, so they will do their first sleep before the bridge
+        // could ever flip the value.
+        let n = trusty_memory::dream_scheduler::spawn_dream_scheduler(
+            &bg_state.registry,
+            dream_shutdown_rx,
+        );
+        tracing::info!(loops = n, "dream_scheduler: {n} loop(s) running (#1529)");
+        // Bridge is spawned AFTER the loops exist — see ordering comment above.
+        trusty_memory::dream_scheduler::spawn_shutdown_bridge(dtx);
+
         // Issue #42: once palaces are live, kick off auto-discovery against
         // cwd targeting the default palace (if configured). Without a default
         // palace there's no obvious destination, so skip — explicit MCP

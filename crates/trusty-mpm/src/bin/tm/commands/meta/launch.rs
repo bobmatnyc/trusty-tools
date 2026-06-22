@@ -208,6 +208,8 @@ pub(crate) async fn launch_and_wait(
             None,
             None,
             RuntimeKind::ClaudeCode,
+            false,
+            false, // not SM-owned: meta-launch uses an existing local dir (#1511)
         )
         .await
         .context("failed to create the tmux session for the metaharness")?;

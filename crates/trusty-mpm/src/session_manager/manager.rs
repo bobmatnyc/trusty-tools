@@ -185,7 +185,8 @@ pub struct SessionManager {
     /// Persisted session store; `pub(crate)` for test helpers that need to
     /// seed internal state without going through the public API.
     pub(crate) store: Arc<RwLock<SessionStore>>,
-    tmux: Arc<dyn ManagedTmuxDriver>,
+    /// tmux driver; `pub(crate)` for the decommission / adopt sibling modules.
+    pub(crate) tmux: Arc<dyn ManagedTmuxDriver>,
     data_dir: PathBuf,
 }
 
@@ -248,6 +249,8 @@ impl SessionManager {
             repo_url,
             branch,
             crate::runtime::RuntimeKind::default(),
+            false,
+            false,
         )
         .await
     }
@@ -263,10 +266,15 @@ impl SessionManager {
     /// What: identical to [`create`] except the id and runtime backend are
     /// supplied by the caller. Creates the tmux session at `cwd` via the driver,
     /// persists a [`SessionRecord`] in state `Provisioning` carrying `runtime`,
-    /// and returns it.
+    /// and returns it. The `ephemeral` flag (#1508) tags test/throwaway sessions
+    /// so the bulk-teardown and age-based reap paths may decommission them
+    /// automatically; real callers pass `false`. The `owned` flag (#1511) must be
+    /// `true` ONLY when the SM provisioned the workspace via git clone; local-path
+    /// spawn, adopt, and reconcile all pass `false` (safe default — never delete).
     /// Test: `spawn_session_tmux_cwd_is_workspace` in session_manager/tests.rs;
     /// `handler_spawn_creates_tmux_at_workspace_cwd` in session_manager_mvp.rs;
-    /// `manager_create_persists_runtime` in session_manager/tests.rs.
+    /// `manager_create_persists_runtime` in session_manager/tests.rs;
+    /// `manager_create_persists_ephemeral_flag` in session_manager/tests.rs.
     #[allow(clippy::too_many_arguments)]
     pub async fn create_with_id(
         &self,
@@ -278,6 +286,8 @@ impl SessionManager {
         repo_url: Option<String>,
         branch: Option<String>,
         runtime: crate::runtime::RuntimeKind,
+        ephemeral: bool,
+        owned: bool,
     ) -> Result<SessionRecord, ManagedError> {
         let cwd = cwd.unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")));
         let tmux_name = if let Some(hint) = name_hint {
@@ -334,6 +344,12 @@ impl SessionManager {
             proposed_default: None,
             correlation,
             runtime,
+            ephemeral,
+            // Ownership is set atomically at creation: `true` ONLY when the SM
+            // provisioned the workspace via git clone; local-path spawn (#1502),
+            // adopt (#1433), and reconcile all pass `false` (safe default —
+            // prefer NOT deleting over accidental deletion).
+            workspace_owned: owned,
         };
 
         // Persist the record. On failure the freshly-created tmux session has
@@ -628,50 +644,6 @@ impl SessionManager {
         Ok(record)
     }
 
-    /// Decommission a session: stop the runtime, remove the workspace from disk,
-    /// and mark the record `Decommissioned`.
-    ///
-    /// Why: the only full teardown operation. Unlike `stop`, this removes the
-    /// workspace directory from disk so no future `resume` is possible. A
-    /// tombstone record is kept in the store so `ls` can show history.
-    /// What: kills the tmux session (best-effort), removes the workspace directory
-    /// via `std::fs::remove_dir_all` when `workspace_path` is set, clears
-    /// `workspace_path` on the record, marks it `Decommissioned`, and persists.
-    /// Test: `manager_decommission_removes_workspace` — asserts the workspace dir
-    /// is gone from disk and the record state is `Decommissioned`.
-    pub async fn decommission(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
-        let mut record = self.get(id).await?;
-
-        // Kill the runtime (best-effort).
-        if self.tmux.session_exists(&record.tmux_name)
-            && let Err(e) = self.tmux.kill_session(&record.tmux_name)
-        {
-            warn!(name = %record.tmux_name, "decommission: kill_session failed: {e}");
-        }
-
-        // Remove the workspace directory from disk.
-        if let Some(ref ws) = record.workspace_path {
-            if ws.exists() {
-                std::fs::remove_dir_all(ws).map_err(|e| {
-                    ManagedError::Io(std::io::Error::new(
-                        e.kind(),
-                        format!("remove workspace {:?}: {e}", ws),
-                    ))
-                })?;
-                info!(id = %id, workspace = %ws.display(), "decommission: workspace removed from disk");
-            } else {
-                warn!(id = %id, workspace = %ws.display(), "decommission: workspace path absent (already removed?)");
-            }
-        }
-
-        // Tombstone: clear workspace_path, mark Decommissioned, persist.
-        record.workspace_path = None;
-        record.state = ManagedSessionState::Decommissioned;
-        self.store.write().await.upsert(record.clone()).await?;
-        info!(id = %id, name = %record.tmux_name, "managed session decommissioned");
-        Ok(record)
-    }
-
     /// Reconcile daemon state against live tmux sessions after a restart.
     ///
     /// Why: the daemon may have crashed or been restarted while sessions were
@@ -754,6 +726,13 @@ impl SessionManager {
                     // Externally-created tmux sessions have unknown provenance;
                     // assume the default (claude-code) backend.
                     runtime: crate::runtime::RuntimeKind::default(),
+                    // Adopted external sessions are NEVER ephemeral: their
+                    // provenance is unknown, so they must never be auto-reaped.
+                    ephemeral: false,
+                    // Externally-adopted sessions are NEVER SM-owned — the SM
+                    // did not create the workspace; decommission must not delete
+                    // it (#1511).
+                    workspace_owned: false,
                 };
                 guard.upsert(external).await?;
                 report.external_adopted.push(name.clone());

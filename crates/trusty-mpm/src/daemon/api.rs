@@ -102,9 +102,10 @@ pub use rpc::rpc_handler;
 /// lets `router` refer to them unqualified, mirroring the `coordinator_routes`
 /// wiring.
 use super::managed_routes::{
-    adopt_existing_session, answer_session_decision, decommission_managed_session, get_attach_cmd,
-    get_managed_session, get_session_activity, list_managed_sessions, resume_managed_session,
-    send_to_session, spawn_session, stop_managed_session, stop_managed_session_runtime,
+    adopt_existing_session, answer_session_decision, decommission_ephemeral_route,
+    decommission_managed_session, get_attach_cmd, get_managed_session, get_session_activity,
+    list_managed_sessions, prune_managed_route, resume_managed_session, send_to_session,
+    spawn_session, stop_managed_session, stop_managed_session_runtime,
 };
 
 /// Typed HTTP response bodies for every endpoint.
@@ -200,6 +201,14 @@ pub fn router(state: Arc<DaemonState>) -> Router {
             "/api/v1/sessions/managed/adopt",
             post(adopt_existing_session),
         )
+        // #1508: bulk teardown + by-state prune. Both literal segments are
+        // registered BEFORE the `/{id}` param route so they are never captured as
+        // an id (mirroring the `/adopt` ordering above).
+        .route(
+            "/api/v1/sessions/managed/decommission-ephemeral",
+            post(decommission_ephemeral_route),
+        )
+        .route("/api/v1/sessions/managed/prune", post(prune_managed_route))
         .route(
             "/api/v1/sessions/managed/{id}",
             get(get_managed_session).delete(stop_managed_session),

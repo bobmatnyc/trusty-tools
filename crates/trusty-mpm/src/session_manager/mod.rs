@@ -9,10 +9,13 @@
 //! tested in `manager::tests`.
 
 pub mod adopt;
+pub mod decommission;
 pub mod manager;
+pub mod prune;
 pub mod record;
 pub mod session_guard;
 pub mod store;
+pub mod workspace_guard;
 
 #[cfg(test)]
 mod tests;
@@ -23,6 +26,7 @@ mod tests;
 pub mod real_tmux;
 
 pub use manager::{ManagedError, ManagedTmuxDriver, ReconcileReport, SessionManager};
+pub use prune::{MAX_EPHEMERAL_AGE_HOURS, PruneAction, PruneFilter, PruneOutcome, PrunedSession};
 pub use record::{ManagedSessionId, ManagedSessionState, RecordError, SessionRecord};
 pub use session_guard::TmuxSessionGuard;
 pub use store::{SessionStore, StoreError};

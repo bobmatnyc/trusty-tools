@@ -11,9 +11,14 @@
 # Test: `make release-prep` populates `ui-dist/index.html` and the `assets/` tree.
 
 CLOSES      ?=
-UI_DIR      := ui
+# Why: paths must resolve to this crate dir regardless of the invoking CWD, so
+# `make -C crates/trusty-search sync-ui` from the workspace root produces a
+# correct `ui-dist/` (not a nested `ui-dist/dist/`) — see issue #1540.
+# What: anchor every UI path to the directory containing THIS Makefile.
+MAKEFILE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+UI_DIR      := $(MAKEFILE_DIR)ui
 UI_DIST     := $(UI_DIR)/dist
-UI_EMBED    := ui-dist
+UI_EMBED    := $(MAKEFILE_DIR)ui-dist
 
 .PHONY: ui build-ui sync-ui release-prep install patch reinstall deploy check clippy test smoke
 

@@ -5,7 +5,8 @@
 //! cap) live alongside it. Included via `#[path = "tests.rs"] mod tests;`.
 //! What: a `MockBackend` implementing every `OrchestratorBackend` method plus
 //! dispatch tests for the handshake, the core tools, the bug-reporting tools,
-//! and the six session-lifecycle tools.
+//! and the eight session-lifecycle tools (six per-session #1221 + the two
+//! fleet-wide #1508 teardown verbs).
 //! Test: this IS the test module.
 
 use super::*;
@@ -73,12 +74,14 @@ impl OrchestratorBackend for MockBackend {
         _task: &str,
         _name_hint: Option<&str>,
         runtime: Option<&str>,
+        ephemeral: Option<bool>,
     ) -> Result<Value, String> {
         Ok(json!({
             "id": "m-1",
             "repo_url": repo_url,
             "branch": git_ref,
             "runtime": runtime.unwrap_or("claude-code"),
+            "ephemeral": ephemeral.unwrap_or(false),
             "state": "active",
         }))
     }
@@ -96,6 +99,27 @@ impl OrchestratorBackend for MockBackend {
     }
     async fn session_send(&self, session_id: &str, text: &str) -> Result<Value, String> {
         Ok(json!({ "id": session_id, "sent": true, "text": text }))
+    }
+
+    // ── #1508: fleet-wide teardown mock impls ────────────────────────────────
+    async fn session_decommission_ephemeral(&self) -> Result<Value, String> {
+        Ok(json!({ "decommissioned": 3 }))
+    }
+    async fn session_prune(
+        &self,
+        state: &str,
+        dry_run: bool,
+        include_active: bool,
+    ) -> Result<Value, String> {
+        // Mirror the real engine's contract: reject an unknown filter spelling so
+        // the dispatch-level "rejects bad state" test exercises the error path.
+        crate::session_manager::PruneFilter::parse(state)?;
+        Ok(json!({
+            "dry_run": dry_run,
+            "filter": state,
+            "include_active": include_active,
+            "sessions": [],
+        }))
     }
 
     // ── #1222: console-facing mock impls ─────────────────────────────────────
@@ -141,6 +165,79 @@ impl OrchestratorBackend for MockBackend {
             "workspace_root": workspace_root_template.unwrap_or("/home/test/trusty-mpm-projects"),
         }))
     }
+
+    // ── #1519 WI-2: project-registry mock impls ───────────────────────────────
+    async fn project_list(&self) -> Result<Value, String> {
+        Ok(json!({
+            "projects": [
+                { "name": "trusty-tools", "repo_url": "https://github.com/o/trusty-tools", "default_branch": "main" }
+            ],
+            "count": 1,
+        }))
+    }
+    async fn project_register(
+        &self,
+        name: &str,
+        repo_url: &str,
+        default_branch: Option<&str>,
+        stack_hint: Option<&str>,
+        tags: Option<Vec<String>>,
+        description: Option<&str>,
+    ) -> Result<Value, String> {
+        Ok(json!({
+            "name": name,
+            "repo_url": repo_url,
+            "default_branch": default_branch.unwrap_or("main"),
+            "stack_hint": stack_hint,
+            "tags": tags.unwrap_or_default(),
+            "description": description,
+        }))
+    }
+    async fn project_get(&self, name: &str) -> Result<Value, String> {
+        if name == "trusty-tools" {
+            Ok(json!({
+                "name": "trusty-tools",
+                "repo_url": "https://github.com/o/trusty-tools",
+                "default_branch": "main",
+            }))
+        } else {
+            Err(format!("project `{name}` not found"))
+        }
+    }
+
+    // ── #1517 WI-5: NL→repo resolver mock impl ───────────────────────────────
+    async fn project_resolve(&self, query: &str) -> Result<Value, String> {
+        if query == "trusty-tools" {
+            Ok(json!({
+                "primary": {
+                    "project": {
+                        "name": "trusty-tools",
+                        "repo_url": "https://github.com/o/trusty-tools",
+                        "default_branch": "main",
+                    },
+                    "confidence": 1.0,
+                    "reason": "exact name match",
+                },
+                "needs_disambiguation": false,
+                "matches": [{
+                    "project": {
+                        "name": "trusty-tools",
+                        "repo_url": "https://github.com/o/trusty-tools",
+                        "default_branch": "main",
+                    },
+                    "confidence": 1.0,
+                    "reason": "exact name match",
+                }],
+            }))
+        } else {
+            Ok(json!({
+                "primary": null,
+                "needs_disambiguation": false,
+                "matches": [],
+                "error": format!("no project matched query: {query:?}"),
+            }))
+        }
+    }
 }
 
 fn call(name: &str, args: Value) -> Request {
@@ -167,8 +264,9 @@ async fn dispatch_initialize_returns_server_info() {
 
 #[tokio::test]
 async fn dispatch_tools_list_returns_full_catalog() {
-    // 9 pre-existing + 6 session-lifecycle + 5 console-facing tools = 20
-    // (#1222 + the two #1220 config tools).
+    // 9 pre-existing + 8 session-lifecycle + 5 console-facing + 4 project = 26
+    // (#1222 + the two #1220 config tools + the two #1508 fleet-teardown tools
+    // + the three #1519 project-registry tools + #1517 WI-5 project_resolve).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -177,7 +275,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 20);
+    assert_eq!(tools.as_array().unwrap().len(), 26);
 }
 
 /// Why: the console Config tab calls `config_read`; dispatch must route it and
@@ -596,5 +694,294 @@ async fn dispatch_session_send_requires_text() {
             .as_str()
             .unwrap()
             .contains("text")
+    );
+}
+
+/// Why (#1508): the fleet-wide `session_decommission_ephemeral` tool takes no
+/// args and must route to the backend, returning the `decommissioned` count.
+/// This is the dispatch wiring that was missing — the descriptor was in the
+/// catalog but `try_dispatch` had no arm, so the tool returned "unknown tool".
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_decommission_ephemeral_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call("session_decommission_ephemeral", json!({})),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("decommissioned")
+    );
+}
+
+/// Why (#1508): `session_prune` must route its `state`/`dry_run`/`include_active`
+/// args to the backend and surface the `PruneOutcome` JSON.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_prune_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_prune",
+            json!({ "state": "ephemeral", "dry_run": true }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("ephemeral")
+    );
+}
+
+/// Why (#1508): `session_prune` must reject an unknown `state` spelling with a
+/// tool-error, mirroring the engine's `PruneFilter::parse` contract.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_prune_rejects_bad_state() {
+    let resp = dispatch(
+        &MockBackend,
+        call("session_prune", json!({ "state": "garbage" })),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unknown prune filter")
+    );
+}
+
+/// Why (#1508): `session_prune` must error when the required `state` arg is missing.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_prune_requires_state() {
+    let resp = dispatch(&MockBackend, call("session_prune", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("state")
+    );
+}
+
+// ── #1519 WI-2: project-registry dispatch tests ───────────────────────────────
+
+/// Why (#1519): `project_list` takes no args and must route to the backend,
+/// returning the projects array.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_list_tool() {
+    let resp = dispatch(&MockBackend, call("project_list", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("projects"), "expected 'projects' in: {text}");
+}
+
+/// Why (#1519): `project_register` must accept `name` + `repo_url` (required)
+/// and optional fields, and return the registered record.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_register_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "project_register",
+            json!({
+                "name": "my-repo",
+                "repo_url": "https://github.com/o/my-repo",
+                "default_branch": "develop",
+                "stack_hint": "rust",
+                "tags": ["backend"],
+                "description": "a repo"
+            }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("my-repo"), "expected 'my-repo' in: {text}");
+}
+
+/// Why (#1519): `project_register` must error when the required `name` arg is missing.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_register_requires_name() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "project_register",
+            json!({ "repo_url": "https://github.com/o/repo" }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("name")
+    );
+}
+
+/// Why (#1519): `project_register` must error when the required `repo_url` arg is missing.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_register_requires_repo_url() {
+    let resp = dispatch(
+        &MockBackend,
+        call("project_register", json!({ "name": "my-repo" })),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("repo_url")
+    );
+}
+
+/// Why (#1519): `project_get` must return the project for a known name.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_get_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call("project_get", json!({ "name": "trusty-tools" })),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("trusty-tools"),
+        "expected 'trusty-tools' in: {text}"
+    );
+}
+
+/// Why (#1519): `project_get` must surface an error for an unknown project name.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_get_missing_name() {
+    let resp = dispatch(
+        &MockBackend,
+        call("project_get", json!({ "name": "does-not-exist" })),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not found")
+    );
+}
+
+/// Why (#1519): `project_get` must error when the required `name` arg is missing.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_get_requires_name() {
+    let resp = dispatch(&MockBackend, call("project_get", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("name")
+    );
+}
+
+// ── #1517 WI-5: project_resolve dispatch tests ───────────────────────────────
+
+/// Why (#1517 WI-5): `project_resolve` must route a matching query to the
+/// backend and return a `primary` match with confidence and reason.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_resolve_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call("project_resolve", json!({ "query": "trusty-tools" })),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("trusty-tools"),
+        "expected 'trusty-tools' in: {text}"
+    );
+    assert!(
+        text.contains("confidence"),
+        "expected 'confidence' field in: {text}"
+    );
+}
+
+/// Why (#1517 WI-5): `project_resolve` must return a no-match response (not an
+/// error) when the query does not match any project; the `primary` field must be
+/// null and an `error` message must explain the failure.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_resolve_no_match() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "project_resolve",
+            json!({ "query": "zzz-unregistered-xyz" }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    // The resolver returns Ok with primary:null for no-match (not isError).
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    // Parse the JSON payload and assert the actual response shape.
+    let payload: serde_json::Value = serde_json::from_str(text)
+        .unwrap_or_else(|_| panic!("response text must be valid JSON, got: {text}"));
+    assert_eq!(
+        payload["primary"],
+        serde_json::Value::Null,
+        "primary must be null for a no-match response, got: {payload}"
+    );
+    let error_msg = payload["error"].as_str().unwrap_or_else(|| {
+        panic!("no-match response must carry an 'error' explanation, got: {payload}")
+    });
+    assert!(
+        error_msg.contains("zzz-unregistered-xyz"),
+        "error message must include the query, got: {error_msg}"
+    );
+}
+
+/// Why (#1517 WI-5): `project_resolve` must error at the dispatch layer when
+/// the required `query` arg is absent.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_resolve_requires_query() {
+    let resp = dispatch(&MockBackend, call("project_resolve", json!({}))).await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("query")
     );
 }

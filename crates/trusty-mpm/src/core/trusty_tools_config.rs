@@ -102,6 +102,16 @@ pub struct TrustyToolsConfig {
     /// are applied to every `gh` subprocess `tm` spawns for the active project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github: Option<GithubConfig>,
+
+    /// Statically-declared projects for the project registry (#1519 MR-1).
+    ///
+    /// `None` / absent → no static projects; the registry starts empty and is
+    /// populated by MCP `project_register` calls and boot auto-registration from
+    /// session history. When present, each entry is upserted into the registry
+    /// at daemon startup, so an operator can declare frequently-used repos once
+    /// in config rather than registering them via MCP on every restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projects: Vec<ProjectConfig>,
 }
 
 /// The `github:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#1265).
@@ -192,6 +202,40 @@ pub struct WatchConfig {
     /// Default poll interval (seconds) for `listen` mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_secs: Option<u64>,
+}
+
+/// A single project entry declared in the `projects:` YAML section (#1519 MR-1).
+///
+/// Why: operators who use a fixed set of repos want to declare them once in
+/// `config.yaml` so the project registry is pre-populated on daemon startup
+/// without requiring MCP `project_register` calls. Every field beyond `name`
+/// and `repo_url` is optional so a minimal two-line entry is valid.
+/// What: on-disk shape for one project declaration. The daemon reads these at
+/// startup and upserts them into the `ProjectRegistry` via `seed_from_config`.
+/// Test: `registry_seed_from_config` in the `project::registry` module.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectConfig {
+    /// Short name used as the registry key (e.g. `trusty-tools`).
+    pub name: String,
+
+    /// Full repository URL (e.g. `https://github.com/owner/trusty-tools`).
+    pub repo_url: String,
+
+    /// Default branch; falls back to `"main"` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+
+    /// Optional technology-stack hint (e.g. `"rust"`, `"python"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_hint: Option<String>,
+
+    /// Classification tags (e.g. `["backend", "production"]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+
+    /// Free-form description of the project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 impl TrustyToolsConfig {
