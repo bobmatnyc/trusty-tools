@@ -226,19 +226,45 @@ impl DaemonState {
     /// Why: the optimizer and overseer policies are framework-managed on disk
     /// (`~/.trusty-mpm/framework/hooks/`); the daemon must reflect whatever the
     /// installed framework declares without an API round-trip.
-    /// What: reads the optimizer config from
-    /// [`FrameworkPaths::optimizer_config`] and the overseer policy from
-    /// [`FrameworkPaths::overseer_config`], falling back to safe defaults when
-    /// either file is missing (framework not yet installed) or unparseable
-    /// (logged, not fatal); builds the audit logger under `~/.trusty-mpm/logs`.
+    /// What: delegates to [`Self::with_root`] using the default
+    /// [`FrameworkPaths`] root (`~/.trusty-mpm`), so startup cleanup and
+    /// pairing restore are handled exactly once in the shared inner constructor.
     /// Test: `new_reads_default_when_optimizer_file_missing`,
     /// `new_overseer_is_disabled_when_file_missing`.
     pub fn new() -> Self {
+        let framework_root = FrameworkPaths::default().root;
+        Self::with_root(framework_root)
+    }
+
+    /// Wrap the state in an `Arc` for sharing across tasks.
+    pub fn shared() -> Arc<Self> {
+        Arc::new(Self::new())
+    }
+
+    /// Construct default state whose persisted pairing lives under `root`.
+    ///
+    /// Why: pairing now writes `pairing.json` to disk; tests that exercise
+    /// confirm / clear must redirect that write to a temp directory so they
+    /// never touch (or depend on) the operator's real `~/.trusty-mpm`. This
+    /// constructor is also the shared innermost path that both `new` and
+    /// `with_root` delegate to, so startup cleanup runs **exactly once** and
+    /// always against the correct `root` (not the default path).
+    /// What: removes orphan `.claim.*` files left by a crashed process (exactly
+    /// once, against `root`), then reads the optimizer config and overseer policy
+    /// from the real framework hooks path, restores any persisted Telegram
+    /// pairing under `root`, and builds the full [`DaemonState`].
+    /// Test: `pairing_persists_to_disk`, `pairing_reset_clears_disk`.
+    pub fn with_root(root: PathBuf) -> Self {
         let optimizer = load_optimizer_config();
         let build = load_overseer();
-        let framework_root = FrameworkPaths::default().root;
+        // Remove any orphan `.claim.*` files left by a previous crashed process
+        // before checking for a pairing record; this prevents a stale claim from
+        // blocking the very first confirm after a crash.
+        // Cleanup runs exactly once here — `new` delegates to this constructor
+        // so there is no duplicate call against the default path.
+        crate::daemon::pairing_store::cleanup_stale_claims(&root);
         // Restore a persisted Telegram pairing so push alerts survive restarts.
-        let paired = crate::daemon::pairing_store::load(&framework_root).map(|r| r.chat_id);
+        let paired = crate::daemon::pairing_store::load(&root).map(|r| r.chat_id);
         if let Some(chat_id) = paired {
             tracing::info!("restored persisted Telegram pairing (chat {chat_id})");
         }
@@ -257,38 +283,16 @@ impl DaemonState {
             overseer: build.overseer,
             overseer_handler: build.handler,
             llm: build.llm,
-            session_manager_agent: build_session_manager_agent(&framework_root),
-            audit: make_audit_logger(&framework_root),
+            session_manager_agent: build_session_manager_agent(&root),
+            audit: make_audit_logger(&root),
             paired_chat_id: Mutex::new(paired),
             pair_code: Mutex::new(None),
-            framework_root,
+            framework_root: root,
             event_tx,
             managed_sessions: tokio::sync::OnceCell::new(),
             activity_monitor: std::sync::OnceLock::new(),
             project_registry: tokio::sync::OnceCell::new(),
         }
-    }
-
-    /// Wrap the state in an `Arc` for sharing across tasks.
-    pub fn shared() -> Arc<Self> {
-        Arc::new(Self::new())
-    }
-
-    /// Construct default state whose persisted pairing lives under `root`.
-    ///
-    /// Why: pairing now writes `pairing.json` to disk; tests that exercise
-    /// confirm / clear must redirect that write to a temp directory so they
-    /// never touch (or depend on) the operator's real `~/.trusty-mpm`.
-    /// What: builds [`DaemonState::new`]'s defaults but overrides the framework
-    /// root with `root`, re-reading any pairing record already under it.
-    /// Test: `pairing_persists_to_disk`, `pairing_reset_clears_disk`.
-    #[doc(hidden)]
-    pub fn with_root(root: PathBuf) -> Self {
-        let mut state = Self::new();
-        let paired = crate::daemon::pairing_store::load(&root).map(|r| r.chat_id);
-        *state.paired_chat_id.lock() = paired;
-        state.framework_root = root;
-        state
     }
 
     /// Construct state whose framework-managed config is read from `paths`.
@@ -314,6 +318,7 @@ impl DaemonState {
         let overseer_cfg = OverseerConfig::load_from(&paths.overseer_config());
         let build = build_overseer(overseer_cfg);
         let framework_root = paths.root.clone();
+        crate::daemon::pairing_store::cleanup_stale_claims(&framework_root);
         let paired = crate::daemon::pairing_store::load(&framework_root).map(|r| r.chat_id);
         let (event_tx, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {

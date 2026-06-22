@@ -230,6 +230,187 @@ pub fn load_pending(root: &Path) -> Option<PendingPairCode> {
     }
 }
 
+/// Maximum age of a `.claim.*` temp file before `cleanup_stale_claims` removes it.
+///
+/// Why: a crash between the rename and the delete leaves an orphan `.claim.*` that
+/// permanently blocks pairing on the same framework root. Any orphan older than
+/// this threshold is considered crash-leftover and is safe to remove.
+const STALE_CLAIM_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Build a collision-resistant claim path for the pending pair file.
+///
+/// Why: using only PID as the distinguishing suffix creates a PID-reuse collision
+/// when a previous process with the same PID crashed leaving an orphan `.claim.<pid>`
+/// file and a new process with the reused PID attempts a claim. Adding total
+/// nanoseconds since the epoch and a UUID component makes the name unique with
+/// overwhelming probability.
+/// What: returns `<base_filename>.claim.<pid>.<total_nanos>.<uuid_prefix>` as a
+/// sibling path of `base`. The suffix is **appended** to the full base filename
+/// (including its `.json` extension) so `pending_pair.json` becomes
+/// `pending_pair.json.claim.…` — not `pending_pair.json.claim.…` with a
+/// replaced extension, which `Path::with_extension` would produce incorrectly.
+/// Test: exercised by `claim_pending` callers; `claim_name_is_unique` checks
+/// that two successive calls produce distinct names; `claim_path_appends_not_replaces`
+/// asserts the base filename is preserved as a prefix of the claim filename.
+fn claim_path(base: &std::path::Path) -> std::path::PathBuf {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let uid = uuid::Uuid::new_v4().simple().to_string();
+    let short_uid = &uid[..8];
+    // Append the claim suffix to the full OS string so the `.json` extension is
+    // preserved rather than replaced (Path::with_extension replaces, not appends).
+    let mut claim = base.as_os_str().to_os_string();
+    claim.push(format!(".claim.{pid}.{nanos}.{short_uid}"));
+    std::path::PathBuf::from(claim)
+}
+
+/// Quarantine path for a structurally-corrupt pending-pair file.
+///
+/// Why: a permanently-corrupt `pending_pair.json` must not be restored to the
+/// live path after a parse failure — doing so would cause every `claim_pending`
+/// call to loop: claim → parse-fail → restore → claim → … forever. Instead the
+/// corrupt file is renamed here so it is preserved for debugging but can never
+/// block future pairing attempts.
+/// What: returns `<root>/pending_pair.json.bad`.
+/// Test: `claim_pending_quarantines_malformed` verifies the sidecar is created.
+fn quarantine_path(root: &Path) -> std::path::PathBuf {
+    root.join(format!("{PENDING_PAIR_FILE}.bad"))
+}
+
+/// Atomically claim and load the outstanding pending pairing code from `root`.
+///
+/// Why: confirming a code must be atomic so two concurrent `/pair` requests to
+/// different daemon processes cannot both read the file before either deletes it.
+/// What: renames `pending_pair.json` to a collision-resistant unique temp name
+/// (`<pid>.<total_nanos>.<uuid-prefix>`) first; only the process that succeeds at
+/// the rename "wins" the claim. On a successful read and parse, the temp file is
+/// deleted. On a **transient read I/O error** (bytes could not be read) the temp
+/// file is renamed back to `pending_pair.json` so the next attempt can retry.
+/// On a **parse failure** (bytes read OK but structurally invalid JSON) the temp
+/// file is quarantined as `pending_pair.json.bad` — restoring it would cause an
+/// infinite claim-parse-restore loop on permanently-corrupt data; the sidecar
+/// preserves the bytes for debugging. Returns `Some(pending)` if claimed and
+/// parseable; `None` otherwise.
+/// Test: `concurrent_pairing_confirms`, `claim_pending_restores_on_read_failure`,
+/// `claim_pending_quarantines_malformed`.
+pub fn claim_pending(root: &Path) -> Option<PendingPairCode> {
+    let path = pending_path(root);
+    let tmp = claim_path(&path);
+
+    // Atomically claim ownership of the file by renaming it.
+    if std::fs::rename(&path, &tmp).is_err() {
+        return None;
+    }
+
+    // Read the claimed file.
+    // TRANSIENT READ ERROR → restore to live path so the next attempt can retry.
+    let contents = match std::fs::read_to_string(&tmp) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "failed to read claimed pending pair file {}, restoring: {e}",
+                tmp.display()
+            );
+            if let Err(re) = std::fs::rename(&tmp, &path) {
+                tracing::warn!("could not restore pending pair file after read failure: {re}");
+            }
+            return None;
+        }
+    };
+
+    // Parse the content.
+    // PARSE FAILURE (structurally corrupt) → quarantine, do NOT restore.
+    // Restoring would cause an infinite claim → parse-fail → restore loop.
+    match serde_json::from_str::<PendingPairCode>(&contents) {
+        Ok(pending) => {
+            // Only delete on success — the data is safely in memory.
+            let _ = std::fs::remove_file(&tmp);
+            Some(pending)
+        }
+        Err(e) => {
+            let bad = quarantine_path(root);
+            tracing::error!(
+                "pending pair file {} is structurally corrupt ({e}); quarantining to {} — \
+                 re-issue a pairing code to recover",
+                tmp.display(),
+                bad.display()
+            );
+            if let Err(re) = std::fs::rename(&tmp, &bad) {
+                tracing::warn!(
+                    "could not quarantine corrupt pending pair file {}: {re}; \
+                     leaving orphan temp file in place",
+                    tmp.display()
+                );
+            }
+            None
+        }
+    }
+}
+
+/// Remove stale orphan `.claim.*` files left by a crashed process.
+///
+/// Why: a process that crashes between the rename-claim and the delete leaves a
+/// `pending_pair.json.claim.*` file that permanently blocks pairing unless cleaned
+/// up. Calling this function at daemon startup recovers from such crashes.
+/// What: delegates to [`cleanup_stale_claims_with_threshold`] using the default
+/// [`STALE_CLAIM_THRESHOLD`] of 60 seconds.
+/// Test: `cleanup_stale_claims_preserves_fresh_claim`,
+/// `cleanup_stale_claims_noop_on_missing_root`.
+pub fn cleanup_stale_claims(root: &Path) {
+    cleanup_stale_claims_with_threshold(root, STALE_CLAIM_THRESHOLD);
+}
+
+/// Remove stale orphan `.claim.*` files older than `max_age`.
+///
+/// Why: the injectable threshold allows tests to exercise the stale-removal
+/// branch without needing to backdate file mtimes or wait 60 seconds. Production
+/// callers use [`cleanup_stale_claims`] which applies the standard 60-second
+/// threshold.
+/// What: scans `root` for files matching `pending_pair.json.claim.*`; any file
+/// whose mtime age exceeds `max_age` is deleted. Files whose age cannot be
+/// determined are conservatively LEFT ALONE (they may belong to a live concurrent
+/// claim — deleting them risks race-deleting a live claim). Files younger than
+/// the threshold are also left alone. A missing or unreadable directory is
+/// silently ignored so startup is never blocked.
+/// Test: `cleanup_stale_claims_removes_old_orphan_with_threshold`,
+/// `cleanup_stale_claims_preserves_fresh_claim`.
+pub fn cleanup_stale_claims_with_threshold(root: &Path, max_age: std::time::Duration) {
+    let prefix = format!("{}.claim.", PENDING_PAIR_FILE);
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.starts_with(&prefix) {
+            continue;
+        }
+        // Check mtime to determine if this orphan is old enough to remove.
+        // Conservative default: if age is undeterminable, leave the file alone
+        // to avoid race-deleting a live claim whose metadata is temporarily
+        // unavailable.
+        let is_stale = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|mtime| mtime.elapsed().ok())
+            .map(|age| age > max_age)
+            .unwrap_or(false); // if age is undeterminable, conservatively keep
+        if is_stale {
+            let path = entry.path();
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!("failed to remove stale claim file {}: {e}", path.display());
+            } else {
+                tracing::info!("removed stale pairing claim file {}", path.display());
+            }
+        }
+    }
+}
+
 /// Delete the outstanding pending pairing code under `root`.
 ///
 /// Why: a code is single-use — once confirmed (or explicitly invalidated) the
@@ -349,5 +530,209 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         std::fs::write(pending_path(dir.path()), "{ not json").expect("write garbage");
         assert!(load_pending(dir.path()).is_none());
+    }
+
+    #[test]
+    fn claim_name_is_unique() {
+        // Two successive calls to `claim_path` must produce distinct names even
+        // within the same process and nanosecond — the UUID component guarantees it.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let base = pending_path(dir.path());
+        let p1 = claim_path(&base);
+        let p2 = claim_path(&base);
+        assert_ne!(
+            p1, p2,
+            "claim_path must generate unique names to prevent PID-reuse collisions"
+        );
+    }
+
+    #[test]
+    fn claim_path_appends_not_replaces() {
+        // Finding 1: claim_path must APPEND the claim suffix to the full filename
+        // (including its .json extension) rather than replacing the last extension.
+        // For `pending_pair.json` the claim filename must start with
+        // `pending_pair.json.claim.` — not `pending_pair.json.claim.<…>` with
+        // the `.json` stripped.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let base = pending_path(dir.path()); // …/pending_pair.json
+        let claim = claim_path(&base);
+        let claim_name = claim
+            .file_name()
+            .expect("claim has a filename")
+            .to_string_lossy();
+        assert!(
+            claim_name.starts_with("pending_pair.json.claim."),
+            "claim filename must start with 'pending_pair.json.claim.' \
+             (i.e. base name preserved, suffix appended); got: {claim_name}"
+        );
+    }
+
+    #[test]
+    fn claim_pending_returns_code_and_removes_temp() {
+        // Happy path: claim_pending claims a valid file, returns the code, and
+        // leaves neither the original pending_pair.json nor the temp claim file.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let pending = PendingPairCode::new("HAPPY1".into());
+        save_pending(root, &pending).expect("save");
+        let claimed = claim_pending(root).expect("claim succeeds");
+        assert_eq!(claimed, pending);
+        // Neither the original path nor any temp file should remain.
+        assert!(!pending_path(root).exists(), "original file must be gone");
+        let leftover: Vec<_> = std::fs::read_dir(root)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("pending_pair.json.claim.")
+            })
+            .collect();
+        assert!(leftover.is_empty(), "no temp claim files must remain");
+    }
+
+    #[test]
+    fn claim_pending_quarantines_malformed() {
+        // Finding 2: a permanently-corrupt pending_pair.json must NOT be restored
+        // to the live path after a parse failure — that would cause an infinite
+        // claim → parse-fail → restore → claim loop. Instead it must be
+        // quarantined as `pending_pair.json.bad`, the live path must NOT exist,
+        // and a second call to claim_pending must return None without looping.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        // Write a malformed file as pending_pair.json.
+        std::fs::write(pending_path(root), "{ this is not valid json }")
+            .expect("write malformed pending");
+        // First claim_pending: should return None and quarantine the corrupt file.
+        let result = claim_pending(root);
+        assert!(result.is_none(), "malformed file must yield None");
+        // The live pending_pair.json must NOT be restored (it was corrupt).
+        assert!(
+            !pending_path(root).exists(),
+            "pending_pair.json must NOT be present after quarantine — \
+             restoring it would cause an infinite loop"
+        );
+        // A quarantine sidecar must exist.
+        let bad = quarantine_path(root);
+        assert!(
+            bad.exists(),
+            "a quarantine sidecar (pending_pair.json.bad) must be created \
+             to preserve the corrupt bytes for debugging"
+        );
+        // A second call must return None cleanly (no live file to claim).
+        let second = claim_pending(root);
+        assert!(
+            second.is_none(),
+            "second claim_pending must return None without spinning"
+        );
+    }
+
+    #[test]
+    fn concurrent_pairing_confirms() {
+        // Finding 4: two threads race to claim the pending code; a Barrier
+        // synchronises them so both hit the rename simultaneously. Exactly one
+        // must win (return Some) and the other must lose (return None), so each
+        // code is consumed exactly once.
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path().to_path_buf();
+        let pending = PendingPairCode::new("RACE01".into());
+        save_pending(&root, &pending).expect("save");
+
+        // Barrier ensures both threads reach the claim call at the same instant.
+        let barrier = Arc::new(Barrier::new(2));
+
+        let root1 = root.clone();
+        let barrier1 = Arc::clone(&barrier);
+        let t1 = std::thread::spawn(move || {
+            barrier1.wait(); // synchronise with t2
+            claim_pending(&root1)
+        });
+
+        let root2 = root.clone();
+        let barrier2 = Arc::clone(&barrier);
+        let t2 = std::thread::spawn(move || {
+            barrier2.wait(); // synchronise with t1
+            claim_pending(&root2)
+        });
+
+        let r1 = t1.join().expect("t1 did not panic");
+        let r2 = t2.join().expect("t2 did not panic");
+
+        // Exactly one thread wins the rename-claim; the other sees the file gone.
+        let (winner, loser) = match (&r1, &r2) {
+            (Some(_), None) => (r1, r2),
+            (None, Some(_)) => (r2, r1),
+            _ => panic!("expected exactly one winner and one loser; got r1={r1:?} r2={r2:?}"),
+        };
+        assert_eq!(
+            winner.unwrap(),
+            pending,
+            "winner must hold the original code"
+        );
+        assert!(loser.is_none(), "loser must receive None");
+    }
+
+    #[test]
+    fn cleanup_stale_claims_removes_old_orphan_with_threshold() {
+        // Finding 4: the real stale-removal branch must be exercised.
+        // By injecting a zero-duration threshold every claim file is "older than
+        // threshold" the instant it is created, so remove_file is called on it.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+
+        let orphan = root.join(format!("{PENDING_PAIR_FILE}.claim.99999.123.deadbeef"));
+        std::fs::write(&orphan, "orphan").expect("write orphan");
+        assert!(orphan.exists(), "orphan must exist before cleanup");
+
+        // A zero-duration threshold means every file is stale.
+        cleanup_stale_claims_with_threshold(root, Duration::ZERO);
+
+        assert!(
+            !orphan.exists(),
+            "orphan claim file must be removed when older than threshold"
+        );
+    }
+
+    #[test]
+    fn cleanup_stale_claims_preserves_fresh_claim() {
+        // A very recent `.claim.*` file (created moments ago) must not be
+        // deleted by cleanup — it belongs to a live concurrent claim.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let fresh = root.join(format!("{PENDING_PAIR_FILE}.claim.12345.999.abcdef12"));
+        std::fs::write(&fresh, "live-claim").expect("write fresh claim");
+
+        cleanup_stale_claims(root);
+
+        assert!(
+            fresh.exists(),
+            "a just-created claim file must not be removed by cleanup"
+        );
+    }
+
+    #[test]
+    fn cleanup_stale_claims_ignores_unrelated_files() {
+        // Unrelated files in root must never be touched by cleanup.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = dir.path();
+        let unrelated = root.join("pairing.json");
+        std::fs::write(&unrelated, "keep me").expect("write unrelated");
+
+        cleanup_stale_claims(root);
+
+        assert!(
+            unrelated.exists(),
+            "cleanup must not remove files that are not .claim.* files"
+        );
+    }
+
+    #[test]
+    fn cleanup_stale_claims_noop_on_missing_root() {
+        // A non-existent directory must not panic or error.
+        let missing = std::path::Path::new("/tmp/trusty-mpm-no-such-root-cleanup-test");
+        cleanup_stale_claims(missing);
+        // If we get here, no panic occurred — the function handled it gracefully.
     }
 }
