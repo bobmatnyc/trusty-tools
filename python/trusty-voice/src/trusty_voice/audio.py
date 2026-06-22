@@ -118,12 +118,17 @@ class MicRecorder:
         )
 
         def _capture() -> None:
-            # Check recording flag before each read so the thread exits promptly
-            # when recording is cleared.  stream.read() is called only while
-            # recording is still set, ensuring the stream is never read after
-            # it has been closed by the main thread.
-            while recording.is_set():
-                frames.append(stream.read(self.CHUNK, exception_on_overflow=False))
+            # The capture thread owns the stream lifecycle: it reads until the
+            # recording event is cleared, then stops and closes the stream
+            # itself.  This eliminates the use-after-close race: the main thread
+            # never touches an open stream, so join() timeout cannot cause a
+            # read/close collision.
+            try:
+                while recording.is_set():
+                    frames.append(stream.read(self.CHUNK, exception_on_overflow=False))
+            finally:
+                stream.stop_stream()
+                stream.close()
 
         thread = threading.Thread(target=_capture, daemon=True)
         thread.start()
@@ -131,15 +136,13 @@ class MicRecorder:
         print("  [Recording — press Enter to stop]", flush=True)
         input()
 
-        # Signal the capture thread to stop, then wait for it to exit
-        # completely before touching the stream.  This prevents a use-after-close
-        # race where stream.close() is called while _capture() is mid-read().
+        # Signal the capture thread to stop.  The thread exits its read loop on
+        # the next flag check and closes the stream in its own finally block.
+        # join() gives it time to finish; if it times out the stream is either
+        # already closed or the daemon thread will close it on exit — the main
+        # thread never calls stream.close() so no double-close can occur.
         recording.clear()
-        thread.join(timeout=3.0)  # generous: one CHUNK at 16 kHz ≈ 64 ms
-
-        # Close only after the thread has stopped — guaranteed by join() above.
-        stream.stop_stream()
-        stream.close()
+        thread.join(timeout=3.0)  # one CHUNK at 16 kHz ≈ 64 ms; 3 s is generous
 
         return self._frames_to_wav(frames)
 

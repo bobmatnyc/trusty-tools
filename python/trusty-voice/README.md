@@ -190,7 +190,7 @@ pipeline prints `[Error: Failed to reach daemon ...]` — it does NOT crash.
 
 | Phase | Feature |
 |-------|---------|
-| 0 (this) | Push-to-talk: Pipecat + Deepgram + ElevenLabs + `:7880/chat` |
+| 0 (this) | Push-to-talk: Pipecat + Deepgram + ElevenLabs + `:7880/api/v1/sessions/chat` |
 | 1 | Wake word ("Hey Trusty") + speaker verification (Picovoice) |
 | 2 | Streaming SSE `coordinator_chat` variant (speak while generating) |
 | 3 | Token-auth gateway + Linux thin web client (WebRTC kiosk) |

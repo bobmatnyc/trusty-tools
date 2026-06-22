@@ -47,6 +47,16 @@ def _load_env() -> None:
     try:
         from dotenv import load_dotenv  # type: ignore[import]
     except ImportError:
+        # python-dotenv is a hard dependency; a missing import means the venv
+        # is broken.  Surface a warning so the user gets a useful hint instead
+        # of a cryptic "missing API key" error later.
+        import sys
+
+        print(
+            "[trusty-voice] WARNING: python-dotenv not found — .env.local will not be loaded. "
+            "Run 'uv sync' to repair the environment.",
+            file=sys.stderr,
+        )
         return
 
     env_path = _find_env_file()

@@ -138,9 +138,9 @@ class VoicePipeline:
         Test: Run with asyncio.timeout(0.1) to exercise the cancel path;
               assert no unhandled exception.
         """
-        print("\ntrustY voice — Phase 0 push-to-talk\nPress Enter (or Ctrl-C to quit)\n")
+        print("\ntrustY voice — Phase 0 push-to-talk\nCtrl-C to quit.\n")
         while True:
-            print("\n[Hold Enter to record your message]", flush=True)
+            print("\n[Press Enter to start recording]", flush=True)
             try:
                 await self.run_once()
             except (KeyboardInterrupt, asyncio.CancelledError):

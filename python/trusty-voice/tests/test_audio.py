@@ -109,6 +109,50 @@ def test_record_for_seconds_closes_stream_on_success() -> None:
 
 
 # ---------------------------------------------------------------------------
+# record_blocking — stream owned by capture thread (use-after-close guard)
+# ---------------------------------------------------------------------------
+
+
+def test_record_blocking_capture_thread_closes_stream() -> None:
+    """record_blocking() capture thread owns stop/close so no use-after-close race.
+
+    Why: The previous implementation closed the stream in the main thread after
+         join(), which could still race if join() timed out.  The fix moves
+         stop_stream()+close() inside the capture thread's finally block.
+    What: Simulates a complete push-to-talk cycle using mock pyaudio and a
+         patched input() that returns immediately (simulating Enter being pressed).
+         Asserts that stop_stream() and close() are called by the thread (i.e.,
+         they ARE called) and that the main thread does NOT call them separately
+         (only once total each).
+    Test: Assert stop_stream and close each called exactly once (by the thread).
+    """
+
+    mock_pyaudio_module = _make_mock_pyaudio()
+    mock_pa = mock_pyaudio_module.PyAudio()
+    mock_stream = mock_pa.open.return_value
+
+    # Make read() return instantly (no blocking) so the thread loop is fast.
+    mock_stream.read.return_value = b"\x00" * MicRecorder.CHUNK
+
+    recorder = MicRecorder()
+    recorder._pa = mock_pa
+
+    # Patch input() so the "press Enter" call returns immediately.
+    with (
+        patch.dict("sys.modules", {"pyaudio": mock_pyaudio_module}),
+        patch("builtins.input", return_value=""),
+    ):
+        wav_bytes = recorder.record_blocking()
+
+    # The capture thread's finally block must have called stop + close.
+    mock_stream.stop_stream.assert_called_once()
+    mock_stream.close.assert_called_once()
+
+    # The returned bytes must be a valid WAV file.
+    assert wav_bytes[:4] == b"RIFF"
+
+
+# ---------------------------------------------------------------------------
 # close() idempotent
 # ---------------------------------------------------------------------------
 
