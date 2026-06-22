@@ -1,11 +1,15 @@
-//! CLI command handlers for the standalone managed driver (`tm register/load/run/ls/path`).
+//! CLI command handlers for the standalone managed driver (`tm register/load/run/ls/path/login`).
 //!
 //! Why: the standalone managed driver adds a new alias-keyed registry and
 //! lifecycle on top of the existing session-manager machinery (DOC-24). Keeping
 //! these handlers in their own file preserves the existing handlers untouched
 //! and stays under the 500-SLOC cap.
-//! What: five thin handlers — `register_cmd`, `ls_cmd`, `load_cmd`, `run_cmd`,
-//! and `path_cmd` — each delegating to `trusty_mpm::core::standalone`.
+//! What: six thin handlers — `register_cmd`, `ls_cmd`, `load_cmd`, `run_cmd`,
+//! `path_cmd`, and `login_cmd` — each delegating to
+//! `trusty_mpm::core::standalone`. `login_cmd` (WI-10) launches
+//! `claude auth login` under the tm-global CLAUDE_CONFIG_DIR so the OAuth flow
+//! creates a keychain entry for that path, enabling future `tm run` sessions to
+//! authenticate on the user's Claude Max/Pro plan.
 //! Test: exercised by `cli_parses_register`, `cli_parses_ls`, etc. in tests.rs.
 
 use anyhow::Context;
@@ -139,4 +143,59 @@ pub(crate) fn path_cmd(alias: &str) -> anyhow::Result<()> {
         .with_context(|| format!("failed to resolve path for alias '{alias}'"))?;
     println!("{}", repo.display());
     Ok(())
+}
+
+/// Handle `tm login` (WI-10 — one-time keychain auth setup).
+///
+/// Why: `CLAUDE_CONFIG_DIR` (A9) relocates the entire `~/.claude/` tree including
+/// the macOS Keychain entry used for Claude Max/Pro OAuth. A fresh
+/// `~/.trusty-mpm/claude-config/` has no keychain entry, so `tm run` sessions
+/// report "Not logged in". `tm login` runs `claude auth login` under the
+/// tm-global `CLAUDE_CONFIG_DIR` so the OAuth flow creates a keychain entry
+/// keyed to that path, enabling all future `tm run` sessions to authenticate
+/// without repeating this step (keychain entry persists across sessions).
+/// What: ensures the tm-global config dir exists via
+/// `ensure_global_config_dir`, then spawns `claude auth login` with
+/// `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` and inherited stdio so the
+/// user can complete the browser/OAuth flow. Prints guidance before and after.
+/// Returns an error (non-zero exit) when `claude auth login` fails or is
+/// cancelled so that `tm login && tm run …` does not proceed after a failed
+/// login.
+/// Test: command construction is unit-tested via
+/// `test_build_login_command_sets_env_and_invocation` in
+/// `core::standalone::run`. Exit-code propagation is covered by reasoning: the
+/// `bail!` path is reached whenever `status.success()` is false. The interactive
+/// OAuth completion requires a human.
+pub(crate) fn login_cmd() -> anyhow::Result<()> {
+    let root = managed_root()?;
+    let cfg_dir = claude_config_dir()?;
+    trusty_mpm::core::standalone::global_config::ensure_global_config_dir(&root, &cfg_dir)?;
+
+    eprintln!(
+        "tm login: one-time setup — authenticates managed `tm run` sessions\n\
+         on your Claude Max/Pro plan via the macOS Keychain.\n\
+         Config dir: {}\n\
+         Launching `claude auth login` — complete the browser OAuth flow...",
+        cfg_dir.display()
+    );
+
+    let status = trusty_mpm::core::standalone::run::build_login_command(&cfg_dir)
+        .status()
+        .context("failed to spawn 'claude auth login'; is `claude` installed and on PATH?")?;
+
+    if status.success() {
+        eprintln!(
+            "tm login: authentication complete.\n\
+             You can now run `tm run <alias>` — sessions will authenticate\n\
+             on your Claude plan automatically (no ANTHROPIC_API_KEY needed)."
+        );
+        Ok(())
+    } else {
+        eprintln!(
+            "tm login: `claude auth login` exited with {status}.\n\
+             If the OAuth flow was cancelled, run `tm login` again to retry.\n\
+             Alternatively, export ANTHROPIC_API_KEY to use the API-key path instead."
+        );
+        anyhow::bail!("claude auth login failed: {status}")
+    }
 }

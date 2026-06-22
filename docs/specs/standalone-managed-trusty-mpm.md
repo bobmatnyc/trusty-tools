@@ -310,15 +310,24 @@ the tm-global config dir). When tm emits `.trusty-mpm/tm-settings.json` / `tm-mc
 as an optional override/replication aid, not the load-bearing path. See §SPEC-STANDALONE-MPM-04 for
 the invariant and §6 for the longevity note.
 
-**Credential precondition (the cost of relocating the user-level layer).** Because
-`CLAUDE_CONFIG_DIR` relocates the **entire** `~/.claude/` tree-equivalent, it also relocates
+**Credential precondition (the cost of relocating the user-level layer) — WI-10 IMPLEMENTED.**
+Because `CLAUDE_CONFIG_DIR` relocates the **entire** `~/.claude/` tree-equivalent, it also relocates
 `~/.claude/.credentials.json` (validated 2026-06-22 / v2.1.185, A9). A session launched against a
 *clean* tm-global config dir is therefore **unauthenticated** ("Not logged in") and cannot make API
-calls. The tm-global config dir MUST carry valid credentials via **one** of: **(a)** `tm` seeds a
-valid `.credentials.json` into `~/.trusty-mpm/claude-config/`, or **(b)** the session runs with
-**`ANTHROPIC_API_KEY`** set (which pairs with Claude Code's **`--bare`** flag — `--bare` skips the
-keychain/credentials lookup and *requires* `ANTHROPIC_API_KEY`). This precondition is owned by `tm
-install`/`tm config` and realized by **WI-10**; `tm run` enforces it (§SPEC-STANDALONE-MPM-05).
+calls. **NOTE:** `.credentials.json` carries MCP OAuth tokens, NOT primary Claude Max/Pro session
+auth — primary auth uses the macOS Keychain keyed by the `CLAUDE_CONFIG_DIR` path.
+
+The two WI-10 auth paths (both implemented, 2026-06-22):
+- **(a) Keychain (default — `tm login`).** Run `tm login` once. This launches
+  `claude auth login` under `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` so the OAuth flow
+  creates a keychain entry for that path. All subsequent `tm run` sessions authenticate on the
+  Claude Max/Pro plan via the keychain (no further setup needed).
+- **(b) API key + `--bare` (CI/automation).** When `ANTHROPIC_API_KEY` is set in the environment,
+  `tm run` automatically adds `--bare` to the `claude` invocation. `--bare` bypasses
+  keychain/OAuth reads and uses the API key directly; no `tm login` needed.
+
+`tm run` emits a non-blocking hint to run `tm login` when neither path is detectable
+(keychain entries cannot be probed without spawning `claude auth status`).
 
 **(d) The marker file.** `.trusty-mpm/managed.toml` records `{alias, url, ref, claude_config_dir,
 settings_arg_path?, mcp_config_arg_path?, generated_by_version}` so `path`/`ls`/`update`/`rm` and an
@@ -482,20 +491,21 @@ session-manager spec and is **out of scope** here except for the seam: a managed
   retains control; the process is foregrounded / attachable.
 - **Preconditions:** alias registered; the tm-global config dir established (`tm install`/`tm config`);
   **the tm-global config dir carries valid credentials** (see *Credential precondition* below).
-- **Credential precondition (required for API calls).** Because the required `CLAUDE_CONFIG_DIR`
-  relocates the **entire** `~/.claude/` tree-equivalent — including `.credentials.json` (A9) — a session
-  launched against a *clean* tm-global config dir starts **unauthenticated** (`claude` reports "Not
-  logged in") and **cannot make API calls**. `tm run` MUST therefore ensure one of two credential paths
-  is in place before launch:
-  - **(a) Seeded credentials:** `tm` seeds a valid `.credentials.json` into the tm-global config dir
-    (`~/.trusty-mpm/claude-config/`) so the relocated user-level layer is authenticated, **or**
-  - **(b) API-key env:** the session runs with **`ANTHROPIC_API_KEY`** set in the environment. This
-    pairs well with Claude Code's **`--bare`** flag (which skips the keychain/credentials lookup and
-    **requires** `ANTHROPIC_API_KEY`).
-
-  Without one of these, the managed session launches but cannot call the API. Establishing/maintaining
-  the credential path is owned by `tm install`/`tm config` (the tm-global config dir) and realized by
-  **WI-10**.
+- **Credential precondition (required for API calls) — WI-10 IMPLEMENTED.** Because the required
+  `CLAUDE_CONFIG_DIR` relocates the **entire** `~/.claude/` tree-equivalent — including the macOS
+  Keychain entry used for Claude Max/Pro OAuth (A9) — a session launched against a *clean* tm-global
+  config dir starts **unauthenticated** (`claude` reports "Not logged in"). **NOTE:** `.credentials.json`
+  (MCP OAuth tokens) is seeded by `ensure_global_config_dir` but does NOT establish primary session
+  auth. `tm run` supports two WI-10 auth paths:
+  - **(a) Keychain (default — `tm login` once):** `tm login` runs `claude auth login` under
+    `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` so the OAuth flow creates a Keychain entry for
+    that path. All subsequent `tm run` sessions authenticate via the Keychain on the user's Claude
+    Max/Pro plan (no further setup needed, no `ANTHROPIC_API_KEY` required).
+  - **(b) API key + `--bare` (CI/automation):** when `ANTHROPIC_API_KEY` is set, `tm run`
+    automatically adds `--bare` to the `claude` invocation. `--bare` bypasses Keychain/OAuth reads
+    and uses the API key directly; no `tm login` step needed.
+  When neither path is detected, `tm run` emits a non-blocking stderr hint pointing to `tm login`
+  (Keychain entries cannot be probed without spawning `claude auth status`, so no hard failure).
 - **Postconditions:** an **attended, interactive** managed Claude Code session is running for the
   alias with the isolation invariant intact — global hooks/MCPs supplied via the tm-global
   `CLAUDE_CONFIG_DIR`, the real `~/.claude` excluded, project-local config discovered from `repo/`,
@@ -521,7 +531,8 @@ override args make a replication command fully explicit.
 
 | Module | Role |
 |--------|------|
-| `tm::commands::run` (new) | Resolves alias, ensures load, **verifies the credential precondition** (seeded `.credentials.json` in the tm-global config dir **or** `ANTHROPIC_API_KEY`+`--bare`), then launches an **attended** Claude Code session with the required `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` and `cwd = repo/` (optional `--settings`/`--mcp-config` override args). |
+| `tm::commands::run` (new) | Resolves alias, ensures load, checks WI-10 auth path (`ANTHROPIC_API_KEY` → `--bare`; otherwise keychain hint), then launches an **attended** Claude Code session with `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` and `cwd = repo/`. `build_launch_command` (in `core::standalone::run`) adds `--bare` when the API key is set. |
+| `tm login` (new, WI-10) | New `Login` CLI variant; `login_cmd` in `commands::standalone` calls `build_login_command` → `claude auth login` under `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` with inherited stdio so the user completes the OAuth flow. |
 | `core::session_launch` | Launches Claude Code with the tm-global `CLAUDE_CONFIG_DIR` (and optional override args) for an interactive session. |
 | Session manager (Layer 2, consumed; DOC-23) | The semi-autonomous orchestrator that *drives* tm-managed projects; **not** implemented by `tm run`. |
 
@@ -691,7 +702,7 @@ specs); a managed project produced by `load` is exactly the seam the session man
 |---|-------------------|--------|-----------------|
 | A1 | **`CLAUDE_CONFIG_DIR` redirects Claude Code's user-level config dir per-process, *excluding* the real `~/.claude` — CONFIRMED as the isolation mechanism.** **CONFIRMED** (empirically tested **and** maintainer-confirmed): setting `CLAUDE_CONFIG_DIR` to a clean directory provides **full user-level config isolation** — (i) **MCP**: all global/cloud MCPs *and* the user-scoped `trusty-review` disappear ("No MCP servers configured"); **both reads and writes** redirect into the clean dir; **zero leakage** into the real `~/.claude`; (ii) **settings/hooks**: the clean dir's `settings.json` is consulted and the real `~/.claude/settings.json` hooks (PostToolUse/SessionStart/Stop/SubagentStop) are **not** read; (iii) it relocates the **entire `~/.claude/` tree-equivalent** (settings, MCP data, sessions, projects, credentials). So pointing it at the tm-global config dir makes Claude Code merge **that** dir as the user-level layer instead of the real `~/.claude` (the maintainer's claude-mpm global hooks/MCPs are excluded). Empirically validated on Claude Code v2.1.185 (macOS, 2026-06-22) **and confirmed by the maintainer** — this is a settled design assumption, not an open risk. The one residual note: the flag is **undocumented** in `--help`, so re-verify the isolation behavior on **major Claude Code upgrades** (a lightweight regression guard, not a blocking risk). **This is the load-bearing isolation primitive — REQUIRED, primary:** the global hooks + skills/slash-commands + MCPs are delivered through it, and it is what prevents real-`~/.claude` step-on. | **CONFIRMED** — full MCP + settings/hooks isolation, empirically tested on Claude Code 2.1.185 (2026-06-22) **and maintainer-confirmed**. Residual: undocumented in `--help` → re-verify on major CC upgrades (lightweight regression guard). | **WI-1** is a minimal **regression-guard / version-pin** (re-verify the user-level swap + real-`~/.claude` exclusion against the pinned CC version on major upgrades). It is **non-blocking** — the mechanism is confirmed, so implementation can proceed; this WI only guards against a future undocumented-behavior regression. |
 | A2 | **`CLAUDE_CONFIG_DIR` does not suppress project-local `.claude/` creation.** Confirmed: a local `.claude/settings.local.json` may still be written in the workspace even with the var set. This is **acceptable** — the managed layout *wants* project-local files under `repo/`; we just must not assume the var centralizes everything. | **Confirmed (acceptable).** | Managed layout treats `repo/.claude/` as the statically-discovered half by design. |
-| A9 | **`CLAUDE_CONFIG_DIR` ALSO relocates `~/.claude/.credentials.json` → a clean tm-global config dir starts UNAUTHENTICATED.** Discovered during the same 2026-06-22 / v2.1.185 test: because the var relocates the **entire** `~/.claude/` tree-equivalent (A1), it also relocates `.credentials.json`, so a session launched with a *clean* tm-global config dir has **no credentials** — `claude` reports "Not logged in" and cannot make API calls. This is a real gap for the managed-session use case, not a benign side effect. | **Confirmed gotcha (blocks API calls).** | The tm-global config dir must carry valid credentials before a managed session can run: either (a) `tm` seeds a valid `.credentials.json` into the tm-global config dir, **or** (b) the session runs with `ANTHROPIC_API_KEY` set (pairs well with `--bare`, which skips the keychain/credentials lookup and requires `ANTHROPIC_API_KEY`). Realized by **WI-10** (credential provisioning); the precondition is recorded in §SPEC-STANDALONE-MPM-03 / -05. |
+| A9 | **`CLAUDE_CONFIG_DIR` ALSO relocates `~/.claude/.credentials.json` → a clean tm-global config dir starts UNAUTHENTICATED.** Discovered 2026-06-22 / v2.1.185: the var relocates the **entire** `~/.claude/` tree-equivalent (A1) including `.credentials.json`. **KEY INSIGHT (empirically confirmed, 2026-06-22):** primary Claude Max/Pro session auth is the macOS **Keychain** entry keyed by the `CLAUDE_CONFIG_DIR` path — NOT `.credentials.json` (which carries MCP OAuth tokens only). A fresh `~/.trusty-mpm/claude-config/` has no Keychain entry, so `claude` reports "Not logged in". | **Confirmed + MITIGATED by WI-10 (2026-06-22).** | **WI-10 IMPLEMENTED:** two auth paths — **(a) `tm login`** (one-time keychain setup, `claude auth login` under `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config`) and **(b) `ANTHROPIC_API_KEY`+`--bare`** (API-key path, auto-detected by `tm run`). Primary managed-session auth is via the Keychain or API key; seeding `.credentials.json` addresses MCP OAuth tokens only. |
 | A3 | **The VS Code / Cursor extension IGNORES `CLAUDE_CONFIG_DIR`** (reads/writes the real `~/.claude/` regardless). | **Confirmed risk — bounds the IDE path.** | Because the load-bearing primitive is `CLAUDE_CONFIG_DIR` (A1) and the IDE ignores it, an IDE-attached session loads project-local config layered on the **real** `~/.claude` (claude-mpm step-on) and does **not** get tm's global hooks/MCPs. IDE-attach (§06) therefore relies **only** on standard project-local discovery of `repo/CLAUDE.md` + `repo/.claude/agents/` + `repo/.claude/skills/`, which the extension *does* honor; faithful, isolated sessions launch via `tm`. WI-1 documents this boundary. |
 | A4 | **Project-local `.claude/` precedence over the user-level layer.** Confirmed: precedence is Managed > CLI args > Local (`settings.local.json`) > Project (`.claude/`) > User (the user-level layer — the real `~/.claude`, or the **tm-global config dir** when `CLAUDE_CONFIG_DIR` redirects it). | **Confirmed.** | Relied on by §03/§06/§08 — project-local `repo/.claude` overlays the tm-global user-level layer. |
 | A8 | **Claude Code CLI accepts argument-supplied settings + MCP config files (the *secondary* override mechanism).** **Verified** against the installed CLI (v2.1.185, `claude --help`): `--settings <file-or-json>` ("Path to a settings JSON file … to load additional settings from" — the file carries the `hooks` block); `--mcp-config <configs...>` ("Load MCP servers from JSON files or strings (space-separated)"); `--strict-mcp-config` ("Only use MCP servers from `--mcp-config`, ignoring all other MCP configurations"). `--bare`/`--safe-mode` help text confirms hooks/MCPs are otherwise standard-discovery customizations. **Reframed as secondary:** these flags are kept for per-run overrides and for *manually replicating* a tm launch (same arguments) — they are **no longer** the primary delivery mechanism for hooks/MCPs (that is the tm-global `CLAUDE_CONFIG_DIR`, A1). | **Verified (CLI v2.1.185); secondary.** | §03/§08 keep them documented as the optional override/replication path; WI-1 re-confirms against the pinned CC version. |
@@ -708,7 +719,7 @@ specs); a managed project produced by `load` is exactly the seam the session man
 |----|-------|------|----------|------------|
 | **WI-1** | **S** | **Regression-guard / version-pin `CLAUDE_CONFIG_DIR` + write the standard.** The load-bearing isolation mechanism is **CONFIRMED** (empirically tested on CC 2.1.185, macOS, 2026-06-22, **and maintainer-confirmed**, A1) — full user-level swap to the tm-global config dir with the real `~/.claude` excluded. This WI is therefore a **minimal regression guard, not a blocking prerequisite and not a "does it work" investigation**: pin a known-good minimum CC version and re-verify `CLAUDE_CONFIG_DIR` isolation (user-level swap + real-`~/.claude` exclusion) against that pinned version on **major** Claude Code upgrades (the flag is undocumented, so guard against a future regression). Also: confirm the IDE ignores it (A3) and document that boundary, re-confirm the **secondary** `--settings`/`--mcp-config` override flags (A8), and capture the credential-relocation gotcha (A9) so WI-10's precondition is accounted for. Write the standard doc (one tm-global config dir + per-alias project layout, marker schema incl. the `CLAUDE_CONFIG_DIR` path, ownership, isolation invariant, the project-local-discovery vs tm-global split, the credential precondition) and a conformance checklist incl. session-replay via the same `CLAUDE_CONFIG_DIR`. **Non-blocking:** the build does not wait on this WI to prove the mechanism — the mechanism is confirmed. | SPEC-STANDALONE-MPM-03, -04 (assumptions A1–A4, A8, A9) | — |
 | **WI-9** | **M** | **Establish + maintain the single tm-global config dir (`tm install` / `tm config`).** Create and maintain `~/.trusty-mpm/claude-config/` holding the **one** set of global hooks, the global skills / slash-commands, and the global MCP servers (memory/search/review); idempotent merge that preserves user-added entries; this is established **once** (not per project) and is what `CLAUDE_CONFIG_DIR` selects at launch. | SPEC-STANDALONE-MPM-03, -04, -08 | — (mechanism confirmed, A1; WI-1 runs alongside as a non-blocking guard) |
-| **WI-10** | **S** | **Credential provisioning for the tm-global config / managed sessions.** Because `CLAUDE_CONFIG_DIR` relocates `.credentials.json` (A9), a clean tm-global config dir is unauthenticated. Provide one of two paths and wire `tm run`'s precondition check: **(a)** seed a valid `.credentials.json` into `~/.trusty-mpm/claude-config/` (at `tm install`/`tm config`), or **(b)** wire `ANTHROPIC_API_KEY` into the launch env and pass Claude Code's `--bare` (skips keychain/credentials lookup, requires `ANTHROPIC_API_KEY`). Document both; fail `tm run` with a clear diagnostic when neither is available. | SPEC-STANDALONE-MPM-03, -05 (A9) | WI-9 |
+| **WI-10** | **S** | **IMPLEMENTED (2026-06-22, refs #1548).** Managed-session auth — `tm login` (keychain, default) + `ANTHROPIC_API_KEY`/`--bare` fallback (CI/automation). Primary auth uses the macOS Keychain keyed by `CLAUDE_CONFIG_DIR` path; `.credentials.json` is MCP OAuth tokens, NOT session auth. `tm login` → `claude auth login` under `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config` (one-time setup; creates the Keychain entry). `tm run` auto-adds `--bare` when `ANTHROPIC_API_KEY` is set (bypasses Keychain/OAuth). Non-blocking hint when neither is detected. `build_launch_command(api_key: Option<&str>)` and `build_login_command(claude_config_dir)` are unit-testable; `AuthState` enum encodes the three states (ApiKey / CredentialsFile / Unknown). | SPEC-STANDALONE-MPM-03, -05 (A9) | WI-9 |
 | **WI-2** | **M** | **Project-local-scope the agent/skill/output-style deploys.** Thread an explicit target through `deploy_agents_filtered`, `deploy_skills_filtered` → `repo/.claude/agents/`, `repo/.claude/skills/` (project, standard discovery; global skills/slash-commands go to the tm-global config dir per WI-9); `deploy_output_style` → `repo/.claude/settings.json` / tm-global config dir; remove the real-`home_dir()` global fallback in managed mode (fail closed). | SPEC-STANDALONE-MPM-04 (sites 1–3) | WI-9 |
 | **WI-3** | **S** | **Emit the one global hooks block + trust into the tm-global config dir; stop the real-global writes.** Re-target hook composition (`remove_global_trusty_memory_hooks` + the managed hooks) to write the **single** global `hooks` block into the tm-global config dir's `settings.json` (selected by `CLAUDE_CONFIG_DIR`); re-target `preseed_workspace_trust_home` to the tm-global config dir's `.claude.json` equivalent; **stop** seeding the real `~/.claude.json`. | SPEC-STANDALONE-MPM-04 (sites 4–5), -08 | WI-9 |
 | **WI-4** | **M** | **Standalone-driver registry + `register`/`ls`.** New registry file under the trusty-mpm config root; `tm register`, `tm ls`. Reuse/align with the DOC-22 project registry. | SPEC-STANDALONE-MPM-01, -07 (`ls`) | — |

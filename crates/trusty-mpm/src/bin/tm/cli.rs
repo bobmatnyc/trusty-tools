@@ -469,6 +469,22 @@ pub(crate) enum Command {
         alias: String,
     },
 
+    /// One-time keychain login for managed `tm run` sessions (WI-10, DOC-24).
+    ///
+    /// Why: `CLAUDE_CONFIG_DIR` relocates the macOS Keychain entry used for
+    /// Claude Max/Pro OAuth (A9). A fresh `~/.trusty-mpm/claude-config/` has
+    /// no keychain entry, so `tm run` reports "Not logged in". `tm login` runs
+    /// `claude auth login` under the tm-global `CLAUDE_CONFIG_DIR` so the
+    /// OAuth flow creates a keychain entry for that path. This is a one-time
+    /// setup — the entry persists across sessions on this machine.
+    /// What: ensures the tm-global config dir exists, spawns
+    /// `claude auth login` with `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config`
+    /// and inherited stdio, prints guidance before/after the OAuth flow.
+    /// Alternative: set `ANTHROPIC_API_KEY` to use the API-key+`--bare` path
+    /// instead (for CI/automation, no login required).
+    /// Test: `cli_parses_login_standalone`.
+    Login,
+
     /// Standalone metaharness — PM + sub-agent delegation without the daemon (#1045).
     ///
     /// Why: the M1 POC (issue #1045) builds a self-contained metaharness that
