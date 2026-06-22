@@ -193,45 +193,15 @@ pub(crate) fn install_claude_hooks() -> anyhow::Result<usize> {
 ///
 /// Why: every call site (the install handler and its unit test) needs the
 /// exact same shape so [`merge_hook_entries`] can dedup by deep equality;
-/// centralising the literal avoids two slightly-different copies racing in
-/// the idempotency check.
-/// What: returns a JSON object with `PreToolUse`, `PostToolUse`, and `Stop`
-/// arrays, each carrying one `{matcher: "*", hooks: [{type: "command",
-/// command: "trusty-mpm hook", timeout: ...}]}` block. `PostToolUse` runs
-/// asynchronously (Claude Code does not block on its completion) because
-/// the daemon may take longer to ingest tool results; `PreToolUse` and
-/// `Stop` keep the default synchronous behaviour with short timeouts.
+/// delegating to the shared library definition avoids two slightly-different
+/// copies racing in the idempotency check. The canonical definition lives in
+/// [`trusty_mpm::core::standalone::hooks::mpm_hook_additions`] so the managed
+/// driver (`ensure_global_config_dir`) and the install path both use the same
+/// literal (WI-3).
+/// What: delegates to the shared library function.
 /// Test: covered indirectly by `install_claude_hooks_is_idempotent`.
 pub(crate) fn mpm_hook_additions() -> serde_json::Value {
-    serde_json::json!({
-        "hooks": {
-            "PreToolUse": [{
-                "matcher": "*",
-                "hooks": [{
-                    "type": "command",
-                    "command": "trusty-mpm hook",
-                    "timeout": 5
-                }]
-            }],
-            "PostToolUse": [{
-                "matcher": "*",
-                "hooks": [{
-                    "type": "command",
-                    "command": "trusty-mpm hook",
-                    "timeout": 60,
-                    "async": true
-                }]
-            }],
-            "Stop": [{
-                "matcher": "*",
-                "hooks": [{
-                    "type": "command",
-                    "command": "trusty-mpm hook",
-                    "timeout": 5
-                }]
-            }]
-        }
-    })
+    trusty_mpm::core::standalone::hooks::mpm_hook_additions()
 }
 
 /// Render per-file status lines for an agent [`DeployResult`].

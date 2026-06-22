@@ -54,7 +54,12 @@ pub struct ManagedMarker {
 /// 4. If `repo/` exists: `git -C repo/ pull --ff-only` (best-effort, non-fatal).
 /// 5. Runs `prepare_session` from `crate::core::session_launch` on `repo/`.
 /// 6. Writes `.trusty-mpm/managed.toml`.
-/// 7. Returns the absolute `PathBuf` to `repo/`.
+/// 7. (WI-3) Pre-seeds project trust + MCP-server approval into
+///    `<claude_config_dir>/.claude.json` via [`super::trust_seed::preseed_managed_trust`].
+/// 8. Returns the absolute `PathBuf` to `repo/`.
+///
+/// The trust seed (step 7) writes ONLY into `<claude_config_dir>` — never to
+/// `~/.claude.json` or `~/.claude/` (isolation invariant, WI-7).
 ///
 /// Test: `test_marker_write_round_trip` (marker); git operations require network.
 pub fn load_alias(
@@ -81,6 +86,14 @@ pub fn load_alias(
 
     run_prepare_session(&repo_dir)?;
     write_marker(&repo_dir, alias, &url, &git_ref, claude_config_dir)?;
+
+    // WI-3 sub-parts 2+3: pre-seed project trust + MCP-server approval into
+    // <claude_config_dir>/.claude.json so managed sessions start without dialogs.
+    // Writes ONLY to <claude_config_dir>/.claude.json — never to ~/.claude.json.
+    // Non-fatal: a seed failure only means the operator may see the trust dialog.
+    if let Err(err) = super::trust_seed::preseed_managed_trust(claude_config_dir, &repo_dir) {
+        tracing::warn!("failed to pre-seed managed trust for '{alias}': {err}");
+    }
 
     Ok(repo_dir)
 }

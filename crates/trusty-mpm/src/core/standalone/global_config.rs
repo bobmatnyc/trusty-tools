@@ -42,10 +42,12 @@ use std::path::{Path, PathBuf};
 /// always contains a valid `settings.json`, MCP config, and (WI-2) the bundled
 /// agents and skills. Idempotent — safe to call on every launch.
 /// What: creates `<managed_root>/claude-config/`, writes `settings.json` (`{}`
-/// when absent), copies `~/.claude/.credentials.json` if found (silently skips
-/// otherwise), writes `.mcp.json` with trusty-memory + trusty-search stubs
-/// (idempotent via the inject pattern), then deploys bundled agents and skills
-/// via [`deploy_agents_and_skills`].
+/// when absent), merges the MPM hook triad into `settings.json` via
+/// [`super::hooks::ensure_managed_hooks`] (WI-3), copies
+/// `~/.claude/.credentials.json` if found (silently skips otherwise), writes
+/// `.mcp.json` with trusty-memory + trusty-search stubs (idempotent via the
+/// inject pattern), then deploys bundled agents and skills via
+/// [`deploy_agents_and_skills`].
 /// Test: `test_global_config_dir_ensure_idempotent`,
 /// `test_deploy_agents_and_skills_populates_config_dir`,
 /// `test_deploy_agents_and_skills_missing_source_is_ok`.
@@ -59,6 +61,10 @@ pub fn ensure_global_config_dir(
     if !settings_path.exists() {
         std::fs::write(&settings_path, "{}\n")?;
     }
+
+    // WI-3: merge the MPM lifecycle hook triad (PreToolUse/PostToolUse/Stop)
+    // into settings.json so managed sessions emit lifecycle events to the daemon.
+    super::hooks::ensure_managed_hooks(claude_config_dir)?;
 
     seed_credentials(claude_config_dir);
     ensure_mcp_config(claude_config_dir)?;
