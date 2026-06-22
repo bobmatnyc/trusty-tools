@@ -483,27 +483,65 @@ fn pairing_confirms_shared_disk_code() {
 
 #[test]
 fn concurrent_pairing_confirms() {
+    // THE #1506 REGRESSION GUARD: two concurrent confirm attempts race on the
+    // same pending code. The atomic rename-based claim must ensure exactly ONE
+    // wins; the WINNER must have the device registered in state, the LOSER must
+    // not. This catches the pre-fix TOCTOU race where both reads could precede
+    // both deletes.
     let dir = tempfile::tempdir().expect("temp dir");
     let root = dir.path().to_path_buf();
 
     let minting = DaemonState::with_root(root.clone());
     let code = minting.generate_pair_code();
 
-    let confirming1 = DaemonState::with_root(root.clone());
-    let confirming2 = DaemonState::with_root(root.clone());
+    // Use Arc so each thread can own a confirming state.
+    let confirming1 = std::sync::Arc::new(DaemonState::with_root(root.clone()));
+    let confirming2 = std::sync::Arc::new(DaemonState::with_root(root.clone()));
+    let c1_ref = confirming1.clone();
+    let c2_ref = confirming2.clone();
 
-    let code_clone = code.clone();
-    let c1 = std::thread::spawn(move || {
-        confirming1.confirm_pair_code(&code_clone, 111)
-    });
-    let c2 = std::thread::spawn(move || {
-        confirming2.confirm_pair_code(&code, 222)
-    });
+    let code1 = code.clone();
+    let code2 = code.clone();
+    let c1 = std::thread::spawn(move || c1_ref.confirm_pair_code(&code1, 111));
+    let c2 = std::thread::spawn(move || c2_ref.confirm_pair_code(&code2, 222));
 
-    let res1 = c1.join().unwrap();
-    let res2 = c2.join().unwrap();
+    let res1 = c1.join().expect("thread 1 must not panic");
+    let res2 = c2.join().expect("thread 2 must not panic");
 
     // Exactly one confirm should succeed due to the atomic claim.
-    assert!(res1 ^ res2, "exactly one concurrent confirm must win the atomic claim");
-}
+    assert!(
+        res1 ^ res2,
+        "exactly one concurrent confirm must win the atomic claim (got res1={res1} res2={res2})"
+    );
 
+    // The WINNER must have its chat_id registered; the LOSER must not.
+    if res1 {
+        assert_eq!(
+            confirming1.paired_chat_id(),
+            Some(111),
+            "winner (thread 1) must have chat_id 111 registered"
+        );
+        assert_eq!(
+            confirming2.paired_chat_id(),
+            None,
+            "loser (thread 2) must not have registered any chat_id"
+        );
+    } else {
+        assert_eq!(
+            confirming2.paired_chat_id(),
+            Some(222),
+            "winner (thread 2) must have chat_id 222 registered"
+        );
+        assert_eq!(
+            confirming1.paired_chat_id(),
+            None,
+            "loser (thread 1) must not have registered any chat_id"
+        );
+    }
+
+    // The pending code file must be gone — consumed by the winner's claim.
+    assert!(
+        crate::daemon::pairing_store::load_pending(&root).is_none(),
+        "pending code file must be absent after a winning confirm"
+    );
+}

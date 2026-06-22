@@ -237,6 +237,10 @@ impl DaemonState {
         let optimizer = load_optimizer_config();
         let build = load_overseer();
         let framework_root = FrameworkPaths::default().root;
+        // Remove any orphan `.claim.*` files left by a previous crashed process
+        // before checking for a pairing record; this prevents a stale claim from
+        // blocking the very first confirm after a crash.
+        crate::daemon::pairing_store::cleanup_stale_claims(&framework_root);
         // Restore a persisted Telegram pairing so push alerts survive restarts.
         let paired = crate::daemon::pairing_store::load(&framework_root).map(|r| r.chat_id);
         if let Some(chat_id) = paired {
@@ -314,6 +318,7 @@ impl DaemonState {
         let overseer_cfg = OverseerConfig::load_from(&paths.overseer_config());
         let build = build_overseer(overseer_cfg);
         let framework_root = paths.root.clone();
+        crate::daemon::pairing_store::cleanup_stale_claims(&framework_root);
         let paired = crate::daemon::pairing_store::load(&framework_root).map(|r| r.chat_id);
         let (event_tx, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Self {
