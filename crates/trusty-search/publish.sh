@@ -43,7 +43,28 @@ set -euo pipefail
 CRATE="trusty-search"
 
 usage() {
-  sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+  # Self-contained usage text (a heredoc, NOT a slice of the script header).
+  # Slicing the header with `sed -n '2,40p'` was fragile: any edit that grew or
+  # reordered the leading comment block would leak raw bash or truncate the help.
+  cat <<'USAGE'
+publish.sh — Publish the trusty-search crate to crates.io from the monorepo.
+
+Strips the workspace-root [patch.crates-io] block (which redirects in-tree libs
+to local path deps) so cargo publish resolves every dependency from crates.io,
+runs the publish, and restores the manifest + lockfile verbatim on every exit.
+
+USAGE:
+  bash crates/trusty-search/publish.sh [--dry-run] [--help]
+    --dry-run   Package + verify without uploading (no crates.io token required).
+    -h, --help  Show this help and exit.
+    (no flag)   Real publish to crates.io.
+
+PREREQUISITES (real publish only — dry-run needs none of these):
+  1. `cargo login <token>` has been run (verified crates.io account).
+  2. Every workspace lib trusty-search depends on (trusty-common, trusty-embedderd,
+     …) is ALREADY published at the version trusty-search pins.
+     See .claude/skills/cargo-publish/SKILL.md for cross-crate ordering.
+USAGE
   exit "${1:-0}"
 }
 
@@ -84,7 +105,16 @@ fi
 # `trusty-common` with its explicit version). That rewrite is a publish-time
 # artifact, not an intended source change, so we restore the original lockfile
 # on exit as well — leaving the workspace exactly as we found it.
+#
+# Edge case: if Cargo.lock did NOT exist before we started, `cargo publish` may
+# CREATE one during resolution. There is then no backup to restore from, so the
+# trap must instead DELETE the newly-created lockfile — otherwise we leave a
+# stray, untracked Cargo.lock behind and the worktree is no longer "exactly as
+# found". `CARGO_LOCK_EXISTED` records the pre-existing state for the trap.
 # ---------------------------------------------------------------------------
+CARGO_LOCK_EXISTED=0
+[[ -f "$CARGO_LOCK" ]] && CARGO_LOCK_EXISTED=1
+
 restore_workspace() {
   if [[ -f "$CARGO_TOML_BACKUP" ]]; then
     mv -f "$CARGO_TOML_BACKUP" "$CARGO_TOML"
@@ -93,13 +123,18 @@ restore_workspace() {
   if [[ -f "$CARGO_LOCK_BACKUP" ]]; then
     mv -f "$CARGO_LOCK_BACKUP" "$CARGO_LOCK"
     log "Restored workspace-root Cargo.lock ($CARGO_LOCK)."
+  elif [[ "$CARGO_LOCK_EXISTED" -eq 0 && -f "$CARGO_LOCK" ]]; then
+    # Cargo.lock was absent before but cargo created it during publish — remove
+    # the artifact so the worktree is left exactly as we found it.
+    rm -f "$CARGO_LOCK"
+    log "Removed publish-created Cargo.lock ($CARGO_LOCK) — none existed before."
   fi
 }
 trap restore_workspace EXIT INT TERM
 
 log "Backing up workspace-root Cargo.toml and Cargo.lock..."
 cp "$CARGO_TOML" "$CARGO_TOML_BACKUP"
-[[ -f "$CARGO_LOCK" ]] && cp "$CARGO_LOCK" "$CARGO_LOCK_BACKUP"
+[[ "$CARGO_LOCK_EXISTED" -eq 1 ]] && cp "$CARGO_LOCK" "$CARGO_LOCK_BACKUP"
 
 log "Stripping [patch.crates-io] block from workspace-root Cargo.toml for publish..."
 # Remove the [patch.crates-io] table (and the comment lines immediately above it)
@@ -113,15 +148,36 @@ import sys, re
 path = sys.argv[1]
 text = open(path).read()
 
-# Match an optional run of comment lines directly above the [patch.crates-io]
-# header, the header itself, and every line until the next top-level table
-# header ("[...]" at column 0) or end-of-file.
+# Match an optional run of comment AND/OR blank lines directly above the
+# [patch.crates-io] header, the header itself, and every line until the next
+# top-level table header ("[...]" at column 0) or end-of-file.
+#
+# The prefix group `(?:^(?:#.*)?\n)*` matches each leading line that is EITHER a
+# comment (`# ...`) OR blank (the `(?:#.*)?` is optional, so a bare `\n` also
+# matches). The previous `(?:^#.*\n)*` only allowed comment lines, so a BLANK
+# line separating the comment banner from the header — a very common Cargo.toml
+# layout — broke the match: the block survived, and `cargo publish` then either
+# failed or, worse, tried to publish a path-patched manifest.
 pattern = re.compile(
-    r'(?:^#.*\n)*^\[patch\.crates-io\]\n(?:^(?!\[).*\n?)*',
+    r'(?:^(?:#.*)?\n)*^\[patch\.crates-io\]\n(?:^(?!\[).*\n?)*',
     flags=re.MULTILINE,
 )
 new_text, n = pattern.subn('', text)
 if n == 0:
+    # FAIL LOUD: if the header is physically present but the regex stripped
+    # nothing, the patch block would survive into the publish — crates.io would
+    # reject it (or, worse, accept a path-patched manifest). A silent no-strip
+    # must NEVER let a publish proceed, so exit non-zero. The shell's `set -e`
+    # plus the EXIT trap then abort the run and restore the manifest verbatim.
+    if re.search(r'^\[patch\.crates-io\]', text, flags=re.MULTILINE):
+        print(
+            "error: [patch.crates-io] header is present but the strip regex "
+            "matched nothing — refusing to publish a path-patched manifest. "
+            "The patch-block layout is unexpected; fix the regex in publish.sh.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # Genuinely no patch block (already stripped / nothing to do) — benign.
     print("WARNING: no [patch.crates-io] block found — nothing stripped.", file=sys.stderr)
 else:
     open(path, 'w').write(new_text)
