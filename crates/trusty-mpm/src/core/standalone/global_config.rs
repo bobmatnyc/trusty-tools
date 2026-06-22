@@ -98,26 +98,49 @@ fn deploy_agents_and_skills(managed_root: &Path, claude_config_dir: &Path) -> an
     let agents_dest = claude_config_dir.join("agents");
     let skills_dest = claude_config_dir.join("skills");
 
-    // Guard: if agents source dir is missing (tm install not yet run), skip and
-    // print a hint to stderr. Never error — tm load/run/login must stay functional
-    // before the framework is installed.
-    if !agents_src.exists() {
+    // Nit 3 (accepted TOCTOU): `exists()` is checked here before calling the
+    // deployers so we can emit a targeted hint. The deployers already handle a
+    // missing source dir by returning Ok(empty) internally, so this is a
+    // benign, accepted TOCTOU window — the framework directory essentially never
+    // disappears mid-run in normal dev use.
+    let agents_missing = !agents_src.exists();
+    let skills_missing = !skills_src.exists();
+
+    // Nit 1: collapse the two missing-source hints into a single combined message
+    // when both source dirs are absent (framework not yet installed), so the user
+    // sees one clear actionable line instead of two. When only one is missing,
+    // print just that specific hint so it names the exact missing path.
+    if agents_missing && skills_missing {
         eprintln!(
-            "note: no bundled agents found at {}; run `tm install` to populate them",
-            agents_src.display()
+            "note: no bundled agents or skills found under {}/framework; \
+             run `tm install` to populate them",
+            managed_root.display()
         );
     } else {
+        if agents_missing {
+            eprintln!(
+                "note: no bundled agents found at {}; run `tm install` to populate them",
+                agents_src.display()
+            );
+        }
+        if skills_missing {
+            eprintln!(
+                "note: no bundled skills found at {}; run `tm install` to populate them",
+                skills_src.display()
+            );
+        }
+    }
+
+    if !agents_missing {
+        // Nit 2: layout contract — deploy_agents writes each flat <name>.md source
+        // as <agents_dest>/<name>.md plus a .trusty-mpm-manifest.json side-car
+        // (see core::agent_deployer). deploy_skills writes each flat <name>.md
+        // source as <skills_dest>/<name>/SKILL.md (see core::skill_deployer).
         crate::core::agent_deployer::deploy_agents(&agents_src, &agents_dest)
             .map_err(|e| anyhow::anyhow!("failed to deploy agents into managed config dir: {e}"))?;
     }
 
-    // Guard: same for skills.
-    if !skills_src.exists() {
-        eprintln!(
-            "note: no bundled skills found at {}; run `tm install` to populate them",
-            skills_src.display()
-        );
-    } else {
+    if !skills_missing {
         crate::core::skill_deployer::deploy_skills(&skills_src, &skills_dest)
             .map_err(|e| anyhow::anyhow!("failed to deploy skills into managed config dir: {e}"))?;
     }
