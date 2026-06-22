@@ -79,7 +79,14 @@ class DaemonClient:
         if conv_id is not None:
             payload["conv_id"] = conv_id
 
-        logger.debug("daemon → POST %s payload=%r", self.CHAT_PATH, {**payload})
+        # Log only key names and message length — never log the message text
+        # itself, as it contains the user's speech (potential PII).
+        logger.debug(
+            "daemon → POST %s payload_keys=%s msg_len=%d",
+            self.CHAT_PATH,
+            list(payload),
+            len(str(payload.get("message", ""))),
+        )
 
         try:
             resp = await self._client.post(self.CHAT_PATH, json=payload)

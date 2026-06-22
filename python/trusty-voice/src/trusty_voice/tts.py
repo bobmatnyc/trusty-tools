@@ -4,16 +4,16 @@ Text-to-speech helpers for trusty-voice Phase 0.
 Why: Decoupling TTS from the pipeline allows provider swaps and makes the
      audio-output step unit-testable without a speaker or API key.
 What: Provides ElevenLabsSpeaker — a thin async wrapper around the ElevenLabs
-     Python SDK that synthesises text and writes PCM audio to a pyaudio stream.
-     Also provides a TextOnlySpeaker used in dry-run / text mode.
-Test: Inject mock ElevenLabs client and mock pyaudio stream; call speak(); assert
-     that generate() was called with the expected text and that stream.write()
-     received the audio chunks.
+     ≥1.x Python SDK (AsyncElevenLabs client) that synthesises text and writes
+     PCM audio to a pyaudio stream.  Also provides TextOnlySpeaker used in
+     dry-run / text mode.
+Test: Inject a mock ElevenLabs client whose text_to_speech.stream() returns an
+     async iterable of bytes; mock pyaudio stream.write; call speak(); assert
+     that write() received the expected chunks.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -21,22 +21,26 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# ElevenLabs implementation
+# ElevenLabs ≥1.x implementation
 # ---------------------------------------------------------------------------
 
 
 class ElevenLabsSpeaker:
-    """Synthesises text via ElevenLabs and plays through the default audio device.
+    """Synthesises text via ElevenLabs ≥1.x and plays through the default audio device.
 
-    Why: Keeps TTS + audio-output as one unit because the ElevenLabs streaming
-         iterator naturally feeds into a pyaudio write loop.
-    What: Uses elevenlabs.generate() with streaming=True to pull audio chunks and
-         writes them directly to a pyaudio output stream at 22050 Hz / 16-bit mono.
-    Test: Mock elevenlabs.generate to return a list of bytes; mock pyaudio.PyAudio
-         and stream.write; assert chunks forwarded in order.
+    Why: The ElevenLabs Python SDK ≥1.0 removed the module-level generate() /
+         set_api_key() helpers and replaced them with an explicit client class.
+         Using AsyncElevenLabs lets speak() stay a first-class async method so
+         it integrates cleanly with the asyncio pipeline loop.
+    What: Uses AsyncElevenLabs.text_to_speech.stream() with output_format="pcm_22050"
+         to receive raw 16-bit mono PCM chunks (no decoder needed) and writes them
+         directly to a pyaudio output stream at 22 050 Hz.
+    Test: Inject a mock async_elevenlabs_client whose text_to_speech.stream returns
+         an async iterator of bytes; mock pyaudio.PyAudio and stream.write; assert
+         chunks forwarded in order and stream is always closed.
     """
 
-    # ElevenLabs turbo models output at 22050 Hz by default.
+    # pcm_22050 → 16-bit / mono / 22 050 Hz raw PCM
     SAMPLE_RATE = 22050
     CHANNELS = 1
     SAMPLE_WIDTH = 2  # 16-bit
@@ -46,16 +50,34 @@ class ElevenLabsSpeaker:
         api_key: str,
         voice_id: str = "21m00Tcm4TlvDq8ikWAM",
         model_id: str = "eleven_turbo_v2",
+        *,
+        _client: Any = None,  # injection point for tests
     ) -> None:
         """
-        Why: Defer heavy SDK imports so tests can mock without installing.
-        What: Stores credentials; pyaudio is initialised lazily on first speak().
-        Test: Construct and assert attributes; no audio device required.
+        Why: Stores credentials and accepts an optional mock client for testing.
+        What: Creates an AsyncElevenLabs client lazily on first speak(); stores
+             config; caches the pyaudio PyAudio instance.
+        Test: Pass _client=mock_async_client; construct and assert attributes;
+             no audio device or network required.
         """
         self._api_key = api_key
         self._voice_id = voice_id
         self._model_id = model_id
+        self._el_client: Any = _client  # AsyncElevenLabs, lazily created
         self._pa: Any = None  # pyaudio.PyAudio, lazily initialised
+
+    def _get_el_client(self) -> Any:
+        """Lazily create the AsyncElevenLabs client.
+
+        Why: Defers SDK import so tests that inject _client never touch real ElevenLabs.
+        What: Imports elevenlabs.client.AsyncElevenLabs, constructs with api_key, caches.
+        Test: Monkeypatch elevenlabs.client before calling; assert _el_client is set.
+        """
+        if self._el_client is None:
+            from elevenlabs.client import AsyncElevenLabs  # type: ignore[import]
+
+            self._el_client = AsyncElevenLabs(api_key=self._api_key)
+        return self._el_client
 
     def _get_pa(self) -> Any:
         """Lazily initialise pyaudio to avoid device probing at import time.
@@ -74,12 +96,15 @@ class ElevenLabsSpeaker:
     async def speak(self, text: str) -> None:
         """Synthesise text and play audio to the default output device.
 
-        Why: async-friendly so it integrates with the asyncio pipeline loop
-             without blocking the event loop for long audio segments.
-        What: Calls elevenlabs.generate() synchronously in a thread executor
-             (the SDK doesn't have a native async API for streaming), then
-             writes chunks to pyaudio in the event loop.
-        Test: Mock generate; mock stream.write; assert called with text.
+        Why: async-friendly so it integrates with the asyncio pipeline loop without
+             blocking the event loop for long audio segments.
+        What: Calls AsyncElevenLabs.text_to_speech.stream() which returns an
+             AsyncIterator[bytes] of raw PCM at 22 050 Hz / 16-bit mono; opens a
+             pyaudio output stream; forwards each chunk via stream.write(); closes
+             the pyaudio stream in a finally block.
+        Test: Mock _get_el_client() to return an object whose text_to_speech.stream
+             returns an async generator yielding known byte chunks; mock pyaudio;
+             assert write() called with each chunk in order.
         """
         if not text.strip():
             logger.debug("tts: empty text — skipping synthesis")
@@ -88,35 +113,29 @@ class ElevenLabsSpeaker:
         logger.debug("tts → synthesising %d chars", len(text))
 
         import pyaudio  # type: ignore[import]
-        from elevenlabs import generate, set_api_key  # type: ignore[import]
 
-        set_api_key(self._api_key)
+        client = self._get_el_client()
+        pa = self._get_pa()
 
-        loop = asyncio.get_running_loop()
-
-        def _generate_and_play() -> None:
-            audio_iter = generate(
+        stream = pa.open(
+            format=pyaudio.paInt16,
+            channels=self.CHANNELS,
+            rate=self.SAMPLE_RATE,
+            output=True,
+        )
+        try:
+            async for chunk in client.text_to_speech.stream(
+                voice_id=self._voice_id,
                 text=text,
-                voice=self._voice_id,
-                model=self._model_id,
-                stream=True,
-            )
-            pa = self._get_pa()
-            stream = pa.open(
-                format=pyaudio.paInt16,
-                channels=self.CHANNELS,
-                rate=self.SAMPLE_RATE,
-                output=True,
-            )
-            try:
-                for chunk in audio_iter:
-                    if chunk:
-                        stream.write(chunk)
-            finally:
-                stream.stop_stream()
-                stream.close()
+                model_id=self._model_id,
+                output_format="pcm_22050",
+            ):
+                if chunk:
+                    stream.write(chunk)
+        finally:
+            stream.stop_stream()
+            stream.close()
 
-        await loop.run_in_executor(None, _generate_and_play)
         logger.debug("tts ← playback complete")
 
     def close(self) -> None:

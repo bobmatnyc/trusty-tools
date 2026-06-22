@@ -163,7 +163,7 @@ class VoicePipeline:
         )
         while True:
             try:
-                raw = await asyncio.get_event_loop().run_in_executor(
+                raw = await asyncio.get_running_loop().run_in_executor(
                     None, lambda: input("[You] > ")
                 )
             except EOFError:

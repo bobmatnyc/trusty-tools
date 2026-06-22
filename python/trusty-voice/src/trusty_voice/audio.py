@@ -118,6 +118,10 @@ class MicRecorder:
         )
 
         def _capture() -> None:
+            # Check recording flag before each read so the thread exits promptly
+            # when recording is cleared.  stream.read() is called only while
+            # recording is still set, ensuring the stream is never read after
+            # it has been closed by the main thread.
             while recording.is_set():
                 frames.append(stream.read(self.CHUNK, exception_on_overflow=False))
 
@@ -127,8 +131,13 @@ class MicRecorder:
         print("  [Recording — press Enter to stop]", flush=True)
         input()
 
+        # Signal the capture thread to stop, then wait for it to exit
+        # completely before touching the stream.  This prevents a use-after-close
+        # race where stream.close() is called while _capture() is mid-read().
         recording.clear()
-        thread.join(timeout=2.0)
+        thread.join(timeout=3.0)  # generous: one CHUNK at 16 kHz ≈ 64 ms
+
+        # Close only after the thread has stopped — guaranteed by join() above.
         stream.stop_stream()
         stream.close()
 
