@@ -43,7 +43,10 @@ class VoiceConfig:
     stt_model: str = "nova-2"
 
     # TTS
-    tts_voice_id: str = "21m00Tcm4TlvDq8ikWAM"  # ElevenLabs "Rachel"
+    # "Rachel" (21m00Tcm4TlvDq8ikWAM) was retired by ElevenLabs and is no longer
+    # on the account — using it causes a 404 at runtime.  "River" is a current
+    # premade conversational voice; do not revert to the Rachel id.
+    tts_voice_id: str = "SAz9YHcvj6GT2YYXdXww"  # ElevenLabs "River"
     tts_model_id: str = "eleven_turbo_v2"
 
     # Session
@@ -83,7 +86,7 @@ class VoiceConfig:
             daemon_base_url=os.environ.get("TRUSTY_VOICE_DAEMON_URL", "http://127.0.0.1:7880"),
             stt_language=os.environ.get("TRUSTY_VOICE_STT_LANGUAGE", "en-US"),
             stt_model=os.environ.get("TRUSTY_VOICE_STT_MODEL", "nova-2"),
-            tts_voice_id=os.environ.get("TRUSTY_VOICE_TTS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
+            tts_voice_id=os.environ.get("TRUSTY_VOICE_TTS_VOICE_ID", "SAz9YHcvj6GT2YYXdXww"),
             tts_model_id=os.environ.get("TRUSTY_VOICE_TTS_MODEL_ID", "eleven_turbo_v2"),
             conv_id=os.environ.get("TRUSTY_VOICE_CONV_ID") or None,
         )

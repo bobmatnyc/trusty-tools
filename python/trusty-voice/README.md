@@ -46,7 +46,7 @@ You can also override the daemon URL and other settings:
 TRUSTY_VOICE_DAEMON_URL=http://127.0.0.1:7880   # default
 TRUSTY_VOICE_STT_LANGUAGE=en-US                  # default
 TRUSTY_VOICE_STT_MODEL=nova-2                    # default
-TRUSTY_VOICE_TTS_VOICE_ID=21m00Tcm4TlvDq8ikWAM  # ElevenLabs "Rachel" (default)
+TRUSTY_VOICE_TTS_VOICE_ID=SAz9YHcvj6GT2YYXdXww  # ElevenLabs "River" (default; Rachel 21m00Tcm4TlvDq8ikWAM was retired)
 TRUSTY_VOICE_TTS_MODEL_ID=eleven_turbo_v2        # default
 TRUSTY_VOICE_CONV_ID=                            # leave blank for a fresh session
 ```

@@ -48,7 +48,10 @@ class ElevenLabsSpeaker:
     def __init__(
         self,
         api_key: str,
-        voice_id: str = "21m00Tcm4TlvDq8ikWAM",
+        # "Rachel" (21m00Tcm4TlvDq8ikWAM) was retired by ElevenLabs — do not
+        # revert to that id.  "River" (SAz9YHcvj6GT2YYXdXww) is a current
+        # premade conversational voice.
+        voice_id: str = "SAz9YHcvj6GT2YYXdXww",  # ElevenLabs "River"
         model_id: str = "eleven_turbo_v2",
         *,
         _client: Any = None,  # injection point for tests
