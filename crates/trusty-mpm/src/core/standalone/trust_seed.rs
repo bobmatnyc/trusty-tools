@@ -146,17 +146,10 @@ pub fn preseed_managed_trust(claude_config_dir: &Path, workspace: &Path) -> anyh
         .or_insert_with(|| Value::from(1));
     entry.insert("enabledMcpjsonServers".to_string(), enabled_mcp);
 
-    let serialized = serde_json::to_string_pretty(&config)
-        .map_err(|e| anyhow::anyhow!("failed to serialize .claude.json: {e}"))?;
-
-    // Ensure parent directory exists (CLAUDE_CONFIG_DIR should already exist at
-    // this point, but be defensive).
-    if let Some(parent) = claude_json.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", parent.display()))?;
-    }
-
-    std::fs::write(&claude_json, serialized)
+    // Use atomic write so a crash mid-write never produces a torn .claude.json
+    // (which may hold OAuth state). `write_json_atomic` also creates parent
+    // directories and backs up the previous file to `.claude.json.bak`.
+    trusty_common::claude_config::write_json_atomic(&claude_json, &config)
         .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", claude_json.display()))?;
 
     Ok(())
@@ -286,40 +279,43 @@ mod tests {
         );
     }
 
-    // WI-3 ISOLATION: preseed_managed_trust must NEVER write to `~/.claude.json`
-    // or `~/.claude/`. Point HOME at a temp dir and assert no such file appears.
-    // This is the guard for WI-7's isolation invariant.
+    // WI-3 ISOLATION: preseed_managed_trust must NEVER write anything outside
+    // `<claude_config_dir>`. Because the function takes `claude_config_dir`
+    // explicitly and never consults `$HOME`, we can assert the isolation invariant
+    // without mutating the environment: place `cfg` as a subdirectory inside a
+    // wider temp root, call the function, then assert that nothing was written
+    // directly under that temp root (outside `cfg`). Any accidental home-relative
+    // write would have to land somewhere on the real filesystem — not in the temp
+    // root — so this test proves the function only touches `claude_config_dir`.
     #[test]
     fn test_preseed_managed_trust_no_home_write() {
-        let fake_home = TempDir::new().unwrap();
-        // Override HOME to a temp dir so any accidental home-relative write
-        // lands there (and can be detected) instead of the real $HOME.
-        // SAFETY: this is a test-only operation; the test runner is single-threaded
-        // for this test (isolation test), and the value is reset when fake_home
-        // is dropped (we set it back manually). In practice, Rust test parallelism
-        // means env mutation should be avoided; we accept this trade-off because
-        // verifying the isolation invariant requires overriding HOME.
-        // For a thread-safe alternative see `test_preseed_managed_trust_marks_directory`
-        // which verifies the write target without env mutation.
-        unsafe { std::env::set_var("HOME", fake_home.path()) };
-
-        let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().join("claude-config");
+        // `root` is the parent sentinel: only `cfg` (a subdirectory) should gain files.
+        let root = TempDir::new().unwrap();
+        let cfg = root.path().join("claude-config");
         std::fs::create_dir_all(&cfg).unwrap();
-        let workspace = tmp.path().join("repo");
+        let workspace = root.path().join("repo");
         std::fs::create_dir_all(&workspace).unwrap();
 
         preseed_managed_trust(&cfg, &workspace).unwrap();
 
-        // Verify that NEITHER ~/.claude.json NOR ~/.claude/ was created.
-        let home = fake_home.path();
+        // The expected output file must exist inside cfg.
         assert!(
-            !home.join(".claude.json").exists(),
-            "preseed_managed_trust must NOT write to $HOME/.claude.json (isolation invariant)"
+            cfg.join(".claude.json").exists(),
+            "preseed_managed_trust must write .claude.json inside claude_config_dir"
         );
+
+        // No .claude.json should exist directly under root (outside cfg).
         assert!(
-            !home.join(".claude").exists(),
-            "preseed_managed_trust must NOT create $HOME/.claude/ (isolation invariant)"
+            !root.path().join(".claude.json").exists(),
+            "preseed_managed_trust must NOT write .claude.json outside claude_config_dir \
+             (isolation invariant)"
+        );
+
+        // No .claude directory should exist directly under root (outside cfg).
+        assert!(
+            !root.path().join(".claude").exists(),
+            "preseed_managed_trust must NOT create .claude/ outside claude_config_dir \
+             (isolation invariant)"
         );
     }
 }

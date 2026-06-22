@@ -18,6 +18,6 @@ pub mod hooks;
 pub mod load;
 pub mod registry;
 pub mod run;
-mod trust_seed;
+pub mod trust_seed;
 
 pub use trust_seed::preseed_managed_trust;
