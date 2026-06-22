@@ -116,6 +116,12 @@ required-features = ["daemon"]
 name = "services_integration"
 path = "tests/services_integration.rs"
 
+# WI-7: isolation-invariant integration tests for the standalone managed driver.
+# No special features required — uses only the always-on `core::standalone` module.
+[[test]]
+name = "standalone_isolation"
+path = "tests/standalone_isolation.rs"
+
 # ── Always-on dependencies ─────────────────────────────────────────────────────
 # Required by the `core` and `client` library modules (compiled unconditionally).
 [dependencies]

@@ -35,8 +35,8 @@ use trusty_search::SearchMcpService;
 /// clients to probe individual daemons.
 /// What: Collects `ServiceDescriptor` impls for memory and search, delegates
 /// to `OpenRpcBuilder::from_services`, returns the finalised OpenRPC `Value`.
-/// Test: `tests::merged_doc_has_all_tools` asserts ≥ 25 methods (11 memory +
-/// 14 search); `tests::every_method_has_x_service_annotation` asserts every
+/// Test: `tests::merged_doc_has_all_tools` asserts ≥ 26 methods (11 memory +
+/// 15 search); `tests::every_method_has_x_service_annotation` asserts every
 /// method carries `x-service`.
 pub fn build_unified_discovery() -> Value {
     let memory = MemoryMcpService;
@@ -100,8 +100,9 @@ mod tests {
         //          trusty-bm25-daemon + trusty-embedderd surfaces via
         //          PR #190/#191 added 3 more (→18 — closes #174);
         //          issue #537 added the `upgrade` MCP tool (→19);
-        //          issue #1104 added `console_metrics` (→20).
-        assert_eq!(svc.tools().len(), 20);
+        //          issue #1104 added `console_metrics` (→20);
+        //          issue #1557 added the `typeahead` MCP tool (→21).
+        assert_eq!(svc.tools().len(), 21);
     }
 
     #[test]
@@ -131,10 +132,10 @@ mod tests {
             .get("methods")
             .and_then(|v| v.as_array())
             .expect("methods array");
-        // 11 memory tools + 14 search tools = 25 minimum.
+        // 11 memory tools + 15 search tools = 26 minimum.
         assert!(
-            methods.len() >= 25,
-            "expected ≥ 25 merged methods, got {} — services: {:?}",
+            methods.len() >= 26,
+            "expected ≥ 26 merged methods, got {} — services: {:?}",
             methods.len(),
             methods
                 .iter()

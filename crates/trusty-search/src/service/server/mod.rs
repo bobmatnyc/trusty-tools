@@ -28,6 +28,7 @@ mod state;
 mod state_impl;
 mod status;
 mod tickers;
+mod typeahead;
 
 // cfg(test) sub-modules — each < 500 lines
 #[cfg(test)]
@@ -90,6 +91,12 @@ use status::{graph_handler, graph_stats_handler, index_status_handler};
 use tickers::{spawn_disk_size_ticker, spawn_idle_chunk_eviction_ticker, spawn_status_ticker};
 
 use files::{call_chain_handler, global_grep_handler, grep_handler};
+use typeahead::typeahead_handler;
+
+// Re-export for integration tests in `tests/typeahead.rs`.
+pub use typeahead::{
+    typeahead_handler as typeahead_handler_for_tests, TypeaheadParams as TypeaheadParamsForTests,
+};
 
 use self::health::upgrade_handler;
 
@@ -130,6 +137,7 @@ pub fn build_router(state: SearchAppState) -> Router {
         .route("/indexes/{id}/grep", post(grep_handler))
         .route("/indexes/{id}/search", post(search_handler))
         .route("/indexes/{id}/search_similar", post(search_similar_handler))
+        .route("/indexes/{id}/typeahead", get(typeahead_handler))
         // Concurrency limiter is outermost (evaluated first; bounds the queue
         // wait). Query timeout is inner (starts after admission; bounds handler
         // execution). In axum, each successive `.route_layer` call wraps the

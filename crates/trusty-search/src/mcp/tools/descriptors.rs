@@ -361,6 +361,38 @@ pub fn tool_descriptors() -> Value {
                 "properties": {},
                 "required": []
             }
+        },
+        {
+            "name": "typeahead",
+            "description": "Fast per-keystroke autocomplete suggestions for an index. \
+                            Default mode (lexical) runs BM25 only — no ONNX call, <30 ms — \
+                            and is safe to call on every keystroke. \
+                            Set mode=blended for richer semantic+KG suggestions on a \
+                            debounced trigger (100–300 ms after the user stops typing). \
+                            Returns up to `limit` hits (default 6, max 25), each tagged with \
+                            `source` (\"lexical\", \"semantic\", or \"kg\"), a `label` \
+                            (function/symbol name or file basename), `path`, `start_line`, \
+                            `score`, and a 7-line `snippet`. \
+                            Empty or whitespace `query` returns an empty list (200, not an error).",
+            "inputSchema": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "index_id": { "type": "string", "description": "Target index id (from list_indexes)." },
+                    "query":    { "type": "string", "description": "Prefix or partial symbol/phrase to complete." },
+                    "limit":    { "type": "integer", "default": 6, "description": "Max suggestions (1–25, default 6)." },
+                    "mode":     {
+                        "type": "string",
+                        "enum": ["lexical", "blended"],
+                        "default": "lexical",
+                        "description": "lexical (default, fast, per-keystroke) or blended (debounced, semantic+KG)."
+                    }
+                },
+                "examples": [
+                    { "index_id": "trusty-tools", "query": "rrf_fuse" },
+                    { "index_id": "trusty-tools", "query": "auth", "limit": 10, "mode": "blended" }
+                ]
+            }
         }
     ])
 }
