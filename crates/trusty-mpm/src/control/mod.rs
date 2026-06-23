@@ -1,0 +1,31 @@
+//! SESSCTL alpha-1 session control plane.
+//!
+//! Why: epic #1590 unifies the two divergent session paths (project sessions
+//! and managed sessions) behind a single actor+registry system so every session
+//! type shares one lifecycle, one ID convention, and one event model. This
+//! module is the Phase 1 foundation: the runtime-adapter trait, two concrete
+//! backends, the actor skeleton, and the registry.
+//! What: re-exports the public API from five focused sub-modules:
+//!   - `id`       — `ControlSessionId` newtype + `SessionCounter` allocator
+//!   - `event`    — `SessionEvent` enum + supporting types
+//!   - `state`    — `SessionState` machine + `SessionMetadata` snapshot
+//!   - `backend`  — `SessionBackend` trait + `StreamJsonBackend` + `TmuxBackend`
+//!   - `actor`    — `SessionActor` task + `SessionActorHandle` + `spawn_actor`
+//!   - `registry` — `SessionRegistry` + `RunParams`
+//! Test: each submodule carries inline unit tests; run with
+//! `cargo test -p trusty-mpm control::` to scope to this module.
+
+pub mod actor;
+pub mod backend;
+pub mod event;
+pub mod id;
+pub mod registry;
+pub mod state;
+
+// Convenience re-exports so consumers can import from `crate::control::*`.
+pub use actor::{ActorCommand, SessionActorHandle, spawn_actor, DEFAULT_BROADCAST_CAPACITY};
+pub use backend::{SessionBackend, SessionInput};
+pub use event::{ActivityKind, BackendKind, SessionEvent, StopReason, StreamJsonEvent};
+pub use id::{ControlSessionId, SessionCounter};
+pub use registry::{RunParams, SessionRegistry};
+pub use state::{SessionMetadata, SessionState};
