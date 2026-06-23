@@ -150,23 +150,33 @@ fn deploy_agents_and_skills(managed_root: &Path, claude_config_dir: &Path) -> an
 
 /// Core copy logic for credential seeding — testable without `dirs::home_dir`.
 ///
-/// Why: extracting the mtime-comparison and copy logic into a free function
-/// with explicit `src`/`dst` parameters makes real unit tests possible without
-/// `dirs::home_dir()` inside the hot path (F3 fix; previously the test
-/// replicated the logic inline rather than calling the production code).
+/// Why: extracting the copy logic into a free function with explicit `src`/`dst`
+/// parameters makes real unit tests possible without `dirs::home_dir()` inside
+/// the hot path (F3 fix; previously the test replicated the logic inline rather
+/// than calling the production code).
 /// NOTE: `.credentials.json` carries MCP OAuth tokens (trusty-memory etc.),
 /// NOT the primary Claude Max/Pro session auth. Primary session auth requires
 /// a macOS Keychain entry keyed by the `CLAUDE_CONFIG_DIR` path — established
 /// via `tm login` (keychain path) or bypassed by `ANTHROPIC_API_KEY`+`--bare`
 /// (API-key path). See module-level WI-10 doc for details.
-/// What: copies `src` → `dst` when `dst` is missing OR `src` mtime is strictly
-/// newer than `dst`. When `src` is missing the function returns `Ok(())` and
-/// emits a warning. Any metadata error is treated as "copy to be safe".
-/// Credential file contents are never logged.
+///
+/// # Credential direction (closes #1550 item 2)
+///
+/// We seed **only when the managed copy is absent**. We intentionally do NOT
+/// overwrite an existing managed `.credentials.json`, even when the real-home
+/// source is newer. Rationale: once the managed dir has a credential file the
+/// user may have intentionally put different MCP OAuth tokens there (e.g. a
+/// different Anthropic account or a customised set of server grants). Silently
+/// clobbering it on every `tm run` would destroy that deliberate divergence with
+/// no warning. When the managed copy already exists, `tm login` is the correct
+/// mechanism to refresh it.
+///
+/// What: copies `src` → `dst` only when `dst` is absent. When `src` is missing
+/// the function returns `Ok(())` and emits an informational note. Credential
+/// file contents are never logged.
 /// Test: `test_seed_credentials_from_missing_src_is_ok`,
 /// `test_seed_credentials_from_copies_when_dst_missing`,
-/// `test_seed_credentials_from_copies_when_src_newer`,
-/// `test_seed_credentials_from_skips_when_src_not_newer`.
+/// `test_seed_credentials_from_skips_when_dst_already_exists`.
 pub(crate) fn seed_credentials_from(
     src: &std::path::Path,
     dst: &std::path::Path,
@@ -180,20 +190,10 @@ pub(crate) fn seed_credentials_from(
         return Ok(());
     }
 
-    // Refresh when dst is absent (first seed) or src is strictly newer.
-    let should_copy = if !dst.exists() {
-        true
-    } else {
-        let src_mtime = std::fs::metadata(src).and_then(|m| m.modified()).ok();
-        let dst_mtime = std::fs::metadata(dst).and_then(|m| m.modified()).ok();
-        match (src_mtime, dst_mtime) {
-            (Some(s), Some(d)) => s > d,
-            // Any metadata error → copy to be safe.
-            _ => true,
-        }
-    };
-
-    if should_copy {
+    // Only seed when the managed copy is absent (first-time bootstrap).
+    // If a managed credential file already exists we leave it untouched — the
+    // user may have intentionally diverged it from the real-home copy.
+    if !dst.exists() {
         std::fs::copy(src, dst).map_err(|e| anyhow::anyhow!("failed to copy credentials: {e}"))?;
     }
     Ok(())
@@ -235,22 +235,28 @@ fn seed_credentials(claude_config_dir: &Path) {
 /// What: reads `<claude_config_dir>/.mcp.json` (starts from `{}` when absent),
 /// injects `trusty-memory`, `trusty-review`, and `trusty-search` entries under
 /// `mcpServers` using the same idempotent merge used by `inject_mcp_server` in
-/// settings.rs.
+/// settings.rs. The merged JSON is serialized with a stable key ordering (using
+/// `serde_json::to_string_pretty` which iterates insertion-order maps), then
+/// compared byte-for-byte to the on-disk content; the file is only written when
+/// the content differs (closes #1550 item 3 — no spurious mtime bumps).
 /// Secrets/env: trusty-review reads its config from the environment
 /// (OPENROUTER_API_KEY, AWS credentials, TRUSTY_SEARCH_URL etc.) — no secrets
 /// are injected here; the managed session inherits the daemon env, matching the
 /// pattern used for trusty-memory and trusty-search.
 /// Test: `test_global_config_dir_ensure_idempotent`,
-/// `test_mcp_config_contains_all_three_servers`.
+/// `test_mcp_config_contains_all_three_servers`,
+/// `test_mcp_config_no_spurious_write_when_unchanged`.
 fn ensure_mcp_config(claude_config_dir: &Path) -> anyhow::Result<()> {
     let mcp_path = claude_config_dir.join(".mcp.json");
-    let mut config = match std::fs::read_to_string(&mcp_path) {
-        Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
-            .ok()
-            .filter(|v| v.is_object())
-            .unwrap_or_else(|| serde_json::json!({})),
-        Err(_) => serde_json::json!({}),
-    };
+
+    // Capture the raw on-disk text before mutation so we can compare later.
+    let existing_text = std::fs::read_to_string(&mcp_path).ok();
+
+    let mut config = existing_text
+        .as_deref()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+        .filter(|v| v.is_object())
+        .unwrap_or_else(|| serde_json::json!({}));
 
     let servers = config
         .as_object_mut()
@@ -293,7 +299,12 @@ fn ensure_mcp_config(claude_config_dir: &Path) -> anyhow::Result<()> {
         .or_insert(search_entry.clone());
 
     let serialized = serde_json::to_string_pretty(&config)?;
-    std::fs::write(&mcp_path, serialized)?;
+
+    // Only write when content actually changed to avoid spurious mtime bumps
+    // that trigger unnecessary file-watcher events on every `tm run`.
+    if existing_text.as_deref() != Some(serialized.as_str()) {
+        std::fs::write(&mcp_path, &serialized)?;
+    }
     Ok(())
 }
 
@@ -425,6 +436,52 @@ mod tests {
         // _home_guard drops here and restores HOME.
     }
 
+    // #1550 item 3: ensure_mcp_config must NOT rewrite .mcp.json when the
+    // content is already up-to-date (no spurious mtime bump on every `tm run`).
+    #[test]
+    fn test_mcp_config_no_spurious_write_when_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().to_path_buf();
+
+        // First call writes the file.
+        ensure_mcp_config(&cfg).unwrap();
+
+        let mcp_path = cfg.join(".mcp.json");
+        let mtime_after_first = std::fs::metadata(&mcp_path).unwrap().modified().unwrap();
+
+        // Brief sleep so any spurious write would produce a measurably later mtime.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        // Second call must not rewrite the file (content is already correct).
+        ensure_mcp_config(&cfg).unwrap();
+
+        let mtime_after_second = std::fs::metadata(&mcp_path).unwrap().modified().unwrap();
+
+        assert_eq!(
+            mtime_after_first, mtime_after_second,
+            "ensure_mcp_config must not rewrite .mcp.json when content is unchanged (#1550 item 3)"
+        );
+    }
+
+    // #1550 item 3: ensure_mcp_config is idempotent across two calls — content
+    // must be byte-identical after both calls.
+    #[test]
+    fn test_mcp_config_idempotent_content() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().to_path_buf();
+
+        ensure_mcp_config(&cfg).unwrap();
+        let text_first = std::fs::read_to_string(cfg.join(".mcp.json")).unwrap();
+
+        ensure_mcp_config(&cfg).unwrap();
+        let text_second = std::fs::read_to_string(cfg.join(".mcp.json")).unwrap();
+
+        assert_eq!(
+            text_first, text_second,
+            "ensure_mcp_config must produce byte-identical output on repeated calls (#1550 item 3)"
+        );
+    }
+
     // F3: seed_credentials_from — src missing → returns Ok, dst unchanged.
     #[test]
     fn test_seed_credentials_from_missing_src_is_ok() {
@@ -457,91 +514,25 @@ mod tests {
         );
     }
 
-    // F3: seed_credentials_from — src newer than dst → dst content updated.
-    //
-    // We guarantee the mtime ordering by writing dst first, then src.  On
-    // filesystems with sub-second mtime resolution the two writes happening in
-    // the same wall-clock second might yield equal mtimes.  When that happens we
-    // manually set src's mtime one second into the future via `filetime`-free
-    // approach: write src a second time (same content) after a tiny sleep so the
-    // OS records a strictly later mtime.  If even that produces equal mtimes we
-    // fall back to asserting that `seed_credentials_from` at least leaves dst
-    // readable and does not error.
+    // #1550 item 2: seed_credentials_from — dst already exists → must NOT be
+    // overwritten even when src has different (or newer) content.  The managed
+    // credential file may have been intentionally diverged (different account).
     #[test]
-    fn test_seed_credentials_from_copies_when_src_newer() {
+    fn test_seed_credentials_from_skips_when_dst_already_exists() {
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("src.json");
         let dst = tmp.path().join("dst.json");
 
-        // Write dst first (older).
-        std::fs::write(&dst, r#"{"token":"old"}"#).unwrap();
-
-        // Brief sleep to ensure the OS advances the clock.
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Write src after dst (newer).
-        std::fs::write(&src, r#"{"token":"new"}"#).unwrap();
-
-        // If mtime granularity is too coarse, write src again to bump mtime.
-        let src_mt = std::fs::metadata(&src).unwrap().modified().unwrap();
-        let dst_mt = std::fs::metadata(&dst).unwrap().modified().unwrap();
-        if src_mt <= dst_mt {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            std::fs::write(&src, r#"{"token":"new"}"#).unwrap();
-        }
-
-        seed_credentials_from(&src, &dst).unwrap();
-
-        let content = std::fs::read_to_string(&dst).unwrap();
-        // On most filesystems src will be newer and dst will be updated to "new".
-        // On rare 1-second-granularity filesystems timestamps may still tie;
-        // in that case the function treats it as "src not newer" and skips.
-        // Either outcome is correct — we assert dst is readable and not empty.
-        assert!(
-            content.contains("new") || content.contains("old"),
-            "dst must be readable JSON after seed_credentials_from; got: {content:?}"
-        );
-        // When src is definitively newer (the common case), assert the update.
-        let src_mt2 = std::fs::metadata(&src).unwrap().modified().unwrap();
-        let dst_mt2 = std::fs::metadata(&dst).unwrap().modified().unwrap();
-        if src_mt2 > dst_mt2 {
-            // dst was just written; its mtime should now be ≥ src_mt2
-            // (or equal — copy preserves src mtime on some platforms).
-            // The content must have been refreshed.
-            assert!(
-                content.contains("new"),
-                "dst content must be 'new' when src was strictly newer; got: {content:?}"
-            );
-        }
-    }
-
-    // F3: seed_credentials_from — src older than dst → dst NOT changed.
-    #[test]
-    fn test_seed_credentials_from_skips_when_src_not_newer() {
-        let tmp = TempDir::new().unwrap();
-        let src = tmp.path().join("src.json");
-        let dst = tmp.path().join("dst.json");
-
-        // Write src first (older).
-        std::fs::write(&src, r#"{"token":"stale"}"#).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        // Write dst after src (newer).
-        std::fs::write(&dst, r#"{"token":"current"}"#).unwrap();
-
-        // Verify ordering assumption; skip if mtime granularity is too coarse.
-        let src_mt = std::fs::metadata(&src).unwrap().modified().unwrap();
-        let dst_mt = std::fs::metadata(&dst).unwrap().modified().unwrap();
-        if src_mt >= dst_mt {
-            // Filesystem mtime resolution too coarse — skip this case.
-            return;
-        }
+        std::fs::write(&src, r#"{"token":"real-home"}"#).unwrap();
+        // dst already exists with different (managed) content.
+        std::fs::write(&dst, r#"{"token":"managed-custom"}"#).unwrap();
 
         seed_credentials_from(&src, &dst).unwrap();
 
         let content = std::fs::read_to_string(&dst).unwrap();
         assert_eq!(
-            content, r#"{"token":"current"}"#,
-            "dst must not be overwritten when src is not newer than dst"
+            content, r#"{"token":"managed-custom"}"#,
+            "existing managed credential must NOT be overwritten (#1550 item 2)"
         );
     }
 
