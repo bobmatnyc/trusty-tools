@@ -171,13 +171,16 @@ pub struct CtlListQuery {
 
 /// A single row in the `GET /api/v1/control/sessions` response.
 ///
-/// Why: `tm sessctl list --format table` needs a compact, serialisable row.
-/// What: session ID, project, backend label, state label, uptime in seconds,
-/// and restart count.
-/// Test: `ctl_list_sessions_returns_empty`.
+/// Why: `tm sessctl list --format json` must expose the full §4.5 schema so
+/// consumers (SM agent, TUI, TELUI) can drive autonomy decisions and display
+/// helpful session state without reading the raw event stream.
+/// What: all fields from §4.5 of SPEC-SESSCTL-01: session_id, project_id,
+/// backend, state, restart_count, context_lost, uptime_secs, last_activity_ts,
+/// last_summary, pending_decision, proposed_default. (WI-3 #1594)
+/// Test: `ctl_list_sessions_full_schema`, `ctl_list_sessions_returns_empty`.
 #[derive(Debug, Serialize)]
 pub struct CtlSessionSummary {
-    /// The session's stable identifier.
+    /// The session's stable identifier (`<project-id>-<N>`).
     pub session_id: String,
     /// The owning project.
     pub project_id: String,
@@ -185,10 +188,23 @@ pub struct CtlSessionSummary {
     pub backend: String,
     /// State label.
     pub state: String,
+    /// Number of times the backend has been auto-restarted (§3.1).
+    /// Widened to u32 at the API boundary so crash-looping sessions never
+    /// saturate at 255 (the source field SessionMetadata::restart_count is
+    /// still u8 per spec; we cast with `as u32` here).
+    pub restart_count: u32,
+    /// `true` if the session has restarted ≥1 time (no history replay in alpha-1).
+    pub context_lost: bool,
     /// Seconds since the session started.
     pub uptime_secs: u64,
-    /// Number of times the backend has been auto-restarted.
-    pub restart_count: u8,
+    /// ISO-8601 timestamp of the most recent output event.
+    pub last_activity_ts: String,
+    /// Last summary text from the §8.2 regex/NLP parse layer (WI-3).
+    pub last_summary: Option<String>,
+    /// Human-readable prompt text if the session is awaiting a decision (§8.4).
+    pub pending_decision: Option<String>,
+    /// Proposed answer to the pending decision (e.g. `"yes"` for `[Y/n]`).
+    pub proposed_default: Option<String>,
 }
 
 /// Response body for `GET /api/v1/control/sessions`.
@@ -384,9 +400,11 @@ pub async fn ctl_auth_session(
 /// Why: `tm sessctl list` needs an HTTP endpoint that returns the current
 /// registry snapshot without requiring the CLI to embed the registry.
 /// What: calls `list_ids()` on the registry, reads each session's metadata,
-/// and builds a `CtlListResponse`. The optional `?project=` query parameter
-/// filters by exact `project_id` match.
-/// Test: `ctl_list_sessions_returns_empty`.
+/// and builds a `CtlListResponse`. WI-3: populates the full §4.5 schema
+/// (restart_count, context_lost, last_activity_ts, last_summary,
+/// pending_decision, proposed_default). The optional `?project=` query
+/// parameter filters by exact `project_id` match.
+/// Test: `ctl_list_sessions_returns_empty`, `ctl_list_sessions_full_schema`.
 pub async fn ctl_list_sessions(
     State(state): State<Arc<DaemonState>>,
     Query(query): Query<CtlListQuery>,
@@ -412,8 +430,13 @@ pub async fn ctl_list_sessions(
                 project_id: meta.project_id.clone(),
                 backend: backend_label.to_owned(),
                 state: meta.state.label().to_owned(),
+                restart_count: meta.restart_count as u32,
+                context_lost: meta.context_lost,
                 uptime_secs: meta.uptime_secs(),
-                restart_count: meta.restart_count,
+                last_activity_ts: meta.last_activity_at.to_rfc3339(),
+                last_summary: meta.last_summary.clone(),
+                pending_decision: meta.pending_decision.clone(),
+                proposed_default: meta.proposed_default.clone(),
             });
         }
     }
@@ -526,6 +549,78 @@ mod tests {
             parsed["sessions"][0]["session_id"].as_str().unwrap(),
             id.as_str()
         );
+    }
+
+    /// Verify the full §4.5 row schema is present in the JSON response (WI-3).
+    ///
+    /// Why: the WI-3 gate requires `tm sessctl list --format json` to emit
+    /// all §4.5 fields; this test verifies every field is present and has the
+    /// correct type.
+    /// What: registers a session with known metadata, calls the list endpoint,
+    /// and asserts each §4.5 field is present with the expected value/type.
+    /// Test: this test.
+    #[tokio::test]
+    async fn ctl_list_sessions_full_schema() {
+        let (state, _dir) = test_state();
+        let id = ControlSessionId::new("schema-proj", 0);
+        let handle = make_handle(&id);
+        state.session_registry.register(id.clone(), handle).await;
+
+        let app = test_router(Arc::clone(&state));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/control/sessions")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let row = &parsed["sessions"][0];
+
+        // Every §4.5 field must be present.
+        assert!(row["session_id"].is_string(), "session_id must be a string");
+        assert!(row["project_id"].is_string(), "project_id must be a string");
+        assert!(row["backend"].is_string(), "backend must be a string");
+        assert!(row["state"].is_string(), "state must be a string");
+        assert!(
+            row["restart_count"].is_number(),
+            "restart_count must be a number"
+        );
+        assert!(
+            row["context_lost"].is_boolean(),
+            "context_lost must be a boolean"
+        );
+        assert!(
+            row["uptime_secs"].is_number(),
+            "uptime_secs must be a number"
+        );
+        assert!(
+            row["last_activity_ts"].is_string(),
+            "last_activity_ts must be a string (ISO-8601)"
+        );
+        // last_summary, pending_decision, proposed_default may be null.
+        assert!(
+            row["last_summary"].is_null() || row["last_summary"].is_string(),
+            "last_summary must be null or string"
+        );
+        assert!(
+            row["pending_decision"].is_null() || row["pending_decision"].is_string(),
+            "pending_decision must be null or string"
+        );
+        assert!(
+            row["proposed_default"].is_null() || row["proposed_default"].is_string(),
+            "proposed_default must be null or string"
+        );
+
+        // Verify known values.
+        assert_eq!(row["session_id"].as_str().unwrap(), id.as_str());
+        assert_eq!(row["project_id"].as_str().unwrap(), "test-proj");
+        assert_eq!(row["backend"].as_str().unwrap(), "stream-json");
+        assert_eq!(row["restart_count"].as_u64().unwrap(), 0);
+        assert!(!row["context_lost"].as_bool().unwrap());
     }
 
     #[tokio::test]

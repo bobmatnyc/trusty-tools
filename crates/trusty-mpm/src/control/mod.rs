@@ -4,8 +4,10 @@
 //! and managed sessions) behind a single actor+registry system so every session
 //! type shares one lifecycle, one ID convention, and one event model. This
 //! module is the Phase 1 foundation: the runtime-adapter trait, two concrete
-//! backends, the actor skeleton, and the registry.
-//! What: re-exports the public API from five focused sub-modules:
+//! backends, the actor skeleton, and the registry. WI-3 adds the §8.2
+//! regex/NLP parse layer via the `activity` submodule.
+//! What: re-exports the public API from six focused sub-modules:
+//!   - `activity` — §8.2 regex/NLP parse layer (`ActivityParser`, `ParseResult`)
 //!   - `id`       — `ControlSessionId` newtype + `SessionCounter` allocator
 //!   - `event`    — `SessionEvent` enum + supporting types
 //!   - `state`    — `SessionState` machine + `SessionMetadata` snapshot
@@ -15,6 +17,7 @@
 //! Test: each submodule carries inline unit tests; run with
 //! `cargo test -p trusty-mpm control::` to scope to this module.
 
+pub mod activity;
 pub mod actor;
 pub mod backend;
 pub mod event;

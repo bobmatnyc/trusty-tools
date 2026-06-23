@@ -245,7 +245,7 @@ async fn sessctl_list(
         return Ok(());
     }
 
-    // Table format.
+    // Table format — shows core fields; use --format json for the full §4.5 schema.
     let sessions = parsed["sessions"]
         .as_array()
         .map(|a| a.as_slice())
@@ -255,8 +255,8 @@ async fn sessctl_list(
         return Ok(());
     }
     println!(
-        "{:<30} {:<20} {:<12} {:<20} {:>10}",
-        "SESSION_ID", "PROJECT", "BACKEND", "STATE", "UPTIME"
+        "{:<30} {:<20} {:<12} {:<22} {:>8} {:<5} {:<40}",
+        "SESSION_ID", "PROJECT", "BACKEND", "STATE", "UPTIME", "RST", "LAST_SUMMARY"
     );
     for s in sessions {
         let sid = s["session_id"].as_str().unwrap_or("-");
@@ -264,10 +264,30 @@ async fn sessctl_list(
         let backend = s["backend"].as_str().unwrap_or("-");
         let state = s["state"].as_str().unwrap_or("-");
         let uptime = s["uptime_secs"].as_u64().unwrap_or(0);
+        let restart_count = s["restart_count"].as_u64().unwrap_or(0);
+        // Truncate last_summary to 40 Unicode scalar values with ellipsis to
+        // keep the table row aligned regardless of summary length (review bug #5).
+        // Known cosmetic limitation: CJK characters and emoji consume 2 display
+        // columns each, so a summary containing them may visually exceed 40
+        // columns. The `unicode-width` crate would fix this, but it is not a
+        // current workspace dependency; adding it for a cosmetic CLI improvement
+        // is not justified — document here instead.
+        let raw_summary = s["last_summary"].as_str().unwrap_or("-");
+        let last_summary: String = if raw_summary.chars().count() > 40 {
+            let truncated: String = raw_summary.chars().take(37).collect();
+            format!("{truncated}...")
+        } else {
+            raw_summary.to_owned()
+        };
         println!(
-            "{:<30} {:<20} {:<12} {:<20} {:>9}s",
-            sid, proj, backend, state, uptime
+            "{:<30} {:<20} {:<12} {:<22} {:>7}s {:<5} {:<40}",
+            sid, proj, backend, state, uptime, restart_count, last_summary
         );
+        // Show pending decision inline if present.
+        if let Some(pd) = s["pending_decision"].as_str() {
+            let default = s["proposed_default"].as_str().unwrap_or("?");
+            println!("  pending: {pd}  [default: {default}]");
+        }
     }
     Ok(())
 }
