@@ -57,7 +57,7 @@ pub struct RunParams {
 /// allocation. All registry mutations hold an exclusive lock only for the
 /// duration of the `HashMap` operation per §7.1.
 /// Test: `registry_register_deregister`, `registry_list`.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SessionRegistry {
     inner: Arc<RwLock<RegistryInner>>,
 }
@@ -65,6 +65,14 @@ pub struct SessionRegistry {
 struct RegistryInner {
     actors: HashMap<ControlSessionId, SessionActorHandle>,
     counter: SessionCounter,
+}
+
+impl std::fmt::Debug for RegistryInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryInner")
+            .field("actor_count", &self.actors.len())
+            .finish()
+    }
 }
 
 impl SessionRegistry {
