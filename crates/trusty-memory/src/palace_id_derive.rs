@@ -150,18 +150,41 @@ fn strip_scheme(url: &str) -> &str {
 ///
 /// Why: both `host/owner/repo` (URL) and `host:owner/repo` (SSH scp-syntax)
 /// carry the host as a leading component that must be dropped before we take
-/// the trailing `owner/repo` segments.
-/// What: if the locator contains an SSH `:` separator before any `/`, splits on
-/// that `:` and returns the remainder; otherwise drops the first `/`-delimited
-/// segment (the host). A locator with no separators is returned unchanged.
-/// Test: covered indirectly by `git_ssh_github`, `git_https_github_*`,
-/// `git_non_github_host`.
+/// the trailing `owner/repo` segments. Self-hosted URLs with explicit ports
+/// (`host:8080/owner/repo`) must not be mistaken for SSH scp-syntax — the
+/// port-number segment after the colon is not an owner path.
+/// What: if the locator contains an SSH `:` separator before any `/` AND the
+/// text immediately after the colon is NOT a pure-digit port number, splits on
+/// that `:` and returns the remainder (SSH scp-syntax); if the colon is
+/// followed by only digits before the next `/`, treats the whole `host:port`
+/// prefix as the host component and drops up through that first `/` (URL
+/// style with explicit port). Otherwise drops the first `/`-delimited segment
+/// (the host). A locator with no separators is returned unchanged.
+/// Test: `git_ssh_github`, `git_https_github_*`, `git_non_github_host`,
+/// `git_self_hosted_with_port`.
 fn host_relative_path(locator: &str) -> &str {
     let colon = locator.find(':');
     let slash = locator.find('/');
     match (colon, slash) {
-        // SSH scp-syntax: `host:owner/repo` — colon precedes the first slash.
-        (Some(c), maybe_slash) if maybe_slash.is_none_or(|s| c < s) => &locator[c + 1..],
+        // Colon precedes the first slash — could be SSH or host:port.
+        (Some(c), maybe_slash) if maybe_slash.is_none_or(|s| c < s) => {
+            let after_colon = &locator[c + 1..];
+            // Check whether the text after the colon up to the next '/' is
+            // all digits — that means this is a `host:port/path` URL, not
+            // SSH scp-syntax `host:owner/repo`.
+            let port_end = after_colon.find('/').unwrap_or(after_colon.len());
+            let potential_port = &after_colon[..port_end];
+            if !potential_port.is_empty() && potential_port.bytes().all(|b| b.is_ascii_digit()) {
+                // URL with explicit port: drop host:port/ prefix.
+                match after_colon.find('/') {
+                    Some(s) => &after_colon[s + 1..],
+                    None => "",
+                }
+            } else {
+                // SSH scp-syntax: return everything after the colon.
+                after_colon
+            }
+        }
         // URL-style `host/owner/repo` — drop the leading host segment.
         (_, Some(s)) => &locator[s + 1..],
         // No path separators at all — nothing to strip.
@@ -207,13 +230,18 @@ pub fn parent_dir_slug(root: &Path) -> Option<String> {
 /// precedence rule lives in one tested place rather than being scattered across
 /// the hook, CLI, and MCP call sites. Keeping it pure (no FS, no `git`, no env
 /// reads) makes every branch deterministically testable.
-/// What: applies the precedence **override > git owner/repo > parent/dir**,
-/// returning the first non-empty slug from, in order: (1) `override_value`
-/// (already-resolved `--palace` flag or `TRUSTY_MEMORY_PALACE` env), slugified
-/// and winning unconditionally; (2) `git_remote` parsed via
-/// [`owner_repo_from_git_remote`]; (3) [`parent_dir_slug`] of `project_root`.
-/// Returns `None` only when none of the three yields a non-empty slug (e.g. an
-/// empty override, an unparseable remote, and a root-less path all at once).
+/// What: applies **three** of the four full-stack precedence levels documented
+/// in `docs/reference/environment-variables.md` for `TRUSTY_MEMORY_PALACE`:
+/// (1) `override_value` — the already-resolved `--palace` flag or
+/// `TRUSTY_MEMORY_PALACE` env read by the call site — slugified and winning
+/// unconditionally; (2) `git_remote` parsed via [`owner_repo_from_git_remote`]
+/// (git owner/repo slug); (3) [`parent_dir_slug`] of `project_root`
+/// (parent/dir slug). The fourth level — a committed
+/// `.trusty-tools/trusty-memory.yaml` pin file — is handled above this
+/// function in `cwd_palace_slug_at` (`messaging::operations`) because it
+/// requires filesystem I/O that this pure core intentionally avoids. Returns
+/// `None` only when none of the three yields a non-empty slug (e.g. an empty
+/// override, an unparseable remote, and a root-less path all at once).
 /// Test: `override_env_wins_over_git`, `git_used_when_no_override`,
 /// `falls_back_to_parent_dir`, `all_empty_returns_none`.
 pub fn derive_palace_id(
@@ -242,6 +270,24 @@ pub fn derive_palace_id(
 
 #[cfg(test)]
 mod tests {
+    //! Unit tests for the palace-ID derivation core.
+    //!
+    //! ## `TRUSTY_MEMORY_PALACE` env-variable safety
+    //!
+    //! The pure helpers tested here (`derive_palace_id`, `owner_repo_from_git_remote`,
+    //! `parent_dir_slug`) do **not** read environment variables — they receive the
+    //! already-resolved override value as a parameter. That reading happens in
+    //! [`crate::palace_id_derive::palace_override_from_env`], which is exercised
+    //! at a higher level (`messaging::operations` tests).
+    //!
+    //! If you add tests that call `palace_override_from_env()` or that otherwise
+    //! mutate `TRUSTY_MEMORY_PALACE` via `std::env::set_var` / `remove_var`,
+    //! **you MUST annotate them with `#[serial_test::serial]`**. Cargo runs test
+    //! functions across OS threads within one process; concurrent env mutations
+    //! without serialization cause non-deterministic failures. See
+    //! `messaging::mod::tests` for the `EnvGuard` RAII helper and the
+    //! `#[serial_test::serial]` call pattern.
+
     use super::*;
     use std::path::PathBuf;
 
@@ -287,6 +333,36 @@ mod tests {
         assert_eq!(
             owner_repo_from_git_remote("https://gitlab.example.com/acme/Cool_App").as_deref(),
             Some("acme-cool-app")
+        );
+    }
+
+    /// Why: self-hosted git servers often bind to a non-default port (e.g.
+    /// `https://gitlab.company.com:8080/owner/repo.git`). Before the port-
+    /// detection fix, `host_relative_path` mistook the `8080` after the colon
+    /// for an SSH scp-style `host:path` separator and yielded `8080-repo`
+    /// instead of `owner-repo`. Regression-guard for issue #1228.
+    /// Test: itself.
+    #[test]
+    fn git_self_hosted_with_port() {
+        // Single-level repo path — the common case that caused the mis-parse.
+        assert_eq!(
+            owner_repo_from_git_remote("https://git.company.com:8080/repo.git").as_deref(),
+            Some("repo")
+        );
+        // With an owner segment — should resolve owner-repo, not 8080-repo.
+        assert_eq!(
+            owner_repo_from_git_remote("https://git.company.com:8080/owner/repo.git").as_deref(),
+            Some("owner-repo")
+        );
+        // Trailing slash variant.
+        assert_eq!(
+            owner_repo_from_git_remote("https://git.company.com:8080/owner/repo/").as_deref(),
+            Some("owner-repo")
+        );
+        // SSH scp-syntax must still work — the colon is followed by a non-digit.
+        assert_eq!(
+            owner_repo_from_git_remote("git@git.company.com:owner/repo.git").as_deref(),
+            Some("owner-repo")
         );
     }
 
