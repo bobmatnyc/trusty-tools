@@ -45,9 +45,10 @@ class VoiceConfig:
     # TTS
     # "Rachel" (21m00Tcm4TlvDq8ikWAM) was retired by ElevenLabs and is no longer
     # on the account — using it causes a 404 at runtime.  Do not revert to the
-    # Rachel id.  "River" (SAz9YHcvj6GT2YYXdXww) was the previous default; replaced
-    # by "Lauren B" from the ElevenLabs Voice Library (refs #1561).
-    tts_voice_id: str = "DODLEQrClDo8wCz460ld"  # ElevenLabs "Lauren B"
+    # Rachel id.  "River" (SAz9YHcvj6GT2YYXdXww) and "Lauren B"
+    # (DODLEQrClDo8wCz460ld) were previous defaults; replaced by "Autumn Veil"
+    # from the ElevenLabs Voice Library (refs #1561).
+    tts_voice_id: str = "KoVIHoyLDrQyd4pGalbs"  # ElevenLabs "Autumn Veil"
     tts_model_id: str = "eleven_turbo_v2"
 
     # Session
@@ -87,7 +88,7 @@ class VoiceConfig:
             daemon_base_url=os.environ.get("TRUSTY_VOICE_DAEMON_URL", "http://127.0.0.1:7880"),
             stt_language=os.environ.get("TRUSTY_VOICE_STT_LANGUAGE", "en-US"),
             stt_model=os.environ.get("TRUSTY_VOICE_STT_MODEL", "nova-2"),
-            tts_voice_id=os.environ.get("TRUSTY_VOICE_TTS_VOICE_ID", "DODLEQrClDo8wCz460ld"),
+            tts_voice_id=os.environ.get("TRUSTY_VOICE_TTS_VOICE_ID", "KoVIHoyLDrQyd4pGalbs"),
             tts_model_id=os.environ.get("TRUSTY_VOICE_TTS_MODEL_ID", "eleven_turbo_v2"),
             conv_id=os.environ.get("TRUSTY_VOICE_CONV_ID") or None,
         )
