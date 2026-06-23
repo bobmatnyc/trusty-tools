@@ -13,6 +13,7 @@ pub mod decommission;
 pub mod manager;
 pub mod prune;
 pub mod record;
+pub mod restart_ops;
 pub mod session_guard;
 pub mod store;
 pub mod workspace_guard;

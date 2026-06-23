@@ -152,6 +152,45 @@ pub trait ManagedTmuxDriver: Send + Sync {
             .map(|names| names.iter().any(|n| n == name))
             .unwrap_or(false)
     }
+
+    /// Send SIGTERM to a session's process, wait briefly, then kill the session.
+    ///
+    /// Why: abruptly killing a session (`kill_session`) discards any in-flight
+    /// work the claude process was persisting. A graceful stop gives the process
+    /// ~2 seconds to flush state before the hard kill, mirroring the SIGTERM
+    /// → kill sequence used by system service managers (systemd, launchd).
+    /// What: if `claude_pid` is known, sends SIGTERM via `nix::signal::kill`;
+    /// sleeps 2 s; then unconditionally calls `kill_session`. If `claude_pid` is
+    /// `None`, falls back to `tmux send-keys C-c` (interrupt) before the kill.
+    /// Errors from the SIGTERM send are logged as warnings (the process may have
+    /// already exited); only `kill_session` failure is returned as `Err`.
+    /// Test: `graceful_stop_sends_sigterm_then_kill` (pid known, records kill),
+    /// `graceful_stop_skips_sigterm_when_no_pid` (no pid, falls back to C-c).
+    fn graceful_stop(&self, name: &str, claude_pid: Option<u32>) -> Result<(), ManagedError> {
+        use std::time::Duration;
+
+        if let Some(pid) = claude_pid {
+            #[cfg(unix)]
+            {
+                use nix::sys::signal::{Signal, kill};
+                use nix::unistd::Pid;
+                if let Err(e) = kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
+                    tracing::warn!(pid, name, "graceful_stop: SIGTERM failed: {e}");
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = pid; // SIGTERM not applicable on non-unix; fall through to kill
+            }
+        } else {
+            // No pid — best effort interrupt via tmux send-keys.
+            let _ = self.send_interrupt(name);
+        }
+
+        // Brief wait so the process can flush state.
+        std::thread::sleep(Duration::from_millis(2_000));
+        self.kill_session(name)
+    }
 }
 
 /// Summary of what a reconciliation pass found and changed.

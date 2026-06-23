@@ -28,7 +28,8 @@ daemon = ["mcp",
           "dep:tokio-stream", "dep:futures",
           "dep:dashmap", "dep:parking_lot",
           "dep:notify", "dep:tracing-appender",
-          "dep:utoipa-swagger-ui"]
+          "dep:utoipa-swagger-ui",
+          "dep:tokio-util"]
 
 # `mcp` gates the MCP server library module.
 # (`async-trait`, used by the OrchestratorBackend trait, is now an always-on

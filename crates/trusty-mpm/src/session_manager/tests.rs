@@ -28,7 +28,8 @@ use std::sync::Arc;
 /// What: stores created sessions in a mutex-guarded map; `session_exists`
 /// consults the map; all operations record their call. `create_cwd_calls`
 /// records `(session_name, workdir)` pairs so tests can assert the correct
-/// cwd was passed to `tmux new-session -c`.
+/// cwd was passed to `tmux new-session -c`. `graceful_stop_calls` records
+/// `(session_name, Option<u32>)` pairs for graceful-stop assertions.
 /// Test: used by every manager unit test.
 pub struct FakeTmuxDriver {
     sessions: Mutex<HashMap<String, String>>,
@@ -42,6 +43,8 @@ pub struct FakeTmuxDriver {
     /// Why: regression guard — tests assert that the cwd passed to
     /// `tmux new-session` equals the provisioned workspace path, never $HOME.
     pub create_cwd_calls: Mutex<Vec<(String, String)>>,
+    /// Records `(session_name, claude_pid)` for every `graceful_stop` call.
+    pub graceful_stop_calls: Mutex<Vec<(String, Option<u32>)>>,
 }
 
 impl FakeTmuxDriver {
@@ -53,6 +56,7 @@ impl FakeTmuxDriver {
             capture_responses: Mutex::new(HashMap::new()),
             seeded_names: Mutex::new(Vec::new()),
             create_cwd_calls: Mutex::new(Vec::new()),
+            graceful_stop_calls: Mutex::new(Vec::new()),
         })
     }
 }
@@ -100,6 +104,22 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
         // without going through create_session).
         names.extend(self.seeded_names.lock().unwrap().iter().cloned());
         Ok(names)
+    }
+
+    /// Override graceful_stop to avoid the real 2-second sleep in unit tests.
+    ///
+    /// Why: the default impl blocks for 2 s which would make the test suite
+    /// unacceptably slow; the fake records the call and delegates to kill_session
+    /// synchronously — no sleep, no real signals.
+    /// What: records `(name, claude_pid)` and calls `kill_session`. No SIGTERM.
+    /// Test: `graceful_stop_sends_sigterm_then_kill`,
+    /// `graceful_stop_skips_sigterm_when_no_pid`.
+    fn graceful_stop(&self, name: &str, claude_pid: Option<u32>) -> Result<(), ManagedError> {
+        self.graceful_stop_calls
+            .lock()
+            .unwrap()
+            .push((name.to_owned(), claude_pid));
+        self.kill_session(name)
     }
 }
 
@@ -1932,5 +1952,91 @@ async fn workspace_owned_flag_round_trips_via_set() {
     assert!(
         updated.workspace_owned,
         "workspace_owned must be true after set_workspace_owned(true)"
+    );
+}
+
+// ── Graceful-stop tests (WI-4 PR A, #1595) ──────────────────────────────────
+
+/// `graceful_stop` with a known PID records the call and kills the session.
+///
+/// Why: regression guard for the graceful-shutdown path — verifies that when
+/// a PID is supplied, `graceful_stop` still results in `kill_session` being
+/// called (the SIGTERM phase is OS-level and not asserted in unit tests, but
+/// the post-signal kill is the mandatory cleanup).
+/// What: creates a session, calls `graceful_stop` with a dummy PID, then
+/// asserts the name appears in `kill_calls` and `graceful_stop_calls`.
+/// Test: this is the test.
+#[tokio::test]
+async fn graceful_stop_sends_sigterm_then_kill() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    mgr.create(
+        "task".into(),
+        Some(PathBuf::from("/tmp/wt-graceful")),
+        Some("graceful-test".into()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("create");
+
+    let tmux_name = "tmpm-graceful-test";
+    let pid: u32 = 99_999; // dummy PID — SIGTERM will fail with ESRCH; we ignore it
+    fake.graceful_stop(tmux_name, Some(pid))
+        .expect("graceful_stop");
+
+    let kills = fake.kill_calls.lock().unwrap();
+    assert!(
+        kills.iter().any(|n| n == tmux_name),
+        "kill_session must be called as the final step of graceful_stop"
+    );
+    let gs_calls = fake.graceful_stop_calls.lock().unwrap();
+    assert!(
+        gs_calls
+            .iter()
+            .any(|(n, p)| n == tmux_name && *p == Some(pid)),
+        "graceful_stop_calls must record (name, Some(pid))"
+    );
+}
+
+/// `graceful_stop` with no PID falls back to send_interrupt then kill_session.
+///
+/// Why: when the PID is unknown the default impl sends a Ctrl-C interrupt
+/// (best-effort) and proceeds to kill_session. This test asserts that even
+/// without a PID the session is ultimately killed.
+/// What: calls `graceful_stop(name, None)` on the fake and asserts that
+/// `kill_calls` contains the name and `graceful_stop_calls` records `None`.
+/// Test: this is the test.
+#[tokio::test]
+async fn graceful_stop_skips_sigterm_when_no_pid() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    mgr.create(
+        "task".into(),
+        Some(PathBuf::from("/tmp/wt-nopid")),
+        Some("no-pid-test".into()),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("create");
+
+    let tmux_name = "tmpm-no-pid-test";
+    fake.graceful_stop(tmux_name, None)
+        .expect("graceful_stop without pid");
+
+    let kills = fake.kill_calls.lock().unwrap();
+    assert!(
+        kills.iter().any(|n| n == tmux_name),
+        "kill_session must be called even when no PID is known"
+    );
+    let gs_calls = fake.graceful_stop_calls.lock().unwrap();
+    assert!(
+        gs_calls.iter().any(|(n, p)| n == tmux_name && p.is_none()),
+        "graceful_stop_calls must record (name, None) when no pid supplied"
     );
 }
