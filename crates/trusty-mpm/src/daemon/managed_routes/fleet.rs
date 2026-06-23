@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use axum::{Json, extract::State, response::IntoResponse};
 use serde::Serialize;
+use tracing::warn;
 
 use crate::daemon::state::DaemonState;
 use crate::session_manager::SessionRecord;
@@ -62,9 +63,21 @@ pub async fn fleet_by_project_route(State(state): State<Arc<DaemonState>>) -> im
     let registry = state.project_registry().await;
 
     let raw_sessions: Vec<SessionRecord> = mgr.list().await;
-    // Gracefully degrade: if the project store is unreadable, report an empty
-    // project list rather than returning a 500 for a non-critical view.
-    let projects = registry.list().await.unwrap_or_default();
+    // Gracefully degrade: if the project store is unreadable, return an empty
+    // project list rather than a 500 — the fleet view is non-critical.
+    // Log at warn so operators can distinguish a broken registry from a
+    // legitimately empty one (an empty registry silently returns `projects: []`).
+    let projects = match registry.list().await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(
+                error = %e,
+                "fleet_by_project_route: project registry read failed; \
+                 returning empty project list (sessions will not be grouped)"
+            );
+            vec![]
+        }
+    };
 
     let fleet = crate::project::fleet_by_project(&raw_sessions, &projects);
 

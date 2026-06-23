@@ -35,6 +35,7 @@ pub use http_client::{
     OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow, TmuxSessionRow,
 };
 pub use resolver::{Resolvable, resolve_target};
+pub(crate) use result::fleet_state_glyph;
 pub use result::{
     CommandResult, DecisionCounts, DiscoveredProjectSummary, HealthReport, ManagedSessionView,
     ProjectFleetView, RecommendationSummary, SessionSummary, TmuxSessionSummary,

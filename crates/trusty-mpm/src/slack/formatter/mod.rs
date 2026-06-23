@@ -13,6 +13,7 @@
 
 use crate::client::{
     CommandResult, DiscoveredProjectSummary, HealthReport, ManagedSessionView, ProjectFleetView,
+    fleet_state_glyph,
 };
 
 #[cfg(test)]
@@ -473,7 +474,8 @@ fn code_block(text: &str) -> String {
 /// so the operator can see which work belongs to which repo at a glance.
 /// What: emits a bold heading, then one block per project — bold project name +
 /// repo URL followed by session rows or a `—` placeholder when empty.
-/// State glyphs: 🟢 active  🟡 provisioning  🔴 other.
+/// State glyphs are delegated to [`crate::client::fleet_state_glyph`] to stay
+/// consistent with the Telegram adapter (🟢 active  🟡 provisioning  🔴 other).
 /// Test: `format_fleet_by_project_slack_renders_projects` in `tests.rs`.
 fn format_fleet_by_project_slack(fleet: &[ProjectFleetView]) -> String {
     if fleet.is_empty() {
@@ -502,20 +504,6 @@ fn format_fleet_by_project_slack(fleet: &[ProjectFleetView]) -> String {
         }
     }
     text
-}
-
-/// Status glyph for a managed session state word (Slack fleet view).
-///
-/// Why: shared by `format_fleet_by_project_slack`; keeps glyph conventions
-/// consistent without duplicating the match arm.
-/// What: `active` → 🟢, `provisioning` → 🟡, anything else → 🔴.
-/// Test: covered by `format_fleet_by_project_slack_renders_projects`.
-fn fleet_state_glyph(state: &str) -> &'static str {
-    match state.to_ascii_lowercase().as_str() {
-        "active" => "🟢",
-        "provisioning" => "🟡",
-        _ => "🔴",
-    }
 }
 
 /// Shorten a session id for compact chat display.

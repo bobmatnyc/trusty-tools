@@ -381,6 +381,24 @@ pub struct ProjectFleetView {
     pub sessions: Vec<ManagedSessionView>,
 }
 
+/// Map a managed session lifecycle state word to a status glyph.
+///
+/// Why: both the Telegram and Slack fleet formatters use identical glyph
+/// conventions (`active → 🟢 / provisioning → 🟡 / _ → 🔴`); keeping the
+/// mapping in one place next to [`ProjectFleetView`] ensures a new lifecycle
+/// state can't diverge silently between adapters.
+/// What: returns a `'static str` glyph — one of `🟢`, `🟡`, or `🔴` — based
+/// on an ASCII-case-insensitive match against `state`.
+/// Test: `fleet_state_glyph_covers_all_tiers` in `client/result.rs` plus
+/// coverage via `format_fleet_by_project_*` tests in both formatter test files.
+pub(crate) fn fleet_state_glyph(state: &str) -> &'static str {
+    match state.to_ascii_lowercase().as_str() {
+        "active" => "🟢",
+        "provisioning" => "🟡",
+        _ => "🔴",
+    }
+}
+
 /// A flat, UI-agnostic view of a managed session.
 ///
 /// Why: the managed list/get results render the same flat summary every adapter
@@ -426,5 +444,30 @@ impl From<crate::client::ManagedSessionSummary> for ManagedSessionView {
             pending_decision: s.pending_decision,
             proposed_default: s.proposed_default,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shared glyph helper covers all three lifecycle tiers.
+    ///
+    /// Why: `fleet_state_glyph` is the single source of truth for formatter
+    /// glyphs; this test ensures both adapters' behaviour stays correct after
+    /// any change to the mapping.
+    /// What: asserts each canonical state maps to the right glyph and that
+    /// case-insensitive matching works.
+    /// Test: this function IS the test.
+    #[test]
+    fn fleet_state_glyph_covers_all_tiers() {
+        assert_eq!(fleet_state_glyph("active"), "🟢");
+        assert_eq!(fleet_state_glyph("Active"), "🟢"); // case-insensitive
+        assert_eq!(fleet_state_glyph("provisioning"), "🟡");
+        assert_eq!(fleet_state_glyph("PROVISIONING"), "🟡");
+        assert_eq!(fleet_state_glyph("stopped"), "🔴");
+        assert_eq!(fleet_state_glyph("errored"), "🔴");
+        assert_eq!(fleet_state_glyph("decommissioned"), "🔴");
+        assert_eq!(fleet_state_glyph(""), "🔴"); // unknown → red
     }
 }

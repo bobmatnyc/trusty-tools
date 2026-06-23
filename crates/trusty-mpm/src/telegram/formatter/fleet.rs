@@ -7,7 +7,7 @@
 //! Telegram HTML message body grouped by project.
 //! Test: `format_fleet_by_project_*` tests in `tests.rs`.
 
-use crate::client::ProjectFleetView;
+use crate::client::{ProjectFleetView, fleet_state_glyph};
 
 use super::{html_escape, short_id};
 
@@ -21,6 +21,8 @@ use super::{html_escape, short_id};
 /// get a ⚠️ flag. Projects with no sessions show an `—` placeholder.
 /// State glyphs follow the flat-list conventions:
 ///   🟢 active  🔴 stopped/errored/decommissioned  🟡 provisioning
+/// Glyph mapping is delegated to [`crate::client::fleet_state_glyph`] so it
+/// stays consistent with the Slack adapter.
 /// Test: `format_fleet_by_project_renders_projects` in `tests.rs`.
 pub fn format_fleet_by_project(fleet: &[ProjectFleetView]) -> String {
     if fleet.is_empty() {
@@ -37,7 +39,7 @@ pub fn format_fleet_by_project(fleet: &[ProjectFleetView]) -> String {
             text.push_str("\n  —");
         } else {
             for s in &pf.sessions {
-                let dot = state_glyph(&s.state);
+                let dot = fleet_state_glyph(&s.state);
                 let flag = if s.pending_decision.is_some() {
                     " ⚠️"
                 } else {
@@ -53,19 +55,4 @@ pub fn format_fleet_by_project(fleet: &[ProjectFleetView]) -> String {
         }
     }
     text
-}
-
-/// Choose a status glyph for a managed session lifecycle state word.
-///
-/// Why: `format_fleet_by_project` and any future multi-project formatter need
-/// the same glyph conventions as the flat-list formatter but expressed as a
-/// shared helper rather than duplicated inline.
-/// What: `active` → 🟢, `provisioning` → 🟡, anything else → 🔴.
-/// Test: covered by `format_fleet_by_project_renders_projects` in `tests.rs`.
-fn state_glyph(state: &str) -> &'static str {
-    match state.to_ascii_lowercase().as_str() {
-        "active" => "🟢",
-        "provisioning" => "🟡",
-        _ => "🔴",
-    }
 }
