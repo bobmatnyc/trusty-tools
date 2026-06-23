@@ -5,12 +5,37 @@ use crate::core::hook::HookEventRecord;
 use crate::core::memory::MemoryPressure;
 use crate::core::memory::MemoryUsage;
 use crate::core::overseer_config::OverseerConfig;
+use crate::core::paths::FrameworkPaths;
 use crate::core::session::{ControlModel, SessionStatus};
 
 use super::core::{DaemonState, HOOK_HISTORY_LIMIT, ReapResult};
 use super::overseer::build_overseer;
 
 use crate::core::session::{Session, SessionId};
+
+/// Build a [`DaemonState`] rooted under an empty temp directory.
+///
+/// Why: tests that assert overseer/LLM config defaults must NOT read from the
+/// real `~/.trusty-mpm/framework/hooks/` — on a dev machine the operator's
+/// `overseer.toml` may have `[llm] enabled = true` with a live API key, which
+/// would make "disabled by default" assertions fail (#1571). Pointing
+/// [`DaemonState::with_paths`] at a freshly-created, empty temp directory
+/// guarantees that `overseer.toml` and `optimizer.toml` are absent, so the
+/// daemon falls back to its disabled/default policy regardless of the host
+/// environment. The `TempDir` is returned so the caller can hold it alive for
+/// the test's duration; the paths it contains are only consulted at
+/// construction time, so the directory can be dropped afterwards without
+/// affecting the in-memory state.
+/// What: creates a `tempfile::TempDir`, builds `FrameworkPaths::under` it, and
+/// calls `DaemonState::with_paths`, returning both.
+/// Test: `new_overseer_is_disabled_when_file_missing`, `overseer_is_accessible`,
+/// `llm_overseer_is_none_without_key`, `overseer_handler_reports_strategy`.
+fn hermetic_state() -> (DaemonState, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temp dir for hermetic DaemonState");
+    let paths = FrameworkPaths::under(dir.path());
+    let state = DaemonState::with_paths(&paths);
+    (state, dir)
+}
 
 fn sample_session() -> Session {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -305,9 +330,12 @@ fn reload_optimizer_config_picks_up_file_changes() {
 
 #[test]
 fn new_overseer_is_disabled_when_file_missing() {
-    // With no framework installed (overseer.toml absent), the overseer
-    // must be present but disabled — oversight is opt-in.
-    let state = DaemonState::new();
+    // With no framework installed (overseer.toml absent in a hermetic temp
+    // dir), the overseer must be present but disabled — oversight is opt-in.
+    // Uses `hermetic_state()` so the real `~/.trusty-mpm/overseer.toml` — if
+    // present on a dev machine with an API key — cannot enable the LLM
+    // overseer and make this assertion spuriously fail (#1571).
+    let (state, _dir) = hermetic_state();
     assert!(!state.overseer().is_enabled());
 }
 
@@ -338,22 +366,26 @@ fn overseer_falls_back_when_llm_key_missing() {
 
 #[test]
 fn llm_overseer_is_none_without_key() {
-    // A default daemon (no OpenRouter key) exposes no LLM chat handler.
-    let state = DaemonState::new();
+    // A daemon that starts from an empty framework root (no overseer.toml
+    // → no [llm] config) must not build an LLM chat handler, regardless of
+    // any API keys present in the operator's environment (#1571).
+    let (state, _dir) = hermetic_state();
     assert!(state.llm_overseer().is_none());
 }
 
 #[test]
 fn overseer_handler_reports_strategy() {
-    // The default daemon reports the deterministic handler.
-    let state = DaemonState::new();
+    // A daemon built from an empty framework root reports the deterministic
+    // handler — the default when no overseer.toml is installed (#1571).
+    let (state, _dir) = hermetic_state();
     assert_eq!(state.overseer_handler(), "deterministic");
 }
 
 #[test]
 fn overseer_is_accessible() {
-    let state = DaemonState::new();
-    // The shared overseer can be cloned out and queried.
+    // The shared overseer can be cloned out and queried; with no overseer.toml
+    // in the hermetic temp dir the overseer must report disabled (#1571).
+    let (state, _dir) = hermetic_state();
     let overseer = state.overseer();
     assert!(!overseer.is_enabled());
 }

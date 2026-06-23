@@ -1,14 +1,49 @@
 use super::*;
+use crate::core::paths::FrameworkPaths;
 use crate::core::session::{ControlModel, Session, SessionStatus};
 use axum::http::{HeaderMap, StatusCode};
 use serial_test::serial;
 
+/// Build a hermetic [`DaemonState`] rooted at an empty temp directory.
+///
+/// Why: tests that assert overseer-disabled or no-LLM behaviour must not read
+/// from the real `~/.trusty-mpm/framework/hooks/overseer.toml`. On a developer
+/// machine with `OPENROUTER_API_KEY` set and a live `overseer.toml` the LLM
+/// overseer is active, causing two distinct failures (#1523):
+///
+/// - Tests that assert HTTP 503 ("overseer unavailable") receive HTTP 200 because
+///   the real LLM responds.
+/// - `ingest_hook` triggers the composite overseer's `pre_tool_use`, which lazily
+///   initialises `reqwest::blocking::Client` — that construction internally spawns
+///   a new `tokio::Runtime` and panics with "Cannot drop a runtime in a context
+///   where blocking is not allowed" when called from a `#[tokio::test]` runtime.
+///
+/// Both failures vanish when the state reads from a temp dir that contains no
+/// `overseer.toml`, so the daemon builds the disabled deterministic overseer.
+///
+/// What: creates a `tempfile::TempDir`, builds `FrameworkPaths::under` it, calls
+/// `DaemonState::with_paths`, and returns both so the caller can keep the
+/// `TempDir` alive for the test's duration (the paths are only consulted at
+/// construction; in-memory state is self-contained afterwards).
+///
+/// Test: `hook_relay_runs_with_disabled_overseer`,
+/// `non_session_start_event_does_not_auto_register`, `llm_chat_without_overseer_is_503`,
+/// `coordinator_chat_without_overseer_is_503`.
+fn hermetic_shared() -> (Arc<DaemonState>, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("temp dir for hermetic DaemonState");
+    let paths = FrameworkPaths::under(dir.path());
+    let state = Arc::new(DaemonState::with_paths(&paths));
+    (state, dir)
+}
+
 fn state_with_session() -> (Arc<DaemonState>, SessionId) {
-    let state = DaemonState::shared();
+    let (state, _dir) = hermetic_shared();
     let id = SessionId::new();
     let mut session = Session::new(id, "/tmp/p", ControlModel::Tmux, None);
     session.status = SessionStatus::Active;
     state.register_session(session);
+    // _dir is intentionally dropped here: FrameworkPaths are only read at
+    // construction; the in-memory state is self-contained afterwards.
     (state, id)
 }
 
@@ -457,8 +492,11 @@ async fn session_start_auto_registers_unknown_session() {
 #[tokio::test]
 async fn non_session_start_event_does_not_auto_register() {
     // Only `SessionStart` auto-registers. A non-start event for an unknown
-    // session must not create a session record.
-    let state = DaemonState::shared();
+    // session must not create a session record. Uses hermetic state: a
+    // `PreToolUse` event triggers the LLM overseer when one is configured via
+    // `~/.trusty-mpm/overseer.toml`; the blocking reqwest client init then
+    // panics inside the tokio test runtime (#1523).
+    let (state, _dir) = hermetic_shared();
     let unknown = crate::core::session::SessionId::new();
     let post = HookPost {
         session_id: unknown.0.to_string(),
@@ -487,9 +525,10 @@ async fn session_start_for_known_session_does_not_duplicate() {
 
 #[tokio::test]
 async fn llm_chat_without_overseer_is_503() {
-    // A default daemon has no OpenRouter key, so `POST /llm/chat` reports the
-    // capability as unavailable rather than attempting a network call.
-    let state = DaemonState::shared();
+    // A daemon built without an overseer config (hermetic empty temp dir) must
+    // report the LLM chat capability as unavailable — the endpoint can only
+    // route to the LLM when an API key resolved at startup (#1523).
+    let (state, _dir) = hermetic_shared();
     let err = llm_chat(
         State(state),
         Json(LlmChatRequest {
@@ -513,9 +552,10 @@ async fn coordinator_context_returns_snapshot() {
 
 #[tokio::test]
 async fn coordinator_chat_without_overseer_is_503() {
-    // A non-prefixed coordinator message needs the LLM; a default daemon has
-    // no key, so the chat endpoint reports the capability unavailable.
-    let state = DaemonState::shared();
+    // A daemon built without an overseer config (hermetic empty temp dir) has
+    // neither LLM overseer nor Session Manager runtime, so a non-prefixed
+    // coordinator message must return HTTP 503 (#1523).
+    let (state, _dir) = hermetic_shared();
     let err = coordinator_chat(
         State(state),
         HeaderMap::new(),
