@@ -28,7 +28,7 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 # publish=false; version 0.0.0 intentionally — pre-release scaffold.
 trusty-code = { path = "crates/trusty-code" }
 trusty-agents-common = { path = "crates/trusty-agents-common" }
-trusty-common = { path = "crates/trusty-common", version = "0.17.0" }
+trusty-common = { path = "crates/trusty-common", version = "0.17.1" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.4" }
@@ -46,7 +46,7 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "0.10.0" }
 # trusty-review: LLM-backed PR-review service. Referenced by trusty-analyze
 # (behind the optional `review` feature) so the analyze MCP server can expose
 # the trusty-review pipeline as `tr_review_*` tools (#630).
-trusty-review = { path = "crates/trusty-review", version = "0.4.0" }
+trusty-review = { path = "crates/trusty-review", version = "0.4.1" }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
