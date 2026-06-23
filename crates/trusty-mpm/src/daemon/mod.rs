@@ -142,9 +142,14 @@ pub async fn serve_http(
         shutdown_signal().await;
         // Signal all background loops to stop before we walk the session list.
         cancel.cancel();
-        // Graceful-stop live managed sessions (SIGTERM → 2s wait → kill).
+        // Graceful-stop live SessionManager sessions (SIGTERM → 2s wait → kill).
+        // This is the single authority for SM-tracked sessions; the legacy-registry
+        // reap that follows (`reap_all_live_sessions`) is intentionally scoped to
+        // the DaemonState legacy registry only — it does NOT re-iterate SM sessions
+        // so there is no double-kill (see `reap_all_live_sessions` doc comment).
         let mgr = reaper_state.session_manager().await;
         mgr.shutdown().await;
+        // Reap remaining legacy-registry sessions not covered by mgr.shutdown().
         reap_all_live_sessions(reaper_state).await;
     })
     .await?;
@@ -186,46 +191,32 @@ async fn shutdown_signal() {
     }
 }
 
-/// Kill every live tmux session owned by the daemon across BOTH registries.
+/// Kill every live tmux session in the LEGACY DaemonState registry on shutdown.
 ///
 /// Why: on graceful shutdown no session may be left fire-and-forget (#1452,
-/// #1455). The periodic `reap_loop` / `orphan_gc_loop` tasks are abandoned when
-/// the process exits, so a dedicated shutdown sweep is the last line that keeps
-/// the host clean of leaked `tmpm-*` sessions.
+/// #1455). `SessionManager::shutdown` (called before this in the shutdown
+/// sequence) is the single authority for SM-tracked sessions; this function
+/// covers only the LEGACY `DaemonState` registry so there is no double-kill.
 /// What: discovers tmux once (a no-op early-return if tmux is unavailable —
 /// nothing to kill), then collects the `tmux_name` of every entry in the legacy
-/// [`DaemonState`] registry and every non-terminal record in the
-/// [`SessionManager`](crate::session_manager::SessionManager) store, de-dupes,
-/// and issues a best-effort `kill_session` for each. One kill failing (the
-/// session may already be gone) never aborts the rest — every name is attempted.
-/// Idempotent: re-running it after a clean sweep simply finds nothing live.
-/// Logs a one-line summary (count reaped) at info level to stderr.
-/// Test: `reap_all_live_sessions_is_safe_when_empty` (empty/ tmux-absent no-op);
-/// the per-session kill loop reuses the unit-tested `kill_session` seam.
+/// [`DaemonState`] registry only (NOT the `SessionManager` store — that was
+/// already handled by `mgr.shutdown()`), and issues a best-effort `kill_session`
+/// for each. One kill failing (the session may already be gone) never aborts the
+/// rest — every name is attempted. Idempotent: re-running it after a clean sweep
+/// simply finds nothing live. Logs a one-line summary at info level to stderr.
+/// Test: `reap_all_live_sessions_is_safe_when_empty` (empty / tmux-absent no-op).
 async fn reap_all_live_sessions(state: Arc<DaemonState>) {
     let Ok(driver) = tmux::TmuxDriver::discover() else {
         info!("graceful shutdown: tmux unavailable; no sessions to reap");
         return;
     };
 
-    // Union the tmux names from both registries so a session tracked by EITHER
-    // is reaped. De-dupe via a set: the same name can appear in both.
-    let mut names: std::collections::HashSet<String> = state
+    // Legacy DaemonState registry only — SM sessions were handled by mgr.shutdown().
+    let names: std::collections::HashSet<String> = state
         .list_sessions()
         .into_iter()
         .map(|s| s.tmux_name)
         .collect();
-
-    let mgr = state.session_manager().await;
-    for record in mgr.list().await {
-        if matches!(
-            record.state,
-            crate::session_manager::ManagedSessionState::Decommissioned
-        ) {
-            continue;
-        }
-        names.insert(record.tmux_name);
-    }
 
     let mut reaped = 0usize;
     for name in names {
@@ -240,7 +231,7 @@ async fn reap_all_live_sessions(state: Arc<DaemonState>) {
             }
         }
     }
-    info!("graceful shutdown: reaped {reaped} live session(s)");
+    info!("graceful shutdown: reaped {reaped} legacy session(s)");
 }
 
 /// Spawn a background axum server for a secondary listener (e.g. Tailscale).
@@ -418,7 +409,13 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                     }
                 };
                 // NOTE: `gather_tracked_names()` and `session_manager()` are acquired in
-                // separate awaits — the two-pass debounce makes this race safe.
+                // separate awaits, so this snapshot is intentionally NON-atomic — a
+                // session could register in the gap between the two. That race is safe:
+                // the two-pass debounce in `OrphanGc` means a just-registered session
+                // missed by this sweep is only ever a reap *candidate* this pass and
+                // must be seen orphaned again next sweep before it can be reaped, by
+                // which point `gather_tracked_names()` will include it. No lock spanning
+                // both calls is needed.
                 let tracked = state.gather_tracked_names().await;
                 let mgr = state.session_manager().await;
                 let mtmux = mgr.tmux_driver();

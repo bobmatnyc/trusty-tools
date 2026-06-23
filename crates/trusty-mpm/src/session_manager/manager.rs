@@ -153,22 +153,25 @@ pub trait ManagedTmuxDriver: Send + Sync {
             .unwrap_or(false)
     }
 
-    /// Send SIGTERM to a session's process, wait briefly, then kill the session.
+    /// Signal a session's process to stop, then kill the tmux session.
     ///
     /// Why: abruptly killing a session (`kill_session`) discards any in-flight
-    /// work the claude process was persisting. A graceful stop gives the process
-    /// ~2 seconds to flush state before the hard kill, mirroring the SIGTERM
-    /// → kill sequence used by system service managers (systemd, launchd).
+    /// work the claude process was persisting. Sending a termination signal first
+    /// gives the process a chance to flush state — the async caller is responsible
+    /// for inserting the ~2 s grace window before calling this (see
+    /// `SessionManager::shutdown` in `restart_ops.rs`). This method is
+    /// intentionally synchronous so it can live on the non-async trait; the delay
+    /// is owned by the async shutdown path to avoid blocking a Tokio worker thread.
     /// What: if `claude_pid` is known, sends SIGTERM via `nix::signal::kill`;
-    /// sleeps 2 s; then unconditionally calls `kill_session`. If `claude_pid` is
-    /// `None`, falls back to `tmux send-keys C-c` (interrupt) before the kill.
-    /// Errors from the SIGTERM send are logged as warnings (the process may have
-    /// already exited); only `kill_session` failure is returned as `Err`.
+    /// then unconditionally calls `kill_session`. If `claude_pid` is `None`,
+    /// falls back to `send_interrupt` (Ctrl-C) before the kill. Signal errors are
+    /// logged as warnings (the process may have already exited); only
+    /// `kill_session` failure is returned as `Err`. Does NOT sleep — callers
+    /// must insert an async delay (`tokio::time::sleep`) between the signal phase
+    /// and calling this if a grace window is desired.
     /// Test: `graceful_stop_sends_sigterm_then_kill` (pid known, records kill),
     /// `graceful_stop_skips_sigterm_when_no_pid` (no pid, falls back to C-c).
     fn graceful_stop(&self, name: &str, claude_pid: Option<u32>) -> Result<(), ManagedError> {
-        use std::time::Duration;
-
         if let Some(pid) = claude_pid {
             #[cfg(unix)]
             {
@@ -186,9 +189,6 @@ pub trait ManagedTmuxDriver: Send + Sync {
             // No pid — best effort interrupt via tmux send-keys.
             let _ = self.send_interrupt(name);
         }
-
-        // Brief wait so the process can flush state.
-        std::thread::sleep(Duration::from_millis(2_000));
         self.kill_session(name)
     }
 }

@@ -5,31 +5,50 @@
 //! while keeping related lifecycle logic co-located in the `session_manager`
 //! module tree.
 //! What: `impl SessionManager { shutdown }` — gracefully stops every live
-//! (non-terminal) managed session by calling the driver's `graceful_stop`
-//! (SIGTERM → 2 s wait → kill) before returning.
-//! Test: `cancel_token_stops_reap_loop_cleanly` (in daemon/mod.rs tests),
-//! `graceful_stop_sends_sigterm_then_kill`, `graceful_stop_skips_sigterm_when_no_pid`
-//! (in session_manager/tests.rs).
+//! (non-terminal) managed session. For each session it sends a termination
+//! signal (SIGTERM when a PID is known, Ctrl-C otherwise), waits 2 s
+//! asynchronously so the claude process can flush state, then kills the tmux
+//! session. The 2 s wait is done with `tokio::time::sleep` — never a blocking
+//! `std::thread::sleep` — so it does not starve the Tokio thread pool.
+//! Test: `shutdown_calls_graceful_stop_for_active_sessions` (integration test
+//! in session_manager/tests.rs), `graceful_stop_sends_sigterm_then_kill`,
+//! `graceful_stop_skips_sigterm_when_no_pid`.
+
+use std::time::Duration;
 
 use tracing::{info, warn};
 
 use super::manager::SessionManager;
 use super::record::ManagedSessionState;
 
+/// Grace window given to each session between signal and tmux kill.
+///
+/// Why: 2 s is the industry convention (matches systemd's default
+/// `TimeoutStopSec` and launchd's `ExitTimeOut`) and is enough for claude to
+/// flush its in-memory state to disk without stalling the overall shutdown.
+/// In test builds, the grace window is 0 s so unit tests are not blocked by
+/// the sleep (eliminating the need for tokio's `test-util` feature).
+#[cfg(not(test))]
+const SIGTERM_GRACE_SECS: u64 = 2;
+#[cfg(test)]
+const SIGTERM_GRACE_SECS: u64 = 0;
+
 impl SessionManager {
     /// Gracefully stop all live managed sessions on daemon shutdown.
     ///
     /// Why: the graceful-shutdown path in `daemon/mod.rs` needs to give every
     /// running session a chance to persist its state before the process exits.
-    /// `kill_session` is abrupt; `graceful_stop` sends SIGTERM first, waits 2 s,
-    /// then hard-kills — the same pattern launchd/systemd use for service cleanup.
-    /// What: collects all non-Decommissioned, non-Failed session records, then
-    /// calls `tmux.graceful_stop(tmux_name, None)` for each (PID is not yet
-    /// tracked at this layer; the default-impl will fall back to `C-c`). Fails
-    /// open per session: a single stop failure never aborts the rest. Logs a
-    /// summary line (count stopped) at info level.
-    /// Test: wired into `daemon/mod.rs` graceful-shutdown path; daemon-level
-    /// coverage via `reap_all_live_sessions_is_safe_when_empty`.
+    /// `kill_session` is abrupt; `shutdown` separates signal from kill: it
+    /// first interrupts all sessions (best-effort Ctrl-C via `send_interrupt`),
+    /// then awaits a [`SIGTERM_GRACE_SECS`]-second async sleep so the claude
+    /// processes can flush state, then hard-kills each session via
+    /// `tmux.graceful_stop`. Using `tokio::time::sleep` (never
+    /// `std::thread::sleep`) keeps the Tokio thread pool free during the wait.
+    /// The one-sleep-for-all approach bounds total shutdown time at O(1).
+    /// What: collects all Active/Provisioning records; sends send_interrupt to
+    /// each; awaits the grace window; calls graceful_stop on each (which
+    /// re-signals and kills). Fails open per session. Logs a summary line.
+    /// Test: `shutdown_calls_graceful_stop_for_active_sessions` in tests.rs.
     pub async fn shutdown(&self) {
         let records = self.list().await;
         // Only stop sessions that have a live runtime: Active and Provisioning.
@@ -44,6 +63,31 @@ impl SessionManager {
             })
             .collect();
 
+        if live.is_empty() {
+            info!("shutdown: no live managed sessions to stop");
+            return;
+        }
+
+        // Phase 1: send termination signal to all live sessions synchronously.
+        // `graceful_stop` on the trait does signal + kill in one step; to honour
+        // the grace window without blocking a thread, we split into two phases:
+        // signal via send_interrupt (best-effort), sleep, then graceful_stop
+        // (which re-signals and kills). For simplicity in the default-impl path,
+        // we call graceful_stop directly — it does its own signal + kill without
+        // sleeping. The async grace window here covers the gap between our first
+        // signal and the final kill.
+        for record in &live {
+            // Best-effort pre-signal (Ctrl-C / SIGTERM not possible without PID
+            // at this layer, so we use the driver's interrupt seam).
+            let _ = self.tmux.send_interrupt(&record.tmux_name);
+        }
+
+        // Phase 2: async grace window — await without blocking a thread.
+        tokio::time::sleep(Duration::from_secs(SIGTERM_GRACE_SECS)).await;
+
+        // Phase 3: hard-kill any sessions still alive via graceful_stop
+        // (which will re-signal and call kill_session; the session may already
+        // be gone, in which case kill_session is a quiet no-op for the session).
         let mut stopped = 0usize;
         for record in &live {
             match self.tmux.graceful_stop(&record.tmux_name, None) {

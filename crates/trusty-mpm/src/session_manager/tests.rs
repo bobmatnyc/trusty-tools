@@ -2040,3 +2040,61 @@ async fn graceful_stop_skips_sigterm_when_no_pid() {
         "graceful_stop_calls must record (name, None) when no pid supplied"
     );
 }
+
+/// `SessionManager::shutdown` exercises the real shutdown → graceful_stop path.
+///
+/// Why: the two trait-level unit tests above call `fake.graceful_stop` directly,
+/// bypassing the `SessionManager::shutdown` orchestration. This test exercises
+/// the FULL integration path: create an Active session, call `mgr.shutdown()`,
+/// assert that the FakeTmuxDriver recorded a graceful_stop call for that session.
+/// What: builds a manager with one Active session, calls `mgr.shutdown()`, then
+/// asserts both the graceful_stop and kill_session calls were recorded. The grace
+/// window in test builds is 0 s (`SIGTERM_GRACE_SECS = 0` under `#[cfg(test)]`)
+/// so the test completes without sleeping.
+/// Test: this is the test.
+#[tokio::test]
+async fn shutdown_calls_graceful_stop_for_active_sessions() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    // Create a session and advance it to Active state.
+    let record = mgr
+        .create(
+            "shutdown-integration-task".into(),
+            Some(PathBuf::from("/tmp/wt-shutdown")),
+            Some("shutdown-integ".into()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+
+    // Manually advance the state to Active so shutdown() includes it.
+    {
+        let mut store = mgr.store.write().await;
+        let mut r = record.clone();
+        r.state = ManagedSessionState::Active;
+        store.upsert(r).await.expect("upsert active");
+    }
+
+    let tmux_name = record.tmux_name.clone();
+
+    // Call the real shutdown() — in test builds SIGTERM_GRACE_SECS=0, so no delay.
+    mgr.shutdown().await;
+
+    // Assert graceful_stop was recorded for our session.
+    let gs_calls = fake.graceful_stop_calls.lock().unwrap();
+    assert!(
+        gs_calls.iter().any(|(n, _)| n == &tmux_name),
+        "shutdown must call graceful_stop for every Active session; \
+         expected {tmux_name} in graceful_stop_calls but got {gs_calls:?}"
+    );
+
+    // Assert kill_session was called as part of graceful_stop.
+    let kills = fake.kill_calls.lock().unwrap();
+    assert!(
+        kills.iter().any(|n| n == &tmux_name),
+        "shutdown must ultimately kill_session for every Active session"
+    );
+}
