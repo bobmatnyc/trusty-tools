@@ -18,6 +18,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::Utc;
 use std::process::Command;
+use tokio::time::Duration;
 use tracing::{debug, warn};
 
 use crate::control::event::SessionEvent;
@@ -26,6 +27,19 @@ use crate::core::tmux::{TmuxCommand, TmuxTarget, tmux_argv};
 use crate::daemon::tmux::TmuxDriver;
 
 use super::{SessionBackend, SessionInput};
+
+/// How long `recv()` parks when the pane is idle (empty or unchanged).
+///
+/// Why: without a park point the actor's `select!` loop would call
+/// `capture-pane` in a tight spin at 100% CPU. 200 ms is responsive
+/// enough for interactive output while being gentle on the executor.
+/// Exposed as a named constant so callers and tests can reference it.
+/// The compile-time assertion below guards against accidental zeroing.
+pub const TMUX_POLL_INTERVAL_MS: u64 = 200;
+
+// Compile-time guard: if TMUX_POLL_INTERVAL_MS is accidentally set to 0
+// the idle-park fix regresses to a busy-spin. Fail the build instead.
+const _: () = assert!(TMUX_POLL_INTERVAL_MS > 0, "poll interval must be > 0ms");
 
 /// Derive the tmux session name for a control-plane session.
 ///
@@ -59,6 +73,9 @@ pub struct TmuxBackend {
     spawned: bool,
     /// Lines to capture on each `recv()` poll (configurable; default 100).
     capture_lines: u32,
+    /// Last pane content seen; used to suppress duplicate Output events and
+    /// to detect idle (unchanged) pane so we park instead of spin.
+    last_pane_content: String,
 }
 
 impl TmuxBackend {
@@ -115,6 +132,7 @@ impl TmuxBackend {
             driver,
             spawned: true,
             capture_lines,
+            last_pane_content: String::new(),
         })
     }
 
@@ -158,15 +176,18 @@ impl SessionBackend for TmuxBackend {
             .with_context(|| format!("send-keys to tmux session {} failed", self.tmux_name))
     }
 
-    /// Capture the tmux pane and return the output as `SessionEvent::Output`.
+    /// Capture the tmux pane and return new output as `SessionEvent::Output`.
     ///
-    /// Why: the actor polls `recv()` periodically to pick up new pane output
-    /// and broadcast it to observers. Returning `None` signals that the tmux
-    /// session no longer exists (session was killed or `claude` exited cleanly).
-    /// What: runs `capture-pane -p -S -<lines>` via `tmux_argv`. On
-    /// success returns the raw pane text in an `Output` event with
-    /// `structured: None`. On tmux session-not-found returns `None`.
-    /// Test: `tmux_recv_returns_none_for_missing_session`.
+    /// Why: the actor polls `recv()` to pick up new pane output and broadcast
+    /// it to observers. Without a park point the actor's `select!` loop would
+    /// call `capture-pane` in a tight spin at ~100% CPU when the pane is idle.
+    /// What: runs `capture-pane -p -S -<lines>`. If the pane is empty OR its
+    /// content is unchanged since the last call, parks for `TMUX_POLL_INTERVAL_MS`
+    /// before returning an empty batch — giving the executor a chance to service
+    /// other tasks. Only emits an `Output` event when the pane content has
+    /// actually changed (diff vs `last_pane_content`). Returns `None` when the
+    /// tmux session no longer exists (treating it as a clean exit).
+    /// Test: `tmux_recv_parks_when_idle`.
     async fn recv(&mut self) -> Option<Result<Vec<SessionEvent>>> {
         let cmd = TmuxCommand::CapturePane {
             target: TmuxTarget::session(&self.tmux_name),
@@ -174,11 +195,17 @@ impl SessionBackend for TmuxBackend {
         };
         match self.run_tmux_cmd(&cmd) {
             Ok(output) => {
-                if output.trim().is_empty() {
-                    // Pane is empty — not an error; keep polling.
-                    // Return an empty batch so the actor doesn't spin.
+                let is_empty = output.trim().is_empty();
+                let is_unchanged = !is_empty && output == self.last_pane_content;
+
+                if is_empty || is_unchanged {
+                    // Pane idle: park so the executor isn't starved.
+                    tokio::time::sleep(Duration::from_millis(TMUX_POLL_INTERVAL_MS)).await;
                     return Some(Ok(vec![]));
                 }
+
+                // New content: record it and emit an Output event.
+                self.last_pane_content = output.clone();
                 let event = SessionEvent::Output {
                     session_id: self.session_id.clone(),
                     raw: output,

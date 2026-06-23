@@ -325,9 +325,9 @@ mod tests {
     // ── Minimal stub backend for unit tests ──────────────────────────────────
 
     struct StubBackend {
-        /// Events to emit on successive `recv()` calls.
-        events: Vec<Option<anyhow::Result<Vec<SessionEvent>>>>,
-        index: usize,
+        /// Events to emit on successive `recv()` calls. `VecDeque` gives O(1)
+        /// pop_front; `Vec::remove(0)` is O(n) (shifts all remaining elements).
+        events: std::collections::VecDeque<Option<anyhow::Result<Vec<SessionEvent>>>>,
         /// When true and events are exhausted, block forever instead of
         /// returning `None`. Used by `actor_command_stop_terminates` so the
         /// actor's `select!` can pick up the Stop command before the backend
@@ -338,8 +338,7 @@ mod tests {
     impl StubBackend {
         fn new_clean_exit() -> Self {
             Self {
-                events: vec![None],
-                index: 0,
+                events: std::collections::VecDeque::from([None]),
                 block_when_exhausted: false,
             }
         }
@@ -348,8 +347,7 @@ mod tests {
         /// all pre-configured events are drained.
         fn new_never_exits() -> Self {
             Self {
-                events: vec![],
-                index: 0,
+                events: std::collections::VecDeque::new(),
                 block_when_exhausted: true,
             }
         }
@@ -362,8 +360,7 @@ mod tests {
                 ts: Utc::now(),
             };
             Self {
-                events: vec![Some(Ok(vec![out])), None],
-                index: 0,
+                events: std::collections::VecDeque::from([Some(Ok(vec![out])), None]),
                 block_when_exhausted: false,
             }
         }
@@ -376,9 +373,7 @@ mod tests {
         }
 
         async fn recv(&mut self) -> Option<anyhow::Result<Vec<SessionEvent>>> {
-            if self.index < self.events.len() {
-                let ev = self.events.remove(0);
-                self.index += 1;
+            if let Some(ev) = self.events.pop_front() {
                 ev
             } else if self.block_when_exhausted {
                 // Park indefinitely so the actor's select! can process
@@ -400,6 +395,12 @@ mod tests {
     async fn actor_broadcasts_started_event() {
         let id = ControlSessionId::new("proj", 0);
         let backend = StubBackend::new_clean_exit();
+        // Subscribe BEFORE spawning so the broadcast ring always has at least
+        // one live receiver — the Started event cannot be dropped unobserved.
+        // We create a temporary channel here and subscribe immediately; the
+        // real channel is created inside spawn_actor, so we obtain our receiver
+        // from the handle immediately after spawn (before yielding) and use a
+        // short poll loop with timeout to wait for the event.
         let handle = spawn_actor(
             id.clone(),
             "proj".into(),
@@ -407,22 +408,35 @@ mod tests {
             backend,
             DEFAULT_BROADCAST_CAPACITY,
         );
-
+        // Subscribe immediately — before yielding to the executor — so the
+        // broadcast ring buffer still holds the Started event (capacity=256).
         let mut rx = handle.event_tx.subscribe();
-        // The actor may have already emitted the Started event before we
-        // subscribed, so wait a tick.
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
 
-        // Drain what's available.
+        // Poll for the Started event with a deadline. The actor runs on the
+        // same tokio executor; yielding a few times is enough for it to emit
+        // Started even if it ran ahead of us.
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
         let mut found_started = false;
-        while let Ok(e) = rx.try_recv() {
-            if matches!(e, SessionEvent::Started { .. }) {
-                found_started = true;
+        loop {
+            match rx.try_recv() {
+                Ok(SessionEvent::Started { .. }) => {
+                    found_started = true;
+                    break;
+                }
+                Ok(_) => {} // other events; keep looking
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                Err(_) => break, // Lagged / closed; should not happen with cap=256
             }
         }
-        // We may have missed it due to subscription timing; that is acceptable.
-        // The important thing is the actor does not panic.
-        let _ = found_started;
+        assert!(
+            found_started,
+            "actor must emit SessionEvent::Started before any other event"
+        );
     }
 
     #[tokio::test]

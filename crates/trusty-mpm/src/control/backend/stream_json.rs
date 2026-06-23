@@ -37,9 +37,12 @@ use super::{SessionBackend, SessionInput};
 /// daemon supervise a `claude` process without a PTY and without exposing the
 /// interactive readline TUI. It's the only path that gives the actor a
 /// machine-readable event stream (stream-JSON stdout).
-/// What: holds the spawned `Child` handle (for Drop / SIGTERM), a
-/// `ChildStdin` writer, and a `BufReader<ChildStdout>` for line-by-line event
-/// parsing. The session ID is carried for event construction.
+/// What: holds the spawned `Child` handle (for Drop / SIGKILL via
+/// `start_kill()`), a `ChildStdin` writer, and a `BufReader<ChildStdout>`
+/// for line-by-line event parsing. The session ID is carried for event
+/// construction. Note: `tokio::process::Child::start_kill()` sends SIGKILL,
+/// not SIGTERM — a graceful SIGTERM → wait → SIGKILL sequence is deferred to
+/// a later phase once a shutdown timeout is defined.
 /// Test: `stream_json_backend_constructs`.
 pub struct StreamJsonBackend {
     session_id: ControlSessionId,
@@ -190,29 +193,29 @@ impl SessionBackend for StreamJsonBackend {
         }
     }
 
-    /// Send SIGTERM to the child process and wait for it to exit.
+    /// Kill the child process and wait for it to exit.
     ///
     /// Why: the RAII reaping contract (§10.1) requires that every
     /// `StreamJsonBackend` cleans up its child on stop, not just on Drop.
-    /// `stop()` gives the child a graceful exit path before forcing SIGKILL.
-    /// What: sends SIGTERM via `child.start_kill()`, then awaits the child.
-    /// Drop provides a final safety net via `child.start_kill()` in case
-    /// `stop()` is never called.
+    /// What: calls `child.start_kill()` (SIGKILL, non-blocking) then awaits
+    /// the child exit. Note: `start_kill()` sends SIGKILL, not SIGTERM; a
+    /// graceful SIGTERM → wait → SIGKILL sequence is deferred to a later phase.
+    /// Drop provides a final safety net in case `stop()` is never called.
     /// Test: stop-path covered by integration test.
     async fn stop(mut self: Box<Self>) -> Result<()> {
-        let _ = self.child.start_kill(); // SIGTERM; ignore if already exited
+        let _ = self.child.start_kill(); // SIGKILL; ignore if already exited
         let _ = self.child.wait().await; // reap the child
         Ok(())
     }
 }
 
 impl Drop for StreamJsonBackend {
-    /// Send SIGTERM on drop to prevent orphaned `claude` child processes.
+    /// Send SIGKILL on drop to prevent orphaned `claude` child processes.
     ///
     /// Why: if the actor task is cancelled or panics without calling `stop()`,
     /// the child process would become an orphan. The Drop impl is the final
     /// safety net per §10.1 (RAII reaping contract).
-    /// What: calls `child.start_kill()` (non-blocking SIGTERM); stdout/stdin
+    /// What: calls `child.start_kill()` (non-blocking SIGKILL); stdout/stdin
     /// are already closed by dropping the handles, which signals EOF.
     /// Test: side-effect-only; covered by the integration cleanup suite.
     fn drop(&mut self) {
