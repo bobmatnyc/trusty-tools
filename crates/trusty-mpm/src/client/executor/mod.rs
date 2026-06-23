@@ -138,6 +138,7 @@ impl CommandExecutor {
                     .await
             }
             TrustyCommand::ManagedList => self.managed_list().await,
+            TrustyCommand::ManagedFleet => self.managed_fleet().await,
             TrustyCommand::ManagedGet { target } => self.managed_get(&target).await,
             TrustyCommand::ManagedSend { target, text } => self.managed_send(&target, &text).await,
             TrustyCommand::ManagedAnswer { target, answer } => {

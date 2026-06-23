@@ -103,9 +103,9 @@ pub use rpc::rpc_handler;
 /// wiring.
 use super::managed_routes::{
     adopt_existing_session, answer_session_decision, decommission_ephemeral_route,
-    decommission_managed_session, get_attach_cmd, get_managed_session, get_session_activity,
-    list_managed_sessions, prune_managed_route, resume_managed_session, send_to_session,
-    spawn_session, stop_managed_session, stop_managed_session_runtime,
+    decommission_managed_session, fleet_by_project_route, get_attach_cmd, get_managed_session,
+    get_session_activity, list_managed_sessions, prune_managed_route, resume_managed_session,
+    send_to_session, spawn_session, stop_managed_session, stop_managed_session_runtime,
 };
 
 /// Typed HTTP response bodies for every endpoint.
@@ -209,6 +209,13 @@ pub fn router(state: Arc<DaemonState>) -> Router {
             post(decommission_ephemeral_route),
         )
         .route("/api/v1/sessions/managed/prune", post(prune_managed_route))
+        // #1586: fleet-by-project view. Literal `/fleet` registered BEFORE the
+        // `/{id}` param route so it is never captured as an id (axum prefers
+        // literal matches, but ordering makes the intent explicit).
+        .route(
+            "/api/v1/sessions/managed/fleet",
+            get(fleet_by_project_route),
+        )
         .route(
             "/api/v1/sessions/managed/{id}",
             get(get_managed_session).delete(stop_managed_session),

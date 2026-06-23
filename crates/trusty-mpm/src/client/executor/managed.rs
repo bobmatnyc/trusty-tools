@@ -16,7 +16,7 @@
 use super::CommandExecutor;
 use crate::client::http_client::{ManagedAdoptRequest, ManagedSessionSummary, ManagedSpawnRequest};
 use crate::client::resolver::resolve_target;
-use crate::client::result::{CommandResult, ManagedSessionView};
+use crate::client::result::{CommandResult, ManagedSessionView, ProjectFleetView};
 
 impl CommandExecutor {
     /// Resolve a fuzzy managed target to its canonical id.
@@ -120,6 +120,36 @@ impl CommandExecutor {
             Ok(sessions) => CommandResult::ManagedSessions(
                 sessions.into_iter().map(ManagedSessionView::from).collect(),
             ),
+            Err(e) => CommandResult::Error(format!("daemon unreachable: {e}")),
+        }
+    }
+
+    /// `managed-fleet` — list managed sessions grouped by registered project.
+    ///
+    /// Why: the Telegram `/fleet` command (and any future TUI surface) needs a
+    /// per-project breakdown; wiring the HTTP call here keeps the Telegram bot
+    /// and the TUI off the raw wire type and off the grouping logic.
+    /// What: calls `GET /api/v1/sessions/managed/fleet`, maps each wire group to
+    /// a [`ProjectFleetView`], and wraps the result in
+    /// [`CommandResult::ManagedFleet`].
+    /// Test: `execute_managed_fleet_against_test_daemon` in `tests.rs`.
+    pub(super) async fn managed_fleet(&self) -> CommandResult {
+        match self.client().fleet_managed_sessions().await {
+            Ok(groups) => {
+                let fleet: Vec<ProjectFleetView> = groups
+                    .into_iter()
+                    .map(|g| ProjectFleetView {
+                        project_name: g.project_name,
+                        repo_url: g.repo_url,
+                        sessions: g
+                            .sessions
+                            .into_iter()
+                            .map(ManagedSessionView::from)
+                            .collect(),
+                    })
+                    .collect();
+                CommandResult::ManagedFleet(fleet)
+            }
             Err(e) => CommandResult::Error(format!("daemon unreachable: {e}")),
         }
     }

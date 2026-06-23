@@ -11,7 +11,9 @@
 //! [`CommandResult`] variant; the free functions render the list/detail shapes.
 //! Test: `crate::slack::formatter::tests` covers each variant's rendering.
 
-use crate::client::{CommandResult, DiscoveredProjectSummary, HealthReport, ManagedSessionView};
+use crate::client::{
+    CommandResult, DiscoveredProjectSummary, HealthReport, ManagedSessionView, ProjectFleetView,
+};
 
 #[cfg(test)]
 mod tests;
@@ -210,6 +212,9 @@ impl SlackFormatter {
             CommandResult::Help(text) => text.clone(),
             CommandResult::Health(report) => format_health(report),
             CommandResult::Error(msg) => format!("❌ {msg}"),
+            // #1586: fleet-by-project view — render the same grouped layout as
+            // the Telegram formatter but in Slack mrkdwn (no HTML tags).
+            CommandResult::ManagedFleet(fleet) => format_fleet_by_project_slack(fleet),
         }
     }
 }
@@ -460,6 +465,57 @@ fn tail_lines(output: &str) -> String {
 /// Test: covered by `format_command_sent_uses_code_block`.
 fn code_block(text: &str) -> String {
     format!("```\n{text}\n```")
+}
+
+/// Render managed sessions grouped by project as a Slack `mrkdwn` body.
+///
+/// Why: `/fleet` (WI-B, #1586) shows a per-project breakdown of live sessions
+/// so the operator can see which work belongs to which repo at a glance.
+/// What: emits a bold heading, then one block per project — bold project name +
+/// repo URL followed by session rows or a `—` placeholder when empty.
+/// State glyphs: 🟢 active  🟡 provisioning  🔴 other.
+/// Test: `format_fleet_by_project_slack_renders_projects` in `tests.rs`.
+fn format_fleet_by_project_slack(fleet: &[ProjectFleetView]) -> String {
+    if fleet.is_empty() {
+        return "No registered projects.".to_string();
+    }
+    let mut text = String::from("*fleet by project*");
+    for pf in fleet {
+        text.push_str(&format!("\n\n*{}* — `{}`", pf.project_name, pf.repo_url,));
+        if pf.sessions.is_empty() {
+            text.push_str("\n  —");
+        } else {
+            for s in &pf.sessions {
+                let dot = fleet_state_glyph(&s.state);
+                let flag = if s.pending_decision.is_some() {
+                    " ⚠️"
+                } else {
+                    ""
+                };
+                text.push_str(&format!(
+                    "\n  {dot} `{}` {} [{}]{flag}",
+                    short_id(&s.id),
+                    s.name,
+                    s.state,
+                ));
+            }
+        }
+    }
+    text
+}
+
+/// Status glyph for a managed session state word (Slack fleet view).
+///
+/// Why: shared by `format_fleet_by_project_slack`; keeps glyph conventions
+/// consistent without duplicating the match arm.
+/// What: `active` → 🟢, `provisioning` → 🟡, anything else → 🔴.
+/// Test: covered by `format_fleet_by_project_slack_renders_projects`.
+fn fleet_state_glyph(state: &str) -> &'static str {
+    match state.to_ascii_lowercase().as_str() {
+        "active" => "🟢",
+        "provisioning" => "🟡",
+        _ => "🔴",
+    }
 }
 
 /// Shorten a session id for compact chat display.

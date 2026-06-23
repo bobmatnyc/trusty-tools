@@ -9,7 +9,7 @@
 use super::*;
 use crate::client::{
     CommandResult, DecisionCounts, DiscoveredProjectSummary, HealthReport, ManagedSessionView,
-    SessionSummary, TmuxSessionSummary,
+    ProjectFleetView, SessionSummary, TmuxSessionSummary,
 };
 use crate::core::doctor::{CheckStatus, DoctorCheck, DoctorReport};
 
@@ -258,4 +258,115 @@ fn short_id_handles_multibyte() {
     assert_eq!(out, "日本語のセッショ…");
     // Char count of the head is SHORT_ID_LEN; the ellipsis is the only extra char.
     assert_eq!(out.chars().count(), SHORT_ID_LEN + 1);
+}
+
+// ── WI-B (#1586): fleet-by-project formatter (Slack mrkdwn) ──────────────────
+
+/// Empty fleet renders a placeholder, not an empty body.
+///
+/// Why: the Slack handler must always emit non-empty text; the sentinel message
+/// lets the operator know the project registry is empty.
+/// What: `SlackFormatter::format` on a `ManagedFleet([])` returns
+/// "No registered projects."
+/// Test: this function IS the test.
+#[test]
+fn format_fleet_by_project_slack_empty_returns_placeholder() {
+    let body = SlackFormatter::format(&CommandResult::ManagedFleet(vec![]));
+    assert_eq!(body, "No registered projects.");
+}
+
+/// Projects with sessions are rendered with correct glyph/flag/mrkdwn structure.
+///
+/// Why: Slack `mrkdwn` uses `*bold*` and backtick code — not HTML tags — so the
+/// fleet-by-project output must differ from the Telegram counterpart in markup
+/// while covering the same semantic content.
+/// What: heading, bold project name, inline-code repo URL, session rows with
+/// state glyphs and ⚠️ flag for pending decisions.
+/// Test: this function IS the test.
+#[test]
+fn format_fleet_by_project_slack_renders_projects() {
+    let fleet = vec![
+        ProjectFleetView {
+            project_name: "proj-alpha".into(),
+            repo_url: "https://github.com/org/alpha".into(),
+            sessions: vec![
+                ManagedSessionView {
+                    id: "aaaa1111bbbb2222".into(),
+                    name: "tmpm-alpha-1".into(),
+                    state: "active".into(),
+                    workspace_path: None,
+                    repo_url: None,
+                    branch: None,
+                    pending_decision: None,
+                    proposed_default: None,
+                },
+                ManagedSessionView {
+                    id: "cccc3333dddd4444".into(),
+                    name: "tmpm-alpha-2".into(),
+                    state: "stopped".into(),
+                    workspace_path: None,
+                    repo_url: None,
+                    branch: None,
+                    pending_decision: Some("apply patch?".into()),
+                    proposed_default: None,
+                },
+            ],
+        },
+        ProjectFleetView {
+            project_name: "proj-beta".into(),
+            repo_url: "https://github.com/org/beta".into(),
+            sessions: vec![],
+        },
+    ];
+    let body = SlackFormatter::format(&CommandResult::ManagedFleet(fleet));
+
+    // Heading uses mrkdwn bold (asterisks, not HTML)
+    assert!(body.contains("*fleet by project*"), "heading: {body}");
+
+    // Project alpha: mrkdwn bold name, backtick-code repo url
+    assert!(body.contains("*proj-alpha*"), "bold project name: {body}");
+    assert!(
+        body.contains("`https://github.com/org/alpha`"),
+        "code repo url: {body}"
+    );
+
+    // Active session → green glyph
+    assert!(body.contains("🟢"), "active → 🟢: {body}");
+    assert!(body.contains("`aaaa1111…`"), "short id: {body}");
+    assert!(body.contains("tmpm-alpha-1"), "session name: {body}");
+    assert!(body.contains("[active]"), "state bracket: {body}");
+
+    // Stopped + pending decision → red glyph + warning flag
+    assert!(body.contains("🔴"), "stopped → 🔴: {body}");
+    assert!(body.contains("⚠️"), "pending decision flag: {body}");
+
+    // Project beta empty → dash placeholder
+    assert!(body.contains("*proj-beta*"), "beta project header: {body}");
+    assert!(body.contains("\n  —"), "empty project placeholder: {body}");
+}
+
+/// Provisioning state maps to the yellow glyph in Slack output.
+///
+/// Why: `fleet_state_glyph` must emit 🟡 for `"provisioning"` in the Slack
+/// formatter, matching the Telegram formatter's three-tier convention.
+/// What: a `ManagedFleet` entry with one `provisioning` session renders 🟡.
+/// Test: this function IS the test.
+#[test]
+fn format_fleet_by_project_slack_provisioning_glyph() {
+    let fleet = vec![ProjectFleetView {
+        project_name: "proj".into(),
+        repo_url: "https://example.com/repo".into(),
+        sessions: vec![ManagedSessionView {
+            id: "eeee5555ffff6666".into(),
+            name: "tmpm-prov".into(),
+            state: "provisioning".into(),
+            workspace_path: None,
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+        }],
+    }];
+    let body = SlackFormatter::format(&CommandResult::ManagedFleet(fleet));
+    assert!(body.contains("🟡"), "provisioning → 🟡: {body}");
 }

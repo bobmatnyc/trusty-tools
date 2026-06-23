@@ -265,6 +265,14 @@ pub enum CommandResult {
     },
     /// `managed-list` — the managed session-manager session list.
     ManagedSessions(Vec<ManagedSessionView>),
+    /// `managed-fleet` — managed sessions grouped by registered project.
+    ///
+    /// Why: `/fleet` gives the operator a project-oriented view so related
+    /// sessions are visible together rather than as a flat list.
+    /// What: each entry is a [`ProjectFleetView`] — the project plus its bound
+    /// sessions; projects with no sessions are still listed (empty `sessions`
+    /// vec) so the operator sees the full registered project landscape.
+    ManagedFleet(Vec<ProjectFleetView>),
     /// `managed-get` — one managed session's record.
     ManagedSession(ManagedSessionView),
     /// `managed-send` — text was injected into a managed session's pane.
@@ -352,6 +360,25 @@ pub enum CommandResult {
 
     /// Any failure rendered as a message rather than a panic.
     Error(String),
+}
+
+/// A project and its grouped managed sessions, for the fleet-by-project view.
+///
+/// Why: `/fleet` should group sessions by project so the operator sees which
+/// work belongs to which repo at a glance; a dedicated view type keeps the UIs
+/// off the resolver's `ProjectFleet` shape and off the wire DTOs.
+/// What: the project name/URL and the sessions bound to it; `sessions` may be
+/// empty when the project is registered but has no active sessions.
+/// Test: covered by the executor's `execute_managed_fleet_*` tests and the
+/// Telegram formatter's `format_fleet_by_project_*` tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectFleetView {
+    /// Registered project name.
+    pub project_name: String,
+    /// Repository URL for the project.
+    pub repo_url: String,
+    /// Managed sessions bound to this project (may be empty).
+    pub sessions: Vec<ManagedSessionView>,
 }
 
 /// A flat, UI-agnostic view of a managed session.

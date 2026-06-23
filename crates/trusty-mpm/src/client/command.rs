@@ -171,6 +171,16 @@ pub enum TrustyCommand {
     },
     /// List every managed session (`sessions.list`).
     ManagedList,
+    /// List managed sessions grouped by registered project (`sessions.fleet`).
+    ///
+    /// Why: operators working across multiple repos need a per-project view of
+    /// their live managed sessions; a flat list (`ManagedList`) makes it hard to
+    /// see which sessions belong together. `ManagedFleet` groups by project via
+    /// `GET /api/v1/sessions/managed/fleet` + the daemon's `fleet_by_project`.
+    /// What: calls the fleet endpoint and returns a
+    /// [`super::result::CommandResult::ManagedFleet`] with one
+    /// [`super::result::ProjectFleetView`] per registered project.
+    ManagedFleet,
     /// Fetch one managed session's record (`sessions.get`).
     ManagedGet {
         /// Managed session id or friendly name.

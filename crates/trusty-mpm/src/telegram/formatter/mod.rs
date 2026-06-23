@@ -11,6 +11,9 @@
 use crate::client::{CommandResult, DiscoveredProjectSummary, HealthReport, ManagedSessionView};
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
+mod fleet;
+pub use fleet::format_fleet_by_project;
+
 #[cfg(test)]
 mod tests;
 
@@ -243,6 +246,7 @@ impl TelegramFormatter {
                 html_escape(attach_cmd),
             ),
             CommandResult::ManagedSessions(sessions) => format_managed_sessions(sessions),
+            CommandResult::ManagedFleet(fleet) => format_fleet_by_project(fleet),
             CommandResult::ManagedSession(view) => format_managed_session(view),
             CommandResult::ManagedSent { id, tmux_name } => {
                 format!(

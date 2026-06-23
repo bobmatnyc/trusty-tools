@@ -26,9 +26,11 @@ use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
 use crate::session_manager::{ManagedSessionId, SessionRecord};
 
+mod fleet;
 pub mod front_gate;
 mod lifecycle;
 pub mod prune;
+pub use fleet::{FleetByProjectResponse, FleetProjectGroup, fleet_by_project_route};
 pub use front_gate::{
     ConformanceGate, FrontGateOutcome, HeadlessApproval, IsrConformanceGate, run_front_gate,
 };
@@ -338,7 +340,7 @@ pub fn record_to_json(r: &SessionRecord) -> serde_json::Value {
 /// the internal record shape.
 /// What: maps every record field to its serialized form.
 /// Test: covered by the list/get handler tests.
-fn record_to_summary(r: &SessionRecord) -> SessionSummary {
+pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
     SessionSummary {
         id: r.id.to_string(),
         name: r.tmux_name.clone(),
