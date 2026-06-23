@@ -93,7 +93,8 @@ Every other finding uses `category` = "correctness" (the default).
   Each finding has: title, body (detailed description), severity (low/medium/high/critical),
   confidence (0.0–1.0), file (source file path), line (null if not applicable),
   category ("correctness" by default, or "method-conformance" per the rule above),
-  consequence (see below), suggested_replacement (see below).
+  consequence (see below), suggested_replacement (see below),
+  source_citation (see below).
 
 `consequence`: a brief statement of the FAILURE MECHANISM — what concretely goes
 wrong in practice if this finding is not addressed (e.g. "panics on empty input",
@@ -112,6 +113,14 @@ NOT wrap it in a code fence and do NOT put prose in it — just the literal
 replacement code. When the fix is not a concrete line replacement (it spans
 multiple hunks, is advisory, or is best described in words), set it to null and
 explain the fix in `body`.
+
+`source_citation`: when a context snippet in the user message carries an explicit
+source label (e.g. "Prescribed method (from ticket IMPL-2026-05-009 WP-9)" or
+"Prescribed method (from spec PRD §4.2)"), copy the EXACT ticket key and
+section/work-package identifier from that label here (e.g. "IMPL-2026-05-009 WP-9"
+or "PRD §4.2"). This makes the finding authoritative — it is grounded in a
+prescribed intent, not just an LLM inference. Set to null when the finding is
+based on general code reasoning rather than a cited context snippet.
 
 `confidence` is a float in [0.0, 1.0].
 `line` may be null if no specific line is applicable.
@@ -205,7 +214,8 @@ coverage floor after your response based on the configured policy.
   Each finding has: title, body (detailed description), severity (low/medium/high/critical),
   confidence (0.0–1.0), file (source file path), line (null if not applicable),
   category ("correctness" by default, or "method-conformance" per the rule above),
-  consequence (see below), suggested_replacement (see below).
+  consequence (see below), suggested_replacement (see below),
+  source_citation (see below).
 
 `consequence`: a brief statement of the FAILURE MECHANISM — what concretely goes
 wrong in practice if this finding is not addressed (e.g. "panics on empty input",
@@ -224,6 +234,14 @@ NOT wrap it in a code fence and do NOT put prose in it — just the literal
 replacement code. When the fix is not a concrete line replacement (it spans
 multiple hunks, is advisory, or is best described in words), set it to null and
 explain the fix in `body`.
+
+`source_citation`: when a context snippet in the user message carries an explicit
+source label (e.g. "Prescribed method (from ticket IMPL-2026-05-009 WP-9)" or
+"Prescribed method (from spec PRD §4.2)"), copy the EXACT ticket key and
+section/work-package identifier from that label here (e.g. "IMPL-2026-05-009 WP-9"
+or "PRD §4.2"). This makes the finding authoritative — it is grounded in a
+prescribed intent, not just an LLM inference. Set to null when the finding is
+based on general code reasoning rather than a cited context snippet.
 
 `confidence` is a float in [0.0, 1.0].
 `line` may be null if no specific line is applicable.

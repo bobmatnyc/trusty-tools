@@ -531,6 +531,38 @@ fn max_tokens_default_for_non_gemini() {
     );
 }
 
+// ── source_citation instruction (#1419) ──────────────────────────────────────
+
+/// Verify both system prompt variants instruct the LLM to populate
+/// `source_citation` when a context snippet carries an explicit source
+/// label (#1419).
+///
+/// Why: the spec-grounding mechanism is inert unless the LLM is told *when*
+/// and *how* to populate `source_citation`.  If the instruction is absent,
+/// the field will always be `None` regardless of the schema.
+/// What: asserts the key instruction phrase is present in both the stock
+/// prompt (coverage gating off) and the coverage-gating variant.
+/// Test: no network.
+#[test]
+fn system_prompt_contains_source_citation_instruction() {
+    for (label, prompt) in [
+        ("stock", reviewer_system_prompt_with_coverage(false)),
+        (
+            "coverage-gating",
+            reviewer_system_prompt_with_coverage(true),
+        ),
+    ] {
+        assert!(
+            prompt.contains("source_citation"),
+            "{label} system prompt must instruct the LLM to populate source_citation (#1419)"
+        );
+        assert!(
+            prompt.contains("prescribed intent"),
+            "{label} system prompt must explain the purpose of source_citation (spec grounding)"
+        );
+    }
+}
+
 // ── APEX prompt tests ─────────────────────────────────────────────────────────
 // Extracted to prompt_tests_apex.rs to keep this file under the 500-line cap (#610).
 #[path = "prompt_tests_apex.rs"]
