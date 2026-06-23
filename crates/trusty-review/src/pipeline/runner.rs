@@ -378,7 +378,8 @@ pub async fn run_review(
     let (final_verdict, final_grade, original_llm_grade) = apply_grade_and_floor(&parsed);
     info!(
         verdict = %final_verdict,
-        grade = %final_grade,
+        // `final_grade` is None for an un-reviewable UNKNOWN verdict (#1474).
+        grade = final_grade.map(|g| g.to_string()).unwrap_or_else(|| "none".to_string()),
         findings_count = parsed.findings.len(),
         "final verdict + grade after severity-anchored floor"
     );
@@ -419,31 +420,29 @@ pub async fn run_review(
     .await;
     result.findings = findings;
 
-    // 7d: derive the envelope grade from the post-verification verdict (closes #1486).
+    // 7d: derive the envelope grade from the post-verification verdict (closes #1486),
+    // suppressing the letter grade entirely for an un-reviewable UNKNOWN (#1474).
     //
-    // BEFORE this fix: the grade was clamped from `final_grade` (the floor-escalated
-    // grade) to `result.verdict`.  When verification RELAXES the verdict (e.g. BLOCK
-    // → APPROVE because the only blocking finding was refuted by the verifier), the
-    // clamp of F→APPROVE is a no-op (F implies BLOCK which is already stricter than
-    // APPROVE), so the envelope grade stayed F even though the verdict became APPROVE.
+    // #1486: we clamp the ORIGINAL LLM grade (pre-floor) to the post-verification
+    // verdict — NOT the floor-escalated `final_grade`.  When verification RELAXES the
+    // verdict (e.g. BLOCK → APPROVE because the only blocking finding was refuted),
+    // clamping the floor-escalated grade (F) would be a no-op (F implies BLOCK, already
+    // stricter than APPROVE), leaving a stale F/APPROVE.  Clamping the original grade
+    // (B-) instead correctly recovers B-/APPROVE; if the blocking finding survives
+    // (verdict stays BLOCK), `clamp_grade_to_verdict(B-, BLOCK)` = F — consistent.
     //
-    // AFTER this fix: we clamp the original LLM grade (pre-floor) to the
-    // post-verification verdict.  The floor escalation (B- → F for a BLOCK) no
-    // longer leaks into the envelope when verification relaxes the verdict: if the
-    // floor finding was refuted, the envelope correctly shows B-/APPROVE instead of
-    // F/APPROVE.  If the blocking finding survives verification (verdict stays BLOCK),
-    // `clamp_grade_to_verdict(B-, BLOCK)` = F — the correct, consistent result.
+    // #1474: `original_llm_grade` is `None` for an un-reviewable UNKNOWN verdict, so
+    // the envelope grade stays `None` (output field omitted) — never an "F".  UNKNOWN
+    // means "could not review", which must never collapse into "reviewed → critical
+    // failure".  `.map` cleanly threads both behaviours: None ⇒ no grade; Some(grade)
+    // ⇒ clamp to the (real, non-UNKNOWN) post-verification verdict.
     //
-    // Coverage-floor tightening (step 7b-post above) may also shift `final_grade`
-    // independently of verification; for now we treat original_llm_grade as the
-    // soft starting point and defer tighter coverage-grade interaction to a follow-up.
-    // In practice the coverage floor only drives REQUEST_CHANGES (not BLOCK), and the
-    // original LLM grade for REQUEST_CHANGES is already at the D-band, so the clamp
-    // is correct in the common case.
-    result.grade = Some(
-        crate::pipeline::letter_grade::clamp_grade_to_verdict(original_llm_grade, &result.verdict)
-            .to_string(),
-    );
+    // Coverage-floor tightening (step 7b-post above) only drives REQUEST_CHANGES (not
+    // BLOCK), and the original LLM grade for REQUEST_CHANGES is already at the D-band,
+    // so the clamp is correct in the common case.
+    result.grade = original_llm_grade.map(|g| {
+        crate::pipeline::letter_grade::clamp_grade_to_verdict(g, &result.verdict).to_string()
+    });
 
     // 7e: build inline per-line comments from the RAW diff (#1414).  Using the
     // pre-filter `raw_diff` (not the noise-filtered `diff` sent to the LLM) means

@@ -585,20 +585,36 @@ fn stricter_of(a: Verdict, b: Verdict) -> Verdict {
 /// (the model could not assess the diff; grade/floor do not apply).
 ///
 /// Also returns the final grade, clamped by `clamp_grade_to_verdict` so the grade
-/// and verdict never disagree in the output.
+/// and verdict never disagree in the output — EXCEPT for `Verdict::Unknown`, which
+/// returns `None` (no letter grade).
+///
+/// ## UNKNOWN ⇒ no letter grade (#1474)
+///
+/// `Verdict::Unknown` means "the diff was un-reviewable" (empty/insufficient diff,
+/// truncated output, parse failure) — NOT "reviewed and failed".  An un-reviewable
+/// change has no quality letter to report, so the grade is `None` (the output field
+/// is then omitted) rather than a misleading `F`.  Previously this path hardcoded
+/// `Grade::F`, which collapsed "could not review" into "reviewed → critical failure"
+/// — e.g. an empty develop→main release PR whose own review_body said grade "A+"
+/// surfaced top-level `grade:"F"`.  `F` is reserved for a real BLOCK verdict.
 ///
 /// Test: `derive_verdict_with_grade_grade_a_no_findings_approve`,
 /// `derive_verdict_with_grade_grade_f_no_findings_block`,
-/// `derive_verdict_with_grade_severity_overrides_grade_a`.
+/// `derive_verdict_with_grade_severity_overrides_grade_a`,
+/// `derive_verdict_with_grade_unknown_yields_no_grade`.
 pub fn derive_verdict_with_grade(
     model_proposed: Verdict,
     grade: Grade,
     findings: &[Finding],
-) -> (Verdict, Grade) {
-    // UNKNOWN is terminal — preserve it; grade does not apply.
+) -> (Verdict, Option<Grade>) {
+    // UNKNOWN is terminal and un-reviewable — preserve the verdict and suppress the
+    // letter grade entirely (None ⇒ field omitted).  An un-reviewable diff has no
+    // quality grade; emitting F would falsely report a critical failure (#1474).
     if model_proposed == Verdict::Unknown {
-        debug!("verdict=UNKNOWN from model — preserving (diff unassessable); grade ignored");
-        return (Verdict::Unknown, Grade::F);
+        debug!(
+            "verdict=UNKNOWN from model — preserving (diff unassessable); grade suppressed (None)"
+        );
+        return (Verdict::Unknown, None);
     }
 
     // Step 1: derive the grade's implied verdict.
@@ -617,10 +633,12 @@ pub fn derive_verdict_with_grade(
     // Step 3: apply the severity floor over the effective model proposal.
     let final_verdict = derive_verdict(effective_model, findings);
 
-    // Clamp the grade so it is consistent with the final verdict.
+    // Clamp the grade so it is consistent with the final verdict.  `final_verdict`
+    // is never Unknown here (the Unknown branch returned above), so the clamp always
+    // yields a real letter grade.
     let final_grade = clamp_grade_to_verdict(grade, &final_verdict);
 
-    (final_verdict, final_grade)
+    (final_verdict, Some(final_grade))
 }
 
 // ─── Unit tests ─────────────────────────────────────────────────────────────
