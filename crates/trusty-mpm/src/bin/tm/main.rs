@@ -37,7 +37,7 @@ mod tests;
 mod tests_behavior_a;
 
 #[cfg(test)]
-#[path = "tests_behavior_b.rs"]
+#[path = "tests_behavior_b_tests.rs"]
 mod tests_behavior_b;
 
 /// Lazy-loaded help configuration for "did you mean?" suggestions (issue #216).
@@ -321,6 +321,14 @@ async fn main() -> anyhow::Result<()> {
         Command::Login { root } => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::login_cmd(&paths)
+        }
+        Command::Rm { alias, root } => {
+            let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
+            commands::standalone::rm_cmd(&paths, &alias)
+        }
+        Command::Update { alias, root } => {
+            let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
+            commands::standalone::update_cmd(&paths, alias.as_deref())
         }
     };
 

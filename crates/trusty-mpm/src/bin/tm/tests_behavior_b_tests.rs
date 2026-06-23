@@ -388,3 +388,270 @@ fn cli_parses_repair_deploy_force() {
         other => panic!("expected Repair {{ Deploy {{ force: true }} }}, got {other:?}"),
     }
 }
+
+// ── standalone rm / update CLI parse tests ──────────────────────────────────
+
+#[test]
+fn cli_parses_rm_standalone() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "rm", "my-proj"]).unwrap();
+    match cli.command {
+        Command::Rm { alias, root } => {
+            assert_eq!(alias, "my-proj");
+            assert_eq!(root, None);
+        }
+        other => panic!("expected Rm, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_rm_with_root() {
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "rm", "my-proj", "--root", "/tmp/custom"]).unwrap();
+    match cli.command {
+        Command::Rm { alias, root } => {
+            assert_eq!(alias, "my-proj");
+            assert_eq!(root.as_deref(), Some("/tmp/custom"));
+        }
+        other => panic!("expected Rm, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_rm_requires_alias() {
+    assert!(Cli::try_parse_from(["trusty-mpm", "rm"]).is_err());
+}
+
+#[test]
+fn cli_parses_update_standalone() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "update", "my-proj"]).unwrap();
+    match cli.command {
+        Command::Update { alias, root } => {
+            assert_eq!(alias.as_deref(), Some("my-proj"));
+            assert_eq!(root, None);
+        }
+        other => panic!("expected Update, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_update_all_standalone() {
+    // `tm update` without alias should update all loaded aliases.
+    let cli = Cli::try_parse_from(["trusty-mpm", "update"]).unwrap();
+    match cli.command {
+        Command::Update { alias, root } => {
+            assert_eq!(alias, None);
+            assert_eq!(root, None);
+        }
+        other => panic!("expected Update, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_update_with_root() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "update", "--root", "/tmp/r"]).unwrap();
+    match cli.command {
+        Command::Update { alias, root } => {
+            assert_eq!(alias, None);
+            assert_eq!(root.as_deref(), Some("/tmp/r"));
+        }
+        other => panic!("expected Update, got {other:?}"),
+    }
+}
+
+// ── standalone rm / update handler unit tests ───────────────────────────────
+
+#[test]
+fn rm_cmd_removes_registry_entry_and_project_dir() {
+    use crate::commands::managed_root::ManagedPaths;
+    use crate::commands::standalone::rm_cmd;
+    use trusty_mpm::core::standalone::registry::ManagedRegistry;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().to_path_buf();
+    let paths = ManagedPaths::from_root(root.clone());
+
+    // Register and set up a fake project dir.
+    let mut reg = ManagedRegistry::load(&root).unwrap();
+    reg.add("demo", "https://github.com/org/repo", false)
+        .unwrap();
+    reg.save().unwrap();
+
+    let project_dir = root.join("projects").join("demo");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::write(project_dir.join("sentinel.txt"), b"data").unwrap();
+
+    rm_cmd(&paths, "demo").expect("rm_cmd must succeed");
+
+    // Registry entry must be gone.
+    let reg2 = ManagedRegistry::load(&root).unwrap();
+    assert!(
+        reg2.list().is_empty(),
+        "registry must be empty after rm_cmd"
+    );
+    // Project dir must be deleted.
+    assert!(
+        !project_dir.exists(),
+        "project dir must be deleted by rm_cmd"
+    );
+}
+
+#[test]
+fn rm_cmd_errors_on_unknown_alias() {
+    use crate::commands::managed_root::ManagedPaths;
+    use crate::commands::standalone::rm_cmd;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let paths = ManagedPaths::from_root(tmp.path().to_path_buf());
+
+    let result = rm_cmd(&paths, "nonexistent");
+    assert!(result.is_err(), "rm_cmd must error on unknown alias");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("nonexistent"),
+        "error message must mention the alias"
+    );
+}
+
+#[test]
+fn rm_cmd_leaves_claude_config_intact() {
+    use crate::commands::managed_root::ManagedPaths;
+    use crate::commands::standalone::rm_cmd;
+    use trusty_mpm::core::standalone::registry::ManagedRegistry;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().to_path_buf();
+    let paths = ManagedPaths::from_root(root.clone());
+
+    // Create a fake shared claude-config dir.
+    let cfg_dir = root.join("claude-config");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(cfg_dir.join("shared.json"), b"{}").unwrap();
+
+    // Register a project and create its directory.
+    let mut reg = ManagedRegistry::load(&root).unwrap();
+    reg.add("proj", "https://github.com/org/repo", false)
+        .unwrap();
+    reg.save().unwrap();
+    let project_dir = root.join("projects").join("proj");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    rm_cmd(&paths, "proj").expect("rm_cmd must succeed");
+
+    // The shared claude-config dir must still be intact.
+    assert!(
+        cfg_dir.exists(),
+        "claude-config dir must NOT be touched by rm_cmd"
+    );
+    assert!(
+        cfg_dir.join("shared.json").exists(),
+        "files inside claude-config must survive rm_cmd"
+    );
+}
+
+#[test]
+fn rm_cmd_succeeds_when_project_dir_absent() {
+    // If the alias is registered but was never loaded (no project dir), rm must
+    // still deregister cleanly — the dir removal is best-effort.
+    use crate::commands::managed_root::ManagedPaths;
+    use crate::commands::standalone::rm_cmd;
+    use trusty_mpm::core::standalone::registry::ManagedRegistry;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().to_path_buf();
+    let paths = ManagedPaths::from_root(root.clone());
+
+    let mut reg = ManagedRegistry::load(&root).unwrap();
+    reg.add("ghost", "https://github.com/org/repo", false)
+        .unwrap();
+    reg.save().unwrap();
+
+    // No project dir exists (never loaded).
+    assert!(!root.join("projects").join("ghost").exists());
+
+    rm_cmd(&paths, "ghost").expect("rm_cmd must succeed even without project dir");
+
+    let reg2 = ManagedRegistry::load(&root).unwrap();
+    assert!(
+        reg2.list().is_empty(),
+        "registry must be empty after rm_cmd on unloaded alias"
+    );
+}
+
+#[test]
+fn update_cmd_errors_if_alias_not_in_registry() {
+    use crate::commands::managed_root::ManagedPaths;
+    use crate::commands::standalone::update_cmd;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let paths = ManagedPaths::from_root(tmp.path().to_path_buf());
+
+    let result = update_cmd(&paths, Some("missing-alias"));
+    assert!(result.is_err(), "update_cmd must error when alias unknown");
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("missing-alias"),
+        "error must name the unknown alias"
+    );
+}
+
+#[test]
+fn update_cmd_errors_if_not_loaded() {
+    // `tm update <alias>` where alias is registered but project dir does not
+    // exist (never loaded) must error IMMEDIATELY with a message that hints to
+    // run `tm load <alias>` first — not a generic end-of-loop bail.
+    use crate::commands::managed_root::ManagedPaths;
+    use crate::commands::standalone::update_cmd;
+    use trusty_mpm::core::standalone::registry::ManagedRegistry;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().to_path_buf();
+    let paths = ManagedPaths::from_root(root.clone());
+
+    // Register the alias but do NOT create the project dir (never loaded).
+    let mut reg = ManagedRegistry::load(&root).unwrap();
+    reg.add("not-loaded", "https://github.com/org/repo", false)
+        .unwrap();
+    reg.save().unwrap();
+    assert!(!root.join("projects").join("not-loaded").exists());
+
+    let result = update_cmd(&paths, Some("not-loaded"));
+    assert!(
+        result.is_err(),
+        "update_cmd must error when alias is registered but not yet loaded"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("not-loaded"),
+        "error must name the alias: {msg}"
+    );
+    assert!(
+        msg.contains("tm load"),
+        "error must hint to run `tm load`: {msg}"
+    );
+}
+
+#[test]
+fn update_cmd_all_skips_unloaded_returns_ok_when_none_loaded() {
+    // `tm update` (no alias) with zero loaded projects should print a message
+    // and return Ok.
+    use crate::commands::managed_root::ManagedPaths;
+    use crate::commands::standalone::update_cmd;
+    use trusty_mpm::core::standalone::registry::ManagedRegistry;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().to_path_buf();
+    let paths = ManagedPaths::from_root(root.clone());
+
+    // Register an alias but never load it (no project dir).
+    let mut reg = ManagedRegistry::load(&root).unwrap();
+    reg.add("unloaded", "https://github.com/org/repo", false)
+        .unwrap();
+    reg.save().unwrap();
+
+    // With no loaded projects, update_cmd should return Ok (nothing to do).
+    let result = update_cmd(&paths, None);
+    assert!(
+        result.is_ok(),
+        "update_cmd with no loaded aliases must return Ok"
+    );
+}
