@@ -272,27 +272,41 @@ automatically).
 
 **Inputs:** session-id (string).
 
-**Preconditions:** session exists and is in `AwaitingAuth` state (the `claude` process is
-presenting the Max OAuth login prompt).
+**Preconditions (alpha-1):**
 
-**Behavior:**
+- **Stream-JSON backend: `~/.claude` MUST be pre-authenticated before session launch.**
+  The stream-JSON backend has no interactive terminal; if `claude` presents an OAuth
+  login prompt on stdout, the `SessionActor` detects it (§8.2 regex: `AuthPrompt`) and
+  transitions the session to `AuthFailed` (a terminal-like error state, not recoverable
+  within the session). The operator must run `claude auth login` in a shell and then
+  re-launch the session with `tm run`. There is no in-session auth recovery path for
+  stream-JSON in alpha-1.
+- **tmux backend:** session may be in `AwaitingAuth` state; the auth prompt is visible
+  in the tmux pane and the operator can resolve it interactively.
 
-1. For the **tmux backend**: the auth prompt is visible in the tmux pane; no daemon
-   action is needed — the operator attaches via `tmux attach` and completes login
-   interactively.
-2. For the **stream-JSON backend**: the daemon detects the OAuth prompt in the stdout
-   event stream (§8.1 regex detection). It emits a `PendingDecision { kind: Auth }` event
-   to all observers. The TUI / operator must resolve this by attaching interactively (a
-   temporary tmux window can be opened for auth-only purposes).
-3. Once auth is detected as complete (stdout resumes normal output), the actor
-   transitions the session from `AwaitingAuth` to `Running`.
+**Behavior (tmux backend only, alpha-1):**
 
-**Postconditions:** session is in `Running` state.
+1. The auth prompt is visible in the tmux pane named `tm:<project-id>:<sessionNo>`.
+   No daemon action is needed — the operator attaches via `tmux attach -t
+   tm:<project-id>:<sessionNo>` and completes Max OAuth login interactively.
+2. Once auth is detected as complete (tmux pane output resumes normal patterns), the
+   actor transitions from `AwaitingAuth` to `Running`. Detection uses the same
+   §8.2 regex layer applied to pane-capture output.
 
-**Notes:** In normal operation, `ANTHROPIC_API_KEY` is unset (§9) and `claude` uses the
-`~/.claude` credential store, which is populated at first login. Re-authentication is
-only needed if Max session tokens expire. This is an edge case; the typical flow is that
-auth happens once at workstation setup.
+**Behavior (stream-JSON backend, alpha-1 — error path only):**
+
+1. Session is in `AuthFailed` state. `tm auth <id>` returns an error:
+   `AuthFailed: stream-json backend requires pre-authenticated ~/.claude; re-launch
+   after running 'claude auth login'`.
+2. The operator must `tm stop <id>` (or the session auto-stops after `auth_timeout_secs`,
+   default: `30`), run `claude auth login` in a shell, then `tm run <project-id>`.
+
+**Postconditions:** tmux-backend session is in `Running` state. Stream-JSON session in
+`AuthFailed` remains in that state until stopped and re-launched.
+
+**Notes:** `AwaitingAuth → Running` is a **tmux-backend-only transition** in alpha-1.
+An interactive auth bridge for stream-JSON sessions (e.g. spawning a temporary PTY or
+tmux pane for the OAuth flow only) is deferred to beta; see §13.6.
 
 ### 4.5 `tm list`
 
@@ -407,9 +421,21 @@ producer by more than `broadcast_capacity` events receives `Err(RecvError::Lagge
   the observer.
 - The observer **must** treat `ObserverLagged` as a gap signal and re-sync state from
   `GET /sessions/{id}` (the snapshot endpoint) before resuming event-driven logic.
-- Persistent lag (three consecutive `Lagged` errors from the same observer) disconnects
-  that observer automatically — it is replaced with a fresh subscription from the
-  current snapshot.
+- Persistent lag behavior is **observer-type-aware**:
+  - **Best-effort observers** (CLI `tm connect`, TUI display panes, TELUI): on three
+    consecutive `Lagged` errors, the observer is automatically disconnected and
+    resubscribed from the current metadata snapshot. Because there is no event-history
+    ring buffer in alpha-1, resubscription may miss `PendingDecision` and `Restarted`
+    events that occurred during the lag gap. This is an accepted limitation for
+    best-effort consumers — they display a WARN and re-sync from `GET /sessions/{id}`.
+  - **Critical observers** (the SM agent, DOC-14): the SM agent MUST NOT be silently
+    disconnected and resubscribed, as losing a `PendingDecision` or `Restarted` event
+    can stall a goal indefinitely. On the first `Lagged` error from a critical observer,
+    the daemon surfaces a hard `ObserverCriticalLag` error to that observer and the
+    session is transitioned to `AwaitingIntervention` (a new sub-state of `Running`).
+    Recovery requires an explicit SM-agent re-attach or session re-launch — not a
+    silent resubscription. The SM agent registers itself as `ObserverPriority::Critical`
+    at connect time; the daemon uses this tag to apply the correct policy.
 
 **Alternative considered:** per-observer `mpsc` channel with back-pressure (blocking the
 actor until each slow observer drains). Rejected for alpha-1: a slow TUI or SM agent
@@ -434,16 +460,30 @@ the handle — NOT a second field inside `Arc<RwLock<SessionMetadata>>` — acqu
 requires exactly **one** operation with no interleave window:
 
 ```
-// Acquire (compare_exchange: false → true, SeqCst/SeqCst)
+// Step 1: clone the handle under the shared registry read-lock.
+//   (Holding only the shared lock; the RwLock is released after the clone.)
+let handle: SessionActorHandle = {
+    let registry = session_registry.read().await;
+    registry.actors.get(&session_id).cloned()?
+};
+// Step 2: CAS on the Arc<AtomicBool> that lives on the cloned handle.
+//   No registry lock is held here — the Arc keeps the flag alive.
 match handle.write_lock_held.compare_exchange(false, true, SeqCst, SeqCst) {
     Ok(_)  => { /* lock acquired; caller is active writer */ }
     Err(_) => { /* lock already held; caller is read-only observer */ }
 }
 ```
 
-The registry `RwLock` is NOT held during this CAS — the handle is cloned out first
-(shared lock, then released), and the CAS runs on the `Arc<AtomicBool>`. This
-eliminates the two-step TOCTOU window.
+**Safety invariant:** the `SessionActorHandle` — and its `Arc<AtomicBool>` write-lock
+flag — MUST be cloned while holding (at minimum) the **shared registry read-lock**.
+Cloning the handle outside the registry lock is **forbidden**: the actor could be
+deregistered between the registry read and the clone, leaving a dangling handle pointing
+to a stopped actor's flag. The shared lock makes the clone+release atomic with respect
+to deregistration. The CAS itself runs on the cloned `Arc` after the registry lock is
+released, which is safe because the `Arc` keeps the flag alive independently.
+
+The registry `RwLock` is released before the CAS, so write-lock acquisition does NOT
+block other registry readers or writers. This eliminates the two-step TOCTOU window.
 
 **Lock release:**
 - On writer disconnect (channel closed, client exits, `tm stop` on the client side):
@@ -510,9 +550,12 @@ Each `SessionActor` follows this state machine:
   └─────┬──────┘
         │ BackendReady
         ▼
-  ┌────────────┐     Auth prompt detected
+  ┌────────────┐     Auth prompt detected (tmux backend only)
   │  Running   │──────────────────────────► AwaitingAuth
-  │            │◄────────────────────────── (auth complete)
+  │            │◄────────────────────────── (auth complete, tmux)
+  │            │
+  │            │     Auth prompt on stream-JSON backend
+  │            │──────────────────────────► AuthFailed  (terminal)
   └─────┬──────┘
         │
         ├─────── Stop command ─────────────► Stopping
@@ -534,14 +577,20 @@ State transitions emit `SessionEvent`s to the broadcast channel.
 
 ```
 enum SessionEvent {
-    Started       { session_id, backend, ts },
-    Output        { session_id, raw: Bytes, structured: Option<StreamJsonEvent>, ts },
-    ActivityParsed{ session_id, kind: ActivityKind, summary: String, ts },
-    PendingDecision{ session_id, prompt: String, proposed_default: Option<String>, ts },
-    Restarted     { session_id, attempt: u8, context_lost: bool, ts },
+    Started                { session_id, backend, ts },
+    Output                 { session_id, raw: Bytes, structured: Option<StreamJsonEvent>, ts },
+    ActivityParsed         { session_id, kind: ActivityKind, summary: String, ts },
+    PendingDecision        { session_id, prompt: String, proposed_default: Option<String>, ts },
+    Restarted              { session_id, attempt: u8, context_lost: bool, ts },
     // context_lost is always true in alpha-1 (no history replay; see §13.3)
-    Stopped       { session_id, reason: StopReason, ts },
-    Failed        { session_id, reason: String, ts },
+    ObserverLagged         { session_id, dropped: u64 },
+    // ObserverCriticalLag is sent to critical observers (e.g. SM agent) on first Lag;
+    // causes session → AwaitingIntervention (see §6.1)
+    ObserverCriticalLag    { session_id, dropped: u64 },
+    AuthFailed             { session_id, backend, reason: String, ts },
+    // AuthFailed is terminal for stream-JSON backend (see §4.4, §13.6)
+    Stopped                { session_id, reason: StopReason, ts },
+    Failed                 { session_id, reason: String, ts },
 }
 ```
 
@@ -732,10 +781,26 @@ launched `claude` binary (not just daemon-owned children), misses orphans under
 PID-1-reparenting inside containers, and is racy by design. The PID-file registry ties
 each tracked PID to a specific session-id with no ambiguity.
 
-**Alpha-1 limitation:** the PID-file approach does not survive daemon crashes without a
-write-ahead of the PID. The implementation MUST write the PID file before returning
-from `spawn()`, not after, to avoid a crash window where a child runs without a PID
-file.
+**Alpha-1 limitation — PID reuse race (accepted, documented):** PIDs are recycled by
+the OS kernel. Between the time a daemon-owned `claude` child exits (orphaned) and the
+orphan-GC tick, a completely unrelated process could be assigned that same PID. Sending
+SIGTERM to that recycled PID would terminate the wrong process.
+
+Mitigation chosen for alpha-1 (pragmatic, not watertight):
+
+- Before sending SIGTERM, orphan-GC reads the PID file to get the expected session-id,
+  then checks that the process at that PID is still named `claude` (via `/proc/<pid>/comm`
+  on Linux or `ps -p <pid> -o comm=` on macOS). If the name does not match, the PID file
+  is stale: remove it without signalling.
+- This does not close the race entirely (a recycled PID could happen to be a different
+  `claude` invocation), but reduces false-positive SIGTERM probability to near-zero in
+  practice on a developer workstation.
+- A robust production solution (Linux `pidfd_open(2)` to hold a live file descriptor to
+  the child process, or a process-group tag set at spawn) is **deferred to beta** (see
+  §13.5).
+
+**Invariant:** the PID file MUST be written before `spawn()` returns, not after, to
+avoid a crash window where an orphaned child has no PID file.
 
 Orphan-GC findings are logged at WARN level and reported in `GET /health`.
 
@@ -836,3 +901,32 @@ crashes before the child process reads it, the temp file is orphaned. Current be
 (inherited from the existing launch path) uses `tempfile`'s drop-on-close semantics
 where possible, but race conditions between file write and process spawn exist. This is
 a pre-existing issue, not introduced by this spec; tracked separately.
+
+### 13.5 Orphan-GC PID reuse race (accepted alpha-1 limitation)
+
+The PID-file registry (§10.3) is not fully immune to PID reuse: between an orphaned
+child's exit and the next GC tick, the kernel may assign the same PID to an unrelated
+process. The alpha-1 mitigation (name check via `comm`/`ps`) reduces but does not
+eliminate the false-positive SIGTERM risk. A robust fix requires either:
+
+- **Linux `pidfd_open(2)`** (Linux 5.3+): hold a file descriptor to the exact child
+  process at spawn time; the fd becomes invalid when the process exits, so there is no
+  PID reuse window.
+- **Process-group tagging**: set a unique process group at spawn
+  (`setpgid(0, 0)` in the child); orphan-GC kills the entire group, not a single PID.
+
+Both are deferred to beta. Alpha-1 accepts the PID-reuse risk as low-probability on a
+developer workstation (GC interval 60s; PID space large; probability near-zero in
+practice).
+
+### 13.6 Stream-JSON interactive auth bridge (deferred)
+
+The stream-JSON backend requires pre-authenticated `~/.claude` credentials; if `claude`
+presents an OAuth prompt it results in `AuthFailed` and requires session re-launch
+(§4.4). For users whose Max credentials expire mid-session or who run on a fresh
+workstation, this is a friction point.
+
+**Deferred design:** an interactive auth bridge would detect the `AuthPrompt` event,
+temporarily spawn a PTY (or a dedicated tmux pane scoped to the session) to serve the
+OAuth flow, then resume the stream-JSON backend once credentials are written to
+`~/.claude`. This requires PTY management in the daemon and is out of scope for alpha-1.
