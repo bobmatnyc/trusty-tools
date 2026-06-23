@@ -13,6 +13,7 @@
 
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{
     Json,
@@ -28,6 +29,41 @@ use tokio_stream::wrappers::BroadcastStream;
 use crate::control::event::BackendKind;
 use crate::control::{ActorCommand, ControlSessionId, RunParams};
 use crate::daemon::state::DaemonState;
+
+// ── RAII write-lock guard ─────────────────────────────────────────────────────
+
+/// RAII guard that releases the SESSCTL write-lock on drop.
+///
+/// Why: the `ctl_connect_session` handler must release the write-lock when
+/// the SSE stream ends — whether by a normal sender-closed signal, a lag
+/// error, or a client disconnect. Without a guard, the only release point
+/// was the `Err(_)` branch of `filter_map`, leaving the lock permanently held
+/// when the stream ends cleanly. This guard makes release unconditional and
+/// automatic regardless of how the stream terminates.
+/// What: wraps the `Arc<AtomicBool>` write-lock flag and calls
+/// `store(false, SeqCst)` in `Drop`. When `held` is `false` the `Drop` is
+/// a no-op so it is safe to create a guard for observer connections too.
+/// Test: `ctl_connect_write_lock_cas_first_caller_is_writer` verifies the
+/// acquire→observe→release→re-acquire cycle; the guard is the mechanism
+/// that makes the release happen in the stream closure.
+struct WriteLockGuard {
+    flag: Arc<AtomicBool>,
+    held: bool,
+}
+
+impl WriteLockGuard {
+    fn new(flag: Arc<AtomicBool>, held: bool) -> Self {
+        Self { flag, held }
+    }
+}
+
+impl Drop for WriteLockGuard {
+    fn drop(&mut self) {
+        if self.held {
+            self.flag.store(false, Ordering::SeqCst);
+        }
+    }
+}
 
 // ── Request / Response types ──────────────────────────────────────────────────
 
@@ -231,8 +267,10 @@ pub async fn ctl_run_session(
 /// and fits axum's `Sse` responder.
 /// What: looks up the handle, attempts a CAS write-lock, subscribes to the
 /// broadcast channel, and streams each `SessionEvent` as an SSE `data:` line.
-/// On client disconnect, releases the write lock if held.
-/// Test: `ctl_connect_write_lock_cas`.
+/// The `WriteLockGuard` is moved into the stream closure so it drops — and
+/// releases the lock — on ANY stream termination: normal end, lag/close error,
+/// or client disconnect.
+/// Test: `ctl_connect_write_lock_cas_first_caller_is_writer`.
 pub async fn ctl_connect_session(
     State(state): State<Arc<DaemonState>>,
     Path(id_str): Path<String>,
@@ -244,26 +282,28 @@ pub async fn ctl_connect_session(
         .await
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("session {id_str} not found")))?;
 
+    // CAS the write-lock per §6.2. The guard releases on drop (any exit path).
     let writer = handle.try_acquire_write_lock();
+    let guard = WriteLockGuard::new(Arc::clone(&handle.write_lock_held), writer);
     let rx = handle.event_tx.subscribe();
 
-    let stream = BroadcastStream::new(rx).filter_map(move |item| {
-        let handle_clone = handle.clone();
-        let _writer = writer;
-        match item {
+    // Move the guard into the stream so it lives as long as the stream does.
+    // When the stream is dropped (client disconnects, sender closed, or lag),
+    // `guard` drops and releases the write-lock automatically.
+    let stream = BroadcastStream::new(rx)
+        .map(move |item| {
+            // Touch `_guard` to keep it alive in this closure's environment.
+            let _guard = &guard;
+            item
+        })
+        .filter_map(|item| match item {
             Ok(event) => {
                 let json = serde_json::to_string(&event).unwrap_or_default();
                 Some(Ok(Event::default().data(json)))
             }
-            Err(_) => {
-                // Lagged or closed — release write lock if we held it and end stream.
-                if _writer {
-                    handle_clone.release_write_lock();
-                }
-                None
-            }
-        }
-    });
+            // Lagged or channel closed — end the stream (guard drops with it).
+            Err(_) => None,
+        });
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
@@ -406,12 +446,22 @@ mod tests {
         }
     }
 
-    fn test_state() -> Arc<DaemonState> {
+    /// Build a test `DaemonState` and return it together with the `TempDir`
+    /// guard so the temp directory lives for the full test duration.
+    ///
+    /// Why: `DaemonState::with_paths` reads `paths` only at construction time,
+    /// but the underlying `TempDir` must not be deleted until the test ends —
+    /// some constructors write pairing files or perform cleanup that may access
+    /// the directory after `new` returns. Returning the guard here makes the
+    /// lifetime explicit in every caller instead of relying on a comment.
+    /// What: creates a `TempDir`, builds `FrameworkPaths`, constructs
+    /// `DaemonState::with_paths`, wraps in `Arc`, and returns both.
+    /// Test: all test functions below destructure the tuple and bind the guard.
+    fn test_state() -> (Arc<DaemonState>, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("temp dir");
         let paths = crate::core::paths::FrameworkPaths::under(dir.path());
-        // We intentionally let `dir` drop here — the paths are only read at
-        // construction; the in-memory state is self-contained afterwards.
-        Arc::new(DaemonState::with_paths(&paths))
+        let state = Arc::new(DaemonState::with_paths(&paths));
+        (state, dir)
     }
 
     fn test_router(state: Arc<DaemonState>) -> Router {
@@ -429,7 +479,7 @@ mod tests {
 
     #[tokio::test]
     async fn ctl_list_sessions_returns_empty() {
-        let state = test_state();
+        let (state, _dir) = test_state();
         let app = test_router(state);
         let req = Request::builder()
             .method(Method::GET)
@@ -447,7 +497,7 @@ mod tests {
 
     #[tokio::test]
     async fn ctl_list_sessions_returns_registered_sessions() {
-        let state = test_state();
+        let (state, _dir) = test_state();
         let id = ControlSessionId::new("list-proj", 0);
         let handle = make_handle(&id);
         state.session_registry.register(id.clone(), handle).await;
@@ -473,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn ctl_stop_session_not_found() {
-        let state = test_state();
+        let (state, _dir) = test_state();
         let app = test_router(state);
         let req = Request::builder()
             .method(Method::POST)
@@ -486,7 +536,7 @@ mod tests {
 
     #[tokio::test]
     async fn ctl_auth_session_returns_state() {
-        let state = test_state();
+        let (state, _dir) = test_state();
         let id = ControlSessionId::new("auth-proj", 0);
         let handle = make_handle(&id);
         state.session_registry.register(id.clone(), handle).await;
@@ -510,7 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn ctl_auth_session_not_found() {
-        let state = test_state();
+        let (state, _dir) = test_state();
         let app = test_router(state);
         let req = Request::builder()
             .method(Method::GET)
@@ -521,16 +571,24 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// Verify the write-lock CAS: acquire → observer → release → re-acquire.
+    ///
+    /// Why: this test proves the §6.2 write-lock protocol is correct at the
+    /// handle level. The SSE stream closure relies on the same
+    /// `try_acquire_write_lock` / `release_write_lock` primitives, so testing
+    /// them here validates the core invariant without requiring a live SSE
+    /// connection.
+    /// What: registers a handle, acquires the lock on clone 1, verifies clone 2
+    /// is observer-only, releases, and verifies clone 3 can re-acquire.
+    /// Test: this test (structural CAS semantics); the RAII guard's drop is
+    /// exercised by `write_lock_guard_releases_on_drop`.
     #[tokio::test]
     async fn ctl_connect_write_lock_cas_first_caller_is_writer() {
-        let state = test_state();
+        let (state, _dir) = test_state();
         let id = ControlSessionId::new("cas-proj", 0);
         let handle = make_handle(&id);
         state.session_registry.register(id.clone(), handle).await;
 
-        // Verify first CAS via the registry handle directly — the connect handler
-        // streams SSE which is hard to tear down cleanly in a unit test, so we
-        // test the CAS semantics through the shared Arc<AtomicBool>.
         let h = state
             .session_registry
             .get(&id)
@@ -543,11 +601,57 @@ mod tests {
         h.release_write_lock();
         let third = h.try_acquire_write_lock();
         assert!(third, "after release, lock must be acquirable again");
+        // Clean up so we don't leave the lock held after the test.
+        h.release_write_lock();
+    }
+
+    /// Verify the `WriteLockGuard` drops the lock on any exit path.
+    ///
+    /// Why: the HIGH finding required proving the RAII guard actually releases
+    /// the lock when it drops — not just when `release_write_lock()` is called
+    /// manually.
+    /// What: creates a guard with `held=true`, verifies the flag is `true`, drops
+    /// the guard by moving it into a block, then verifies the flag is `false`.
+    /// Test: this test (direct RAII drop verification).
+    #[test]
+    fn write_lock_guard_releases_on_drop() {
+        let flag = Arc::new(AtomicBool::new(false));
+        // Simulate a successful acquire.
+        flag.store(true, Ordering::SeqCst);
+        {
+            let _guard = WriteLockGuard::new(Arc::clone(&flag), true);
+            assert!(
+                flag.load(Ordering::SeqCst),
+                "flag must be true while guard is live"
+            );
+        }
+        // Guard dropped — flag must be false.
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "guard must release lock on drop"
+        );
+    }
+
+    /// Verify a no-op guard (observer) does not reset the flag on drop.
+    ///
+    /// Why: observer connections create a `WriteLockGuard` with `held=false`;
+    /// dropping it must NOT clear a flag that a concurrent writer holds.
+    /// Test: this test.
+    #[test]
+    fn write_lock_guard_observer_noop_on_drop() {
+        let flag = Arc::new(AtomicBool::new(true)); // writer holds it
+        {
+            let _observer_guard = WriteLockGuard::new(Arc::clone(&flag), false);
+        }
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "observer guard must not clear a writer's lock"
+        );
     }
 
     #[tokio::test]
     async fn ctl_stop_session_sends_stop_command() {
-        let state = test_state();
+        let (state, _dir) = test_state();
         let id = ControlSessionId::new("stop-proj", 0);
         let (command_tx, mut command_rx) = mpsc::channel(4);
         let (event_tx, _) = broadcast::channel(16);

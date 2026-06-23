@@ -193,8 +193,9 @@ async fn sessctl_auth(
 ///
 /// Why: `tm sessctl list` gives operators a snapshot of every live control-plane
 /// session without requiring access to the daemon process.
-/// What: GETs the sessions list (with optional `?project=` filter) and renders
-/// as a table or raw JSON.
+/// What: GETs the sessions list (with optional `?project=` filter using reqwest's
+/// query builder so project names with special characters are properly encoded)
+/// and renders as a table or raw JSON.
 /// Test: `cli_parses_sessctl_list`; live test requires daemon.
 async fn sessctl_list(
     client: &reqwest::Client,
@@ -202,12 +203,13 @@ async fn sessctl_list(
     project: Option<&str>,
     format: &str,
 ) -> anyhow::Result<()> {
-    let mut endpoint = format!("{url}/api/v1/control/sessions");
+    let endpoint = format!("{url}/api/v1/control/sessions");
+    let mut req = client.get(&endpoint);
     if let Some(proj) = project {
-        endpoint.push_str(&format!("?project={proj}"));
+        req = req.query(&[("project", proj)]);
     }
 
-    let resp = client.get(&endpoint).send().await?;
+    let resp = req.send().await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -252,22 +254,22 @@ async fn sessctl_list(
 /// Attempt to resolve a project's workdir from the daemon registry (best-effort).
 ///
 /// Why: when `--workdir` is omitted the daemon may know the project's working
-/// directory from its project registry. This tries that lookup; the caller
-/// falls back to cwd when this returns `None`.
-/// What: GETs `GET /projects/{id}` synchronously-ish (blocks the tokio task)
-/// and returns `Some(PathBuf)` on success, `None` on any error.
-/// Test: fallback path covered by unit tests; success path requires daemon.
+/// directory from its project registry. This preserves the lookup seam for WI-3.
+/// What: currently returns `None` (fallback to cwd) with an explicit stderr
+/// warning so the operator knows why cwd was chosen. A full HTTP lookup is
+/// deferred to WI-3 when the project registry HTTP endpoint is wired.
+/// Test: callers fall back to `std::env::current_dir()` when this returns
+/// `None`; the warning message is observable in integration tests.
 fn resolve_workdir_from_daemon(
-    client: &reqwest::Client,
-    url: &str,
+    _client: &reqwest::Client,
+    _url: &str,
     project_id: &str,
 ) -> Option<PathBuf> {
-    // Build a blocking request from the async client handle.
-    // We use a one-shot tokio runtime via `futures::executor::block_on` to avoid
-    // nesting runtimes; the caller is already inside `#[tokio::main]`.
-    // Actually, simpler: just return None here and let the caller use cwd.
-    // A full lookup would require another async call; for Phase 2 the --workdir
-    // flag is the correct way to override. This function preserves the seam.
-    let _ = (client, url, project_id);
+    // TODO(#1593/WI-3): implement daemon project-workdir lookup once the
+    // project registry HTTP endpoint is wired. For now, fall back to cwd.
+    eprintln!(
+        "warning: no --workdir given and daemon workdir lookup is not yet wired \
+         (WI-3); using current directory as workdir for project '{project_id}'"
+    );
     None
 }
