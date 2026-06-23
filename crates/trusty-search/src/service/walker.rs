@@ -192,6 +192,21 @@ pub const DOC_EXCLUDE_BASENAME_SUBSTRINGS: &[&str] = &["changelog", "license", "
 /// [`SKIP_DIRS`]) and `data_file_max_bytes` (a tighter size cap applied only to
 /// [`DATA_EXTS`] files). Because these carry an owned `Vec<String>`, `WalkOptions`
 /// is no longer `Copy`; the orchestrator clones it per subtree.
+///
+/// The full config stack for #1372 is complete:
+///
+/// - **Walker defaults** (`DEFAULT_EXTRA_SKIP_DIRS` / `DEFAULT_DATA_FILE_MAX_BYTES`) —
+///   this file.
+/// - **Per-index config** (`IndexConfig` / `ProjectConfig`) — `core/repo_config.rs`
+///   and `core/project_config.rs`; defaults flow into `WalkOptions` at reindex time.
+/// - **Runtime edit API** (`GET`/`PATCH /indexes/:id/config`) —
+///   `service/server/index_config.rs`; changes persist to `indexes.toml`.
+/// - **Dashboard UI** (`IndexConfig.svelte`) — the settings view reads and
+///   writes the config API so operators can tune hygiene without touching config files.
+///
+/// Issue #1554 (walk root in skip-dir path) is addressed by stripping the
+/// canonical root prefix before checking components — only segments RELATIVE
+/// to the walk root are tested against the skip lists.
 #[derive(Debug, Clone)]
 pub struct WalkOptions {
     /// When `true` (default as of v0.8.3 / issue #118), files matching
