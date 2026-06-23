@@ -265,6 +265,14 @@ pub enum CommandResult {
     },
     /// `managed-list` — the managed session-manager session list.
     ManagedSessions(Vec<ManagedSessionView>),
+    /// `managed-fleet` — managed sessions grouped by registered project.
+    ///
+    /// Why: `/fleet` gives the operator a project-oriented view so related
+    /// sessions are visible together rather than as a flat list.
+    /// What: each entry is a [`ProjectFleetView`] — the project plus its bound
+    /// sessions; projects with no sessions are still listed (empty `sessions`
+    /// vec) so the operator sees the full registered project landscape.
+    ManagedFleet(Vec<ProjectFleetView>),
     /// `managed-get` — one managed session's record.
     ManagedSession(ManagedSessionView),
     /// `managed-send` — text was injected into a managed session's pane.
@@ -354,6 +362,43 @@ pub enum CommandResult {
     Error(String),
 }
 
+/// A project and its grouped managed sessions, for the fleet-by-project view.
+///
+/// Why: `/fleet` should group sessions by project so the operator sees which
+/// work belongs to which repo at a glance; a dedicated view type keeps the UIs
+/// off the resolver's `ProjectFleet` shape and off the wire DTOs.
+/// What: the project name/URL and the sessions bound to it; `sessions` may be
+/// empty when the project is registered but has no active sessions.
+/// Test: covered by the executor's `execute_managed_fleet_*` tests and the
+/// Telegram formatter's `format_fleet_by_project_*` tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectFleetView {
+    /// Registered project name.
+    pub project_name: String,
+    /// Repository URL for the project.
+    pub repo_url: String,
+    /// Managed sessions bound to this project (may be empty).
+    pub sessions: Vec<ManagedSessionView>,
+}
+
+/// Map a managed session lifecycle state word to a status glyph.
+///
+/// Why: both the Telegram and Slack fleet formatters use identical glyph
+/// conventions (`active → 🟢 / provisioning → 🟡 / _ → 🔴`); keeping the
+/// mapping in one place next to [`ProjectFleetView`] ensures a new lifecycle
+/// state can't diverge silently between adapters.
+/// What: returns a `'static str` glyph — one of `🟢`, `🟡`, or `🔴` — based
+/// on an ASCII-case-insensitive match against `state`.
+/// Test: `fleet_state_glyph_covers_all_tiers` in `client/result.rs` plus
+/// coverage via `format_fleet_by_project_*` tests in both formatter test files.
+pub(crate) fn fleet_state_glyph(state: &str) -> &'static str {
+    match state.to_ascii_lowercase().as_str() {
+        "active" => "🟢",
+        "provisioning" => "🟡",
+        _ => "🔴",
+    }
+}
+
 /// A flat, UI-agnostic view of a managed session.
 ///
 /// Why: the managed list/get results render the same flat summary every adapter
@@ -399,5 +444,30 @@ impl From<crate::client::ManagedSessionSummary> for ManagedSessionView {
             pending_decision: s.pending_decision,
             proposed_default: s.proposed_default,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shared glyph helper covers all three lifecycle tiers.
+    ///
+    /// Why: `fleet_state_glyph` is the single source of truth for formatter
+    /// glyphs; this test ensures both adapters' behaviour stays correct after
+    /// any change to the mapping.
+    /// What: asserts each canonical state maps to the right glyph and that
+    /// case-insensitive matching works.
+    /// Test: this function IS the test.
+    #[test]
+    fn fleet_state_glyph_covers_all_tiers() {
+        assert_eq!(fleet_state_glyph("active"), "🟢");
+        assert_eq!(fleet_state_glyph("Active"), "🟢"); // case-insensitive
+        assert_eq!(fleet_state_glyph("provisioning"), "🟡");
+        assert_eq!(fleet_state_glyph("PROVISIONING"), "🟡");
+        assert_eq!(fleet_state_glyph("stopped"), "🔴");
+        assert_eq!(fleet_state_glyph("errored"), "🔴");
+        assert_eq!(fleet_state_glyph("decommissioned"), "🔴");
+        assert_eq!(fleet_state_glyph(""), "🔴"); // unknown → red
     }
 }

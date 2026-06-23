@@ -18,8 +18,9 @@ use anyhow::Context;
 
 use super::DaemonClient;
 use super::types::{
-    ManagedActivityResponse, ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest,
-    ManagedAnswerResponse, ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
+    FleetByProjectWireResponse, FleetProjectGroupWire, ManagedActivityResponse,
+    ManagedAdoptRequest, ManagedAdoptResponse, ManagedAnswerRequest, ManagedAnswerResponse,
+    ManagedAttachCmdResponse, ManagedListResponse, ManagedSendInputRequest,
     ManagedSendInputResponse, ManagedSessionSummary, ManagedSpawnRequest, ManagedSpawnResponse,
 };
 
@@ -42,6 +43,29 @@ impl DaemonClient {
             .json()
             .await?;
         Ok(body.sessions)
+    }
+
+    /// Fetch managed sessions grouped by project via `GET /api/v1/sessions/managed/fleet`.
+    ///
+    /// Why: the fleet-by-project view groups live sessions under their owning
+    /// project so the Telegram `/fleet` command and the TUI can render a
+    /// per-project breakdown without re-implementing the resolver logic on the
+    /// client side.
+    /// What: GETs the fleet endpoint and returns the `projects` array as a vec
+    /// of `(project_name, repo_url, sessions)` tuples via [`FleetProjectGroupWire`].
+    /// Test: `managed_fleet_response_deserializes` in `tests.rs`; live HTTP via
+    /// `fleet_route_groups_by_project` in `tests/session_manager_mvp.rs`.
+    pub async fn fleet_managed_sessions(&self) -> anyhow::Result<Vec<FleetProjectGroupWire>> {
+        let url = format!("{}/api/v1/sessions/managed/fleet", self.base);
+        let body: FleetByProjectWireResponse = self
+            .http
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(body.projects)
     }
 
     /// Fetch one managed session via `GET /api/v1/sessions/managed/{id}`.

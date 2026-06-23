@@ -166,7 +166,7 @@ impl From<TelegramCommand> for TrustyCommand {
                     runtime: None,
                 }
             }
-            TelegramCommand::Fleet => TrustyCommand::ManagedList,
+            TelegramCommand::Fleet => TrustyCommand::ManagedFleet,
             TelegramCommand::Get(target) => TrustyCommand::ManagedGet {
                 target: target.trim().to_string(),
             },
@@ -386,10 +386,10 @@ mod tests {
 
     #[test]
     fn fleet_command_converts() {
-        // `/fleet` lists the managed fleet — distinct from legacy `/sessions`.
+        // `/fleet` maps to ManagedFleet (project-grouped view) since WI-B (#1586).
         assert_eq!(
             TrustyCommand::from(TelegramCommand::Fleet),
-            TrustyCommand::ManagedList
+            TrustyCommand::ManagedFleet
         );
     }
 

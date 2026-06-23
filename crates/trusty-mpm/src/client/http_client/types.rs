@@ -616,6 +616,37 @@ pub struct ManagedActivityResponse {
     pub proposed_default: Option<String>,
 }
 
+/// Per-project session group from `GET /api/v1/sessions/managed/fleet`.
+///
+/// Why: the fleet-by-project endpoint groups sessions by registered project so
+/// the client view layer (Telegram, TUI) can render per-project sections without
+/// re-implementing the grouping logic.
+/// What: mirrors `daemon::managed_routes::FleetProjectGroup` field-for-field.
+/// Test: `managed_fleet_response_deserializes` in `tests.rs`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetProjectGroupWire {
+    /// Registered project name.
+    pub project_name: String,
+    /// Repository URL for the project.
+    pub repo_url: String,
+    /// Sessions bound to this project (may be empty).
+    #[serde(default)]
+    pub sessions: Vec<ManagedSessionSummary>,
+}
+
+/// Response body for `GET /api/v1/sessions/managed/fleet`.
+///
+/// Why: a typed wrapper so the client deserializes the `projects` key without
+/// an ad-hoc local struct.
+/// What: mirrors `daemon::managed_routes::FleetByProjectResponse`.
+/// Test: `managed_fleet_response_deserializes` in `tests.rs`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FleetByProjectWireResponse {
+    /// Per-project session groups.
+    #[serde(default)]
+    pub projects: Vec<FleetProjectGroupWire>,
+}
+
 /// The daemon's `GET /health` snapshot.
 ///
 /// Why: the `health` verb reports the daemon's liveness word and the

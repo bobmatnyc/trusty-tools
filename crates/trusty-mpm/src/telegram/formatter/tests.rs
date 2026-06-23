@@ -1,7 +1,7 @@
 use super::*;
 use crate::client::{
-    DecisionCounts, DiscoveredProjectSummary, RecommendationSummary, SessionSummary,
-    TmuxSessionSummary,
+    DecisionCounts, DiscoveredProjectSummary, ManagedSessionView, ProjectFleetView,
+    RecommendationSummary, SessionSummary, TmuxSessionSummary,
 };
 
 #[test]
@@ -376,6 +376,156 @@ fn intentional_html_tags_are_preserved_in_other_variants() {
         !text.contains("&lt;b&gt;"),
         "intentional <b> must not be double-escaped: {text}"
     );
+}
+
+// ── WI-B (#1586): fleet-by-project formatter ──────────────────────────────────
+
+/// Empty fleet renders a placeholder, not an empty string.
+///
+/// Why: the operator needs a non-empty message even when no projects are
+/// registered, so Telegram always has something to display.
+/// What: `format_fleet_by_project` with an empty slice returns the sentinel
+/// "No registered projects." string.
+/// Test: this function IS the test.
+#[test]
+fn format_fleet_by_project_empty_returns_placeholder() {
+    let text = format_fleet_by_project(&[]);
+    assert_eq!(text, "No registered projects.");
+}
+
+/// Projects with sessions are rendered with correct glyph/flag/HTML structure.
+///
+/// Why: the Telegram bot sends HTML-escaped content under `ParseMode::Html`;
+/// project names and repo URLs that contain `<`, `>`, or `&` would break the
+/// Telegram message if unescaped.
+/// What: the formatter emits the heading, one block per project with its
+/// sessions, the pending-decision ⚠️ flag when applicable, and the state glyph.
+/// Test: this function IS the test.
+#[test]
+fn format_fleet_by_project_renders_projects() {
+    let fleet = vec![
+        ProjectFleetView {
+            project_name: "proj-alpha".into(),
+            repo_url: "https://github.com/org/alpha".into(),
+            sessions: vec![
+                ManagedSessionView {
+                    id: "aaaa1111bbbb2222".into(),
+                    name: "tmpm-alpha-1".into(),
+                    state: "active".into(),
+                    workspace_path: None,
+                    repo_url: None,
+                    branch: None,
+                    pending_decision: None,
+                    proposed_default: None,
+                },
+                ManagedSessionView {
+                    id: "cccc3333dddd4444".into(),
+                    name: "tmpm-alpha-2".into(),
+                    state: "stopped".into(),
+                    workspace_path: None,
+                    repo_url: None,
+                    branch: None,
+                    pending_decision: Some("apply patch?".into()),
+                    proposed_default: Some("yes".into()),
+                },
+            ],
+        },
+        ProjectFleetView {
+            project_name: "proj-beta".into(),
+            repo_url: "https://github.com/org/beta".into(),
+            sessions: vec![],
+        },
+    ];
+    let text = format_fleet_by_project(&fleet);
+
+    // Heading
+    assert!(text.contains("<b>fleet by project</b>"), "heading: {text}");
+
+    // Project alpha header
+    assert!(
+        text.contains("<b>proj-alpha</b>"),
+        "project name must be bold: {text}"
+    );
+    assert!(
+        text.contains("<code>https://github.com/org/alpha</code>"),
+        "repo url must be in code tag: {text}"
+    );
+
+    // Active session gets green glyph, short id, name, state
+    assert!(text.contains("🟢"), "active → 🟢: {text}");
+    assert!(text.contains("<code>aaaa1111…</code>"), "short id: {text}");
+    assert!(text.contains("tmpm-alpha-1"), "session name: {text}");
+    assert!(text.contains("[active]"), "state bracket: {text}");
+
+    // Stopped + pending decision gets red glyph + warning flag
+    assert!(text.contains("🔴"), "stopped → 🔴: {text}");
+    assert!(text.contains("⚠️"), "pending decision flag: {text}");
+    assert!(text.contains("tmpm-alpha-2"), "second session name: {text}");
+
+    // Project beta has no sessions → dash placeholder
+    assert!(
+        text.contains("<b>proj-beta</b>"),
+        "beta project header: {text}"
+    );
+    assert!(
+        text.contains("\n  —"),
+        "empty project placeholder dash: {text}"
+    );
+}
+
+/// Project names / repo URLs with HTML-significant chars must be escaped.
+///
+/// Why: daemon-sourced project names and URLs may contain `<`, `>`, or `&`;
+/// sending them raw under `ParseMode::Html` causes Telegram to reject or
+/// misrender the message (same class of bug as issue #1514).
+/// What: `format_fleet_by_project` must escape project_name and repo_url.
+/// Test: this function IS the test.
+#[test]
+fn format_fleet_by_project_escapes_html_in_project_fields() {
+    let fleet = vec![ProjectFleetView {
+        project_name: "org/proj<1>&x".into(),
+        repo_url: "https://host/repo&foo<bar>".into(),
+        sessions: vec![],
+    }];
+    let text = format_fleet_by_project(&fleet);
+    assert!(
+        text.contains("org/proj&lt;1&gt;&amp;x"),
+        "project_name must be HTML-escaped: {text}"
+    );
+    assert!(
+        text.contains("https://host/repo&amp;foo&lt;bar&gt;"),
+        "repo_url must be HTML-escaped: {text}"
+    );
+    assert!(
+        !text.contains("org/proj<1>&x"),
+        "raw < and & must not appear in project_name: {text}"
+    );
+}
+
+/// Provisioning state maps to the yellow glyph.
+///
+/// Why: `state_glyph` must emit 🟡 for `"provisioning"` to keep the three-tier
+/// traffic-light convention consistent.
+/// What: a fleet entry with one `provisioning` session produces the 🟡 glyph.
+/// Test: this function IS the test.
+#[test]
+fn format_fleet_by_project_provisioning_glyph() {
+    let fleet = vec![ProjectFleetView {
+        project_name: "proj".into(),
+        repo_url: "https://example.com/repo".into(),
+        sessions: vec![ManagedSessionView {
+            id: "eeee5555ffff6666".into(),
+            name: "tmpm-prov".into(),
+            state: "provisioning".into(),
+            workspace_path: None,
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+        }],
+    }];
+    let text = format_fleet_by_project(&fleet);
+    assert!(text.contains("🟡"), "provisioning → 🟡: {text}");
 }
 
 /// Ampersands in Help text must be escaped to `&amp;`.
