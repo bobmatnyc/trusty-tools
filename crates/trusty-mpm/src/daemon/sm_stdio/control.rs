@@ -108,10 +108,13 @@ impl SessionControl for DaemonSessionControl {
     /// What: maps `workdir → repo_url` (unless an explicit `repo_url` was
     /// supplied — WI-A #1585 — in which case that takes precedence), `prompt →
     /// task` (defaulting to a generic description when absent), `model →
-    /// runtime`, and `ref_ → git_ref` (WI-A #1585; empty string when absent,
-    /// which lets the spawn path use its default-branch strategy). Returns
-    /// `{ session_id }`. The `goal_id` link is recorded by the caller via the
-    /// goal store (§9.3), not here, so this stays purely session-control.
+    /// runtime`, and `ref_ → git_ref` (WI-A #1585; empty string when absent).
+    /// A blank `git_ref` is explicitly handled by `RealGitBackend::clone_repo`
+    /// which omits `--branch` entirely so git uses the remote's default branch
+    /// (HEAD) — see `provisioner::workspace::blank_git_ref_omits_branch_flag`
+    /// for the contract test. Returns `{ session_id }`. The `goal_id` link is
+    /// recorded by the caller via the goal store (§9.3), not here, so this
+    /// stays purely session-control.
     /// Test: forwards to `spawn_managed` (managed integration tests); the
     /// repo_url/ref_ threading is covered by
     /// `chat_action_tests.rs::execute_launch_threads_repo_url_and_ref_`.
