@@ -24,6 +24,7 @@ use crate::core::paths::FrameworkPaths;
 use crate::core::project::ProjectInfo;
 use crate::core::session::{Session, SessionId};
 
+use crate::control::SessionRegistry;
 use crate::daemon::audit::AuditLogger;
 use crate::daemon::optimizer::OptimizerConfig;
 
@@ -212,6 +213,17 @@ pub struct DaemonState {
     /// Test: `mcp_project` tests exercise the registry via the dispatch path.
     pub(super) project_registry:
         tokio::sync::OnceCell<std::sync::Arc<crate::project::ProjectRegistry>>,
+
+    /// SESSCTL control-plane session registry (WI-2, #1593).
+    ///
+    /// Why: every HTTP handler and CLI command for the SESSCTL surface needs a
+    /// single, shared, thread-safe view of live control-plane sessions. Storing
+    /// it in `DaemonState` follows the same injection pattern as every other
+    /// shared subsystem.
+    /// What: wraps `HashMap<ControlSessionId, SessionActorHandle>` behind a
+    /// `tokio::sync::RwLock`; actors are registered here via `run_session`.
+    /// Test: `control_routes` handler tests register sessions and assert list/get.
+    pub session_registry: Arc<SessionRegistry>,
 }
 
 impl Default for DaemonState {
@@ -292,6 +304,7 @@ impl DaemonState {
             managed_sessions: tokio::sync::OnceCell::new(),
             activity_monitor: std::sync::OnceLock::new(),
             project_registry: tokio::sync::OnceCell::new(),
+            session_registry: Arc::new(SessionRegistry::new()),
         }
     }
 
@@ -344,6 +357,7 @@ impl DaemonState {
             managed_sessions: tokio::sync::OnceCell::new(),
             activity_monitor: std::sync::OnceLock::new(),
             project_registry: tokio::sync::OnceCell::new(),
+            session_registry: Arc::new(SessionRegistry::new()),
         }
     }
 

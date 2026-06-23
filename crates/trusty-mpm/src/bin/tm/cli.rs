@@ -583,29 +583,21 @@ pub(crate) enum Command {
         root: Option<String>,
     },
 
-    /// Spawn a SESSCTL control-plane session for a registered project (WI-1 #1592).
+    /// Manage SESSCTL control-plane sessions (WI-2 #1593).
     ///
-    /// Why: `tm sessctl-run` is the Phase-1 gate command for the alpha-1 unified
-    /// session control plane (epic #1590). It allocates a `<project-id>-<N>`
-    /// session ID, spawns a `SessionActor` via the `SessionRegistry`, and returns
-    /// the session ID so callers can observe the session.
-    /// What: resolves `project_id` to a workdir via the daemon's project registry,
-    /// selects either the `StreamJsonBackend` (default) or `TmuxBackend` (`--tmux`),
-    /// spawns the actor, and prints the allocated session ID.
-    /// Test: `cli_parses_sessctl_run` in `tests.rs`.
-    #[command(name = "sessctl-run")]
-    SessctlRun {
-        /// Registered project ID to run a session for.
-        project_id: String,
-        /// Use the tmux backend instead of the default stream-JSON backend.
-        ///
-        /// When set, the session is hosted in a tmux session named
-        /// `tm:<project-id>:<N>` and driven via `tmux send-keys`.
-        #[arg(long)]
-        tmux: bool,
-        /// Path to a system-prompt file to append (`--append-system-prompt-file`).
-        #[arg(long)]
-        prompt_file: Option<String>,
+    /// Why: the Phase-2 implementation replaces the flat `sessctl-run` command
+    /// with a proper subcommand group that mirrors the daemon HTTP API surface
+    /// (`run`, `connect`, `stop`, `auth`, `list`).
+    /// What: dispatches to daemon HTTP endpoints under
+    /// `/api/v1/control/sessions/*`.
+    /// Test: `cli_parses_sessctl_run`, `cli_parses_sessctl_connect`,
+    /// `cli_parses_sessctl_stop`, `cli_parses_sessctl_auth`,
+    /// `cli_parses_sessctl_list` in `tests.rs`.
+    #[command(name = "sessctl")]
+    Sessctl {
+        /// SESSCTL action to perform.
+        #[command(subcommand)]
+        action: SessctlAction,
     },
 
     /// Standalone metaharness — PM + sub-agent delegation without the daemon (#1045).
@@ -630,6 +622,86 @@ pub(crate) enum Command {
         /// Metaharness action to run.
         #[command(subcommand)]
         action: MetaAction,
+    },
+}
+
+/// Verbs for the `tm sessctl` SESSCTL control-plane command group (WI-2 #1593).
+///
+/// Why: Phase 2 exposes the full session lifecycle over the daemon HTTP API;
+/// a sub-subcommand group makes each verb discoverable and individually
+/// parseable without growing the top-level command surface.
+/// What: `Run` spawns a session, `Connect` streams SSE events, `Stop` sends
+/// a stop command, `Auth` polls the auth state, `List` enumerates sessions.
+/// Test: `cli_parses_sessctl_*` in `tests.rs`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum SessctlAction {
+    /// Spawn a SESSCTL session for a project via the daemon HTTP API.
+    ///
+    /// Why: delegates session spawning to the daemon so a single shared
+    /// registry owns all live sessions.
+    /// What: POSTs to `POST /api/v1/control/sessions/run` and prints the
+    /// allocated session ID.
+    /// Test: `cli_parses_sessctl_run`.
+    Run {
+        /// Registered project ID.
+        project_id: String,
+        /// Use the tmux backend instead of stream-JSON.
+        #[arg(long)]
+        tmux: bool,
+        /// Path to a system-prompt file (`--append-system-prompt-file`).
+        #[arg(long)]
+        prompt_file: Option<String>,
+        /// Working directory override (daemon resolves from project-id by default).
+        #[arg(long)]
+        workdir: Option<String>,
+    },
+    /// Connect to a session (writer if write-lock available, observer otherwise).
+    ///
+    /// Why: streams SSE events from the daemon so the CLI can display live
+    /// session output without embedding the registry.
+    /// What: POSTs to `POST /api/v1/control/sessions/{id}/connect` and prints
+    /// each event to stdout.
+    /// Test: `cli_parses_sessctl_connect`.
+    Connect {
+        /// SESSCTL session ID (e.g. `my-proj-0`).
+        session_id: String,
+    },
+    /// Stop a session (graceful by default, --force for immediate).
+    ///
+    /// Why: mirrors `tm sessions stop` for the SESSCTL surface.
+    /// What: POSTs to `POST /api/v1/control/sessions/{id}/stop?force=<bool>`.
+    /// Test: `cli_parses_sessctl_stop`.
+    Stop {
+        /// SESSCTL session ID.
+        session_id: String,
+        /// Send ForceStop instead of graceful Stop.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show the auth state for a session.
+    ///
+    /// Why: lets the operator poll for `awaiting-auth` without subscribing to
+    /// the full SSE stream.
+    /// What: GETs `GET /api/v1/control/sessions/{id}/auth` and prints the result.
+    /// Test: `cli_parses_sessctl_auth`.
+    Auth {
+        /// SESSCTL session ID.
+        session_id: String,
+    },
+    /// List all SESSCTL sessions.
+    ///
+    /// Why: provides a table or JSON view of every live control-plane session.
+    /// What: GETs `GET /api/v1/control/sessions?project=<filter>` and renders
+    /// the result as a table or JSON.
+    /// Test: `cli_parses_sessctl_list`.
+    #[command(name = "list")]
+    List {
+        /// Filter by project ID.
+        #[arg(long)]
+        project: Option<String>,
+        /// Output format: `table` (default) or `json`.
+        #[arg(long, default_value = "table", value_parser = ["table", "json"])]
+        format: String,
     },
 }
 

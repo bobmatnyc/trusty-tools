@@ -36,6 +36,19 @@ use super::error::DaemonError;
 use super::services::{HookDecision, HookService, PairingService, SessionService, TmuxService};
 use super::state::DaemonState;
 
+/// The SESSCTL control-plane routes (`/api/v1/control/sessions/*`, WI-2 #1593).
+///
+/// Why: the SESSCTL Phase 2 handlers are a cohesive cluster; keeping them in a
+/// sibling module mirrors `coordinator_routes` and keeps `api.rs` focused on
+/// routing only.
+/// What: five handlers wired to `DaemonState::session_registry` (run, connect,
+/// stop, auth, list). Re-exported so `router` refers to them unqualified.
+/// Test: `control_routes::tests`.
+pub mod control_routes;
+pub use control_routes::{
+    ctl_auth_session, ctl_connect_session, ctl_list_sessions, ctl_run_session, ctl_stop_session,
+};
+
 /// The Claude Code configuration analyzer routes (`/claude-config/*`).
 ///
 /// Why: that endpoint cluster is cohesive and large; keeping it in its own
@@ -189,6 +202,17 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route("/api/v1/doctor", get(doctor))
         .route("/api/v1/errors", get(list_errors))
         .route("/api/v1/report-bug", post(report_bug_http))
+        // WI-2 #1593: SESSCTL control-plane routes. All literal `/run` and
+        // `/{id}/*` leaves are registered before any `managed/{id}` param route
+        // so they are never captured as managed-session IDs.
+        .route("/api/v1/control/sessions", get(ctl_list_sessions))
+        .route("/api/v1/control/sessions/run", post(ctl_run_session))
+        .route(
+            "/api/v1/control/sessions/{id}/connect",
+            post(ctl_connect_session),
+        )
+        .route("/api/v1/control/sessions/{id}/stop", post(ctl_stop_session))
+        .route("/api/v1/control/sessions/{id}/auth", get(ctl_auth_session))
         .route(
             "/api/v1/sessions/managed",
             post(spawn_session).get(list_managed_sessions),

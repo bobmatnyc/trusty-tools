@@ -12,7 +12,7 @@
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command, RepairAction, ServicesAction};
+use crate::cli::{Cli, Command, RepairAction, ServicesAction, SessctlAction};
 use crate::commands::session::compose_session_instructions;
 
 #[test]
@@ -654,4 +654,145 @@ fn update_cmd_all_skips_unloaded_returns_ok_when_none_loaded() {
         result.is_ok(),
         "update_cmd with no loaded aliases must return Ok"
     );
+}
+
+// ── WI-2 #1593: `tm sessctl` CLI parse round-trips ───────────────────────────
+
+#[test]
+fn cli_parses_sessctl_run() {
+    // Why: `tm sessctl run <project-id>` must parse to Command::Sessctl with
+    // SessctlAction::Run carrying the project_id.
+    // What: assert parse round-trip for the run subcommand.
+    // Test: direct parse via Cli::try_parse_from.
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessctl", "run", "my-proj"]).unwrap();
+    match cli.command {
+        Command::Sessctl {
+            action: SessctlAction::Run {
+                project_id, tmux, ..
+            },
+        } => {
+            assert_eq!(project_id, "my-proj");
+            assert!(!tmux);
+        }
+        other => panic!("expected sessctl run, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_sessctl_run_tmux() {
+    // Why: `--tmux` must flip the backend to tmux.
+    // What: assert `tmux == true` when the flag is present.
+    // Test: direct parse via Cli::try_parse_from.
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessctl", "run", "--tmux", "proj"]).unwrap();
+    match cli.command {
+        Command::Sessctl {
+            action: SessctlAction::Run { tmux, .. },
+        } => assert!(tmux),
+        other => panic!("expected sessctl run, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_sessctl_connect() {
+    // Why: `tm sessctl connect <id>` must parse to SessctlAction::Connect.
+    // What: assert the session_id field is populated.
+    // Test: direct parse via Cli::try_parse_from.
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessctl", "connect", "my-proj-0"]).unwrap();
+    match cli.command {
+        Command::Sessctl {
+            action: SessctlAction::Connect { session_id },
+        } => assert_eq!(session_id, "my-proj-0"),
+        other => panic!("expected sessctl connect, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_sessctl_stop() {
+    // Why: `tm sessctl stop <id>` must parse to SessctlAction::Stop with
+    // force=false by default.
+    // What: assert force defaults to false.
+    // Test: direct parse via Cli::try_parse_from.
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessctl", "stop", "my-proj-0"]).unwrap();
+    match cli.command {
+        Command::Sessctl {
+            action: SessctlAction::Stop { session_id, force },
+        } => {
+            assert_eq!(session_id, "my-proj-0");
+            assert!(!force);
+        }
+        other => panic!("expected sessctl stop, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_sessctl_stop_force() {
+    // Why: `tm sessctl stop --force <id>` must set force=true.
+    // What: assert force is true when the flag is present.
+    // Test: direct parse via Cli::try_parse_from.
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "sessctl", "stop", "--force", "my-proj-0"]).unwrap();
+    match cli.command {
+        Command::Sessctl {
+            action: SessctlAction::Stop { force, .. },
+        } => assert!(force),
+        other => panic!("expected sessctl stop --force, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_sessctl_auth() {
+    // Why: `tm sessctl auth <id>` must parse to SessctlAction::Auth.
+    // What: assert the session_id field is populated.
+    // Test: direct parse via Cli::try_parse_from.
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessctl", "auth", "my-proj-0"]).unwrap();
+    match cli.command {
+        Command::Sessctl {
+            action: SessctlAction::Auth { session_id },
+        } => assert_eq!(session_id, "my-proj-0"),
+        other => panic!("expected sessctl auth, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_sessctl_list() {
+    // Why: `tm sessctl list` must parse to SessctlAction::List with default
+    // format="table" and no project filter.
+    // What: assert defaults are applied.
+    // Test: direct parse via Cli::try_parse_from.
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessctl", "list"]).unwrap();
+    match cli.command {
+        Command::Sessctl {
+            action: SessctlAction::List { project, format },
+        } => {
+            assert!(project.is_none());
+            assert_eq!(format, "table");
+        }
+        other => panic!("expected sessctl list, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_sessctl_list_with_project_and_json() {
+    // Why: `tm sessctl list --project foo --format json` must parse both flags.
+    // What: assert project filter and json format are set.
+    // Test: direct parse via Cli::try_parse_from.
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "sessctl",
+        "list",
+        "--project",
+        "foo",
+        "--format",
+        "json",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Sessctl {
+            action: SessctlAction::List { project, format },
+        } => {
+            assert_eq!(project.as_deref(), Some("foo"));
+            assert_eq!(format, "json");
+        }
+        other => panic!("expected sessctl list, got {other:?}"),
+    }
 }
