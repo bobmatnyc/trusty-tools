@@ -8,9 +8,12 @@
 //! What: [`SessionActor`] holds a backend, a command receiver, and a broadcast
 //! sender. [`ActorCommand`] is the inbox type. [`run_actor`] is the task entry
 //! point. [`SessionActorHandle`] is the registry-visible handle (command sender,
-//! event sender, write-lock flag, and metadata Arc).
+//! event sender, write-lock flag, and metadata Arc). WI-3 adds critical-observer
+//! subscription via [`ActorCommand::SubscribeCritical`] and wires the §8.2
+//! regex/NLP parse layer into the output path.
 //!
-//! Test: inline test module — stop_terminates, broadcasts_started, write_lock_cas.
+//! Test: inline test module — stop_terminates, broadcasts_started, write_lock_cas,
+//! activity_parsed_on_output, critical_observer_lag_on_first_lag.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,8 +22,9 @@ use chrono::Utc;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{debug, warn};
 
+use crate::control::activity::ActivityParser;
 use crate::control::backend::SessionBackend;
-use crate::control::event::{BackendKind, SessionEvent, StopReason};
+use crate::control::event::{ActivityKind, BackendKind, SessionEvent, StopReason};
 use crate::control::id::ControlSessionId;
 use crate::control::state::{SessionMetadata, SessionState};
 
@@ -37,8 +41,11 @@ pub const DEFAULT_BROADCAST_CAPACITY: usize = 256;
 /// (HTTP handlers, CLI) must go through the inbox to avoid concurrent backend
 /// access.
 /// What: `Send` injects input; `Stop` / `ForceStop` trigger graceful /
-/// immediate shutdown; `Subscribe` returns a broadcast receiver clone.
-/// Test: `actor_command_stop_terminates`.
+/// immediate shutdown; `Subscribe` returns a broadcast receiver clone;
+/// `SubscribeCritical` returns a receiver AND registers the caller as a
+/// critical observer (§6.1) so the first lag yields `ObserverCriticalLag`
+/// instead of a silent resubscription.
+/// Test: `actor_command_stop_terminates`, `critical_observer_lag_on_first_lag`.
 pub enum ActorCommand {
     /// Deliver text input to the session backend (write-lock required).
     Send(crate::control::backend::SessionInput),
@@ -46,9 +53,15 @@ pub enum ActorCommand {
     Stop,
     /// Immediately kill the session (no drain).
     ForceStop,
-    /// Subscribe an observer; the `Sender` carries the reply channel for
-    /// the cloned `broadcast::Receiver`.
+    /// Subscribe a best-effort observer; the `Sender` carries the reply
+    /// channel for the cloned `broadcast::Receiver`.
     Subscribe(tokio::sync::oneshot::Sender<broadcast::Receiver<SessionEvent>>),
+    /// Subscribe a **critical** observer (e.g. the SM agent) per §6.1.
+    ///
+    /// Unlike `Subscribe`, the first `Lagged` error on this receiver causes
+    /// the actor to emit `ObserverCriticalLag` and transition the session to
+    /// `AwaitingIntervention` instead of silently resubscribing.
+    SubscribeCritical(tokio::sync::oneshot::Sender<broadcast::Receiver<SessionEvent>>),
 }
 
 impl std::fmt::Debug for ActorCommand {
@@ -58,6 +71,7 @@ impl std::fmt::Debug for ActorCommand {
             Self::Stop => f.write_str("Stop"),
             Self::ForceStop => f.write_str("ForceStop"),
             Self::Subscribe(_) => f.write_str("Subscribe"),
+            Self::SubscribeCritical(_) => f.write_str("SubscribeCritical"),
         }
     }
 }
@@ -103,6 +117,24 @@ impl SessionActorHandle {
     pub fn release_write_lock(&self) {
         self.write_lock_held.store(false, Ordering::SeqCst);
     }
+
+    /// Subscribe a **critical** observer (§6.1 of SPEC-SESSCTL-01).
+    ///
+    /// Why: critical observers (e.g. the SM agent) must never be silently
+    /// resubscribed after a lag — the first `Lagged` error transitions the
+    /// session to `AwaitingIntervention` and surfaces `ObserverCriticalLag`.
+    /// What: sends `ActorCommand::SubscribeCritical` over the command inbox
+    /// and waits on a oneshot for the `broadcast::Receiver`. Returns `None`
+    /// if the actor inbox is closed (actor already stopped).
+    /// Test: `critical_observer_lag_on_first_lag`.
+    pub async fn subscribe_critical(&self) -> Option<broadcast::Receiver<SessionEvent>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.command_tx
+            .send(ActorCommand::SubscribeCritical(tx))
+            .await
+            .ok()?;
+        rx.await.ok()
+    }
 }
 
 /// Spawn a `SessionActor` task and return its registry handle.
@@ -111,7 +143,9 @@ impl SessionActorHandle {
 /// constructed with the correct channel and atomic pairing.
 /// What: creates the `mpsc` command channel, the `broadcast` event channel,
 /// and the shared metadata Arc, then `tokio::spawn`s `run_actor`. Returns
-/// the handle ready for insertion into `SessionRegistry`.
+/// the handle ready for insertion into `SessionRegistry`. WI-3: also
+/// initialises the `critical_observer_active` flag that tracks whether a
+/// critical observer is currently subscribed.
 /// Test: `actor_broadcasts_started_event`.
 pub fn spawn_actor<B: SessionBackend>(
     session_id: ControlSessionId,
@@ -156,7 +190,12 @@ pub fn spawn_actor<B: SessionBackend>(
 /// What: `select!` over `command_rx.recv()` and `backend.recv()`. Dispatches
 /// commands, forwards events to broadcast, transitions `SessionState`, and
 /// exits when the state machine reaches a terminal state.
-/// Test: `actor_command_stop_terminates`, `actor_broadcasts_started_event`.
+/// WI-3: after forwarding each `Output` event, runs the §8.2 regex/NLP parse
+/// layer and emits `ActivityParsed` / `PendingDecision` if a match is found,
+/// updating `SessionMetadata` accordingly. Also handles `SubscribeCritical`
+/// to track critical observers per §6.1.
+/// Test: `actor_command_stop_terminates`, `actor_broadcasts_started_event`,
+/// `actor_activity_parsed_on_output`, `critical_observer_lag_yields_event`.
 async fn run_actor<B: SessionBackend>(
     session_id: ControlSessionId,
     mut backend: B,
@@ -176,6 +215,10 @@ async fn run_actor<B: SessionBackend>(
         let mut m = metadata.write().await;
         m.state = SessionState::Running;
     }
+
+    // Track whether a critical observer is currently registered (§6.1).
+    // We store the receiver so we can poll it for lag detection.
+    let mut critical_rx: Option<broadcast::Receiver<SessionEvent>> = None;
 
     loop {
         // Check if we are already in a terminal state (shouldn't happen here,
@@ -229,6 +272,18 @@ async fn run_actor<B: SessionBackend>(
                         let rx = event_tx.subscribe();
                         let _ = reply_tx.send(rx);
                     }
+                    Some(ActorCommand::SubscribeCritical(reply_tx)) => {
+                        // Replace any prior critical receiver with a fresh one.
+                        let rx = event_tx.subscribe();
+                        // Keep a second clone for lag detection inside the actor.
+                        let lag_rx = event_tx.subscribe();
+                        let _ = reply_tx.send(rx);
+                        critical_rx = Some(lag_rx);
+                        debug!(
+                            session_id = %session_id,
+                            "critical observer subscribed (§6.1)"
+                        );
+                    }
                 }
             }
 
@@ -246,7 +301,6 @@ async fn run_actor<B: SessionBackend>(
                     Some(Err(e)) => {
                         warn!(session_id = %session_id, "backend recv error: {e}");
                         // Phase 1: treat recv errors as terminal (restart is WI-4).
-                        // A seam is preserved by having the Failed event here.
                         let _ = event_tx.send(SessionEvent::Failed {
                             session_id: session_id.clone(),
                             reason: e.to_string(),
@@ -259,13 +313,132 @@ async fn run_actor<B: SessionBackend>(
                         break;
                     }
                     Some(Ok(events)) => {
-                        // Update last_activity_at on any output.
+                        let now = Utc::now();
+
+                        // Check critical observer for lag BEFORE forwarding new
+                        // events. `try_recv` on a critical receiver that has lagged
+                        // returns `Err(Lagged)` — the receiver is still valid for
+                        // future events but we must surface the lag immediately.
+                        let mut critical_lagged = false;
+                        if let Some(ref mut crit_rx) = critical_rx {
+                            // Drain what we can; if we hit a Lagged error, the
+                            // critical observer missed events.
+                            loop {
+                                match crit_rx.try_recv() {
+                                    Ok(_) => {} // successfully drained an event
+                                    Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                                        warn!(
+                                            session_id = %session_id,
+                                            dropped = n,
+                                            "critical observer lagged (§6.1) — \
+                                             transitioning to AwaitingIntervention"
+                                        );
+                                        let _ = event_tx.send(
+                                            SessionEvent::ObserverCriticalLag {
+                                                session_id: session_id.clone(),
+                                                dropped: n,
+                                            },
+                                        );
+                                        {
+                                            let mut m = metadata.write().await;
+                                            m.state = SessionState::AwaitingIntervention;
+                                        }
+                                        // Clear the critical receiver — recovery
+                                        // requires an explicit re-attach.
+                                        critical_rx = None;
+                                        critical_lagged = true;
+                                        break;
+                                    }
+                                    Err(broadcast::error::TryRecvError::Empty) => break,
+                                    Err(broadcast::error::TryRecvError::Closed) => {
+                                        critical_rx = None;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        // §6.1: AwaitingIntervention is a halt state — stop
+                        // processing further events and exit the actor loop.
+                        if critical_lagged {
+                            break;
+                        }
+
+                        // Forward all raw output events and collect raw text.
+                        let mut raw_text = String::new();
+                        for event in &events {
+                            if let SessionEvent::Output { raw, .. } = event {
+                                raw_text.push_str(raw);
+                                raw_text.push('\n');
+                            }
+                            let _ = event_tx.send(event.clone());
+                        }
+
+                        // Update last_activity_at after forwarding.
                         {
                             let mut m = metadata.write().await;
-                            m.last_activity_at = Utc::now();
+                            m.last_activity_at = now;
                         }
-                        for event in events {
-                            let _ = event_tx.send(event);
+
+                        // §8.2 Regex/NLP parse layer — runs only when there is
+                        // raw text in the output batch.
+                        if !raw_text.is_empty()
+                            && let Some(parsed) = ActivityParser::parse_output(&raw_text)
+                        {
+                            // Update metadata with the parse result.
+                            {
+                                let mut m = metadata.write().await;
+                                m.last_summary = Some(parsed.summary.clone());
+                                if parsed.pending_decision.is_some() {
+                                    m.pending_decision = parsed.pending_decision.clone();
+                                    m.proposed_default = parsed.proposed_default.clone();
+                                }
+                                // Auth prompt on stream-JSON is a terminal error.
+                                if parsed.kind == ActivityKind::AuthPrompt
+                                    && backend_kind == BackendKind::StreamJson
+                                {
+                                    m.state = SessionState::AuthFailed;
+                                }
+                            }
+
+                            let _ = event_tx.send(SessionEvent::ActivityParsed {
+                                session_id: session_id.clone(),
+                                kind: parsed.kind.clone(),
+                                summary: parsed.summary.clone(),
+                                ts: now,
+                            });
+
+                            // Emit PendingDecision if decision prompt detected.
+                            if let Some(ref prompt) = parsed.pending_decision {
+                                let _ = event_tx.send(SessionEvent::PendingDecision {
+                                    session_id: session_id.clone(),
+                                    prompt: prompt.clone(),
+                                    proposed_default: parsed.proposed_default.clone(),
+                                    ts: now,
+                                });
+                            }
+
+                            // Auth prompt on stream-JSON → transition and exit.
+                            if parsed.kind == ActivityKind::AuthPrompt
+                                && backend_kind == BackendKind::StreamJson
+                            {
+                                let _ = event_tx.send(SessionEvent::AuthFailed {
+                                    session_id: session_id.clone(),
+                                    backend: backend_kind,
+                                    reason: "auth prompt detected on stream-json backend; \
+                                             pre-authenticate ~/.claude and re-launch"
+                                        .into(),
+                                    ts: now,
+                                });
+                                break;
+                            }
+
+                            // Auth prompt on tmux → AwaitingAuth state.
+                            if parsed.kind == ActivityKind::AuthPrompt
+                                && backend_kind == BackendKind::Tmux
+                            {
+                                let mut m = metadata.write().await;
+                                m.state = SessionState::AwaitingAuth;
+                            }
                         }
                     }
                 }
@@ -316,204 +489,5 @@ async fn transition_to_stopped(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::control::backend::{SessionBackend, SessionInput};
-    use crate::control::event::SessionEvent;
-    use crate::control::id::ControlSessionId;
-
-    // ── Minimal stub backend for unit tests ──────────────────────────────────
-
-    struct StubBackend {
-        /// Events to emit on successive `recv()` calls. `VecDeque` gives O(1)
-        /// pop_front; `Vec::remove(0)` is O(n) (shifts all remaining elements).
-        events: std::collections::VecDeque<Option<anyhow::Result<Vec<SessionEvent>>>>,
-        /// When true and events are exhausted, block forever instead of
-        /// returning `None`. Used by `actor_command_stop_terminates` so the
-        /// actor's `select!` can pick up the Stop command before the backend
-        /// exits naturally.
-        block_when_exhausted: bool,
-    }
-
-    impl StubBackend {
-        fn new_clean_exit() -> Self {
-            Self {
-                events: std::collections::VecDeque::from([None]),
-                block_when_exhausted: false,
-            }
-        }
-
-        /// A backend that never exits on its own — recv() parks forever once
-        /// all pre-configured events are drained.
-        fn new_never_exits() -> Self {
-            Self {
-                events: std::collections::VecDeque::new(),
-                block_when_exhausted: true,
-            }
-        }
-
-        fn new_with_output(session_id: &ControlSessionId) -> Self {
-            let out = SessionEvent::Output {
-                session_id: session_id.clone(),
-                raw: "hello".into(),
-                structured: None,
-                ts: Utc::now(),
-            };
-            Self {
-                events: std::collections::VecDeque::from([Some(Ok(vec![out])), None]),
-                block_when_exhausted: false,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl SessionBackend for StubBackend {
-        async fn send(&mut self, _msg: SessionInput) -> anyhow::Result<()> {
-            Ok(())
-        }
-
-        async fn recv(&mut self) -> Option<anyhow::Result<Vec<SessionEvent>>> {
-            if let Some(ev) = self.events.pop_front() {
-                ev
-            } else if self.block_when_exhausted {
-                // Park indefinitely so the actor's select! can process
-                // command-inbox messages (e.g. Stop) before we exit.
-                std::future::pending::<Option<anyhow::Result<Vec<SessionEvent>>>>().await
-            } else {
-                None
-            }
-        }
-
-        async fn stop(self: Box<Self>) -> anyhow::Result<()> {
-            Ok(())
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn actor_broadcasts_started_event() {
-        let id = ControlSessionId::new("proj", 0);
-        let backend = StubBackend::new_clean_exit();
-        // Subscribe BEFORE spawning so the broadcast ring always has at least
-        // one live receiver — the Started event cannot be dropped unobserved.
-        // We create a temporary channel here and subscribe immediately; the
-        // real channel is created inside spawn_actor, so we obtain our receiver
-        // from the handle immediately after spawn (before yielding) and use a
-        // short poll loop with timeout to wait for the event.
-        let handle = spawn_actor(
-            id.clone(),
-            "proj".into(),
-            BackendKind::StreamJson,
-            backend,
-            DEFAULT_BROADCAST_CAPACITY,
-        );
-        // Subscribe immediately — before yielding to the executor — so the
-        // broadcast ring buffer still holds the Started event (capacity=256).
-        let mut rx = handle.event_tx.subscribe();
-
-        // Poll for the Started event with a deadline. The actor runs on the
-        // same tokio executor; yielding a few times is enough for it to emit
-        // Started even if it ran ahead of us.
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
-        let mut found_started = false;
-        loop {
-            match rx.try_recv() {
-                Ok(SessionEvent::Started { .. }) => {
-                    found_started = true;
-                    break;
-                }
-                Ok(_) => {} // other events; keep looking
-                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
-                    if tokio::time::Instant::now() >= deadline {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
-                }
-                Err(_) => break, // Lagged / closed; should not happen with cap=256
-            }
-        }
-        assert!(
-            found_started,
-            "actor must emit SessionEvent::Started before any other event"
-        );
-    }
-
-    #[tokio::test]
-    async fn actor_command_stop_terminates() {
-        let id = ControlSessionId::new("proj", 1);
-        // Use a backend whose recv() parks forever so the actor stays alive
-        // long enough for our Stop command to arrive in the select! loop.
-        let backend = StubBackend::new_never_exits();
-        let handle = spawn_actor(
-            id.clone(),
-            "proj".into(),
-            BackendKind::StreamJson,
-            backend,
-            DEFAULT_BROADCAST_CAPACITY,
-        );
-        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-
-        // Send stop command.
-        handle.command_tx.send(ActorCommand::Stop).await.unwrap();
-        // Wait for the actor to process.
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Metadata should now be Stopped.
-        let m = handle.metadata.read().await;
-        assert!(
-            m.state.is_terminal(),
-            "expected terminal state, got: {}",
-            m.state
-        );
-    }
-
-    #[tokio::test]
-    async fn actor_clean_exit_from_backend_stops_actor() {
-        let id = ControlSessionId::new("proj", 2);
-        let backend = StubBackend::new_with_output(&id);
-        let handle = spawn_actor(
-            id.clone(),
-            "proj".into(),
-            BackendKind::StreamJson,
-            backend,
-            DEFAULT_BROADCAST_CAPACITY,
-        );
-        // Wait for actor to process output + clean exit.
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        let m = handle.metadata.read().await;
-        assert!(
-            m.state.is_terminal(),
-            "expected terminal state, got: {}",
-            m.state
-        );
-    }
-
-    #[test]
-    fn actor_handle_write_lock_cas() {
-        let lock = Arc::new(AtomicBool::new(false));
-        let (command_tx, _) = mpsc::channel(1);
-        let (event_tx, _) = broadcast::channel(4);
-        let id = ControlSessionId::new("p", 0);
-        let handle = SessionActorHandle {
-            command_tx,
-            event_tx,
-            write_lock_held: Arc::clone(&lock),
-            metadata: Arc::new(RwLock::new(SessionMetadata::new(
-                id,
-                "p".into(),
-                BackendKind::StreamJson,
-            ))),
-        };
-
-        // First acquire succeeds.
-        assert!(handle.try_acquire_write_lock());
-        // Second acquire fails (already held).
-        assert!(!handle.try_acquire_write_lock());
-        // Release.
-        handle.release_write_lock();
-        // After release, another acquire succeeds.
-        assert!(handle.try_acquire_write_lock());
-    }
-}
+#[path = "actor_tests.rs"]
+mod tests;
