@@ -149,21 +149,28 @@ fn re_rate_limited() -> &'static Regex {
 ///
 /// Why: §8.4 — when the output contains a `[Y/n]`-style prompt the daemon
 /// must extract both the prompt text and the proposed default.
-/// What: matches `… [Y/n]`, `… (yes/no)`, or generic `?` question endings.
-/// Test: `activity_parser_pending_decision`.
+/// What: matches `… [Y/n]`, `… (yes/no)`, `… (Yes/no)`, `… (yes/No)`, or
+/// generic `?` question endings. Named captures:
+///   `yes` / `no` — the letter inside `[Y/n]` brackets; uppercase letter = default.
+///   `pyes` / `pno` — the word inside `(yes/no)` parens; uppercase first letter = default.
+/// §8.4 convention: the uppercase option is the proposed default. For the
+/// `(yes/no)` form where neither option is capitalised, `proposed_default` is
+/// `None` (no default specified by the prompt).
+/// Test: `activity_parser_pending_decision`, `activity_parser_yes_no_proposed_default`.
 fn re_pending_decision() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
             r"(?x)
-            (?P<question>[^\n]{10,200}?)         # question text (non-greedy)
+            (?P<question>[^\n]{10,200}?)              # question text (non-greedy)
             \s*
             (?:
-                \[(?P<yes>[Yy])/(?P<no>[Nn])\]   # [Y/n] or [y/N]
+                \[(?P<yes>[Yy])/(?P<no>[Nn])\]        # [Y/n] or [y/N]
                 |
-                \((?:yes|no)/(?:yes|no)\)         # (yes/no)
+                \((?P<pyes>(?:yes|no|Yes|No))          # (Yes/no) / (yes/No) / (yes/no)
+                  /(?P<pno>(?:yes|no|Yes|No))\)
             )
-            \s*:?\s*$                             # optional colon + line end
+            \s*:?\s*$                                  # optional colon + line end
             ",
         )
         .expect("pending_decision regex")
@@ -215,11 +222,15 @@ impl ActivityParser {
     /// Test: `activity_parser_*` table-driven tests.
     pub fn parse_output(text: &str) -> Option<ParseResult> {
         // 1. Auth prompt — highest priority; terminal risk.
+        // AuthPrompt is not a user-answerable decision — the actor handles it
+        // via a dedicated state transition (AuthFailed / AwaitingAuth). Setting
+        // pending_decision here would be semantically wrong and confuse the
+        // actor's PendingDecision emission path, so both fields are None.
         if re_auth_prompt().is_match(text) {
             return Some(ParseResult {
                 kind: ActivityKind::AuthPrompt,
                 summary: "authentication / login prompt detected".into(),
-                pending_decision: Some(text.lines().next().unwrap_or(text).trim().to_owned()),
+                pending_decision: None,
                 proposed_default: None,
             });
         }
@@ -303,11 +314,22 @@ impl ActivityParser {
 
         // 7. Git operation.
         if let Some(caps) = re_git_op().captures(text) {
+            // `verb` capture is set by the `git <verb>` branch (push/pull/…).
+            // The bracket branch (`[branch sha] msg`) has no `verb` capture —
+            // it always represents a commit, optionally annotated with the branch
+            // name. We must NOT use the `branch` capture as the verb because
+            // that would produce `git: main` instead of `git: commit (main)`.
             let verb = caps
                 .name("verb")
-                .or_else(|| caps.name("branch"))
-                .map_or("commit", |m| m.as_str())
-                .to_owned();
+                .map(|m| m.as_str().to_owned())
+                .unwrap_or_else(|| {
+                    let branch = caps.name("branch").map_or("", |m| m.as_str());
+                    if branch.is_empty() {
+                        "commit".to_owned()
+                    } else {
+                        format!("commit ({branch})")
+                    }
+                });
             let summary = format!("git: {verb}");
             return Some(ParseResult {
                 kind: ActivityKind::GitOp { verb },
@@ -325,16 +347,42 @@ impl ActivityParser {
                 .map_or(text, |m| m.as_str())
                 .trim()
                 .to_owned();
-            // Convention: in `[Y/n]` the uppercase letter is the default answer.
-            // `Y` (uppercase) → proposed default is "yes"; `y` (lowercase) →
-            // proposed default is "no" (meaning `N` is the uppercase default).
-            let proposed_default = caps.name("yes").map(|m| {
-                if m.as_str().chars().next().is_some_and(|c| c.is_uppercase()) {
-                    "yes".to_owned()
+            // §8.4 convention: the uppercase option is the proposed default.
+            // `[Y/n]` → `yes` capture is uppercase → default "yes".
+            // `[y/N]` → `yes` capture is lowercase → `no` capture is uppercase → default "no".
+            // `(Yes/no)` → `pyes` starts uppercase → default "yes".
+            // `(yes/No)` → `pno` starts uppercase → default "no".
+            // `(yes/no)` → neither capitalised → no default (None, per §8.4).
+            let proposed_default = if let Some(m) = caps.name("yes") {
+                // Bracket form [Y/n] / [y/N]
+                Some(
+                    if m.as_str().chars().next().is_some_and(|c| c.is_uppercase()) {
+                        "yes".to_owned()
+                    } else {
+                        "no".to_owned()
+                    },
+                )
+            } else if let Some(pyes) = caps.name("pyes") {
+                // Parenthesised form (yes/no) / (Yes/no) / (yes/No)
+                let pno_upper = caps
+                    .name("pno")
+                    .is_some_and(|m| m.as_str().chars().next().is_some_and(|c| c.is_uppercase()));
+                let pyes_upper = pyes
+                    .as_str()
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_uppercase());
+                if pyes_upper {
+                    Some("yes".to_owned())
+                } else if pno_upper {
+                    Some("no".to_owned())
                 } else {
-                    "no".to_owned()
+                    // (yes/no) — neither capitalised; no default defined.
+                    None
                 }
-            });
+            } else {
+                None
+            };
             let summary = format!("awaiting decision: {question}");
             return Some(ParseResult {
                 kind: ActivityKind::AwaitingInput,

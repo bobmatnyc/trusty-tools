@@ -278,6 +278,104 @@ fn activity_parser_pending_decision_no_default() {
     assert_eq!(r.proposed_default.as_deref(), Some("no"));
 }
 
+/// Verify that a bracket-SHA git commit line produces `commit (branch)` as the
+/// verb, NOT the branch name alone.
+///
+/// Why: before this fix the verb was set to `caps.name("branch")` which gave
+/// `git: main` for `[main abc1234] msg`. The summary should be
+/// `git: commit (main)` so it's clear this is a commit, not a git push.
+/// What: asserts that the `GitOp { verb }` carries "commit (main)" and that the
+/// summary contains both "git:" and "commit".
+/// Test: this test.
+#[test]
+fn activity_parser_git_op_bracket_verb_is_commit() {
+    let result = ActivityParser::parse_output("[main abc1234] Add feature");
+    assert!(result.is_some(), "expected GitOp match");
+    let r = result.unwrap();
+    match &r.kind {
+        ActivityKind::GitOp { verb } => {
+            assert!(
+                verb.starts_with("commit"),
+                "verb must start with 'commit' for bracket-SHA path, got: {verb:?}"
+            );
+            assert!(
+                verb.contains("main"),
+                "verb should include the branch name, got: {verb:?}"
+            );
+        }
+        other => panic!("expected GitOp, got: {other:?}"),
+    }
+    assert!(
+        r.summary.contains("commit"),
+        "summary must contain 'commit' for bracket-SHA path, got: {:?}",
+        r.summary
+    );
+}
+
+/// Verify that a plain `git push` line produces `push` as the verb (not `commit`).
+///
+/// Why: companion to the bracket-verb test; confirms the verb branch is correct
+/// for explicit git invocations.
+/// Test: this test.
+#[test]
+fn activity_parser_git_op_explicit_verb() {
+    for (input, expected_verb) in [
+        ("git push origin main", "push"),
+        ("git pull --rebase", "pull"),
+        ("git merge feature-branch", "merge"),
+    ] {
+        let result = ActivityParser::parse_output(input);
+        assert!(result.is_some(), "expected GitOp for: {input}");
+        let r = result.unwrap();
+        match &r.kind {
+            ActivityKind::GitOp { verb } => {
+                assert_eq!(
+                    verb.as_str(),
+                    expected_verb,
+                    "verb mismatch for input={input:?}"
+                );
+            }
+            other => panic!("expected GitOp for {input:?}, got: {other:?}"),
+        }
+    }
+}
+
+/// Verify `(yes/no)` proposed_default derivation from capitalisation.
+///
+/// Why: §8.4 convention — uppercase option = default. The `(yes/no)` form
+/// without capitalisation has no defined default (None), but `(Yes/no)` means
+/// "yes" is default and `(yes/No)` means "no" is default.
+/// What: table-driven check of all three forms.
+/// Test: this test.
+#[test]
+fn activity_parser_yes_no_proposed_default() {
+    let cases = [
+        // (yes/no) — no capitalisation → None (no default defined per §8.4)
+        ("Do you want to continue? (yes/no):", None),
+        // (Yes/no) — Yes is capitalised → default "yes"
+        ("Overwrite the file? (Yes/no):", Some("yes")),
+        // (yes/No) — No is capitalised → default "no"
+        ("Delete the directory? (yes/No):", Some("no")),
+    ];
+    for (input, expected_default) in &cases {
+        let result = ActivityParser::parse_output(input);
+        assert!(result.is_some(), "expected a match for {input:?}; got None");
+        let r = result.unwrap();
+        assert!(
+            r.pending_decision.is_some(),
+            "pending_decision must be set for {input:?}"
+        );
+        assert_eq!(
+            r.proposed_default.as_deref(),
+            *expected_default,
+            "proposed_default mismatch for {input:?}: \
+             expected {:?}, got {:?}",
+            expected_default,
+            r.proposed_default
+        );
+    }
+}
+
 #[test]
 fn activity_parser_returns_none_for_unknown_output() {
     let result =
@@ -335,10 +433,12 @@ fn activity_parser_table_driven() {
             proposed_default: None,
         },
         Case {
+            // AuthPrompt must NOT set pending_decision (actor handles it via
+            // a dedicated state transition, not via PendingDecision emission).
             input: "Please log in to use Claude",
             expected_kind: ActivityKind::AuthPrompt,
             summary_prefix: "authentication",
-            pending_decision: Some("Please log in to use Claude"),
+            pending_decision: None,
             proposed_default: None,
         },
         Case {

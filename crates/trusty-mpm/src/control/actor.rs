@@ -233,6 +233,11 @@ pub(crate) async fn run_actor<B: SessionBackend>(
     // AwaitingIntervention. Using mpsc rather than a broadcast clone means we
     // measure the actual consumer's queue depth, not a self-drained proxy.
     let mut critical_tx: Option<mpsc::Sender<SessionEvent>> = None;
+    // Total events that failed try_send(Full) since the critical observer
+    // subscribed. Accumulated across batches so ObserverCriticalLag.dropped
+    // reports the true session-lifetime count of undelivered events, not
+    // just the count from the batch that finally tripped the lag.
+    let mut critical_total_dropped: u64 = 0;
 
     loop {
         let is_terminal = {
@@ -298,10 +303,13 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                                 drop(reply_tx);
                             } else {
                                 // Previous observer disconnected; safe to replace.
+                                // Reset the dropped counter — the new observer
+                                // starts fresh with no accumulated lag.
                                 let (tx, rx) =
                                     mpsc::channel::<SessionEvent>(CRITICAL_OBSERVER_CAPACITY);
                                 let _ = reply_tx.send(rx);
                                 critical_tx = Some(tx);
+                                critical_total_dropped = 0;
                                 debug!(
                                     session_id = %session_id,
                                     "critical observer replaced (prior was disconnected, §6.1)"
@@ -313,6 +321,7 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                                 mpsc::channel::<SessionEvent>(CRITICAL_OBSERVER_CAPACITY);
                             let _ = reply_tx.send(rx);
                             critical_tx = Some(tx);
+                            critical_total_dropped = 0;
                             debug!(session_id = %session_id, "critical observer subscribed (§6.1)");
                         }
                     }
@@ -347,12 +356,11 @@ pub(crate) async fn run_actor<B: SessionBackend>(
 
                         // Forward events to broadcast channel AND to the critical
                         // observer mpsc. Detect lag via try_send (§6.1):
-                        //   Err(Full)         → genuine sustained backpressure →
-                        //                        AwaitingIntervention + teardown.
-                        //   Err(Disconnected) → observer dropped its Receiver →
-                        //                        clear critical_tx, keep running.
+                        //   Err(Full)   → genuine sustained backpressure →
+                        //                 AwaitingIntervention + teardown.
+                        //   Err(Closed) → observer dropped its Receiver →
+                        //                 clear critical_tx, keep running.
                         let mut critical_lagged = false;
-                        let mut dropped_count: u64 = 0;
                         let mut raw_text = String::new();
 
                         // Forward every event in the batch to the broadcast channel and
@@ -373,9 +381,11 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                                     Err(TrySendError::Full(_)) => {
                                         // Channel of capacity N is full → N events
                                         // have backed up without being consumed.
-                                        // Count each failed send so ObserverCriticalLag
-                                        // reports the real number of dropped events.
-                                        dropped_count += 1;
+                                        // Accumulate into the session-lifetime counter
+                                        // so ObserverCriticalLag.dropped reports the
+                                        // total events dropped since subscription, not
+                                        // just the batch-local count.
+                                        critical_total_dropped += 1;
                                         critical_lagged = true;
                                     }
                                     Err(TrySendError::Closed(_)) => {
@@ -412,10 +422,12 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                             );
                             let _ = event_tx.send(SessionEvent::ObserverCriticalLag {
                                 session_id: session_id.clone(),
-                                // Count of events that failed try_send(Full) in
-                                // this batch — the real number of undelivered
-                                // critical-observer events.
-                                dropped: dropped_count,
+                                // Session-lifetime count of events that failed
+                                // try_send(Full) since the critical observer
+                                // subscribed. Accumulated across all batches so
+                                // consumers know the total loss, not just the
+                                // count from the batch that tripped the lag.
+                                dropped: critical_total_dropped,
                             });
                             {
                                 let mut m = metadata.write().await;

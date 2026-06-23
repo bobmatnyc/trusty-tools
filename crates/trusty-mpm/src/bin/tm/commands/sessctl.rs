@@ -265,8 +265,13 @@ async fn sessctl_list(
         let state = s["state"].as_str().unwrap_or("-");
         let uptime = s["uptime_secs"].as_u64().unwrap_or(0);
         let restart_count = s["restart_count"].as_u64().unwrap_or(0);
-        // Truncate last_summary to 40 chars (Unicode-safe) with ellipsis to
+        // Truncate last_summary to 40 Unicode scalar values with ellipsis to
         // keep the table row aligned regardless of summary length (review bug #5).
+        // Known cosmetic limitation: CJK characters and emoji consume 2 display
+        // columns each, so a summary containing them may visually exceed 40
+        // columns. The `unicode-width` crate would fix this, but it is not a
+        // current workspace dependency; adding it for a cosmetic CLI improvement
+        // is not justified — document here instead.
         let raw_summary = s["last_summary"].as_str().unwrap_or("-");
         let last_summary: String = if raw_summary.chars().count() > 40 {
             let truncated: String = raw_summary.chars().take(37).collect();
