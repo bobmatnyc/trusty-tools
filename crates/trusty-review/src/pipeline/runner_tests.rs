@@ -947,6 +947,139 @@ async fn run_review_live_post_and_dedup_skip_integration() {
     // Placeholder for a future live integration test against a fixture PR.
 }
 
+/// REGRESSION GUARD (#1486): when a High-effort finding causes the severity floor
+/// to escalate the LLM's APPROVE/B- to BLOCK/F, but verification then REFUTES
+/// that finding, the envelope verdict must relax (BLOCK → APPROVE) AND the
+/// envelope grade must also relax (F → B-), not stay pinned at F.
+///
+/// Root cause (before fix): step 7d clamped the FLOOR-ESCALATED grade (F) to the
+/// post-verification verdict.  `clamp_grade_to_verdict(F, APPROVE)` is a no-op
+/// (F implies BLOCK which is already stricter than APPROVE), so the grade stayed F
+/// even though the verdict became APPROVE.  The fix clamps the ORIGINAL LLM grade
+/// (B-) to the post-verification verdict instead.
+///
+/// Why this test matters: any automation gating on the top-level `grade` field
+/// (not just `verdict`) would see F/APPROVE — an incoherent state.
+/// What: runs the full pipeline with a FakeLlm that emits APPROVE/B- plus a
+/// High-effort/0.95-confidence finding, a FakeVerifier that refutes that finding,
+/// and asserts that the post-verification envelope has verdict=APPROVE and
+/// grade=B-.
+#[tokio::test]
+async fn envelope_grade_tracks_verdict_after_verification_relaxation_1486() {
+    // LLM says: clean APPROVE with grade B-, but there is a high-severity finding
+    // that the LLM is nonetheless confident about (confidence 0.95).  The severity
+    // floor in derive_verdict_with_grade escalates this to BLOCK/F.  Verification
+    // then refutes the high-severity finding → verdict drops back to APPROVE.
+    let llm_response = r#"Code looks good overall, minor concern.
+
+```json
+{"verdict":"APPROVE","grade":"B-","summary":"Looks solid","findings":[{"title":"Potential XSS","body":"line 5 unescaped","severity":"high","confidence":0.95,"file":"src/render.rs","line":5}]}
+```"#;
+    let (source, _tmp) = local_diff_source("+fn render(s: &str) { println!(\"{s}\"); }\n");
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "fake-model".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+    };
+    let deps = ready_deps(
+        Arc::new(FakeLlm {
+            response: llm_response.to_string(),
+            error: None,
+            output_tokens: None,
+        }),
+        Some(Arc::new(FakeVerifier {
+            judgment: "REFUTED",
+        })),
+    );
+
+    let result = run_review(&config, input, deps).await;
+
+    // After verification refutes the High-effort finding, the verdict must relax.
+    assert_eq!(
+        result.verdict,
+        Verdict::Approve,
+        "#1486: verification refutes the only blocking finding → verdict must be APPROVE (got {:?})",
+        result.verdict,
+    );
+
+    // The envelope grade must be consistent with APPROVE, not the pre-verification F.
+    let grade = result.grade.as_deref().unwrap_or("(none)");
+    // B- maps to APPROVE; any APPROVE-band grade (A+ through B-) is correct here.
+    // The specific value is B- (the original LLM grade, clamped to APPROVE which
+    // accepts any grade, so no clamping occurs → grade stays B-).
+    assert_eq!(
+        grade, "B-",
+        "#1486: envelope grade must be the original LLM grade B- after verification \
+         relaxes the verdict to APPROVE (before fix, it was F)"
+    );
+
+    // Sanity: the finding is preserved (demoted, not dropped) and is refuted.
+    assert_eq!(result.findings.len(), 1, "finding must be preserved");
+    assert!(
+        matches!(
+            result.findings[0].verified,
+            Some(crate::models::VerifyOutcome::Refuted)
+        ),
+        "the High-effort finding must be marked Refuted"
+    );
+}
+
+/// REGRESSION GUARD (#1486 — stable-escalation path): when a High-effort finding
+/// is CONFIRMED by verification, the envelope must stay at BLOCK/F (the floor
+/// escalation correctly survives).
+///
+/// Why: the #1486 fix must not accidentally soften verdicts where the escalating
+/// finding WAS confirmed — only the refuted case should relax.
+#[tokio::test]
+async fn envelope_grade_stays_block_when_high_effort_confirmed_1486() {
+    let llm_response = r#"Review with confirmed critical finding.
+
+```json
+{"verdict":"APPROVE","grade":"B-","summary":"Mostly OK","findings":[{"title":"Auth bypass","body":"line 10","severity":"high","confidence":0.95,"file":"src/auth.rs","line":10}]}
+```"#;
+    let (source, _tmp) = local_diff_source("+fn auth(t: &str) {}\n");
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "fake-model".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+    };
+    let deps = ready_deps(
+        Arc::new(FakeLlm {
+            response: llm_response.to_string(),
+            error: None,
+            output_tokens: None,
+        }),
+        Some(Arc::new(FakeVerifier {
+            judgment: "CONFIRMED",
+        })),
+    );
+
+    let result = run_review(&config, input, deps).await;
+
+    // High-effort confirmed → BLOCK floor must survive verification.
+    assert_eq!(
+        result.verdict,
+        Verdict::Block,
+        "#1486 stable path: confirmed High-effort finding must keep verdict at BLOCK"
+    );
+    // Grade must be clamped to F (BLOCK's band ceiling).
+    let grade = result.grade.as_deref().unwrap_or("(none)");
+    assert_eq!(
+        grade, "F",
+        "#1486 stable path: confirmed BLOCK must clamp B- → F (consistent with verdict)"
+    );
+}
+
 /// `attach_inline_comments` maps on-diff findings to inline comments and leaves
 /// off-diff findings for the summary body (#1414).
 ///

@@ -31,21 +31,31 @@ use crate::{
 
 use super::runner::{ReviewDeps, ReviewInput};
 
-/// Derive (verdict, grade) from a `ParsedReview` using grade + severity floor.
+/// Derive (verdict, floor_grade, original_llm_grade) from a `ParsedReview`.
 ///
 /// Why: extracted to keep `run_review` under the line cap and make it testable.
-/// What: fail-safe → (APPROVE, default grade); normal → resolves LLM grade string
+/// Also returns the original LLM grade (pre-floor) so the runner can re-derive
+/// the envelope grade AFTER verification by clamping the original grade to the
+/// post-verification verdict (fixes #1486: the floor-escalated grade must not
+/// survive verification relaxation).
+///
+/// What: fail-safe → (UNKNOWN, F, F); normal → resolves LLM grade string
 /// (or default), calls `derive_verdict_with_grade` for max(grade, model) + floor.
-/// Test: covered by runner integration tests.
+/// Returns `(floor_verdict, floor_grade, original_llm_grade)`.
+/// Test: covered by runner integration tests and the #1486 regression test.
 pub(super) fn apply_grade_and_floor(
     parsed: &crate::pipeline::parser::ParsedReview,
-) -> (Verdict, crate::pipeline::letter_grade::Grade) {
+) -> (
+    Verdict,
+    crate::pipeline::letter_grade::Grade,
+    crate::pipeline::letter_grade::Grade,
+) {
     if parsed.is_fail_safe {
         let v = parsed.verdict.clone();
         let g = default_grade_for_verdict(&v);
-        return (v, g);
+        return (v, g, g);
     }
-    let grade = parsed
+    let original_llm_grade = parsed
         .grade
         .as_deref()
         .and_then(|s| s.parse().ok())
@@ -58,7 +68,9 @@ pub(super) fn apply_grade_and_floor(
             );
             g
         });
-    derive_verdict_with_grade(parsed.verdict.clone(), grade, &parsed.findings)
+    let (floor_verdict, floor_grade) =
+        derive_verdict_with_grade(parsed.verdict.clone(), original_llm_grade, &parsed.findings);
+    (floor_verdict, floor_grade, original_llm_grade)
 }
 
 /// Fetch PR metadata and return `(ReviewPrMeta, head_sha)`.
