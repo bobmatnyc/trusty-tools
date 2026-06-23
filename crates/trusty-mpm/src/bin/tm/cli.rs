@@ -583,6 +583,31 @@ pub(crate) enum Command {
         root: Option<String>,
     },
 
+    /// Spawn a SESSCTL control-plane session for a registered project (WI-1 #1592).
+    ///
+    /// Why: `tm sessctl-run` is the Phase-1 gate command for the alpha-1 unified
+    /// session control plane (epic #1590). It allocates a `<project-id>-<N>`
+    /// session ID, spawns a `SessionActor` via the `SessionRegistry`, and returns
+    /// the session ID so callers can observe the session.
+    /// What: resolves `project_id` to a workdir via the daemon's project registry,
+    /// selects either the `StreamJsonBackend` (default) or `TmuxBackend` (`--tmux`),
+    /// spawns the actor, and prints the allocated session ID.
+    /// Test: `cli_parses_sessctl_run` in `tests.rs`.
+    #[command(name = "sessctl-run")]
+    SessctlRun {
+        /// Registered project ID to run a session for.
+        project_id: String,
+        /// Use the tmux backend instead of the default stream-JSON backend.
+        ///
+        /// When set, the session is hosted in a tmux session named
+        /// `tm:<project-id>:<N>` and driven via `tmux send-keys`.
+        #[arg(long)]
+        tmux: bool,
+        /// Path to a system-prompt file to append (`--append-system-prompt-file`).
+        #[arg(long)]
+        prompt_file: Option<String>,
+    },
+
     /// Standalone metaharness — PM + sub-agent delegation without the daemon (#1045).
     ///
     /// Why: the M1 POC (issue #1045) builds a self-contained metaharness that

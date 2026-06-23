@@ -129,6 +129,18 @@ pub mod supervisor;
 /// Test: each submodule carries inline unit tests run by `cargo test -p trusty-mpm`.
 pub mod project;
 
+/// SESSCTL alpha-1 session control plane (epic #1590, WI-1).
+///
+/// Why: the daemon's two parallel session paths (project sessions + managed
+/// sessions) are unified here under one actor+registry system with a common
+/// session ID convention (`<project-id>-<N>`), a common event model, and two
+/// pluggable execution backends (`StreamJsonBackend` default, `TmuxBackend`
+/// for `--tmux`).
+/// What: re-exports `SessionBackend` trait, `ControlSessionId`, `SessionEvent`,
+/// `SessionState`, `SessionRegistry`, `SessionActorHandle`, and `RunParams`.
+/// Test: each submodule carries inline unit tests; see `control::*` for details.
+pub mod control;
+
 // ── Feature-gated modules ────────────────────────────────────────────────────
 
 /// MCP server: six orchestration tools exposed to Claude Code sessions.

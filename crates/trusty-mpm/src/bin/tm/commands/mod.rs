@@ -23,6 +23,7 @@ pub(crate) mod prune;
 pub(crate) mod repair;
 pub(crate) mod serve_stdio;
 pub(crate) mod services;
+pub(crate) mod sessctl;
 pub(crate) mod session;
 pub(crate) mod slack;
 pub(crate) mod sm_serve;

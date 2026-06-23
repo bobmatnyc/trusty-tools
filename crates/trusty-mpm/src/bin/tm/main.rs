@@ -330,6 +330,11 @@ async fn main() -> anyhow::Result<()> {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::update_cmd(&paths, alias.as_deref())
         }
+        Command::SessctlRun {
+            project_id,
+            tmux,
+            prompt_file,
+        } => commands::sessctl::sessctl_run(&client, &url, project_id, tmux, prompt_file).await,
     };
 
     // Top-level exit-code translation: a `tm sessions prune-idle` that found the
