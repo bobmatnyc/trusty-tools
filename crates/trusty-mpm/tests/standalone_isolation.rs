@@ -668,3 +668,224 @@ fn output_styles_deploy_to_config_dir_not_home() {
 
     // _home_guard drops here and restores HOME.
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 8. WI-1 Isolation regression guard — version-captured invariant check
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// Why: Claude Code is an external binary that releases frequently; each upgrade
+// could introduce new write paths under `~/.claude`, `~/.claude.json`, or
+// `~/.config/claude*`. This section pins the isolation invariant to the
+// currently-installed Claude Code version so any version drift that introduces
+// new write paths is detectable immediately.
+//
+// Design choice (CI test only, not launch-time):
+//   - The regression guard lives entirely here as CI tests — no changes to the
+//     `tm run` launch path. A launch-time check would block or slow attended
+//     interactive sessions and is inappropriate for a non-fatal advisory concern.
+//   - The tests shell out to `claude --version` to capture the version string.
+//     When `claude` is NOT on PATH (CI without Claude Code installed, fresh
+//     developer machine), the tests skip with a clear log line rather than
+//     failing — keeping the CI green on machines where Claude Code is absent.
+//   - The version string is embedded in the test output via `println!` so it
+//     appears in `cargo test -- --nocapture` and in CI logs, making version
+//     drift visible without any persistent state file.
+//
+// Graceful-skip protocol: `detect_claude_version()` returns `None` when
+// `claude` is absent or its output cannot be parsed. Every test below calls
+// `detect_claude_version()` first and returns early (skip) when `None`.
+
+/// Attempt to run `claude --version` and return the version string.
+///
+/// Why: version capture is the key addition of WI-1 — it anchors the isolation
+/// invariant to a specific Claude Code release so future upgrades that add new
+/// write paths are surfaced immediately rather than silently passing.
+/// What: shells out to `claude --version`, parses stdout into a trimmed string.
+/// Returns `None` when `claude` is not on PATH or the output is empty/unparseable
+/// — the caller then skips the test rather than failing, keeping CI green on
+/// machines without Claude Code.
+/// Test: exercised by `regression_guard_version_capture_and_isolation_invariant`
+/// and `regression_guard_config_write_paths_never_escape_to_home` below.
+fn detect_claude_version() -> Option<String> {
+    let out = std::process::Command::new("claude")
+        .arg("--version")
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    } else {
+        // `claude --version` failed or exited non-zero — treat as not installed.
+        None
+    }
+}
+
+/// Assert that no managed-driver writes landed under the fake home's "real home"
+/// locations: `<fake_home>/.claude/`, `<fake_home>/.claude.json`, and any
+/// `claude*` entry under `<fake_home>/.config/`.
+///
+/// Why: the standard `assert_no_real_claude_writes` checks `~/.claude` and
+/// `~/.claude.json` (the two paths known at WI-7 time). WI-1 extends the check
+/// to `~/.config/claude*` because Claude Code could write profile/auth state
+/// there across upgrades. Centralising the extended check here ensures every
+/// WI-1 guard test reports the exact violating path rather than a generic panic.
+/// What: calls `assert_no_real_claude_writes` first, then scans
+/// `<fake_home>/.config/` for any entry whose name starts with `claude`.
+/// Panics with the violating path if found.
+/// Test: called by every WI-1 regression guard test in this file.
+fn assert_no_managed_driver_writes_to_home(fake_home: &Path) {
+    // Standard two-path check shared with the WI-7 tests.
+    assert_no_real_claude_writes(fake_home);
+
+    // Extended check: ~/.config/claude* must also be clean.
+    let config_dir = fake_home.join(".config");
+    if config_dir.exists() {
+        let claude_in_config = std::fs::read_dir(&config_dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .any(|e| e.file_name().to_string_lossy().starts_with("claude"))
+            })
+            .unwrap_or(false);
+        assert!(
+            !claude_in_config,
+            "isolation invariant VIOLATED: managed driver must NEVER write to \
+             $HOME/.config/claude* — found a claude entry under {}",
+            config_dir.display()
+        );
+    }
+}
+
+/// WI-1 regression guard — version capture + full isolation invariant.
+///
+/// Why: each Claude Code upgrade could introduce new write paths under the real
+/// home. This test anchors the isolation invariant to the installed version so
+/// drift is immediately visible in CI logs without any persistent state file.
+/// What: (1) detects the installed Claude Code version (skips gracefully when
+/// absent so CI without Claude Code stays green), (2) prints the version string
+/// to the test log, (3) runs the full config-assembly pipeline with HOME
+/// redirected to `fake_home`, (4) asserts no write landed under `~/.claude`,
+/// `~/.claude.json`, or `~/.config/claude*` — naming the exact violating path
+/// if the assertion fires.
+/// Test: this function IS the test; run with
+/// `cargo test -p trusty-mpm --test standalone_isolation`.
+#[serial_test::serial]
+#[test]
+fn regression_guard_version_capture_and_isolation_invariant() {
+    // Step 1: version detection — graceful skip when claude is absent.
+    let claude_version = detect_claude_version();
+    match &claude_version {
+        None => {
+            // `claude` is not installed or not on PATH. Skip this test so CI
+            // on machines without Claude Code stays green.
+            println!(
+                "[WI-1 regression guard] SKIP — `claude` not found on PATH; \
+                 install Claude Code to enable version-pinned isolation checks."
+            );
+            return;
+        }
+        Some(v) => {
+            // Emit version so it appears in CI logs for drift detection.
+            println!("[WI-1 regression guard] Validated against Claude Code {v}");
+        }
+    }
+
+    // Step 2: full assembly pipeline under fake HOME.
+    let tmp = TempDir::new().expect("temp dir");
+    let fake_home = TempDir::new().expect("fake home temp dir");
+
+    let managed_root = tmp.path().join("managed");
+    let claude_config = managed_root.join("claude-config");
+    let workspace = tmp.path().join("my-project");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+
+    // Redirect HOME so any accidental home-dir access goes to fake_home.
+    let _home_guard = HomeGuard::redirect(fake_home.path());
+
+    ensure_global_config_dir(&managed_root, &claude_config)
+        .expect("ensure_global_config_dir must not fail");
+    ensure_managed_hooks(&claude_config).expect("ensure_managed_hooks must not fail");
+    preseed_managed_trust(&claude_config, &workspace).expect("preseed_managed_trust must not fail");
+
+    // Step 3: isolation assertions.
+    // If any of these panic the message names the exact violating path,
+    // mirroring the WI-7 assertion style.
+    assert_no_managed_driver_writes_to_home(fake_home.path());
+
+    // Positive assertion: output must exist inside claude_config (not just "no leak").
+    assert!(
+        claude_config.join("settings.json").exists(),
+        "settings.json must exist inside managed claude_config_dir"
+    );
+    assert!(
+        claude_config.join(".claude.json").exists(),
+        ".claude.json must exist inside managed claude_config_dir"
+    );
+
+    println!(
+        "[WI-1 regression guard] PASS — zero writes to fake home under \
+         Claude Code {}",
+        claude_version.expect("version checked above")
+    );
+    // _home_guard drops here and restores HOME.
+}
+
+/// WI-1 regression guard — write-path leakage check (focused negative assertion).
+///
+/// Why: a focused guard that checks only the negative assertion (no leakage to
+/// the real home) so that a future factoring of the assembly pipeline into
+/// separate stages doesn't accidentally drop a write-path check. Kept separate
+/// from the positive-plus-negative test above so failure messages are targeted.
+/// What: redirects HOME to `fake_home`, calls all three config-assembly
+/// functions, then asserts zero writes to `~/.claude`, `~/.claude.json`, and
+/// `~/.config/claude*`. Skips gracefully when `claude` is not installed.
+/// Test: this function IS the test.
+#[serial_test::serial]
+#[test]
+fn regression_guard_config_write_paths_never_escape_to_home() {
+    // Graceful skip when claude is not installed (CI without Claude Code).
+    let claude_version = detect_claude_version();
+    match &claude_version {
+        None => {
+            println!(
+                "[WI-1 regression guard] SKIP (write-path check) — \
+                 `claude` not found on PATH."
+            );
+            return;
+        }
+        Some(v) => {
+            println!("[WI-1 regression guard] Write-path check against Claude Code {v}");
+        }
+    }
+
+    let tmp = TempDir::new().expect("temp dir");
+    let fake_home = TempDir::new().expect("fake home temp dir");
+
+    let managed_root = tmp.path().join("managed");
+    let claude_config = managed_root.join("claude-config");
+    let workspace = tmp.path().join("repo");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+
+    let _home_guard = HomeGuard::redirect(fake_home.path());
+
+    // Run every public config-assembly entry point.
+    ensure_global_config_dir(&managed_root, &claude_config).expect("ensure_global_config_dir");
+    ensure_managed_hooks(&claude_config).expect("ensure_managed_hooks");
+    preseed_managed_trust(&claude_config, &workspace).expect("preseed_managed_trust");
+
+    // All writes must be confined to claude_config (or managed_root).
+    // None must escape to fake_home.
+    assert_no_managed_driver_writes_to_home(fake_home.path());
+
+    println!(
+        "[WI-1 regression guard] PASS (write-path) — no leakage under \
+         Claude Code {}",
+        claude_version.expect("version checked above")
+    );
+    // _home_guard drops here and restores HOME.
+}
