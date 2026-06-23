@@ -13,6 +13,33 @@ use std::path::PathBuf;
 
 use crate::cli::SessctlAction;
 
+/// Percent-encode a session ID for safe inclusion in a URL path segment.
+///
+/// Why: session IDs derive from project IDs which may contain characters that
+/// need encoding in a URL path (e.g. `/`, `?`, `#`, spaces). Using
+/// `reqwest::Url` path-segment API guarantees correct RFC 3986 encoding without
+/// adding an extra dependency.
+/// What: parses `base_url`, appends the static path segments and then the
+/// encoded `session_id` as the final dynamic segment, and returns the full URL.
+/// Test: this is a pure function; callers (`sessctl_connect`, `sessctl_stop`,
+/// `sessctl_auth`) pass it simple ASCII IDs in unit tests; the encoding is
+/// verified by reqwest's own test suite.
+fn session_url(base_url: &str, session_id: &str, suffix: &str) -> anyhow::Result<String> {
+    let mut url = reqwest::Url::parse(base_url)
+        .map_err(|e| anyhow::anyhow!("invalid daemon URL '{base_url}': {e}"))?;
+    {
+        let mut segs = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("daemon URL cannot-be-a-base: {base_url}"))?;
+        segs.extend(["api", "v1", "control", "sessions"]);
+        segs.push(session_id); // reqwest Url percent-encodes each segment
+        if !suffix.is_empty() {
+            segs.push(suffix);
+        }
+    }
+    Ok(url.to_string())
+}
+
 /// Dispatch a `SessctlAction` to the appropriate HTTP handler.
 ///
 /// Why: keeps `main.rs` thin — one match arm dispatches every sessctl verb.
@@ -59,7 +86,7 @@ async fn sessctl_run(
 ) -> anyhow::Result<()> {
     let resolved_workdir = workdir
         .map(PathBuf::from)
-        .or_else(|| resolve_workdir_from_daemon(client, url, &project_id))
+        .or_else(|| resolve_workdir_from_daemon(&project_id))
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
     let backend = if use_tmux { "tmux" } else { "stream-json" };
@@ -103,12 +130,8 @@ async fn sessctl_connect(
     url: &str,
     session_id: String,
 ) -> anyhow::Result<()> {
-    let resp = client
-        .post(format!(
-            "{url}/api/v1/control/sessions/{session_id}/connect"
-        ))
-        .send()
-        .await?;
+    let endpoint = session_url(url, &session_id, "connect")?;
+    let resp = client.post(&endpoint).send().await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -142,10 +165,10 @@ async fn sessctl_stop(
     session_id: String,
     force: bool,
 ) -> anyhow::Result<()> {
+    let endpoint = session_url(url, &session_id, "stop")?;
     let resp = client
-        .post(format!(
-            "{url}/api/v1/control/sessions/{session_id}/stop?force={force}"
-        ))
+        .post(&endpoint)
+        .query(&[("force", force.to_string().as_str())])
         .send()
         .await?;
 
@@ -171,10 +194,8 @@ async fn sessctl_auth(
     url: &str,
     session_id: String,
 ) -> anyhow::Result<()> {
-    let resp = client
-        .get(format!("{url}/api/v1/control/sessions/{session_id}/auth"))
-        .send()
-        .await?;
+    let endpoint = session_url(url, &session_id, "auth")?;
+    let resp = client.get(&endpoint).send().await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -254,17 +275,14 @@ async fn sessctl_list(
 /// Attempt to resolve a project's workdir from the daemon registry (best-effort).
 ///
 /// Why: when `--workdir` is omitted the daemon may know the project's working
-/// directory from its project registry. This preserves the lookup seam for WI-3.
+/// directory from its project registry. This preserves the lookup seam for WI-3
+/// without taking `client`/`url` parameters that cannot be used yet.
 /// What: currently returns `None` (fallback to cwd) with an explicit stderr
 /// warning so the operator knows why cwd was chosen. A full HTTP lookup is
 /// deferred to WI-3 when the project registry HTTP endpoint is wired.
 /// Test: callers fall back to `std::env::current_dir()` when this returns
 /// `None`; the warning message is observable in integration tests.
-fn resolve_workdir_from_daemon(
-    _client: &reqwest::Client,
-    _url: &str,
-    project_id: &str,
-) -> Option<PathBuf> {
+fn resolve_workdir_from_daemon(project_id: &str) -> Option<PathBuf> {
     // TODO(#1593/WI-3): implement daemon project-workdir lookup once the
     // project registry HTTP endpoint is wired. For now, fall back to cwd.
     eprintln!(

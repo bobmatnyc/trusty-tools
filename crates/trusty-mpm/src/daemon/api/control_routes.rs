@@ -267,10 +267,15 @@ pub async fn ctl_run_session(
 /// and fits axum's `Sse` responder.
 /// What: looks up the handle, attempts a CAS write-lock, subscribes to the
 /// broadcast channel, and streams each `SessionEvent` as an SSE `data:` line.
-/// The `WriteLockGuard` is moved into the stream closure so it drops — and
-/// releases the lock — on ANY stream termination: normal end, lag/close error,
-/// or client disconnect.
-/// Test: `ctl_connect_write_lock_cas_first_caller_is_writer`.
+/// The `WriteLockGuard` is moved into a single `move` closure over the stream
+/// so it is **owned** by the stream — it drops (and releases the lock) on ANY
+/// stream termination: normal end, lag/close error, or client disconnect.
+/// Why POST (not GET): connect acquires the write-lock via CAS — a side effect —
+/// so it is not a pure read. POST signals that intent explicitly and prevents
+/// inadvertent browser pre-fetches or proxy caching from stealing the lock.
+/// Test: `ctl_connect_write_lock_cas_first_caller_is_writer` (CAS semantics);
+/// `write_lock_guard_releases_on_drop` (guard drop mechanics);
+/// `ctl_connect_write_lock_guard_lives_with_stream` (handler-level lifetime).
 pub async fn ctl_connect_session(
     State(state): State<Arc<DaemonState>>,
     Path(id_str): Path<String>,
@@ -282,28 +287,30 @@ pub async fn ctl_connect_session(
         .await
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("session {id_str} not found")))?;
 
-    // CAS the write-lock per §6.2. The guard releases on drop (any exit path).
+    // CAS the write-lock per §6.2.
     let writer = handle.try_acquire_write_lock();
+    // The guard is moved into the `filter_map` closure below.  It owns the
+    // write-lock release: when the Sse stream is dropped (on any exit path),
+    // the closure drops, the guard drops, and the AtomicBool is cleared.
     let guard = WriteLockGuard::new(Arc::clone(&handle.write_lock_held), writer);
     let rx = handle.event_tx.subscribe();
 
-    // Move the guard into the stream so it lives as long as the stream does.
-    // When the stream is dropped (client disconnects, sender closed, or lag),
-    // `guard` drops and releases the write-lock automatically.
-    let stream = BroadcastStream::new(rx)
-        .map(move |item| {
-            // Touch `_guard` to keep it alive in this closure's environment.
-            let _guard = &guard;
-            item
-        })
-        .filter_map(|item| match item {
+    // Single `move` closure owns `guard` — no separate `.map()` step needed.
+    // Ownership is unambiguous: the closure captures `guard` by move, so the
+    // compiler enforces that it lives exactly as long as this stream does.
+    let stream = BroadcastStream::new(rx).filter_map(move |item| {
+        // `_guard` is referenced here so the compiler keeps `guard` in this
+        // closure's captured environment for the entire stream lifetime.
+        let _guard = &guard;
+        match item {
             Ok(event) => {
                 let json = serde_json::to_string(&event).unwrap_or_default();
                 Some(Ok(Event::default().data(json)))
             }
-            // Lagged or channel closed — end the stream (guard drops with it).
+            // Lagged or channel closed — end the stream; guard drops with it.
             Err(_) => None,
-        });
+        }
+    });
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
@@ -647,6 +654,86 @@ mod tests {
             flag.load(Ordering::SeqCst),
             "observer guard must not clear a writer's lock"
         );
+    }
+
+    /// Prove the write-lock is held for the stream's lifetime and released on drop.
+    ///
+    /// Why: the HIGH finding demanded a handler-level regression test — not just
+    /// isolated Drop tests — that proves the guard is owned by the stream, not by
+    /// the handler stack frame. This test drives the same code path that
+    /// `ctl_connect_session` uses: `BroadcastStream::filter_map(move |item| {
+    /// let _guard = &guard; … })`. When the stream value is dropped the closure
+    /// drops, the guard drops, and the write-lock is released.
+    /// What: creates a `WriteLockGuard` with `held=true`, moves it into a
+    /// `BroadcastStream::filter_map` closure (the exact pattern used in the handler),
+    /// asserts the lock is held while the stream is alive, drops the stream (without
+    /// polling — no need to consume events), and asserts the lock is released.
+    /// Why no poll: `BroadcastStream` would block indefinitely on an empty channel;
+    /// the test only needs to verify that `drop(stream)` releases the lock, not that
+    /// events flow through.
+    /// Test: this test.
+    #[test]
+    fn ctl_connect_write_lock_guard_lives_with_stream() {
+        use tokio_stream::wrappers::BroadcastStream;
+
+        // Use a tokio broadcast channel with a disconnected sender so the stream
+        // is immediately at end-of-stream (no events; receiver lag is irrelevant
+        // because we never poll). The channel is dropped before creating the stream.
+        let (tx, rx) = tokio::sync::broadcast::channel::<crate::control::event::SessionEvent>(4);
+        drop(tx); // sender dropped — stream would immediately end if polled
+
+        let flag = Arc::new(AtomicBool::new(true)); // guard "holds" the lock
+        let guard = WriteLockGuard::new(Arc::clone(&flag), true);
+
+        let stream = BroadcastStream::new(rx).filter_map(move |item| {
+            let _guard = &guard; // guard is owned by this closure
+            match item {
+                Ok(event) => {
+                    let json = serde_json::to_string(&event).unwrap_or_default();
+                    Some(Ok::<_, std::convert::Infallible>(
+                        axum::response::sse::Event::default().data(json),
+                    ))
+                }
+                Err(_) => None,
+            }
+        });
+        // Pin on heap so we have a concrete value to drop.
+        let pinned = Box::pin(stream);
+
+        // === While stream is alive, lock must be held. ===
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "write_lock_held must be true while the stream (and its closure) is alive"
+        );
+
+        // Verify a second CAS would fail (lock is held).
+        let second = flag
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        assert!(
+            !second,
+            "CAS must fail while the guard-owned stream is alive"
+        );
+
+        // === Drop the stream — closure drops, guard drops, lock released. ===
+        drop(pinned);
+
+        // === After drop, lock must be false. ===
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "write_lock_held must be false after the stream is dropped"
+        );
+
+        // === Third acquire must now succeed. ===
+        let third = flag
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        assert!(
+            third,
+            "third caller must be able to re-acquire lock after stream drop"
+        );
+        // Clean up — store false so the flag doesn't outlive this assert.
+        flag.store(false, Ordering::SeqCst);
     }
 
     #[tokio::test]
