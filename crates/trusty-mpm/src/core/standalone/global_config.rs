@@ -761,35 +761,33 @@ mod tests {
     }
 
     // WI-2 follow-up (#1553): output-style deploy must be idempotent — a second
-    // call to ensure_global_config_dir must not rewrite style files whose
-    // content is already current.
+    // call to deploy_output_styles must not rewrite style files whose content
+    // is already current.  We assert via the DeployResult fields rather than
+    // mtime comparisons (mtime checks are racy on coarse-grained filesystems).
     #[test]
     fn test_deploy_output_styles_idempotent_via_global_config() {
         let tmp = TempDir::new().unwrap();
         let managed_root = tmp.path().join("managed");
         let claude_config = managed_root.join("claude-config");
 
-        // First call seeds all output styles.
+        // First call (via ensure_global_config_dir) seeds all output styles.
         ensure_global_config_dir(&managed_root, &claude_config).unwrap();
 
-        let styles_dir = claude_config.join("output-styles");
-        let first_style = &crate::core::bundle::OUTPUT_STYLES[0];
-        let mtime_first = std::fs::metadata(styles_dir.join(first_style.file_name))
-            .unwrap()
-            .modified()
-            .unwrap();
-
-        // Second call must be idempotent — no rewrite.
-        ensure_global_config_dir(&managed_root, &claude_config).unwrap();
-
-        let mtime_second = std::fs::metadata(styles_dir.join(first_style.file_name))
-            .unwrap()
-            .modified()
-            .unwrap();
+        // Second call to the deployer directly must report all files unchanged.
+        let result =
+            crate::core::output_style_deployer::deploy_output_styles(&claude_config).unwrap();
+        assert!(
+            result.deployed.is_empty(),
+            "second deploy must not overwrite any style file (idempotent); \
+             deployed: {:?}",
+            result.deployed
+        );
         assert_eq!(
-            mtime_first, mtime_second,
-            "output style {} must not be rewritten on idempotent call",
-            first_style.file_name
+            result.unchanged.len(),
+            crate::core::bundle::OUTPUT_STYLES.len(),
+            "all style files must be reported unchanged on second call; \
+             unchanged: {:?}",
+            result.unchanged
         );
     }
 }

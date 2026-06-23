@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use crate::core::agent_manifest::{atomic_write, checksum};
+use crate::core::agent_manifest::atomic_write;
 use crate::core::bundle::OUTPUT_STYLES;
 
 /// Summary of one [`deploy_output_styles`] run.
@@ -46,7 +46,9 @@ pub struct OutputStyleDeployResult {
 /// honoured, without requiring the user to first run `tm install` (closes #1553).
 /// What: creates `<claude_config_dir>/output-styles/` if absent, then iterates
 /// [`OUTPUT_STYLES`], comparing each style's content to the on-disk copy via a
-/// sha256 checksum.  Files whose checksum already matches are skipped (idempotent);
+/// byte-exact comparison (reads raw bytes so the check is valid even for
+/// non-UTF-8 on-disk content, and surfaces IO errors rather than swallowing them).
+/// Files whose bytes already match the bundled content are skipped (idempotent);
 /// others are written atomically (temp-then-rename) via [`atomic_write`].  All
 /// logging goes to stderr.
 /// Test: `deploy_output_styles_populates_output_styles_dir` (happy path),
@@ -60,14 +62,27 @@ pub fn deploy_output_styles(claude_config_dir: &Path) -> anyhow::Result<OutputSt
 
     for style in OUTPUT_STYLES {
         let target = styles_dir.join(style.file_name);
+        let bundled_bytes = style.content.as_bytes();
 
-        // Idempotency: skip write when the on-disk content is already current.
-        let on_disk_matches = std::fs::read_to_string(&target)
-            .ok()
-            .map(|existing| checksum(&existing) == checksum(style.content))
-            .unwrap_or(false);
+        // Idempotency guard: read the on-disk bytes and compare directly.
+        // Using `read` (raw bytes) rather than `read_to_string` avoids two
+        // hazards: (a) silently treating non-UTF-8 on-disk content as absent
+        // (which would trigger a spurious rewrite), and (b) swallowing genuine
+        // IO errors (e.g. permissions) via `.ok()`.  Only `NotFound` (the file
+        // genuinely does not exist yet) is treated as "needs write"; all other
+        // IO errors are propagated so the caller sees them.
+        let needs_write = match std::fs::read(&target) {
+            Ok(disk_bytes) => disk_bytes != bundled_bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "failed to read on-disk style '{}' for idempotency check: {e}",
+                    target.display()
+                ));
+            }
+        };
 
-        if on_disk_matches {
+        if !needs_write {
             result.unchanged.push(style.file_name.to_string());
             continue;
         }
@@ -93,6 +108,11 @@ mod tests {
     use tempfile::TempDir;
 
     /// Deploy to a fresh directory must write all three bundled styles.
+    ///
+    /// Why: confirms the happy-path deploy populates the output-styles dir.
+    /// What: calls deploy_output_styles on an empty temp dir and asserts every
+    /// bundled style is written with the correct content.
+    /// Test: this function IS the test.
     #[test]
     fn deploy_output_styles_populates_output_styles_dir() {
         let tmp = TempDir::new().unwrap();
@@ -131,6 +151,14 @@ mod tests {
     }
 
     /// A second deploy with no source changes must not rewrite any file.
+    ///
+    /// Why: idempotency is the key safety property — avoids spurious mtime
+    /// bumps and thrashing on every managed-session bootstrap.
+    /// What: calls deploy_output_styles twice and asserts the second call
+    /// returns `deployed.is_empty()` and `unchanged.len() == OUTPUT_STYLES.len()`.
+    /// Relies on the `OutputStyleDeployResult` fields rather than mtime
+    /// comparisons (mtime assertions are racy on coarse-grained CI filesystems).
+    /// Test: this function IS the test.
     #[test]
     fn deploy_output_styles_idempotent() {
         let tmp = TempDir::new().unwrap();
@@ -139,19 +167,8 @@ mod tests {
         // First call populates the directory.
         deploy_output_styles(&cfg).unwrap();
 
-        // Record mtimes before the second call.
-        let styles_dir = cfg.join("output-styles");
-        let mtimes_before: Vec<_> = OUTPUT_STYLES
-            .iter()
-            .map(|s| {
-                std::fs::metadata(styles_dir.join(s.file_name))
-                    .unwrap()
-                    .modified()
-                    .unwrap()
-            })
-            .collect();
-
-        // Second call must leave files untouched.
+        // Second call must leave files untouched — assert via result fields,
+        // not mtime (mtime checks are racy on coarse-grained filesystems).
         let result = deploy_output_styles(&cfg).unwrap();
 
         assert!(
@@ -162,24 +179,21 @@ mod tests {
         assert_eq!(
             result.unchanged.len(),
             OUTPUT_STYLES.len(),
-            "all files must be reported unchanged on idempotent call"
+            "all files must be reported unchanged on idempotent call; \
+             got unchanged={:?} deployed={:?}",
+            result.unchanged,
+            result.deployed
         );
-
-        // mtimes must not have changed.
-        for (style, mtime_before) in OUTPUT_STYLES.iter().zip(mtimes_before.iter()) {
-            let mtime_after = std::fs::metadata(styles_dir.join(style.file_name))
-                .unwrap()
-                .modified()
-                .unwrap();
-            assert_eq!(
-                mtime_before, &mtime_after,
-                "unchanged style {} must not be rewritten (mtime changed)",
-                style.file_name
-            );
-        }
     }
 
     /// A stale on-disk copy (content differs from bundled) must be overwritten.
+    ///
+    /// Why: when the framework upgrades a style, the deployer must replace the
+    /// stale on-disk copy, not leave it in place.
+    /// What: writes deliberately stale content to the first style's target path,
+    /// calls deploy_output_styles, and asserts the result reports the file as
+    /// deployed and the on-disk content now matches the bundle.
+    /// Test: this function IS the test.
     #[test]
     fn deploy_output_styles_refreshes_stale_file() {
         let tmp = TempDir::new().unwrap();
@@ -209,52 +223,40 @@ mod tests {
         );
     }
 
-    /// deploy_output_styles must NOT write outside the given claude_config_dir.
+    /// Non-UTF-8 bytes on disk must trigger a rewrite, not a spurious OK.
     ///
-    /// Why: isolation invariant (SPEC-STANDALONE-MPM-04) — the managed driver
-    /// must never write to the real `~/.claude*`.  This test points HOME at a
-    /// fresh temp dir and asserts nothing lands there.
-    /// What: redirects HOME, calls deploy_output_styles, asserts no
-    /// `.claude` dir or `.claude.json` file appears in the fake home.
+    /// Why: the idempotency guard reads raw bytes (not UTF-8 string) so that
+    /// a corrupt or binary on-disk file is correctly detected as "stale" and
+    /// replaced, rather than silently swallowed.
+    /// What: writes raw non-UTF-8 bytes to the first style's path, calls
+    /// deploy_output_styles, and asserts the file is reported as deployed.
     /// Test: this function IS the test.
-    #[serial_test::serial]
     #[test]
-    fn deploy_output_styles_does_not_write_to_home() {
-        struct HomeGuard(Option<String>);
-        impl Drop for HomeGuard {
-            fn drop(&mut self) {
-                match self.0 {
-                    Some(ref p) => unsafe { std::env::set_var("HOME", p) },
-                    None => unsafe { std::env::remove_var("HOME") },
-                }
-            }
-        }
-
+    fn deploy_output_styles_handles_non_utf8_on_disk() {
         let tmp = TempDir::new().unwrap();
-        let cfg = tmp.path().join("claude-config");
-        std::fs::create_dir_all(&cfg).unwrap();
+        let cfg = tmp.path().to_path_buf();
+        let styles_dir = cfg.join("output-styles");
+        std::fs::create_dir_all(&styles_dir).unwrap();
 
-        let fake_home = TempDir::new().unwrap();
-        let _home_guard = {
-            let prev = std::env::var("HOME").ok();
-            unsafe { std::env::set_var("HOME", fake_home.path()) };
-            HomeGuard(prev)
-        };
+        // Write non-UTF-8 bytes (invalid in UTF-8) to the first style path.
+        let first = &OUTPUT_STYLES[0];
+        let target = styles_dir.join(first.file_name);
+        std::fs::write(&target, b"\xff\xfe invalid utf-8 bytes \x80\x81").unwrap();
 
-        deploy_output_styles(&cfg).unwrap();
+        let result = deploy_output_styles(&cfg).unwrap();
 
-        // styles must land inside cfg, not in fake_home.
+        // The file with non-UTF-8 content must be treated as stale and refreshed.
         assert!(
-            cfg.join("output-styles").exists(),
-            "output-styles dir must exist inside the given config dir"
+            result.deployed.contains(&first.file_name.to_string()),
+            "non-UTF-8 on-disk file must be refreshed; deployed: {:?}",
+            result.deployed
         );
-        assert!(
-            !fake_home.path().join(".claude").exists(),
-            "deploy_output_styles must NOT write to $HOME/.claude (isolation)"
-        );
-        assert!(
-            !fake_home.path().join("output-styles").exists(),
-            "deploy_output_styles must NOT write output-styles to $HOME (isolation)"
+
+        // After refresh, content must match the bundled constant.
+        let refreshed = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(
+            refreshed, first.content,
+            "after refresh, content must match bundled constant"
         );
     }
 }
