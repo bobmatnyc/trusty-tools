@@ -265,7 +265,15 @@ async fn sessctl_list(
         let state = s["state"].as_str().unwrap_or("-");
         let uptime = s["uptime_secs"].as_u64().unwrap_or(0);
         let restart_count = s["restart_count"].as_u64().unwrap_or(0);
-        let last_summary = s["last_summary"].as_str().unwrap_or("-");
+        // Truncate last_summary to 40 chars (Unicode-safe) with ellipsis to
+        // keep the table row aligned regardless of summary length (review bug #5).
+        let raw_summary = s["last_summary"].as_str().unwrap_or("-");
+        let last_summary: String = if raw_summary.chars().count() > 40 {
+            let truncated: String = raw_summary.chars().take(37).collect();
+            format!("{truncated}...")
+        } else {
+            raw_summary.to_owned()
+        };
         println!(
             "{:<30} {:<20} {:<12} {:<22} {:>7}s {:<5} {:<40}",
             sid, proj, backend, state, uptime, restart_count, last_summary

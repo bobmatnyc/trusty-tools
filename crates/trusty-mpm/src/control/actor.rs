@@ -12,8 +12,8 @@
 //! subscription via [`ActorCommand::SubscribeCritical`] and wires the §8.2
 //! regex/NLP parse layer into the output path.
 //!
-//! Test: inline test module — stop_terminates, broadcasts_started, write_lock_cas,
-//! activity_parsed_on_output, critical_observer_lag_on_first_lag.
+//! Test: actor_tests.rs — stop_terminates, broadcasts_started, write_lock_cas,
+//! activity_parsed_on_output, critical_observer_lag, no_false_positive_lag.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,6 +35,15 @@ use crate::control::state::{SessionMetadata, SessionState};
 /// per spec (`session.broadcast_capacity`).
 pub const DEFAULT_BROADCAST_CAPACITY: usize = 256;
 
+/// Per-critical-observer mpsc channel capacity (§6.1 of SPEC-SESSCTL-01).
+///
+/// Why: the actor detects a critical observer's lag via `try_send` on a bounded
+/// `mpsc::Sender`. When the channel is full the consumer has fallen behind and
+/// the actor must surface `ObserverCriticalLag`. This capacity matches the
+/// broadcast capacity so an idle consumer can buffer the same number of events
+/// before triggering intervention.
+pub const CRITICAL_OBSERVER_CAPACITY: usize = DEFAULT_BROADCAST_CAPACITY;
+
 /// Commands the `SessionActor` accepts on its `mpsc` inbox.
 ///
 /// Why: the actor is the single writer to the backend; all external callers
@@ -42,10 +51,9 @@ pub const DEFAULT_BROADCAST_CAPACITY: usize = 256;
 /// access.
 /// What: `Send` injects input; `Stop` / `ForceStop` trigger graceful /
 /// immediate shutdown; `Subscribe` returns a broadcast receiver clone;
-/// `SubscribeCritical` returns a receiver AND registers the caller as a
-/// critical observer (§6.1) so the first lag yields `ObserverCriticalLag`
-/// instead of a silent resubscription.
-/// Test: `actor_command_stop_terminates`, `critical_observer_lag_on_first_lag`.
+/// `SubscribeCritical` registers the caller as a critical observer (§6.1) via
+/// a dedicated bounded mpsc so the actor can detect genuine backpressure.
+/// Test: `actor_command_stop_terminates`, `critical_observer_lag`.
 pub enum ActorCommand {
     /// Deliver text input to the session backend (write-lock required).
     Send(crate::control::backend::SessionInput),
@@ -58,10 +66,12 @@ pub enum ActorCommand {
     Subscribe(tokio::sync::oneshot::Sender<broadcast::Receiver<SessionEvent>>),
     /// Subscribe a **critical** observer (e.g. the SM agent) per §6.1.
     ///
-    /// Unlike `Subscribe`, the first `Lagged` error on this receiver causes
-    /// the actor to emit `ObserverCriticalLag` and transition the session to
-    /// `AwaitingIntervention` instead of silently resubscribing.
-    SubscribeCritical(tokio::sync::oneshot::Sender<broadcast::Receiver<SessionEvent>>),
+    /// Unlike `Subscribe`, events are delivered via a dedicated bounded
+    /// `mpsc::Receiver` (capacity `CRITICAL_OBSERVER_CAPACITY`). The actor
+    /// uses `try_send` to forward each event; a full channel means the real
+    /// consumer has fallen behind → `ObserverCriticalLag` is emitted and the
+    /// session transitions to `AwaitingIntervention`.
+    SubscribeCritical(tokio::sync::oneshot::Sender<mpsc::Receiver<SessionEvent>>),
 }
 
 impl std::fmt::Debug for ActorCommand {
@@ -121,13 +131,14 @@ impl SessionActorHandle {
     /// Subscribe a **critical** observer (§6.1 of SPEC-SESSCTL-01).
     ///
     /// Why: critical observers (e.g. the SM agent) must never be silently
-    /// resubscribed after a lag — the first `Lagged` error transitions the
-    /// session to `AwaitingIntervention` and surfaces `ObserverCriticalLag`.
+    /// resubscribed after a lag — the first full-channel condition transitions
+    /// the session to `AwaitingIntervention` and surfaces `ObserverCriticalLag`.
     /// What: sends `ActorCommand::SubscribeCritical` over the command inbox
-    /// and waits on a oneshot for the `broadcast::Receiver`. Returns `None`
-    /// if the actor inbox is closed (actor already stopped).
-    /// Test: `critical_observer_lag_on_first_lag`.
-    pub async fn subscribe_critical(&self) -> Option<broadcast::Receiver<SessionEvent>> {
+    /// and awaits a oneshot that carries an `mpsc::Receiver`. The actor holds
+    /// the `Sender` and uses `try_send` to detect genuine backpressure from the
+    /// real consumer. Returns `None` if the actor inbox is closed.
+    /// Test: `critical_observer_lag`, `critical_observer_no_false_positive`.
+    pub async fn subscribe_critical(&self) -> Option<mpsc::Receiver<SessionEvent>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.command_tx
             .send(ActorCommand::SubscribeCritical(tx))
@@ -143,9 +154,7 @@ impl SessionActorHandle {
 /// constructed with the correct channel and atomic pairing.
 /// What: creates the `mpsc` command channel, the `broadcast` event channel,
 /// and the shared metadata Arc, then `tokio::spawn`s `run_actor`. Returns
-/// the handle ready for insertion into `SessionRegistry`. WI-3: also
-/// initialises the `critical_observer_active` flag that tracks whether a
-/// critical observer is currently subscribed.
+/// the handle ready for insertion into `SessionRegistry`.
 /// Test: `actor_broadcasts_started_event`.
 pub fn spawn_actor<B: SessionBackend>(
     session_id: ControlSessionId,
@@ -188,15 +197,16 @@ pub fn spawn_actor<B: SessionBackend>(
 /// state machine run independently — slow backend I/O in one session does not
 /// block another.
 /// What: `select!` over `command_rx.recv()` and `backend.recv()`. Dispatches
-/// commands, forwards events to broadcast, transitions `SessionState`, and
-/// exits when the state machine reaches a terminal state.
+/// commands, forwards events to broadcast AND the critical-observer mpsc,
+/// transitions `SessionState`, and exits when the state machine reaches a
+/// terminal state.
 /// WI-3: after forwarding each `Output` event, runs the §8.2 regex/NLP parse
 /// layer and emits `ActivityParsed` / `PendingDecision` if a match is found,
-/// updating `SessionMetadata` accordingly. Also handles `SubscribeCritical`
-/// to track critical observers per §6.1.
+/// updating `SessionMetadata` accordingly. Critical-observer lag is detected
+/// via `try_send` on the per-observer bounded mpsc (§6.1).
 /// Test: `actor_command_stop_terminates`, `actor_broadcasts_started_event`,
-/// `actor_activity_parsed_on_output`, `critical_observer_lag_yields_event`.
-async fn run_actor<B: SessionBackend>(
+/// `actor_activity_parsed_on_output`, `critical_observer_lag`.
+pub(crate) async fn run_actor<B: SessionBackend>(
     session_id: ControlSessionId,
     mut backend: B,
     backend_kind: BackendKind,
@@ -205,24 +215,23 @@ async fn run_actor<B: SessionBackend>(
     metadata: Arc<RwLock<SessionMetadata>>,
 ) {
     // Emit Started event and transition to Running.
-    let started = SessionEvent::Started {
+    let _ = event_tx.send(SessionEvent::Started {
         session_id: session_id.clone(),
         backend: backend_kind,
         ts: Utc::now(),
-    };
-    let _ = event_tx.send(started);
+    });
     {
         let mut m = metadata.write().await;
         m.state = SessionState::Running;
     }
 
-    // Track whether a critical observer is currently registered (§6.1).
-    // We store the receiver so we can poll it for lag detection.
-    let mut critical_rx: Option<broadcast::Receiver<SessionEvent>> = None;
+    // Critical observer (§6.1): a bounded mpsc Sender. The actor `try_send`s
+    // each event here; `Err(Full)` means the REAL consumer is behind → trigger
+    // AwaitingIntervention. Using mpsc rather than a broadcast clone means we
+    // measure the actual consumer's queue depth, not a self-drained proxy.
+    let mut critical_tx: Option<mpsc::Sender<SessionEvent>> = None;
 
     loop {
-        // Check if we are already in a terminal state (shouldn't happen here,
-        // but guard against re-entrancy from a ForceStop).
         let is_terminal = {
             let m = metadata.read().await;
             m.state.is_terminal()
@@ -236,14 +245,12 @@ async fn run_actor<B: SessionBackend>(
             cmd = command_rx.recv() => {
                 match cmd {
                     None => {
-                        // All senders dropped; treat as a stop signal.
                         debug!(session_id = %session_id, "command channel closed; stopping actor");
                         break;
                     }
                     Some(ActorCommand::Stop) => {
                         debug!(session_id = %session_id, "actor: graceful Stop received");
-                        transition_to_stopping(&session_id, &event_tx, &metadata).await;
-                        // Box<B> satisfies stop(self: Box<Self>) without needing dyn.
+                        transition_to_stopping(&metadata).await;
                         if let Err(e) = Box::new(backend).stop().await {
                             warn!(session_id = %session_id, "backend stop error: {e}");
                         }
@@ -254,7 +261,6 @@ async fn run_actor<B: SessionBackend>(
                     }
                     Some(ActorCommand::ForceStop) => {
                         debug!(session_id = %session_id, "actor: ForceStop received");
-                        // Box<B> satisfies stop(self: Box<Self>) without needing dyn.
                         if let Err(e) = Box::new(backend).stop().await {
                             warn!(session_id = %session_id, "backend force-stop error: {e}");
                         }
@@ -269,20 +275,16 @@ async fn run_actor<B: SessionBackend>(
                         }
                     }
                     Some(ActorCommand::Subscribe(reply_tx)) => {
-                        let rx = event_tx.subscribe();
-                        let _ = reply_tx.send(rx);
+                        let _ = reply_tx.send(event_tx.subscribe());
                     }
                     Some(ActorCommand::SubscribeCritical(reply_tx)) => {
-                        // Replace any prior critical receiver with a fresh one.
-                        let rx = event_tx.subscribe();
-                        // Keep a second clone for lag detection inside the actor.
-                        let lag_rx = event_tx.subscribe();
+                        // Create a bounded mpsc pair. The actor keeps the Sender
+                        // and uses try_send to detect genuine backpressure from
+                        // the real consumer (who holds the Receiver).
+                        let (tx, rx) = mpsc::channel::<SessionEvent>(CRITICAL_OBSERVER_CAPACITY);
                         let _ = reply_tx.send(rx);
-                        critical_rx = Some(lag_rx);
-                        debug!(
-                            session_id = %session_id,
-                            "critical observer subscribed (§6.1)"
-                        );
+                        critical_tx = Some(tx);
+                        debug!(session_id = %session_id, "critical observer subscribed (§6.1)");
                     }
                 }
             }
@@ -291,7 +293,6 @@ async fn run_actor<B: SessionBackend>(
             maybe_events = backend.recv() => {
                 match maybe_events {
                     None => {
-                        // Clean exit from backend.
                         debug!(session_id = %session_id, "backend recv returned None (clean exit)");
                         transition_to_stopped(
                             &session_id, StopReason::Completed, &event_tx, &metadata,
@@ -300,7 +301,6 @@ async fn run_actor<B: SessionBackend>(
                     }
                     Some(Err(e)) => {
                         warn!(session_id = %session_id, "backend recv error: {e}");
-                        // Phase 1: treat recv errors as terminal (restart is WI-4).
                         let _ = event_tx.send(SessionEvent::Failed {
                             session_id: session_id.clone(),
                             reason: e.to_string(),
@@ -315,88 +315,119 @@ async fn run_actor<B: SessionBackend>(
                     Some(Ok(events)) => {
                         let now = Utc::now();
 
-                        // Check critical observer for lag BEFORE forwarding new
-                        // events. `try_recv` on a critical receiver that has lagged
-                        // returns `Err(Lagged)` — the receiver is still valid for
-                        // future events but we must surface the lag immediately.
+                        // Forward events to broadcast channel AND to the critical
+                        // observer mpsc. Detect lag via try_send: a full channel
+                        // means the real consumer has fallen behind (§6.1).
                         let mut critical_lagged = false;
-                        if let Some(ref mut crit_rx) = critical_rx {
-                            // Drain what we can; if we hit a Lagged error, the
-                            // critical observer missed events.
-                            loop {
-                                match crit_rx.try_recv() {
-                                    Ok(_) => {} // successfully drained an event
-                                    Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                                        warn!(
-                                            session_id = %session_id,
-                                            dropped = n,
-                                            "critical observer lagged (§6.1) — \
-                                             transitioning to AwaitingIntervention"
-                                        );
-                                        let _ = event_tx.send(
-                                            SessionEvent::ObserverCriticalLag {
-                                                session_id: session_id.clone(),
-                                                dropped: n,
-                                            },
-                                        );
-                                        {
-                                            let mut m = metadata.write().await;
-                                            m.state = SessionState::AwaitingIntervention;
-                                        }
-                                        // Clear the critical receiver — recovery
-                                        // requires an explicit re-attach.
-                                        critical_rx = None;
-                                        critical_lagged = true;
-                                        break;
-                                    }
-                                    Err(broadcast::error::TryRecvError::Empty) => break,
-                                    Err(broadcast::error::TryRecvError::Closed) => {
-                                        critical_rx = None;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        // §6.1: AwaitingIntervention is a halt state — stop
-                        // processing further events and exit the actor loop.
-                        if critical_lagged {
-                            break;
-                        }
-
-                        // Forward all raw output events and collect raw text.
                         let mut raw_text = String::new();
+
                         for event in &events {
                             if let SessionEvent::Output { raw, .. } = event {
                                 raw_text.push_str(raw);
                                 raw_text.push('\n');
                             }
                             let _ = event_tx.send(event.clone());
+
+                            // Forward to critical observer via try_send.
+                            // Err(Full) or Err(Disconnected) → consumer behind.
+                            if critical_tx
+                                .as_ref()
+                                .is_some_and(|tx| tx.try_send(event.clone()).is_err())
+                            {
+                                critical_lagged = true;
+                            }
                         }
 
-                        // Update last_activity_at after forwarding.
+                        // Update last_activity_at.
                         {
                             let mut m = metadata.write().await;
                             m.last_activity_at = now;
                         }
 
-                        // §8.2 Regex/NLP parse layer — runs only when there is
-                        // raw text in the output batch.
+                        // §6.1: critical observer lag → emit event, transition to
+                        // AwaitingIntervention, stop the backend, and exit the loop.
+                        if critical_lagged {
+                            warn!(
+                                session_id = %session_id,
+                                "critical observer lagged (§6.1) — \
+                                 transitioning to AwaitingIntervention"
+                            );
+                            let _ = event_tx.send(SessionEvent::ObserverCriticalLag {
+                                session_id: session_id.clone(),
+                                dropped: 0, // exact count not available with mpsc
+                            });
+                            {
+                                let mut m = metadata.write().await;
+                                m.state = SessionState::AwaitingIntervention;
+                            }
+                            // Stop the backend to release resources and avoid
+                            // a process/tmux-pane leak (fixes review bug #2).
+                            if let Err(e) = Box::new(backend).stop().await {
+                                warn!(session_id = %session_id, "backend stop on lag: {e}");
+                            }
+                            // Emit a terminal Stopped event so observers can drain.
+                            let _ = event_tx.send(SessionEvent::Stopped {
+                                session_id: session_id.clone(),
+                                reason: StopReason::Forced,
+                                ts: Utc::now(),
+                            });
+                            break;
+                        }
+
+                        // §8.2 Regex/NLP parse layer.
                         if !raw_text.is_empty()
                             && let Some(parsed) = ActivityParser::parse_output(&raw_text)
                         {
-                            // Update metadata with the parse result.
+                            // Auth prompt: emit ActivityParsed, then handle
+                            // stream-json (terminal) or tmux (AwaitingAuth).
+                            // Never emit PendingDecision for AuthPrompt —
+                            // the decision surface is wrong and the state
+                            // write must be coherent (fixes review bug #3).
+                            if parsed.kind == ActivityKind::AuthPrompt {
+                                let _ = event_tx.send(SessionEvent::ActivityParsed {
+                                    session_id: session_id.clone(),
+                                    kind: parsed.kind.clone(),
+                                    summary: parsed.summary.clone(),
+                                    ts: now,
+                                });
+                                if backend_kind == BackendKind::StreamJson {
+                                    {
+                                        let mut m = metadata.write().await;
+                                        m.last_summary = Some(parsed.summary.clone());
+                                        m.state = SessionState::AuthFailed;
+                                    }
+                                    let _ = event_tx.send(SessionEvent::AuthFailed {
+                                        session_id: session_id.clone(),
+                                        backend: backend_kind,
+                                        reason: "auth prompt detected on stream-json; \
+                                                 pre-authenticate ~/.claude and re-launch"
+                                            .into(),
+                                        ts: now,
+                                    });
+                                    break;
+                                } else if backend_kind == BackendKind::Tmux {
+                                    let mut m = metadata.write().await;
+                                    m.last_summary = Some(parsed.summary.clone());
+                                    m.state = SessionState::AwaitingAuth;
+                                }
+                                continue;
+                            }
+
+                            // Non-auth path: update metadata, emit ActivityParsed,
+                            // optionally emit PendingDecision, clear stale decision
+                            // when this output is not itself a decision prompt
+                            // (fixes review bug #6).
                             {
                                 let mut m = metadata.write().await;
                                 m.last_summary = Some(parsed.summary.clone());
                                 if parsed.pending_decision.is_some() {
                                     m.pending_decision = parsed.pending_decision.clone();
                                     m.proposed_default = parsed.proposed_default.clone();
-                                }
-                                // Auth prompt on stream-JSON is a terminal error.
-                                if parsed.kind == ActivityKind::AuthPrompt
-                                    && backend_kind == BackendKind::StreamJson
-                                {
-                                    m.state = SessionState::AuthFailed;
+                                } else {
+                                    // Clear stale pending_decision when the new
+                                    // output is not itself a decision prompt.
+                                    m.pending_decision = None;
+                                    m.proposed_default = None;
                                 }
                             }
 
@@ -407,7 +438,6 @@ async fn run_actor<B: SessionBackend>(
                                 ts: now,
                             });
 
-                            // Emit PendingDecision if decision prompt detected.
                             if let Some(ref prompt) = parsed.pending_decision {
                                 let _ = event_tx.send(SessionEvent::PendingDecision {
                                     session_id: session_id.clone(),
@@ -415,29 +445,6 @@ async fn run_actor<B: SessionBackend>(
                                     proposed_default: parsed.proposed_default.clone(),
                                     ts: now,
                                 });
-                            }
-
-                            // Auth prompt on stream-JSON → transition and exit.
-                            if parsed.kind == ActivityKind::AuthPrompt
-                                && backend_kind == BackendKind::StreamJson
-                            {
-                                let _ = event_tx.send(SessionEvent::AuthFailed {
-                                    session_id: session_id.clone(),
-                                    backend: backend_kind,
-                                    reason: "auth prompt detected on stream-json backend; \
-                                             pre-authenticate ~/.claude and re-launch"
-                                        .into(),
-                                    ts: now,
-                                });
-                                break;
-                            }
-
-                            // Auth prompt on tmux → AwaitingAuth state.
-                            if parsed.kind == ActivityKind::AuthPrompt
-                                && backend_kind == BackendKind::Tmux
-                            {
-                                let mut m = metadata.write().await;
-                                m.state = SessionState::AwaitingAuth;
                             }
                         }
                     }
@@ -449,18 +456,12 @@ async fn run_actor<B: SessionBackend>(
     debug!(session_id = %session_id, "actor task exiting");
 }
 
-/// Transition to `Stopping` state and emit the corresponding event (implicit).
+/// Transition to `Stopping` state (internal; no event emitted in alpha-1).
 ///
-/// Why: a separate helper keeps the actor loop readable and ensures the
-/// metadata is always updated before broadcasting.
-/// What: sets `metadata.state = Stopping`. No separate `SessionEvent` is
-/// defined for `Stopping` in alpha-1; the transition is internal.
+/// Why: a separate helper keeps the actor loop readable.
+/// What: sets `metadata.state = Stopping`.
 /// Test: `actor_command_stop_terminates`.
-async fn transition_to_stopping(
-    _session_id: &ControlSessionId,
-    _event_tx: &broadcast::Sender<SessionEvent>,
-    metadata: &Arc<RwLock<SessionMetadata>>,
-) {
+async fn transition_to_stopping(metadata: &Arc<RwLock<SessionMetadata>>) {
     let mut m = metadata.write().await;
     m.state = SessionState::Stopping;
 }
