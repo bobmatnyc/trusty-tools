@@ -1,15 +1,15 @@
-//! CLI command handlers for the standalone managed driver (`tm register/load/run/ls/path/login`).
+//! CLI command handlers for the standalone managed driver.
 //!
 //! Why: the standalone managed driver adds a new alias-keyed registry and
 //! lifecycle on top of the existing session-manager machinery (DOC-24). Keeping
 //! these handlers in their own file preserves the existing handlers untouched
 //! and stays under the 500-SLOC cap.
-//! What: six thin handlers — `register_cmd`, `ls_cmd`, `load_cmd`, `run_cmd`,
-//! `path_cmd`, and `login_cmd` — each accepting a `&ManagedPaths` resolved by
-//! `resolve_managed_paths` in `managed_root.rs` (closes #1566). `login_cmd`
-//! (WI-10) launches `claude auth login` under the tm-global CLAUDE_CONFIG_DIR
-//! so the OAuth flow creates a keychain entry for that path, enabling future
-//! `tm run` sessions to authenticate on the user's Claude Max/Pro plan.
+//! What: eight thin handlers — `register_cmd`, `ls_cmd`, `load_cmd`, `run_cmd`,
+//! `path_cmd`, `login_cmd`, `rm_cmd`, and `update_cmd` — each accepting a
+//! `&ManagedPaths` resolved by `resolve_managed_paths` in `managed_root.rs`
+//! (closes #1566). `rm_cmd` deregisters an alias and removes its project dir.
+//! `update_cmd` pulls the latest changes and idempotently re-deploys managed
+//! config — reusing the same `load_alias` function that `load_cmd` calls.
 //! Test: exercised by `cli_parses_register`, `cli_parses_ls`, etc. in tests.rs.
 
 use anyhow::Context;
@@ -126,6 +126,122 @@ pub(crate) fn path_cmd(paths: &ManagedPaths, alias: &str) -> anyhow::Result<()> 
     let repo = trusty_mpm::core::standalone::run::resolve_repo_path(alias, root)
         .with_context(|| format!("failed to resolve path for alias '{alias}'"))?;
     println!("{}", repo.display());
+    Ok(())
+}
+
+/// Handle `tm rm <alias>` — deregister and remove the project directory.
+///
+/// Why: operators need a clean teardown verb that pairs with `register/load`.
+/// The shared `<root>/claude-config/` CLAUDE_CONFIG_DIR is intentionally
+/// untouched — it is shared across all aliases and must not be wiped by a
+/// single-alias removal.
+/// What: removes the registry entry via [`ManagedRegistry::remove`], saves the
+/// updated registry, then deletes `<root>/projects/<alias>/` with
+/// `fs::remove_dir_all`. Errors clearly when the alias is unknown in the
+/// registry. The project dir deletion is best-effort (succeeds even if the
+/// dir was already absent — i.e. never loaded).
+/// Test: `test_rm_cmd_removes_entry_and_dir`,
+/// `test_rm_cmd_errors_on_unknown_alias`,
+/// `test_rm_cmd_leaves_claude_config_intact` in tests_behavior_b.rs.
+pub(crate) fn rm_cmd(paths: &ManagedPaths, alias: &str) -> anyhow::Result<()> {
+    let root = &paths.root;
+    let mut registry = trusty_mpm::core::standalone::registry::ManagedRegistry::load(root)
+        .with_context(|| format!("failed to load registry from {}", root.display()))?;
+    registry
+        .remove(alias)
+        .with_context(|| format!("alias '{alias}' is not registered"))?;
+    registry
+        .save()
+        .context("failed to save registry after rm")?;
+
+    let project_dir = root.join("projects").join(alias);
+    if project_dir.exists() {
+        std::fs::remove_dir_all(&project_dir).with_context(|| {
+            format!(
+                "failed to remove project directory {}",
+                project_dir.display()
+            )
+        })?;
+    }
+    println!(
+        "removed {alias} (registry entry deleted; project dir: {})",
+        project_dir.display()
+    );
+    Ok(())
+}
+
+/// Handle `tm update [alias]` — refresh loaded project(s).
+///
+/// Why: operators need an idempotent "bring this project up to date" verb that
+/// mirrors what `load` does (pull + re-deploy) without requiring a full `rm`
+/// and re-`load` cycle. With no alias, updates all currently-loaded aliases so
+/// a single `tm update` keeps the whole fleet current.
+/// What: for each target alias, calls `load_alias` (the same function `load_cmd`
+/// uses) which performs `git pull --ff-only` on the existing checkout and
+/// idempotently re-runs `prepare_session` + `write_marker`. If an alias is
+/// registered but the project dir does not yet exist (i.e. never loaded), the
+/// command errors with a clear hint to run `tm load <alias>` first. With no
+/// alias argument, iterates all registry entries whose project dir already
+/// exists and updates each one; aliases that have never been loaded are skipped
+/// with a warning.
+/// Test: `test_update_cmd_errors_if_not_loaded`,
+/// `test_update_cmd_all_skips_unloaded` in tests_behavior_b.rs.
+pub(crate) fn update_cmd(paths: &ManagedPaths, alias: Option<&str>) -> anyhow::Result<()> {
+    let root = &paths.root;
+    let cfg_dir = &paths.claude_config_dir;
+    trusty_mpm::core::standalone::global_config::ensure_global_config_dir(root, cfg_dir)?;
+
+    let registry = trusty_mpm::core::standalone::registry::ManagedRegistry::load(root)
+        .with_context(|| format!("failed to load registry from {}", root.display()))?;
+
+    let entries = registry.list();
+
+    let targets: Vec<String> = match alias {
+        Some(a) => {
+            // Verify the alias exists in the registry.
+            registry
+                .get(a)
+                .with_context(|| format!("alias '{a}' is not registered"))?;
+            vec![a.to_string()]
+        }
+        None => {
+            // No alias → update all entries whose project dir already exists.
+            entries
+                .iter()
+                .filter(|e| root.join("projects").join(&e.alias).join("repo").exists())
+                .map(|e| e.alias.clone())
+                .collect()
+        }
+    };
+
+    if targets.is_empty() {
+        println!("no loaded aliases found — nothing to update");
+        return Ok(());
+    }
+
+    let mut any_error = false;
+    for target in &targets {
+        let repo_dir = root.join("projects").join(target).join("repo");
+        if !repo_dir.exists() {
+            // Registered but never loaded — advise the user.
+            eprintln!(
+                "warning: '{target}' is registered but not yet loaded; \
+                 run `tm load {target}` to clone and configure it first"
+            );
+            any_error = true;
+            continue;
+        }
+        match trusty_mpm::core::standalone::load::load_alias(target, root, cfg_dir) {
+            Ok(_) => println!("updated {target}"),
+            Err(e) => {
+                eprintln!("error updating '{target}': {e}");
+                any_error = true;
+            }
+        }
+    }
+    if any_error {
+        anyhow::bail!("one or more aliases failed to update");
+    }
     Ok(())
 }
 

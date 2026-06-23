@@ -322,6 +322,14 @@ async fn main() -> anyhow::Result<()> {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::login_cmd(&paths)
         }
+        Command::Rm { alias, root } => {
+            let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
+            commands::standalone::rm_cmd(&paths, &alias)
+        }
+        Command::Update { alias, root } => {
+            let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
+            commands::standalone::update_cmd(&paths, alias.as_deref())
+        }
     };
 
     // Top-level exit-code translation: a `tm sessions prune-idle` that found the

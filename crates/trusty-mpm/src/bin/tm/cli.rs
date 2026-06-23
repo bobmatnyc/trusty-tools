@@ -543,6 +543,46 @@ pub(crate) enum Command {
         root: Option<String>,
     },
 
+    /// Remove a managed alias: deregister and delete its project dir (DOC-24).
+    ///
+    /// Why: completes the lifecycle — operators need a clean teardown verb that
+    /// removes the cloned repo and registry entry without touching the shared
+    /// CLAUDE_CONFIG_DIR (which is shared across all aliases).
+    /// What: deregisters `<alias>` from `registry.json` and removes
+    /// `<root>/projects/<alias>/`. The shared `<root>/claude-config/` is
+    /// untouched. Errors clearly if the alias is unknown.
+    /// Test: `cli_parses_rm_standalone`.
+    #[command(name = "rm")]
+    Rm {
+        /// Registered alias to remove.
+        alias: String,
+        /// Override the managed root (default: `~/.trusty-mpm`).
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
+        #[arg(long)]
+        root: Option<String>,
+    },
+
+    /// Refresh a loaded alias — pull latest and re-deploy managed config (DOC-24).
+    ///
+    /// Why: operators need a way to bring a loaded project up to date without
+    /// re-running `tm rm && tm load`. `tm update` is the idempotent refresh verb.
+    /// What: for each target alias, runs `git pull --ff-only` on its repo then
+    /// re-runs the same managed-config deploy as `load` (idempotent). With no
+    /// alias, updates ALL registered aliases whose project dir exists (loaded).
+    /// If the alias is registered but not yet loaded, errors with a hint to run
+    /// `tm load <alias>` first.
+    /// Test: `cli_parses_update_standalone`, `cli_parses_update_all_standalone`.
+    Update {
+        /// Registered alias to update; omit to update all loaded aliases.
+        alias: Option<String>,
+        /// Override the managed root (default: `~/.trusty-mpm`).
+        ///
+        /// Note: do NOT use `env = "TRUSTY_MPM_ROOT"` here — see `Register`.
+        #[arg(long)]
+        root: Option<String>,
+    },
+
     /// Standalone metaharness — PM + sub-agent delegation without the daemon (#1045).
     ///
     /// Why: the M1 POC (issue #1045) builds a self-contained metaharness that
