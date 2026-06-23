@@ -37,7 +37,7 @@ mod tests;
 mod tests_behavior_a;
 
 #[cfg(test)]
-#[path = "tests_behavior_b.rs"]
+#[path = "tests_behavior_b_tests.rs"]
 mod tests_behavior_b;
 
 /// Lazy-loaded help configuration for "did you mean?" suggestions (issue #216).

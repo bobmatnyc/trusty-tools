@@ -3,7 +3,7 @@
 //! Why: tests live in dedicated files so main.rs stays thin. This file
 //! covers short-id / banner / formatter tests and the first half of the
 //! CLI parse round-trips. Install / hook / session / services / compose
-//! tests live in `tests_behavior_a.rs` and `tests_behavior_b.rs`.
+//! tests live in `tests_behavior_a.rs` and `tests_behavior_b_tests.rs`.
 //! What: parse round-trips for short_id, banners, daemon, project, session
 //! subcommands (up through daemon flag parsing).
 //! Test: `cargo test -p trusty-mpm` to run all fast tests.

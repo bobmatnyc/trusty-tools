@@ -595,6 +595,42 @@ fn update_cmd_errors_if_alias_not_in_registry() {
 }
 
 #[test]
+fn update_cmd_errors_if_not_loaded() {
+    // `tm update <alias>` where alias is registered but project dir does not
+    // exist (never loaded) must error IMMEDIATELY with a message that hints to
+    // run `tm load <alias>` first — not a generic end-of-loop bail.
+    use crate::commands::managed_root::ManagedPaths;
+    use crate::commands::standalone::update_cmd;
+    use trusty_mpm::core::standalone::registry::ManagedRegistry;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().to_path_buf();
+    let paths = ManagedPaths::from_root(root.clone());
+
+    // Register the alias but do NOT create the project dir (never loaded).
+    let mut reg = ManagedRegistry::load(&root).unwrap();
+    reg.add("not-loaded", "https://github.com/org/repo", false)
+        .unwrap();
+    reg.save().unwrap();
+    assert!(!root.join("projects").join("not-loaded").exists());
+
+    let result = update_cmd(&paths, Some("not-loaded"));
+    assert!(
+        result.is_err(),
+        "update_cmd must error when alias is registered but not yet loaded"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("not-loaded"),
+        "error must name the alias: {msg}"
+    );
+    assert!(
+        msg.contains("tm load"),
+        "error must hint to run `tm load`: {msg}"
+    );
+}
+
+#[test]
 fn update_cmd_all_skips_unloaded_returns_ok_when_none_loaded() {
     // `tm update` (no alias) with zero loaded projects should print a message
     // and return Ok.

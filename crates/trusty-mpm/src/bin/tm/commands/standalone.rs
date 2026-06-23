@@ -142,7 +142,7 @@ pub(crate) fn path_cmd(paths: &ManagedPaths, alias: &str) -> anyhow::Result<()> 
 /// dir was already absent — i.e. never loaded).
 /// Test: `test_rm_cmd_removes_entry_and_dir`,
 /// `test_rm_cmd_errors_on_unknown_alias`,
-/// `test_rm_cmd_leaves_claude_config_intact` in tests_behavior_b.rs.
+/// `test_rm_cmd_leaves_claude_config_intact` in tests_behavior_b_tests.rs.
 pub(crate) fn rm_cmd(paths: &ManagedPaths, alias: &str) -> anyhow::Result<()> {
     let root = &paths.root;
     let mut registry = trusty_mpm::core::standalone::registry::ManagedRegistry::load(root)
@@ -178,14 +178,17 @@ pub(crate) fn rm_cmd(paths: &ManagedPaths, alias: &str) -> anyhow::Result<()> {
 /// a single `tm update` keeps the whole fleet current.
 /// What: for each target alias, calls `load_alias` (the same function `load_cmd`
 /// uses) which performs `git pull --ff-only` on the existing checkout and
-/// idempotently re-runs `prepare_session` + `write_marker`. If an alias is
-/// registered but the project dir does not yet exist (i.e. never loaded), the
-/// command errors with a clear hint to run `tm load <alias>` first. With no
-/// alias argument, iterates all registry entries whose project dir already
-/// exists and updates each one; aliases that have never been loaded are skipped
-/// with a warning.
-/// Test: `test_update_cmd_errors_if_not_loaded`,
-/// `test_update_cmd_all_skips_unloaded` in tests_behavior_b.rs.
+/// idempotently re-runs `prepare_session` + `write_marker`.
+/// Single-alias path: if the alias is registered but the project dir does not
+/// yet exist, errors IMMEDIATELY with a clear hint to run `tm load <alias>`
+/// first (does not defer to a generic end-of-loop message).
+/// No-alias path: iterates all registry entries whose project dir already
+/// exists (i.e. loaded), updates each; when any fail the returned error names
+/// all failed aliases by name.
+/// Test: update_cmd_errors_if_alias_not_in_registry,
+/// update_cmd_errors_if_not_loaded, and
+/// update_cmd_all_skips_unloaded_returns_ok_when_none_loaded
+/// in tests_behavior_b_tests.rs.
 pub(crate) fn update_cmd(paths: &ManagedPaths, alias: Option<&str>) -> anyhow::Result<()> {
     let root = &paths.root;
     let cfg_dir = &paths.claude_config_dir;
@@ -194,53 +197,49 @@ pub(crate) fn update_cmd(paths: &ManagedPaths, alias: Option<&str>) -> anyhow::R
     let registry = trusty_mpm::core::standalone::registry::ManagedRegistry::load(root)
         .with_context(|| format!("failed to load registry from {}", root.display()))?;
 
-    let entries = registry.list();
+    // Single-alias fast path: validate, check loaded state, then update.
+    if let Some(a) = alias {
+        registry
+            .get(a)
+            .with_context(|| format!("alias '{a}' is not registered"))?;
+        let repo_dir = root.join("projects").join(a).join("repo");
+        if !repo_dir.exists() {
+            anyhow::bail!(
+                "alias '{a}' is registered but has not been loaded yet; \
+                 run `tm load {a}` to clone and configure it first"
+            );
+        }
+        trusty_mpm::core::standalone::load::load_alias(a, root, cfg_dir)
+            .with_context(|| format!("failed to update alias '{a}'"))?;
+        println!("updated {a}");
+        return Ok(());
+    }
 
-    let targets: Vec<String> = match alias {
-        Some(a) => {
-            // Verify the alias exists in the registry.
-            registry
-                .get(a)
-                .with_context(|| format!("alias '{a}' is not registered"))?;
-            vec![a.to_string()]
-        }
-        None => {
-            // No alias → update all entries whose project dir already exists.
-            entries
-                .iter()
-                .filter(|e| root.join("projects").join(&e.alias).join("repo").exists())
-                .map(|e| e.alias.clone())
-                .collect()
-        }
-    };
+    // No-alias path: update all loaded aliases.
+    let targets: Vec<String> = registry
+        .list()
+        .into_iter()
+        .filter(|e| root.join("projects").join(&e.alias).join("repo").exists())
+        .map(|e| e.alias)
+        .collect();
 
     if targets.is_empty() {
         println!("no loaded aliases found — nothing to update");
         return Ok(());
     }
 
-    let mut any_error = false;
+    let mut failed: Vec<String> = Vec::new();
     for target in &targets {
-        let repo_dir = root.join("projects").join(target).join("repo");
-        if !repo_dir.exists() {
-            // Registered but never loaded — advise the user.
-            eprintln!(
-                "warning: '{target}' is registered but not yet loaded; \
-                 run `tm load {target}` to clone and configure it first"
-            );
-            any_error = true;
-            continue;
-        }
         match trusty_mpm::core::standalone::load::load_alias(target, root, cfg_dir) {
             Ok(_) => println!("updated {target}"),
             Err(e) => {
                 eprintln!("error updating '{target}': {e}");
-                any_error = true;
+                failed.push(target.clone());
             }
         }
     }
-    if any_error {
-        anyhow::bail!("one or more aliases failed to update");
+    if !failed.is_empty() {
+        anyhow::bail!("failed to update: {}", failed.join(", "));
     }
     Ok(())
 }
