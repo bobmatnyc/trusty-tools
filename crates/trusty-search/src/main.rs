@@ -788,7 +788,7 @@ enum Commands {
         #[arg(long)]
         repo: Option<std::path::PathBuf>,
         #[command(subcommand)]
-        action: HookAction,
+        action: commands::hook::HookAction,
     },
 
     /// Diagnose configuration, model cache, and index health
@@ -1002,21 +1002,6 @@ enum IndexAction {
         #[arg(long = "to")]
         to: std::path::PathBuf,
     },
-}
-
-/// Sub-actions for `trusty-search hook`.
-///
-/// Why: clap's subcommand nesting is the idiomatic way to add install/uninstall
-/// variants under a parent command.
-/// What: two variants — `Install` writes the hook files; `Uninstall` removes
-/// the trusty-search block from them.
-/// Test: `commands::hook::tests::handle_hook_install_writes_all_three_hooks`.
-#[derive(Subcommand, Debug)]
-enum HookAction {
-    /// Write post-commit / post-merge / post-checkout hooks (idempotent)
-    Install,
-    /// Remove the trusty-search block from the hook files
-    Uninstall,
 }
 
 /// Target surface for the `monitor` subcommand.
@@ -1414,15 +1399,7 @@ async fn run() -> Result<()> {
         }
 
         Commands::Hook { repo, action } => {
-            let hook_action = match action {
-                HookAction::Install => commands::hook::HookAction::Install,
-                HookAction::Uninstall => commands::hook::HookAction::Uninstall,
-            };
-            commands::hook::handle_hook(commands::hook::HookArgs {
-                repo,
-                action: hook_action,
-            })
-            .await?;
+            commands::hook::handle_hook(commands::hook::HookArgs { repo, action }).await?;
         }
 
         Commands::Doctor { fix } => {

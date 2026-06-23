@@ -7,10 +7,18 @@
 //! in the opt-in allowlist and silently no-ops when the daemon is down, so
 //! it never blocks a commit.
 //!
-//! What: `handle_hook_install` writes a marker-delimited block into the
-//! target repo's `.git/hooks/{post-commit,post-merge,post-checkout}` files,
-//! preserving any existing hook logic via append-safe insertion.
-//! `handle_hook_uninstall` removes only the trusty-search marker block.
+//! What: `handle_hook` writes a marker-delimited block into the target repo's
+//! `.git/hooks/{post-commit,post-merge,post-checkout}` files, preserving any
+//! existing hook logic via append-safe insertion.  `HookAction::Uninstall`
+//! removes only the trusty-search marker block.
+//!
+//! Index resolution: hooks are installed into the git repo and git always sets
+//! CWD to the repo root before invoking any hook. `trusty-search add/remove`
+//! without an explicit `--index` flag calls `detect_project(CWD)`, which walks
+//! up from the repo root, finds `.git`, and derives the index id from the
+//! directory name — exactly the same id that `trusty-search index .` would
+//! register. So the hook scripts deliberately omit `--index` and rely on this
+//! auto-detection, which requires no baking of paths at install time.
 //!
 //! Test: `tests` module exercises install → verify block present → idempotent
 //! re-install → uninstall → verify block removed, all using a temp `.git/hooks`
@@ -19,7 +27,6 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 // ── Marker strings ────────────────────────────────────────────────────────────
@@ -35,6 +42,12 @@ const MARKER_END: &str = "# <<< trusty-search <<<";
 // ── Public interface ──────────────────────────────────────────────────────────
 
 /// Parameters extracted from the `hook install` / `hook uninstall` clap args.
+///
+/// Why: bundles the two fields so `handle_hook` has a clean call signature
+/// and so `main.rs` dispatches via a single match arm.
+/// What: repo is the path to the git repo root (defaults to CWD); action
+/// selects install or uninstall.
+/// Test: constructed by `main.rs` before calling `handle_hook`.
 #[derive(Debug)]
 pub struct HookArgs {
     /// Path to the repository root (the directory that contains `.git/`).
@@ -44,10 +57,19 @@ pub struct HookArgs {
     pub action: HookAction,
 }
 
-/// The two supported sub-actions.
-#[derive(Debug, Clone)]
+/// The two supported sub-actions for `trusty-search hook`.
+///
+/// Why: defined once here so `main.rs` re-exports it for the clap `Subcommand`
+/// derive rather than maintaining a parallel enum — eliminates the
+/// dual-enum mapping pattern noted in review issue #5.
+/// What: two variants — `Install` writes the hook files; `Uninstall` removes
+/// the trusty-search block.
+/// Test: dispatched via `handle_hook`.
+#[derive(Debug, Clone, clap::Subcommand)]
 pub enum HookAction {
+    /// Write post-commit / post-merge / post-checkout hooks (idempotent)
     Install,
+    /// Remove the trusty-search block from the hook files
     Uninstall,
 }
 
@@ -55,7 +77,7 @@ pub enum HookAction {
 ///
 /// Why: single public entry point so `main.rs` stays a thin dispatcher.
 /// What: resolves the git directory, writes all three hook scripts.
-/// Test: `tests::install_creates_and_is_idempotent`.
+/// Test: `tests::handle_hook_install_writes_all_three_hooks`.
 pub async fn handle_hook(args: HookArgs) -> Result<()> {
     let repo_root = resolve_repo_root(args.repo.as_deref())?;
     let hooks_dir = repo_root.join(".git").join("hooks");
@@ -106,21 +128,27 @@ fn hook_scripts() -> [(&'static str, &'static str); 3] {
 }
 
 /// `post-commit`: index changed/added files, remove deleted files.
+///
+/// Index resolution: git sets CWD to the repo root before invoking this hook,
+/// so `trusty-search add/remove` (no `--index` flag) will call `detect_project`
+/// from that root, walk up to find `.git`, and derive the correct index id.
+/// The daemon's allowlist then silently rejects repos that are not registered
+/// (no-op; exit 0 always).
 const POST_COMMIT_SCRIPT: &str = r#"#!/bin/sh
 # trusty-search: incremental reindex on commit
-set -e
+# CWD is always the repo root when git invokes this hook.
+# `trusty-search add/remove` auto-detects the index from CWD — no --index needed.
 
-# Locate the repo root (one level above the hooks dir).
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 BINARY="trusty-search"
 
 # Bail out silently when the binary is not on PATH.
 command -v "$BINARY" >/dev/null 2>&1 || exit 0
 
-# No-op when the daemon is down (best-effort health probe, 200ms timeout).
+# No-op when the daemon is down (best-effort health probe).
 "$BINARY" health >/dev/null 2>&1 || exit 0
 
 # Determine changed/added vs deleted files in the last commit.
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 CHANGED="$(git diff-tree --no-commit-id -r --name-only --diff-filter=ACRMT HEAD 2>/dev/null)" || true
 DELETED="$(git diff-tree --no-commit-id -r --name-only --diff-filter=D HEAD 2>/dev/null)" || true
 
@@ -128,14 +156,14 @@ DELETED="$(git diff-tree --no-commit-id -r --name-only --diff-filter=D HEAD 2>/d
 if [ -n "$CHANGED" ]; then
     echo "$CHANGED" | while IFS= read -r f; do
         [ -f "$REPO_ROOT/$f" ] || continue
-        "$BINARY" --index "" add "$REPO_ROOT/$f" >/dev/null 2>&1 || true
+        "$BINARY" add "$REPO_ROOT/$f" >/dev/null 2>&1 || true
     done
 fi
 
 # Remove deleted files.
 if [ -n "$DELETED" ]; then
     echo "$DELETED" | while IFS= read -r f; do
-        "$BINARY" --index "" remove "$REPO_ROOT/$f" >/dev/null 2>&1 || true
+        "$BINARY" remove "$REPO_ROOT/$f" >/dev/null 2>&1 || true
     done
 fi
 
@@ -143,31 +171,44 @@ exit 0
 "#;
 
 /// `post-merge`: same incremental update after a merge/pull.
+///
+/// ORIG_HEAD may not exist on fast-forward pulls; we guard for its existence
+/// and fall back to HEAD@{1} (the previous tip) so the diff is always correct.
 const POST_MERGE_SCRIPT: &str = r#"#!/bin/sh
 # trusty-search: incremental reindex on merge
-set -e
+# CWD is always the repo root when git invokes this hook.
 
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
 BINARY="trusty-search"
 
 command -v "$BINARY" >/dev/null 2>&1 || exit 0
 "$BINARY" health >/dev/null 2>&1 || exit 0
 
-# $1 is "1" for a squash merge, "0" for a true merge.
-ORIG_HEAD="ORIG_HEAD"
-CHANGED="$(git diff --name-only --diff-filter=ACRMT "$ORIG_HEAD" HEAD 2>/dev/null)" || true
-DELETED="$(git diff --name-only --diff-filter=D "$ORIG_HEAD" HEAD 2>/dev/null)" || true
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+
+# Resolve the pre-merge reference: ORIG_HEAD is reliable for true merges, but
+# fast-forward pulls may not leave it. Fall back to HEAD@{1} (reflog), and if
+# that also fails (initial clone) skip cleanly.
+if git rev-parse --verify -q ORIG_HEAD >/dev/null 2>&1; then
+    BASE="ORIG_HEAD"
+elif git rev-parse --verify -q "HEAD@{1}" >/dev/null 2>&1; then
+    BASE="HEAD@{1}"
+else
+    exit 0
+fi
+
+CHANGED="$(git diff --name-only --diff-filter=ACRMT "$BASE" HEAD 2>/dev/null)" || true
+DELETED="$(git diff --name-only --diff-filter=D "$BASE" HEAD 2>/dev/null)" || true
 
 if [ -n "$CHANGED" ]; then
     echo "$CHANGED" | while IFS= read -r f; do
         [ -f "$REPO_ROOT/$f" ] || continue
-        "$BINARY" --index "" add "$REPO_ROOT/$f" >/dev/null 2>&1 || true
+        "$BINARY" add "$REPO_ROOT/$f" >/dev/null 2>&1 || true
     done
 fi
 
 if [ -n "$DELETED" ]; then
     echo "$DELETED" | while IFS= read -r f; do
-        "$BINARY" --index "" remove "$REPO_ROOT/$f" >/dev/null 2>&1 || true
+        "$BINARY" remove "$REPO_ROOT/$f" >/dev/null 2>&1 || true
     done
 fi
 
@@ -179,7 +220,7 @@ exit 0
 ///   $1 = previous HEAD, $2 = new HEAD, $3 = branch flag (1 = branch switch)
 const POST_CHECKOUT_SCRIPT: &str = r#"#!/bin/sh
 # trusty-search: background reindex on branch switch
-set -e
+# CWD is always the repo root when git invokes this hook.
 
 # Only act on branch-switch checkouts ($3 == 1).
 [ "$3" = "1" ] || exit 0
@@ -206,7 +247,7 @@ exit 0
 /// delimited block lets us coexist without clobbering existing logic. If a
 /// prior block exists it is replaced in-place (idempotent).
 /// What: reads the current file (or starts empty), splices the new block in,
-/// writes atomically (tmp + rename), and sets `chmod +x`.
+/// writes atomically (unique tmp sibling + rename), and sets `chmod +x`.
 /// Test: `tests::install_creates_and_is_idempotent`.
 pub fn install_block(hook_path: &Path, script_body: &str) -> Result<()> {
     let existing = if hook_path.exists() {
@@ -318,20 +359,40 @@ pub fn remove_block(content: &str) -> String {
 
 // ── Filesystem helpers ────────────────────────────────────────────────────────
 
-/// Write `content` to `path` atomically (tmp sibling + rename).
+/// Write `content` to `path` atomically using a unique temp-file sibling.
 ///
-/// Why: prevents a partial write from leaving the hook file in a broken state.
-/// What: writes to `<path>.ts-tmp`, then renames to `path`.
+/// Why: prevents a partial write from leaving the hook file in a broken state,
+/// and avoids temp-file name collisions if a previous process was killed.
+/// What: builds a unique tmp filename using the current process id (unique per
+/// running process) and a nanosecond monotonic counter — no crate dependency
+/// required. Writes to the sibling file, then renames (atomic within the same
+/// filesystem) to the final path. A killed process leaves at most one `.ts-tmp`
+/// file per PID that git ignores (it lives in `.git/hooks/`).
 /// Test: covered by `install_block` tests.
 fn atomic_write(path: &Path, content: &str) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
-    }
-    let tmp = path.with_extension("ts-tmp");
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("hook path '{}' has no parent directory", path.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("could not create {}", parent.display()))?;
+
+    // Build a collision-resistant tmp path: PID + monotonic nanos.
+    let uid = {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        format!("{}-{}", std::process::id(), nanos)
+    };
+    let file_name = path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("hook"));
+    let tmp_name = format!(".{}-{}.ts-tmp", file_name.to_string_lossy(), uid);
+    let tmp = parent.join(tmp_name);
+
     fs::write(&tmp, content).with_context(|| format!("could not write {}", tmp.display()))?;
     fs::rename(&tmp, path)
-        .with_context(|| format!("could not rename {} → {}", tmp.display(), path.display()))?;
+        .with_context(|| format!("could not rename {} to {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
@@ -339,14 +400,30 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
 ///
 /// Why: git will not invoke a hook script unless it is executable.
 /// What: reads current permissions, adds 0o111 (user/group/other execute).
-/// Test: covered by `install_block` integration tests.
+///   On non-Unix targets this is a no-op (Windows does not have Unix
+///   permission bits, and hook scripts are resolved differently there).
+/// Test: covered by `install_block` integration tests on Unix.
+#[cfg(unix)]
 fn make_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     let meta = fs::metadata(path).with_context(|| format!("could not stat {}", path.display()))?;
     let mut perms = meta.permissions();
     let mode = perms.mode() | 0o111;
     perms.set_mode(mode);
     fs::set_permissions(path, perms)
         .with_context(|| format!("could not chmod +x {}", path.display()))?;
+    Ok(())
+}
+
+/// No-op on non-Unix platforms (Windows manages hook executability differently).
+///
+/// Why: `git` on Windows invokes hook scripts via the shell regardless of the
+/// executable bit; forcing compilation of the Unix chmod path on Windows would
+/// break the build with no benefit.
+/// What: returns `Ok(())` immediately.
+/// Test: compile-time gate only; no runtime test needed.
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -381,7 +458,6 @@ fn resolve_repo_root(explicit: Option<&Path>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
     // ── String manipulation ───────────────────────────────────────────────────
@@ -441,6 +517,53 @@ mod tests {
         assert_eq!(result, content);
     }
 
+    // ── Issue 1: hook scripts must NOT contain --index "" ─────────────────────
+
+    #[test]
+    fn post_commit_script_does_not_use_empty_index_flag() {
+        // Why: `--index ""` overrides auto-detection with an empty string, making
+        // every incremental update silently fail against a non-existent index.
+        // The correct approach is to omit --index so the CLI auto-detects the
+        // index from CWD (which git sets to the repo root before invoking hooks).
+        assert!(
+            !POST_COMMIT_SCRIPT.contains("--index \"\""),
+            "post-commit must not use --index \"\""
+        );
+        assert!(
+            !POST_COMMIT_SCRIPT.contains("--index ''"),
+            "post-commit must not use --index ''"
+        );
+    }
+
+    #[test]
+    fn post_merge_script_does_not_use_empty_index_flag() {
+        // Why: same as above for the merge hook.
+        assert!(
+            !POST_MERGE_SCRIPT.contains("--index \"\""),
+            "post-merge must not use --index \"\""
+        );
+        assert!(
+            !POST_MERGE_SCRIPT.contains("--index ''"),
+            "post-merge must not use --index ''"
+        );
+    }
+
+    // ── Issue 2: ORIG_HEAD robustness ─────────────────────────────────────────
+
+    #[test]
+    fn post_merge_script_guards_orig_head_existence() {
+        // Why: on fast-forward pulls ORIG_HEAD may not exist. The hook must
+        // guard for its existence and fall back to HEAD@{1} or skip cleanly.
+        assert!(
+            POST_MERGE_SCRIPT.contains("rev-parse --verify"),
+            "post-merge must verify ORIG_HEAD before using it"
+        );
+        assert!(
+            POST_MERGE_SCRIPT.contains("HEAD@{1}"),
+            "post-merge must have a HEAD@{{1}} fallback"
+        );
+    }
+
     // ── Filesystem operations ─────────────────────────────────────────────────
 
     fn fake_hooks_dir() -> (TempDir, PathBuf) {
@@ -451,12 +574,22 @@ mod tests {
     }
 
     #[test]
-    fn install_creates_hook_file_and_is_executable() {
-        // Why: a freshly created hook file must be chmod +x so git invokes it.
+    fn install_creates_hook_file() {
+        // Why: a freshly created hook file must exist after install.
         let (_tmp, hooks) = fake_hooks_dir();
         let path = hooks.join("post-commit");
         install_block(&path, POST_COMMIT_SCRIPT).unwrap();
         assert!(path.exists(), "hook file was not created");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_creates_hook_file_and_is_executable() {
+        // Why: a freshly created hook file must be chmod +x so git invokes it.
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, hooks) = fake_hooks_dir();
+        let path = hooks.join("post-commit");
+        install_block(&path, POST_COMMIT_SCRIPT).unwrap();
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_ne!(mode & 0o111, 0, "hook is not executable");
     }
@@ -478,6 +611,7 @@ mod tests {
         let (_tmp, hooks) = fake_hooks_dir();
         let path = hooks.join("post-commit");
         fs::write(&path, "#!/bin/sh\necho existing\n").unwrap();
+        #[cfg(unix)]
         make_executable(&path).unwrap();
         install_block(&path, POST_COMMIT_SCRIPT).unwrap();
         let content = fs::read_to_string(&path).unwrap();
@@ -512,6 +646,7 @@ mod tests {
         let (_tmp, hooks) = fake_hooks_dir();
         let path = hooks.join("post-commit");
         fs::write(&path, "#!/bin/sh\necho other-tool\n").unwrap();
+        #[cfg(unix)]
         make_executable(&path).unwrap();
         install_block(&path, POST_COMMIT_SCRIPT).unwrap();
         uninstall_block(&path).unwrap();
