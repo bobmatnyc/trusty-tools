@@ -26,8 +26,11 @@
 
 use std::path::Path;
 use tempfile::TempDir;
-use trusty_mpm::core::standalone::{
-    global_config::ensure_global_config_dir, hooks::ensure_managed_hooks, preseed_managed_trust,
+use trusty_mpm::core::{
+    bundle::OUTPUT_STYLES,
+    standalone::{
+        global_config::ensure_global_config_dir, hooks::ensure_managed_hooks, preseed_managed_trust,
+    },
 };
 
 // ── RAII HOME guard ────────────────────────────────────────────────────────────
@@ -595,4 +598,73 @@ fn teardown_leaves_no_stray_artifacts_outside_temp_roots() {
     fake_home
         .close()
         .expect("fake home must be empty and closeable — no stray writes");
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 7. Output-style deployer isolation — styles deploy ONLY to config dir
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// `ensure_global_config_dir` must deploy all bundled output styles under
+/// `<config_dir>/output-styles/` and NEVER write to `$HOME/.claude*`.
+///
+/// Why: WI-2 follow-up (#1553, epic #1548).  The managed driver must deploy
+/// output-style definitions into `CLAUDE_CONFIG_DIR/output-styles/` so Claude
+/// Code can resolve the `"outputStyle": "trusty-mpm"` key.  The isolation
+/// invariant (SPEC-STANDALONE-MPM-04) requires that no write goes to the real
+/// `~/.claude*` — this test proves both properties hold together.
+/// What: redirects HOME to a fresh temp dir, runs `ensure_global_config_dir`,
+/// then asserts:
+///   (a) `<config_dir>/output-styles/<file_name>` exists for every bundled style,
+///   (b) content matches the bundled constant,
+///   (c) `$HOME/.claude` and `$HOME/.claude.json` do NOT exist.
+/// Test: this function IS the test; run with
+/// `cargo test -p trusty-mpm --test standalone_isolation`.
+#[serial_test::serial]
+#[test]
+fn output_styles_deploy_to_config_dir_not_home() {
+    let tmp = TempDir::new().expect("temp dir");
+    let fake_home = TempDir::new().expect("fake home temp dir");
+
+    let managed_root = tmp.path().join("managed");
+    let claude_config = managed_root.join("claude-config");
+
+    // Redirect HOME so any accidental home-dir resolution lands in fake_home.
+    let _home_guard = HomeGuard::redirect(fake_home.path());
+
+    ensure_global_config_dir(&managed_root, &claude_config)
+        .expect("ensure_global_config_dir must not fail");
+
+    let styles_dir = claude_config.join("output-styles");
+
+    // (a) + (b): every bundled style must be present with the correct content.
+    assert!(
+        styles_dir.exists(),
+        "output-styles dir must exist inside the managed CLAUDE_CONFIG_DIR after \
+         ensure_global_config_dir (WI-2 follow-up #1553)"
+    );
+    for style in OUTPUT_STYLES {
+        let target = styles_dir.join(style.file_name);
+        assert!(
+            target.exists(),
+            "output-styles/{} must be deployed to config_dir/output-styles/ — \
+             not found at {}",
+            style.file_name,
+            target.display()
+        );
+        let content = std::fs::read_to_string(&target).expect("read deployed style");
+        assert_eq!(
+            content, style.content,
+            "deployed output style {} content must match bundled constant",
+            style.file_name
+        );
+    }
+
+    // (c): isolation — nothing must have been written to the fake home.
+    assert_no_real_claude_writes(fake_home.path());
+    assert!(
+        !fake_home.path().join("output-styles").exists(),
+        "isolation VIOLATED: output styles must NOT be written to $HOME/output-styles"
+    );
+
+    // _home_guard drops here and restores HOME.
 }

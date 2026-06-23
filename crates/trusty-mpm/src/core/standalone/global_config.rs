@@ -89,9 +89,29 @@ pub fn ensure_global_config_dir(
 /// are surfaced as `anyhow::Error`.
 /// Test: `test_deploy_agents_and_skills_populates_config_dir` (happy-path),
 /// `test_deploy_agents_and_skills_missing_source_is_ok` (pre-install guard).
-// TODO(WI-2): output-style deployer — none exists yet (`output_style.rs` handles
-// prompt injection, not filesystem deployment into CLAUDE_CONFIG_DIR); follow-up
-// ticket needed to wire a style deployer here when one is implemented.
+/// Deploy bundled output styles, agents, and skills into the managed CLAUDE_CONFIG_DIR (WI-2).
+///
+/// Why: managed `tm run`/`tm load`/`tm login` sessions use
+/// `CLAUDE_CONFIG_DIR=~/.trusty-mpm/claude-config/` which starts empty.
+/// Without deploying the trusty-mpm agent/skill set AND the output-style
+/// definitions, sessions start with neither agent/skill set nor output-style
+/// active, defeating the purpose of the managed driver.
+/// This function populates `<claude_config_dir>/output-styles/`,
+/// `<claude_config_dir>/agents/`, and `<claude_config_dir>/skills/` from the
+/// bundled constants (output styles) and the framework sources installed by
+/// `tm install` (agents + skills).
+/// What: calls [`crate::core::output_style_deployer::deploy_output_styles`]
+/// unconditionally (bundled constants are always available), then calls
+/// [`crate::core::agent_deployer::deploy_agents`] and
+/// [`crate::core::skill_deployer::deploy_skills`] (the same deployers used by
+/// `tm install` for the real `~/.claude` dirs), each guarded by a source-dir
+/// existence check. If a source dir is missing (framework not yet installed),
+/// emits a hint to stderr and skips without error so `tm load`/`tm run`/
+/// `tm login` remain functional before `tm install` has been run. Errors from
+/// the deployers are surfaced as `anyhow::Error`.
+/// Test: `test_deploy_agents_and_skills_populates_config_dir` (happy-path),
+/// `test_deploy_agents_and_skills_missing_source_is_ok` (pre-install guard),
+/// `test_deploy_output_styles_wired_into_config_dir` (output-style write).
 fn deploy_agents_and_skills(managed_root: &Path, claude_config_dir: &Path) -> anyhow::Result<()> {
     let agents_src = managed_root.join("framework").join("agents");
     let skills_src = managed_root.join("framework").join("skills");
@@ -144,6 +164,14 @@ fn deploy_agents_and_skills(managed_root: &Path, claude_config_dir: &Path) -> an
         crate::core::skill_deployer::deploy_skills(&skills_src, &skills_dest)
             .map_err(|e| anyhow::anyhow!("failed to deploy skills into managed config dir: {e}"))?;
     }
+
+    // WI-2 follow-up (#1553): deploy bundled output styles from compile-time
+    // constants — no framework installation required.  These are always
+    // framework-owned (never user-editable), so the deployer overwrites stale
+    // copies and skips files whose checksum already matches (idempotent).
+    crate::core::output_style_deployer::deploy_output_styles(claude_config_dir).map_err(|e| {
+        anyhow::anyhow!("failed to deploy output styles into managed config dir: {e}")
+    })?;
 
     Ok(())
 }
@@ -689,6 +717,77 @@ mod tests {
         assert!(
             !claude_config.join("skills").exists(),
             "skills dir must not be created when source is missing"
+        );
+        // output-styles/ must always be populated (bundled constants, no install needed).
+        assert!(
+            claude_config.join("output-styles").exists(),
+            "output-styles dir must be created even when no framework is installed"
+        );
+    }
+
+    // WI-2 follow-up (#1553): ensure_global_config_dir must always deploy the
+    // bundled output styles into <config_dir>/output-styles/ even when the
+    // framework source dirs (agents, skills) are absent (pre-install state).
+    // Output styles come from bundled constants, not framework root.
+    #[test]
+    fn test_deploy_output_styles_wired_into_config_dir() {
+        let tmp = TempDir::new().unwrap();
+        let managed_root = tmp.path().join("managed");
+        let claude_config = managed_root.join("claude-config");
+
+        ensure_global_config_dir(&managed_root, &claude_config).unwrap();
+
+        let styles_dir = claude_config.join("output-styles");
+        assert!(
+            styles_dir.exists(),
+            "output-styles dir must exist after ensure_global_config_dir"
+        );
+
+        // All bundled styles must be present.
+        for style in crate::core::bundle::OUTPUT_STYLES {
+            let target = styles_dir.join(style.file_name);
+            assert!(
+                target.exists(),
+                "output-styles/{} must be deployed by ensure_global_config_dir",
+                style.file_name
+            );
+            let content = std::fs::read_to_string(&target).unwrap();
+            assert_eq!(
+                content, style.content,
+                "deployed output style {} must match bundled content",
+                style.file_name
+            );
+        }
+    }
+
+    // WI-2 follow-up (#1553): output-style deploy must be idempotent — a second
+    // call to deploy_output_styles must not rewrite style files whose content
+    // is already current.  We assert via the DeployResult fields rather than
+    // mtime comparisons (mtime checks are racy on coarse-grained filesystems).
+    #[test]
+    fn test_deploy_output_styles_idempotent_via_global_config() {
+        let tmp = TempDir::new().unwrap();
+        let managed_root = tmp.path().join("managed");
+        let claude_config = managed_root.join("claude-config");
+
+        // First call (via ensure_global_config_dir) seeds all output styles.
+        ensure_global_config_dir(&managed_root, &claude_config).unwrap();
+
+        // Second call to the deployer directly must report all files unchanged.
+        let result =
+            crate::core::output_style_deployer::deploy_output_styles(&claude_config).unwrap();
+        assert!(
+            result.deployed.is_empty(),
+            "second deploy must not overwrite any style file (idempotent); \
+             deployed: {:?}",
+            result.deployed
+        );
+        assert_eq!(
+            result.unchanged.len(),
+            crate::core::bundle::OUTPUT_STYLES.len(),
+            "all style files must be reported unchanged on second call; \
+             unchanged: {:?}",
+            result.unchanged
         );
     }
 }
