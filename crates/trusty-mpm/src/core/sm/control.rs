@@ -33,9 +33,14 @@ use crate::activity::cache::ActivityState;
 /// without re-deriving the mapping at the call site.
 /// What: `workdir` (the directory/repo the session launches against, mapped to
 /// the managed `repo_url`), an optional `model` (runtime selector), an optional
-/// `prompt` (the task/intent, mapped to the managed `task`), and an optional
-/// `goal_id` the caller wants the new session linked to (§9.3).
-/// Test: `tests.rs::launch_round_trips` and `delegate` tests construct this.
+/// `prompt` (the task/intent, mapped to the managed `task`), an optional
+/// `goal_id` the caller wants the new session linked to (§9.3), an optional
+/// `repo_url` (the canonical repository URL for git-backed provisioning, WI-A
+/// #1585), and an optional `ref_` (the git branch/tag/SHA to check out, WI-A
+/// #1585).
+/// Test: `tests.rs::launch_round_trips` and `delegate` tests construct this;
+/// `chat_action_tests.rs::execute_launch_threads_repo_url_and_ref_` covers the
+/// new fields.
 #[derive(Debug, Clone)]
 pub struct LaunchParams {
     /// Working directory / repository the session launches against.
@@ -52,6 +57,29 @@ pub struct LaunchParams {
     /// so the bulk-teardown and age-based reap paths can clean it up. `None`/
     /// `Some(false)` → a normal durable session the automatic paths never touch.
     pub ephemeral: Option<bool>,
+    /// Optional canonical repository URL for git-backed provisioning (WI-A #1585).
+    ///
+    /// Why: `workdir` carries either a local path OR a repository URL depending on
+    /// caller context; `repo_url` is the explicit, separate field that the
+    /// multi-project context (#1517) populates with the canonical URL so the
+    /// spawn path can perform a fresh git clone rather than re-using a pre-existing
+    /// local workspace.  When both are supplied the spawn path prefers `repo_url`
+    /// for provisioning; when absent it falls back to `workdir`.
+    /// What: `None` preserves the existing `workdir`-only behaviour; `Some(url)`
+    /// is forwarded to `SpawnParams::repo_url`, overriding the workdir-as-url path.
+    /// Test: `chat_action_tests.rs::execute_launch_threads_repo_url_and_ref_`.
+    pub repo_url: Option<String>,
+    /// Optional git branch, tag, or SHA to check out (WI-A #1585).
+    ///
+    /// Why: a bare `workdir` carries no ref information; `ref_` lets the
+    /// multi-project (#1517) context pass the exact commit/branch the session
+    /// should run against so reproducibility is preserved across re-launches.
+    /// The field is named `ref_` (trailing underscore) because `ref` is a Rust
+    /// keyword.
+    /// What: `None` → the managed spawn defaults to its own ref strategy (e.g.
+    /// the repo's default branch); `Some(r)` is forwarded to `SpawnParams::git_ref`.
+    /// Test: `chat_action_tests.rs::execute_launch_threads_repo_url_and_ref_`.
+    pub ref_: Option<String>,
 }
 
 /// A failure surfaced by a [`SessionControl`] operation.

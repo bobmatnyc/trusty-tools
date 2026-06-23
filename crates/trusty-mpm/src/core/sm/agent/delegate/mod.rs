@@ -383,6 +383,12 @@ impl SessionManagerAgent {
                 goal_id: Some(goal_id.to_string()),
                 // Delegated goal-fan-out sessions are real work, never ephemeral.
                 ephemeral: None,
+                // WI-A #1585: delegate path has no repo context at this level;
+                // the workdir already encodes the target. Callers that have a
+                // canonical repo URL should populate these via LaunchParams
+                // directly before passing to launch.
+                repo_url: None,
+                ref_: None,
             };
             // Per-task best-effort: a single launch failure must NOT abort the whole
             // fan-out (which would orphan sessions already launched for earlier

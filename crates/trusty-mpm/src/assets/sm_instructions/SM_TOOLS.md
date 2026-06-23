@@ -17,7 +17,7 @@ them by their fully namespaced name so the prompt and the wire never diverge.
 
 | Verb | Purpose |
 |------|---------|
-| `sessions.launch(workdir, model?, prompt?, goal_id?)` | Launch a new t-mpm session scoped to a task; links to a goal when `goal_id` is given |
+| `sessions.launch(workdir, model?, prompt?, goal_id?, repo_url?, ref_?)` | Launch a new t-mpm session scoped to a task; links to a goal when `goal_id` is given |
 | `sessions.list()` | List the current fleet of sessions |
 | `sessions.get(session_id)` | Fetch a session's state, captured output, and events |
 | `sessions.send(session_id, text)` | Send a command / answer a decision prompt to a session |
