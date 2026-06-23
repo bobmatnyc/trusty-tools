@@ -235,27 +235,33 @@ fn seed_credentials(claude_config_dir: &Path) {
 /// What: reads `<claude_config_dir>/.mcp.json` (starts from `{}` when absent),
 /// injects `trusty-memory`, `trusty-review`, and `trusty-search` entries under
 /// `mcpServers` using the same idempotent merge used by `inject_mcp_server` in
-/// settings.rs. The merged JSON is serialized with a stable key ordering (using
-/// `serde_json::to_string_pretty` which iterates insertion-order maps), then
-/// compared byte-for-byte to the on-disk content; the file is only written when
-/// the content differs (closes #1550 item 3 — no spurious mtime bumps).
+/// settings.rs. To avoid spurious mtime bumps on every `tm run`, the on-disk
+/// content is parsed into a `serde_json::Value` and compared structurally
+/// (not byte-wise) to the merged value; the file is only written when the
+/// parsed Values differ (closes #1550 item 3). Byte-wise comparison would be
+/// defeated by any trailing newline or whitespace difference left by editors or
+/// prior writes; structural comparison is immune to those formatting variations.
 /// Secrets/env: trusty-review reads its config from the environment
 /// (OPENROUTER_API_KEY, AWS credentials, TRUSTY_SEARCH_URL etc.) — no secrets
 /// are injected here; the managed session inherits the daemon env, matching the
 /// pattern used for trusty-memory and trusty-search.
 /// Test: `test_global_config_dir_ensure_idempotent`,
 /// `test_mcp_config_contains_all_three_servers`,
-/// `test_mcp_config_no_spurious_write_when_unchanged`.
+/// `test_mcp_config_no_spurious_write_when_unchanged`,
+/// `test_mcp_config_trailing_newline_does_not_trigger_rewrite`.
 fn ensure_mcp_config(claude_config_dir: &Path) -> anyhow::Result<()> {
     let mcp_path = claude_config_dir.join(".mcp.json");
 
-    // Capture the raw on-disk text before mutation so we can compare later.
-    let existing_text = std::fs::read_to_string(&mcp_path).ok();
+    // Parse the on-disk value for structural comparison.  On parse failure
+    // (malformed file) or absence we treat the existing state as "empty object"
+    // so the merge proceeds and the file is (re)written correctly.
+    let existing_value: Option<serde_json::Value> = std::fs::read_to_string(&mcp_path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .filter(|v| v.is_object());
 
-    let mut config = existing_text
-        .as_deref()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
-        .filter(|v| v.is_object())
+    let mut config = existing_value
+        .clone()
         .unwrap_or_else(|| serde_json::json!({}));
 
     let servers = config
@@ -298,11 +304,16 @@ fn ensure_mcp_config(claude_config_dir: &Path) -> anyhow::Result<()> {
         .entry("trusty-search")
         .or_insert(search_entry.clone());
 
-    let serialized = serde_json::to_string_pretty(&config)?;
+    // Compare structurally (Value == Value) rather than byte-wise so that
+    // trailing newlines, editor-inserted whitespace, or any other formatting
+    // difference in the on-disk file does NOT trigger a spurious rewrite.
+    // A byte comparison of `existing_text` vs the fresh serialization would
+    // fail whenever the on-disk file has a trailing newline, defeating the
+    // idempotency guarantee this function is supposed to provide.
+    let needs_write = existing_value.as_ref() != Some(&config);
 
-    // Only write when content actually changed to avoid spurious mtime bumps
-    // that trigger unnecessary file-watcher events on every `tm run`.
-    if existing_text.as_deref() != Some(serialized.as_str()) {
+    if needs_write {
+        let serialized = serde_json::to_string_pretty(&config)?;
         std::fs::write(&mcp_path, &serialized)?;
     }
     Ok(())
@@ -437,29 +448,59 @@ mod tests {
     }
 
     // #1550 item 3: ensure_mcp_config must NOT rewrite .mcp.json when the
-    // content is already up-to-date (no spurious mtime bump on every `tm run`).
+    // content is already correct.  We detect a write by comparing the raw bytes
+    // before and after — if the guard regresses the bytes will change.
+    // (mtime-based assertions are unreliable on coarse-grained CI filesystems.)
     #[test]
     fn test_mcp_config_no_spurious_write_when_unchanged() {
         let tmp = TempDir::new().unwrap();
         let cfg = tmp.path().to_path_buf();
-
-        // First call writes the file.
-        ensure_mcp_config(&cfg).unwrap();
-
         let mcp_path = cfg.join(".mcp.json");
-        let mtime_after_first = std::fs::metadata(&mcp_path).unwrap().modified().unwrap();
 
-        // Brief sleep so any spurious write would produce a measurably later mtime.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        // Second call must not rewrite the file (content is already correct).
+        // First call writes the canonical file.
         ensure_mcp_config(&cfg).unwrap();
+        let bytes_after_first = std::fs::read(&mcp_path).unwrap();
 
-        let mtime_after_second = std::fs::metadata(&mcp_path).unwrap().modified().unwrap();
+        // Second call must leave the file byte-identical (no write occurred).
+        ensure_mcp_config(&cfg).unwrap();
+        let bytes_after_second = std::fs::read(&mcp_path).unwrap();
 
         assert_eq!(
-            mtime_after_first, mtime_after_second,
+            bytes_after_first, bytes_after_second,
             "ensure_mcp_config must not rewrite .mcp.json when content is unchanged (#1550 item 3)"
+        );
+    }
+
+    // #1550 item 3 regression: a file with a trailing newline (left by an
+    // editor or a prior write) is logically identical to the same JSON without
+    // the newline.  The structural comparison must treat them as equal and must
+    // NOT rewrite the file.  A byte-wise comparison would fail here, defeating
+    // idempotency.  This test directly covers the Finding-1 regression scenario.
+    #[test]
+    fn test_mcp_config_trailing_newline_does_not_trigger_rewrite() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().to_path_buf();
+        let mcp_path = cfg.join(".mcp.json");
+
+        // Write the canonical content, then append a trailing newline to
+        // simulate what an editor or prior implementation might have left.
+        ensure_mcp_config(&cfg).unwrap();
+        let canonical = std::fs::read_to_string(&mcp_path).unwrap();
+        let with_trailing_newline = format!("{canonical}\n");
+        std::fs::write(&mcp_path, with_trailing_newline.as_bytes()).unwrap();
+
+        // Capture the bytes as they are now (with the extra newline).
+        let bytes_before = std::fs::read(&mcp_path).unwrap();
+
+        // ensure_mcp_config must recognise the file is structurally up-to-date
+        // and must NOT rewrite it.
+        ensure_mcp_config(&cfg).unwrap();
+
+        let bytes_after = std::fs::read(&mcp_path).unwrap();
+        assert_eq!(
+            bytes_before, bytes_after,
+            "trailing newline in .mcp.json must not trigger a spurious rewrite \
+             (structural comparison must tolerate formatting differences, refs #1550 Finding-1)"
         );
     }
 
