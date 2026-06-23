@@ -322,10 +322,17 @@ mod tests {
     /// What: create a root dir named `actual-dir`, write a pin with
     /// `palace: pinned-name`, call `cwd_palace_slug_at`, assert result is
     /// `pinned-name` not `actual-dir`.
-    /// Test: itself.
+    /// Test: itself; serialised against all other env-mutating tests via
+    /// `#[serial_test::serial]` + `EnvGuard::clear` so that a concurrently
+    /// racing `cwd_palace_slug_at_env_override_wins` cannot leak
+    /// `TRUSTY_MEMORY_PALACE` into this test (env check is step 1, pin file
+    /// is step 2 — a leaked env var would shadow the pin and return
+    /// "my-override" instead of "pinned-name").
+    #[serial_test::serial]
     #[test]
     fn cwd_palace_slug_at_prefers_pin_file() {
         use crate::project_root::{write_project_pin, ProjectPin, PIN_SCHEMA_VERSION};
+        let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("actual-dir");
         std::fs::create_dir_all(root.join(".git")).unwrap();
@@ -348,10 +355,14 @@ mod tests {
     /// calling it from the root — consistent with how `prompt-context` runs.
     /// What: pin file at root, call from a nested subdirectory, assert pinned
     /// slug is returned.
-    /// Test: itself.
+    /// Test: itself; serialised against env-mutating sibling tests so that
+    /// `TRUSTY_MEMORY_PALACE` (step-1 precedence) cannot leak and shadow the
+    /// pin-file result (step-2 precedence).
+    #[serial_test::serial]
     #[test]
     fn cwd_palace_slug_at_reads_pin_from_subdir() {
         use crate::project_root::{write_project_pin, ProjectPin, PIN_SCHEMA_VERSION};
+        let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("my-repo");
         std::fs::create_dir_all(root.join(".git")).unwrap();
@@ -373,10 +384,14 @@ mod tests {
     /// variant so no file write occurs even when no pin exists.
     /// What: call `cwd_palace_slug_at` from a git repo with no pin file;
     /// assert the pin file is absent after the call.
-    /// Test: itself.
+    /// Test: itself; serialised so that a leaked `TRUSTY_MEMORY_PALACE` env
+    /// var cannot short-circuit step 1 and return early before the pin-file
+    /// absence check at step 2.
+    #[serial_test::serial]
     #[test]
     fn cwd_palace_slug_at_pin_read_does_not_create_pin_file() {
         use crate::project_root::{read_project_pin, PIN_FILE_REL};
+        let _guard = EnvGuard::clear(crate::palace_id_derive::PALACE_OVERRIDE_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("no-pin-project");
         std::fs::create_dir_all(root.join(".git")).unwrap();
