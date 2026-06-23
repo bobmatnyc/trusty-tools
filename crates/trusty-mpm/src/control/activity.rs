@@ -95,7 +95,10 @@ fn re_git_op() -> &'static Regex {
             r"(?xi)
             (?:
                 # git commit output: [branch abc1234] message
-                \[(?P<branch>\S+)\s+[0-9a-f]+\]\s+(?P<msg>.{1,80})
+                # Require a real short-SHA length (7–40 hex chars) so that
+                # short identifiers like `[session a1b2c3]` (6 chars) or
+                # `[error 404abc]` (6 chars) do NOT match.
+                \[(?P<branch>\S+)\s+[0-9a-f]{7,40}\]\s+(?P<msg>.{1,80})
                 |
                 # explicit `git <verb>` invocation
                 \bgit\s+(?P<verb>push|pull|merge|fetch|commit|rebase|clone)(?:ing|ed)?\b

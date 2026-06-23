@@ -355,11 +355,16 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                         let mut dropped_count: u64 = 0;
                         let mut raw_text = String::new();
 
+                        // Forward every event in the batch to the broadcast channel and
+                        // to the critical observer mpsc. The entire batch is always
+                        // forwarded to broadcast regardless of auth-prompt detection or
+                        // critical-observer state. No event is skipped mid-batch.
                         for event in &events {
                             if let SessionEvent::Output { raw, .. } = event {
                                 raw_text.push_str(raw);
                                 raw_text.push('\n');
                             }
+                            // Broadcast unconditionally — all observers see every event.
                             let _ = event_tx.send(event.clone());
 
                             if let Some(ref tx) = critical_tx {
@@ -374,18 +379,18 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                                         critical_lagged = true;
                                     }
                                     Err(TrySendError::Closed(_)) => {
-                                        // Critical observer dropped its Receiver and
-                                        // went away cleanly. Stop tracking it so we
-                                        // do NOT kill an otherwise-healthy session.
+                                        // Critical observer dropped its Receiver.
+                                        // Clear critical_tx so future batches don't
+                                        // try_send to a dead channel. Do NOT break —
+                                        // remaining events in THIS batch still need to
+                                        // be broadcast (see above). The session keeps
+                                        // running (Closed ≠ lag).
                                         info!(
                                             session_id = %session_id,
                                             "critical observer disconnected (Closed) — \
                                              clearing critical_tx, session continues (§6.1)"
                                         );
                                         critical_tx = None;
-                                        // Stop iterating over remaining events for
-                                        // the critical path; broadcast already sent.
-                                        break;
                                     }
                                 }
                             }

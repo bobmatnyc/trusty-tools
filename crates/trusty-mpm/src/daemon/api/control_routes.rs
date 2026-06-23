@@ -189,7 +189,10 @@ pub struct CtlSessionSummary {
     /// State label.
     pub state: String,
     /// Number of times the backend has been auto-restarted (§3.1).
-    pub restart_count: u8,
+    /// Widened to u32 at the API boundary so crash-looping sessions never
+    /// saturate at 255 (the source field SessionMetadata::restart_count is
+    /// still u8 per spec; we cast with `as u32` here).
+    pub restart_count: u32,
     /// `true` if the session has restarted ≥1 time (no history replay in alpha-1).
     pub context_lost: bool,
     /// Seconds since the session started.
@@ -427,7 +430,7 @@ pub async fn ctl_list_sessions(
                 project_id: meta.project_id.clone(),
                 backend: backend_label.to_owned(),
                 state: meta.state.label().to_owned(),
-                restart_count: meta.restart_count,
+                restart_count: meta.restart_count as u32,
                 context_lost: meta.context_lost,
                 uptime_secs: meta.uptime_secs(),
                 last_activity_ts: meta.last_activity_at.to_rfc3339(),

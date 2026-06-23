@@ -171,6 +171,58 @@ fn activity_parser_git_op_no_false_positives() {
     }
 }
 
+/// Table-driven test for the bracket-SHA false-positive fix.
+///
+/// Why: the old regex used `[0-9a-f]+` (1+ chars) so non-git bracket patterns
+/// like `[session a1b2c3]` (6-char hex-like token) matched as GitOp. The fix
+/// requires 7–40 hex chars (real git short-SHA range).
+/// What: checks that short (≤6 char) bracket tokens do NOT match and that
+/// real 7-char and 40-char SHAs DO match.
+/// Test: this test.
+#[test]
+fn activity_parser_git_op_bracket_sha_length() {
+    // --- False positives: short tokens that look like hex but are not SHAs ---
+    let false_positive_cases = [
+        // 6-char hex — one char short of minimum SHA length
+        "[session a1b2c3] starting up",
+        "[error 404abc] not found",
+        "[job a1b2] done",
+        // edge: exactly 6 chars
+        "[main ab1234] message",
+    ];
+    for input in &false_positive_cases {
+        let result = ActivityParser::parse_output(input);
+        let is_git_op = result
+            .as_ref()
+            .is_some_and(|r| matches!(r.kind, ActivityKind::GitOp { .. }));
+        assert!(
+            !is_git_op,
+            "bracket false positive: {input:?} must NOT classify as GitOp \
+             (token is <7 hex chars); got: {result:?}"
+        );
+    }
+
+    // --- True positives: real git commit bracket output ---
+    let true_positive_cases = [
+        // Standard 7-char short SHA
+        "[main abc1234] Add feature",
+        // 8-char SHA
+        "[main 1a2b3c4d] Fix typo",
+        // Full 40-char SHA
+        "[main a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0] Large commit",
+    ];
+    for input in &true_positive_cases {
+        let result = ActivityParser::parse_output(input);
+        let is_git_op = result
+            .as_ref()
+            .is_some_and(|r| matches!(r.kind, ActivityKind::GitOp { .. }));
+        assert!(
+            is_git_op,
+            "expected GitOp for bracket commit output: {input:?}; got: {result:?}"
+        );
+    }
+}
+
 #[test]
 fn activity_parser_auth_prompt() {
     let cases = [

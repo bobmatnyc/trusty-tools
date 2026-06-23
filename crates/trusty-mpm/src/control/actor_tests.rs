@@ -358,6 +358,96 @@ async fn actor_pending_decision_cleared_on_next_output() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Auth-prompt batch forwarding test
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Verify that events AFTER an AuthPrompt in the same batch are still
+/// forwarded to the broadcast channel.
+///
+/// Why: if the forwarding loop breaks early (e.g. on critical Closed) while
+/// an AuthPrompt is present, trailing events in the batch would be dropped
+/// from broadcast. §7.4 requires all events in a batch to be forwarded before
+/// the actor acts on any state transition.
+/// What: sends a batch of [Output("normal"), Output("auth"), Output("trailing")]
+/// where "auth" triggers AuthPrompt detection. Subscribes a broadcast receiver
+/// and asserts all three Output events arrive.
+/// Test: this test.
+#[tokio::test]
+async fn actor_auth_prompt_batch_trailing_event_forwarded() {
+    let id = ControlSessionId::new("auth-batch-proj", 0);
+
+    // Build a batch where the second event contains an auth prompt phrase and
+    // the third event is a normal output that must NOT be dropped.
+    let batch = vec![
+        SessionEvent::Output {
+            session_id: id.clone(),
+            raw: "Normal output before auth".into(),
+            structured: None,
+            ts: Utc::now(),
+        },
+        SessionEvent::Output {
+            session_id: id.clone(),
+            raw: "Please log in to claude.ai".into(), // triggers AuthPrompt
+            structured: None,
+            ts: Utc::now(),
+        },
+        SessionEvent::Output {
+            session_id: id.clone(),
+            raw: "trailing-sentinel-event".into(), // must reach broadcast
+            structured: None,
+            ts: Utc::now(),
+        },
+    ];
+    let backend = StubBackend {
+        events: std::collections::VecDeque::from([Some(Ok(batch)), None]),
+        block_when_exhausted: false,
+    };
+
+    let handle = spawn_actor(
+        id.clone(),
+        "auth-batch-proj".into(),
+        BackendKind::Tmux, // Tmux: auth → AwaitingAuth but does NOT break the loop
+        backend,
+        DEFAULT_BROADCAST_CAPACITY,
+    );
+    let mut rx = handle.event_tx.subscribe();
+
+    // Collect all Output events from the broadcast for up to 500ms.
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+    let mut raw_outputs: Vec<String> = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(SessionEvent::Output { raw, .. }) => {
+                raw_outputs.push(raw);
+            }
+            Ok(_) => {}
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            Err(_) => break,
+        }
+    }
+
+    assert!(
+        raw_outputs
+            .iter()
+            .any(|r| r.contains("trailing-sentinel-event")),
+        "trailing event after AuthPrompt in the same batch must be broadcast; \
+         received outputs: {raw_outputs:?}"
+    );
+    assert!(
+        raw_outputs
+            .iter()
+            .any(|r| r.contains("Normal output before auth")),
+        "first event before AuthPrompt must also be broadcast; \
+         received outputs: {raw_outputs:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // §6.1 critical observer lag tests (mpsc backpressure design)
 // ─────────────────────────────────────────────────────────────────────────────
 
