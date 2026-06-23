@@ -189,10 +189,12 @@ fn git_sha_like_recognises_short_and_full() {
 fn git_sha_like_rejects_overlong_and_nonhex() {
     // 6 chars is below git's abbreviation floor.
     assert!(!is_git_sha_like("0fda53"));
-    // 41 chars exceeds SHA-1 length.
-    assert!(!is_git_sha_like(
-        "0fda534e0fda534e0fda534e0fda534e0fda534e0"
-    ));
+    // 41 chars: was rejected under the old SHA-1-only cap (40); now accepted
+    // as within the 7–64 range that covers SHA-256 repos (issue #1484).
+    assert!(is_git_sha_like("0fda534e0fda534e0fda534e0fda534e0fda534e0"));
+    // 65 chars exceeds SHA-256 length and must be rejected.
+    let sixty_five = "a".repeat(65);
+    assert!(!is_git_sha_like(&sixty_five));
     // Non-hex characters.
     assert!(!is_git_sha_like("0fda534g"));
     assert!(!is_git_sha_like("hello123"));
@@ -352,4 +354,118 @@ fn filter_config_force_bypasses_all() {
     // call it at all to force-store.
     let cfg = FilterConfig::default();
     assert!(cfg.apply("Tool use: x", true).is_err());
+}
+
+// ---- Issue #1484: advisory hardening follow-ups ----
+
+/// Why (issue #1484, gap 1): git 2.29+ repos using `--object-format=sha256`
+/// emit 64-hex-char commit SHAs. Before raising GIT_SHA_MAX_LEN from 40 to 64,
+/// a 64-char lowercase-hex token in prose would fail `is_git_sha_like` (too
+/// long), pass the secret detector (pure-lowercase-hex with no credential
+/// prefix), but then push the non-alpha ratio over the gate threshold when the
+/// content was hex-dense. This test locks in the allowlist at 64 chars.
+/// What: asserts 64-hex tokens are allowlisted as SHA-like and pass the gate.
+/// Test: itself.
+#[test]
+fn git_sha_like_recognises_sha256() {
+    // 64 hex chars: a SHA-256 git object id.
+    let sha256 = "a".repeat(63) + "b"; // 63 'a' + 1 'b' = 64 hex chars
+    assert!(
+        is_git_sha_like(&sha256),
+        "64-hex SHA-256 must be recognised as git-SHA-like"
+    );
+    // 65 chars: exceeds SHA-256, must NOT be allowlisted.
+    let too_long = "a".repeat(65);
+    assert!(
+        !is_git_sha_like(&too_long),
+        "65-hex token must not be allowlisted (exceeds SHA-256 length)"
+    );
+    // End-to-end: prose containing a SHA-256 commit reference must pass.
+    let cfg = FilterConfig::default();
+    let sha256_hex = "a".repeat(64);
+    let prose = format!("Merged commit {sha256_hex} into main via PR #42.");
+    assert!(
+        cfg.apply(&prose, true).is_ok(),
+        "prose with SHA-256 commit must pass the gate; got {:?}",
+        cfg.apply(&prose, true)
+    );
+}
+
+/// Why (issue #1484, gap 2): `looks_like_secret`'s fallback requires
+/// `has_lower && has_upper && has_digit`. Mixed-case alphabetic tokens with no
+/// digit (e.g. base58 wallet key segments) slip through unless they match a
+/// known prefix. This test documents the limitation so future reviewers know
+/// the known false-negative surface and do not mistake it for a bug introduced
+/// later.
+/// What: asserts a mixed-case-no-digit ≥20-char token is NOT flagged by the
+/// fallback heuristic (documents the known gap without changing behaviour).
+/// Test: itself.
+#[test]
+fn mixed_case_no_digit_limitation() {
+    // 24-char mixed-case alphabetic, no digit, no known prefix — would be a
+    // false negative if it were a real base58 key segment.
+    let mixed_alpha_only = "AbCdEfGhIjKlMnOpQrStUvWx";
+    assert_eq!(mixed_alpha_only.len(), 24);
+    assert!(
+        !looks_like_secret(mixed_alpha_only),
+        "known FN-2 limitation (issue #1484): mixed-case-no-digit tokens \
+         are not flagged by the fallback heuristic; document, do not panic"
+    );
+}
+
+/// Why (issue #1484, gap 3): `is_git_sha_like` uses `is_ascii_hexdigit()`
+/// which returns `true` for `0-9` as well as `a-f`/`A-F`. An all-digit string
+/// of 7–64 chars (e.g. a long account number) is therefore allowlisted as
+/// SHA-like. The risk is low, but callers should know the allowlist is broader
+/// than strictly "git commit SHA". This test documents the known behaviour.
+/// What: asserts that an all-digit 10-char string is accepted by
+/// `is_git_sha_like` (broader-than-SHA allowlist), and that it also passes the
+/// full gate as an allowlisted token.
+/// Test: itself.
+#[test]
+fn pure_digit_token_is_sha_like() {
+    // 10 ASCII digits: broader-than-SHA allowlist — known and documented.
+    let digits = "1234567890";
+    assert!(
+        is_git_sha_like(digits),
+        "known gap (issue #1484, gap 3): all-digit strings of SHA length \
+         pass is_git_sha_like because ASCII digits are valid hex"
+    );
+    // Verify it does not cause a false reject (it is allowlisted as safe).
+    assert!(
+        !looks_like_secret(digits),
+        "an all-digit short token must not be flagged as a secret"
+    );
+}
+
+/// Why (issue #1484, gap 5): a bare single-token SHA passed to `apply` with
+/// `enforce_min_tokens=true` is rejected as `TooShort` because it counts as
+/// only 1 meaningful token — below the MCP threshold of 8. This is correct
+/// behaviour (a bare SHA alone carries too little context for memory_remember)
+/// but the gap was that the `enforce_min_tokens=true` path for bare SHAs had
+/// no explicit test or doc coverage.
+/// What: asserts `apply` returns `TooShort` for a bare SHA with the MCP
+/// threshold and `enforce_min_tokens=true`, and `Ok` with `false`.
+/// Test: itself.
+#[test]
+fn bare_sha_with_enforce_min_tokens_is_too_short() {
+    let cfg = FilterConfig {
+        min_tokens: MCP_MIN_TOKENS, // 8 tokens
+        ..FilterConfig::default()
+    };
+    let bare_sha = "0fda534e0fda534e0fda534e0fda534e0fda534e"; // pragma: allowlist secret
+
+    // With enforcement: 1 token < 8 threshold → TooShort.
+    match cfg.apply(bare_sha, true) {
+        Err(FilterReject::TooShort { tokens }) => assert_eq!(tokens, 1),
+        other => {
+            panic!("expected TooShort(1) for bare SHA with enforce_min_tokens=true; got {other:?}")
+        }
+    }
+
+    // Without enforcement (e.g. memory_note path): the bare SHA passes.
+    assert!(
+        cfg.apply(bare_sha, false).is_ok(),
+        "bare SHA must pass gate when enforce_min_tokens=false"
+    );
 }

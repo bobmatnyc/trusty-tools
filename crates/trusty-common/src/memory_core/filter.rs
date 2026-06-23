@@ -68,13 +68,24 @@ pub const GIT_SHA_MIN_LEN: usize = 7;
 /// Upper bound on git-SHA-shaped hex token length recognised by
 /// [`is_git_sha_like`].
 ///
-/// Why (issue #1481): SHA-1 object ids are 40 hex chars and SHA-256 object ids
-/// (git's newer object format) are 64. We cap at 40 per the issue spec — a
-/// pure-hex run of exactly git-SHA length is the safe case to allowlist, while
-/// arbitrarily long hex blobs stay subject to the secret/non-alpha heuristics.
+/// Why (issue #1484): SHA-1 object ids are 40 hex chars; SHA-256 object ids
+/// (git's newer `--object-format=sha256`, supported since git 2.29) are 64.
+/// Raising the cap to 64 keeps engineering prose that references SHA-256
+/// commits (e.g. in repos converted to SHA-256) from being incorrectly
+/// classified as raw code or a secret by the non-alpha-ratio heuristic. A
+/// pure-lowercase-hex run of 41–64 characters is overwhelmingly likely to be
+/// a SHA-256 commit id, not a credential (credentials never appear as a pure
+/// lowercase-hex string of exactly SHA length). Arbitrarily longer hex blobs
+/// (≥ 65 chars) remain subject to the normal secret/non-alpha heuristics.
+///
+/// Knowns limitation: `is_git_sha_like` accepts pure-digit tokens in the
+/// 7–64 char range (since ASCII digits `0-9` are valid hex). This means
+/// numeric IDs such as account numbers of that length are also allowlisted.
+/// The risk is low — such tokens rarely appear in prose — but callers should
+/// be aware the allowlist is broader than strictly "git SHA". See issue #1484.
 /// What: inclusive maximum hex-digit count for a token to count as a SHA.
-/// Test: `git_sha_like_rejects_overlong_and_nonhex`.
-pub const GIT_SHA_MAX_LEN: usize = 40;
+/// Test: `git_sha_like_recognises_sha256`, `git_sha_like_rejects_overlong_and_nonhex`.
+pub const GIT_SHA_MAX_LEN: usize = 64;
 
 /// Rejection reasons surfaced to the caller.
 ///
@@ -321,9 +332,19 @@ pub fn is_git_sha_like(token: &str) -> bool {
 /// the `max_non_alpha_ratio` and rejecting it as "raw code". Masking the SHAs
 /// (the intended-safe tokens) keeps prose-with-SHAs on the prose side of the
 /// line while leaving genuinely code-shaped content untouched.
-/// What: splits on whitespace and joins back, swapping any [`is_git_sha_like`]
-/// token for the word "sha". Non-SHA tokens (including real secrets, which are
-/// caught earlier) pass through unchanged.
+/// What: splits on whitespace and joins back with single spaces, swapping any
+/// [`is_git_sha_like`] token for the word "sha". Non-SHA tokens (including
+/// real secrets, which are caught earlier) pass through unchanged.
+///
+/// **Note (issue #1484):** the `split_whitespace().join(" ")` implementation
+/// collapses multi-space runs, tabs, and newlines to single spaces before the
+/// non-alpha ratio is computed. For whitespace-heavy inputs (code blocks with
+/// indentation, markdown tables) this slightly reduces the computed ratio
+/// relative to the raw input — making the gate marginally more permissive on
+/// whitespace-rich content. This is a nit; the effect is small because
+/// whitespace is excluded from the ratio computation in
+/// `non_alphabetic_ratio`. The behaviour is intentional: normalising
+/// whitespace avoids penalising prose that happens to have extra spacing.
 /// Test: exercised via `git_sha_prose_is_accepted` and
 /// `non_alpha_masking_ignores_shas`.
 fn mask_git_shas(s: &str) -> String {
@@ -409,9 +430,17 @@ const SECRET_PREFIXES: &[&str] = &[
 /// or longer all-hex), all-uppercase tokens without a known prefix, and ordinary
 /// words are not flagged by the (b) fallback — which is exactly why AWS access
 /// key IDs (all-uppercase base32) MUST be caught by the prefix list in (a).
+///
+/// **Known limitation (FN-2, issue #1484):** mixed-case-but-no-digit tokens
+/// ≥ 20 chars (e.g. base58 key segments like `xPubKeySegmentAbCdEf`) are not
+/// flagged by the (b) fallback because `has_digit` is `false`. The prefix list
+/// (a) remains the authoritative gate for well-known credential formats. If
+/// your deployment stores content that may contain bare mixed-case-alphabetic
+/// high-entropy blobs without a known prefix, add a custom prefix or extend
+/// the pattern list in `FilterConfig`.
 /// Test: `secret_token_is_blocked`, `base64_blob_is_blocked`,
 /// `git_sha_like_is_not_secret`, `ordinary_words_are_not_secret`,
-/// `aws_access_key_ids_are_blocked`.
+/// `aws_access_key_ids_are_blocked`, `mixed_case_no_digit_limitation`.
 fn looks_like_secret(token: &str) -> bool {
     // Allowlist git SHAs first — the whole point of issue #1481.
     if is_git_sha_like(token) {
