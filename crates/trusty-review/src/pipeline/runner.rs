@@ -17,7 +17,8 @@ use tracing::{debug, info, warn};
 
 use super::runner_coverage::load_coverage_contrib;
 use super::runner_helpers::{
-    abort_dry, apply_grade_and_floor, attach_inline_comments, fetch_github_pr_meta, finalize_run,
+    abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
+    fetch_github_pr_meta, finalize_run,
 };
 use crate::{
     config::ReviewConfig,
@@ -40,6 +41,30 @@ use crate::{
 };
 
 // ─── Pipeline input ───────────────────────────────────────────────────────────
+
+/// Optional caller-supplied PR context (#1618).
+///
+/// Why: a caller (CI, editor, MCP) often has richer context than the bare diff —
+/// the PR description prose, the human review/issue discussion (author rationale),
+/// and any related/referenced source the diff depends on.  On the local-diff path
+/// there is NO GitHub fetch, so the caller is the ONLY source of this context.
+/// Threading it lets the reviewer see the author's intent and lets the adversarial
+/// verifier refute a finding the author has already empirically addressed.
+/// What: three optional prose blocks, all `None` by default so every existing
+/// construction site is a one-line `caller_context: CallerContext::default()`.
+/// The reviewer renders all three as labelled sections; the verifier receives the
+/// description + discussion as author rationale.  Provider-agnostic — no
+/// integration-specific shape, just free-form caller prose.
+/// Test: `prompt_includes_caller_context`, `verify_request_includes_author_rationale`.
+#[derive(Debug, Default, Clone)]
+pub struct CallerContext {
+    /// PR body/description prose.
+    pub pr_description: Option<String>,
+    /// Concatenated human review/issue comments — author rationale.
+    pub pr_discussion: Option<String>,
+    /// Caller-supplied referenced/related code or domain context.
+    pub referenced_code: Option<String>,
+}
 
 /// All inputs for a single review run.
 ///
@@ -76,6 +101,10 @@ pub struct ReviewInput {
     /// `--local-diff` set this `false` so they can never post even if a trigger
     /// or config somehow forces live.  `run`/`serve` set it `true`.
     pub allow_posting: bool,
+    /// Optional caller-supplied PR context (#1618): description, discussion, and
+    /// referenced code.  `CallerContext::default()` (all `None`) for callers that
+    /// have no extra context — unaffected behaviour.
+    pub caller_context: CallerContext,
 }
 
 /// Injected service dependencies (trait objects for testability).
@@ -280,6 +309,15 @@ pub async fn run_review(
     // Inject the coverage contrib into the context struct for prompt assembly.
     context.coverage_contrib = coverage_contrib.clone();
 
+    // Inject caller-supplied PR context (#1618) for the reviewer prompt.  These
+    // render as labelled sections only when present; on the local-diff path they
+    // are the sole source of PR description / discussion / referenced code (no
+    // GitHub fetch happened).  Cloned because the verifier also needs the
+    // description + discussion as author rationale below.
+    context.pr_description = input.caller_context.pr_description.clone();
+    context.pr_discussion = input.caller_context.pr_discussion.clone();
+    context.referenced_code = input.caller_context.referenced_code.clone();
+
     // ── Step 6: build prompt and call LLM ─────────────────────────────────
     // Build the 3-layer VoiceConfig (stock + principles + voice) from config.
     let voice_config = build_voice_config(config);
@@ -409,12 +447,22 @@ pub async fn run_review(
 
     let mut findings = parsed.findings;
     // 7c: verification round — re-derives verdict from surviving findings.
+    // Pass the caller-supplied PR description + discussion as author rationale
+    // (#1618) so the adversarial verifier can REFUTE a finding the author has
+    // already empirically addressed (e.g. "checked the data source; no values
+    // exceed X").  `build_author_rationale` returns None when neither is present,
+    // leaving the verifier prompt unchanged for existing callers.
+    let author_rationale = build_author_rationale(
+        input.caller_context.pr_description.as_deref(),
+        input.caller_context.pr_discussion.as_deref(),
+    );
     result.verdict = maybe_verify(
         config,
         deps.verifier.as_ref(),
         &diff,
         final_verdict,
         &mut findings,
+        author_rationale.as_deref(),
     )
     .await;
     result.findings = findings;

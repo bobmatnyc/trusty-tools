@@ -18,7 +18,7 @@ use trusty_review::{
     },
     llm::models::COMPARE_CANDIDATE_MODELS,
     models::ReviewResult,
-    pipeline::{DiffSource, ReviewInput, TriggerDecision, run_review},
+    pipeline::{CallerContext, DiffSource, ReviewInput, TriggerDecision, run_review},
 };
 
 use crate::commands::run::build_deps_async;
@@ -112,6 +112,7 @@ pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<
             trigger: TriggerDecision::ForceDryRun,
             run_mode: RunMode::Cli,
             allow_posting: false,
+            caller_context: CallerContext::default(),
         };
         eprint!("  Running {} ...", model);
         let start = std::time::Instant::now();

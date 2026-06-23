@@ -68,6 +68,7 @@ pub async fn maybe_verify(
     diff: &str,
     verdict: Verdict,
     findings: &mut [Finding],
+    author_rationale: Option<&str>,
 ) -> Verdict {
     if !config.verification.enabled {
         debug!("verification disabled by config — skipping round");
@@ -86,6 +87,7 @@ pub async fn maybe_verify(
         findings,
         Some(role.temperature),
         Some(role.max_tokens),
+        author_rationale,
     )
     .await
 }
@@ -107,6 +109,10 @@ pub async fn maybe_verify(
 /// Test: `verify_confirmed_keeps_and_block_holds`,
 /// `verify_refuted_demotes_and_block_relaxes`,
 /// `verify_no_candidates_is_noop`.
+// 8 args: verifier + model + diff + verdict + findings + temp/tokens overrides +
+// author_rationale (#1618).  Each is an independent input to the round; bundling
+// them into a struct would add indirection without clarity for a single caller.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_verification_round(
     verifier: &Arc<dyn LlmProvider>,
     verifier_model: &str,
@@ -115,6 +121,7 @@ pub async fn run_verification_round(
     findings: &mut [Finding],
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    author_rationale: Option<&str>,
 ) -> Verdict {
     // UNKNOWN is terminal — the diff was unassessable, so there is nothing to
     // verify and no verdict to re-derive.
@@ -147,6 +154,7 @@ pub async fn run_verification_round(
                 &findings[idx],
                 temperature,
                 max_tokens,
+                author_rationale,
             );
             async move {
                 let outcome = verify_one(verifier, req).await;

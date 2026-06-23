@@ -71,7 +71,7 @@ pub use prompt::{
     build_system_prompt, build_system_prompt_with_coverage, reviewer_system_prompt,
     reviewer_system_prompt_with_coverage,
 };
-pub use runner::{ReviewDeps, ReviewInput, run_review};
+pub use runner::{CallerContext, ReviewDeps, ReviewInput, run_review};
 pub use trigger::{TriggerDecision, classify_review_request, effective_dry_run};
 pub use verify::{maybe_verify, run_verification_round, select_candidates};
 pub use verify_liveness::{LivenessDecision, enforce_verifier_liveness, probe_verifier_liveness};

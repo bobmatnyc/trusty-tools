@@ -93,6 +93,17 @@ is not present in the diff at all. Decide on the evidence — do not default to
 either verdict. If the concern is real but the diff is merely ambiguous, prefer
 CONFIRMED with a qualifying reason.
 
+## Author rationale (when provided)
+A "PR Discussion / Author Rationale" section may be supplied below with the
+author's own explanation. If it contains the author's explicit verification of
+external-system state (e.g. "checked the data source; no values exceed X; the
+contract owner agreed"), treat it as a plausible correct explanation. Respond
+REFUTED if the only remaining doubt is unverifiable speculation about external
+systems the author claims to have checked — you cannot re-verify those systems
+from the diff, and a finding that rests solely on such speculation is not
+defensible. This does NOT relax the diff-grounding rules above: a problem the
+diff itself demonstrates remains CONFIRMED regardless of any rationale.
+
 Populate the structured response fields: `judgment` (CONFIRMED or REFUTED) and
 `reason` (one short sentence)."#
 }
@@ -147,22 +158,38 @@ pub fn verify_response_schema() -> ResponseSchema {
 /// judgment.  `verifier_model` may carry a `bedrock/`/`openrouter/` routing
 /// prefix; it is stripped before being set as the bare API model id.  The
 /// resolved role `temperature` / `max_tokens` are passed through so config
-/// overrides apply; `None` falls back to the role defaults.
-/// Test: `verify_request_contains_finding`, `verify_request_forces_schema`.
+/// overrides apply; `None` falls back to the role defaults.  `author_rationale`
+/// (#1618) is the caller-supplied PR description + discussion; when present and
+/// non-empty it is rendered as an "Author rationale" block so the verifier can
+/// refute a finding the author has already empirically addressed.  Absent ⇒ the
+/// user message is unchanged (back-compat).
+/// Test: `verify_request_contains_finding`, `verify_request_forces_schema`,
+/// `verify_request_includes_author_rationale`,
+/// `verify_request_omits_absent_author_rationale`.
 pub fn build_verify_request(
     verifier_model: &str,
     diff: &str,
     finding: &Finding,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    author_rationale: Option<&str>,
 ) -> LlmRequest {
     let line = finding
         .line
         .map(|l| l.to_string())
         .unwrap_or_else(|| "(unspecified)".to_string());
 
+    // Render the author-rationale block only when present and non-empty (#1618),
+    // so existing callers (no rationale) get a byte-for-byte unchanged message.
+    let rationale_block = author_rationale
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(|r| format!("{r}\n\n"))
+        .unwrap_or_default();
+
     let user_message = format!(
         "## Unified diff\n\n```diff\n{diff}\n```\n\n\
+         {rationale_block}\
          ## Finding to verify\n\
          - file: `{file}`\n\
          - line: {line}\n\
@@ -172,6 +199,7 @@ pub fn build_verify_request(
          Decide CONFIRMED or REFUTED per the rules in the system prompt. \
          If `{file}` or line {line} does not appear in the diff above, answer REFUTED.",
         diff = diff,
+        rationale_block = rationale_block,
         file = finding.file,
         line = line,
         kind = finding.kind,

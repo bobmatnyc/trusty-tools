@@ -138,6 +138,12 @@ pub(crate) async fn gather_context(
         // Coverage contrib is populated by the runner AFTER context gathering
         // (step 5b), once the diff is available for new-code extraction (#1014).
         coverage_contrib: None,
+        // Caller-supplied PR context (#1618) is injected by the runner AFTER
+        // context gathering (from `ReviewInput::caller_context`); gather_context
+        // has no access to it, so default to None here.
+        pr_description: None,
+        pr_discussion: None,
+        referenced_code: None,
     }
 }
 
