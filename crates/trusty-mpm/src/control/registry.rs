@@ -20,9 +20,7 @@ use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use crate::control::actor::{
-    DEFAULT_BROADCAST_CAPACITY, SessionActorHandle, spawn_actor,
-};
+use crate::control::actor::{DEFAULT_BROADCAST_CAPACITY, SessionActorHandle, spawn_actor};
 use crate::control::backend::stream_json::StreamJsonBackend;
 use crate::control::backend::tmux::TmuxBackend;
 use crate::control::event::BackendKind;
@@ -169,9 +167,7 @@ impl SessionRegistry {
                     params.workdir,
                     params.prompt_file,
                 )
-                .with_context(|| {
-                    format!("stream-json spawn failed for session {session_id}")
-                })?;
+                .with_context(|| format!("stream-json spawn failed for session {session_id}"))?;
                 spawn_actor(
                     session_id.clone(),
                     params.project_id,
@@ -189,9 +185,7 @@ impl SessionRegistry {
                     claude_cmd,
                     100, // default capture_lines
                 )
-                .with_context(|| {
-                    format!("tmux backend spawn failed for session {session_id}")
-                })?;
+                .with_context(|| format!("tmux backend spawn failed for session {session_id}"))?;
                 spawn_actor(
                     session_id.clone(),
                     params.project_id,
@@ -217,14 +211,13 @@ impl Default for SessionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::control::actor::{ActorCommand, SessionActorHandle};
-    use crate::control::backend::{SessionBackend, SessionInput};
-    use crate::control::event::{BackendKind, SessionEvent};
+    use crate::control::actor::SessionActorHandle;
+    use crate::control::event::BackendKind;
     use crate::control::id::ControlSessionId;
     use crate::control::state::SessionMetadata;
-    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
-    use tokio::sync::{broadcast, mpsc, RwLock};
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::{RwLock, broadcast, mpsc};
 
     fn make_handle(id: &ControlSessionId) -> SessionActorHandle {
         let (command_tx, _) = mpsc::channel(1);

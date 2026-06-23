@@ -23,7 +23,7 @@ pub mod registry;
 pub mod state;
 
 // Convenience re-exports so consumers can import from `crate::control::*`.
-pub use actor::{ActorCommand, SessionActorHandle, spawn_actor, DEFAULT_BROADCAST_CAPACITY};
+pub use actor::{ActorCommand, DEFAULT_BROADCAST_CAPACITY, SessionActorHandle, spawn_actor};
 pub use backend::{SessionBackend, SessionInput};
 pub use event::{ActivityKind, BackendKind, SessionEvent, StopReason, StreamJsonEvent};
 pub use id::{ControlSessionId, SessionCounter};

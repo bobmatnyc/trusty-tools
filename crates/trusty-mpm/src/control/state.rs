@@ -125,11 +125,7 @@ impl SessionMetadata {
     /// backend is ready; all optional fields start as `None`.
     /// What: sets `state = Starting`, `restart_count = 0`, and timestamps to now.
     /// Test: `session_metadata_serde`.
-    pub fn new(
-        session_id: ControlSessionId,
-        project_id: String,
-        backend: BackendKind,
-    ) -> Self {
+    pub fn new(session_id: ControlSessionId, project_id: String, backend: BackendKind) -> Self {
         let now = Utc::now();
         Self {
             session_id,
@@ -153,7 +149,8 @@ impl SessionMetadata {
     /// Test: uptime grows monotonically; covered indirectly by list-command tests.
     pub fn uptime_secs(&self) -> u64 {
         let delta = Utc::now() - self.started_at;
-        delta.num_seconds().max(0) as u64
+        // num_seconds() can be negative if the clock moved backwards; clamp to 0.
+        u64::try_from(delta.num_seconds()).unwrap_or(0)
     }
 }
 
@@ -176,8 +173,14 @@ mod tests {
     #[test]
     fn session_state_display() {
         assert_eq!(SessionState::Running.to_string(), "running");
-        assert_eq!(SessionState::Restarting { attempt: 1 }.to_string(), "restarting");
-        assert_eq!(SessionState::AwaitingIntervention.to_string(), "awaiting-intervention");
+        assert_eq!(
+            SessionState::Restarting { attempt: 1 }.to_string(),
+            "restarting"
+        );
+        assert_eq!(
+            SessionState::AwaitingIntervention.to_string(),
+            "awaiting-intervention"
+        );
     }
 
     #[test]
@@ -194,11 +197,9 @@ mod tests {
 
     #[test]
     fn session_metadata_uptime_non_negative() {
-        let meta = SessionMetadata::new(
-            ControlSessionId::new("x", 0),
-            "x".into(),
-            BackendKind::Tmux,
-        );
-        assert!(meta.uptime_secs() >= 0);
+        let meta =
+            SessionMetadata::new(ControlSessionId::new("x", 0), "x".into(), BackendKind::Tmux);
+        // uptime_secs returns u64; just verify it doesn't panic.
+        let _ = meta.uptime_secs();
     }
 }

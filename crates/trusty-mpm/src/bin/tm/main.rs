@@ -334,9 +334,7 @@ async fn main() -> anyhow::Result<()> {
             project_id,
             tmux,
             prompt_file,
-        } => {
-            commands::sessctl::sessctl_run(&client, &url, project_id, tmux, prompt_file).await
-        }
+        } => commands::sessctl::sessctl_run(&client, &url, project_id, tmux, prompt_file).await,
     };
 
     // Top-level exit-code translation: a `tm sessions prune-idle` that found the

@@ -7,16 +7,16 @@
 //! transitions the lifecycle state machine.
 //! What: [`SessionActor`] holds a backend, a command receiver, and a broadcast
 //! sender. [`ActorCommand`] is the inbox type. [`run_actor`] is the task entry
-//! point. [`SessionActorHandle`] is the registry-visible handle (command sender
-//! + event sender + write-lock flag + metadata Arc).
-//! Test: `actor_command_stop_terminates`, `actor_broadcasts_started_event`,
-//! `actor_handle_write_lock_cas` in the inline test module.
+//! point. [`SessionActorHandle`] is the registry-visible handle (command sender,
+//! event sender, write-lock flag, and metadata Arc).
+//!
+//! Test: inline test module — stop_terminates, broadcasts_started, write_lock_cas.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Utc;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{debug, warn};
 
 use crate::control::backend::SessionBackend;
@@ -328,11 +328,30 @@ mod tests {
         /// Events to emit on successive `recv()` calls.
         events: Vec<Option<anyhow::Result<Vec<SessionEvent>>>>,
         index: usize,
+        /// When true and events are exhausted, block forever instead of
+        /// returning `None`. Used by `actor_command_stop_terminates` so the
+        /// actor's `select!` can pick up the Stop command before the backend
+        /// exits naturally.
+        block_when_exhausted: bool,
     }
 
     impl StubBackend {
         fn new_clean_exit() -> Self {
-            Self { events: vec![None], index: 0 }
+            Self {
+                events: vec![None],
+                index: 0,
+                block_when_exhausted: false,
+            }
+        }
+
+        /// A backend that never exits on its own — recv() parks forever once
+        /// all pre-configured events are drained.
+        fn new_never_exits() -> Self {
+            Self {
+                events: vec![],
+                index: 0,
+                block_when_exhausted: true,
+            }
         }
 
         fn new_with_output(session_id: &ControlSessionId) -> Self {
@@ -345,6 +364,7 @@ mod tests {
             Self {
                 events: vec![Some(Ok(vec![out])), None],
                 index: 0,
+                block_when_exhausted: false,
             }
         }
     }
@@ -360,6 +380,10 @@ mod tests {
                 let ev = self.events.remove(0);
                 self.index += 1;
                 ev
+            } else if self.block_when_exhausted {
+                // Park indefinitely so the actor's select! can process
+                // command-inbox messages (e.g. Stop) before we exit.
+                std::future::pending::<Option<anyhow::Result<Vec<SessionEvent>>>>().await
             } else {
                 None
             }
@@ -391,14 +415,9 @@ mod tests {
 
         // Drain what's available.
         let mut found_started = false;
-        loop {
-            match rx.try_recv() {
-                Ok(e) => {
-                    if matches!(e, SessionEvent::Started { .. }) {
-                        found_started = true;
-                    }
-                }
-                Err(_) => break,
+        while let Ok(e) = rx.try_recv() {
+            if matches!(e, SessionEvent::Started { .. }) {
+                found_started = true;
             }
         }
         // We may have missed it due to subscription timing; that is acceptable.
@@ -409,8 +428,9 @@ mod tests {
     #[tokio::test]
     async fn actor_command_stop_terminates() {
         let id = ControlSessionId::new("proj", 1);
-        // Use a backend that never exits on its own.
-        let backend = StubBackend { events: vec![], index: 0 };
+        // Use a backend whose recv() parks forever so the actor stays alive
+        // long enough for our Stop command to arrive in the select! loop.
+        let backend = StubBackend::new_never_exits();
         let handle = spawn_actor(
             id.clone(),
             "proj".into(),
@@ -427,7 +447,11 @@ mod tests {
 
         // Metadata should now be Stopped.
         let m = handle.metadata.read().await;
-        assert!(m.state.is_terminal(), "expected terminal state, got: {}", m.state);
+        assert!(
+            m.state.is_terminal(),
+            "expected terminal state, got: {}",
+            m.state
+        );
     }
 
     #[tokio::test]
@@ -445,7 +469,11 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
         let m = handle.metadata.read().await;
-        assert!(m.state.is_terminal(), "expected terminal state, got: {}", m.state);
+        assert!(
+            m.state.is_terminal(),
+            "expected terminal state, got: {}",
+            m.state
+        );
     }
 
     #[test]

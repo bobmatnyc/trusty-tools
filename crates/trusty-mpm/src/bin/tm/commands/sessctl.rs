@@ -66,11 +66,7 @@ pub(crate) async fn sessctl_run(
 /// What: attempts `GET /projects/<project-id>` on the daemon; on any failure
 /// (unreachable, not found) logs a warning and returns the current directory.
 /// Test: fallback path is exercised by `sessctl_run_cwd_fallback` in tests.rs.
-async fn resolve_workdir(
-    client: &reqwest::Client,
-    url: &str,
-    project_id: &str,
-) -> PathBuf {
+async fn resolve_workdir(client: &reqwest::Client, url: &str, project_id: &str) -> PathBuf {
     #[derive(serde::Deserialize)]
     struct ProjectRow {
         workdir: String,

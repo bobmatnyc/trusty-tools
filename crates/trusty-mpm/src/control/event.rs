@@ -235,7 +235,10 @@ mod tests {
     fn stop_reason_display() {
         assert_eq!(StopReason::Requested.to_string(), "requested");
         assert_eq!(StopReason::Completed.to_string(), "completed");
-        assert_eq!(StopReason::MaxRestartsExceeded.to_string(), "max-restarts-exceeded");
+        assert_eq!(
+            StopReason::MaxRestartsExceeded.to_string(),
+            "max-restarts-exceeded"
+        );
         assert_eq!(StopReason::AuthFailed.to_string(), "auth-failed");
     }
 

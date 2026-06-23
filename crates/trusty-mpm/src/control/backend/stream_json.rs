@@ -127,7 +127,10 @@ impl SessionBackend for StreamJsonBackend {
             .write_all(text.as_bytes())
             .await
             .context("write to claude stdin failed")?;
-        self.stdin.flush().await.context("flush claude stdin failed")
+        self.stdin
+            .flush()
+            .await
+            .context("flush claude stdin failed")
     }
 
     /// Read the next line from `claude`'s stdout and parse as a stream-JSON event.

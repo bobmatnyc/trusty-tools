@@ -94,10 +94,7 @@ impl TmuxBackend {
 
         // Build and send the `claude` start command.
         let cmd_str = if let Some(pf) = prompt_file {
-            format!(
-                "{claude_cmd} --append-system-prompt-file {}",
-                pf.display()
-            )
+            format!("{claude_cmd} --append-system-prompt-file {}", pf.display())
         } else {
             claude_cmd
         };
@@ -234,14 +231,14 @@ impl Drop for TmuxBackend {
     /// (i.e. `stop()` has not already cleaned up).
     /// Test: side-effect-only; covered by integration cleanup suite.
     fn drop(&mut self) {
-        if self.spawned {
-            if let Err(e) = self.driver.kill_session(&self.tmux_name) {
-                // Log at debug level — Drop is best-effort.
-                debug!(
-                    session_id = %self.session_id,
-                    "TmuxBackend::drop: kill_session failed: {e}"
-                );
-            }
+        if self.spawned
+            && let Err(e) = self.driver.kill_session(&self.tmux_name)
+        {
+            // Log at debug level — Drop is best-effort.
+            debug!(
+                session_id = %self.session_id,
+                "TmuxBackend::drop: kill_session failed: {e}"
+            );
         }
     }
 }
