@@ -19,8 +19,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Utc;
+use tokio::sync::mpsc::error::TrySendError;
+// TrySendError has two variants: Full (channel saturated) and Closed (all
+// Receivers dropped). We treat them differently — only Full means lag.
 use tokio::sync::{RwLock, broadcast, mpsc};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::control::activity::ActivityParser;
 use crate::control::backend::SessionBackend;
@@ -278,13 +281,40 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                         let _ = reply_tx.send(event_tx.subscribe());
                     }
                     Some(ActorCommand::SubscribeCritical(reply_tx)) => {
-                        // Create a bounded mpsc pair. The actor keeps the Sender
-                        // and uses try_send to detect genuine backpressure from
-                        // the real consumer (who holds the Receiver).
-                        let (tx, rx) = mpsc::channel::<SessionEvent>(CRITICAL_OBSERVER_CAPACITY);
-                        let _ = reply_tx.send(rx);
-                        critical_tx = Some(tx);
-                        debug!(session_id = %session_id, "critical observer subscribed (§6.1)");
+                        // §6.1 — enforce single critical observer: if an existing
+                        // Sender is still connected (not all Receivers dropped),
+                        // reject the new subscription to avoid silently evicting
+                        // the first observer.
+                        if let Some(ref existing_tx) = critical_tx {
+                            if !existing_tx.is_closed() {
+                                warn!(
+                                    session_id = %session_id,
+                                    "SubscribeCritical rejected: \
+                                     a connected critical observer already exists (§6.1). \
+                                     Only one critical observer is supported at a time."
+                                );
+                                // Drop reply_tx without sending — caller gets
+                                // None from rx.await.ok() in subscribe_critical().
+                                drop(reply_tx);
+                            } else {
+                                // Previous observer disconnected; safe to replace.
+                                let (tx, rx) =
+                                    mpsc::channel::<SessionEvent>(CRITICAL_OBSERVER_CAPACITY);
+                                let _ = reply_tx.send(rx);
+                                critical_tx = Some(tx);
+                                debug!(
+                                    session_id = %session_id,
+                                    "critical observer replaced (prior was disconnected, §6.1)"
+                                );
+                            }
+                        } else {
+                            // No existing observer; register fresh.
+                            let (tx, rx) =
+                                mpsc::channel::<SessionEvent>(CRITICAL_OBSERVER_CAPACITY);
+                            let _ = reply_tx.send(rx);
+                            critical_tx = Some(tx);
+                            debug!(session_id = %session_id, "critical observer subscribed (§6.1)");
+                        }
                     }
                 }
             }
@@ -316,9 +346,13 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                         let now = Utc::now();
 
                         // Forward events to broadcast channel AND to the critical
-                        // observer mpsc. Detect lag via try_send: a full channel
-                        // means the real consumer has fallen behind (§6.1).
+                        // observer mpsc. Detect lag via try_send (§6.1):
+                        //   Err(Full)         → genuine sustained backpressure →
+                        //                        AwaitingIntervention + teardown.
+                        //   Err(Disconnected) → observer dropped its Receiver →
+                        //                        clear critical_tx, keep running.
                         let mut critical_lagged = false;
+                        let mut dropped_count: u64 = 0;
                         let mut raw_text = String::new();
 
                         for event in &events {
@@ -328,13 +362,32 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                             }
                             let _ = event_tx.send(event.clone());
 
-                            // Forward to critical observer via try_send.
-                            // Err(Full) or Err(Disconnected) → consumer behind.
-                            if critical_tx
-                                .as_ref()
-                                .is_some_and(|tx| tx.try_send(event.clone()).is_err())
-                            {
-                                critical_lagged = true;
+                            if let Some(ref tx) = critical_tx {
+                                match tx.try_send(event.clone()) {
+                                    Ok(()) => {}
+                                    Err(TrySendError::Full(_)) => {
+                                        // Channel of capacity N is full → N events
+                                        // have backed up without being consumed.
+                                        // Count each failed send so ObserverCriticalLag
+                                        // reports the real number of dropped events.
+                                        dropped_count += 1;
+                                        critical_lagged = true;
+                                    }
+                                    Err(TrySendError::Closed(_)) => {
+                                        // Critical observer dropped its Receiver and
+                                        // went away cleanly. Stop tracking it so we
+                                        // do NOT kill an otherwise-healthy session.
+                                        info!(
+                                            session_id = %session_id,
+                                            "critical observer disconnected (Closed) — \
+                                             clearing critical_tx, session continues (§6.1)"
+                                        );
+                                        critical_tx = None;
+                                        // Stop iterating over remaining events for
+                                        // the critical path; broadcast already sent.
+                                        break;
+                                    }
+                                }
                             }
                         }
 
@@ -354,7 +407,10 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                             );
                             let _ = event_tx.send(SessionEvent::ObserverCriticalLag {
                                 session_id: session_id.clone(),
-                                dropped: 0, // exact count not available with mpsc
+                                // Count of events that failed try_send(Full) in
+                                // this batch — the real number of undelivered
+                                // critical-observer events.
+                                dropped: dropped_count,
                             });
                             {
                                 let mut m = metadata.write().await;
@@ -410,6 +466,11 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                                     m.last_summary = Some(parsed.summary.clone());
                                     m.state = SessionState::AwaitingAuth;
                                 }
+                                // Note: `continue` here re-enters the select! loop without
+                                // falling through to the PendingDecision path below.
+                                // The StreamJson arm is the only one that moved `backend`
+                                // (via Box::new(backend).stop()); the Tmux arm only wrote
+                                // metadata and we continue without calling backend.stop().
                                 continue;
                             }
 

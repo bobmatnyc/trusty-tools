@@ -322,6 +322,9 @@ impl ActivityParser {
                 .map_or(text, |m| m.as_str())
                 .trim()
                 .to_owned();
+            // Convention: in `[Y/n]` the uppercase letter is the default answer.
+            // `Y` (uppercase) → proposed default is "yes"; `y` (lowercase) →
+            // proposed default is "no" (meaning `N` is the uppercase default).
             let proposed_default = caps.name("yes").map(|m| {
                 if m.as_str().chars().next().is_some_and(|c| c.is_uppercase()) {
                     "yes".to_owned()

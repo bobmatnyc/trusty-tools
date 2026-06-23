@@ -371,8 +371,8 @@ async fn actor_pending_decision_cleared_on_next_output() {
 /// What: uses a channel-fed backend so the test controls when events arrive.
 /// Registers a critical observer but never drains its mpsc Receiver. Sends
 /// enough events to fill the mpsc (capacity = CRITICAL_OBSERVER_CAPACITY + 1).
-/// Verifies that after batch2 the actor is in AwaitingIntervention and the
-/// backend's stop() was called (no leak).
+/// Waits (event-driven via broadcast + timeout) for `ObserverCriticalLag` and
+/// then asserts AwaitingIntervention + backend stop() called.
 /// Test: this test; would fail if lag detection used a self-drained broadcast
 /// clone because that proxy would never report Full.
 #[tokio::test]
@@ -389,7 +389,13 @@ async fn critical_observer_lag_yields_awaiting_intervention() {
     };
 
     let (command_tx, command_rx) = mpsc::channel::<ActorCommand>(32);
-    let (event_tx, _) = broadcast::channel::<SessionEvent>(DEFAULT_BROADCAST_CAPACITY);
+    // Use 4× the overflow batch size so the broadcast ring never wraps.
+    // The lag test sends CRITICAL_OBSERVER_CAPACITY + 2 events; if the broadcast
+    // ring is only DEFAULT_BROADCAST_CAPACITY (256) wide the receiver gets
+    // RecvError::Lagged and can miss the ObserverCriticalLag sentinel. A ring
+    // of 4× ensures every event — including ObserverCriticalLag — is visible.
+    let bcast_cap = (CRITICAL_OBSERVER_CAPACITY + 16) * 4;
+    let (event_tx, _) = broadcast::channel::<SessionEvent>(bcast_cap);
     let metadata = Arc::new(RwLock::new(SessionMetadata::new(
         id.clone(),
         "crit-proj".into(),
@@ -402,6 +408,9 @@ async fn critical_observer_lag_yields_awaiting_intervention() {
         event_tx.clone(),
         Arc::clone(&metadata),
     );
+
+    // Subscribe to the broadcast BEFORE spawning so we don't miss events.
+    let mut bcast_rx = event_tx.subscribe();
 
     // Spawn actor (blocks on backend.recv() immediately).
     tokio::spawn(run_actor(
@@ -425,8 +434,8 @@ async fn critical_observer_lag_yields_awaiting_intervention() {
     // the actor try_sends events, causing Err(Full) on the (capacity+1)th event.
     let _critical_rx = sub_rx.await.expect("actor must reply to SubscribeCritical");
 
-    // Send CRITICAL_OBSERVER_CAPACITY + 1 events to overflow the mpsc.
-    // Each batch of N events each tries try_send; on the (N+1)th send → Full.
+    // Send CRITICAL_OBSERVER_CAPACITY + 2 events to overflow the mpsc.
+    // Each try_send on a Full channel increments the dropped counter.
     let overflow_count = CRITICAL_OBSERVER_CAPACITY + 2;
     let big_batch: Vec<SessionEvent> = (0..overflow_count as u32)
         .map(|i| SessionEvent::Output {
@@ -441,8 +450,36 @@ async fn critical_observer_lag_yields_awaiting_intervention() {
         .await
         .expect("backend channel open");
 
-    // Give actor time to process.
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    // Wait (event-driven) for ObserverCriticalLag on the broadcast, with a
+    // 2-second timeout. This is immune to scheduler jitter: the assertion only
+    // fires after the actor has actually processed the batch and emitted the
+    // event, not after an arbitrary sleep.
+    //
+    // Note: we overflow_count > DEFAULT_BROADCAST_CAPACITY events through the
+    // broadcast, so the receiver may get RecvError::Lagged (ring overflowed).
+    // Lagged is not fatal — we re-enter recv() and will catch ObserverCriticalLag
+    // or Stopped if they're still in the ring. RecvError::Closed is terminal.
+    let lag_seen = tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+        loop {
+            match bcast_rx.recv().await {
+                Ok(SessionEvent::ObserverCriticalLag { .. }) => break true,
+                Ok(_) => {} // keep draining other events
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    // Ring overflowed — some events were dropped from the broadcast.
+                    // Continue polling; ObserverCriticalLag may still be in the ring
+                    // or we'll see the Stopped event that follows it.
+                }
+                Err(broadcast::error::RecvError::Closed) => break false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    assert!(
+        lag_seen,
+        "ObserverCriticalLag event must be emitted when critical mpsc is full"
+    );
 
     let m = handle.metadata.read().await;
     assert_eq!(
@@ -455,6 +492,185 @@ async fn critical_observer_lag_yields_awaiting_intervention() {
     assert!(
         stop_called.load(std::sync::atomic::Ordering::SeqCst),
         "backend stop() must be called on critical-lag path (no resource leak)"
+    );
+}
+
+/// Verify that a critical observer that drops its Receiver does NOT kill the
+/// session (Disconnected ≠ Full).
+///
+/// Why: `Err(TrySendError::Disconnected)` just means the observer went away
+/// cleanly — the session is healthy and must continue running. Only
+/// `Err(TrySendError::Full)` (genuine backpressure) triggers AwaitingIntervention.
+/// What: registers a critical observer, drops its Receiver, then sends more
+/// output. Waits for the session to reach a terminal state (clean exit) and
+/// asserts it is NOT AwaitingIntervention.
+/// Test: this test.
+#[tokio::test]
+async fn critical_observer_disconnected_keeps_session_running() {
+    let id = ControlSessionId::new("disc-proj", 0);
+
+    let (backend_tx, backend_rx) = mpsc::channel::<Option<anyhow::Result<Vec<SessionEvent>>>>(32);
+    let backend = ChanBackend {
+        rx: backend_rx,
+        stop_flag: None,
+    };
+
+    let (command_tx, command_rx) = mpsc::channel::<ActorCommand>(32);
+    let (event_tx, _) = broadcast::channel::<SessionEvent>(DEFAULT_BROADCAST_CAPACITY);
+    let metadata = Arc::new(RwLock::new(SessionMetadata::new(
+        id.clone(),
+        "disc-proj".into(),
+        BackendKind::StreamJson,
+    )));
+    let handle = make_handle(
+        &id,
+        "disc-proj",
+        command_tx,
+        event_tx.clone(),
+        Arc::clone(&metadata),
+    );
+
+    let mut bcast_rx = event_tx.subscribe();
+
+    tokio::spawn(run_actor(
+        id.clone(),
+        backend,
+        BackendKind::StreamJson,
+        command_rx,
+        event_tx.clone(),
+        Arc::clone(&metadata),
+    ));
+
+    // Subscribe, receive the Receiver, then immediately drop it (simulates the
+    // critical observer going away before any events arrive).
+    let (sub_tx, sub_rx) = tokio::sync::oneshot::channel();
+    handle
+        .command_tx
+        .send(ActorCommand::SubscribeCritical(sub_tx))
+        .await
+        .unwrap();
+    let critical_rx = sub_rx.await.expect("actor must reply to SubscribeCritical");
+    // Drop the Receiver — actor's next try_send will get Disconnected.
+    drop(critical_rx);
+
+    // Send some events — actor should detect Disconnected, clear critical_tx,
+    // and keep running without entering AwaitingIntervention.
+    let events: Vec<SessionEvent> = (0..5u32)
+        .map(|i| SessionEvent::Output {
+            session_id: id.clone(),
+            raw: format!("after-disconnect-{i}"),
+            structured: None,
+            ts: Utc::now(),
+        })
+        .collect();
+    backend_tx.send(Some(Ok(events))).await.unwrap();
+    // Signal clean exit.
+    backend_tx.send(None).await.unwrap();
+
+    // Wait (event-driven) for Stopped event to confirm the actor exited cleanly.
+    let stopped = tokio::time::timeout(tokio::time::Duration::from_secs(2), async {
+        loop {
+            match bcast_rx.recv().await {
+                Ok(SessionEvent::Stopped { .. }) => break true,
+                Ok(_) => {}
+                Err(_) => break false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    assert!(
+        stopped,
+        "session should reach Stopped after clean backend exit"
+    );
+
+    let m = handle.metadata.read().await;
+    assert_ne!(
+        m.state,
+        SessionState::AwaitingIntervention,
+        "Disconnected critical observer must NOT trigger AwaitingIntervention; \
+         got: {}",
+        m.state
+    );
+}
+
+/// Verify that a second `SubscribeCritical` while the first observer is still
+/// connected is rejected, not silently evicting the first observer.
+///
+/// Why: §6.1 intends exactly one critical observer per session. Silently
+/// replacing the first would cause it to lose all subsequent events without
+/// knowing, defeating the purpose of the critical-observer contract.
+/// What: registers a critical observer, holds its Receiver, then issues a second
+/// SubscribeCritical. Asserts that subscribe_critical() returns None (rejected)
+/// and that the first Receiver is still functional (actor can still send to it).
+/// Test: this test.
+#[tokio::test]
+async fn critical_observer_double_subscribe_rejects_second() {
+    let id = ControlSessionId::new("dbl-proj", 0);
+
+    let (_backend_tx, backend_rx) = mpsc::channel::<Option<anyhow::Result<Vec<SessionEvent>>>>(32);
+    let backend = ChanBackend {
+        rx: backend_rx,
+        stop_flag: None,
+    };
+
+    let (command_tx, command_rx) = mpsc::channel::<ActorCommand>(32);
+    let (event_tx, _) = broadcast::channel::<SessionEvent>(DEFAULT_BROADCAST_CAPACITY);
+    let metadata = Arc::new(RwLock::new(SessionMetadata::new(
+        id.clone(),
+        "dbl-proj".into(),
+        BackendKind::StreamJson,
+    )));
+    // handle only needed to keep metadata Arc alive; command_tx used directly.
+    let _handle = make_handle(
+        &id,
+        "dbl-proj",
+        command_tx.clone(),
+        event_tx.clone(),
+        Arc::clone(&metadata),
+    );
+
+    tokio::spawn(run_actor(
+        id.clone(),
+        backend,
+        BackendKind::StreamJson,
+        command_rx,
+        event_tx.clone(),
+        Arc::clone(&metadata),
+    ));
+
+    // First subscription — should succeed.
+    let (sub_tx1, sub_rx1) = tokio::sync::oneshot::channel();
+    command_tx
+        .send(ActorCommand::SubscribeCritical(sub_tx1))
+        .await
+        .unwrap();
+    let first_rx = sub_rx1.await.expect("first SubscribeCritical must succeed");
+
+    // Second subscription while first is still alive — must be rejected.
+    // The actor drops the reply_tx, so rx2.await returns Err(RecvError).
+    let (sub_tx2, sub_rx2) = tokio::sync::oneshot::channel();
+    command_tx
+        .send(ActorCommand::SubscribeCritical(sub_tx2))
+        .await
+        .unwrap();
+    // Give actor a moment to process the command.
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+    let second_result = sub_rx2.await;
+    assert!(
+        second_result.is_err(),
+        "second SubscribeCritical must be rejected (reply_tx dropped) \
+         while first observer is connected"
+    );
+
+    // The first Receiver is NOT dropped — the actor's critical_tx still
+    // points to the original pair. Verify by ensuring first_rx is still open
+    // (not closed from the actor side).
+    assert!(
+        !first_rx.is_closed(),
+        "first critical Receiver must remain open after a rejected second subscription"
     );
 }
 
