@@ -94,6 +94,14 @@ use files::{call_chain_handler, global_grep_handler, grep_handler};
 use typeahead::typeahead_handler;
 
 // Re-export for integration tests in `tests/typeahead.rs`.
+//
+// Why: the integration tests in `tests/typeahead.rs` call the handler directly
+// (not via a running HTTP router), which requires importing both the handler
+// function and its `TypeaheadParams` extractor. These names are public so the
+// integration-test crate can see them, but `#[doc(hidden)]` keeps them off the
+// crate's documented public API surface to avoid misleading downstream callers
+// (issue #1560 nit 1).
+#[doc(hidden)]
 pub use typeahead::{
     typeahead_handler as typeahead_handler_for_tests, TypeaheadParams as TypeaheadParamsForTests,
 };

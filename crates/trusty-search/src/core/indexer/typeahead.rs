@@ -75,6 +75,14 @@ impl TypeaheadHit {
     /// `"kg"`) that clients consume.
     /// What: `"hybrid+kg"` → `"kg"`, `"vector"` → `"semantic"`,
     /// everything else (`"hybrid"`, `"bm25"`, `"fallback:ripgrep"`) → `"lexical"`.
+    /// Note: `"hybrid"` collapses to `"lexical"` because the three-valued
+    /// `source` enum (`lexical` / `semantic` / `kg`) has no slot for a combined
+    /// BM25+vector result. In lexical typeahead mode the pipeline only runs BM25
+    /// so results are truly lexical; in blended mode the RRF fuser may produce
+    /// `"hybrid"` hits, and we conservatively tag them as `"lexical"` (the
+    /// majority contributor at the BM25-heavy weights used for typeahead) rather
+    /// than inventing a fourth tag that would break existing client rendering
+    /// (issue #1560 nit 3).
     /// Test: `classify_source_*` unit tests below.
     pub fn classify_source(match_reason: &str) -> &'static str {
         if match_reason.contains("kg") {
@@ -82,6 +90,8 @@ impl TypeaheadHit {
         } else if match_reason == "vector" {
             "semantic"
         } else {
+            // Covers "hybrid" (BM25+vector blend), "bm25", "fallback:ripgrep",
+            // and any future reason strings — all collapse to the "lexical" tag.
             "lexical"
         }
     }
@@ -145,7 +155,9 @@ pub struct TypeaheadResponse {
     pub hits: Vec<TypeaheadHit>,
     /// The effective mode used (`"lexical"` or `"blended"`).
     pub mode: String,
-    /// Server-side handler latency in milliseconds.
+    /// Search execution latency in milliseconds (measured after the index
+    /// read-lock is acquired, so it reflects BM25 + HNSW time only — not
+    /// lock-acquisition wait under contention).
     pub latency_ms: u64,
 }
 

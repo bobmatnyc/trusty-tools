@@ -116,8 +116,12 @@ pub async fn typeahead_handler(
         ..SearchQuery::default()
     };
 
-    let started = std::time::Instant::now();
+    // Acquire the read lock first, then start the latency timer so `latency_ms`
+    // measures search execution time rather than search + lock-acquisition wait
+    // (issue #1560 nit 2). Under contention the lock-wait could dominate and
+    // mislead callers who use `latency_ms` to budget ONNX / BM25 time.
     let indexer = handle.indexer.read().await;
+    let started = std::time::Instant::now();
     let chunks = indexer.search(&query).await.map_err(|e| {
         tracing::warn!(index_id = %id, err = %e, "typeahead search error");
         (
