@@ -314,12 +314,23 @@ session_id:       string          // "<project-id>-<N>"
 project_id:       string
 backend:          "stream-json" | "tmux"
 state:            SessionState    // see §7.2
+restart_count:    u8              // number of auto-restarts since session start (§3.1)
+context_lost:     bool            // true if the session has restarted ≥1 time and
+                                  // conversation history was NOT replayed (alpha-1
+                                  // never replays; consumers must treat this as a
+                                  // hard context-reset signal — see §13.3)
 uptime_secs:      u64
 last_activity_ts: DateTime<Utc>
 last_summary:     Option<string>  // from activity observability §8
 pending_decision: Option<string>  // human-readable prompt if awaiting input
 proposed_default: Option<string>  // suggested answer if one exists
 ```
+
+**Consumer contract for `restart_count` / `context_lost`:**
+SM-agent and TUI consumers MUST poll or observe `SessionEvent::Restarted` (§7.3) and
+treat it as a full context-reset: any in-memory model of the session's conversation
+state is invalid. `context_lost: true` in `tm list` output is the durable form of this
+signal for callers that missed the broadcast event.
 
 ---
 
@@ -381,13 +392,35 @@ stream-JSON and tmux backends can pass them to `claude` when relevant.
 
 ### 6.1 Output fan-out to many observers
 
-Session output events are broadcast to **all registered observers** via an unbounded
-`broadcast::Sender<SessionEvent>` channel (tokio). Each `tm connect` call receives its
-own `broadcast::Receiver` clone. There is no limit on the number of observers.
+Session output events are broadcast to **all registered observers** via a
+`broadcast::Sender<SessionEvent>` channel (tokio) with a **fixed ring-buffer capacity**
+(default: `256` events, configurable as `session.broadcast_capacity`). Each `tm connect`
+call clones a `broadcast::Receiver` from the same sender. There is no limit on the number
+of observers.
 
-**Guarantee:** every observer receives every event that was enqueued after it connected.
-Events before connection are not replayed (no ring buffer in alpha-1; replay is future
-work captured in §13.3).
+**Important: tokio `broadcast` is NOT unbounded.** A receiver that falls behind the
+producer by more than `broadcast_capacity` events receives `Err(RecvError::Lagged(n))`
+— events in the gap are silently dropped by tokio. The daemon handles lag as follows:
+
+- On `RecvError::Lagged(n)`: log a WARN with session ID, observer identity, and count;
+  emit a synthetic `SessionEvent::ObserverLagged { session_id, dropped: n }` to notify
+  the observer.
+- The observer **must** treat `ObserverLagged` as a gap signal and re-sync state from
+  `GET /sessions/{id}` (the snapshot endpoint) before resuming event-driven logic.
+- Persistent lag (three consecutive `Lagged` errors from the same observer) disconnects
+  that observer automatically — it is replaced with a fresh subscription from the
+  current snapshot.
+
+**Alternative considered:** per-observer `mpsc` channel with back-pressure (blocking the
+actor until each slow observer drains). Rejected for alpha-1: a slow TUI or SM agent
+would stall output delivery to all other observers and to the session backend read loop.
+The `broadcast`-with-lag-policy approach keeps producers non-blocking; consumers handle
+gaps explicitly.
+
+**Guarantee for well-behaved observers:** an observer that drains its receiver promptly
+(within `broadcast_capacity` events of the producer) receives every event from the
+moment of subscription. Events before connection are not replayed (no persistent ring
+buffer in alpha-1; replay is future work captured in §13.3).
 
 ### 6.2 Single-writer attach model
 
@@ -395,27 +428,39 @@ work captured in §13.3).
 grants the ability to call `send()` on the session backend. All other connected clients
 are read-only observers.
 
-**Lock acquisition:**
-- First `tm connect` call (or first call with `--write` intent) acquires the lock.
-- Subsequent `tm connect` calls are automatically read-only if the lock is held.
-- The caller that holds the write lock is the **active writer**.
+**Write-lock representation:** the lock is an `AtomicBool` stored on
+`SessionActorHandle.write_lock_held` (see §7.1). Because it is a single atomic flag on
+the handle — NOT a second field inside `Arc<RwLock<SessionMetadata>>` — acquisition
+requires exactly **one** operation with no interleave window:
 
-**Lock handoff:**
-- When the active writer disconnects (channel closed, client exits, `tm stop` on the
-  client side), the write lock is released.
+```
+// Acquire (compare_exchange: false → true, SeqCst/SeqCst)
+match handle.write_lock_held.compare_exchange(false, true, SeqCst, SeqCst) {
+    Ok(_)  => { /* lock acquired; caller is active writer */ }
+    Err(_) => { /* lock already held; caller is read-only observer */ }
+}
+```
+
+The registry `RwLock` is NOT held during this CAS — the handle is cloned out first
+(shared lock, then released), and the CAS runs on the `Arc<AtomicBool>`. This
+eliminates the two-step TOCTOU window.
+
+**Lock release:**
+- On writer disconnect (channel closed, client exits, `tm stop` on the client side):
+  `write_lock_held.store(false, SeqCst)`.
+- On actor teardown (`Stopped` / `Failed`): same store; all observer channels close.
 - The daemon does NOT automatically grant the lock to a waiting observer. The next
-  `tm connect` with write intent from any client acquires it.
-- If two clients simultaneously attempt write-intent connect, the first to arrive wins;
-  the second becomes read-only. This is a potential race condition noted in §13.2.
+  write-intent `tm connect` races on the CAS and the first wins.
 
 **Graceful degradation if the active writer exits independently:**
 - If the Claude Code session itself sends an exit signal (detected in the event stream),
   the actor transitions to `Stopped` and broadcasts a `SessionStopped` event.
 - All observers receive the final event and their channels are closed.
-- The write lock is released as part of actor teardown.
+- The write lock is cleared as part of actor teardown.
 
 **Invariant:** the daemon never routes input from two clients to the same session
-backend simultaneously.
+backend simultaneously. The single-CAS acquisition protocol guarantees this without any
+additional mutex.
 
 ---
 
@@ -445,9 +490,10 @@ exclusive lock held only for the HashMap operation, not for the actor's entire l
 
 ```
 SessionActorHandle {
-    command_tx: mpsc::Sender<ActorCommand>,
-    event_tx:   broadcast::Sender<SessionEvent>,
-    metadata:   Arc<RwLock<SessionMetadata>>,
+    command_tx:       mpsc::Sender<ActorCommand>,
+    event_tx:         broadcast::Sender<SessionEvent>,
+    write_lock_held:  Arc<AtomicBool>,   // single-writer flag — see §6.2
+    metadata:         Arc<RwLock<SessionMetadata>>,
 }
 ```
 
@@ -492,7 +538,8 @@ enum SessionEvent {
     Output        { session_id, raw: Bytes, structured: Option<StreamJsonEvent>, ts },
     ActivityParsed{ session_id, kind: ActivityKind, summary: String, ts },
     PendingDecision{ session_id, prompt: String, proposed_default: Option<String>, ts },
-    Restarted     { session_id, attempt: u8, ts },
+    Restarted     { session_id, attempt: u8, context_lost: bool, ts },
+    // context_lost is always true in alpha-1 (no history replay; see §13.3)
     Stopped       { session_id, reason: StopReason, ts },
     Failed        { session_id, reason: String, ts },
 }
@@ -547,8 +594,12 @@ Recognized patterns (illustrative, not exhaustive):
 | OAuth / login prompt text | `AuthPrompt` |
 | `Session complete` or exit-code 0 on stream-JSON | `SessionComplete` |
 
-The parse layer uses compiled `Regex` instances (lazily initialized) and runs in O(N)
-over the raw bytes with no heap allocations beyond the match result.
+The parse layer uses compiled `Regex` instances (lazily initialized, stored in
+`OnceLock`-backed statics) and runs in O(N) over the raw bytes. It performs **minimal
+allocation**: regex match extraction allocates for captures and the `ActivityParsed`
+event carries a heap `String` summary, but there is no per-byte or per-event allocation
+in the non-matching path. The claim is "minimal allocation / no per-byte allocation" —
+not zero-allocation.
 
 ### 8.3 OpenRouter LLM classifier (optional, unattended/standalone only)
 
@@ -667,9 +718,24 @@ default: `60`) that:
 
 1. Scans for tmux sessions matching `tm:*` that are NOT in the `SessionRegistry`.
 2. Kills any discovered orphans via `tmux kill-session`.
-3. Scans for child processes with `comm = claude` whose parent PID is the daemon
-   but whose `SessionId` cannot be resolved in the registry.
-4. Sends SIGTERM to any discovered orphan child processes.
+3. Scans for orphaned child processes using a **PID-file registry** (not `comm`-name
+   scanning): at spawn, `StreamJsonBackend` writes the child PID to a file at
+   `~/.trusty-mpm/pids/<session-id>.pid`. Orphan-GC reads all `.pid` files, cross-
+   references against live `SessionRegistry` entries, and sends SIGTERM to any PID
+   whose session-id is not in the registry.
+4. PID files are removed by the backend's `Drop` impl on normal termination. A stale
+   PID file (process no longer exists at that PID) is silently removed by orphan-GC.
+
+**Why PID files instead of `comm`-name scanning:** scanning `/proc/<pid>/comm` (Linux)
+or `ps -o comm` (macOS) for the string `claude` is fragile — it matches any user-
+launched `claude` binary (not just daemon-owned children), misses orphans under
+PID-1-reparenting inside containers, and is racy by design. The PID-file registry ties
+each tracked PID to a specific session-id with no ambiguity.
+
+**Alpha-1 limitation:** the PID-file approach does not survive daemon crashes without a
+write-ahead of the PID. The implementation MUST write the PID file before returning
+from `spawn()`, not after, to avoid a crash window where a child runs without a PID
+file.
 
 Orphan-GC findings are logged at WARN level and reported in `GET /health`.
 
@@ -736,19 +802,17 @@ production.
 **Open question:** Should the daemon implement a rate-limit backpressure signal that the
 SM agent can observe to pause session fan-out? Deferred to beta.
 
-### 13.2 Write-lock handoff race condition
+### 13.2 Write-lock concurrency — resolved by AtomicBool CAS
 
-**Risk:** If two clients simultaneously attempt write-intent `tm connect`, the first to
-register in the registry wins. If the resolution is not atomic (depends on
-`RwLock<SessionRegistry>` acquisition order), both clients might briefly believe they
-hold the lock.
+The TOCTOU risk originally noted here (two clients racing on write-intent connect) is
+closed by the design in §6.2 and §7.1: the write lock is an `AtomicBool` on
+`SessionActorHandle`, acquired by a single `compare_exchange(false, true)`. The
+registry `RwLock` is released before the CAS runs, so there is no two-step window.
 
-**Mitigation planned:** The write-lock acquisition must be an atomic CAS operation inside
-a single `RwLock::write()` guard. The current design assumes this; the implementation
-must verify it.
-
-**Open question:** Should the daemon support a `--wait-for-lock` flag on `tm connect`
-that queues the caller until the lock is available? Deferred.
+**Remaining open question:** Should the daemon support a `--wait-for-lock` flag on
+`tm connect` that parks the caller in a wait queue until the lock is released (rather
+than immediately downgrading to read-only)? This would be useful for SM-agent handoff
+scenarios. Deferred to beta.
 
 ### 13.3 Stream-JSON reconnect semantics across auto-restart
 
