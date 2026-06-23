@@ -369,7 +369,13 @@ pub async fn run_review(
     }
 
     // ── Step 7b–7e: grade derivation, coverage floor, verification, reconcile ─
-    let (final_verdict, final_grade) = apply_grade_and_floor(&parsed);
+    // `original_llm_grade` is the pre-floor LLM grade; it is held separately so
+    // that after verification potentially RELAXES the verdict (e.g. BLOCK → APPROVE
+    // because the only blocking finding was refuted), the envelope grade can be
+    // re-clamped from the original LLM grade rather than the floor-escalated grade.
+    // Without this, a floor that escalated B- → F would not recover to B- when
+    // verification refutes the escalating finding (closes #1486).
+    let (final_verdict, final_grade, original_llm_grade) = apply_grade_and_floor(&parsed);
     info!(
         verdict = %final_verdict,
         grade = %final_grade,
@@ -380,7 +386,12 @@ pub async fn run_review(
     // 7b-post: apply coverage floor AFTER severity derivation (#1014).
     // Coverage can only TIGHTEN (REQUEST_CHANGES) — never soften a BLOCK.
     // This is a no-op when coverage gating is disabled (the default).
-    let (final_verdict, final_grade) = if let Some(ref cov) = coverage_contrib {
+    // Note: the coverage-adjusted grade (_cov_grade) is intentionally not used as
+    // the source for step 7d's grade derivation — see the #1486 fix comment below
+    // for why the original_llm_grade is the correct basis for the post-verification
+    // grade clamp.  The coverage floor only shifts the verdict; the grade is
+    // re-clamped from original_llm_grade to the final post-verification verdict.
+    let (final_verdict, _cov_grade) = if let Some(ref cov) = coverage_contrib {
         let before = final_verdict.clone();
         let (cv, cg) = apply_coverage_floor(final_verdict, final_grade, cov);
         if cv != before {
@@ -407,9 +418,30 @@ pub async fn run_review(
     )
     .await;
     result.findings = findings;
-    // 7d: clamp grade to stay consistent with the post-verification verdict.
+
+    // 7d: derive the envelope grade from the post-verification verdict (closes #1486).
+    //
+    // BEFORE this fix: the grade was clamped from `final_grade` (the floor-escalated
+    // grade) to `result.verdict`.  When verification RELAXES the verdict (e.g. BLOCK
+    // → APPROVE because the only blocking finding was refuted by the verifier), the
+    // clamp of F→APPROVE is a no-op (F implies BLOCK which is already stricter than
+    // APPROVE), so the envelope grade stayed F even though the verdict became APPROVE.
+    //
+    // AFTER this fix: we clamp the original LLM grade (pre-floor) to the
+    // post-verification verdict.  The floor escalation (B- → F for a BLOCK) no
+    // longer leaks into the envelope when verification relaxes the verdict: if the
+    // floor finding was refuted, the envelope correctly shows B-/APPROVE instead of
+    // F/APPROVE.  If the blocking finding survives verification (verdict stays BLOCK),
+    // `clamp_grade_to_verdict(B-, BLOCK)` = F — the correct, consistent result.
+    //
+    // Coverage-floor tightening (step 7b-post above) may also shift `final_grade`
+    // independently of verification; for now we treat original_llm_grade as the
+    // soft starting point and defer tighter coverage-grade interaction to a follow-up.
+    // In practice the coverage floor only drives REQUEST_CHANGES (not BLOCK), and the
+    // original LLM grade for REQUEST_CHANGES is already at the D-band, so the clamp
+    // is correct in the common case.
     result.grade = Some(
-        crate::pipeline::letter_grade::clamp_grade_to_verdict(final_grade, &result.verdict)
+        crate::pipeline::letter_grade::clamp_grade_to_verdict(original_llm_grade, &result.verdict)
             .to_string(),
     );
 
