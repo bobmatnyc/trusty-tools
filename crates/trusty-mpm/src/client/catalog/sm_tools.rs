@@ -25,7 +25,7 @@ const SM_SESSION_VERBS: &[CommandSpec] = &[
     CommandSpec {
         name: "sessions.launch",
         aliases: &[],
-        args: "workdir, model?, prompt?, goal_id?",
+        args: "workdir, model?, prompt?, goal_id?, repo_url?, ref_?",
         summary: "Launch a new t-mpm session scoped to a task; links to a goal when `goal_id` is given",
         kind: SpecKind::SmOnly,
     },
@@ -412,7 +412,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             sm.prompt_signature(),
-            "sessions.launch(workdir, model?, prompt?, goal_id?)"
+            "sessions.launch(workdir, model?, prompt?, goal_id?, repo_url?, ref_?)"
         );
     }
 }

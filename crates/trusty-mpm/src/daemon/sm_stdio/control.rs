@@ -105,19 +105,29 @@ impl SessionControl for DaemonSessionControl {
     /// Why: the spec maps `sm.sessions.launch` onto `POST /sessions`, whose
     /// engine is [`spawn_managed`]. Forwarding here keeps the adapter a thin
     /// mapping with zero provisioning logic of its own.
-    /// What: maps `workdir → repo_url`, `prompt → task` (defaulting to a generic
-    /// description when absent), and `model → runtime`, then returns
+    /// What: maps `workdir → repo_url` (unless an explicit `repo_url` was
+    /// supplied — WI-A #1585 — in which case that takes precedence), `prompt →
+    /// task` (defaulting to a generic description when absent), `model →
+    /// runtime`, and `ref_ → git_ref` (WI-A #1585; empty string when absent,
+    /// which lets the spawn path use its default-branch strategy). Returns
     /// `{ session_id }`. The `goal_id` link is recorded by the caller via the
     /// goal store (§9.3), not here, so this stays purely session-control.
-    /// Test: forwards to `spawn_managed` (managed integration tests).
+    /// Test: forwards to `spawn_managed` (managed integration tests); the
+    /// repo_url/ref_ threading is covered by
+    /// `chat_action_tests.rs::execute_launch_threads_repo_url_and_ref_`.
     async fn launch(&self, params: LaunchParams) -> Result<serde_json::Value, SessionControlError> {
         let task = params
             .prompt
             .filter(|p| !p.trim().is_empty())
             .unwrap_or_else(|| "session-manager launched task".to_string());
+        // WI-A #1585: an explicit `repo_url` in LaunchParams takes precedence
+        // over `workdir` for provisioning; `workdir` is used as the fallback
+        // (local-path fast-path or legacy callers that encode the URL there).
+        let repo_url = params.repo_url.unwrap_or(params.workdir);
+        let git_ref = params.ref_.unwrap_or_default();
         let spawn = SpawnParams {
-            repo_url: params.workdir,
-            git_ref: String::new(),
+            repo_url,
+            git_ref,
             task,
             name_hint: None,
             runtime: params.model,

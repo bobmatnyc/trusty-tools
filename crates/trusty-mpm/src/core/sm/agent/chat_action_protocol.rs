@@ -280,7 +280,9 @@ pub fn action_instructions() -> String {
         "\nArgument conventions: pass a session id as `args.session_id`; \
          `sessions.send` also takes `args.text`; `sessions.launch` takes \
          `args.workdir` (required) plus optional `args.model`, `args.prompt`, \
-         `args.goal_id`; `sessions.adopt` takes `args.tmux_name` and `args.cwd` \
+         `args.goal_id`, `args.repo_url` (canonical git URL for provisioning, \
+         WI-A #1585), and `args.ref_` (git branch/tag/SHA to check out, \
+         WI-A #1585); `sessions.adopt` takes `args.tmux_name` and `args.cwd` \
          (both required) plus optional `args.task`, `args.runtime`; \
          `sessions.inject` takes `args.session_id`, `args.text`, and optional \
          `args.submit` (one of `enter` [default], `no_submit`, `interrupt`); \
@@ -381,6 +383,9 @@ pub async fn execute_verb(
                 // #1508: an explicit `ephemeral` arg marks the launched session
                 // disposable; absent → a normal durable session.
                 ephemeral: args.get("ephemeral").and_then(Value::as_bool),
+                // WI-A #1585: optional repo context from the action-chat args.
+                repo_url: str_arg(args, "repo_url"),
+                ref_: str_arg(args, "ref_"),
             };
             control.launch(params).await
         }

@@ -470,3 +470,74 @@ async fn execute_unknown_verb_errors() {
     assert!(err.to_string().contains("unknown verb"));
     assert!(err.to_string().contains("sessions.list"));
 }
+
+/// Why: WI-A #1585 — `sessions.launch` must thread an explicit `repo_url` and
+/// `ref_` from the action-chat args into the [`LaunchParams`] it passes to
+/// `SessionControl::launch`, so the spawn path can provision against the exact
+/// canonical URL and git ref the multi-project context supplied.
+/// What: dispatches `sessions.launch` with `repo_url` + `ref_` in args, then
+/// reads the mock's recorded launch and asserts those fields were forwarded.
+/// Test: this is the test.
+#[tokio::test]
+async fn execute_launch_threads_repo_url_and_ref_() {
+    let mock = Arc::new(MockSessionControl::default());
+    let control: Arc<dyn SessionControl> = mock.clone();
+    let out = execute_verb(
+        &control,
+        "sessions.launch",
+        &json!({
+            "workdir": "/local/fallback",
+            "repo_url": "https://github.com/example/repo",
+            "ref_": "feat/my-branch",
+            "prompt": "run tests",
+        }),
+    )
+    .await
+    .expect("launch with repo_url+ref_ dispatches");
+    assert!(
+        out.get("session_id").and_then(|v| v.as_str()).is_some(),
+        "launch must return a session_id"
+    );
+    let launches = mock.launches();
+    assert_eq!(launches.len(), 1, "exactly one launch recorded");
+    let (_, params) = &launches[0];
+    assert_eq!(
+        params.repo_url.as_deref(),
+        Some("https://github.com/example/repo"),
+        "repo_url must be threaded through LaunchParams"
+    );
+    assert_eq!(
+        params.ref_.as_deref(),
+        Some("feat/my-branch"),
+        "ref_ must be threaded through LaunchParams"
+    );
+    assert_eq!(params.workdir, "/local/fallback");
+    assert_eq!(params.prompt.as_deref(), Some("run tests"));
+}
+
+/// Why: WI-A #1585 — when `repo_url`/`ref_` are absent from the action-chat
+/// args the launch must still succeed with `None` in those fields (backward-
+/// compatible, no regression against existing callers that only provide workdir).
+/// What: dispatches `sessions.launch` with only `workdir` and `prompt`, then
+/// asserts `repo_url` and `ref_` are `None` in the recorded params.
+/// Test: this is the test.
+#[tokio::test]
+async fn execute_launch_repo_url_and_ref_default_to_none() {
+    let mock = Arc::new(MockSessionControl::default());
+    let control: Arc<dyn SessionControl> = mock.clone();
+    execute_verb(
+        &control,
+        "sessions.launch",
+        &json!({ "workdir": "/some/dir", "prompt": "do work" }),
+    )
+    .await
+    .expect("launch without repo_url dispatches");
+    let launches = mock.launches();
+    assert_eq!(launches.len(), 1);
+    let (_, params) = &launches[0];
+    assert!(
+        params.repo_url.is_none(),
+        "repo_url must be None when not supplied"
+    );
+    assert!(params.ref_.is_none(), "ref_ must be None when not supplied");
+}

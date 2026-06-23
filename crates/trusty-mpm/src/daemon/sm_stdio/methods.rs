@@ -220,6 +220,10 @@ pub async fn sm_sessions_launch(d: &SmDispatcher, params: &Value) -> Result<Valu
         // #1508: honour an explicit `ephemeral` flag from the wire so a
         // chat/test launch can mark its session disposable; absent → durable.
         ephemeral: params.get("ephemeral").and_then(Value::as_bool),
+        // WI-A #1585: honour optional repo_url / ref_ from the wire params so
+        // the SM-STDIO dispatch path threads them through to the spawn.
+        repo_url: opt_str(params, "repo_url"),
+        ref_: opt_str(params, "ref_"),
     };
     let result = d.sessions.launch(launch).await.map_err(map_control_err)?;
 
