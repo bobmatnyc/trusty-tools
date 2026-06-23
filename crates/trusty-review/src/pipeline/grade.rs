@@ -150,6 +150,101 @@ const FLOOR_MIN_CONFIDENCE: f32 = 0.80;
 /// `low_confidence_high_effort_finding_still_drives_floor`.
 const FLOOR_COUNT_MIN_CONFIDENCE: f32 = 0.50;
 
+// ─── Calibration env-var overrides (#1597) ────────────────────────────────────
+
+/// Environment variable for overriding [`LOW_CONFIDENCE_THRESHOLD`] at runtime.
+///
+/// Why: per-deployment tuning of grading strictness without recompiling.  Parsed
+/// as `f32`; invalid or out-of-`[0.0, 1.0]` values silently fall back to the
+/// compile-time constant (closes #1597).
+/// What: when set to a valid `f32` in `[0.0, 1.0]`, overrides the advisory-batch
+/// collapse threshold.  Default value when unset: `0.65`.
+/// Test: `env_override_low_confidence_threshold_changes_value`,
+/// `env_override_defaults_when_unset`.
+pub const TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV: &str =
+    "TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD";
+
+/// Environment variable for overriding [`FLOOR_MIN_CONFIDENCE`] at runtime.
+///
+/// Why: per-deployment control over how strictly Medium findings must score to
+/// count toward the REQUEST_CHANGES floor (closes #1597).
+/// What: when set to a valid `f32` in `[0.0, 1.0]`, overrides the Medium-floor
+/// gate.  Default value when unset: `0.80`.
+/// Test: `env_override_floor_min_confidence_changes_value`,
+/// `env_override_defaults_when_unset`.
+pub const TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV: &str = "TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE";
+
+/// Environment variable for overriding [`FLOOR_COUNT_MIN_CONFIDENCE`] at runtime.
+///
+/// Why: per-deployment control over the sub-coin-flip exclusion floor (closes #1597).
+/// What: when set to a valid `f32` in `[0.0, 1.0]`, overrides the minimum
+/// confidence for a finding to participate in the verdict floor at all.  Default
+/// value when unset: `0.50`.
+/// Test: `env_override_floor_count_min_confidence_changes_value`,
+/// `env_override_defaults_when_unset`.
+pub const TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE_ENV: &str =
+    "TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE";
+
+/// Read a calibration threshold from an env var, falling back to `default`.
+///
+/// Why: centralises the parse-or-fallback logic so every threshold reads the same
+/// way (close #1597 without any runtime config struct or re-compilation).
+/// What: tries `std::env::var(key)`; on success parses as `f32` and accepts the
+/// value only when it is finite and in `[0.0, 1.0]`.  Any other outcome returns
+/// `default` silently (operators who want to debug set `RUST_LOG=debug`).
+/// Test: `env_override_low_confidence_threshold_changes_value` (verifies a valid
+/// override is applied); `env_override_defaults_when_unset` (verifies the
+/// constant default is returned when the var is absent or invalid).
+fn read_threshold_env(key: &str, default: f32) -> f32 {
+    match std::env::var(key) {
+        Ok(raw) => match raw.trim().parse::<f32>() {
+            Ok(v) if v.is_finite() && (0.0..=1.0).contains(&v) => {
+                debug!(key, value = v, "calibration threshold overridden via env");
+                v
+            }
+            _ => default,
+        },
+        Err(_) => default,
+    }
+}
+
+/// Effective `LOW_CONFIDENCE_THRESHOLD` (env-override aware, closes #1597).
+///
+/// Why: exposes the advisory-batch collapse line as an operator knob so
+/// per-deployment strictness can be tuned without recompiling.
+/// What: returns the env-var value when set and valid; otherwise the compile-time
+/// constant `0.65`.
+/// Test: `env_override_low_confidence_threshold_changes_value`.
+fn low_confidence_threshold() -> f32 {
+    read_threshold_env(
+        TRUSTY_REVIEW_LOW_CONFIDENCE_THRESHOLD_ENV,
+        LOW_CONFIDENCE_THRESHOLD,
+    )
+}
+
+/// Effective `FLOOR_MIN_CONFIDENCE` (env-override aware, closes #1597).
+///
+/// Why: exposes the Medium-floor confidence gate so operators can tighten or
+/// loosen the REQUEST_CHANGES escalation without recompiling.
+/// What: returns the env-var value when set and valid; otherwise `0.80`.
+/// Test: `env_override_floor_min_confidence_changes_value`.
+fn floor_min_confidence() -> f32 {
+    read_threshold_env(TRUSTY_REVIEW_FLOOR_MIN_CONFIDENCE_ENV, FLOOR_MIN_CONFIDENCE)
+}
+
+/// Effective `FLOOR_COUNT_MIN_CONFIDENCE` (env-override aware, closes #1597).
+///
+/// Why: exposes the sub-coin-flip exclusion floor so operators can widen or
+/// narrow which findings are considered substantive without recompiling.
+/// What: returns the env-var value when set and valid; otherwise `0.50`.
+/// Test: `env_override_floor_count_min_confidence_changes_value`.
+fn floor_count_min_confidence() -> f32 {
+    read_threshold_env(
+        TRUSTY_REVIEW_FLOOR_COUNT_MIN_CONFIDENCE_ENV,
+        FLOOR_COUNT_MIN_CONFIDENCE,
+    )
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// Compute the final review verdict from the model-proposed verdict and findings.
@@ -195,15 +290,15 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
     // over-fire (Fix 4).  High-effort findings escape this gate: a confirmed
     // bug with low confidence should still BLOCK, not disappear.
     let has_high = substantive.iter().any(|f| is_high_severity(f));
-    let all_low_confidence = !substantive.is_empty()
-        && substantive
-            .iter()
-            .all(|f| f.confidence <= LOW_CONFIDENCE_THRESHOLD);
+    let threshold = low_confidence_threshold();
+    let all_low_confidence =
+        !substantive.is_empty() && substantive.iter().all(|f| f.confidence <= threshold);
 
     if all_low_confidence && !has_high {
         debug!(
             model_verdict = %model_proposed,
-            "low-confidence override: all substantive findings ≤0.65 confidence, no High-effort → APPROVE"
+            threshold,
+            "low-confidence override: all substantive findings ≤ threshold confidence, no High-effort → APPROVE"
         );
         return Verdict::Approve;
     }
@@ -228,7 +323,7 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
     // RequestChanges floor in the first place — see `conformance_floor` — so the
     // cap correctly still applies to advisory-only conformance, honouring AC-12.)
     let has_confident_conformance = substantive.iter().any(|f| {
-        f.category == FindingCategory::MethodConformance && f.confidence >= FLOOR_MIN_CONFIDENCE
+        f.category == FindingCategory::MethodConformance && f.confidence >= floor_min_confidence()
     });
     if model_proposed == Verdict::Approve
         && floor == Verdict::RequestChanges
@@ -292,7 +387,7 @@ fn is_substantive(f: &Finding) -> bool {
     // (critical or high) finding: a genuine critical or high-severity concern must
     // keep its place at the verdict floor even when the model is only uncertain
     // about it.
-    !refuted && (f.confidence >= FLOOR_COUNT_MIN_CONFIDENCE || is_high_severity(f))
+    !refuted && (f.confidence >= floor_count_min_confidence() || is_high_severity(f))
 }
 
 /// Return `true` when a finding is critical- or high-severity (closes #1352).
@@ -397,9 +492,10 @@ fn correctness_floor(findings: &[&&Finding]) -> Verdict {
 
     // Only count Medium findings whose confidence clears the floor threshold
     // (#1015: advisory-tier Medium findings must not force REQUEST_CHANGES).
+    let medium_floor = floor_min_confidence();
     let medium_count = findings
         .iter()
-        .filter(|f| f.effort == Effort::Medium && f.confidence > FLOOR_MIN_CONFIDENCE)
+        .filter(|f| f.effort == Effort::Medium && f.confidence > medium_floor)
         .count();
 
     // Tier 1: any High-effort (critical/high severity) → BLOCK floor.
@@ -440,9 +536,8 @@ fn correctness_floor(findings: &[&&Finding]) -> Verdict {
 /// `conformance_below_floor_confidence_is_advisory`.
 fn conformance_floor(findings: &[&&Finding]) -> Verdict {
     // Effort is intentionally ignored: the conformance cap is confidence-only (never BLOCK).
-    let any_confident = findings
-        .iter()
-        .any(|f| f.confidence >= FLOOR_MIN_CONFIDENCE);
+    let floor = floor_min_confidence();
+    let any_confident = findings.iter().any(|f| f.confidence >= floor);
     if any_confident {
         // Capped at REQUEST_CHANGES — conformance NEVER drives BLOCK.
         Verdict::RequestChanges
