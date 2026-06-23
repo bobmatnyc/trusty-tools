@@ -169,8 +169,8 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// `kill_session` failure is returned as `Err`. Does NOT sleep — callers
     /// must insert an async delay (`tokio::time::sleep`) between the signal phase
     /// and calling this if a grace window is desired.
-    /// Test: `graceful_stop_sends_sigterm_then_kill` (pid known, records kill),
-    /// `graceful_stop_skips_sigterm_when_no_pid` (no pid, falls back to C-c).
+    /// Test: `fake_driver_graceful_stop_with_pid` (pid known, records kill),
+    /// `fake_driver_graceful_stop_without_pid` (no pid, falls back to C-c).
     fn graceful_stop(&self, name: &str, claude_pid: Option<u32>) -> Result<(), ManagedError> {
         if let Some(pid) = claude_pid {
             #[cfg(unix)]

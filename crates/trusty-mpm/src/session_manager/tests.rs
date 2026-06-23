@@ -1967,7 +1967,7 @@ async fn workspace_owned_flag_round_trips_via_set() {
 /// asserts the name appears in `kill_calls` and `graceful_stop_calls`.
 /// Test: this is the test.
 #[tokio::test]
-async fn graceful_stop_sends_sigterm_then_kill() {
+async fn fake_driver_graceful_stop_with_pid() {
     let dir = TempDir::new().unwrap();
     let (mgr, fake) = make_manager(&dir).await;
 
@@ -2010,7 +2010,7 @@ async fn graceful_stop_sends_sigterm_then_kill() {
 /// `kill_calls` contains the name and `graceful_stop_calls` records `None`.
 /// Test: this is the test.
 #[tokio::test]
-async fn graceful_stop_skips_sigterm_when_no_pid() {
+async fn fake_driver_graceful_stop_without_pid() {
     let dir = TempDir::new().unwrap();
     let (mgr, fake) = make_manager(&dir).await;
 

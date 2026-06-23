@@ -104,8 +104,9 @@ pub async fn serve_http(
     let cancel = tokio_util::sync::CancellationToken::new();
 
     // Spawn the multi-session file watcher as a background task.
+    // Pass a child cancel token so the watcher exits cleanly on daemon shutdown.
     let fw = watcher::FileWatcher::new(Arc::clone(&state));
-    tokio::spawn(fw.spawn());
+    tokio::spawn(fw.spawn(cancel.child_token()));
 
     // Spawn the periodic dead-session reaper with a cancel token.
     tokio::spawn(reap_loop(Arc::clone(&state), cancel.child_token()));

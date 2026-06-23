@@ -5,14 +5,15 @@
 //! while keeping related lifecycle logic co-located in the `session_manager`
 //! module tree.
 //! What: `impl SessionManager { shutdown }` — gracefully stops every live
-//! (non-terminal) managed session. For each session it sends a termination
-//! signal (SIGTERM when a PID is known, Ctrl-C otherwise), waits 2 s
-//! asynchronously so the claude process can flush state, then kills the tmux
-//! session. The 2 s wait is done with `tokio::time::sleep` — never a blocking
+//! (non-terminal) managed session. For each session it sends a best-effort
+//! Ctrl-C interrupt (`send_interrupt`), waits 2 s asynchronously so the claude
+//! process can flush state, then kills the tmux session via `graceful_stop`.
+//! SIGTERM-with-known-PID is deferred to PR B (#1595) once the PID registry
+//! exists. The 2 s wait is done with `tokio::time::sleep` — never a blocking
 //! `std::thread::sleep` — so it does not starve the Tokio thread pool.
 //! Test: `shutdown_calls_graceful_stop_for_active_sessions` (integration test
-//! in session_manager/tests.rs), `graceful_stop_sends_sigterm_then_kill`,
-//! `graceful_stop_skips_sigterm_when_no_pid`.
+//! in session_manager/tests.rs), `fake_driver_graceful_stop_with_pid`,
+//! `fake_driver_graceful_stop_without_pid`.
 
 use std::time::Duration;
 
@@ -46,8 +47,10 @@ impl SessionManager {
     /// `std::thread::sleep`) keeps the Tokio thread pool free during the wait.
     /// The one-sleep-for-all approach bounds total shutdown time at O(1).
     /// What: collects all Active/Provisioning records; sends send_interrupt to
-    /// each; awaits the grace window; calls graceful_stop on each (which
-    /// re-signals and kills). Fails open per session. Logs a summary line.
+    /// each; awaits the grace window; calls graceful_stop on each. Currently
+    /// passes `None` as the PID (Ctrl-C + grace + kill path); the SIGTERM-with-
+    /// known-PID branch of `graceful_stop` activates once the PID registry
+    /// lands in PR B (#1595). Fails open per session. Logs a summary line.
     /// Test: `shutdown_calls_graceful_stop_for_active_sessions` in tests.rs.
     pub async fn shutdown(&self) {
         let records = self.list().await;
@@ -90,6 +93,7 @@ impl SessionManager {
         // be gone, in which case kill_session is a quiet no-op for the session).
         let mut stopped = 0usize;
         for record in &live {
+            // TODO(#1595 PR B): thread record.claude_pid here once the PID registry exists
             match self.tmux.graceful_stop(&record.tmux_name, None) {
                 Ok(()) => {
                     stopped += 1;
