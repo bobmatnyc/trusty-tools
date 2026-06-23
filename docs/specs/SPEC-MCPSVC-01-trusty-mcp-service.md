@@ -1,10 +1,10 @@
-# DOC-26 — `trusty-mcp-service`: Unified Native Sidecar Services via MCP-A
+# DOC-27 — `trusty-mcp-service`: Unified Native Sidecar Services via MCP-A
 
 **Status:** Draft
 **Subsystem:** trusty-mcp-service (new) — unified native sidecar services / MCP-A gateway
 **Owner:** Engineering (Bob Matsuoka)
 **Last-updated:** 2026-06-23
-**Spec ID:** `SPEC-MCPSVC-01~draft` … `-07~draft` (DOC-26)
+**Spec ID:** `SPEC-MCPSVC-01~draft` … `-07~draft` (DOC-27)
 **Builds on:** `trusty_common::mcp` (JSON-RPC framing, `run_stdio_loop`, `ServiceDescriptor`,
 `DaemonBridgeConfig`, `ensure_daemon_up`, `OpenRpcBuilder`, `shutdown_signal`,
 `server::with_standard_middleware`); DOC-19 — TELUI / Telegram (the `trusty-mpm-telegram`
