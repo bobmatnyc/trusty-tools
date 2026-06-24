@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::control::config::ObservabilityConfig;
 use crate::control::event::ActivityKind;
@@ -121,19 +121,30 @@ test-result, git-op, auth-prompt, session-complete, rate-limited, unknown.";
 /// (or an error string the caller logs and swallows — classification is
 /// fail-open and must never break supervision). Implementors are `Send + Sync`
 /// so they live behind `Arc<dyn ActivityClassifier>`.
+/// The return type is `Result<Option<ActivityKind>, String>`:
+///   `Ok(Some(kind))` — a confident label was returned and mapped.
+///   `Ok(None)` — the model replied `"unknown"` or an unrecognised but valid
+///               label; the caller treats this as a silent no-op (no warn, no
+///               `ActivityParsed`). This is NOT an error.
+///   `Err(reason)` — a transport/parse failure; the caller logs at warn and
+///                   continues (fail-open, §8.3).
 /// Test: `openrouter_classifier_returns_label_on_gate_on`,
 /// `actor_classifier_*` in `actor_tests.rs`.
 #[async_trait]
 pub trait ActivityClassifier: Send + Sync {
-    /// Classify `raw_output` into an [`ActivityKind`].
+    /// Classify `raw_output` into an optional [`ActivityKind`].
     ///
     /// Why: the actor calls this only when the §8.3 gate is open AND the regex
     /// layer returned no confident match; it surfaces the label as an
-    /// `ActivityParsed` event.
-    /// What: returns `Ok(kind)` on success or `Err(reason)` on any failure; the
-    /// caller MUST treat `Err` as fail-open (log + continue), never as fatal.
-    /// Test: `openrouter_classifier_returns_label_on_gate_on`.
-    async fn classify(&self, raw_output: &str) -> Result<ActivityKind, String>;
+    /// `ActivityParsed` event on `Ok(Some(kind))`, and is a silent no-op on
+    /// `Ok(None)` (model said "unknown" or unrecognised label — not an error).
+    /// What: returns `Ok(Some(kind))` on a confident match, `Ok(None)` for
+    /// `"unknown"` or any label the mapping table does not know, and `Err` only
+    /// for actual transport or parsing failures. The caller MUST treat `Err` as
+    /// fail-open (log + continue), never as fatal.
+    /// Test: `openrouter_classifier_returns_label_on_gate_on`,
+    /// `openrouter_classifier_unknown_is_ok_none`.
+    async fn classify(&self, raw_output: &str) -> Result<Option<ActivityKind>, String>;
 }
 
 /// OpenRouter-backed [`ActivityClassifier`] (§8.3) reusing the SM `LlmProvider`.
@@ -169,7 +180,7 @@ impl OpenRouterClassifier {
 
 #[async_trait]
 impl ActivityClassifier for OpenRouterClassifier {
-    async fn classify(&self, raw_output: &str) -> Result<ActivityKind, String> {
+    async fn classify(&self, raw_output: &str) -> Result<Option<ActivityKind>, String> {
         let req = LlmRequest {
             model: self.model.clone(),
             system: CLASSIFIER_SYSTEM_PROMPT.to_string(),
@@ -188,12 +199,19 @@ impl ActivityClassifier for OpenRouterClassifier {
         match label_to_activity_kind(&resp.text) {
             Some(kind) => {
                 debug!(label = %resp.text.trim(), "§8.3 classifier resolved a label");
-                Ok(kind)
+                Ok(Some(kind))
             }
-            None => Err(format!(
-                "classifier returned unmapped label {:?}",
-                resp.text.trim()
-            )),
+            // `None` from label_to_activity_kind means either `"unknown"` (an
+            // expected/valid model response meaning "can't classify") or an
+            // unrecognised label. Both are silent no-ops — not errors. The
+            // caller treats `Ok(None)` as "model was unsure; skip ActivityParsed".
+            None => {
+                debug!(
+                    label = %resp.text.trim(),
+                    "§8.3 classifier returned no-match label (ok-none, silent no-op)"
+                );
+                Ok(None)
+            }
         }
     }
 }
@@ -228,12 +246,11 @@ pub fn label_to_activity_kind(label: &str) -> Option<ActivityKind> {
         "auth-prompt" | "auth_prompt" => Some(ActivityKind::AuthPrompt),
         "session-complete" | "session_complete" => Some(ActivityKind::SessionComplete),
         "rate-limited" | "rate_limited" => Some(ActivityKind::RateLimited),
-        other => {
-            // `unknown` and anything unrecognised → no confident label. The
-            // caller logs and continues (fail-open, §8.3).
-            if other != "unknown" {
-                warn!(label = %other, "§8.3 classifier returned an unmapped label");
-            }
+        _ => {
+            // `unknown` is the model's valid "can't classify" response;
+            // anything else unrecognised is treated the same: no confident
+            // label, silent no-op. The caller (`OpenRouterClassifier::classify`)
+            // maps `None` → `Ok(None)` and logs at debug — no warn here.
             None
         }
     }
@@ -373,22 +390,36 @@ mod tests {
             reply: Ok("rate-limited".to_string()),
         });
         let classifier = OpenRouterClassifier::new(provider, "openai/gpt-4o-mini");
-        let kind = classifier
+        let result = classifier
             .classify("HTTP 429 Too Many Requests from the API")
             .await
-            .expect("mock provider must classify");
-        assert_eq!(kind, ActivityKind::RateLimited);
+            .expect("mock provider must not error");
+        assert_eq!(result, Some(ActivityKind::RateLimited));
     }
 
     #[tokio::test]
-    async fn openrouter_classifier_maps_unknown_to_err() {
-        // An unmapped label is an Err so the actor treats it as a fail-open
-        // no-op (it never emits a bogus ActivityParsed).
+    async fn openrouter_classifier_unknown_is_ok_none() {
+        // `"unknown"` is a valid model response meaning "can't classify" —
+        // it MUST be `Ok(None)`, not an `Err`. The caller silently skips
+        // ActivityParsed; no warn is emitted.
+        let provider = Arc::new(MockProvider {
+            reply: Ok("unknown".to_string()),
+        });
+        let classifier = OpenRouterClassifier::new(provider, "m");
+        let result = classifier.classify("ambiguous output").await.unwrap();
+        assert_eq!(result, None, "unknown must be Ok(None), not Err");
+    }
+
+    #[tokio::test]
+    async fn openrouter_classifier_unrecognised_label_is_ok_none() {
+        // A label the mapping table does not know is also Ok(None) — the model
+        // may return garbage; treat it like "unknown" (silent no-op, not Err).
         let provider = Arc::new(MockProvider {
             reply: Ok("???".to_string()),
         });
         let classifier = OpenRouterClassifier::new(provider, "m");
-        assert!(classifier.classify("weird output").await.is_err());
+        let result = classifier.classify("weird output").await.unwrap();
+        assert_eq!(result, None, "unrecognised label must be Ok(None), not Err");
     }
 
     #[tokio::test]

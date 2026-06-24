@@ -234,7 +234,7 @@ impl SessionBackend for TmuxBackend {
     /// (session may already be gone). Marks `spawned = false` to prevent
     /// double-kill from Drop.
     /// Test: integration test (`#[ignore]`).
-    async fn stop(mut self: Box<Self>) -> Result<()> {
+    async fn stop(mut self) -> Result<()> {
         if self.spawned {
             self.spawned = false;
             if let Err(e) = self.driver.kill_session(&self.tmux_name) {

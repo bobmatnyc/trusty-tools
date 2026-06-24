@@ -50,6 +50,19 @@ pub const DEFAULT_BROADCAST_CAPACITY: usize = 256;
 /// before triggering intervention.
 pub const CRITICAL_OBSERVER_CAPACITY: usize = DEFAULT_BROADCAST_CAPACITY;
 
+/// Minimum byte length of accumulated output to trigger the §8.3 LLM fallback.
+///
+/// Why: the regex layer returns `None` for ALL unmatched text, including single
+/// progress dots (`.`), spinner ticks, or short noise lines that carry no
+/// semantic content. Sending every such byte to OpenRouter would produce spurious
+/// "unknown" classifications and needless cost. A minimum length gates out
+/// obviously-trivial output so the classifier only sees substantive lines.
+/// What: output shorter than this threshold is silently skipped by the
+/// classifier fallback path; the §8.2 regex layer still ran (and returned None).
+/// Test: covered implicitly by `actor_classifier_gate_on_invokes_and_surfaces_label`
+/// (uses output longer than this threshold) and the gate-off test.
+const CLASSIFIER_MIN_OUTPUT_LEN: usize = 20;
+
 /// Per-actor injectable behavior config (WI-5 #1648/#1649).
 ///
 /// Why: WI-5 adds two per-session behaviors that must be injectable so tests can
@@ -362,7 +375,7 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                     ),
                     ts: now,
                 });
-                if let Err(e) = Box::new(backend).stop().await {
+                if let Err(e) = backend.stop().await {
                     warn!(session_id = %session_id, "backend stop on auth timeout: {e}");
                 }
                 break;
@@ -378,7 +391,7 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                     Some(ActorCommand::Stop) => {
                         debug!(session_id = %session_id, "actor: graceful Stop received");
                         transition_to_stopping(&metadata).await;
-                        if let Err(e) = Box::new(backend).stop().await {
+                        if let Err(e) = backend.stop().await {
                             warn!(session_id = %session_id, "backend stop error: {e}");
                         }
                         transition_to_stopped(
@@ -388,7 +401,7 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                     }
                     Some(ActorCommand::ForceStop) => {
                         debug!(session_id = %session_id, "actor: ForceStop received");
-                        if let Err(e) = Box::new(backend).stop().await {
+                        if let Err(e) = backend.stop().await {
                             warn!(session_id = %session_id, "backend force-stop error: {e}");
                         }
                         transition_to_stopped(
@@ -554,7 +567,7 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                             }
                             // Stop the backend to release resources and avoid
                             // a process/tmux-pane leak (fixes review bug #2).
-                            if let Err(e) = Box::new(backend).stop().await {
+                            if let Err(e) = backend.stop().await {
                                 warn!(session_id = %session_id, "backend stop on lag: {e}");
                             }
                             // Emit a terminal Stopped event so observers can drain.
@@ -605,7 +618,7 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                                 // Note: `continue` here re-enters the select! loop without
                                 // falling through to the PendingDecision path below.
                                 // The StreamJson arm is the only one that moved `backend`
-                                // (via Box::new(backend).stop()); the Tmux arm only wrote
+                                // (via backend.stop()); the Tmux arm only wrote
                                 // metadata and we continue without calling backend.stop().
                                 continue;
                             }
@@ -643,14 +656,18 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                                     ts: now,
                                 });
                             }
-                        } else if !raw_text.is_empty()
+                        } else if raw_text.len() >= CLASSIFIER_MIN_OUTPUT_LEN
                             && let Some(classifier) = actor_config.classifier.as_ref()
                         {
-                            // §8.3 fallback (#1648): the regex layer was unsure
-                            // about this output. The gate is open (a classifier
-                            // was injected), so ask the OpenRouter classifier.
-                            // This is FAIL-OPEN: any error is logged and ignored
-                            // — classification must never break supervision.
+                            // §8.3 fallback (#1648): the regex layer returned
+                            // None (no confident pattern match). The gate is
+                            // open (a classifier was injected) AND the output
+                            // is long enough to be substantive — ask the
+                            // OpenRouter classifier. Progress dots, single
+                            // characters, or very short noise lines are skipped
+                            // (< CLASSIFIER_MIN_OUTPUT_LEN) to bound LLM cost.
+                            // FAIL-OPEN: any error is logged and ignored —
+                            // classification must never break supervision.
                             classify_fallback(
                                 classifier.as_ref(),
                                 &session_id,
@@ -674,12 +691,15 @@ pub(crate) async fn run_actor<B: SessionBackend>(
 /// resolve, emitting `ActivityParsed` on a confident label (#1648).
 ///
 /// Why: §8.3 makes the LLM classifier an explicit fallback for activity the
-/// §8.2 regex layer could not confidently classify. Isolating the call in a
-/// helper keeps the actor loop readable and the actor file under its SLOC cap.
-/// What: awaits `classifier.classify(raw_text)`; on `Ok(kind)` updates
-/// `last_summary` and broadcasts `ActivityParsed`; on `Err` logs at warn and
-/// returns (FAIL-OPEN — a classifier failure must never break supervision).
-/// Test: `actor_classifier_invoked_on_unmatched_output`,
+/// §8.2 regex layer returned `None` for. Isolating the call in a helper keeps
+/// the actor loop readable and the actor file under its SLOC cap.
+/// What: awaits `classifier.classify(raw_text)`.
+///   `Ok(Some(kind))` → updates `last_summary` and broadcasts `ActivityParsed`.
+///   `Ok(None)` → model said "unknown" or returned an unmapped label; this is a
+///               valid no-op — no warn, no event, session continues silently.
+///   `Err(reason)` → transport/parse failure; logged at warn and swallowed
+///               (FAIL-OPEN — a classifier failure must never break supervision).
+/// Test: `actor_classifier_gate_on_invokes_and_surfaces_label`,
 /// `actor_classifier_failure_is_fail_open` in `actor_tests.rs`.
 async fn classify_fallback(
     classifier: &dyn ActivityClassifier,
@@ -690,7 +710,7 @@ async fn classify_fallback(
     metadata: &Arc<RwLock<SessionMetadata>>,
 ) {
     match classifier.classify(raw_text).await {
-        Ok(kind) => {
+        Ok(Some(kind)) => {
             let summary = format!("llm-classified: {kind:?}");
             {
                 let mut m = metadata.write().await;
@@ -702,6 +722,14 @@ async fn classify_fallback(
                 summary,
                 ts: now,
             });
+        }
+        // `Ok(None)` means the model replied "unknown" or an unmapped label —
+        // a valid, expected response. Silently skip; no ActivityParsed emitted.
+        Ok(None) => {
+            debug!(
+                session_id = %session_id,
+                "§8.3 classifier returned no-match (ok-none); skipping ActivityParsed"
+            );
         }
         Err(reason) => {
             // FAIL-OPEN: the §8.3 classifier is best-effort. A failure must
