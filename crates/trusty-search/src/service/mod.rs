@@ -33,6 +33,7 @@ pub mod walker;
 pub mod warm_boot;
 pub mod watch_loop;
 pub mod watcher;
+pub mod watcher_manager;
 
 pub use mcp_descriptor::SearchMcpService;
 
@@ -47,3 +48,4 @@ pub use indexed_files::IndexedFiles;
 pub use server::SearchAppState;
 pub use watch_loop::{spawn_watch_loop, WatcherTask};
 pub use watcher::{FileWatcher, WatchEvent};
+pub use watcher_manager::WatcherManager;

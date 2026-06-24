@@ -40,6 +40,9 @@ pub(super) async fn delete_index_handler(
     let (removed, removed_handle) = state.registry.remove_and_get(&index_id);
     let root_path_for_cleanup = removed_handle.map(|h| h.root_path.clone());
     state.reindex_progress.remove(&index_id);
+    // Issue #1621: stop the filesystem watcher for this index so it does not
+    // keep firing into a now-dropped indexer after the handle is removed.
+    state.watcher_manager.stop_for_index(&index_id).await;
     if removed {
         // Issue #85: drop the on-disk footprint so the index doesn't come
         // back on the next daemon restart. Best-effort — log on failure.

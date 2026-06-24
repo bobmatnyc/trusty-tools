@@ -6,10 +6,18 @@ use crate::detect::detect_project;
 use anyhow::Result;
 use colored::Colorize;
 
-/// Why: placeholder for the FileWatcher integration tracked in issue #6.
-/// What: resolves the index id, prints "watching ...", emits a not-implemented
-/// notice. Kept as a separate handler so the CLI structure is consistent.
-/// Test: `cargo run -- watch` prints the message without panicking.
+/// Why: issue #1621 wired the `FileWatcher` directly into the daemon — every
+/// registered (allowlisted) index is watched automatically and saves are
+/// incrementally indexed within the 500ms debounce window. There is therefore
+/// no separate "watch" product to run; this command is now an informational
+/// status check that confirms the daemon-managed watcher covers the resolved
+/// index, rather than the old "not yet implemented" stub.
+/// What: resolves the index id, ensures the daemon is up, prints the watched
+/// root and a note that watching is automatic. Honours `TRUSTY_DISABLE_WATCHER`
+/// in the message so operators who opted out understand why saves are not
+/// auto-indexed.
+/// Test: `cargo run -- watch` prints the daemon-managed message without
+/// panicking; the no-op nature means there is no long-running loop to assert on.
 pub async fn handle_watch(
     explicit_index: &Option<String>,
     path: Option<std::path::PathBuf>,
@@ -21,15 +29,32 @@ pub async fn handle_watch(
         let cwd = std::env::current_dir().unwrap_or_default();
         detect_project(&cwd).root_path
     });
+
+    // Issue #1621: the daemon watches every registered index automatically.
+    let disabled = std::env::var("TRUSTY_DISABLE_WATCHER").as_deref() == Ok("1");
+    if disabled {
+        println!(
+            "{} File watching is {} ({} is set).",
+            "⚠".yellow(),
+            "disabled".red(),
+            "TRUSTY_DISABLE_WATCHER=1".cyan()
+        );
+        println!(
+            "  Re-index manually with {} or unset the variable and restart the daemon.",
+            format!("trusty-search reindex {}", watch_path.display()).cyan()
+        );
+        return Ok(());
+    }
+
     println!(
-        "{} Watching {} as index {}",
+        "{} {} is watched automatically by the daemon — saves under {} are indexed within ~500ms.",
         "◉".green(),
+        format!("'{}'", index_id).bold(),
         watch_path.display().to_string().cyan(),
-        format!("'{}'", index_id).bold()
     );
     println!(
-        "{}",
-        "  FileWatcher not yet implemented — see issue #6".yellow()
+        "  No separate watch process is needed (issue #1621). Register a path with {} to have the daemon watch it.",
+        "trusty-search index <path>".cyan()
     );
     Ok(())
 }
