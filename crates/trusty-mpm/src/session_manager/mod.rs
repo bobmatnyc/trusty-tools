@@ -21,6 +21,9 @@ pub mod workspace_guard;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod restart_tests;
+
 /// Real tmux driver adapter — only available when the `daemon` feature (and thus
 /// the daemon's `TmuxDriver`) is compiled in.
 #[cfg(feature = "daemon")]
