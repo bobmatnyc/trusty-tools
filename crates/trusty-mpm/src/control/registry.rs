@@ -212,20 +212,43 @@ impl SessionRegistry {
     /// counter is authoritative and an issued ID is always observable by
     /// concurrent `get()` / `list_ids()` callers. WI-5 (§9.2) adds two cost
     /// guardrails here: the concurrency cap (hard limit, enforced under the
-    /// write lock so it is race-free) and the launch stagger (applied BEFORE
-    /// the lock so it spaces successive launches without serializing the lock).
-    /// What: (1) applies the configured `launch_stagger_ms` sleep up front;
-    /// (2) acquires ONE write lock and re-checks the cap authoritatively —
-    /// rejecting with [`AdmissionError::CapReached`] if `live >= cap`; (3) holds
-    /// that lock for ID allocation, backend construction, actor spawn, and
+    /// write lock so it is race-free) and the launch stagger (applied ONLY on
+    /// the admit path, so a rejected launch returns immediately without paying
+    /// the stagger delay).
+    /// What: (1) acquires a write lock and performs a fast-fail cap check —
+    /// returning [`AdmissionError::CapReached`] immediately (no stagger) if
+    /// `live >= cap`; (2) on the admit path, releases the lock, sleeps the
+    /// configured `launch_stagger_ms`, then re-acquires the write lock and
+    /// re-checks the cap authoritatively (preventing a concurrent launch that
+    /// slipped in during the stagger from exceeding the cap); (3) holds that
+    /// second lock for ID allocation, backend construction, actor spawn, and
     /// handle insertion so `get(&id)` is never `None` for a returned ID.
     /// Returns the allocated `ControlSessionId`.
     /// Test: `registry_run_session`, `registry_run_session_id_visible_immediately`,
-    /// `registry_cap_rejects_over_limit`.
+    /// `registry_run_session_rejects_when_capped`, `registry_cap_reject_is_immediate`.
     pub async fn run_session(&self, params: RunParams) -> Result<ControlSessionId> {
-        // §9.2 launch stagger — applied before acquiring the lock so concurrent
-        // launches are spaced without serializing the registry. Tests inject a
-        // zero stagger (Duration::ZERO) so this is a no-op and stays fast.
+        // §9.2 fast-fail cap check — under the read lock (cheap; no writers
+        // blocked). A stale count that causes a false-admit is caught by the
+        // authoritative write-lock recheck below; a false-reject is safe
+        // (conservative). A rejected launch returns immediately, paying ZERO
+        // stagger delay.
+        {
+            let inner = self.inner.read().await;
+            let live = inner.actors.len() as u32;
+            if let AdmissionDecision::Reject { live, cap } =
+                check_admission(live, self.config.max_concurrent_sessions, 0)
+            {
+                warn!(
+                    live,
+                    cap, "session launch rejected: concurrency cap reached (§9.2)"
+                );
+                return Err(AdmissionError::CapReached { live, cap }.into());
+            }
+        }
+
+        // §9.2 launch stagger — applied ONLY on the admit path, AFTER the
+        // cap check, so rejected launches pay zero delay. Tests inject zero
+        // stagger (Duration::ZERO) so this guard is a no-op and stays fast.
         let stagger = self.config.stagger_duration();
         if !stagger.is_zero() {
             tokio::time::sleep(stagger).await;
@@ -233,15 +256,17 @@ impl SessionRegistry {
 
         let mut inner = self.inner.write().await;
 
-        // §9.2 concurrency cap — authoritative check under the write lock so two
-        // concurrent launches cannot both slip past a stale count.
+        // §9.2 authoritative re-check under the write lock. A concurrent
+        // launch may have been admitted during our stagger sleep and pushed
+        // the count to the cap; re-checking here closes that TOCTOU window.
         let live = inner.actors.len() as u32;
         if let AdmissionDecision::Reject { live, cap } =
             check_admission(live, self.config.max_concurrent_sessions, 0)
         {
             warn!(
                 live,
-                cap, "session launch rejected: concurrency cap reached (§9.2)"
+                cap,
+                "session launch rejected at write-lock recheck (concurrent launch raced, §9.2)"
             );
             return Err(AdmissionError::CapReached { live, cap }.into());
         }
@@ -497,5 +522,63 @@ mod tests {
         assert!(!h2.try_acquire_write_lock()); // same Arc → same flag
         h1.release_write_lock();
         assert!(h2.try_acquire_write_lock()); // now acquirable
+    }
+
+    /// A rejected launch returns immediately without paying the stagger delay.
+    ///
+    /// Why: §9.2 stagger is a *spacing* mechanism for admitted sessions, not a
+    /// penalty for all launches. A rejected launch must fail fast so callers
+    /// get a prompt error rather than waiting for a stagger that will never
+    /// produce a session. This test injects a non-zero stagger (200 ms) to
+    /// make any accidental stagger-before-reject detectable on a wall-clock
+    /// assertion with generous headroom.
+    /// What: configures cap=1, stagger=200 ms; pre-fills to cap; calls
+    /// `run_session` and times the call — it must complete in well under 200 ms
+    /// (we allow 150 ms slack for scheduling noise) and must return `CapReached`.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn registry_cap_reject_is_immediate() {
+        use std::time::Instant;
+
+        // 200 ms stagger — detectable if paid, negligible if skipped.
+        let cfg = ControlPlaneConfig {
+            max_concurrent_sessions: 1,
+            launch_stagger_ms: 200,
+            ..Default::default()
+        };
+        let registry = SessionRegistry::with_config(cfg);
+        let id = ControlSessionId::new("p", 0);
+        registry.register(id.clone(), make_handle(&id)).await;
+
+        let t0 = Instant::now();
+        let params = RunParams {
+            project_id: "p".into(),
+            workdir: PathBuf::from("/tmp"),
+            backend: BackendKind::StreamJson,
+            prompt_file: None,
+            claude_cmd: None,
+        };
+        let err = registry
+            .run_session(params)
+            .await
+            .expect_err("must reject at cap");
+        let elapsed = t0.elapsed();
+
+        // Must return CapReached.
+        let admission_err = err
+            .downcast_ref::<crate::control::admission::AdmissionError>()
+            .expect("error must be AdmissionError");
+        assert_eq!(
+            *admission_err,
+            crate::control::admission::AdmissionError::CapReached { live: 1, cap: 1 }
+        );
+
+        // Must NOT have paid the 200 ms stagger — allow 150 ms for scheduling
+        // noise (CI machines can be slow; 200 - 150 = 50 ms true budget).
+        assert!(
+            elapsed.as_millis() < 150,
+            "rejected launch must return in <150 ms, not {} ms (stagger must not be paid on reject path)",
+            elapsed.as_millis()
+        );
     }
 }

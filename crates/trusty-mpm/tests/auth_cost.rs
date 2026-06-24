@@ -172,16 +172,40 @@ fn cap_admits_exactly_allowed_concurrency() {
 /// without spawning a backend.
 ///
 /// Why: parts 1–3 cover the seams in isolation; this exercises the real
-/// `SessionRegistry::run_session` admission path so the gate covers the wired
-/// behavior, not just the pure helpers. cap=2, zero stagger keeps it hermetic
-/// and fast (no real `claude` spawn for the rejected launch).
-/// What: pre-fills the registry to its cap with placeholder handles via the
-/// public register() API, then asserts `admission()` reports Reject.
+/// `SessionRegistry` admission path (both ADMIT and REJECT) so the gate covers
+/// the wired behavior end-to-end. cap=2, zero stagger keeps it hermetic and
+/// fast (no real `claude` spawn needed — we drive `register()` directly).
+/// What: with an empty registry, asserts Admit; then pre-fills to cap=2 via
+/// `register()`, and asserts the next `admission()` returns Reject. The Reject
+/// arm is the critical invariant — it is what actually stops a 3rd session
+/// from launching against the Max OAuth shared bucket.
 /// Test: this is the test.
 #[tokio::test]
 async fn registry_admission_rejects_at_cap() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use tokio::sync::{RwLock, broadcast, mpsc};
+    use trusty_mpm::control::actor::SessionActorHandle;
     use trusty_mpm::control::config::ControlPlaneConfig;
+    use trusty_mpm::control::event::BackendKind;
+    use trusty_mpm::control::id::ControlSessionId;
     use trusty_mpm::control::registry::SessionRegistry;
+    use trusty_mpm::control::state::SessionMetadata;
+
+    fn make_handle(id: &ControlSessionId) -> SessionActorHandle {
+        let (command_tx, _) = mpsc::channel(1);
+        let (event_tx, _) = broadcast::channel(4);
+        SessionActorHandle {
+            command_tx,
+            event_tx,
+            write_lock_held: Arc::new(AtomicBool::new(false)),
+            metadata: Arc::new(RwLock::new(SessionMetadata::new(
+                id.clone(),
+                "proj".into(),
+                BackendKind::StreamJson,
+            ))),
+        }
+    }
 
     let cfg = ControlPlaneConfig {
         max_concurrent_sessions: 2,
@@ -190,9 +214,23 @@ async fn registry_admission_rejects_at_cap() {
     };
     let registry = SessionRegistry::with_config(cfg);
 
-    // Below cap → admit.
-    assert!(matches!(
-        registry.admission().await,
-        AdmissionDecision::Admit { .. }
-    ));
+    // Empty registry → admit.
+    assert!(
+        matches!(registry.admission().await, AdmissionDecision::Admit { .. }),
+        "empty registry must admit"
+    );
+
+    // Pre-fill to cap (2 live sessions) via the public register() API.
+    for n in 0..2u64 {
+        let id = ControlSessionId::new("gate-proj", n);
+        registry.register(id.clone(), make_handle(&id)).await;
+    }
+
+    // Now live == cap → the next launch must be REJECTED.
+    let decision = registry.admission().await;
+    assert_eq!(
+        decision,
+        AdmissionDecision::Reject { live: 2, cap: 2 },
+        "at cap=2 with 2 live sessions, admission must REJECT"
+    );
 }
