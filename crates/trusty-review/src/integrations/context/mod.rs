@@ -34,13 +34,17 @@ pub mod config;
 pub mod confluence;
 pub mod confluence_parse;
 pub mod conformance;
+pub mod external_spec;
 pub mod github_issues;
 pub mod jira;
 pub mod jira_parse;
 pub mod orchestrator;
 pub mod pr_history;
 
-pub use config::{ContextSourcesConfig, ContextSourcesFileConfig, SourceConfig, SourceFileConfig};
+pub use config::{
+    ConformanceSourceConfig, ConformanceSourceFileConfig, ContextSourcesConfig,
+    ContextSourcesFileConfig, SourceConfig, SourceFileConfig,
+};
 pub use confluence::ConfluenceSource;
 pub use conformance::ConformanceSource;
 pub use github_issues::GithubIssuesSource;

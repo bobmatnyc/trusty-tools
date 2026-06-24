@@ -53,6 +53,7 @@ use super::{
     ReviewSubject, SNIPPET_BODY_CHARS, truncate_on_char_boundary,
 };
 use crate::config::ReviewConfig;
+use crate::integrations::context::external_spec::ExternalRepoSpecLookup;
 use crate::integrations::github::{AuthStrategy, GithubClient, RunMode};
 
 /// Source identifier used in logs, config keys, and error messages.
@@ -436,6 +437,28 @@ pub fn build_gap_snippets(
     snippets
 }
 
+// ─── Fallback spec lookup ────────────────────────────────────────────────────
+
+/// Tries `primary`, falls back to `secondary` when primary returns `None`.
+///
+/// Why: the external-spec lookup (primary) augments rather than replaces the
+/// local `FsSpecLookup` (secondary); a fallback chain keeps both active (#1419).
+/// What: `load` calls `primary.load(f)` first; returns that if `Some`, else
+/// calls `secondary.load(f)`.
+/// Test: covered transitively by `from_config` tests in `conformance_tests.rs`.
+struct FallbackSpecLookup {
+    primary: Box<dyn SpecLookup>,
+    secondary: Box<dyn SpecLookup>,
+}
+
+impl SpecLookup for FallbackSpecLookup {
+    fn load(&self, spec_file: &str) -> Option<String> {
+        self.primary
+            .load(spec_file)
+            .or_else(|| self.secondary.load(spec_file))
+    }
+}
+
 // ─── The source ──────────────────────────────────────────────────────────────
 
 /// BACK-gate context source: surfaces the resolved ticket/spec intent and
@@ -469,17 +492,48 @@ impl ConformanceSource {
     /// on mere credential *presence* the way `github_issues` does), and attaches
     /// the production fetcher + spec lookup.
     /// Test: `from_config_respects_explicit_disable` in `conformance_tests`.
-    pub fn from_config(cfg: &super::SourceConfig, run_mode: RunMode, config: ReviewConfig) -> Self {
+    pub fn from_config(
+        cfg: &super::ConformanceSourceConfig,
+        run_mode: RunMode,
+        config: ReviewConfig,
+    ) -> Self {
+        // Extract the PAT token BEFORE moving `config` into the resolver below.
+        // `config.github_token` is resolved from `GITHUB_TOKEN` by
+        // `ReviewConfig::load` — using it here keeps the external-spec lookup
+        // on the same single-sourced token path as the rest of the config and
+        // avoids a second independent `std::env::var` read (issue #1419 fix).
+        let github_pat = config.github_token.clone();
         let token: Arc<dyn ConformanceTokenResolver> =
             Arc::new(DualModeConformanceToken::new(run_mode, config));
         let bridge = IsrTokenBridge { inner: token };
         let fetcher = Box::new(BackendTicketFetcher::new(Box::new(bridge)));
         let repo_root = crate::config::index_resolver::repo_root_from_cwd();
-        let spec_lookup = Box::new(FsSpecLookup::new(repo_root));
+        let fs_lookup: Box<dyn SpecLookup> = Box::new(FsSpecLookup::new(repo_root));
+
+        // When external_spec_repo is configured, wrap it in a fallback chain
+        // (external first, then local FS). Fail-open: if from_parts returns None
+        // (malformed repo string or TLS init failure), fall back to fs_lookup only.
+        let spec_lookup: Box<dyn SpecLookup> = if let Some(ref owner_repo) = cfg.external_spec_repo
+        {
+            match ExternalRepoSpecLookup::from_parts(
+                owner_repo,
+                cfg.spec_path_prefix.clone(),
+                github_pat,
+            ) {
+                Some(ext) => Box::new(FallbackSpecLookup {
+                    primary: Box::new(ext),
+                    secondary: fs_lookup,
+                }),
+                None => fs_lookup,
+            }
+        } else {
+            fs_lookup
+        };
+
         Self {
             // Default DISABLED (conformance needs explicit opt-in + GitHub auth).
             enabled: cfg.effective_enabled(false),
-            mode: cfg.mode,
+            mode: cfg.mode(),
             fetcher,
             spec_lookup,
         }
