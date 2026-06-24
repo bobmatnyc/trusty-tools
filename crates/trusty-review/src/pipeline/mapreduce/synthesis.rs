@@ -378,7 +378,8 @@ findings justify a stricter verdict than APPROVE.";
 /// on failure, tries to find the first `{...}` JSON object in the body (in case
 /// the model emitted a small prose preamble).  Returns `None` on parse failure
 /// so the caller can fall back gracefully.
-/// Test: `synthesis_response_parses_approve_json`, `synthesis_response_extracts_embedded_json`.
+/// Test: `synthesis_response_parses_approve_json`, `synthesis_response_extracts_embedded_json`,
+///   `synthesis_embedded_json_ignores_trailing_stray_brace`.
 fn parse_synthesis_response(body: &str) -> Option<ParsedSynthesis> {
     let trimmed = body.trim();
 
@@ -387,17 +388,29 @@ fn parse_synthesis_response(body: &str) -> Option<ParsedSynthesis> {
         return Some(s);
     }
 
-    // Strategy 2: extract the first `{...}` object from the body (prose preamble guard).
-    let embedded = trimmed
-        .find('{')
-        .zip(trimmed.rfind('}'))
-        .and_then(|(start, end)| {
-            if end > start {
-                try_parse_synthesis_json(&trimmed[start..=end])
-            } else {
-                None
+    // Strategy 2: brace-depth scan — find the first balanced `{...}` object from the
+    // body (prose preamble guard).  Using rfind('}') is unsafe when the model emits
+    // trailing stray braces after the JSON object; a depth counter finds the correct
+    // closing brace of the FIRST top-level object.
+    let embedded = trimmed.find('{').and_then(|start| {
+        let tail = &trimmed[start..];
+        let mut depth: i32 = 0;
+        let mut end_pos: Option<usize> = None;
+        for (i, ch) in tail.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end_pos = Some(start + i);
+                        break;
+                    }
+                }
+                _ => {}
             }
-        });
+        }
+        end_pos.and_then(|end| try_parse_synthesis_json(&trimmed[start..=end]))
+    });
     if embedded.is_some() {
         return embedded;
     }
@@ -423,17 +436,27 @@ fn try_parse_synthesis_json(s: &str) -> Option<ParsedSynthesis> {
 /// Parse a verdict string to a `Verdict`, returning `None` for unrecognised tokens.
 ///
 /// Why: synthesis must not silently default to APPROVE when the model returns an
-/// unrecognised verdict string — `None` triggers the fall-back path.
+/// unrecognised verdict string — `None` triggers the fall-back path.  `UNKNOWN` is
+/// explicitly excluded: allowing it to propagate would confuse downstream grade and
+/// poster logic that does not expect `Verdict::Unknown` from a synthesis pass.
 /// What: maps the canonical verdict tokens (case-sensitive) to `Verdict`; returns
-/// `None` for anything else.
-/// Test: covered transitively by `synthesis_response_parses_approve_json`.
+/// `None` for anything else, including `UNKNOWN` (which triggers the graceful
+/// fall-back to the mechanical result).
+/// Test: covered transitively by `synthesis_response_parses_approve_json`; FIX A
+/// path covered by `synthesis_unknown_verdict_falls_back`.
 fn parse_verdict_str(s: &str) -> Option<Verdict> {
     match s.trim() {
         "APPROVE" => Some(Verdict::Approve),
         "APPROVE*" => Some(Verdict::ApproveWithReservations),
         "REQUEST_CHANGES" => Some(Verdict::RequestChanges),
         "BLOCK" => Some(Verdict::Block),
-        "UNKNOWN" => Some(Verdict::Unknown),
+        "UNKNOWN" => {
+            warn!(
+                verdict = "UNKNOWN",
+                "synthesis: model returned UNKNOWN verdict — treating as unrecognised,                  falling back to mechanical result"
+            );
+            None
+        }
         other => {
             warn!(verdict = other, "synthesis: unrecognised verdict token");
             None

@@ -384,3 +384,71 @@ async fn synthesis_parse_error_falls_back() {
         "parse error must not populate grade"
     );
 }
+
+/// FIX A (#1664): a synthesis response with `"verdict":"UNKNOWN"` must trigger
+/// the graceful fallback path and return the original mechanical ReducedReview
+/// unchanged, NOT a result with Verdict::Unknown.
+#[tokio::test]
+async fn synthesis_unknown_verdict_falls_back() {
+    let reduced = reduced_with_findings(
+        Verdict::RequestChanges,
+        vec![finding("nit", "style issue", Effort::Medium, 0.8)],
+    );
+
+    // Return UNKNOWN verdict — must NOT propagate to final result.
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm::new(
+        r#"{"verdict":"UNKNOWN","grade":"","summary":""}"#,
+    ));
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+
+    let result = synthesize_review(reduced, &llm, &c, &cfg()).await;
+
+    // Must fall back to the mechanical result — UNKNOWN must NOT propagate.
+    assert_eq!(
+        result.verdict,
+        Verdict::RequestChanges,
+        "UNKNOWN verdict from synthesis must fall back to the mechanical result, not produce Verdict::Unknown"
+    );
+    assert!(
+        result.grade.is_none(),
+        "fallback path must not populate grade"
+    );
+}
+
+/// FIX B (#1664): `parse_synthesis_response` strategy 2 (brace-depth scan) must
+/// correctly extract the FIRST balanced JSON object from a response with trailing
+/// stray braces — `rfind('}')` would have grabbed the wrong closing brace.
+#[tokio::test]
+async fn synthesis_embedded_json_ignores_trailing_stray_brace() {
+    let reduced = reduced_with_findings(Verdict::RequestChanges, vec![]);
+
+    // Response has a valid JSON object followed by trailing prose with a stray brace.
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm::new(
+        r#"prefix text {"verdict":"APPROVE","grade":"B","summary":"ok"} trailing {stray}"#,
+    ));
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+
+    let result = synthesize_review(reduced, &llm, &c, &cfg()).await;
+
+    // Must parse the FIRST balanced object, not fail due to the trailing stray brace.
+    assert_eq!(
+        result.verdict,
+        Verdict::Approve,
+        "brace-depth scan must extract the first balanced JSON object (APPROVE), not fail on trailing stray brace"
+    );
+    assert_eq!(
+        result.grade.as_deref(),
+        Some("B"),
+        "grade must be extracted from the embedded JSON"
+    );
+    assert_eq!(
+        result.summary, "ok",
+        "summary must be extracted from the embedded JSON"
+    );
+}
