@@ -355,8 +355,8 @@ fn item_has_test_coverage(item: &str, changed_files: &[String], identifiers: &[S
         .collect();
 
     if key_terms.is_empty() {
-        // No distinguishing terms; fall back to "any test file covers it".
-        return !test_files.is_empty() || !test_ids.is_empty();
+        // No distinguishing terms — cannot confirm per-item coverage.
+        return false;
     }
 
     // A single key-term hit in any test file path or test identifier counts.

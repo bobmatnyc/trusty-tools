@@ -556,10 +556,10 @@ Some background text.\n\
 - [ ] Should validate the cursor token\n\
 ";
     let items = super::extract_ac_bullets(ticket_body);
-    // Expect 3 items: 2 from the AC section + 1 from - [ ] checkbox
-    assert!(
-        items.len() >= 2,
-        "at least two AC items expected: {:?}",
+    assert_eq!(
+        items.len(),
+        3,
+        "expected 3 AC items (2 from section + 1 from - [ ] checkbox): {:?}",
         items
     );
     assert!(
