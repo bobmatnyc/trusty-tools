@@ -52,8 +52,14 @@ pub use unit::{MapUnit, MapUnitKind};
 /// outcomes into a `ReducedReview` (deterministic verdict + deduped findings +
 /// partial-coverage stats).  Never truncates: every surviving file/hunk reaches
 /// a reviewer (or is honestly recorded as skipped/failed in the stats).
-/// Test: `mapreduce_end_to_end_*` in `reduce_tests.rs` and the runner integration
-/// tests `run_review_oversized_diff_mapreduce_reviews_tail_signature` etc.
+///
+/// Note on `config.synthesis`: that knob is RESERVED and intentionally not
+/// consumed here.  #1643 requires the verdict to be derived DETERMINISTICALLY
+/// from the finding set (so a summariser can never silently downgrade a real
+/// blocking finding); an optional LLM synthesis pass would only ever rewrite the
+/// prose summary, never the verdict.  It is left for a future phase.
+/// Test: `reduce_tests.rs` and the runner integration tests
+/// `run_review_oversized_diff_mapreduce_reviews_tail_signature` etc.
 pub async fn run_map_reduce(
     filtered: &FilteredDiff,
     llm: &Arc<dyn LlmProvider>,

@@ -132,14 +132,58 @@ pub(super) async fn run_mapreduce_branch(
         fail_safe_reason: None,
     };
 
-    // Telemetry: surface the map-reduce model + a partial-coverage error label.
+    // Telemetry: surface the map-reduce model + a partial-coverage status.
     result.model = input.reviewer_model.clone();
     if reduced.stats.is_partial() {
         result.status = ReviewStatus::Degraded;
     }
 
+    // Narrative body: the unified path sets `review_body` from the LLM prose
+    // (`apply_llm_response`), but the map-reduce path has N per-chunk responses
+    // and no single prose summary.  Without a body the GitHub poster substitutes
+    // the "_No narrative summary was produced_" sentinel on EVERY over-cap review
+    // (posting.rs:138).  Synthesise a deterministic one-line summary from the
+    // reduce stats so the posted comment is informative.
+    result.review_body = format!(
+        "Map-reduce review: {} file(s) reviewed across {} unit(s), \
+         {} skipped, {} failed; {} finding(s) surfaced.",
+        reduced.stats.files_reviewed,
+        reduced.stats.units_total,
+        reduced.stats.files_skipped,
+        reduced.stats.files_failed,
+        reduced.stats.findings_surfaced,
+    );
+
     let degraded_reason = run.degraded_reason.clone();
     fold_reduced_into_result(config, deps, &mut result, parsed, &run).await;
+
+    // Honest partial-coverage labelling (analogous to the #1638 truncation
+    // marker): when some files could not be reviewed the review is non-
+    // authoritative.  Surface it in BOTH the posted body (a visible banner) and
+    // the internal `error` field so neither the PR author nor a log consumer
+    // mistakes a partial review for a complete one.
+    if reduced.stats.is_partial() {
+        let notice = format!(
+            "> **Coverage notice:** {} file(s) could not be reviewed \
+             ({} failed, {} over-cap hunk(s)) — this review is partial.\n\n",
+            reduced.stats.files_failed,
+            reduced
+                .stats
+                .files_failed
+                .saturating_sub(reduced.stats.hunks_oversized),
+            reduced.stats.hunks_oversized,
+        );
+        result.review_body = format!("{notice}{}", result.review_body);
+        if result.error.is_none() {
+            result.error = Some(format!(
+                "map-reduce coverage partial: {} reviewed, {} skipped, {} failed ({} over-cap hunk(s))",
+                reduced.stats.files_reviewed,
+                reduced.stats.files_skipped,
+                reduced.stats.files_failed,
+                reduced.stats.hunks_oversized,
+            ));
+        }
+    }
 
     // Degraded labelling (#590 parity with the unified path): when an operator
     // opted out of a required context dependency, prepend a banner and set the
@@ -154,20 +198,6 @@ pub(super) async fn run_mapreduce_branch(
         if result.error.is_none() {
             result.error = Some(format!("degraded (non-authoritative): {reason}"));
         }
-    }
-
-    // Honest partial-coverage labelling (analogous to the #1638 truncation
-    // marker): when some files could not be reviewed, the review is non-
-    // authoritative — surface it in the error field and banner.
-    if reduced.stats.is_partial() && result.error.is_none() {
-        let banner = format!(
-            "map-reduce coverage partial: {} reviewed, {} skipped, {} failed ({} over-cap hunk(s))",
-            reduced.stats.files_reviewed,
-            reduced.stats.files_skipped,
-            reduced.stats.files_failed,
-            reduced.stats.hunks_oversized,
-        );
-        result.error = Some(banner);
     }
 
     finalize_run(result, config, input, deps.dedup.as_ref()).await

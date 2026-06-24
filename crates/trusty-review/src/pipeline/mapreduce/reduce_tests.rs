@@ -174,6 +174,27 @@ fn reduce_keeps_distinct_findings() {
     );
 }
 
+/// Two same-file findings with identical description text but DIFFERENT `kind`
+/// must NOT be deduped — they are genuinely distinct issues.
+#[test]
+fn reduce_keeps_same_text_different_kind() {
+    let text = "value is used before it is validated";
+    let outcomes = vec![reviewed(
+        "src/a.rs",
+        Verdict::ApproveWithReservations,
+        vec![
+            finding("src/a.rs", "security", text, 0.8, Effort::Medium),
+            finding("src/a.rs", "logic-error", text, 0.8, Effort::Medium),
+        ],
+    )];
+    let reduced = reduce(outcomes, &cfg());
+    assert_eq!(
+        reduced.findings.len(),
+        2,
+        "same text but different kind must NOT be deduped"
+    );
+}
+
 /// When EVERY reviewed chunk is UNKNOWN the whole review collapses to UNKNOWN.
 #[test]
 fn reduce_all_unknown_collapses() {

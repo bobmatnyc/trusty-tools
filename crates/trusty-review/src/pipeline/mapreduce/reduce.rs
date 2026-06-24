@@ -141,6 +141,11 @@ fn aggregate_verdict(chunk_verdicts: &[Verdict], findings: &[Finding]) -> Verdic
 
     // Stricter-of all non-UNKNOWN chunk verdicts (by ordinal severity).  This is
     // the precedence BLOCK > REQUEST_CHANGES > APPROVE* > APPROVE from #680.
+    //
+    // IMPORTANT: the UNKNOWN filter above MUST precede this `max_by_key`, because
+    // `Verdict::Unknown.ordinal() == 4` is the HIGHEST ordinal — an unfiltered
+    // UNKNOWN would be selected as "worst" and poison the seed.  The filter is
+    // therefore load-bearing, not cosmetic.
     let worst = non_unknown
         .iter()
         .max_by_key(|v| v.ordinal())
@@ -161,15 +166,20 @@ fn aggregate_verdict(chunk_verdicts: &[Verdict], findings: &[Finding]) -> Verdic
 /// Reusing the profile synthesiser's Jaccard metric keeps the similarity rule
 /// consistent across the crate.
 /// What: keeps the FIRST occurrence; a later finding is dropped only when it
-/// shares the same `file` AND its `description` Jaccard-similarity to an already
-/// kept finding is ≥ `FINDING_SIMILARITY_THRESHOLD`.  Findings on different files
-/// are never merged (a cross-file coincidence is not a duplicate).
-/// Test: `reduce_dedups_identical_findings`, `reduce_keeps_distinct_findings`.
+/// shares the same `file` AND the same `kind` AND its `description`
+/// Jaccard-similarity to an already kept finding is ≥
+/// `FINDING_SIMILARITY_THRESHOLD`.  Requiring matching `kind` prevents merging
+/// two genuinely distinct issues (e.g. a `"security"` and a `"logic-error"`
+/// finding) that happen to share similar prose.  Findings on different files are
+/// never merged (a cross-file coincidence is not a duplicate).
+/// Test: `reduce_dedups_identical_findings`, `reduce_keeps_distinct_findings`,
+/// `reduce_keeps_same_text_different_kind`.
 fn dedup_findings(findings: Vec<Finding>) -> Vec<Finding> {
     let mut kept: Vec<Finding> = Vec::with_capacity(findings.len());
     for f in findings {
         let is_dup = kept.iter().any(|k| {
             k.file == f.file
+                && k.kind == f.kind
                 && jaccard_similarity(&k.description, &f.description)
                     >= f64::from(FINDING_SIMILARITY_THRESHOLD)
         });
