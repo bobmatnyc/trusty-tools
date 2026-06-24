@@ -385,6 +385,20 @@ pub struct SearchAppState {
     /// construction via `install_embed_pool`.
     /// Test: `health_reports_stalled_embedder` in tests_health.rs.
     pub embedder_stall_tracker: Arc<crate::service::stall_tracker::EmbedderStallTracker>,
+    /// Live filesystem watchers, one per registered index (issue #1621).
+    ///
+    /// Why: epic #1619 WI-2 activates the dormant `FileWatcher` so a file save
+    /// triggers incremental indexing within the 500ms debounce window. The
+    /// daemon owns watcher lifetimes here so they start on index registration
+    /// (warm-boot + `POST /indexes`), stop on `DELETE /indexes/:id`, and are all
+    /// torn down on graceful shutdown (SIGTERM). Because watchers are keyed off
+    /// registered handles — which only exist for allowlisted repos — this is a
+    /// no-op for unregistered repos by construction.
+    /// What: a cheap-to-clone `WatcherManager` (Arc inside) shared across every
+    /// handler clone of the state.
+    /// Test: `crate::service::watcher_manager::tests` cover the manager;
+    /// `save_triggers_incremental_index_via_manager` covers the live path.
+    pub watcher_manager: crate::service::watcher_manager::WatcherManager,
 }
 
 /// Per-boot summary of warm-boot index loading, surfaced on `GET /health`.

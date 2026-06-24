@@ -350,5 +350,10 @@ pub(crate) async fn restore_one_index(
             crate::core::registry::WalkDiagnostics::default(),
         )),
     };
-    state.registry.register(handle);
+    let registered = state.registry.register(handle);
+    // Issue #1621 (epic #1619 WI-2): activate the filesystem watcher for this
+    // warm-booted index so subsequent saves are incrementally indexed within
+    // the 500ms debounce window. No-op when the watcher is disabled
+    // (`TRUSTY_DISABLE_WATCHER=1`) or already watching this index.
+    state.watcher_manager.spawn_for_index(&registered).await;
 }

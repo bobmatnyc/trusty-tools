@@ -27,11 +27,46 @@ use crate::service::indexed_files::IndexedFiles;
 use crate::service::walker::{path_in_skipped_dir, should_skip_path};
 use crate::service::watcher::{FileWatcher, WatchEvent};
 
-/// Handle for a running watch loop. Drop it to stop watching and join the
-/// consumer task on the next `await` boundary.
+/// Handle for a running watch loop. Drop it (or call [`WatcherTask::stop`]) to
+/// stop watching: the OS watcher is torn down and the consumer task is aborted.
+///
+/// Why: issue #1621 wires the watcher into the daemon and requires it to honour
+/// graceful shutdown (SIGTERM). The previous handle only dropped the
+/// `FileWatcher` — which stops the OS watch — but *detached* the consumer task
+/// (dropping a `JoinHandle` leaves the task running). Holding an `AbortHandle`
+/// and aborting it on `Drop` guarantees the consumer task is actually cancelled
+/// when the manager tears watchers down, so no orphaned tasks survive a stop.
+/// What: owns the `FileWatcher` (OS watch lifetime) and an `AbortHandle` for the
+/// consumer task; `Drop` aborts the consumer and drops the watcher.
+/// Test: `watcher_task_stop_aborts_consumer` below.
 pub struct WatcherTask {
     _watcher: FileWatcher,
-    _join: JoinHandle<()>,
+    join: JoinHandle<()>,
+}
+
+impl WatcherTask {
+    /// Stop watching: abort the consumer task and drop the OS watcher.
+    ///
+    /// Why: lets the [`crate::service::watcher_manager::WatcherManager`] tear a
+    /// single watcher down deterministically (e.g. on `DELETE /indexes/:id` or
+    /// graceful shutdown) without waiting for the value to be dropped at an
+    /// `await` boundary.
+    /// What: aborts the consumer `JoinHandle`; the `FileWatcher` is dropped when
+    /// `self` is consumed, releasing the kqueue/inotify/fsevent handle.
+    /// Test: `watcher_task_stop_aborts_consumer`.
+    pub fn stop(self) {
+        self.join.abort();
+        // `_watcher` drops here, terminating the OS watch.
+    }
+}
+
+impl Drop for WatcherTask {
+    /// Abort the consumer task on drop so a dropped handle never leaks a
+    /// long-running tokio task (the OS watcher is torn down by `FileWatcher`'s
+    /// own `Drop`).
+    fn drop(&mut self) {
+        self.join.abort();
+    }
 }
 
 /// Start watching `root_path` and forward changes into `indexer`.
@@ -78,7 +113,7 @@ pub fn spawn_watch_loop(
 
     Ok(WatcherTask {
         _watcher: watcher,
-        _join: join,
+        join,
     })
 }
 
@@ -484,6 +519,41 @@ mod tests {
         assert_eq!(
             tracked, 1,
             "exactly one file (handler.py) should be tracked, got {tracked}"
+        );
+    }
+
+    /// Issue #1621: `WatcherTask::stop` must abort the consumer task so a stop
+    /// (graceful shutdown / DELETE index) leaves no file events being processed.
+    /// After stop, writing a file must NOT change the indexer's chunk count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn watcher_task_stop_aborts_consumer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let indexer = Arc::new(RwLock::new(CodeIndexer::new("test", dir.path())));
+        let tracker = IndexedFiles::new();
+
+        let task = spawn_watch_loop(dir.path(), Arc::clone(&indexer), tracker.clone())
+            .expect("watch loop starts");
+
+        // Stop immediately — the OS watch is dropped and the consumer aborted.
+        task.stop();
+
+        // Allow any in-flight teardown to settle, then write a file.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::fs::write(dir.path().join("after_stop.rs"), "fn z() {}\n")
+            .await
+            .expect("write file");
+
+        // Give the (now-stopped) loop a generous window to (not) react.
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        assert_eq!(
+            indexer.read().await.chunk_count(),
+            0,
+            "no chunks should be indexed after the watcher was stopped"
+        );
+        assert!(
+            tracker.is_empty().await,
+            "no files should be tracked after the watcher was stopped"
         );
     }
 }

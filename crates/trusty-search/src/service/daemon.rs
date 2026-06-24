@@ -499,6 +499,14 @@ pub async fn run_daemon(state: SearchAppState, requested_port: u16) -> Result<()
         })
         .await;
 
+    // Issue #1621: stop every filesystem watcher before flushing so no save
+    // event races the shutdown flush by mutating an index mid-write. Aborts the
+    // consumer tasks and releases the OS watches as part of the graceful drain.
+    let stopped_watchers = flush_state.watcher_manager.stop_all().await;
+    if stopped_watchers > 0 {
+        tracing::info!("shutdown: stopped {stopped_watchers} file watcher(s)");
+    }
+
     // Issue #85 — flush HNSW + chunk corpus for every registered index so
     // the next daemon boot warm-starts instead of paying a full re-index.
     // Best-effort: log on failure, don't abort cleanup.
