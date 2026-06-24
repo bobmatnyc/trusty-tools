@@ -240,10 +240,13 @@ where
             Ok(child) => return Ok(child),
             Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
                 last_err = Some(e);
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    BACKOFF_MS * (1 << attempt),
-                ))
-                .await;
+                // Exponential backoff: 5ms, 10ms, 20ms for MAX_ATTEMPTS=3.
+                // `attempt` is bounded by MAX_ATTEMPTS, so the shift is far
+                // below u64's 64-bit width. Use an explicit `1u64` shift and a
+                // saturating multiply so this stays overflow-safe for any
+                // reasonable MAX_ATTEMPTS value if it is ever raised.
+                let backoff_ms = BACKOFF_MS.saturating_mul(1u64 << attempt);
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
             }
             Err(e) => return Err(e),
         }
