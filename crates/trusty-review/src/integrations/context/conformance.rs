@@ -295,27 +295,42 @@ impl ConformanceSource {
 
         // The precedence-winning method is the thing to check conformance against.
         if let Some(method) = Self::winning_method(intent) {
-            let ticket_label = intent
-                .ticket
-                .as_ref()
-                .map(|t| format!("ticket {}", t.id))
-                .unwrap_or_else(|| "ticket".to_string());
-            let source_label = match intent.precedence_winner {
-                Precedence::Ticket => ticket_label,
-                Precedence::Spec => intent
-                    .spec_section
-                    .as_ref()
-                    .map(|s| format!("spec {}", s.spec_id))
-                    .unwrap_or_else(|| "spec".to_string()),
-                Precedence::None => "intent".to_string(),
+            // Build the human-readable source label AND a bare citation key the
+            // LLM can copy verbatim into `source_citation` (#1419).
+            let (source_label, citation_key) = match intent.precedence_winner {
+                Precedence::Ticket => {
+                    let id = intent
+                        .ticket
+                        .as_ref()
+                        .map(|t| t.id.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    (format!("ticket {id}"), id)
+                }
+                Precedence::Spec => {
+                    let spec_id = intent
+                        .spec_section
+                        .as_ref()
+                        .map(|s| s.spec_id.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    (format!("spec {spec_id}"), spec_id)
+                }
+                Precedence::None => ("intent".to_string(), String::new()),
             };
             let body =
                 truncate_on_char_boundary(method.text.trim(), SNIPPET_BODY_CHARS).to_string();
+            // Subtitle carries the copyable citation so the LLM can populate
+            // `source_citation` with the exact identifier (#1419).
+            let subtitle = if citation_key.is_empty() {
+                "Flag the diff ONLY if it explicitly contradicts this method.".to_string()
+            } else {
+                format!(
+                    "Flag the diff ONLY if it explicitly contradicts this method. \
+                     Source citation key: {citation_key}"
+                )
+            };
             snippets.push(ContextSnippet {
                 title: format!("Prescribed method (from {source_label})"),
-                subtitle: Some(
-                    "Flag the diff ONLY if it explicitly contradicts this method.".to_string(),
-                ),
+                subtitle: Some(subtitle),
                 body: (!body.is_empty()).then_some(body),
                 link: intent.ticket.as_ref().and_then(|t| t.url.clone()),
             });

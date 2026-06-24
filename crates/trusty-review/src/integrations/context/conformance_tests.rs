@@ -440,3 +440,59 @@ fn query_none_without_owner_repo() {
         "no owner/repo (local-diff) must yield None"
     );
 }
+
+// ─── source_citation: snippet title/subtitle carry the ticket key (#1419) ────
+
+/// The rendered snippet title contains the ticket ID so the LLM can copy it
+/// verbatim into `source_citation` (#1419).
+///
+/// Why: the source-citation grounding mechanism (AC #1419) requires the LLM
+/// to have the EXACT ticket key available as a copyable string in the context
+/// snippet; if the key is absent from the rendered snippet, the LLM cannot
+/// populate `source_citation` reliably.
+/// What: renders a `ResolvedIntent` with a known ticket ID and asserts both
+/// the snippet title and the subtitle contain that ID.
+/// Test: this test; pure, no network.
+#[test]
+fn render_section_title_and_subtitle_contain_ticket_key() {
+    let ticket_id = "IMPL-2026-05-009".to_string();
+    let intent = ResolvedIntent {
+        ticket: Some(TicketRef {
+            id: ticket_id.clone(),
+            title: "Paginate listing".to_string(),
+            url: None,
+            backend: "github".to_string(),
+        }),
+        ticket_method: Some(Method {
+            text: "use cursor-based pagination".to_string(),
+            kind: MethodKind::Approach,
+            source_excerpt: "use cursor-based pagination".to_string(),
+        }),
+        spec_section: None,
+        spec_method: None,
+        precedence_winner: Precedence::Ticket,
+        conflict: false,
+        stale_spec: false,
+        unresolved: None,
+    };
+    let section = ConformanceSource::render_section(&intent);
+    assert!(
+        !section.snippets.is_empty(),
+        "a prescribed method must produce a non-empty section"
+    );
+    let snippet = &section.snippets[0];
+    assert!(
+        snippet.title.contains(&ticket_id),
+        "snippet title must contain the ticket ID for source_citation grounding: got {:?}",
+        snippet.title
+    );
+    let subtitle = snippet
+        .subtitle
+        .as_deref()
+        .expect("subtitle must be present");
+    assert!(
+        subtitle.contains(&ticket_id),
+        "snippet subtitle must contain the ticket ID as the citation key: got {:?}",
+        subtitle
+    );
+}

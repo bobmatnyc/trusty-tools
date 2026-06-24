@@ -7,7 +7,8 @@
 //! What: exposes `Verdict`, `Effort`, `VerifyOutcome`, `Finding`
 //! (FixSuggestion), and `ReviewResult` — all serde-serialisable.
 //! Test: `verdict_serde_roundtrip`, `review_result_serde_roundtrip`,
-//! and `finding_confidence_clamping` in this module.
+//! `finding_confidence_clamping`, and `finding_source_citation_roundtrip`
+//! in this module.
 
 use serde::{Deserialize, Serialize};
 
@@ -256,6 +257,18 @@ pub struct Finding {
     /// pre-#1359 serialised finding deserialising as `Correctness`.
     #[serde(default)]
     pub category: FindingCategory,
+    /// Exact spec/ticket/test-plan source grounding this finding (#1419).
+    ///
+    /// Why: citing the precise source (e.g. `"IMPL-2026-05-009 WP-9"`,
+    /// `"PRD §4.2"`) makes a finding authoritative — it demonstrates a
+    /// prescribed intent was violated, not just an LLM inference.  The LLM
+    /// populates this when the context snippet it used carries a source label
+    /// (see `prompt_templates.rs`).  `None` when the finding rests on general
+    /// code reasoning rather than a cited spec/ticket snippet.
+    /// `#[serde(default, skip_serializing_if)]` keeps every pre-#1419 finding
+    /// deserialising unchanged (backward-compatible `None` default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_citation: Option<String>,
     // ── Transient pipeline state ──────────────────────────────────────────
     /// Verification outcome; `None` before the verification round.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -291,6 +304,7 @@ impl Finding {
             confidence: confidence.clamp(0.0, 1.0),
             effort,
             category: FindingCategory::Correctness,
+            source_citation: None,
             verified: None,
             issue_eligible: false,
         }
@@ -698,6 +712,54 @@ mod tests {
         let f = Finding::new("src/lib.rs", "bug", "desc", "fix", 0.9, Effort::Medium)
             .with_category(FindingCategory::MethodConformance);
         assert_eq!(f.category, FindingCategory::MethodConformance);
+    }
+
+    /// `source_citation` round-trips via serde and is absent from legacy fixtures.
+    ///
+    /// Why: the serde attributes must (a) preserve a populated citation through
+    /// a JSON round-trip, and (b) be absent from the serialised form when `None`
+    /// so pre-#1419 fixtures (no `source_citation` key) keep deserialising.
+    /// What: serialises a finding with a citation, round-trips it, asserts the
+    /// field survives; then asserts the key is absent when `None`.
+    /// Test: this test itself; no network.
+    #[test]
+    fn finding_source_citation_roundtrip() {
+        // Populated citation survives a JSON round-trip.
+        let json = r#"{
+            "file": "src/page.rs",
+            "kind": "method-conformance",
+            "description": "uses offset pagination",
+            "suggestion": "switch to cursor",
+            "confidence": 0.9,
+            "effort": "medium",
+            "source_citation": "IMPL-2026-05-009 WP-9"
+        }"#;
+        let f: Finding = serde_json::from_str(json).expect("must deserialise");
+        assert_eq!(
+            f.source_citation.as_deref(),
+            Some("IMPL-2026-05-009 WP-9"),
+            "source_citation must survive deserialisation"
+        );
+        let re_json = serde_json::to_string(&f).expect("must serialise");
+        let back: Finding = serde_json::from_str(&re_json).expect("must round-trip");
+        assert_eq!(
+            back.source_citation.as_deref(),
+            Some("IMPL-2026-05-009 WP-9"),
+            "source_citation must survive a full round-trip"
+        );
+
+        // When `None`, the key is skipped entirely (back-compat).
+        let f_none = Finding::new("src/lib.rs", "bug", "desc", "fix", 0.8, Effort::Low);
+        let json_none = serde_json::to_string(&f_none).expect("serialise");
+        assert!(
+            !json_none.contains("source_citation"),
+            "absent source_citation must not appear in serialised form (pre-#1419 back-compat)"
+        );
+        let back_none: Finding = serde_json::from_str(&json_none).expect("deserialise");
+        assert!(
+            back_none.source_citation.is_none(),
+            "absent source_citation key must deserialise to None"
+        );
     }
 
     /// A serialised finding WITHOUT a `category` field still deserialises (the

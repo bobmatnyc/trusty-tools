@@ -101,6 +101,12 @@ struct LlmFinding {
     /// fixture — still parse.
     #[serde(default)]
     suggested_replacement: Option<String>,
+    /// Exact spec/ticket/test-plan source grounding this finding (#1419).
+    ///
+    /// `#[serde(default)]` → `None` so models that omit it — and every pre-#1419
+    /// fixture — still parse.
+    #[serde(default)]
+    source_citation: Option<String>,
 }
 
 // ─── Parsed output ────────────────────────────────────────────────────────────
@@ -308,9 +314,11 @@ fn try_parse_json_block(body: &str) -> Option<ParsedReview> {
 /// What: maps severity → effort (high/critical → High; medium → Medium; else Low);
 /// uses the `title` as the `kind` and `body` as `description`; preserves the
 /// finding `category` (#1359 — defaulting to `Correctness` when the model omits
-/// it) so the verdict floor can cap a `method-conformance` finding.
-/// Test: covered transitively by `parse_json_block_happy_path` and
-/// `parse_method_conformance_finding_category`.
+/// it) so the verdict floor can cap a `method-conformance` finding; carries
+/// `source_citation` (#1419) when the model provides it.
+/// Test: covered transitively by `parse_json_block_happy_path`,
+/// `parse_method_conformance_finding_category`, and
+/// `parse_finding_carries_source_citation`.
 fn convert_llm_finding(f: LlmFinding) -> Finding {
     let effort = match f.severity.to_lowercase().as_str() {
         "high" | "critical" => Effort::High,
@@ -332,6 +340,9 @@ fn convert_llm_finding(f: LlmFinding) -> Finding {
     // Carry the committable replacement code through for a GitHub suggestion
     // block (#1415); normalise empty/whitespace-only strings to None.
     finding.suggested_replacement = f.suggested_replacement.filter(|s| !s.trim().is_empty());
+    // Carry the spec/ticket source citation through (#1419); normalise
+    // empty/whitespace-only strings to None.
+    finding.source_citation = f.source_citation.filter(|s| !s.trim().is_empty());
     finding
 }
 
