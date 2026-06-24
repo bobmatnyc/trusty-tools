@@ -85,7 +85,11 @@ impl LlmProvider for RecordingReviewer {
         self.seen.lock().expect("lock").push(body);
 
         let text = if want_rc {
-            r#"{"verdict":"REQUEST_CHANGES","summary":"bug","findings":[{"title":"bug","body":"the build() signature changed and a caller passes null","severity":"medium","confidence":0.95,"file":"src/big.rs","line":1}]}"#
+            // Use HIGH severity so the safety floor preserves this finding even
+            // after an LLM synthesis pass.  A Medium finding might be holistically
+            // softened by synthesis (the intended calibration); a High finding must
+            // ALWAYS floor to BLOCK/REQUEST_CHANGES regardless of synthesis (#1663).
+            r#"{"verdict":"BLOCK","summary":"critical bug","findings":[{"title":"auth-bypass","body":"the build() signature changed and a caller passes null — auth check skipped","severity":"high","confidence":0.95,"file":"src/big.rs","line":1}]}"#
         } else {
             r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
         };
@@ -316,16 +320,22 @@ impl LlmProvider for SelectivelyFailingReviewer {
     }
 }
 
-/// A REQUEST_CHANGES in the SINGLE chunk that contains the tail signature must
-/// propagate to the overall verdict — proving the reduce stage aggregates
-/// per-chunk verdicts (no chunk verdict is lost).
+/// A HIGH-severity finding in the SINGLE chunk that contains the tail signature
+/// must propagate to the overall verdict — proving both (a) per-chunk verdict
+/// aggregation and (b) the synthesis safety floor for High-effort findings (#1663).
+/// The finding uses `severity: "high"` so the `apply_high_severity_floor_only`
+/// in the synthesis pass cannot soften it to APPROVE; a Medium finding here would
+/// correctly be softened by synthesis (that's the feature), but we need this test
+/// to remain a regression guard after synthesis was added.
 #[tokio::test]
 async fn run_review_mapreduce_chunk_request_changes_propagates() {
     let (diff, tail_signature) = oversized_multi_file_diff();
     let (source, _tmp) = local_source(&diff);
 
-    // Only the chunk whose prompt contains the tail signature returns
-    // REQUEST_CHANGES; every other (early-file) chunk APPROVEs.
+    // Only the chunk whose prompt contains the tail signature returns BLOCK
+    // (High-severity finding); every other (early-file) chunk APPROVEs.
+    // The synthesis LLM (same RecordingReviewer, no tail_signature in synthesis
+    // prompt) returns APPROVE, but the High-severity safety floor re-applies.
     let reviewer = Arc::new(RecordingReviewer::request_changes_on(tail_signature));
     let llm: Arc<dyn LlmProvider> = reviewer.clone();
     let config = ReviewConfig::load(None);

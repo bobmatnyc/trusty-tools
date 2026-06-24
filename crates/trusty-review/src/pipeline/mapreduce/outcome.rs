@@ -129,20 +129,31 @@ impl MapReduceStats {
 ///
 /// Why: the reduce stage's job is to collapse N per-chunk outcomes into ONE
 /// verdict + finding set with the SAME shape the unified path produces, so the
-/// downstream grade/verify/post code is unchanged.
+/// downstream grade/verify/post code is unchanged.  After an optional LLM
+/// synthesis pass (#1663), `verdict` may be the synthesis-calibrated verdict
+/// (High-severity floored), `grade` carries the synthesis letter grade, and
+/// `summary` carries the synthesis prose summary.
 /// What: `verdict` is derived deterministically from the union of findings via
 /// the existing `derive_verdict` precedence rules (a chunk REQUEST_CHANGES/BLOCK
 /// propagates up); `findings` is the deduped, capped, prioritised union;
-/// `stats` carries the partial-coverage telemetry.
-/// Test: `reduce_*` in `reduce_tests.rs`.
+/// `stats` carries the partial-coverage telemetry.  `grade` and `summary` are
+/// `None`/empty when synthesis is disabled (the runner falls back to the
+/// mechanical defaults in that case).
+/// Test: `reduce_*` in `reduce_tests.rs`; `synthesis_*` in `synthesis_tests.rs`.
 #[derive(Debug, Clone)]
 pub struct ReducedReview {
-    /// Aggregated verdict derived deterministically from the union of findings.
+    /// Aggregated verdict — mechanical (deterministic) or synthesis-calibrated.
     pub verdict: Verdict,
     /// Deduped, prioritised, capped union of all per-chunk findings.
     pub findings: Vec<Finding>,
     /// Partial-coverage telemetry.
     pub stats: MapReduceStats,
+    /// Synthesis letter grade (e.g. `"B+"`) from the calibration LLM pass,
+    /// or `None` when synthesis is disabled or failed.
+    pub grade: Option<String>,
+    /// Synthesis prose summary from the calibration LLM pass, or empty string
+    /// when synthesis is disabled or failed.
+    pub summary: String,
 }
 
 #[cfg(test)]

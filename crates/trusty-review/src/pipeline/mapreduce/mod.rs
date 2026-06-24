@@ -33,32 +33,34 @@ pub mod map;
 pub mod outcome;
 pub mod reduce;
 pub mod splitter;
+pub mod synthesis;
 pub mod unit;
 
 pub use map::{MapContext, run_map_stage};
 pub use outcome::{MapOutcome, MapReduceStats, ReducedReview};
 pub use reduce::reduce;
 pub use splitter::split_into_units;
+pub use synthesis::synthesize_review;
 pub use unit::{MapUnit, MapUnitKind};
 
-/// Run the full map-reduce review: split → map (bounded fan-out) → reduce.
+/// Run the full map-reduce review: split → map (bounded fan-out) → reduce → synthesis.
 ///
 /// Why: the runner needs ONE call that takes the already-filtered diff and the
 /// shared review context and returns a merged `ReducedReview` whose shape matches
 /// the unified path.  Keeping the split/map/reduce wiring here (not in the
 /// near-cap `runner.rs`) honours the SLOC cap and keeps the runner readable.
 /// What: splits `filtered` into `MapUnit`s under the config budgets, fans the
-/// `Review` units out over `config.concurrency` LLM calls, and reduces the
+/// `Review` units out over `config.concurrency` LLM calls, reduces the
 /// outcomes into a `ReducedReview` (deterministic verdict + deduped findings +
-/// partial-coverage stats).  Never truncates: every surviving file/hunk reaches
-/// a reviewer (or is honestly recorded as skipped/failed in the stats).
-///
-/// Note on `config.synthesis`: that knob is RESERVED and intentionally not
-/// consumed here.  #1643 requires the verdict to be derived DETERMINISTICALLY
-/// from the finding set (so a summariser can never silently downgrade a real
-/// blocking finding); an optional LLM synthesis pass would only ever rewrite the
-/// prose summary, never the verdict.  It is left for a future phase.
-/// Test: `reduce_tests.rs` and the runner integration tests
+/// partial-coverage stats), and then runs an optional LLM synthesis pass
+/// (`config.synthesis`, default `true`, closes #1663) that calibrates the
+/// aggregate verdict to match a single holistic reviewer.  The synthesis pass
+/// applies a High-severity safety floor so critical findings can never be softened;
+/// the count-based `≥2 Medium → REQUEST_CHANGES` floor is intentionally omitted
+/// in the synthesis path because the LLM has already judged those findings
+/// holistically.  Never truncates: every surviving file/hunk reaches a reviewer
+/// (or is honestly recorded as skipped/failed in the stats).
+/// Test: `reduce_tests.rs`, `synthesis_tests.rs`, and the runner integration tests
 /// `run_review_oversized_diff_mapreduce_reviews_tail_signature` etc.
 pub async fn run_map_reduce(
     filtered: &FilteredDiff,
@@ -74,5 +76,6 @@ pub async fn run_map_reduce(
         "map-reduce: split diff into units"
     );
     let outcomes = run_map_stage(&units, llm, ctx, config.concurrency).await;
-    reduce(outcomes, config)
+    let reduced = reduce(outcomes, config);
+    synthesize_review(reduced, llm, ctx, config).await
 }
