@@ -567,3 +567,40 @@ fn system_prompt_contains_source_citation_instruction() {
 // Extracted to prompt_tests_apex.rs to keep this file under the 500-line cap (#610).
 #[path = "prompt_tests_apex.rs"]
 mod apex_tests;
+
+// ── Rust false-positive guardrail tests (#1422) ───────────────────────────────
+
+/// Verify both system-prompt variants contain the Rust false-positive guardrail.
+///
+/// Why: the guardrail section was added to reduce known false positives on Rust
+/// `move` closures and `tokio::select!` branches (#1422).  Asserting its presence
+/// ensures prompt changes don't accidentally drop it.
+/// What: checks both SYSTEM_PROMPT_STOCK and SYSTEM_PROMPT_COVERAGE_GATING for
+/// the key guardrail phrases.
+/// Test: no network; operates on the constant strings directly.
+#[test]
+fn both_system_prompts_contain_rust_fp_guardrail() {
+    use crate::pipeline::prompt_templates::{SYSTEM_PROMPT_COVERAGE_GATING, SYSTEM_PROMPT_STOCK};
+
+    for (label, prompt) in [
+        ("stock", SYSTEM_PROMPT_STOCK),
+        ("coverage-gating", SYSTEM_PROMPT_COVERAGE_GATING),
+    ] {
+        assert!(
+            prompt.contains("Known false-positive patterns"),
+            "{label} system prompt must contain the 'Known false-positive patterns' section"
+        );
+        assert!(
+            prompt.contains("`move` closures"),
+            "{label} system prompt must include the move-closure guardrail"
+        );
+        assert!(
+            prompt.contains("tokio::select!"),
+            "{label} system prompt must include the tokio::select! guardrail"
+        );
+        assert!(
+            prompt.contains("DO NOT flag"),
+            "{label} system prompt must say DO NOT flag for the guardrail"
+        );
+    }
+}
