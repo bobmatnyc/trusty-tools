@@ -184,11 +184,11 @@ pub enum VerifyOutcome {
 /// correctness finding floors normally.  Threading a category through the finding
 /// model is the minimal way to carry that distinction from the LLM JSON all the
 /// way to `grade::severity_floor`.
-/// What: a two-variant enum serialised kebab-case (`"correctness"` /
-/// `"method-conformance"`).  It is `#[serde(default)]` (→ `Correctness`) wherever
-/// it appears so pre-#1359 fixtures and LLM responses that omit `category` still
-/// deserialise unchanged (back-compat — every legacy finding is a correctness
-/// finding).
+/// What: a three-variant enum serialised kebab-case (`"correctness"` /
+/// `"method-conformance"` / `"test-coverage"`).  It is `#[serde(default)]` (→
+/// `Correctness`) wherever it appears so pre-#1359 fixtures and LLM responses that
+/// omit `category` still deserialise unchanged (back-compat — every legacy finding
+/// is a correctness finding).  The `TestCoverage` variant was added in #1418.
 /// Test: `finding_category_serde_roundtrip`,
 /// `finding_defaults_category_correctness`, and the parser/grade tests that
 /// assert the conformance cap.
@@ -201,6 +201,10 @@ pub enum FindingCategory {
     /// An intent/method-conformance divergence: the diff contradicts an explicit
     /// method the ticket or spec prescribed (`SPEC-CONFORMANCE-02`, M5).
     MethodConformance,
+    /// An unmet test-plan / acceptance-criteria item: the diff lacks evidence of
+    /// test coverage for an AC item from the linked ticket or PR test-plan section
+    /// (#1418).  Informational — never drives BLOCK or REQUEST_CHANGES alone.
+    TestCoverage,
 }
 
 // ─── Finding ──────────────────────────────────────────────────────────────────
@@ -671,8 +675,9 @@ mod tests {
     ///
     /// Why: the LLM emits and the review log persists the category as a string;
     /// the back gate (#1359) keys verdict-floor behaviour off it, so the wire
-    /// shape must be stable.
-    /// What: serialises both variants, asserts the exact tokens, deserialises back.
+    /// shape must be stable.  The test-coverage variant was added in #1418.
+    /// What: serialises all three variants, asserts the exact tokens, deserialises
+    /// back; also verifies the serde default.
     /// Test: this test itself.
     #[test]
     fn finding_category_serde_roundtrip() {
@@ -684,8 +689,14 @@ mod tests {
             serde_json::to_string(&FindingCategory::MethodConformance).unwrap(),
             "\"method-conformance\""
         );
+        assert_eq!(
+            serde_json::to_string(&FindingCategory::TestCoverage).unwrap(),
+            "\"test-coverage\""
+        );
         let back: FindingCategory = serde_json::from_str("\"method-conformance\"").unwrap();
         assert_eq!(back, FindingCategory::MethodConformance);
+        let back_tc: FindingCategory = serde_json::from_str("\"test-coverage\"").unwrap();
+        assert_eq!(back_tc, FindingCategory::TestCoverage);
         assert_eq!(FindingCategory::default(), FindingCategory::Correctness);
     }
 

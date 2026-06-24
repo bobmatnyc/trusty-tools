@@ -84,6 +84,17 @@ Do NOT emit a method-conformance finding when:
 - you are merely unsure; ambiguity is not a contradiction.
 Every other finding uses `category` = "correctness" (the default).
 
+## Test plan gaps (ticket/PR acceptance criteria)
+The user message may include a context section headed Test plan gaps or Intended method
+(ticket/spec) containing snippets titled "Unmet AC: <item>". Each such snippet identifies
+an acceptance-criteria or test-plan item from the PR body or linked ticket that has no
+matching test file in the diff. When you see an "Unmet AC" snippet, emit a finding with
+`category` = "test-coverage", severity = "medium", and set `source_citation` to the exact
+item text from the snippet title. If the context only contains the advisory snippet
+"No test plan or AC found in PR description or linked ticket", you may note it as a
+low-severity `test-coverage` finding or omit it at your discretion. Do NOT escalate
+your verdict solely on the basis of test-plan gaps; gaps are informational.
+
 ## Output (REQUIRED — populate the structured response fields)
 - `grade`: one of A+, A, A-, B+, B, B-, C+, C, C-, D+, D, D-, F.
 - `grade_justification`: one-sentence reason for the grade.
@@ -92,7 +103,8 @@ Every other finding uses `category` = "correctness" (the default).
 - `findings`: array of issues found (empty array if none).
   Each finding has: title, body (detailed description), severity (low/medium/high/critical),
   confidence (0.0–1.0), file (source file path), line (null if not applicable),
-  category ("correctness" by default, or "method-conformance" per the rule above),
+  category ("correctness" by default, "method-conformance" per the rule above, or
+  "test-coverage" for test-plan gap findings),
   consequence (see below), suggested_replacement (see below),
   source_citation (see below).
 
@@ -116,9 +128,9 @@ explain the fix in `body`.
 
 `source_citation`: when a context snippet in the user message carries an explicit
 source label (e.g. "Prescribed method (from ticket IMPL-2026-05-009 WP-9)" or
-"Prescribed method (from spec PRD §4.2)"), copy the EXACT ticket key and
+"Prescribed method (from spec PRD § 4.2)"), copy the EXACT ticket key and
 section/work-package identifier from that label here (e.g. "IMPL-2026-05-009 WP-9"
-or "PRD §4.2"). This makes the finding authoritative — it is grounded in a
+or "PRD § 4.2"). This makes the finding authoritative — it is grounded in a
 prescribed intent, not just an LLM inference. Set to null when the finding is
 based on general code reasoning rather than a cited context snippet.
 
@@ -199,6 +211,17 @@ Do NOT emit a method-conformance finding when:
 - you are merely unsure; ambiguity is not a contradiction.
 Every other finding uses `category` = "correctness" (the default).
 
+## Test plan gaps (ticket/PR acceptance criteria)
+The user message may include a context section headed Test plan gaps or Intended method
+(ticket/spec) containing snippets titled "Unmet AC: <item>". Each such snippet identifies
+an acceptance-criteria or test-plan item from the PR body or linked ticket that has no
+matching test file in the diff. When you see an "Unmet AC" snippet, emit a finding with
+`category` = "test-coverage", severity = "medium", and set `source_citation` to the exact
+item text from the snippet title. If the context only contains the advisory snippet
+"No test plan or AC found in PR description or linked ticket", you may note it as a
+low-severity `test-coverage` finding or omit it at your discretion. Do NOT escalate
+your verdict solely on the basis of test-plan gaps; gaps are informational.
+
 ## Test coverage
 A coverage report has been provided in the user message (## Test coverage context).
 You may note coverage gaps as findings (severity=low or medium), but do NOT use
@@ -213,7 +236,8 @@ coverage floor after your response based on the configured policy.
 - `findings`: array of issues found (empty array if none).
   Each finding has: title, body (detailed description), severity (low/medium/high/critical),
   confidence (0.0–1.0), file (source file path), line (null if not applicable),
-  category ("correctness" by default, or "method-conformance" per the rule above),
+  category ("correctness" by default, "method-conformance" per the rule above, or
+  "test-coverage" for test-plan gap findings),
   consequence (see below), suggested_replacement (see below),
   source_citation (see below).
 
@@ -237,9 +261,9 @@ explain the fix in `body`.
 
 `source_citation`: when a context snippet in the user message carries an explicit
 source label (e.g. "Prescribed method (from ticket IMPL-2026-05-009 WP-9)" or
-"Prescribed method (from spec PRD §4.2)"), copy the EXACT ticket key and
+"Prescribed method (from spec PRD § 4.2)"), copy the EXACT ticket key and
 section/work-package identifier from that label here (e.g. "IMPL-2026-05-009 WP-9"
-or "PRD §4.2"). This makes the finding authoritative — it is grounded in a
+or "PRD § 4.2"). This makes the finding authoritative — it is grounded in a
 prescribed intent, not just an LLM inference. Set to null when the finding is
 based on general code reasoning rather than a cited context snippet.
 
