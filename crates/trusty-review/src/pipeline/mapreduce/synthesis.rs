@@ -366,7 +366,7 @@ fn parse_synthesis_response(body: &str) -> Option<ParsedSynthesis> {
     // Strategy 2: extract the first `{...}` object from the body (prose preamble guard).
     let embedded = trimmed
         .find('{')
-        .and_then(|start| trimmed.rfind('}').map(|end| (start, end)))
+        .zip(trimmed.rfind('}'))
         .and_then(|(start, end)| {
             if end > start {
                 try_parse_synthesis_json(&trimmed[start..=end])
