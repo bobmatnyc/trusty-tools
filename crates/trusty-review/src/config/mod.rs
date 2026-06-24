@@ -22,11 +22,15 @@ pub mod verification;
 // Why: voice configuration loading extracted to keep config/mod.rs under the
 // 500-line cap (#610) after adding voice support (#754/#756).
 pub mod voice;
+// Why: outcome-polling configuration extracted to keep config/mod.rs under the
+// 500-line cap — mirrors the verification module pattern.
+pub mod outcome;
 
 pub use index_resolver::{find_git_root, repo_root_from_cwd, resolve_index_from_list};
 pub use mapreduce::{DiffStats, MapMode, MapReduceConfig, ReviewPath, select_review_mode};
 
 pub use context::{ContextConfig, ContextFileConfig};
+pub use outcome::{OutcomeConfig, OutcomeFileConfig};
 pub use role_models::{
     FileModels, RoleCliOverrides, RoleConfig, RoleConfigOverride, RoleEnv, RoleModels,
 };
@@ -95,6 +99,8 @@ struct TomlFile {
     voice: voice::VoiceFileConfig,
     #[serde(default)]
     coverage: crate::coverage::CoverageFileConfig,
+    #[serde(default)]
+    outcome: outcome::OutcomeFileConfig,
 }
 
 /// Global service configuration for trusty-review.
@@ -238,6 +244,12 @@ pub struct ReviewConfig {
     /// default).  All fields configurable via env vars or `[coverage]` TOML table.
     /// When `enabled = false`, the coverage pipeline is a complete no-op.
     pub coverage: crate::coverage::CoveragePolicy,
+
+    // ── Outcome polling (issue #1421) ─────────────────────────────────────
+    /// Resolved outcome-polling settings (`enabled`, `poll_delay_minutes`,
+    /// `dismissal_threshold`).  Defaults to disabled — opt-in via
+    /// `TRUSTY_REVIEW_OUTCOME_ENABLED=true`.
+    pub outcome: OutcomeConfig,
 }
 
 impl ReviewConfig {
@@ -264,6 +276,8 @@ impl ReviewConfig {
         let file_voice: Option<&voice::VoiceFileConfig> = toml_file.as_ref().map(|f| &f.voice);
         let file_coverage: Option<&crate::coverage::CoverageFileConfig> =
             toml_file.as_ref().map(|f| &f.coverage);
+        let file_outcome: Option<&outcome::OutcomeFileConfig> =
+            toml_file.as_ref().map(|f| &f.outcome);
 
         let env = RoleEnv::from_env();
         let role_models = RoleModels::resolve(cli_overrides, &env, file_models.as_ref());
@@ -326,6 +340,7 @@ impl ReviewConfig {
             voice_package: voice::load_voice_package(file_voice),
             voice_principles: voice::load_voice_principles(file_voice),
             coverage: crate::coverage::CoveragePolicy::from_env_and_file(file_coverage),
+            outcome: OutcomeConfig::from_env_and_file(file_outcome),
         }
     }
 

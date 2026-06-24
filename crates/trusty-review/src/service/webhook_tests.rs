@@ -240,3 +240,62 @@ async fn webhook_accepts_review_requested_returns_202() {
     // 202 Accepted — pipeline spawned in background.
     assert_eq!(response.status(), StatusCode::ACCEPTED);
 }
+
+#[test]
+fn load_last_review_result_finds_correct_file() {
+    // Arrange: write two JSON files in a tempdir — one matching the PR,
+    // one for a different PR — and verify only the matching one is loaded.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log_dir = dir.path();
+
+    // Helper: build a minimal ReviewResult JSON for a given PR.
+    fn make_result_json(owner: &str, repo: &str, pr: u64) -> String {
+        // Construct a minimal ReviewResult JSON directly.
+        format!(
+            r#"{{
+                "owner": "{owner}",
+                "repo": "{repo}",
+                "pr_number": {pr},
+                "pr_title": "Test PR",
+                "pr_url": "https://github.com/{owner}/{repo}/pull/{pr}",
+                "review_body": "",
+                "verdict": "APPROVE",
+                "findings": [],
+                "model": "test",
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cost_estimate_usd": 0.0,
+                "latency_ms": 0,
+                "dry_run": true,
+                "posted": false,
+                "timestamp": "2026-06-23T12:00:00Z",
+                "head_sha": "abc123",
+                "review_version": "tr-test"
+            }}"#
+        )
+    }
+
+    // Write a matching file (acme-backend-pr42-...).
+    let matching_path = log_dir.join("acme-backend-pr42-2026-06-23T12-00-00Z.json");
+    std::fs::write(&matching_path, make_result_json("acme", "backend", 42))
+        .expect("write matching");
+
+    // Write a non-matching file (different PR number).
+    let non_matching_path = log_dir.join("acme-backend-pr99-2026-06-23T12-00-00Z.json");
+    std::fs::write(&non_matching_path, make_result_json("acme", "backend", 99))
+        .expect("write non-matching");
+
+    // Act.
+    let result = super::load_last_review_result(log_dir, "acme", "backend", 42);
+
+    // Assert: the matching result is found.
+    assert!(result.is_some(), "should find the matching review result");
+    assert_eq!(result.unwrap().pr_number, 42);
+}
+
+#[test]
+fn load_last_review_result_returns_none_for_missing_pr() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let result = super::load_last_review_result(dir.path(), "acme", "backend", 42);
+    assert!(result.is_none(), "should return None for empty log dir");
+}

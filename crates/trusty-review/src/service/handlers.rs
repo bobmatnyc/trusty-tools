@@ -67,6 +67,16 @@ pub struct AppState {
     /// process is alive.  The probe is cached so repeated health polls don't
     /// hammer the provider.
     pub inference_probe: InferenceProbe,
+    /// Shutdown signal sender for outcome-poll background tasks (issue #1421).
+    ///
+    /// Why: background outcome-poll tasks use `tokio::select!` on the corresponding
+    /// receiver so they are cancelled on daemon shutdown rather than becoming orphans.
+    /// What: an `Arc<Sender<bool>>` shared across clones; sending `true` cancels all
+    /// active poll tasks. Created fresh in every constructor; `serve()` sends `true`
+    /// after `axum::serve` returns.
+    /// Test: `webhook_closed_merged_schedules_outcome_poll` in `webhook_tests.rs`
+    /// verifies the task is registered; orphan-prevention is structural (select!).
+    pub shutdown_tx: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl AppState {
@@ -121,6 +131,7 @@ impl AppState {
         analyze: Option<Arc<dyn AnalyzeClient>>,
         dedup: Option<Arc<DedupStore>>,
     ) -> Self {
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         Self {
             config,
             llm,
@@ -132,6 +143,7 @@ impl AppState {
             dedup,
             in_flight_registry: InFlightRegistry::new(),
             inference_probe: InferenceProbe::default(),
+            shutdown_tx: Arc::new(shutdown_tx),
         }
     }
 }
