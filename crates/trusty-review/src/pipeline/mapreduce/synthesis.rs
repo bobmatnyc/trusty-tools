@@ -27,7 +27,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     config::mapreduce::MapReduceConfig,
-    llm::{ChatMessage, LlmError, LlmProvider, LlmRequest},
+    llm::{ChatMessage, LlmProvider, LlmRequest},
     models::{Effort, Finding, Verdict},
     pipeline::{letter_grade::Grade, mapreduce::map::MapContext},
 };
@@ -152,12 +152,15 @@ pub async fn synthesize_review(
     let floored_verdict =
         apply_high_severity_floor_only(synthesis.synthesized_verdict, &reduced.findings);
 
-    // Parse the synthesized grade string; fall back to the floor-derived default.
-    let grade_str = if synthesis.grade.is_empty() {
-        grade_for_verdict(&floored_verdict).to_string()
-    } else {
-        synthesis.grade.clone()
-    };
+    // Parse the synthesized grade string through the Grade type so invalid tokens
+    // (e.g. "Pass", "A+/B") are caught; fall back to the floor-derived default on
+    // parse failure or empty string.
+    let grade_str = synthesis
+        .grade
+        .parse::<Grade>()
+        .ok()
+        .map(|g| g.to_string())
+        .unwrap_or_else(|| grade_for_verdict(&floored_verdict).to_string());
 
     let summary = synthesis.summary.clone();
 
@@ -205,6 +208,27 @@ struct ParsedSynthesis {
 /// to provide.  The one non-negotiable floor is: ANY non-refuted High-severity
 /// finding must still floor the verdict to at least BLOCK.  Critical findings
 /// cannot be forgiven by synthesis — that would be a safety hole.
+///
+/// **High → BLOCK is the correct and intentional floor** (floor semantics note):
+/// The unified single-file path's `derive_verdict` (in `pipeline/grade.rs`,
+/// `correctness_floor`) maps `Effort::High` → `Verdict::Block` as Tier 1.
+/// `Effort::High` is the only severity level above Medium in the domain model
+/// ("Critical or High severity" per the `grade.rs` module-level comment).  There
+/// is no separate `Critical` variant in `Effort`.  Our `High → BLOCK` floor here
+/// therefore MATCHES the unified path's semantics exactly, keeping map-reduce and
+/// unified verdicts on a single standard.
+///
+/// **Softening a mechanical BLOCK IS intentional** (calibration goal):
+/// The `worst-chunk-wins` mechanical reduce can produce a BLOCK verdict even when
+/// no High-severity finding exists — for example, when the count-based `≥2 Medium
+/// → REQUEST_CHANGES` floor fires on many chunks and the most severe chunk verdict
+/// is REQUEST_CHANGES, not BLOCK.  In practice, a mechanical BLOCK may arise from
+/// a per-chunk BLOCK that was itself driven by a Medium-count heuristic rather than
+/// a genuine High-severity finding.  Synthesis is PERMITTED to soften such a
+/// mechanical BLOCK, because the LLM has seen all findings holistically and judged
+/// them minor.  The High-severity floor below is the only hard backstop: synthesis
+/// can NEVER soften a BLOCK that is backed by a non-refuted `Effort::High` finding.
+///
 /// What: if any finding in `findings` is `Effort::High` AND not refuted →
 /// returns the stricter of (`synthesized_verdict`, BLOCK).  Otherwise returns
 /// `synthesized_verdict` unchanged.  This deliberately does NOT apply the
@@ -429,23 +453,6 @@ fn parse_verdict_str(s: &str) -> Option<Verdict> {
 fn grade_for_verdict(v: &Verdict) -> Grade {
     use crate::pipeline::letter_grade::default_grade_for_verdict;
     default_grade_for_verdict(v)
-}
-
-// ─── Synthesis error type ─────────────────────────────────────────────────────
-
-/// Synthesis-stage error for tracing (never propagated — all paths fall back).
-///
-/// Why: synthesis errors must be observable but never fatal; using a typed enum
-/// keeps the `warn!` calls structured and avoids string formatting at call sites.
-/// What: two variants — LLM transport error and JSON parse error.  Both cause
-/// fall-back to the mechanical `ReducedReview`.
-/// Test: `synthesis_llm_error_falls_back`, `synthesis_parse_error_falls_back`.
-#[allow(dead_code)]
-enum SynthesisError {
-    /// LLM call returned an error.
-    Llm(LlmError),
-    /// Response could not be parsed as a valid synthesis JSON.
-    Parse(String),
 }
 
 #[cfg(test)]

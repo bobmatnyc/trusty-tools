@@ -125,7 +125,7 @@ fn ctx<'a>(
         pr_meta,
         context,
         external_context: "",
-        reviewer_model: "openai/gpt-5.4-mini-20260317",
+        reviewer_model: "test/fake-synthesis-model",
         voice_config: voice,
         coverage_enabled: false,
     }
