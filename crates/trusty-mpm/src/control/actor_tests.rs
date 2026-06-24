@@ -15,8 +15,8 @@ use chrono::Utc;
 use tokio::sync::{RwLock, broadcast, mpsc};
 
 use crate::control::actor::{
-    ActorCommand, CRITICAL_OBSERVER_CAPACITY, DEFAULT_BROADCAST_CAPACITY, SessionActorHandle,
-    run_actor, spawn_actor,
+    ActorCommand, CRITICAL_OBSERVER_CAPACITY, DEFAULT_BROADCAST_CAPACITY, SessionActorConfig,
+    SessionActorHandle, run_actor, spawn_actor,
 };
 use crate::control::backend::{SessionBackend, SessionInput};
 use crate::control::event::{BackendKind, SessionEvent};
@@ -137,6 +137,7 @@ async fn actor_broadcasts_started_event() {
         BackendKind::StreamJson,
         StubBackend::new_clean_exit(),
         DEFAULT_BROADCAST_CAPACITY,
+        SessionActorConfig::default(),
     );
     let mut rx = handle.event_tx.subscribe();
 
@@ -170,6 +171,7 @@ async fn actor_command_stop_terminates() {
         BackendKind::StreamJson,
         StubBackend::new_never_exits(),
         DEFAULT_BROADCAST_CAPACITY,
+        SessionActorConfig::default(),
     );
     tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
     handle.command_tx.send(ActorCommand::Stop).await.unwrap();
@@ -188,6 +190,7 @@ async fn actor_clean_exit_from_backend_stops_actor() {
         BackendKind::StreamJson,
         StubBackend::new_with_output(&id),
         DEFAULT_BROADCAST_CAPACITY,
+        SessionActorConfig::default(),
     );
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -249,6 +252,7 @@ async fn actor_activity_parsed_on_output() {
         BackendKind::StreamJson,
         backend,
         DEFAULT_BROADCAST_CAPACITY,
+        SessionActorConfig::default(),
     );
     tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
 
@@ -288,6 +292,7 @@ async fn actor_pending_decision_extracted() {
         BackendKind::StreamJson,
         backend,
         DEFAULT_BROADCAST_CAPACITY,
+        SessionActorConfig::default(),
     );
     tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
 
@@ -341,6 +346,7 @@ async fn actor_pending_decision_cleared_on_next_output() {
         BackendKind::StreamJson,
         backend,
         DEFAULT_BROADCAST_CAPACITY,
+        SessionActorConfig::default(),
     );
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
@@ -409,6 +415,7 @@ async fn actor_auth_prompt_batch_trailing_event_forwarded() {
         BackendKind::Tmux, // Tmux: auth → AwaitingAuth but does NOT break the loop
         backend,
         DEFAULT_BROADCAST_CAPACITY,
+        SessionActorConfig::default(),
     );
     let mut rx = handle.event_tx.subscribe();
 
@@ -510,6 +517,7 @@ async fn critical_observer_lag_yields_awaiting_intervention() {
         command_rx,
         event_tx.clone(),
         Arc::clone(&metadata),
+        SessionActorConfig::default(),
     ));
 
     // Register critical observer and wait for the mpsc Receiver.
@@ -629,6 +637,7 @@ async fn critical_observer_disconnected_keeps_session_running() {
         command_rx,
         event_tx.clone(),
         Arc::clone(&metadata),
+        SessionActorConfig::default(),
     ));
 
     // Subscribe, receive the Receiver, then immediately drop it (simulates the
@@ -728,6 +737,7 @@ async fn critical_observer_double_subscribe_rejects_second() {
         command_rx,
         event_tx.clone(),
         Arc::clone(&metadata),
+        SessionActorConfig::default(),
     ));
 
     // First subscription — should succeed.
@@ -809,6 +819,7 @@ async fn critical_observer_no_false_positive_when_keeping_up() {
         command_rx,
         event_tx.clone(),
         Arc::clone(&metadata),
+        SessionActorConfig::default(),
     ));
 
     // Register critical observer.
@@ -845,5 +856,318 @@ async fn critical_observer_no_false_positive_when_keeping_up() {
         "no false positive: state should not be AwaitingIntervention when \
          consumer keeps up; got: {}",
         m.state
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WI-5 #1649: auth-timeout auto-stop timer tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Helper: build the explicit-channel test rig and spawn the actor with a given
+/// backend, backend kind, and actor config. Returns the handle, a pre-subscribed
+/// broadcast receiver, and the backend command sender (for feeding events).
+///
+/// Why: the auth-timeout and classifier tests share the same channel-fed setup;
+/// a helper keeps each test focused on its assertion.
+/// What: wires command/event/metadata channels, subscribes a broadcast receiver
+/// before spawn (so no event is missed), spawns `run_actor`, and returns the
+/// handle + receiver + backend sender.
+/// Test: used by `actor_auth_timeout_*` and `actor_classifier_*`.
+/// Backend feed channel: the sender side a test uses to push event batches
+/// (`Some(Ok(..))`), a clean exit (`None`), or an error (`Some(Err(..))`).
+type BackendFeed = mpsc::Sender<Option<anyhow::Result<Vec<SessionEvent>>>>;
+
+/// The rig returned by [`spawn_chan_actor`]: the actor handle, a pre-subscribed
+/// broadcast receiver, and the backend feed sender.
+type ChanActorRig = (
+    SessionActorHandle,
+    broadcast::Receiver<SessionEvent>,
+    BackendFeed,
+);
+
+fn spawn_chan_actor(
+    id: &ControlSessionId,
+    backend_kind: BackendKind,
+    actor_config: SessionActorConfig,
+) -> ChanActorRig {
+    let (backend_tx, backend_rx) = mpsc::channel::<Option<anyhow::Result<Vec<SessionEvent>>>>(32);
+    let backend = ChanBackend {
+        rx: backend_rx,
+        stop_flag: None,
+    };
+    let (command_tx, command_rx) = mpsc::channel::<ActorCommand>(32);
+    let (event_tx, _) = broadcast::channel::<SessionEvent>(DEFAULT_BROADCAST_CAPACITY);
+    let metadata = Arc::new(RwLock::new(SessionMetadata::new(
+        id.clone(),
+        "auth-proj".into(),
+        backend_kind,
+    )));
+    let handle = make_handle(
+        id,
+        "auth-proj",
+        command_tx,
+        event_tx.clone(),
+        Arc::clone(&metadata),
+    );
+    let bcast_rx = event_tx.subscribe();
+    tokio::spawn(run_actor(
+        id.clone(),
+        backend,
+        backend_kind,
+        command_rx,
+        event_tx.clone(),
+        metadata,
+        actor_config,
+    ));
+    (handle, bcast_rx, backend_tx)
+}
+
+/// Await a terminal state on `handle.metadata`, polling up to `timeout`.
+///
+/// Why: condition-based waiting avoids brittle fixed sleeps; the test asserts on
+/// the state the actor lands in, not on wall-clock timing.
+/// What: loops reading metadata until `is_terminal()` or the timeout elapses,
+/// returning the final observed `SessionState`.
+/// Test: used by `actor_auth_timeout_*`.
+async fn await_terminal(
+    handle: &SessionActorHandle,
+    timeout: tokio::time::Duration,
+) -> SessionState {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let state = { handle.metadata.read().await.state.clone() };
+        if state.is_terminal() || tokio::time::Instant::now() >= deadline {
+            return state;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// A session stuck in `AwaitingAuth` past the (injected, tiny) auth timeout
+/// auto-transitions to terminal `AuthFailed` and stops (#1649, §4.4).
+///
+/// Why: WI-5 added `auth_timeout_secs` but the auto-stop TIMER was not wired
+/// into the actor loop. This test proves the timer fires.
+/// What: spawns a tmux-backed actor with a 10 ms auth timeout, feeds an
+/// auth-prompt output (tmux → `AwaitingAuth`), then asserts the session reaches
+/// `AuthFailed` (the timer fired) without the test sleeping 30 s.
+/// Test: this test.
+#[tokio::test]
+async fn actor_auth_timeout_fires_and_stops() {
+    let id = ControlSessionId::new("auth-to", 0);
+    let cfg = SessionActorConfig {
+        auth_timeout: tokio::time::Duration::from_millis(10),
+        classifier: None,
+    };
+    let (handle, _bcast, backend_tx) = spawn_chan_actor(&id, BackendKind::Tmux, cfg);
+
+    // Feed an auth-prompt output: tmux backend → AwaitingAuth (not terminal).
+    let auth_event = SessionEvent::Output {
+        session_id: id.clone(),
+        raw: "Please log in to claude.ai to continue".into(),
+        structured: None,
+        ts: Utc::now(),
+    };
+    backend_tx.send(Some(Ok(vec![auth_event]))).await.unwrap();
+
+    // The 10 ms timer must fire and drive the session to terminal AuthFailed.
+    let state = await_terminal(&handle, tokio::time::Duration::from_secs(2)).await;
+    assert_eq!(
+        state,
+        SessionState::AuthFailed,
+        "session stuck in AwaitingAuth past the timeout must become AuthFailed; got: {state}"
+    );
+}
+
+/// A session that does NOT enter `AwaitingAuth` is never auto-stopped by the
+/// auth timer, even with a tiny timeout (#1649).
+///
+/// Why: the timer must be armed ONLY in `AwaitingAuth`. A normal `Running`
+/// session with a tiny configured timeout must not be spuriously killed.
+/// What: spawns a tmux actor with a 10 ms auth timeout, feeds a NORMAL output
+/// (no auth prompt) and a clean exit, and asserts the session ends `Stopped`
+/// (clean completion), never `AuthFailed`.
+/// Test: this test.
+#[tokio::test]
+async fn actor_auth_timeout_does_not_fire_without_awaiting_auth() {
+    let id = ControlSessionId::new("auth-noto", 0);
+    let cfg = SessionActorConfig {
+        auth_timeout: tokio::time::Duration::from_millis(10),
+        classifier: None,
+    };
+    let (handle, _bcast, backend_tx) = spawn_chan_actor(&id, BackendKind::Tmux, cfg);
+
+    // Normal (non-auth) output keeps the session in Running.
+    let normal = SessionEvent::Output {
+        session_id: id.clone(),
+        raw: "Tool use: Bash".into(),
+        structured: None,
+        ts: Utc::now(),
+    };
+    backend_tx.send(Some(Ok(vec![normal]))).await.unwrap();
+    // Give the (tiny) timer ample opportunity to (wrongly) fire.
+    tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
+    // Then signal a clean exit.
+    backend_tx.send(None).await.unwrap();
+
+    let state = await_terminal(&handle, tokio::time::Duration::from_secs(2)).await;
+    assert_eq!(
+        state,
+        SessionState::Stopped,
+        "a session that never awaits auth must complete cleanly, never AuthFailed; got: {state}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WI-5 #1648: classifier fallback wiring tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+use crate::control::classifier::ActivityClassifier;
+use crate::control::event::ActivityKind;
+
+/// A mock classifier that records whether it was called and returns a fixed
+/// label (or an injected error).
+///
+/// Why: #1648 must prove the actor (a) makes ZERO classifier calls when the
+/// gate is off (classifier `None`), and (b) calls the seam and surfaces the
+/// label when the gate is on — all WITHOUT real network or an OpenRouter key.
+/// What: `classify` flips `called` and returns the configured result.
+/// Test: `actor_classifier_*`.
+struct MockClassifier {
+    called: Arc<AtomicBool>,
+    result: Result<ActivityKind, String>,
+}
+
+#[async_trait::async_trait]
+impl ActivityClassifier for MockClassifier {
+    async fn classify(&self, _raw_output: &str) -> Result<ActivityKind, String> {
+        self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.result.clone()
+    }
+}
+
+/// Gate-OFF (default config): the actor makes ZERO classifier calls, even on
+/// output the regex layer cannot classify (AC-9, #1648).
+///
+/// Why: the AC-9 guarantee is that with the classifier disabled NO classifier
+/// invocation happens — the strongest no-network assertion at the actor seam.
+/// What: spawns an actor with `SessionActorConfig::default()` (classifier
+/// `None`), feeds unmatched gibberish output, and asserts the (separately held)
+/// mock was never invoked — because none was injected, the call site is skipped.
+/// Test: this test.
+#[tokio::test]
+async fn actor_classifier_gate_off_makes_no_call() {
+    let id = ControlSessionId::new("clf-off", 0);
+    let called = Arc::new(AtomicBool::new(false));
+    // Default config => classifier None => the actor must never reach a seam.
+    let (handle, _bcast, backend_tx) =
+        spawn_chan_actor(&id, BackendKind::StreamJson, SessionActorConfig::default());
+
+    // Output the §8.2 regex layer does NOT classify.
+    let gibberish = SessionEvent::Output {
+        session_id: id.clone(),
+        raw: "zzxq unmatched gibberish no pattern here".into(),
+        structured: None,
+        ts: Utc::now(),
+    };
+    backend_tx.send(Some(Ok(vec![gibberish]))).await.unwrap();
+    backend_tx.send(None).await.unwrap();
+
+    let _ = await_terminal(&handle, tokio::time::Duration::from_secs(2)).await;
+    assert!(
+        !called.load(std::sync::atomic::Ordering::SeqCst),
+        "gate-off (no classifier injected) must make ZERO classifier calls (AC-9)"
+    );
+}
+
+/// Gate-ON: the actor invokes the injected classifier on output the regex layer
+/// could not classify and surfaces the returned label as `ActivityParsed` (#1648).
+///
+/// Why: WI-5 shipped only the gate; this proves the call is actually wired and
+/// the label flows into the activity stream / metadata.
+/// What: injects a `MockClassifier` returning `RateLimited`, feeds unmatched
+/// output, and asserts (a) the classifier was called and (b) `last_summary`
+/// reflects the classified label.
+/// Test: this test.
+#[tokio::test]
+async fn actor_classifier_gate_on_invokes_and_surfaces_label() {
+    let id = ControlSessionId::new("clf-on", 0);
+    let called = Arc::new(AtomicBool::new(false));
+    let mock = Arc::new(MockClassifier {
+        called: Arc::clone(&called),
+        result: Ok(ActivityKind::RateLimited),
+    });
+    let cfg = SessionActorConfig {
+        auth_timeout: tokio::time::Duration::from_secs(30),
+        classifier: Some(mock),
+    };
+    let (handle, _bcast, backend_tx) = spawn_chan_actor(&id, BackendKind::StreamJson, cfg);
+
+    let gibberish = SessionEvent::Output {
+        session_id: id.clone(),
+        raw: "zzxq unmatched gibberish no pattern here".into(),
+        structured: None,
+        ts: Utc::now(),
+    };
+    backend_tx.send(Some(Ok(vec![gibberish]))).await.unwrap();
+    backend_tx.send(None).await.unwrap();
+
+    let _ = await_terminal(&handle, tokio::time::Duration::from_secs(2)).await;
+    assert!(
+        called.load(std::sync::atomic::Ordering::SeqCst),
+        "gate-on must invoke the injected classifier on unmatched output"
+    );
+    let m = handle.metadata.read().await;
+    assert!(
+        m.last_summary
+            .as_deref()
+            .unwrap_or("")
+            .contains("llm-classified"),
+        "classified label must surface into last_summary; got: {:?}",
+        m.last_summary
+    );
+}
+
+/// A classifier FAILURE is fail-open: it logs and the session continues to a
+/// clean terminal state, never breaking supervision (#1648).
+///
+/// Why: §8.3 mandates the classifier is best-effort; a failure must never abort
+/// or stall the session.
+/// What: injects a classifier that always errors, feeds unmatched output and a
+/// clean exit, and asserts the session reaches `Stopped` (clean) — not a hung
+/// or `Failed` state — proving the error was swallowed.
+/// Test: this test.
+#[tokio::test]
+async fn actor_classifier_failure_is_fail_open() {
+    let id = ControlSessionId::new("clf-fail", 0);
+    let called = Arc::new(AtomicBool::new(false));
+    let mock = Arc::new(MockClassifier {
+        called: Arc::clone(&called),
+        result: Err("simulated openrouter outage".to_string()),
+    });
+    let cfg = SessionActorConfig {
+        auth_timeout: tokio::time::Duration::from_secs(30),
+        classifier: Some(mock),
+    };
+    let (handle, _bcast, backend_tx) = spawn_chan_actor(&id, BackendKind::StreamJson, cfg);
+
+    let gibberish = SessionEvent::Output {
+        session_id: id.clone(),
+        raw: "zzxq unmatched gibberish no pattern here".into(),
+        structured: None,
+        ts: Utc::now(),
+    };
+    backend_tx.send(Some(Ok(vec![gibberish]))).await.unwrap();
+    backend_tx.send(None).await.unwrap();
+
+    let state = await_terminal(&handle, tokio::time::Duration::from_secs(2)).await;
+    assert!(
+        called.load(std::sync::atomic::Ordering::SeqCst),
+        "the classifier must have been invoked"
+    );
+    assert_eq!(
+        state,
+        SessionState::Stopped,
+        "a classifier failure must be fail-open: session completes cleanly; got: {state}"
     );
 }

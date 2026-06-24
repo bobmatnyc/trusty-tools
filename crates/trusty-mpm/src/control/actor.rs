@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use chrono::Utc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -27,6 +28,8 @@ use tracing::{debug, info, warn};
 
 use crate::control::activity::ActivityParser;
 use crate::control::backend::SessionBackend;
+use crate::control::classifier::ActivityClassifier;
+use crate::control::config::DEFAULT_AUTH_TIMEOUT_SECS;
 use crate::control::event::{ActivityKind, BackendKind, SessionEvent, StopReason};
 use crate::control::id::ControlSessionId;
 use crate::control::state::{SessionMetadata, SessionState};
@@ -46,6 +49,52 @@ pub const DEFAULT_BROADCAST_CAPACITY: usize = 256;
 /// broadcast capacity so an idle consumer can buffer the same number of events
 /// before triggering intervention.
 pub const CRITICAL_OBSERVER_CAPACITY: usize = DEFAULT_BROADCAST_CAPACITY;
+
+/// Per-actor injectable behavior config (WI-5 #1648/#1649).
+///
+/// Why: WI-5 adds two per-session behaviors that must be injectable so tests can
+/// drive them deterministically without real network or 30 s sleeps — the §4.4
+/// auth-timeout auto-stop duration (#1649) and the optional §8.3 OpenRouter
+/// classifier (#1648). Bundling both into one struct keeps `spawn_actor`'s
+/// signature stable as later phases add more knobs, and gives every actor one
+/// authoritative behavior surface.
+/// What: `auth_timeout` is the duration a (stream-JSON) session may sit in
+/// `AwaitingAuth` before auto-transitioning to terminal `AuthFailed`;
+/// `classifier` is `None` by default (gate closed → ZERO network, AC-9) and
+/// `Some(_)` only when the §8.3 gate has opened and a provider was resolved.
+/// Test: `actor_auth_timeout_*`, `actor_classifier_*` in `actor_tests.rs`.
+#[derive(Clone)]
+pub struct SessionActorConfig {
+    /// §4.4 auth-timeout: how long a session may remain in `AwaitingAuth`
+    /// before the actor auto-transitions it to terminal `AuthFailed` and stops.
+    pub auth_timeout: Duration,
+    /// §8.3 optional activity classifier. `None` = the gate is closed (default
+    /// path): the actor makes ZERO classifier calls. `Some(_)` = the gate is
+    /// open and this seam is invoked fail-open when the regex layer is unsure.
+    pub classifier: Option<Arc<dyn ActivityClassifier>>,
+}
+
+impl Default for SessionActorConfig {
+    /// Why: the default actor must behave exactly as pre-WI-5 — a 30 s auth
+    /// timeout (spec §4.4 default) and NO classifier (gate closed, AC-9).
+    /// What: `auth_timeout = 30 s`, `classifier = None`.
+    /// Test: `actor_config_default_has_no_classifier`.
+    fn default() -> Self {
+        Self {
+            auth_timeout: Duration::from_secs(DEFAULT_AUTH_TIMEOUT_SECS),
+            classifier: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for SessionActorConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionActorConfig")
+            .field("auth_timeout", &self.auth_timeout)
+            .field("classifier", &self.classifier.is_some())
+            .finish()
+    }
+}
 
 /// Commands the `SessionActor` accepts on its `mpsc` inbox.
 ///
@@ -158,6 +207,10 @@ impl SessionActorHandle {
 /// What: creates the `mpsc` command channel, the `broadcast` event channel,
 /// and the shared metadata Arc, then `tokio::spawn`s `run_actor`. Returns
 /// the handle ready for insertion into `SessionRegistry`.
+/// WI-5: takes a [`SessionActorConfig`] carrying the §4.4 auth timeout (#1649)
+/// and the optional §8.3 classifier (#1648). Pass
+/// `SessionActorConfig::default()` for the pre-WI-5 behavior (30 s timeout, no
+/// classifier).
 /// Test: `actor_broadcasts_started_event`.
 pub fn spawn_actor<B: SessionBackend>(
     session_id: ControlSessionId,
@@ -165,6 +218,7 @@ pub fn spawn_actor<B: SessionBackend>(
     backend_kind: BackendKind,
     backend: B,
     broadcast_capacity: usize,
+    actor_config: SessionActorConfig,
 ) -> SessionActorHandle {
     let (command_tx, command_rx) = mpsc::channel::<ActorCommand>(32);
     let (event_tx, _) = broadcast::channel::<SessionEvent>(broadcast_capacity);
@@ -189,6 +243,7 @@ pub fn spawn_actor<B: SessionBackend>(
         command_rx,
         event_tx,
         metadata,
+        actor_config,
     ));
 
     handle
@@ -216,6 +271,7 @@ pub(crate) async fn run_actor<B: SessionBackend>(
     mut command_rx: mpsc::Receiver<ActorCommand>,
     event_tx: broadcast::Sender<SessionEvent>,
     metadata: Arc<RwLock<SessionMetadata>>,
+    actor_config: SessionActorConfig,
 ) {
     // Emit Started event and transition to Running.
     let _ = event_tx.send(SessionEvent::Started {
@@ -233,6 +289,14 @@ pub(crate) async fn run_actor<B: SessionBackend>(
     // AwaitingIntervention. Using mpsc rather than a broadcast clone means we
     // measure the actual consumer's queue depth, not a self-drained proxy.
     let mut critical_tx: Option<mpsc::Sender<SessionEvent>> = None;
+
+    // §4.4 auth-timeout (#1649): when a session enters `AwaitingAuth`, the actor
+    // arms a deadline `auth_timeout` from now. If it has not transitioned to
+    // `Running` by the deadline, the actor auto-stops it (→ terminal
+    // `AuthFailed`). `None` means the timer is disarmed (the session is not
+    // awaiting auth). The deadline is recomputed each loop iteration from the
+    // CURRENT state so a tmux `AwaitingAuth → Running` transition disarms it.
+    let mut auth_deadline: Option<tokio::time::Instant> = None;
     // Total events that failed try_send(Full) since the critical observer
     // subscribed. Accumulated across batches so ObserverCriticalLag.dropped
     // reports the true session-lifetime count of undelivered events, not
@@ -240,15 +304,70 @@ pub(crate) async fn run_actor<B: SessionBackend>(
     let mut critical_total_dropped: u64 = 0;
 
     loop {
+        // §4.4 auth-timer maintenance (#1649): arm the deadline on first entry
+        // into `AwaitingAuth`, and disarm it the moment the session leaves that
+        // state (e.g. tmux `AwaitingAuth → Running`). Recomputing from the
+        // CURRENT state each iteration keeps the timer and the state machine
+        // coherent without an explicit cancel signal.
         let is_terminal = {
             let m = metadata.read().await;
+            match m.state {
+                SessionState::AwaitingAuth => {
+                    if auth_deadline.is_none() {
+                        auth_deadline =
+                            Some(tokio::time::Instant::now() + actor_config.auth_timeout);
+                    }
+                }
+                _ => auth_deadline = None,
+            }
             m.state.is_terminal()
         };
         if is_terminal {
             break;
         }
 
+        // The auth-timeout future: an already-elapsed sleep when disarmed (it is
+        // only polled in the `AwaitingAuth` arm guard below, so a disarmed timer
+        // never fires spuriously).
+        let auth_timer = async {
+            match auth_deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+
         tokio::select! {
+            // §4.4 auth-timeout fired (#1649): the session sat in `AwaitingAuth`
+            // past `auth_timeout` without authenticating. Transition to terminal
+            // `AuthFailed`, emit the event, and stop the backend. The `if`
+            // guard ensures this arm is only live while a deadline is armed.
+            () = auth_timer, if auth_deadline.is_some() => {
+                warn!(
+                    session_id = %session_id,
+                    timeout_secs = actor_config.auth_timeout.as_secs(),
+                    "auth timeout elapsed in AwaitingAuth (§4.4) — \
+                     auto-stopping session as AuthFailed"
+                );
+                let now = Utc::now();
+                {
+                    let mut m = metadata.write().await;
+                    m.state = SessionState::AuthFailed;
+                }
+                let _ = event_tx.send(SessionEvent::AuthFailed {
+                    session_id: session_id.clone(),
+                    backend: backend_kind,
+                    reason: format!(
+                        "auth not completed within {}s; session auto-stopped (§4.4)",
+                        actor_config.auth_timeout.as_secs()
+                    ),
+                    ts: now,
+                });
+                if let Err(e) = Box::new(backend).stop().await {
+                    warn!(session_id = %session_id, "backend stop on auth timeout: {e}");
+                }
+                break;
+            }
+
             // Command inbox.
             cmd = command_rx.recv() => {
                 match cmd {
@@ -524,6 +643,23 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                                     ts: now,
                                 });
                             }
+                        } else if !raw_text.is_empty()
+                            && let Some(classifier) = actor_config.classifier.as_ref()
+                        {
+                            // §8.3 fallback (#1648): the regex layer was unsure
+                            // about this output. The gate is open (a classifier
+                            // was injected), so ask the OpenRouter classifier.
+                            // This is FAIL-OPEN: any error is logged and ignored
+                            // — classification must never break supervision.
+                            classify_fallback(
+                                classifier.as_ref(),
+                                &session_id,
+                                &raw_text,
+                                now,
+                                &event_tx,
+                                &metadata,
+                            )
+                            .await;
                         }
                     }
                 }
@@ -532,6 +668,50 @@ pub(crate) async fn run_actor<B: SessionBackend>(
     }
 
     debug!(session_id = %session_id, "actor task exiting");
+}
+
+/// Run the §8.3 OpenRouter classifier on output the regex layer could not
+/// resolve, emitting `ActivityParsed` on a confident label (#1648).
+///
+/// Why: §8.3 makes the LLM classifier an explicit fallback for activity the
+/// §8.2 regex layer could not confidently classify. Isolating the call in a
+/// helper keeps the actor loop readable and the actor file under its SLOC cap.
+/// What: awaits `classifier.classify(raw_text)`; on `Ok(kind)` updates
+/// `last_summary` and broadcasts `ActivityParsed`; on `Err` logs at warn and
+/// returns (FAIL-OPEN — a classifier failure must never break supervision).
+/// Test: `actor_classifier_invoked_on_unmatched_output`,
+/// `actor_classifier_failure_is_fail_open` in `actor_tests.rs`.
+async fn classify_fallback(
+    classifier: &dyn ActivityClassifier,
+    session_id: &ControlSessionId,
+    raw_text: &str,
+    now: chrono::DateTime<Utc>,
+    event_tx: &broadcast::Sender<SessionEvent>,
+    metadata: &Arc<RwLock<SessionMetadata>>,
+) {
+    match classifier.classify(raw_text).await {
+        Ok(kind) => {
+            let summary = format!("llm-classified: {kind:?}");
+            {
+                let mut m = metadata.write().await;
+                m.last_summary = Some(summary.clone());
+            }
+            let _ = event_tx.send(SessionEvent::ActivityParsed {
+                session_id: session_id.clone(),
+                kind,
+                summary,
+                ts: now,
+            });
+        }
+        Err(reason) => {
+            // FAIL-OPEN: the §8.3 classifier is best-effort. A failure must
+            // never break session supervision — log and continue.
+            warn!(
+                session_id = %session_id,
+                "§8.3 classifier failed (fail-open, session continues): {reason}"
+            );
+        }
+    }
 }
 
 /// Transition to `Stopping` state (internal; no event emitted in alpha-1).

@@ -33,10 +33,12 @@ pub mod registry;
 pub mod state;
 
 // Convenience re-exports so consumers can import from `crate::control::*`.
-pub use actor::{ActorCommand, DEFAULT_BROADCAST_CAPACITY, SessionActorHandle, spawn_actor};
+pub use actor::{
+    ActorCommand, DEFAULT_BROADCAST_CAPACITY, SessionActorConfig, SessionActorHandle, spawn_actor,
+};
 pub use admission::{AdmissionDecision, AdmissionError, check_admission};
 pub use backend::{SessionBackend, SessionInput};
-pub use classifier::ClassifierGate;
+pub use classifier::{ActivityClassifier, ClassifierGate, OpenRouterClassifier};
 pub use config::{ControlPlaneConfig, ObservabilityConfig};
 pub use event::{ActivityKind, BackendKind, SessionEvent, StopReason, StreamJsonEvent};
 pub use id::{ControlSessionId, SessionCounter};
