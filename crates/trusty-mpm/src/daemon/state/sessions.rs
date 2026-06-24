@@ -149,9 +149,7 @@ impl DaemonState {
     /// Test: `set_session_pid_updates_field`, `set_session_pid_writes_pidfile`.
     pub fn set_session_pid(&self, id: SessionId, pid: u32) -> bool {
         let updated = self.update_session(&id, |s| s.pid = Some(pid));
-        if updated
-            && let Err(e) = self.pid_registry().register(&id.0.to_string(), pid)
-        {
+        if updated && let Err(e) = self.pid_registry().register(&id.0.to_string(), pid) {
             tracing::warn!(session_id = %id.0, pid, "pid-registry: register failed: {e}");
         }
         updated

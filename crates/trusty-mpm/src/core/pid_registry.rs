@@ -142,8 +142,9 @@ pub struct PidEntry {
 /// 2. process not alive → [`PidDecision::RemoveStale`]`(ProcessDead)`; else
 /// 3. process alive but not named `claude` → [`PidDecision::RemoveStale`]`(PidReused)`; else
 /// 4. untracked, alive, still `claude` → [`PidDecision::Terminate`].
+///
 /// Test: `classify_keeps_tracked`, `classify_removes_dead`,
-/// `classify_removes_reused_pid`, `classify_terminates_untracked_claude`.
+/// `classify_removes_reused_pid`, and `classify_terminates_untracked_claude`.
 pub fn classify_pidfile(
     entry: &PidEntry,
     live_session_ids: &HashSet<String>,
@@ -257,9 +258,7 @@ impl PidRegistry {
         std::fs::create_dir_all(&self.dir)?;
         let final_path = self.pid_path(session_id);
         // Atomic write: stage in a temp sibling, then rename over the target.
-        let tmp_path = self
-            .dir
-            .join(format!(".{session_id}.{PID_FILE_EXT}.tmp"));
+        let tmp_path = self.dir.join(format!(".{session_id}.{PID_FILE_EXT}.tmp"));
         std::fs::write(&tmp_path, pid.to_string())?;
         std::fs::rename(&tmp_path, &final_path)?;
         debug!(session_id, pid, "pid-registry: registered");
@@ -662,7 +661,14 @@ mod tests {
         reg.register("tracked", 9).unwrap();
         let probe = FakeProbe::new(&[9], &[9]);
         let outcome = reg.sweep_orphans(&live(&["tracked"]), &probe);
-        assert_eq!(outcome, SweepOutcome { scanned: 1, terminated: 0, removed_stale: 0 });
+        assert_eq!(
+            outcome,
+            SweepOutcome {
+                scanned: 1,
+                terminated: 0,
+                removed_stale: 0
+            }
+        );
         assert_eq!(reg.entries().unwrap(), vec![entry("tracked", 9)]);
     }
 }
