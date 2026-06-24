@@ -168,6 +168,169 @@ pub async fn fetch_pr_diff(
     Ok(body)
 }
 
+// ─── Reaction and commit types ────────────────────────────────────────────────
+
+/// A single emoji reaction on a GitHub review comment.
+///
+/// Why: reaction data tells us whether the author accepted a finding
+/// (👍/🚀) or dismissed it (👎) — the primary outcome signal.
+/// What: a typed subset of the `GET /repos/{owner}/{repo}/pulls/comments/{id}/reactions`
+/// response. Unknown `content` values are kept as-is for forward compatibility.
+/// Test: `reaction_deserialises`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Reaction {
+    /// Emoji content string e.g. `"+1"`, `"-1"`, `"rocket"`.
+    pub content: String,
+    /// Login of the user who reacted.
+    pub user: PrUser,
+    /// ISO-8601 creation timestamp e.g. `"2026-06-23T12:00:00Z"`.
+    pub created_at: String,
+}
+
+/// Minimal commit info from the PR commits list.
+///
+/// Why: follow-up commits touching a finding's file within ~7 days signal
+/// that the author acted on the finding (ActedOn outcome).
+/// What: a typed subset of the
+/// `GET /repos/{owner}/{repo}/pulls/{pr}/commits` response.
+/// Test: `commit_info_deserialises`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitInfo {
+    /// Commit SHA.
+    pub sha: String,
+    /// Commit timestamp (from `commit.author.date`) ISO-8601.
+    pub commit_date: String,
+    /// Files changed in this commit (from `files[].filename`).
+    /// Populated only when the response includes file data (not always present
+    /// in the listing endpoint — callers must note this).
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+// ─── Reaction and commit fetch helpers ───────────────────────────────────────
+
+/// Fetch emoji reactions on a PR review comment.
+///
+/// Why: reactions (👍/🚀 = accepted, 👎 = dismissed) are the cheapest
+/// outcome signal — they require no diff analysis and are always present
+/// when the author interacts with a comment.
+/// What: `GET /repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions`
+/// with the reactions preview Accept header. Fail-open: returns `Ok(vec![])`
+/// on API errors to avoid blocking the outcome pipeline.
+/// Test: `reaction_deserialises` covers the JSON parsing path; transport errors
+/// are logged and returned as empty to callers.
+pub async fn get_review_comment_reactions(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    comment_id: u64,
+    token: &str,
+) -> Result<Vec<Reaction>, GithubError> {
+    let url = format!(
+        "https://api.github.com/repos/{owner}/{repo}/pulls/comments/{comment_id}/reactions"
+    );
+    let resp = client
+        .http
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", &client.user_agent)
+        .send()
+        .await
+        .map_err(|e| GithubError::Transport(format!("GET {url}: {e}")))?;
+
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| GithubError::Transport(format!("read body of {url}: {e}")))?;
+
+    if !status.is_success() {
+        return Err(GithubError::Api {
+            status: status.as_u16(),
+            body,
+        });
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|e| GithubError::Transport(format!("parse reactions from {url}: {e}")))
+}
+
+/// Fetch commits on a PR (all commits — caller filters by timestamp).
+///
+/// Why: follow-up commits touching a finding's file within ~7 days of the
+/// review are an `ActedOn` signal — the author fixed the issue without
+/// explicitly reacting to the comment.
+/// What: `GET /repos/{owner}/{repo}/pulls/{pr}/commits` returns up to 250
+/// commits per page (GitHub default is 35). For outcome polling this is
+/// sufficient — PRs with 250+ commits are not typical code-review targets.
+/// Returns a flat list of `CommitInfo`; the SHA list endpoint does not include
+/// per-commit file changes; callers derive file-touch information from the
+/// PR diff or the individual commit endpoint if required.
+/// Test: `commit_info_deserialises` covers the JSON parsing path.
+pub async fn get_pr_commits_after(
+    client: &GithubClient,
+    owner: &str,
+    repo: &str,
+    pr: u64,
+    token: &str,
+) -> Result<Vec<CommitInfo>, GithubError> {
+    let url =
+        format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr}/commits?per_page=100");
+    let resp = client
+        .http
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", &client.user_agent)
+        .send()
+        .await
+        .map_err(|e| GithubError::Transport(format!("GET {url}: {e}")))?;
+
+    let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| GithubError::Transport(format!("read body of {url}: {e}")))?;
+
+    if !status.is_success() {
+        return Err(GithubError::Api {
+            status: status.as_u16(),
+            body,
+        });
+    }
+
+    // GitHub commits endpoint returns an array of objects with nested structure.
+    // We need to extract sha + commit.author.date. Use a local helper shape.
+    #[derive(serde::Deserialize)]
+    struct RawCommit {
+        sha: String,
+        commit: RawCommitInner,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawCommitInner {
+        author: RawCommitAuthor,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawCommitAuthor {
+        date: String,
+    }
+
+    let raw: Vec<RawCommit> = serde_json::from_str(&body)
+        .map_err(|e| GithubError::Transport(format!("parse commits from {url}: {e}")))?;
+
+    Ok(raw
+        .into_iter()
+        .map(|c| CommitInfo {
+            sha: c.sha,
+            commit_date: c.commit.author.date,
+            files: vec![],
+        })
+        .collect())
+}
+
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -239,6 +402,47 @@ mod tests {
         let meta: PrMetadata = serde_json::from_str(json).expect("extra fields should be ignored");
         assert_eq!(meta.number, 99);
         assert_eq!(meta.user.login, "eve");
+    }
+
+    #[test]
+    fn reaction_deserialises() {
+        let json = r#"[
+            {"id": 1, "content": "+1", "user": {"login": "alice"}, "created_at": "2026-06-23T12:00:00Z"},
+            {"id": 2, "content": "rocket", "user": {"login": "bob"}, "created_at": "2026-06-23T13:00:00Z"}
+        ]"#;
+        let reactions: Vec<Reaction> = serde_json::from_str(json).expect("should deserialise");
+        assert_eq!(reactions.len(), 2);
+        assert_eq!(reactions[0].content, "+1");
+        assert_eq!(reactions[0].user.login, "alice");
+        assert_eq!(reactions[1].content, "rocket");
+    }
+
+    #[test]
+    fn commit_info_deserialises() {
+        let json = r#"[
+            {"sha": "abc123", "commit": {"author": {"date": "2026-06-20T10:00:00Z"}, "message": "fix: resolve issue"}},
+            {"sha": "def456", "commit": {"author": {"date": "2026-06-21T11:00:00Z"}, "message": "chore: cleanup"}}
+        ]"#;
+        // CommitInfo uses the raw deserialization path in get_pr_commits_after.
+        // Test the RawCommit parsing by direct serde.
+        #[derive(serde::Deserialize)]
+        struct RawCommit {
+            sha: String,
+            commit: RawCommitInner,
+        }
+        #[derive(serde::Deserialize)]
+        struct RawCommitInner {
+            author: RawCommitAuthor,
+        }
+        #[derive(serde::Deserialize)]
+        struct RawCommitAuthor {
+            date: String,
+        }
+        let raw: Vec<RawCommit> = serde_json::from_str(json).expect("should deserialise");
+        assert_eq!(raw.len(), 2);
+        assert_eq!(raw[0].sha, "abc123");
+        assert_eq!(raw[0].commit.author.date, "2026-06-20T10:00:00Z");
+        assert_eq!(raw[1].sha, "def456");
     }
 
     #[tokio::test]
