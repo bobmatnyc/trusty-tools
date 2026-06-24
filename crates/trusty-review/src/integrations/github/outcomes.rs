@@ -358,13 +358,26 @@ pub async fn poll_review_outcomes(
     for finding in &result.findings {
         let hash = finding_hash(finding);
 
-        // Reactions-based classification: requires a comment_id stored on the finding.
-        // Since `Finding` doesn't currently carry a `comment_id`, we skip
-        // the reaction fetch here — the inline-comment infrastructure (PR C
-        // #1625) does not yet write comment IDs back to findings. When it
-        // does, this section can fetch reactions directly.
-        // For now, reactions-based classification is available via the
-        // public `classify_reactions` + `get_review_comment_reactions` helpers.
+        // Reactions-based outcome classification is intentionally not wired here.
+        //
+        // Why it's None: posting inline comments via `POST /pulls/{n}/reviews` with
+        // a `comments[]` batch returns a single review-level `id`, not per-comment
+        // IDs.  To fetch reactions per-comment we would need either (a) the per-
+        // comment ID on the Finding, or (b) a separate LIST call to match comments
+        // back by body text.  Neither is available without restructuring the posting
+        // pipeline.
+        //
+        // TODO(#FOLLOWUP): Thread `Finding.comment_id: Option<u64>` by posting
+        // inline comments individually via `POST /repos/{owner}/{repo}/pulls/{pr}/comments`
+        // (which returns a single comment id) and storing the returned id on the
+        // finding.  Then uncomment the reaction fetch below:
+        //
+        //   if let Some(comment_id) = finding.comment_id {
+        //       match get_review_comment_reactions(client, owner, repo, comment_id, token).await {
+        //           Ok(reactions) => reaction_outcome = classify_reactions(&reactions),
+        //           Err(e) => warn!(hash = %hash, error = %e, "could not fetch reactions"),
+        //       }
+        //   }
         let reaction_outcome: Option<Outcome> = None;
 
         // ActedOn via commit file touch.

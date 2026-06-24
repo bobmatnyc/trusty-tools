@@ -202,7 +202,10 @@ impl OutcomeStore {
     /// as "what NOT to flag" guardrails (issue #1421); the prompt injection is a
     /// follow-up (PR F) — this method exposes the aggregated data.
     /// What: scans the full `OUTCOMES` table, groups records by `kind`, sums
-    /// `dismissed_count` per kind, and returns kinds whose sum exceeds `threshold`.
+    /// `dismissed_count` per kind, and returns kinds whose sum **strictly exceeds**
+    /// `threshold` (`dismissed_count > threshold`, not `>=`).  A kind dismissed
+    /// exactly `threshold` times is NOT returned — the threshold is a minimum
+    /// exclusive lower bound.
     /// Test: `record_and_dismissed_patterns_threshold`, `record_below_threshold`.
     pub fn dismissed_patterns(&self, threshold: u32) -> Result<Vec<String>, OutcomeError> {
         let read = self

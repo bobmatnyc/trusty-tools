@@ -257,18 +257,27 @@ pub async fn get_review_comment_reactions(
         .map_err(|e| GithubError::Transport(format!("parse reactions from {url}: {e}")))
 }
 
-/// Fetch commits on a PR (all commits — caller filters by timestamp).
+/// Fetch commits on a PR and populate per-commit file lists.
 ///
 /// Why: follow-up commits touching a finding's file within ~7 days of the
 /// review are an `ActedOn` signal — the author fixed the issue without
 /// explicitly reacting to the comment.
-/// What: `GET /repos/{owner}/{repo}/pulls/{pr}/commits` returns up to 250
-/// commits per page (GitHub default is 35). For outcome polling this is
-/// sufficient — PRs with 250+ commits are not typical code-review targets.
-/// Returns a flat list of `CommitInfo`; the SHA list endpoint does not include
-/// per-commit file changes; callers derive file-touch information from the
-/// PR diff or the individual commit endpoint if required.
-/// Test: `commit_info_deserialises` covers the JSON parsing path.
+///
+/// What: two-phase fetch —
+///
+///   1. `GET /repos/{owner}/{repo}/pulls/{pr}/commits?per_page=100` returns the
+///      SHA list (no per-commit file data from this endpoint).
+///   2. For each of the first 20 commits, `GET /repos/{owner}/{repo}/commits/{sha}`
+///      returns file-level change data; `files[].filename` is extracted and stored
+///      on the corresponding `CommitInfo`.
+///
+/// Fail-open: if the per-commit fetch fails for any SHA, a `warn!` is logged
+/// and that commit is returned with `files: vec![]` — the batch continues.
+/// Cap at 20 commits to bound N+1 API cost. No pagination: `per_page=100`
+/// is sufficient for typical PRs.
+///
+/// Test: `commit_info_deserialises` covers SHA-list parsing;
+/// `commit_files_populated_from_single_commit_response` covers file extraction.
 pub async fn get_pr_commits_after(
     client: &GithubClient,
     owner: &str,
@@ -302,12 +311,16 @@ pub async fn get_pr_commits_after(
         });
     }
 
-    // GitHub commits endpoint returns an array of objects with nested structure.
-    // We need to extract sha + commit.author.date. Use a local helper shape.
+    // GitHub commits-list endpoint: array with sha + nested commit.author.date.
+    // The `files[]` array is NOT present in the list response — only in the
+    // individual commit endpoint.
     #[derive(serde::Deserialize)]
     struct RawCommit {
         sha: String,
         commit: RawCommitInner,
+        /// Present in single-commit response; absent in list response.
+        #[serde(default)]
+        files: Vec<RawCommitFile>,
     }
     #[derive(serde::Deserialize)]
     struct RawCommitInner {
@@ -317,18 +330,70 @@ pub async fn get_pr_commits_after(
     struct RawCommitAuthor {
         date: String,
     }
+    #[derive(serde::Deserialize)]
+    struct RawCommitFile {
+        filename: String,
+    }
 
     let raw: Vec<RawCommit> = serde_json::from_str(&body)
         .map_err(|e| GithubError::Transport(format!("parse commits from {url}: {e}")))?;
 
-    Ok(raw
+    // Phase 1: build the flat list from the SHA-list response (files are empty here).
+    let mut commits: Vec<CommitInfo> = raw
         .into_iter()
         .map(|c| CommitInfo {
             sha: c.sha,
             commit_date: c.commit.author.date,
             files: vec![],
         })
-        .collect())
+        .collect();
+
+    // Phase 2: enrich the first 20 commits with per-file data from the individual
+    // commit endpoint.  Fail-open: on any error, continue with empty files.
+    const FILE_ENRICH_CAP: usize = 20;
+    for info in commits.iter_mut().take(FILE_ENRICH_CAP) {
+        let sha_url = format!(
+            "https://api.github.com/repos/{owner}/{repo}/commits/{}",
+            info.sha
+        );
+        let result = client
+            .http
+            .get(&sha_url)
+            .header("Accept", "application/vnd.github+json")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", &client.user_agent)
+            .send()
+            .await;
+        let resp = match result {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(sha = %info.sha, error = %e, "per-commit file fetch failed; continuing with empty files");
+                continue;
+            }
+        };
+        if !resp.status().is_success() {
+            tracing::warn!(sha = %info.sha, status = %resp.status(), "per-commit file fetch non-2xx; continuing with empty files");
+            continue;
+        }
+        let text = match resp.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(sha = %info.sha, error = %e, "per-commit body read failed; continuing with empty files");
+                continue;
+            }
+        };
+        match serde_json::from_str::<RawCommit>(&text) {
+            Ok(raw_single) => {
+                info.files = raw_single.files.into_iter().map(|f| f.filename).collect();
+            }
+            Err(e) => {
+                tracing::warn!(sha = %info.sha, error = %e, "per-commit JSON parse failed; continuing with empty files");
+            }
+        }
+    }
+
+    Ok(commits)
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -429,6 +494,8 @@ mod tests {
         struct RawCommit {
             sha: String,
             commit: RawCommitInner,
+            #[serde(default)]
+            files: Vec<RawCommitFile>,
         }
         #[derive(serde::Deserialize)]
         struct RawCommitInner {
@@ -438,11 +505,76 @@ mod tests {
         struct RawCommitAuthor {
             date: String,
         }
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct RawCommitFile {
+            filename: String,
+        }
         let raw: Vec<RawCommit> = serde_json::from_str(json).expect("should deserialise");
         assert_eq!(raw.len(), 2);
         assert_eq!(raw[0].sha, "abc123");
         assert_eq!(raw[0].commit.author.date, "2026-06-20T10:00:00Z");
+        assert!(raw[0].files.is_empty(), "list response has no files");
         assert_eq!(raw[1].sha, "def456");
+    }
+
+    /// Verify that the single-commit response shape (with `files[]`) is parsed correctly.
+    ///
+    /// Why: `get_pr_commits_after` phase-2 uses the single-commit endpoint to
+    /// populate `CommitInfo.files`; this test exercises the JSON parsing without
+    /// making real network calls.
+    /// What: construct a fake single-commit JSON body matching GitHub's shape,
+    /// parse it with the same local structs used in the function, assert filenames.
+    /// Test: no network calls — pure serde deserialization.
+    #[test]
+    fn commit_files_populated_from_single_commit_response() {
+        // Fake single-commit response: matches GET /repos/{owner}/{repo}/commits/{sha}.
+        let json = r#"{
+            "sha": "abc123",
+            "commit": {
+                "author": { "date": "2026-06-20T10:00:00Z" },
+                "message": "fix: resolve issue"
+            },
+            "files": [
+                { "filename": "src/main.rs", "status": "modified" },
+                { "filename": "src/lib.rs",  "status": "added" }
+            ]
+        }"#;
+
+        // Mirror the private local structs used inside get_pr_commits_after.
+        #[derive(serde::Deserialize)]
+        struct RawCommit {
+            sha: String,
+            commit: RawCommitInner,
+            #[serde(default)]
+            files: Vec<RawCommitFile>,
+        }
+        #[derive(serde::Deserialize)]
+        struct RawCommitInner {
+            author: RawCommitAuthor,
+        }
+        #[derive(serde::Deserialize)]
+        struct RawCommitAuthor {
+            date: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct RawCommitFile {
+            filename: String,
+        }
+
+        let raw: RawCommit = serde_json::from_str(json).expect("should deserialise");
+        assert_eq!(raw.sha, "abc123");
+        assert_eq!(raw.commit.author.date, "2026-06-20T10:00:00Z");
+        assert_eq!(raw.files.len(), 2, "two file entries expected");
+        let filenames: Vec<&str> = raw.files.iter().map(|f| f.filename.as_str()).collect();
+        assert!(
+            filenames.contains(&"src/main.rs"),
+            "src/main.rs must be present"
+        );
+        assert!(
+            filenames.contains(&"src/lib.rs"),
+            "src/lib.rs must be present"
+        );
     }
 
     #[tokio::test]
