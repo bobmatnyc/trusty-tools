@@ -591,7 +591,7 @@ fn both_system_prompts_contain_rust_fp_guardrail() {
             "{label} system prompt must contain the 'Known false-positive patterns' section"
         );
         assert!(
-            prompt.contains("move` closures"),
+            prompt.contains("`move` closures"),
             "{label} system prompt must include the move-closure guardrail"
         );
         assert!(

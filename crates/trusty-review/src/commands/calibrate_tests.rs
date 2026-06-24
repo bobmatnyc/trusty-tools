@@ -245,6 +245,54 @@ fn rust_semantic_fp_rate_neutral_when_no_rust_semantic_findings() {
     );
 }
 
+// ─── Recall cap test ──────────────────────────────────────────────────────────
+
+/// Verify recall stays ≤ 1.0 when multiple trusty findings match one human finding.
+///
+/// Why: if we counted trusty-side matches for recall (instead of distinct human
+/// findings), recall could exceed 1.0 when two trusty findings both match the
+/// same human finding — making the metric meaningless.  This test guards that.
+/// What: 1 human finding, 2 trusty findings both matching it → recall must be 1.0
+/// (one distinct human finding recalled), not 2.0 (two trusty hits).
+/// Test: asserts recall == 1.0 and precision == 1.0 (both trusty matched).
+#[test]
+fn recall_does_not_exceed_one_when_two_trusty_match_same_human_finding() {
+    let corpus = vec![CorpusEntry {
+        owner: "acme".to_string(),
+        repo: "api".to_string(),
+        pr: 200,
+        human_findings: vec![make_human("src/lib.rs", "logic-error", true)],
+    }];
+    // Two trusty findings that BOTH match the single human finding.
+    let results = vec![vec![
+        make_finding("src/lib.rs", "logic-error"),
+        make_finding("src/lib.rs", "logic-error"),
+    ]];
+    let report = compute_metrics(&corpus, &results);
+    // Recall: 1 distinct human finding recalled / 1 total → 1.0 (not 2.0)
+    assert!(
+        (report.per_pr[0].recall - 1.0).abs() < 1e-9,
+        "recall expected 1.0 (not > 1.0), got {}",
+        report.per_pr[0].recall
+    );
+    assert!(
+        report.per_pr[0].recall <= 1.0,
+        "recall must never exceed 1.0, got {}",
+        report.per_pr[0].recall
+    );
+    // Precision: both trusty findings matched → 2/2 = 1.0
+    assert!(
+        (report.per_pr[0].precision - 1.0).abs() < 1e-9,
+        "precision expected 1.0, got {}",
+        report.per_pr[0].precision
+    );
+    // No false positives
+    assert!(
+        report.per_pr[0].false_positives.is_empty(),
+        "no false positives expected"
+    );
+}
+
 // ─── Corpus loader ────────────────────────────────────────────────────────────
 
 #[test]

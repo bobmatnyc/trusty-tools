@@ -124,7 +124,8 @@ pub struct CalibrationReport {
     ///
     /// Why: trusty-review false-positives HIGH on Rust semantic patterns (`move`
     /// closures, `tokio::select!` branches).  This field measures that FP rate as
-    /// `1.0 - (recalled / total_rust_semantic)`, so **lower is better** (0.0 = perfect,
+    /// `1.0 - precision(rust_semantic)` — i.e. `1 - (trusty_matched / trusty_total)`
+    /// for Rust-semantic findings only — so **lower is better** (0.0 = perfect,
     /// 1.0 = every Rust semantic finding was a false positive).  Returns 0.0 (no FPs)
     /// when no Rust semantic findings exist in the run.
     pub rust_semantic_fp_rate: f64,
@@ -205,7 +206,8 @@ pub fn compute_metrics(
     );
 
     let mut total_human: usize = 0;
-    let mut total_recalled: usize = 0;
+    let mut total_recalled: usize = 0; // sum of distinct human findings recalled
+    let mut total_trusty_matched: usize = 0; // sum of trusty findings matched (precision numerator)
     let mut total_trusty: usize = 0;
     let mut rust_sem_total: usize = 0;
     let mut rust_sem_recalled: usize = 0;
@@ -217,13 +219,15 @@ pub fn compute_metrics(
         let n_human = human.len();
         let n_trusty = findings.len();
 
-        let mut recalled = 0usize;
+        // Precision numerator: trusty findings that matched at least one human finding.
+        // Used for precision = trusty_side_matched / total_trusty.
+        let mut trusty_matched = 0usize;
         let mut false_positives: Vec<FpFinding> = Vec::new();
 
         for tf in findings {
             let matched = human.iter().any(|hf| is_recalled(tf, hf));
             if matched {
-                recalled += 1;
+                trusty_matched += 1;
             } else {
                 false_positives.push(FpFinding {
                     file: tf.file.clone(),
@@ -239,19 +243,28 @@ pub fn compute_metrics(
             }
         }
 
+        // Recall numerator: DISTINCT human findings with ≥1 matching trusty finding.
+        // Counting distinct human-side hits prevents recall > 1.0 when multiple
+        // trusty findings match the same human finding.
+        let recalled_human = human
+            .iter()
+            .filter(|hf| findings.iter().any(|tf| is_recalled(tf, hf)))
+            .count();
+
         let pr_recall = if n_human == 0 {
             1.0_f64
         } else {
-            recalled as f64 / n_human as f64
+            recalled_human as f64 / n_human as f64
         };
         let pr_precision = if n_trusty == 0 {
             1.0_f64
         } else {
-            recalled as f64 / n_trusty as f64
+            trusty_matched as f64 / n_trusty as f64
         };
 
         total_human += n_human;
-        total_recalled += recalled;
+        total_recalled += recalled_human;
+        total_trusty_matched += trusty_matched;
         total_trusty += n_trusty;
 
         per_pr.push(PrMetrics {
@@ -270,7 +283,7 @@ pub fn compute_metrics(
     let aggregate_precision = if total_trusty == 0 {
         1.0_f64
     } else {
-        total_recalled as f64 / total_trusty as f64
+        total_trusty_matched as f64 / total_trusty as f64
     };
     // TRUE false-positive rate: 0.0 = no FPs (all Rust semantic findings recalled),
     // 1.0 = every Rust semantic finding was a false positive.
