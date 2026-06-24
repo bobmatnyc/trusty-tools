@@ -21,8 +21,10 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::control::actor::{DEFAULT_BROADCAST_CAPACITY, SessionActorHandle, spawn_actor};
+use crate::control::admission::{AdmissionDecision, AdmissionError, check_admission};
 use crate::control::backend::stream_json::StreamJsonBackend;
 use crate::control::backend::tmux::TmuxBackend;
+use crate::control::config::ControlPlaneConfig;
 use crate::control::event::BackendKind;
 use crate::control::id::{ControlSessionId, SessionCounter};
 
@@ -60,6 +62,10 @@ pub struct RunParams {
 #[derive(Clone, Debug)]
 pub struct SessionRegistry {
     inner: Arc<RwLock<RegistryInner>>,
+    /// Auth + cost guardrails (§9): concurrency cap, launch stagger, auth
+    /// timeout, classifier gate. Shared so the daemon can read the same config
+    /// the registry enforces.
+    config: Arc<ControlPlaneConfig>,
 }
 
 struct RegistryInner {
@@ -76,19 +82,56 @@ impl std::fmt::Debug for RegistryInner {
 }
 
 impl SessionRegistry {
-    /// Create a new empty registry.
+    /// Create a new empty registry with the default control-plane config.
     ///
     /// Why: the daemon constructs a registry at startup and injects it into
-    /// every handler; an empty initial state is the correct starting point.
-    /// What: allocates the `Arc<RwLock<…>>` with an empty map and counter.
-    /// Test: all registry tests construct via `new()`.
+    /// every handler; an empty initial state with spec-default guardrails (cap
+    /// 5, stagger 2 s) is the correct starting point.
+    /// What: allocates the `Arc<RwLock<…>>` with an empty map and counter and a
+    /// [`ControlPlaneConfig::default`].
+    /// Test: all registry tests construct via `new()` or `with_config()`.
     pub fn new() -> Self {
+        Self::with_config(ControlPlaneConfig::default())
+    }
+
+    /// Create a new empty registry with an explicit control-plane config.
+    ///
+    /// Why: the daemon loads `[control_plane]` from the operator's config and
+    /// must inject the cap/stagger/timeout values the registry enforces. Tests
+    /// inject a zero-stagger config for deterministic, fast cap testing.
+    /// What: allocates the registry as in `new()` but stores the supplied
+    /// `ControlPlaneConfig` (wrapped in an `Arc` for cheap cloning).
+    /// Test: `registry_cap_rejects_over_limit`, `registry_stagger_zero_is_instant`.
+    pub fn with_config(config: ControlPlaneConfig) -> Self {
         Self {
             inner: Arc::new(RwLock::new(RegistryInner {
                 actors: HashMap::new(),
                 counter: SessionCounter::default(),
             })),
+            config: Arc::new(config),
         }
+    }
+
+    /// Borrow the registry's control-plane config (§9).
+    ///
+    /// Why: HTTP handlers and the daemon's classifier gate need to read the
+    /// same config the registry enforces (e.g. the auth timeout, the classifier
+    /// flag) without cloning the whole struct.
+    /// What: returns a `&ControlPlaneConfig` for the lifetime of the borrow.
+    /// Test: `registry_exposes_config`.
+    pub fn config(&self) -> &ControlPlaneConfig {
+        &self.config
+    }
+
+    /// Number of live sessions currently registered.
+    ///
+    /// Why: `tm list` summaries and the admission check both need the current
+    /// live count; exposing it avoids forcing callers to materialize the full
+    /// id list just to count.
+    /// What: acquires the read lock and returns `actors.len()`.
+    /// Test: `registry_live_count`.
+    pub async fn live_count(&self) -> usize {
+        self.inner.read().await.actors.len()
     }
 
     /// Register an actor handle under a session ID.
@@ -144,22 +187,62 @@ impl SessionRegistry {
         inner.actors.keys().cloned().collect()
     }
 
-    /// Allocate a session ID and spawn an actor via the selected backend.
+    /// Check the §9.2 concurrency cap against the current live count.
+    ///
+    /// Why: callers (and the staggered-launch loop) sometimes want to know
+    /// whether a launch would be admitted *before* paying the stagger delay, so
+    /// they can fail fast. `run_session` ALSO re-checks under the write lock so
+    /// this pre-check is advisory, not the authoritative gate.
+    /// What: reads the live count under the read lock and runs the pure
+    /// [`check_admission`] predicate with the configured cap and stagger.
+    /// Test: `registry_admission_check`.
+    pub async fn admission(&self) -> AdmissionDecision {
+        let live = self.live_count().await as u32;
+        check_admission(
+            live,
+            self.config.max_concurrent_sessions,
+            self.config.launch_stagger_ms,
+        )
+    }
+
+    /// Allocate a session ID and spawn an actor via the selected backend,
+    /// enforcing the §9.2 concurrency cap and launch stagger.
     ///
     /// Why: `tm run <project-id>` must go through the registry so the ID
     /// counter is authoritative and an issued ID is always observable by
-    /// concurrent `get()` / `list_ids()` callers. The former two-step pattern
-    /// (allocate → release lock → spawn → re-acquire to register) had a TOCTOU
-    /// gap: the ID existed but `get()` returned `None` during backend setup.
-    /// What: holds ONE write lock for the entire sequence — ID allocation,
-    /// backend construction, actor spawn, and handle insertion — so `get(&id)`
-    /// is never `None` for a returned ID. Backend construction (`Command::spawn`
-    /// or `tmux new-session`) takes O(10 ms) in the worst case; holding the
-    /// write lock across that is acceptable for Phase 1.
+    /// concurrent `get()` / `list_ids()` callers. WI-5 (§9.2) adds two cost
+    /// guardrails here: the concurrency cap (hard limit, enforced under the
+    /// write lock so it is race-free) and the launch stagger (applied BEFORE
+    /// the lock so it spaces successive launches without serializing the lock).
+    /// What: (1) applies the configured `launch_stagger_ms` sleep up front;
+    /// (2) acquires ONE write lock and re-checks the cap authoritatively —
+    /// rejecting with [`AdmissionError::CapReached`] if `live >= cap`; (3) holds
+    /// that lock for ID allocation, backend construction, actor spawn, and
+    /// handle insertion so `get(&id)` is never `None` for a returned ID.
     /// Returns the allocated `ControlSessionId`.
-    /// Test: `registry_run_session`, `registry_run_session_id_visible_immediately`.
+    /// Test: `registry_run_session`, `registry_run_session_id_visible_immediately`,
+    /// `registry_cap_rejects_over_limit`.
     pub async fn run_session(&self, params: RunParams) -> Result<ControlSessionId> {
+        // §9.2 launch stagger — applied before acquiring the lock so concurrent
+        // launches are spaced without serializing the registry. Tests inject a
+        // zero stagger (Duration::ZERO) so this is a no-op and stays fast.
+        let stagger = self.config.stagger_duration();
+        if !stagger.is_zero() {
+            tokio::time::sleep(stagger).await;
+        }
+
         let mut inner = self.inner.write().await;
+
+        // §9.2 concurrency cap — authoritative check under the write lock so two
+        // concurrent launches cannot both slip past a stale count.
+        let live = inner.actors.len() as u32;
+        if let AdmissionDecision::Reject { live, cap } =
+            check_admission(live, self.config.max_concurrent_sessions, 0)
+        {
+            warn!(live, cap, "session launch rejected: concurrency cap reached (§9.2)");
+            return Err(AdmissionError::CapReached { live, cap }.into());
+        }
+
         let session_id = inner.counter.next(&params.project_id);
 
         info!(
@@ -317,6 +400,79 @@ mod tests {
         assert!(
             registry.get(&id).await.is_some(),
             "session must be visible immediately after registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_live_count_and_config() {
+        // Default config: cap 5, stagger 2000, classifier off.
+        let registry = SessionRegistry::new();
+        assert_eq!(registry.live_count().await, 0);
+        assert_eq!(registry.config().max_concurrent_sessions, 5);
+        assert!(!registry.config().observability.llm_classifier);
+
+        let id = ControlSessionId::new("p", 0);
+        registry.register(id.clone(), make_handle(&id)).await;
+        assert_eq!(registry.live_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn registry_admission_check_under_cap_admits() {
+        // cap=2, zero stagger so tests stay fast.
+        let cfg = ControlPlaneConfig {
+            max_concurrent_sessions: 2,
+            launch_stagger_ms: 0,
+            ..Default::default()
+        };
+        let registry = SessionRegistry::with_config(cfg);
+        assert!(matches!(
+            registry.admission().await,
+            AdmissionDecision::Admit { stagger_ms: 0 }
+        ));
+
+        // Fill to cap with placeholder handles.
+        for n in 0..2 {
+            let id = ControlSessionId::new("p", n);
+            registry.register(id.clone(), make_handle(&id)).await;
+        }
+        // Now at cap → reject.
+        assert!(matches!(
+            registry.admission().await,
+            AdmissionDecision::Reject { live: 2, cap: 2 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn registry_run_session_rejects_when_capped() {
+        // cap=1, zero stagger. Fill with one placeholder, then run_session must
+        // reject with CapReached without spawning a backend.
+        let cfg = ControlPlaneConfig {
+            max_concurrent_sessions: 1,
+            launch_stagger_ms: 0,
+            ..Default::default()
+        };
+        let registry = SessionRegistry::with_config(cfg);
+        let id = ControlSessionId::new("p", 0);
+        registry.register(id.clone(), make_handle(&id)).await;
+
+        let params = RunParams {
+            project_id: "p".into(),
+            workdir: PathBuf::from("/tmp"),
+            backend: BackendKind::StreamJson,
+            prompt_file: None,
+            claude_cmd: None,
+        };
+        let err = registry
+            .run_session(params)
+            .await
+            .expect_err("run_session must reject when at cap");
+        // The error chain must carry the typed CapReached rejection.
+        let admission_err = err
+            .downcast_ref::<crate::control::admission::AdmissionError>()
+            .expect("error must be an AdmissionError");
+        assert_eq!(
+            *admission_err,
+            crate::control::admission::AdmissionError::CapReached { live: 1, cap: 1 }
         );
     }
 
