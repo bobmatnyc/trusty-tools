@@ -44,16 +44,33 @@ use crate::service::watch_loop::{spawn_watch_loop, WatcherTask};
 /// machinery.
 const DISABLE_WATCHER_ENV: &str = "TRUSTY_DISABLE_WATCHER";
 
+/// Pure decision for the watcher opt-out gate, given a raw env-var value.
+///
+/// Why: the disable gate must be unit-testable without mutating process-global
+/// env state (which is unsound to set/unset concurrently in a multi-threaded
+/// test binary). Splitting the pure decision out from the env read lets a test
+/// exercise the *real* logic across every relevant value directly. Issue #1641.
+/// What: returns `true` only for the exact value `Some("1")`; any other value —
+/// unset (`None`), `Some("0")`, `Some("true")`, whitespace, … — leaves the
+/// watcher enabled, so an operator who sets a non-`1` value is never silently
+/// opted out of incremental indexing.
+/// Test: `disable_env_gate_only_matches_one`.
+fn watcher_disabled_for_value(val: Option<&str>) -> bool {
+    val == Some("1")
+}
+
 /// True when the watcher is disabled via `TRUSTY_DISABLE_WATCHER=1`.
 ///
 /// Why: centralises the opt-out check so both the manager and any future caller
 /// read the same flag.
-/// What: returns `true` only for the exact value `"1"`; any other value (unset,
-/// `"0"`, `"true"`, …) leaves the watcher enabled to avoid surprising operators
-/// who set a non-`1` value.
-/// Test: `disable_env_gate_only_matches_one`.
+/// What: reads `TRUSTY_DISABLE_WATCHER` from the process env and delegates the
+/// decision to the pure [`watcher_disabled_for_value`] — so only the exact
+/// value `"1"` disables the watcher.
+/// Test: covered indirectly via `watcher_disabled_for_value`'s unit test
+/// (`disable_env_gate_only_matches_one`); the env read itself is a thin,
+/// side-effect-only wrapper.
 fn watcher_disabled() -> bool {
-    std::env::var(DISABLE_WATCHER_ENV).as_deref() == Ok("1")
+    watcher_disabled_for_value(std::env::var(DISABLE_WATCHER_ENV).ok().as_deref())
 }
 
 /// Registry of running watchers keyed by index id.
@@ -84,13 +101,16 @@ impl WatcherManager {
     /// without a manual reindex. Returns early when the watcher is globally
     /// disabled or when this index is already being watched, so callers can fire
     /// it unconditionally after `registry.register`.
-    /// What: (1) no-op when `TRUSTY_DISABLE_WATCHER=1`; (2) no-op when an entry
-    /// for `id` already exists; (3) otherwise calls `spawn_watch_loop` with the
-    /// handle's `indexer` and a fresh `IndexedFiles` tracker, storing the
-    /// resulting `WatcherTask`. A `spawn_watch_loop` failure (e.g. the root path
-    /// vanished between registration and now) is logged at WARN and swallowed so
-    /// registration never fails because of the watcher.
-    /// Test: `spawn_is_idempotent`, `spawn_respects_disable_env`.
+    /// What: (1) no-op when `TRUSTY_DISABLE_WATCHER=1`; (2) builds the watcher
+    /// task by calling `spawn_watch_loop` **before** acquiring the lock — the
+    /// `Mutex` is then taken only for the brief `contains_key` + `insert`, never
+    /// across the (potentially blocking) OS-watch installation; (3) the spawn is
+    /// idempotent: if a racing `spawn_for_index` won the insert for this `id`
+    /// while we were building our task, we drop the just-built task (`stop()`)
+    /// and keep the existing one. A `spawn_watch_loop` failure (e.g. the root
+    /// path vanished between registration and now) is logged at WARN and
+    /// swallowed so registration never fails because of the watcher.
+    /// Test: `spawn_is_idempotent`, `disable_env_gate_only_matches_one`.
     pub async fn spawn_for_index(&self, handle: &Arc<IndexHandle>) {
         if watcher_disabled() {
             tracing::debug!(
@@ -100,34 +120,46 @@ impl WatcherManager {
             return;
         }
 
-        let mut guard = self.inner.lock().await;
-        if guard.contains_key(&handle.id) {
-            // Already watching — keep the existing task (idempotent).
-            return;
-        }
-
+        // Build the watcher task BEFORE acquiring the lock (issue #1640). This
+        // (a) closes the deadlock window — the `Mutex` is never held across the
+        // potentially-blocking `spawn_watch_loop` (slow filesystem, inotify
+        // limit exhaustion) so `stop_for_index`/`stop_all` can never block on a
+        // spawn — and (b) keeps the critical section to a bare insert.
         let indexed_files = IndexedFiles::new();
-        match spawn_watch_loop(
+        let task = match spawn_watch_loop(
             &handle.root_path,
             Arc::clone(&handle.indexer),
             indexed_files,
         ) {
-            Ok(task) => {
-                guard.insert(handle.id.clone(), task);
-                tracing::info!(
-                    index_id = %handle.id,
-                    root = %handle.root_path.display(),
-                    "file watcher active — saves trigger incremental indexing (issue #1621)",
-                );
-            }
+            Ok(task) => task,
             Err(e) => {
                 tracing::warn!(
                     index_id = %handle.id,
                     root = %handle.root_path.display(),
                     "could not start file watcher (incremental indexing disabled for this index): {e:#}",
                 );
+                return;
             }
+        };
+
+        // Lock ONLY to insert. The earlier check-then-insert had a TOCTOU
+        // window: two concurrent `spawn_for_index` calls for the same id could
+        // both pass `contains_key` before either inserted. Re-check under the
+        // lock and, if a racing insert already won, stop the task we just built
+        // so we keep exactly one watcher (idempotent).
+        let mut guard = self.inner.lock().await;
+        if guard.contains_key(&handle.id) {
+            drop(guard);
+            task.stop();
+            return;
         }
+        guard.insert(handle.id.clone(), task);
+        drop(guard);
+        tracing::info!(
+            index_id = %handle.id,
+            root = %handle.root_path.display(),
+            "file watcher active — saves trigger incremental indexing (issue #1621)",
+        );
     }
 
     /// Stop watching a single index, aborting its consumer task and releasing
@@ -197,14 +229,27 @@ mod tests {
     }
 
     /// Why: the opt-out gate must match ONLY the exact value "1" so a stray
-    /// `TRUSTY_DISABLE_WATCHER=true` doesn't silently disable indexing.
-    /// Test: this test (does not mutate the process env — pure value check).
+    /// `TRUSTY_DISABLE_WATCHER=true` (or `0`, or any other value) doesn't
+    /// silently disable incremental indexing. Issue #1641: the previous version
+    /// of this test only compared raw literals and never touched the real
+    /// decision function, so it could pass even if the gate were broken.
+    /// Test: exercises the pure `watcher_disabled_for_value` helper that
+    /// `watcher_disabled()` delegates to — no process-env mutation needed.
     #[test]
     fn disable_env_gate_only_matches_one() {
-        // We can't safely mutate the process env in a multi-threaded test
-        // binary, so assert the comparison semantics directly: only "1" counts.
-        assert_eq!(Ok("1"), Result::<&str, ()>::Ok("1"));
-        assert_ne!(Ok::<&str, ()>("true"), Ok("1"));
+        // Only the exact "1" disables the watcher.
+        assert!(watcher_disabled_for_value(Some("1")));
+
+        // Every other value leaves the watcher enabled.
+        assert!(!watcher_disabled_for_value(None)); // unset
+        assert!(!watcher_disabled_for_value(Some(""))); // empty
+        assert!(!watcher_disabled_for_value(Some("0")));
+        assert!(!watcher_disabled_for_value(Some("true")));
+        assert!(!watcher_disabled_for_value(Some("yes")));
+        assert!(!watcher_disabled_for_value(Some("on")));
+        assert!(!watcher_disabled_for_value(Some(" 1"))); // not trimmed
+        assert!(!watcher_disabled_for_value(Some("1 ")));
+        assert!(!watcher_disabled_for_value(Some("11")));
     }
 
     /// Why: spawning twice for the same index must keep exactly one watcher so
