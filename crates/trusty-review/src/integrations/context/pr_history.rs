@@ -251,8 +251,9 @@ impl PrHistoryTransport for ReqwestPrHistoryTransport {
             .http
             .get(&url)
             .header("Authorization", format!("Bearer {token}"))
-            // groot-preview header required to list PRs for a commit.
-            .header("Accept", "application/vnd.github.groot-preview+json")
+            // The "List pull requests associated with a commit" endpoint
+            // graduated to the stable API; use the standard Accept header.
+            .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "trusty-review")
             .send()
             .await
@@ -589,7 +590,9 @@ impl ContextSource for PrHistorySource {
 
             // For each commit, look up associated PRs.
             for sha in &shas {
-                // Stop early if we already have enough PRs.
+                // Stop early if we have collected 2× the output cap already.
+                // This `break` exits only this file's SHA loop, not the outer
+                // file loop — other changed files are still processed.
                 if seen.len() >= MAX_PRS * 2 {
                     break;
                 }
