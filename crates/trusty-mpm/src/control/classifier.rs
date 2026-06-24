@@ -77,7 +77,11 @@ impl ClassifierGate {
 mod tests {
     use super::*;
 
-    fn gate(config_enabled: bool, api_key_present: bool, sm_agent_connected: bool) -> ClassifierGate {
+    fn gate(
+        config_enabled: bool,
+        api_key_present: bool,
+        sm_agent_connected: bool,
+    ) -> ClassifierGate {
         ClassifierGate {
             config_enabled,
             api_key_present,
@@ -97,7 +101,10 @@ mod tests {
         assert!(gate(true, true, false).should_classify());
 
         // Each single missing precondition closes the gate.
-        assert!(!gate(false, true, false).should_classify(), "config off blocks");
+        assert!(
+            !gate(false, true, false).should_classify(),
+            "config off blocks"
+        );
         assert!(!gate(true, false, false).should_classify(), "no key blocks");
     }
 

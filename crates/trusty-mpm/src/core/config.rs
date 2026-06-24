@@ -191,6 +191,15 @@ pub struct MpmConfig {
     #[serde(default)]
     pub session_manager: SessionManagerConfig,
 
+    /// `[control_plane]` — SESSCTL auth + cost guardrails (SPEC-SESSCTL-01 §9,
+    /// WI-5 #1596).
+    ///
+    /// Absent or partial section → spec defaults (concurrency cap 5, launch
+    /// stagger 2000 ms, auth timeout 30 s, LLM classifier off). The daemon
+    /// injects this into the control-plane `SessionRegistry`.
+    #[serde(default)]
+    pub control_plane: crate::control::config::ControlPlaneConfig,
+
     /// `[style]` — active output-style selection (HR-4 / DOC-17).
     ///
     /// Absent section → professional default (`trusty-mpm`). See

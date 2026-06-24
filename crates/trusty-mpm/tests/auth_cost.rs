@@ -10,15 +10,14 @@
 //! invariant we protect: NO managed session may ever inherit `ANTHROPIC_API_KEY`
 //! (which would silently switch billing from flat-rate Max OAuth to a metered
 //! key, §9.1).
-//! What: three test groups —
-//!   1. `three_simultaneous_sessions_no_key_leak` — build 3 commands and assert
-//!      each one explicitly REMOVES `ANTHROPIC_API_KEY` from its child env.
-//!   2. `key_removed_even_when_present_in_parent_env` — serial-guarded: set the
-//!      key in THIS process, build the command, assert it is still removed
-//!      (proving removal is unconditional, not dependent on parent state).
-//!   3. `cap_admits_exactly_allowed_concurrency` — drive the real
-//!      `SessionRegistry` admission path with cap=3, zero stagger, and assert it
-//!      admits 3 and rejects the 4th.
+//! What: three test groups — (1) `three_simultaneous_sessions_no_key_leak`
+//! builds 3 commands and asserts each one explicitly REMOVES `ANTHROPIC_API_KEY`
+//! from its child env; (2) `key_removed_even_when_present_in_parent_env`
+//! (serial-guarded) sets the key in THIS process, builds the command, and
+//! asserts it is still removed (proving removal is unconditional, not dependent
+//! on parent state); (3) `cap_admits_exactly_allowed_concurrency` drives the
+//! real `SessionRegistry` admission path with cap=3, zero stagger, and asserts
+//! it admits 3 and rejects the 4th.
 //! Test: this file IS the WI-5 gate. Run with
 //! `cargo test -p trusty-mpm --test auth_cost`.
 
@@ -122,7 +121,10 @@ fn key_removed_even_when_present_in_parent_env() {
     // there is no concurrent reader/writer of the process environment here.
     let prior = std::env::var(ANTHROPIC_API_KEY_VAR).ok();
     unsafe {
-        std::env::set_var(ANTHROPIC_API_KEY_VAR, "sk-ant-LEAK-CANARY-should-never-reach-child");
+        std::env::set_var(
+            ANTHROPIC_API_KEY_VAR,
+            "sk-ant-LEAK-CANARY-should-never-reach-child",
+        );
     }
 
     let cmd = build_claude_command(Path::new("/tmp/wi5-parent-has-key"), None);

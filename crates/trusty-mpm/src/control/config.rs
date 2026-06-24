@@ -58,10 +58,9 @@ pub const DEFAULT_AUTH_TIMEOUT_SECS: u64 = 30;
 #[serde(default)]
 pub struct ControlPlaneConfig {
     /// Maximum number of concurrent live sessions (§9.2). Default `5`. A value
-    /// of `0` is treated as "no admission allowed" (every launch is rejected);
-    /// operators who want unbounded fan-out should not set this section at all
-    /// is NOT an option — the default cap always applies. Use a large number to
-    /// effectively disable the cap.
+    /// of `0` is treated as "no admission allowed" (every launch is rejected).
+    /// There is no "unbounded" sentinel: to effectively disable the cap, set a
+    /// large number.
     pub max_concurrent_sessions: u32,
 
     /// Delay in milliseconds applied before each session launch when launching
@@ -207,7 +206,10 @@ launch_stagger_ms = 0
             launch_stagger_ms: 1_500,
             ..Default::default()
         };
-        assert_eq!(cfg.stagger_duration(), std::time::Duration::from_millis(1_500));
+        assert_eq!(
+            cfg.stagger_duration(),
+            std::time::Duration::from_millis(1_500)
+        );
         // Zero stagger (test-injection path) yields a zero duration.
         let zero = ControlPlaneConfig {
             launch_stagger_ms: 0,

@@ -239,7 +239,10 @@ impl SessionRegistry {
         if let AdmissionDecision::Reject { live, cap } =
             check_admission(live, self.config.max_concurrent_sessions, 0)
         {
-            warn!(live, cap, "session launch rejected: concurrency cap reached (§9.2)");
+            warn!(
+                live,
+                cap, "session launch rejected: concurrency cap reached (§9.2)"
+            );
             return Err(AdmissionError::CapReached { live, cap }.into());
         }
 
