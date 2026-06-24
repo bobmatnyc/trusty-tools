@@ -424,6 +424,24 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 if reaped > 0 {
                     info!("orphan-GC reaped {reaped} orphaned managed session(s)");
                 }
+
+                // PID-file orphan-GC (§10.3): reap daemon-owned `claude` child
+                // processes whose tmux pane is already gone — invisible to the
+                // tmux-name sweep above. Live session-ids come from BOTH registries;
+                // any recorded PID whose session-id is absent is a candidate, and
+                // the registry SIGTERMs it only after verifying it is still a live
+                // `claude` process (the §13.5 PID-reuse mitigation).
+                let live_ids = state.gather_live_session_ids().await;
+                let pid_outcome = state
+                    .pid_registry()
+                    .sweep_orphans(&live_ids, &crate::core::pid_registry::OsProcessProbe);
+                if pid_outcome.terminated > 0 || pid_outcome.removed_stale > 0 {
+                    info!(
+                        terminated = pid_outcome.terminated,
+                        removed_stale = pid_outcome.removed_stale,
+                        "orphan-GC PID-file sweep cleaned up orphaned claude process(es)"
+                    );
+                }
                 // #1508: auto-reap STALE EPHEMERAL sessions as a backstop.
                 let max_age = chrono::Duration::hours(crate::session_manager::MAX_EPHEMERAL_AGE_HOURS);
                 match mgr.reap_aged_ephemeral(max_age).await {

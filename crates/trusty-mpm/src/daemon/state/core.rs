@@ -375,6 +375,22 @@ impl DaemonState {
         &self.framework_root
     }
 
+    /// The PID-file registry rooted under this daemon's framework root.
+    ///
+    /// Why: the §10.3 orphan-GC needs a single, consistent answer for "where do
+    /// daemon-owned `claude` child PIDs get recorded?". Deriving it from
+    /// [`framework_root`](Self::framework_root) keeps the `pids/` directory under
+    /// the SAME root the daemon uses — a temp dir in tests, `~/.trusty-mpm` in
+    /// production — so the spawn path, the session-drop path, and the GC sweep all
+    /// agree without any global state.
+    /// What: returns a fresh [`crate::core::pid_registry::PidRegistry`] over
+    /// `<framework_root>/pids`. The handle is cheap (just a path), so a new one
+    /// per call is fine and avoids holding a long-lived field.
+    /// Test: `pid_registry_is_under_framework_root` in `state/tests.rs`.
+    pub fn pid_registry(&self) -> crate::core::pid_registry::PidRegistry {
+        crate::core::pid_registry::PidRegistry::under(&self.framework_root)
+    }
+
     /// Return the shared activity monitor, constructing it on first access.
     ///
     /// Why: the `/sessions/managed/{id}/activity` handler needs a single,
