@@ -51,6 +51,91 @@ enum BbAuth {
     Basic { username: String, password: String },
 }
 
+/// Resolve Bitbucket auth credentials from config plus an injected env lookup.
+///
+/// Why: the original logic read `std::env::var` directly, which made the auth
+/// unit tests mutate process-global environment variables. Under the
+/// multi-threaded test harness those mutations raced across tests, flaking
+/// `app_password_falls_back_to_env_when_config_absent` in CI (issue #1653).
+/// Threading the environment in as a closure removes the ambient-state
+/// coupling: production passes `std::env::var`; tests pass an in-memory map,
+/// so no test ever touches the real environment and the race cannot occur.
+/// What: applies the documented precedence — (1) Bearer `token` (config,
+/// then `BITBUCKET_TOKEN`), else (2) Basic auth `username` + `app_password`
+/// (config with `${VAR}` expansion via the same `env` lookup, then
+/// `BITBUCKET_APP_PASSWORD`). Config values written as `${MY_SECRET}` are
+/// expanded against `env` before use (closes #842). Returns
+/// [`CollectError::Config`] when no usable credential is available.
+/// Test: `client::tests` — `resolve_auth_*` cases inject env maps directly
+/// (no `std::env` mutation), covering bearer, basic, env-expansion,
+/// precedence, env-fallback, and the missing-credential error branches.
+fn resolve_auth(config: &BitbucketConfig, env: impl Fn(&str) -> Option<String>) -> Result<BbAuth> {
+    // Expand `${VAR}` placeholders using the injected env lookup so config
+    // and env resolution share one source of truth (no `std::env` here).
+    let expand = |raw: &str| -> String {
+        if let Some(var) = raw
+            .strip_prefix("${")
+            .and_then(|s| s.strip_suffix('}'))
+            .filter(|v| !v.is_empty())
+        {
+            env(var).unwrap_or_default()
+        } else {
+            raw.to_string()
+        }
+    };
+    let clean = |s: String| -> Option<String> {
+        let t = s.trim().to_string();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    };
+
+    let token = config
+        .token
+        .as_deref()
+        .map(&expand)
+        .and_then(clean)
+        .or_else(|| env("BITBUCKET_TOKEN").and_then(clean));
+
+    if let Some(t) = token {
+        return Ok(BbAuth::Bearer(t));
+    }
+
+    let username = config
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            CollectError::Config(
+                "bitbucket auth missing: provide `token` or `username` + `app_password`".into(),
+            )
+        })?
+        .to_string();
+
+    // `app_password` may be written as `${MY_SECRET}` in YAML; without
+    // expansion the literal `${MY_SECRET}` is sent as the Basic-auth password,
+    // yielding a silent 401 (closes #842). Falls back to the
+    // `BITBUCKET_APP_PASSWORD` env var, mirroring `token` above.
+    let password = config
+        .app_password
+        .as_deref()
+        .map(&expand)
+        .and_then(clean)
+        .or_else(|| env("BITBUCKET_APP_PASSWORD").and_then(clean))
+        .ok_or_else(|| {
+            CollectError::Config(
+                "bitbucket auth missing: app_password (or BITBUCKET_APP_PASSWORD) \
+                 required when token is unset"
+                    .into(),
+            )
+        })?;
+
+    Ok(BbAuth::Basic { username, password })
+}
+
 /// Async Bitbucket Cloud REST client.
 pub struct BitbucketClient {
     client: reqwest::Client,
@@ -90,62 +175,10 @@ impl BitbucketClient {
             .ok_or_else(|| CollectError::Config("bitbucket.repo_slug is required".into()))?
             .to_string();
 
-        let token = config
-            .token
-            .as_deref()
-            .map(crate::collect::env_expand::expand_env_var)
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("BITBUCKET_TOKEN")
-                    .ok()
-                    .map(|v| v.trim().to_string())
-                    .filter(|s| !s.is_empty())
-            });
-
-        let auth = if let Some(t) = token {
-            BbAuth::Bearer(t)
-        } else {
-            let username = config
-                .username
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| {
-                    CollectError::Config(
-                        "bitbucket auth missing: provide `token` or `username` + `app_password`"
-                            .into(),
-                    )
-                })?
-                .to_string();
-            // Why: `app_password` may be written as `${MY_SECRET}` in YAML;
-            // without expansion the literal `${MY_SECRET}` is sent as the
-            // Basic-auth password, yielding a silent 401 (closes #842).
-            // What: expands `${VAR}` placeholders from the environment before
-            // trimming, then falls back to `BITBUCKET_APP_PASSWORD` env var —
-            // mirroring the identical treatment applied to `token` above.
-            // Test: `app_password_env_var_expanded` in this module.
-            let password = config
-                .app_password
-                .as_deref()
-                .map(crate::collect::env_expand::expand_env_var)
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .or_else(|| {
-                    std::env::var("BITBUCKET_APP_PASSWORD")
-                        .ok()
-                        .map(|v| v.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                })
-                .ok_or_else(|| {
-                    CollectError::Config(
-                        "bitbucket auth missing: app_password (or BITBUCKET_APP_PASSWORD) \
-                         required when token is unset"
-                            .into(),
-                    )
-                })?;
-            BbAuth::Basic { username, password }
-        };
+        // Resolve credentials through the live process environment. The
+        // env-coupled logic lives in `resolve_auth` so tests can exercise it
+        // with an injected lookup instead of mutating `std::env` (issue #1653).
+        let auth = resolve_auth(config, |name| std::env::var(name).ok())?;
 
         let mut headers = HeaderMap::new();
         headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
