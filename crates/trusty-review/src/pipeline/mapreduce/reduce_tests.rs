@@ -272,6 +272,36 @@ fn reduce_caps_findings() {
     assert_eq!(reduced.stats.findings_surfaced, 2);
 }
 
+/// Guard the load-bearing ordinal invariant: `Verdict::Unknown` MUST have the
+/// highest ordinal of all variants so the UNKNOWN filter in `aggregate_verdict`
+/// is sufficient to prevent poisoning.
+///
+/// Why: `aggregate_verdict` filters UNKNOWN before `max_by_key(ordinal())`.
+/// If a future enum reorder gives Unknown a lower ordinal than Block, the filter
+/// would still be correct — but this test catches any regression where Unknown's
+/// ordinal moves below an existing non-Unknown variant and the filter assumption
+/// is broken in both directions.
+/// What: asserts Unknown.ordinal() > every other variant's ordinal.
+/// Test: this test IS the guard.
+#[test]
+fn verdict_unknown_ordinal_is_highest_invariant() {
+    let non_unknown_verdicts = [
+        Verdict::Approve,
+        Verdict::ApproveWithReservations,
+        Verdict::RequestChanges,
+        Verdict::Block,
+    ];
+    for v in &non_unknown_verdicts {
+        assert!(
+            Verdict::Unknown.ordinal() > v.ordinal(),
+            "Verdict::Unknown.ordinal() ({}) must be > {v}.ordinal() ({}) \
+             (load-bearing for aggregate_verdict UNKNOWN filter in reduce.rs)",
+            Verdict::Unknown.ordinal(),
+            v.ordinal()
+        );
+    }
+}
+
 /// Partial-coverage stats must flag a failed/oversized chunk.
 #[test]
 fn reduce_stats_partial_flag() {

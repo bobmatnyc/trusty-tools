@@ -132,11 +132,8 @@ pub(super) async fn run_mapreduce_branch(
         fail_safe_reason: None,
     };
 
-    // Telemetry: surface the map-reduce model + a partial-coverage status.
+    // Telemetry: surface the map-reduce model.
     result.model = input.reviewer_model.clone();
-    if reduced.stats.is_partial() {
-        result.status = ReviewStatus::Degraded;
-    }
 
     // Narrative body: the unified path sets `review_body` from the LLM prose
     // (`apply_llm_response`), but the map-reduce path has N per-chunk responses
@@ -162,24 +159,28 @@ pub(super) async fn run_mapreduce_branch(
     // authoritative.  Surface it in BOTH the posted body (a visible banner) and
     // the internal `error` field so neither the PR author nor a log consumer
     // mistakes a partial review for a complete one.
+    //
+    // Note: status is set AFTER the fold so finalize_run cannot clobber it.
     if reduced.stats.is_partial() {
+        let llm_errors = reduced
+            .stats
+            .files_failed
+            .saturating_sub(reduced.stats.hunks_oversized);
         let notice = format!(
             "> **Coverage notice:** {} file(s) could not be reviewed \
-             ({} failed, {} over-cap hunk(s)) — this review is partial.\n\n",
-            reduced.stats.files_failed,
-            reduced
-                .stats
-                .files_failed
-                .saturating_sub(reduced.stats.hunks_oversized),
-            reduced.stats.hunks_oversized,
+             ({} LLM error(s), {} over-cap hunk(s)) — this review is partial.\n\n",
+            reduced.stats.files_failed, llm_errors, reduced.stats.hunks_oversized,
         );
         result.review_body = format!("{notice}{}", result.review_body);
+        result.status = ReviewStatus::Degraded;
         if result.error.is_none() {
             result.error = Some(format!(
-                "map-reduce coverage partial: {} reviewed, {} skipped, {} failed ({} over-cap hunk(s))",
+                "map-reduce coverage partial: {} reviewed, {} skipped, {} failed \
+                 ({} LLM error(s), {} over-cap hunk(s))",
                 reduced.stats.files_reviewed,
                 reduced.stats.files_skipped,
                 reduced.stats.files_failed,
+                llm_errors,
                 reduced.stats.hunks_oversized,
             ));
         }
