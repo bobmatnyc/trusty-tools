@@ -42,9 +42,10 @@ mod mock;
 
 pub use fast_embedder::FastEmbedder;
 pub use types::{
-    CudaOptions, DEFAULT_CACHE_CAPACITY, DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES, EMBED_DIM, Embedder,
-    ExecutionProvider, embed_one, resolve_cuda_options, resolve_expected_provider,
-    resolve_fastembed_cache_dir,
+    CudaOptions, DEFAULT_CACHE_CAPACITY, DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES,
+    DEFAULT_ORT_INTER_THREADS, DEFAULT_ORT_INTRA_THREADS, EMBED_DIM, Embedder, ExecutionProvider,
+    OrtThreadingOptions, embed_one, resolve_cuda_options, resolve_expected_provider,
+    resolve_fastembed_cache_dir, resolve_ort_threading_options,
 };
 
 #[cfg(any(test, feature = "embedder-test-support"))]
@@ -243,6 +244,109 @@ mod tests {
                 resolve_cuda_options().gpu_mem_limit_bytes,
                 DEFAULT_CUDA_GPU_MEM_LIMIT_BYTES,
                 "zero BYTES + malformed MB must fall back to the safe default"
+            );
+        }
+    }
+
+    /// Why: #1542 — the CUDA deferred-embed deadlock is fixed by pinning ORT's
+    /// intra-/inter-op threads to 1 and disabling intra-op spinning. With no
+    /// operator override the resolver must default to that safe single-threaded,
+    /// no-spin profile so the daemon never reproduces the 8-ORT-thread barrier
+    /// deadlock out of the box.
+    /// What: clears all three knobs and asserts the defaults.
+    /// Test: this test.
+    #[test]
+    fn ort_threading_defaults() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _i = EnvVarGuard::apply("TRUSTY_ORT_INTRA_THREADS", None);
+        let _e = EnvVarGuard::apply("TRUSTY_ORT_INTER_THREADS", None);
+        let _s = EnvVarGuard::apply("TRUSTY_ORT_ALLOW_SPINNING", None);
+
+        let opts = resolve_ort_threading_options();
+        assert_eq!(
+            opts.intra_threads, DEFAULT_ORT_INTRA_THREADS,
+            "default intra-op threads must be 1 to avoid the #1542 barrier deadlock"
+        );
+        assert_eq!(opts.inter_threads, DEFAULT_ORT_INTER_THREADS);
+        assert!(
+            !opts.allow_spinning,
+            "spinning must default to off — it is the busy-wait half of the deadlock"
+        );
+        assert_eq!(DEFAULT_ORT_INTRA_THREADS, 1);
+        assert_eq!(DEFAULT_ORT_INTER_THREADS, 1);
+    }
+
+    /// Why: operators on hosts proven free of the ORT barrier bug may want to
+    /// raise the thread counts; the knobs must be honoured so the safe default
+    /// is overridable without a code change.
+    /// What: sets explicit positive thread counts and asserts they pass through.
+    /// Test: this test.
+    #[test]
+    fn ort_threading_reads_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _i = EnvVarGuard::apply("TRUSTY_ORT_INTRA_THREADS", Some("4"));
+        let _e = EnvVarGuard::apply("TRUSTY_ORT_INTER_THREADS", Some("2"));
+        let _s = EnvVarGuard::apply("TRUSTY_ORT_ALLOW_SPINNING", None);
+
+        let opts = resolve_ort_threading_options();
+        assert_eq!(
+            opts.intra_threads, 4,
+            "explicit intra-op count must be used"
+        );
+        assert_eq!(
+            opts.inter_threads, 2,
+            "explicit inter-op count must be used"
+        );
+        assert!(!opts.allow_spinning);
+    }
+
+    /// Why: a malformed or zero thread count must never silently disable
+    /// parallelism control or panic — it must fall back to the safe default so
+    /// the deadlock fix still holds.
+    /// What: feeds non-numeric and zero values and asserts the defaults win.
+    /// Test: this test.
+    #[test]
+    fn ort_threading_ignores_malformed() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _i = EnvVarGuard::apply("TRUSTY_ORT_INTRA_THREADS", Some("not-a-number"));
+        let _e = EnvVarGuard::apply("TRUSTY_ORT_INTER_THREADS", Some("0"));
+        let _s = EnvVarGuard::apply("TRUSTY_ORT_ALLOW_SPINNING", None);
+
+        let opts = resolve_ort_threading_options();
+        assert_eq!(
+            opts.intra_threads, DEFAULT_ORT_INTRA_THREADS,
+            "malformed intra-op count must fall back to the safe default"
+        );
+        assert_eq!(
+            opts.inter_threads, DEFAULT_ORT_INTER_THREADS,
+            "zero inter-op count must fall back to the safe default"
+        );
+    }
+
+    /// Why: spinning is opt-in and only safe under constant inference; the knob
+    /// must accept the common truthy spellings and treat everything else
+    /// (including unset) as disabled.
+    /// What: asserts a truthy value enables spinning while a non-truthy value
+    /// leaves it off.
+    /// Test: this test.
+    #[test]
+    fn ort_threading_spinning_truthy() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let _i = EnvVarGuard::apply("TRUSTY_ORT_INTRA_THREADS", None);
+        let _e = EnvVarGuard::apply("TRUSTY_ORT_INTER_THREADS", None);
+
+        {
+            let _s = EnvVarGuard::apply("TRUSTY_ORT_ALLOW_SPINNING", Some("TRUE"));
+            assert!(
+                resolve_ort_threading_options().allow_spinning,
+                "a truthy value (case-insensitive) must enable spinning"
+            );
+        }
+        {
+            let _s = EnvVarGuard::apply("TRUSTY_ORT_ALLOW_SPINNING", Some("maybe"));
+            assert!(
+                !resolve_ort_threading_options().allow_spinning,
+                "a non-truthy value must leave spinning disabled"
             );
         }
     }
