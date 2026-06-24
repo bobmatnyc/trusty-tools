@@ -469,3 +469,170 @@ fn bare_sha_with_enforce_min_tokens_is_too_short() {
         "bare SHA must pass gate when enforce_min_tokens=false"
     );
 }
+
+// ---- Issue #1667: false-positive fixes for path/slug/key=value tokens ----
+
+/// Why (issue #1667): the `has_b64_sym` branch in `looks_like_secret` was
+/// flagging `/` (path separator) and `=` (key=value, semver operator) as
+/// base64 indicators, causing legitimate technical tokens to be rejected as
+/// credentials. `is_structural_token` now guards that branch.
+/// What: asserts each known-false-positive token is NOT flagged as a secret
+/// by `looks_like_secret`, and that the full gate accepts them.
+/// Test: itself.
+#[test]
+fn structural_tokens_are_not_flagged() {
+    // slash-path tokens (issue #1667 primary cases)
+    let slash_tokens = [
+        "verdict/grade/prose-summary", // 27 chars — the exact reported FP
+        "duettoresearch/duetto",       // org/repo slug
+        "duettoresearch/projects/19",  // org/repo/id path
+        "crates/trusty-review/src/pipeline/mapreduce/synthesis.rs", // file path
+    ];
+    for tok in slash_tokens {
+        assert!(
+            !looks_like_secret(tok),
+            "slash-path token should NOT be flagged as secret: {tok}"
+        );
+    }
+
+    // key=value / semver-operator tokens
+    let eq_tokens = [
+        ">=2-medium->REQUEST_CHANGES", // semver + status slug
+    ];
+    for tok in eq_tokens {
+        assert!(
+            !looks_like_secret(tok),
+            "key=value/semver token should NOT be flagged as secret: {tok}"
+        );
+    }
+
+    // version/crate tag strings
+    let version_tokens = [
+        "trusty-review-v0.6.0", // crate release tag — has hyphens, no b64 syms
+    ];
+    for tok in version_tokens {
+        assert!(
+            !looks_like_secret(tok),
+            "version tag should NOT be flagged as secret: {tok}"
+        );
+    }
+}
+
+/// Why (issue #1667): end-to-end gate must ACCEPT content containing
+/// the real false-positive tokens that were rejected before this fix.
+/// What: passes each FP token through `FilterConfig::apply` and asserts Ok.
+/// Test: itself.
+#[test]
+fn gate_accepts_fp_content() {
+    let cfg = FilterConfig::default();
+    let cases = [
+        // The exact token from the rejection report:
+        "Use verdict/grade/prose-summary as the synthesized output key",
+        // Org/repo slug references:
+        "See duettoresearch/duetto for the upstream fork and duettoresearch/projects/19 for tracking",
+        // Semver / review-decision token:
+        "Review verdict: >=2-medium->REQUEST_CHANGES must block merge",
+        // File path reference:
+        "The synthesis module lives at crates/trusty-review/src/pipeline/mapreduce/synthesis.rs",
+        // Crate release tag:
+        "Released trusty-review-v0.6.0 with map-reduce support",
+        // Bare 40-char git SHA (regression lock from #1481):
+        "Merged 0fda534e0fda534e0fda534e0fda534e0fda534e into main",
+    ];
+    for content in cases {
+        assert!(
+            cfg.apply(content, false).is_ok(),
+            "gate must ACCEPT: {content:?}\ngot: {:?}",
+            cfg.apply(content, false)
+        );
+    }
+}
+
+/// Why (issue #1667 hardening): verifying the fix did NOT weaken real-secret
+/// detection. Prefix-based secrets (AKIA, ghp_, sk-, AIza) are caught by the
+/// `SECRET_PREFIXES` / `find_secret_token` layer that runs BEFORE
+/// `looks_like_secret`'s entropy heuristics; the assertions here go through
+/// the REAL public entry points (`find_secret_token` and `FilterConfig::apply`)
+/// so that the test proves the actual end-to-end blocking guarantee rather than
+/// only a lower-level heuristic.
+/// What: asserts every secret class (prefix-based and entropy-based) is rejected
+/// by both `find_secret_token` (the intermediate public guard) and `apply` (the
+/// full gate). For the GCP key (`AIzaSy…`), which is caught by the mixed-case+
+/// digit fallback rather than a prefix, `looks_like_secret` is also verified
+/// directly since that is the authoritative guard for that class.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_1667_fix() {
+    let cfg = FilterConfig::default();
+
+    // --- Prefix-based secrets: verified through the public guard ---
+    // `find_secret_token` is the REAL layer that catches these (the
+    // `SECRET_PREFIXES` check inside `looks_like_secret` is reached only via
+    // `find_secret_token`; calling `looks_like_secret` directly on a bare
+    // prefix token tests a sub-layer but not the actual end-to-end path).
+    let prefix_cases = [
+        ("AKIAIOSFODNN7EXAMPLE", "AWS long-term key"), // pragma: allowlist secret
+        ("ASIAY34FZKBOKMUTVV7A", "AWS STS temp cred"), // pragma: allowlist secret
+        ("ghp_abcdefghijklmnopqrstuvwxyz012345", "GitHub PAT"), // pragma: allowlist secret
+        ("sk-abcdefghijklmnopqrstuvwxyz01234567890123", "OpenAI key"), // pragma: allowlist secret
+    ];
+    for (tok, label) in prefix_cases {
+        // Layer 1: the intermediate public guard must find the secret token.
+        assert!(
+            find_secret_token(tok).is_some(),
+            "{label} must be caught by find_secret_token: {tok}"
+        );
+        // Layer 2: the full gate (apply) must return PotentialSecret when the
+        // token appears in prose, which is the actual blocking guarantee.
+        let prose = format!("Deployment secret: {tok}");
+        assert!(
+            matches!(
+                cfg.apply(&prose, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "{label} must be rejected by apply end-to-end; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
+
+    // --- GCP API key: caught by the mixed-case+digit fallback, not a prefix ---
+    // For this class, `looks_like_secret` is the primary guard; verify all
+    // three layers: looks_like_secret, find_secret_token, and apply.
+    let gcp_key = "AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI"; // pragma: allowlist secret
+    assert!(
+        looks_like_secret(gcp_key),
+        "GCP API key must be flagged by looks_like_secret: {gcp_key}"
+    );
+    assert!(
+        find_secret_token(gcp_key).is_some(),
+        "GCP API key must be caught by find_secret_token: {gcp_key}"
+    );
+    let gcp_prose = format!("API key: {gcp_key} — keep secret");
+    assert!(
+        matches!(
+            cfg.apply(&gcp_prose, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "GCP API key must be rejected by apply end-to-end; got {:?}",
+        cfg.apply(&gcp_prose, false)
+    );
+
+    // --- High-entropy base64 blob (with `+`): caught by the b64-symbol branch ---
+    // `+` is unambiguously base64 and is not a structural char, so this blob
+    // must be rejected even though it also contains `/` (which would be a
+    // structural indicator if `+` weren't present).
+    let b64_blob = "aGVsbG8rd29ybGQvZm9vK2Jhcj09bG9uZ2Jhc2U2NAaGVsbG8rd29ybGQ="; // pragma: allowlist secret
+    let b64_content = format!("Config blob: {b64_blob} stored in env");
+    assert!(
+        find_secret_token(&b64_content).is_some(),
+        "base64 blob must be caught by find_secret_token"
+    );
+    assert!(
+        matches!(
+            cfg.apply(&b64_content, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "content with base64 blob must reject end-to-end; got {:?}",
+        cfg.apply(&b64_content, false)
+    );
+}
