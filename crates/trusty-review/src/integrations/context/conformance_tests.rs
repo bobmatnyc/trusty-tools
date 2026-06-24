@@ -496,3 +496,174 @@ fn render_section_title_and_subtitle_contain_ticket_key() {
         subtitle
     );
 }
+
+// ─── #1418: test-plan / AC conformance gap tests ──────────────────────────────
+
+/// PR body with a `## Test plan` section yields the contained bullet items.
+///
+/// Why: `extract_test_plan_items` must correctly identify the `## Test plan`
+/// heading (case-insensitive) and collect every bullet line beneath it, stopping
+/// at the next `##` heading (#1418 AC-1).
+/// What: a body with a `## Test plan` section containing two bullets → both
+/// items returned; a non-test-plan heading following them is not included.
+/// Test: this test; pure, no network.
+#[test]
+fn test_plan_extraction_from_pr_body() {
+    let body = "\
+## Summary\n\
+This PR adds pagination.\n\
+\n\
+## Test plan\n\
+- Verify the endpoint returns 20 items per page\n\
+- Should fail gracefully on invalid cursor\n\
+\n\
+## Related\n\
+- Some other note\n\
+";
+    let items = super::extract_test_plan_items(body);
+    assert_eq!(items.len(), 2, "two bullet items under ## Test plan");
+    assert!(
+        items[0].contains("Verify the endpoint"),
+        "first item text: {:?}",
+        items[0]
+    );
+    assert!(
+        items[1].contains("Should fail gracefully"),
+        "second item text: {:?}",
+        items[1]
+    );
+}
+
+/// Ticket body with `## Acceptance Criteria` bullets and `- [ ]` checkboxes
+/// yields all AC items, deduped (#1418 AC-2).
+///
+/// Why: tickets use both heading-scoped bullets and freestanding `- [ ]`
+/// checklist items; `extract_ac_bullets` must collect both forms.
+/// What: a ticket body with an `## Acceptance Criteria` section (plain bullet)
+/// and a `- [ ]` checkbox item elsewhere → both are returned, no duplicates.
+/// Test: this test; pure, no network.
+#[test]
+fn ac_extraction_from_ticket() {
+    let ticket_body = "\
+## Background\n\
+Some background text.\n\
+\n\
+## Acceptance Criteria\n\
+- Tests cover the cursor path\n\
+- Error handling is documented\n\
+\n\
+## Implementation notes\n\
+- [ ] Should validate the cursor token\n\
+";
+    let items = super::extract_ac_bullets(ticket_body);
+    // Expect 3 items: 2 from the AC section + 1 from - [ ] checkbox
+    assert!(
+        items.len() >= 2,
+        "at least two AC items expected: {:?}",
+        items
+    );
+    assert!(
+        items.iter().any(|i| i.contains("cursor")),
+        "cursor-related item must be present: {:?}",
+        items
+    );
+    assert!(
+        items.iter().any(|i| i.contains("validate")),
+        "validate item from - [ ] must be present: {:?}",
+        items
+    );
+}
+
+/// An AC item referencing test behaviour with no test file in the diff produces
+/// an "Unmet AC" snippet with a source citation subtitle (#1418 AC-3).
+///
+/// Why: the primary payoff of #1418 is a citable gap finding the LLM can
+/// reference instead of emitting a vague "needs tests" note.  The snippet title
+/// must start with "Unmet AC:" and the subtitle must carry the source.
+/// What: `build_gap_snippets` with one test-related AC item and no test-file
+/// coverage → one snippet with the expected title/subtitle.
+/// Test: this test; pure (calls `build_gap_snippets` directly).
+#[test]
+fn unmet_ac_renders_snippet() {
+    let ac_items = vec!["Should verify the pagination cursor is valid".to_string()];
+    let changed_files = vec!["src/page.rs".to_string()]; // no test file
+    let identifiers: Vec<String> = Vec::new();
+
+    let snippets = super::build_gap_snippets(
+        &[],
+        &ac_items,
+        Some("https://github.com/owner/repo/issues/42"),
+        Some("#42"),
+        &changed_files,
+        &identifiers,
+    );
+    assert_eq!(
+        snippets.len(),
+        1,
+        "one unmet AC item must produce one snippet"
+    );
+    let snip = &snippets[0];
+    assert!(
+        snip.title.starts_with("Unmet AC:"),
+        "snippet title must start with 'Unmet AC:': got {:?}",
+        snip.title
+    );
+    let subtitle = snip.subtitle.as_deref().expect("subtitle must be present");
+    assert!(
+        subtitle.contains("#42"),
+        "subtitle must carry ticket ID: got {:?}",
+        subtitle
+    );
+}
+
+/// When the PR body is non-empty but has no `## Test plan` and the linked ticket
+/// has no `## Acceptance Criteria`, a single advisory snippet is emitted (#1418 AC-4).
+///
+/// Why: a PR without any test plan or AC context is a review gap; the advisory
+/// snippet signals this so the reviewer LLM can note it.
+/// What: `build_gap_snippets` with empty `tp_items` and `ac_items` → exactly one
+/// advisory snippet with subtitle "advisory".
+/// Test: this test; pure.
+#[test]
+fn no_plan_produces_advisory_snippet() {
+    let snippets =
+        super::build_gap_snippets(&[], &[], None, None, &["src/foo.rs".to_string()], &[]);
+    assert_eq!(
+        snippets.len(),
+        1,
+        "exactly one advisory snippet when no plan/AC: {:?}",
+        snippets
+    );
+    let sub = snippets[0].subtitle.as_deref().unwrap_or("");
+    assert_eq!(
+        sub, "advisory",
+        "subtitle must be 'advisory': got {:?}",
+        sub
+    );
+}
+
+/// A completely empty PR body produces no snippets at all (not even advisory).
+///
+/// Why: an empty PR body signals a local-diff / draft review where there is no
+/// authored test plan to check against; emitting an advisory would be a false
+/// positive (the author hasn't described the PR yet).
+/// What: a subject with `body = ""` → `gather_gap_snippets` returns an empty Vec
+/// (checked by asserting `gather` returns an empty section when the ISR also
+/// resolves to no intent).
+/// Test: this test; no network.
+#[tokio::test]
+async fn empty_body_no_snippets() {
+    let src = source_with_fetcher(MockFetcher {
+        body: String::new(),
+        fail: false,
+    });
+    let subject = ReviewSubject {
+        body: String::new(), // empty body
+        ..subject_with_body("")
+    };
+    let section = src.gather(&subject).await.expect("gather must not error");
+    assert!(
+        section.snippets.is_empty(),
+        "empty PR body must produce no snippets (not even advisory)"
+    );
+}

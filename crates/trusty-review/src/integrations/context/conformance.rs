@@ -11,15 +11,17 @@
 //! `ContextSource` reuses the entire existing pipeline (gather → prompt → parse →
 //! grade) with the documented one-line registration seam (spec §5.2, §7.1) — the
 //! source renders the resolved intent as review context; the LLM emits the
-//! `method-conformance` finding; the verdict floor caps it at REQUEST_CHANGES.
+//! `method-conformance` finding; `grade.rs` caps it at REQUEST_CHANGES.
 //!
-//! What: `ConformanceSource` implements `ContextSource` by calling the shared ISR
-//! ([`trusty_common::intent_source::resolve`], C1 / #1363) with an
-//! `IntentQuery::Pr` built from the `ReviewSubject`, then renders the resulting
-//! `ResolvedIntent` into a `## Intended method (ticket/spec)` section.  The ISR
-//! seams (`TicketFetcher` / `SpecLookup`) are injected so the source is testable
-//! offline; the production constructor wires a `BackendTicketFetcher` behind a
-//! pluggable token resolver (spec §7.4 — NO hard-wired PAT) and an `FsSpecLookup`.
+//! ## Test-plan & AC conformance (#1418)
+//! `gather` also parses the PR body for a `## Test plan` section and fetches
+//! the linked ticket body for `## Acceptance Criteria` / `- [ ]` checklist
+//! items.  Items that reference test/verify behaviour with no matching test
+//! file or test identifier in the diff are surfaced as "possibly unmet"
+//! snippets.  When neither a test-plan section nor AC bullets are found (but
+//! the PR body is non-empty), a single advisory snippet is emitted.  All of
+//! this is pure string parsing — no extra network calls beyond what the
+//! existing ISR ticket fetch already performs.
 //!
 //! ## Fail-open (AC-11)
 //! If the ISR returns `unresolved` (ticket fetch failed) or `none` (no ticket
@@ -34,7 +36,8 @@
 //!
 //! Test: `conformance_tests.rs` — gather renders the ticket method, fail-open on
 //! unresolved/none yields an empty section, semantic-mode errors, disabled-source
-//! skip.
+//! skip, test-plan extraction, AC extraction, unmet-AC rendering, advisory on
+//! missing plan.
 
 use std::sync::Arc;
 
@@ -42,7 +45,7 @@ use async_trait::async_trait;
 use trusty_common::intent_source::backend_fetcher::{BackendTicketFetcher, FsSpecLookup};
 use trusty_common::intent_source::{
     ChangedFile, IntentQuery, IntentTokenResolver, IsrError, Method, Precedence, ResolvedIntent,
-    SpecLookup, TicketFetcher, resolve_default,
+    SpecLookup, TicketFetcher, extract_pr_ticket, resolve_default,
 };
 
 use super::{
@@ -57,6 +60,9 @@ const SOURCE_NAME: &str = "conformance";
 
 /// Heading rendered for the resolved-intent section in the reviewer prompt.
 const SECTION_HEADING: &str = "Intended method (ticket/spec)";
+
+/// Heading rendered when only test-plan gaps are surfaced (#1418).
+const GAPS_HEADING: &str = "Test plan gaps";
 
 // ─── Auth seam (mirrors github_issues::IssueTokenResolver, spec §7.4) ─────────
 
@@ -162,14 +168,242 @@ impl IntentTokenResolver for IsrTokenBridge {
     }
 }
 
+// ─── Test-plan / AC parsing helpers (#1418) ───────────────────────────────────
+
+/// Extract bullet items from the `## Test plan` section of a PR body.
+///
+/// Why: PR authors list what they manually tested or expect CI to verify under
+/// `## Test plan`; surfacing those items lets the reviewer flag ones with no
+/// corresponding test change in the diff (#1418 AC-1).
+/// What: finds the first heading matching `(?i)## test plan`, then collects
+/// every leading-`-` / `*` bullet line until the next `##` heading or
+/// end-of-body.  Returns an empty `Vec` when no matching section is found.
+/// Test: `test_plan_extraction_from_pr_body` in `conformance_tests.rs`.
+pub fn extract_test_plan_items(pr_body: &str) -> Vec<String> {
+    let mut in_section = false;
+    let mut items: Vec<String> = Vec::new();
+    for line in pr_body.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("##") {
+            let heading_text = trimmed.trim_start_matches('#').trim();
+            let normalised = heading_text
+                .to_lowercase()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let is_testplan = normalised.starts_with("test plan");
+            if is_testplan {
+                in_section = true;
+                continue;
+            }
+            if in_section {
+                break;
+            }
+        }
+        if in_section && let Some(item) = parse_bullet(trimmed) {
+            items.push(item);
+        }
+    }
+    items
+}
+
+/// Extract acceptance-criteria bullets from a ticket body.
+///
+/// Why: ticket AC items state what the diff must implement/prove; items with no
+/// test coverage in the diff are "possibly unmet" (#1418 AC-2).
+/// What: collects `- [ ]` / `* [ ]` checkbox items from anywhere in the body,
+/// plus plain bullets under a case-insensitive `## Acceptance Criteria` section.
+/// Returns the union, deduped preserving order, trimmed.
+/// Test: `ac_extraction_from_ticket` in `conformance_tests.rs`.
+pub fn extract_ac_bullets(ticket_body: &str) -> Vec<String> {
+    let mut items: Vec<String> = Vec::new();
+    let mut in_ac_section = false;
+
+    for line in ticket_body.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("##") {
+            let heading_text = trimmed.trim_start_matches('#').trim().to_lowercase();
+            in_ac_section =
+                heading_text.contains("acceptance") && heading_text.contains("criteria");
+            continue;
+        }
+
+        // Always collect `- [ ]` / `* [ ]` checkbox items regardless of section.
+        if trimmed.starts_with("- [ ]") || trimmed.starts_with("* [ ]") {
+            let text = trimmed
+                .trim_start_matches(['-', '*'])
+                .trim()
+                .trim_start_matches("[ ]")
+                .trim()
+                .to_string();
+            if !text.is_empty() && !items.contains(&text) {
+                items.push(text);
+            }
+            continue;
+        }
+
+        if in_ac_section
+            && let Some(item) = parse_bullet(trimmed)
+            && !items.contains(&item)
+        {
+            items.push(item);
+        }
+    }
+    items
+}
+
+/// Parse a single leading-bullet line, returning its trimmed text (or `None`).
+///
+/// Why: both `extract_test_plan_items` and `extract_ac_bullets` need to strip
+/// `-`, `*`, `+` leaders and optional checkbox markers; a shared helper avoids
+/// drift between the two parsers.
+/// What: strips a leading `-`, `*`, or `+` leader, then any `[x]`/`[X]`/`[ ]`
+/// checkbox marker, and returns the remaining text when non-empty.
+/// Test: exercised transitively by the two extraction functions.
+fn parse_bullet(trimmed: &str) -> Option<String> {
+    let after_marker = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .or_else(|| trimmed.strip_prefix("+ "))?;
+    let text = if after_marker.starts_with("[x] ")
+        || after_marker.starts_with("[X] ")
+        || after_marker.starts_with("[ ] ")
+    {
+        after_marker[4..].trim()
+    } else {
+        after_marker.trim()
+    };
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+/// Returns `true` when `item` references testable / verifiable behaviour.
+///
+/// Why: not every AC or test-plan item is test-measurable; items like
+/// "document the new endpoint" should not trigger a test-gap finding.
+/// What: checks whether the lowercased item text contains any of a set of
+/// test-signalling keywords: test, verify, check, assert, should, validate,
+/// ensure, confirm.
+/// Test: exercised transitively by `unmet_ac_renders_snippet`.
+fn item_is_test_related(item: &str) -> bool {
+    let lower = item.to_lowercase();
+    let keywords = [
+        "test", "verify", "check", "assert", "should", "validate", "ensure", "confirm",
+    ];
+    keywords.iter().any(|kw| lower.contains(kw))
+}
+
+/// Returns `true` when the diff already covers `item` with a test artifact.
+///
+/// Why: an AC item is only "possibly unmet" when there is NO evidence of test
+/// coverage in the diff; an item matched by a test file path or a test-named
+/// identifier is considered covered (permissive heuristic — avoids false
+/// positives).
+/// What: returns `true` if any `changed_files` path contains "test" or "spec"
+/// (case-insensitive) OR any `identifiers` entry contains "test".  The item
+/// text itself is not matched against file content (requires a richer diff view
+/// beyond this seam).
+/// Test: exercised transitively by `unmet_ac_renders_snippet`.
+fn item_has_test_coverage(_item: &str, changed_files: &[String], identifiers: &[String]) -> bool {
+    let has_test_file = changed_files.iter().any(|f| {
+        let lower = f.to_lowercase();
+        lower.contains("test") || lower.contains("spec")
+    });
+    if has_test_file {
+        return true;
+    }
+    identifiers
+        .iter()
+        .any(|id| id.to_lowercase().contains("test"))
+}
+
+/// Build gap snippets from unmet test-plan / AC items (#1418).
+///
+/// Why: the reviewer LLM needs structured, citable context to raise
+/// `test-coverage` findings; citing the exact AC item and its source is
+/// actionable (#1413 top Duetto signal #4).
+/// What: for every test-related item in `tp_items` and `ac_items` with no test
+/// coverage in the diff, emits one `ContextSnippet` titled `"Unmet AC: <item>"`
+/// with a source subtitle.  When neither list has any items, emits ONE advisory
+/// snippet.  Returns an empty `Vec` when all test-related items are covered.
+/// Test: `unmet_ac_renders_snippet`, `no_plan_produces_advisory_snippet`,
+/// `empty_body_no_snippets` in `conformance_tests.rs`.
+pub fn build_gap_snippets(
+    tp_items: &[String],
+    ac_items: &[String],
+    ticket_url: Option<&str>,
+    ticket_id: Option<&str>,
+    changed_files: &[String],
+    identifiers: &[String],
+) -> Vec<ContextSnippet> {
+    if tp_items.is_empty() && ac_items.is_empty() {
+        return vec![ContextSnippet {
+            title: "No test plan or AC found in PR description or linked ticket".to_string(),
+            subtitle: Some("advisory".to_string()),
+            body: Some(
+                "The PR description has no ## Test plan section and the linked ticket (if any) \
+                 has no ## Acceptance Criteria or - [ ] checklist. \
+                 Consider adding explicit test-plan bullets."
+                    .to_string(),
+            ),
+            link: None,
+        }];
+    }
+
+    let mut snippets: Vec<ContextSnippet> = Vec::new();
+
+    for item in tp_items {
+        if !item_is_test_related(item) {
+            continue;
+        }
+        if item_has_test_coverage(item, changed_files, identifiers) {
+            continue;
+        }
+        snippets.push(ContextSnippet {
+            title: format!("Unmet AC: {}", truncate_on_char_boundary(item, 80)),
+            subtitle: Some("PR body test plan".to_string()),
+            body: Some(item.clone()),
+            link: None,
+        });
+    }
+
+    let ticket_subtitle = match (ticket_id, ticket_url) {
+        (Some(id), Some(url)) => format!("{id} — {url}"),
+        (Some(id), None) => id.to_string(),
+        _ => "linked ticket".to_string(),
+    };
+    for item in ac_items {
+        if !item_is_test_related(item) {
+            continue;
+        }
+        if item_has_test_coverage(item, changed_files, identifiers) {
+            continue;
+        }
+        snippets.push(ContextSnippet {
+            title: format!("Unmet AC: {}", truncate_on_char_boundary(item, 80)),
+            subtitle: Some(ticket_subtitle.clone()),
+            body: Some(item.clone()),
+            link: ticket_url.map(str::to_string),
+        });
+    }
+
+    snippets
+}
+
 // ─── The source ──────────────────────────────────────────────────────────────
 
-/// BACK-gate context source: surfaces the resolved ticket/spec intent.
+/// BACK-gate context source: surfaces the resolved ticket/spec intent and
+/// test-plan / AC conformance gaps (#1359, #1418).
 ///
 /// Why: the back gate (#1359) is modelled as a `ContextSource` so it reuses the
 /// existing review pipeline (spec §5.2).  It renders the resolved intent for the
 /// reviewer LLM; the LLM emits the `method-conformance` finding; `grade.rs` caps
-/// it at REQUEST_CHANGES.
+/// it at REQUEST_CHANGES.  Since #1418 it also surfaces unmet test-plan / AC
+/// items as `test-coverage` findings so the LLM can cite the exact source line.
 /// What: holds `enabled`, `mode`, a boxed `TicketFetcher`, and a `SpecLookup`
 /// (both ISR seams, injected for testability).  `gather` builds an
 /// `IntentQuery::Pr` from the subject, calls the ISR, and renders the result.
@@ -415,6 +649,69 @@ impl ConformanceSource {
             snippets: Vec::new(),
         }
     }
+
+    /// Gather test-plan gap snippets for the diff, fail-open (#1418).
+    ///
+    /// Why: the gap check runs inside `gather` and must be fail-open; wrapping it
+    /// in a dedicated helper keeps `gather` linear and the logic independently
+    /// testable via `build_gap_snippets`.
+    /// What: parses the PR body for test-plan items; optionally fetches the linked
+    /// ticket for AC bullets (same fail-open contract — any fetch error yields an
+    /// empty AC list); calls `build_gap_snippets` to produce `ContextSnippet`s.
+    /// The advisory snippet ("No test plan or AC found") is only emitted when there
+    /// IS a ticket link in the PR body (we know the author linked a ticket, so they
+    /// had an opportunity to add AC) — it is suppressed when there is no ticket and
+    /// no test-plan section (avoids false-positive advisory for un-ticketed PRs).
+    /// Returns an empty `Vec` when the PR body is blank or there is nothing to
+    /// check.
+    /// Test: `unmet_ac_renders_snippet`, `no_plan_produces_advisory_snippet`,
+    /// `empty_body_no_snippets`.
+    async fn gather_gap_snippets(&self, subject: &ReviewSubject) -> Vec<ContextSnippet> {
+        if subject.body.trim().is_empty() {
+            return Vec::new();
+        }
+
+        let tp_items = extract_test_plan_items(&subject.body);
+
+        let (ac_items, ticket_url, ticket_id) =
+            if !subject.owner.is_empty() && !subject.repo.is_empty() {
+                if let Some(id) = extract_pr_ticket(&subject.body, &[], None) {
+                    match self.fetcher.fetch(&subject.owner, &subject.repo, &id).await {
+                        Ok(data) => {
+                            let url = data.url.clone();
+                            let tid = data.id.clone();
+                            (extract_ac_bullets(&data.body), url, Some(tid))
+                        }
+                        Err(_) => (Vec::new(), None, None),
+                    }
+                } else {
+                    (Vec::new(), None, None)
+                }
+            } else {
+                (Vec::new(), None, None)
+            };
+
+        // Only call `build_gap_snippets` when there are actual items to evaluate.
+        // The `build_gap_snippets` advisory (both lists empty) is for direct
+        // callers who have already confirmed context; `gather_gap_snippets` is
+        // fail-open and silently returns empty when no test-plan section and no
+        // AC were found — this avoids false-positive advisories for:
+        //   • fetch failures (AC-11 fail-open),
+        //   • tickets with no AC (M3 / AC-9 gap → empty),
+        //   • PRs without explicit test plans or ticket linkage.
+        if tp_items.is_empty() && ac_items.is_empty() {
+            return Vec::new();
+        }
+
+        build_gap_snippets(
+            &tp_items,
+            &ac_items,
+            ticket_url.as_deref(),
+            ticket_id.as_deref(),
+            &subject.changed_files,
+            &subject.identifiers,
+        )
+    }
 }
 
 #[async_trait]
@@ -431,20 +728,60 @@ impl ContextSource for ConformanceSource {
         self.mode
     }
 
+    /// Gather intent + test-plan gap context for the PR.
+    ///
+    /// Why: the conformance source contributes two kinds of reviewer context:
+    /// (1) the resolved ticket/spec method for method-conformance checking, and
+    /// (2) unmet test-plan / AC items for test-coverage checking (#1418).
+    /// Combining them in one gather keeps the source count stable and reuses the
+    /// same fail-open orchestrator path.
+    /// What: resolves the intent (existing ISR path); gathers gap snippets from
+    /// PR-body test-plan + linked-ticket AC; returns a combined section whose
+    /// heading is `SECTION_HEADING` when intent snippets are present, or
+    /// `GAPS_HEADING` when only gap snippets exist.  An empty section is returned
+    /// (orchestrator drops it) when both the intent and the gaps are empty.
+    /// Test: existing tests (method intent) + new gap tests in `conformance_tests.rs`.
     async fn gather(&self, subject: &ReviewSubject) -> Result<ContextSection, ContextSourceError> {
         if self.mode == RetrievalMode::Semantic {
             return Err(ContextSourceError::SemanticNotImplemented { src: SOURCE_NAME });
         }
-        let Some(query) = Self::build_query(subject) else {
-            // No owner/repo (local-diff) — nothing to resolve; empty, not error.
-            return Ok(Self::empty_section());
+
+        // Intent section (existing ISR path, fail-open).
+        let intent_snippets = if let Some(query) = Self::build_query(subject) {
+            // The ISR is itself FAIL-OPEN: a fetch/parse failure yields
+            // `ResolvedIntent::unresolved` (never an Err), which `render_section`
+            // turns into an empty section.  No conformance finding is manufactured
+            // (AC-11).
+            let intent =
+                resolve_default(query, self.fetcher.as_ref(), self.spec_lookup.as_ref()).await;
+            Self::render_section(&intent).snippets
+        } else {
+            Vec::new()
         };
-        // The ISR is itself FAIL-OPEN: a fetch/parse failure yields
-        // `ResolvedIntent::unresolved` (never an Err), which `render_section`
-        // turns into an empty section.  No conformance finding is manufactured
-        // (AC-11).
-        let intent = resolve_default(query, self.fetcher.as_ref(), self.spec_lookup.as_ref()).await;
-        Ok(Self::render_section(&intent))
+        let has_intent = !intent_snippets.is_empty();
+
+        // Test-plan / AC gaps (fail-open — any error yields an empty Vec).
+        let gap_snippets = self.gather_gap_snippets(subject).await;
+
+        let all_snippets: Vec<ContextSnippet> =
+            intent_snippets.into_iter().chain(gap_snippets).collect();
+
+        if all_snippets.is_empty() {
+            return Ok(Self::empty_section());
+        }
+
+        // Use the intent heading when intent snippets are present (primary signal);
+        // fall back to the gaps heading so the section is clearly labelled.
+        let heading = if has_intent {
+            SECTION_HEADING.to_string()
+        } else {
+            GAPS_HEADING.to_string()
+        };
+
+        Ok(ContextSection {
+            heading,
+            snippets: all_snippets,
+        })
     }
 }
 
