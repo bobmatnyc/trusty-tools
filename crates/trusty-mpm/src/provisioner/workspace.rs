@@ -290,7 +290,16 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         // for any reason) we log and continue so a session can still start — the
         // operator can run `tm install` / `tm catalog sync` to populate agents.
         let fw = crate::core::paths::FrameworkPaths::default();
-        match crate::core::session_launch::prepare_session(&fw, &workspace_path) {
+        // Thread the cloned-from `repo_url` so the trusty-memory MCP injection
+        // pins `env.TRUSTY_MEMORY_PALACE` to the project's `owner-repo` slug
+        // (issue #1605). Without it the injector would fall back to deriving the
+        // palace from the throwaway `<session-id>` workspace basename — the
+        // WRONG palace for a cloned session.
+        match crate::core::session_launch::prepare_session_with_repo_url(
+            &fw,
+            &workspace_path,
+            Some(repo_url),
+        ) {
             Ok(report) => {
                 info!(
                     session = %session_id,

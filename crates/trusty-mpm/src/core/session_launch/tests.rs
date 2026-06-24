@@ -1,7 +1,7 @@
 use super::settings::{
     clean_global_trusty_memory_hooks, deploy_output_style, inject_trusty_memory_mcp,
     inject_trusty_search_mcp, preseed_workspace_trust, register_project_index,
-    trusty_search_mcp_value, write_output_style, write_project_hooks,
+    trusty_memory_mcp_value, trusty_search_mcp_value, write_output_style, write_project_hooks,
 };
 use super::*;
 use tempfile::tempdir;
@@ -26,6 +26,38 @@ impl EnvVarGuard {
         // no other thread races the set/restore. Restore happens in `Drop`.
         unsafe {
             std::env::set_var(key, value);
+        }
+        Self { key, prev }
+    }
+
+    /// Set a string-valued env var for the duration of a serial test (#1605).
+    ///
+    /// Why: the palace-pinning tests must set `TRUSTY_MEMORY_PALACE` to a plain
+    /// string override; the path-based `set` would round-trip through a
+    /// `PathBuf` unnecessarily.
+    /// What: snapshots the prior value and sets `key=value`; restored in `Drop`.
+    /// Test: used by `inject_trusty_memory_mcp_override_env_wins`.
+    fn set_str(key: &'static str, value: &str) -> Self {
+        let prev = std::env::var(key).ok();
+        // SAFETY: serialized by `#[serial]`; restored in `Drop`.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, prev }
+    }
+
+    /// Clear an env var for the duration of a serial test, restoring it on drop.
+    ///
+    /// Why: the palace-derivation tests must run with no ambient
+    /// `TRUSTY_MEMORY_PALACE` override (which would otherwise win over the
+    /// derived slug and make the assertions non-hermetic).
+    /// What: snapshots the prior value and removes the var; restored in `Drop`.
+    /// Test: used by `inject_trusty_memory_mcp_pins_palace_from_repo_url`.
+    fn clear(key: &'static str) -> Self {
+        let prev = std::env::var(key).ok();
+        // SAFETY: serialized by `#[serial]`; restored in `Drop`.
+        unsafe {
+            std::env::remove_var(key);
         }
         Self { key, prev }
     }
@@ -498,7 +530,7 @@ fn inject_trusty_memory_mcp_adds_server() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    inject_trusty_memory_mcp(project).expect("injection succeeds");
+    inject_trusty_memory_mcp(project, None).expect("injection succeeds");
 
     let mcp_path = project.join(".mcp.json");
     assert!(mcp_path.exists(), ".mcp.json must be created");
@@ -517,7 +549,7 @@ fn inject_trusty_memory_mcp_uses_serve_stdio() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    inject_trusty_memory_mcp(project).expect("injection succeeds");
+    inject_trusty_memory_mcp(project, None).expect("injection succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
@@ -546,7 +578,7 @@ fn inject_trusty_memory_mcp_preserves_existing() {
     )
     .unwrap();
 
-    inject_trusty_memory_mcp(project).expect("injection succeeds");
+    inject_trusty_memory_mcp(project, None).expect("injection succeeds");
 
     let value: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
@@ -574,10 +606,10 @@ fn inject_trusty_memory_mcp_is_idempotent() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    inject_trusty_memory_mcp(project).expect("first injection succeeds");
+    inject_trusty_memory_mcp(project, None).expect("first injection succeeds");
     let after_first = std::fs::read_to_string(project.join(".mcp.json")).expect("file exists");
 
-    inject_trusty_memory_mcp(project).expect("second injection succeeds");
+    inject_trusty_memory_mcp(project, None).expect("second injection succeeds");
     let after_second = std::fs::read_to_string(project.join(".mcp.json")).expect("file exists");
 
     assert_eq!(
@@ -589,6 +621,154 @@ fn inject_trusty_memory_mcp_is_idempotent() {
         value["mcpServers"].as_object().unwrap().len(),
         1,
         "trusty-memory must not be duplicated"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1605 — trusty-memory palace-slug pinning in managed-session injection.
+// ---------------------------------------------------------------------------
+
+/// Initialise a git repo at `dir` with `origin` pointing at `remote_url`.
+///
+/// Why: the palace-slug git-fallback path shells out to
+/// `git -C <dir> config --get remote.origin.url`; exercising it needs a real
+/// repo with a configured origin remote, not a network clone.
+/// What: runs `git init`, `git remote add origin <url>` in `dir`. Skips
+/// (returns `false`) when git is unavailable so the test degrades gracefully on
+/// a git-less host rather than failing spuriously.
+/// Test: used by `inject_trusty_memory_mcp_pins_palace_from_git_remote` and
+/// `resolve_palace_slug_falls_back_to_git_remote` (it is the helper).
+fn init_git_repo_with_origin(dir: &std::path::Path, remote_url: &str) -> bool {
+    let init = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir)
+        .status();
+    match init {
+        Ok(status) if status.success() => {}
+        _ => return false,
+    }
+    let remote = std::process::Command::new("git")
+        .args(["remote", "add", "origin", remote_url])
+        .current_dir(dir)
+        .status();
+    matches!(remote, Ok(status) if status.success())
+}
+
+/// Why: `trusty_memory_mcp_value(Some(slug))` must embed
+/// `env.TRUSTY_MEMORY_PALACE = <slug>` so the spawned trusty-memory resolves the
+/// pinned project palace (issue #1605); the rest of the block must stay the
+/// canonical `serve --stdio` stub.
+/// Test: itself.
+#[test]
+fn trusty_memory_mcp_value_pins_palace() {
+    let server = trusty_memory_mcp_value(Some("bobmatnyc-trusty-tools"));
+    assert_eq!(server["type"], serde_json::json!("stdio"));
+    assert_eq!(server["command"], serde_json::json!("trusty-memory"));
+    assert_eq!(server["args"], serde_json::json!(["serve", "--stdio"]));
+    assert_eq!(
+        server["env"]["TRUSTY_MEMORY_PALACE"],
+        serde_json::json!("bobmatnyc-trusty-tools")
+    );
+}
+
+/// Why: when no slug can be derived the block must be byte-identical to the
+/// pre-#1605 bare stub (no `env` key) so there is zero regression for sessions
+/// without a resolvable project identity.
+/// Test: itself.
+#[test]
+fn trusty_memory_mcp_value_bare() {
+    let bare = trusty_memory_mcp_value(None);
+    assert!(
+        bare.get("env").is_none(),
+        "no env key when no slug is derived"
+    );
+    // An empty / whitespace slug is also treated as "no pin".
+    let empty = trusty_memory_mcp_value(Some("   "));
+    assert!(
+        empty.get("env").is_none(),
+        "blank slug must not produce an env pin"
+    );
+}
+
+/// Why (issue #1605 acceptance): a repo_url-cloned managed session must pin the
+/// palace to the cloned-from repo's `owner-repo` slug, NOT the throwaway
+/// `<session-id>` workspace basename. Passing an explicit `git_remote` (the
+/// `LaunchParams`/`SessionRecord.repo_url`) must drive
+/// `env.TRUSTY_MEMORY_PALACE`.
+/// Test: itself — asserts the injected `.mcp.json` carries the expected slug.
+#[test]
+#[serial_test::serial]
+fn inject_trusty_memory_mcp_pins_palace_from_repo_url() {
+    // Guard: an ambient TRUSTY_MEMORY_PALACE override would win over the derived
+    // slug. Clear it for the duration so the test is hermetic.
+    let _guard = EnvVarGuard::clear("TRUSTY_MEMORY_PALACE");
+    let tmp = tempdir().unwrap();
+    // The workspace basename here is deliberately a session-id-like value; the
+    // pin must come from the repo_url, not this directory name.
+    let project = tmp.path().join("0c8f1a2b3c4d");
+    std::fs::create_dir_all(&project).unwrap();
+
+    inject_trusty_memory_mcp(&project, Some("git@github.com:bobmatnyc/trusty-tools.git"))
+        .expect("injection succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        value["mcpServers"]["trusty-memory"]["env"]["TRUSTY_MEMORY_PALACE"],
+        serde_json::json!("bobmatnyc-trusty-tools"),
+        "palace must be pinned to the cloned-from owner-repo slug, not the workspace basename"
+    );
+}
+
+/// Why (issue #1605): for a LOCAL-PATH session (`repo_url == None`) the injector
+/// must fall back to the workspace's own `git remote get-url origin` so the
+/// palace is still pinned by repo identity rather than the directory basename.
+/// Test: itself — initialises a real repo with an origin remote and asserts the
+/// derived slug is pinned.
+#[test]
+#[serial_test::serial]
+fn inject_trusty_memory_mcp_pins_palace_from_git_remote() {
+    let _guard = EnvVarGuard::clear("TRUSTY_MEMORY_PALACE");
+    let tmp = tempdir().unwrap();
+    let project = tmp.path().join("checkout-7e2");
+    std::fs::create_dir_all(&project).unwrap();
+    if !init_git_repo_with_origin(&project, "https://github.com/acme/widget.git") {
+        eprintln!("skipping: git unavailable");
+        return;
+    }
+
+    inject_trusty_memory_mcp(&project, None).expect("injection succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        value["mcpServers"]["trusty-memory"]["env"]["TRUSTY_MEMORY_PALACE"],
+        serde_json::json!("acme-widget"),
+        "local-path session must pin the palace from its own origin remote"
+    );
+}
+
+/// Why (issue #1605): the operator `TRUSTY_MEMORY_PALACE` override is the
+/// highest-precedence palace source; it must win over a parseable git remote so
+/// an explicit pin is never silently overridden by repo identity.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn inject_trusty_memory_mcp_override_env_wins() {
+    let _guard = EnvVarGuard::set_str("TRUSTY_MEMORY_PALACE", "my-pinned-palace");
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    inject_trusty_memory_mcp(project, Some("git@github.com:bobmatnyc/trusty-tools.git"))
+        .expect("injection succeeds");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(project.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(
+        value["mcpServers"]["trusty-memory"]["env"]["TRUSTY_MEMORY_PALACE"],
+        serde_json::json!("my-pinned-palace"),
+        "the operator override must win over the git owner/repo slug"
     );
 }
 
@@ -704,7 +884,7 @@ fn inject_trusty_search_mcp_preserves_existing() {
     // Why: injecting trusty-search must not clobber an existing trusty-memory.
     let tmp = tempdir().unwrap();
     let project = tmp.path();
-    inject_trusty_memory_mcp(project).expect("memory injection succeeds");
+    inject_trusty_memory_mcp(project, None).expect("memory injection succeeds");
 
     inject_trusty_search_mcp(project, None).expect("search injection succeeds");
 
@@ -763,7 +943,7 @@ fn inject_both_mcp_servers_coexist() {
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
-    inject_trusty_memory_mcp(project).expect("memory injection succeeds");
+    inject_trusty_memory_mcp(project, None).expect("memory injection succeeds");
     inject_trusty_search_mcp(project, None).expect("search injection succeeds");
 
     let value: serde_json::Value =
