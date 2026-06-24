@@ -27,10 +27,9 @@
 //! with a `tracing::debug!` log. A follow-up ticket (#1671) should add
 //! mtime-based reconciliation for non-git indexes.
 //!
-//! Test: unit + integration tests in the `tests` module below.
+//! Test: unit + integration tests in `commands/start/reconcile_tests.rs`.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 use crate::core::registry::IndexHandle;
@@ -62,7 +61,7 @@ const NO_BOOT_RECONCILE_ENV: &str = "TRUSTY_NO_BOOT_RECONCILE";
 /// of `watcher_disabled_for_value` in `watcher_manager.rs`.
 /// What: returns `true` only when `val == Some("1")`; any other value (unset,
 /// `"0"`, `"true"`, empty) leaves reconciliation enabled.
-/// Test: `reconcile_disabled_for_value_only_matches_one` below.
+/// Test: `reconcile_disabled_for_value_only_matches_one` in reconcile_tests.rs.
 pub(crate) fn reconcile_disabled_for_value(val: Option<&str>) -> bool {
     val == Some("1")
 }
@@ -73,16 +72,19 @@ pub(crate) fn reconcile_disabled_for_value(val: Option<&str>) -> bool {
 /// Returns `None` when git is unavailable, the repo is not a git repo, or
 /// `old_sha` is unknown to local history (history rewrite / forced push) —
 /// callers fall back to a full reindex on `None`.
-/// What: shells out to
+/// What: shells out asynchronously to
 /// `git diff --name-only --diff-filter=ACDMRT <old_sha>..HEAD` in `root_path`.
+/// Uses `tokio::process::Command` so the Tokio worker thread is not blocked
+/// while git runs (fix #1671 reviewer finding — was `std::process::Command`).
 /// The `--diff-filter` keeps Added, Copied, Deleted, Modified, Renamed, and
 /// Type-changed files; Unmerged (U) and Unknown (X) are excluded.
 /// Returns the non-empty lines as a `Vec<String>` of repo-root-relative paths.
 /// Test: `changed_files_between_returns_none_outside_git_repo`,
 ///       `changed_files_between_finds_modified_file`,
-///       `changed_files_between_returns_none_for_unknown_sha`.
-pub(crate) fn changed_files_between(root_path: &Path, old_sha: &str) -> Option<Vec<String>> {
-    let out = Command::new("git")
+///       `changed_files_between_returns_none_for_unknown_sha`
+///       in reconcile_tests.rs.
+pub(crate) async fn changed_files_between(root_path: &Path, old_sha: &str) -> Option<Vec<String>> {
+    let out = tokio::process::Command::new("git")
         .args([
             "diff",
             "--name-only",
@@ -91,6 +93,7 @@ pub(crate) fn changed_files_between(root_path: &Path, old_sha: &str) -> Option<V
         ])
         .current_dir(root_path)
         .output()
+        .await
         .ok()?;
 
     if !out.status.success() {
@@ -118,7 +121,7 @@ pub(crate) fn changed_files_between(root_path: &Path, old_sha: &str) -> Option<V
 /// We share the walker's `should_skip_path` / `path_in_skipped_dir` predicates
 /// so the exclusion rules are applied consistently with the live watcher.
 /// What: delegates to the walker's two public skip predicates.
-/// Test: `reconcile_skip_excluded_path` below.
+/// Test: `reconcile_skip_excluded_path` in reconcile_tests.rs.
 pub(crate) fn should_skip_for_reconcile(path: &Path) -> bool {
     path_in_skipped_dir(path) || should_skip_path(path)
 }
@@ -130,7 +133,7 @@ pub(crate) fn should_skip_for_reconcile(path: &Path) -> bool {
 /// auto-discover scan.
 /// What: checks the `TRUSTY_NO_BOOT_RECONCILE` gate; then spawns one
 /// independent background `tokio::task` per registered index.
-/// Test: `reconcile_disabled_gate` below.
+/// Test: `reconcile_disabled_gate` in reconcile_tests.rs.
 pub(super) async fn reconcile_stale_indexes(state: &SearchAppState) {
     let raw = std::env::var(NO_BOOT_RECONCILE_ENV).ok();
     if reconcile_disabled_for_value(raw.as_deref()) {
@@ -164,7 +167,8 @@ pub(super) async fn reconcile_stale_indexes(state: &SearchAppState) {
 /// queries while reconciliation proceeds and avoid one slow index blocking others.
 /// What: reads the stored + current HEAD SHAs, computes the diff, then either
 /// runs per-file reconciliation or falls back to a full background reindex.
-/// Test: `reconcile_up_to_date_index_is_noop`, `reconcile_stale_index_stamps_new_sha`.
+/// Test: `reconcile_up_to_date_index_is_noop`, `reconcile_stale_index_stamps_new_sha`
+/// in reconcile_tests.rs.
 async fn reconcile_one_index(handle: Arc<IndexHandle>) {
     let index_id = handle.id.0.clone();
 
@@ -205,7 +209,7 @@ async fn reconcile_one_index(handle: Arc<IndexHandle>) {
         &current[..current.len().min(12)],
     );
 
-    match changed_files_between(&handle.root_path, &stored) {
+    match changed_files_between(&handle.root_path, &stored).await {
         None => {
             tracing::warn!(
                 "reconcile[{index_id}]: git diff unavailable for old_sha={} \
@@ -240,6 +244,10 @@ async fn reconcile_one_index(handle: Arc<IndexHandle>) {
 /// What: allocates a fresh `ReindexProgress` and calls
 /// `spawn_reindex_with_cleanup` with `priority=false` (background semaphore)
 /// so it does not compete with interactive reindex requests.
+/// No boot-loop risk: `spawn_reindex_with_cleanup` → `finish_reindex` stamps
+/// `indexed_head_sha = git::head_sha(root)` and `last_indexed_at = now()` on
+/// successful completion (see `service/reindex/finish.rs` lines ~321-324).
+/// The next boot will therefore see `stored == current` and skip reconciliation.
 /// Test: exercised by the `None`/threshold fallback paths in
 /// `reconcile_one_index`.
 fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
@@ -265,9 +273,13 @@ fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
 /// What: for each repo-relative path in `files`:
 /// if the file exists on disk and passes skip rules → `indexer.index_file`;
 /// if the file is gone → `indexer.remove_file` (removes all its chunks).
+/// The indexer read-lock is acquired and dropped per-file so concurrent HTTP
+/// reindex requests (which need a write lock) are not blocked for the entire
+/// batch duration. This mirrors the locking discipline in
+/// `service/watch_loop.rs::handle_modified` (acquire → single async call → drop).
 /// Stamps `indexed_head_sha = new_sha` and `last_indexed_at = now` on success.
 ///
-/// Test: `reconcile_stale_index_stamps_new_sha`.
+/// Test: `reconcile_stale_index_stamps_new_sha` in reconcile_tests.rs.
 async fn apply_delta(handle: &Arc<IndexHandle>, index_id: &str, files: &[String], new_sha: &str) {
     let root = &handle.root_path;
     let mut indexed = 0usize;
@@ -295,8 +307,12 @@ async fn apply_delta(handle: &Arc<IndexHandle>, index_id: &str, files: &[String]
                     continue;
                 }
             };
-            let idx = handle.indexer.read().await;
-            match idx.index_file(rel_path_str, &content).await {
+            // Acquire and drop per-call: gives writers a window between files.
+            let result = {
+                let idx = handle.indexer.read().await;
+                idx.index_file(rel_path_str, &content).await
+            };
+            match result {
                 Ok(()) => indexed += 1,
                 Err(e) => {
                     tracing::warn!(
@@ -307,8 +323,12 @@ async fn apply_delta(handle: &Arc<IndexHandle>, index_id: &str, files: &[String]
             }
         } else {
             // Deleted: remove all chunks for this file.
-            let idx = handle.indexer.read().await;
-            match idx.remove_file(rel_path_str).await {
+            // Acquire and drop per-call so write-lock contention is bounded.
+            let result = {
+                let idx = handle.indexer.read().await;
+                idx.remove_file(rel_path_str).await
+            };
+            match result {
                 Ok(n) if n > 0 => removed += n,
                 Ok(_) => skipped += 1,
                 Err(e) => {
@@ -337,418 +357,18 @@ async fn apply_delta(handle: &Arc<IndexHandle>, index_id: &str, files: &[String]
 /// (`results_may_be_stale` in the search response) must clear so callers are
 /// no longer warned about outdated results.
 /// What: acquires write locks on both `Arc<RwLock<Option<String>>>` fields and
-/// writes the new values. Uses a minimal RFC-3339 formatter to avoid adding
-/// external dependencies to this lightweight module.
-/// Test: `reconcile_stamps_head_sha_after_delta`.
-async fn stamp_handle(handle: &Arc<IndexHandle>, new_sha: &str) {
+/// writes the new values. Uses `chrono::Utc::now().to_rfc3339()` for the
+/// timestamp — the same call used by `service::reindex::stages::now_rfc3339` —
+/// so the format is consistent with the reindex pipeline and correct for all
+/// calendar dates (no hand-rolled Gregorian approximation).
+/// Test: `reconcile_stamps_head_sha_after_delta` in reconcile_tests.rs.
+pub(crate) async fn stamp_handle(handle: &Arc<IndexHandle>, new_sha: &str) {
     *handle.indexed_head_sha.write().await = Some(new_sha.to_owned());
-    *handle.last_indexed_at.write().await = Some(now_rfc3339());
+    *handle.last_indexed_at.write().await = Some(chrono::Utc::now().to_rfc3339());
 }
 
-/// Minimal RFC-3339 UTC timestamp (seconds precision).
-///
-/// Why: consistent timestamp format with `service::reindex::stages::now_rfc3339`
-/// without importing that `pub(super)` function from an unrelated module.
-/// What: formats `SystemTime::now()` as `YYYY-MM-DDTHH:MM:SSZ` using simple
-/// integer arithmetic (Gregorian calendar approximation, good through 2100).
-/// Test: `now_rfc3339_produces_valid_format`.
-fn now_rfc3339() -> String {
-    use std::time::SystemTime;
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let s = secs % 60;
-    let m = (secs / 60) % 60;
-    let h = (secs / 3600) % 24;
-    let days = secs / 86400;
-    // Gregorian approximation: 365.2425 days/year, accurate through 2100.
-    let year = 1970 + days / 365;
-    let day_of_year = days % 365;
-    let month = day_of_year / 30 + 1;
-    let day = day_of_year % 30 + 1;
-    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
-}
-
-// ── Tests ────────────────────────────────────────────────────────────────────
-
+// Tests live in the sibling file so that reconcile.rs stays under the 500-SLOC
+// production cap. The `_tests.rs` suffix gives the file the 1500-SLOC test cap.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
-
-    // ── Pure unit tests ──────────────────────────────────────────────────────
-
-    /// Why: the disable gate must be testable without touching process env to
-    /// avoid flaky behaviour in parallel test binaries.
-    /// Test: only `Some("1")` disables; other values leave reconciliation on.
-    #[test]
-    fn reconcile_disabled_for_value_only_matches_one() {
-        assert!(
-            reconcile_disabled_for_value(Some("1")),
-            "Some(\"1\") must disable"
-        );
-        assert!(
-            !reconcile_disabled_for_value(None),
-            "None (unset) must keep enabled"
-        );
-        assert!(
-            !reconcile_disabled_for_value(Some("0")),
-            "\"0\" must keep enabled"
-        );
-        assert!(
-            !reconcile_disabled_for_value(Some("true")),
-            "\"true\" must keep enabled"
-        );
-        assert!(
-            !reconcile_disabled_for_value(Some("")),
-            "empty string must keep enabled"
-        );
-    }
-
-    /// Why: outside a git repo `changed_files_between` must return `None`,
-    /// not panic — callers fall back to a full reindex on `None`.
-    /// Test: this test.
-    #[test]
-    fn changed_files_between_returns_none_outside_git_repo() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        assert!(
-            changed_files_between(tmp.path(), "deadbeef").is_none(),
-            "expected None outside a git repo"
-        );
-    }
-
-    /// Why: skip predicates must exclude build artefacts and pass normal source.
-    /// Test: `node_modules` path excluded; plain Rust file not excluded.
-    #[test]
-    fn reconcile_skip_excluded_path() {
-        assert!(
-            should_skip_for_reconcile(Path::new("node_modules/lodash/index.js")),
-            "node_modules must be excluded"
-        );
-        assert!(
-            !should_skip_for_reconcile(Path::new("src/lib.rs")),
-            "normal source file must not be excluded"
-        );
-    }
-
-    /// Why: `now_rfc3339` must produce a non-empty string in the expected format.
-    /// Test: basic format checks.
-    #[test]
-    fn now_rfc3339_produces_valid_format() {
-        let ts = now_rfc3339();
-        assert!(!ts.is_empty(), "timestamp must not be empty");
-        assert!(ts.ends_with('Z'), "timestamp must end with Z: {ts}");
-        assert!(ts.contains('T'), "timestamp must contain T: {ts}");
-        assert_eq!(ts.len(), 20, "timestamp must be exactly 20 chars: {ts}");
-    }
-
-    // ── Git-backed integration helpers ───────────────────────────────────────
-
-    /// Create a minimal git repo with one committed file.
-    /// Returns `(TempDir, initial_sha, root_path)`.
-    fn init_git_repo_with_file(
-        filename: &str,
-        content: &str,
-    ) -> (tempfile::TempDir, String, PathBuf) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().to_path_buf();
-
-        let ok = |output: std::process::Output| {
-            assert!(output.status.success(), "git command failed");
-        };
-
-        ok(Command::new("git")
-            .args(["init", "-b", "main"])
-            .current_dir(&root)
-            .output()
-            .expect("git init"));
-        ok(Command::new("git")
-            .args(["config", "user.email", "test@test.test"])
-            .current_dir(&root)
-            .output()
-            .expect("git config email"));
-        ok(Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(&root)
-            .output()
-            .expect("git config name"));
-
-        std::fs::write(root.join(filename), content).expect("write file");
-        ok(Command::new("git")
-            .args(["add", "."])
-            .current_dir(&root)
-            .output()
-            .expect("git add"));
-        ok(Command::new("git")
-            .args(["commit", "-m", "initial"])
-            .current_dir(&root)
-            .output()
-            .expect("git commit"));
-
-        let sha_out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&root)
-            .output()
-            .expect("git rev-parse");
-        let sha = std::str::from_utf8(&sha_out.stdout)
-            .expect("utf8")
-            .trim()
-            .to_owned();
-
-        (dir, sha, root)
-    }
-
-    /// Add a second commit with modified file content. Returns the new HEAD SHA.
-    fn add_commit(root: &Path, filename: &str, content: &str) -> String {
-        std::fs::write(root.join(filename), content).expect("write file");
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(root)
-            .output()
-            .expect("git add");
-        Command::new("git")
-            .args(["commit", "-m", "update"])
-            .current_dir(root)
-            .output()
-            .expect("git commit");
-        let sha_out = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(root)
-            .output()
-            .expect("git rev-parse");
-        std::str::from_utf8(&sha_out.stdout)
-            .expect("utf8")
-            .trim()
-            .to_owned()
-    }
-
-    // ── Git-backed integration tests ─────────────────────────────────────────
-
-    /// Why: `changed_files_between` must find the file that changed between
-    /// two real commits in a git repo.
-    /// Test: two commits; assert the diff includes the modified file.
-    #[test]
-    fn changed_files_between_finds_modified_file() {
-        let (_dir, first_sha, root) = init_git_repo_with_file("src.rs", "fn a() {}");
-        add_commit(&root, "src.rs", "fn a() {}\nfn b() {}\n");
-
-        let files = changed_files_between(&root, &first_sha)
-            .expect("changed_files_between must return Some in a valid repo");
-        assert!(
-            files.iter().any(|f| f == "src.rs"),
-            "expected src.rs in changed files, got {files:?}"
-        );
-    }
-
-    /// Why: a fabricated / history-rewritten SHA must return `None` so the
-    /// caller can fall back to a full reindex.
-    /// Test: pass a zeroed SHA to a valid git repo.
-    #[test]
-    fn changed_files_between_returns_none_for_unknown_sha() {
-        let (_dir, _sha, root) = init_git_repo_with_file("foo.rs", "fn x() {}");
-        assert!(
-            changed_files_between(&root, "0000000000000000000000000000000000000000").is_none(),
-            "unknown SHA must return None"
-        );
-    }
-
-    /// Why: `stamp_handle` must update both `indexed_head_sha` and
-    /// `last_indexed_at` so the staleness signal clears after reconciliation.
-    /// Test: build a minimal handle, call `stamp_handle`, assert both fields.
-    #[tokio::test]
-    async fn reconcile_stamps_head_sha_after_delta() {
-        use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
-        use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let handle = Arc::new(IndexHandle {
-            id: IndexId::new("test-stamp"),
-            indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(
-                "test-stamp",
-                dir.path(),
-            ))),
-            root_path: dir.path().to_path_buf(),
-            include_paths: vec![],
-            exclude_globs: vec![],
-            extensions: vec![],
-            domain_terms: vec![],
-            include_docs: true,
-            respect_gitignore: true,
-            extra_skip_dirs: vec![],
-            data_file_max_bytes: 0,
-            path_filter: vec![],
-            context_embedding: Arc::new(RwLock::new(None)),
-            context_summary: Arc::new(RwLock::new(None)),
-            indexed_head_sha: Arc::new(RwLock::new(Some("old_sha".to_owned()))),
-            last_indexed_at: Arc::new(RwLock::new(None)),
-            lexical_only: false,
-            skip_kg: false,
-            defer_embed: false,
-            stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
-                chunk_count: 0,
-                hnsw_snapshot_ready: false,
-                graph_node_count: 0,
-                lexical_only: false,
-                skip_kg: false,
-                corpus_open_failed: false,
-            }))),
-            search_pressure: Arc::new(tokio::sync::Notify::new()),
-            walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
-        });
-
-        let new_sha = "new_sha_abcde";
-        stamp_handle(&handle, new_sha).await;
-
-        let stored = handle.indexed_head_sha.read().await.clone();
-        assert_eq!(
-            stored,
-            Some(new_sha.to_owned()),
-            "indexed_head_sha must equal new_sha after stamp"
-        );
-        assert!(
-            handle.last_indexed_at.read().await.is_some(),
-            "last_indexed_at must be Some after stamp"
-        );
-    }
-
-    /// Why: `TRUSTY_NO_BOOT_RECONCILE=1` must prevent any reconcile task from
-    /// being spawned. This uses `serial_test::serial` to avoid env contamination
-    /// from concurrent tests.
-    /// Test: set the env var, call `reconcile_stale_indexes`, assert no panic.
-    #[tokio::test]
-    #[serial_test::serial]
-    async fn reconcile_disabled_gate() {
-        // SAFETY: serial; only one test mutates this env var at a time.
-        unsafe { std::env::set_var(NO_BOOT_RECONCILE_ENV, "1") };
-        let state =
-            crate::service::SearchAppState::new(crate::core::registry::IndexRegistry::new());
-        reconcile_stale_indexes(&state).await; // must not panic
-        unsafe { std::env::remove_var(NO_BOOT_RECONCILE_ENV) };
-    }
-
-    /// Why: when `indexed_head_sha == current HEAD`, `reconcile_one_index`
-    /// must be a no-op (the handle must not be modified).
-    /// Test: real git repo; stamp handle with current HEAD; call
-    /// `reconcile_one_index`; assert SHA is unchanged.
-    #[tokio::test]
-    async fn reconcile_up_to_date_index_is_noop() {
-        use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
-        use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
-
-        let (_dir, first_sha, root) = init_git_repo_with_file("hello.rs", "fn hello() {}");
-
-        let handle = Arc::new(IndexHandle {
-            id: IndexId::new("test-up-to-date"),
-            indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(
-                "test-up-to-date",
-                &root,
-            ))),
-            root_path: root.clone(),
-            include_paths: vec![],
-            exclude_globs: vec![],
-            extensions: vec![],
-            domain_terms: vec![],
-            include_docs: true,
-            respect_gitignore: true,
-            extra_skip_dirs: vec![],
-            data_file_max_bytes: 0,
-            path_filter: vec![],
-            context_embedding: Arc::new(RwLock::new(None)),
-            context_summary: Arc::new(RwLock::new(None)),
-            indexed_head_sha: Arc::new(RwLock::new(Some(first_sha.clone()))),
-            last_indexed_at: Arc::new(RwLock::new(None)),
-            lexical_only: false,
-            skip_kg: false,
-            defer_embed: false,
-            stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
-                chunk_count: 0,
-                hnsw_snapshot_ready: false,
-                graph_node_count: 0,
-                lexical_only: false,
-                skip_kg: false,
-                corpus_open_failed: false,
-            }))),
-            search_pressure: Arc::new(tokio::sync::Notify::new()),
-            walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
-        });
-
-        reconcile_one_index(Arc::clone(&handle)).await;
-
-        let stored = handle.indexed_head_sha.read().await.clone();
-        assert_eq!(
-            stored,
-            Some(first_sha),
-            "SHA must not change when already up-to-date"
-        );
-        // last_indexed_at must remain None (no work done).
-        assert!(
-            handle.last_indexed_at.read().await.is_none(),
-            "last_indexed_at must remain None when no-op"
-        );
-    }
-
-    /// Why: when the stored SHA is older than current HEAD and the delta is
-    /// within threshold, per-file reconciliation must run and stamp new SHA.
-    /// Test: two-commit repo; handle stores old SHA; call `reconcile_one_index`;
-    /// assert `indexed_head_sha` is updated to the new HEAD and
-    /// `last_indexed_at` is stamped.
-    #[tokio::test]
-    async fn reconcile_stale_index_stamps_new_sha() {
-        use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
-        use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
-
-        let (_dir, first_sha, root) = init_git_repo_with_file("lib.rs", "fn old() {}");
-        add_commit(&root, "lib.rs", "fn old() {}\nfn new_fn() {}\n");
-        let current_sha = crate::core::git::head_sha(&root).expect("head sha");
-
-        let handle = Arc::new(IndexHandle {
-            id: IndexId::new("test-stale"),
-            indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(
-                "test-stale",
-                &root,
-            ))),
-            root_path: root.clone(),
-            include_paths: vec![],
-            exclude_globs: vec![],
-            extensions: vec![],
-            domain_terms: vec![],
-            include_docs: true,
-            respect_gitignore: true,
-            extra_skip_dirs: vec![],
-            data_file_max_bytes: 0,
-            path_filter: vec![],
-            context_embedding: Arc::new(RwLock::new(None)),
-            context_summary: Arc::new(RwLock::new(None)),
-            indexed_head_sha: Arc::new(RwLock::new(Some(first_sha))),
-            last_indexed_at: Arc::new(RwLock::new(None)),
-            lexical_only: false,
-            skip_kg: false,
-            defer_embed: false,
-            stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
-                chunk_count: 0,
-                hnsw_snapshot_ready: false,
-                graph_node_count: 0,
-                lexical_only: false,
-                skip_kg: false,
-                corpus_open_failed: false,
-            }))),
-            search_pressure: Arc::new(tokio::sync::Notify::new()),
-            walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
-        });
-
-        reconcile_one_index(Arc::clone(&handle)).await;
-
-        let stored = handle.indexed_head_sha.read().await.clone();
-        assert_eq!(
-            stored,
-            Some(current_sha),
-            "indexed_head_sha must be updated to current HEAD"
-        );
-        assert!(
-            handle.last_indexed_at.read().await.is_some(),
-            "last_indexed_at must be stamped after reconcile"
-        );
-    }
-}
+#[path = "reconcile_tests.rs"]
+mod tests;
