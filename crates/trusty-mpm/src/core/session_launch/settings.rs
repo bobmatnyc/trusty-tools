@@ -88,23 +88,41 @@ pub(super) const TRUSTY_MEMORY_HOOKS: &str = r#"{
   ]
 }"#;
 
-/// The `trusty-memory` MCP server definition injected into a project's
-/// `.mcp.json`.
+/// Build the `trusty-memory` MCP server definition injected into a project's
+/// `.mcp.json`, optionally pinned to a project palace (issue #1605).
 ///
 /// Why (issue #1270): Claude Code reads MCP servers from `<project>/.mcp.json`;
 /// a launched trusty-mpm session needs the `trusty-memory` server registered
 /// there so the memory tools (`memory_recall`, `memory_remember`, …) are
-/// available. The previous definition used `args: ["mcp", "serve"]`, but
-/// `trusty-memory` has **no `mcp` subcommand** — the server would have failed
-/// to start. The canonical stdio MCP invocation (per `trusty-memory setup`) is
-/// `serve --stdio`.
-/// What: a stdio MCP server entry running `trusty-memory serve --stdio`.
-/// Test: `inject_trusty_memory_mcp_uses_serve_stdio`.
-pub(super) const TRUSTY_MEMORY_MCP_SERVER: &str = r#"{
-  "type": "stdio",
-  "command": "trusty-memory",
-  "args": ["serve", "--stdio"]
-}"#;
+/// available. The canonical stdio MCP invocation (per `trusty-memory setup`) is
+/// `serve --stdio`. Issue #1605: a bare stub leaves palace selection to
+/// trusty-memory's cwd-based derivation, which for a repo_url-cloned managed
+/// session resolves to the session-id directory basename — the WRONG palace.
+/// Pinning `env.TRUSTY_MEMORY_PALACE` to the project's derived `owner-repo` slug
+/// makes the spawned trusty-memory resolve the correct project-scoped palace
+/// regardless of the throwaway workspace path (the env var is the
+/// highest-precedence palace override read by `derive_palace_id`). No
+/// trusty-memory CLI/protocol change — the env var is the agreed seam.
+/// What: returns the JSON `Value` for a stdio MCP server running
+/// `trusty-memory serve --stdio` — with `"env": { "TRUSTY_MEMORY_PALACE": <slug> }`
+/// when `palace_slug` is `Some` (non-empty), else the bare stub (no `env` key,
+/// byte-identical to the pre-#1605 block). Pure: callers resolve the slug.
+/// Test: `trusty_memory_mcp_value_pins_palace`, `trusty_memory_mcp_value_bare`.
+pub(super) fn trusty_memory_mcp_value(palace_slug: Option<&str>) -> serde_json::Value {
+    let mut server = serde_json::json!({
+        "type": "stdio",
+        "command": "trusty-memory",
+        "args": ["serve", "--stdio"],
+    });
+    if let Some(slug) = palace_slug {
+        if !slug.trim().is_empty() {
+            server["env"] = serde_json::json!({
+                trusty_common::PALACE_OVERRIDE_ENV: slug,
+            });
+        }
+    }
+    server
+}
 
 /// Build the `trusty-search` MCP server definition injected into a project's
 /// `.mcp.json`, optionally pinned to a project index (issue #1373).
@@ -355,21 +373,102 @@ fn inject_mcp_server(
     Ok(())
 }
 
-/// Inject the `trusty-memory` MCP server into the project's `.mcp.json`.
+/// Inject the `trusty-memory` MCP server into the project's `.mcp.json`,
+/// pinned to the project's palace when one can be derived (issue #1605).
 ///
 /// Why: `prepare_session` configures hooks and instructions but, without this,
 /// the launched `claude` process has no access to the memory tools because the
 /// `trusty-memory` MCP server is never registered in `<project>/.mcp.json`.
-/// What: thin wrapper over [`inject_mcp_server`] registering the
-/// [`TRUSTY_MEMORY_MCP_SERVER`] entry under the key `trusty-memory`.
+/// Issue #1605: the stub must additionally PIN the session to its project's
+/// palace via `env.TRUSTY_MEMORY_PALACE`, because a repo_url-cloned managed
+/// session lives under a throwaway `<owner>/<repo>/<session-id>/` workspace
+/// whose basename is the session-id — so trusty-memory's cwd-based derivation
+/// would resolve the wrong palace. The slug is derived from project identity
+/// (operator override > git `owner/repo` > parent/dir) so it matches the slug
+/// trusty-memory itself would compute for the canonical project root.
+/// What: resolves the palace slug via [`resolve_palace_slug`] (passing the
+/// explicit `git_remote` from `LaunchParams`/`SessionRecord` when known, else
+/// best-effort `git remote get-url origin` in `project_path`), builds the
+/// (optionally pinned) server value via [`trusty_memory_mcp_value`], and
+/// registers it under the key `trusty-memory`. When no slug can be derived the
+/// bare stub is injected — byte-identical to the pre-#1605 behaviour, so the
+/// session still gets the memory tools (no regression).
 /// Test: `inject_trusty_memory_mcp_adds_server`,
 /// `inject_trusty_memory_mcp_preserves_existing`,
 /// `inject_trusty_memory_mcp_is_idempotent`,
-/// `inject_trusty_memory_mcp_uses_serve_stdio`.
-pub(super) fn inject_trusty_memory_mcp(project_path: &Path) -> Result<(), PrepError> {
-    let server: serde_json::Value = serde_json::from_str(TRUSTY_MEMORY_MCP_SERVER)
-        .expect("bundled MCP server block is valid JSON");
-    inject_mcp_server(project_path, "trusty-memory", server)
+/// `inject_trusty_memory_mcp_uses_serve_stdio`,
+/// `inject_trusty_memory_mcp_pins_palace_from_repo_url`,
+/// `inject_trusty_memory_mcp_pins_palace_from_git_remote`.
+pub(super) fn inject_trusty_memory_mcp(
+    project_path: &Path,
+    git_remote: Option<&str>,
+) -> Result<(), PrepError> {
+    let slug = resolve_palace_slug(project_path, git_remote);
+    inject_mcp_server(
+        project_path,
+        "trusty-memory",
+        trusty_memory_mcp_value(slug.as_deref()),
+    )
+}
+
+/// Resolve the trusty-memory palace slug to pin for a managed session (#1605).
+///
+/// Why: the slug must match what trusty-memory itself would derive for the
+/// project's canonical identity, so memory written/read in the managed session
+/// lands in the project-scoped palace rather than a session-id-named one. The
+/// explicit `git_remote` (threaded from `LaunchParams`/`SessionRecord.repo_url`)
+/// is the authoritative identity for repo_url-cloned sessions; for local-path
+/// sessions where it is `None` we fall back to the workspace's own
+/// `git remote get-url origin`, exactly as trusty-memory's `cwd_palace_slug_at`
+/// does. The operator `TRUSTY_MEMORY_PALACE` override still wins over both, per
+/// `derive_palace_id` precedence.
+/// What: reads the `TRUSTY_MEMORY_PALACE` env override (highest precedence),
+/// resolves the git remote (explicit arg, else best-effort `git -C
+/// <project_path> config --get remote.origin.url`), and returns
+/// `trusty_common::derive_palace_id(project_path, git_remote, override)`. Returns
+/// `None` when nothing usable can be derived (no override, no remote, root-less
+/// path) so the caller injects the bare stub. Best-effort and side-effect-free
+/// beyond the read-only `git config` probe; never panics.
+/// Test: covered via `inject_trusty_memory_mcp_pins_palace_from_repo_url`
+/// (explicit remote) and `resolve_palace_slug_*` (override / git-fallback / none).
+fn resolve_palace_slug(project_path: &Path, git_remote: Option<&str>) -> Option<String> {
+    let override_value = trusty_common::palace_override_from_env();
+    // Prefer the explicit (cloned-from) remote; otherwise probe the workspace's
+    // own origin remote so a local-path session still pins by repo identity.
+    let probed = match git_remote {
+        Some(_) => None,
+        None => git_remote_origin(project_path),
+    };
+    let effective_remote = git_remote.or(probed.as_deref());
+    trusty_common::derive_palace_id(project_path, effective_remote, override_value.as_deref())
+}
+
+/// Read `remote.origin.url` for the repo containing `start` (best-effort).
+///
+/// Why: a local-path managed session (no `repo_url` in `LaunchParams`) should
+/// still pin its palace by the repo's GitHub identity rather than the directory
+/// basename. Shelling out to `git config` (rather than parsing `.git/config`)
+/// transparently handles worktrees, mirroring trusty-memory's own
+/// `git_remote_origin` so the two derive the same slug.
+/// What: runs `git -C <start> config --get remote.origin.url`; returns the
+/// trimmed URL on success, `None` when there is no origin remote, git is
+/// absent, or `start` is not in a repo. No network.
+/// Test: exercised indirectly via `resolve_palace_slug_falls_back_to_git_remote`
+/// (a temp git repo) and the daemon-less paths in `inject_trusty_memory_mcp_*`.
+fn git_remote_origin(start: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(start)
+        .arg("config")
+        .arg("--get")
+        .arg("remote.origin.url")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if url.is_empty() { None } else { Some(url) }
 }
 
 /// Inject the `trusty-search` MCP server into the project's `.mcp.json`,
