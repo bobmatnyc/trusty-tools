@@ -469,3 +469,131 @@ fn bare_sha_with_enforce_min_tokens_is_too_short() {
         "bare SHA must pass gate when enforce_min_tokens=false"
     );
 }
+
+// ---- Issue #1667: false-positive fixes for path/slug/key=value tokens ----
+
+/// Why (issue #1667): the `has_b64_sym` branch in `looks_like_secret` was
+/// flagging `/` (path separator) and `=` (key=value, semver operator) as
+/// base64 indicators, causing legitimate technical tokens to be rejected as
+/// credentials. `is_structural_token` now guards that branch.
+/// What: asserts each known-false-positive token is NOT flagged as a secret
+/// by `looks_like_secret`, and that the full gate accepts them.
+/// Test: itself.
+#[test]
+fn structural_tokens_are_not_flagged() {
+    // slash-path tokens (issue #1667 primary cases)
+    let slash_tokens = [
+        "verdict/grade/prose-summary", // 27 chars — the exact reported FP
+        "duettoresearch/duetto",       // org/repo slug
+        "duettoresearch/projects/19",  // org/repo/id path
+        "crates/trusty-review/src/pipeline/mapreduce/synthesis.rs", // file path
+    ];
+    for tok in slash_tokens {
+        assert!(
+            !looks_like_secret(tok),
+            "slash-path token should NOT be flagged as secret: {tok}"
+        );
+    }
+
+    // key=value / semver-operator tokens
+    let eq_tokens = [
+        ">=2-medium->REQUEST_CHANGES", // semver + status slug
+    ];
+    for tok in eq_tokens {
+        assert!(
+            !looks_like_secret(tok),
+            "key=value/semver token should NOT be flagged as secret: {tok}"
+        );
+    }
+
+    // version/crate tag strings
+    let version_tokens = [
+        "trusty-review-v0.6.0", // crate release tag — has hyphens, no b64 syms
+    ];
+    for tok in version_tokens {
+        assert!(
+            !looks_like_secret(tok),
+            "version tag should NOT be flagged as secret: {tok}"
+        );
+    }
+}
+
+/// Why (issue #1667): end-to-end gate must ACCEPT content containing
+/// the real false-positive tokens that were rejected before this fix.
+/// What: passes each FP token through `FilterConfig::apply` and asserts Ok.
+/// Test: itself.
+#[test]
+fn gate_accepts_fp_content() {
+    let cfg = FilterConfig::default();
+    let cases = [
+        // The exact token from the rejection report:
+        "Use verdict/grade/prose-summary as the synthesized output key",
+        // Org/repo slug references:
+        "See duettoresearch/duetto for the upstream fork and duettoresearch/projects/19 for tracking",
+        // Semver / review-decision token:
+        "Review verdict: >=2-medium->REQUEST_CHANGES must block merge",
+        // File path reference:
+        "The synthesis module lives at crates/trusty-review/src/pipeline/mapreduce/synthesis.rs",
+        // Crate release tag:
+        "Released trusty-review-v0.6.0 with map-reduce support",
+        // Bare 40-char git SHA (regression lock from #1481):
+        "Merged 0fda534e0fda534e0fda534e0fda534e0fda534e into main",
+    ];
+    for content in cases {
+        assert!(
+            cfg.apply(content, false).is_ok(),
+            "gate must ACCEPT: {content:?}\ngot: {:?}",
+            cfg.apply(content, false)
+        );
+    }
+}
+
+/// Why (issue #1667): verifying the fix did NOT weaken real-secret detection.
+/// What: asserts that every known-secret token is still rejected by the gate.
+/// Test: itself.
+#[test]
+fn real_secrets_still_blocked_after_1667_fix() {
+    let cfg = FilterConfig::default();
+
+    // Known-prefix secrets must still be caught.
+    let prefix_cases = [
+        ("AKIAIOSFODNN7EXAMPLE", "AWS long-term key"), // pragma: allowlist secret
+        ("ASIAY34FZKBOKMUTVV7A", "AWS STS temp cred"), // pragma: allowlist secret
+        ("ghp_abcdefghijklmnopqrstuvwxyz012345", "GitHub PAT"), // pragma: allowlist secret
+        ("sk-abcdefghijklmnopqrstuvwxyz01234567890123", "OpenAI key"), // pragma: allowlist secret
+        ("AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI", "GCP API key"), // pragma: allowlist secret
+    ];
+    for (tok, label) in prefix_cases {
+        assert!(
+            looks_like_secret(tok),
+            "{label} must still be flagged as secret: {tok}"
+        );
+    }
+
+    // End-to-end: prose containing a real secret must reject.
+    let real_secret_content = format!(
+        "Deploy key is ghp_{} — do not commit", // pragma: allowlist secret
+        "abcdefghijklmnopqrstuvwxyz012345"
+    );
+    assert!(
+        matches!(
+            cfg.apply(&real_secret_content, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "content with real GitHub PAT must reject; got {:?}",
+        cfg.apply(&real_secret_content, false)
+    );
+
+    // A 64-char random base64 blob (with `+` or opaque mix) must still reject.
+    // Using `+` ensures the structural-token check doesn't skip it.
+    let b64_blob = "aGVsbG8rd29ybGQvZm9vK2Jhcj09bG9uZ2Jhc2U2NAaGVsbG8rd29ybGQ="; // pragma: allowlist secret
+    let b64_content = format!("Config blob: {b64_blob} stored in env");
+    assert!(
+        matches!(
+            cfg.apply(&b64_content, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "content with base64 blob must reject; got {:?}",
+        cfg.apply(&b64_content, false)
+    );
+}

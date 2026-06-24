@@ -417,6 +417,110 @@ const SECRET_PREFIXES: &[&str] = &[
     "asia",
 ];
 
+/// True when `seg` is a "uniform-case word segment": non-empty, consists only
+/// of ASCII alphanumeric chars (no punctuation), and every alphabetic char is
+/// either all-lowercase or all-uppercase (no internal mixed case within the
+/// segment). Digits count as case-neutral.
+///
+/// Why: this is the per-segment predicate used by [`is_segmented_identifier`]
+/// to determine whether a hyphen-delimited token reads like a compound
+/// human-readable identifier (`2-medium->REQUEST_CHANGES`) vs. a random
+/// mixed-case credential blob (`AbCd1234-EfGh5678`).
+/// What: strips leading/trailing non-alnum chars (from arrow punctuation like
+/// `>`, `<`), then checks all-lowercase-or-digit or all-uppercase-or-digit.
+/// Test: `structural_tokens_are_not_flagged`.
+fn is_uniform_word_segment(seg: &str) -> bool {
+    let s = seg.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    if s.is_empty() {
+        return false;
+    }
+    // All alphabetic chars in segment must share a single case.
+    let all_lower = s
+        .chars()
+        .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_lowercase());
+    let all_upper = s
+        .chars()
+        .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase());
+    all_lower || all_upper
+}
+
+/// True when `token` looks like a compound identifier whose hyphen-separated
+/// segments are each uniform-case words (e.g. `2-medium->REQUEST_CHANGES`,
+/// `trusty-review-v0.6.0`, `snake-case-value`).
+///
+/// Why (issue #1667): the mixed-case-plus-digit heuristic in
+/// [`looks_like_secret`] fires on `2-medium->REQUEST_CHANGES` because the
+/// compound token contains lower (`medium`), upper (`REQUEST_CHANGES`), and
+/// digit (`2`) when considered as a whole. But each segment is internally
+/// uniform-case, which is the hallmark of a human-readable compound
+/// identifier, not a random credential blob.
+/// What: requires at least two non-empty segments after splitting on `-`,
+/// with each segment passing [`is_uniform_word_segment`].
+/// Test: `structural_tokens_are_not_flagged`.
+fn is_segmented_identifier(token: &str) -> bool {
+    if !token.contains('-') {
+        return false;
+    }
+    let segments: Vec<&str> = token.split('-').collect();
+    if segments.len() < 2 {
+        return false;
+    }
+    segments.iter().all(|s| is_uniform_word_segment(s))
+}
+
+/// True when `token` is a structured path/slug/key=value/compound-identifier
+/// that should NOT be treated as a base64 blob or mixed-case credential.
+///
+/// Why (issue #1667): `looks_like_secret`'s heuristics (b64-symbol check and
+/// mixed-case+digit check) fire on legitimate technical tokens. Examples:
+/// `verdict/grade/prose-summary` contains `/` (b64 sym) → false positive;
+/// `>=2-medium->REQUEST_CHANGES` strips to `2-medium->REQUEST_CHANGES` which
+/// is lower+upper+digit → false positive on the mixed-case branch.
+/// This function recognises those structural shapes and short-circuits the
+/// two dangerous branches in `looks_like_secret`.
+/// What: returns `true` for (a) slash-path tokens where every `/`-segment is
+/// word-like, (b) `=`-containing tokens where at least one side of the `=`
+/// is word-like and the RHS is not pure padding, or (c) hyphen-segmented
+/// compound identifiers where each segment is uniform-case.
+/// A token with `+` is never structural (`+` never appears in identifiers).
+/// Test: `structural_tokens_are_not_flagged`, `base64_blob_is_blocked`.
+fn is_structural_token(token: &str) -> bool {
+    // `+` is unambiguously base64 — no structural pattern uses it.
+    if token.contains('+') {
+        return false;
+    }
+    // A "word segment" for slash/equals splitting: non-empty, only
+    // alphanumeric, `-`, `_`, `.`, `>`, `<`, `!`, `@`, `#`, `~`, `:`.
+    fn is_word_segment(s: &str) -> bool {
+        !s.is_empty()
+            && s.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '-' | '_' | '.' | '>' | '<' | '!' | '@' | '#' | '~' | ':')
+            })
+    }
+    // (a) Path/slug shape: all `/`-separated segments are word-like.
+    // Covers `verdict/grade/prose-summary`, `org/repo`, file paths.
+    if token.contains('/') {
+        return token.split('/').all(is_word_segment);
+    }
+    // (b) key=value / semver-operator shape: `=` present and at least one
+    // side is word-like; RHS is not pure base64 padding (`===`).
+    if token.contains('=') {
+        let parts: Vec<&str> = token.splitn(2, '=').collect();
+        if parts.len() == 2 {
+            let rhs = parts[1];
+            if rhs.chars().all(|c| c == '=') {
+                return false; // pure base64 padding, not key=value
+            }
+            return is_word_segment(parts[0]) || is_word_segment(rhs);
+        }
+    }
+    // (c) Hyphen-segmented compound identifier: no b64 syms remain at this
+    // point; check whether every `-`-separated segment is uniform-case.
+    // Covers `2-medium->REQUEST_CHANGES`, `trusty-review-v0.6.0`.
+    is_segmented_identifier(token)
+}
+
 /// Heuristic: is `token` a likely secret/credential (and not a git SHA)?
 ///
 /// Why (issue #1481): see [`find_secret_token`]. This is the core decision —
@@ -424,12 +528,13 @@ const SECRET_PREFIXES: &[&str] = &[
 /// What: returns `false` immediately for [`is_git_sha_like`] tokens (the
 /// allowlist), then returns `true` when the token (a) carries a known
 /// [`SECRET_PREFIXES`] credential prefix (e.g. `sk-`, `ghp_`, AWS `AKIA`/`ASIA`),
-/// or (b) is long (≥ 20 chars) AND mixes character classes in a way SHAs cannot
+/// or (b) is long (≥ 20 chars) AND is not a structural token (see
+/// [`is_structural_token`]) AND mixes character classes in a way SHAs cannot
 /// — i.e. contains BOTH a lowercase and an uppercase letter plus a digit, or
-/// contains a base64/url-safe symbol (`+ / =`). Pure lowercase-hex (SHA-shaped
-/// or longer all-hex), all-uppercase tokens without a known prefix, and ordinary
-/// words are not flagged by the (b) fallback — which is exactly why AWS access
-/// key IDs (all-uppercase base32) MUST be caught by the prefix list in (a).
+/// contains a base64-indicator symbol (`+`) or an `=`/`/` that is NOT part of
+/// a structural path/slug/key=value token. Pure lowercase-hex (SHA-shaped or
+/// longer all-hex), all-uppercase tokens without a known prefix, ordinary words,
+/// path-like tokens, and compound identifiers are not flagged.
 ///
 /// **Known limitation (FN-2, issue #1484):** mixed-case-but-no-digit tokens
 /// ≥ 20 chars (e.g. base58 key segments like `xPubKeySegmentAbCdEf`) are not
@@ -440,7 +545,8 @@ const SECRET_PREFIXES: &[&str] = &[
 /// the pattern list in `FilterConfig`.
 /// Test: `secret_token_is_blocked`, `base64_blob_is_blocked`,
 /// `git_sha_like_is_not_secret`, `ordinary_words_are_not_secret`,
-/// `aws_access_key_ids_are_blocked`, `mixed_case_no_digit_limitation`.
+/// `aws_access_key_ids_are_blocked`, `mixed_case_no_digit_limitation`,
+/// `structural_tokens_are_not_flagged`.
 fn looks_like_secret(token: &str) -> bool {
     // Allowlist git SHAs first — the whole point of issue #1481.
     if is_git_sha_like(token) {
@@ -454,11 +560,17 @@ fn looks_like_secret(token: &str) -> bool {
     if token.len() < 20 {
         return false;
     }
+    // Issue #1667: structural tokens (paths, slugs, key=value pairs, and
+    // hyphen-segmented compound identifiers) must not be flagged as secrets
+    // even when they contain `/`, `=`, or mixed case across segments.
+    if is_structural_token(token) {
+        return false;
+    }
     let has_lower = token.chars().any(|c| c.is_ascii_lowercase());
     let has_upper = token.chars().any(|c| c.is_ascii_uppercase());
     let has_digit = token.chars().any(|c| c.is_ascii_digit());
     let has_b64_sym = token.chars().any(|c| matches!(c, '+' | '/' | '='));
-    // base64/url-safe blob: long and carries a base64-only symbol.
+    // base64/url-safe blob: long, not structural, and carries a base64 symbol.
     if has_b64_sym && (has_lower || has_upper || has_digit) {
         return true;
     }
