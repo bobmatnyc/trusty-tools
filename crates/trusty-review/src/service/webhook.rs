@@ -461,33 +461,52 @@ async fn handle_closed_merged(
 ///
 /// Why: the outcome poller needs a `ReviewResult` to know which findings to
 /// poll against; the log dir is the durable record of completed reviews.
-/// What: scans `{log_dir}/*.json` files for one matching `owner/repo/pr_number`;
-/// returns the most recently modified match, or `None` if not found.
+/// What: constructs a filename prefix `{owner}-{repo}-pr{pr_number}-` (matching
+/// the `log_stem` naming convention in `pipeline/output.rs`) and scans only
+/// the matching `.json` entries — avoiding an O(N-files) full parse of the
+/// log directory.  Returns the most recently modified match, or `None` if
+/// not found.
 /// Fail-open: any I/O or parse error returns `None` (the poll is skipped).
-/// Test: exercised indirectly; the store path and log path are configurable.
+/// Test: `load_last_review_result_finds_correct_file` in `webhook_tests.rs`.
 fn load_last_review_result(
     log_dir: &std::path::Path,
     owner: &str,
     repo: &str,
     pr_number: u64,
 ) -> Option<crate::models::ReviewResult> {
+    let prefix = format!(
+        "{}-{}-pr{}-",
+        sanitize_log_component(owner),
+        sanitize_log_component(repo),
+        pr_number
+    );
     let dir = std::fs::read_dir(log_dir).ok()?;
     let mut candidates: Vec<(std::time::SystemTime, crate::models::ReviewResult)> = dir
         .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter(|e| {
+            let name = e.file_name();
+            let name_str = name.to_string_lossy();
+            name_str.ends_with(".json") && name_str.starts_with(prefix.as_str())
+        })
         .filter_map(|e| {
             let mtime = e.metadata().ok()?.modified().ok()?;
             let content = std::fs::read_to_string(e.path()).ok()?;
             let result: crate::models::ReviewResult = serde_json::from_str(&content).ok()?;
-            if result.owner == owner && result.repo == repo && result.pr_number == pr_number {
-                Some((mtime, result))
-            } else {
-                None
-            }
+            Some((mtime, result))
         })
         .collect();
     candidates.sort_by(|(a, _), (b, _)| b.cmp(a)); // most recent first
     candidates.into_iter().next().map(|(_, r)| r)
+}
+
+/// Sanitize an owner or repo name for use as a log filename component.
+///
+/// Why: matches the `sanitize_path` logic in `pipeline/output.rs` so the
+/// poller constructs the same prefix the log writer uses.
+/// What: lowercases the string and replaces `/` with `-`.
+/// Test: exercised transitively by `load_last_review_result_finds_correct_file`.
+fn sanitize_log_component(s: &str) -> String {
+    s.to_lowercase().replace('/', "-")
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────

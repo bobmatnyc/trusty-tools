@@ -202,10 +202,9 @@ impl OutcomeStore {
     /// as "what NOT to flag" guardrails (issue #1421); the prompt injection is a
     /// follow-up (PR F) — this method exposes the aggregated data.
     /// What: scans the full `OUTCOMES` table, groups records by `kind`, sums
-    /// `dismissed_count` per kind, and returns kinds whose sum **strictly exceeds**
-    /// `threshold` (`dismissed_count > threshold`, not `>=`).  A kind dismissed
-    /// exactly `threshold` times is NOT returned — the threshold is a minimum
-    /// exclusive lower bound.
+    /// `dismissed_count` per kind, and returns kinds whose sum is **at least**
+    /// `threshold` (`dismissed_count >= threshold`).  A kind dismissed exactly
+    /// `threshold` times IS returned — the threshold is inclusive (N or more).
     /// Test: `record_and_dismissed_patterns_threshold`, `record_below_threshold`.
     pub fn dismissed_patterns(&self, threshold: u32) -> Result<Vec<String>, OutcomeError> {
         let read = self
@@ -233,7 +232,7 @@ impl OutcomeStore {
 
         let mut result: Vec<String> = kind_counts
             .into_iter()
-            .filter(|(_, count)| *count > threshold)
+            .filter(|(_, count)| *count >= threshold)
             .map(|(kind, _)| kind)
             .collect();
         result.sort();
@@ -349,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn dismissed_patterns_at_exact_threshold_not_included() {
+    fn dismissed_patterns_at_exact_threshold_included() {
         let (store, _d) = temp_store();
         for i in 0..5u32 {
             let o = make_outcome(&format!("h{i}"), "style", Outcome::Dismissed);
@@ -357,8 +356,8 @@ mod tests {
         }
         let patterns = store.dismissed_patterns(5).expect("query");
         assert!(
-            patterns.is_empty(),
-            "count == threshold (5) should not be returned"
+            patterns.contains(&"style".to_string()),
+            "count == threshold (5) IS returned — threshold is inclusive"
         );
     }
 }

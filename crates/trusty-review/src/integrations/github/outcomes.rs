@@ -367,7 +367,7 @@ pub async fn poll_review_outcomes(
         // back by body text.  Neither is available without restructuring the posting
         // pipeline.
         //
-        // TODO(#FOLLOWUP): Thread `Finding.comment_id: Option<u64>` by posting
+        // TODO(#1631): Thread `Finding.comment_id: Option<u64>` by posting
         // inline comments individually via `POST /repos/{owner}/{repo}/pulls/{pr}/comments`
         // (which returns a single comment id) and storing the returned id on the
         // finding.  Then uncomment the reaction fetch below:
