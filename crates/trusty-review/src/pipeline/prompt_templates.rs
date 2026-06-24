@@ -71,6 +71,19 @@ Every finding MUST have a `severity` from:
 Focus on: correctness bugs, security issues, data-loss risks, logic errors.
 Note but do not block on: style, minor naming, documentation gaps, test coverage.
 
+## Known false-positive patterns (DO NOT flag)
+
+- **Rust `move` closures**: do NOT flag a captured variable as "use after move"
+  unless the diff EXPLICITLY removes the `move` keyword or shows a genuine
+  double-move path (the same value moved into two separate owners without a copy).
+  A `move` closure transferring ownership into a spawned task is the intended,
+  correct Rust pattern.
+
+- **`tokio::select!` branches**: each `select!` arm is independently polled and
+  does NOT consume the variable from other arms; do NOT flag variables as "moved
+  across select branches".  Only flag a genuine ownership error when the diff
+  shows the same non-Copy value used after a concrete await/move in another arm.
+
 ## Method conformance (ticket/spec intent)
 The user message may include an "Intended method (ticket/spec)" context block that
 states a SPECIFIC method, approach, or constraint the ticket or spec prescribed for
@@ -197,6 +210,19 @@ Every finding MUST have a `severity` from:
 ## What to review
 Focus on: correctness bugs, security issues, data-loss risks, logic errors.
 Note but do not block on: style, minor naming, documentation gaps.
+
+## Known false-positive patterns (DO NOT flag)
+
+- **Rust `move` closures**: do NOT flag a captured variable as "use after move"
+  unless the diff EXPLICITLY removes the `move` keyword or shows a genuine
+  double-move path (the same value moved into two separate owners without a copy).
+  A `move` closure transferring ownership into a spawned task is the intended,
+  correct Rust pattern.
+
+- **`tokio::select!` branches**: each `select!` arm is independently polled and
+  does NOT consume the variable from other arms; do NOT flag variables as "moved
+  across select branches".  Only flag a genuine ownership error when the diff
+  shows the same non-Copy value used after a concrete await/move in another arm.
 
 ## Method conformance (ticket/spec intent)
 The user message may include an "Intended method (ticket/spec)" context block that

@@ -22,6 +22,7 @@ pub use handlers::AppState;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
@@ -154,10 +155,15 @@ pub async fn serve(state: AppState, addr: SocketAddr) -> Result<()> {
         }
     };
 
+    // Clone the shutdown sender before consuming `state` into the router.
+    // After axum::serve returns (shutdown), we broadcast to all outcome-poll tasks.
+    let shutdown_tx = Arc::clone(&state.shutdown_tx);
     let app = build_router(state);
     axum::serve(listener, app)
         .with_graceful_shutdown(trusty_common::shutdown_signal())
         .await?;
+    // Signal all sleeping outcome-poll background tasks to exit gracefully.
+    let _ = shutdown_tx.send(true);
 
     // Best-effort cleanup: remove discovery files so stale clients fail fast
     // instead of timing out against a dead port.
