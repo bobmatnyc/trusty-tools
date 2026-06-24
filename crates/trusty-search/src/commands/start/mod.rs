@@ -18,6 +18,7 @@
 
 mod daemon;
 mod embedder;
+pub(super) mod reconcile;
 mod restore;
 
 #[cfg(test)]
