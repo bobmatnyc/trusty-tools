@@ -20,7 +20,7 @@ use crate::{
         apex_context::fetch_apex_context,
         context::{
             ConfluenceSource, ConformanceSource, ContextSource, GithubIssuesSource, JiraSource,
-            ReviewSubject, gather_external_context, render_sections,
+            PrHistorySource, ReviewSubject, gather_external_context, render_sections,
         },
         github::RunMode,
     },
@@ -215,6 +215,12 @@ pub(crate) async fn gather_external_context_md(
         // can flag explicit method contradictions.  Default DISABLED (needs auth).
         Box::new(ConformanceSource::from_config(
             &cs.conformance,
+            run_mode,
+            config.clone(),
+        )),
+        // Prior-PR / file change-history source (T10, #1423).  Default DISABLED.
+        Box::new(PrHistorySource::from_config(
+            &cs.pr_history,
             run_mode,
             config.clone(),
         )),

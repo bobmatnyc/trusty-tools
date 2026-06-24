@@ -38,6 +38,7 @@ pub mod github_issues;
 pub mod jira;
 pub mod jira_parse;
 pub mod orchestrator;
+pub mod pr_history;
 
 pub use config::{ContextSourcesConfig, ContextSourcesFileConfig, SourceConfig, SourceFileConfig};
 pub use confluence::ConfluenceSource;
@@ -45,6 +46,7 @@ pub use conformance::ConformanceSource;
 pub use github_issues::GithubIssuesSource;
 pub use jira::JiraSource;
 pub use orchestrator::{gather_external_context, render_sections};
+pub use pr_history::PrHistorySource;
 
 use async_trait::async_trait;
 
