@@ -529,21 +529,22 @@ mod tests {
     /// Why: §9.2 stagger is a *spacing* mechanism for admitted sessions, not a
     /// penalty for all launches. A rejected launch must fail fast so callers
     /// get a prompt error rather than waiting for a stagger that will never
-    /// produce a session. This test injects a non-zero stagger (200 ms) to
-    /// make any accidental stagger-before-reject detectable on a wall-clock
-    /// assertion with generous headroom.
-    /// What: configures cap=1, stagger=200 ms; pre-fills to cap; calls
-    /// `run_session` and times the call — it must complete in well under 200 ms
-    /// (we allow 150 ms slack for scheduling noise) and must return `CapReached`.
+    /// produce a session.
+    /// What: configures cap=1, stagger=5000 ms (5 s); pre-fills to cap; calls
+    /// `run_session` and times the call — a correct reject returns in
+    /// microseconds (we allow < 1 s), while an incorrect stagger-before-reject
+    /// would block for the full 5 s. The 4 s gap cleanly separates correct from
+    /// incorrect behaviour with no jitter risk on any CI machine.
     /// Test: this is the test.
     #[tokio::test]
     async fn registry_cap_reject_is_immediate() {
-        use std::time::Instant;
+        use std::time::{Duration, Instant};
 
-        // 200 ms stagger — detectable if paid, negligible if skipped.
+        // 5 s stagger — would be obviously detectable if paid; a <1 s threshold
+        // leaves 4 s of headroom so scheduling jitter cannot cause a false fail.
         let cfg = ControlPlaneConfig {
             max_concurrent_sessions: 1,
-            launch_stagger_ms: 200,
+            launch_stagger_ms: 5_000,
             ..Default::default()
         };
         let registry = SessionRegistry::with_config(cfg);
@@ -573,12 +574,13 @@ mod tests {
             crate::control::admission::AdmissionError::CapReached { live: 1, cap: 1 }
         );
 
-        // Must NOT have paid the 200 ms stagger — allow 150 ms for scheduling
-        // noise (CI machines can be slow; 200 - 150 = 50 ms true budget).
+        // Must NOT have paid the 5 s stagger. A <1 s threshold is generous for
+        // any real CI scheduling jitter; if this ever fires the stagger is
+        // leaking onto the reject path (a bug), not a noise artifact.
         assert!(
-            elapsed.as_millis() < 150,
-            "rejected launch must return in <150 ms, not {} ms (stagger must not be paid on reject path)",
-            elapsed.as_millis()
+            elapsed < Duration::from_secs(1),
+            "rejected launch must return in <1 s, not {elapsed:?} \
+             (5 s stagger must not be paid on reject path)"
         );
     }
 }
