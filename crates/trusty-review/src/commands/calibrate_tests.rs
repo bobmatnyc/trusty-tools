@@ -218,12 +218,11 @@ fn rust_semantic_fp_rate_computed_correctly() {
     // PR 101 trusty: src/db.rs/logic-error → recalled (human has it) → +1 recalled, +1 total
     // PR 102 trusty: src/lib.rs/ownership → recalled; src/lib.rs/logic-error → FP → +1 recalled, +2 total
     // PR 103 trusty: none
-    // Total Rust semantic: 3 (db.rs/logic-error + lib.rs/ownership + lib.rs/logic-error)
-    // Recalled Rust semantic: 2 (db.rs/logic-error + lib.rs/ownership)
-    // rust_semantic_fp_rate = 2/3 ≈ 0.6667
+    // Total Rust semantic: 3; recalled: 2; FP: 1 (lib.rs/logic-error)
+    // rust_semantic_fp_rate = 1 - 2/3 = 1/3 ≈ 0.333 (TRUE FP rate; lower is better)
     assert!(
-        (report.rust_semantic_fp_rate - (2.0_f64 / 3.0_f64)).abs() < 1e-9,
-        "rust_semantic_fp_rate expected 2/3, got {}",
+        (report.rust_semantic_fp_rate - (1.0_f64 / 3.0_f64)).abs() < 1e-9,
+        "rust_semantic_fp_rate expected 1/3 (true FP rate), got {}",
         report.rust_semantic_fp_rate
     );
 }
@@ -240,8 +239,8 @@ fn rust_semantic_fp_rate_neutral_when_no_rust_semantic_findings() {
     let results = vec![vec![make_finding("src/main.py", "logic-error")]];
     let report = compute_metrics(&corpus, &results);
     assert!(
-        (report.rust_semantic_fp_rate - 1.0).abs() < 1e-9,
-        "expected neutral 1.0 when no Rust semantic findings, got {}",
+        (report.rust_semantic_fp_rate - 0.0).abs() < 1e-9,
+        "expected neutral 0.0 (no FPs) when no Rust semantic findings, got {}",
         report.rust_semantic_fp_rate
     );
 }

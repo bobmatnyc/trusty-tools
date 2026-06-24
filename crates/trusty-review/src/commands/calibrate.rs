@@ -5,20 +5,32 @@
 //! merged PRs with human-review ground truth and produces a repeatable
 //! recall/precision report so calibration regressions are caught early.
 //!
-//! What: loads a JSONL corpus (`CorpusEntry` per line), runs the review
-//! pipeline in dry-run mode for each PR, fuzzy-matches trusty findings
-//! against human findings by (file, kind), and emits a JSON report with
-//! per-PR and aggregate metrics including `rust_semantic_fp_rate`.
+//! What: loads a JSONL corpus (`CorpusEntry` per line), runs the REAL review
+//! pipeline in dry-run mode for each PR (no GitHub post), fuzzy-matches trusty
+//! findings against human findings by (file, kind), and emits a JSON report
+//! with per-PR and aggregate metrics including `rust_semantic_fp_rate`.
 //!
 //! Test: `calibrate_tests.rs` — synthetic 3-PR corpus fixture with known
 //! ground truth asserts recall/precision computation and fuzzy matcher.
+//! Pure functions are tested without hitting a real LLM or GitHub.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
-use trusty_review::models::{Effort, Finding};
+use trusty_review::{
+    config::ReviewConfig,
+    integrations::{
+        github::{AuthStrategy, GithubClient, RunMode},
+        search_client::HttpSearchClient,
+    },
+    models::Finding,
+    pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
+};
+
+use super::run::build_deps_async;
 
 // ─── Corpus format ────────────────────────────────────────────────────────────
 
@@ -97,8 +109,8 @@ pub struct PrMetrics {
 /// Why: the top-level output that CI and humans consume to track calibration
 /// regressions across prompt changes, model upgrades, and corpus expansions.
 /// What: aggregate recall/precision over all corpus PRs, per-PR details, and
-/// the `rust_semantic_fp_rate` measuring precision of logic-error/ownership
-/// findings on `.rs` files specifically (the known Rust FP hotspot).
+/// the `rust_semantic_fp_rate` — the TRUE false-positive rate (lower = better)
+/// of logic-error/ownership findings on `.rs` files specifically.
 /// Test: computed and asserted in `calibrate_tests.rs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalibrationReport {
@@ -108,11 +120,12 @@ pub struct CalibrationReport {
     pub precision: f64,
     /// Per-PR metrics (one entry per corpus line).
     pub per_pr: Vec<PrMetrics>,
-    /// Precision of `logic-error`/`ownership` findings on `.rs` files.
+    /// True false-positive rate of `logic-error`/`ownership` findings on `.rs` files.
     ///
-    /// Why: trusty-review false-positives HIGH on these Rust semantic patterns
-    /// (`move` closures, `tokio::select!` branches).  This field makes the
-    /// false-positive rate measurable and regressionable.  Returns 1.0 (neutral)
+    /// Why: trusty-review false-positives HIGH on Rust semantic patterns (`move`
+    /// closures, `tokio::select!` branches).  This field measures that FP rate as
+    /// `1.0 - (recalled / total_rust_semantic)`, so **lower is better** (0.0 = perfect,
+    /// 1.0 = every Rust semantic finding was a false positive).  Returns 0.0 (no FPs)
     /// when no Rust semantic findings exist in the run.
     pub rust_semantic_fp_rate: f64,
 }
@@ -133,6 +146,14 @@ pub struct CalibrateArgs {
     /// Write the JSON report to this file instead of stdout.
     #[arg(long, value_name = "FILE")]
     pub output: Option<PathBuf>,
+
+    /// Override the reviewer model slug (passed through to the review pipeline).
+    #[arg(long, value_name = "SLUG")]
+    pub reviewer_model: Option<String>,
+
+    /// Provider backend: `bedrock` (default) or `openrouter`.
+    #[arg(long, value_name = "PROVIDER")]
+    pub provider: Option<String>,
 }
 
 // ─── Fuzzy matcher ────────────────────────────────────────────────────────────
@@ -143,7 +164,7 @@ pub struct CalibrateArgs {
 /// deliberate.  A finding is recalled when the same file AND kind appear in
 /// both the trusty output and the human ground truth.
 /// What: case-insensitive kind comparison; exact file-path string comparison.
-/// Test: `finding_recalled_same_file_kind`, `finding_not_recalled_diff_kind`,
+/// Test: `finding_recalled_same_file_and_kind`, `finding_not_recalled_diff_kind`,
 /// `finding_not_recalled_diff_file` in `calibrate_tests.rs`.
 pub fn is_recalled(trusty: &Finding, human: &HumanFinding) -> bool {
     trusty.file == human.file && trusty.kind.eq_ignore_ascii_case(&human.kind)
@@ -154,7 +175,7 @@ pub fn is_recalled(trusty: &Finding, human: &HumanFinding) -> bool {
 /// Why: the `rust_semantic_fp_rate` metric needs a consistent classifier.
 /// What: the file ends in `.rs` AND kind is `logic-error` or `ownership`
 /// (case-insensitive match).
-/// Test: `rust_semantic_classifier` in `calibrate_tests.rs`.
+/// Test: `rust_semantic_classifier_*` tests in `calibrate_tests.rs`.
 pub fn is_rust_semantic(finding: &Finding) -> bool {
     finding.file.ends_with(".rs")
         && matches!(
@@ -171,7 +192,7 @@ pub fn is_rust_semantic(finding: &Finding) -> bool {
 /// or pipeline invocations.
 /// What: for each (corpus_entry, trusty_findings) pair counts recalled human
 /// findings, false-positive trusty findings, and accumulates into aggregate
-/// recall/precision and the Rust semantic FP rate.
+/// recall/precision and the TRUE Rust semantic FP rate (lower = better).
 /// Test: `compute_metrics_three_pr_corpus` in `calibrate_tests.rs`.
 pub fn compute_metrics(
     corpus: &[CorpusEntry],
@@ -251,10 +272,13 @@ pub fn compute_metrics(
     } else {
         total_recalled as f64 / total_trusty as f64
     };
+    // TRUE false-positive rate: 0.0 = no FPs (all Rust semantic findings recalled),
+    // 1.0 = every Rust semantic finding was a false positive.
+    // Returns 0.0 (neutral/no FPs) when no Rust semantic findings were emitted.
     let rust_semantic_fp_rate = if rust_sem_total == 0 {
-        1.0_f64
+        0.0_f64
     } else {
-        rust_sem_recalled as f64 / rust_sem_total as f64
+        1.0_f64 - (rust_sem_recalled as f64 / rust_sem_total as f64)
     };
 
     CalibrationReport {
@@ -289,45 +313,129 @@ pub fn load_corpus(path: &Path) -> Result<Vec<CorpusEntry>> {
     Ok(entries)
 }
 
+// ─── Pipeline runner ─────────────────────────────────────────────────────────
+
+/// Run the real review pipeline for a corpus PR and return its findings.
+///
+/// Why: the calibration harness must call the REAL review pipeline to produce
+/// actual model findings — synthesising findings from the corpus ground truth
+/// would be tautological and say nothing about the model.
+/// What: resolves a GitHub token, builds `DiffSource::Github`, runs `run_review`
+/// in dry-run mode (no GitHub post, no log write), and returns the findings list.
+/// Errors are fail-open: a pipeline error for one PR logs a warning and returns
+/// an empty findings list so the rest of the corpus continues.
+/// Test: called in `cmd_calibrate`; pure functions (`is_recalled`, `compute_metrics`)
+/// are tested separately in `calibrate_tests.rs` without hitting real services.
+async fn run_pipeline_for_entry(
+    config: &ReviewConfig,
+    entry: &CorpusEntry,
+    reviewer_model: &str,
+    deps: ReviewDeps,
+) -> Vec<Finding> {
+    let client = match GithubClient::new() {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(pr = entry.pr, owner = %entry.owner, repo = %entry.repo,
+                  "calibrate: failed to build GitHub client: {e}");
+            return Vec::new();
+        }
+    };
+    let token = match AuthStrategy::select(RunMode::Cli, None)
+        .resolve_token(&client, config, &entry.owner)
+        .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(pr = entry.pr, owner = %entry.owner, repo = %entry.repo,
+                  "calibrate: GitHub token resolution failed: {e}");
+            return Vec::new();
+        }
+    };
+
+    let diff_source = DiffSource::Github {
+        owner: entry.owner.clone(),
+        repo: entry.repo.clone(),
+        pr: entry.pr,
+        token,
+    };
+
+    let input = ReviewInput {
+        diff_source,
+        reviewer_model: reviewer_model.to_string(),
+        write_log: false,    // never write log files during calibration
+        print_result: false, // suppress stdout during batch run
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false, // NEVER post during calibration — always dry-run
+    };
+
+    let result = run_review(config, input, deps).await;
+    result.findings
+}
+
 // ─── Subcommand handler ───────────────────────────────────────────────────────
 
 /// Execute the `calibrate` subcommand.
 ///
 /// Why: provides a repeatable calibration harness so prompt changes and model
-/// upgrades can be measured against a fixed corpus before they ship.
-/// What: loads the corpus JSONL, synthesises dry-run trusty findings from the
-/// corpus `acted_on` flags (no live LLM call — future iterations wire
-/// `run_review`), computes recall/precision, and emits a JSON report.
-/// Test: `cargo run -p trusty-review -- calibrate --corpus corpus.jsonl`.
-pub async fn cmd_calibrate(args: CalibrateArgs) -> Result<()> {
+/// upgrades can be measured against a fixed corpus of human-reviewed PRs before
+/// they ship.
+/// What: loads the corpus JSONL, runs the REAL `run_review` pipeline in dry-run
+/// mode for each PR to obtain actual model findings, fuzzy-matches them against
+/// the corpus human findings using `is_recalled`, runs `compute_metrics`, and
+/// emits a JSON report.  Errors for individual PRs are fail-open (logged as
+/// warnings; that PR contributes an empty findings list).
+/// Test: `cargo run -p trusty-review -- calibrate --corpus corpus.jsonl`
+/// (requires GitHub token + LLM credentials at runtime).
+pub async fn cmd_calibrate(_config: ReviewConfig, args: CalibrateArgs) -> Result<()> {
     let corpus = load_corpus(&args.corpus)?;
     if corpus.is_empty() {
         anyhow::bail!("corpus file is empty — nothing to calibrate against");
     }
 
-    // Dry-run mode: synthesise trusty findings from corpus `acted_on` flags.
-    // This makes the harness runnable without a live LLM or GitHub connection.
-    // A future iteration replaces this stub with an actual `run_review` call.
-    let trusty_results: Vec<Vec<Finding>> = corpus
-        .iter()
-        .map(|entry| {
-            entry
-                .human_findings
-                .iter()
-                .filter(|hf| hf.acted_on)
-                .map(|hf| {
-                    Finding::new(
-                        hf.file.clone(),
-                        hf.kind.clone(),
-                        format!("synthetic finding for {}", hf.file),
-                        String::new(),
-                        0.9_f32,
-                        Effort::Low,
-                    )
-                })
-                .collect()
-        })
-        .collect();
+    let overrides = trusty_review::config::RoleCliOverrides {
+        reviewer_model: args.reviewer_model.clone(),
+        provider: args.provider.clone(),
+        ..Default::default()
+    };
+    let config_with_overrides = ReviewConfig::from_env_and_file(None, Some(&overrides));
+    let reviewer_model = config_with_overrides.role_models.reviewer.model.clone();
+    let default_provider = config_with_overrides.role_models.reviewer.provider.clone();
+
+    eprintln!(
+        "calibrate: running real review pipeline for {} corpus PRs (model: {reviewer_model})",
+        corpus.len()
+    );
+
+    // Resolve the search index once before the batch.
+    let mut cfg = config_with_overrides.clone();
+    if let Ok(search_client) = HttpSearchClient::from_config(&cfg) {
+        cfg.resolve_index(&search_client).await;
+    }
+
+    // Run the real pipeline for each corpus PR.  Deps are rebuilt per-PR because
+    // `ReviewDeps` contains `Arc<dyn LlmProvider>` which is not cheaply cloneable.
+    let mut trusty_results: Vec<Vec<Finding>> = Vec::with_capacity(corpus.len());
+    for (i, entry) in corpus.iter().enumerate() {
+        eprintln!(
+            "calibrate: [{}/{}] {}/{}#{}",
+            i + 1,
+            corpus.len(),
+            entry.owner,
+            entry.repo,
+            entry.pr
+        );
+        let deps = match build_deps_async(&cfg, &reviewer_model, &default_provider).await {
+            Ok(d) => d,
+            Err(e) => {
+                warn!("calibrate: failed to build deps for PR {}: {e}", entry.pr);
+                trusty_results.push(Vec::new());
+                continue;
+            }
+        };
+        let findings = run_pipeline_for_entry(&cfg, entry, &reviewer_model, deps).await;
+        trusty_results.push(findings);
+    }
 
     let report = compute_metrics(&corpus, &trusty_results);
     let json = serde_json::to_string_pretty(&report).context("serialising calibration report")?;
@@ -337,10 +445,11 @@ pub async fn cmd_calibrate(args: CalibrateArgs) -> Result<()> {
             std::fs::write(path, &json)
                 .with_context(|| format!("writing report to {}", path.display()))?;
             eprintln!(
-                "calibration report written to {} (recall={:.3}, precision={:.3})",
+                "calibration report written to {} (recall={:.3}, precision={:.3}, rust_fp={:.3})",
                 path.display(),
                 report.recall,
-                report.precision
+                report.precision,
+                report.rust_semantic_fp_rate,
             );
         }
         None => {

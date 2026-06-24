@@ -183,7 +183,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Commands::Serve(args) => cmd_serve(config, args).await,
         #[cfg(feature = "profile")]
         Commands::Profile(args) => cli_profile::cmd_profile(config, args).await,
-        Commands::Calibrate(args) => cmd_calibrate(args).await,
+        Commands::Calibrate(args) => cmd_calibrate(config, args).await,
         // Port is handled synchronously in `main` before this function is
         // called; this arm is unreachable at runtime but required for
         // exhaustive match.
