@@ -84,7 +84,15 @@ pub fn load_alias(
         pull_ff_only(&repo_dir);
     }
 
-    run_prepare_session(&repo_dir)?;
+    // Issue #1651: thread the registry clone `url` as the authoritative git
+    // remote so the per-project `repo/.mcp.json` pins `TRUSTY_MEMORY_PALACE` to
+    // the repo's canonical `owner-repo` slug (the same `derive_palace_id`
+    // mechanism #1605 uses for the per-project injection). The clone URL is more
+    // authoritative than probing the checkout's own origin remote (which a
+    // shallow / renamed / origin-less clone might lack); the operator
+    // `TRUSTY_MEMORY_PALACE` override still wins over it per `derive_palace_id`
+    // precedence.
+    run_prepare_session(&repo_dir, Some(&url))?;
     write_marker(&repo_dir, alias, &url, &git_ref, claude_config_dir)?;
 
     // WI-3 sub-parts 2+3: pre-seed project trust + MCP-server approval into
@@ -146,16 +154,27 @@ fn pull_ff_only(repo_dir: &Path) {
     }
 }
 
-/// Run `prepare_session` on the given repo directory.
+/// Run `prepare_session` on the given repo directory, pinning the palace to the
+/// cloned-from `repo_url` (issue #1651).
 ///
-/// Why: `prepare_session` deploys composed agents, skills, and CLAUDE.md so
-/// the project-local half of the managed configuration is complete.
+/// Why: `prepare_session` deploys composed agents, skills, and CLAUDE.md so the
+/// project-local half of the managed configuration is complete — and (issue
+/// #1605/#1651) injects the per-project `repo/.mcp.json` trusty-memory stub.
+/// Threading the registry clone URL as the authoritative git remote makes the
+/// injector pin `env.TRUSTY_MEMORY_PALACE` to the repo's canonical `owner-repo`
+/// slug (the highest-precedence `derive_palace_id` source after the operator
+/// override), so the managed session lands in the SAME palace a non-tm Claude
+/// session in that repo would use. `None` falls back to probing the checkout's
+/// own `git remote get-url origin`, then to the directory-basename slug.
 /// What: resolves `FrameworkPaths` from the home directory and calls
-/// `crate::core::session_launch::prepare_session`.
-/// Test: `prepare_session` has its own unit tests in session_launch/tests.rs.
-fn run_prepare_session(repo_dir: &Path) -> anyhow::Result<()> {
+/// `crate::core::session_launch::prepare_session_with_repo_url`, forwarding
+/// `repo_url` to the trusty-memory MCP palace-slug derivation.
+/// Test: `run_prepare_session_pins_palace_from_clone_url`,
+/// `run_prepare_session_bare_stub_when_no_identity`; `prepare_session` itself is
+/// covered in session_launch/tests.rs.
+fn run_prepare_session(repo_dir: &Path, repo_url: Option<&str>) -> anyhow::Result<()> {
     let fw = crate::core::paths::FrameworkPaths::default();
-    crate::core::session_launch::prepare_session(&fw, repo_dir)
+    crate::core::session_launch::prepare_session_with_repo_url(&fw, repo_dir, repo_url)
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("prepare_session failed: {e}"))
 }
@@ -193,6 +212,119 @@ fn write_marker(
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// RAII guard that clears an env var for the duration of a test and restores
+    /// the prior value on drop.
+    ///
+    /// Why: the palace-pin test must be hermetic against an ambient
+    /// `TRUSTY_MEMORY_PALACE` override (which `derive_palace_id` honours at
+    /// highest precedence and would otherwise mask the URL-derived slug).
+    /// What: snapshots the prior value, removes the var, and restores it on drop.
+    /// Pairs with `#[serial_test::serial]` so concurrent tests never race on the
+    /// shared process environment.
+    /// Test: used by `run_prepare_session_pins_palace_from_clone_url`.
+    struct EnvClearGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvClearGuard {
+        fn clear(key: &'static str) -> Self {
+            let prior = std::env::var(key).ok();
+            // SAFETY: tests run serially under `#[serial_test::serial]`, so no
+            // other thread reads/writes the environment concurrently.
+            unsafe { std::env::remove_var(key) };
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvClearGuard {
+        fn drop(&mut self) {
+            // SAFETY: see `clear`.
+            unsafe {
+                match self.prior.take() {
+                    Some(v) => std::env::set_var(self.key, v),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    /// Why (issue #1651): the standalone `load` path must pin the per-project
+    /// `repo/.mcp.json` trusty-memory palace to the registry CLONE URL's
+    /// canonical `owner-repo` slug — the same `derive_palace_id` mechanism #1605
+    /// uses — rather than leaving a bare stub or relying on probing the
+    /// checkout's own origin remote. Threading the clone URL explicitly is the
+    /// authoritative identity (a shallow/origin-less clone might lack a remote).
+    /// What: runs `run_prepare_session` on a repo dir with an explicit clone URL
+    /// and asserts the injected `.mcp.json` carries
+    /// `env.TRUSTY_MEMORY_PALACE == "bobmatnyc-trusty-tools"`.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn run_prepare_session_pins_palace_from_clone_url() {
+        // Hermetic: an ambient override would win over the URL-derived slug.
+        let _guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
+        let tmp = TempDir::new().unwrap();
+        // Deliberately a session-id-like basename: the pin must come from the
+        // clone URL, NOT this directory name.
+        let repo = tmp.path().join("0c8f1a2b3c4d");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        run_prepare_session(&repo, Some("git@github.com:bobmatnyc/trusty-tools.git"))
+            .expect("run_prepare_session succeeds");
+
+        let mcp_path = repo.join(".mcp.json");
+        assert!(
+            mcp_path.exists(),
+            "run_prepare_session must write repo/.mcp.json"
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mcp_path).unwrap()).unwrap();
+        assert_eq!(
+            value["mcpServers"]["trusty-memory"]["env"]["TRUSTY_MEMORY_PALACE"],
+            serde_json::json!("bobmatnyc-trusty-tools"),
+            "standalone load must pin the palace to the clone URL's owner-repo slug, \
+             not the workspace basename"
+        );
+    }
+
+    /// Why (issue #1651): when no clone URL is threaded AND the checkout has no
+    /// git origin remote AND no env override, the injection must fail open with
+    /// a BARE trusty-memory stub (no `env` key) so the session still gets the
+    /// memory tools — backward-compatible with the pre-#1651 behaviour.
+    /// What: runs `run_prepare_session(repo, None)` on a non-repo dir whose
+    /// basename does not slugify and asserts the trusty-memory block has no
+    /// `TRUSTY_MEMORY_PALACE` pin. (A non-empty basename would fall back to the
+    /// parent-dir slug, so we assert only the no-`env` shape is preserved when
+    /// pinning is impossible.)
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn run_prepare_session_bare_stub_when_no_identity() {
+        let _guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
+        let tmp = TempDir::new().unwrap();
+        // A basename that slugifies to empty (only separators) cannot yield a
+        // parent-dir slug, so with no URL/remote/override the stub stays bare.
+        let repo = tmp.path().join("---");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        run_prepare_session(&repo, None).expect("run_prepare_session succeeds");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(repo.join(".mcp.json")).unwrap())
+                .unwrap();
+        let memory = &value["mcpServers"]["trusty-memory"];
+        assert_eq!(
+            memory["command"],
+            serde_json::json!("trusty-memory"),
+            "the trusty-memory stub must still be present"
+        );
+        assert!(
+            memory.get("env").is_none(),
+            "with no derivable identity the stub must be bare (no TRUSTY_MEMORY_PALACE env); got {memory}"
+        );
+    }
 
     #[test]
     fn test_marker_write_round_trip() {
