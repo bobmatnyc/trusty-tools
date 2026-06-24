@@ -244,7 +244,7 @@ impl SessionBackend for StreamJsonBackend {
     /// graceful SIGTERM → wait → SIGKILL sequence is deferred to a later phase.
     /// Drop provides a final safety net in case `stop()` is never called.
     /// Test: stop-path covered by integration test.
-    async fn stop(mut self: Box<Self>) -> Result<()> {
+    async fn stop(mut self) -> Result<()> {
         let _ = self.child.start_kill(); // SIGKILL; ignore if already exited
         let _ = self.child.wait().await; // reap the child
         Ok(())

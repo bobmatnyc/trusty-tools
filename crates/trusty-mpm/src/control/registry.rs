@@ -20,10 +20,13 @@ use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use crate::control::actor::{DEFAULT_BROADCAST_CAPACITY, SessionActorHandle, spawn_actor};
+use crate::control::actor::{
+    DEFAULT_BROADCAST_CAPACITY, SessionActorConfig, SessionActorHandle, spawn_actor,
+};
 use crate::control::admission::{AdmissionDecision, AdmissionError, check_admission};
 use crate::control::backend::stream_json::StreamJsonBackend;
 use crate::control::backend::tmux::TmuxBackend;
+use crate::control::classifier::{ActivityClassifier, ClassifierGate, OpenRouterClassifier};
 use crate::control::config::ControlPlaneConfig;
 use crate::control::event::BackendKind;
 use crate::control::id::{ControlSessionId, SessionCounter};
@@ -59,13 +62,27 @@ pub struct RunParams {
 /// allocation. All registry mutations hold an exclusive lock only for the
 /// duration of the `HashMap` operation per §7.1.
 /// Test: `registry_register_deregister`, `registry_list`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SessionRegistry {
     inner: Arc<RwLock<RegistryInner>>,
     /// Auth + cost guardrails (§9): concurrency cap, launch stagger, auth
     /// timeout, classifier gate. Shared so the daemon can read the same config
     /// the registry enforces.
     config: Arc<ControlPlaneConfig>,
+    /// §8.3 OpenRouter classifier (#1648). `None` = the §8.3 gate is closed
+    /// (default path): spawned actors make ZERO classifier calls (AC-9).
+    /// `Some(_)` = the daemon resolved an `OPENROUTER_API_KEY` provider AND the
+    /// gate opened; spawned actors invoke it fail-open on unmatched output.
+    classifier: Option<Arc<dyn ActivityClassifier>>,
+}
+
+impl std::fmt::Debug for SessionRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionRegistry")
+            .field("config", &self.config)
+            .field("classifier", &self.classifier.is_some())
+            .finish()
+    }
 }
 
 struct RegistryInner {
@@ -109,6 +126,58 @@ impl SessionRegistry {
                 counter: SessionCounter::default(),
             })),
             config: Arc::new(config),
+            classifier: None,
+        }
+    }
+
+    /// Wire an OpenRouter activity classifier (§8.3, #1648) onto the registry.
+    ///
+    /// Why: the §8.3 classifier is gated by config flag + key presence + no-SM
+    /// (per [`ClassifierGate`]). The daemon resolves an `OPENROUTER_API_KEY`
+    /// provider once and calls this ONLY when the gate is open; spawned actors
+    /// then invoke it fail-open. The default registry has no classifier, so the
+    /// default path makes ZERO OpenRouter calls (AC-9).
+    /// What: builds an [`OpenRouterClassifier`] from `provider` + `model` and
+    /// stores it as the per-actor classifier seam. Returns `self` for chaining.
+    /// Test: `registry_with_classifier_builds_actor_config_with_seam`.
+    pub fn with_classifier(
+        mut self,
+        provider: Arc<dyn crate::core::sm::providers::LlmProvider>,
+        model: impl Into<String>,
+    ) -> Self {
+        self.classifier = Some(Arc::new(OpenRouterClassifier::new(provider, model)));
+        self
+    }
+
+    /// Build the per-actor [`SessionActorConfig`] from registry config (#1648/#1649).
+    ///
+    /// Why: every actor spawned by the registry must carry the §4.4 auth timeout
+    /// (from `[control_plane].auth_timeout_secs`) and, when the §8.3 gate is
+    /// open, the classifier seam. Centralising the construction keeps both spawn
+    /// sites identical and the gate check in one place.
+    /// What: sets `auth_timeout` from `self.config.auth_timeout()`, and includes
+    /// the classifier ONLY when [`ClassifierGate::should_classify`] permits it —
+    /// i.e. config flag on, a provider is wired, and no SM agent is connected.
+    /// `sm_agent_connected` is currently always `false` (alpha-1 daemon is the
+    /// only caller); when SM-connection signalling lands it threads through here.
+    /// Test: `registry_actor_config_default_no_classifier`,
+    /// `registry_actor_config_gate_off_no_classifier`.
+    fn actor_config(&self) -> SessionActorConfig {
+        // §8.3 gate: a classifier is only attached when the config flag is on,
+        // a provider was wired (api-key-present analogue), and no SM is attached.
+        let gate = ClassifierGate::from_config(
+            &self.config.observability,
+            self.classifier.is_some(),
+            false,
+        );
+        let classifier = if gate.should_classify() {
+            self.classifier.clone()
+        } else {
+            None
+        };
+        SessionActorConfig {
+            auth_timeout: self.config.auth_timeout(),
+            classifier,
         }
     }
 
@@ -295,6 +364,7 @@ impl SessionRegistry {
                     BackendKind::StreamJson,
                     backend,
                     DEFAULT_BROADCAST_CAPACITY,
+                    self.actor_config(),
                 )
             }
             BackendKind::Tmux => {
@@ -313,6 +383,7 @@ impl SessionRegistry {
                     BackendKind::Tmux,
                     backend,
                     DEFAULT_BROADCAST_CAPACITY,
+                    self.actor_config(),
                 )
             }
         };
@@ -428,6 +499,90 @@ mod tests {
         assert!(
             registry.get(&id).await.is_some(),
             "session must be visible immediately after registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_actor_config_default_no_classifier() {
+        // Default registry: auth timeout = 30 s, classifier None (gate closed).
+        let registry = SessionRegistry::new();
+        let cfg = registry.actor_config();
+        assert_eq!(cfg.auth_timeout, std::time::Duration::from_secs(30));
+        assert!(
+            cfg.classifier.is_none(),
+            "default registry must attach NO classifier (AC-9)"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_actor_config_threads_auth_timeout() {
+        // A non-default auth_timeout_secs flows into the per-actor config (#1649).
+        let control = ControlPlaneConfig {
+            auth_timeout_secs: 7,
+            ..Default::default()
+        };
+        let registry = SessionRegistry::with_config(control);
+        assert_eq!(
+            registry.actor_config().auth_timeout,
+            std::time::Duration::from_secs(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_actor_config_gate_off_drops_classifier() {
+        // Even with a wired provider, the §8.3 gate stays CLOSED while the config
+        // flag is off (default), so the per-actor classifier is None (#1648).
+        use crate::core::sm::providers::{LlmProvider, LlmRequest, LlmResponse, error::SmLlmError};
+
+        struct NoopProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for NoopProvider {
+            fn name(&self) -> &str {
+                "noop"
+            }
+            async fn complete(&self, _req: LlmRequest) -> Result<LlmResponse, SmLlmError> {
+                Err(SmLlmError::Degraded("test".into()))
+            }
+        }
+
+        // Default observability => llm_classifier = false => gate closed.
+        let registry =
+            SessionRegistry::new().with_classifier(Arc::new(NoopProvider), "openai/gpt-4o-mini");
+        assert!(
+            registry.actor_config().classifier.is_none(),
+            "gate off (config flag false) must drop the classifier even when a provider is wired"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_actor_config_gate_on_attaches_classifier() {
+        // With the §8.3 config flag ON and a provider wired, the gate opens and
+        // the per-actor classifier is attached (#1648).
+        use crate::control::config::ObservabilityConfig;
+        use crate::core::sm::providers::{LlmProvider, LlmRequest, LlmResponse, error::SmLlmError};
+
+        struct NoopProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for NoopProvider {
+            fn name(&self) -> &str {
+                "noop"
+            }
+            async fn complete(&self, _req: LlmRequest) -> Result<LlmResponse, SmLlmError> {
+                Err(SmLlmError::Degraded("test".into()))
+            }
+        }
+
+        let control = ControlPlaneConfig {
+            observability: ObservabilityConfig {
+                llm_classifier: true,
+            },
+            ..Default::default()
+        };
+        let registry = SessionRegistry::with_config(control)
+            .with_classifier(Arc::new(NoopProvider), "openai/gpt-4o-mini");
+        assert!(
+            registry.actor_config().classifier.is_some(),
+            "gate on (flag true + provider wired + no SM) must attach the classifier"
         );
     }
 

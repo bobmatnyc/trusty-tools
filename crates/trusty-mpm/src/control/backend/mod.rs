@@ -84,6 +84,8 @@ pub trait SessionBackend: Send + 'static {
     /// What: sends a stop signal to the child process / tmux session; waits up
     /// to an internal grace period; then forces termination if needed.
     /// Returns `Ok(())` on clean stop, `Err` if the kill itself failed.
+    /// Takes ownership (`self`) so callers with a sized generic `B: SessionBackend`
+    /// can call `backend.stop().await` directly without wrapping in `Box`.
     /// Test: per-backend unit tests cover the stop path.
-    async fn stop(self: Box<Self>) -> Result<()>;
+    async fn stop(self) -> Result<()>;
 }
