@@ -3,8 +3,8 @@
 **Status:** Draft
 **Subsystem:** trusty-mpm — control plane / session manager (`crates/trusty-mpm/`)
 **Owner:** Engineering (trusty-mpm)
-**Last-updated:** 2026-06-23
-**Spec ID:** `SPEC-SESSCTL-01~draft` (DOC-26)
+**Last-updated:** 2026-06-24
+**Spec ID:** `SPEC-SESSCTL-01~draft` … `SPEC-SESSCTL-02~draft` (DOC-26)
 **Builds on:**
 - DOC-14 — Session Manager Agent (`docs/specs/session-manager-agent.md`)
 - DOC-16 — Sessions TUI Interactive (`docs/specs/sessions-tui-interactive.md`)
@@ -930,3 +930,93 @@ workstation, this is a friction point.
 temporarily spawn a PTY (or a dedicated tmux pane scoped to the session) to serve the
 OAuth flow, then resume the stream-JSON backend once credentials are written to
 `~/.claude`. This requires PTY management in the daemon and is out of scope for alpha-1.
+
+---
+
+## 14. Native MCP palace-slug injection {#SPEC-SESSCTL-02~draft}
+
+**Spec ID:** `SPEC-SESSCTL-02~draft` — issue **#1605**.
+
+A managed session launches a plain `claude` process whose behaviour is supplied through
+the per-project `<workspace>/.mcp.json` that `prepare_session` injects (see §4.1, §5.3).
+That injection registers two MCP servers: `trusty-search` (pinned to the project's index
+id, issue #1373) and `trusty-memory` (the memory palace front-end). This section
+specifies how the **trusty-memory palace** is pinned so a session resolves the correct
+project-scoped palace.
+
+### 14.1 The cwd-derivation gap
+
+trusty-memory derives its default palace from the *cwd* at runtime — precedence
+**operator override > committed pin file > git `owner/repo` > parent/dir** (DOC-?? /
+issue #1217). For a repo_url-cloned managed session this is wrong: the session runs in a
+throwaway workspace at `~/trusty-mpm-projects/<owner>/<repo>/<session-id>/`, whose
+**basename is the session-id**, not `owner/repo`. With a bare `serve --stdio` stub the
+spawned trusty-memory would derive (and create) a palace named after the session-id —
+orphaning memory from the project palace every reader/writer expects.
+
+### 14.2 Pinning mechanism — `env.TRUSTY_MEMORY_PALACE` (DECIDED)
+
+The injected `trusty-memory` MCP server block carries an `env` map pinning the palace:
+
+```json
+"trusty-memory": {
+  "type": "stdio",
+  "command": "trusty-memory",
+  "args": ["serve", "--stdio"],
+  "env": { "TRUSTY_MEMORY_PALACE": "<derived-slug>" }
+}
+```
+
+`TRUSTY_MEMORY_PALACE` is the **highest-precedence** palace override already read by
+trusty-memory's `derive_palace_id`. Pinning it makes the spawned server resolve the
+project palace regardless of the workspace path. **No trusty-memory CLI/protocol change**
+is made — the previously-considered `--palace` flag was rejected in favour of the
+existing env seam. The injection is scoped to the **per-project `.mcp.json` only**; the
+standalone / global-config (DOC-24) injection path is explicitly out of scope here and
+tracked as a separate follow-up.
+
+### 14.3 Slug derivation and `repo_url` threading
+
+The slug is derived by `trusty_common::derive_palace_id(project_root, git_remote,
+override)` — the pure core extracted from trusty-memory into `trusty-common` (issue
+#1605, WI-1) so trusty-mpm and trusty-memory compute a **byte-for-byte identical** slug
+without a trusty-mpm → trusty-memory dependency edge (mirrors `derive_index_id`, #1373).
+
+The `git_remote` input is threaded from `LaunchParams`/`SessionRecord.repo_url` (the
+cloned-from URL, WI-A #1587) down the `prepare_session` call chain to the injector. The
+precedence applied at injection time is:
+
+1. **`TRUSTY_MEMORY_PALACE` env override** (operator escape hatch) — wins unconditionally.
+2. **Explicit `repo_url`** from `LaunchParams` → parsed to the `owner-repo` slug
+   (cloned session case).
+3. **Workspace `git remote get-url origin`** fallback for local-path sessions where
+   `repo_url` is `None` (mirrors trusty-memory's `cwd_palace_slug_at`).
+4. **Parent/dir slug** of the workspace when there is no remote at all.
+
+### 14.4 Edge cases and failure modes
+
+- **No remote** → the parent/dir slug is pinned (e.g. `projects-trusty-tools`).
+- **Cloned session** → the cloned-from `owner-repo` slug is pinned, never the session-id
+  basename.
+- **No derivable slug** (root-less path, empty override, no remote) → the **bare stub**
+  is injected, byte-identical to the pre-#1605 block — no regression; the session still
+  gets the memory tools and trusty-memory falls back to its own cwd derivation.
+- **Daemon down / unresolved workdir** → non-fatal. Injection only requires the
+  `project_dir`; it never blocks on the deferred `resolve_workdir_from_daemon` stub
+  (#1593) and fails open with a `warn!` rather than aborting launch (consistent with the
+  best-effort posture of the trusty-search index registration in §4.1).
+
+### 14.5 Acceptance
+
+- Given a workspace whose git origin resolves to a known `owner/repo`, the injected
+  `.mcp.json`'s `trusty-memory` block has `env.TRUSTY_MEMORY_PALACE == "<owner>-<repo>"`.
+- An explicit `repo_url` passed to `prepare_session_with_repo_url` pins the same slug
+  even when the workspace basename is a session-id.
+- An operator `TRUSTY_MEMORY_PALACE` override wins over the derived git slug.
+- A workspace with no derivable identity injects the bare stub (no `env` key).
+
+Coverage lives in `crates/trusty-mpm/src/core/session_launch/tests.rs`
+(`inject_trusty_memory_mcp_pins_palace_from_repo_url`,
+`inject_trusty_memory_mcp_pins_palace_from_git_remote`,
+`inject_trusty_memory_mcp_override_env_wins`, `trusty_memory_mcp_value_*`) and the pure
+derivation in `crates/trusty-common/src/palace_id.rs` (`palace_id::tests`).

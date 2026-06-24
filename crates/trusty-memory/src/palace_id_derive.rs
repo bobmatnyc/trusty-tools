@@ -17,6 +17,6 @@
 //! env-override read path that wraps these shims).
 
 pub use trusty_common::palace_id::{
-    PALACE_OVERRIDE_ENV, derive_palace_id, owner_repo_from_git_remote, palace_override_from_env,
-    parent_dir_slug,
+    derive_palace_id, owner_repo_from_git_remote, palace_override_from_env, parent_dir_slug,
+    PALACE_OVERRIDE_ENV,
 };

@@ -261,19 +261,14 @@ pub fn derive_palace_id(
     git_remote: Option<&str>,
     override_value: Option<&str>,
 ) -> Option<String> {
-    // 1. Explicit override always wins.
-    if let Some(ov) = override_value {
-        let slug = slugify_string(ov);
-        if !slug.is_empty() {
-            return Some(slug);
-        }
+    // 1. Explicit override always wins (when it slugifies to a non-empty token).
+    if let Some(slug) = override_value.map(slugify_string).filter(|s| !s.is_empty()) {
+        return Some(slug);
     }
 
     // 2. Git owner/repo identity.
-    if let Some(url) = git_remote {
-        if let Some(slug) = owner_repo_from_git_remote(url) {
-            return Some(slug);
-        }
+    if let Some(slug) = git_remote.and_then(owner_repo_from_git_remote) {
+        return Some(slug);
     }
 
     // 3. parent/dir fallback.

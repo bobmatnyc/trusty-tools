@@ -114,12 +114,12 @@ pub(super) fn trusty_memory_mcp_value(palace_slug: Option<&str>) -> serde_json::
         "command": "trusty-memory",
         "args": ["serve", "--stdio"],
     });
-    if let Some(slug) = palace_slug {
-        if !slug.trim().is_empty() {
-            server["env"] = serde_json::json!({
-                trusty_common::PALACE_OVERRIDE_ENV: slug,
-            });
-        }
+    if let Some(slug) = palace_slug
+        && !slug.trim().is_empty()
+    {
+        server["env"] = serde_json::json!({
+            trusty_common::PALACE_OVERRIDE_ENV: slug,
+        });
     }
     server
 }
