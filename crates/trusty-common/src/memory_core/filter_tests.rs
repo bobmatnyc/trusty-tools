@@ -548,52 +548,91 @@ fn gate_accepts_fp_content() {
     }
 }
 
-/// Why (issue #1667): verifying the fix did NOT weaken real-secret detection.
-/// What: asserts that every known-secret token is still rejected by the gate.
+/// Why (issue #1667 hardening): verifying the fix did NOT weaken real-secret
+/// detection. Prefix-based secrets (AKIA, ghp_, sk-, AIza) are caught by the
+/// `SECRET_PREFIXES` / `find_secret_token` layer that runs BEFORE
+/// `looks_like_secret`'s entropy heuristics; the assertions here go through
+/// the REAL public entry points (`find_secret_token` and `FilterConfig::apply`)
+/// so that the test proves the actual end-to-end blocking guarantee rather than
+/// only a lower-level heuristic.
+/// What: asserts every secret class (prefix-based and entropy-based) is rejected
+/// by both `find_secret_token` (the intermediate public guard) and `apply` (the
+/// full gate). For the GCP key (`AIzaSy…`), which is caught by the mixed-case+
+/// digit fallback rather than a prefix, `looks_like_secret` is also verified
+/// directly since that is the authoritative guard for that class.
 /// Test: itself.
 #[test]
 fn real_secrets_still_blocked_after_1667_fix() {
     let cfg = FilterConfig::default();
 
-    // Known-prefix secrets must still be caught.
+    // --- Prefix-based secrets: verified through the public guard ---
+    // `find_secret_token` is the REAL layer that catches these (the
+    // `SECRET_PREFIXES` check inside `looks_like_secret` is reached only via
+    // `find_secret_token`; calling `looks_like_secret` directly on a bare
+    // prefix token tests a sub-layer but not the actual end-to-end path).
     let prefix_cases = [
         ("AKIAIOSFODNN7EXAMPLE", "AWS long-term key"), // pragma: allowlist secret
         ("ASIAY34FZKBOKMUTVV7A", "AWS STS temp cred"), // pragma: allowlist secret
         ("ghp_abcdefghijklmnopqrstuvwxyz012345", "GitHub PAT"), // pragma: allowlist secret
         ("sk-abcdefghijklmnopqrstuvwxyz01234567890123", "OpenAI key"), // pragma: allowlist secret
-        ("AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI", "GCP API key"), // pragma: allowlist secret
     ];
     for (tok, label) in prefix_cases {
+        // Layer 1: the intermediate public guard must find the secret token.
         assert!(
-            looks_like_secret(tok),
-            "{label} must still be flagged as secret: {tok}"
+            find_secret_token(tok).is_some(),
+            "{label} must be caught by find_secret_token: {tok}"
+        );
+        // Layer 2: the full gate (apply) must return PotentialSecret when the
+        // token appears in prose, which is the actual blocking guarantee.
+        let prose = format!("Deployment secret: {tok}");
+        assert!(
+            matches!(
+                cfg.apply(&prose, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "{label} must be rejected by apply end-to-end; got {:?}",
+            cfg.apply(&prose, false)
         );
     }
 
-    // End-to-end: prose containing a real secret must reject.
-    let real_secret_content = format!(
-        "Deploy key is ghp_{} — do not commit", // pragma: allowlist secret
-        "abcdefghijklmnopqrstuvwxyz012345"
+    // --- GCP API key: caught by the mixed-case+digit fallback, not a prefix ---
+    // For this class, `looks_like_secret` is the primary guard; verify all
+    // three layers: looks_like_secret, find_secret_token, and apply.
+    let gcp_key = "AIzaSyDdI0hCZtE6vySjMm-WEfRq3CPzqKqqsHI"; // pragma: allowlist secret
+    assert!(
+        looks_like_secret(gcp_key),
+        "GCP API key must be flagged by looks_like_secret: {gcp_key}"
     );
     assert!(
+        find_secret_token(gcp_key).is_some(),
+        "GCP API key must be caught by find_secret_token: {gcp_key}"
+    );
+    let gcp_prose = format!("API key: {gcp_key} — keep secret");
+    assert!(
         matches!(
-            cfg.apply(&real_secret_content, false),
+            cfg.apply(&gcp_prose, false),
             Err(FilterReject::PotentialSecret { .. })
         ),
-        "content with real GitHub PAT must reject; got {:?}",
-        cfg.apply(&real_secret_content, false)
+        "GCP API key must be rejected by apply end-to-end; got {:?}",
+        cfg.apply(&gcp_prose, false)
     );
 
-    // A 64-char random base64 blob (with `+` or opaque mix) must still reject.
-    // Using `+` ensures the structural-token check doesn't skip it.
+    // --- High-entropy base64 blob (with `+`): caught by the b64-symbol branch ---
+    // `+` is unambiguously base64 and is not a structural char, so this blob
+    // must be rejected even though it also contains `/` (which would be a
+    // structural indicator if `+` weren't present).
     let b64_blob = "aGVsbG8rd29ybGQvZm9vK2Jhcj09bG9uZ2Jhc2U2NAaGVsbG8rd29ybGQ="; // pragma: allowlist secret
     let b64_content = format!("Config blob: {b64_blob} stored in env");
+    assert!(
+        find_secret_token(&b64_content).is_some(),
+        "base64 blob must be caught by find_secret_token"
+    );
     assert!(
         matches!(
             cfg.apply(&b64_content, false),
             Err(FilterReject::PotentialSecret { .. })
         ),
-        "content with base64 blob must reject; got {:?}",
+        "content with base64 blob must reject end-to-end; got {:?}",
         cfg.apply(&b64_content, false)
     );
 }

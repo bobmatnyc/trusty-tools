@@ -489,14 +489,21 @@ fn is_structural_token(token: &str) -> bool {
     if token.contains('+') {
         return false;
     }
-    // A "word segment" for slash/equals splitting: non-empty, only
-    // alphanumeric, `-`, `_`, `.`, `>`, `<`, `!`, `@`, `#`, `~`, `:`.
+    // A "word segment" for slash/equals splitting: non-empty, contains only
+    // ASCII alphanumeric chars plus the minimal set of punctuation that
+    // appears in legitimate structural tokens:
+    //   `-`  — hyphen in slug/version segments (`prose-summary`, `v0.6.0`)
+    //   `_`  — underscore in snake_case identifiers
+    //   `.`  — dot in file extensions and semver (`synthesis.rs`, `v0.6.0`)
+    //   `>`  — needed for the `>` in `>=2-medium->REQUEST_CHANGES` which
+    //           arrives as the LHS of the `=` split (i.e. the lone `>` char).
+    // All other chars (`<`, `!`, `@`, `#`, `~`, `:`) are excluded — none
+    // appear in paths, slugs, or key=value tokens we need to allow, and
+    // admitting them would unnecessarily widen the bypass surface.
     fn is_word_segment(s: &str) -> bool {
         !s.is_empty()
-            && s.chars().all(|c| {
-                c.is_ascii_alphanumeric()
-                    || matches!(c, '-' | '_' | '.' | '>' | '<' | '!' | '@' | '#' | '~' | ':')
-            })
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '>'))
     }
     // (a) Path/slug shape: all `/`-separated segments are word-like.
     // Covers `verdict/grade/prose-summary`, `org/repo`, file paths.
