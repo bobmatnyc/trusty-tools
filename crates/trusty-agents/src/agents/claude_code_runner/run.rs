@@ -146,77 +146,88 @@ impl ClaudeCodeAgentRunner {
             Self::prepend_harness_layers(&cfg.system_prompt.content, cfg.llm.use_finish_task);
         let sanitized_system = Self::strip_finish_task_instructions(&composed_system);
 
-        let mut cmd = Command::new(&self.claude_bin);
-        cmd.args([
-            "-p",
-            &sanitized_task,
-            "--model",
-            &model,
-            "--system-prompt",
-            &sanitized_system,
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--dangerously-skip-permissions",
-            "--max-turns",
-            &max_turns,
-        ])
-        .stdout(Stdio::piped())
-        // #268: Sub-agent `claude` CLI subprocesses must not bleed their own
-        // tracing/log output to the parent's TTY. The parent REPL routes its
-        // own tracing to `~/.trusty-agents/logs/repl.log` when stdin is a TTY, but
-        // sub-agent processes detect a non-TTY stdin and default to stderr —
-        // which the parent inherits, so log lines clobber the carefully
-        // positioned chat scrollback.
-        // Detection: when the parent's stdin is a TTY, this is an interactive
-        // REPL session and sub-agent stderr must be silenced. When the parent
-        // is non-interactive (CI, piped input, --workflow, --api), inherit
-        // stderr so existing log-capture tooling continues to work.
-        .stderr(if crate::repl::is_tty() {
-            Stdio::null()
-        } else {
-            Stdio::inherit()
-        });
+        // Build the command inside a closure so the ETXTBSY retry wrapper can
+        // reconstruct it on each attempt (`Command` is not `Clone`). See
+        // `spawn_with_etxtbsy_retry` for why the retry exists (#1634 / #1528).
+        let build_cmd = || {
+            let mut cmd = Command::new(&self.claude_bin);
+            cmd.args([
+                "-p",
+                &sanitized_task,
+                "--model",
+                &model,
+                "--system-prompt",
+                &sanitized_system,
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--dangerously-skip-permissions",
+                "--max-turns",
+                &max_turns,
+            ])
+            .stdout(Stdio::piped())
+            // #268: Sub-agent `claude` CLI subprocesses must not bleed their own
+            // tracing/log output to the parent's TTY. The parent REPL routes its
+            // own tracing to `~/.trusty-agents/logs/repl.log` when stdin is a TTY, but
+            // sub-agent processes detect a non-TTY stdin and default to stderr —
+            // which the parent inherits, so log lines clobber the carefully
+            // positioned chat scrollback.
+            // Detection: when the parent's stdin is a TTY, this is an interactive
+            // REPL session and sub-agent stderr must be silenced. When the parent
+            // is non-interactive (CI, piped input, --workflow, --api), inherit
+            // stderr so existing log-capture tooling continues to work.
+            .stderr(if crate::repl::is_tty() {
+                Stdio::null()
+            } else {
+                Stdio::inherit()
+            });
 
-        if let Some(wd) = &ctx.working_dir {
-            cmd.current_dir(wd);
-            // #159: The `claude` CLI anchors write paths to the git root, not
-            // the subprocess CWD. Passing `--add-dir` scopes the claude
-            // session to the designated output directory so file writes land
-            // in `out_dir` rather than the repo root.
-            cmd.arg("--add-dir").arg(wd);
-        }
-        // Pass --allowedTools if the agent config restricts claude CLI tools.
-        // Why: Research agents should not write files or run shell — only
-        // WebSearch/WebFetch. Empty vec (default) means no restriction.
-        if !cfg.llm.claude_allowed_tools.is_empty() {
-            cmd.arg("--allowedTools")
-                .arg(cfg.llm.claude_allowed_tools.join(","));
-        }
-        if let Some(path) = &ctx.assigned_file {
-            cmd.env("TAGENT_ASSIGNED_FILE", path);
-        }
-        // Mark this claude CLI invocation as an MPM-spawned sub-agent so the
-        // `trusty-mpm hook` command wired into its Claude Code settings
-        // short-circuits. Without this guard a nested claude session would
-        // re-emit PreToolUse / PostToolUse events (doubling the daemon's
-        // audit feed). The memory enrichment hook (`trusty-memory
-        // prompt-context`) deliberately does NOT guard on this variable —
-        // sub-agents benefit from the parent palace's prompt-fact block as
-        // much as the PM does. The variable name is sourced from
-        // `trusty_common::claude_config::CLAUDE_MPM_SUB_AGENT_ENV_VAR` so
-        // every spawn site and consumer references the same literal.
-        cmd.env(
-            trusty_common::claude_config::CLAUDE_MPM_SUB_AGENT_ENV_VAR,
-            "1",
-        );
+            if let Some(wd) = &ctx.working_dir {
+                cmd.current_dir(wd);
+                // #159: The `claude` CLI anchors write paths to the git root,
+                // not the subprocess CWD. Passing `--add-dir` scopes the claude
+                // session to the designated output directory so file writes land
+                // in `out_dir` rather than the repo root.
+                cmd.arg("--add-dir").arg(wd);
+            }
+            // Pass --allowedTools if the agent config restricts claude CLI tools.
+            // Why: Research agents should not write files or run shell — only
+            // WebSearch/WebFetch. Empty vec (default) means no restriction.
+            if !cfg.llm.claude_allowed_tools.is_empty() {
+                cmd.arg("--allowedTools")
+                    .arg(cfg.llm.claude_allowed_tools.join(","));
+            }
+            if let Some(path) = &ctx.assigned_file {
+                cmd.env("TAGENT_ASSIGNED_FILE", path);
+            }
+            // Mark this claude CLI invocation as an MPM-spawned sub-agent so the
+            // `trusty-mpm hook` command wired into its Claude Code settings
+            // short-circuits. Without this guard a nested claude session would
+            // re-emit PreToolUse / PostToolUse events (doubling the daemon's
+            // audit feed). The memory enrichment hook (`trusty-memory
+            // prompt-context`) deliberately does NOT guard on this variable —
+            // sub-agents benefit from the parent palace's prompt-fact block as
+            // much as the PM does. The variable name is sourced from
+            // `trusty_common::claude_config::CLAUDE_MPM_SUB_AGENT_ENV_VAR` so
+            // every spawn site and consumer references the same literal.
+            cmd.env(
+                trusty_common::claude_config::CLAUDE_MPM_SUB_AGENT_ENV_VAR,
+                "1",
+            );
+            cmd
+        };
 
-        let mut child = cmd.spawn().with_context(|| {
-            format!(
-                "failed to spawn claude CLI at {}",
-                self.claude_bin.display()
-            )
-        })?;
+        // Spawn with a bounded ETXTBSY retry (#1634): freshly written, just
+        // chmod'd mock scripts (and the real `claude` CLI under load) can
+        // transiently return "Text file busy" from `execve`.
+        let mut child = super::spawn_with_etxtbsy_retry(build_cmd)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to spawn claude CLI at {}",
+                    self.claude_bin.display()
+                )
+            })?;
 
         // #283 follow-up: latency instrumentation. Record spawn-to-ready
         // wall-clock so we can distinguish "CLI took forever to start" from
