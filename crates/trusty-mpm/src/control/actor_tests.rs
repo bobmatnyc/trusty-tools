@@ -943,20 +943,21 @@ async fn await_terminal(
     }
 }
 
-/// A session stuck in `AwaitingAuth` past the (injected, tiny) auth timeout
+/// A session stuck in `AwaitingAuth` past the (injected) auth timeout
 /// auto-transitions to terminal `AuthFailed` and stops (#1649, §4.4).
 ///
 /// Why: WI-5 added `auth_timeout_secs` but the auto-stop TIMER was not wired
 /// into the actor loop. This test proves the timer fires.
-/// What: spawns a tmux-backed actor with a 10 ms auth timeout, feeds an
-/// auth-prompt output (tmux → `AwaitingAuth`), then asserts the session reaches
-/// `AuthFailed` (the timer fired) without the test sleeping 30 s.
+/// What: uses `start_paused = true` (Tokio virtual clock) to advance time
+/// deterministically — no real wall-clock sleep. Spawns a tmux actor with a
+/// 5 s timeout, feeds an auth-prompt output (tmux → `AwaitingAuth`), then
+/// advances virtual time by 10 s and asserts `AuthFailed`.
 /// Test: this test.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn actor_auth_timeout_fires_and_stops() {
     let id = ControlSessionId::new("auth-to", 0);
     let cfg = SessionActorConfig {
-        auth_timeout: tokio::time::Duration::from_millis(10),
+        auth_timeout: tokio::time::Duration::from_secs(5),
         classifier: None,
     };
     let (handle, _bcast, backend_tx) = spawn_chan_actor(&id, BackendKind::Tmux, cfg);
@@ -969,9 +970,24 @@ async fn actor_auth_timeout_fires_and_stops() {
         ts: Utc::now(),
     };
     backend_tx.send(Some(Ok(vec![auth_event]))).await.unwrap();
+    // Yield so the actor task processes the output and enters AwaitingAuth.
+    tokio::task::yield_now().await;
 
-    // The 10 ms timer must fire and drive the session to terminal AuthFailed.
-    let state = await_terminal(&handle, tokio::time::Duration::from_secs(2)).await;
+    // Advance virtual time past the timeout — no real wall-clock delay.
+    tokio::time::advance(tokio::time::Duration::from_secs(10)).await;
+    // Yield so the actor task wakes from sleep_until and handles the timeout.
+    tokio::task::yield_now().await;
+
+    // Allow up to a few more yields for state propagation (all virtual, no sleep).
+    for _ in 0..20 {
+        let state = handle.metadata.read().await.state.clone();
+        if state.is_terminal() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let state = handle.metadata.read().await.state.clone();
     assert_eq!(
         state,
         SessionState::AuthFailed,
@@ -980,24 +996,24 @@ async fn actor_auth_timeout_fires_and_stops() {
 }
 
 /// A session that does NOT enter `AwaitingAuth` is never auto-stopped by the
-/// auth timer, even with a tiny timeout (#1649).
+/// auth timer, even past its configured timeout (#1649).
 ///
-/// Why: the timer must be armed ONLY in `AwaitingAuth`. A normal `Running`
-/// session with a tiny configured timeout must not be spuriously killed.
-/// What: spawns a tmux actor with a 10 ms auth timeout, feeds a NORMAL output
-/// (no auth prompt) and a clean exit, and asserts the session ends `Stopped`
-/// (clean completion), never `AuthFailed`.
+/// Why: the timer must be armed ONLY in `AwaitingAuth`. A session in `Running`
+/// with a configured timeout must not be spuriously killed.
+/// What: uses `start_paused = true` (Tokio virtual clock). Spawns a tmux actor
+/// with a 5 s timeout, feeds NORMAL output (no auth prompt), advances virtual
+/// time well past the timeout, then signals clean exit and asserts `Stopped`.
 /// Test: this test.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn actor_auth_timeout_does_not_fire_without_awaiting_auth() {
     let id = ControlSessionId::new("auth-noto", 0);
     let cfg = SessionActorConfig {
-        auth_timeout: tokio::time::Duration::from_millis(10),
+        auth_timeout: tokio::time::Duration::from_secs(5),
         classifier: None,
     };
     let (handle, _bcast, backend_tx) = spawn_chan_actor(&id, BackendKind::Tmux, cfg);
 
-    // Normal (non-auth) output keeps the session in Running.
+    // Normal (non-auth) output: no auth-prompt regex match → stays in Running.
     let normal = SessionEvent::Output {
         session_id: id.clone(),
         raw: "Tool use: Bash".into(),
@@ -1005,12 +1021,28 @@ async fn actor_auth_timeout_does_not_fire_without_awaiting_auth() {
         ts: Utc::now(),
     };
     backend_tx.send(Some(Ok(vec![normal]))).await.unwrap();
-    // Give the (tiny) timer ample opportunity to (wrongly) fire.
-    tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
+    // Yield so the actor processes the output.
+    tokio::task::yield_now().await;
+
+    // Advance virtual time well past the timeout — the timer must NOT fire
+    // because the session is NOT in AwaitingAuth (the deadline is never armed).
+    tokio::time::advance(tokio::time::Duration::from_secs(30)).await;
+    tokio::task::yield_now().await;
+
     // Then signal a clean exit.
     backend_tx.send(None).await.unwrap();
+    tokio::task::yield_now().await;
 
-    let state = await_terminal(&handle, tokio::time::Duration::from_secs(2)).await;
+    // A few more yields for state propagation.
+    for _ in 0..20 {
+        let state = handle.metadata.read().await.state.clone();
+        if state.is_terminal() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let state = handle.metadata.read().await.state.clone();
     assert_eq!(
         state,
         SessionState::Stopped,
@@ -1050,58 +1082,15 @@ impl ActivityClassifier for MockClassifier {
     }
 }
 
-/// Gate-OFF: actor makes ZERO classifier calls even with output the regex layer
-/// cannot classify (AC-9, #1648).
-///
-/// Why: the AC-9 guarantee requires that when the classifier is NOT injected
-/// (`SessionActorConfig::classifier = None`), the actor NEVER calls any
-/// classifier seam — not even on unmatched output. This test is designed to
-/// fail if a regression removes the `if let Some(classifier)` guard and calls
-/// the seam unconditionally, because a real `MockClassifier` wired to `called`
-/// is constructed and would set `called = true` if invoked.
-/// What: constructs a `MockClassifier` wired to `called`, but injects it into a
-/// SEPARATE config that is NOT passed to the actor — the actor runs with
-/// `SessionActorConfig::default()` (classifier `None`). Feeds unmatched
-/// output, and asserts `called` stays false. A regression that ignores the
-/// None check would require a different code path; this confirms the guard works.
-/// Test: this test.
-#[tokio::test]
-async fn actor_classifier_gate_off_makes_no_call() {
-    let id = ControlSessionId::new("clf-off", 0);
-    let called = Arc::new(AtomicBool::new(false));
-    // Build a real mock wired to `called`. We do NOT inject it into the actor —
-    // it acts as a canary: if the actor somehow reaches the classifier seam
-    // despite classifier=None, a regression in the wiring would need to bypass
-    // the None guard to reach this mock. The assertion below catches that.
-    let _canary = Arc::new(MockClassifier {
-        called: Arc::clone(&called),
-        result: Ok(ActivityKind::AwaitingInput),
-    });
-
-    // Actor gets NO classifier (gate closed, AC-9).
-    let (handle, _bcast, backend_tx) =
-        spawn_chan_actor(&id, BackendKind::StreamJson, SessionActorConfig::default());
-
-    // Output that the §8.2 regex layer does NOT match — would trigger the
-    // classifier fallback IF the gate were open.
-    let gibberish = SessionEvent::Output {
-        session_id: id.clone(),
-        raw: "zzxq unmatched gibberish no pattern here (long enough to pass length gate)".into(),
-        structured: None,
-        ts: Utc::now(),
-    };
-    backend_tx.send(Some(Ok(vec![gibberish]))).await.unwrap();
-    backend_tx.send(None).await.unwrap();
-
-    let _ = await_terminal(&handle, tokio::time::Duration::from_secs(2)).await;
-    // `called` MUST be false: the mock was never injected into the actor, so
-    // the actor had no seam to call. This proves the `classifier.as_ref()`
-    // guard is the only path to the seam — nothing else calls it.
-    assert!(
-        !called.load(std::sync::atomic::Ordering::SeqCst),
-        "gate-off (classifier=None): actor must make ZERO classifier calls (AC-9)"
-    );
-}
+// NOTE: "gate-OFF makes no call" coverage is NOT an actor-level test — it is
+// structurally impossible to make meaningful at the actor level. When
+// `SessionActorConfig::classifier = None` there is no mock to wire, so any
+// assertion about a separate mock staying false would be vacuous (the actor can
+// never reach a mock it was never given). The gate DECISION tests live at the
+// registry level where the gate is actually evaluated:
+//   `registry_actor_config_gate_off_drops_classifier`  → gate closed  → None
+//   `registry_actor_config_gate_on_attaches_classifier` → gate open → Some(_)
+// See `crates/trusty-mpm/src/control/registry.rs` for those tests.
 
 /// Gate-ON: the actor invokes the injected classifier on output the regex layer
 /// could not classify and surfaces the returned label as `ActivityParsed` (#1648).

@@ -672,7 +672,6 @@ pub(crate) async fn run_actor<B: SessionBackend>(
                                 classifier.as_ref(),
                                 &session_id,
                                 &raw_text,
-                                now,
                                 &event_tx,
                                 &metadata,
                             )
@@ -705,12 +704,15 @@ async fn classify_fallback(
     classifier: &dyn ActivityClassifier,
     session_id: &ControlSessionId,
     raw_text: &str,
-    now: chrono::DateTime<Utc>,
     event_tx: &broadcast::Sender<SessionEvent>,
     metadata: &Arc<RwLock<SessionMetadata>>,
 ) {
     match classifier.classify(raw_text).await {
         Ok(Some(kind)) => {
+            // Capture a fresh timestamp AFTER the (potentially slow) classify
+            // await so the event's `ts` reflects when the label was resolved,
+            // not when the output batch arrived.
+            let classified_at = Utc::now();
             let summary = format!("llm-classified: {kind:?}");
             {
                 let mut m = metadata.write().await;
@@ -720,7 +722,7 @@ async fn classify_fallback(
                 session_id: session_id.clone(),
                 kind,
                 summary,
-                ts: now,
+                ts: classified_at,
             });
         }
         // `Ok(None)` means the model replied "unknown" or an unmapped label —

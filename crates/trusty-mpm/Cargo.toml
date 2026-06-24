@@ -245,3 +245,6 @@ http-body-util.workspace = true
 # serial_test: run env-mutating tests serially to prevent env-var races across
 # parallel Rust test threads (used by bug-report token resolution tests).
 serial_test.workspace = true
+# test-util enables tokio's paused-clock (`tokio::time::pause` / `start_paused = true`)
+# used by the deterministic auth-timeout tests in actor_tests.rs (#1649).
+tokio = { workspace = true, features = ["test-util"] }
