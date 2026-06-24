@@ -397,6 +397,110 @@ async fn run_review_truncated_output_is_unknown() {
     );
 }
 
+/// FAIL-CLOSED ON TRUNCATED DIFF (#1638): an over-cap diff whose tail (a changed
+/// function signature) is dropped by `render_for_prompt` / `truncate_diff` must
+/// NOT be reviewed as-if-complete.  The runner must fail CLOSED to UNKNOWN.
+///
+/// Why: this is the live bug — the reviewer received a truncated diff and could
+/// not see a changed `build(…, null)` signature near the end of a large diff, so
+/// it reviewed code it could not see.  Before the fix the runner would happily
+/// APPROVE the visible portion; after the fix it returns UNKNOWN with an
+/// actionable error.
+/// What: builds a single-file diff far larger than `MAX_DIFF_CHARS` with a
+/// distinctive changed signature on the LAST line, runs the pipeline with a
+/// FakeLlm that would APPROVE, and asserts UNKNOWN + an actionable error.
+/// Test: this test itself (no network).
+#[tokio::test]
+async fn run_review_oversized_diff_fails_closed_to_unknown() {
+    use crate::config::constants::MAX_DIFF_CHARS;
+
+    // A valid unified-diff header, then a huge body of added lines that pushes the
+    // rendered diff well past MAX_DIFF_CHARS, then a changed signature on the tail.
+    let mut diff = String::from("diff --git a/src/big.rs b/src/big.rs\n");
+    diff.push_str("--- a/src/big.rs\n+++ b/src/big.rs\n");
+    diff.push_str("@@ -1,1 +1,100000 @@\n");
+    // ~2x the cap of added content so render_for_prompt is forced to truncate.
+    let filler_line = "+    let _padding = compute_value(some_argument_here);\n";
+    while diff.len() < MAX_DIFF_CHARS * 2 {
+        diff.push_str(filler_line);
+    }
+    // The changed signature that MUST be reviewed — placed at the very end so it
+    // falls in the truncated region.
+    diff.push_str("+pub fn build(a: i32, b: i32, c: i32, previous: Option<i32>) -> i32 { 0 }\n");
+
+    let (source, _tmp) = local_diff_source(&diff);
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+    };
+    // FakeLlm would APPROVE if it were ever consulted — proving the guard fires
+    // BEFORE the LLM sees a partial diff.
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(
+        result.verdict,
+        Verdict::Unknown,
+        "an over-cap (truncated) diff must fail CLOSED to UNKNOWN, never APPROVE a partial diff (#1638)"
+    );
+    let err = result
+        .error
+        .expect("a truncated diff must set an actionable error");
+    assert!(
+        err.contains("truncat"),
+        "error must explain the truncation: {err}"
+    );
+    assert!(
+        !result.posted,
+        "a truncated-diff review must never be posted live"
+    );
+    assert!(result.dry_run, "a fail-closed review is dry-run");
+}
+
+/// REGRESSION GUARD (#1638): a normal, under-cap diff must STILL be reviewed
+/// (the truncation guard must not false-positive on complete diffs).
+///
+/// Why: the fail-closed guard must only fire when content was actually dropped;
+/// a complete diff (the overwhelming common case) must review normally.
+/// What: a tiny diff with no truncation marker reviews to APPROVE as before.
+/// Test: this test itself.
+#[tokio::test]
+async fn run_review_under_cap_diff_is_not_flagged_truncated() {
+    let (source, _tmp) = local_diff_source(
+        "diff --git a/src/s.rs b/src/s.rs\n--- a/src/s.rs\n+++ b/src/s.rs\n\
+         @@ -1 +1 @@\n+pub fn build(a: i32, prev: Option<i32>) -> i32 { 0 }\n",
+    );
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+    };
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(
+        result.verdict,
+        Verdict::Approve,
+        "a complete under-cap diff must review normally (no false-positive truncation)"
+    );
+    assert!(
+        result.error.is_none(),
+        "no error expected for a complete diff: {:?}",
+        result.error
+    );
+}
+
 /// PRIMARY signal (#1357): a length/max_tokens finish_reason flags truncation
 /// regardless of the token count.
 ///

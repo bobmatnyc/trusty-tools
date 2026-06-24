@@ -113,6 +113,47 @@ pub fn truncate_diff(diff: &str) -> String {
     )
 }
 
+// ─── Truncation detection ──────────────────────────────────────────────────────
+
+/// Marker prefix `truncate_diff` appends when it cuts an over-cap diff.
+///
+/// Why: the runner's fail-closed guard (#1638) must detect that the diff handed
+/// to the reviewer had content removed; matching the exact marker string keeps
+/// the producer (`truncate_diff`) and the consumer (`diff_was_truncated`) in sync
+/// from one definition rather than two copies of a magic string.
+/// What: the literal prefix emitted by `truncate_diff` (see the `format!` above).
+/// Test: `diff_was_truncated_detects_diff_marker`.
+pub const DIFF_TRUNCATED_MARKER: &str = "[DIFF TRUNCATED";
+
+/// Marker prefix `FilteredDiff::render_for_prompt` appends when it cuts at the
+/// char budget (whole files or trailing hunks dropped).
+///
+/// Why: `render_for_prompt` drops whole files at the END of a large diff (a
+/// changed signature in a late file is silently lost); the runner must detect
+/// this and fail closed rather than review the visible portion only (#1638).
+/// What: the literal prefix emitted by `render_for_prompt` (see `models.rs`).
+/// Test: `diff_was_truncated_detects_render_marker`.
+pub const RENDER_TRUNCATED_MARKER: &str = "[RENDER TRUNCATED";
+
+/// Returns `true` when the rendered diff handed to the reviewer had content
+/// removed by either truncation path.
+///
+/// Why: a reviewer working from a partial diff produces wrong/incomplete reviews
+/// — the live symptom was a changed `build(…, null)` signature cut off so the
+/// reviewer literally could not see it (#1638).  The runner uses this predicate
+/// to fail CLOSED to UNKNOWN (consistent with the #1241 / #590 philosophy) rather
+/// than silently reviewing the visible portion.
+/// What: a pure check for the self-announcing markers that `truncate_diff` and
+/// `FilteredDiff::render_for_prompt` append when (and only when) they drop content.
+/// Detecting the markers — rather than re-deriving length math — keeps this in
+/// lock-step with the producers and is robust to either path firing.
+/// Test: `diff_was_truncated_detects_diff_marker`,
+/// `diff_was_truncated_detects_render_marker`,
+/// `diff_was_truncated_false_on_complete_diff`.
+pub fn diff_was_truncated(rendered: &str) -> bool {
+    rendered.contains(DIFF_TRUNCATED_MARKER) || rendered.contains(RENDER_TRUNCATED_MARKER)
+}
+
 // ─── Identifier extraction ────────────────────────────────────────────────────
 
 /// Extract salient identifier names from changed (`+`/`-`) diff lines.
@@ -322,6 +363,45 @@ index abc..def 100644
         let result = truncate_diff(&diff);
         // The truncation marker should appear.
         assert!(result.contains("[DIFF TRUNCATED"));
+    }
+
+    #[test]
+    fn diff_was_truncated_detects_diff_marker() {
+        // A diff long enough that `truncate_diff` actually cuts it must be flagged.
+        let long = "a".repeat(MAX_DIFF_CHARS + 1000);
+        let rendered = truncate_diff(&long);
+        assert!(
+            rendered.contains(DIFF_TRUNCATED_MARKER),
+            "precondition: truncate_diff must append its marker"
+        );
+        assert!(
+            diff_was_truncated(&rendered),
+            "diff_was_truncated must detect the truncate_diff marker"
+        );
+    }
+
+    #[test]
+    fn diff_was_truncated_detects_render_marker() {
+        // Simulate the marker render_for_prompt appends when it drops whole files.
+        let rendered = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n+fn a() {}\n\
+             \n[RENDER TRUNCATED — char budget (160000) reached; ~3 file(s) omitted; \
+             review covers only the visible portion above]\n";
+        assert!(
+            diff_was_truncated(rendered),
+            "diff_was_truncated must detect the render_for_prompt marker"
+        );
+    }
+
+    #[test]
+    fn diff_was_truncated_false_on_complete_diff() {
+        assert!(
+            !diff_was_truncated(SAMPLE_DIFF),
+            "a complete diff with no truncation marker must not be flagged"
+        );
+        assert!(
+            !diff_was_truncated(""),
+            "an empty diff must not be flagged as truncated"
+        );
     }
 
     #[test]

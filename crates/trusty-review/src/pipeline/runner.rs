@@ -27,7 +27,10 @@ use crate::{
     models::{ReviewResult, ReviewStatus, Verdict},
     pipeline::{
         context_gate::{GateOutcome, degraded_banner, preflight_context},
-        diff::{DiffSource, extract_changed_files, extract_identifiers, load_diff, truncate_diff},
+        diff::{
+            DiffSource, diff_was_truncated, extract_changed_files, extract_identifiers, load_diff,
+            truncate_diff,
+        },
         diff_analyzer::DiffAnalyzer, // noise filter (Stages A+B); #624
         parser::parse_review_response,
         prompt::{ReviewPrMeta, build_review_prompt_with_coverage},
@@ -218,6 +221,36 @@ pub async fn run_review(
     let max = crate::config::constants::MAX_DIFF_CHARS;
     let diff = truncate_diff(&filtered.render_for_prompt(max));
     debug!(orig = raw_diff.len(), filt = diff.len(), "diff filtered");
+
+    // ── Step 3b: diff-truncation guard (#1638) ────────────────────────────
+    // The unified path renders the (noise-filtered) diff bounded to MAX_DIFF_CHARS;
+    // for an over-cap diff `render_for_prompt` drops whole files at the END of the
+    // diff (and `truncate_diff` cuts trailing hunks).  A changed function/method
+    // signature in a dropped/cut region is then INVISIBLE to the reviewer — the
+    // live symptom that motivated this fix (a `build(…, null)` signature cut off so
+    // the reviewer could not see it).  Reviewing a partial diff yields a wrong /
+    // incomplete verdict, so we fail CLOSED to UNKNOWN (consistent with the #1241
+    // truncated-output guard and the #590 required-context gate) rather than
+    // silently reviewing only the visible portion.  The map-reduce path (#680) will
+    // later review over-cap diffs per-file with no truncation; until that fan-out
+    // lands, fail-closed is the safe behaviour.
+    if diff_was_truncated(&diff) {
+        warn!(
+            orig_chars = raw_diff.len(),
+            rendered_chars = diff.len(),
+            max_chars = max,
+            "diff exceeded MAX_DIFF_CHARS and was truncated — failing CLOSED to UNKNOWN \
+             so the reviewer never silently reviews a partial diff (#1638)"
+        );
+        result.verdict = Verdict::Unknown;
+        result.error = Some(format!(
+            "diff too large to review in full ({orig} chars > {max} cap) — content was \
+             truncated before the reviewer, so changed code (e.g. function signatures) \
+             may be invisible; could not review",
+            orig = raw_diff.len(),
+        ));
+        return abort_dry(result, config, &input, &deps);
+    }
 
     // ── Step 4: extract identifiers for context retrieval ─────────────────
     let identifiers = extract_identifiers(&diff, 8);
