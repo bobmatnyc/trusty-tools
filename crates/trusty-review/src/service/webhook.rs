@@ -352,9 +352,23 @@ async fn handle_closed_merged(
         "webhook: PR closed+merged — scheduling outcome poll"
     );
 
+    // Subscribe to the shutdown channel before spawning so the task can cancel
+    // during the sleep phase — no orphan tasks on daemon shutdown (issue #1421).
+    let mut shutdown_rx = state.shutdown_tx.subscribe();
+
     tokio::spawn(async move {
         // Wait before polling so reactions/commits have time to accumulate.
-        tokio::time::sleep(std::time::Duration::from_secs(delay_mins * 60)).await;
+        // Use tokio::select! so the task exits early on daemon shutdown.
+        let sleep = tokio::time::sleep(std::time::Duration::from_secs(delay_mins * 60));
+        tokio::pin!(sleep);
+        tokio::select! {
+            () = &mut sleep => { /* delay elapsed — proceed with poll */ }
+            Ok(()) = shutdown_rx.changed() => {
+                // Daemon is shutting down; abort the outcome poll gracefully.
+                debug!(pr = pr_number, "outcome poll: cancelled by shutdown signal");
+                return;
+            }
+        }
 
         let client = match crate::integrations::github::GithubClient::new() {
             Ok(c) => c,
