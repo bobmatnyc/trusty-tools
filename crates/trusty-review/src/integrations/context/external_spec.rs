@@ -8,17 +8,19 @@
 //! What: `ExternalFetch` (async, injectable for tests), `GithubContentsFetch`
 //! (production impl hitting `GET /repos/{owner}/{repo}/contents/{path}`),
 //! `ExternalRepoSpecLookup` implementing `SpecLookup` with per-run in-memory
-//! caching and fail-open semantics.
+//! caching and fail-open semantics.  The blocking bridge spawns a dedicated
+//! thread with its own `current_thread` Tokio runtime so it works regardless
+//! of the ambient runtime flavor — no `block_in_place` panic on single-threaded
+//! runtimes.
 //!
 //! Test: `external_spec` tests module below (9 unit tests, no network).
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use base64::Engine as _;
 use serde::Deserialize;
-use tokio::runtime::Handle;
 use tracing::debug;
 use trusty_common::intent_source::SpecLookup;
 
@@ -147,16 +149,25 @@ impl ExternalFetch for GithubContentsFetch {
 /// Why: teams maintaining a canonical spec repo separate from their reviewed
 /// repo need a lookup that crosses repo boundaries while remaining fail-open
 /// and fast (per-run in-memory cache avoids redundant API calls, #1419 PR-B).
-/// What: wraps a `Box<dyn ExternalFetch>`, an optional `spec_path_prefix`
-/// prepended to every file name, and a `Mutex<HashMap>` cache.  `load` checks
-/// the cache first; on a miss it calls `blocking_fetch` (which uses
-/// `block_in_place` so it works from a sync `SpecLookup::load` call inside a
-/// Tokio multi-thread runtime) and stores the result.  All errors are logged
-/// and swallowed — fail-open is the contract (AC-11).
+/// What: wraps an `Arc<dyn ExternalFetch>` (shared so it can be cloned into
+/// the blocking thread), an optional `spec_path_prefix` prepended to every
+/// file name, and a `Mutex<HashMap>` cache.  `load` checks the cache first;
+/// on a miss it calls `blocking_fetch` and stores the result.  All errors are
+/// logged and swallowed — fail-open is the contract (AC-11).
+///
+/// ## Runtime-flavor safety
+///
+/// `SpecLookup::load` is a synchronous function.  To run the async fetch
+/// without calling `block_in_place` (which panics on a `current_thread`
+/// runtime), `blocking_fetch` spawns a dedicated OS thread and builds its own
+/// `current_thread` Tokio runtime there.  This is safe on every ambient
+/// runtime flavor.
+///
 /// Test: 9 unit tests in `tests` submodule; no network.
 pub struct ExternalRepoSpecLookup {
     spec_path_prefix: Option<String>,
-    fetcher: Box<dyn ExternalFetch>,
+    /// Arc so the fetcher can be cloned cheaply into the blocking-fetch thread.
+    fetcher: Arc<dyn ExternalFetch>,
     cache: Mutex<HashMap<String, Option<String>>>,
 }
 
@@ -165,9 +176,10 @@ impl ExternalRepoSpecLookup {
     ///
     /// Why: allows test code to inject a mock fetcher without going through the
     /// full `from_parts` GitHub client path.
-    /// What: stores the prefix and fetcher; initialises an empty cache.
+    /// What: stores the prefix and fetcher (wrapped in `Arc`); initialises an
+    /// empty cache.
     /// Test: all unit tests in this module use this constructor.
-    pub fn new(spec_path_prefix: Option<String>, fetcher: Box<dyn ExternalFetch>) -> Self {
+    pub fn new(spec_path_prefix: Option<String>, fetcher: Arc<dyn ExternalFetch>) -> Self {
         Self {
             spec_path_prefix,
             fetcher,
@@ -197,7 +209,7 @@ impl ExternalRepoSpecLookup {
         let fetcher = GithubContentsFetch::new(owner.to_string(), repo.to_string(), token)
             .map_err(|e| debug!("external spec: failed to build fetcher: {e}"))
             .ok()?;
-        Some(Self::new(spec_path_prefix, Box::new(fetcher)))
+        Some(Self::new(spec_path_prefix, Arc::new(fetcher)))
     }
 
     /// Resolve the full path (prefix + file), normalising separators.
@@ -219,22 +231,43 @@ impl ExternalRepoSpecLookup {
         }
     }
 
-    /// Blocking wrapper around `fetcher.fetch` for use in a sync context.
+    /// Blocking wrapper around `fetcher.fetch`, safe on any Tokio runtime flavor.
     ///
-    /// Why: `SpecLookup::load` is synchronous; `block_in_place` lets it call
-    /// async `fetcher.fetch` without spawning a new thread, provided the caller
-    /// is inside a Tokio multi-thread runtime (which the review pipeline always
-    /// provides).
-    /// What: calls `Handle::current().block_on(self.fetcher.fetch(path))`;
-    /// on any error logs at DEBUG and returns `None` (fail-open).
-    /// Test: exercised transitively by every `load`-path test.
+    /// Why: `SpecLookup::load` is synchronous but `ExternalFetch::fetch` is
+    /// async.  `tokio::task::block_in_place` would panic on a `current_thread`
+    /// runtime (used by `#[tokio::test]` and the MCP stdio serve path).
+    /// Instead we spawn a dedicated OS thread that owns its own
+    /// `current_thread` Tokio runtime — this never panics regardless of the
+    /// caller's ambient runtime flavor.
+    /// What: clones the `Arc<dyn ExternalFetch>` into the thread; the thread
+    /// builds a runtime, drives `fetcher.fetch(path)` to completion, and sends
+    /// the result back over a channel.  The calling thread blocks on `recv()`.
+    /// On any error (runtime build, channel, fetch) returns `None` (fail-open).
+    /// Test: exercised by every `load`-path test; see also
+    /// `fetch_fails_open_on_error` and `fetch_fail_open_on_not_found`.
     fn blocking_fetch(&self, path: &str) -> Option<String> {
-        let result =
-            tokio::task::block_in_place(|| Handle::current().block_on(self.fetcher.fetch(path)));
-        match result {
-            Ok(content) => content,
-            Err(e) => {
+        let fetcher = Arc::clone(&self.fetcher);
+        let path_owned = path.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map(|rt| rt.block_on(fetcher.fetch(&path_owned)));
+            let _ = tx.send(result);
+        });
+        match rx.recv() {
+            Ok(Ok(Ok(content))) => content,
+            Ok(Ok(Err(e))) => {
                 debug!("external spec fetch error for {path:?}: {e}");
+                None
+            }
+            Ok(Err(e)) => {
+                debug!("external spec: tokio runtime build failed for {path:?}: {e}");
+                None
+            }
+            Err(_) => {
+                debug!("external spec: worker thread dropped sender for {path:?}");
                 None
             }
         }
@@ -270,7 +303,6 @@ impl SpecLookup for ExternalRepoSpecLookup {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
@@ -290,16 +322,23 @@ mod tests {
 
     fn make_mock(
         result: Result<Option<String>, String>,
-    ) -> (Arc<AtomicUsize>, Box<dyn ExternalFetch>) {
+    ) -> (Arc<AtomicUsize>, Arc<dyn ExternalFetch>) {
         let call_count = Arc::new(AtomicUsize::new(0));
-        let mock = MockExternalFetch {
+        let mock = Arc::new(MockExternalFetch {
             result,
             call_count: Arc::clone(&call_count),
-        };
-        (call_count, Box::new(mock))
+        });
+        (call_count, mock)
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    // ── Happy path ────────────────────────────────────────────────────────────
+
+    /// Mock returns content → `load` returns the same text.
+    ///
+    /// Why: primary AC — a configured external lookup surfaces the spec.
+    /// What: mock returns `Ok(Some("spec content"))`, load returns it.
+    /// Test: this test; also verifies no panic on the default test runtime.
+    #[tokio::test]
     async fn fetch_succeeds_with_mock() {
         let (_, fetcher) = make_mock(Ok(Some("spec content".to_string())));
         let lookup = ExternalRepoSpecLookup::new(None, fetcher);
@@ -307,34 +346,59 @@ mod tests {
         assert_eq!(result, Some("spec content".to_string()));
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    // ── Fail-open: 404 / None ─────────────────────────────────────────────────
+
+    /// Mock returns `Ok(None)` (404) → `load` returns `None` without panicking.
+    ///
+    /// Why: a missing spec in the external repo must never block a review.
+    /// What: mock returns `Ok(None)`, load returns `None`.
+    /// Test: this test.
+    #[tokio::test]
     async fn fetch_fail_open_on_not_found() {
         let (_, fetcher) = make_mock(Ok(None));
         let lookup = ExternalRepoSpecLookup::new(None, fetcher);
         assert!(lookup.load("SPEC-001.md").is_none());
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    // ── Fail-open: transport / API error ─────────────────────────────────────
+
+    /// Mock returns `Err` → `load` returns `None` (fail-open, no panic).
+    ///
+    /// Why: network or API failure must degrade gracefully.
+    /// What: mock returns `Err("network failure")`, load returns `None`.
+    /// Test: this test.
+    #[tokio::test]
     async fn fetch_fails_open_on_error() {
         let (_, fetcher) = make_mock(Err("network failure".to_string()));
         let lookup = ExternalRepoSpecLookup::new(None, fetcher);
         assert!(lookup.load("SPEC-001.md").is_none());
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    // ── Cache avoids second fetch ─────────────────────────────────────────────
+
+    /// Second `load` for the same path does not call the fetcher again.
+    ///
+    /// Why: the ISR may reference the same spec multiple times per run.
+    /// What: load called twice, `call_count` stays at 1.
+    /// Test: this test.
+    #[tokio::test]
     async fn cache_avoids_second_fetch() {
         let (count, fetcher) = make_mock(Ok(Some("cached".to_string())));
         let lookup = ExternalRepoSpecLookup::new(None, fetcher);
         lookup.load("SPEC-001.md");
         lookup.load("SPEC-001.md");
-        assert_eq!(
-            count.load(Ordering::SeqCst),
-            1,
-            "fetcher must be called only once"
-        );
+        assert_eq!(count.load(Ordering::SeqCst), 1, "fetcher called only once");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
+    // ── Cache stores None (fail-open) ─────────────────────────────────────────
+
+    /// `None` results are also cached — repeated missing-spec lookups don't
+    /// re-trigger a failing fetch.
+    ///
+    /// Why: a flaky or absent spec should not hammer the GitHub API.
+    /// What: mock returns `Ok(None)`; two `load` calls produce one fetch.
+    /// Test: this test.
+    #[tokio::test]
     async fn cache_stores_none_result() {
         let (count, fetcher) = make_mock(Ok(None));
         let lookup = ExternalRepoSpecLookup::new(None, fetcher);
@@ -343,34 +407,57 @@ mod tests {
         assert_eq!(
             count.load(Ordering::SeqCst),
             1,
-            "None result must also be cached"
+            "None result must be cached"
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn path_prefix_combined_correctly() {
+    // ── Path prefix combination ───────────────────────────────────────────────
+
+    /// `spec_path_prefix` is prepended with a `/` separator.
+    ///
+    /// Why: operators set a prefix so bare filenames resolve to the correct
+    /// repo path.
+    /// What: `"docs/specs"` + `"SPEC-001.md"` → `"docs/specs/SPEC-001.md"`.
+    /// Test: this test.
+    #[test]
+    fn path_prefix_combined_correctly() {
         let (_, fetcher) = make_mock(Ok(None));
         let lookup = ExternalRepoSpecLookup::new(Some("docs/specs".to_string()), fetcher);
-        let path = lookup.resolve_path("SPEC-001.md");
-        assert_eq!(path, "docs/specs/SPEC-001.md");
+        assert_eq!(lookup.resolve_path("SPEC-001.md"), "docs/specs/SPEC-001.md");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn path_prefix_with_trailing_slash_no_double_sep() {
+    /// Trailing slash on prefix does not produce a double separator.
+    ///
+    /// Why: `"docs/specs/"` is a natural form; must yield one `/`, not two.
+    /// What: `"docs/specs/"` + `"SPEC-001.md"` → `"docs/specs/SPEC-001.md"`.
+    /// Test: this test.
+    #[test]
+    fn path_prefix_with_trailing_slash_no_double_sep() {
         let (_, fetcher) = make_mock(Ok(None));
         let lookup = ExternalRepoSpecLookup::new(Some("docs/specs/".to_string()), fetcher);
-        let path = lookup.resolve_path("SPEC-001.md");
-        assert_eq!(path, "docs/specs/SPEC-001.md");
+        assert_eq!(lookup.resolve_path("SPEC-001.md"), "docs/specs/SPEC-001.md");
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn path_no_prefix_unchanged() {
+    /// Without a prefix, `resolve_path` returns `spec_file` unchanged.
+    ///
+    /// Why: bare paths must pass through unchanged when no prefix is set.
+    /// What: `resolve_path("docs/specs/SPEC-001.md")` is the same string.
+    /// Test: this test.
+    #[test]
+    fn path_no_prefix_unchanged() {
         let (_, fetcher) = make_mock(Ok(None));
         let lookup = ExternalRepoSpecLookup::new(None, fetcher);
-        let path = lookup.resolve_path("SPEC-001.md");
-        assert_eq!(path, "SPEC-001.md");
+        assert_eq!(
+            lookup.resolve_path("docs/specs/SPEC-001.md"),
+            "docs/specs/SPEC-001.md"
+        );
     }
 
+    /// `from_parts` returns `None` for a malformed `owner_repo` string.
+    ///
+    /// Why: a config value without a `/` must not panic.
+    /// What: `from_parts("noslash", …)` returns `None`.
+    /// Test: this test (no network — parse-failure short-circuits).
     #[test]
     fn from_parts_rejects_malformed_owner_repo() {
         let result = ExternalRepoSpecLookup::from_parts("noslash", None, "tok".to_string());

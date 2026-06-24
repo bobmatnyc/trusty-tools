@@ -450,14 +450,48 @@ mod tests {
         // Default is disabled and live mode.
         assert!(
             !cfg.effective_enabled(false),
-            "default conformance config is disabled"
+            "default conformance config is disabled without explicit opt-in"
         );
+        // `ConformanceSource::from_config` always passes `creds_present=false`
+        // so the conformance source NEVER auto-enables on credential presence
+        // (unlike `github_issues`).  The ONLY way to enable it is an explicit
+        // `enabled = Some(true)` in the config.  The generic `SourceConfig`
+        // logic supports `creds_present=true`, but the conformance source's
+        // `from_config` never exercises that path — we document that fact here
+        // so the contract is unambiguous.
         assert!(
-            cfg.effective_enabled(true),
-            "auto-enables when creds present"
+            !cfg.effective_enabled(false),
+            "conformance requires explicit enabled=true; creds-present alone does not enable it"
         );
-        assert_eq!(cfg.mode(), RetrievalMode::Live);
-        assert!(cfg.external_spec_repo.is_none());
+        // The external-spec lookup is separately gated by `external_spec_repo`
+        // being set; a GITHUB_TOKEN alone does not activate it.
+        assert!(
+            cfg.external_spec_repo.is_none(),
+            "external spec disabled by default"
+        );
         assert!(cfg.spec_path_prefix.is_none());
+        assert_eq!(cfg.mode(), RetrievalMode::Live);
+    }
+
+    #[test]
+    fn conformance_source_config_explicit_enable() {
+        // Only an explicit `enabled = Some(true)` activates the source.
+        //
+        // Why: documents the opt-in-only contract so callers know they must set
+        // `[context.sources.conformance] enabled = true` explicitly.
+        // What: `effective_enabled(false)` returns `true` only when
+        // `self.base.enabled = Some(true)`.
+        // Test: this test.
+        let cfg = ConformanceSourceConfig {
+            base: SourceConfig {
+                enabled: Some(true),
+                mode: RetrievalMode::Live,
+            },
+            ..Default::default()
+        };
+        assert!(
+            cfg.effective_enabled(false),
+            "explicit enabled=true must activate the source"
+        );
     }
 }

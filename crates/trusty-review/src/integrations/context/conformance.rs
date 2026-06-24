@@ -497,6 +497,12 @@ impl ConformanceSource {
         run_mode: RunMode,
         config: ReviewConfig,
     ) -> Self {
+        // Extract the PAT token BEFORE moving `config` into the resolver below.
+        // `config.github_token` is resolved from `GITHUB_TOKEN` by
+        // `ReviewConfig::load` — using it here keeps the external-spec lookup
+        // on the same single-sourced token path as the rest of the config and
+        // avoids a second independent `std::env::var` read (issue #1419 fix).
+        let github_pat = config.github_token.clone();
         let token: Arc<dyn ConformanceTokenResolver> =
             Arc::new(DualModeConformanceToken::new(run_mode, config));
         let bridge = IsrTokenBridge { inner: token };
@@ -509,11 +515,10 @@ impl ConformanceSource {
         // (malformed repo string or TLS init failure), fall back to fs_lookup only.
         let spec_lookup: Box<dyn SpecLookup> = if let Some(ref owner_repo) = cfg.external_spec_repo
         {
-            let token_str = std::env::var("GITHUB_TOKEN").unwrap_or_default();
             match ExternalRepoSpecLookup::from_parts(
                 owner_repo,
                 cfg.spec_path_prefix.clone(),
-                token_str,
+                github_pat,
             ) {
                 Some(ext) => Box::new(FallbackSpecLookup {
                     primary: Box::new(ext),
