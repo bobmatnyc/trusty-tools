@@ -152,6 +152,45 @@ pub trait ManagedTmuxDriver: Send + Sync {
             .map(|names| names.iter().any(|n| n == name))
             .unwrap_or(false)
     }
+
+    /// Signal a session's process to stop, then kill the tmux session.
+    ///
+    /// Why: abruptly killing a session (`kill_session`) discards any in-flight
+    /// work the claude process was persisting. Sending a termination signal first
+    /// gives the process a chance to flush state — the async caller is responsible
+    /// for inserting the ~2 s grace window before calling this (see
+    /// `SessionManager::shutdown` in `restart_ops.rs`). This method is
+    /// intentionally synchronous so it can live on the non-async trait; the delay
+    /// is owned by the async shutdown path to avoid blocking a Tokio worker thread.
+    /// What: if `claude_pid` is known, sends SIGTERM via `nix::signal::kill`;
+    /// then unconditionally calls `kill_session`. If `claude_pid` is `None`,
+    /// falls back to `send_interrupt` (Ctrl-C) before the kill. Signal errors are
+    /// logged as warnings (the process may have already exited); only
+    /// `kill_session` failure is returned as `Err`. Does NOT sleep — callers
+    /// must insert an async delay (`tokio::time::sleep`) between the signal phase
+    /// and calling this if a grace window is desired.
+    /// Test: `fake_driver_graceful_stop_with_pid` (pid known, records kill),
+    /// `fake_driver_graceful_stop_without_pid` (no pid, falls back to C-c).
+    fn graceful_stop(&self, name: &str, claude_pid: Option<u32>) -> Result<(), ManagedError> {
+        if let Some(pid) = claude_pid {
+            #[cfg(unix)]
+            {
+                use nix::sys::signal::{Signal, kill};
+                use nix::unistd::Pid;
+                if let Err(e) = kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
+                    tracing::warn!(pid, name, "graceful_stop: SIGTERM failed: {e}");
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = pid; // SIGTERM not applicable on non-unix; fall through to kill
+            }
+        } else {
+            // No pid — best effort interrupt via tmux send-keys.
+            let _ = self.send_interrupt(name);
+        }
+        self.kill_session(name)
+    }
 }
 
 /// Summary of what a reconciliation pass found and changed.
