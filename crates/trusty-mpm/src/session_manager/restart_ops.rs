@@ -5,15 +5,18 @@
 //! while keeping related lifecycle logic co-located in the `session_manager`
 //! module tree.
 //! What: `impl SessionManager { shutdown }` — gracefully stops every live
-//! (non-terminal) managed session. For each session it sends a best-effort
-//! Ctrl-C interrupt (`send_interrupt`), waits 2 s asynchronously so the claude
-//! process can flush state, then kills the tmux session via `graceful_stop`.
-//! SIGTERM-with-known-PID is deferred to PR B (#1595) once the PID registry
-//! exists. The 2 s wait is done with `tokio::time::sleep` — never a blocking
-//! `std::thread::sleep` — so it does not starve the Tokio thread pool.
+//! (non-terminal) managed session. For each session it resolves the live
+//! `claude` PID (a single quick `find_claude_pid_in_tmux` probe), waits 2 s
+//! asynchronously so the claude process can flush state, then calls
+//! `graceful_stop(name, pid)` ONCE — SIGTERM when the PID is known (#1595 PR B),
+//! else a single Ctrl-C fallback. There is exactly one signal per session: the
+//! earlier double-Ctrl-C (a pre-signal loop *plus* `graceful_stop`'s own
+//! fallback interrupt) is gone. The 2 s wait is done with `tokio::time::sleep` —
+//! never a blocking `std::thread::sleep` — so it does not starve the Tokio
+//! thread pool.
 //! Test: `shutdown_calls_graceful_stop_for_active_sessions` (integration test
 //! in session_manager/tests.rs), `fake_driver_graceful_stop_with_pid`,
-//! `fake_driver_graceful_stop_without_pid`.
+//! `fake_driver_graceful_stop_without_pid`, `default_graceful_stop_sends_sigterm`.
 
 use std::time::Duration;
 
@@ -40,17 +43,20 @@ impl SessionManager {
     /// Why: the graceful-shutdown path in `daemon/mod.rs` needs to give every
     /// running session a chance to persist its state before the process exits.
     /// `kill_session` is abrupt; `shutdown` separates signal from kill: it
-    /// first interrupts all sessions (best-effort Ctrl-C via `send_interrupt`),
-    /// then awaits a [`SIGTERM_GRACE_SECS`]-second async sleep so the claude
-    /// processes can flush state, then hard-kills each session via
-    /// `tmux.graceful_stop`. Using `tokio::time::sleep` (never
-    /// `std::thread::sleep`) keeps the Tokio thread pool free during the wait.
-    /// The one-sleep-for-all approach bounds total shutdown time at O(1).
-    /// What: collects all Active/Provisioning records; sends send_interrupt to
-    /// each; awaits the grace window; calls graceful_stop on each. Currently
-    /// passes `None` as the PID (Ctrl-C + grace + kill path); the SIGTERM-with-
-    /// known-PID branch of `graceful_stop` activates once the PID registry
-    /// lands in PR B (#1595). Fails open per session. Logs a summary line.
+    /// resolves each session's live `claude` PID, awaits a [`SIGTERM_GRACE_SECS`]
+    /// async grace window so the processes can flush state, then calls
+    /// `graceful_stop(name, pid)` ONCE per session. `graceful_stop` sends SIGTERM
+    /// when the PID is known (#1595 PR B) and falls back to a single Ctrl-C only
+    /// when it is not — so each session receives exactly ONE termination signal.
+    /// The previous implementation pre-signalled every session with Ctrl-C *and*
+    /// then let `graceful_stop(None)` send another, double-interrupting the pane;
+    /// that pre-signal loop is removed. Using `tokio::time::sleep` (never
+    /// `std::thread::sleep`) keeps the Tokio thread pool free; the one-sleep-for-
+    /// all approach bounds total shutdown time at O(1).
+    /// What: collects all Active/Provisioning records; resolves each session's
+    /// PID via a single [`crate::core::process::find_claude_pid_in_tmux`] probe
+    /// (one attempt — at shutdown we do not retry); awaits the grace window once;
+    /// calls `graceful_stop(name, pid)` per session, failing open. Logs a summary.
     /// Test: `shutdown_calls_graceful_stop_for_active_sessions` in tests.rs.
     pub async fn shutdown(&self) {
         let records = self.list().await;
@@ -71,30 +77,29 @@ impl SessionManager {
             return;
         }
 
-        // Phase 1: send termination signal to all live sessions synchronously.
-        // `graceful_stop` on the trait does signal + kill in one step; to honour
-        // the grace window without blocking a thread, we split into two phases:
-        // signal via send_interrupt (best-effort), sleep, then graceful_stop
-        // (which re-signals and kills). For simplicity in the default-impl path,
-        // we call graceful_stop directly — it does its own signal + kill without
-        // sleeping. The async grace window here covers the gap between our first
-        // signal and the final kill.
-        for record in &live {
-            // Best-effort pre-signal (Ctrl-C / SIGTERM not possible without PID
-            // at this layer, so we use the driver's interrupt seam).
-            let _ = self.tmux.send_interrupt(&record.tmux_name);
-        }
+        // Resolve each session's live `claude` PID up front (a single quick probe
+        // per session — no retry budget at shutdown). A known PID lets
+        // `graceful_stop` send SIGTERM directly instead of a tmux Ctrl-C.
+        let pids: Vec<Option<u32>> = live
+            .iter()
+            .map(|r| {
+                crate::core::process::find_claude_pid_in_tmux(
+                    &r.tmux_name,
+                    1,
+                    Duration::from_millis(0),
+                )
+            })
+            .collect();
 
-        // Phase 2: async grace window — await without blocking a thread.
+        // Single async grace window for ALL sessions — bounds shutdown at O(1)
+        // and lets the claude processes flush state before the kill.
         tokio::time::sleep(Duration::from_secs(SIGTERM_GRACE_SECS)).await;
 
-        // Phase 3: hard-kill any sessions still alive via graceful_stop
-        // (which will re-signal and call kill_session; the session may already
-        // be gone, in which case kill_session is a quiet no-op for the session).
+        // Exactly one signal + kill per session via `graceful_stop`: SIGTERM when
+        // the PID is known, else a single Ctrl-C fallback (no double interrupt).
         let mut stopped = 0usize;
-        for record in &live {
-            // TODO(#1595 PR B): thread record.claude_pid here once the PID registry exists
-            match self.tmux.graceful_stop(&record.tmux_name, None) {
+        for (record, pid) in live.iter().zip(pids) {
+            match self.tmux.graceful_stop(&record.tmux_name, pid) {
                 Ok(()) => {
                     stopped += 1;
                 }
