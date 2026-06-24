@@ -397,35 +397,41 @@ async fn run_review_truncated_output_is_unknown() {
     );
 }
 
-/// FAIL-CLOSED ON TRUNCATED DIFF (#1638): an over-cap diff whose tail (a changed
-/// function signature) is dropped by `render_for_prompt` / `truncate_diff` must
-/// NOT be reviewed as-if-complete.  The runner must fail CLOSED to UNKNOWN.
+/// PATHOLOGICAL SINGLE-GIANT-HUNK BACKSTOP (#1638 + #1643): a single file whose
+/// ONE hunk alone exceeds the per-file budget cannot be reviewed without
+/// truncation even by the map-reduce path, so it must still fail CLOSED to
+/// UNKNOWN — never APPROVE a diff the reviewer could not fully see.
 ///
-/// Why: this is the live bug — the reviewer received a truncated diff and could
-/// not see a changed `build(…, null)` signature near the end of a large diff, so
-/// it reviewed code it could not see.  Before the fix the runner would happily
-/// APPROVE the visible portion; after the fix it returns UNKNOWN with an
-/// actionable error.
-/// What: builds a single-file diff far larger than `MAX_DIFF_CHARS` with a
+/// Why: #1643 replaced the unconditional fail-closed guard with the per-file
+/// map-reduce path, but a single hunk larger than `per_file_chars` is the one
+/// case the splitter cannot sub-divide (whole-hunk is the only safe boundary).
+/// The map stage fails THAT chunk closed (`hunk_oversized`), and with no other
+/// reviewable chunk the reduce + runner backstop returns UNKNOWN.  This proves
+/// the #1639 fail-closed guard survives as a backstop for the pathological case.
+/// What: builds a single-file diff that is ONE hunk far larger than
+/// `MAX_DIFF_CHARS` (so it also exceeds the 120 K per-file budget), with a
 /// distinctive changed signature on the LAST line, runs the pipeline with a
-/// FakeLlm that would APPROVE, and asserts UNKNOWN + an actionable error.
+/// FakeLlm that would APPROVE, and asserts UNKNOWN + an actionable "could not
+/// review" error.
 /// Test: this test itself (no network).
 #[tokio::test]
-async fn run_review_oversized_diff_fails_closed_to_unknown() {
+async fn run_review_oversized_single_hunk_fails_closed_to_unknown() {
     use crate::config::constants::MAX_DIFF_CHARS;
 
-    // A valid unified-diff header, then a huge body of added lines that pushes the
-    // rendered diff well past MAX_DIFF_CHARS, then a changed signature on the tail.
+    // A valid unified-diff header, then a huge body of added lines forming ONE
+    // hunk that pushes the rendered diff well past MAX_DIFF_CHARS *and* past the
+    // 120 K per-file map budget, then a changed signature on the tail.
     let mut diff = String::from("diff --git a/src/big.rs b/src/big.rs\n");
     diff.push_str("--- a/src/big.rs\n+++ b/src/big.rs\n");
     diff.push_str("@@ -1,1 +1,100000 @@\n");
-    // ~2x the cap of added content so render_for_prompt is forced to truncate.
+    // ~2x the cap of added content in a SINGLE hunk so neither render nor the
+    // splitter can divide it — the pathological case.
     let filler_line = "+    let _padding = compute_value(some_argument_here);\n";
     while diff.len() < MAX_DIFF_CHARS * 2 {
         diff.push_str(filler_line);
     }
-    // The changed signature that MUST be reviewed — placed at the very end so it
-    // falls in the truncated region.
+    // The changed signature that the reviewer could only see if the chunk were
+    // not over-cap — placed at the very end.
     diff.push_str("+pub fn build(a: i32, b: i32, c: i32, previous: Option<i32>) -> i32 { 0 }\n");
 
     let (source, _tmp) = local_diff_source(&diff);
@@ -439,26 +445,26 @@ async fn run_review_oversized_diff_fails_closed_to_unknown() {
         run_mode: RunMode::Cli,
         allow_posting: false,
     };
-    // FakeLlm would APPROVE if it were ever consulted — proving the guard fires
-    // BEFORE the LLM sees a partial diff.
+    // FakeLlm would APPROVE the chunk if it were ever consulted — proving the
+    // backstop fires (the chunk is failed-closed before any partial APPROVE).
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
     let result = run_review(&config, input, deps).await;
     assert_eq!(
         result.verdict,
         Verdict::Unknown,
-        "an over-cap (truncated) diff must fail CLOSED to UNKNOWN, never APPROVE a partial diff (#1638)"
+        "an over-cap single-giant-hunk diff must fail CLOSED to UNKNOWN, never APPROVE (#1638/#1643 backstop)"
     );
     let err = result
         .error
-        .expect("a truncated diff must set an actionable error");
+        .expect("a pathological over-cap diff must set an actionable error");
     assert!(
-        err.contains("truncat"),
-        "error must explain the truncation: {err}"
+        err.contains("could not review") || err.contains("assessed no files"),
+        "error must explain the review could not complete: {err}"
     );
     assert!(
         !result.posted,
-        "a truncated-diff review must never be posted live"
+        "a fail-closed review must never be posted live"
     );
     assert!(result.dry_run, "a fail-closed review is dry-run");
 }
