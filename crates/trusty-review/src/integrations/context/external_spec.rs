@@ -106,6 +106,7 @@ impl ExternalFetch for GithubContentsFetch {
             .get(&url)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "trusty-review")
             .send()
             .await
@@ -192,18 +193,20 @@ impl ExternalRepoSpecLookup {
     /// Why: the production wiring path — `from_config` calls this to construct
     /// the lookup without knowing the internal types.
     /// What: splits `owner_repo` on `'/'`; returns `None` when the string is
-    /// malformed (no slash or owner/repo empty).  On a valid split, builds a
-    /// `GithubContentsFetch` and wraps it in an `ExternalRepoSpecLookup`.
-    /// Returns `None` when the HTTP client cannot be initialised (rare TLS
-    /// failure — fail-open contract).
-    /// Test: `from_parts_rejects_malformed_owner_repo`.
+    /// malformed (no slash, owner/repo empty, or repo contains a second slash —
+    /// e.g. `"org/repo/extra"` is rejected to prevent malformed API URLs).
+    /// On a valid split, builds a `GithubContentsFetch` and wraps it in an
+    /// `ExternalRepoSpecLookup`.  Returns `None` when the HTTP client cannot be
+    /// initialised (rare TLS failure — fail-open contract).
+    /// Test: `from_parts_rejects_malformed_owner_repo`,
+    /// `from_parts_rejects_multi_slash_owner_repo`.
     pub fn from_parts(
         owner_repo: &str,
         spec_path_prefix: Option<String>,
         token: String,
     ) -> Option<Self> {
         let (owner, repo) = owner_repo.split_once('/')?;
-        if owner.is_empty() || repo.is_empty() {
+        if owner.is_empty() || repo.is_empty() || repo.contains('/') {
             return None;
         }
         let fetcher = GithubContentsFetch::new(owner.to_string(), repo.to_string(), token)
@@ -462,5 +465,17 @@ mod tests {
     fn from_parts_rejects_malformed_owner_repo() {
         let result = ExternalRepoSpecLookup::from_parts("noslash", None, "tok".to_string());
         assert!(result.is_none(), "malformed owner_repo must return None");
+    }
+
+    /// `from_parts` returns `None` when `owner_repo` contains more than one slash.
+    ///
+    /// Why: `"org/repo/extra"` splits to repo=`"repo/extra"` which would produce
+    /// a malformed GitHub API URL that silently fail-opens; reject it early.
+    /// What: `from_parts("org/repo/extra", …)` returns `None`.
+    /// Test: this test (no network — validation short-circuits before client build).
+    #[test]
+    fn from_parts_rejects_multi_slash_owner_repo() {
+        let result = ExternalRepoSpecLookup::from_parts("org/repo/extra", None, "tok".to_string());
+        assert!(result.is_none(), "multi-slash owner_repo must return None");
     }
 }
