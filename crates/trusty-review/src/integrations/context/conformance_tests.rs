@@ -363,9 +363,13 @@ async fn gather_local_diff_renders_empty() {
 /// Test: this test; no network.
 #[test]
 fn from_config_respects_explicit_disable() {
-    let cfg_off = crate::integrations::context::SourceConfig {
-        enabled: Some(false),
-        mode: RetrievalMode::Live,
+    let cfg_off = crate::integrations::context::ConformanceSourceConfig {
+        base: crate::integrations::context::SourceConfig {
+            enabled: Some(false),
+            mode: RetrievalMode::Live,
+        },
+        external_spec_repo: None,
+        spec_path_prefix: None,
     };
     let src = ConformanceSource::from_config(&cfg_off, RunMode::Cli, ReviewConfig::load(None));
     assert!(
@@ -373,7 +377,7 @@ fn from_config_respects_explicit_disable() {
         "explicit disable must keep the source off"
     );
 
-    let cfg_default = crate::integrations::context::SourceConfig::default();
+    let cfg_default = crate::integrations::context::ConformanceSourceConfig::default();
     let src2 = ConformanceSource::from_config(&cfg_default, RunMode::Cli, ReviewConfig::load(None));
     assert!(
         !src2.is_enabled(),
@@ -388,13 +392,34 @@ fn from_config_respects_explicit_disable() {
 /// Test: this test; no network.
 #[test]
 fn from_config_respects_explicit_enable() {
-    let cfg_on = crate::integrations::context::SourceConfig {
-        enabled: Some(true),
-        mode: RetrievalMode::Live,
+    let cfg_on = crate::integrations::context::ConformanceSourceConfig {
+        base: crate::integrations::context::SourceConfig {
+            enabled: Some(true),
+            mode: RetrievalMode::Live,
+        },
+        external_spec_repo: None,
+        spec_path_prefix: None,
     };
     let src = ConformanceSource::from_config(&cfg_on, RunMode::Cli, ReviewConfig::load(None));
     assert!(src.is_enabled(), "explicit enable must turn the source on");
     assert_eq!(src.name(), "conformance");
+}
+
+/// `from_config` with default config (no external_spec_repo) produces a disabled source.
+///
+/// Why: validates that the default `ConformanceSourceConfig` (no external repo,
+/// no explicit enable) results in a disabled conformance source -- the expected
+/// production default.
+/// What: constructs with default config, asserts `is_enabled() == false`.
+/// Test: this test; no network.
+#[test]
+fn from_config_with_external_spec_is_disabled_when_not_configured() {
+    let cfg = crate::integrations::context::ConformanceSourceConfig::default();
+    let src = ConformanceSource::from_config(&cfg, RunMode::Cli, ReviewConfig::load(None));
+    assert!(
+        !src.is_enabled(),
+        "default ConformanceSourceConfig must produce a disabled source"
+    );
 }
 
 // ─── build_query: PR-number threading (#1359) ─────────────────────────────────
