@@ -7,6 +7,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-24
+
+### Added
+
+- LLM synthesis pass in map-reduce reduce stage (closes #1663) ([#1664](https://github.com/bobmatnyc/trusty-tools/pull/1664)) ([`1ade9a5`](https://github.com/bobmatnyc/trusty-tools/commit/1ade9a5d1e82e255b447fb995541a80551e854a5))
+
 ## [0.5.0] — 2026-06-24
 
 ### Added
