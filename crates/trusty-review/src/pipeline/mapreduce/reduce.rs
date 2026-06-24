@@ -103,6 +103,10 @@ pub fn reduce(outcomes: Vec<MapOutcome>, config: &MapReduceConfig) -> ReducedRev
         verdict,
         findings,
         stats,
+        // grade and summary are populated by the optional synthesis pass (#1663);
+        // the mechanical reduce stage leaves them absent.
+        grade: None,
+        summary: String::new(),
     }
 }
 

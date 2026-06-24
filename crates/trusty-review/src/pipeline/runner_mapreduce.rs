@@ -27,7 +27,7 @@ use crate::{
     models::{ReviewResult, ReviewStatus},
     pipeline::{
         diff_analyzer::models::FilteredDiff,
-        letter_grade::clamp_grade_to_verdict,
+        letter_grade::{Grade, clamp_grade_to_verdict, default_grade_for_verdict},
         mapreduce::{MapContext, ReducedReview, run_map_reduce},
         parser::ParsedReview,
         prompt::{ReviewContext, ReviewPrMeta},
@@ -121,12 +121,18 @@ pub(super) async fn run_mapreduce_branch(
         return abort_dry(result, config, input, deps);
     }
 
-    // Synthesise a `ParsedReview` from the DETERMINISTIC reduce output so the
-    // existing grade/floor chain treats it identically to a unified parse.
+    // When the synthesis pass (#1663) ran successfully, `reduced.grade` carries
+    // the calibrated letter grade and `reduced.summary` carries the prose summary.
+    // Thread both into the ParsedReview so the downstream grade/verify chain can
+    // use them; the synthesis_active flag tells fold_reduced_into_result to use
+    // the synthesis-floored verdict directly instead of re-applying the full
+    // derive_verdict_with_grade (which would re-add the count-based Medium floor
+    // that synthesis is calibrating away).
+    let synthesis_active = reduced.grade.is_some();
     let parsed = ParsedReview {
         verdict: reduced.verdict.clone(),
-        grade: None,
-        summary: String::new(),
+        grade: reduced.grade.clone(),
+        summary: reduced.summary.clone(),
         findings: reduced.findings.clone(),
         is_fail_safe: false,
         fail_safe_reason: None,
@@ -135,13 +141,9 @@ pub(super) async fn run_mapreduce_branch(
     // Telemetry: surface the map-reduce model.
     result.model = input.reviewer_model.clone();
 
-    // Narrative body: the unified path sets `review_body` from the LLM prose
-    // (`apply_llm_response`), but the map-reduce path has N per-chunk responses
-    // and no single prose summary.  Without a body the GitHub poster substitutes
-    // the "_No narrative summary was produced_" sentinel on EVERY over-cap review
-    // (posting.rs:138).  Synthesise a deterministic one-line summary from the
-    // reduce stats so the posted comment is informative.
-    result.review_body = format!(
+    // Narrative body: use the synthesis prose summary when available (#1663);
+    // fall back to the deterministic stats string when synthesis is disabled.
+    let stats_body = format!(
         "Map-reduce review: {} file(s) reviewed across {} unit(s), \
          {} skipped, {} failed; {} finding(s) surfaced.",
         reduced.stats.files_reviewed,
@@ -150,9 +152,14 @@ pub(super) async fn run_mapreduce_branch(
         reduced.stats.files_failed,
         reduced.stats.findings_surfaced,
     );
+    result.review_body = if !reduced.summary.is_empty() {
+        format!("{}\n\n{}", reduced.summary, stats_body)
+    } else {
+        stats_body
+    };
 
     let degraded_reason = run.degraded_reason.clone();
-    fold_reduced_into_result(config, deps, &mut result, parsed, &run).await;
+    fold_reduced_into_result(config, deps, &mut result, parsed, &run, synthesis_active).await;
 
     // Honest partial-coverage labelling (analogous to the #1638 truncation
     // marker): when some files could not be reviewed the review is non-
@@ -206,10 +213,19 @@ pub(super) async fn run_mapreduce_branch(
 
 /// Apply the post-LLM grade/verify/inline chain to a reduced parse.
 ///
-/// Why: the reduce output must go through the EXACT same severity floor,
-/// coverage floor, verification round, grade clamp, and inline-comment mapping
-/// as the unified path so the verdict policy never drifts between the two paths.
-/// What: mirrors `run_review` steps 7b–7e against the synthesised `parsed`.
+/// Why: the reduce output must go through the severity floor, coverage floor,
+/// verification round, grade clamp, and inline-comment mapping so the verdict
+/// policy is applied consistently.  When `synthesis_active` is `true` (#1663),
+/// the synthesis pass has already applied the High-severity safety floor and we
+/// MUST NOT re-apply `apply_grade_and_floor` (which would re-add the count-based
+/// `≥2 Medium → REQUEST_CHANGES` floor that synthesis is calibrating away).
+/// Instead we use the already-floored `parsed.verdict` directly and parse the
+/// grade from `parsed.grade`, bypassing `derive_verdict_with_grade`.
+/// What: mirrors `run_review` steps 7b–7e against the `parsed` input.
+///
+///   - `synthesis_active=false` → full `apply_grade_and_floor` (mechanical path).
+///   - `synthesis_active=true`  → synthesis-floored verdict + grade used directly.
+///
 /// Test: covered by the map-reduce runner integration tests.
 async fn fold_reduced_into_result(
     config: &ReviewConfig,
@@ -217,8 +233,23 @@ async fn fold_reduced_into_result(
     result: &mut ReviewResult,
     parsed: ParsedReview,
     run: &MapReduceRun,
+    synthesis_active: bool,
 ) {
-    let (final_verdict, final_grade, original_llm_grade) = apply_grade_and_floor(&parsed);
+    // Derive (final_verdict, final_grade, original_llm_grade) depending on path.
+    let (final_verdict, final_grade, original_llm_grade) = if synthesis_active {
+        // Synthesis path (#1663): verdict is already High-severity-floored.
+        // Re-applying derive_verdict_with_grade would wrongly re-add the count
+        // floor.  Use the synthesis verdict + grade directly instead.
+        let synthesis_grade: Grade = parsed
+            .grade
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| default_grade_for_verdict(&parsed.verdict));
+        (parsed.verdict.clone(), synthesis_grade, synthesis_grade)
+    } else {
+        // Mechanical path: apply the full severity floor via apply_grade_and_floor.
+        apply_grade_and_floor(&parsed)
+    };
 
     // Coverage floor (no-op when coverage gating disabled).
     let (final_verdict, _cov_grade) = if let Some(ref cov) = run.coverage_contrib {

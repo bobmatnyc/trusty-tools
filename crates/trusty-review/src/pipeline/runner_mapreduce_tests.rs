@@ -85,7 +85,11 @@ impl LlmProvider for RecordingReviewer {
         self.seen.lock().expect("lock").push(body);
 
         let text = if want_rc {
-            r#"{"verdict":"REQUEST_CHANGES","summary":"bug","findings":[{"title":"bug","body":"the build() signature changed and a caller passes null","severity":"medium","confidence":0.95,"file":"src/big.rs","line":1}]}"#
+            // Use HIGH severity so the safety floor preserves this finding even
+            // after an LLM synthesis pass.  A Medium finding might be holistically
+            // softened by synthesis (the intended calibration); a High finding must
+            // ALWAYS floor to BLOCK/REQUEST_CHANGES regardless of synthesis (#1663).
+            r#"{"verdict":"BLOCK","summary":"critical bug","findings":[{"title":"auth-bypass","body":"the build() signature changed and a caller passes null — auth check skipped","severity":"high","confidence":0.95,"file":"src/big.rs","line":1}]}"#
         } else {
             r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
         };
@@ -316,16 +320,22 @@ impl LlmProvider for SelectivelyFailingReviewer {
     }
 }
 
-/// A REQUEST_CHANGES in the SINGLE chunk that contains the tail signature must
-/// propagate to the overall verdict — proving the reduce stage aggregates
-/// per-chunk verdicts (no chunk verdict is lost).
+/// A HIGH-severity finding in the SINGLE chunk that contains the tail signature
+/// must propagate to the overall verdict — proving both (a) per-chunk verdict
+/// aggregation and (b) the synthesis safety floor for High-effort findings (#1663).
+/// The finding uses `severity: "high"` so the `apply_high_severity_floor_only`
+/// in the synthesis pass cannot soften it to APPROVE; a Medium finding here would
+/// correctly be softened by synthesis (that's the feature), but we need this test
+/// to remain a regression guard after synthesis was added.
 #[tokio::test]
 async fn run_review_mapreduce_chunk_request_changes_propagates() {
     let (diff, tail_signature) = oversized_multi_file_diff();
     let (source, _tmp) = local_source(&diff);
 
-    // Only the chunk whose prompt contains the tail signature returns
-    // REQUEST_CHANGES; every other (early-file) chunk APPROVEs.
+    // Only the chunk whose prompt contains the tail signature returns BLOCK
+    // (High-severity finding); every other (early-file) chunk APPROVEs.
+    // The synthesis LLM (same RecordingReviewer, no tail_signature in synthesis
+    // prompt) returns APPROVE, but the High-severity safety floor re-applies.
     let reviewer = Arc::new(RecordingReviewer::request_changes_on(tail_signature));
     let llm: Arc<dyn LlmProvider> = reviewer.clone();
     let config = ReviewConfig::load(None);
@@ -480,5 +490,103 @@ async fn run_review_partial_mapreduce_status_is_degraded() {
         ReviewStatus::Degraded,
         "partial map-reduce (≥1 chunk failed) must end with status == Degraded \
          even after fold/finalize (Fix 2 guard — status set post-fold)"
+    );
+}
+
+/// A reviewer that returns REQUEST_CHANGES with a Medium finding when the prompt
+/// contains `rc_marker`, returns REQUEST_CHANGES for synthesis prompts (identified
+/// by the synthesis prompt header), and APPROVEs for all other per-file prompts.
+///
+/// Why: lets us drive a per-chunk REQUEST_CHANGES → synthesis → final verdict
+/// path at the integration level, exercising the RC propagation coverage gap
+/// left when `run_review_mapreduce_chunk_request_changes_propagates` was updated
+/// to use BLOCK/High for synthesis-floor compatibility (#1663).
+struct MediumRcReviewer {
+    seen: Mutex<Vec<String>>,
+    rc_marker: String,
+}
+
+impl MediumRcReviewer {
+    fn rc_on(marker: &str) -> Self {
+        Self {
+            seen: Mutex::new(Vec::new()),
+            rc_marker: marker.to_string(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for MediumRcReviewer {
+    fn name(&self) -> &str {
+        "medium-rc-reviewer"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        let body = req
+            .messages
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.seen.lock().expect("lock").push(body.clone());
+
+        // Synthesis prompts start with the synthesis header — return RC so the
+        // synthesis concurs with the per-chunk verdict (tests the RC path end-to-end).
+        let is_synthesis = body.contains("## PR under review");
+        let text = if is_synthesis {
+            r#"{"verdict":"REQUEST_CHANGES","grade":"C","summary":"medium nit remains."}"#
+        } else if body.contains(self.rc_marker.as_str()) {
+            r#"{"verdict":"REQUEST_CHANGES","summary":"medium nit found","findings":[{"title":"style-nit","body":"missing doc comment","severity":"medium","confidence":0.85,"file":"src/big.rs","line":1}]}"#
+        } else {
+            r#"{"verdict":"APPROVE","summary":"ok","findings":[]}"#
+        };
+        Ok(LlmResponse {
+            text: text.to_string(),
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: 5,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
+/// End-to-end REQUEST_CHANGES propagation: a single chunk returns REQUEST_CHANGES
+/// (Medium finding) and the synthesis LLM concurs — the final verdict must be
+/// REQUEST_CHANGES (not softened to APPROVE).
+///
+/// Why: the BLOCK/High test (`run_review_mapreduce_chunk_request_changes_propagates`)
+/// verifies the High-severity floor but no longer exercises the RC → synthesis →
+/// RC end-to-end path at medium severity.  This test restores that coverage.
+/// What: drives the full map-reduce → synthesis pipeline with a medium-severity
+/// REQUEST_CHANGES per-chunk verdict; synthesis also returns REQUEST_CHANGES.
+/// Test: this IS the test — asserts final verdict == REQUEST_CHANGES.
+#[tokio::test]
+async fn run_review_mapreduce_medium_rc_propagates_through_synthesis() {
+    let (diff, tail_signature) = oversized_multi_file_diff();
+    let (source, _tmp) = local_source(&diff);
+
+    // Only the chunk whose prompt contains the tail signature returns RC (Medium);
+    // synthesis also returns RC (no High floor fires — no High-severity findings).
+    let reviewer = Arc::new(MediumRcReviewer::rc_on(tail_signature));
+    let llm: Arc<dyn LlmProvider> = reviewer.clone();
+    let config = ReviewConfig::load(None);
+
+    let result = run_review(&config, input(source), deps(llm)).await;
+
+    assert_ne!(
+        result.verdict,
+        Verdict::Unknown,
+        "RC path must complete normally — verdict must not be UNKNOWN"
+    );
+    // Synthesis concurs (RC), so final verdict must be REQUEST_CHANGES.
+    assert_eq!(
+        result.verdict,
+        Verdict::RequestChanges,
+        "synthesis-concurred REQUEST_CHANGES must propagate to the final result"
+    );
+    assert!(
+        !result.findings.is_empty(),
+        "the per-chunk Medium finding must survive into the merged result"
     );
 }
