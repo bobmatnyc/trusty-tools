@@ -94,7 +94,13 @@ pub struct FindingOutcome {
 pub fn finding_hash(finding: &Finding) -> String {
     use sha2::{Digest, Sha256};
     let line_str = finding.line.unwrap_or(0).to_string();
-    let desc_prefix = &finding.description[..finding.description.len().min(50)];
+    // Use char-boundary-safe truncation to avoid panics on multi-byte UTF-8.
+    let desc_end = finding
+        .description
+        .char_indices()
+        .nth(50)
+        .map_or(finding.description.len(), |(i, _)| i);
+    let desc_prefix = &finding.description[..desc_end];
     let mut h = Sha256::new();
     h.update(finding.kind.as_bytes());
     h.update(b"\x00");
@@ -231,7 +237,8 @@ pub fn commits_touch_file(
         };
         if commit_secs >= review_timestamp_secs
             && commit_secs.saturating_sub(review_timestamp_secs) <= window
-            && (c.files.is_empty() || c.files.iter().any(|f| f == file))
+            && !c.files.is_empty()
+            && c.files.iter().any(|f| f == file)
         {
             return true;
         }
@@ -361,12 +368,15 @@ pub async fn poll_review_outcomes(
         let reaction_outcome: Option<Outcome> = None;
 
         // ActedOn via commit file touch.
-        let acted_on = if commits.is_empty() {
-            commits_touch_file(&commits, &finding.file, review_secs, within_days)
-        } else if !touched_files.is_empty() {
+        // touched_files is pre-filtered to the time window; use it when commits
+        // include file lists.  When all commits have empty file lists (which is
+        // normal for the GitHub commits-list endpoint), touched_files is also
+        // empty, and we fall through to Ignored rather than ActedOn.
+        let acted_on = if !touched_files.is_empty() {
             touched_files.contains(&finding.file)
         } else {
-            commits_touch_file(&commits, &finding.file, review_secs, within_days)
+            // commits.is_empty() OR all commits had empty file lists — no signal.
+            false
         };
 
         let outcome = match reaction_outcome {
@@ -433,6 +443,17 @@ mod tests {
         let f1 = make_finding("security", "src/a.rs", Some(1), "issue");
         let f2 = make_finding("security", "src/b.rs", Some(1), "issue");
         assert_ne!(finding_hash(&f1), finding_hash(&f2));
+    }
+
+    #[test]
+    fn finding_hash_handles_multibyte_utf8_description() {
+        // "🦀" is 4 bytes; indexing by bytes would panic at position 50 if
+        // the slice boundary falls in the middle of a multi-byte char.
+        let desc = "🦀".repeat(20); // 20 crabs = 80 bytes, 20 chars
+        let f = make_finding("security", "src/main.rs", Some(1), &desc);
+        // Must not panic; hash must be 64 hex chars.
+        let h = finding_hash(&f);
+        assert_eq!(h.len(), 64);
     }
 
     // ── classify_reactions ────────────────────────────────────────────────────
@@ -509,14 +530,20 @@ mod tests {
     }
 
     #[test]
-    fn acted_on_empty_files_list_is_conservative_true() {
+    fn acted_on_empty_files_list_is_false() {
+        // The GitHub commits-list endpoint never populates file lists.
+        // An empty files list must NOT be treated as "touches all files" —
+        // that would cause a false ActedOn for every finding on every merged PR.
         let commits = vec![CommitInfo {
             sha: "abc".to_string(),
             commit_date: "2026-06-24T10:00:00Z".to_string(),
             files: vec![],
         }];
         let review_secs = parse_iso8601_secs("2026-06-23T00:00:00Z").unwrap();
-        assert!(commits_touch_file(&commits, "src/main.rs", review_secs, 7));
+        assert!(
+            !commits_touch_file(&commits, "src/main.rs", review_secs, 7),
+            "empty files list must return false, not true — no-data is no-signal"
+        );
     }
 
     // ── iso8601 helpers ───────────────────────────────────────────────────────

@@ -363,7 +363,7 @@ async fn handle_closed_merged(
         tokio::pin!(sleep);
         tokio::select! {
             () = &mut sleep => { /* delay elapsed — proceed with poll */ }
-            Ok(()) = shutdown_rx.changed() => {
+            _ = shutdown_rx.changed() => {
                 // Daemon is shutting down; abort the outcome poll gracefully.
                 debug!(pr = pr_number, "outcome poll: cancelled by shutdown signal");
                 return;
