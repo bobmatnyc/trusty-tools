@@ -82,6 +82,9 @@ pub struct ContextSourcesConfig {
     /// Intent/method-conformance back gate (#1359).  Default DISABLED: it calls
     /// the ISR (GitHub ticket fetch) so it must be explicitly opted in.
     pub conformance: SourceConfig,
+    /// Prior-PR / file change-history source (T10, #1423).  Default DISABLED:
+    /// makes multiple GitHub API calls per review; opt in explicitly.
+    pub pr_history: SourceConfig,
 }
 
 impl ContextSourcesConfig {
@@ -99,6 +102,7 @@ impl ContextSourcesConfig {
             confluence: resolve_source("CONFLUENCE", file.map(|f| &f.confluence)),
             github_issues: resolve_source("GITHUB_ISSUES", file.map(|f| &f.github_issues)),
             conformance: resolve_source("CONFORMANCE", file.map(|f| &f.conformance)),
+            pr_history: resolve_source("PR_HISTORY", file.map(|f| &f.pr_history)),
         }
     }
 }
@@ -148,6 +152,9 @@ pub struct ContextSourcesFileConfig {
     /// `[context.sources.conformance]` — the intent/method-conformance back gate.
     #[serde(default)]
     pub conformance: SourceFileConfig,
+    /// `[context.sources.pr_history]` — prior-PR / file change-history source.
+    #[serde(default)]
+    pub pr_history: SourceFileConfig,
 }
 
 /// TOML-deserialisable single-source table (all fields optional).
