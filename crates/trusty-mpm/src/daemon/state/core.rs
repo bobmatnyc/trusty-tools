@@ -31,6 +31,25 @@ use crate::daemon::optimizer::OptimizerConfig;
 use super::overseer::{build_overseer, load_optimizer_config, load_overseer, make_audit_logger};
 use super::sm::build_session_manager_agent;
 
+/// Build the control-plane [`SessionRegistry`] from the operator's config.
+///
+/// Why: WI-5 (§9) makes the concurrency cap, launch stagger, auth timeout, and
+/// classifier gate operator-configurable via the `[control_plane]` section of
+/// `~/.trusty-mpm/config.toml`. The daemon must read that section at startup and
+/// inject it into the registry so the cost guardrails reflect the operator's
+/// settings; an absent section falls back to spec defaults (cap 5, stagger 2 s).
+/// What: loads [`MpmConfig`](crate::core::config::MpmConfig) from `root`
+/// (silently defaulting on absence/malformed input, exactly as the loader
+/// documents) and constructs a [`SessionRegistry`] with its `control_plane`
+/// config.
+/// Test: exercised by every `DaemonState` constructor; control-plane defaults
+/// are pinned by `control::config::tests` and the cap behavior by
+/// `control::registry::tests`.
+fn build_session_registry(root: &std::path::Path) -> SessionRegistry {
+    let cfg = crate::core::config::MpmConfig::load(root);
+    SessionRegistry::with_config(cfg.control_plane)
+}
+
 /// Outcome of a reap sweep over the session registry.
 ///
 /// Why: the reaper now does two distinct things — it *removes* tmux sessions
@@ -281,6 +300,9 @@ impl DaemonState {
             tracing::info!("restored persisted Telegram pairing (chat {chat_id})");
         }
         let (event_tx, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        // §9 (WI-5): build the control-plane registry with the operator's
+        // [control_plane] auth+cost config (cap, stagger, classifier gate).
+        let session_registry = Arc::new(build_session_registry(&root));
         Self {
             sessions: DashMap::new(),
             delegations: DashMap::new(),
@@ -304,7 +326,7 @@ impl DaemonState {
             managed_sessions: tokio::sync::OnceCell::new(),
             activity_monitor: std::sync::OnceLock::new(),
             project_registry: tokio::sync::OnceCell::new(),
-            session_registry: Arc::new(SessionRegistry::new()),
+            session_registry,
         }
     }
 
@@ -334,6 +356,10 @@ impl DaemonState {
         crate::daemon::pairing_store::cleanup_stale_claims(&framework_root);
         let paired = crate::daemon::pairing_store::load(&framework_root).map(|r| r.chat_id);
         let (event_tx, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        // §9 (WI-5): build the control-plane registry from [control_plane] under
+        // this (possibly temp-dir) framework root, so e2e tests can inject a
+        // hermetic auth+cost config and the real daemon reads the operator's.
+        let session_registry = Arc::new(build_session_registry(&framework_root));
         Self {
             sessions: DashMap::new(),
             delegations: DashMap::new(),
@@ -357,7 +383,7 @@ impl DaemonState {
             managed_sessions: tokio::sync::OnceCell::new(),
             activity_monitor: std::sync::OnceLock::new(),
             project_registry: tokio::sync::OnceCell::new(),
-            session_registry: Arc::new(SessionRegistry::new()),
+            session_registry,
         }
     }
 
