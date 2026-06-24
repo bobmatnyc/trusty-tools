@@ -258,21 +258,30 @@ pub fn extract_ac_bullets(ticket_body: &str) -> Vec<String> {
 /// Why: both `extract_test_plan_items` and `extract_ac_bullets` need to strip
 /// `-`, `*`, `+` leaders and optional checkbox markers; a shared helper avoids
 /// drift between the two parsers.
-/// What: strips a leading `-`, `*`, or `+` leader, then any `[x]`/`[X]`/`[ ]`
-/// checkbox marker, and returns the remaining text when non-empty.
-/// Test: exercised transitively by the two extraction functions.
+/// What: strips a leading `-`, `*`, or `+` leader (plus any following
+/// whitespace including tabs), then any `[x]`/`[X]`/`[ ]` checkbox marker,
+/// and returns the remaining text when non-empty.  Using `trim_start` after
+/// the leader makes this consistent with the checkbox branch in
+/// `extract_ac_bullets` (which already calls `trim_start_matches(['-','*'])`)
+/// and handles tab-separated bullets (common in some editors).
+/// Test: exercised transitively by the two extraction functions;
+/// `parse_bullet_accepts_tab_separator` covers the tab case explicitly.
 fn parse_bullet(trimmed: &str) -> Option<String> {
+    // Strip the leading marker character, then any following whitespace.
     let after_marker = trimmed
-        .strip_prefix("- ")
-        .or_else(|| trimmed.strip_prefix("* "))
-        .or_else(|| trimmed.strip_prefix("+ "))?;
-    let text = if after_marker.starts_with("[x] ")
-        || after_marker.starts_with("[X] ")
-        || after_marker.starts_with("[ ] ")
+        .strip_prefix('-')
+        .or_else(|| trimmed.strip_prefix('*'))
+        .or_else(|| trimmed.strip_prefix('+'))
+        .map(str::trim_start)?;
+    // Strip optional `[x]`/`[X]`/`[ ]` checkbox marker (with trailing whitespace).
+    let text = if let Some(rest) = after_marker
+        .strip_prefix("[x]")
+        .or_else(|| after_marker.strip_prefix("[X]"))
+        .or_else(|| after_marker.strip_prefix("[ ]"))
     {
-        after_marker[4..].trim()
+        rest.trim_start()
     } else {
-        after_marker.trim()
+        after_marker
     };
     if text.is_empty() {
         None
@@ -300,25 +309,67 @@ fn item_is_test_related(item: &str) -> bool {
 /// Returns `true` when the diff already covers `item` with a test artifact.
 ///
 /// Why: an AC item is only "possibly unmet" when there is NO evidence of test
-/// coverage in the diff; an item matched by a test file path or a test-named
-/// identifier is considered covered (permissive heuristic — avoids false
-/// positives).
-/// What: returns `true` if any `changed_files` path contains "test" or "spec"
-/// (case-insensitive) OR any `identifiers` entry contains "test".  The item
-/// text itself is not matched against file content (requires a richer diff view
-/// beyond this seam).
-/// Test: exercised transitively by `unmet_ac_renders_snippet`.
-fn item_has_test_coverage(_item: &str, changed_files: &[String], identifiers: &[String]) -> bool {
-    let has_test_file = changed_files.iter().any(|f| {
-        let lower = f.to_lowercase();
-        lower.contains("test") || lower.contains("spec")
-    });
-    if has_test_file {
-        return true;
-    }
-    identifiers
+/// coverage for THAT SPECIFIC ITEM in the diff; an item should only be
+/// considered covered when the test artifact is plausibly related to it, not
+/// when any unrelated test file was touched (#1418 review fix).
+/// What: extracts significant words (length > 3, excluding common stop-words)
+/// from the item text, then checks whether any test-file path or any test
+/// identifier contains at least one of those key terms (case-insensitive).
+/// A "test artifact" is a file whose path contains "test" or "spec", or an
+/// identifier that contains "test".  The heuristic is permissive — a single
+/// key-term match counts as covered — to avoid false positives.
+/// Test: `item_has_test_coverage_per_item` and transitively
+/// `unmet_ac_renders_snippet` in `conformance_tests.rs`.
+fn item_has_test_coverage(item: &str, changed_files: &[String], identifiers: &[String]) -> bool {
+    // Collect test-file paths and test identifiers from the diff.
+    let test_files: Vec<String> = changed_files
         .iter()
-        .any(|id| id.to_lowercase().contains("test"))
+        .filter(|f| {
+            let lower = f.to_lowercase();
+            lower.contains("test") || lower.contains("spec")
+        })
+        .map(|f| f.to_lowercase())
+        .collect();
+
+    let test_ids: Vec<String> = identifiers
+        .iter()
+        .filter(|id| id.to_lowercase().contains("test"))
+        .map(|id| id.to_lowercase())
+        .collect();
+
+    if test_files.is_empty() && test_ids.is_empty() {
+        return false;
+    }
+
+    // Extract significant key terms from the item text (skip short words and
+    // common stop-words that would match trivially).
+    let stop_words = [
+        "the", "and", "for", "with", "that", "this", "from", "are", "not", "have", "been",
+        "should", "must", "will", "when", "does", "into", "each", "item", "test", "check",
+        "verify", "ensure", "assert", "validate", "confirm",
+    ];
+    let key_terms: Vec<String> = item
+        .split(|c: char| !c.is_alphanumeric())
+        .map(|w| w.to_lowercase())
+        .filter(|w| w.len() > 3 && !stop_words.contains(&w.as_str()))
+        .collect();
+
+    if key_terms.is_empty() {
+        // No distinguishing terms; fall back to "any test file covers it".
+        return !test_files.is_empty() || !test_ids.is_empty();
+    }
+
+    // A single key-term hit in any test file path or test identifier counts.
+    for term in &key_terms {
+        if test_files.iter().any(|f| f.contains(term.as_str())) {
+            return true;
+        }
+        if test_ids.iter().any(|id| id.contains(term.as_str())) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Build gap snippets from unmet test-plan / AC items (#1418).
@@ -326,12 +377,17 @@ fn item_has_test_coverage(_item: &str, changed_files: &[String], identifiers: &[
 /// Why: the reviewer LLM needs structured, citable context to raise
 /// `test-coverage` findings; citing the exact AC item and its source is
 /// actionable (#1413 top Duetto signal #4).
-/// What: for every test-related item in `tp_items` and `ac_items` with no test
-/// coverage in the diff, emits one `ContextSnippet` titled `"Unmet AC: <item>"`
-/// with a source subtitle.  When neither list has any items, emits ONE advisory
-/// snippet.  Returns an empty `Vec` when all test-related items are covered.
-/// Test: `unmet_ac_renders_snippet`, `no_plan_produces_advisory_snippet`,
-/// `empty_body_no_snippets` in `conformance_tests.rs`.
+/// What: for every test-related item in `tp_items` and `ac_items` with no
+/// per-item test coverage in the diff, emits one `ContextSnippet` titled
+/// `"Unmet AC: <item>"` with a source subtitle.  Returns an empty `Vec` when
+/// all test-related items are covered OR both lists are empty.
+/// Note: callers are expected to only invoke this when at least one list is
+/// non-empty; passing both empty lists returns an empty Vec (no advisory is
+/// emitted — the advisory was removed because `gather_gap_snippets` already
+/// gates on having something to check before calling this function, so the
+/// advisory branch was dead code in production).
+/// Test: `unmet_ac_renders_snippet`, `empty_body_no_snippets` in
+/// `conformance_tests.rs`.
 pub fn build_gap_snippets(
     tp_items: &[String],
     ac_items: &[String],
@@ -340,20 +396,6 @@ pub fn build_gap_snippets(
     changed_files: &[String],
     identifiers: &[String],
 ) -> Vec<ContextSnippet> {
-    if tp_items.is_empty() && ac_items.is_empty() {
-        return vec![ContextSnippet {
-            title: "No test plan or AC found in PR description or linked ticket".to_string(),
-            subtitle: Some("advisory".to_string()),
-            body: Some(
-                "The PR description has no ## Test plan section and the linked ticket (if any) \
-                 has no ## Acceptance Criteria or - [ ] checklist. \
-                 Consider adding explicit test-plan bullets."
-                    .to_string(),
-            ),
-            link: None,
-        }];
-    }
-
     let mut snippets: Vec<ContextSnippet> = Vec::new();
 
     for item in tp_items {

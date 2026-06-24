@@ -616,29 +616,89 @@ fn unmet_ac_renders_snippet() {
     );
 }
 
-/// When the PR body is non-empty but has no `## Test plan` and the linked ticket
-/// has no `## Acceptance Criteria`, a single advisory snippet is emitted (#1418 AC-4).
+/// A PR that touches an UNRELATED test file does NOT count as covering an AC
+/// item whose key terms do not appear in any test file path or test identifier.
 ///
-/// Why: a PR without any test plan or AC context is a review gap; the advisory
-/// snippet signals this so the reviewer LLM can note it.
-/// What: `build_gap_snippets` with empty `tp_items` and `ac_items` → exactly one
-/// advisory snippet with subtitle "advisory".
-/// Test: this test; pure.
+/// Why: `item_has_test_coverage` must be PER-ITEM — touching `tests/auth_test.rs`
+/// must not suppress a gap finding for "verify pagination cursor is valid"; the
+/// two concerns are unrelated (#1418 review fix, Issue 1).
+/// What: a changed_files list containing a test file for "auth" and an AC item
+/// about "pagination cursor" → gap snippet IS emitted (the auth test does not
+/// cover the pagination AC item).
+/// Test: this test; pure (calls `build_gap_snippets` directly).
 #[test]
-fn no_plan_produces_advisory_snippet() {
-    let snippets =
-        super::build_gap_snippets(&[], &[], None, None, &["src/foo.rs".to_string()], &[]);
+fn unrelated_test_file_does_not_cover_ac_item() {
+    let ac_items = vec!["verify pagination cursor is valid".to_string()];
+    // An auth test file — unrelated to pagination.
+    let changed_files = vec!["tests/auth_test.rs".to_string()];
+    let identifiers: Vec<String> = Vec::new();
+
+    let snippets = super::build_gap_snippets(
+        &[],
+        &ac_items,
+        Some("https://github.com/owner/repo/issues/55"),
+        Some("#55"),
+        &changed_files,
+        &identifiers,
+    );
     assert_eq!(
         snippets.len(),
         1,
-        "exactly one advisory snippet when no plan/AC: {:?}",
+        "unrelated test file must NOT count as coverage; gap snippet expected: {:?}",
         snippets
     );
-    let sub = snippets[0].subtitle.as_deref().unwrap_or("");
-    assert_eq!(
-        sub, "advisory",
-        "subtitle must be 'advisory': got {:?}",
-        sub
+    assert!(
+        snippets[0].title.contains("pagination"),
+        "gap snippet must reference the AC item: {:?}",
+        snippets[0].title
+    );
+}
+
+/// A PR that touches a test file whose path shares key terms with the AC item
+/// IS considered to cover that item (the permissive heuristic).
+///
+/// Why: if the test file path contains a key term from the AC item, we trust
+/// the author added coverage for it; we must not emit a false-positive gap.
+/// What: `changed_files` with `tests/pagination_test.rs` and an AC item about
+/// "pagination cursor" → no gap snippet emitted.
+/// Test: this test; pure.
+#[test]
+fn related_test_file_covers_ac_item() {
+    let ac_items = vec!["verify pagination cursor is valid".to_string()];
+    let changed_files = vec!["tests/pagination_test.rs".to_string()];
+    let identifiers: Vec<String> = Vec::new();
+
+    let snippets = super::build_gap_snippets(
+        &[],
+        &ac_items,
+        Some("https://github.com/owner/repo/issues/55"),
+        Some("#55"),
+        &changed_files,
+        &identifiers,
+    );
+    assert!(
+        snippets.is_empty(),
+        "a test file sharing key terms with the AC item must be treated as covering it: {:?}",
+        snippets
+    );
+}
+
+/// `build_gap_snippets` returns empty when both lists are empty (no advisory).
+///
+/// Why: the advisory branch was removed because `gather_gap_snippets` already
+/// gates on having items to check before calling this function; emitting an
+/// advisory from `build_gap_snippets` would be dead code in production and
+/// confusing to direct callers.
+/// What: empty `tp_items` + empty `ac_items` → empty Vec.
+/// Test: this test; pure.
+#[test]
+fn empty_lists_produce_no_snippets() {
+    let snippets =
+        super::build_gap_snippets(&[], &[], None, None, &["src/foo.rs".to_string()], &[]);
+    assert!(
+        snippets.is_empty(),
+        "empty tp_items + empty ac_items must produce no snippets (advisory removed): {:?}",
+        snippets
     );
 }
 
@@ -665,5 +725,31 @@ async fn empty_body_no_snippets() {
     assert!(
         section.snippets.is_empty(),
         "empty PR body must produce no snippets (not even advisory)"
+    );
+}
+
+/// `extract_test_plan_items` accepts tab-separated bullets (e.g. `-\titem`) as
+/// well as space-separated bullets, consistent with the checkbox branch in
+/// `extract_ac_bullets` (#1418 fix 4).
+///
+/// Why: some editors / PR templates emit tab-after-marker bullets; `parse_bullet`
+/// must accept them or silently drop items from the test-plan parse.
+/// What: a PR body with `"-\tVerify the tab bullet"` under `## Test plan` →
+/// the item is returned (not dropped).
+/// Test: this test; pure, no network.
+#[test]
+fn test_plan_accepts_tab_separated_bullets() {
+    let body = "## Test plan\n-\tVerify the tab bullet is parsed\n";
+    let items = super::extract_test_plan_items(body);
+    assert_eq!(
+        items.len(),
+        1,
+        "tab-separated bullet must be parsed: {:?}",
+        items
+    );
+    assert!(
+        items[0].contains("tab bullet"),
+        "item text must survive tab stripping: {:?}",
+        items[0]
     );
 }
