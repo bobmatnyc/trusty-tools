@@ -294,7 +294,7 @@ fn grade_compile_break_high_effort_flows_to_block() {
 fn derive_verdict_with_grade_grade_a_no_findings_approve() {
     let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::A, &[]);
     assert_eq!(v, Verdict::Approve);
-    assert_eq!(g, Grade::A);
+    assert_eq!(g, Some(Grade::A));
 }
 
 /// Grade "F", no findings, model APPROVE → verdict=BLOCK (grade floors it).
@@ -306,7 +306,7 @@ fn derive_verdict_with_grade_grade_a_no_findings_approve() {
 fn derive_verdict_with_grade_grade_f_no_findings_block() {
     let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::F, &[]);
     assert_eq!(v, Verdict::Block);
-    assert_eq!(g, Grade::F);
+    assert_eq!(g, Some(Grade::F));
 }
 
 /// Grade "A", model APPROVE, ONE High-effort finding → verdict=BLOCK, grade=F.
@@ -320,7 +320,62 @@ fn derive_verdict_with_grade_severity_overrides_grade_a() {
     let findings = vec![finding(Effort::High, 0.9)];
     let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::A, &findings);
     assert_eq!(v, Verdict::Block, "severity floor must override grade A");
-    assert_eq!(g, Grade::F, "grade must be clamped to F when verdict=BLOCK");
+    assert_eq!(
+        g,
+        Some(Grade::F),
+        "grade must be clamped to F when verdict=BLOCK"
+    );
+}
+
+/// UNKNOWN verdict ⇒ grade is None (no letter grade), NOT "F" (#1474).
+///
+/// Why: this is the intelligence-domain#403 repro. An empty/un-reviewable diff
+/// drives `Verdict::Unknown`.  UNKNOWN means "could not review", which is NOT
+/// "reviewed and failed" — so the top-level grade must be None (the output field
+/// is omitted), never "F".  Even when the model emitted a coherent inner grade
+/// (e.g. "A+" for an empty diff "there is no code to review"), an UNKNOWN verdict
+/// suppresses the letter grade entirely.  Previously this path hardcoded
+/// `Grade::F`, collapsing "un-reviewable" into "critical failure".
+#[test]
+fn derive_verdict_with_grade_unknown_yields_no_grade() {
+    // Inner model grade "A+" (the empty-diff case), verdict UNKNOWN.
+    let (v, g) = derive_verdict_with_grade(Verdict::Unknown, Grade::APlus, &[]);
+    assert_eq!(v, Verdict::Unknown, "UNKNOWN verdict must be preserved");
+    assert_eq!(g, None, "UNKNOWN ⇒ no letter grade (must NOT be F)");
+    assert_ne!(g, Some(Grade::F), "UNKNOWN must never collapse to grade F");
+}
+
+/// UNKNOWN verdict ⇒ grade None even with findings present (#1474).
+///
+/// Why: the grade-suppression for UNKNOWN must be unconditional — independent of
+/// any findings the model may have emitted before deciding the diff was
+/// unassessable.
+#[test]
+fn derive_verdict_with_grade_unknown_yields_no_grade_with_findings() {
+    let findings = vec![finding(Effort::High, 0.9)];
+    let (v, g) = derive_verdict_with_grade(Verdict::Unknown, Grade::D, &findings);
+    assert_eq!(v, Verdict::Unknown);
+    assert_eq!(g, None, "UNKNOWN ⇒ no letter grade regardless of findings");
+}
+
+/// A normal (non-UNKNOWN) verdict still relays a `Some(grade)` (#1474 guard).
+///
+/// Why: the UNKNOWN suppression must NOT leak into real verdicts — every
+/// reviewable verdict must continue to carry its (clamped) letter grade verbatim.
+#[test]
+fn derive_verdict_with_grade_real_verdict_relays_some_grade() {
+    // APPROVE relays its grade unchanged.
+    let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::AMinus, &[]);
+    assert_eq!(v, Verdict::Approve);
+    assert_eq!(
+        g,
+        Some(Grade::AMinus),
+        "real verdict must relay a letter grade"
+    );
+    // REQUEST_CHANGES relays a (band-consistent) grade, never None.
+    let (v2, g2) = derive_verdict_with_grade(Verdict::RequestChanges, Grade::D, &[]);
+    assert_eq!(v2, Verdict::RequestChanges);
+    assert!(g2.is_some(), "real verdict must never yield None grade");
 }
 
 /// Grade "B-" (APPROVE floor) → verdict=APPROVE.
@@ -330,7 +385,7 @@ fn derive_verdict_with_grade_severity_overrides_grade_a() {
 fn derive_verdict_with_grade_b_minus_yields_approve() {
     let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::BMinus, &[]);
     assert_eq!(v, Verdict::Approve);
-    assert_eq!(g, Grade::BMinus);
+    assert_eq!(g, Some(Grade::BMinus));
 }
 
 /// Grade "C+" (lowest APPROVE* grade) → verdict=APPROVE*.
@@ -341,7 +396,7 @@ fn derive_verdict_with_grade_c_plus_yields_approve_star() {
     let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::CPlus, &[]);
     assert_eq!(v, Verdict::ApproveWithReservations);
     // CPlus is the ceiling of APPROVE*, no clamping needed.
-    assert_eq!(g, Grade::CPlus);
+    assert_eq!(g, Some(Grade::CPlus));
 }
 
 /// Grade "C-" → verdict=APPROVE*.
@@ -356,7 +411,7 @@ fn derive_verdict_with_grade_c_minus_yields_approve_star() {
 fn derive_verdict_with_grade_d_plus_yields_request_changes() {
     let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::DPlus, &[]);
     assert_eq!(v, Verdict::RequestChanges);
-    assert_eq!(g, Grade::DPlus);
+    assert_eq!(g, Some(Grade::DPlus));
 }
 
 /// Grade "D-" → verdict=REQUEST_CHANGES.
@@ -375,7 +430,7 @@ fn derive_verdict_with_grade_model_escalates_above_grade() {
     let (v, g) = derive_verdict_with_grade(Verdict::ApproveWithReservations, Grade::A, &[]);
     assert_eq!(v, Verdict::ApproveWithReservations);
     // Grade "A" clamped to C+ (ceiling of APPROVE* band) since verdict is APPROVE*.
-    assert_eq!(g, Grade::CPlus);
+    assert_eq!(g, Some(Grade::CPlus));
 }
 
 /// Grade "C-", model APPROVE, two high-confidence Medium findings → REQUEST_CHANGES.
@@ -392,7 +447,7 @@ fn derive_verdict_with_grade_floor_stricter_than_grade() {
     assert_eq!(v, Verdict::RequestChanges);
     assert_eq!(
         g,
-        Grade::DPlus,
+        Some(Grade::DPlus),
         "grade must clamp to D+ (ceiling of REQUEST_CHANGES)"
     );
 }
@@ -419,7 +474,7 @@ fn grade_approve_b_plus_two_medium_advisory_stays_approve() {
         "advisory Medium@0.70 must not escalate APPROVE/B+ to REQUEST_CHANGES (#1015)"
     );
     // Grade B+ is in the APPROVE band — no clamping needed.
-    assert_eq!(g, Grade::BPlus);
+    assert_eq!(g, Some(Grade::BPlus));
 }
 
 /// Advisory Medium findings do not count even at the LOW_CONFIDENCE_THRESHOLD boundary.
@@ -514,7 +569,7 @@ fn approve_b_plus_survives_refuted_and_low_confidence_findings() {
     );
     assert_eq!(
         g,
-        Grade::BPlus,
+        Some(Grade::BPlus),
         "B+ grade must not be clamped down to D+ (#1343 footer/grade consistency)"
     );
 }
@@ -539,7 +594,7 @@ fn approve_b_plus_two_high_conf_medium_caps_at_approve_star() {
     );
     assert_eq!(
         g,
-        Grade::CPlus,
+        Some(Grade::CPlus),
         "grade clamps to C+ (APPROVE* ceiling), never D+ (#1343)"
     );
 }
@@ -559,7 +614,7 @@ fn model_request_changes_review_body_still_surfaces_request_changes() {
         Verdict::RequestChanges,
         "a genuine REQUEST_CHANGES review_body must still surface REQUEST_CHANGES (#1343)"
     );
-    assert_eq!(g, Grade::DPlus);
+    assert_eq!(g, Some(Grade::DPlus));
 }
 
 /// #1343: a confirmed High finding still BLOCKs an APPROVE — verified critical
@@ -579,7 +634,7 @@ fn high_effort_finding_still_overrides_approve() {
         Verdict::Block,
         "a substantive High-effort finding must still BLOCK an APPROVE (#1343)"
     );
-    assert_eq!(g, Grade::F);
+    assert_eq!(g, Some(Grade::F));
 }
 
 // ── PR #1350 advisory fix A: High-effort findings keep their floor seat ──────
@@ -623,7 +678,11 @@ fn low_confidence_high_effort_clamps_grade_to_block() {
         Verdict::Block,
         "uncertain critical (High@0.40) must still BLOCK through the grade pipeline (PR #1350)"
     );
-    assert_eq!(g, Grade::F, "grade must clamp to F when verdict=BLOCK");
+    assert_eq!(
+        g,
+        Some(Grade::F),
+        "grade must clamp to F when verdict=BLOCK"
+    );
 }
 
 /// A REFUTED High-effort finding (even at high confidence) must STILL be excluded —
@@ -700,7 +759,11 @@ fn grade_confirmed_high_still_blocks_despite_b_plus_grade() {
         Verdict::Block,
         "High-effort finding must still BLOCK regardless of grade (#1015 regression)"
     );
-    assert_eq!(g, Grade::F, "grade must clamp to F when verdict=BLOCK");
+    assert_eq!(
+        g,
+        Some(Grade::F),
+        "grade must clamp to F when verdict=BLOCK"
+    );
 }
 
 // ── Method-conformance back gate (#1359, SPEC-CONFORMANCE-02 §5.2; AC-8..AC-12) ─

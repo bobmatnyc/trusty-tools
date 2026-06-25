@@ -51,18 +51,27 @@ use crate::{
 /// verdict is weaker (APPROVE or APPROVE*), the verdict is raised to REQUEST_CHANGES
 /// and the grade is clamped to at most D+.  A BLOCK verdict is never weakened.
 /// When `contrib.floor` is None (coverage passed or policy disabled), returns
-/// the inputs unchanged.
+/// the inputs unchanged.  When `grade` is `None` (an un-reviewable UNKNOWN verdict,
+/// #1474), the inputs are returned unchanged: coverage gating does not apply to a
+/// diff that could not be reviewed, and `None` must never be promoted to a letter
+/// grade.
 /// Test: `apply_coverage_floor_noop_when_no_floor`,
 /// `apply_coverage_floor_tightens_approve`,
-/// `apply_coverage_floor_does_not_weaken_block`.
+/// `apply_coverage_floor_does_not_weaken_block`,
+/// `apply_coverage_floor_passes_through_none_grade`.
 pub fn apply_coverage_floor(
     verdict: Verdict,
-    grade: Grade,
+    grade: Option<Grade>,
     contrib: &CoverageVerdictContrib,
-) -> (Verdict, Grade) {
+) -> (Verdict, Option<Grade>) {
+    // No letter grade ⇒ the diff was un-reviewable (UNKNOWN); coverage does not
+    // apply and `None` must be preserved (#1474).
+    let Some(grade) = grade else {
+        return (verdict, None);
+    };
     let Some(floor) = contrib.floor.as_ref() else {
         // Coverage passed (or policy disabled) — return unchanged.
-        return (verdict, grade);
+        return (verdict, Some(grade));
     };
 
     // Only REQUEST_CHANGES is a valid coverage floor (coverage cannot BLOCK).
@@ -87,7 +96,7 @@ pub fn apply_coverage_floor(
         clamp_grade_to_verdict(grade, &new_verdict)
     };
 
-    (new_verdict, new_grade)
+    (new_verdict, Some(new_grade))
 }
 
 #[cfg(test)]
@@ -117,9 +126,9 @@ mod tests {
     /// Test: pass_contrib → same verdict/grade.
     #[test]
     fn apply_coverage_floor_noop_when_no_floor() {
-        let (v, g) = apply_coverage_floor(Verdict::Approve, Grade::A, &pass_contrib());
+        let (v, g) = apply_coverage_floor(Verdict::Approve, Some(Grade::A), &pass_contrib());
         assert_eq!(v, Verdict::Approve);
-        assert_eq!(g, Grade::A);
+        assert_eq!(g, Some(Grade::A));
     }
 
     /// apply_coverage_floor tightens APPROVE to REQUEST_CHANGES.
@@ -129,9 +138,9 @@ mod tests {
     /// Test: fail_contrib on APPROVE/A → REQUEST_CHANGES/D+.
     #[test]
     fn apply_coverage_floor_tightens_approve() {
-        let (v, g) = apply_coverage_floor(Verdict::Approve, Grade::A, &fail_contrib());
+        let (v, g) = apply_coverage_floor(Verdict::Approve, Some(Grade::A), &fail_contrib());
         assert_eq!(v, Verdict::RequestChanges);
-        assert_eq!(g, Grade::DPlus, "grade must be clamped to D+");
+        assert_eq!(g, Some(Grade::DPlus), "grade must be clamped to D+");
     }
 
     /// apply_coverage_floor tightens APPROVE* to REQUEST_CHANGES.
@@ -140,10 +149,13 @@ mod tests {
     /// Test: fail_contrib on APPROVE*/C → REQUEST_CHANGES/D+.
     #[test]
     fn apply_coverage_floor_tightens_approve_star() {
-        let (v, g) =
-            apply_coverage_floor(Verdict::ApproveWithReservations, Grade::C, &fail_contrib());
+        let (v, g) = apply_coverage_floor(
+            Verdict::ApproveWithReservations,
+            Some(Grade::C),
+            &fail_contrib(),
+        );
         assert_eq!(v, Verdict::RequestChanges);
-        assert_eq!(g, Grade::DPlus);
+        assert_eq!(g, Some(Grade::DPlus));
     }
 
     /// apply_coverage_floor does NOT weaken a BLOCK verdict.
@@ -152,9 +164,9 @@ mod tests {
     /// Test: fail_contrib on BLOCK/F → BLOCK/F unchanged.
     #[test]
     fn apply_coverage_floor_does_not_weaken_block() {
-        let (v, g) = apply_coverage_floor(Verdict::Block, Grade::F, &fail_contrib());
+        let (v, g) = apply_coverage_floor(Verdict::Block, Some(Grade::F), &fail_contrib());
         assert_eq!(v, Verdict::Block, "BLOCK must not be softened by coverage");
-        assert_eq!(g, Grade::F);
+        assert_eq!(g, Some(Grade::F));
     }
 
     /// apply_coverage_floor is idempotent on REQUEST_CHANGES.
@@ -164,12 +176,29 @@ mod tests {
     /// Test: fail_contrib on REQUEST_CHANGES/D → REQUEST_CHANGES/D+.
     #[test]
     fn apply_coverage_floor_idempotent_on_request_changes() {
-        let (v, g) = apply_coverage_floor(Verdict::RequestChanges, Grade::D, &fail_contrib());
+        let (v, g) = apply_coverage_floor(Verdict::RequestChanges, Some(Grade::D), &fail_contrib());
         assert_eq!(v, Verdict::RequestChanges);
         // Grade D < D+ ceiling → clamped up to D+ (grade can only improve from D to D+)
         // Actually D+ ceiling means grade must be AT MOST D+.  D < D+, so D stays D.
         // The `grade > ceiling` comparison uses Ord where D+ > D (ordinal 3 > 2),
         // so D does NOT exceed the D+ ceiling — grade stays D.
-        assert_eq!(g, Grade::D, "D does not exceed D+ ceiling so stays D");
+        assert_eq!(g, Some(Grade::D), "D does not exceed D+ ceiling so stays D");
+    }
+
+    /// apply_coverage_floor passes a `None` grade through unchanged (#1474).
+    ///
+    /// Why: a `None` grade signals an un-reviewable UNKNOWN verdict; coverage
+    /// gating must not apply to a diff that could not be reviewed, and `None`
+    /// must never be promoted to a letter grade (which would re-introduce the
+    /// UNKNOWN→F collapse).
+    /// Test: fail_contrib with None grade → grade stays None.
+    #[test]
+    fn apply_coverage_floor_passes_through_none_grade() {
+        let (v, g) = apply_coverage_floor(Verdict::Unknown, None, &fail_contrib());
+        assert_eq!(v, Verdict::Unknown, "UNKNOWN verdict preserved");
+        assert_eq!(
+            g, None,
+            "None grade must pass through (never promoted to a letter)"
+        );
     }
 }

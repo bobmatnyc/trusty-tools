@@ -39,37 +39,52 @@ use super::runner::{ReviewDeps, ReviewInput};
 /// post-verification verdict (fixes #1486: the floor-escalated grade must not
 /// survive verification relaxation).
 ///
-/// What: fail-safe → (UNKNOWN, F, F); normal → resolves LLM grade string
+/// What: fail-safe → `(verdict, grade, grade)` where an UNKNOWN fail-safe carries
+/// `None` for BOTH grades (un-reviewable ⇒ no letter grade, #1474) and any other
+/// fail-safe verdict carries its default grade; normal → resolves LLM grade string
 /// (or default), calls `derive_verdict_with_grade` for max(grade, model) + floor.
+/// Both `floor_grade` and `original_llm_grade` are `None` whenever the diff was
+/// un-reviewable (verdict UNKNOWN), so the post-verification envelope grade (step
+/// 7d) also resolves to `None` — never an "F" (#1474).
 /// Returns `(floor_verdict, floor_grade, original_llm_grade)`.
 /// Test: covered by runner integration tests and the #1486 regression test.
 pub(super) fn apply_grade_and_floor(
     parsed: &crate::pipeline::parser::ParsedReview,
 ) -> (
     Verdict,
-    crate::pipeline::letter_grade::Grade,
-    crate::pipeline::letter_grade::Grade,
+    Option<crate::pipeline::letter_grade::Grade>,
+    Option<crate::pipeline::letter_grade::Grade>,
 ) {
     if parsed.is_fail_safe {
         let v = parsed.verdict.clone();
-        let g = default_grade_for_verdict(&v);
+        // An UNKNOWN fail-safe is un-reviewable — no letter grade (#1474).
+        let g = (v != Verdict::Unknown).then(|| default_grade_for_verdict(&v));
         return (v, g, g);
     }
-    let original_llm_grade = parsed
-        .grade
-        .as_deref()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| {
-            let g = default_grade_for_verdict(&parsed.verdict);
-            warn!(
-                verdict = %parsed.verdict,
-                default_grade = %g,
-                "LLM grade absent or unparseable — using default for verdict"
-            );
-            g
-        });
+    // An UNKNOWN verdict is un-reviewable — suppress the LLM grade entirely so the
+    // post-verification clamp (step 7d) yields `None`, not the LLM's grade (#1474).
+    let original_llm_grade = (parsed.verdict != Verdict::Unknown).then(|| {
+        parsed
+            .grade
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| {
+                let g = default_grade_for_verdict(&parsed.verdict);
+                warn!(
+                    verdict = %parsed.verdict,
+                    default_grade = %g,
+                    "LLM grade absent or unparseable — using default for verdict"
+                );
+                g
+            })
+    });
+    // `derive_verdict_with_grade` returns `None` for an UNKNOWN verdict; for any
+    // real verdict it returns `Some(grade)`.  Feed it the resolved LLM grade (or a
+    // conservative default for the UNKNOWN case, which it ignores).
+    let grade_input =
+        original_llm_grade.unwrap_or_else(|| default_grade_for_verdict(&parsed.verdict));
     let (floor_verdict, floor_grade) =
-        derive_verdict_with_grade(parsed.verdict.clone(), original_llm_grade, &parsed.findings);
+        derive_verdict_with_grade(parsed.verdict.clone(), grade_input, &parsed.findings);
     (floor_verdict, floor_grade, original_llm_grade)
 }
 
