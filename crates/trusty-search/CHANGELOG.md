@@ -9,6 +9,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- boot-time stale-index reconciliation via git-diff delta reindex (closes #1670) ([#1671](https://github.com/bobmatnyc/trusty-tools/pull/1671)) ([`fe4c0b2`](https://github.com/bobmatnyc/trusty-tools/commit/fe4c0b28d340b19d3ada390925b17305412f96b2))
+## [Unreleased]
+
+### Added
+
 - auto-fresh reindex file watcher (closes #1621, refs #1619) ([#1635](https://github.com/bobmatnyc/trusty-tools/pull/1635)) ([`80e247f`](https://github.com/bobmatnyc/trusty-tools/commit/80e247fa8e64f2f701a83500e778cfb4bf5522b5))
 - reindex-on-commit git hooks + hook install/uninstall (closes #1620) ([#1622](https://github.com/bobmatnyc/trusty-tools/pull/1622)) ([`6b70579`](https://github.com/bobmatnyc/trusty-tools/commit/6b705792512bc1c7a2d7ef26ba03c470d4c9fc97))
 - typeahead endpoint + MCP tool (lexical default, opt-in blended) (closes #1557) ([#1559](https://github.com/bobmatnyc/trusty-tools/pull/1559)) ([`db16554`](https://github.com/bobmatnyc/trusty-tools/commit/db16554bbfb6d5bc1f42f3aeb29bf0c7b71b9510))
