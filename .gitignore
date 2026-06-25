@@ -67,3 +67,12 @@ tga.db
 
 # Obsidian editor config (personal)
 .obsidian/
+
+# Code-signing certificate artifacts — never commit (see #873/#1726)
+docs/certificates/*.certSigningRequest
+docs/certificates/*.p12
+docs/certificates/*.cer
+docs/certificates/*.cert
+docs/certificates/*.pem
+docs/certificates/*.key
+docs/certificates/*.mobileprovision
