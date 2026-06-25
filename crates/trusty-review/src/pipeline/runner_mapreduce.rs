@@ -252,18 +252,26 @@ async fn fold_reduced_into_result(
         // Synthesis path (#1663): verdict is already floored by apply_synthesis_floor.
         // Re-applying derive_verdict_with_grade would wrongly re-add the count
         // floor.  Use the synthesis verdict + grade directly instead.
-        let final_grade: Grade = parsed
-            .grade
-            .as_deref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(|| default_grade_for_verdict(&parsed.verdict));
+        // Grade is always available on the synthesis path (the LLM returned a
+        // verdict), so wrap in Some to match the Option<Grade> type that
+        // apply_grade_and_floor returns on the mechanical path (where an UNKNOWN
+        // verdict suppresses the grade — see #1615).
+        let final_grade: Option<Grade> = Some(
+            parsed
+                .grade
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| default_grade_for_verdict(&parsed.verdict)),
+        );
         // Pre-floor grade for telemetry: use grade_pre_floor when available;
         // fall back to final_grade when no flooring occurred (they'll be equal).
-        let pre_floor_grade: Grade = parsed
-            .grade_pre_floor
-            .as_deref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(final_grade);
+        let pre_floor_grade: Option<Grade> = Some(
+            parsed
+                .grade_pre_floor
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(|| final_grade.unwrap_or_else(|| default_grade_for_verdict(&parsed.verdict))),
+        );
         (parsed.verdict.clone(), final_grade, pre_floor_grade)
     } else {
         // Mechanical path: apply the full severity floor via apply_grade_and_floor.
@@ -292,7 +300,10 @@ async fn fold_reduced_into_result(
 
     // Envelope grade: clamp the original (pre-floor) grade to the post-
     // verification verdict (closes #1486 parity with the unified path).
-    result.grade = Some(clamp_grade_to_verdict(original_llm_grade, &result.verdict).to_string());
+    // #1615 parity: original_llm_grade is None for an un-reviewable UNKNOWN
+    // verdict (matching runner.rs behaviour); map to avoid clamping None grades.
+    result.grade = original_llm_grade
+        .map(|g| clamp_grade_to_verdict(g, &result.verdict).to_string());
 
     // Inline per-line comments from the RAW diff (#1414 parity).
     attach_inline_comments(result, &run.raw_diff);
