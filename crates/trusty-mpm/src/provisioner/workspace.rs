@@ -276,6 +276,17 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
 
         self.git.clone_repo(repo_url, git_ref, &workspace_path)?;
 
+        // Best-effort: pre-seed workspace trust + renderer-upsell dismissal into
+        // ~/.claude.json so the session starts without blocking startup prompts.
+        // Non-fatal: a seed failure must never abort provisioning (closes #1696).
+        if let Err(e) = crate::core::home_trust_seed::preseed_home_trust(&workspace_path) {
+            tracing::warn!(
+                session = %session_id,
+                path = %workspace_path.display(),
+                "home trust pre-seed failed (non-fatal): {e}"
+            );
+        }
+
         if !self.prepare {
             return Ok(PreparedWorkspace {
                 path: workspace_path,

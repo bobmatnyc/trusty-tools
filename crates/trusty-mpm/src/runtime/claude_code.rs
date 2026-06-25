@@ -116,6 +116,16 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             claude = %claude_bin,
             "spawning claude-code in tmux pane"
         );
+        // Best-effort: pre-seed workspace trust + renderer-upsell dismissal into
+        // ~/.claude.json so the session starts without blocking startup prompts.
+        // Non-fatal: a seed failure must never abort the spawn (closes #1696).
+        if let Err(e) = crate::core::home_trust_seed::preseed_home_trust(cwd) {
+            tracing::warn!(
+                session = %tmux_name,
+                cwd = %cwd.display(),
+                "home trust pre-seed failed (non-fatal): {e}"
+            );
+        }
         self.tmux
             .send_line(tmux_name, &spawn_command(&claude_bin))
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
