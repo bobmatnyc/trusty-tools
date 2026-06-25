@@ -333,6 +333,12 @@ pub async fn handle_start(
                     .store(prior, std::sync::atomic::Ordering::Relaxed);
                 // Issue #85: restore every index recorded in `indexes.toml`.
                 restore_indexes(&install_state, &embedder).await;
+                // Issue #1670: boot-time stale-index reconciliation — for each
+                // restored index, compare the stored indexed_head_sha against
+                // the current git HEAD and reindex only what changed (or fall
+                // back to a full background reindex if the delta is too large).
+                // Gated by TRUSTY_NO_BOOT_RECONCILE=1.
+                super::reconcile::reconcile_stale_indexes(&install_state).await;
                 // Schema migration: spawn a per-index background migration task.
                 if std::env::var("TRUSTY_DISABLE_MIGRATIONS").as_deref() != Ok("1") {
                     let registry =
