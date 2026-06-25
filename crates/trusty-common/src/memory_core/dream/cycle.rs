@@ -523,11 +523,17 @@ pub(super) async fn semantic_consolidation_pass(
 /// `created_at` is older than `max_age_days`, runs the consolidator over them,
 /// applies the result (canonical drawers + KG provenance), then evicts every
 /// superseded original via `handle.forget`. Returns the created/evicted counts.
+/// `max_age_days <= 0` is treated as an explicit guard value (no-op, zero
+/// counts): the contract is "consolidate facts *older* than N days", and a
+/// non-positive window selects no history rather than the whole room — without
+/// the guard a cutoff of `now` would make every drawer (even ones created this
+/// instant) eligible and evict the entire room.
 /// `injected` lets tests supply a `MockInference`-backed consolidator; in
 /// production it is `None` and the consolidator is built from `config`.
 /// Test: `consolidate_scoped_filters_by_room`,
 /// `consolidate_scoped_skips_task_drawers`,
-/// `consolidate_scoped_no_inference_is_noop` in `dream::tests`.
+/// `consolidate_scoped_no_inference_is_noop`,
+/// `consolidate_scoped_non_positive_age_is_noop` in `dream::tests`.
 pub async fn consolidate_scoped(
     handle: &Arc<PalaceHandle>,
     config: &DreamConfig,
@@ -535,6 +541,18 @@ pub async fn consolidate_scoped(
     max_age_days: i64,
     injected: Option<Arc<SemanticConsolidator>>,
 ) -> Result<RoomConsolidationStats> {
+    // Guard value: a non-positive window means "consolidate nothing" rather than
+    // "consolidate everything". Return before building the consolidator so the
+    // call is a true no-op (no inference backend touched).
+    if max_age_days <= 0 {
+        tracing::debug!(
+            palace = %handle.id,
+            max_age_days,
+            "dream_consolidate_room: non-positive age window; no-op"
+        );
+        return Ok(RoomConsolidationStats::default());
+    }
+
     let consolidator: Arc<SemanticConsolidator> = match injected {
         Some(c) => c,
         None => match build_consolidator_from_config(config) {
@@ -551,7 +569,9 @@ pub async fn consolidate_scoped(
 
     // Select candidates: room-scoped (list_drawers handles the room filter),
     // older than the age cutoff, and never protected Task drawers.
-    let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days.max(0));
+    // `max_age_days` is guaranteed positive here (the `<= 0` guard above
+    // returned early), so the cutoff is strictly in the past.
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days);
     let snapshot: Vec<Drawer> = handle
         .list_drawers(room, None, usize::MAX)
         .into_iter()

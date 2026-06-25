@@ -1406,6 +1406,84 @@ async fn consolidate_scoped_no_inference_is_noop() {
     assert_eq!(stats, RoomConsolidationStats::default());
 }
 
+/// Why: `max_age_days <= 0` is a guard value meaning "consolidate nothing".
+/// Regression for the off-by-zero bug where a cutoff of `now` made *every*
+/// drawer — including freshly created ones — eligible, evicting the whole room.
+/// What: seeds two recent (NOT aged) drawers plus a mock consolidator that would
+/// merge them, then calls `consolidate_scoped` with `max_age_days = 0` and a
+/// negative value; asserts zero counts, the consolidator never runs, and both
+/// recent drawers survive.
+/// Test: this function.
+#[tokio::test]
+async fn consolidate_scoped_non_positive_age_is_noop() {
+    use crate::memory_core::semantic_consolidation::{
+        ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+    };
+
+    let handle = open_test_handle("scoped-non-positive-age").await;
+    let r1 = handle
+        .remember(
+            "recent planning note one".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+    let r2 = handle
+        .remember(
+            "recent planning note two".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+    // Deliberately leave `created_at` at "now" — these drawers are NOT aged.
+
+    let mock = std::sync::Arc::new(MockInference::new(vec![ConsolidationAction::Merge {
+        canonical_content: "must NOT merge recent drawers".to_string(),
+        superseded_ids: vec![r1, r2],
+    }]));
+    let call_count = mock.call_count.clone();
+    let consolidator = std::sync::Arc::new(SemanticConsolidator::new(
+        mock,
+        SemanticConsolidationConfig {
+            enabled: true,
+            ..Default::default()
+        },
+    ));
+    let cfg = DreamConfig::default();
+
+    for age in [0_i64, -5] {
+        let stats = consolidate_scoped(
+            &handle,
+            &cfg,
+            Some(RoomType::Planning),
+            age,
+            Some(consolidator.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stats,
+            RoomConsolidationStats::default(),
+            "max_age_days={age} must consolidate/evict nothing"
+        );
+    }
+
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        0,
+        "consolidator must never run for a non-positive age window"
+    );
+    let ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert!(
+        ids.contains(&r1) && ids.contains(&r2),
+        "recent drawers must survive a non-positive age window"
+    );
+}
+
 // ─── RAII env-var guard for tests ────────────────────────────────────────
 //
 // Safety: test-only; the tokio::test macro with default settings uses the

@@ -26,10 +26,11 @@ fn ready_state(tmp: &TempDir) -> AppState {
 /// for an empty palace (no inference call made).
 #[tokio::test]
 async fn dream_consolidate_room_returns_shape() {
-    // Force the inference gate to "unavailable" so the no-op path is taken even
-    // if no drawers existed. Safe: this dedicated test binary is single-process.
-    unsafe { std::env::remove_var("OPENROUTER_API_KEY") };
-
+    // No env mutation: the palace is created empty, so `consolidate_scoped`
+    // short-circuits on an empty drawer snapshot and never calls an inference
+    // backend — the result is zero counts regardless of any ambient
+    // OPENROUTER_API_KEY. Mutating `std::env` here would be a data race under
+    // the default multi-threaded `#[tokio::test]` runtime.
     let tmp = tempfile::tempdir().expect("tempdir");
     let state = ready_state(&tmp);
     let cwd = tmp.path().to_string_lossy().to_string();

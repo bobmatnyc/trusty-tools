@@ -85,7 +85,9 @@ impl From<LegacyDrawerRecord> for DrawerRecord {
 /// defaults the new `completed_at_ms`.
 /// What: mirrors the pre-spec-001 `DrawerRecord` field-for-field; `From` lifts
 /// it into the modern record with `completed_at_ms = None`.
-/// Test: `drawer_completed_at_round_trips_through_redb` and the existing
+/// Test: `pre_task_drawer_row_migrates_completed_at_to_none` (decodes a
+/// legacy-shaped row through this fallback) plus the round-trip coverage in
+/// `drawer_completed_at_round_trips_through_redb` and
 /// `drawer_type_round_trips_through_redb`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(super) struct PreTaskDrawerRecord {

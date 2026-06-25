@@ -80,6 +80,13 @@ pub(crate) async fn handle_chat_session_create(state: &AppState, args: Value) ->
 /// to return the authoritative `message_count` and `updated_at`.
 /// Test: `chat_session_add_turn_appends`,
 /// `chat_session_add_turn_rejects_bad_role` in `tests/chat_mcp.rs`.
+///
+/// KNOWN MVP LIMITATION (tracked follow-up): the load→append→write sequence is
+/// NOT atomic. Two concurrent `add_turn` calls on the same `session_id` can both
+/// read the same history snapshot and the second write clobbers the first,
+/// dropping a message. The MVP assumes a single sequential caller per session; a
+/// follow-up issue covers making this a transactional read-modify-write (or a
+/// per-session append lock) before concurrent callers are supported.
 pub(crate) async fn handle_chat_session_add_turn(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "chat_session_add_turn")?;
     let session_id = args
