@@ -301,8 +301,30 @@ longer applies to the freshly-installed binary. The launchd daemon then cannot
 read indexes on `/Volumes/…` and warm-boot collapses from ~102 indexes to
 **indexes:2** (only non-external-volume indexes load).
 
-**After every `cargo install trusty-search` (or any binary that accesses
-external/protected volumes as a launchd daemon), re-grant FDA:**
+**Permanent fix (recommended): use `scripts/install-trusty-search-signed.sh`**
+
+Once you have a Developer ID Application certificate installed in your login
+keychain, install via the signed-install script instead of bare `cargo install`:
+
+```bash
+# From the repo root (installs from source + signs both binaries)
+scripts/install-trusty-search-signed.sh
+# or
+make install-search-signed
+```
+
+Developer-ID signing anchors the designated requirement (DR) to your Team ID
+and a fixed `--identifier` per binary — not the binary content — so the FDA
+grant persists across all future reinstalls. After the one-time FDA grant you
+never need to re-grant it again, even after `cargo install` rebuilds.
+
+See `docs/reference/release-workflow.md` for the one-time cert setup steps,
+`TRUSTY_SIGN_IDENTITY` override, and the optional notarization appendix.
+
+**Workaround (without a Developer ID cert): re-grant FDA manually after each install.**
+
+After every `cargo install trusty-search` (or any binary that accesses
+external/protected volumes as a launchd daemon), re-grant FDA:
 
 1. Open **System Settings → Privacy & Security → Full Disk Access**.
 2. Remove `~/.cargo/bin/trusty-search` from the list.

@@ -66,6 +66,141 @@ and renames atomically, which keeps the cache consistent. If you must copy
 manually, follow it with `codesign --force --sign - ~/.cargo/bin/<binary>`
 to regenerate the ad-hoc signature against the final file.
 
+## Developer ID Signing for Persistent macOS FDA (fixes #873)
+
+### The Problem
+
+`cargo install` produces a new binary with a new **cdhash** every time it
+runs (ad-hoc / linker-signed). macOS TCC keys the Full Disk Access grant by
+cdhash, so FDA is revoked after every reinstall. The workaround is to
+re-grant FDA manually each time — tedious and easy to forget.
+
+### The Fix: Developer ID Application Signing
+
+Signing with a Developer ID Application certificate + a fixed `--identifier`
+per binary makes the **designated requirement (DR)** stable across rebuilds.
+TCC matches the DR, not the cdhash, so the FDA grant persists permanently.
+
+### One-Time Certificate Setup
+
+1. **Enroll in the Apple Developer Program** (if not already enrolled):
+   https://developer.apple.com/programs/enroll/
+
+2. **Issue a Developer ID Application certificate** via one of:
+   - Xcode → Settings → Accounts → select your Apple ID → Manage
+     Certificates → "+" → "Developer ID Application"
+   - https://developer.apple.com/account/resources/certificates/list →
+     "+" → Developer ID → Developer ID Application → download the `.cer`
+
+3. **Install the certificate** in your login keychain:
+   - Double-click the downloaded `.cer` file — Keychain Access opens and
+     imports it automatically.
+   - Or drag the `.cer` into Keychain Access → login keychain.
+
+4. **Verify the certificate is visible**:
+   ```bash
+   security find-identity -v -p codesigning | grep 'Developer ID Application'
+   # Expected output (identity string varies by account):
+   # 1) AABBCCDDEEFF "Developer ID Application: Your Name (TEAM1234)"
+   ```
+
+### Signed Install Script
+
+Use `scripts/install-trusty-search-signed.sh` (or `make install-search-signed`)
+instead of bare `cargo install`:
+
+```bash
+# From the repo root — installs from source and signs both binaries
+scripts/install-trusty-search-signed.sh
+# or
+make install-search-signed
+```
+
+The script:
+1. Runs `cargo install --path crates/trusty-search --locked` (installs both
+   `trusty-search` and the bundled `trusty-embedderd` to `~/.cargo/bin/`).
+2. Auto-detects the Developer ID identity from the login keychain.
+3. Codesigns both binaries with:
+   - `--identifier com.trusty.trusty-search` / `com.trusty.trusty-embedderd`
+   - `--options runtime` (Hardened Runtime — required for notarization)
+   - `--timestamp` (secure timestamp from Apple's servers)
+4. Verifies signatures with `codesign --verify --strict`.
+5. Prints one-time FDA grant instructions and daemon restart commands.
+
+### TRUSTY_SIGN_IDENTITY Override
+
+If you have multiple Developer ID Application certificates (e.g. personal and
+org), specify which one to use:
+
+```bash
+TRUSTY_SIGN_IDENTITY="Developer ID Application: Acme Corp (ABCDE12345)" \
+  scripts/install-trusty-search-signed.sh
+```
+
+### Install from a Specific crates.io Version
+
+```bash
+TRUSTY_INSTALL_VERSION=0.24.10 scripts/install-trusty-search-signed.sh
+```
+
+### Install from an Alternate Repo Path
+
+```bash
+TRUSTY_INSTALL_PATH=/path/to/trusty-tools scripts/install-trusty-search-signed.sh
+```
+
+### One-Time FDA Grant (after first signed install)
+
+After the first signed install, grant Full Disk Access once:
+
+1. Open **System Settings → Privacy & Security → Full Disk Access**
+2. Click **"+"** and navigate to `~/.cargo/bin/trusty-search`
+3. Enable the toggle for `trusty-search`
+4. Restart the daemon:
+   ```bash
+   launchctl bootout  gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
+   ```
+
+After this one-time grant, future `scripts/install-trusty-search-signed.sh`
+reinstalls keep the FDA grant — no re-granting needed.
+
+### Notarization Appendix (Optional — for distributing to OTHER machines)
+
+Notarization is **not required** for local FDA persistence. It is only needed
+if you distribute the `trusty-search` binary to other machines that do not
+have it in their FDA list already (e.g. sharing a build with a team member).
+
+Notarize a signed binary using `xcrun notarytool`:
+
+```bash
+# Option A: Apple ID + app-specific password
+xcrun notarytool submit ~/.cargo/bin/trusty-search \
+  --apple-id "you@example.com" \
+  --team-id "TEAM1234" \
+  --password "xxxx-xxxx-xxxx-xxxx" \
+  --wait
+
+# Option B: App Store Connect API key (preferred for automation)
+xcrun notarytool submit ~/.cargo/bin/trusty-search \
+  --key /path/to/AuthKey_KEYID.p8 \
+  --key-id "KEYID" \
+  --issuer "issuer-uuid" \
+  --wait
+```
+
+After notarization succeeds, staple the ticket (for offline Gatekeeper checks):
+
+```bash
+xcrun stapler staple ~/.cargo/bin/trusty-search
+```
+
+> Note: binaries (as opposed to `.app` bundles or `.pkg` installers) cannot
+> have a notarization ticket stapled — the ticket must be retrieved online by
+> Gatekeeper when the binary first runs on the target machine. For local use
+> (your own machine), notarization adds no benefit; Developer ID signing alone
+> is sufficient for FDA persistence.
+
 ## Version Management
 
 Every crate manages its own version independently in its own `Cargo.toml`.
