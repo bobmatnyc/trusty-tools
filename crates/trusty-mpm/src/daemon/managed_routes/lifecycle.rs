@@ -311,6 +311,29 @@ async fn spawn_managed_inproject(
 ) -> Result<crate::session_manager::SessionRecord, String> {
     use crate::session_manager::ManagedSessionState;
 
+    // Pre-flight reconnect check (#1707): if an Active managed session with the
+    // same source_id already exists and its tmux session is still live, return it
+    // directly instead of spawning a duplicate. This is the primary mechanism by
+    // which `tm` (bare or with a path) reconnects to an in-progress session for
+    // the same project without creating a second worktree.
+    let candidate_source_id = format!("{owner}/{repo}");
+    {
+        let mgr = state.session_manager().await;
+        let existing = mgr.list().await;
+        if let Some(live) = existing.iter().find(|r| {
+            r.source_id.as_deref() == Some(&candidate_source_id)
+                && r.state == ManagedSessionState::Active
+                && mgr.tmux_driver().session_exists(&r.tmux_name)
+        }) {
+            info!(
+                id = %live.id,
+                source_id = %candidate_source_id,
+                "spawn_managed (inproject): reconnecting to existing live session"
+            );
+            return Ok(live.clone());
+        }
+    }
+
     info!(
         id = %session_id,
         worktree = %worktree.display(),
