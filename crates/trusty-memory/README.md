@@ -3,10 +3,10 @@
 [![crates.io](https://img.shields.io/crates/v/trusty-memory.svg)](https://crates.io/crates/trusty-memory)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Memory palace MCP server (HTTP/SSE) backed by `usearch` vector store, SQLite
-metadata, and `fastembed` embeddings. Stores and retrieves natural-language
-memories organized into named "palaces" (namespaces), with an optional
-knowledge-graph layer for structured triples.
+Memory palace MCP server (HTTP/SSE) backed by `usearch` (HNSW) vector store,
+`redb` metadata and knowledge-graph stores, and `fastembed` embeddings. Stores
+and retrieves natural-language memories organized into named "palaces"
+(namespaces), with an optional knowledge-graph layer for structured triples.
 
 Claude Code integration uses `trusty-memory serve --stdio` — a direct
 stdio JSON-RPC MCP server that forwards every request to the running HTTP

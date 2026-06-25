@@ -49,8 +49,8 @@ pub struct PalaceHandle {
     pub kg: Arc<KnowledgeGraph>,
     pub drawers: Arc<RwLock<Vec<Drawer>>>,
     /// On-disk data directory for this palace (where palace.json,
-    /// identity.txt, l1_cache.json, the usearch index, and the KG SQLite
-    /// file all live). `None` for in-memory tests built via `new`.
+    /// identity.txt, l1_cache.json, the usearch index, and the KG redb
+    /// store all live). `None` for in-memory tests built via `new`.
     pub data_dir: Option<std::path::PathBuf>,
     /// Temporal decay configuration applied during L2/L3 ranking.
     ///
@@ -92,7 +92,7 @@ pub struct PalaceHandle {
     pub is_compacting: Arc<AtomicBool>,
     /// Serialises mutating ops (`remember_with_options`, `forget`) on this
     /// palace so concurrent writers don't race on the L1 snapshot rename,
-    /// the vector store upsert, the KG SQLite row insert, or the in-memory
+    /// the vector store upsert, the KG redb record insert, or the in-memory
     /// drawer table.
     ///
     /// Why: Issue #154 — under 20 concurrent HTTP `memory_remember` calls,
@@ -193,7 +193,7 @@ impl PalaceHandle {
     /// What: Creates the data directory if missing, loads identity.txt
     /// (defaulting to empty), loads the L1 snapshot (defaulting to empty),
     /// opens the usearch index at `<data_dir>/index.usearch` (384-d), and
-    /// opens the KG SQLite at `<data_dir>/kg.db`. The drawer table is
+    /// opens the KG redb store at `<data_dir>/kg.redb`. The drawer table is
     /// initialized from the L1 snapshot (the L1 cache is the only
     /// authoritative drawer metadata until the full drawer table is
     /// persisted in a follow-up issue).
@@ -238,7 +238,7 @@ impl PalaceHandle {
         let kg = KnowledgeGraph::open_with_intent(&kg_path, intent)
             .with_context(|| format!("open KG for {}", palace.id))?;
 
-        // Load full drawer table from SQLite (the persistent source of truth).
+        // Load full drawer table from redb (the persistent source of truth).
         // Fall back to an empty list on error so a corrupt table doesn't make
         // the palace unopenable — the L1 snapshot still provides essentials.
         let persisted_drawers = match kg.load_drawers() {
@@ -353,7 +353,7 @@ impl PalaceHandle {
     /// Attach a recall analytics log to this handle.
     ///
     /// Why: Recall logging is opt-in so simple tests don't need to manage a
-    /// SQLite file; production palaces wire one in at construction time.
+    /// redb file; production palaces wire one in at construction time.
     /// What: Builder-style mutator returning `self`.
     /// Test: `recall_logs_events_when_log_present` uses this to enable logging.
     pub fn with_recall_log(mut self, log: Arc<RecallLog>) -> Self {
@@ -539,7 +539,7 @@ impl PalaceHandle {
         }
 
         // Persist drawer metadata BEFORE the in-memory push so a crash mid-op
-        // cannot leave an in-memory drawer with no SQLite row backing it.
+        // cannot leave an in-memory drawer with no redb record backing it.
         self.kg
             .upsert_drawer(&drawer)
             .await

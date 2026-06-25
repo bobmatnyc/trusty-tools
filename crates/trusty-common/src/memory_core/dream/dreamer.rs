@@ -286,9 +286,9 @@ impl Dreamer {
         };
         stats.update_compression_ratio();
 
-        // WAL checkpoint — PASSIVE mode is non-blocking. Issue #36: without
-        // periodic checkpointing the SQLite WAL grows unbounded over a
-        // long-running daemon's lifetime.
+        // WAL checkpoint hook — kept for API compatibility; redb manages its
+        // own write log internally so this is a no-op (issue #36, #989).
+        // Previously, SQLite needed periodic checkpointing to bound WAL growth.
         match handle.kg.checkpoint() {
             Ok((wal, done)) => {
                 tracing::debug!(

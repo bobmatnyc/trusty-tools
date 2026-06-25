@@ -188,7 +188,7 @@ pub(crate) async fn handle_palace_info(state: &AppState, args: Value) -> Result<
 pub(crate) async fn handle_palace_compact(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "palace_compact")?;
     let handle = open_palace_handle(state, &palace)?;
-    // Use the live drawer table (sourced from SQLite at palace open) as
+    // Use the live drawer table (sourced from redb at palace open) as
     // the authoritative valid-id set, then run the vector store's
     // synchronous compaction on a blocking thread.
     let valid_ids: std::collections::HashSet<Uuid> =

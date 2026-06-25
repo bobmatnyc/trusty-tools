@@ -1,4 +1,4 @@
-//! Storage backends: vector index (HNSW) + temporal knowledge graph (SQLite).
+//! Storage backends: vector index (HNSW) + temporal knowledge graph (redb).
 //!
 //! Why: Two complementary data shapes — dense vectors for semantic recall and
 //! triples-with-time for relational facts — covered by separate modules so each

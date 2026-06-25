@@ -8,24 +8,24 @@
 //! pulled in from the sibling `tools` submodule.
 //! Test: behaviour exercised end-to-end via the chat SSE integration paths.
 
-use crate::web::load_user_config;
 use crate::AppState;
+use crate::web::load_user_config;
 use axum::{
+    Json,
     body::Body,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
+use trusty_common::memory_core::PalaceRegistry;
 use trusty_common::memory_core::palace::PalaceId;
 use trusty_common::memory_core::retrieval::recall_with_default_embedder;
-use trusty_common::memory_core::PalaceRegistry;
 use trusty_common::{ChatEvent, ChatMessage};
 
 // ---------------------------------------------------------------------------
 
-use super::tools::{all_tools, execute_get_dream_status, execute_tool, ChatBody, MAX_TOOL_ROUNDS};
+use super::tools::{ChatBody, MAX_TOOL_ROUNDS, all_tools, execute_get_dream_status, execute_tool};
 
 pub(crate) async fn chat_handler(
     State(state): State<AppState>,
@@ -181,7 +181,7 @@ pub(crate) async fn chat_handler(
          service running locally on this user's machine. trusty-memory stores \
          knowledge in named \"palaces\" — isolated memory namespaces, each with \
          its own vector index (usearch HNSW) and temporal knowledge graph \
-         (SQLite). Memories are organized as Palace -> Wing -> Room -> Closet \
+         (redb). Memories are organized as Palace -> Wing -> Room -> Closet \
          -> Drawer, where a Drawer is an atomic memory unit.\n\
          There are currently {palace_count} palace(s) on this machine.\n",
     ));

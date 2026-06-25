@@ -9,7 +9,7 @@
 //! What: Re-exports the palace hierarchy (`Palace`, `Wing`, `Room`,
 //! `Drawer`), the registry, and the retrieval handle. Gated behind the
 //! `memory-core` feature because it pulls in heavy storage deps
-//! (`usearch`, `rusqlite`, `r2d2`, `tiktoken-rs`, `git2`).
+//! (`usearch`, `redb`, `postcard`, `tiktoken-rs`, `git2`).
 //! Test: Each submodule keeps its existing unit tests; `cargo test -p
 //! trusty-common --features memory-core` exercises the full surface.
 
