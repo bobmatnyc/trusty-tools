@@ -331,7 +331,9 @@ async fn main() -> anyhow::Result<()> {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::update_cmd(&paths, alias.as_deref())
         }
-        Some(Command::Sessctl { action }) => commands::sessctl::dispatch(&client, &url, action).await,
+        Some(Command::Sessctl { action }) => {
+            commands::sessctl::dispatch(&client, &url, action).await
+        }
     };
 
     // Top-level exit-code translation: a `tm sessions prune-idle` that found the

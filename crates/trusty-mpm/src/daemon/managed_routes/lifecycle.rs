@@ -105,7 +105,13 @@ pub async fn spawn_managed(
         match try_inproject_spawn(local_path, &session_id) {
             Ok(Some((worktree, owner, repo))) => {
                 return spawn_managed_inproject(
-                    state, &session_id, &params, runtime, worktree, owner, repo,
+                    state,
+                    &session_id,
+                    &params,
+                    runtime,
+                    worktree,
+                    owner,
+                    repo,
                 )
                 .await;
             }

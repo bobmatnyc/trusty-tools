@@ -288,7 +288,7 @@ mod tests {
             runtime: Default::default(),
             ephemeral: false,
             workspace_owned: false,
-        source_id: None,
+            source_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -318,7 +318,7 @@ mod tests {
             runtime: Default::default(),
             ephemeral: false,
             workspace_owned: false,
-        source_id: None,
+            source_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -346,7 +346,7 @@ mod tests {
             runtime: Default::default(),
             ephemeral: false,
             workspace_owned: false,
-        source_id: None,
+            source_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -399,7 +399,7 @@ mod tests {
             runtime: Default::default(),
             ephemeral: false,
             workspace_owned: false,
-        source_id: None,
+            source_id: None,
         };
         record.runtime = crate::runtime::RuntimeKind::Tcode;
         let json = serde_json::to_string(&record).expect("serialize");
@@ -456,7 +456,7 @@ mod tests {
             runtime: Default::default(),
             ephemeral: true,
             workspace_owned: false,
-        source_id: None,
+            source_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -512,7 +512,7 @@ mod tests {
             runtime: Default::default(),
             ephemeral: false,
             workspace_owned: true,
-        source_id: None,
+            source_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");

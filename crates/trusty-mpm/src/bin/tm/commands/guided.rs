@@ -46,10 +46,7 @@ struct SpawnManagedResponse {
 /// Test: `guided_default_falls_back_when_daemon_unreachable` in
 /// `tests_behavior_a.rs` (verifies no panic on a refused connection);
 /// `guided_default_attaches_on_success` (mocked daemon response).
-pub(crate) async fn run_guided_default(
-    client: &reqwest::Client,
-    url: &str,
-) -> anyhow::Result<()> {
+pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     // 1. Resolve the current directory.
     let cwd = std::env::current_dir().context("cannot resolve current directory")?;
     let workdir = cwd.to_string_lossy().to_string();
@@ -72,27 +69,25 @@ pub(crate) async fn run_guided_default(
         .await;
 
     match resp {
-        Ok(r) if r.status().is_success() => {
-            match r.json::<SpawnManagedResponse>().await {
-                Ok(body) if !body.name.is_empty() => {
-                    eprintln!("tm: attaching to session '{}' ({})", body.name, body.state);
-                    let status = std::process::Command::new("tmux")
-                        .args(["attach-session", "-t", &body.name])
-                        .status()
-                        .context("failed to invoke tmux")?;
-                    if !status.success() {
-                        anyhow::bail!("tmux attach-session exited with failure");
-                    }
-                    return Ok(());
+        Ok(r) if r.status().is_success() => match r.json::<SpawnManagedResponse>().await {
+            Ok(body) if !body.name.is_empty() => {
+                eprintln!("tm: attaching to session '{}' ({})", body.name, body.state);
+                let status = std::process::Command::new("tmux")
+                    .args(["attach-session", "-t", &body.name])
+                    .status()
+                    .context("failed to invoke tmux")?;
+                if !status.success() {
+                    anyhow::bail!("tmux attach-session exited with failure");
                 }
-                Ok(_) => {
-                    eprintln!("tm: daemon returned empty session name; falling back to launch");
-                }
-                Err(e) => {
-                    eprintln!("tm: failed to parse daemon response ({e}); falling back to launch");
-                }
+                return Ok(());
             }
-        }
+            Ok(_) => {
+                eprintln!("tm: daemon returned empty session name; falling back to launch");
+            }
+            Err(e) => {
+                eprintln!("tm: failed to parse daemon response ({e}); falling back to launch");
+            }
+        },
         Ok(r) => {
             eprintln!(
                 "tm: daemon returned {} for managed spawn; falling back to launch",

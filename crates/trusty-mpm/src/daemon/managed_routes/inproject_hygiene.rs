@@ -41,8 +41,15 @@ pub fn get_default_branch(base_path: &Path) -> Option<String> {
     }
     let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
     // symbolic-ref returns e.g. "origin/main"; strip the "origin/" prefix.
-    let branch = branch.strip_prefix("origin/").unwrap_or(&branch).to_string();
-    if branch.is_empty() { None } else { Some(branch) }
+    let branch = branch
+        .strip_prefix("origin/")
+        .unwrap_or(&branch)
+        .to_string();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
 }
 
 /// Run hygiene for a single base clone: fetch, hard-reset to default, prune worktrees.
@@ -206,7 +213,10 @@ mod tests {
         // A path that does not have .git must return Ok(()) immediately.
         let tmp = std::env::temp_dir();
         let result = run_hygiene_for_base(&tmp);
-        assert!(result.is_ok(), "should skip non-git dir cleanly: {result:?}");
+        assert!(
+            result.is_ok(),
+            "should skip non-git dir cleanly: {result:?}"
+        );
     }
 
     #[test]

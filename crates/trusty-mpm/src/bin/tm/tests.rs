@@ -63,14 +63,20 @@ fn cli_parses_start() {
 fn cli_parses_serve() {
     // Bare `serve` defaults to the non-stdio (start-like) behaviour.
     let cli = Cli::try_parse_from(["trusty-mpm", "serve"]).unwrap();
-    assert!(matches!(cli.command.unwrap(), Command::Serve { stdio: false }));
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Serve { stdio: false }
+    ));
 }
 
 #[test]
 fn cli_parses_serve_stdio() {
     // `serve --stdio` selects the MCP stdio bridge (#1221).
     let cli = Cli::try_parse_from(["trusty-mpm", "serve", "--stdio"]).unwrap();
-    assert!(matches!(cli.command.unwrap(), Command::Serve { stdio: true }));
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Serve { stdio: true }
+    ));
 }
 
 #[test]
@@ -464,7 +470,10 @@ fn cli_bare_invocation_uses_guided_default() {
     // Since #1708, a bare `tm` invocation is valid: clap parses it with
     // command = None and the guided default fires at runtime.
     let cli = Cli::try_parse_from(["trusty-mpm"]).expect("bare tm must parse");
-    assert!(cli.command.is_none(), "bare tm should produce command = None");
+    assert!(
+        cli.command.is_none(),
+        "bare tm should produce command = None"
+    );
 }
 
 #[test]
