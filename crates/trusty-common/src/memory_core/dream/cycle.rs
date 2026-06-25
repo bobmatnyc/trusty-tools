@@ -457,6 +457,17 @@ pub(super) async fn semantic_consolidation_pass(
     config: &DreamConfig,
     injected: Option<Arc<SemanticConsolidator>>,
 ) -> (usize, usize, usize) {
+    // The idle cycle honours the `semantic.enabled` switch even when a
+    // consolidator is injected (tests rely on this): disabling the phase in
+    // config must skip it entirely.
+    if !config.semantic.enabled {
+        tracing::debug!(
+            palace = %handle.id,
+            "skipping semantic consolidation: disabled in config"
+        );
+        return (0, 0, 0);
+    }
+
     // Use the injected consolidator (test path) or build one from config.
     let consolidator: Arc<SemanticConsolidator> = match injected {
         Some(c) => c,
