@@ -11,7 +11,7 @@
 # they are deleted and the target exits 0.  Run it again on a clean tree
 # and assert it still exits 0 (idempotent).
 
-.PHONY: clean-runtime e2e-docker
+.PHONY: clean-runtime e2e-docker install-search-signed
 
 # Remove per-crate runtime artefacts that accumulate during development.
 #
@@ -48,3 +48,29 @@ e2e-docker:
 		$(if $(TRUSTY_MEMORY_VERSION),--memory-version $(TRUSTY_MEMORY_VERSION)) \
 		$(if $(TRUSTY_MPM_VERSION),--mpm-version $(TRUSTY_MPM_VERSION)) \
 		$(if $(TRUSTY_ANALYZE_VERSION),--analyze-version $(TRUSTY_ANALYZE_VERSION))
+
+# Install trusty-search with Developer ID signing for persistent macOS FDA grant.
+#
+# Why: fixes #873 — `cargo install` produces a new cdhash (ad-hoc signing) that
+# causes macOS TCC to revoke the Full Disk Access grant after every reinstall.
+# Signing with a Developer ID Application cert + fixed --identifier per binary
+# makes the designated requirement (DR) stable, so FDA persists across reinstalls.
+#
+# What: delegates to scripts/install-trusty-search-signed.sh which runs
+# `cargo install`, auto-detects the Developer ID identity (or prints setup
+# instructions if none found), codesigns both trusty-search and trusty-embedderd,
+# verifies the signatures, and prints next-steps for the one-time FDA grant and
+# daemon restart.
+#
+# Test: run `make install-search-signed`; assert both binaries are signed with
+# a Developer ID (not ad-hoc) and `codesign --verify --strict` passes for each.
+# Run without a Developer ID cert installed to verify it exits non-zero and
+# prints actionable cert setup guidance.
+#
+# Overrides (passed as env vars, not make vars):
+#   TRUSTY_SIGN_IDENTITY=...       override the auto-detected signing identity
+#   TRUSTY_INSTALL_PATH=...        install from an explicit repo checkout path
+#   TRUSTY_INSTALL_VERSION=X.Y.Z   install a specific crates.io published version
+#   TRUSTY_CODESIGN_DRY_RUN=1     skip cargo install + codesign, test guidance only
+install-search-signed:
+	bash scripts/install-trusty-search-signed.sh
