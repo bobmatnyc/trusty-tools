@@ -127,6 +127,12 @@ pub struct ParsedReview {
     pub verdict: Verdict,
     /// Letter grade from the LLM (A+ through F), or `None` if not provided.
     pub grade: Option<String>,
+    /// Pre-floor synthesis letter grade (#1665 item 3) — the grade derived from
+    /// the LLM's RAW synthesis verdict BEFORE the two-tier floor was applied.
+    /// `None` for non-synthesis reviews or when synthesis is disabled/failed.
+    /// When `grade_pre_floor != grade`, the floor changed the verdict; when equal,
+    /// no flooring occurred.
+    pub grade_pre_floor: Option<String>,
     /// One-line summary extracted from the JSON block, or empty string.
     pub summary: String,
     /// Parsed findings (may be empty).
@@ -151,6 +157,7 @@ impl ParsedReview {
         Self {
             verdict: Verdict::Unknown,
             grade: None,
+            grade_pre_floor: None,
             summary: String::new(),
             findings: Vec::new(),
             is_fail_safe: true,
@@ -206,6 +213,7 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
         return ParsedReview {
             verdict,
             grade: None,
+            grade_pre_floor: None,
             summary: String::new(),
             findings: Vec::new(),
             is_fail_safe: false,
@@ -254,6 +262,7 @@ fn try_parse_direct_json(body: &str) -> Option<ParsedReview> {
     Some(ParsedReview {
         verdict,
         grade,
+        grade_pre_floor: None,
         summary: block.summary,
         findings,
         is_fail_safe: false,
@@ -300,6 +309,7 @@ fn try_parse_json_block(body: &str) -> Option<ParsedReview> {
     Some(ParsedReview {
         verdict,
         grade,
+        grade_pre_floor: None,
         summary: block.summary,
         findings,
         is_fail_safe: false,
