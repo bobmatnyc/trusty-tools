@@ -132,6 +132,10 @@ pub(super) async fn run_mapreduce_branch(
     let parsed = ParsedReview {
         verdict: reduced.verdict.clone(),
         grade: reduced.grade.clone(),
+        // Thread the pre-floor grade for observable telemetry (#1665 item 3).
+        // When synthesis fired the two-tier floor, grade_pre_floor differs from
+        // grade and downstream code can detect it.
+        grade_pre_floor: reduced.grade_pre_floor.clone(),
         summary: reduced.summary.clone(),
         findings: reduced.findings.clone(),
         is_fail_safe: false,
@@ -236,16 +240,31 @@ async fn fold_reduced_into_result(
     synthesis_active: bool,
 ) {
     // Derive (final_verdict, final_grade, original_llm_grade) depending on path.
+    //
+    // For the synthesis path (#1663 / #1665 item 3):
+    //   - `final_grade`        = grade for the FLOORED verdict (post-floor).
+    //   - `original_llm_grade` = grade from the LLM's RAW synthesis verdict
+    //                            (pre-floor), threaded in via `ReducedReview::grade_pre_floor`.
+    //   When the two-tier floor (#1665) changed the verdict, the two grades differ
+    //   and downstream telemetry can detect the flooring.  When no floor fired,
+    //   both are equal (same behaviour as before #1665).
     let (final_verdict, final_grade, original_llm_grade) = if synthesis_active {
-        // Synthesis path (#1663): verdict is already High-severity-floored.
+        // Synthesis path (#1663): verdict is already floored by apply_synthesis_floor.
         // Re-applying derive_verdict_with_grade would wrongly re-add the count
         // floor.  Use the synthesis verdict + grade directly instead.
-        let synthesis_grade: Grade = parsed
+        let final_grade: Grade = parsed
             .grade
             .as_deref()
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| default_grade_for_verdict(&parsed.verdict));
-        (parsed.verdict.clone(), synthesis_grade, synthesis_grade)
+        // Pre-floor grade for telemetry: use grade_pre_floor when available;
+        // fall back to final_grade when no flooring occurred (they'll be equal).
+        let pre_floor_grade: Grade = parsed
+            .grade_pre_floor
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(final_grade);
+        (parsed.verdict.clone(), final_grade, pre_floor_grade)
     } else {
         // Mechanical path: apply the full severity floor via apply_grade_and_floor.
         apply_grade_and_floor(&parsed)

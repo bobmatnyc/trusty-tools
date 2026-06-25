@@ -13,10 +13,14 @@
 //! makes ONE additional LLM call asking the model to judge the PR holistically
 //! (given the deduped finding list and per-chunk verdicts), and returns a new
 //! `ReducedReview` whose `verdict`, `grade`, and `summary` come from the synthesis
-//! response.  The High-severity safety floor is re-applied after synthesis, but the
-//! count-based Medium floor is deliberately omitted — the LLM has already holistically
-//! judged those findings.  Any synthesis error causes a graceful fall-back to the
-//! original mechanical `ReducedReview` so synthesis can NEVER fail the whole review.
+//! response.  The two-tier safety floor is re-applied after synthesis (#1665):
+//! any non-refuted `Effort::High` finding floors the verdict to at least BLOCK;
+//! failing that, a mechanical BLOCK floors the synthesis verdict to at least
+//! REQUEST_CHANGES (so synthesis cannot de-escalate BLOCK to APPROVE/APPROVE*).
+//! The count-based Medium floor is deliberately omitted — the LLM has already
+//! holistically judged those findings.  Any synthesis error causes a graceful
+//! fall-back to the original mechanical `ReducedReview` so synthesis can NEVER
+//! fail the whole review.
 //!
 //! Test: `synthesis_tests.rs`.
 
@@ -82,21 +86,32 @@ struct SynthesisResponse {
 /// Why: the mechanical reduce path applies a count-based `≥2 Medium →
 /// REQUEST_CHANGES` floor that fires on minor isolated nits and over-strictens the
 /// verdict compared to a single reviewer reading the whole PR.  The synthesis pass
-/// lets an LLM judge the PR holistically and optionally forgive nits.  The
-/// High-severity safety floor is re-applied so critical issues cannot be softened.
+/// lets an LLM judge the PR holistically and optionally forgive nits.  A two-tier
+/// safety floor (#1665) is re-applied so critical issues cannot be softened past
+/// defined lower bounds.
 /// What:
 ///   1. If `!config.synthesis` → returns `reduced` unchanged (legacy path preserved).
-///   2. Builds a synthesis prompt from PR metadata + deduped finding list.
-///   3. Calls the LLM; on any error, logs a warning and returns `reduced` unchanged.
-///   4. Parses the JSON response (verdict, grade, summary).
-///   5. Applies `apply_high_severity_floor_only` (High-severity floor ONLY —
-///      deliberately omitting the count-based Medium floor, which is the over-strictness
-///      source).
-///   6. Returns a new `ReducedReview` with the synthesis verdict/grade/summary.
+///   2. Captures `mechanical_verdict = reduced.verdict` BEFORE any modification.
+///   3. Builds a synthesis prompt from PR metadata + deduped finding list.
+///   4. Calls the LLM; on any error, logs a warning and returns `reduced` unchanged.
+///   5. Parses the JSON response (verdict, grade, summary).
+///   6. Applies `apply_synthesis_floor` with the two-tier policy (#1665).
+///      Tier 1: any unrefuted `Effort::High` finding → floor to BLOCK.
+///      Tier 2: else if `mechanical_verdict == Block` → floor to REQUEST_CHANGES
+///      (synthesis may de-escalate BLOCK→REQUEST_CHANGES but NEVER →APPROVE).
+///      Tier 3: else no floor; synthesis verdict stands.
+///      The count-based Medium floor is deliberately omitted (it is the
+///      over-strictness source the synthesis pass is calibrating away).
+///   7. Returns a new `ReducedReview` with synthesis verdict/grade/summary plus
+///      `grade_pre_floor` for observable telemetry (#1665 item 3).
 ///
-/// Test: `synthesis_tests.rs` — `synthesis_softens_minor_nits`,
-///   `synthesis_high_severity_still_floors`, `synthesis_false_returns_unchanged`,
-///   `synthesis_llm_error_falls_back`, `synthesis_grade_and_summary_flow_through`.
+/// Test: `synthesis_tests.rs` — covers `synthesis_softens_minor_nits`,
+/// `synthesis_high_severity_still_floors`, `synthesis_false_returns_unchanged`,
+/// `synthesis_llm_error_falls_back`, `synthesis_grade_and_summary_flow_through`,
+/// `synthesis_block_without_high_finding_floors_to_request_changes`,
+/// `synthesis_mechanical_rc_allows_full_softening`,
+/// `synthesis_floor_telemetry_differs_when_floored`,
+/// `synthesis_floor_telemetry_equal_when_no_floor`.
 pub async fn synthesize_review(
     reduced: ReducedReview,
     llm: &Arc<dyn LlmProvider>,
@@ -108,6 +123,10 @@ pub async fn synthesize_review(
         debug!("synthesis disabled via config.synthesis=false — returning mechanical reduce");
         return reduced;
     }
+
+    // Capture the mechanical verdict BEFORE any modification — needed by the
+    // two-tier floor (#1665 item 1) and for telemetry logging.
+    let mechanical_verdict = reduced.verdict.clone();
 
     // Build the synthesis prompt from PR metadata and the deduped finding list.
     let prompt = build_synthesis_prompt(ctx, &reduced);
@@ -148,24 +167,50 @@ pub async fn synthesize_review(
         }
     };
 
-    // Apply the High-severity safety floor (omitting the count-based Medium floor).
-    let floored_verdict =
-        apply_high_severity_floor_only(synthesis.synthesized_verdict, &reduced.findings);
+    // Capture the raw (pre-floor) synthesized verdict so we can compute the
+    // pre-floor grade independently from the post-floor grade (#1665 item 3).
+    let raw_verdict = synthesis.synthesized_verdict.clone();
 
-    // Parse the synthesized grade string through the Grade type so invalid tokens
-    // (e.g. "Pass", "A+/B") are caught; fall back to the floor-derived default on
-    // parse failure or empty string.
+    // Apply the two-tier synthesis floor (#1665 item 1):
+    //   Tier 1: any unrefuted High finding → floor to BLOCK.
+    //   Tier 2: else mechanical_verdict was BLOCK → floor to REQUEST_CHANGES.
+    //   Tier 3: else no floor; synthesis verdict stands (may soften freely).
+    let floored_verdict = apply_synthesis_floor(
+        synthesis.synthesized_verdict,
+        &reduced.findings,
+        &mechanical_verdict,
+    );
+
+    // Pre-floor grade: clamp the LLM grade to the RAW (pre-floor) verdict for
+    // observable telemetry (#1665 item 3).  When the floor changes the verdict,
+    // pre_floor_grade_str differs from grade_str below; when no floor fires
+    // (raw_verdict == floored_verdict), they are identical.
+    let pre_floor_grade_str = synthesis
+        .grade
+        .parse::<Grade>()
+        .ok()
+        .map(|g| {
+            use crate::pipeline::letter_grade::clamp_grade_to_verdict;
+            clamp_grade_to_verdict(g, &raw_verdict).to_string()
+        })
+        .unwrap_or_else(|| grade_for_verdict(&raw_verdict).to_string());
+
+    // Post-floor grade: clamp the LLM grade to the FLOORED verdict so invalid
+    // combinations (e.g. "A" on a floored BLOCK) are corrected.
     let grade_str = synthesis
         .grade
         .parse::<Grade>()
         .ok()
-        .map(|g| g.to_string())
+        .map(|g| {
+            use crate::pipeline::letter_grade::clamp_grade_to_verdict;
+            clamp_grade_to_verdict(g, &floored_verdict).to_string()
+        })
         .unwrap_or_else(|| grade_for_verdict(&floored_verdict).to_string());
 
     let summary = synthesis.summary.clone();
 
     info!(
-        mechanical_verdict = %reduced.verdict,
+        mechanical_verdict = %mechanical_verdict,
         synthesis_verdict = %floored_verdict,
         grade = %grade_str,
         "synthesis pass complete"
@@ -176,6 +221,7 @@ pub async fn synthesize_review(
         findings: reduced.findings,
         stats: reduced.stats,
         grade: Some(grade_str),
+        grade_pre_floor: Some(pre_floor_grade_str),
         summary,
     }
 }
@@ -198,46 +244,49 @@ struct ParsedSynthesis {
     summary: String,
 }
 
-// ─── High-severity-only floor ─────────────────────────────────────────────────
+// ─── Two-tier synthesis floor ─────────────────────────────────────────────────
 
-/// Apply ONLY the High-severity floor after synthesis (closes #1663).
+/// Apply the two-tier synthesis floor after the synthesis LLM call (#1665).
 ///
 /// Why: the synthesis LLM has holistically judged the PR; re-applying the full
 /// `derive_verdict` (which includes the count-based `≥2 Medium →
 /// REQUEST_CHANGES` floor) would undo the calibration the synthesis was designed
-/// to provide.  The one non-negotiable floor is: ANY non-refuted High-severity
-/// finding must still floor the verdict to at least BLOCK.  Critical findings
-/// cannot be forgiven by synthesis — that would be a safety hole.
+/// to provide.  Two non-negotiable floors remain (#1665, decided policy):
 ///
-/// **High → BLOCK is the correct and intentional floor** (floor semantics note):
-/// The unified single-file path's `derive_verdict` (in `pipeline/grade.rs`,
-/// `correctness_floor`) maps `Effort::High` → `Verdict::Block` as Tier 1.
-/// `Effort::High` is the only severity level above Medium in the domain model
-/// ("Critical or High severity" per the `grade.rs` module-level comment).  There
-/// is no separate `Critical` variant in `Effort`.  Our `High → BLOCK` floor here
-/// therefore MATCHES the unified path's semantics exactly, keeping map-reduce and
-/// unified verdicts on a single standard.
+///   **Tier 1 — High finding → BLOCK:**
+///   ANY non-refuted `Effort::High` finding must floor the verdict to at least
+///   BLOCK.  Critical findings cannot be forgiven by synthesis — that would be a
+///   safety hole.  This matches the unified path's `correctness_floor` semantics
+///   (`Effort::High` is the only severity above Medium; there is no separate
+///   `Critical` variant).
 ///
-/// **Softening a mechanical BLOCK IS intentional** (calibration goal):
-/// The `worst-chunk-wins` mechanical reduce can produce a BLOCK verdict even when
-/// no High-severity finding exists — for example, when the count-based `≥2 Medium
-/// → REQUEST_CHANGES` floor fires on many chunks and the most severe chunk verdict
-/// is REQUEST_CHANGES, not BLOCK.  In practice, a mechanical BLOCK may arise from
-/// a per-chunk BLOCK that was itself driven by a Medium-count heuristic rather than
-/// a genuine High-severity finding.  Synthesis is PERMITTED to soften such a
-/// mechanical BLOCK, because the LLM has seen all findings holistically and judged
-/// them minor.  The High-severity floor below is the only hard backstop: synthesis
-/// can NEVER soften a BLOCK that is backed by a non-refuted `Effort::High` finding.
+///   **Tier 2 — mechanical BLOCK → at least REQUEST_CHANGES:**
+///   If no High finding is present but the mechanical (pre-synthesis) verdict was
+///   `Verdict::Block`, synthesis may de-escalate BLOCK → REQUEST_CHANGES but MUST
+///   NOT de-escalate BLOCK → APPROVE or APPROVE*.  A per-chunk BLOCK without a
+///   High finding is typically driven by a Medium-count heuristic; an LLM
+///   holistically judging those nits minor is permitted — but the human reviewer
+///   must at minimum be informed via REQUEST_CHANGES, not silently APPROVED.
 ///
-/// What: if any finding in `findings` is `Effort::High` AND not refuted →
-/// returns the stricter of (`synthesized_verdict`, BLOCK).  Otherwise returns
-/// `synthesized_verdict` unchanged.  This deliberately does NOT apply the
-/// count-based `≥2 Medium → REQUEST_CHANGES` floor (that floor is the
-/// over-strictness source the synthesis is calibrating away).
-/// Test: `synthesis_high_severity_still_floors` in synthesis_tests.rs.
-pub(crate) fn apply_high_severity_floor_only(
+///   **Tier 3 — no floor:** when neither condition above applies, synthesis may
+///   soften the verdict freely (e.g. REQUEST_CHANGES → APPROVE is allowed for
+///   non-BLOCK mechanical verdicts with no High findings).
+///
+/// What: given `synthesized` (the LLM's raw output), `findings` (the deduped
+/// finding set), and `mechanical_verdict` (the deterministic pre-synthesis
+/// verdict captured before synthesis ran):
+///   - Returns `BLOCK` when `has_unrefuted_high`.
+///   - Returns `max_by_ordinal(synthesized, REQUEST_CHANGES)` when
+///     `mechanical_verdict == Block` (and no High finding).
+///   - Otherwise returns `synthesized` unchanged.
+///
+/// Test: `synthesis_high_severity_still_floors`,
+/// `synthesis_block_without_high_finding_floors_to_request_changes`,
+/// `synthesis_mechanical_rc_allows_full_softening` in synthesis_tests.rs.
+pub(crate) fn apply_synthesis_floor(
     synthesized: Verdict,
     findings: &[Finding],
+    mechanical_verdict: &Verdict,
 ) -> Verdict {
     use crate::models::VerifyOutcome;
 
@@ -253,17 +302,50 @@ pub(crate) fn apply_high_severity_floor_only(
     });
 
     if has_unrefuted_high {
-        // BLOCK is the minimum for a critical finding — take the stricter of
-        // the synthesized verdict and BLOCK.
+        // Tier 1: BLOCK is the minimum for a critical finding — take the stricter
+        // of the synthesized verdict and BLOCK.
         if synthesized.ordinal() < Verdict::Block.ordinal() {
             debug!(
                 synthesis_verdict = %synthesized,
-                "High-severity safety floor: synthesis verdict upgraded to BLOCK"
+                "synthesis floor tier-1: High-severity finding — upgrading verdict to BLOCK"
             );
             return Verdict::Block;
         }
+        return synthesized;
     }
+
+    if *mechanical_verdict == Verdict::Block {
+        // Tier 2: mechanical BLOCK without High finding — synthesis may de-escalate
+        // BLOCK → REQUEST_CHANGES but NOT further toward APPROVE.
+        if synthesized.ordinal() < Verdict::RequestChanges.ordinal() {
+            debug!(
+                synthesis_verdict = %synthesized,
+                "synthesis floor tier-2: mechanical BLOCK (no High finding) — \
+                 upgrading synthesis verdict to REQUEST_CHANGES"
+            );
+            return Verdict::RequestChanges;
+        }
+    }
+
+    // Tier 3: no floor — return synthesized verdict unchanged.
     synthesized
+}
+
+/// Alias kept for backward-compat in existing test call-sites; delegates to
+/// `apply_synthesis_floor` with an `Approve` mechanical verdict (tier-2 never
+/// fires, only tier-1 applies) so the semantics of the old single-floor helper
+/// are preserved exactly.
+///
+/// Why: avoids a noisy test diff; all call-sites that only exercise the
+/// High-severity floor can keep using the name they document.
+/// What: calls `apply_synthesis_floor(synthesized, findings, &Verdict::Approve)`.
+/// Test: old helper unit tests in synthesis_tests.rs.
+#[cfg(test)]
+pub(crate) fn apply_high_severity_floor_only(
+    synthesized: Verdict,
+    findings: &[Finding],
+) -> Verdict {
+    apply_synthesis_floor(synthesized, findings, &Verdict::Approve)
 }
 
 // ─── Prompt builders ──────────────────────────────────────────────────────────
@@ -453,7 +535,7 @@ fn parse_verdict_str(s: &str) -> Option<Verdict> {
         "UNKNOWN" => {
             warn!(
                 verdict = "UNKNOWN",
-                "synthesis: model returned UNKNOWN verdict — treating as unrecognised,                  falling back to mechanical result"
+                "synthesis: model returned UNKNOWN verdict — treating as unrecognised, falling back to mechanical result"
             );
             None
         }

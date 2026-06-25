@@ -106,6 +106,7 @@ fn reduced_with_findings(verdict: Verdict, findings: Vec<Finding>) -> ReducedRev
         findings,
         stats: stats_one_reviewed(),
         grade: None,
+        grade_pre_floor: None,
         summary: String::new(),
     }
 }
@@ -415,6 +416,190 @@ async fn synthesis_unknown_verdict_falls_back() {
     assert!(
         result.grade.is_none(),
         "fallback path must not populate grade"
+    );
+}
+
+// ── #1665 follow-up tests ──────────────────────────────────────────────────
+
+/// #1665 item 1 — DECIDED policy, Tier-2 floor:
+/// per-chunk BLOCK (no High finding, only Medium) + synthesis returns APPROVE
+/// → final verdict must be REQUEST_CHANGES (NOT APPROVE, NOT BLOCK).
+///
+/// The mechanical reduce produced BLOCK via the worst-chunk-wins aggregate even
+/// though the only finding is Medium-effort.  Synthesis sees minor isolated nits
+/// holistically and returns APPROVE.  Tier-2 of `apply_synthesis_floor` must
+/// floor that APPROVE to at least REQUEST_CHANGES because the mechanical verdict
+/// was BLOCK.
+#[tokio::test]
+async fn synthesis_block_without_high_finding_floors_to_request_changes() {
+    // Mechanical BLOCK, only Medium findings (no High present).
+    let findings = vec![
+        finding(
+            "nit",
+            "missing doc comment on public fn",
+            Effort::Medium,
+            0.85,
+        ),
+        finding("style", "inconsistent naming", Effort::Medium, 0.80),
+    ];
+    let reduced = reduced_with_findings(Verdict::Block, findings);
+
+    // Synthesis LLM judges nits minor and returns APPROVE — Tier-2 must fire.
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm::new(
+        r#"{"verdict":"APPROVE","grade":"B","summary":"Nits are minor; approving holistically."}"#,
+    ));
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+
+    let result = synthesize_review(reduced, &llm, &c, &cfg()).await;
+
+    assert_eq!(
+        result.verdict,
+        Verdict::RequestChanges,
+        "#1665 tier-2 floor: per-chunk BLOCK + only Medium findings + synthesis APPROVE \
+         must produce REQUEST_CHANGES, not APPROVE and not BLOCK"
+    );
+}
+
+/// #1665 item 1 — High finding still floors to BLOCK (Tier-1, existing rule preserved).
+///
+/// Confirms the Tier-1 floor still fires: a High-effort finding is present so the
+/// verdict must be BLOCK regardless of the synthesis output.
+#[tokio::test]
+async fn synthesis_high_finding_tier1_still_blocks() {
+    let findings = vec![finding(
+        "auth-bypass",
+        "skips all auth on admin endpoints",
+        Effort::High,
+        0.97,
+    )];
+    let reduced = reduced_with_findings(Verdict::Block, findings);
+
+    // Synthesis returns APPROVE — Tier-1 must upgrade to BLOCK.
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm::new(
+        r#"{"verdict":"APPROVE","grade":"A","summary":"Looks fine."}"#,
+    ));
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+
+    let result = synthesize_review(reduced, &llm, &c, &cfg()).await;
+
+    assert_eq!(
+        result.verdict,
+        Verdict::Block,
+        "#1665 tier-1: High-effort finding must always floor to BLOCK"
+    );
+}
+
+/// #1665 item 1 — Tier-3 (no floor): mechanical REQUEST_CHANGES + synthesis
+/// returns APPROVE* → final must be APPROVE* (synthesis allowed to soften freely).
+///
+/// The mechanical verdict was REQUEST_CHANGES (not BLOCK) and there are no High
+/// findings — neither Tier-1 nor Tier-2 fires.  Synthesis can soften freely to
+/// APPROVE*.
+#[tokio::test]
+async fn synthesis_mechanical_rc_allows_full_softening() {
+    let findings = vec![finding("nit", "cosmetic whitespace", Effort::Low, 0.7)];
+    let reduced = reduced_with_findings(Verdict::RequestChanges, findings);
+
+    // Synthesis returns APPROVE* — must NOT be floored (mechanical was RC, not BLOCK).
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm::new(
+        r#"{"verdict":"APPROVE*","grade":"B-","summary":"Minor nit, approvable with reservations."}"#,
+    ));
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+
+    let result = synthesize_review(reduced, &llm, &c, &cfg()).await;
+
+    assert_eq!(
+        result.verdict,
+        Verdict::ApproveWithReservations,
+        "#1665 tier-3 (no floor): mechanical RC + no High finding must allow \
+         synthesis to soften to APPROVE*"
+    );
+}
+
+/// #1665 item 3 — telemetry: when the floor changes the verdict, `grade_pre_floor`
+/// differs from `grade` so downstream code can detect flooring.
+///
+/// Mechanical BLOCK + only Medium findings + synthesis returns APPROVE.
+/// Tier-2 floors APPROVE → REQUEST_CHANGES, so the pre-floor grade (B, for APPROVE)
+/// must differ from the post-floor grade (clamped for REQUEST_CHANGES).
+#[tokio::test]
+async fn synthesis_floor_telemetry_differs_when_floored() {
+    let findings = vec![finding("nit", "style", Effort::Medium, 0.8)];
+    let reduced = reduced_with_findings(Verdict::Block, findings);
+
+    // Synthesis returns APPROVE (grade "B") — Tier-2 floors verdict to RC.
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm::new(
+        r#"{"verdict":"APPROVE","grade":"B","summary":"Minor nit."}"#,
+    ));
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+
+    let result = synthesize_review(reduced, &llm, &c, &cfg()).await;
+
+    // Flooring occurred — verify the verdict was changed.
+    assert_eq!(
+        result.verdict,
+        Verdict::RequestChanges,
+        "tier-2 floor must produce RC"
+    );
+
+    // Telemetry: grade and grade_pre_floor must differ (floor was observable).
+    assert!(
+        result.grade.is_some(),
+        "grade must be populated after synthesis"
+    );
+    assert!(
+        result.grade_pre_floor.is_some(),
+        "grade_pre_floor must be populated when synthesis ran"
+    );
+    assert_ne!(
+        result.grade, result.grade_pre_floor,
+        "#1665 item 3: when the floor changes the verdict, \
+         grade (post-floor) must differ from grade_pre_floor (pre-floor)"
+    );
+}
+
+/// #1665 item 3 — telemetry: when no floor fires, `grade_pre_floor == grade`.
+///
+/// Mechanical REQUEST_CHANGES + synthesis APPROVE* (Tier-3, no floor) — both
+/// grades should be equal because synthesis verdict was not changed.
+#[tokio::test]
+async fn synthesis_floor_telemetry_equal_when_no_floor() {
+    let findings = vec![finding("nit", "whitespace", Effort::Low, 0.6)];
+    let reduced = reduced_with_findings(Verdict::RequestChanges, findings);
+
+    // Synthesis returns APPROVE* — no floor fires (RC mechanical, no High finding).
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm::new(
+        r#"{"verdict":"APPROVE*","grade":"B-","summary":"Minor nit, approvable."}"#,
+    ));
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+
+    let result = synthesize_review(reduced, &llm, &c, &cfg()).await;
+
+    assert_eq!(
+        result.verdict,
+        Verdict::ApproveWithReservations,
+        "no floor — verdict unchanged"
+    );
+
+    // Telemetry: no floor → grades must be equal.
+    assert_eq!(
+        result.grade, result.grade_pre_floor,
+        "#1665 item 3: when no floor fires, grade and grade_pre_floor must be equal"
     );
 }
 
