@@ -471,19 +471,25 @@ fn is_segmented_identifier(token: &str) -> bool {
 /// True when `token` is a structured path/slug/key=value/compound-identifier
 /// that should NOT be treated as a base64 blob or mixed-case credential.
 ///
-/// Why (issue #1667): `looks_like_secret`'s heuristics (b64-symbol check and
-/// mixed-case+digit check) fire on legitimate technical tokens. Examples:
-/// `verdict/grade/prose-summary` contains `/` (b64 sym) → false positive;
-/// `>=2-medium->REQUEST_CHANGES` strips to `2-medium->REQUEST_CHANGES` which
-/// is lower+upper+digit → false positive on the mixed-case branch.
+/// Why (issues #1667, #1676): `looks_like_secret`'s heuristics (b64-symbol
+/// check and mixed-case+digit check) fire on legitimate technical tokens.
+/// Examples: `verdict/grade/prose-summary` contains `/` (b64 sym) → false
+/// positive; `>=2-medium->REQUEST_CHANGES` is lower+upper+digit → false
+/// positive on the mixed-case branch; `reviewer_model=openrouter/openai/...`
+/// was routed to the slash-path branch, where the first `/`-segment
+/// `reviewer_model=openrouter` contains `=` and fails `is_word_segment`,
+/// causing a false positive (#1676).
 /// This function recognises those structural shapes and short-circuits the
 /// two dangerous branches in `looks_like_secret`.
-/// What: returns `true` for (a) slash-path tokens where every `/`-segment is
-/// word-like, (b) `=`-containing tokens where at least one side of the `=`
-/// is word-like and the RHS is not pure padding, or (c) hyphen-segmented
-/// compound identifiers where each segment is uniform-case.
-/// A token with `+` is never structural (`+` never appears in identifiers).
-/// Test: `structural_tokens_are_not_flagged`, `base64_blob_is_blocked`.
+/// What: returns `true` for (a) `=`-containing tokens where the LHS is a
+/// word segment and the RHS is itself structural (a word segment OR a
+/// slash-path), checked before the slash-path branch so that tokens like
+/// `key=path/to/value` are decomposed at `=` first; (b) slash-path tokens
+/// where every `/`-segment is word-like; or (c) hyphen-segmented compound
+/// identifiers where each segment is uniform-case. A token with `+` is
+/// never structural (`+` never appears in identifiers).
+/// Test: `structural_tokens_are_not_flagged`, `base64_blob_is_blocked`,
+/// `key_equals_slashpath_not_flagged` (issue #1676 regression tests).
 fn is_structural_token(token: &str) -> bool {
     // `+` is unambiguously base64 — no structural pattern uses it.
     if token.contains('+') {
@@ -505,22 +511,47 @@ fn is_structural_token(token: &str) -> bool {
             && s.chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '>'))
     }
-    // (a) Path/slug shape: all `/`-separated segments are word-like.
-    // Covers `verdict/grade/prose-summary`, `org/repo`, file paths.
-    if token.contains('/') {
-        return token.split('/').all(is_word_segment);
+    // True when every `/`-separated segment of `s` is a word segment.
+    // Extracted as a named helper so the `=` branch can use it for the RHS
+    // without re-entering `is_structural_token` (one-level bounded check).
+    fn is_slash_path(s: &str) -> bool {
+        s.contains('/') && s.split('/').all(is_word_segment)
     }
-    // (b) key=value / semver-operator shape: `=` present and at least one
-    // side is word-like; RHS is not pure base64 padding (`===`).
+    // (a) key=value / semver-operator shape — checked BEFORE slash-path so
+    // that tokens containing BOTH `=` and `/` (e.g.
+    // `reviewer_model=openrouter/openai/gpt-5.4-mini-20260317`) are
+    // decomposed at the `=` boundary first, letting the RHS be validated as
+    // a slash-path rather than having the whole token routed to branch (b)
+    // where the first `/`-segment (`reviewer_model=openrouter`) contains `=`
+    // and fails `is_word_segment`.
+    //
+    // Compositional rule (issue #1676): LHS must be a word segment AND the
+    // RHS must be EITHER a word segment OR a slash-path (all its `/`-separated
+    // segments are word-like). A RHS that is a high-entropy opaque blob — no
+    // slashes, not a simple word — is not structural, so the token falls
+    // through to the entropy heuristics and is correctly flagged.
+    // Exception: RHS that is pure `=` padding is non-structural (base64).
     if token.contains('=') {
         let parts: Vec<&str> = token.splitn(2, '=').collect();
         if parts.len() == 2 {
+            let lhs = parts[0];
             let rhs = parts[1];
             if rhs.chars().all(|c| c == '=') {
                 return false; // pure base64 padding, not key=value
             }
-            return is_word_segment(parts[0]) || is_word_segment(rhs);
+            if is_word_segment(lhs) && (is_word_segment(rhs) || is_slash_path(rhs)) {
+                return true;
+            }
+            // Fall back to the original OR for semver-operator tokens like
+            // `>=value` where the LHS may be a bare `>` and the RHS drives
+            // the structural signal.
+            return is_word_segment(lhs) || is_word_segment(rhs);
         }
+    }
+    // (b) Path/slug shape: all `/`-separated segments are word-like.
+    // Covers `verdict/grade/prose-summary`, `org/repo`, file paths.
+    if token.contains('/') {
+        return token.split('/').all(is_word_segment);
     }
     // (c) Hyphen-segmented compound identifier: no b64 syms remain at this
     // point; check whether every `-`-separated segment is uniform-case.

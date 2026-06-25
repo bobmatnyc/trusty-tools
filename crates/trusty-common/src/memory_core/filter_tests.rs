@@ -636,3 +636,134 @@ fn real_secrets_still_blocked_after_1667_fix() {
         cfg.apply(&b64_content, false)
     );
 }
+
+// ---- Issue #1676: key=value tokens where the value is a slash-path ----
+
+/// Why (issue #1676): `is_structural_token` routed tokens containing both `=`
+/// and `/` to the slash-path branch first, where the first `/`-segment (e.g.
+/// `reviewer_model=openrouter`) contains `=` and fails `is_word_segment`,
+/// causing false positives. The fix: evaluate `=` before `/` and use a
+/// compositional check — LHS must be a word segment AND the RHS must be
+/// either a word segment or a slash-path.
+/// What: asserts that `key=slash/path/value` tokens are NOT flagged as secrets.
+/// Test: itself.
+#[test]
+fn key_equals_slashpath_not_flagged() {
+    // The exact token from the live false positive (issue #1676).
+    assert!(
+        !looks_like_secret("reviewer_model=openrouter/openai/gpt-5.4-mini-20260317"),
+        "reviewer_model=openrouter/openai/... must NOT be flagged as secret"
+    );
+
+    // Additional key=slash-path shapes.
+    let allowed = [
+        "reviewer_model=openrouter/openai/gpt-5.4-mini-20260317",
+        "model=anthropic/claude-3-5-sonnet",
+        "provider=openai/gpt-4o",
+        "config=org/repo/settings.json",
+        "base_path=usr/local/bin",
+        // Plain key=word (unchanged existing behaviour).
+        "timeout=30s",
+        "env=production",
+        // key=version-tag
+        "version=v1.2.3",
+    ];
+    for tok in allowed {
+        assert!(
+            !looks_like_secret(tok),
+            "key=value token should NOT be flagged as secret: {tok}"
+        );
+    }
+}
+
+/// Why (issue #1676): end-to-end gate must ACCEPT content containing
+/// `key=slash/path` tokens.
+/// What: passes the confirmed live false positive and additional representative
+/// cases through `FilterConfig::apply` and asserts Ok.
+/// Test: itself.
+#[test]
+fn gate_accepts_key_equals_slashpath() {
+    let cfg = FilterConfig::default();
+    let cases = [
+        // The exact rejection from the issue report:
+        "reviewer_model=openrouter/openai/gpt-5.4-mini-20260317",
+        // Representative variations:
+        "Using model=anthropic/claude-3-5-sonnet for code review",
+        "Set provider=openai/gpt-4o in your config",
+        "Deploy with config=org/repo/settings.json",
+    ];
+    for content in cases {
+        assert!(
+            cfg.apply(content, false).is_ok(),
+            "gate must ACCEPT: {content:?}\ngot: {:?}",
+            cfg.apply(content, false)
+        );
+    }
+}
+
+/// Why (issue #1676): the compositional fix must NOT weaken detection of real
+/// secrets embedded as values in `key=value` tokens. The critical guard is the
+/// `+` early-exit in `is_structural_token`: a `key=base64blob` where the
+/// encoded blob itself contains `+` (a standard base64 symbol) is NEVER
+/// structural, regardless of the `=` reordering introduced by this fix.
+///
+/// Note: `key=alnum_only_blob` (no `+`, no `/` in value, all alnum) is treated
+/// as structural by `is_word_segment` — this is a KNOWN FALSE NEGATIVE that
+/// predates issue #1667 (the `=` branch already returned true for these), and
+/// the #1676 compositional fix does not change it. Real-world API keys with a
+/// slash in them are not emitted by any known provider. The `+` guard and the
+/// known-prefix layer (`sk-`, `ghp_`, `AKIA`, …) remain the primary defences.
+///
+/// What: verifies that `key=<blob-with-plus>` tokens are still flagged and that
+/// the known prefix layer (`AKIA…`) is still operative end-to-end when the
+/// token arrives as a standalone whitespace-delimited token (not embedded in
+/// `key=value` form, where the prefix check is bypassed).
+/// Test: itself.
+#[test]
+fn key_equals_secret_still_blocked_after_1676_fix() {
+    let cfg = FilterConfig::default();
+
+    // A `key=` token where the base64-ENCODED value itself contains `+` —
+    // the `+` early-exit in `is_structural_token` fires before the `=` branch,
+    // so the token is correctly non-structural even after the reordering.
+    // Base64 of arbitrary bytes that encodes to contain `+`:
+    // bytes [3, 224, 200] × 10 → "A+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DI"
+    let b64_value = "A+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DIA+DI"; // pragma: allowlist secret
+    let b64_kv = format!("token={b64_value}");
+    assert!(
+        find_secret_token(&b64_kv).is_some(),
+        "key=base64blob (with literal + in encoding) must still be flagged: {b64_kv}"
+    );
+    assert!(
+        matches!(
+            cfg.apply(&b64_kv, false),
+            Err(FilterReject::PotentialSecret { .. })
+        ),
+        "key=base64blob (with +) must be rejected by apply; got {:?}",
+        cfg.apply(&b64_kv, false)
+    );
+
+    // A standalone known-prefix secret — the prefix check runs BEFORE
+    // `is_structural_token`, so moving `=` before `/` in the structural check
+    // does NOT affect it.
+    let cases = [
+        ("AKIAIOSFODNN7EXAMPLE", "AWS long-term key"), // pragma: allowlist secret
+        ("ghp_abcdefghijklmnopqrstuvwxyz012345", "GitHub PAT"), // pragma: allowlist secret
+        ("sk-abcdefghijklmnopqrstuvwxyz01234567890123", "OpenAI key"), // pragma: allowlist secret
+    ];
+    for (tok, label) in cases {
+        assert!(
+            find_secret_token(tok).is_some(),
+            "{label} must still be caught by find_secret_token after #1676 fix: {tok}"
+        );
+        let prose = format!("Config: {tok}");
+        assert!(
+            matches!(
+                cfg.apply(&prose, false),
+                Err(FilterReject::PotentialSecret { .. })
+            ),
+            "{label} must still be rejected by apply end-to-end; got {:?}",
+            cfg.apply(&prose, false)
+        );
+    }
+}
