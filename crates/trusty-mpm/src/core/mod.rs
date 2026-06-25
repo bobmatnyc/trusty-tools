@@ -29,6 +29,7 @@ pub mod doctor;
 pub mod error;
 pub mod external_session;
 pub mod frontmatter;
+pub mod home_trust_seed;
 pub mod hook;
 pub mod instruction_overrides;
 pub mod instruction_pipeline;

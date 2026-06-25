@@ -10,7 +10,8 @@
 //! `cwd = workspace_path`) which the local spawn reuses verbatim.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
-use trusty_mpm::daemon::managed_routes::is_local_workdir;
+use trusty_mpm::daemon::managed_routes::{is_local_workdir, write_task_md};
+use trusty_mpm::session_manager::ManagedSessionId;
 
 /// An existing absolute directory must be detected as a local workdir so the
 /// spawn uses it directly and SKIPS the clone (#1433).
@@ -97,5 +98,58 @@ fn is_local_workdir_follows_symlinked_dir() {
     assert!(
         is_local_workdir(&path),
         "a symlink to a directory must be a usable local workdir: {path}"
+    );
+}
+
+// ── TASK.md tests — local-path spawn path (refs #1693) ───────────────────────
+
+/// The local-path spawn path MUST write TASK.md into the workspace when a task
+/// is provided (refs #1693).
+///
+/// Why: `spawn_managed_local` previously bypassed `WorkspaceProvisioner::provision_in`
+/// (which owns TASK.md writing for clone sessions) and therefore NEVER wrote
+/// TASK.md even when the caller supplied `--task "..."`. This test locks in the
+/// fix so both spawn paths produce TASK.md consistently.
+/// What: calls `write_task_md` (the shared helper called by `spawn_managed_local`)
+/// with a non-empty task and asserts TASK.md is created with the exact content.
+/// Test: this function IS the test.
+#[test]
+fn local_path_spawn_writes_task_md() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let session_id = ManagedSessionId::new();
+    let task = "Implement the OAuth2 login flow for the mobile app";
+
+    write_task_md(dir.path(), task, &session_id);
+
+    let task_file = dir.path().join("TASK.md");
+    assert!(
+        task_file.exists(),
+        "TASK.md must be written into the local workspace when task is non-empty"
+    );
+    let content = std::fs::read_to_string(&task_file).expect("read TASK.md");
+    assert_eq!(
+        content, task,
+        "TASK.md must contain the exact task string provided to the spawn"
+    );
+}
+
+/// When no task is provided the local-path spawn path must NOT create an empty
+/// TASK.md (refs #1693, mirrors clone-path behaviour in workspace.rs).
+///
+/// Why: an empty TASK.md is misleading — the agent would open a blank file and
+/// have no useful brief. Writing nothing is preferable to writing an empty file.
+/// What: calls `write_task_md` with an empty task and asserts no TASK.md appears.
+/// Test: this function IS the test.
+#[test]
+fn local_path_spawn_skips_task_md_when_empty() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let session_id = ManagedSessionId::new();
+
+    write_task_md(dir.path(), "", &session_id);
+
+    let task_file = dir.path().join("TASK.md");
+    assert!(
+        !task_file.exists(),
+        "TASK.md must NOT be created when the task string is empty"
     );
 }
