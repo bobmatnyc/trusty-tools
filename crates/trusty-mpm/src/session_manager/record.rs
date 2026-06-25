@@ -212,6 +212,20 @@ pub struct SessionRecord {
     /// an accidentally deleted live repo cannot be un-deleted.
     #[serde(default)]
     pub workspace_owned: bool,
+
+    /// Opaque identifier linking this session to its source project.
+    ///
+    /// Why (#1707): the in-project spawn path (#1706) creates sessions that are
+    /// associated with a specific GitHub `owner/repo`; recording the source id
+    /// (e.g. `"owner/repo"`) lets callers filter the session list by project
+    /// and lets `tm` reconnect to an existing session for the same project
+    /// instead of spawning a duplicate.
+    ///
+    /// `#[serde(default)]` keeps records persisted before this field existed
+    /// deserializable — they load with `source_id = None`, which is correct:
+    /// sessions spawned via the old paths carry no project identity.
+    #[serde(default)]
+    pub source_id: Option<String>,
 }
 
 /// Error types for session record operations.
@@ -274,6 +288,7 @@ mod tests {
             runtime: Default::default(),
             ephemeral: false,
             workspace_owned: false,
+        source_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -303,6 +318,7 @@ mod tests {
             runtime: Default::default(),
             ephemeral: false,
             workspace_owned: false,
+        source_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -330,6 +346,7 @@ mod tests {
             runtime: Default::default(),
             ephemeral: false,
             workspace_owned: false,
+        source_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -382,6 +399,7 @@ mod tests {
             runtime: Default::default(),
             ephemeral: false,
             workspace_owned: false,
+        source_id: None,
         };
         record.runtime = crate::runtime::RuntimeKind::Tcode;
         let json = serde_json::to_string(&record).expect("serialize");
@@ -438,6 +456,7 @@ mod tests {
             runtime: Default::default(),
             ephemeral: true,
             workspace_owned: false,
+        source_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -493,6 +512,7 @@ mod tests {
             runtime: Default::default(),
             ephemeral: false,
             workspace_owned: true,
+        source_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");

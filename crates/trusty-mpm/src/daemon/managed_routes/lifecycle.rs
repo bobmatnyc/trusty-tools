@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use tracing::{info, warn};
 
+use super::inproject::try_inproject_spawn;
 use crate::daemon::state::DaemonState;
 use crate::provisioner::WorkspaceProvisioner;
 use crate::runtime::{RuntimeKind, build_adapter};
@@ -95,6 +96,29 @@ pub async fn spawn_managed(
     // `git@…` URL, a relative path, a non-existent path) falls through to the
     // existing clone-based provisioning below, so remote-URL callers are unaffected.
     if is_local_workdir(&params.repo_url) {
+        // In-project path (#1706): if the local directory is a git repo with a
+        // GitHub remote, spawn against a per-session worktree of a protected base
+        // clone rather than using the directory directly. If it is NOT a git repo
+        // with a GitHub remote (no `.git`, no remote origin, non-GitHub URL), fall
+        // through to the existing local-path spawn.
+        let local_path = std::path::Path::new(&params.repo_url);
+        match try_inproject_spawn(local_path, &session_id) {
+            Ok(Some((worktree, owner, repo))) => {
+                return spawn_managed_inproject(
+                    state, &session_id, &params, runtime, worktree, owner, repo,
+                )
+                .await;
+            }
+            Ok(None) => {
+                // Not a git repo with a GitHub remote — use local-path fast path.
+            }
+            Err(e) => {
+                tracing::warn!(
+                    id = %session_id,
+                    "in-project spawn failed: {e}; falling back to local-path spawn"
+                );
+            }
+        }
         return spawn_managed_local(state, &session_id, &params, runtime).await;
     }
 
@@ -259,6 +283,105 @@ pub fn write_task_md(workspace: &std::path::Path, task: &str, session_id: &Manag
             "failed to write TASK.md (local-path spawn): {e}"
         );
     }
+}
+
+/// Spawn a managed session rooted at a per-session git worktree (#1706).
+///
+/// Why: the in-project spawn path gives every managed session its own isolated
+/// branch worktree of a protected base clone, rather than operating directly on
+/// the operator's working directory. This mirrors `spawn_managed_local` but uses
+/// the `worktree` path as both the session workspace and cwd, records the
+/// `source_id` (`owner/repo`) on the record so `tm` can reconnect to existing
+/// sessions for the same project, and sets `workspace_owned = false` (the
+/// worktree is inside the base clone dir, which the operator should manage; the
+/// session does NOT own it for decommission purposes).
+/// What: in order — (1) creates the tmux session rooted at the worktree via
+/// `create_with_id`; (2) writes `TASK.md` into the worktree; (3) sets `source_id`
+/// via `set_source_id`; (4) runs the FRONT gate (fail-open); (5) marks `Active`;
+/// (6) spawns the runtime. A spawn failure marks the record errored (non-fatal).
+/// Test: covered transitively by the in-project spawn integration tests.
+async fn spawn_managed_inproject(
+    state: &std::sync::Arc<crate::daemon::state::DaemonState>,
+    session_id: &crate::session_manager::ManagedSessionId,
+    params: &SpawnParams,
+    runtime: crate::runtime::RuntimeKind,
+    worktree: std::path::PathBuf,
+    owner: String,
+    repo: String,
+) -> Result<crate::session_manager::SessionRecord, String> {
+    use crate::session_manager::ManagedSessionState;
+
+    info!(
+        id = %session_id,
+        worktree = %worktree.display(),
+        owner = %owner,
+        repo = %repo,
+        "spawn_managed: in-project worktree spawn"
+    );
+
+    write_task_md(&worktree, &params.task, session_id);
+
+    let mgr = state.session_manager().await;
+    let record = mgr
+        .create_with_id(
+            *session_id,
+            params.task.clone(),
+            Some(worktree.clone()),
+            params.name_hint.clone(),
+            Some(worktree.clone()),
+            None, // no remote repo_url — the worktree IS the workspace
+            None,
+            runtime,
+            params.ephemeral.unwrap_or(false),
+            false, // workspace_owned: worktrees are inside the base clone; not auto-deletable
+        )
+        .await
+        .map_err(|e| {
+            warn!(id = %session_id, "spawn_managed (inproject): create failed: {e}");
+            e.to_string()
+        })?;
+
+    // Record the source project identity so callers can reconnect later.
+    let source_id = format!("{owner}/{repo}");
+    if let Err(e) = mgr.set_source_id(session_id, &source_id).await {
+        warn!(id = %session_id, "spawn_managed (inproject): set_source_id failed: {e}");
+    }
+
+    // Front gate with the original repo_url so GitHub identity is parseable.
+    if let Some(record) =
+        front_gate_or_escalate(&mgr, &record, &params.repo_url, &params.task).await?
+    {
+        return Ok(record);
+    }
+
+    if let Err(e) = mgr
+        .set_workspace(session_id, worktree.clone(), ManagedSessionState::Active)
+        .await
+    {
+        warn!(id = %session_id, "spawn_managed (inproject): set_workspace failed: {e}");
+    }
+
+    let tmux_arc = mgr.tmux_driver();
+    let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc);
+    if let Err(e) = adapter.spawn(&record.tmux_name, &worktree, &params.task) {
+        warn!(
+            id = %record.id,
+            name = %record.tmux_name,
+            "spawn_managed (inproject): runtime adapter spawn failed: {e}"
+        );
+        let _ = mgr
+            .mark_errored(&record.id, &format!("spawn failed: {e}"))
+            .await;
+    } else {
+        info!(
+            id = %record.id,
+            name = %record.tmux_name,
+            worktree = %worktree.display(),
+            "managed session spawned successfully (in-project worktree)"
+        );
+    }
+
+    Ok(mgr.get(&record.id).await.unwrap_or(record))
 }
 
 /// Spawn a managed session rooted at an EXISTING local directory — NO clone (#1433).
