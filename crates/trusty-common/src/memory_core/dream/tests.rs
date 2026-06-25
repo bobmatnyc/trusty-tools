@@ -623,6 +623,95 @@ async fn dream_cycle_semantic_consolidation_with_mock() {
     assert!(has_canonical, "canonical drawer must be present");
 }
 
+/// Why: spec-001 — `DrawerType::Task` drawers must never be fed to the
+/// semantic consolidator, so they can never be superseded by a canonical
+/// summary. This guards the snapshot filter in `semantic_consolidation_pass`.
+/// What: plants two Task drawers, injects a MockInference that WOULD merge any
+/// drawers it is handed, runs a dream cycle, and asserts the consolidator was
+/// never called (call_count == 0), no canonical drawer was created, and both
+/// Task drawers survive unchanged.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_semantic_consolidation_skips_task_drawers() {
+    use crate::memory_core::palace::DrawerType;
+    use crate::memory_core::retrieval::RememberOptions;
+    use crate::memory_core::semantic_consolidation::{
+        ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+    };
+
+    let handle = open_test_handle("dream-semantic-task-skip").await;
+
+    let task_opts = || RememberOptions {
+        force: true,
+        classify_as: Some(DrawerType::Task),
+        ..RememberOptions::default()
+    };
+    let id1 = handle
+        .remember_with_options(
+            "Goal: migrate the chat store to redb".into(),
+            RoomType::Planning,
+            vec![],
+            0.7,
+            task_opts(),
+        )
+        .await
+        .unwrap();
+    let id2 = handle
+        .remember_with_options(
+            "Milestone: ship the MCP chat-session tools".into(),
+            RoomType::Planning,
+            vec![],
+            0.6,
+            task_opts(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.drawers.read().len(), 2);
+
+    // A mock that would merge anything it is handed — it must never be called.
+    let actions = vec![ConsolidationAction::Merge {
+        canonical_content: "tasks should NOT be merged".to_string(),
+        superseded_ids: vec![id1, id2],
+    }];
+    let mock = std::sync::Arc::new(MockInference::new(actions));
+    let call_count = mock.call_count.clone();
+    let cfg = SemanticConsolidationConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let consolidator = std::sync::Arc::new(SemanticConsolidator::new(mock, cfg));
+
+    let dreamer = Dreamer::with_consolidator(
+        DreamConfig {
+            dedup_threshold: 0.999,
+            semantic: SemanticConsolidationConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..DreamConfig::default()
+        },
+        consolidator,
+    );
+
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(
+        stats.semantically_consolidated, 0,
+        "Task drawers must not be consolidated"
+    );
+    assert_eq!(
+        call_count.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "consolidator must never be called when only Task drawers exist"
+    );
+    let ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert!(
+        ids.contains(&id1) && ids.contains(&id2),
+        "both tasks survive"
+    );
+    assert_eq!(handle.drawers.read().len(), 2, "no canonical drawer added");
+}
+
 /// Why: When no inference backend is configured, the semantic phase must
 /// silently skip without error and the dream cycle must complete normally
 /// with the same behavior as pre-#87.

@@ -69,6 +69,50 @@ impl From<LegacyDrawerRecord> for DrawerRecord {
             created_at_ms: l.created_at_ms,
             drawer_type: None,
             expires_at_ms: None,
+            completed_at_ms: None,
+        }
+    }
+}
+
+/// #61-era on-disk shape of a drawer row (with `drawer_type` /
+/// `expires_at_ms` but without the spec-001 `completed_at_ms`).
+///
+/// Why: postcard is positional, so adding `completed_at_ms` to `DrawerRecord`
+/// means rows written in the #61 era no longer decode as the current shape —
+/// the reader would otherwise wrongly fall all the way back to
+/// `LegacyDrawerRecord` and silently drop each row's `drawer_type` /
+/// `expires_at`. This intermediate shape preserves those fields and only
+/// defaults the new `completed_at_ms`.
+/// What: mirrors the pre-spec-001 `DrawerRecord` field-for-field; `From` lifts
+/// it into the modern record with `completed_at_ms = None`.
+/// Test: `drawer_completed_at_round_trips_through_redb` and the existing
+/// `drawer_type_round_trips_through_redb`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct PreTaskDrawerRecord {
+    pub room_id: String,
+    pub content: String,
+    pub importance: f32,
+    pub tags: Vec<String>,
+    pub source_file: Option<String>,
+    pub created_at_ms: i64,
+    #[serde(default)]
+    pub drawer_type: Option<String>,
+    #[serde(default)]
+    pub expires_at_ms: Option<i64>,
+}
+
+impl From<PreTaskDrawerRecord> for DrawerRecord {
+    fn from(p: PreTaskDrawerRecord) -> Self {
+        DrawerRecord {
+            room_id: p.room_id,
+            content: p.content,
+            importance: p.importance,
+            tags: p.tags,
+            source_file: p.source_file,
+            created_at_ms: p.created_at_ms,
+            drawer_type: p.drawer_type,
+            expires_at_ms: p.expires_at_ms,
+            completed_at_ms: None,
         }
     }
 }
@@ -95,6 +139,7 @@ pub(super) fn drawer_to_record(drawer: &Drawer) -> DrawerRecord {
         created_at_ms: drawer.created_at.timestamp_millis(),
         drawer_type: Some(drawer.drawer_type.as_str().to_string()),
         expires_at_ms: drawer.expires_at.map(|d| d.timestamp_millis()),
+        completed_at_ms: drawer.completed_at.map(|d| d.timestamp_millis()),
     }
 }
 
@@ -113,6 +158,7 @@ pub(super) fn parse_drawer_type(tag: Option<&str>) -> crate::memory_core::palace
         Some("SessionEvent") => DrawerType::SessionEvent,
         Some("AgentNote") => DrawerType::AgentNote,
         Some("Commit") => DrawerType::Commit,
+        Some("Task") => DrawerType::Task,
         _ => DrawerType::Unknown,
     }
 }

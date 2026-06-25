@@ -1012,6 +1012,7 @@ fn rescore_l1_by_similarity_patches_scores() {
         access_count: 0,
         drawer_type: crate::memory_core::palace::DrawerType::UserFact,
         expires_at: None,
+        completed_at: None,
     };
 
     // L1 drawer that appears in the similarity map.

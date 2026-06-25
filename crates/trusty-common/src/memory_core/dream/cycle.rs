@@ -50,6 +50,10 @@ pub(super) async fn content_prune_pass(
         if started.elapsed() >= budget {
             break;
         }
+        // spec-001: Task drawers are protected — never evicted by any pass.
+        if drawer.drawer_type.is_protected() {
+            continue;
+        }
         if is_low_quality_content(&drawer.content, min_words) {
             victims.push(drawer.id);
         }
@@ -190,6 +194,10 @@ pub(super) async fn dedup_pass(
         if already_removed.contains(&drawer.id) {
             continue;
         }
+        // spec-001: never merge away a protected Task drawer.
+        if drawer.drawer_type.is_protected() {
+            continue;
+        }
         // Top-3 keeps the dedup pass cheap; the first neighbor is `drawer`
         // itself (score ~1.0) so we look at index 1+. `vector_store.search`
         // returns pure cosine similarity — no importance weighting baked
@@ -208,6 +216,11 @@ pub(super) async fn dedup_pass(
             let Some(hit_drawer) = snapshot.iter().find(|d| d.id == hit.drawer_id) else {
                 continue;
             };
+            // spec-001: a protected Task drawer must never be merged away, even
+            // when it is the lower-importance side of a near-duplicate pair.
+            if hit_drawer.drawer_type.is_protected() {
+                continue;
+            }
 
             // Pick survivor (higher importance wins; ties keep `drawer`).
             let (survivor, loser) = if drawer.importance >= hit_drawer.importance {
@@ -241,6 +254,11 @@ pub(super) async fn prune_pass(
     for drawer in snapshot.iter() {
         if started.elapsed() >= budget {
             break;
+        }
+        // spec-001: Task drawers are never pruned, regardless of age or
+        // decayed importance.
+        if drawer.drawer_type.is_protected() {
+            continue;
         }
         let age = DecayConfig::age_days(drawer.created_at);
         let boost = drawer.accumulated_boost(&handle.decay_config);
@@ -339,7 +357,15 @@ pub(super) async fn semantic_consolidation_pass(
         Arc::new(SemanticConsolidator::new(backend, config.semantic.clone()))
     };
 
-    let snapshot: Vec<Drawer> = handle.drawers.read().clone();
+    // spec-001: exclude protected Task drawers from consolidation entirely so
+    // they are never folded into a canonical summary or superseded.
+    let snapshot: Vec<Drawer> = handle
+        .drawers
+        .read()
+        .iter()
+        .filter(|d| !d.drawer_type.is_protected())
+        .cloned()
+        .collect();
     if snapshot.is_empty() {
         return (0, 0, 0);
     }

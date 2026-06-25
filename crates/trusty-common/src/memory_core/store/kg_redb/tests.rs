@@ -204,6 +204,27 @@ mod tests {
     }
 
     #[test]
+    fn drawer_completed_at_round_trips_through_redb() {
+        // spec-001: a Task drawer's type and optional completed_at timestamp
+        // must survive a write/read through the new on-disk field.
+        use crate::memory_core::palace::DrawerType;
+        let (_d, kg) = open_kg();
+        let mut drawer =
+            Drawer::new(Uuid::new_v4(), "ship v2 milestone").with_type(DrawerType::Task);
+        let done = chrono::Utc::now();
+        drawer.completed_at = Some(done);
+        kg.upsert_drawer(&drawer).unwrap();
+
+        let loaded = kg.load_drawers().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].drawer_type, DrawerType::Task);
+        assert!(loaded[0].expires_at.is_none(), "tasks never expire");
+        let got = loaded[0].completed_at.expect("completed_at persisted");
+        // redb stores millisecond precision; compare at that granularity.
+        assert_eq!(got.timestamp_millis(), done.timestamp_millis());
+    }
+
+    #[test]
     fn load_drawer_ids_matches_load_drawers() {
         let (_d, kg) = open_kg();
         let room = Uuid::new_v4();

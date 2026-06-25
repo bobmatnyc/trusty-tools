@@ -486,6 +486,7 @@ mod tests {
                 access_count: 0,
                 drawer_type: Default::default(),
                 expires_at: None,
+                completed_at: None,
             };
             handle.add_drawer(drawer);
         }
