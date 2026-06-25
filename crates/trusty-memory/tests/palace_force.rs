@@ -111,3 +111,46 @@ async fn force_false_still_enforces_validation() {
         "expected a validation error, got: {msg}"
     );
 }
+
+/// `force=true` still rejects unsafe slug formats (issue #1719).
+///
+/// Why: the `force` flag bypasses the project-slug gate but must never allow
+/// slugs that could cause path traversal, filesystem issues, or redb table-name
+/// collisions. The format gate runs unconditionally.
+/// What: attempts to create palaces with unsafe slugs and verifies each is
+/// rejected even with `force=true`.
+/// Test: this function.
+#[tokio::test]
+async fn force_flag_rejects_unsafe_slugs() {
+    let (state, _root, cwd) = fixture();
+    let cwd_str = cwd.path().to_string_lossy().to_string();
+
+    let long_slug = "a".repeat(64);
+    let unsafe_slugs: &[&str] = &[
+        "../traversal",      // path traversal
+        "has spaces",        // whitespace
+        "UPPERCASE",         // uppercase letters
+        "has_underscore",    // underscore not allowed
+        "-starts-with-dash", // must start with letter/digit
+        "",                  // empty
+        &long_slug,          // too long (> 63 chars)
+    ];
+    for slug in unsafe_slugs {
+        let result = dispatch_tool(
+            &state,
+            "palace_create",
+            json!({ "name": slug, "force": true, "cwd": cwd_str }),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "slug {slug:?} should be rejected by format validation even with force=true; got {result:?}"
+        );
+        let err = result.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("slug") || msg.contains("character") || msg.contains("match"),
+            "error should mention slug format, got: {msg}"
+        );
+    }
+}

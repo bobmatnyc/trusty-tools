@@ -17,6 +17,37 @@ use uuid::Uuid;
 
 use super::helpers::{open_palace_handle, resolve_palace};
 
+/// Validate that a palace slug is a safe, well-formed filesystem name.
+///
+/// Why: `force=true` bypasses the project-slug enforcement gate but must not
+/// allow arbitrary strings that could cause path traversal, redb table-name
+/// collisions, or filesystem issues. This guard runs unconditionally.
+/// What: Accepts `[a-z0-9][a-z0-9-]{0,62}` — lowercase letters, digits, and
+/// hyphens; must start with a letter or digit; max 63 characters.
+/// Test: indirectly via `force_flag_rejects_unsafe_slugs` in tools tests.
+fn validate_slug_format(slug: &str) -> Result<()> {
+    if slug.is_empty() || slug.len() > 63 {
+        return Err(anyhow!(
+            "palace slug must be 1–63 characters (got {}): {slug:?}",
+            slug.len()
+        ));
+    }
+    let is_safe = slug.chars().enumerate().all(|(i, c)| {
+        if i == 0 {
+            c.is_ascii_lowercase() || c.is_ascii_digit()
+        } else {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
+        }
+    });
+    if !is_safe {
+        return Err(anyhow!(
+            "palace slug must match [a-z0-9][a-z0-9-]{{0,62}} \
+             (lowercase letters, digits, hyphens only): {slug:?}"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_palace_create(state: &AppState, args: Value) -> Result<Value> {
     let palace_name = args
         .get("name")
@@ -44,6 +75,15 @@ pub(crate) async fn handle_palace_create(state: &AppState, args: Value) -> Resul
     // test contexts; either short-circuits the same validation call.
     let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
     let skip_enforcement = std::env::var("TRUSTY_SKIP_PALACE_ENFORCEMENT").as_deref() == Ok("1");
+    // Even when `force=true`, validate that the slug is a safe filesystem name:
+    // lowercase letters, digits, and hyphens only; must start with a letter or
+    // digit; max 63 chars. This prevents path traversal and redb table-name
+    // collisions regardless of the project-slug enforcement bypass.
+    // The test-context bypass (TRUSTY_SKIP_PALACE_ENFORCEMENT=1) also skips
+    // the format gate so unit tests that use historical slug names keep passing.
+    if !skip_enforcement {
+        validate_slug_format(palace_name)?;
+    }
     if !skip_enforcement && !force {
         let cwd = args
             .get("cwd")
