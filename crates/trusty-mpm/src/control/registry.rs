@@ -20,9 +20,14 @@ use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use crate::control::actor::{DEFAULT_BROADCAST_CAPACITY, SessionActorHandle, spawn_actor};
+use crate::control::actor::{
+    DEFAULT_BROADCAST_CAPACITY, SessionActorConfig, SessionActorHandle, spawn_actor,
+};
+use crate::control::admission::{AdmissionDecision, AdmissionError, check_admission};
 use crate::control::backend::stream_json::StreamJsonBackend;
 use crate::control::backend::tmux::TmuxBackend;
+use crate::control::classifier::{ActivityClassifier, ClassifierGate, OpenRouterClassifier};
+use crate::control::config::ControlPlaneConfig;
 use crate::control::event::BackendKind;
 use crate::control::id::{ControlSessionId, SessionCounter};
 
@@ -57,9 +62,27 @@ pub struct RunParams {
 /// allocation. All registry mutations hold an exclusive lock only for the
 /// duration of the `HashMap` operation per §7.1.
 /// Test: `registry_register_deregister`, `registry_list`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SessionRegistry {
     inner: Arc<RwLock<RegistryInner>>,
+    /// Auth + cost guardrails (§9): concurrency cap, launch stagger, auth
+    /// timeout, classifier gate. Shared so the daemon can read the same config
+    /// the registry enforces.
+    config: Arc<ControlPlaneConfig>,
+    /// §8.3 OpenRouter classifier (#1648). `None` = the §8.3 gate is closed
+    /// (default path): spawned actors make ZERO classifier calls (AC-9).
+    /// `Some(_)` = the daemon resolved an `OPENROUTER_API_KEY` provider AND the
+    /// gate opened; spawned actors invoke it fail-open on unmatched output.
+    classifier: Option<Arc<dyn ActivityClassifier>>,
+}
+
+impl std::fmt::Debug for SessionRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionRegistry")
+            .field("config", &self.config)
+            .field("classifier", &self.classifier.is_some())
+            .finish()
+    }
 }
 
 struct RegistryInner {
@@ -76,19 +99,108 @@ impl std::fmt::Debug for RegistryInner {
 }
 
 impl SessionRegistry {
-    /// Create a new empty registry.
+    /// Create a new empty registry with the default control-plane config.
     ///
     /// Why: the daemon constructs a registry at startup and injects it into
-    /// every handler; an empty initial state is the correct starting point.
-    /// What: allocates the `Arc<RwLock<…>>` with an empty map and counter.
-    /// Test: all registry tests construct via `new()`.
+    /// every handler; an empty initial state with spec-default guardrails (cap
+    /// 5, stagger 2 s) is the correct starting point.
+    /// What: allocates the `Arc<RwLock<…>>` with an empty map and counter and a
+    /// [`ControlPlaneConfig::default`].
+    /// Test: all registry tests construct via `new()` or `with_config()`.
     pub fn new() -> Self {
+        Self::with_config(ControlPlaneConfig::default())
+    }
+
+    /// Create a new empty registry with an explicit control-plane config.
+    ///
+    /// Why: the daemon loads `[control_plane]` from the operator's config and
+    /// must inject the cap/stagger/timeout values the registry enforces. Tests
+    /// inject a zero-stagger config for deterministic, fast cap testing.
+    /// What: allocates the registry as in `new()` but stores the supplied
+    /// `ControlPlaneConfig` (wrapped in an `Arc` for cheap cloning).
+    /// Test: `registry_cap_rejects_over_limit`, `registry_stagger_zero_is_instant`.
+    pub fn with_config(config: ControlPlaneConfig) -> Self {
         Self {
             inner: Arc::new(RwLock::new(RegistryInner {
                 actors: HashMap::new(),
                 counter: SessionCounter::default(),
             })),
+            config: Arc::new(config),
+            classifier: None,
         }
+    }
+
+    /// Wire an OpenRouter activity classifier (§8.3, #1648) onto the registry.
+    ///
+    /// Why: the §8.3 classifier is gated by config flag + key presence + no-SM
+    /// (per [`ClassifierGate`]). The daemon resolves an `OPENROUTER_API_KEY`
+    /// provider once and calls this ONLY when the gate is open; spawned actors
+    /// then invoke it fail-open. The default registry has no classifier, so the
+    /// default path makes ZERO OpenRouter calls (AC-9).
+    /// What: builds an [`OpenRouterClassifier`] from `provider` + `model` and
+    /// stores it as the per-actor classifier seam. Returns `self` for chaining.
+    /// Test: `registry_with_classifier_builds_actor_config_with_seam`.
+    pub fn with_classifier(
+        mut self,
+        provider: Arc<dyn crate::core::sm::providers::LlmProvider>,
+        model: impl Into<String>,
+    ) -> Self {
+        self.classifier = Some(Arc::new(OpenRouterClassifier::new(provider, model)));
+        self
+    }
+
+    /// Build the per-actor [`SessionActorConfig`] from registry config (#1648/#1649).
+    ///
+    /// Why: every actor spawned by the registry must carry the §4.4 auth timeout
+    /// (from `[control_plane].auth_timeout_secs`) and, when the §8.3 gate is
+    /// open, the classifier seam. Centralising the construction keeps both spawn
+    /// sites identical and the gate check in one place.
+    /// What: sets `auth_timeout` from `self.config.auth_timeout()`, and includes
+    /// the classifier ONLY when [`ClassifierGate::should_classify`] permits it —
+    /// i.e. config flag on, a provider is wired, and no SM agent is connected.
+    /// `sm_agent_connected` is currently always `false` (alpha-1 daemon is the
+    /// only caller); when SM-connection signalling lands it threads through here.
+    /// Test: `registry_actor_config_default_no_classifier`,
+    /// `registry_actor_config_gate_off_no_classifier`.
+    fn actor_config(&self) -> SessionActorConfig {
+        // §8.3 gate: a classifier is only attached when the config flag is on,
+        // a provider was wired (api-key-present analogue), and no SM is attached.
+        let gate = ClassifierGate::from_config(
+            &self.config.observability,
+            self.classifier.is_some(),
+            false,
+        );
+        let classifier = if gate.should_classify() {
+            self.classifier.clone()
+        } else {
+            None
+        };
+        SessionActorConfig {
+            auth_timeout: self.config.auth_timeout(),
+            classifier,
+        }
+    }
+
+    /// Borrow the registry's control-plane config (§9).
+    ///
+    /// Why: HTTP handlers and the daemon's classifier gate need to read the
+    /// same config the registry enforces (e.g. the auth timeout, the classifier
+    /// flag) without cloning the whole struct.
+    /// What: returns a `&ControlPlaneConfig` for the lifetime of the borrow.
+    /// Test: `registry_exposes_config`.
+    pub fn config(&self) -> &ControlPlaneConfig {
+        &self.config
+    }
+
+    /// Number of live sessions currently registered.
+    ///
+    /// Why: `tm list` summaries and the admission check both need the current
+    /// live count; exposing it avoids forcing callers to materialize the full
+    /// id list just to count.
+    /// What: acquires the read lock and returns `actors.len()`.
+    /// Test: `registry_live_count`.
+    pub async fn live_count(&self) -> usize {
+        self.inner.read().await.actors.len()
     }
 
     /// Register an actor handle under a session ID.
@@ -144,22 +256,90 @@ impl SessionRegistry {
         inner.actors.keys().cloned().collect()
     }
 
-    /// Allocate a session ID and spawn an actor via the selected backend.
+    /// Check the §9.2 concurrency cap against the current live count.
+    ///
+    /// Why: callers (and the staggered-launch loop) sometimes want to know
+    /// whether a launch would be admitted *before* paying the stagger delay, so
+    /// they can fail fast. `run_session` ALSO re-checks under the write lock so
+    /// this pre-check is advisory, not the authoritative gate.
+    /// What: reads the live count under the read lock and runs the pure
+    /// [`check_admission`] predicate with the configured cap and stagger.
+    /// Test: `registry_admission_check`.
+    pub async fn admission(&self) -> AdmissionDecision {
+        let live = self.live_count().await as u32;
+        check_admission(
+            live,
+            self.config.max_concurrent_sessions,
+            self.config.launch_stagger_ms,
+        )
+    }
+
+    /// Allocate a session ID and spawn an actor via the selected backend,
+    /// enforcing the §9.2 concurrency cap and launch stagger.
     ///
     /// Why: `tm run <project-id>` must go through the registry so the ID
     /// counter is authoritative and an issued ID is always observable by
-    /// concurrent `get()` / `list_ids()` callers. The former two-step pattern
-    /// (allocate → release lock → spawn → re-acquire to register) had a TOCTOU
-    /// gap: the ID existed but `get()` returned `None` during backend setup.
-    /// What: holds ONE write lock for the entire sequence — ID allocation,
-    /// backend construction, actor spawn, and handle insertion — so `get(&id)`
-    /// is never `None` for a returned ID. Backend construction (`Command::spawn`
-    /// or `tmux new-session`) takes O(10 ms) in the worst case; holding the
-    /// write lock across that is acceptable for Phase 1.
+    /// concurrent `get()` / `list_ids()` callers. WI-5 (§9.2) adds two cost
+    /// guardrails here: the concurrency cap (hard limit, enforced under the
+    /// write lock so it is race-free) and the launch stagger (applied ONLY on
+    /// the admit path, so a rejected launch returns immediately without paying
+    /// the stagger delay).
+    /// What: (1) acquires a write lock and performs a fast-fail cap check —
+    /// returning [`AdmissionError::CapReached`] immediately (no stagger) if
+    /// `live >= cap`; (2) on the admit path, releases the lock, sleeps the
+    /// configured `launch_stagger_ms`, then re-acquires the write lock and
+    /// re-checks the cap authoritatively (preventing a concurrent launch that
+    /// slipped in during the stagger from exceeding the cap); (3) holds that
+    /// second lock for ID allocation, backend construction, actor spawn, and
+    /// handle insertion so `get(&id)` is never `None` for a returned ID.
     /// Returns the allocated `ControlSessionId`.
-    /// Test: `registry_run_session`, `registry_run_session_id_visible_immediately`.
+    /// Test: `registry_run_session`, `registry_run_session_id_visible_immediately`,
+    /// `registry_run_session_rejects_when_capped`, `registry_cap_reject_is_immediate`.
     pub async fn run_session(&self, params: RunParams) -> Result<ControlSessionId> {
+        // §9.2 fast-fail cap check — under the read lock (cheap; no writers
+        // blocked). A stale count that causes a false-admit is caught by the
+        // authoritative write-lock recheck below; a false-reject is safe
+        // (conservative). A rejected launch returns immediately, paying ZERO
+        // stagger delay.
+        {
+            let inner = self.inner.read().await;
+            let live = inner.actors.len() as u32;
+            if let AdmissionDecision::Reject { live, cap } =
+                check_admission(live, self.config.max_concurrent_sessions, 0)
+            {
+                warn!(
+                    live,
+                    cap, "session launch rejected: concurrency cap reached (§9.2)"
+                );
+                return Err(AdmissionError::CapReached { live, cap }.into());
+            }
+        }
+
+        // §9.2 launch stagger — applied ONLY on the admit path, AFTER the
+        // cap check, so rejected launches pay zero delay. Tests inject zero
+        // stagger (Duration::ZERO) so this guard is a no-op and stays fast.
+        let stagger = self.config.stagger_duration();
+        if !stagger.is_zero() {
+            tokio::time::sleep(stagger).await;
+        }
+
         let mut inner = self.inner.write().await;
+
+        // §9.2 authoritative re-check under the write lock. A concurrent
+        // launch may have been admitted during our stagger sleep and pushed
+        // the count to the cap; re-checking here closes that TOCTOU window.
+        let live = inner.actors.len() as u32;
+        if let AdmissionDecision::Reject { live, cap } =
+            check_admission(live, self.config.max_concurrent_sessions, 0)
+        {
+            warn!(
+                live,
+                cap,
+                "session launch rejected at write-lock recheck (concurrent launch raced, §9.2)"
+            );
+            return Err(AdmissionError::CapReached { live, cap }.into());
+        }
+
         let session_id = inner.counter.next(&params.project_id);
 
         info!(
@@ -184,6 +364,7 @@ impl SessionRegistry {
                     BackendKind::StreamJson,
                     backend,
                     DEFAULT_BROADCAST_CAPACITY,
+                    self.actor_config(),
                 )
             }
             BackendKind::Tmux => {
@@ -202,6 +383,7 @@ impl SessionRegistry {
                     BackendKind::Tmux,
                     backend,
                     DEFAULT_BROADCAST_CAPACITY,
+                    self.actor_config(),
                 )
             }
         };
@@ -321,6 +503,163 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_actor_config_default_no_classifier() {
+        // Default registry: auth timeout = 30 s, classifier None (gate closed).
+        let registry = SessionRegistry::new();
+        let cfg = registry.actor_config();
+        assert_eq!(cfg.auth_timeout, std::time::Duration::from_secs(30));
+        assert!(
+            cfg.classifier.is_none(),
+            "default registry must attach NO classifier (AC-9)"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_actor_config_threads_auth_timeout() {
+        // A non-default auth_timeout_secs flows into the per-actor config (#1649).
+        let control = ControlPlaneConfig {
+            auth_timeout_secs: 7,
+            ..Default::default()
+        };
+        let registry = SessionRegistry::with_config(control);
+        assert_eq!(
+            registry.actor_config().auth_timeout,
+            std::time::Duration::from_secs(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_actor_config_gate_off_drops_classifier() {
+        // Even with a wired provider, the §8.3 gate stays CLOSED while the config
+        // flag is off (default), so the per-actor classifier is None (#1648).
+        use crate::core::sm::providers::{LlmProvider, LlmRequest, LlmResponse, error::SmLlmError};
+
+        struct NoopProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for NoopProvider {
+            fn name(&self) -> &str {
+                "noop"
+            }
+            async fn complete(&self, _req: LlmRequest) -> Result<LlmResponse, SmLlmError> {
+                Err(SmLlmError::Degraded("test".into()))
+            }
+        }
+
+        // Default observability => llm_classifier = false => gate closed.
+        let registry =
+            SessionRegistry::new().with_classifier(Arc::new(NoopProvider), "openai/gpt-4o-mini");
+        assert!(
+            registry.actor_config().classifier.is_none(),
+            "gate off (config flag false) must drop the classifier even when a provider is wired"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_actor_config_gate_on_attaches_classifier() {
+        // With the §8.3 config flag ON and a provider wired, the gate opens and
+        // the per-actor classifier is attached (#1648).
+        use crate::control::config::ObservabilityConfig;
+        use crate::core::sm::providers::{LlmProvider, LlmRequest, LlmResponse, error::SmLlmError};
+
+        struct NoopProvider;
+        #[async_trait::async_trait]
+        impl LlmProvider for NoopProvider {
+            fn name(&self) -> &str {
+                "noop"
+            }
+            async fn complete(&self, _req: LlmRequest) -> Result<LlmResponse, SmLlmError> {
+                Err(SmLlmError::Degraded("test".into()))
+            }
+        }
+
+        let control = ControlPlaneConfig {
+            observability: ObservabilityConfig {
+                llm_classifier: true,
+            },
+            ..Default::default()
+        };
+        let registry = SessionRegistry::with_config(control)
+            .with_classifier(Arc::new(NoopProvider), "openai/gpt-4o-mini");
+        assert!(
+            registry.actor_config().classifier.is_some(),
+            "gate on (flag true + provider wired + no SM) must attach the classifier"
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_live_count_and_config() {
+        // Default config: cap 5, stagger 2000, classifier off.
+        let registry = SessionRegistry::new();
+        assert_eq!(registry.live_count().await, 0);
+        assert_eq!(registry.config().max_concurrent_sessions, 5);
+        assert!(!registry.config().observability.llm_classifier);
+
+        let id = ControlSessionId::new("p", 0);
+        registry.register(id.clone(), make_handle(&id)).await;
+        assert_eq!(registry.live_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn registry_admission_check_under_cap_admits() {
+        // cap=2, zero stagger so tests stay fast.
+        let cfg = ControlPlaneConfig {
+            max_concurrent_sessions: 2,
+            launch_stagger_ms: 0,
+            ..Default::default()
+        };
+        let registry = SessionRegistry::with_config(cfg);
+        assert!(matches!(
+            registry.admission().await,
+            AdmissionDecision::Admit { stagger_ms: 0 }
+        ));
+
+        // Fill to cap with placeholder handles.
+        for n in 0..2 {
+            let id = ControlSessionId::new("p", n);
+            registry.register(id.clone(), make_handle(&id)).await;
+        }
+        // Now at cap → reject.
+        assert!(matches!(
+            registry.admission().await,
+            AdmissionDecision::Reject { live: 2, cap: 2 }
+        ));
+    }
+
+    #[tokio::test]
+    async fn registry_run_session_rejects_when_capped() {
+        // cap=1, zero stagger. Fill with one placeholder, then run_session must
+        // reject with CapReached without spawning a backend.
+        let cfg = ControlPlaneConfig {
+            max_concurrent_sessions: 1,
+            launch_stagger_ms: 0,
+            ..Default::default()
+        };
+        let registry = SessionRegistry::with_config(cfg);
+        let id = ControlSessionId::new("p", 0);
+        registry.register(id.clone(), make_handle(&id)).await;
+
+        let params = RunParams {
+            project_id: "p".into(),
+            workdir: PathBuf::from("/tmp"),
+            backend: BackendKind::StreamJson,
+            prompt_file: None,
+            claude_cmd: None,
+        };
+        let err = registry
+            .run_session(params)
+            .await
+            .expect_err("run_session must reject when at cap");
+        // The error chain must carry the typed CapReached rejection.
+        let admission_err = err
+            .downcast_ref::<crate::control::admission::AdmissionError>()
+            .expect("error must be an AdmissionError");
+        assert_eq!(
+            *admission_err,
+            crate::control::admission::AdmissionError::CapReached { live: 1, cap: 1 }
+        );
+    }
+
+    #[tokio::test]
     async fn registry_get_clones_under_read_lock() {
         let registry = SessionRegistry::new();
         let id = ControlSessionId::new("proj", 0);
@@ -338,5 +677,65 @@ mod tests {
         assert!(!h2.try_acquire_write_lock()); // same Arc → same flag
         h1.release_write_lock();
         assert!(h2.try_acquire_write_lock()); // now acquirable
+    }
+
+    /// A rejected launch returns immediately without paying the stagger delay.
+    ///
+    /// Why: §9.2 stagger is a *spacing* mechanism for admitted sessions, not a
+    /// penalty for all launches. A rejected launch must fail fast so callers
+    /// get a prompt error rather than waiting for a stagger that will never
+    /// produce a session.
+    /// What: configures cap=1, stagger=5000 ms (5 s); pre-fills to cap; calls
+    /// `run_session` and times the call — a correct reject returns in
+    /// microseconds (we allow < 1 s), while an incorrect stagger-before-reject
+    /// would block for the full 5 s. The 4 s gap cleanly separates correct from
+    /// incorrect behaviour with no jitter risk on any CI machine.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn registry_cap_reject_is_immediate() {
+        use std::time::{Duration, Instant};
+
+        // 5 s stagger — would be obviously detectable if paid; a <1 s threshold
+        // leaves 4 s of headroom so scheduling jitter cannot cause a false fail.
+        let cfg = ControlPlaneConfig {
+            max_concurrent_sessions: 1,
+            launch_stagger_ms: 5_000,
+            ..Default::default()
+        };
+        let registry = SessionRegistry::with_config(cfg);
+        let id = ControlSessionId::new("p", 0);
+        registry.register(id.clone(), make_handle(&id)).await;
+
+        let t0 = Instant::now();
+        let params = RunParams {
+            project_id: "p".into(),
+            workdir: PathBuf::from("/tmp"),
+            backend: BackendKind::StreamJson,
+            prompt_file: None,
+            claude_cmd: None,
+        };
+        let err = registry
+            .run_session(params)
+            .await
+            .expect_err("must reject at cap");
+        let elapsed = t0.elapsed();
+
+        // Must return CapReached.
+        let admission_err = err
+            .downcast_ref::<crate::control::admission::AdmissionError>()
+            .expect("error must be AdmissionError");
+        assert_eq!(
+            *admission_err,
+            crate::control::admission::AdmissionError::CapReached { live: 1, cap: 1 }
+        );
+
+        // Must NOT have paid the 5 s stagger. A <1 s threshold is generous for
+        // any real CI scheduling jitter; if this ever fires the stagger is
+        // leaking onto the reject path (a bug), not a noise artifact.
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "rejected launch must return in <1 s, not {elapsed:?} \
+             (5 s stagger must not be paid on reject path)"
+        );
     }
 }

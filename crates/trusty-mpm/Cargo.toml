@@ -1,6 +1,6 @@
 [package]
 name = "trusty-mpm"
-version = "0.10.0"
+version = "0.11.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -28,7 +28,8 @@ daemon = ["mcp",
           "dep:tokio-stream", "dep:futures",
           "dep:dashmap", "dep:parking_lot",
           "dep:notify", "dep:tracing-appender",
-          "dep:utoipa-swagger-ui"]
+          "dep:utoipa-swagger-ui",
+          "dep:tokio-util"]
 
 # `mcp` gates the MCP server library module.
 # (`async-trait`, used by the OrchestratorBackend trait, is now an always-on
@@ -244,3 +245,6 @@ http-body-util.workspace = true
 # serial_test: run env-mutating tests serially to prevent env-var races across
 # parallel Rust test threads (used by bug-report token resolution tests).
 serial_test.workspace = true
+# test-util enables tokio's paused-clock (`tokio::time::pause` / `start_paused = true`)
+# used by the deterministic auth-timeout tests in actor_tests.rs (#1649).
+tokio = { workspace = true, features = ["test-util"] }

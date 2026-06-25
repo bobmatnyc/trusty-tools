@@ -355,7 +355,13 @@ pub(super) async fn create_index_handler(
             crate::core::registry::WalkDiagnostics::default(),
         )),
     };
-    state.registry.register(handle);
+    let registered = state.registry.register(handle);
+    // Issue #1621 (epic #1619 WI-2): start the filesystem watcher for the
+    // freshly-registered index so saves trigger incremental indexing without a
+    // manual reindex. No-op when disabled (`TRUSTY_DISABLE_WATCHER=1`) or when
+    // an entry already exists. Driven off the registered handle, so this is
+    // inherently scoped to the opt-in allowlist (no handle ⇒ no watcher).
+    state.watcher_manager.spawn_for_index(&registered).await;
     // Issue #41 Phase 1: refresh the index-count gauge so /metrics reflects
     // the registry size without a separate poll.
     crate::service::metrics::set_index_count(state.registry.list().len());

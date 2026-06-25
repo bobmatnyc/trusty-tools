@@ -385,6 +385,33 @@ pub struct SearchAppState {
     /// construction via `install_embed_pool`.
     /// Test: `health_reports_stalled_embedder` in tests_health.rs.
     pub embedder_stall_tracker: Arc<crate::service::stall_tracker::EmbedderStallTracker>,
+    /// Live filesystem watchers, one per registered index (issue #1621).
+    ///
+    /// Why: epic #1619 WI-2 activates the dormant `FileWatcher` so a file save
+    /// triggers incremental indexing within the 500ms debounce window. The
+    /// daemon owns watcher lifetimes here so they start on index registration
+    /// (warm-boot + `POST /indexes`), stop on `DELETE /indexes/:id`, and are all
+    /// torn down on graceful shutdown (SIGTERM). Because watchers are keyed off
+    /// registered handles — which only exist for allowlisted repos — this is a
+    /// no-op for unregistered repos by construction.
+    /// What: a cheap-to-clone `WatcherManager` (Arc inside) shared across every
+    /// handler clone of the state.
+    /// Test: `crate::service::watcher_manager::tests` cover the manager;
+    /// `save_triggers_incremental_index_via_manager` covers the live path.
+    pub watcher_manager: crate::service::watcher_manager::WatcherManager,
+    /// Boot-time reconcile summary surfaced on `GET /health` (issue #1672).
+    ///
+    /// Why: boot-reconcile logs at `info!` but previously exposed nothing on
+    /// `/health`. Operators debugging stale search results had to tail daemon
+    /// logs; making the summary machine-readable lets monitoring scripts and
+    /// `trusty-search health` detect reconciliation failures instantly.
+    /// What: written by `reconcile_stale_indexes` as it runs (in-progress) and
+    /// when it completes. Protected by `Mutex` because `ReconcileSummary` has
+    /// non-atomic fields. Defaults to a zeroed/incomplete summary before the first
+    /// reconcile run. Read by `health_handler` on every `/health` poll.
+    /// Test: `health_includes_reconcile_summary` in tests_health.rs verifies the
+    /// field appears in the JSON response after reconcile runs.
+    pub reconcile_summary: Arc<std::sync::Mutex<ReconcileSummary>>,
 }
 
 /// Per-boot summary of warm-boot index loading, surfaced on `GET /health`.
@@ -449,4 +476,38 @@ pub struct WarmBootSummary {
     /// `ColdIndexStore::failed_len`. `0` is the normal steady-state value.
     /// Test: `health_failed_index_reported` in server tests.
     pub indexes_failed: usize,
+}
+
+/// Per-boot reconcile summary surfaced on `GET /health` (issue #1672).
+///
+/// Why: boot-time reconciliation catches stale indexes but previously only
+/// logged results. This struct makes the outcome machine-readable on `/health`
+/// so operators can see at a glance whether reconciliation finished, how many
+/// files were caught up, and whether any index failed — without tailing logs.
+/// What: written incrementally by `reconcile_stale_indexes` as each index is
+/// processed. `in_progress` is `true` from start until all background tasks
+/// have signalled completion. `degraded` becomes `true` if any index
+/// encountered an error during reconciliation.
+/// Test: `health_includes_reconcile_summary` in server/tests_health.rs.
+#[derive(Clone, Default, serde::Serialize)]
+pub struct ReconcileSummary {
+    /// `true` while `reconcile_stale_indexes` is still running background tasks.
+    /// Flips to `false` once all per-index tasks have completed or been skipped.
+    pub in_progress: bool,
+    /// Count of indexes that were already up-to-date (no changes needed).
+    pub up_to_date: usize,
+    /// Count of indexes reconciled via per-file delta (git or mtime path).
+    pub delta_reindexed: usize,
+    /// Count of indexes that fell back to a full reindex
+    /// (delta too large, git unavailable, etc.).
+    pub fell_back_to_full: usize,
+    /// Count of indexes skipped because no baseline timestamp was available
+    /// (never indexed, or non-git with no persisted `last_indexed_unix`).
+    pub skipped_no_data: usize,
+    /// Total number of individual files queued for reindex across all delta
+    /// reconciles. Does not count full-reindex files (those are unbounded).
+    pub files_reconciled: usize,
+    /// `true` when at least one index encountered an error during reconciliation
+    /// (the error was logged; the index may still be partially usable).
+    pub degraded: bool,
 }

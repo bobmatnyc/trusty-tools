@@ -5,9 +5,11 @@
 //! newline-delimited stream-JSON events on stdout. This keeps the session warm
 //! across multiple user messages without the overhead of a new process per
 //! message, and uses Max OAuth billing by unsetting `ANTHROPIC_API_KEY` (§9.1).
-//! What: [`StreamJsonBackend`] spawns `env -u ANTHROPIC_API_KEY claude -p
-//! --output-format stream-json [--append-system-prompt-file …] --workdir <dir>`
-//! and implements [`super::SessionBackend`]. `recv()` reads stdout line-by-line
+//! What: [`StreamJsonBackend`] spawns `claude -p --output-format stream-json
+//! [--append-system-prompt-file …] --workdir <dir>` with `ANTHROPIC_API_KEY`
+//! removed from the child environment via [`build_claude_command`] (the §9.1
+//! no-key-leak seam) and implements [`super::SessionBackend`]. `recv()` reads
+//! stdout line-by-line
 //! and parses each line as a `StreamJsonEvent`. Stderr is captured but never
 //! forwarded. On clean child exit `recv()` returns `None`. A seam for the
 //! crash-watchdog / auto-restart policy (WI-4) is present but not wired in
@@ -16,7 +18,7 @@
 //! `stream_json_backend_constructs` (constructor-only; no child process),
 //! `session_input_newtype` in the inline module.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
@@ -30,6 +32,55 @@ use crate::control::event::{SessionEvent, StreamJsonEvent};
 use crate::control::id::ControlSessionId;
 
 use super::{SessionBackend, SessionInput};
+
+/// Environment variable holding the metered Anthropic API key.
+///
+/// Why: §9.1 LOCKED requirement — this variable MUST be removed from every
+/// spawned `claude` child so the child resolves Max-OAuth credentials from
+/// `~/.claude` and no metered key leaks into a managed session. Naming it once
+/// as a constant keeps the security-critical string from drifting between the
+/// command builder and the tests that assert its removal.
+/// What: the literal `"ANTHROPIC_API_KEY"`.
+/// Test: `build_command_removes_api_key`, `build_command_removes_key_even_if_set`.
+pub const ANTHROPIC_API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
+
+/// Build the `claude` stream-JSON [`std::process::Command`] for a session.
+///
+/// Why: this is the single security seam where §9.1's no-key-leak invariant is
+/// enforced. Extracting command construction into a pure function (no spawn,
+/// no I/O) lets the gating integration test inspect the built command's
+/// environment and assert `ANTHROPIC_API_KEY` is removed — WITHOUT spawning a
+/// real `claude` process. Defense-in-depth: the key is stripped two ways — an
+/// explicit [`std::process::Command::env_remove`] (which `get_envs()` exposes as
+/// an explicit removal, making it test-observable) AND, belt-and-braces, the
+/// child never inherits a re-added key because we never call `env()` for it.
+/// What: returns a `std::process::Command` for
+/// `claude -p --output-format stream-json [--append-system-prompt-file <f>]
+/// --workdir <dir>` with `ANTHROPIC_API_KEY` removed from the child env,
+/// stdin/stdout piped, stderr captured, and the working directory set. The
+/// caller converts it to a `tokio::process::Command` to spawn.
+/// Test: `build_command_removes_api_key`, `build_command_has_stream_json_args`.
+pub fn build_claude_command(workdir: &Path, prompt_file: Option<&Path>) -> std::process::Command {
+    // Invoke `claude` directly (not via the `env -u` shell wrapper). Using
+    // Command::env_remove makes the key-removal an explicit, inspectable part
+    // of the child environment (visible via get_envs() in tests), which is what
+    // the WI-5 gating test asserts. The child inherits the parent's environment
+    // MINUS the removed key.
+    let mut cmd = std::process::Command::new("claude");
+    // §9.1 LOCKED: strip the metered key so claude uses ~/.claude Max OAuth.
+    cmd.env_remove(ANTHROPIC_API_KEY_VAR);
+    cmd.arg("-p");
+    cmd.arg("--output-format").arg("stream-json");
+    if let Some(pf) = prompt_file {
+        cmd.arg("--append-system-prompt-file").arg(pf);
+    }
+    cmd.arg("--workdir").arg(workdir);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(workdir);
+    cmd
+}
 
 /// Warm headless `claude -p --output-format stream-json` execution backend.
 ///
@@ -57,33 +108,24 @@ impl StreamJsonBackend {
     /// Why: allocating the backend at session-spawn time (not lazily) lets the
     /// actor emit a `BackendSpawnError` immediately if `claude` is not found,
     /// before the session is registered with the HTTP API.
-    /// What: builds a `tokio::process::Command` for
-    /// `env -u ANTHROPIC_API_KEY claude -p --output-format stream-json
-    /// [--append-system-prompt-file <prompt_file>] --workdir <workdir>`,
-    /// spawns with stdin/stdout piped and stderr captured (never forwarded),
-    /// and wraps the handles.
+    /// What: delegates to [`build_claude_command`] (the §9.1 no-key-leak seam)
+    /// for `claude -p --output-format stream-json
+    /// [--append-system-prompt-file <prompt_file>] --workdir <workdir>` with
+    /// `ANTHROPIC_API_KEY` removed from the child environment, converts the
+    /// resulting `std::process::Command` to a `tokio::process::Command`, spawns
+    /// it (stdin/stdout piped, stderr captured and never forwarded), and wraps
+    /// the handles.
     /// Test: `stream_json_spawn_requires_claude` (integration; #[ignore] if
-    /// claude absent); constructor checked by `stream_json_backend_constructs`.
+    /// claude absent); constructor checked by `stream_json_backend_constructs`;
+    /// the no-key-leak invariant is asserted at the command seam by
+    /// `build_command_removes_api_key` and the `auth_cost` integration suite.
     pub fn spawn(
         session_id: ControlSessionId,
         workdir: PathBuf,
         prompt_file: Option<PathBuf>,
     ) -> Result<Self> {
-        let mut cmd = Command::new("env");
-        // Unset ANTHROPIC_API_KEY so claude resolves credentials from
-        // ~/.claude (Max OAuth path, §9.1 of SPEC-SESSCTL-01).
-        cmd.arg("-u").arg("ANTHROPIC_API_KEY");
-        cmd.arg("claude");
-        cmd.arg("-p");
-        cmd.arg("--output-format").arg("stream-json");
-        if let Some(pf) = prompt_file {
-            cmd.arg("--append-system-prompt-file").arg(pf);
-        }
-        cmd.arg("--workdir").arg(&workdir);
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .current_dir(&workdir);
+        let std_cmd = build_claude_command(&workdir, prompt_file.as_deref());
+        let mut cmd = Command::from(std_cmd);
 
         let mut child = cmd.spawn().with_context(|| {
             format!(
@@ -202,7 +244,7 @@ impl SessionBackend for StreamJsonBackend {
     /// graceful SIGTERM → wait → SIGKILL sequence is deferred to a later phase.
     /// Drop provides a final safety net in case `stop()` is never called.
     /// Test: stop-path covered by integration test.
-    async fn stop(mut self: Box<Self>) -> Result<()> {
+    async fn stop(mut self) -> Result<()> {
         let _ = self.child.start_kill(); // SIGKILL; ignore if already exited
         let _ = self.child.wait().await; // reap the child
         Ok(())
@@ -226,11 +268,78 @@ impl Drop for StreamJsonBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
 
     #[test]
     fn session_input_newtype() {
         let input = SessionInput::new("hello");
         assert_eq!(input.text, "hello");
+    }
+
+    /// Collect the explicit env mutations from a built command as
+    /// `(key, Option<value>)` pairs. `None` value = `env_remove` (the security
+    /// invariant we assert below).
+    fn env_mutations(cmd: &std::process::Command) -> Vec<(String, Option<String>)> {
+        cmd.get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn build_command_removes_api_key() {
+        // §9.1: the built command MUST explicitly remove ANTHROPIC_API_KEY so
+        // it cannot leak into the spawned child. get_envs() surfaces an
+        // env_remove as (key, None).
+        let cmd = build_claude_command(Path::new("/tmp/wd"), None);
+        let muts = env_mutations(&cmd);
+        let removed = muts
+            .iter()
+            .find(|(k, _)| k == ANTHROPIC_API_KEY_VAR)
+            .expect("ANTHROPIC_API_KEY must appear as an explicit env mutation");
+        assert_eq!(
+            removed.1, None,
+            "ANTHROPIC_API_KEY must be REMOVED (None), never set, in the child env"
+        );
+    }
+
+    #[test]
+    fn build_command_program_is_claude() {
+        // The seam invokes `claude` directly, not the `env` shell wrapper, so
+        // get_program() is stable and inspectable.
+        let cmd = build_claude_command(Path::new("/tmp/wd"), None);
+        assert_eq!(cmd.get_program(), OsStr::new("claude"));
+    }
+
+    #[test]
+    fn build_command_has_stream_json_args() {
+        let cmd = build_claude_command(Path::new("/tmp/wd"), None);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"-p".to_string()));
+        assert!(args.contains(&"--output-format".to_string()));
+        assert!(args.contains(&"stream-json".to_string()));
+        assert!(args.contains(&"--workdir".to_string()));
+        // No prompt file → no --append-system-prompt-file flag.
+        assert!(!args.contains(&"--append-system-prompt-file".to_string()));
+    }
+
+    #[test]
+    fn build_command_includes_prompt_file_when_present() {
+        let pf = PathBuf::from("/tmp/prompt.md");
+        let cmd = build_claude_command(Path::new("/tmp/wd"), Some(&pf));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--append-system-prompt-file".to_string()));
+        assert!(args.contains(&"/tmp/prompt.md".to_string()));
     }
 
     /// Verify that spawning when `claude` is absent returns a descriptive error.

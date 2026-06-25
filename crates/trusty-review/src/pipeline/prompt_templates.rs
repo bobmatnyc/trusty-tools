@@ -71,6 +71,19 @@ Every finding MUST have a `severity` from:
 Focus on: correctness bugs, security issues, data-loss risks, logic errors.
 Note but do not block on: style, minor naming, documentation gaps, test coverage.
 
+## Known false-positive patterns (DO NOT flag)
+
+- **Rust `move` closures**: do NOT flag a captured variable as "use after move"
+  unless the diff EXPLICITLY removes the `move` keyword or shows a genuine
+  double-move path (the same value moved into two separate owners without a copy).
+  A `move` closure transferring ownership into a spawned task is the intended,
+  correct Rust pattern.
+
+- **`tokio::select!` branches**: each `select!` arm is independently polled and
+  does NOT consume the variable from other arms; do NOT flag variables as "moved
+  across select branches".  Only flag a genuine ownership error when the diff
+  shows the same non-Copy value used after a concrete await/move in another arm.
+
 ## Method conformance (ticket/spec intent)
 The user message may include an "Intended method (ticket/spec)" context block that
 states a SPECIFIC method, approach, or constraint the ticket or spec prescribed for
@@ -84,6 +97,17 @@ Do NOT emit a method-conformance finding when:
 - you are merely unsure; ambiguity is not a contradiction.
 Every other finding uses `category` = "correctness" (the default).
 
+## Test plan gaps (ticket/PR acceptance criteria)
+The user message may include a context section headed Test plan gaps or Intended method
+(ticket/spec) containing snippets titled "Unmet AC: <item>". Each such snippet identifies
+an acceptance-criteria or test-plan item from the PR body or linked ticket that has no
+matching test file in the diff. When you see an "Unmet AC" snippet, emit a finding with
+`category` = "test-coverage", severity = "medium", and set `source_citation` to the exact
+item text from the snippet title. If the context only contains the advisory snippet
+"No test plan or AC found in PR description or linked ticket", you may note it as a
+low-severity `test-coverage` finding or omit it at your discretion. Do NOT escalate
+your verdict solely on the basis of test-plan gaps; gaps are informational.
+
 ## Output (REQUIRED — populate the structured response fields)
 - `grade`: one of A+, A, A-, B+, B, B-, C+, C, C-, D+, D, D-, F.
 - `grade_justification`: one-sentence reason for the grade.
@@ -92,8 +116,10 @@ Every other finding uses `category` = "correctness" (the default).
 - `findings`: array of issues found (empty array if none).
   Each finding has: title, body (detailed description), severity (low/medium/high/critical),
   confidence (0.0–1.0), file (source file path), line (null if not applicable),
-  category ("correctness" by default, or "method-conformance" per the rule above),
-  consequence (see below), suggested_replacement (see below).
+  category ("correctness" by default, "method-conformance" per the rule above, or
+  "test-coverage" for test-plan gap findings),
+  consequence (see below), suggested_replacement (see below),
+  source_citation (see below).
 
 `consequence`: a brief statement of the FAILURE MECHANISM — what concretely goes
 wrong in practice if this finding is not addressed (e.g. "panics on empty input",
@@ -112,6 +138,14 @@ NOT wrap it in a code fence and do NOT put prose in it — just the literal
 replacement code. When the fix is not a concrete line replacement (it spans
 multiple hunks, is advisory, or is best described in words), set it to null and
 explain the fix in `body`.
+
+`source_citation`: when a context snippet in the user message carries an explicit
+source label (e.g. "Prescribed method (from ticket IMPL-2026-05-009 WP-9)" or
+"Prescribed method (from spec PRD § 4.2)"), copy the EXACT ticket key and
+section/work-package identifier from that label here (e.g. "IMPL-2026-05-009 WP-9"
+or "PRD § 4.2"). This makes the finding authoritative — it is grounded in a
+prescribed intent, not just an LLM inference. Set to null when the finding is
+based on general code reasoning rather than a cited context snippet.
 
 `confidence` is a float in [0.0, 1.0].
 `line` may be null if no specific line is applicable.
@@ -177,6 +211,19 @@ Every finding MUST have a `severity` from:
 Focus on: correctness bugs, security issues, data-loss risks, logic errors.
 Note but do not block on: style, minor naming, documentation gaps.
 
+## Known false-positive patterns (DO NOT flag)
+
+- **Rust `move` closures**: do NOT flag a captured variable as "use after move"
+  unless the diff EXPLICITLY removes the `move` keyword or shows a genuine
+  double-move path (the same value moved into two separate owners without a copy).
+  A `move` closure transferring ownership into a spawned task is the intended,
+  correct Rust pattern.
+
+- **`tokio::select!` branches**: each `select!` arm is independently polled and
+  does NOT consume the variable from other arms; do NOT flag variables as "moved
+  across select branches".  Only flag a genuine ownership error when the diff
+  shows the same non-Copy value used after a concrete await/move in another arm.
+
 ## Method conformance (ticket/spec intent)
 The user message may include an "Intended method (ticket/spec)" context block that
 states a SPECIFIC method, approach, or constraint the ticket or spec prescribed for
@@ -189,6 +236,17 @@ Do NOT emit a method-conformance finding when:
 - the ticket and spec merely disagree (stale-spec conflict — advisory only);
 - you are merely unsure; ambiguity is not a contradiction.
 Every other finding uses `category` = "correctness" (the default).
+
+## Test plan gaps (ticket/PR acceptance criteria)
+The user message may include a context section headed Test plan gaps or Intended method
+(ticket/spec) containing snippets titled "Unmet AC: <item>". Each such snippet identifies
+an acceptance-criteria or test-plan item from the PR body or linked ticket that has no
+matching test file in the diff. When you see an "Unmet AC" snippet, emit a finding with
+`category` = "test-coverage", severity = "medium", and set `source_citation` to the exact
+item text from the snippet title. If the context only contains the advisory snippet
+"No test plan or AC found in PR description or linked ticket", you may note it as a
+low-severity `test-coverage` finding or omit it at your discretion. Do NOT escalate
+your verdict solely on the basis of test-plan gaps; gaps are informational.
 
 ## Test coverage
 A coverage report has been provided in the user message (## Test coverage context).
@@ -204,8 +262,10 @@ coverage floor after your response based on the configured policy.
 - `findings`: array of issues found (empty array if none).
   Each finding has: title, body (detailed description), severity (low/medium/high/critical),
   confidence (0.0–1.0), file (source file path), line (null if not applicable),
-  category ("correctness" by default, or "method-conformance" per the rule above),
-  consequence (see below), suggested_replacement (see below).
+  category ("correctness" by default, "method-conformance" per the rule above, or
+  "test-coverage" for test-plan gap findings),
+  consequence (see below), suggested_replacement (see below),
+  source_citation (see below).
 
 `consequence`: a brief statement of the FAILURE MECHANISM — what concretely goes
 wrong in practice if this finding is not addressed (e.g. "panics on empty input",
@@ -224,6 +284,14 @@ NOT wrap it in a code fence and do NOT put prose in it — just the literal
 replacement code. When the fix is not a concrete line replacement (it spans
 multiple hunks, is advisory, or is best described in words), set it to null and
 explain the fix in `body`.
+
+`source_citation`: when a context snippet in the user message carries an explicit
+source label (e.g. "Prescribed method (from ticket IMPL-2026-05-009 WP-9)" or
+"Prescribed method (from spec PRD § 4.2)"), copy the EXACT ticket key and
+section/work-package identifier from that label here (e.g. "IMPL-2026-05-009 WP-9"
+or "PRD § 4.2"). This makes the finding authoritative — it is grounded in a
+prescribed intent, not just an LLM inference. Set to null when the finding is
+based on general code reasoning rather than a cited context snippet.
 
 `confidence` is a float in [0.0, 1.0].
 `line` may be null if no specific line is applicable.

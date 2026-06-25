@@ -88,6 +88,97 @@ pub fn resolve_cuda_options() -> CudaOptions {
     }
 }
 
+/// Default ORT intra-op thread count for embedder sessions.
+///
+/// Why: fastembed-rs hardcodes `with_intra_threads(available_parallelism())` on
+/// every session it builds, so each embed-pool worker's ORT session spins up
+/// one intra-op thread *per logical CPU*. On the CUDA deferred-embed path this
+/// multi-threaded intra-op barrier deadlocks inside `libonnxruntime` 1.24.2: a
+/// couple of workers busy-spin while the rest block forever in
+/// `condition_variable::wait`, producing 0 embeddings and an empty HNSW index
+/// (code-intelligence #1542). Pinning intra-op to a single thread removes the
+/// barrier entirely — there is no second worker to wait on — so the pass can
+/// never deadlock. `1` is the safe default; raise it only on hosts proven not
+/// to hit the ORT barrier bug.
+/// What: `1`, used when `TRUSTY_ORT_INTRA_THREADS` is unset or unparseable.
+/// Test: `ort_threading_defaults` asserts the resolver returns this value.
+pub const DEFAULT_ORT_INTRA_THREADS: usize = 1;
+
+/// Default ORT inter-op thread count for embedder sessions.
+///
+/// Why: inter-op parallelism only matters for models with parallelizable
+/// branches under `with_parallel_execution(true)`, which the all-MiniLM
+/// embedder does not use. Pinning it to `1` keeps the total ORT thread count
+/// deterministic (= number of embed-pool workers) instead of
+/// workers × CPUs, which is the workers-vs-threads mismatch behind #1542.
+/// What: `1`, used when `TRUSTY_ORT_INTER_THREADS` is unset or unparseable.
+/// Test: `ort_threading_defaults`.
+pub const DEFAULT_ORT_INTER_THREADS: usize = 1;
+
+/// Resolved ORT threading tuning for embedder sessions, derived purely from
+/// the environment so it is unit-testable on any host.
+///
+/// Why: the deadlock fix must be verifiable without a CUDA GPU or a real ONNX
+/// session, so the knob parsing lives in a pure function and only the *effect*
+/// (committing an ORT global thread pool) is applied in `fast_embedder.rs`.
+/// What: carries the intra-op / inter-op thread counts and whether intra-op
+/// spinning is allowed. These are applied to an ORT *global* thread pool
+/// (`ort::init().with_global_thread_pool(..)`) because fastembed does not
+/// expose the per-session `SessionBuilder`; committing a global pool makes ORT
+/// call `DisablePerSessionThreads`, overriding fastembed's hardcoded
+/// per-session `with_intra_threads(N)`.
+/// Test: `ort_threading_*` tests below.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrtThreadingOptions {
+    /// Threads used for parallelization *within* a single ORT operator.
+    pub intra_threads: usize,
+    /// Threads used for parallelization *between* ORT operators.
+    pub inter_threads: usize,
+    /// Whether ORT worker threads may busy-spin when their queue is empty.
+    /// Disabled by default: spinning is the half of the #1542 deadlock that
+    /// pins two workers at ~70% CPU, and the embed pass is bursty (not a
+    /// constant inference stream) so spinning buys nothing here.
+    pub allow_spinning: bool,
+}
+
+/// Resolve ORT threading options from the process environment.
+///
+/// Why: centralises the `TRUSTY_ORT_*` knob parsing so the live global-thread-
+/// pool builder and the unit tests agree on precedence and defaults, keeping
+/// the deadlock fix (#1542) verifiable without ORT/CUDA.
+/// What: reads `TRUSTY_ORT_INTRA_THREADS` and `TRUSTY_ORT_INTER_THREADS`
+/// (positive integers; malformed/zero values fall back to the safe defaults of
+/// `1`) and `TRUSTY_ORT_ALLOW_SPINNING` (truthy = `1`/`true`/`yes`/`on`,
+/// case-insensitive; anything else, including unset, means spinning stays
+/// disabled).
+/// Test: `ort_threading_defaults`, `ort_threading_reads_env`,
+/// `ort_threading_ignores_malformed`, `ort_threading_spinning_truthy`.
+pub fn resolve_ort_threading_options() -> OrtThreadingOptions {
+    fn positive_thread_count(key: &str, default: usize) -> usize {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(default)
+    }
+
+    let allow_spinning = std::env::var("TRUSTY_ORT_ALLOW_SPINNING")
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+
+    OrtThreadingOptions {
+        intra_threads: positive_thread_count("TRUSTY_ORT_INTRA_THREADS", DEFAULT_ORT_INTRA_THREADS),
+        inter_threads: positive_thread_count("TRUSTY_ORT_INTER_THREADS", DEFAULT_ORT_INTER_THREADS),
+        allow_spinning,
+    }
+}
+
 /// Identifier for the execution provider an embedder is actually using.
 ///
 /// Why: callers want to log which backend is active (CPU vs CoreML/Metal vs

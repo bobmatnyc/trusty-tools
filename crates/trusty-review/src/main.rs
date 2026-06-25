@@ -1,7 +1,8 @@
 //! `trusty-review` CLI entry point.
 //!
 //! Why: provides the user-facing interface for running, comparing, inspecting
-//! PR reviews, and generating longitudinal contributor profiles.
+//! PR reviews, generating longitudinal contributor profiles, and running the
+//! calibration harness (#1422).
 //!
 //! What: parses flags via clap-derive, resolves config, and dispatches to the
 //! appropriate subcommand handler.  All heavy logic lives in `commands/`.
@@ -20,6 +21,7 @@ use clap::{Parser, Subcommand};
 
 use trusty_review::config::ReviewConfig;
 
+use commands::calibrate::{CalibrateArgs, cmd_calibrate};
 use commands::compare::{CompareArgs, cmd_compare};
 use commands::port::{PortFormat, handle_port};
 use commands::run::{RunArgs, cmd_run};
@@ -122,6 +124,21 @@ enum Commands {
     /// Requires the `profile` Cargo feature (enabled by default).
     #[cfg(feature = "profile")]
     Profile(cli_profile::ProfileArgs),
+
+    /// Run the calibration harness against a human-reviewed PR corpus (#1422).
+    ///
+    /// Loads a JSONL corpus (one CorpusEntry JSON object per line), runs the
+    /// review pipeline in dry-run mode for each PR, fuzzy-matches trusty findings
+    /// against human findings by (file, kind), and emits a JSON report:
+    ///
+    ///   {recall, precision, per_pr:[{pr, recall, precision, false_positives:[...]}],
+    ///    rust_semantic_fp_rate}
+    ///
+    /// `rust_semantic_fp_rate` measures precision of logic-error/ownership findings
+    /// on `.rs` files — the known Rust false-positive hotspot.
+    ///
+    /// Always dry-run safe: never posts to GitHub.
+    Calibrate(CalibrateArgs),
 }
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
@@ -166,6 +183,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Commands::Serve(args) => cmd_serve(config, args).await,
         #[cfg(feature = "profile")]
         Commands::Profile(args) => cli_profile::cmd_profile(config, args).await,
+        Commands::Calibrate(args) => cmd_calibrate(config, args).await,
         // Port is handled synchronously in `main` before this function is
         // called; this arm is unreachable at runtime but required for
         // exhaustive match.

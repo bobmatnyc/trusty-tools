@@ -86,16 +86,18 @@ impl FileWatcher {
             .map(|(session, _)| *session)
     }
 
-    /// Run the filesystem watcher loop until the daemon shuts down.
+    /// Run the filesystem watcher loop until the daemon shuts down or is cancelled.
     ///
     /// Why: the daemon spawns this as a background task so file changes across
-    /// every session's workdir flow into the shared hook feed.
+    /// every session's workdir flow into the shared hook feed. Accepting a
+    /// `CancellationToken` lets the graceful-shutdown path drain this actor
+    /// alongside `reap_loop` and `orphan_gc_loop`.
     /// What: registers a `notify` watcher for each known session workdir, then
-    /// drains filesystem events from a channel, attributing each changed path
-    /// to a session via [`record_change`](Self::record_change).
+    /// drains filesystem events from a channel via `tokio::select!`, exiting
+    /// cleanly when `cancel` is triggered or the channel sender is dropped.
     /// Test: bookkeeping and path attribution are unit-tested directly; this
     /// async glue is exercised by `cargo run`.
-    pub async fn spawn(self) {
+    pub async fn spawn(self, cancel: tokio_util::sync::CancellationToken) {
         // Seed watch roots from the sessions known at startup.
         for session in self.state.list_sessions() {
             let root = PathBuf::from(&session.workdir);
@@ -149,10 +151,24 @@ impl FileWatcher {
         }
         info!("file watcher started ({} root(s))", self.watched_count());
 
-        // Drain change events for the lifetime of the daemon.
-        while let Some(path) = rx.recv().await {
-            if self.record_change(&path) {
-                debug!("recorded file change: {}", path.display());
+        // Drain change events for the lifetime of the daemon. Exit cleanly
+        // on cancellation (graceful-shutdown path) or when the sender drops.
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!("file_watcher: cancel signal received; exiting");
+                    break;
+                }
+                maybe_path = rx.recv() => {
+                    match maybe_path {
+                        Some(path) => {
+                            if self.record_change(&path) {
+                                debug!("recorded file change: {}", path.display());
+                            }
+                        }
+                        None => break, // sender dropped; watcher has been torn down
+                    }
+                }
             }
         }
     }

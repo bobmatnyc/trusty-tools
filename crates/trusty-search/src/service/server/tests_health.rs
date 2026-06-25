@@ -489,3 +489,81 @@ fn routing_mode_from_request_resolves_strategy() {
         _ => panic!("expected Threshold"),
     }
 }
+
+/// Why: issue #1672 adds `boot_reconcile` to `/health`. This test verifies that
+/// (a) the field is absent when reconcile has not started, (b) it appears once
+/// the summary is populated, and (c) `in_progress` and counts are correct.
+/// What: directly mutate `state.reconcile_summary`, call `health_handler`,
+/// deserialize to JSON and assert field presence and values.
+/// Test: this test.
+#[tokio::test]
+async fn health_includes_reconcile_summary_when_started() {
+    use crate::core::registry::IndexRegistry;
+    use crate::service::server::ReconcileSummary;
+    use serde_json::Value;
+
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+
+    // Before any reconcile: boot_reconcile must be absent from JSON.
+    let Json(resp_before) = health_handler(State(Arc::clone(&state))).await;
+    let json_before: Value = serde_json::to_value(&resp_before).expect("serialize");
+    assert!(
+        json_before.get("boot_reconcile").is_none(),
+        "boot_reconcile must be absent before reconcile starts; json={json_before}"
+    );
+
+    // Simulate reconcile having run: write a non-default summary.
+    {
+        let mut s = state.reconcile_summary.lock().expect("summary lock");
+        *s = ReconcileSummary {
+            in_progress: false,
+            up_to_date: 2,
+            delta_reindexed: 1,
+            fell_back_to_full: 0,
+            skipped_no_data: 1,
+            files_reconciled: 3,
+            degraded: false,
+        };
+    }
+
+    let Json(resp_after) = health_handler(State(Arc::clone(&state))).await;
+    let json_after: Value = serde_json::to_value(&resp_after).expect("serialize");
+
+    let reconcile = json_after
+        .get("boot_reconcile")
+        .expect("boot_reconcile must be present after reconcile");
+    assert_eq!(reconcile["up_to_date"].as_u64(), Some(2));
+    assert_eq!(reconcile["delta_reindexed"].as_u64(), Some(1));
+    assert_eq!(reconcile["files_reconciled"].as_u64(), Some(3));
+    assert_eq!(reconcile["skipped_no_data"].as_u64(), Some(1));
+    assert_eq!(reconcile["degraded"].as_bool(), Some(false));
+    assert_eq!(reconcile["in_progress"].as_bool(), Some(false));
+}
+
+/// Why: when `in_progress = true`, `boot_reconcile` must still appear in JSON
+/// (it only hides when the summary has never been touched at all).
+/// Test: set `in_progress = true`, call health_handler, assert field present.
+#[tokio::test]
+async fn health_includes_reconcile_summary_when_in_progress() {
+    use crate::core::registry::IndexRegistry;
+    use crate::service::server::ReconcileSummary;
+    use serde_json::Value;
+
+    let state = Arc::new(SearchAppState::new(IndexRegistry::new()));
+
+    {
+        let mut s = state.reconcile_summary.lock().expect("summary lock");
+        *s = ReconcileSummary {
+            in_progress: true,
+            ..Default::default()
+        };
+    }
+
+    let Json(resp) = health_handler(State(Arc::clone(&state))).await;
+    let json: Value = serde_json::to_value(&resp).expect("serialize");
+
+    let reconcile = json
+        .get("boot_reconcile")
+        .expect("boot_reconcile must be present when in_progress=true");
+    assert_eq!(reconcile["in_progress"].as_bool(), Some(true));
+}

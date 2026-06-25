@@ -109,6 +109,29 @@ pub fn prepare_session(fw: &FrameworkPaths, project_dir: &Path) -> Result<PrepRe
     prepare_session_with_style(fw, project_dir, None)
 }
 
+/// Prepare a session, threading the cloned-from `repo_url` for palace pinning.
+///
+/// Why (issue #1605): a managed session cloned from `repo_url` lives under a
+/// throwaway `<owner>/<repo>/<session-id>/` workspace whose basename is the
+/// session-id. Without the originating `repo_url`, the trusty-memory MCP
+/// injection would derive (and pin) the WRONG palace from that directory
+/// basename. The provisioner knows the `repo_url` it cloned, so threading it
+/// here lets the injector pin `env.TRUSTY_MEMORY_PALACE` to the project's
+/// canonical `owner-repo` slug. The flag-less [`prepare_session`] delegates with
+/// `None`, which falls back to the workspace's own `git remote get-url origin`.
+/// What: identical to [`prepare_session`] except the optional `repo_url` (from
+/// `LaunchParams`/`SessionRecord`) is threaded down to the trusty-memory MCP
+/// injector for palace-slug derivation. Real native-style detection is applied.
+/// Test: `prepare_session_repo_url_pins_palace` in this module's tests.
+pub fn prepare_session_with_repo_url(
+    fw: &FrameworkPaths,
+    project_dir: &Path,
+    repo_url: Option<&str>,
+) -> Result<PrepReport, PrepError> {
+    let native = crate::core::output_style::claude_supports_native_output_style();
+    prepare_session_inner(fw, project_dir, None, native, repo_url)
+}
+
 /// Prepare a session, selecting an explicit output style (HR-4).
 ///
 /// Why: `tm launch --style <id>` lets the operator override the configured
@@ -154,6 +177,29 @@ pub fn prepare_session_with_style_and_native(
     project_dir: &Path,
     explicit_style: Option<&str>,
     native_supported: bool,
+) -> Result<PrepReport, PrepError> {
+    prepare_session_inner(fw, project_dir, explicit_style, native_supported, None)
+}
+
+/// Shared body for every `prepare_session*` entry point.
+///
+/// Why: the public entry points differ only in how they resolve `explicit_style`,
+/// `native_supported`, and (issue #1605) the cloned-from `repo_url`. Funnelling
+/// them through one private body keeps the long preparation sequence in a single
+/// place so the variants cannot drift. `repo_url` is the only new degree of
+/// freedom: it is threaded to the trusty-memory MCP injector for palace pinning
+/// and is `None` for the flag-less / style-only entry points (which then fall
+/// back to the workspace's own git origin remote).
+/// What: identical to the documented [`prepare_session_with_style_and_native`]
+/// behaviour, plus it passes `repo_url` to [`inject_trusty_memory_mcp`].
+/// Test: covered by every `prepare_session_*` test plus
+/// `prepare_session_repo_url_pins_palace`.
+fn prepare_session_inner(
+    fw: &FrameworkPaths,
+    project_dir: &Path,
+    explicit_style: Option<&str>,
+    native_supported: bool,
+    repo_url: Option<&str>,
 ) -> Result<PrepReport, PrepError> {
     // Load the user config ONCE and thread it through both the manifest
     // resolution / catalog-root path AND the style resolution path below. Reading
@@ -296,7 +342,12 @@ pub fn prepare_session_with_style_and_native(
     // (default on). Non-fatal: the session still launches, it just lacks the
     // memory tools.
     if plan.inject_trusty_memory {
-        if let Err(err) = inject_trusty_memory_mcp(project_dir) {
+        // Pin the project's palace via `env.TRUSTY_MEMORY_PALACE` (issue #1605).
+        // `repo_url` (the cloned-from URL, threaded from LaunchParams) is the
+        // authoritative identity for repo_url-cloned sessions; the injector
+        // falls back to the workspace's own git origin remote when it is `None`,
+        // and to the bare stub when no slug can be derived (fail-open).
+        if let Err(err) = inject_trusty_memory_mcp(project_dir, repo_url) {
             tracing::warn!("failed to inject trusty-memory MCP server: {err}");
         }
     } else {

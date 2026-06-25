@@ -363,9 +363,13 @@ async fn gather_local_diff_renders_empty() {
 /// Test: this test; no network.
 #[test]
 fn from_config_respects_explicit_disable() {
-    let cfg_off = crate::integrations::context::SourceConfig {
-        enabled: Some(false),
-        mode: RetrievalMode::Live,
+    let cfg_off = crate::integrations::context::ConformanceSourceConfig {
+        base: crate::integrations::context::SourceConfig {
+            enabled: Some(false),
+            mode: RetrievalMode::Live,
+        },
+        external_spec_repo: None,
+        spec_path_prefix: None,
     };
     let src = ConformanceSource::from_config(&cfg_off, RunMode::Cli, ReviewConfig::load(None));
     assert!(
@@ -373,7 +377,7 @@ fn from_config_respects_explicit_disable() {
         "explicit disable must keep the source off"
     );
 
-    let cfg_default = crate::integrations::context::SourceConfig::default();
+    let cfg_default = crate::integrations::context::ConformanceSourceConfig::default();
     let src2 = ConformanceSource::from_config(&cfg_default, RunMode::Cli, ReviewConfig::load(None));
     assert!(
         !src2.is_enabled(),
@@ -388,13 +392,34 @@ fn from_config_respects_explicit_disable() {
 /// Test: this test; no network.
 #[test]
 fn from_config_respects_explicit_enable() {
-    let cfg_on = crate::integrations::context::SourceConfig {
-        enabled: Some(true),
-        mode: RetrievalMode::Live,
+    let cfg_on = crate::integrations::context::ConformanceSourceConfig {
+        base: crate::integrations::context::SourceConfig {
+            enabled: Some(true),
+            mode: RetrievalMode::Live,
+        },
+        external_spec_repo: None,
+        spec_path_prefix: None,
     };
     let src = ConformanceSource::from_config(&cfg_on, RunMode::Cli, ReviewConfig::load(None));
     assert!(src.is_enabled(), "explicit enable must turn the source on");
     assert_eq!(src.name(), "conformance");
+}
+
+/// `from_config` with default config (no external_spec_repo) produces a disabled source.
+///
+/// Why: validates that the default `ConformanceSourceConfig` (no external repo,
+/// no explicit enable) results in a disabled conformance source -- the expected
+/// production default.
+/// What: constructs with default config, asserts `is_enabled() == false`.
+/// Test: this test; no network.
+#[test]
+fn from_config_with_external_spec_is_disabled_when_not_configured() {
+    let cfg = crate::integrations::context::ConformanceSourceConfig::default();
+    let src = ConformanceSource::from_config(&cfg, RunMode::Cli, ReviewConfig::load(None));
+    assert!(
+        !src.is_enabled(),
+        "default ConformanceSourceConfig must produce a disabled source"
+    );
 }
 
 // ─── build_query: PR-number threading (#1359) ─────────────────────────────────
@@ -438,5 +463,318 @@ fn query_none_without_owner_repo() {
     assert!(
         ConformanceSource::build_query(&subject).is_none(),
         "no owner/repo (local-diff) must yield None"
+    );
+}
+
+// ─── source_citation: snippet title/subtitle carry the ticket key (#1419) ────
+
+/// The rendered snippet title contains the ticket ID so the LLM can copy it
+/// verbatim into `source_citation` (#1419).
+///
+/// Why: the source-citation grounding mechanism (AC #1419) requires the LLM
+/// to have the EXACT ticket key available as a copyable string in the context
+/// snippet; if the key is absent from the rendered snippet, the LLM cannot
+/// populate `source_citation` reliably.
+/// What: renders a `ResolvedIntent` with a known ticket ID and asserts both
+/// the snippet title and the subtitle contain that ID.
+/// Test: this test; pure, no network.
+#[test]
+fn render_section_title_and_subtitle_contain_ticket_key() {
+    let ticket_id = "IMPL-2026-05-009".to_string();
+    let intent = ResolvedIntent {
+        ticket: Some(TicketRef {
+            id: ticket_id.clone(),
+            title: "Paginate listing".to_string(),
+            url: None,
+            backend: "github".to_string(),
+        }),
+        ticket_method: Some(Method {
+            text: "use cursor-based pagination".to_string(),
+            kind: MethodKind::Approach,
+            source_excerpt: "use cursor-based pagination".to_string(),
+        }),
+        spec_section: None,
+        spec_method: None,
+        precedence_winner: Precedence::Ticket,
+        conflict: false,
+        stale_spec: false,
+        unresolved: None,
+    };
+    let section = ConformanceSource::render_section(&intent);
+    assert!(
+        !section.snippets.is_empty(),
+        "a prescribed method must produce a non-empty section"
+    );
+    let snippet = &section.snippets[0];
+    assert!(
+        snippet.title.contains(&ticket_id),
+        "snippet title must contain the ticket ID for source_citation grounding: got {:?}",
+        snippet.title
+    );
+    let subtitle = snippet
+        .subtitle
+        .as_deref()
+        .expect("subtitle must be present");
+    assert!(
+        subtitle.contains(&ticket_id),
+        "snippet subtitle must contain the ticket ID as the citation key: got {:?}",
+        subtitle
+    );
+}
+
+// ─── #1418: test-plan / AC conformance gap tests ──────────────────────────────
+
+/// PR body with a `## Test plan` section yields the contained bullet items.
+///
+/// Why: `extract_test_plan_items` must correctly identify the `## Test plan`
+/// heading (case-insensitive) and collect every bullet line beneath it, stopping
+/// at the next `##` heading (#1418 AC-1).
+/// What: a body with a `## Test plan` section containing two bullets → both
+/// items returned; a non-test-plan heading following them is not included.
+/// Test: this test; pure, no network.
+#[test]
+fn test_plan_extraction_from_pr_body() {
+    let body = "\
+## Summary\n\
+This PR adds pagination.\n\
+\n\
+## Test plan\n\
+- Verify the endpoint returns 20 items per page\n\
+- Should fail gracefully on invalid cursor\n\
+\n\
+## Related\n\
+- Some other note\n\
+";
+    let items = super::extract_test_plan_items(body);
+    assert_eq!(items.len(), 2, "two bullet items under ## Test plan");
+    assert!(
+        items[0].contains("Verify the endpoint"),
+        "first item text: {:?}",
+        items[0]
+    );
+    assert!(
+        items[1].contains("Should fail gracefully"),
+        "second item text: {:?}",
+        items[1]
+    );
+}
+
+/// Ticket body with `## Acceptance Criteria` bullets and `- [ ]` checkboxes
+/// yields all AC items, deduped (#1418 AC-2).
+///
+/// Why: tickets use both heading-scoped bullets and freestanding `- [ ]`
+/// checklist items; `extract_ac_bullets` must collect both forms.
+/// What: a ticket body with an `## Acceptance Criteria` section (plain bullet)
+/// and a `- [ ]` checkbox item elsewhere → both are returned, no duplicates.
+/// Test: this test; pure, no network.
+#[test]
+fn ac_extraction_from_ticket() {
+    let ticket_body = "\
+## Background\n\
+Some background text.\n\
+\n\
+## Acceptance Criteria\n\
+- Tests cover the cursor path\n\
+- Error handling is documented\n\
+\n\
+## Implementation notes\n\
+- [ ] Should validate the cursor token\n\
+";
+    let items = super::extract_ac_bullets(ticket_body);
+    assert_eq!(
+        items.len(),
+        3,
+        "expected 3 AC items (2 from section + 1 from - [ ] checkbox): {:?}",
+        items
+    );
+    assert!(
+        items.iter().any(|i| i.contains("cursor")),
+        "cursor-related item must be present: {:?}",
+        items
+    );
+    assert!(
+        items.iter().any(|i| i.contains("validate")),
+        "validate item from - [ ] must be present: {:?}",
+        items
+    );
+}
+
+/// An AC item referencing test behaviour with no test file in the diff produces
+/// an "Unmet AC" snippet with a source citation subtitle (#1418 AC-3).
+///
+/// Why: the primary payoff of #1418 is a citable gap finding the LLM can
+/// reference instead of emitting a vague "needs tests" note.  The snippet title
+/// must start with "Unmet AC:" and the subtitle must carry the source.
+/// What: `build_gap_snippets` with one test-related AC item and no test-file
+/// coverage → one snippet with the expected title/subtitle.
+/// Test: this test; pure (calls `build_gap_snippets` directly).
+#[test]
+fn unmet_ac_renders_snippet() {
+    let ac_items = vec!["Should verify the pagination cursor is valid".to_string()];
+    let changed_files = vec!["src/page.rs".to_string()]; // no test file
+    let identifiers: Vec<String> = Vec::new();
+
+    let snippets = super::build_gap_snippets(
+        &[],
+        &ac_items,
+        Some("https://github.com/owner/repo/issues/42"),
+        Some("#42"),
+        &changed_files,
+        &identifiers,
+    );
+    assert_eq!(
+        snippets.len(),
+        1,
+        "one unmet AC item must produce one snippet"
+    );
+    let snip = &snippets[0];
+    assert!(
+        snip.title.starts_with("Unmet AC:"),
+        "snippet title must start with 'Unmet AC:': got {:?}",
+        snip.title
+    );
+    let subtitle = snip.subtitle.as_deref().expect("subtitle must be present");
+    assert!(
+        subtitle.contains("#42"),
+        "subtitle must carry ticket ID: got {:?}",
+        subtitle
+    );
+}
+
+/// A PR that touches an UNRELATED test file does NOT count as covering an AC
+/// item whose key terms do not appear in any test file path or test identifier.
+///
+/// Why: `item_has_test_coverage` must be PER-ITEM — touching `tests/auth_test.rs`
+/// must not suppress a gap finding for "verify pagination cursor is valid"; the
+/// two concerns are unrelated (#1418 review fix, Issue 1).
+/// What: a changed_files list containing a test file for "auth" and an AC item
+/// about "pagination cursor" → gap snippet IS emitted (the auth test does not
+/// cover the pagination AC item).
+/// Test: this test; pure (calls `build_gap_snippets` directly).
+#[test]
+fn unrelated_test_file_does_not_cover_ac_item() {
+    let ac_items = vec!["verify pagination cursor is valid".to_string()];
+    // An auth test file — unrelated to pagination.
+    let changed_files = vec!["tests/auth_test.rs".to_string()];
+    let identifiers: Vec<String> = Vec::new();
+
+    let snippets = super::build_gap_snippets(
+        &[],
+        &ac_items,
+        Some("https://github.com/owner/repo/issues/55"),
+        Some("#55"),
+        &changed_files,
+        &identifiers,
+    );
+    assert_eq!(
+        snippets.len(),
+        1,
+        "unrelated test file must NOT count as coverage; gap snippet expected: {:?}",
+        snippets
+    );
+    assert!(
+        snippets[0].title.contains("pagination"),
+        "gap snippet must reference the AC item: {:?}",
+        snippets[0].title
+    );
+}
+
+/// A PR that touches a test file whose path shares key terms with the AC item
+/// IS considered to cover that item (the permissive heuristic).
+///
+/// Why: if the test file path contains a key term from the AC item, we trust
+/// the author added coverage for it; we must not emit a false-positive gap.
+/// What: `changed_files` with `tests/pagination_test.rs` and an AC item about
+/// "pagination cursor" → no gap snippet emitted.
+/// Test: this test; pure.
+#[test]
+fn related_test_file_covers_ac_item() {
+    let ac_items = vec!["verify pagination cursor is valid".to_string()];
+    let changed_files = vec!["tests/pagination_test.rs".to_string()];
+    let identifiers: Vec<String> = Vec::new();
+
+    let snippets = super::build_gap_snippets(
+        &[],
+        &ac_items,
+        Some("https://github.com/owner/repo/issues/55"),
+        Some("#55"),
+        &changed_files,
+        &identifiers,
+    );
+    assert!(
+        snippets.is_empty(),
+        "a test file sharing key terms with the AC item must be treated as covering it: {:?}",
+        snippets
+    );
+}
+
+/// `build_gap_snippets` returns empty when both lists are empty (no advisory).
+///
+/// Why: the advisory branch was removed because `gather_gap_snippets` already
+/// gates on having items to check before calling this function; emitting an
+/// advisory from `build_gap_snippets` would be dead code in production and
+/// confusing to direct callers.
+/// What: empty `tp_items` + empty `ac_items` → empty Vec.
+/// Test: this test; pure.
+#[test]
+fn empty_lists_produce_no_snippets() {
+    let snippets =
+        super::build_gap_snippets(&[], &[], None, None, &["src/foo.rs".to_string()], &[]);
+    assert!(
+        snippets.is_empty(),
+        "empty tp_items + empty ac_items must produce no snippets (advisory removed): {:?}",
+        snippets
+    );
+}
+
+/// A completely empty PR body produces no snippets at all (not even advisory).
+///
+/// Why: an empty PR body signals a local-diff / draft review where there is no
+/// authored test plan to check against; emitting an advisory would be a false
+/// positive (the author hasn't described the PR yet).
+/// What: a subject with `body = ""` → `gather_gap_snippets` returns an empty Vec
+/// (checked by asserting `gather` returns an empty section when the ISR also
+/// resolves to no intent).
+/// Test: this test; no network.
+#[tokio::test]
+async fn empty_body_no_snippets() {
+    let src = source_with_fetcher(MockFetcher {
+        body: String::new(),
+        fail: false,
+    });
+    let subject = ReviewSubject {
+        body: String::new(), // empty body
+        ..subject_with_body("")
+    };
+    let section = src.gather(&subject).await.expect("gather must not error");
+    assert!(
+        section.snippets.is_empty(),
+        "empty PR body must produce no snippets (not even advisory)"
+    );
+}
+
+/// `extract_test_plan_items` accepts tab-separated bullets (e.g. `-\titem`) as
+/// well as space-separated bullets, consistent with the checkbox branch in
+/// `extract_ac_bullets` (#1418 fix 4).
+///
+/// Why: some editors / PR templates emit tab-after-marker bullets; `parse_bullet`
+/// must accept them or silently drop items from the test-plan parse.
+/// What: a PR body with `"-\tVerify the tab bullet"` under `## Test plan` →
+/// the item is returned (not dropped).
+/// Test: this test; pure, no network.
+#[test]
+fn test_plan_accepts_tab_separated_bullets() {
+    let body = "## Test plan\n-\tVerify the tab bullet is parsed\n";
+    let items = super::extract_test_plan_items(body);
+    assert_eq!(
+        items.len(),
+        1,
+        "tab-separated bullet must be parsed: {:?}",
+        items
+    );
+    assert!(
+        items[0].contains("tab bullet"),
+        "item text must survive tab stripping: {:?}",
+        items[0]
     );
 }

@@ -153,6 +153,7 @@ fn health_response_contains_stall_fields() {
         background_reindex_queue_depth: 0,
         update_available: None,
         warmboot_summary: WarmBootSummary::default(),
+        boot_reconcile: None,
     };
 
     let json: Value = serde_json::to_value(&resp).expect("serialize");
@@ -204,6 +205,7 @@ fn health_response_omits_last_ok_when_none() {
         background_reindex_queue_depth: 0,
         update_available: None,
         warmboot_summary: WarmBootSummary::default(),
+        boot_reconcile: None,
     };
 
     let json: Value = serde_json::to_value(&resp).expect("serialize");

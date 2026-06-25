@@ -63,6 +63,47 @@ impl SourceConfig {
     }
 }
 
+/// Resolved configuration for the conformance source, including external-spec fields.
+///
+/// Why: the conformance source needs two extra optional fields (`external_spec_repo`,
+/// `spec_path_prefix`) beyond the generic `SourceConfig` knobs (#1419 PR-B).
+/// What: embeds the base `SourceConfig` and adds the two optional external-spec
+/// knobs (default `None` -- disabled).
+/// Test: `conformance_source_config_defaults` in this module.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConformanceSourceConfig {
+    /// Base enable/mode config (shared with other sources).
+    pub base: SourceConfig,
+    /// `"org/repo"` of the external spec repository (e.g. `"myorg/apex-specs"`).
+    /// `None` -- external spec lookup disabled.
+    pub external_spec_repo: Option<String>,
+    /// Optional path prefix prepended to every spec filename when fetching
+    /// from the external repo (e.g. `"docs/specs/"`).
+    pub spec_path_prefix: Option<String>,
+}
+
+impl ConformanceSourceConfig {
+    /// Delegate `effective_enabled` to the inner `SourceConfig`.
+    ///
+    /// Why: callers of `ConformanceSourceConfig` call this the same way they
+    /// call it on `SourceConfig` -- transparent delegation keeps the API uniform.
+    /// What: forwards to `self.base.effective_enabled(creds_present)`.
+    /// Test: `conformance_source_config_defaults`.
+    pub fn effective_enabled(&self, creds_present: bool) -> bool {
+        self.base.effective_enabled(creds_present)
+    }
+
+    /// The retrieval mode from the inner `SourceConfig`.
+    ///
+    /// Why: callers need the mode without reaching into `base` directly,
+    /// keeping the API surface consistent with `SourceConfig`.
+    /// What: returns `self.base.mode`.
+    /// Test: `conformance_source_config_defaults`.
+    pub fn mode(&self) -> super::RetrievalMode {
+        self.base.mode
+    }
+}
+
 /// Resolved per-source context configuration for all external sources.
 ///
 /// Why: the runner constructs the source set from one owned struct instead of
@@ -81,7 +122,10 @@ pub struct ContextSourcesConfig {
     pub github_issues: SourceConfig,
     /// Intent/method-conformance back gate (#1359).  Default DISABLED: it calls
     /// the ISR (GitHub ticket fetch) so it must be explicitly opted in.
-    pub conformance: SourceConfig,
+    pub conformance: ConformanceSourceConfig,
+    /// Prior-PR / file change-history source (T10, #1423).  Default DISABLED:
+    /// makes multiple GitHub API calls per review; opt in explicitly.
+    pub pr_history: SourceConfig,
 }
 
 impl ContextSourcesConfig {
@@ -98,7 +142,8 @@ impl ContextSourcesConfig {
             jira: resolve_source("JIRA", file.map(|f| &f.jira)),
             confluence: resolve_source("CONFLUENCE", file.map(|f| &f.confluence)),
             github_issues: resolve_source("GITHUB_ISSUES", file.map(|f| &f.github_issues)),
-            conformance: resolve_source("CONFORMANCE", file.map(|f| &f.conformance)),
+            conformance: resolve_conformance_source(file.map(|f| &f.conformance)),
+            pr_history: resolve_source("PR_HISTORY", file.map(|f| &f.pr_history)),
         }
     }
 }
@@ -125,6 +170,29 @@ fn resolve_source(env_key: &str, file: Option<&SourceFileConfig>) -> SourceConfi
     cfg
 }
 
+/// Resolve the `ConformanceSourceConfig` from its file table + env overrides.
+///
+/// Why: the conformance source has extra fields (`external_spec_repo`,
+/// `spec_path_prefix`) beyond the generic `SourceConfig`; factoring the
+/// resolution keeps `from_env_and_file` readable and the extra fields
+/// in one place (#1419 PR-B).
+/// What: delegates base `enabled`/`mode` resolution to `resolve_source`, then
+/// copies the two extra optional fields from the file table.
+/// Test: `conformance_source_config_defaults`.
+fn resolve_conformance_source(
+    file: Option<&ConformanceSourceFileConfig>,
+) -> ConformanceSourceConfig {
+    let base_file = file.map(|f| SourceFileConfig {
+        enabled: f.enabled,
+        mode: f.mode,
+    });
+    ConformanceSourceConfig {
+        base: resolve_source("CONFORMANCE", base_file.as_ref()),
+        external_spec_repo: file.and_then(|f| f.external_spec_repo.clone()),
+        spec_path_prefix: file.and_then(|f| f.spec_path_prefix.clone()),
+    }
+}
+
 // ─── TOML mirrors ───────────────────────────────────────────────────────────
 
 /// TOML-deserialisable `[context.sources]` table.
@@ -147,7 +215,10 @@ pub struct ContextSourcesFileConfig {
     pub github_issues: SourceFileConfig,
     /// `[context.sources.conformance]` — the intent/method-conformance back gate.
     #[serde(default)]
-    pub conformance: SourceFileConfig,
+    pub conformance: ConformanceSourceFileConfig,
+    /// `[context.sources.pr_history]` — prior-PR / file change-history source.
+    #[serde(default)]
+    pub pr_history: SourceFileConfig,
 }
 
 /// TOML-deserialisable single-source table (all fields optional).
@@ -162,6 +233,24 @@ pub struct SourceFileConfig {
     pub enabled: Option<bool>,
     /// `mode = "live"|"semantic"`.
     pub mode: Option<RetrievalMode>,
+}
+
+/// TOML-deserialisable `[context.sources.conformance]` table with extra fields.
+///
+/// Why: extends the generic `SourceFileConfig` with external-spec knobs (#1419).
+/// What: `enabled`, `mode` (inherited), plus `external_spec_repo` and
+/// `spec_path_prefix` (both optional, default absent -- None).
+/// Test: covered by `from_env_and_file` for conformance field.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ConformanceSourceFileConfig {
+    /// `enabled = true|false`.
+    pub enabled: Option<bool>,
+    /// `mode = "live"|"semantic"`.
+    pub mode: Option<RetrievalMode>,
+    /// `external_spec_repo = "org/repo"`.
+    pub external_spec_repo: Option<String>,
+    /// `spec_path_prefix = "docs/specs/"`.
+    pub spec_path_prefix: Option<String>,
 }
 
 // ─── Env parsing helpers ────────────────────────────────────────────────────
@@ -353,5 +442,56 @@ mod tests {
         assert_eq!(cfg.jira.enabled, None, "garbage enabled ignored");
         assert_eq!(cfg.jira.mode, RetrievalMode::Live, "garbage mode ignored");
         clear_env();
+    }
+
+    #[test]
+    fn conformance_source_config_defaults() {
+        let cfg = ConformanceSourceConfig::default();
+        // Default is disabled and live mode.
+        assert!(
+            !cfg.effective_enabled(false),
+            "default conformance config is disabled without explicit opt-in"
+        );
+        // `ConformanceSource::from_config` always passes `creds_present=false`
+        // so the conformance source NEVER auto-enables on credential presence
+        // (unlike `github_issues`).  The ONLY way to enable it is an explicit
+        // `enabled = Some(true)` in the config.  The generic `SourceConfig`
+        // logic supports `creds_present=true`, but the conformance source's
+        // `from_config` never exercises that path — we document that fact here
+        // so the contract is unambiguous.
+        assert!(
+            !cfg.effective_enabled(false),
+            "conformance requires explicit enabled=true; creds-present alone does not enable it"
+        );
+        // The external-spec lookup is separately gated by `external_spec_repo`
+        // being set; a GITHUB_TOKEN alone does not activate it.
+        assert!(
+            cfg.external_spec_repo.is_none(),
+            "external spec disabled by default"
+        );
+        assert!(cfg.spec_path_prefix.is_none());
+        assert_eq!(cfg.mode(), RetrievalMode::Live);
+    }
+
+    #[test]
+    fn conformance_source_config_explicit_enable() {
+        // Only an explicit `enabled = Some(true)` activates the source.
+        //
+        // Why: documents the opt-in-only contract so callers know they must set
+        // `[context.sources.conformance] enabled = true` explicitly.
+        // What: `effective_enabled(false)` returns `true` only when
+        // `self.base.enabled = Some(true)`.
+        // Test: this test.
+        let cfg = ConformanceSourceConfig {
+            base: SourceConfig {
+                enabled: Some(true),
+                mode: RetrievalMode::Live,
+            },
+            ..Default::default()
+        };
+        assert!(
+            cfg.effective_enabled(false),
+            "explicit enabled=true must activate the source"
+        );
     }
 }

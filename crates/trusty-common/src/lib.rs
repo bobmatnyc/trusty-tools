@@ -384,6 +384,26 @@ pub use slug::slugify_string;
 pub mod index_id;
 pub use index_id::{derive_index_id, resolve_project_root};
 
+/// Canonical trusty-memory palace-ID derivation from project identity (#1217/#1605).
+///
+/// Why: trusty-memory (default-palace derivation at the CLI/hook/MCP edges) and
+/// trusty-mpm (managed-session MCP injection — it pins `TRUSTY_MEMORY_PALACE` in
+/// a cloned session's `.mcp.json`) must derive the byte-for-byte identical
+/// palace slug from the same project identity, or a repo-cloned session resolves
+/// the wrong palace. Centralising the pure rule here — the crate both already
+/// depend on — keeps them in lockstep without a trusty-mpm → trusty-memory
+/// dependency edge, exactly as `index_id` does for trusty-search index pinning.
+/// What: Exposes [`palace_id::derive_palace_id`],
+/// [`palace_id::owner_repo_from_git_remote`], [`palace_id::parent_dir_slug`],
+/// and the [`palace_id::PALACE_OVERRIDE_ENV`] / [`palace_id::palace_override_from_env`]
+/// env helpers.
+/// Test: `cargo test -p trusty-common -- palace_id::tests`.
+pub mod palace_id;
+pub use palace_id::{
+    PALACE_OVERRIDE_ENV, derive_palace_id, owner_repo_from_git_remote, palace_override_from_env,
+    parent_dir_slug,
+};
+
 /// Shared GitHub `owner/repo` path derivation (issue #1220).
 ///
 /// Why: trusty-mpm's managed-session workspace root

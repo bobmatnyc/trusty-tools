@@ -1,6 +1,6 @@
 [package]
 name = "trusty-search"
-version = "0.27.2"
+version = "0.29.0"
 edition = "2021"
 description = "Machine-wide hybrid code search service: BM25 + vector + KG, zero cold-start, MCP server"
 readme = "README.md"
@@ -207,6 +207,9 @@ serial_test = "3"
 # `service::concurrency` and `service::metrics` modules (issue #41 Phase 1)
 # to exercise router behaviour without binding a TCP port.
 tower = { version = "0.5", features = ["util"] }
+# Why: issue #1672 mtime reconcile tests need to set file mtimes precisely so
+# `collect_stale_files_by_mtime` returns the expected set.
+filetime = "0.2"
 
 [features]
 # Default: bundle ORT static libs via trusty-embedder. Works on macOS and

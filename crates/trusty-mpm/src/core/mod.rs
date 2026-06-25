@@ -43,6 +43,7 @@ pub mod output_style_deployer;
 pub mod overseer;
 pub mod overseer_config;
 pub mod paths;
+pub mod pid_registry;
 pub mod process;
 pub mod project;
 pub mod project_discovery;

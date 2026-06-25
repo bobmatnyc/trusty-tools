@@ -1,20 +1,81 @@
-//! Map-reduce review pipeline — per-file diff splitting and (future) fan-out.
+//! Map-reduce review pipeline — per-file diff splitting + LLM fan-out + reduce.
 //!
 //! Why: the unified-diff path silently drops files when the diff exceeds
 //! `MAX_DIFF_CHARS`; the map-reduce path reviews each file independently and
 //! then reduces the per-file verdicts into one merged result.  This module is
-//! the public API surface for all map-reduce sub-stages.
+//! the public API surface for all map-reduce sub-stages and the top-level
+//! `run_map_reduce` orchestrator the runner calls (Phase 5, #1643).
 //!
-//! What: Phase 2 adds the per-file diff splitter (`split_into_units`), which
-//! turns `FilteredDiff` output into a `Vec<MapUnit>` — the map units the
-//! (future) map stage will review (Phase 3).  Phases 3-5 will add submodules
-//! here.  The module uses a re-export facade (`mod.rs`) per the 500-line-cap
-//! convention from CLAUDE.md.
+//! What:
+//!  - Phase 2: `split_into_units` turns a `FilteredDiff` into `Vec<MapUnit>`.
+//!  - Phase 3: `run_map_stage` reviews each unit with a bounded-parallel LLM
+//!    fan-out (`map.rs`).
+//!  - Phase 4: `reduce` aggregates the per-chunk outcomes into one
+//!    `ReducedReview` (`reduce.rs`).
+//!  - Phase 5: `run_map_reduce` (this file) wires split → map → reduce so the
+//!    runner has a single entry point.
 //!
-//! Test: comprehensive unit tests live in `splitter_tests.rs`.
+//! The module uses a re-export facade (`mod.rs`) per the 500-line-cap convention.
+//!
+//! Test: comprehensive unit tests live in `splitter_tests.rs`, `map_tests.rs`,
+//! `reduce_tests.rs`, `outcome_tests.rs`, and the end-to-end runner tests.
 
+use std::sync::Arc;
+
+use tracing::info;
+
+use crate::{
+    config::mapreduce::MapReduceConfig, llm::LlmProvider,
+    pipeline::diff_analyzer::models::FilteredDiff,
+};
+
+pub mod map;
+pub mod outcome;
+pub mod reduce;
 pub mod splitter;
+pub mod synthesis;
 pub mod unit;
 
+pub use map::{MapContext, run_map_stage};
+pub use outcome::{MapOutcome, MapReduceStats, ReducedReview};
+pub use reduce::reduce;
 pub use splitter::split_into_units;
+pub use synthesis::synthesize_review;
 pub use unit::{MapUnit, MapUnitKind};
+
+/// Run the full map-reduce review: split → map (bounded fan-out) → reduce → synthesis.
+///
+/// Why: the runner needs ONE call that takes the already-filtered diff and the
+/// shared review context and returns a merged `ReducedReview` whose shape matches
+/// the unified path.  Keeping the split/map/reduce wiring here (not in the
+/// near-cap `runner.rs`) honours the SLOC cap and keeps the runner readable.
+/// What: splits `filtered` into `MapUnit`s under the config budgets, fans the
+/// `Review` units out over `config.concurrency` LLM calls, reduces the
+/// outcomes into a `ReducedReview` (deterministic verdict + deduped findings +
+/// partial-coverage stats), and then runs an optional LLM synthesis pass
+/// (`config.synthesis`, default `true`, closes #1663) that calibrates the
+/// aggregate verdict to match a single holistic reviewer.  The synthesis pass
+/// applies a High-severity safety floor so critical findings can never be softened;
+/// the count-based `≥2 Medium → REQUEST_CHANGES` floor is intentionally omitted
+/// in the synthesis path because the LLM has already judged those findings
+/// holistically.  Never truncates: every surviving file/hunk reaches a reviewer
+/// (or is honestly recorded as skipped/failed in the stats).
+/// Test: `reduce_tests.rs`, `synthesis_tests.rs`, and the runner integration tests
+/// `run_review_oversized_diff_mapreduce_reviews_tail_signature` etc.
+pub async fn run_map_reduce(
+    filtered: &FilteredDiff,
+    llm: &Arc<dyn LlmProvider>,
+    ctx: &MapContext<'_>,
+    config: &MapReduceConfig,
+) -> ReducedReview {
+    let units = split_into_units(filtered, config);
+    info!(
+        files = filtered.files.len(),
+        units = units.len(),
+        concurrency = config.concurrency,
+        "map-reduce: split diff into units"
+    );
+    let outcomes = run_map_stage(&units, llm, ctx, config.concurrency).await;
+    let reduced = reduce(outcomes, config);
+    synthesize_review(reduced, llm, ctx, config).await
+}

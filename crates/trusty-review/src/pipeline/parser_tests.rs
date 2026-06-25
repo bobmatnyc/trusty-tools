@@ -562,3 +562,78 @@ fn parse_finding_carries_suggested_replacement() {
         "whitespace-only replacement must normalise to None"
     );
 }
+
+// ── Source citation (#1419) ───────────────────────────────────────────────
+
+/// A finding's `source_citation` is carried through the parser (#1419).
+///
+/// Why: the renderer and log reader need the exact spec/ticket key the LLM
+/// cited; it must survive the JSON → `Finding` conversion and be `None`-normalised
+/// for empty/whitespace values, mirroring `suggested_replacement`.
+/// What: parses one finding with a concrete citation and one with an empty
+/// string, asserting the first is `Some` and the second is `None`.
+/// Test: this test itself; no network.
+#[test]
+fn parse_finding_carries_source_citation() {
+    let body = r#"{
+        "verdict":"REQUEST_CHANGES",
+        "summary":"Conformance finding.",
+        "findings":[
+            {
+                "title":"Uses offset pagination",
+                "body":"Ticket specifies cursor-based pagination.",
+                "severity":"medium",
+                "confidence":0.9,
+                "file":"src/page.rs",
+                "category":"method-conformance",
+                "source_citation":"IMPL-2026-05-009 WP-9"
+            },
+            {
+                "title":"Nit",
+                "body":"Style.",
+                "severity":"low",
+                "confidence":0.4,
+                "file":"src/page.rs",
+                "source_citation":"   "
+            }
+        ]
+    }"#;
+    let result = parse_review_response(body);
+    assert_eq!(result.findings.len(), 2);
+    assert_eq!(
+        result.findings[0].source_citation.as_deref(),
+        Some("IMPL-2026-05-009 WP-9"),
+        "concrete source_citation must be carried through"
+    );
+    assert!(
+        result.findings[1].source_citation.is_none(),
+        "whitespace-only source_citation must normalise to None"
+    );
+}
+
+/// A finding that OMITS `source_citation` defaults to `None` (back-compat).
+///
+/// Why: pre-#1419 fixtures and models that do not emit `source_citation` must
+/// keep parsing — the field is opt-in, never required.
+/// What: parses a finding with no `source_citation` key, asserts `None`.
+/// Test: this test itself; no network.
+#[test]
+fn parse_finding_without_source_citation_defaults_none() {
+    let body = r#"{
+        "verdict":"APPROVE",
+        "summary":"Clean.",
+        "findings":[{
+            "title":"Minor nit",
+            "body":"Style issue.",
+            "severity":"low",
+            "confidence":0.5,
+            "file":"src/lib.rs"
+        }]
+    }"#;
+    let result = parse_review_response(body);
+    assert_eq!(result.findings.len(), 1);
+    assert!(
+        result.findings[0].source_citation.is_none(),
+        "absent source_citation must default to None (pre-#1419 back-compat)"
+    );
+}

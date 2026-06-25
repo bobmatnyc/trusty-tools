@@ -3,8 +3,11 @@
 //! Why: split from `client.rs` to keep that file under the 500-line cap
 //! while keeping the tests adjacent to the code they exercise.
 //! What: covers JSON deserialisation, PR state mapping, pagination, auth
-//! construction (including env-expansion of `app_password` — issue #842),
-//! and auth rejection when credentials are absent.
+//! resolution via [`super::resolve_auth`] with an injected env lookup
+//! (including env-expansion of `app_password` — issue #842 — and the
+//! env-fallback path — issue #1653), and auth rejection when credentials
+//! are absent. Auth tests inject an in-memory env map rather than mutating
+//! `std::env`, so they cannot race under the parallel test harness.
 //! Test: `cargo test -p tga collect::bitbucket::tests`.
 
 use super::*;
@@ -179,57 +182,109 @@ async fn fetch_pull_requests_follows_next_cursor() {
     assert!(prs[1].commit_shas.contains("abc123"));
 }
 
-/// Drop guard that snapshots an env var, removes it for the test, and
-/// restores it (or re-removes it if originally absent) on drop. The Drop
-/// impl runs during stack unwinding, so a panic inside the test body
-/// still triggers env restore — unlike a closure-based save/run/restore
-/// pattern, which silently leaks mutated state when the closure panics.
-pub(super) struct EnvVarGuard {
-    pub(super) name: &'static str,
-    pub(super) original: Option<String>,
-}
-
-impl EnvVarGuard {
-    pub(super) fn remove(name: &'static str) -> Self {
-        let original = std::env::var(name).ok();
-        // SAFETY: 2024-edition env mutation; the guard is the sole writer
-        // for `name` within the test it covers, restored unconditionally
-        // on drop.
-        unsafe { std::env::remove_var(name) };
-        Self { name, original }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        // SAFETY: see [`EnvVarGuard::remove`].
-        unsafe {
-            match self.original.as_deref() {
-                Some(v) => std::env::set_var(self.name, v),
-                None => std::env::remove_var(self.name),
-            }
-        }
-    }
-}
-
-/// `new()` rejects a config that has neither token nor username+password.
-#[test]
-fn client_new_rejects_missing_auth() {
-    // Take care not to pick up a real env credential during this
-    // assertion; guards restore env even if the test below panics.
-    let _t = EnvVarGuard::remove("BITBUCKET_TOKEN");
-    let _p = EnvVarGuard::remove("BITBUCKET_APP_PASSWORD");
-
-    let result = BitbucketClient::new(&BitbucketConfig {
+/// Build a `BitbucketConfig` with workspace/repo set and the given auth
+/// fields, so each auth test only states what it actually cares about.
+fn auth_config(
+    token: Option<&str>,
+    username: Option<&str>,
+    app_password: Option<&str>,
+) -> BitbucketConfig {
+    BitbucketConfig {
+        token: token.map(Into::into),
+        username: username.map(Into::into),
+        app_password: app_password.map(Into::into),
         workspace: Some("acme".into()),
         repo_slug: Some("widgets".into()),
         fetch_prs: true,
         ..Default::default()
-    });
-    match result {
+    }
+}
+
+/// Build an injected env lookup from a fixed `(name, value)` table.
+///
+/// Why: `resolve_auth` takes the environment as a closure precisely so tests
+/// never mutate process-global `std::env` — that ambient mutation is what
+/// raced across parallel tests and flaked the env-fallback case (issue #1653).
+/// What: returns a closure that resolves names against an owned map; any name
+/// not in the table reads as unset, regardless of the real process env.
+fn env_map(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    let owned: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect();
+    move |name: &str| {
+        owned
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+    }
+}
+
+/// `resolve_auth` rejects a config with neither token nor username+password,
+/// even when the (empty) environment offers nothing either.
+///
+/// Why: missing credentials must surface as a `Config` error, never a panic
+/// or a silent default.
+/// What: empty config auth fields + empty env → `CollectError::Config`.
+/// Test: this test (pure, no env mutation).
+#[test]
+fn resolve_auth_rejects_missing_auth() {
+    let cfg = auth_config(None, None, None);
+    match resolve_auth(&cfg, env_map(&[])) {
         Ok(_) => panic!("expected auth failure, got Ok(_)"),
         Err(CollectError::Config(_)) => {}
         Err(other) => panic!("unexpected error: {other:?}"),
+    }
+}
+
+/// A `username` set without any app_password (config or env) is rejected.
+///
+/// Why: half-specified Basic auth must error rather than send an empty
+/// password.
+/// What: username present, app_password absent, empty env → `Config` error.
+/// Test: this test.
+#[test]
+fn resolve_auth_rejects_username_without_password() {
+    let cfg = auth_config(None, Some("carol"), None);
+    match resolve_auth(&cfg, env_map(&[])) {
+        Err(CollectError::Config(_)) => {}
+        other => panic!("expected Config error, got {other:?}"),
+    }
+}
+
+/// A plain config `token` resolves to Bearer auth and wins over Basic fields.
+///
+/// Why: documents the precedence — token always supersedes username/password.
+/// What: config token + username/app_password → `BbAuth::Bearer(token)`.
+/// Test: this test.
+#[test]
+fn resolve_auth_config_token_yields_bearer() {
+    let cfg = auth_config(Some("tok-123"), Some("u"), Some("p"));
+    match resolve_auth(&cfg, env_map(&[])).expect("resolves") {
+        BbAuth::Bearer(t) => assert_eq!(t, "tok-123"),
+        BbAuth::Basic { .. } => panic!("expected Bearer, got Basic"),
+    }
+}
+
+/// A `${VAR}` token placeholder is expanded from the injected env, and the
+/// `BITBUCKET_TOKEN` env var is used as a fallback when config token is unset.
+///
+/// Why: keeps token env-expansion (#741) and the env fallback covered after
+/// the refactor.
+/// What: placeholder token → expanded value; absent token → env var value.
+/// Test: this test.
+#[test]
+fn resolve_auth_token_expands_and_falls_back() {
+    let cfg = auth_config(Some("${TGA_BB_TOKEN}"), None, None);
+    match resolve_auth(&cfg, env_map(&[("TGA_BB_TOKEN", "expanded-tok")])).expect("resolves") {
+        BbAuth::Bearer(t) => assert_eq!(t, "expanded-tok"),
+        BbAuth::Basic { .. } => panic!("expected Bearer"),
+    }
+
+    let cfg = auth_config(None, None, None);
+    match resolve_auth(&cfg, env_map(&[("BITBUCKET_TOKEN", "env-tok")])).expect("resolves") {
+        BbAuth::Bearer(t) => assert_eq!(t, "env-tok"),
+        BbAuth::Basic { .. } => panic!("expected Bearer from env fallback"),
     }
 }
 
@@ -239,35 +294,13 @@ fn client_new_rejects_missing_auth() {
 /// Why: PR #743 fixed env-expansion for `token` but missed `app_password`,
 /// so users who wrote `app_password = "${MY_SECRET}"` in their YAML config
 /// got a literal `${MY_SECRET}` sent as the HTTP Basic password → silent 401.
-/// What: sets a known env var, configures `app_password` as a placeholder,
-/// builds the client, and asserts the resolved password equals the env value.
-/// Test: this test (unit, no network). Precedence variant (config wins over
-/// env fallback) is also covered: explicit password string is used as-is.
+/// What: injects an env value, configures `app_password` as a placeholder,
+/// resolves auth, and asserts the resolved password equals the env value.
+/// Test: this test (pure; injected env, no `std::env` mutation).
 #[test]
-fn app_password_env_var_expanded() {
-    // Isolate env state so parallel tests cannot interfere.
-    let _t = EnvVarGuard::remove("BITBUCKET_TOKEN");
-    let _fallback = EnvVarGuard::remove("BITBUCKET_APP_PASSWORD");
-
-    // SAFETY: same pattern used by EnvVarGuard; sole writer in this test.
-    unsafe { std::env::set_var("TGA_TEST_BB_APP_PW_842", "s3cr3t-expanded") };
-    let _guard = EnvVarGuard {
-        name: "TGA_TEST_BB_APP_PW_842",
-        original: None,
-    };
-
-    let client = BitbucketClient::new(&BitbucketConfig {
-        username: Some("myuser".into()),
-        app_password: Some("${TGA_TEST_BB_APP_PW_842}".into()),
-        workspace: Some("acme".into()),
-        repo_slug: Some("widgets".into()),
-        fetch_prs: true,
-        ..Default::default()
-    })
-    .expect("client builds with expanded app_password");
-
-    // Inspect the resolved password via the auth field on the client.
-    match &client.auth {
+fn resolve_auth_app_password_env_var_expanded() {
+    let cfg = auth_config(None, Some("myuser"), Some("${TGA_BB_APP_PW}"));
+    match resolve_auth(&cfg, env_map(&[("TGA_BB_APP_PW", "s3cr3t-expanded")])).expect("resolves") {
         BbAuth::Basic { username, password } => {
             assert_eq!(username, "myuser");
             assert_eq!(
@@ -286,31 +319,18 @@ fn app_password_env_var_expanded() {
 /// Why: verifies the precedence chain — config value wins over env fallback —
 /// so adding env-expansion does not accidentally break callers who store the
 /// literal password in YAML.
-/// What: sets `BITBUCKET_APP_PASSWORD` to a different string, configures a
-/// plain `app_password`, and asserts the config value wins.
+/// What: injects a different `BITBUCKET_APP_PASSWORD`, configures a plain
+/// `app_password`, and asserts the config value wins.
 /// Test: this test.
 #[test]
-fn app_password_config_takes_precedence_over_env_fallback() {
-    let _t = EnvVarGuard::remove("BITBUCKET_TOKEN");
-
-    // SAFETY: sole writer; EnvVarGuard restores on drop.
-    unsafe { std::env::set_var("BITBUCKET_APP_PASSWORD", "env-fallback-value") };
-    let _fallback = EnvVarGuard {
-        name: "BITBUCKET_APP_PASSWORD",
-        original: None,
-    };
-
-    let client = BitbucketClient::new(&BitbucketConfig {
-        username: Some("bob".into()),
-        app_password: Some("config-literal-pw".into()),
-        workspace: Some("acme".into()),
-        repo_slug: Some("widgets".into()),
-        fetch_prs: true,
-        ..Default::default()
-    })
-    .expect("client builds");
-
-    match &client.auth {
+fn resolve_auth_app_password_config_takes_precedence_over_env_fallback() {
+    let cfg = auth_config(None, Some("bob"), Some("config-literal-pw"));
+    match resolve_auth(
+        &cfg,
+        env_map(&[("BITBUCKET_APP_PASSWORD", "env-fallback-value")]),
+    )
+    .expect("resolves")
+    {
         BbAuth::Basic { password, .. } => {
             assert_eq!(
                 password, "config-literal-pw",
@@ -324,32 +344,18 @@ fn app_password_config_takes_precedence_over_env_fallback() {
 /// When `app_password` is absent from config, the `BITBUCKET_APP_PASSWORD`
 /// env var is used as the fallback credential.
 ///
-/// Why: validates the fallback branch is still reachable after the env-expansion
-/// fix — a regression here would silently break users who rely on the env var.
-/// What: removes config `app_password`, sets env fallback, asserts env value used.
-/// Test: this test.
+/// Why: validates the fallback branch is still reachable after the
+/// env-expansion fix — a regression here would silently break users who rely
+/// on the env var. This is the case that flaked in CI (issue #1653); injecting
+/// the env removes the parallel-test race entirely.
+/// What: config `app_password` absent, env fallback present → env value used.
+/// Test: this test (pure; injected env, no `std::env` mutation).
 #[test]
-fn app_password_falls_back_to_env_when_config_absent() {
-    let _t = EnvVarGuard::remove("BITBUCKET_TOKEN");
-
-    // SAFETY: sole writer; EnvVarGuard restores on drop.
-    unsafe { std::env::set_var("BITBUCKET_APP_PASSWORD", "env-only-pw") };
-    let _fallback = EnvVarGuard {
-        name: "BITBUCKET_APP_PASSWORD",
-        original: None,
-    };
-
-    let client = BitbucketClient::new(&BitbucketConfig {
-        username: Some("carol".into()),
-        app_password: None, // rely entirely on env
-        workspace: Some("acme".into()),
-        repo_slug: Some("widgets".into()),
-        fetch_prs: true,
-        ..Default::default()
-    })
-    .expect("client builds from env fallback");
-
-    match &client.auth {
+fn resolve_auth_app_password_falls_back_to_env_when_config_absent() {
+    let cfg = auth_config(None, Some("carol"), None);
+    match resolve_auth(&cfg, env_map(&[("BITBUCKET_APP_PASSWORD", "env-only-pw")]))
+        .expect("resolves")
+    {
         BbAuth::Basic { password, .. } => {
             assert_eq!(password, "env-only-pw");
         }

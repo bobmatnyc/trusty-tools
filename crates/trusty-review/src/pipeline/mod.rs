@@ -35,7 +35,10 @@ pub mod parser;
 pub mod post;
 pub mod prompt;
 pub mod runner;
+// Why: the map-reduce branch of `run_review` (split → map → reduce → fold) is
+// extracted here to keep runner.rs under the 500-line cap (#610 / #1643).
 pub mod runner_context;
+pub mod runner_mapreduce;
 pub mod trigger;
 pub mod verify;
 pub mod verify_liveness;

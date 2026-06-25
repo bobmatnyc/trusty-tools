@@ -273,6 +273,16 @@ fn seed_credentials(claude_config_dir: &Path) {
 /// (OPENROUTER_API_KEY, AWS credentials, TRUSTY_SEARCH_URL etc.) — no secrets
 /// are injected here; the managed session inherits the daemon env, matching the
 /// pattern used for trusty-memory and trusty-search.
+/// Palace pinning (issue #1651): the trusty-memory entry here is DELIBERATELY a
+/// bare `serve --stdio` stub with NO `env.TRUSTY_MEMORY_PALACE`. This is the
+/// SINGLE tm-global config dir (SPEC-STANDALONE-MPM-08), shared as the
+/// user-level MCP layer across EVERY alias, so it cannot carry any one project's
+/// palace slug. The per-project palace pin lives in the cloned repo's
+/// `repo/.mcp.json` (written by `load_alias` → `run_prepare_session` →
+/// `prepare_session_with_repo_url`, threading the registry clone URL), which
+/// Claude Code layers OVER this global stub (project-local precedence, A4). So
+/// the correct slug is always applied at the project layer; this global stub
+/// only declares server availability and must stay bare.
 /// Test: `test_global_config_dir_ensure_idempotent`,
 /// `test_mcp_config_contains_all_three_servers`,
 /// `test_mcp_config_no_spurious_write_when_unchanged`,

@@ -205,3 +205,59 @@ fn candidate_exists(dir: &Path, name: &str) -> bool {
     let p = dir.join(name);
     p.is_file()
 }
+
+/// Spawn a freshly-built `Command`, retrying on ETXTBSY (os error 26).
+///
+/// Why: `execve` can fail with `ETXTBSY` ("Text file busy") when the kernel
+/// still considers the target inode open-for-write — e.g. when a just-written,
+/// just-chmod'd script is exec'd before the page-cache flush settles. This is
+/// the same race #1528 fixed for the test-only `spawn_script` helper, but the
+/// production runner's `cmd.spawn()` lacked the guard, so the flaky test
+/// `run_sanitizes_finish_task_from_cli_args` (#1634) — whose mock `claude`
+/// script is exec'd through THIS path — still intermittently hit ETXTBSY under
+/// concurrent `cargo test` load. Retrying here de-flakes the test and hardens
+/// the real `claude` CLI spawn against the same transient kernel state.
+/// What: Calls `build()` to obtain a fresh `Command` on each attempt (required
+/// because `Command` is not `Clone`) and `.spawn()`s it. On `ETXTBSY` it backs
+/// off with a short exponential delay (≤3 attempts, 5 ms base) and retries; any
+/// other error, or the success path, returns immediately. The bound keeps real
+/// failures (missing binary, permission denied) from being masked or delayed.
+/// Test: Exercised by every claude-code-runner spawn test, in particular
+/// `run_sanitizes_finish_task_from_cli_args`, which was order-/load-dependent
+/// before this retry was added.
+pub(crate) async fn spawn_with_etxtbsy_retry<F>(
+    mut build: F,
+) -> std::io::Result<tokio::process::Child>
+where
+    F: FnMut() -> Command,
+{
+    const MAX_ATTEMPTS: u32 = 3;
+    const BACKOFF_MS: u64 = 5;
+
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..MAX_ATTEMPTS {
+        match build().spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                last_err = Some(e);
+                // Exponential backoff: 5ms, 10ms, 20ms for MAX_ATTEMPTS=3.
+                // `attempt` is bounded by MAX_ATTEMPTS, so the shift is far
+                // below u64's 64-bit width. Use an explicit `1u64` shift and a
+                // saturating multiply so this stays overflow-safe for any
+                // reasonable MAX_ATTEMPTS value if it is ever raised.
+                let backoff_ms = BACKOFF_MS.saturating_mul(1u64 << attempt);
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    // Unreachable in practice: the loop only falls through after recording an
+    // ETXTBSY error, so `last_err` is always `Some`. Construct a defensive
+    // fallback rather than panicking.
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::ExecutableFileBusy,
+            "spawn retries exhausted",
+        )
+    }))
+}

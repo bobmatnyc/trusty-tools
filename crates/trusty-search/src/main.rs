@@ -758,6 +758,39 @@ enum Commands {
         no_rules: bool,
     },
 
+    /// Install or remove git hooks for incremental reindexing
+    ///
+    /// Writes post-commit, post-merge, and post-checkout hooks into the
+    /// target repository's `.git/hooks/` directory. The hooks call the
+    /// daemon's incremental index-file / remove-file endpoints for each
+    /// changed or deleted path after every commit or merge.
+    ///
+    /// Each hook is wrapped in a trusty-search marker block so it can
+    /// coexist with other tools that already manage the same hook file.
+    /// Running `install` a second time is idempotent (block is replaced,
+    /// not appended). `uninstall` removes only the trusty-search block and
+    /// leaves any other content intact.
+    ///
+    /// Requirements:
+    ///   • The repository must be registered in the allowlist
+    ///     (`trusty-search index add <path>`) before the hooks will act.
+    ///   • The daemon must be running (`trusty-search start`); if it is
+    ///     down the hooks silently no-op and never block the commit.
+    ///
+    /// Examples:
+    ///   trusty-search hook install
+    ///   trusty-search hook install --repo ~/Projects/myapp
+    ///   trusty-search hook uninstall
+    ///   trusty-search hook uninstall --repo ~/Projects/myapp
+    #[command(display_order = 29)]
+    Hook {
+        /// Repository root containing `.git/` (default: CWD / git top-level)
+        #[arg(long)]
+        repo: Option<std::path::PathBuf>,
+        #[command(subcommand)]
+        action: commands::hook::HookAction,
+    },
+
     /// Diagnose configuration, model cache, and index health
     ///
     /// Checks each component and reports ✓ / ✗ / ⚠ for each. Exit code 0
@@ -767,7 +800,7 @@ enum Commands {
     /// Examples:
     ///   trusty-search doctor
     ///   trusty-search doctor --fix
-    #[command(display_order = 29)]
+    #[command(display_order = 30)]
     Doctor {
         /// Attempt to fix detected problems automatically
         #[arg(long)]
@@ -1363,6 +1396,10 @@ async fn run() -> Result<()> {
                 no_rules,
             )
             .await?;
+        }
+
+        Commands::Hook { repo, action } => {
+            commands::hook::handle_hook(commands::hook::HookArgs { repo, action }).await?;
         }
 
         Commands::Doctor { fix } => {

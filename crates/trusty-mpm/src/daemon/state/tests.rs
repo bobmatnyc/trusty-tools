@@ -254,7 +254,9 @@ fn reap_keeps_native_sessions() {
 #[test]
 fn set_session_pid_updates_field() {
     // Registering a session leaves `pid` unset; set_session_pid records it.
-    let state = DaemonState::new();
+    // Use a hermetic state so the PID-file write lands under a temp dir, never
+    // the operator's real `~/.trusty-mpm/pids`.
+    let (state, _tmp) = hermetic_state();
     let s = sample_session();
     let id = s.id;
     state.register_session(s);
@@ -265,6 +267,53 @@ fn set_session_pid_updates_field() {
 
     // An unknown id is reported as not updated.
     assert!(!state.set_session_pid(SessionId::new(), 1));
+}
+
+#[test]
+fn pid_registry_is_under_framework_root() {
+    // The PID registry must resolve to `<framework_root>/pids` so the spawn,
+    // drop, and sweep paths all agree on one directory.
+    let (state, _tmp) = hermetic_state();
+    let expected = state.framework_root().join("pids");
+    assert_eq!(state.pid_registry().dir(), expected.as_path());
+}
+
+#[test]
+fn set_session_pid_writes_pidfile() {
+    // Recording a PID must also write a `<uuid>.pid` file to the registry so a
+    // future orphan-GC sweep can find this claude process even after the tmux
+    // pane and in-memory entry are gone (§10.3).
+    let (state, _tmp) = hermetic_state();
+    let s = sample_session();
+    let id = s.id;
+    state.register_session(s);
+    assert!(state.set_session_pid(id, 4242));
+
+    let entries = state.pid_registry().entries().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].session_id, id.0.to_string());
+    assert_eq!(entries[0].pid, 4242);
+
+    // Removing the session must clear its PID file (no orphan left behind).
+    state.remove_session(id);
+    assert!(state.pid_registry().entries().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn gather_live_session_ids_unions_both() {
+    // The live-id set the PID sweep uses must include every legacy DaemonState
+    // session id (the SM store starts empty in a hermetic state, so the legacy
+    // ids are what must be present).
+    let (state, _tmp) = hermetic_state();
+    let a = sample_session();
+    let b = sample_session();
+    let (id_a, id_b) = (a.id, b.id);
+    state.register_session(a);
+    state.register_session(b);
+
+    let ids = state.gather_live_session_ids().await;
+    assert!(ids.contains(&id_a.0.to_string()));
+    assert!(ids.contains(&id_b.0.to_string()));
 }
 
 #[test]
