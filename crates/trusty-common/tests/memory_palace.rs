@@ -1,10 +1,13 @@
-//! Integration tests for `DrawerType::Task` protection (spec-001 Phase 4).
+//! Integration tests for `DrawerType::Task` protection and serialization safety
+//! (spec-001 Phase 4, issue #1722).
 //!
 //! Why: Task drawers hold goals/checkpoints an application must re-derive
 //! across sessions, so they must survive the dream cycle's eviction and
 //! consolidation passes. These tests exercise that contract end-to-end through
-//! the public palace + dream API, and confirm the optional `completed_at`
-//! timestamp round-trips through a palace reopen.
+//! the public palace + dream API, confirm the optional `completed_at`
+//! timestamp round-trips through a palace reopen, AND verify that the
+//! postcard serialization indices of pre-existing variants are unchanged after
+//! `Task` was appended (backward-compat guarantee for redb-stored drawers).
 //! What: builds a palace with the mock embedder (no model download), seeds Task
 //! and ordinary drawers, ages them past the prune floor, runs a full dream
 //! cycle, and asserts the Task drawers remain while the ordinary one is evicted.
@@ -123,6 +126,48 @@ async fn task_drawers_survive_full_dream_cycle() {
         !drawers.iter().any(|d| d.id == ordinary_id),
         "ordinary aged low-importance drawer should have been pruned"
     );
+}
+
+/// `DrawerType::Task` uses postcard index 5; pre-existing variants are unchanged.
+///
+/// Why (issue #1722): `DrawerType` is persisted inside redb blobs via postcard.
+/// Postcard serializes C-like enums by variant index. `Task` was added at the
+/// END of the enum (after `Unknown`), so existing stored data is unaffected:
+/// - `Unknown` stays at index 4 (its original position).
+/// - `Task` is at index 5 (new).
+/// This test pins those indices so any future reordering fails loudly.
+/// What: postcard-encodes each variant and checks the first byte (the variant
+/// index in postcard's variable-length encoding; all variants fit in one byte).
+/// Test: this function (pure encode/decode, no I/O needed).
+#[test]
+fn drawer_type_postcard_indices_are_stable() {
+    // Variant indices must match the definition order in palace.rs and must
+    // NEVER change once data has been written to redb. If this test fails,
+    // you are about to corrupt all existing palace data.
+    let cases: &[(DrawerType, u8)] = &[
+        (DrawerType::UserFact, 0),
+        (DrawerType::SessionEvent, 1),
+        (DrawerType::AgentNote, 2),
+        (DrawerType::Commit, 3),
+        (DrawerType::Unknown, 4), // legacy default; must remain at 4
+        (DrawerType::Task, 5),    // appended last; must remain at 5
+    ];
+    for (variant, expected_index) in cases {
+        let encoded = postcard::to_allocvec(variant)
+            .unwrap_or_else(|e| panic!("postcard encode {variant:?}: {e}"));
+        assert_eq!(
+            encoded[0], *expected_index,
+            "DrawerType::{variant:?} must serialize to byte {expected_index} \
+             (got {}); changing this breaks existing redb data",
+            encoded[0]
+        );
+        let decoded: DrawerType = postcard::from_bytes(&encoded)
+            .unwrap_or_else(|e| panic!("postcard decode {variant:?}: {e}"));
+        assert_eq!(
+            decoded, *variant,
+            "DrawerType::{variant:?} must round-trip through postcard"
+        );
+    }
 }
 
 /// A Task drawer's `completed_at` timestamp survives a palace reopen.

@@ -171,6 +171,9 @@ redb = { workspace = true }
 chrono = { workspace = true }
 # tokio: used by kg_store_snapshot_tests async test harness.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# postcard: used by `memory_palace` integration test to assert DrawerType
+# serialization indices are stable (issue #1722 backward-compat guarantee).
+postcard = { workspace = true }
 
 [features]
 default = []
