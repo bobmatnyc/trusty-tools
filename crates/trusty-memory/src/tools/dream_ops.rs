@@ -1,4 +1,4 @@
-//! On-demand dream / consolidation MCP handlers (spec-001 Phase 3).
+//! On-demand dream / consolidation MCP handlers (spec-001 Phase 3, issue #1721).
 //!
 //! Why: the idle dream cycle consolidates a whole palace on a ~300s timer. An
 //! application managing chat history wants to compact a single room's older
@@ -8,6 +8,8 @@
 //! optional room + age window, builds a `DreamConfig` from the daemon's user
 //! config (OpenRouter key / local-model setting), and delegates to
 //! `dream::consolidate_scoped`. Task drawers are skipped inside that helper.
+//! `handle_palace_dream` is an alias for `handle_dream_consolidate_room` with
+//! the same parameters, exposed as `palace_dream` in the MCP tool surface.
 //! Test: `crates/trusty-memory/tests/dream_room_mcp.rs` (wiring + no-op) and
 //! `dream::tests::consolidate_scoped_*` in trusty-common (behaviour).
 
@@ -66,4 +68,20 @@ pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value)
         "summary_facts_created": stats.summary_facts_created,
         "facts_evicted": stats.facts_evicted,
     }))
+}
+
+/// On-demand LLM-driven consolidation for a palace (issue #1721 `palace_dream`).
+///
+/// Why: `dream_consolidate_room` was the original tool name from spec-001 Phase
+/// 3. Issue #1721 requests the MCP tool be named `palace_dream` to match the
+/// naming convention of `palace_compact` / `palace_info`. Both tools expose the
+/// same underlying `consolidate_scoped` pipeline; `palace_dream` is the
+/// canonical name going forward and `dream_consolidate_room` is retained for
+/// backward compatibility.
+/// What: delegates directly to `handle_dream_consolidate_room` — the args
+/// schema and response shape are identical.
+/// Test: `palace_dream_no_inference_returns_gracefully` in
+/// `tests/dream_room_mcp.rs`.
+pub(crate) async fn handle_palace_dream(state: &AppState, args: Value) -> Result<Value> {
+    handle_dream_consolidate_room(state, args).await
 }
