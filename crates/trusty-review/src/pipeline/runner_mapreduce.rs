@@ -253,25 +253,23 @@ async fn fold_reduced_into_result(
         // Re-applying derive_verdict_with_grade would wrongly re-add the count
         // floor.  Use the synthesis verdict + grade directly instead.
         // Grade is always available on the synthesis path (the LLM returned a
-        // verdict), so wrap in Some to match the Option<Grade> type that
-        // apply_grade_and_floor returns on the mechanical path (where an UNKNOWN
+        // verdict), so compute as Grade then wrap in Some to match the
+        // Option<Grade> return type of apply_grade_and_floor (where an UNKNOWN
         // verdict suppresses the grade — see #1615).
-        let final_grade: Option<Grade> = Some(
-            parsed
-                .grade
-                .as_deref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(|| default_grade_for_verdict(&parsed.verdict)),
-        );
+        let fg: Grade = parsed
+            .grade
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| default_grade_for_verdict(&parsed.verdict));
+        let final_grade: Option<Grade> = Some(fg);
         // Pre-floor grade for telemetry: use grade_pre_floor when available;
         // fall back to final_grade when no flooring occurred (they'll be equal).
-        let pre_floor_grade: Option<Grade> = Some(
-            parsed
-                .grade_pre_floor
-                .as_deref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or_else(|| final_grade.unwrap_or_else(|| default_grade_for_verdict(&parsed.verdict))),
-        );
+        let pfg: Grade = parsed
+            .grade_pre_floor
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(fg);
+        let pre_floor_grade: Option<Grade> = Some(pfg);
         (parsed.verdict.clone(), final_grade, pre_floor_grade)
     } else {
         // Mechanical path: apply the full severity floor via apply_grade_and_floor.
