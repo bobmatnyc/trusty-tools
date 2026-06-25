@@ -15,6 +15,7 @@
 pub mod auth;
 pub mod firewall;
 pub mod inline;
+pub mod outcomes;
 pub mod posting;
 pub mod pr;
 pub mod webhook;
@@ -26,7 +27,10 @@ pub use inline::{
     build_inline_plan, render_finding_comment, suggestion_is_committable,
 };
 pub use posting::{PostedReview, post_pr_review};
-pub use pr::{PrMetadata, PrRef, PrUser, fetch_pr_diff, fetch_pr_metadata};
+pub use pr::{
+    CommitInfo, PrMetadata, PrRef, PrUser, Reaction, fetch_pr_diff, fetch_pr_metadata,
+    get_pr_commits_after, get_review_comment_reactions,
+};
 pub use webhook::verify_webhook_signature;
 
 // ─── Shared error type ────────────────────────────────────────────────────────

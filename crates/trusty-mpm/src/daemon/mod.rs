@@ -98,18 +98,24 @@ pub async fn serve_http(
         );
     }
 
-    // Spawn the multi-session file watcher as a background task.
-    let fw = watcher::FileWatcher::new(Arc::clone(&state));
-    tokio::spawn(fw.spawn());
+    // Create a cancellation token so background loops exit cleanly on shutdown.
+    // Each spawned loop receives a child token; the parent is cancelled inside
+    // `with_graceful_shutdown` AFTER axum drains in-flight requests.
+    let cancel = tokio_util::sync::CancellationToken::new();
 
-    // Spawn the periodic dead-session reaper.
-    tokio::spawn(reap_loop(Arc::clone(&state)));
+    // Spawn the multi-session file watcher as a background task.
+    // Pass a child cancel token so the watcher exits cleanly on daemon shutdown.
+    let fw = watcher::FileWatcher::new(Arc::clone(&state));
+    tokio::spawn(fw.spawn(cancel.child_token()));
+
+    // Spawn the periodic dead-session reaper with a cancel token.
+    tokio::spawn(reap_loop(Arc::clone(&state), cancel.child_token()));
 
     // Orphan-GC: clean accumulated leaked managed sessions. Runs ONE sweep now
     // (boot cleanup of orphans inherited across restarts) and then periodically.
     // Default ON; set TRUSTY_MPM_ORPHAN_GC=0 to disable entirely.
     if orphan_gc_enabled() {
-        tokio::spawn(orphan_gc_loop(Arc::clone(&state)));
+        tokio::spawn(orphan_gc_loop(Arc::clone(&state), cancel.child_token()));
     } else {
         info!("orphan-GC disabled via TRUSTY_MPM_ORPHAN_GC");
     }
@@ -123,8 +129,11 @@ pub async fn serve_http(
     // `with_graceful_shutdown` lets the daemon reap every live tmux session it
     // owns before the process exits (#1455). Without it the `reap_loop` /
     // `orphan_gc_loop` tasks are simply abandoned on SIGTERM and the sessions
-    // they track leak. The shutdown future first drains in-flight requests, then
-    // walks BOTH registries and kills each live session, fail-open per session.
+    // they track leak. The shutdown future: waits for signal, cancels all
+    // background actor loops (so they exit cleanly rather than being dropped
+    // mid-sweep), then walks BOTH registries and kills each live session,
+    // fail-open per session. Also calls `manager.shutdown()` to graceful-stop
+    // all live managed sessions via SIGTERM-before-kill.
     let reaper_state = Arc::clone(&state);
     axum::serve(
         listener,
@@ -132,6 +141,16 @@ pub async fn serve_http(
     )
     .with_graceful_shutdown(async move {
         shutdown_signal().await;
+        // Signal all background loops to stop before we walk the session list.
+        cancel.cancel();
+        // Graceful-stop live SessionManager sessions (SIGTERM → 2s wait → kill).
+        // This is the single authority for SM-tracked sessions; the legacy-registry
+        // reap that follows (`reap_all_live_sessions`) is intentionally scoped to
+        // the DaemonState legacy registry only — it does NOT re-iterate SM sessions
+        // so there is no double-kill (see `reap_all_live_sessions` doc comment).
+        let mgr = reaper_state.session_manager().await;
+        mgr.shutdown().await;
+        // Reap remaining legacy-registry sessions not covered by mgr.shutdown().
         reap_all_live_sessions(reaper_state).await;
     })
     .await?;
@@ -173,46 +192,32 @@ async fn shutdown_signal() {
     }
 }
 
-/// Kill every live tmux session owned by the daemon across BOTH registries.
+/// Kill every live tmux session in the LEGACY DaemonState registry on shutdown.
 ///
 /// Why: on graceful shutdown no session may be left fire-and-forget (#1452,
-/// #1455). The periodic `reap_loop` / `orphan_gc_loop` tasks are abandoned when
-/// the process exits, so a dedicated shutdown sweep is the last line that keeps
-/// the host clean of leaked `tmpm-*` sessions.
+/// #1455). `SessionManager::shutdown` (called before this in the shutdown
+/// sequence) is the single authority for SM-tracked sessions; this function
+/// covers only the LEGACY `DaemonState` registry so there is no double-kill.
 /// What: discovers tmux once (a no-op early-return if tmux is unavailable —
 /// nothing to kill), then collects the `tmux_name` of every entry in the legacy
-/// [`DaemonState`] registry and every non-terminal record in the
-/// [`SessionManager`](crate::session_manager::SessionManager) store, de-dupes,
-/// and issues a best-effort `kill_session` for each. One kill failing (the
-/// session may already be gone) never aborts the rest — every name is attempted.
-/// Idempotent: re-running it after a clean sweep simply finds nothing live.
-/// Logs a one-line summary (count reaped) at info level to stderr.
-/// Test: `reap_all_live_sessions_is_safe_when_empty` (empty/ tmux-absent no-op);
-/// the per-session kill loop reuses the unit-tested `kill_session` seam.
+/// [`DaemonState`] registry only (NOT the `SessionManager` store — that was
+/// already handled by `mgr.shutdown()`), and issues a best-effort `kill_session`
+/// for each. One kill failing (the session may already be gone) never aborts the
+/// rest — every name is attempted. Idempotent: re-running it after a clean sweep
+/// simply finds nothing live. Logs a one-line summary at info level to stderr.
+/// Test: `reap_all_live_sessions_is_safe_when_empty` (empty / tmux-absent no-op).
 async fn reap_all_live_sessions(state: Arc<DaemonState>) {
     let Ok(driver) = tmux::TmuxDriver::discover() else {
         info!("graceful shutdown: tmux unavailable; no sessions to reap");
         return;
     };
 
-    // Union the tmux names from both registries so a session tracked by EITHER
-    // is reaped. De-dupe via a set: the same name can appear in both.
-    let mut names: std::collections::HashSet<String> = state
+    // Legacy DaemonState registry only — SM sessions were handled by mgr.shutdown().
+    let names: std::collections::HashSet<String> = state
         .list_sessions()
         .into_iter()
         .map(|s| s.tmux_name)
         .collect();
-
-    let mgr = state.session_manager().await;
-    for record in mgr.list().await {
-        if matches!(
-            record.state,
-            crate::session_manager::ManagedSessionState::Decommissioned
-        ) {
-            continue;
-        }
-        names.insert(record.tmux_name);
-    }
 
     let mut reaped = 0usize;
     for name in names {
@@ -227,7 +232,7 @@ async fn reap_all_live_sessions(state: Arc<DaemonState>) {
             }
         }
     }
-    info!("graceful shutdown: reaped {reaped} live session(s)");
+    info!("graceful shutdown: reaped {reaped} legacy session(s)");
 }
 
 /// Spawn a background axum server for a secondary listener (e.g. Tailscale).
@@ -265,22 +270,31 @@ const REAP_INTERVAL_SECS: u64 = 60;
 /// Why: without housekeeping, dead sessions accumulate in `DaemonState`
 /// forever; a slow background sweep keeps the registry honest.
 /// What: every [`REAP_INTERVAL_SECS`] seconds, discovers tmux and calls
-/// [`DaemonState::reap_dead_sessions`]; logs how many entries were reaped.
-/// Test: the reaping rule is unit-tested via `DaemonState::reap_against`.
-async fn reap_loop(state: Arc<DaemonState>) {
+/// [`DaemonState::reap_dead_sessions`]; exits cleanly when `cancel` fires
+/// rather than being dropped mid-sweep on SIGTERM.
+/// Test: the reaping rule is unit-tested via `DaemonState::reap_against`;
+/// `cancel_token_stops_reap_loop_cleanly` asserts the loop exits on cancel.
+async fn reap_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::CancellationToken) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(REAP_INTERVAL_SECS));
     loop {
-        tick.tick().await;
-        if let Ok(driver) = tmux::TmuxDriver::discover() {
-            let result = state.reap_dead_sessions(&driver);
-            if result.reaped > 0 {
-                info!("reaped {} dead session(s)", result.reaped);
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("reap_loop: cancel signal received; exiting");
+                break;
             }
-            if result.stopped > 0 {
-                info!(
-                    "marked {} session(s) stopped (claude process exited)",
-                    result.stopped
-                );
+            _ = tick.tick() => {
+                if let Ok(driver) = tmux::TmuxDriver::discover() {
+                    let result = state.reap_dead_sessions(&driver);
+                    if result.reaped > 0 {
+                        info!("reaped {} dead session(s)", result.reaped);
+                    }
+                    if result.stopped > 0 {
+                        info!(
+                            "marked {} session(s) stopped (claude process exited)",
+                            result.stopped
+                        );
+                    }
+                }
             }
         }
     }
@@ -358,7 +372,8 @@ fn parse_orphan_gc_interval(raw: Option<&str>) -> u64 {
 /// cleaned up self-healingly. One sweep runs immediately at boot to clear
 /// accumulated orphans, then the loop runs on the configured interval.
 /// What: owns a single [`orphan_gc::OrphanGc`] so the two-pass debounce persists
-/// across sweeps; each tick gathers the live managed panes (via
+/// across sweeps; exits cleanly when `cancel` fires rather than being dropped
+/// mid-sweep on SIGTERM. Each tick gathers the live managed panes (via
 /// [`tmux::TmuxDriver::list_managed_panes`]) and both registries' tracked names
 /// (via [`DaemonState::gather_tracked_names`]), then calls
 /// [`orphan_gc::run_sweep`]. A tmux-listing failure skips the pass (reaps
@@ -368,7 +383,7 @@ fn parse_orphan_gc_interval(raw: Option<&str>) -> u64 {
 /// skips its reap phase for that tick — both paths fail CLOSED.
 /// Test: the reconciliation rule and debounce are unit-tested in
 /// [`orphan_gc`]; the end-to-end sweep is covered by `tests/orphan_gc_sweep.rs`.
-async fn orphan_gc_loop(state: Arc<DaemonState>) {
+async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::CancellationToken) {
     let interval_secs = orphan_gc_interval_secs();
     info!(
         interval_secs,
@@ -378,44 +393,63 @@ async fn orphan_gc_loop(state: Arc<DaemonState>) {
     let probe = orphan_gc::ProcessTreeProbe;
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
     loop {
-        tick.tick().await;
-        let Ok(driver) = tmux::TmuxDriver::discover() else {
-            continue;
-        };
-        let panes = match driver.list_managed_panes() {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("orphan-GC: list_managed_panes failed: {e}");
-                continue;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("orphan_gc_loop: cancel signal received; exiting");
+                break;
             }
-        };
-        // NOTE: `gather_tracked_names()` and `session_manager()` are acquired in
-        // separate awaits, so this snapshot is intentionally NON-atomic — a
-        // session could register in the gap between the two. That race is safe:
-        // the two-pass debounce in `OrphanGc` means a just-registered session
-        // missed by this sweep is only ever a reap *candidate* this pass and
-        // must be seen orphaned again next sweep before it can be reaped, by
-        // which point `gather_tracked_names()` will include it. No lock spanning
-        // both calls is needed.
-        let tracked = state.gather_tracked_names().await;
-        let mgr = state.session_manager().await;
-        let mtmux = mgr.tmux_driver();
-        let reaped = orphan_gc::run_sweep(&mut gc, &panes, &tracked, &probe, mtmux.as_ref());
-        if reaped > 0 {
-            info!("orphan-GC reaped {reaped} orphaned managed session(s)");
-        }
+            _ = tick.tick() => {
+                let Ok(driver) = tmux::TmuxDriver::discover() else {
+                    continue;
+                };
+                let panes = match driver.list_managed_panes() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!("orphan-GC: list_managed_panes failed: {e}");
+                        continue;
+                    }
+                };
+                // NOTE: `gather_tracked_names()` and `session_manager()` are acquired in
+                // separate awaits, so this snapshot is intentionally NON-atomic — a
+                // session could register in the gap between the two. That race is safe:
+                // the two-pass debounce in `OrphanGc` means a just-registered session
+                // missed by this sweep is only ever a reap *candidate* this pass and
+                // must be seen orphaned again next sweep before it can be reaped, by
+                // which point `gather_tracked_names()` will include it. No lock spanning
+                // both calls is needed.
+                let tracked = state.gather_tracked_names().await;
+                let mgr = state.session_manager().await;
+                let mtmux = mgr.tmux_driver();
+                let reaped = orphan_gc::run_sweep(&mut gc, &panes, &tracked, &probe, mtmux.as_ref());
+                if reaped > 0 {
+                    info!("orphan-GC reaped {reaped} orphaned managed session(s)");
+                }
 
-        // #1508: alongside the orphan sweep, auto-reap STALE EPHEMERAL sessions.
-        // Only `ephemeral == true` records older than `MAX_EPHEMERAL_AGE_HOURS`
-        // are in scope — real sessions default `ephemeral=false` and are
-        // unreachable here, so this never touches durable work. This is the
-        // backstop for an e2e test that panicked before its Drop-guard could tear
-        // its session down.
-        let max_age = chrono::Duration::hours(crate::session_manager::MAX_EPHEMERAL_AGE_HOURS);
-        match mgr.reap_aged_ephemeral(max_age).await {
-            Ok(n) if n > 0 => info!("ephemeral auto-reap decommissioned {n} stale session(s)"),
-            Ok(_) => {}
-            Err(e) => tracing::warn!("ephemeral auto-reap failed: {e}"),
+                // PID-file orphan-GC (§10.3): reap daemon-owned `claude` child
+                // processes whose tmux pane is already gone — invisible to the
+                // tmux-name sweep above. Live session-ids come from BOTH registries;
+                // any recorded PID whose session-id is absent is a candidate, and
+                // the registry SIGTERMs it only after verifying it is still a live
+                // `claude` process (the §13.5 PID-reuse mitigation).
+                let live_ids = state.gather_live_session_ids().await;
+                let pid_outcome = state
+                    .pid_registry()
+                    .sweep_orphans(&live_ids, &crate::core::pid_registry::OsProcessProbe);
+                if pid_outcome.terminated > 0 || pid_outcome.removed_stale > 0 {
+                    info!(
+                        terminated = pid_outcome.terminated,
+                        removed_stale = pid_outcome.removed_stale,
+                        "orphan-GC PID-file sweep cleaned up orphaned claude process(es)"
+                    );
+                }
+                // #1508: auto-reap STALE EPHEMERAL sessions as a backstop.
+                let max_age = chrono::Duration::hours(crate::session_manager::MAX_EPHEMERAL_AGE_HOURS);
+                match mgr.reap_aged_ephemeral(max_age).await {
+                    Ok(n) if n > 0 => info!("ephemeral auto-reap decommissioned {n} stale session(s)"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("ephemeral auto-reap failed: {e}"),
+                }
+            }
         }
     }
 }
@@ -440,7 +474,7 @@ pub async fn run_mcp(state: Arc<DaemonState>) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod shutdown_reaper_tests {
-    use super::{DaemonState, reap_all_live_sessions};
+    use super::{DaemonState, reap_all_live_sessions, reap_loop};
     use std::sync::Arc;
 
     /// The shutdown reaper is a safe no-op on an empty daemon.
@@ -457,6 +491,29 @@ mod shutdown_reaper_tests {
         let state: Arc<DaemonState> = DaemonState::shared();
         // Must not panic regardless of tmux availability on the host.
         reap_all_live_sessions(state).await;
+    }
+
+    /// Cancelling the token causes `reap_loop` to exit without panic.
+    ///
+    /// Why: the WI-4 PR A requirement is that background loops respond to the
+    /// cancellation token rather than being dropped mid-sweep on SIGTERM. This
+    /// test asserts that the loop task completes cleanly (join returns `Ok`)
+    /// after the token is cancelled, and never panics.
+    /// What: spawns `reap_loop` with a fresh token, immediately cancels it,
+    /// then awaits the task handle and asserts the join succeeded.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn cancel_token_stops_reap_loop_cleanly() {
+        let state: Arc<DaemonState> = DaemonState::shared();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let token = cancel.clone();
+        let handle = tokio::spawn(reap_loop(state, token));
+        // Cancel immediately — the loop should exit on the next select! poll.
+        cancel.cancel();
+        // The task must complete without panicking (join returns Ok).
+        handle
+            .await
+            .expect("reap_loop task must not panic after cancellation");
     }
 }
 

@@ -116,6 +116,22 @@ fn process_name_contains_claude(pid: u32) -> bool {
     }
 }
 
+/// Check whether the process at `pid` is (still) a `claude` process.
+///
+/// Why: the PID-file orphan-GC ([`crate::core::pid_registry`]) must verify, just
+/// before SIGTERMing a recorded PID, that the process at that PID is still named
+/// `claude` — the alpha-1 mitigation for the PID-reuse race (spec §13.5). A
+/// recycled PID now owned by an unrelated process fails this check and is spared.
+/// What: a thin public wrapper over the crate-internal `comm`/`ps` name check,
+/// returning `true` only when the process's command name contains `claude`
+/// (case-insensitive), matching both `claude` and `claude-code`. A dead PID or
+/// any lookup failure returns `false`.
+/// Test: `process_name_is_claude_for_dead_pid_is_false` (a non-existent PID is
+/// never `claude`); the positive path is covered by `find_claude_pid_in_tmux`.
+pub fn process_name_is_claude(pid: u32) -> bool {
+    process_name_contains_claude(pid)
+}
+
 /// Check whether a process with the given PID is still alive.
 ///
 /// Why: the daemon's reaper must distinguish a tmux session whose `claude`
@@ -177,5 +193,11 @@ mod tests {
     fn is_process_alive_dead_pid() {
         // u32::MAX is far above any real PID — no such process can exist.
         assert!(!is_process_alive(u32::MAX));
+    }
+
+    #[test]
+    fn process_name_is_claude_for_dead_pid_is_false() {
+        // A non-existent PID can never be a live `claude` process.
+        assert!(!process_name_is_claude(u32::MAX));
     }
 }

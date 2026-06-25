@@ -39,6 +39,7 @@ pub mod daemon_guard;
 pub mod dashboard;
 pub mod discover;
 pub mod doctor;
+pub mod hook;
 pub mod index;
 pub mod index_allowlist;
 pub mod index_cwd_resolve;

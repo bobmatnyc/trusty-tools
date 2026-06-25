@@ -65,7 +65,8 @@ pub struct PullRequestEvent {
 /// Minimal PR metadata extracted from the webhook payload.
 ///
 /// Why: we need the PR number to dispatch the pipeline.
-/// What: carries `number` (the PR id) and optional `head.sha` for dedup.
+/// What: carries `number` (the PR id), optional `head.sha` for dedup,
+/// and `merged` for outcome-poll scheduling on close events.
 /// Test: covered by `webhook_payload_deserialises`.
 #[derive(Debug, Deserialize)]
 pub struct PrInfo {
@@ -76,6 +77,9 @@ pub struct PrInfo {
     /// Head commit info.
     #[serde(default)]
     pub head: Option<HeadInfo>,
+    /// Whether the PR was merged (present on `closed` action).
+    #[serde(default)]
+    pub merged: bool,
 }
 
 /// GitHub user info (minimal).
@@ -175,8 +179,12 @@ pub async fn handle_github_webhook(
         }
     };
 
-    // ── Step 4: action filtering — only review_requested dispatches ───────
+    // ── Step 4: action filtering — review_requested dispatches; closed+merged
+    // schedules outcome polling (if enabled); all other actions are ignored.
     // Per spec REV-702: only `review_requested` triggers a pipeline run.
+    if event.action == "closed" && event.pull_request.merged && state.config.outcome.enabled {
+        return handle_closed_merged(state, event).await;
+    }
     if event.action != "review_requested" {
         debug!(action = %event.action, pr = event.pull_request.number, "pull_request event ignored (not review_requested)");
         return (StatusCode::OK, "ignored").into_response();
@@ -313,6 +321,193 @@ pub async fn handle_github_webhook(
         }),
     )
         .into_response()
+}
+
+// ─── Outcome poll dispatch ────────────────────────────────────────────────────
+
+/// Handle a `closed` + `merged` pull_request event by scheduling an outcome poll.
+///
+/// Why: when a PR merges, we schedule a delayed poll (default 60 min) to check
+/// reactions and follow-up commits — the two cheapest outcome signals (issue #1421,
+/// Qodo/Cloudflare best practice 4.13).
+/// What: spawns a background task that sleeps `poll_delay_minutes`, then calls
+/// `poll_review_outcomes` and records each `FindingOutcome` into the `OutcomeStore`.
+/// Fail-open: poll failures are logged but never bubble up to the webhook ACK.
+/// Test: `webhook_closed_merged_schedules_outcome_poll` in `webhook_tests.rs`.
+async fn handle_closed_merged(
+    state: AppState,
+    event: PullRequestEvent,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let pr_number = event.pull_request.number;
+    let owner = event.repository.owner.login.clone();
+    let repo = event.repository.name.clone();
+    let delay_mins = state.config.outcome.poll_delay_minutes;
+    let threshold = state.config.outcome.dismissal_threshold;
+
+    info!(
+        pr = pr_number,
+        owner = %owner,
+        repo = %repo,
+        delay_mins,
+        "webhook: PR closed+merged — scheduling outcome poll"
+    );
+
+    // Subscribe to the shutdown channel before spawning so the task can cancel
+    // during the sleep phase — no orphan tasks on daemon shutdown (issue #1421).
+    let mut shutdown_rx = state.shutdown_tx.subscribe();
+
+    tokio::spawn(async move {
+        // Wait before polling so reactions/commits have time to accumulate.
+        // Use tokio::select! so the task exits early on daemon shutdown.
+        let sleep = tokio::time::sleep(std::time::Duration::from_secs(delay_mins * 60));
+        tokio::pin!(sleep);
+        tokio::select! {
+            () = &mut sleep => { /* delay elapsed — proceed with poll */ }
+            _ = shutdown_rx.changed() => {
+                // Daemon is shutting down; abort the outcome poll gracefully.
+                debug!(pr = pr_number, "outcome poll: cancelled by shutdown signal");
+                return;
+            }
+        }
+
+        let client = match crate::integrations::github::GithubClient::new() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(pr = pr_number, error = %e, "outcome poll: could not build GitHub client");
+                return;
+            }
+        };
+
+        let token = match crate::integrations::github::resolve_token_for_mode(
+            &client,
+            &state.config,
+            &owner,
+            crate::integrations::github::RunMode::Serve,
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                warn!(pr = pr_number, error = %e, "outcome poll: could not resolve GitHub token");
+                return;
+            }
+        };
+
+        // We need a ReviewResult to poll against. Look up the last logged result
+        // for this PR from the log dir. As a best-effort approach: if no result
+        // is available (common for the first deployment), we skip and log.
+        // A future PR will wire the result into the outcome store directly from
+        // the review task; for now, the polling infrastructure is in place.
+        let log_dir = state.config.log_dir.clone();
+        let result_opt = load_last_review_result(&log_dir, &owner, &repo, pr_number);
+
+        let result = match result_opt {
+            Some(r) => r,
+            None => {
+                info!(
+                    pr = pr_number,
+                    "outcome poll: no stored review result found for this PR — skipping poll"
+                );
+                return;
+            }
+        };
+
+        let outcomes = crate::integrations::github::outcomes::poll_review_outcomes(
+            &client, &owner, &repo, &token, &result, 7, // 7-day commit-touch window
+        )
+        .await;
+
+        info!(
+            pr = pr_number,
+            outcomes = outcomes.len(),
+            "outcome poll: collected outcomes"
+        );
+
+        // Record outcomes into the store (best-effort).
+        let store_path = log_dir.join("outcomes.redb");
+        match crate::store::OutcomeStore::open(&store_path) {
+            Ok(store) => {
+                for outcome in &outcomes {
+                    if let Err(e) = store.record(outcome) {
+                        warn!(pr = pr_number, hash = %outcome.finding_hash, error = %e,
+                              "outcome poll: could not record outcome");
+                    }
+                }
+                // Log chronically-dismissed patterns.
+                match store.dismissed_patterns(threshold) {
+                    Ok(patterns) if !patterns.is_empty() => {
+                        info!(
+                            pr = pr_number,
+                            ?patterns,
+                            "outcome poll: dismissed patterns above threshold"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(pr = pr_number, error = %e, "outcome poll: could not query dismissed patterns");
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(pr = pr_number, error = %e, "outcome poll: could not open outcome store");
+            }
+        }
+    });
+
+    (StatusCode::ACCEPTED, "outcome poll scheduled").into_response()
+}
+
+/// Load the most recent `ReviewResult` for a PR from the log directory.
+///
+/// Why: the outcome poller needs a `ReviewResult` to know which findings to
+/// poll against; the log dir is the durable record of completed reviews.
+/// What: constructs a filename prefix `{owner}-{repo}-pr{pr_number}-` (matching
+/// the `log_stem` naming convention in `pipeline/output.rs`) and scans only
+/// the matching `.json` entries — avoiding an O(N-files) full parse of the
+/// log directory.  Returns the most recently modified match, or `None` if
+/// not found.
+/// Fail-open: any I/O or parse error returns `None` (the poll is skipped).
+/// Test: `load_last_review_result_finds_correct_file` in `webhook_tests.rs`.
+fn load_last_review_result(
+    log_dir: &std::path::Path,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+) -> Option<crate::models::ReviewResult> {
+    let prefix = format!(
+        "{}-{}-pr{}-",
+        sanitize_log_component(owner),
+        sanitize_log_component(repo),
+        pr_number
+    );
+    let dir = std::fs::read_dir(log_dir).ok()?;
+    let mut candidates: Vec<(std::time::SystemTime, crate::models::ReviewResult)> = dir
+        .flatten()
+        .filter(|e| {
+            let name = e.file_name();
+            let name_str = name.to_string_lossy();
+            name_str.ends_with(".json") && name_str.starts_with(prefix.as_str())
+        })
+        .filter_map(|e| {
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            let content = std::fs::read_to_string(e.path()).ok()?;
+            let result: crate::models::ReviewResult = serde_json::from_str(&content).ok()?;
+            Some((mtime, result))
+        })
+        .collect();
+    candidates.sort_by(|(a, _), (b, _)| b.cmp(a)); // most recent first
+    candidates.into_iter().next().map(|(_, r)| r)
+}
+
+/// Sanitize an owner or repo name for use as a log filename component.
+///
+/// Why: matches the `sanitize_path` logic in `pipeline/output.rs` so the
+/// poller constructs the same prefix the log writer uses.
+/// What: lowercases the string and replaces `/` with `-`.
+/// Test: exercised transitively by `load_last_review_result_finds_correct_file`.
+fn sanitize_log_component(s: &str) -> String {
+    s.to_lowercase().replace('/', "-")
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────

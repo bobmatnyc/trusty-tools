@@ -11,8 +11,8 @@
 //! tests in `mod.rs` that call `FastEmbedder::init_options` directly.
 
 use super::types::{
-    DEFAULT_CACHE_CAPACITY, EMBED_DIM, ExecutionProvider, is_zero_vector,
-    resolve_fastembed_cache_dir,
+    DEFAULT_CACHE_CAPACITY, EMBED_DIM, ExecutionProvider, OrtThreadingOptions, is_zero_vector,
+    resolve_fastembed_cache_dir, resolve_ort_threading_options,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -20,7 +20,7 @@ use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[cfg(feature = "embedder-cuda")]
 use super::types::{CudaOptions, resolve_cuda_options};
@@ -45,6 +45,78 @@ fn build_cuda_provider(opts: &CudaOptions) -> ort::execution_providers::Executio
         .with_arena_extend_strategy(ArenaExtendStrategy::SameAsRequested)
         .with_memory_limit(opts.gpu_mem_limit_bytes)
         .build()
+}
+
+/// Records the outcome of the one-shot ORT global-thread-pool commit so we
+/// only ever attempt it once per process and can log the resolved knobs.
+static ORT_RUNTIME: OnceLock<OrtThreadingOptions> = OnceLock::new();
+
+/// Commit an ORT global thread pool that pins intra-/inter-op threads and
+/// disables intra-op spinning for *every* embedder session, exactly once.
+///
+/// Why: fastembed-rs builds its ONNX `Session` internally and hardcodes
+/// `with_intra_threads(available_parallelism())` (= logical CPU count) — it
+/// exposes no hook to override per-session thread counts. On the CUDA
+/// deferred-embed path that multi-threaded intra-op barrier deadlocks inside
+/// `libonnxruntime` 1.24.2 (code-intelligence #1542): the pool reports
+/// `workers: 2` yet 8 ORT threads spin, two busy-wait at ~70% CPU while the
+/// rest block forever in `condition_variable::wait`, yielding 0 embeddings and
+/// an empty 112-byte HNSW. ORT's *global* thread pool is the one lever that
+/// reaches fastembed's opaque sessions: when an environment is committed with
+/// a global pool, `ort`'s `commit_*` path calls `DisablePerSessionThreads`,
+/// so fastembed's `with_intra_threads(N)` is ignored and the global pool's
+/// thread count + spin policy govern instead.
+/// What: resolves [`OrtThreadingOptions`] from the environment (defaults:
+/// intra=1, inter=1, spinning=off), commits `ort::init().with_global_thread_pool(..)`,
+/// and caches the result in [`ORT_RUNTIME`]. Must be called *before* any
+/// `TextEmbedding::try_new`; `ort::init().commit()` is a no-op once any
+/// session/environment already exists. Idempotent and thread-safe via
+/// `OnceLock`.
+/// Test: `ort_threading_*` resolver tests in `mod.rs` cover the knob parsing;
+/// the global-pool commit itself is ORT-runtime-gated and only exercised when
+/// a real model is loaded (the `#[ignore]` embedder tests).
+fn init_ort_runtime() -> OrtThreadingOptions {
+    *ORT_RUNTIME.get_or_init(|| {
+        let opts = resolve_ort_threading_options();
+
+        let pool = ort::environment::GlobalThreadPoolOptions::default()
+            .with_intra_threads(opts.intra_threads)
+            .and_then(|p| p.with_inter_threads(opts.inter_threads))
+            .and_then(|p| p.with_spin_control(opts.allow_spinning));
+
+        match pool {
+            Ok(pool) => {
+                let committed = ort::init().with_global_thread_pool(pool).commit();
+                if committed {
+                    tracing::info!(
+                        intra_threads = opts.intra_threads,
+                        inter_threads = opts.inter_threads,
+                        allow_spinning = opts.allow_spinning,
+                        "trusty-embedder: committed ORT global thread pool \
+                         (deadlock fix #1542 — overrides fastembed's per-session \
+                         with_intra_threads(num_cpus) via DisablePerSessionThreads)"
+                    );
+                } else {
+                    tracing::warn!(
+                        intra_threads = opts.intra_threads,
+                        "trusty-embedder: ORT environment already committed before \
+                         init_ort_runtime() — the single-intra-op-thread deadlock fix \
+                         (#1542) did NOT take effect; ensure no ORT session is created \
+                         before the embedder initialises"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "trusty-embedder: failed to build ORT global thread pool options; \
+                     falling back to fastembed defaults (deadlock fix #1542 NOT applied)"
+                );
+            }
+        }
+
+        opts
+    })
 }
 
 /// Local CPU embedder backed by fastembed-rs (ONNX runtime, all-MiniLM-L6-v2).
@@ -240,6 +312,13 @@ impl FastEmbedder {
 
         let (model, provider) =
             tokio::task::spawn_blocking(|| -> Result<(TextEmbedding, ExecutionProvider)> {
+                // Commit the ORT global thread pool (intra=1, spinning=off by
+                // default) BEFORE fastembed creates any session, so the
+                // per-session `with_intra_threads(num_cpus)` it hardcodes is
+                // overridden via DisablePerSessionThreads. This is the
+                // deferred-embed deadlock fix (#1542).
+                init_ort_runtime();
+
                 let require_gpu = std::env::var("TRUSTY_DEVICE")
                     .map(|v| v.eq_ignore_ascii_case("gpu"))
                     .unwrap_or(false);

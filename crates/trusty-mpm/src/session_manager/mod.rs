@@ -13,12 +13,16 @@ pub mod decommission;
 pub mod manager;
 pub mod prune;
 pub mod record;
+pub mod restart_ops;
 pub mod session_guard;
 pub mod store;
 pub mod workspace_guard;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod restart_tests;
 
 /// Real tmux driver adapter — only available when the `daemon` feature (and thus
 /// the daemon's `TmuxDriver`) is compiled in.

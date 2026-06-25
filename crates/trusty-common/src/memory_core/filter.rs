@@ -417,6 +417,148 @@ const SECRET_PREFIXES: &[&str] = &[
     "asia",
 ];
 
+/// True when `seg` is a "uniform-case word segment": non-empty, consists only
+/// of ASCII alphanumeric chars (no punctuation), and every alphabetic char is
+/// either all-lowercase or all-uppercase (no internal mixed case within the
+/// segment). Digits count as case-neutral.
+///
+/// Why: this is the per-segment predicate used by [`is_segmented_identifier`]
+/// to determine whether a hyphen-delimited token reads like a compound
+/// human-readable identifier (`2-medium->REQUEST_CHANGES`) vs. a random
+/// mixed-case credential blob (`AbCd1234-EfGh5678`).
+/// What: strips leading/trailing non-alnum chars (from arrow punctuation like
+/// `>`, `<`), then checks all-lowercase-or-digit or all-uppercase-or-digit.
+/// Test: `structural_tokens_are_not_flagged`.
+fn is_uniform_word_segment(seg: &str) -> bool {
+    let s = seg.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+    if s.is_empty() {
+        return false;
+    }
+    // All alphabetic chars in segment must share a single case.
+    let all_lower = s
+        .chars()
+        .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_lowercase());
+    let all_upper = s
+        .chars()
+        .all(|c| !c.is_ascii_alphabetic() || c.is_ascii_uppercase());
+    all_lower || all_upper
+}
+
+/// True when `token` looks like a compound identifier whose hyphen-separated
+/// segments are each uniform-case words (e.g. `2-medium->REQUEST_CHANGES`,
+/// `trusty-review-v0.6.0`, `snake-case-value`).
+///
+/// Why (issue #1667): the mixed-case-plus-digit heuristic in
+/// [`looks_like_secret`] fires on `2-medium->REQUEST_CHANGES` because the
+/// compound token contains lower (`medium`), upper (`REQUEST_CHANGES`), and
+/// digit (`2`) when considered as a whole. But each segment is internally
+/// uniform-case, which is the hallmark of a human-readable compound
+/// identifier, not a random credential blob.
+/// What: requires at least two non-empty segments after splitting on `-`,
+/// with each segment passing [`is_uniform_word_segment`].
+/// Test: `structural_tokens_are_not_flagged`.
+fn is_segmented_identifier(token: &str) -> bool {
+    if !token.contains('-') {
+        return false;
+    }
+    let segments: Vec<&str> = token.split('-').collect();
+    if segments.len() < 2 {
+        return false;
+    }
+    segments.iter().all(|s| is_uniform_word_segment(s))
+}
+
+/// True when `token` is a structured path/slug/key=value/compound-identifier
+/// that should NOT be treated as a base64 blob or mixed-case credential.
+///
+/// Why (issues #1667, #1676): `looks_like_secret`'s heuristics (b64-symbol
+/// check and mixed-case+digit check) fire on legitimate technical tokens.
+/// Examples: `verdict/grade/prose-summary` contains `/` (b64 sym) → false
+/// positive; `>=2-medium->REQUEST_CHANGES` is lower+upper+digit → false
+/// positive on the mixed-case branch; `reviewer_model=openrouter/openai/...`
+/// was routed to the slash-path branch, where the first `/`-segment
+/// `reviewer_model=openrouter` contains `=` and fails `is_word_segment`,
+/// causing a false positive (#1676).
+/// This function recognises those structural shapes and short-circuits the
+/// two dangerous branches in `looks_like_secret`.
+/// What: returns `true` for (a) `=`-containing tokens where the LHS is a
+/// word segment and the RHS is itself structural (a word segment OR a
+/// slash-path), checked before the slash-path branch so that tokens like
+/// `key=path/to/value` are decomposed at `=` first; (b) slash-path tokens
+/// where every `/`-segment is word-like; or (c) hyphen-segmented compound
+/// identifiers where each segment is uniform-case. A token with `+` is
+/// never structural (`+` never appears in identifiers).
+/// Test: `structural_tokens_are_not_flagged`, `base64_blob_is_blocked`,
+/// `key_equals_slashpath_not_flagged` (issue #1676 regression tests).
+fn is_structural_token(token: &str) -> bool {
+    // `+` is unambiguously base64 — no structural pattern uses it.
+    if token.contains('+') {
+        return false;
+    }
+    // A "word segment" for slash/equals splitting: non-empty, contains only
+    // ASCII alphanumeric chars plus the minimal set of punctuation that
+    // appears in legitimate structural tokens:
+    //   `-`  — hyphen in slug/version segments (`prose-summary`, `v0.6.0`)
+    //   `_`  — underscore in snake_case identifiers
+    //   `.`  — dot in file extensions and semver (`synthesis.rs`, `v0.6.0`)
+    //   `>`  — needed for the `>` in `>=2-medium->REQUEST_CHANGES` which
+    //           arrives as the LHS of the `=` split (i.e. the lone `>` char).
+    // All other chars (`<`, `!`, `@`, `#`, `~`, `:`) are excluded — none
+    // appear in paths, slugs, or key=value tokens we need to allow, and
+    // admitting them would unnecessarily widen the bypass surface.
+    fn is_word_segment(s: &str) -> bool {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '>'))
+    }
+    // True when every `/`-separated segment of `s` is a word segment.
+    // Extracted as a named helper so the `=` branch can use it for the RHS
+    // without re-entering `is_structural_token` (one-level bounded check).
+    fn is_slash_path(s: &str) -> bool {
+        s.contains('/') && s.split('/').all(is_word_segment)
+    }
+    // (a) key=value / semver-operator shape — checked BEFORE slash-path so
+    // that tokens containing BOTH `=` and `/` (e.g.
+    // `reviewer_model=openrouter/openai/gpt-5.4-mini-20260317`) are
+    // decomposed at the `=` boundary first, letting the RHS be validated as
+    // a slash-path rather than having the whole token routed to branch (b)
+    // where the first `/`-segment (`reviewer_model=openrouter`) contains `=`
+    // and fails `is_word_segment`.
+    //
+    // Compositional rule (issue #1676): LHS must be a word segment AND the
+    // RHS must be EITHER a word segment OR a slash-path (all its `/`-separated
+    // segments are word-like). A RHS that is a high-entropy opaque blob — no
+    // slashes, not a simple word — is not structural, so the token falls
+    // through to the entropy heuristics and is correctly flagged.
+    // Exception: RHS that is pure `=` padding is non-structural (base64).
+    if token.contains('=') {
+        let parts: Vec<&str> = token.splitn(2, '=').collect();
+        if parts.len() == 2 {
+            let lhs = parts[0];
+            let rhs = parts[1];
+            if rhs.chars().all(|c| c == '=') {
+                return false; // pure base64 padding, not key=value
+            }
+            if is_word_segment(lhs) && (is_word_segment(rhs) || is_slash_path(rhs)) {
+                return true;
+            }
+            // Fall back to the original OR for semver-operator tokens like
+            // `>=value` where the LHS may be a bare `>` and the RHS drives
+            // the structural signal.
+            return is_word_segment(lhs) || is_word_segment(rhs);
+        }
+    }
+    // (b) Path/slug shape: all `/`-separated segments are word-like.
+    // Covers `verdict/grade/prose-summary`, `org/repo`, file paths.
+    if token.contains('/') {
+        return token.split('/').all(is_word_segment);
+    }
+    // (c) Hyphen-segmented compound identifier: no b64 syms remain at this
+    // point; check whether every `-`-separated segment is uniform-case.
+    // Covers `2-medium->REQUEST_CHANGES`, `trusty-review-v0.6.0`.
+    is_segmented_identifier(token)
+}
+
 /// Heuristic: is `token` a likely secret/credential (and not a git SHA)?
 ///
 /// Why (issue #1481): see [`find_secret_token`]. This is the core decision —
@@ -424,12 +566,13 @@ const SECRET_PREFIXES: &[&str] = &[
 /// What: returns `false` immediately for [`is_git_sha_like`] tokens (the
 /// allowlist), then returns `true` when the token (a) carries a known
 /// [`SECRET_PREFIXES`] credential prefix (e.g. `sk-`, `ghp_`, AWS `AKIA`/`ASIA`),
-/// or (b) is long (≥ 20 chars) AND mixes character classes in a way SHAs cannot
+/// or (b) is long (≥ 20 chars) AND is not a structural token (see
+/// [`is_structural_token`]) AND mixes character classes in a way SHAs cannot
 /// — i.e. contains BOTH a lowercase and an uppercase letter plus a digit, or
-/// contains a base64/url-safe symbol (`+ / =`). Pure lowercase-hex (SHA-shaped
-/// or longer all-hex), all-uppercase tokens without a known prefix, and ordinary
-/// words are not flagged by the (b) fallback — which is exactly why AWS access
-/// key IDs (all-uppercase base32) MUST be caught by the prefix list in (a).
+/// contains a base64-indicator symbol (`+`) or an `=`/`/` that is NOT part of
+/// a structural path/slug/key=value token. Pure lowercase-hex (SHA-shaped or
+/// longer all-hex), all-uppercase tokens without a known prefix, ordinary words,
+/// path-like tokens, and compound identifiers are not flagged.
 ///
 /// **Known limitation (FN-2, issue #1484):** mixed-case-but-no-digit tokens
 /// ≥ 20 chars (e.g. base58 key segments like `xPubKeySegmentAbCdEf`) are not
@@ -440,7 +583,8 @@ const SECRET_PREFIXES: &[&str] = &[
 /// the pattern list in `FilterConfig`.
 /// Test: `secret_token_is_blocked`, `base64_blob_is_blocked`,
 /// `git_sha_like_is_not_secret`, `ordinary_words_are_not_secret`,
-/// `aws_access_key_ids_are_blocked`, `mixed_case_no_digit_limitation`.
+/// `aws_access_key_ids_are_blocked`, `mixed_case_no_digit_limitation`,
+/// `structural_tokens_are_not_flagged`.
 fn looks_like_secret(token: &str) -> bool {
     // Allowlist git SHAs first — the whole point of issue #1481.
     if is_git_sha_like(token) {
@@ -454,11 +598,17 @@ fn looks_like_secret(token: &str) -> bool {
     if token.len() < 20 {
         return false;
     }
+    // Issue #1667: structural tokens (paths, slugs, key=value pairs, and
+    // hyphen-segmented compound identifiers) must not be flagged as secrets
+    // even when they contain `/`, `=`, or mixed case across segments.
+    if is_structural_token(token) {
+        return false;
+    }
     let has_lower = token.chars().any(|c| c.is_ascii_lowercase());
     let has_upper = token.chars().any(|c| c.is_ascii_uppercase());
     let has_digit = token.chars().any(|c| c.is_ascii_digit());
     let has_b64_sym = token.chars().any(|c| matches!(c, '+' | '/' | '='));
-    // base64/url-safe blob: long and carries a base64-only symbol.
+    // base64/url-safe blob: long, not structural, and carries a base64 symbol.
     if has_b64_sym && (has_lower || has_upper || has_digit) {
         return true;
     }

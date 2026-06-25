@@ -81,6 +81,13 @@ impl SearchAppState {
             // PR #1103: in-memory rate-limit gate replacing the sync disk read
             // that `search_handler` previously did on every warm query.
             last_queried_write_cache: Arc::new(DashMap::new()),
+            // Issue #1621: empty until indexes register; populated by the
+            // warm-boot restore + `POST /indexes` paths.
+            watcher_manager: crate::service::watcher_manager::WatcherManager::new(),
+            // Issue #1672: zeroed summary; populated by reconcile_stale_indexes.
+            reconcile_summary: Arc::new(std::sync::Mutex::new(
+                crate::service::server::state::ReconcileSummary::default(),
+            )),
         }
     }
 

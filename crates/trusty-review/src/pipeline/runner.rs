@@ -21,18 +21,22 @@ use super::runner_helpers::{
     fetch_github_pr_meta, finalize_run,
 };
 use crate::{
-    config::ReviewConfig,
+    config::{DiffStats, MapReduceConfig, ReviewConfig, ReviewPath, select_review_mode},
     coverage::{CoverageVerdictContrib, apply_coverage_floor},
     integrations::{analyze_client::AnalyzeClient, github::RunMode, search_client::SearchClient},
     llm::LlmProvider,
     models::{ReviewResult, ReviewStatus, Verdict},
     pipeline::{
         context_gate::{GateOutcome, degraded_banner, preflight_context},
-        diff::{DiffSource, extract_changed_files, extract_identifiers, load_diff, truncate_diff},
+        diff::{
+            DiffSource, diff_was_truncated, extract_changed_files, extract_identifiers, load_diff,
+            truncate_diff,
+        },
         diff_analyzer::DiffAnalyzer, // noise filter (Stages A+B); #624
         parser::parse_review_response,
         prompt::{ReviewPrMeta, build_review_prompt_with_coverage},
         runner_context::{gather_context, gather_external_context_md},
+        runner_mapreduce::{MapReduceRun, run_mapreduce_branch},
         trigger::TriggerDecision,
         verify::maybe_verify,
         voice_config::build_voice_config,
@@ -245,8 +249,64 @@ pub async fn run_review(
     };
     let filtered = DiffAnalyzer::default().analyze(&raw_diff).await;
     let max = crate::config::constants::MAX_DIFF_CHARS;
+    // Render ONCE at no cap so DiffStats sees the true (untruncated) length the
+    // selector needs; the unified path re-bounds to `max` below.
+    let rendered_full = filtered.render_for_prompt(usize::MAX);
     let diff = truncate_diff(&filtered.render_for_prompt(max));
     debug!(orig = raw_diff.len(), filt = diff.len(), "diff filtered");
+
+    // ── Step 3a: select review path (unified vs map-reduce) (#1643 / #680) ─
+    // The selector decides per the `TRUSTY_REVIEW_MAP_MODE` heuristic: `auto`
+    // routes to map-reduce when the unified render WOULD truncate (rendered
+    // chars > MAX_DIFF_CHARS) OR the file count exceeds the threshold; `always`
+    // forces map-reduce; `never` forces the unified path (today's behaviour).
+    let mr_config = MapReduceConfig::from_env();
+    let stats = DiffStats {
+        diff_chars: rendered_full.len(),
+        file_count: filtered.files.len(),
+    };
+    let review_path = select_review_mode(stats, &mr_config);
+    debug!(
+        mode = %mr_config.mode,
+        diff_chars = stats.diff_chars,
+        file_count = stats.file_count,
+        path = ?review_path,
+        "review path selected"
+    );
+
+    // ── Step 3b: diff-truncation guard (#1638) — UNIFIED PATH ONLY ─────────
+    // Only the unified path can truncate; the map-reduce path reviews per-file
+    // with no truncation, so the fail-closed guard is now a backstop scoped to
+    // the unified path (and to the pathological all-failed map-reduce case,
+    // handled in `run_mapreduce_branch`).
+    // The unified path renders the (noise-filtered) diff bounded to MAX_DIFF_CHARS;
+    // for an over-cap diff `render_for_prompt` drops whole files at the END of the
+    // diff (and `truncate_diff` cuts trailing hunks).  A changed function/method
+    // signature in a dropped/cut region is then INVISIBLE to the reviewer — the
+    // live symptom that motivated this fix (a `build(…, null)` signature cut off so
+    // the reviewer could not see it).  Reviewing a partial diff yields a wrong /
+    // incomplete verdict, so we fail CLOSED to UNKNOWN (consistent with the #1241
+    // truncated-output guard and the #590 required-context gate) rather than
+    // silently reviewing only the visible portion.  The map-reduce path (#680) will
+    // later review over-cap diffs per-file with no truncation; until that fan-out
+    // lands, fail-closed is the safe behaviour.
+    if review_path == ReviewPath::Unified && diff_was_truncated(&diff) {
+        warn!(
+            orig_chars = raw_diff.len(),
+            rendered_chars = diff.len(),
+            max_chars = max,
+            "diff exceeded MAX_DIFF_CHARS and was truncated — failing CLOSED to UNKNOWN \
+             so the reviewer never silently reviews a partial diff (#1638)"
+        );
+        result.verdict = Verdict::Unknown;
+        result.error = Some(format!(
+            "diff too large to review in full ({orig} chars > {max} cap) — content was \
+             truncated before the reviewer, so changed code (e.g. function signatures) \
+             may be invisible; could not review",
+            orig = raw_diff.len(),
+        ));
+        return abort_dry(result, config, &input, &deps);
+    }
 
     // ── Step 4: extract identifiers for context retrieval ─────────────────
     let identifiers = extract_identifiers(&diff, 8);
@@ -318,7 +378,26 @@ pub async fn run_review(
     context.pr_discussion = input.caller_context.pr_discussion.clone();
     context.referenced_code = input.caller_context.referenced_code.clone();
 
-    // ── Step 6: build prompt and call LLM ─────────────────────────────────
+    // ── Step 5c: MAP-REDUCE branch (#1643 / #680) ─────────────────────────
+    // When the selector chose the per-file path, delegate to the map-reduce
+    // branch: split the (untruncated) filtered diff into per-file units, review
+    // EACH with its own LLM call (bounded fan-out), and reduce the per-chunk
+    // verdicts/findings into one ReviewResult.  No file is ever truncated away,
+    // so a changed signature near the END of a large diff is still reviewed.
+    if review_path == ReviewPath::MapReduce {
+        let run = MapReduceRun {
+            filtered,
+            raw_diff,
+            pr_meta,
+            context,
+            external_context,
+            coverage_contrib,
+            degraded_reason,
+        };
+        return run_mapreduce_branch(config, &input, &deps, &mr_config, result, run).await;
+    }
+
+    // ── Step 6: build prompt and call LLM (UNIFIED PATH) ──────────────────
     // Build the 3-layer VoiceConfig (stock + principles + voice) from config.
     let voice_config = build_voice_config(config);
     let llm_req = build_review_prompt_with_coverage(
@@ -416,7 +495,8 @@ pub async fn run_review(
     let (final_verdict, final_grade, original_llm_grade) = apply_grade_and_floor(&parsed);
     info!(
         verdict = %final_verdict,
-        grade = %final_grade,
+        // `final_grade` is None for an un-reviewable UNKNOWN verdict (#1474).
+        grade = final_grade.map(|g| g.to_string()).unwrap_or_else(|| "none".to_string()),
         findings_count = parsed.findings.len(),
         "final verdict + grade after severity-anchored floor"
     );
@@ -467,31 +547,29 @@ pub async fn run_review(
     .await;
     result.findings = findings;
 
-    // 7d: derive the envelope grade from the post-verification verdict (closes #1486).
+    // 7d: derive the envelope grade from the post-verification verdict (closes #1486),
+    // suppressing the letter grade entirely for an un-reviewable UNKNOWN (#1474).
     //
-    // BEFORE this fix: the grade was clamped from `final_grade` (the floor-escalated
-    // grade) to `result.verdict`.  When verification RELAXES the verdict (e.g. BLOCK
-    // → APPROVE because the only blocking finding was refuted by the verifier), the
-    // clamp of F→APPROVE is a no-op (F implies BLOCK which is already stricter than
-    // APPROVE), so the envelope grade stayed F even though the verdict became APPROVE.
+    // #1486: we clamp the ORIGINAL LLM grade (pre-floor) to the post-verification
+    // verdict — NOT the floor-escalated `final_grade`.  When verification RELAXES the
+    // verdict (e.g. BLOCK → APPROVE because the only blocking finding was refuted),
+    // clamping the floor-escalated grade (F) would be a no-op (F implies BLOCK, already
+    // stricter than APPROVE), leaving a stale F/APPROVE.  Clamping the original grade
+    // (B-) instead correctly recovers B-/APPROVE; if the blocking finding survives
+    // (verdict stays BLOCK), `clamp_grade_to_verdict(B-, BLOCK)` = F — consistent.
     //
-    // AFTER this fix: we clamp the original LLM grade (pre-floor) to the
-    // post-verification verdict.  The floor escalation (B- → F for a BLOCK) no
-    // longer leaks into the envelope when verification relaxes the verdict: if the
-    // floor finding was refuted, the envelope correctly shows B-/APPROVE instead of
-    // F/APPROVE.  If the blocking finding survives verification (verdict stays BLOCK),
-    // `clamp_grade_to_verdict(B-, BLOCK)` = F — the correct, consistent result.
+    // #1474: `original_llm_grade` is `None` for an un-reviewable UNKNOWN verdict, so
+    // the envelope grade stays `None` (output field omitted) — never an "F".  UNKNOWN
+    // means "could not review", which must never collapse into "reviewed → critical
+    // failure".  `.map` cleanly threads both behaviours: None ⇒ no grade; Some(grade)
+    // ⇒ clamp to the (real, non-UNKNOWN) post-verification verdict.
     //
-    // Coverage-floor tightening (step 7b-post above) may also shift `final_grade`
-    // independently of verification; for now we treat original_llm_grade as the
-    // soft starting point and defer tighter coverage-grade interaction to a follow-up.
-    // In practice the coverage floor only drives REQUEST_CHANGES (not BLOCK), and the
-    // original LLM grade for REQUEST_CHANGES is already at the D-band, so the clamp
-    // is correct in the common case.
-    result.grade = Some(
-        crate::pipeline::letter_grade::clamp_grade_to_verdict(original_llm_grade, &result.verdict)
-            .to_string(),
-    );
+    // Coverage-floor tightening (step 7b-post above) only drives REQUEST_CHANGES (not
+    // BLOCK), and the original LLM grade for REQUEST_CHANGES is already at the D-band,
+    // so the clamp is correct in the common case.
+    result.grade = original_llm_grade.map(|g| {
+        crate::pipeline::letter_grade::clamp_grade_to_verdict(g, &result.verdict).to_string()
+    });
 
     // 7e: build inline per-line comments from the RAW diff (#1414).  Using the
     // pre-filter `raw_diff` (not the noise-filtered `diff` sent to the LLM) means

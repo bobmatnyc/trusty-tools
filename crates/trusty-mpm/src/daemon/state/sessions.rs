@@ -141,15 +141,30 @@ impl DaemonState {
     /// pane *after* launch; reporting it back lets the reaper check process
     /// liveness rather than relying on the tmux session alone.
     /// What: sets `session.pid = Some(pid)` under a write guard; returns `true`
-    /// when the session existed, `false` for an unknown id.
-    /// Test: `set_session_pid_updates_field`.
+    /// when the session existed, `false` for an unknown id. On success it ALSO
+    /// records the PID in the on-disk PID-file registry (§10.3) so a future
+    /// orphan-GC sweep can find and reap this `claude` process even after its
+    /// tmux pane (and this in-memory entry) are gone. A registry write failure is
+    /// logged but never fails the call — PID tracking is best-effort hardening.
+    /// Test: `set_session_pid_updates_field`, `set_session_pid_writes_pidfile`.
     pub fn set_session_pid(&self, id: SessionId, pid: u32) -> bool {
-        self.update_session(&id, |s| s.pid = Some(pid))
+        let updated = self.update_session(&id, |s| s.pid = Some(pid));
+        if updated && let Err(e) = self.pid_registry().register(&id.0.to_string(), pid) {
+            tracing::warn!(session_id = %id.0, pid, "pid-registry: register failed: {e}");
+        }
+        updated
     }
 
     /// Remove a session and its associated memory snapshot.
+    ///
+    /// Also unregisters the session's PID-file (§10.3) so a cleanly-removed
+    /// session is never treated as an orphan by a later sweep. A missing PID file
+    /// is a no-op; an unexpected removal error is logged, not propagated.
     pub fn remove_session(&self, id: SessionId) -> Option<Session> {
         self.memory.remove(&id);
+        if let Err(e) = self.pid_registry().unregister(&id.0.to_string()) {
+            tracing::warn!(session_id = %id.0, "pid-registry: unregister failed: {e}");
+        }
         self.sessions.remove(&id).map(|(_, s)| s)
     }
 
@@ -331,6 +346,32 @@ impl DaemonState {
                 }
             }
         }
+    }
+
+    /// Gather the set of live session-id strings across BOTH registries.
+    ///
+    /// Why: the PID-file orphan-GC (§10.3) reaps any recorded PID whose session
+    /// is no longer tracked. The PID files are keyed by session-id (a UUID
+    /// string), so the sweep needs the union of every live id — from the legacy
+    /// `DaemonState` registry (the launch path's `set_session_pid` records PIDs
+    /// under these ids) and from the `SessionManager` store — to know which PID
+    /// files are still attached to a live session and must be spared.
+    /// What: collects `self.sessions` keys and every `SessionManager` record id
+    /// (`mgr.list()`) into one `HashSet<String>` of lowercase-hyphenated UUIDs.
+    /// The union is conservative for the PID sweep: a session tracked by EITHER
+    /// registry has its PID file spared, so a still-live `claude` is never reaped.
+    /// Test: `gather_live_session_ids_unions_both` in `state/tests.rs`.
+    pub async fn gather_live_session_ids(&self) -> std::collections::HashSet<String> {
+        let mut ids: std::collections::HashSet<String> = self
+            .sessions
+            .iter()
+            .map(|e| e.key().0.to_string())
+            .collect();
+        let mgr = self.session_manager().await;
+        for record in mgr.list().await {
+            ids.insert(record.id.0.to_string());
+        }
+        ids
     }
 
     // ---- projects -------------------------------------------------------

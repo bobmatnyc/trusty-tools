@@ -10949,7 +10949,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11027,7 +11027,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.4.1"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11068,7 +11068,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.27.2"
+version = "0.29.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11085,6 +11085,7 @@ dependencies = [
  "dirs 5.0.1",
  "dotenvy",
  "eventsource-stream",
+ "filetime",
  "fs4 0.8.4",
  "futures",
  "futures-util",
