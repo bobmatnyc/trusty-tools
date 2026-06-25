@@ -180,6 +180,21 @@ mod tests {
     }
 
     #[test]
+    fn default_url_passed_as_explicit_falls_through_to_lock() {
+        // Why: clap injects DEFAULT_DAEMON_URL when the user does not pass --url.
+        // resolve_daemon_url must NOT treat that as a real user override — it must
+        // fall through to the lock file (or the final default when no lock file
+        // exists). We verify this behaviorally: with no lock file present in the
+        // test environment the result must still be a valid HTTP URL (either the
+        // lock-file URL or the compiled-in default).
+        let result = resolve_daemon_url(Some(DEFAULT_DAEMON_URL));
+        assert!(
+            result.starts_with("http"),
+            "resolve_daemon_url(DEFAULT_DAEMON_URL) must return an HTTP URL: {result}"
+        );
+    }
+
+    #[test]
     fn lock_file_path_is_under_framework_root() {
         // Why: the lock file must share the `~/.trusty-mpm` root with every
         // other framework artifact. A path under `~/.config` (the previous

@@ -24,7 +24,9 @@ use axum::{
 use futures::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
+#[cfg(feature = "swagger-ui")]
 use utoipa::OpenApi;
+#[cfg(feature = "swagger-ui")]
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::core::compress::CompressionLevel;
@@ -136,7 +138,7 @@ pub use types::*;
 /// Test: `health_endpoint_responds` and the hook-relay tests call handlers via
 /// this router's logic.
 pub fn router(state: Arc<DaemonState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/health", get(health))
         .route("/sessions", get(list_sessions).post(register_session))
         .route("/api/v1/sessions/connect", post(connect_session))
@@ -271,12 +273,18 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         )
         // #1221: loopback-only JSON-RPC dispatch for the `serve --stdio` bridge.
         // The handler independently enforces the loopback gate via ConnectInfo.
-        .route("/rpc", post(rpc_handler))
-        .merge(
-            SwaggerUi::new("/api-docs")
-                .url("/api-docs/openapi.json", super::openapi::ApiDoc::openapi()),
-        )
-        .with_state(state)
+        .route("/rpc", post(rpc_handler));
+
+    // Gate the in-process Swagger UI explorer behind the `swagger-ui` feature
+    // so offline / air-gapped builds (which cannot fetch the swagger-ui static
+    // assets) compile cleanly with `--features daemon` alone (closes #1694).
+    #[cfg(feature = "swagger-ui")]
+    let router = router.merge(
+        SwaggerUi::new("/api-docs")
+            .url("/api-docs/openapi.json", super::openapi::ApiDoc::openapi()),
+    );
+
+    router.with_state(state)
 }
 
 /// Liveness probe plus the HR-3 catalog-staleness signal.
