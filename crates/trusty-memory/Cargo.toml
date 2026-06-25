@@ -159,6 +159,12 @@ open = "5"
 tempfile = { workspace = true }
 tower = { workspace = true }
 serial_test = { workspace = true }
+# Issue #1722: `task_mcp` integration tests drive `seed_shared_embedder_with_mock`
+# which is gated behind `embedder-test-support`. Re-declaring trusty-common here
+# with the feature activates it for all integration tests without enabling it in
+# the production library (mirrors the trusty-mpm and trusty-search pattern).
+trusty-common = { path = "../trusty-common", version = "0.18.0", default-features = false, features = ["memory-core", "embedder-test-support"] }
+chrono = { workspace = true }
 
 [features]
 # Why (issue #226): library consumers that only need `MemoryMcpService` for

@@ -27,6 +27,8 @@ pub mod helpers;
 pub mod kg_ops;
 pub mod memory_ops;
 pub mod palace_ops;
+pub mod task_definitions;
+pub mod task_ops;
 
 // Re-export the public + cross-module surface so external call sites
 // (`crate::tools::X`) and the `super::*` glob in `tools::tests` keep
@@ -65,6 +67,7 @@ use palace_ops::{
     handle_palace_compact, handle_palace_create, handle_palace_delete, handle_palace_info,
     handle_palace_list, handle_palace_update,
 };
+use task_ops::{handle_task_add, handle_task_complete, handle_task_list};
 
 /// Dispatch a tool call by name to its real handler.
 ///
@@ -113,6 +116,9 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "chat_turn_append" => handle_chat_turn_append(state, args).await,
         "dream_consolidate_room" => handle_dream_consolidate_room(state, args).await,
         "palace_dream" => handle_palace_dream(state, args).await,
+        "task_add" => handle_task_add(state, args).await,
+        "task_list" => handle_task_list(state, args).await,
+        "task_complete" => handle_task_complete(state, args).await,
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }

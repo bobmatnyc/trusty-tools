@@ -9,6 +9,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `task_add` MCP tool — creates a `DrawerType::Task` drawer that is never evicted or
+  consolidated by the dream cycle (`is_protected() = true`); bypasses content filters
+  via `force=true` (spec-001 issue #1722)
+- `task_list` MCP tool — returns all Task drawers in a palace; open tasks only by
+  default, `include_completed=true` includes tasks with a `completed_at` timestamp
+  (spec-001 issue #1722)
+- `task_complete` MCP tool — sets `completed_at` on a Task drawer and persists via
+  `kg.upsert_drawer`; errors if drawer does not exist or is not a Task drawer
+  (spec-001 issue #1722)
 - `palace_create` `force=true` flag — bypasses project-slug gate for arbitrary-slug
   palace creation (e.g. per-app/per-tenant chat session stores); slug format validation
   (`[a-z0-9][a-z0-9-]{0,62}`) still runs unconditionally (closes #1719)

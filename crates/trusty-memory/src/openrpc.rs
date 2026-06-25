@@ -96,6 +96,11 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         // installed binary and may restart the daemon.
         "upgrade" => &[MEMORY_WRITE],
 
+        // spec-001 Phase 4 task tools (issue #1722):
+        // task_list is read-only; task_add and task_complete mutate palace state.
+        "task_list" => &[MEMORY_READ],
+        "task_add" | "task_complete" => &[MEMORY_WRITE],
+
         _ => &[],
     };
     s.iter().map(|x| (*x).to_string()).collect()

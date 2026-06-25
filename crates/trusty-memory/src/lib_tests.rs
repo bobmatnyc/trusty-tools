@@ -95,8 +95,9 @@ async fn tools_list_returns_all_tools() {
     // issue #1104 adds `console_metrics`; spec-001 adds the four
     // `chat_session_*` tools and `dream_consolidate_room`;
     // issue #1720 adds `chat_session_recall`, `chat_session_delete`,
-    // `chat_turn_append`; issue #1721 adds `palace_dream`.
-    assert_eq!(tools.len(), 34);
+    // `chat_turn_append`; issue #1721 adds `palace_dream`;
+    // issue #1722 adds `task_add`, `task_list`, `task_complete`.
+    assert_eq!(tools.len(), 37);
 }
 
 #[tokio::test]

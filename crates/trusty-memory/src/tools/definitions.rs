@@ -9,6 +9,8 @@
 
 use serde_json::{json, Value};
 
+use super::task_definitions::task_tool_definitions;
+
 /// Marker server type. Reserved for future stateful MCP server impls.
 ///
 /// Why: Keep a stable type name while the protocol-loop is implemented at
@@ -124,7 +126,7 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
         vec!["palace", "session_id"]
     };
 
-    json!({
+    let mut result = json!({
         "tools": [
             {
                 "name": "memory_remember",
@@ -535,5 +537,12 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
             },
             crate::console_metrics::descriptor()
         ]
-    })
+    });
+    // spec-001 Phase 4 (issue #1722): splice task tool schemas.
+    // Defined in task_definitions.rs to respect the 500-SLOC cap on this file.
+    let tools = result["tools"].as_array_mut().expect("tools is array");
+    let metrics = tools.pop().expect("console_metrics sentinel");
+    tools.extend(task_tool_definitions(has_default));
+    tools.push(metrics);
+    result
 }
