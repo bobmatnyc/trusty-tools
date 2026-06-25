@@ -14,8 +14,8 @@
 //! descriptor shape and handler via the existing `dispatch_tool` harness.
 
 use anyhow::Result;
-use serde_json::{Value, json};
-use trusty_common::console_metrics::{ServiceHealth, make_report};
+use serde_json::{json, Value};
+use trusty_common::console_metrics::{make_report, ServiceHealth};
 use trusty_common::memory_core::PalaceRegistry;
 
 use crate::AppState;

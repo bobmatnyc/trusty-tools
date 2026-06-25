@@ -16,17 +16,17 @@
 //! `tests/serve_stdio_e2e.rs` end-to-end harness.
 
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use tokio::sync::{OnceCell, RwLock, broadcast};
-use trusty_common::ChatProvider;
+use tokio::sync::{broadcast, OnceCell, RwLock};
 use trusty_common::bm25_client::Bm25Client;
 use trusty_common::mcp::initialize_response;
 use trusty_common::memory_core::embed::FastEmbedder;
-use trusty_common::memory_core::{PalaceRegistry, store::ChatSessionStore};
+use trusty_common::memory_core::{store::ChatSessionStore, PalaceRegistry};
+use trusty_common::ChatProvider;
 
 // Why: `tracing::info` is only used by the axum HTTP-serving helpers
 //      (`run_http_on`, `spawn_uds_listener`). Pulling it in unconditionally
@@ -67,7 +67,11 @@ impl DaemonReadiness {
     /// `1` is ever written).
     /// Test: `daemon_readiness_from_u8` in this module.
     pub fn from_u8(v: u8) -> Self {
-        if v == 0 { Self::Warming } else { Self::Ready }
+        if v == 0 {
+            Self::Warming
+        } else {
+            Self::Ready
+        }
     }
 }
 
@@ -203,7 +207,11 @@ pub use tools::MemoryMcpServer;
 /// `resolve_palace_registry_dir_falls_back_to_data_dir`.
 pub fn resolve_palace_registry_dir(data_dir: PathBuf) -> PathBuf {
     let nested = data_dir.join("palaces");
-    if nested.is_dir() { nested } else { data_dir }
+    if nested.is_dir() {
+        nested
+    } else {
+        data_dir
+    }
 }
 
 /// Hook type — labels the Claude Code hook that triggered a submission.
