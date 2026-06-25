@@ -7,6 +7,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+## [0.6.1] — 2026-06-25
+
+### Fixed
+
+- per-chunk BLOCK floors synthesis to REQUEST_CHANGES, fix log whitespace, observable floor telemetry (closes #1665) ([#1674](https://github.com/bobmatnyc/trusty-tools/pull/1674)) ([`734dac6`](https://github.com/bobmatnyc/trusty-tools/commit/734dac64))
+
 ## [0.6.0] — 2026-06-24
 
 ### Added
