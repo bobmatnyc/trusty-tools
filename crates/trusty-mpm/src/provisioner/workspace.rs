@@ -235,11 +235,11 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         session_id: &ManagedSessionId,
         repo_url: &str,
         git_ref: &str,
-        _task: &str,
+        task: &str,
     ) -> Result<PreparedWorkspace, ProvisionError> {
         let project_slug = repo_slug(repo_url);
         let project_dir = self.workspace_root.join(&project_slug);
-        self.provision_in(&project_dir, session_id, repo_url, git_ref, _task)
+        self.provision_in(&project_dir, session_id, repo_url, git_ref, task)
     }
 
     /// Provision an isolated workspace under an explicit project directory.
@@ -262,7 +262,7 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         session_id: &ManagedSessionId,
         repo_url: &str,
         git_ref: &str,
-        _task: &str,
+        task: &str,
     ) -> Result<PreparedWorkspace, ProvisionError> {
         let workspace_path = project_dir.join(session_id.to_string());
 
@@ -275,6 +275,19 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         );
 
         self.git.clone_repo(repo_url, git_ref, &workspace_path)?;
+
+        // Write the task description into TASK.md at the workspace root so the
+        // agent can read it as its initial brief (closes #1693).
+        if !task.is_empty() {
+            let task_file = workspace_path.join("TASK.md");
+            if let Err(e) = std::fs::write(&task_file, task) {
+                tracing::warn!(
+                    session = %session_id,
+                    path = %task_file.display(),
+                    "failed to write TASK.md: {e}"
+                );
+            }
+        }
 
         // Best-effort: pre-seed workspace trust + renderer-upsell dismissal into
         // ~/.claude.json so the session starts without blocking startup prompts.
@@ -510,5 +523,52 @@ mod tests {
             "blank ref must be stored as-is, not substituted"
         );
         drop(fake); // explicitly drop to silence unused-variable lint
+    }
+
+    /// Why: closes #1693 — the task description must be written to TASK.md in
+    /// the workspace root so the agent can read its brief without requiring
+    /// interactive input. This test locks in the write behaviour.
+    /// What: provisions with a non-empty task and asserts TASK.md exists and
+    /// contains exactly the task string.
+    /// Test: this is the test.
+    #[test]
+    fn provision_writes_task_md() {
+        let root = TempDir::new().unwrap();
+        let prov = make_provisioner(&root);
+        let id = ManagedSessionId::new();
+        let task = "Fix the authentication bug in the login flow";
+
+        let ws = prov
+            .provision(&id, "https://github.com/owner/repo", "main", task)
+            .unwrap();
+
+        let task_file = ws.path.join("TASK.md");
+        assert!(
+            task_file.exists(),
+            "TASK.md must be written when task is non-empty"
+        );
+        let content = std::fs::read_to_string(&task_file).unwrap();
+        assert_eq!(content, task, "TASK.md must contain the exact task text");
+    }
+
+    /// Why: closes #1693 — when no task is provided the workspace must NOT
+    /// receive an empty TASK.md (an empty file is misleading and wastes I/O).
+    /// What: provisions with an empty task string and asserts TASK.md is absent.
+    /// Test: this is the test.
+    #[test]
+    fn provision_skips_task_md_when_empty() {
+        let root = TempDir::new().unwrap();
+        let prov = make_provisioner(&root);
+        let id = ManagedSessionId::new();
+
+        let ws = prov
+            .provision(&id, "https://github.com/owner/repo", "main", "")
+            .unwrap();
+
+        let task_file = ws.path.join("TASK.md");
+        assert!(
+            !task_file.exists(),
+            "TASK.md must NOT be created when task is empty"
+        );
     }
 }
