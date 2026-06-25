@@ -294,94 +294,82 @@ pub(super) fn refresh_closets(handle: &Arc<PalaceHandle>) -> usize {
     count
 }
 
-/// Optional inference-backed semantic consolidation pass.
+/// Result of an on-demand, room-scoped consolidation (spec-001 Phase 3).
 ///
-/// Why: the NLP-only passes miss semantic equivalence (aliases, paraphrases,
-/// near-duplicate triples expressed differently). This phase delegates
-/// canonicalization to a cheap LLM, preserving original drawers and adding
-/// canonical replacements with `superseded_by` links in the KG.
-/// What: gates on `inference_available`; when false logs at DEBUG and
-/// returns `(0, 0, 0)` immediately. When true (or when a consolidator is
-/// injected via `Dreamer::with_consolidator`), runs consolidation on all
-/// current drawers, writes each canonical drawer via `handle.remember`,
-/// and records the `superseded_by` KG triple so the original drawers are
-/// traceable. Returns `(canonical_count, llm_calls, cache_hits)`.
-/// Test: `dream_cycle_semantic_consolidation_with_mock` (injected
-/// consolidator); `dream_cycle_semantic_consolidation_no_inference`.
-pub(super) async fn semantic_consolidation_pass(
-    handle: &Arc<PalaceHandle>,
-    config: &DreamConfig,
-    injected: Option<Arc<SemanticConsolidator>>,
-) -> (usize, usize, usize) {
+/// Why: the `dream_consolidate_room` MCP tool reports how much work it did so
+/// the calling application can log progress / decide whether to run again.
+/// What: `summary_facts_created` is the number of canonical summary drawers
+/// added; `facts_evicted` is the number of superseded originals removed.
+/// Test: `consolidate_scoped_*` in `dream::tests`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RoomConsolidationStats {
+    pub summary_facts_created: usize,
+    pub facts_evicted: usize,
+}
+
+/// Build the production semantic consolidator from config, gating on inference
+/// availability.
+///
+/// Why: both the idle dream pass and the on-demand room consolidation need the
+/// identical "is inference configured? then build a backend" logic; sharing it
+/// keeps the gate in one place.
+/// What: returns `None` when `config.semantic` is disabled or no inference
+/// backend is available; otherwise builds an `OllamaInference` (when a local
+/// model is enabled and no key is set) or `OpenRouterInference` and wraps it in
+/// a `SemanticConsolidator`.
+/// Test: exercised via `dream_cycle_semantic_consolidation_no_inference` (None
+/// path) and the production daemon.
+fn build_consolidator_from_config(config: &DreamConfig) -> Option<Arc<SemanticConsolidator>> {
     if !config.semantic.enabled {
-        tracing::debug!(
-            palace = %handle.id,
-            "skipping semantic consolidation: disabled in config"
-        );
-        return (0, 0, 0);
+        return None;
     }
-
-    // Use the injected consolidator (test path) or build one from config.
-    let consolidator: Arc<SemanticConsolidator> = if let Some(c) = injected {
-        c
+    let api_key = if !config.openrouter_api_key.is_empty() {
+        config.openrouter_api_key.clone()
     } else {
-        // Production path: gate on inference availability.
-        let api_key = if !config.openrouter_api_key.is_empty() {
-            config.openrouter_api_key.clone()
-        } else {
-            std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
-        };
-
-        if !inference_available(&api_key, config.local_model_enabled) {
-            tracing::debug!(
-                palace = %handle.id,
-                "skipping semantic consolidation: inference unavailable \
-                 (set OPENROUTER_API_KEY or enable local_model)"
-            );
-            return (0, 0, 0);
-        }
-
-        // Build the inference backend: prefer local model (free),
-        // fall back to OpenRouter.
-        use crate::memory_core::semantic_consolidation::{OllamaInference, OpenRouterInference};
-        let backend: Arc<dyn crate::memory_core::semantic_consolidation::Inference> =
-            if config.local_model_enabled && api_key.is_empty() {
-                Arc::new(OllamaInference::new(
-                    "http://localhost:11434",
-                    &config.semantic.model,
-                ))
-            } else {
-                Arc::new(OpenRouterInference::new(api_key, &config.semantic.model))
-            };
-
-        Arc::new(SemanticConsolidator::new(backend, config.semantic.clone()))
+        std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
     };
-
-    // spec-001: exclude protected Task drawers from consolidation entirely so
-    // they are never folded into a canonical summary or superseded.
-    let snapshot: Vec<Drawer> = handle
-        .drawers
-        .read()
-        .iter()
-        .filter(|d| !d.drawer_type.is_protected())
-        .cloned()
-        .collect();
-    if snapshot.is_empty() {
-        return (0, 0, 0);
+    if !inference_available(&api_key, config.local_model_enabled) {
+        return None;
     }
+    use crate::memory_core::semantic_consolidation::{OllamaInference, OpenRouterInference};
+    let backend: Arc<dyn crate::memory_core::semantic_consolidation::Inference> =
+        if config.local_model_enabled && api_key.is_empty() {
+            Arc::new(OllamaInference::new(
+                "http://localhost:11434",
+                &config.semantic.model,
+            ))
+        } else {
+            Arc::new(OpenRouterInference::new(api_key, &config.semantic.model))
+        };
+    Some(Arc::new(SemanticConsolidator::new(
+        backend,
+        config.semantic.clone(),
+    )))
+}
 
-    let consolidation_result = consolidator.consolidate(&snapshot).await;
-
-    // Apply results: add canonical drawers, mark superseded ids in KG.
+/// Apply a consolidation result: add canonical drawers + record KG provenance.
+///
+/// Why: the canonical-add / `superseded_by` / `alias_of` / flagged-log logic is
+/// identical for the idle pass and the on-demand room consolidation; extracting
+/// it removes duplication and keeps side-effect ordering consistent.
+/// What: for each canonical drawer, writes it via `handle.remember` and asserts
+/// a `superseded_by` triple per original; stores `alias_of` triples; logs
+/// flagged contradictions. Returns `(canonical_count, superseded_ids)` where
+/// `superseded_ids` are the original drawer ids that were folded into a
+/// canonical (callers that compact — e.g. the room tool — evict these).
+/// Test: `dream_cycle_semantic_consolidation_with_mock`, `consolidate_scoped_*`.
+async fn apply_consolidation_result(
+    handle: &Arc<PalaceHandle>,
+    result: &crate::memory_core::semantic_consolidation::ConsolidationResult,
+) -> (usize, Vec<Uuid>) {
     let mut canonical_count = 0usize;
+    let mut superseded_ids: Vec<Uuid> = Vec::new();
 
-    for canonical in &consolidation_result.canonical_drawers {
-        // Add the canonical drawer to the palace.
-        let room_type = RoomType::General;
+    for canonical in &result.canonical_drawers {
         match handle
             .remember(
                 canonical.content.clone(),
-                room_type,
+                RoomType::General,
                 canonical.tags.clone(),
                 canonical.importance,
             )
@@ -389,15 +377,12 @@ pub(super) async fn semantic_consolidation_pass(
         {
             Ok(canonical_id) => {
                 canonical_count += 1;
-                // Record `superseded_by` triples in the KG for every
-                // original drawer so the provenance chain is preserved.
                 for &orig_id in &canonical.canonical_for {
-                    let triple_subject = format!("drawer:{orig_id}");
-                    let triple_object = format!("drawer:{canonical_id}");
+                    superseded_ids.push(orig_id);
                     let triple = crate::memory_core::store::kg::Triple {
-                        subject: triple_subject,
+                        subject: format!("drawer:{orig_id}"),
                         predicate: "superseded_by".to_string(),
-                        object: triple_object,
+                        object: format!("drawer:{canonical_id}"),
                         valid_from: chrono::Utc::now(),
                         valid_to: None,
                         confidence: 1.0,
@@ -421,8 +406,7 @@ pub(super) async fn semantic_consolidation_pass(
         }
     }
 
-    // Store aliases as KG triples.
-    for (from, to) in &consolidation_result.aliases {
+    for (from, to) in &result.aliases {
         let triple = crate::memory_core::store::kg::Triple {
             subject: from.clone(),
             predicate: "alias_of".to_string(),
@@ -441,8 +425,7 @@ pub(super) async fn semantic_consolidation_pass(
         }
     }
 
-    // Log flagged contradictions (no auto-resolution).
-    for (id, reason) in &consolidation_result.flagged_ids {
+    for (id, reason) in &result.flagged_ids {
         tracing::info!(
             palace = %handle.id,
             drawer_id = %id,
@@ -451,19 +434,147 @@ pub(super) async fn semantic_consolidation_pass(
         );
     }
 
+    (canonical_count, superseded_ids)
+}
+
+/// Optional inference-backed semantic consolidation pass.
+///
+/// Why: the NLP-only passes miss semantic equivalence (aliases, paraphrases,
+/// near-duplicate triples expressed differently). This phase delegates
+/// canonicalization to a cheap LLM, preserving original drawers and adding
+/// canonical replacements with `superseded_by` links in the KG.
+/// What: gates on `inference_available`; when false logs at DEBUG and
+/// returns `(0, 0, 0)` immediately. When true (or when a consolidator is
+/// injected via `Dreamer::with_consolidator`), runs consolidation on all
+/// current non-Task drawers, writes each canonical drawer via `handle.remember`,
+/// and records the `superseded_by` KG triple so the original drawers are
+/// traceable. Additive-only — originals are preserved.
+/// Returns `(canonical_count, llm_calls, cache_hits)`.
+/// Test: `dream_cycle_semantic_consolidation_with_mock` (injected
+/// consolidator); `dream_cycle_semantic_consolidation_no_inference`.
+pub(super) async fn semantic_consolidation_pass(
+    handle: &Arc<PalaceHandle>,
+    config: &DreamConfig,
+    injected: Option<Arc<SemanticConsolidator>>,
+) -> (usize, usize, usize) {
+    // Use the injected consolidator (test path) or build one from config.
+    let consolidator: Arc<SemanticConsolidator> = match injected {
+        Some(c) => c,
+        None => match build_consolidator_from_config(config) {
+            Some(c) => c,
+            None => {
+                tracing::debug!(
+                    palace = %handle.id,
+                    "skipping semantic consolidation: disabled or inference unavailable"
+                );
+                return (0, 0, 0);
+            }
+        },
+    };
+
+    // spec-001: exclude protected Task drawers from consolidation entirely so
+    // they are never folded into a canonical summary or superseded.
+    let snapshot: Vec<Drawer> = handle
+        .drawers
+        .read()
+        .iter()
+        .filter(|d| !d.drawer_type.is_protected())
+        .cloned()
+        .collect();
+    if snapshot.is_empty() {
+        return (0, 0, 0);
+    }
+
+    let result = consolidator.consolidate(&snapshot).await;
+    let (canonical_count, _superseded) = apply_consolidation_result(handle, &result).await;
+
     tracing::debug!(
         palace = %handle.id,
         canonical_added = canonical_count,
-        aliases = consolidation_result.aliases.len(),
-        flagged = consolidation_result.flagged_ids.len(),
-        llm_calls = consolidation_result.llm_calls,
-        cache_hits = consolidation_result.cache_hits,
+        aliases = result.aliases.len(),
+        flagged = result.flagged_ids.len(),
+        llm_calls = result.llm_calls,
+        cache_hits = result.cache_hits,
         "semantic consolidation phase complete"
     );
 
-    (
-        canonical_count,
-        consolidation_result.llm_calls,
-        consolidation_result.cache_hits,
-    )
+    (canonical_count, result.llm_calls, result.cache_hits)
+}
+
+/// On-demand, room-scoped semantic consolidation that compacts older history
+/// (spec-001 Phase 3, the `dream_consolidate_room` MCP tool).
+///
+/// Why: applications driving trusty-memory as a chat-session manager want to
+/// compact a single room's older turns on demand rather than waiting for the
+/// idle dream cycle, and — unlike the additive idle pass — they want the
+/// superseded originals evicted so history actually shrinks.
+/// What: selects non-Task drawers in `room` (or all rooms when `None`) whose
+/// `created_at` is older than `max_age_days`, runs the consolidator over them,
+/// applies the result (canonical drawers + KG provenance), then evicts every
+/// superseded original via `handle.forget`. Returns the created/evicted counts.
+/// `injected` lets tests supply a `MockInference`-backed consolidator; in
+/// production it is `None` and the consolidator is built from `config`.
+/// Test: `consolidate_scoped_filters_by_room`,
+/// `consolidate_scoped_skips_task_drawers`,
+/// `consolidate_scoped_no_inference_is_noop` in `dream::tests`.
+pub async fn consolidate_scoped(
+    handle: &Arc<PalaceHandle>,
+    config: &DreamConfig,
+    room: Option<RoomType>,
+    max_age_days: i64,
+    injected: Option<Arc<SemanticConsolidator>>,
+) -> Result<RoomConsolidationStats> {
+    let consolidator: Arc<SemanticConsolidator> = match injected {
+        Some(c) => c,
+        None => match build_consolidator_from_config(config) {
+            Some(c) => c,
+            None => {
+                tracing::debug!(
+                    palace = %handle.id,
+                    "dream_consolidate_room: inference unavailable; no-op"
+                );
+                return Ok(RoomConsolidationStats::default());
+            }
+        },
+    };
+
+    // Select candidates: room-scoped (list_drawers handles the room filter),
+    // older than the age cutoff, and never protected Task drawers.
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days.max(0));
+    let snapshot: Vec<Drawer> = handle
+        .list_drawers(room, None, usize::MAX)
+        .into_iter()
+        .filter(|d| !d.drawer_type.is_protected())
+        .filter(|d| d.created_at <= cutoff)
+        .collect();
+    if snapshot.is_empty() {
+        return Ok(RoomConsolidationStats::default());
+    }
+
+    let result = consolidator.consolidate(&snapshot).await;
+    let (summary_facts_created, superseded_ids) = apply_consolidation_result(handle, &result).await;
+
+    // Compaction step: evict the superseded originals so history shrinks.
+    // Task drawers were excluded from the snapshot, so they can never appear
+    // here. De-duplicate ids defensively in case two canonicals claim one.
+    let mut evicted = 0usize;
+    let mut seen: HashSet<Uuid> = HashSet::new();
+    for id in superseded_ids {
+        if !seen.insert(id) {
+            continue;
+        }
+        match handle.forget(id).await {
+            Ok(()) => evicted += 1,
+            Err(e) => tracing::warn!(?id, "dream_consolidate_room: evict failed: {e:#}"),
+        }
+    }
+
+    if let Err(e) = handle.flush() {
+        tracing::warn!(palace = %handle.id, "dream_consolidate_room flush failed: {e:#}");
+    }
+
+    Ok(RoomConsolidationStats {
+        summary_facts_created,
+        facts_evicted: evicted,
+    })
 }

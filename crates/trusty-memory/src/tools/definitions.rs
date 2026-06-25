@@ -110,6 +110,8 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     } else {
         vec!["palace", "session_id", "role", "content"]
     };
+    let dream_consolidate_room_required: Vec<&str> =
+        if has_default { vec![] } else { vec!["palace"] };
 
     json!({
         "tools": [
@@ -454,6 +456,19 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                         "offset": {"type": "integer", "default": 0}
                     },
                     "required": chat_session_palace_required,
+                }
+            },
+            {
+                "name": "dream_consolidate_room",
+                "description": "Trigger LLM-driven semantic consolidation for one room (or all rooms) of a palace, on demand and synchronously (spec-001). Consolidates facts older than max_age_days into canonical summaries, then evicts the superseded originals so history shrinks. Task drawers are always skipped. No-op (zero counts) when no inference backend (OpenRouter key / local model) is configured. Returns { summary_facts_created, facts_evicted }.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":       {"type": "string"},
+                        "room":         {"type": "string", "description": "Room to scope to (e.g. Backend, Planning, or a custom name). Omit or null to consolidate all rooms."},
+                        "max_age_days": {"type": "integer", "default": 7, "description": "Only consolidate facts older than this many days."}
+                    },
+                    "required": dream_consolidate_room_required,
                 }
             },
             crate::console_metrics::descriptor()

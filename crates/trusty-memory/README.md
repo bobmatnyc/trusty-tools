@@ -262,9 +262,22 @@ includes `memory_note`, `memory_recall_all`, `palace_delete`,
 
 | Tool | Arguments | Description |
 |---|---|---|
-| `palace_create` | `name, description?` | Create a new palace namespace. See [Palace as Project](#palace-as-project) for naming rules. |
+| `palace_create` | `name, description?, force?` | Create a new palace namespace. See [Palace as Project](#palace-as-project) for naming rules. Pass `force=true` to bypass project-slug validation and create a palace under an arbitrary app/tenant slug (chat-session-manager use case). |
 | `palace_list` | — | List all palaces and their IDs. |
 | `palace_info` | `palace` | Palace metadata and statistics. |
+
+### Chat session tools
+
+A redb-backed, per-palace chat store for applications using trusty-memory as a
+conversation session manager. Turns are stored verbatim and bypass the
+`memory_remember` signal/noise + dedup gates.
+
+| Tool | Arguments | Description |
+|---|---|---|
+| `chat_session_create` | `palace, session_id?, title?` | Create (or reference) a session. Returns `{ session_id, created_at, message_count }`. |
+| `chat_session_add_turn` | `palace, session_id, role, content` | Append a `user`/`assistant`/`system` turn (creates the session if missing). Returns `{ message_count, updated_at }`. |
+| `chat_session_get` | `palace, session_id` | Full session with all turns in order. |
+| `chat_session_list` | `palace, limit?=50, offset?=0` | Paginated session metadata. Returns `{ sessions, total_count }`. |
 
 ### Knowledge graph tools
 
@@ -278,7 +291,19 @@ includes `memory_note`, `memory_recall_all`, `palace_delete`,
 | Tool | Arguments | Description |
 |---|---|---|
 | `memory_dream` | `palace?` | Run a consolidation cycle (merge near-duplicates, prune, compact). |
+| `dream_consolidate_room` | `palace, room?, max_age_days?=7` | On-demand, synchronous LLM consolidation scoped to one room (omit `room` for all rooms). Summarises facts older than `max_age_days` into canonical drawers, then evicts the superseded originals. `Task` drawers are always skipped. No-op when no inference backend is configured. Returns `{ summary_facts_created, facts_evicted }`. |
 | `memory_status` | — | Global statistics (total drawers, vectors, KG triples). |
+
+### Task drawers (protected memory)
+
+`DrawerType::Task` is a drawer classification for goals, milestones, and
+checkpoints that an application must re-derive across sessions. Task drawers are
+**protected from the dream cycle**: they are never evicted (content-prune,
+dedup-merge, or age/importance prune) and never consolidated into summaries,
+regardless of age or importance. An optional `completed_at` timestamp marks a
+task done — this makes it eligible for *manual* cleanup but never triggers
+automatic eviction. Store a Task drawer by classifying a write as `Task`; it
+will survive every subsequent dream cycle until explicitly deleted.
 
 ## Dream Cycle: Semantic Consolidation (issue #87)
 
@@ -558,7 +583,7 @@ trusty-memory (this crate)          trusty-common `memory-core` feature
   axum HTTP/SSE server     ──────►  PalaceRegistry
   Unix domain socket       ──────►  usearch vector index (index.usearch)
   embedded Svelte UI               redb metadata + KG (kg.redb)
-  25 MCP tools                     fastembed (AllMiniLML6V2Q)
+  30 MCP tools                     fastembed (AllMiniLML6V2Q)
 
 trusty-memory-mcp-bridge (separate binary, PR #149)
   Claude Code stdio  ◄──pipe──►  trusty-memory UDS
