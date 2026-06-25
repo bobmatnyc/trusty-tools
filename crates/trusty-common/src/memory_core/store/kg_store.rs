@@ -169,6 +169,14 @@ pub struct DrawerRecord {
     /// in the past.
     #[serde(default)]
     pub expires_at_ms: Option<i64>,
+    /// spec-001: optional `Task` completion timestamp (epoch ms). `None` for
+    /// open tasks and every non-Task drawer. Because postcard is positional,
+    /// rows written before this field existed fail to decode as the current
+    /// shape; the reader falls back through `PreTaskDrawerRecord` (the #61-era
+    /// shape) and then `LegacyDrawerRecord` to migrate them forward with this
+    /// field defaulted to `None`.
+    #[serde(default)]
+    pub completed_at_ms: Option<i64>,
 }
 
 // ── Key encoding helpers ─────────────────────────────────────────────────
@@ -434,6 +442,7 @@ mod tests {
             created_at_ms: 1_700_000_000_000,
             drawer_type: Some("UserFact".to_string()),
             expires_at_ms: Some(1_710_000_000_000),
+            completed_at_ms: Some(1_720_000_000_000),
         };
         let bytes = encode_value(&d).expect("encode");
         let decoded: DrawerRecord = decode_value(&bytes).expect("decode");
@@ -457,12 +466,14 @@ mod tests {
             created_at_ms: 1,
             drawer_type: None,
             expires_at_ms: None,
+            completed_at_ms: None,
         };
         let bytes = encode_value(&d).expect("encode");
         let decoded: DrawerRecord = decode_value(&bytes).expect("decode");
         assert_eq!(d, decoded);
         assert!(decoded.drawer_type.is_none());
         assert!(decoded.expires_at_ms.is_none());
+        assert!(decoded.completed_at_ms.is_none());
     }
 
     #[test]

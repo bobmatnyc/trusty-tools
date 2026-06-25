@@ -193,9 +193,21 @@ impl MemoryService {
         //      fallback (rarely meaningful when the daemon is launched from ~).
         // This keeps older clients that omit `cwd` working without a breaking
         // change, while letting pin-file-aware clients get accurate validation.
+        // spec-001: `force=true` lets an application bypass the project-slug
+        // gate so it can create palaces under arbitrary slugs (e.g. one per
+        // app/tenant for chat-session storage). The env-var bypass remains for
+        // test contexts; both short-circuit the same validation call.
+        //
+        // KNOWN MVP LIMITATION (tracked follow-up): `force=true` bypasses slug
+        // validation with NO authorization check — any caller that can reach
+        // this endpoint can create a palace under an arbitrary slug, including
+        // one that collides with another tenant's namespace. This is intended
+        // for trusted / single-tenant callers only. Multi-tenant auth gating
+        // (verifying the caller owns the requested slug) is a tracked follow-up;
+        // do not expose `force` to untrusted clients until that lands.
         let skip_enforcement =
             std::env::var("TRUSTY_SKIP_PALACE_ENFORCEMENT").as_deref() == Ok("1");
-        if !skip_enforcement {
+        if !skip_enforcement && !body.force {
             let cwd = body
                 .cwd
                 .as_deref()

@@ -96,6 +96,22 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
         vec!["palace", "short", "full"]
     };
     let discover_aliases_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
+    // spec-001 chat-session tools: `palace` is optional only when a server
+    // default is configured, matching the convention used by every other
+    // palace-scoped tool above.
+    let chat_session_palace_required: Vec<&str> = if has_default { vec![] } else { vec!["palace"] };
+    let chat_session_get_required: Vec<&str> = if has_default {
+        vec!["session_id"]
+    } else {
+        vec!["palace", "session_id"]
+    };
+    let chat_session_add_turn_required: Vec<&str> = if has_default {
+        vec!["session_id", "role", "content"]
+    } else {
+        vec!["palace", "session_id", "role", "content"]
+    };
+    let dream_consolidate_room_required: Vec<&str> =
+        if has_default { vec![] } else { vec!["palace"] };
 
     json!({
         "tools": [
@@ -163,7 +179,8 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                     "properties": {
                         "name":        {"type": "string"},
                         "description": {"type": "string"},
-                        "cwd":         {"type": "string", "description": "Optional caller working directory used for palace-name enforcement. Pass the project root (or any path inside it) so the pin file at `.trusty-tools/trusty-memory.yaml` is honoured. When omitted, the daemon's own cwd is used (rarely meaningful for remote calls)."}
+                        "cwd":         {"type": "string", "description": "Optional caller working directory used for palace-name enforcement. Pass the project root (or any path inside it) so the pin file at `.trusty-tools/trusty-memory.yaml` is honoured. When omitted, the daemon's own cwd is used (rarely meaningful for remote calls)."},
+                        "force":       {"type": "boolean", "description": "Bypass project-slug validation so an application can create a palace under an arbitrary slug (spec-001: chat-session manager, one palace per app/tenant). Defaults to false.", "default": false}
                     },
                     "required": ["name"]
                 }
@@ -387,6 +404,71 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                         "confirm": {"type": "boolean", "description": "Set to true to install the new version. NEVER set automatically — the operator must explicitly pass confirm=true.", "default": false}
                     },
                     "required": []
+                }
+            },
+            {
+                "name": "chat_session_create",
+                "description": "Create a new chat session in a palace (spec-001 chat-session manager). Returns the session id, its creation timestamp, and the message count (0 for a fresh session). Pass an optional session_id to use a caller-chosen id (idempotent — an existing session is returned unchanged); pass an optional title to name a server-generated session. Sessions are stored in the palace's dedicated redb chat store, NOT the generic memory drawer surface.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":     {"type": "string", "description": "Palace slug (optional if server started with --palace)"},
+                        "session_id": {"type": "string", "description": "Optional caller-supplied session id; a UUID is generated when omitted."},
+                        "title":      {"type": "string", "description": "Optional session name (applied only when session_id is omitted)."}
+                    },
+                    "required": chat_session_palace_required,
+                }
+            },
+            {
+                "name": "chat_session_add_turn",
+                "description": "Append a message (prompt or response) to a chat session's history. Creates the session if it does not yet exist. Returns the new message_count and updated_at. Bypasses the memory_remember signal/noise + dedup gates so sequential conversational turns persist verbatim.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":     {"type": "string"},
+                        "session_id": {"type": "string"},
+                        "role":       {"type": "string", "enum": ["user", "assistant", "system"]},
+                        "content":    {"type": "string"}
+                    },
+                    "required": chat_session_add_turn_required,
+                }
+            },
+            {
+                "name": "chat_session_get",
+                "description": "Retrieve a full chat session: metadata plus every turn in chronological order. Errors if the session id is unknown.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":     {"type": "string"},
+                        "session_id": {"type": "string"}
+                    },
+                    "required": chat_session_get_required,
+                }
+            },
+            {
+                "name": "chat_session_list",
+                "description": "List chat sessions in a palace as paginated metadata (id, title, timestamps, message_count) ordered most-recently-updated first. Does not include message bodies. Returns { sessions, total_count }.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace": {"type": "string"},
+                        "limit":  {"type": "integer", "default": 50},
+                        "offset": {"type": "integer", "default": 0}
+                    },
+                    "required": chat_session_palace_required,
+                }
+            },
+            {
+                "name": "dream_consolidate_room",
+                "description": "Trigger LLM-driven semantic consolidation for one room (or all rooms) of a palace, on demand and synchronously (spec-001). Consolidates facts older than max_age_days into canonical summaries, then evicts the superseded originals so history shrinks. Task drawers are always skipped. No-op (zero counts) when no inference backend (OpenRouter key / local model) is configured. Returns { summary_facts_created, facts_evicted }.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":       {"type": "string"},
+                        "room":         {"type": "string", "description": "Room to scope to (e.g. Backend, Planning, or a custom name). Omit or null to consolidate all rooms."},
+                        "max_age_days": {"type": "integer", "default": 7, "description": "Only consolidate facts older than this many days."}
+                    },
+                    "required": dream_consolidate_room_required,
                 }
             },
             crate::console_metrics::descriptor()

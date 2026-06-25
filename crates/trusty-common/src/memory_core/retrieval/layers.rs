@@ -100,6 +100,7 @@ pub fn retrieve_l0_l1(handle: &PalaceHandle) -> Vec<RecallResult> {
             access_count: 0,
             drawer_type: DrawerType::UserFact,
             expires_at: None,
+            completed_at: None,
         };
         out.push(RecallResult {
             drawer: identity_drawer,

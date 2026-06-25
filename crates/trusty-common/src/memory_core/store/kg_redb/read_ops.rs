@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use super::super::kg::Triple;
 use super::store::KgStoreRedb;
-use super::types::{LegacyDrawerRecord, parse_drawer_type, triple_from_parts};
+use super::types::{LegacyDrawerRecord, PreTaskDrawerRecord, parse_drawer_type, triple_from_parts};
 
 impl KgStoreRedb {
     /// Return all currently active triples for `subject`.
@@ -250,16 +250,21 @@ impl KgStoreRedb {
             let record: DrawerRecord = match decode_value::<DrawerRecord>(v.value()) {
                 Ok(r) => r,
                 Err(_) => {
-                    // Issue #61: rows written before drawer_type /
-                    // expires_at_ms existed lack those trailing fields and
-                    // postcard refuses to decode them as the new struct.
-                    // Fall back to the legacy shape and lift it forward.
-                    match decode_value::<LegacyDrawerRecord>(v.value()) {
-                        Ok(legacy) => legacy.into(),
-                        Err(e) => {
-                            tracing::warn!(id = %id, "skip drawer with malformed value: {e}");
-                            continue;
-                        }
+                    // Postcard is positional, so older rows lack the current
+                    // shape's trailing fields and refuse to decode. Walk the
+                    // migration chain newest→oldest, lifting each forward:
+                    //   1. PreTaskDrawerRecord — #61-era (drawer_type +
+                    //      expires_at_ms, no spec-001 completed_at_ms).
+                    //   2. LegacyDrawerRecord — pre-#61 (none of those fields).
+                    match decode_value::<PreTaskDrawerRecord>(v.value()) {
+                        Ok(pre) => pre.into(),
+                        Err(_) => match decode_value::<LegacyDrawerRecord>(v.value()) {
+                            Ok(legacy) => legacy.into(),
+                            Err(e) => {
+                                tracing::warn!(id = %id, "skip drawer with malformed value: {e}");
+                                continue;
+                            }
+                        },
                     }
                 }
             };
@@ -281,6 +286,9 @@ impl KgStoreRedb {
             let expires_at = record
                 .expires_at_ms
                 .and_then(DateTime::from_timestamp_millis);
+            let completed_at = record
+                .completed_at_ms
+                .and_then(DateTime::from_timestamp_millis);
             out.push(Drawer {
                 id,
                 room_id,
@@ -293,6 +301,7 @@ impl KgStoreRedb {
                 access_count: 0,
                 drawer_type,
                 expires_at,
+                completed_at,
             });
         }
         Ok(out)

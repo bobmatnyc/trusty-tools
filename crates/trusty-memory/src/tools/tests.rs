@@ -116,7 +116,7 @@ fn tool_definitions_lists_all_tools() {
         .get("tools")
         .and_then(|t| t.as_array())
         .expect("tools array");
-    assert_eq!(tools.len(), 25);
+    assert_eq!(tools.len(), 30);
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
@@ -147,6 +147,11 @@ fn tool_definitions_lists_all_tools() {
         "memory_send_message",
         "upgrade",
         "console_metrics",
+        "chat_session_create",
+        "chat_session_add_turn",
+        "chat_session_get",
+        "chat_session_list",
+        "dream_consolidate_room",
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
