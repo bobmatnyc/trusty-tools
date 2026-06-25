@@ -11,7 +11,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use super::state::{SearchAppState, WarmBootSummary};
+use super::state::{ReconcileSummary, SearchAppState, WarmBootSummary};
 
 /// Response shape for `GET /health` (issue #34 + #35 + #38 + #282 + #537 +
 /// #1003).
@@ -64,6 +64,15 @@ pub(super) struct HealthResponse {
     /// `~102`) immediately visible without tailing logs. The `warm_boot_degraded`
     /// boolean is the machine-readable flag external monitors should poll.
     pub(super) warmboot_summary: WarmBootSummary,
+    /// Boot-time reconcile summary (issue #1672).
+    ///
+    /// Why: boot-reconcile catches stale indexes (git-delta path since #1670,
+    /// mtime path since #1672) but previously only logged results. Surfacing it
+    /// here lets operators and monitors see reconciliation outcome without
+    /// grepping logs. `None` before the first daemon reconcile run (back-compat:
+    /// daemons with reconcile disabled via `TRUSTY_NO_BOOT_RECONCILE=1` omit it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) boot_reconcile: Option<ReconcileSummary>,
 }
 
 /// Embedding-model metadata surfaced by `GET /health` (issue #38).
@@ -220,6 +229,32 @@ pub(super) async fn health_handler(
     warmboot_summary.indexes_lazy = state.cold_store.len();
     warmboot_summary.indexes_failed = state.cold_store.failed_len();
 
+    // Issue #1672: read the reconcile summary. Returns None when reconcile has
+    // not started yet (disabled via env gate or daemon still in boot). The
+    // `skip_serializing_if = "Option::is_none"` on the response field keeps
+    // the wire payload backward-compatible.
+    let boot_reconcile = state
+        .reconcile_summary
+        .lock()
+        .map(|g| {
+            // Only surface a summary that has actually started (in_progress
+            // or completed). Before the first reconcile run all counters are
+            // 0 and in_progress is false — treat that as "not yet started"
+            // so the field is absent rather than a zeroed-out struct.
+            let s = g.clone();
+            let started = s.in_progress
+                || s.up_to_date > 0
+                || s.delta_reindexed > 0
+                || s.fell_back_to_full > 0
+                || s.skipped_no_data > 0;
+            if started {
+                Some(s)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(None);
+
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
@@ -241,6 +276,7 @@ pub(super) async fn health_handler(
         background_reindex_queue_depth: crate::service::reindex::background_reindex_queue_depth(),
         update_available,
         warmboot_summary,
+        boot_reconcile,
     })
 }
 

@@ -1,31 +1,29 @@
-//! Boot-time stale-index reconciliation (issue #1670).
+//! Boot-time stale-index reconciliation (issues #1670 / #1672).
 //!
 //! Why: the live filesystem watcher catches changes made while the daemon is
 //! running, but there is no hook for changes made while the daemon was DOWN.
-//! After a warm-boot restore, every index that has a stored `indexed_head_sha`
-//! may be stale — the working tree advanced past that commit and the index was
-//! never told. This module closes that gap by computing the git diff between the
-//! stored SHA and the current HEAD and reindexing only the changed files, or
-//! falling back to a full `spawn_reindex` when the delta is too large or git
-//! history is unavailable.
+//! After a warm-boot restore, every index may be stale. This module closes
+//! that gap via two complementary paths:
 //!
-//! What: `reconcile_stale_indexes` iterates over every registered index and
-//! spawns one background `tokio::task` per index that:
-//!   1. Reads `indexed_head_sha` and calls `core::git::head_sha`.
-//!   2. If both SHAs are present and differ, calls `changed_files_between` to
-//!      compute the delta via `git diff --name-only <old>..HEAD`.
-//!   3. If the delta exceeds `FULL_REINDEX_THRESHOLD` files, falls back to
-//!      `spawn_reindex_with_cleanup` (full background reindex).
-//!   4. Otherwise, walks the delta: modified/added files get `indexer.index_file`;
-//!      deleted files get `indexer.remove_file` (same API the HTTP handler uses).
-//!   5. Stamps `indexed_head_sha` = current HEAD and `last_indexed_at` = now.
+//! **Git path** (issue #1670): indexes whose `indexed_head_sha` is set are
+//! reconciled via `git diff --name-only <stored>..HEAD`. Per-file or full-reindex
+//! depending on delta size vs. `FULL_REINDEX_THRESHOLD`.
+//!
+//! **mtime path** (issue #1672): indexes whose root is not a git repo (or whose
+//! `indexed_head_sha` is None) are reconciled by walking the index root and
+//! collecting all files whose mtime exceeds the persisted `last_indexed_unix`
+//! timestamp from `indexes.toml`. Same threshold / full-reindex fallback applies.
+//! Non-git indexes with no `last_indexed_unix` AND no corpus are skipped (never
+//! indexed — nothing to catch up).
+//!
+//! Both paths reuse the walker's `path_in_skipped_dir` / `should_skip_path`
+//! predicates so exclusion rules are applied consistently.
+//!
+//! Boot-reconcile progress is surfaced on `GET /health` via `ReconcileSummary`
+//! on `SearchAppState` (issue #1672).
 //!
 //! Gated by `TRUSTY_NO_BOOT_RECONCILE=1` (disables) following the pattern of
 //! `TRUSTY_DISABLE_WATCHER` and `TRUSTY_NO_AUTO_DISCOVER`.
-//!
-//! Non-git indexes (or indexes whose `indexed_head_sha` is `None`) are skipped
-//! with a `tracing::debug!` log. A follow-up ticket (#1671) should add
-//! mtime-based reconciliation for non-git indexes.
 //!
 //! Test: unit + integration tests in `commands/start/reconcile_tests.rs`.
 
@@ -34,6 +32,7 @@ use std::sync::Arc;
 
 use crate::core::registry::IndexHandle;
 use crate::service::reindex::{spawn_reindex_with_cleanup, ReindexProgress};
+use crate::service::server::ReconcileSummary;
 use crate::service::walker::{path_in_skipped_dir, should_skip_path};
 use crate::service::SearchAppState;
 
@@ -114,6 +113,86 @@ pub(crate) async fn changed_files_between(root_path: &Path, old_sha: &str) -> Op
     Some(files)
 }
 
+/// Walk `root_path` and collect relative paths of files whose mtime > `since_unix`.
+///
+/// Why: for non-git indexes the only staleness signal is file mtime vs. the
+/// last-indexed timestamp persisted in `indexes.toml`. This is bounded by the
+/// same `FULL_REINDEX_THRESHOLD` used by the git path so large trees cannot
+/// cause boot thrash.
+/// What: recursively walks the root using `walkdir::filter_entry` to PRUNE
+/// excluded directory subtrees (SKIP_DIRS + should_skip_for_reconcile) before
+/// descending — directories are never statted beyond the basename check, so
+/// `node_modules/`, `target/`, `.git/`, etc. are skipped without traversal.
+/// For accepted files, compares mtime (seconds since Unix epoch) to `since_unix`.
+/// Returns repo-root-relative paths as strings, capped at
+/// `FULL_REINDEX_THRESHOLD + 1` (callers check `> FULL_REINDEX_THRESHOLD` for
+/// the fallback decision, so one extra entry is sufficient to trigger it without
+/// walking the whole tree).
+/// Test: `mtime_walk_finds_newer_file_and_skips_older`,
+///       `mtime_walk_skips_excluded_dir`,
+///       `mtime_walk_caps_at_threshold_plus_one` in reconcile_tests.rs.
+pub(crate) fn collect_stale_files_by_mtime(root_path: &Path, since_unix: u64) -> Vec<String> {
+    use walkdir::WalkDir;
+
+    let mut stale: Vec<String> = Vec::new();
+    let cap = FULL_REINDEX_THRESHOLD + 1;
+
+    let iter = WalkDir::new(root_path)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            // For directories: prune by basename against SKIP_DIRS so walkdir
+            // never descends into excluded subtrees (node_modules, target, .git,
+            // etc.). Without pruning, walkdir stats every file inside before the
+            // per-file predicate rejects them — causing the boot-thrash described
+            // in #1672 reviewer finding 1.
+            if e.file_type().is_dir() {
+                let name = e.file_name().to_str().unwrap_or("");
+                return !crate::service::walker::SKIP_DIRS.contains(&name);
+            }
+            // For files: apply the same exclusion rules as the live watcher.
+            // path_in_skipped_dir handles nested excluded dirs that share a name
+            // not in SKIP_DIRS (shouldn't normally occur, but guards correctly).
+            let rel = match e.path().strip_prefix(root_path) {
+                Ok(r) => r,
+                Err(_) => return false,
+            };
+            !should_skip_for_reconcile(rel)
+        });
+
+    for entry in iter.flatten() {
+        if stale.len() >= cap {
+            break;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        // Build root-relative path (already filtered above, but strip again for
+        // the String conversion).
+        let rel = match entry.path().strip_prefix(root_path) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        let mtime_secs = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        if mtime_secs > since_unix {
+            if let Some(s) = rel.to_str() {
+                stale.push(s.to_owned());
+            }
+        }
+    }
+
+    stale
+}
+
 /// Returns `true` when `path` should be excluded from incremental reconciliation.
 ///
 /// Why: a file that appears in the git diff but lives inside an excluded subtree
@@ -126,14 +205,41 @@ pub(crate) fn should_skip_for_reconcile(path: &Path) -> bool {
     path_in_skipped_dir(path) || should_skip_path(path)
 }
 
+/// RAII guard that clears `ReconcileSummary::in_progress` on drop.
+///
+/// Why: the joiner task that clears `in_progress` after all per-index tasks
+/// finish can be cancelled (daemon shutdown) or panic. Without a drop guard
+/// `in_progress` stays `true` forever and `/health` reports a stale status.
+/// What: holds a clone of the `Arc<Mutex<ReconcileSummary>>` and sets
+/// `in_progress = false` in `Drop::drop`, guaranteeing the flag is cleared
+/// regardless of how the joiner exits (normal completion, panic, or
+/// cancellation via `tokio::task::abort`).
+/// Test: `reconcile_in_progress_clears_after_tasks_complete` in reconcile_tests.rs.
+struct InProgressGuard(Arc<std::sync::Mutex<ReconcileSummary>>);
+
+impl Drop for InProgressGuard {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.0.lock() {
+            s.in_progress = false;
+        }
+    }
+}
+
 /// Kick off background reconciliation for every registered index.
 ///
 /// Why: called once during daemon startup, after `restore_indexes`, so stale
 /// indexes are silently caught up without blocking the HTTP listener or the
 /// auto-discover scan.
-/// What: checks the `TRUSTY_NO_BOOT_RECONCILE` gate; then spawns one
-/// independent background `tokio::task` per registered index.
-/// Test: `reconcile_disabled_gate` in reconcile_tests.rs.
+/// What: checks the `TRUSTY_NO_BOOT_RECONCILE` gate; marks the summary
+/// `in_progress`; spawns one independent background `tokio::task` per
+/// registered index; spawns a bounded joiner task that awaits all per-index
+/// handles and then drops `InProgressGuard`, which clears `in_progress` — this
+/// guarantees the flag is cleared even on panic or daemon shutdown (drop guard
+/// pattern). The joiner task is detached (fire-and-forget) but its panic path
+/// is safe: `Drop` runs regardless. Boot is never blocked; queries are served
+/// throughout.
+/// Test: `reconcile_disabled_gate`, `reconcile_in_progress_clears_after_tasks_complete`
+/// in reconcile_tests.rs.
 pub(super) async fn reconcile_stale_indexes(state: &SearchAppState) {
     let raw = std::env::var(NO_BOOT_RECONCILE_ENV).ok();
     if reconcile_disabled_for_value(raw.as_deref()) {
@@ -153,53 +259,92 @@ pub(super) async fn reconcile_stale_indexes(state: &SearchAppState) {
         FULL_REINDEX_THRESHOLD,
     );
 
+    // Mark reconcile as in-progress before spawning tasks.
+    let summary = Arc::clone(&state.reconcile_summary);
+    if let Ok(mut s) = summary.lock() {
+        s.in_progress = true;
+    }
+
+    let total = index_ids.len();
+    let mut handles = Vec::with_capacity(total);
+
     for index_id in index_ids {
         let Some(handle) = state.registry.get(&index_id) else {
             continue;
         };
-        tokio::spawn(reconcile_one_index(handle));
+        let summary_clone = Arc::clone(&summary);
+        handles.push(tokio::spawn(reconcile_one_index(handle, summary_clone)));
     }
+
+    // Spawn a joiner task to clear in_progress once all per-index tasks finish.
+    // The InProgressGuard ensures in_progress is cleared even if this task
+    // panics or is cancelled at daemon shutdown.
+    tokio::spawn(async move {
+        // Guard clears in_progress=false when dropped (normal exit OR panic).
+        let _guard = InProgressGuard(Arc::clone(&summary));
+        for h in handles {
+            // Absorb per-task JoinErrors (panics): individual task failures are
+            // already logged inside reconcile_one_index; a panic there must not
+            // prevent other tasks from completing or the guard from running.
+            let _ = h.await;
+        }
+        tracing::debug!("boot reconcile: all tasks complete");
+        // _guard drops here → in_progress = false
+    });
 }
 
 /// Reconcile one stale index in the background.
 ///
 /// Why: each index is independent; background tasks let the daemon serve
 /// queries while reconciliation proceeds and avoid one slow index blocking others.
-/// What: reads the stored + current HEAD SHAs, computes the diff, then either
-/// runs per-file reconciliation or falls back to a full background reindex.
+/// What: reads the stored + current HEAD SHAs (git path), or falls back to the
+/// mtime path for non-git / missing-SHA indexes. Updates `summary` with the
+/// outcome so `GET /health` reports boot-reconcile progress.
 /// Test: `reconcile_up_to_date_index_is_noop`, `reconcile_stale_index_stamps_new_sha`
 /// in reconcile_tests.rs.
-async fn reconcile_one_index(handle: Arc<IndexHandle>) {
+async fn reconcile_one_index(
+    handle: Arc<IndexHandle>,
+    summary: Arc<std::sync::Mutex<ReconcileSummary>>,
+) {
     let index_id = handle.id.0.clone();
 
     // Read the stored indexed SHA and the current HEAD.
     let stored_sha = handle.indexed_head_sha.read().await.clone();
     let current_sha = crate::core::git::head_sha(&handle.root_path);
 
-    let (stored, current) = match (stored_sha, current_sha) {
-        (Some(s), Some(c)) => (s, c),
-        (None, _) => {
-            tracing::debug!(
-                "reconcile[{index_id}]: skipping — no stored indexed_head_sha \
-                 (non-git index or never indexed; follow-up #1671 for mtime-based scan)"
-            );
-            return;
+    match (stored_sha, current_sha) {
+        (Some(stored), Some(current)) => {
+            reconcile_git_path(&handle, &index_id, &stored, &current, &summary).await;
         }
-        (_, None) => {
-            tracing::debug!(
-                "reconcile[{index_id}]: skipping — root_path is not a git repo \
-                 ({})",
-                handle.root_path.display()
-            );
-            return;
+        _ => {
+            // Non-git root or missing stored SHA: fall back to mtime-based catch-up.
+            reconcile_mtime_path(&handle, &index_id, &summary).await;
         }
-    };
+    }
+}
 
+/// Git-backed reconciliation: compare stored SHA vs. current HEAD.
+///
+/// Why: the authoritative fast path for git-backed indexes; git diff is O(delta)
+/// and doesn't require a full tree walk.
+/// What: if SHAs match → up-to-date; else compute diff and apply delta or
+/// trigger full reindex.
+/// Test: `reconcile_up_to_date_index_is_noop`, `reconcile_stale_index_stamps_new_sha`.
+async fn reconcile_git_path(
+    handle: &Arc<IndexHandle>,
+    index_id: &str,
+    stored: &str,
+    current: &str,
+    summary: &Arc<std::sync::Mutex<ReconcileSummary>>,
+) {
     if stored == current {
         tracing::debug!(
             "reconcile[{index_id}]: up to date (sha={})",
             &current[..current.len().min(12)]
         );
+        if let Ok(mut s) = summary.lock() {
+            s.up_to_date += 1;
+        }
         return;
     }
 
@@ -209,14 +354,17 @@ async fn reconcile_one_index(handle: Arc<IndexHandle>) {
         &current[..current.len().min(12)],
     );
 
-    match changed_files_between(&handle.root_path, &stored).await {
+    match changed_files_between(&handle.root_path, stored).await {
         None => {
             tracing::warn!(
                 "reconcile[{index_id}]: git diff unavailable for old_sha={} \
                  (unknown to history, or git not available) — full background reindex",
                 &stored[..stored.len().min(12)],
             );
-            trigger_full_reindex(&handle);
+            trigger_full_reindex(handle);
+            if let Ok(mut s) = summary.lock() {
+                s.fell_back_to_full += 1;
+            }
         }
         Some(files) if files.len() > FULL_REINDEX_THRESHOLD => {
             tracing::info!(
@@ -225,16 +373,135 @@ async fn reconcile_one_index(handle: Arc<IndexHandle>) {
                 files.len(),
                 FULL_REINDEX_THRESHOLD,
             );
-            trigger_full_reindex(&handle);
+            trigger_full_reindex(handle);
+            if let Ok(mut s) = summary.lock() {
+                s.fell_back_to_full += 1;
+            }
         }
         Some(files) => {
+            let file_count = files.len();
             tracing::info!(
                 "reconcile[{index_id}]: applying per-file delta ({} file(s))",
-                files.len()
+                file_count
             );
-            apply_delta(&handle, &index_id, &files, &current).await;
+            let ok = apply_delta(handle, index_id, &files, current).await;
+            if let Ok(mut s) = summary.lock() {
+                if ok {
+                    s.delta_reindexed += 1;
+                    s.files_reconciled += file_count;
+                } else {
+                    s.degraded = true;
+                }
+            }
         }
     }
+}
+
+/// mtime-based reconciliation for non-git / missing-SHA indexes.
+///
+/// Why: non-git directories (archived tarballs, vendored trees, mounted docs)
+/// don't have a SHA timeline but their files do have mtimes. Comparing file
+/// mtime to the persisted `last_indexed_unix` (from `indexes.toml`) gives a
+/// bounded catch-up without a full reindex on every boot.
+/// What: reads `last_indexed_unix` from the persisted registry. If None, skips
+/// with a log (never indexed). Otherwise walks the root collecting files newer
+/// than `last_indexed_unix`; falls back to full reindex when count exceeds
+/// `FULL_REINDEX_THRESHOLD`; else applies a per-file delta.
+/// Test: `mtime_reconcile_finds_newer_files`, `mtime_reconcile_skips_never_indexed`
+/// and `mtime_reconcile_falls_back_on_large_delta` in reconcile_tests.rs.
+async fn reconcile_mtime_path(
+    handle: &Arc<IndexHandle>,
+    index_id: &str,
+    summary: &Arc<std::sync::Mutex<ReconcileSummary>>,
+) {
+    // Read persisted last_indexed_unix from indexes.toml.
+    let last_indexed_unix = read_last_indexed_unix_for_index(index_id);
+
+    match last_indexed_unix {
+        None => {
+            // No persisted last_indexed_unix: this index was never fully indexed
+            // (pre-dates timestamp persistence, or was indexed with an older
+            // daemon that did not write the field). Skip with a clear log so
+            // operators know to re-run `trusty-search index` explicitly.
+            tracing::debug!(
+                "reconcile[{index_id}]: skipping non-git index with no \
+                 last_indexed_unix — run `trusty-search index` to build an \
+                 initial index and enable future mtime-based catch-ups"
+            );
+            if let Ok(mut s) = summary.lock() {
+                s.skipped_no_data += 1;
+            }
+        }
+        Some(since_unix) => {
+            tracing::debug!(
+                "reconcile[{index_id}]: mtime scan (non-git); last_indexed_unix={}",
+                since_unix
+            );
+            // Walk the root synchronously (blocking I/O in a spawn_blocking).
+            let root = handle.root_path.clone();
+            let stale_files = tokio::task::spawn_blocking(move || {
+                collect_stale_files_by_mtime(&root, since_unix)
+            })
+            .await
+            .unwrap_or_default();
+
+            if stale_files.len() > FULL_REINDEX_THRESHOLD {
+                tracing::info!(
+                    "reconcile[{index_id}]: mtime delta too large ({} files > threshold {}) \
+                     — full background reindex",
+                    stale_files.len(),
+                    FULL_REINDEX_THRESHOLD,
+                );
+                trigger_full_reindex(handle);
+                if let Ok(mut s) = summary.lock() {
+                    s.fell_back_to_full += 1;
+                }
+            } else if stale_files.is_empty() {
+                tracing::debug!("reconcile[{index_id}]: mtime scan — no stale files found");
+                if let Ok(mut s) = summary.lock() {
+                    s.up_to_date += 1;
+                }
+            } else {
+                let file_count = stale_files.len();
+                tracing::info!(
+                    "reconcile[{index_id}]: mtime catch-up: {} stale file(s)",
+                    file_count
+                );
+                // Use now as the new timestamp sentinel; stamp_handle will
+                // write last_indexed_at but not last_indexed_unix (that is
+                // written by the full reindex finish path). For mtime-reconcile
+                // we stamp last_indexed_at to mark the handle as recently-synced
+                // so the stale-results signal clears.
+                let now_sha = format!("mtime:{}", since_unix);
+                let ok = apply_delta(handle, index_id, &stale_files, &now_sha).await;
+                if let Ok(mut s) = summary.lock() {
+                    if ok {
+                        s.delta_reindexed += 1;
+                        s.files_reconciled += file_count;
+                    } else {
+                        s.degraded = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Read `last_indexed_unix` from the persisted registry for one index id.
+///
+/// Why: `IndexHandle` does not carry `last_indexed_unix` in memory (it lives
+/// on `PersistedIndex`). At reconcile time (warm-boot) we need the on-disk
+/// value. A one-shot load of `indexes.toml` is cheap and doesn't block a hot
+/// path.
+/// What: calls `load_index_registry`, finds the entry by id, returns
+/// `last_indexed_unix`. Returns `None` on any error or if the entry is absent.
+/// Test: exercised transitively by `mtime_reconcile_*` tests.
+fn read_last_indexed_unix_for_index(index_id: &str) -> Option<u64> {
+    let entries = crate::service::persistence::load_index_registry().ok()?;
+    entries
+        .into_iter()
+        .find(|e| e.id == index_id)
+        .and_then(|e| e.last_indexed_unix)
 }
 
 /// Trigger a full background reindex for a handle.
@@ -286,10 +553,17 @@ fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
 /// least one file operation succeeded (`indexed > 0 || removed > 0`). If the
 /// delta was non-empty but every operation errored, the SHA is left unstamped so
 /// the next boot retries reconciliation instead of silently marking it complete.
+/// Returns `true` if at least one operation succeeded (stamp happened), `false`
+/// on total failure.
 ///
 /// Test: `reconcile_stale_index_stamps_new_sha`,
 ///       `apply_delta_total_failure_does_not_stamp` in reconcile_tests.rs.
-async fn apply_delta(handle: &Arc<IndexHandle>, index_id: &str, files: &[String], new_sha: &str) {
+async fn apply_delta(
+    handle: &Arc<IndexHandle>,
+    index_id: &str,
+    files: &[String],
+    new_sha: &str,
+) -> bool {
     let root = &handle.root_path;
     let mut indexed = 0usize;
     let mut removed = 0usize;
@@ -359,15 +633,18 @@ async fn apply_delta(handle: &Arc<IndexHandle>, index_id: &str, files: &[String]
     // reconcile complete with a stale index.
     if !files.is_empty() && indexed == 0 && removed == 0 && failed > 0 {
         tracing::warn!(
-            "reconcile[{index_id}]: total failure — {failed} error(s),              {skipped} skipped — SHA NOT stamped; next boot will retry              (new_sha={})",
+            "reconcile[{index_id}]: total failure — {failed} error(s), \
+             {skipped} skipped — SHA NOT stamped; next boot will retry \
+             (new_sha={})",
             &new_sha[..new_sha.len().min(12)],
         );
-        return;
+        return false;
     }
 
     if failed > 0 {
         tracing::warn!(
-            "reconcile[{index_id}]: partial failure — {failed} error(s);              stamping SHA anyway (indexed={indexed} removed_chunks={removed})"
+            "reconcile[{index_id}]: partial failure — {failed} error(s); \
+             stamping SHA anyway (indexed={indexed} removed_chunks={removed})"
         );
     }
 
@@ -379,6 +656,8 @@ async fn apply_delta(handle: &Arc<IndexHandle>, index_id: &str, files: &[String]
          skipped={skipped} failed={failed} new_sha={}",
         &new_sha[..new_sha.len().min(12)],
     );
+
+    true
 }
 
 /// Stamp `indexed_head_sha = new_sha` and `last_indexed_at = now` on the handle.
