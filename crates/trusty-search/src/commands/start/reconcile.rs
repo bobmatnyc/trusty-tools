@@ -119,58 +119,61 @@ pub(crate) async fn changed_files_between(root_path: &Path, old_sha: &str) -> Op
 /// last-indexed timestamp persisted in `indexes.toml`. This is bounded by the
 /// same `FULL_REINDEX_THRESHOLD` used by the git path so large trees cannot
 /// cause boot thrash.
-/// What: recursively walks the root using `walkdir`, skips directories and
-/// file paths excluded by the walker predicates (`path_in_skipped_dir` /
-/// `should_skip_path`), compares each file's `mtime` (seconds since Unix epoch)
-/// to `since_unix`. Returns repo-root-relative paths as strings, capped at
+/// What: recursively walks the root using `walkdir::filter_entry` to PRUNE
+/// excluded directory subtrees (SKIP_DIRS + should_skip_for_reconcile) before
+/// descending — directories are never statted beyond the basename check, so
+/// `node_modules/`, `target/`, `.git/`, etc. are skipped without traversal.
+/// For accepted files, compares mtime (seconds since Unix epoch) to `since_unix`.
+/// Returns repo-root-relative paths as strings, capped at
 /// `FULL_REINDEX_THRESHOLD + 1` (callers check `> FULL_REINDEX_THRESHOLD` for
 /// the fallback decision, so one extra entry is sufficient to trigger it without
 /// walking the whole tree).
-/// Test: `mtime_walk_finds_newer_file`, `mtime_walk_skips_older_file`,
-///       `mtime_walk_skips_excluded_dir` in reconcile_tests.rs.
+/// Test: `mtime_walk_finds_newer_file_and_skips_older`,
+///       `mtime_walk_skips_excluded_dir`,
+///       `mtime_walk_caps_at_threshold_plus_one` in reconcile_tests.rs.
 pub(crate) fn collect_stale_files_by_mtime(root_path: &Path, since_unix: u64) -> Vec<String> {
     use walkdir::WalkDir;
 
     let mut stale: Vec<String> = Vec::new();
     let cap = FULL_REINDEX_THRESHOLD + 1;
 
-    for entry in WalkDir::new(root_path)
+    let iter = WalkDir::new(root_path)
         .follow_links(false)
         .into_iter()
-        .flatten()
-    {
+        .filter_entry(|e| {
+            // For directories: prune by basename against SKIP_DIRS so walkdir
+            // never descends into excluded subtrees (node_modules, target, .git,
+            // etc.). Without pruning, walkdir stats every file inside before the
+            // per-file predicate rejects them — causing the boot-thrash described
+            // in #1672 reviewer finding 1.
+            if e.file_type().is_dir() {
+                let name = e.file_name().to_str().unwrap_or("");
+                return !crate::service::walker::SKIP_DIRS.contains(&name);
+            }
+            // For files: apply the same exclusion rules as the live watcher.
+            // path_in_skipped_dir handles nested excluded dirs that share a name
+            // not in SKIP_DIRS (shouldn't normally occur, but guards correctly).
+            let rel = match e.path().strip_prefix(root_path) {
+                Ok(r) => r,
+                Err(_) => return false,
+            };
+            !should_skip_for_reconcile(rel)
+        });
+
+    for entry in iter.flatten() {
         if stale.len() >= cap {
             break;
         }
-
-        let ft = entry.file_type();
-        if ft.is_dir() {
-            // Prune excluded directories so walkdir doesn't descend into them.
-            let dir_name = entry.path().file_name().and_then(|n| n.to_str());
-            if let Some(name) = dir_name {
-                if crate::service::walker::SKIP_DIRS.contains(&name) {
-                    // Note: WalkDir `into_iter().filter_entry()` is the preferred
-                    // way, but `flatten()` doesn't compose with it; we rely on the
-                    // basename check here instead. The `path_in_skipped_dir` check
-                    // below catches nested excluded dirs.
-                    continue;
-                }
-            }
-            continue;
-        }
-        if !ft.is_file() {
+        if !entry.file_type().is_file() {
             continue;
         }
 
-        // Build root-relative path for skip predicate checks.
+        // Build root-relative path (already filtered above, but strip again for
+        // the String conversion).
         let rel = match entry.path().strip_prefix(root_path) {
             Ok(r) => r,
             Err(_) => continue,
         };
-
-        if should_skip_for_reconcile(rel) {
-            continue;
-        }
 
         let mtime_secs = entry
             .metadata()
@@ -202,6 +205,26 @@ pub(crate) fn should_skip_for_reconcile(path: &Path) -> bool {
     path_in_skipped_dir(path) || should_skip_path(path)
 }
 
+/// RAII guard that clears `ReconcileSummary::in_progress` on drop.
+///
+/// Why: the joiner task that clears `in_progress` after all per-index tasks
+/// finish can be cancelled (daemon shutdown) or panic. Without a drop guard
+/// `in_progress` stays `true` forever and `/health` reports a stale status.
+/// What: holds a clone of the `Arc<Mutex<ReconcileSummary>>` and sets
+/// `in_progress = false` in `Drop::drop`, guaranteeing the flag is cleared
+/// regardless of how the joiner exits (normal completion, panic, or
+/// cancellation via `tokio::task::abort`).
+/// Test: `reconcile_in_progress_clears_after_tasks_complete` in reconcile_tests.rs.
+struct InProgressGuard(Arc<std::sync::Mutex<ReconcileSummary>>);
+
+impl Drop for InProgressGuard {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.0.lock() {
+            s.in_progress = false;
+        }
+    }
+}
+
 /// Kick off background reconciliation for every registered index.
 ///
 /// Why: called once during daemon startup, after `restore_indexes`, so stale
@@ -209,11 +232,14 @@ pub(crate) fn should_skip_for_reconcile(path: &Path) -> bool {
 /// auto-discover scan.
 /// What: checks the `TRUSTY_NO_BOOT_RECONCILE` gate; marks the summary
 /// `in_progress`; spawns one independent background `tokio::task` per
-/// registered index; clears `in_progress` after all tasks are spawned (tasks
-/// themselves run asynchronously, so counts reflect dispatch, not completion).
-/// To report completion accurately each spawned task writes into the shared
-/// summary directly.
-/// Test: `reconcile_disabled_gate` in reconcile_tests.rs.
+/// registered index; spawns a bounded joiner task that awaits all per-index
+/// handles and then drops `InProgressGuard`, which clears `in_progress` — this
+/// guarantees the flag is cleared even on panic or daemon shutdown (drop guard
+/// pattern). The joiner task is detached (fire-and-forget) but its panic path
+/// is safe: `Drop` runs regardless. Boot is never blocked; queries are served
+/// throughout.
+/// Test: `reconcile_disabled_gate`, `reconcile_in_progress_clears_after_tasks_complete`
+/// in reconcile_tests.rs.
 pub(super) async fn reconcile_stale_indexes(state: &SearchAppState) {
     let raw = std::env::var(NO_BOOT_RECONCILE_ENV).ok();
     if reconcile_disabled_for_value(raw.as_deref()) {
@@ -250,15 +276,20 @@ pub(super) async fn reconcile_stale_indexes(state: &SearchAppState) {
         handles.push(tokio::spawn(reconcile_one_index(handle, summary_clone)));
     }
 
-    // Spawn a task to clear in_progress once all per-index tasks are done.
+    // Spawn a joiner task to clear in_progress once all per-index tasks finish.
+    // The InProgressGuard ensures in_progress is cleared even if this task
+    // panics or is cancelled at daemon shutdown.
     tokio::spawn(async move {
+        // Guard clears in_progress=false when dropped (normal exit OR panic).
+        let _guard = InProgressGuard(Arc::clone(&summary));
         for h in handles {
+            // Absorb per-task JoinErrors (panics): individual task failures are
+            // already logged inside reconcile_one_index; a panic there must not
+            // prevent other tasks from completing or the guard from running.
             let _ = h.await;
         }
-        if let Ok(mut s) = summary.lock() {
-            s.in_progress = false;
-        }
         tracing::debug!("boot reconcile: all tasks complete");
+        // _guard drops here → in_progress = false
     });
 }
 
