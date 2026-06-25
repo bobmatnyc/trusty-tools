@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::types::VectorStore;
-use super::usearch_store::UsearchStore;
+use super::usearch_store::{UsearchStore, POPULATED_SNAPSHOT_THRESHOLD_BYTES};
 
 #[tokio::test]
 async fn test_upsert_and_search() {
@@ -351,4 +351,145 @@ async fn test_capacity_growth() {
         store.upsert(&format!("k{i}"), v).await.unwrap();
     }
     assert_eq!(store.len().await.unwrap(), 50);
+}
+
+// ── Issue #1711 regression tests — data-loss guard in save() ─────────────────
+
+/// Why (issue #1711): the data-loss guard in `save()` must refuse to overwrite
+/// a populated on-disk snapshot (> 100 KB) with an empty in-memory index.
+/// This protects against shutdown races where a fresh/promoted-but-empty
+/// UsearchStore saves 0 vectors over a fully-populated on-disk snapshot.
+///
+/// What: writes a filler file LARGER than `POPULATED_SNAPSHOT_THRESHOLD_BYTES`
+/// at the HNSW path to simulate a populated on-disk snapshot, then calls
+/// `save()` on a FRESH EMPTY store targeting the same path. Asserts:
+/// (a) `save()` returns `Ok(())` — the guard does not surface an error, it
+///     just silently preserves the on-disk state and returns `Ok`, so callers
+///     can proceed with shutdown without aborting.
+/// (b) The on-disk file is **byte-for-byte unchanged** — the guard fired and
+///     the filler was NOT overwritten.
+///
+/// Without the guard, (b) would fail: usearch would happily write a tiny
+/// empty-index file over the filler, proving the regression exists.
+///
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_save_refuses_to_overwrite_populated_snapshot_with_empty_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+
+    // Write a filler file that is larger than the guard threshold.
+    // This simulates a fully-populated on-disk snapshot without needing a
+    // real usearch index file (the guard only checks file size, not content).
+    let filler = vec![0xABu8; POPULATED_SNAPSHOT_THRESHOLD_BYTES as usize + 1];
+    std::fs::write(&path, &filler).expect("write filler");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        filler.len() as u64,
+        "pre-condition: filler must be written at threshold+1 bytes"
+    );
+
+    // Create a fresh EMPTY store and attempt to save it over the populated path.
+    let empty = UsearchStore::new(4).unwrap();
+    assert_eq!(
+        empty.len().await.unwrap(),
+        0,
+        "empty store must have 0 vectors"
+    );
+
+    // save() must return Ok(()) — the guard fires silently (no propagated error)
+    // so callers can complete shutdown gracefully.
+    empty
+        .save(&path)
+        .await
+        .expect("save must return Ok(()) even when the guard fires");
+
+    // THE KEY ASSERTION: the on-disk file must be byte-for-byte unchanged —
+    // the guard preserved the populated snapshot and did NOT overwrite it.
+    let on_disk = std::fs::read(&path).expect("read back hnsw path");
+    assert_eq!(
+        on_disk, filler,
+        "guard must preserve the populated on-disk snapshot byte-for-byte; \
+         if this fails the guard did not fire and the empty index clobbered \
+         the snapshot (issue #1711 regression)"
+    );
+}
+
+/// Why (issue #1711): the data-loss guard must NOT block the first-time creation
+/// of an HNSW file when no prior snapshot exists on disk. Saving an empty store
+/// to a new path must create the file normally.
+/// What: constructs an empty store, saves to a path that does not exist yet.
+/// Asserts the file was created and `save()` returned `Ok(())`.
+/// Test: this IS the test.
+#[tokio::test]
+async fn test_save_does_not_block_first_time_creation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw_new.usearch");
+
+    // File must not exist before this test.
+    assert!(!path.exists(), "pre-condition: file must not exist");
+
+    let store = UsearchStore::new(4).unwrap();
+    // Save an empty store to a path with no prior snapshot — guard must not fire.
+    store
+        .save(&path)
+        .await
+        .expect("save to new path must succeed even with 0 vectors");
+
+    // The file must have been created.
+    assert!(
+        path.exists(),
+        "hnsw file must be created by first-time save"
+    );
+}
+
+/// Why (issue #1711): the normal happy path must still work — a populated store
+/// must write all its vectors correctly.
+/// What: upserts 3 vectors, saves, loads into a fresh store, asserts all vectors
+/// are present and searchable.
+/// Test: this IS the test (guards against accidental regression of the happy path).
+#[tokio::test]
+async fn test_save_populated_index_writes_correctly() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw_pop.usearch");
+
+    let store = UsearchStore::new(4).unwrap();
+    store
+        .upsert("vec-a", vec![1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    store
+        .upsert("vec-b", vec![0.0, 1.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    store
+        .upsert("vec-c", vec![0.0, 0.0, 1.0, 0.0])
+        .await
+        .unwrap();
+    store
+        .save(&path)
+        .await
+        .expect("save populated store must succeed");
+
+    assert!(path.exists(), "hnsw file must exist");
+    assert!(
+        path.with_extension("keys.json").exists(),
+        "key sidecar must exist"
+    );
+
+    // Reload and verify round-trip.
+    let loaded = UsearchStore::load_from(&path)
+        .await
+        .expect("load ok")
+        .expect("load returned Some");
+    assert_eq!(
+        loaded.len().await.unwrap(),
+        3,
+        "all 3 vectors must survive round-trip"
+    );
+    let hits = loaded.search(&[1.0, 0.0, 0.0, 0.0], 1).await.unwrap();
+    assert_eq!(
+        hits[0].chunk_id, "vec-a",
+        "top hit for vec-a direction must be vec-a"
+    );
 }

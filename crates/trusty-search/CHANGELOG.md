@@ -5,6 +5,31 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+
+## [0.29.1] — 2026-06-25
+
+### Fixed (closes #1711)
+
+- **HNSW shutdown data-loss guard: prevent empty in-memory index from
+  overwriting a populated on-disk snapshot.**
+  A graceful-shutdown race (background reindex from `reconcile_stale_indexes`
+  / commit `fe4c0b28` flushed mid-run on SIGTERM) could cause a
+  just-promoted but not-yet-populated `UsearchStore` to call `save()` and
+  overwrite a fully-populated on-disk snapshot with 0 vectors.
+  The guard now runs **under the same write-lock scope** that owns the save
+  (eliminating the TOCTOU window), refuses to proceed when `index.size()==0`
+  and the on-disk file is larger than 100 KB, and returns `Ok(())` so
+  callers complete shutdown gracefully. A follow-up issue (#1717) tracks
+  draining/cancelling in-flight background reindex tasks on SIGTERM and
+  guarding catastrophic partial-snapshot shrinks.
+- `POPULATED_SNAPSHOT_THRESHOLD_BYTES` promoted to module-level `pub(super)
+  const` so tests can reference it without hard-coding a magic literal.
+- Regression test `test_save_refuses_to_overwrite_populated_snapshot_with_empty_index`
+  rewritten to actually trigger the guard (writes a filler file above the
+  threshold, asserts byte-for-byte preservation after `save()` on an empty
+  store).
+
+---
 ## [Unreleased]
 
 ### Added

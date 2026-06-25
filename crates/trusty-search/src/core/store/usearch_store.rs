@@ -40,6 +40,23 @@ pub(super) const INITIAL_CAPACITY: usize = 64;
 /// bound RAM (~6 GB at 1M × 384-dim × 4 bytes plus graph overhead).
 const DEFAULT_HNSW_MAX_ELEMENTS: usize = 1_000_000;
 
+/// Minimum on-disk HNSW snapshot size that is considered "populated" for the
+/// data-loss guard in [`UsearchStore::save`] (issue #1711).
+///
+/// Why: A freshly-created empty HNSW snapshot written by usearch is a few
+/// hundred bytes of header/metadata. A snapshot that contains real vector data
+/// is at minimum several KB of graph structure even for tiny indexes. 100 KB is
+/// a conservative threshold well above any empty snapshot and well below any
+/// snapshot with meaningful data, making it a reliable sentinel for the guard.
+///
+/// Exposed as `pub(super)` so the store tests can reference it without
+/// hard-coding a magic literal.
+///
+/// Caveat: this guard catches only the exact-0-vector case. A non-zero but
+/// catastrophically-partial in-memory index (e.g., mid-reindex 5k of 312k
+/// vectors) would NOT be caught — tracked in issue #1717.
+pub(super) const POPULATED_SNAPSHOT_THRESHOLD_BYTES: u64 = 100_000; // 100 KB
+
 /// Read the HNSW max-elements cap from the environment, with a sane default.
 /// Shared with `TRUSTY_MAX_CHUNKS` so a single knob bounds both the chunk
 /// corpus and the vector store.
@@ -198,9 +215,13 @@ impl UsearchStore {
     /// locks, then calls usearch's `Index::save(&str)` and writes the sidecar
     /// JSON. Both writes are atomic (tmp + rename) so a crash mid-save never
     /// leaves a partial file. The caller passes the HNSW path; the sidecar is
-    /// written next to it with extension `.keys.json`.
+    /// written next to it with extension `.keys.json`. A data-loss guard
+    /// (issue #1711) refuses to overwrite an on-disk snapshot larger than 100 KB
+    /// when the in-memory index has 0 vectors, preserving the on-disk state.
     /// Test: `tests::test_save_load_roundtrip` saves then loads into a fresh
-    /// store and asserts a search still returns the original chunk_ids.
+    /// store and asserts a search still returns the original chunk_ids;
+    /// `tests::test_save_refuses_to_overwrite_populated_snapshot_with_empty_index`
+    /// covers the #1711 guard.
     pub async fn save(&self, hnsw_path: &Path) -> Result<()> {
         // Fast path: in view mode the in-memory state is a mmap of the
         // on-disk snapshot — there is nothing dirty to flush. Skipping the
@@ -226,9 +247,9 @@ impl UsearchStore {
 
         // Snapshot the key map under read locks so we can release them before
         // the (possibly slow) usearch save. The HNSW write lock is required
-        // because usearch's save is `&self` but mutates internal serializer
-        // buffers; treating it as a write-side operation matches the rest of
-        // this store.
+        // below because usearch's save is `&self` but mutates internal
+        // serializer buffers; treating it as a write-side operation matches the
+        // rest of this store.
         let key_map = {
             let id_to_key = self.id_to_key.read().await;
             StoreKeyMap {
@@ -245,12 +266,45 @@ impl UsearchStore {
 
         // usearch's `save` takes a `&str` path. We write to a tmp file and
         // rename so callers never observe a half-written snapshot.
+        //
+        // Defensive guard (issue #1711): refuse to overwrite a large on-disk
+        // snapshot with an empty in-memory index. The check runs UNDER the
+        // same write-lock scope that owns the save, eliminating the TOCTOU
+        // window that existed when the guard used a separate read-lock
+        // acquisition. This protects against shutdown races where an
+        // uninitialized / just-promoted but not-yet-populated UsearchStore
+        // flushes 0 vectors over a fully-populated on-disk snapshot.
+        //
+        // Residual-risk caveat (issue #1717): this guard catches the
+        // exact-0-vector case only. A non-zero but catastrophically-partial
+        // in-memory index (e.g. mid-reindex 5k of 312k vectors) would NOT
+        // be caught — the underlying race (shutdown flushing an in-flight
+        // background reindex from reconcile_stale_indexes / fe4c0b28) is
+        // tracked separately in #1717. This guard is defense-in-depth for
+        // the most acute data-loss path, not a complete fix.
         let tmp_hnsw = hnsw_path.with_extension("usearch.tmp");
         let tmp_hnsw_str = tmp_hnsw
             .to_str()
             .ok_or_else(|| anyhow!("non-utf8 path: {}", tmp_hnsw.display()))?;
         {
             let index = self.index.write().await;
+            // Guard: check size under the write lock so there is no window
+            // between the check and the save call.
+            if index.size() == 0 {
+                if let Ok(meta) = std::fs::metadata(hnsw_path) {
+                    if meta.len() > POPULATED_SNAPSHOT_THRESHOLD_BYTES {
+                        tracing::error!(
+                            "usearch: REFUSING to overwrite populated snapshot {} \
+                             ({} bytes on disk) with an empty in-memory index \
+                             (issue #1711 — data-loss guard). \
+                             On-disk snapshot is preserved.",
+                            hnsw_path.display(),
+                            meta.len()
+                        );
+                        return Ok(());
+                    }
+                }
+            }
             index
                 .save(tmp_hnsw_str)
                 .map_err(|e| anyhow!("usearch save failed: {e}"))?;
