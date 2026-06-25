@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::types::VectorStore;
-use super::usearch_store::UsearchStore;
+use super::usearch_store::{UsearchStore, POPULATED_SNAPSHOT_THRESHOLD_BYTES};
 
 #[tokio::test]
 async fn test_upsert_and_search() {
@@ -359,61 +359,59 @@ async fn test_capacity_growth() {
 /// a populated on-disk snapshot (> 100 KB) with an empty in-memory index.
 /// This protects against shutdown races where a fresh/promoted-but-empty
 /// UsearchStore saves 0 vectors over a fully-populated on-disk snapshot.
-/// What: saves a 5-vector store to disk, then calls `save()` on a NEW empty
-/// store pointing at the same path. Asserts the on-disk file is unchanged
-/// (not clobbered) and `save()` returns `Ok(())`.
+///
+/// What: writes a filler file LARGER than `POPULATED_SNAPSHOT_THRESHOLD_BYTES`
+/// at the HNSW path to simulate a populated on-disk snapshot, then calls
+/// `save()` on a FRESH EMPTY store targeting the same path. Asserts:
+/// (a) `save()` returns `Ok(())` — the guard does not surface an error, it
+///     just silently preserves the on-disk state and returns `Ok`, so callers
+///     can proceed with shutdown without aborting.
+/// (b) The on-disk file is **byte-for-byte unchanged** — the guard fired and
+///     the filler was NOT overwritten.
+///
+/// Without the guard, (b) would fail: usearch would happily write a tiny
+/// empty-index file over the filler, proving the regression exists.
+///
 /// Test: this IS the test.
 #[tokio::test]
 async fn test_save_refuses_to_overwrite_populated_snapshot_with_empty_index() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hnsw.usearch");
 
-    // Phase 1: create a populated store and persist it.
-    // Use orthogonal unit vectors so all 5 are retained (cosine-safe).
-    let populated = UsearchStore::new(4).unwrap();
-    for i in 0..5u32 {
-        let mut v = vec![0.0f32; 4];
-        v[i as usize % 4] = (i + 1) as f32;
-        populated.upsert(&format!("chunk:{i}"), v).await.unwrap();
-    }
-    populated
-        .save(&path)
-        .await
-        .expect("initial save must succeed");
-    assert!(path.exists(), "hnsw file must exist after save");
-    let _on_disk_size_before = std::fs::metadata(&path).unwrap().len();
-    // The 5-vector snapshot must be well above our 100 KB guard threshold
-    // (usearch serialises graph structure; even tiny HNSW files are > a few KB,
-    // not 100 KB, so we assert > 0 here and the guard's 100 KB threshold is
-    // tested implicitly — if the file were < 100 KB the guard would NOT fire
-    // and we'd overwrite; the test would then assert the file is unchanged but
-    // it wouldn't be, catching the regression). In practice usearch snapshots
-    // with 5 vectors are < 100 KB, so we use a small threshold here to make
-    // the unit test reliable: we force the guard to trigger by manually
-    // checking size logic separately (see next test). This test validates the
-    // end-to-end "non-empty file stays non-empty" contract.
-    drop(populated);
+    // Write a filler file that is larger than the guard threshold.
+    // This simulates a fully-populated on-disk snapshot without needing a
+    // real usearch index file (the guard only checks file size, not content).
+    let filler = vec![0xABu8; POPULATED_SNAPSHOT_THRESHOLD_BYTES as usize + 1];
+    std::fs::write(&path, &filler).expect("write filler");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        filler.len() as u64,
+        "pre-condition: filler must be written at threshold+1 bytes"
+    );
 
-    // Phase 2: create a FRESH empty store and try to save it to the SAME path.
+    // Create a fresh EMPTY store and attempt to save it over the populated path.
     let empty = UsearchStore::new(4).unwrap();
     assert_eq!(
         empty.len().await.unwrap(),
         0,
         "empty store must have 0 vectors"
     );
-    // The save() call must return Ok(()) — either because the guard fires
-    // (file > 100 KB) or because it proceeds (file <= 100 KB, guard does NOT
-    // fire, overwrite is allowed for small files). Either way the call must not
-    // error.
+
+    // save() must return Ok(()) — the guard fires silently (no propagated error)
+    // so callers can complete shutdown gracefully.
     empty
         .save(&path)
         .await
-        .expect("save on empty store must return Ok()");
+        .expect("save must return Ok(()) even when the guard fires");
 
-    // Verify: the file must still exist regardless.
-    assert!(
-        path.exists(),
-        "hnsw file must still exist after empty save attempt"
+    // THE KEY ASSERTION: the on-disk file must be byte-for-byte unchanged —
+    // the guard preserved the populated snapshot and did NOT overwrite it.
+    let on_disk = std::fs::read(&path).expect("read back hnsw path");
+    assert_eq!(
+        on_disk, filler,
+        "guard must preserve the populated on-disk snapshot byte-for-byte; \
+         if this fails the guard did not fire and the empty index clobbered \
+         the snapshot (issue #1711 regression)"
     );
 }
 
