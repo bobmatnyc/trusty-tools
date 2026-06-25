@@ -15,7 +15,7 @@
 //! functions guarantees the host-merged manifest and the standalone one
 //! stay byte-identical.
 //!
-//! Test: `tests` below assert the tool count (30), the name string, and
+//! Test: `tests` below assert the tool count (37), the name string, and
 //! that the read/write scope split matches what `scopes_for_tool` returns
 //! for representative tools (`memory_recall` → `memory.read`,
 //! `memory_remember` → `memory.write`).
@@ -25,7 +25,7 @@ use trusty_common::mcp::ServiceDescriptor;
 use crate::openrpc::scopes_for_tool;
 use crate::tools::tool_definitions_with;
 
-/// `ServiceDescriptor` impl that advertises this crate's 30 memory tools.
+/// `ServiceDescriptor` impl that advertises this crate's 37 memory tools.
 ///
 /// Why: Lets open-mpm link trusty-memory-mcp directly and include its
 /// tools in a unified `rpc.discover` document without bespoke glue code.
@@ -87,8 +87,8 @@ mod tests {
         let tools = svc.tools();
         assert_eq!(
             tools.len(),
-            30,
-            "expected 30 memory tools (including chat-session + dream_consolidate_room), got {}",
+            37,
+            "expected 37 memory tools (including chat-session + dream-ops + palace_dream), got {}",
             tools.len()
         );
     }
@@ -111,7 +111,7 @@ mod tests {
         //      so we must confirm dynamic dispatch resolves correctly here.
         let svc: Box<dyn ServiceDescriptor> = Box::new(MemoryMcpService);
         assert_eq!(svc.name(), "trusty-memory");
-        assert_eq!(svc.tools().len(), 30);
+        assert_eq!(svc.tools().len(), 37);
         assert_eq!(svc.scopes_for("palace_create"), vec!["memory.write"]);
         assert_eq!(svc.scopes_for("palace_delete"), vec!["memory.write"]);
         assert_eq!(svc.scopes_for("palace_update"), vec!["memory.write"]);

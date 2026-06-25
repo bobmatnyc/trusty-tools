@@ -248,3 +248,143 @@ async fn turns_persist_across_restart() {
     assert_eq!(history.len(), 1, "turn survived restart");
     assert_eq!(history[0]["content"], "remember me");
 }
+
+/// `chat_session_delete` removes a session; deleting a missing id is a no-op.
+///
+/// Why: issue #1720 acceptance — sessions must be deletable for lifecycle
+/// management; idempotency prevents errors on double-delete.
+#[tokio::test]
+async fn chat_session_delete_removes_session() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = state_at(&tmp);
+
+    let sid = dispatch_tool(&state, "chat_session_create", json!({ "palace": PALACE }))
+        .await
+        .expect("create")["session_id"]
+        .as_str()
+        .expect("sid")
+        .to_string();
+
+    // Session exists: get returns it.
+    dispatch_tool(
+        &state,
+        "chat_session_get",
+        json!({ "palace": PALACE, "session_id": sid }),
+    )
+    .await
+    .expect("get before delete");
+
+    // Delete it.
+    let del = dispatch_tool(
+        &state,
+        "chat_session_delete",
+        json!({ "palace": PALACE, "session_id": sid }),
+    )
+    .await
+    .expect("delete");
+    assert_eq!(del["deleted"], sid);
+
+    // Session is gone: get errors.
+    let gone = dispatch_tool(
+        &state,
+        "chat_session_get",
+        json!({ "palace": PALACE, "session_id": sid }),
+    )
+    .await;
+    assert!(gone.is_err(), "deleted session must not be retrievable");
+
+    // Double-delete is idempotent (no panic, no error).
+    dispatch_tool(
+        &state,
+        "chat_session_delete",
+        json!({ "palace": PALACE, "session_id": sid }),
+    )
+    .await
+    .expect("double-delete idempotent");
+}
+
+/// `chat_session_recall` is an alias for `chat_session_get`.
+///
+/// Why: issue #1720 specifies both names; this test verifies the alias route
+/// returns the same history as `chat_session_get`.
+#[tokio::test]
+async fn chat_session_recall_returns_history() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = state_at(&tmp);
+
+    let sid = dispatch_tool(&state, "chat_session_create", json!({ "palace": PALACE }))
+        .await
+        .expect("create")["session_id"]
+        .as_str()
+        .expect("sid")
+        .to_string();
+    dispatch_tool(
+        &state,
+        "chat_session_add_turn",
+        json!({ "palace": PALACE, "session_id": sid, "role": "user", "content": "recall me" }),
+    )
+    .await
+    .expect("turn");
+
+    let recalled = dispatch_tool(
+        &state,
+        "chat_session_recall",
+        json!({ "palace": PALACE, "session_id": sid }),
+    )
+    .await
+    .expect("recall");
+    let history = recalled["history"].as_array().expect("history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0]["content"], "recall me");
+}
+
+/// `chat_turn_append` stores a prompt/response pair as two consecutive messages.
+///
+/// Why: issue #1720 acceptance — prompt/response pairs must be stored atomically
+/// as user + assistant messages in a single call.
+#[tokio::test]
+async fn chat_turn_append_stores_pair() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = state_at(&tmp);
+
+    let sid = dispatch_tool(&state, "chat_session_create", json!({ "palace": PALACE }))
+        .await
+        .expect("create")["session_id"]
+        .as_str()
+        .expect("sid")
+        .to_string();
+
+    let r = dispatch_tool(
+        &state,
+        "chat_turn_append",
+        json!({
+            "palace": PALACE,
+            "session_id": sid,
+            "prompt": "What is redb?",
+            "response": "An embedded key-value store backed by LMDB-like memory-mapped files."
+        }),
+    )
+    .await
+    .expect("append pair");
+    // One pair = 2 messages.
+    assert_eq!(r["message_count"], 2);
+    assert!(r["updated_at"].is_string());
+
+    // Verify via get: user message first, assistant second.
+    let got = dispatch_tool(
+        &state,
+        "chat_session_get",
+        json!({ "palace": PALACE, "session_id": sid }),
+    )
+    .await
+    .expect("get");
+    let history = got["history"].as_array().expect("history");
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0]["role"], "user");
+    assert_eq!(history[0]["content"], "What is redb?");
+    assert_eq!(history[1]["role"], "assistant");
+    assert_eq!(
+        history[1]["content"],
+        "An embedded key-value store backed by LMDB-like memory-mapped files."
+    );
+}

@@ -53,11 +53,20 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
     use scopes::*;
     let s: &[&str] = match name {
         // Read-only / query
-        "memory_recall" | "memory_recall_deep" | "memory_recall_all" | "memory_list"
-        | "palace_list" | "palace_info" | "kg_query" | "kg_gaps" | "list_prompt_facts"
-        | "get_prompt_context" | "console_metrics" | "chat_session_get" | "chat_session_list" => {
-            &[MEMORY_READ]
-        }
+        "memory_recall"
+        | "memory_recall_deep"
+        | "memory_recall_all"
+        | "memory_list"
+        | "palace_list"
+        | "palace_info"
+        | "kg_query"
+        | "kg_gaps"
+        | "list_prompt_facts"
+        | "get_prompt_context"
+        | "console_metrics"
+        | "chat_session_get"
+        | "chat_session_list"
+        | "chat_session_recall" => &[MEMORY_READ],
 
         // Mutating
         "memory_remember"
@@ -74,7 +83,10 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "memory_send_message"
         | "chat_session_create"
         | "chat_session_add_turn"
-        | "dream_consolidate_room" => &[MEMORY_WRITE],
+        | "chat_session_delete"
+        | "chat_turn_append"
+        | "dream_consolidate_room"
+        | "palace_dream" => &[MEMORY_WRITE],
 
         // Bootstrap mutates the KG from external project files; it belongs
         // in the dedicated knowledge.write scope (issue #60).
@@ -83,6 +95,11 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         // Upgrade: requires admin-level write access because it modifies the
         // installed binary and may restart the daemon.
         "upgrade" => &[MEMORY_WRITE],
+
+        // spec-001 Phase 4 task tools (issue #1722):
+        // task_list is read-only; task_add and task_complete mutate palace state.
+        "task_list" => &[MEMORY_READ],
+        "task_add" | "task_complete" => &[MEMORY_WRITE],
 
         _ => &[],
     };

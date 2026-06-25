@@ -1,3 +1,44 @@
+# Changelog
+
+All notable changes are documented in this file.
+
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+---
+## [0.17.0] — 2026-06-25
+
+### Added
+
+- `task_add` MCP tool — creates a `DrawerType::Task` drawer that is never evicted or
+  consolidated by the dream cycle (`is_protected() = true`); bypasses content filters
+  via `force=true` (spec-001 issue #1722)
+- `task_list` MCP tool — returns all Task drawers in a palace; open tasks only by
+  default, `include_completed=true` includes tasks with a `completed_at` timestamp
+  (spec-001 issue #1722)
+- `task_complete` MCP tool — sets `completed_at` on a Task drawer and persists via
+  `kg.upsert_drawer`; errors if drawer does not exist or is not a Task drawer
+  (spec-001 issue #1722)
+- `palace_create` `force=true` flag — bypasses project-slug gate for arbitrary-slug
+  palace creation (e.g. per-app/per-tenant chat session stores); slug format validation
+  (`[a-z0-9][a-z0-9-]{0,62}`) still runs unconditionally (closes #1719)
+- `chat_turn_append` MCP tool — appends a prompt+response pair as two messages (user
+  then assistant) to an existing chat session in one call (closes #1720)
+- `chat_session_recall` MCP tool — alias for `chat_session_get`; returns ordered turn
+  history for a session (closes #1720)
+- `chat_session_delete` MCP tool — removes a chat session by ID; idempotent for unknown
+  IDs (closes #1720)
+- `palace_dream` MCP tool — on-demand, room-filtered LLM compaction; gracefully returns
+  a no-op result when `OPENROUTER_API_KEY` is absent (closes #1721)
+- chat session manager MVP — force palaces, chat-session MCP tools, room-scoped consolidation, Task drawers (closes #1700, #1701, #1702, #1703) ([#1710](https://github.com/bobmatnyc/trusty-tools/pull/1710)) ([`dcb31f7`](https://github.com/bobmatnyc/trusty-tools/commit/dcb31f7e6743dda227e79cb8d8a7116440868d10))
+- pin trusty-memory palace slug in managed-session MCP injection (closes #1605) ([#1652](https://github.com/bobmatnyc/trusty-tools/pull/1652)) ([`d15c96d`](https://github.com/bobmatnyc/trusty-tools/commit/d15c96dc846e805f2ddf6549d157d2719afd4e9a))
+
+### Fixed
+
+- serialize env-mutating cwd_palace_slug_at tests to stop CI flake ([#1624](https://github.com/bobmatnyc/trusty-tools/pull/1624)) ([`3660bcd`](https://github.com/bobmatnyc/trusty-tools/commit/3660bcd20ca0ff4b726fffce80b846eaa08f2afc))
+
+### Documentation
+
+- correct stale SQLite references to redb in comments and README ([#1704](https://github.com/bobmatnyc/trusty-tools/pull/1704)) ([`63645b3`](https://github.com/bobmatnyc/trusty-tools/commit/63645b3d3028940299dd6f9a4b09310ac5ee5f00))
 # Changelog — trusty-memory
 
 ## [0.15.5] — 2026-06-16

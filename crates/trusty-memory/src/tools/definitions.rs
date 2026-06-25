@@ -9,6 +9,8 @@
 
 use serde_json::{json, Value};
 
+use super::task_definitions::task_tool_definitions;
+
 /// Marker server type. Reserved for future stateful MCP server impls.
 ///
 /// Why: Keep a stable type name while the protocol-loop is implemented at
@@ -112,8 +114,19 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
     };
     let dream_consolidate_room_required: Vec<&str> =
         if has_default { vec![] } else { vec!["palace"] };
+    // chat_turn_append requires palace + session_id + prompt + response.
+    let chat_turn_append_required: Vec<&str> = if has_default {
+        vec!["session_id", "prompt", "response"]
+    } else {
+        vec!["palace", "session_id", "prompt", "response"]
+    };
+    let chat_session_delete_required: Vec<&str> = if has_default {
+        vec!["session_id"]
+    } else {
+        vec!["palace", "session_id"]
+    };
 
-    json!({
+    let mut result = json!({
         "tools": [
             {
                 "name": "memory_remember",
@@ -471,7 +484,65 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                     "required": dream_consolidate_room_required,
                 }
             },
+            {
+                "name": "palace_dream",
+                "description": "On-demand LLM-driven consolidation for a palace (issue #1721). Alias for dream_consolidate_room with the same parameters; use this name when following the palace_* convention. Triggers a scoped dream/consolidation cycle immediately for the named palace, optionally filtered to one room. Task drawers are always skipped. Gracefully returns zero counts when no inference backend is configured. Returns { palace, room, summary_facts_created, facts_evicted }.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":       {"type": "string"},
+                        "room":         {"type": "string", "description": "Room to scope to. Omit or null to consolidate all rooms."},
+                        "max_age_days": {"type": "integer", "default": 7, "description": "Only consolidate facts older than this many days."}
+                    },
+                    "required": dream_consolidate_room_required,
+                }
+            },
+            {
+                "name": "chat_session_recall",
+                "description": "Retrieve a full chat session with all turns in order (alias for chat_session_get, preferred name for agent-facing recall). Errors if the session id is unknown.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":     {"type": "string"},
+                        "session_id": {"type": "string"}
+                    },
+                    "required": chat_session_get_required,
+                }
+            },
+            {
+                "name": "chat_session_delete",
+                "description": "Delete a chat session (and its full history) from a palace. Idempotent: deleting an unknown session id is a no-op, not an error. Returns { deleted: session_id }.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":     {"type": "string"},
+                        "session_id": {"type": "string"}
+                    },
+                    "required": chat_session_delete_required,
+                }
+            },
+            {
+                "name": "chat_turn_append",
+                "description": "Append a prompt/response PAIR to a chat session as two consecutive messages (user role then assistant role). Atomic at the session level — both messages are written together. Creates the session implicitly when it does not exist. Returns { message_count, updated_at }.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "palace":     {"type": "string"},
+                        "session_id": {"type": "string"},
+                        "prompt":     {"type": "string", "description": "User-side message (stored with role=user)."},
+                        "response":   {"type": "string", "description": "Assistant-side message (stored with role=assistant)."}
+                    },
+                    "required": chat_turn_append_required,
+                }
+            },
             crate::console_metrics::descriptor()
         ]
-    })
+    });
+    // spec-001 Phase 4 (issue #1722): splice task tool schemas.
+    // Defined in task_definitions.rs to respect the 500-SLOC cap on this file.
+    let tools = result["tools"].as_array_mut().expect("tools is array");
+    let metrics = tools.pop().expect("console_metrics sentinel");
+    tools.extend(task_tool_definitions(has_default));
+    tools.push(metrics);
+    result
 }

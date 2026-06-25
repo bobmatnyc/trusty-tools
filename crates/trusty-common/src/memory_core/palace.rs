@@ -121,16 +121,24 @@ pub enum DrawerType {
     AgentNote,
     /// Git commit message captured by a hook.
     Commit,
-    /// Task / goal / milestone (spec-001). Protected from the dream cycle:
+    /// Legacy / unclassified (the serde default for backward compat).
+    ///
+    /// SERIALIZATION SAFETY: this variant must remain at index 4 (its original
+    /// position before `Task` was added) so existing redb-stored drawers whose
+    /// postcard bytes carry index 4 still deserialise as `Unknown`. Any new
+    /// variant must be appended AFTER this one.
+    #[default]
+    Unknown,
+    /// Task / goal / milestone (spec-001, issue #1722). Protected from the dream cycle:
     /// never evicted (regardless of age or importance) and never consolidated.
     /// Use for long-lived context an application must re-derive across
     /// sessions. An optional [`Drawer::completed_at`] marks a task done; once
     /// set, the drawer becomes eligible for *manual* cleanup but is still never
     /// auto-evicted.
+    ///
+    /// SERIALIZATION SAFETY: appended at the END (index 5) so pre-existing
+    /// postcard data is unaffected. Do NOT insert new variants before this one.
     Task,
-    /// Legacy / unclassified (the serde default for backward compat).
-    #[default]
-    Unknown,
 }
 
 impl DrawerType {

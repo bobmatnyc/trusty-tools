@@ -600,9 +600,18 @@ fn inject_trusty_memory_mcp_preserves_existing() {
 }
 
 #[test]
+#[serial_test::serial]
 fn inject_trusty_memory_mcp_is_idempotent() {
     // Why: `/connect` and `tm sessions start` may run repeatedly; a second
     // injection must not duplicate or alter the `trusty-memory` entry.
+    // `#[serial]` + the guard below are required because `resolve_palace_slug`
+    // reads the process-global `TRUSTY_MEMORY_PALACE` env var; a sibling serial
+    // test (`inject_trusty_memory_mcp_override_env_wins`) sets it to
+    // `"my-pinned-palace"`, and without serialisation + clearing the var here,
+    // a race can produce different slugs on the first vs second injection, making
+    // `after_first != after_second` non-deterministically (the "env-isolation
+    // flake" observed on PR #1723 CI).
+    let _env = EnvVarGuard::clear("TRUSTY_MEMORY_PALACE");
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 

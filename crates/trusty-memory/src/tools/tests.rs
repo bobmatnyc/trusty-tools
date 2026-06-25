@@ -116,7 +116,8 @@ fn tool_definitions_lists_all_tools() {
         .get("tools")
         .and_then(|t| t.as_array())
         .expect("tools array");
-    assert_eq!(tools.len(), 30);
+    // 34 original + 3 task tools (task_add, task_list, task_complete, issue #1722)
+    assert_eq!(tools.len(), 37);
     let names: Vec<&str> = tools
         .iter()
         .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
@@ -150,8 +151,16 @@ fn tool_definitions_lists_all_tools() {
         "chat_session_create",
         "chat_session_add_turn",
         "chat_session_get",
+        "chat_session_recall",
         "chat_session_list",
+        "chat_session_delete",
+        "chat_turn_append",
         "dream_consolidate_room",
+        "palace_dream",
+        // spec-001 Phase 4 (issue #1722):
+        "task_add",
+        "task_list",
+        "task_complete",
     ] {
         assert!(names.contains(&expected), "missing tool: {expected}");
     }
