@@ -163,7 +163,8 @@ pub fn tool_definitions_with(has_default: bool) -> Value {
                     "properties": {
                         "name":        {"type": "string"},
                         "description": {"type": "string"},
-                        "cwd":         {"type": "string", "description": "Optional caller working directory used for palace-name enforcement. Pass the project root (or any path inside it) so the pin file at `.trusty-tools/trusty-memory.yaml` is honoured. When omitted, the daemon's own cwd is used (rarely meaningful for remote calls)."}
+                        "cwd":         {"type": "string", "description": "Optional caller working directory used for palace-name enforcement. Pass the project root (or any path inside it) so the pin file at `.trusty-tools/trusty-memory.yaml` is honoured. When omitted, the daemon's own cwd is used (rarely meaningful for remote calls)."},
+                        "force":       {"type": "boolean", "description": "Bypass project-slug validation so an application can create a palace under an arbitrary slug (spec-001: chat-session manager, one palace per app/tenant). Defaults to false.", "default": false}
                     },
                     "required": ["name"]
                 }

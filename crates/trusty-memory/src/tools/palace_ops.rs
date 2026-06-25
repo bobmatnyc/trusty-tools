@@ -38,8 +38,13 @@ pub(crate) async fn handle_palace_create(state: &AppState, args: Value) -> Resul
     // names against tempdir roots that are not real projects). The bypass is
     // keyed on an env var (`TRUSTY_SKIP_PALACE_ENFORCEMENT=1`) that tests set
     // locally; production deployments never set it.
+    // spec-001 / Phase 1: `force=true` bypasses slug validation so an
+    // application can create a palace under an arbitrary slug (e.g. one palace
+    // per app/tenant for chat-session storage). The env-var bypass remains for
+    // test contexts; either short-circuits the same validation call.
+    let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
     let skip_enforcement = std::env::var("TRUSTY_SKIP_PALACE_ENFORCEMENT").as_deref() == Ok("1");
-    if !skip_enforcement {
+    if !skip_enforcement && !force {
         let cwd = args
             .get("cwd")
             .and_then(|v| v.as_str())

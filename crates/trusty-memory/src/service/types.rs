@@ -82,9 +82,10 @@ impl From<PersistedDreamStats> for DreamStatusPayload {
 /// validation instead of the daemon's own cwd (which is `~` or `/` and
 /// rarely meaningful). When absent the existing daemon-cwd fallback applies
 /// so older clients continue to work.
-/// What: `name` is required; `description` and `cwd` are optional.
+/// What: `name` is required; `description`, `cwd`, and `force` are optional.
 /// Test: `create_palace_accepts_pinned_slug_via_cwd`,
-///       `create_palace_rejects_mismatch_when_cwd_given`.
+///       `create_palace_rejects_mismatch_when_cwd_given`,
+///       `create_palace_force_bypasses_validation`.
 #[derive(Deserialize, Clone, Debug)]
 pub struct CreatePalaceBody {
     pub name: String,
@@ -96,6 +97,12 @@ pub struct CreatePalaceBody {
     /// but the caller is inside a project tree.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// When `true`, bypass project-slug validation so an application can
+    /// create a palace under an arbitrary slug (spec-001: trusty-memory as a
+    /// chat session manager). Defaults to `false`, preserving the issue #88
+    /// "palace name must match the project slug" gate for ordinary callers.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// `POST /api/v1/palaces/{id}/drawers` body — service-facing version.
