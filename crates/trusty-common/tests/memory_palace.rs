@@ -135,6 +135,7 @@ async fn task_drawers_survive_full_dream_cycle() {
 /// END of the enum (after `Unknown`), so existing stored data is unaffected:
 /// - `Unknown` stays at index 4 (its original position).
 /// - `Task` is at index 5 (new).
+///
 /// This test pins those indices so any future reordering fails loudly.
 /// What: postcard-encodes each variant and checks the first byte (the variant
 /// index in postcard's variable-length encoding; all variants fit in one byte).
