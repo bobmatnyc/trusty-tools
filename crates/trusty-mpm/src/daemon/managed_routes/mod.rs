@@ -36,7 +36,7 @@ pub use front_gate::{
 };
 pub use lifecycle::{
     ResumeManagedError, SpawnParams, is_local_workdir, resume_managed, spawn_managed,
-    spawn_runtime_for,
+    spawn_runtime_for, write_task_md,
 };
 pub use prune::{PruneRequest, decommission_ephemeral_route, prune_managed_route};
 

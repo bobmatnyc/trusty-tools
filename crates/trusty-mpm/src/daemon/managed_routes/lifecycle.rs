@@ -235,6 +235,32 @@ pub fn is_local_workdir(s: &str) -> bool {
     p.is_absolute() && p.is_dir()
 }
 
+/// Write the task description to `TASK.md` in a workspace directory (both paths).
+///
+/// Why: the agent's initial brief must be available as a file in the workspace
+/// so it can be read without interactive input (closes #1693). This helper is
+/// shared by both the clone path (via `WorkspaceProvisioner::provision_in`) and
+/// the local-path fast path (`spawn_managed_local`) so the two call sites cannot
+/// diverge. Writing is non-fatal: a failed write is logged but never aborts the
+/// spawn. Overwrite semantics are intentional — the caller's task always wins.
+/// What: when `task` is non-empty, writes `task` to `<workspace>/TASK.md` and
+/// logs a warning on I/O failure. When `task` is empty, does nothing (avoids
+/// writing an empty file that would mislead the agent).
+/// Test: `local_path_spawn_writes_task_md` in tests/local_spawn.rs.
+pub fn write_task_md(workspace: &std::path::Path, task: &str, session_id: &ManagedSessionId) {
+    if task.is_empty() {
+        return;
+    }
+    let task_file = workspace.join("TASK.md");
+    if let Err(e) = std::fs::write(&task_file, task) {
+        tracing::warn!(
+            session = %session_id,
+            path = %task_file.display(),
+            "failed to write TASK.md (local-path spawn): {e}"
+        );
+    }
+}
+
 /// Spawn a managed session rooted at an EXISTING local directory — NO clone (#1433).
 ///
 /// Why: the local-path fast path of [`spawn_managed`]. When `repo_url` is already
@@ -244,12 +270,14 @@ pub fn is_local_workdir(s: &str) -> bool {
 /// (there is no remote) so `resume` re-spawns in the same local directory.
 /// What: in order — (1) creates the tmux session rooted at the local path via
 /// `create_with_id` (with `cwd = workspace_path = <local path>`, `repo_url = None`,
-/// `branch = None`); (2) runs the same FRONT gate (fail-open, non-GitHub →
-/// auto-proceed); (3) marks the record `Active`; (4) spawns the runtime in the
+/// `branch = None`); (2) writes `TASK.md` into the local directory when task is
+/// non-empty (refs #1693); (3) runs the same FRONT gate (fail-open, non-GitHub →
+/// auto-proceed); (4) marks the record `Active`; (5) spawns the runtime in the
 /// pane (a spawn failure marks the record errored but is not fatal). Returns the
 /// final record.
 /// Test: `local_path_spawn_uses_path_as_cwd_and_skips_clone` in tests/local_spawn.rs
-/// asserts the chosen cwd equals the local path and NO clone backend was invoked.
+/// asserts the chosen cwd equals the local path and NO clone backend was invoked;
+/// `local_path_spawn_writes_task_md` asserts TASK.md is created.
 async fn spawn_managed_local(
     state: &Arc<DaemonState>,
     session_id: &ManagedSessionId,
@@ -262,6 +290,11 @@ async fn spawn_managed_local(
         path = %workspace.display(),
         "spawn_managed: local-path workdir detected — using it directly, skipping git clone"
     );
+
+    // Write TASK.md into the user's directory so the agent can read its brief
+    // (refs #1693). This mirrors what WorkspaceProvisioner::provision_in does for
+    // the clone path. Writing is non-fatal and overwrites any prior TASK.md.
+    write_task_md(&workspace, &params.task, session_id);
 
     let mgr = state.session_manager().await;
     let record = mgr
