@@ -28,6 +28,7 @@ use crate::session_manager::{ManagedSessionId, SessionRecord};
 
 mod fleet;
 pub mod inproject;
+pub mod inproject_hygiene;
 pub mod front_gate;
 mod lifecycle;
 pub mod prune;
