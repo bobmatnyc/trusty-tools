@@ -54,6 +54,7 @@ fn session_with_repo(repo_url: &str) -> SessionRecord {
         runtime: Default::default(),
         ephemeral: false,
         workspace_owned: false,
+        source_id: None,
     }
 }
 
@@ -75,6 +76,7 @@ fn session_no_repo() -> SessionRecord {
         runtime: Default::default(),
         ephemeral: false,
         workspace_owned: false,
+        source_id: None,
     }
 }
 

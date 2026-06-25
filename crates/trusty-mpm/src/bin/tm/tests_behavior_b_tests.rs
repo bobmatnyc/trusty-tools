@@ -18,7 +18,7 @@ use crate::commands::session::compose_session_instructions;
 #[test]
 fn cli_parses_attach() {
     let cli = Cli::try_parse_from(["trusty-mpm", "attach", "frontend"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Attach { target, json } => {
             assert_eq!(target, "frontend");
             assert!(!json);
@@ -30,7 +30,7 @@ fn cli_parses_attach() {
 #[test]
 fn cli_parses_attach_with_json() {
     let cli = Cli::try_parse_from(["trusty-mpm", "attach", "abc-123", "--json"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Attach { target, json } => {
             assert_eq!(target, "abc-123");
             assert!(json);
@@ -49,7 +49,7 @@ fn cli_parses_connect() {
     // `tm connect` is the no-deployment session starter; it takes an
     // optional project directory, exactly like `tm launch`.
     let cli = Cli::try_parse_from(["trusty-mpm", "connect"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Connect { dir } => assert_eq!(dir, None),
         other => panic!("expected Connect, got {other:?}"),
     }
@@ -58,7 +58,7 @@ fn cli_parses_connect() {
 #[test]
 fn cli_parses_connect_with_dir() {
     let cli = Cli::try_parse_from(["trusty-mpm", "connect", "/work/p"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Connect { dir } => assert_eq!(dir.as_deref(), Some("/work/p")),
         other => panic!("expected Connect, got {other:?}"),
     }
@@ -72,7 +72,7 @@ fn cli_sm_aliases_reach_coordinator() {
     for name in ["coordinator", "sm", "session-manager", "coord"] {
         let cli = Cli::try_parse_from(["trusty-mpm", name, "hello there"])
             .unwrap_or_else(|e| panic!("`tm {name}` must parse: {e}"));
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Coordinator { message, action } => {
                 assert_eq!(
                     message.as_deref(),
@@ -95,7 +95,7 @@ fn cli_parses_sm_serve_stdio() {
     for name in ["coordinator", "sm", "session-manager", "coord"] {
         let cli = Cli::try_parse_from(["trusty-mpm", name, "serve", "--stdio"])
             .unwrap_or_else(|e| panic!("`tm {name} serve --stdio` must parse: {e}"));
-        match cli.command {
+        match cli.command.unwrap() {
             Command::Coordinator { message, action } => {
                 assert!(message.is_none(), "the serve subcommand carries no message");
                 match action {
@@ -113,7 +113,7 @@ fn cli_parses_sm_serve_stdio() {
 #[test]
 fn cli_parses_daemon_custom_addr() {
     let cli = Cli::try_parse_from(["trusty-mpm", "daemon", "--addr", "0.0.0.0:9000"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Daemon { addr, .. } => assert_eq!(addr.to_string(), "0.0.0.0:9000"),
         other => panic!("expected Daemon, got {other:?}"),
     }
@@ -125,7 +125,7 @@ fn cli_parses_daemon_custom_addr() {
 fn cli_parses_services_list() {
     let cli = Cli::try_parse_from(["trusty-mpm", "services", "list"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Services {
             action: ServicesAction::List { json: false }
         }
@@ -136,7 +136,7 @@ fn cli_parses_services_list() {
 fn cli_parses_services_list_json() {
     let cli = Cli::try_parse_from(["trusty-mpm", "services", "list", "--json"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Services {
             action: ServicesAction::List { json: true }
         }
@@ -146,7 +146,7 @@ fn cli_parses_services_list_json() {
 #[test]
 fn cli_parses_services_status() {
     let cli = Cli::try_parse_from(["trusty-mpm", "services", "status", "trusty-search"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Services {
             action: ServicesAction::Status { name, json },
         } => {
@@ -167,7 +167,7 @@ fn cli_parses_services_status_json() {
         "--json",
     ])
     .unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Services {
             action: ServicesAction::Status { name, json },
         } => {
@@ -181,7 +181,7 @@ fn cli_parses_services_status_json() {
 #[test]
 fn cli_parses_services_port() {
     let cli = Cli::try_parse_from(["trusty-mpm", "services", "port", "trusty-search"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Services {
             action: ServicesAction::Port { name },
         } => assert_eq!(name, "trusty-search"),
@@ -192,7 +192,7 @@ fn cli_parses_services_port() {
 #[test]
 fn cli_parses_services_url() {
     let cli = Cli::try_parse_from(["trusty-mpm", "services", "url", "trusty-search"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Services {
             action: ServicesAction::Url { name },
         } => assert_eq!(name, "trusty-search"),
@@ -203,7 +203,7 @@ fn cli_parses_services_url() {
 #[test]
 fn cli_parses_services_health() {
     let cli = Cli::try_parse_from(["trusty-mpm", "services", "health", "trusty-search"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Services {
             action: ServicesAction::Health { name },
         } => assert_eq!(name, "trusty-search"),
@@ -214,7 +214,7 @@ fn cli_parses_services_health() {
 #[test]
 fn cli_parses_services_log() {
     let cli = Cli::try_parse_from(["trusty-mpm", "services", "log", "trusty-search"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Services {
             action: ServicesAction::Log { name },
         } => assert_eq!(name, "trusty-search"),
@@ -226,7 +226,7 @@ fn cli_parses_services_log() {
 fn cli_parses_services_init() {
     let cli = Cli::try_parse_from(["trusty-mpm", "services", "init"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Services {
             action: ServicesAction::Init { force: false }
         }
@@ -237,7 +237,7 @@ fn cli_parses_services_init() {
 fn cli_parses_services_init_force() {
     let cli = Cli::try_parse_from(["trusty-mpm", "services", "init", "--force"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Services {
             action: ServicesAction::Init { force: true }
         }
@@ -247,7 +247,7 @@ fn cli_parses_services_init_force() {
 #[test]
 fn cli_parses_services_restart() {
     let cli = Cli::try_parse_from(["trusty-mpm", "services", "restart", "trusty-search"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Services {
             action: ServicesAction::Restart { name },
         } => assert_eq!(name, "trusty-search"),
@@ -355,7 +355,7 @@ fn compose_session_instructions_display_matches_live_prompt_with_override() {
 #[test]
 fn cli_parses_daemon_mcp() {
     let cli = Cli::try_parse_from(["trusty-mpm", "daemon", "--mcp"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Daemon { mcp, .. } => assert!(mcp),
         other => panic!("expected Daemon, got {other:?}"),
     }
@@ -365,7 +365,7 @@ fn cli_parses_daemon_mcp() {
 fn cli_parses_repair_deploy() {
     // `tm repair deploy` must parse to Command::Repair { action: RepairAction::Deploy { force: false } }.
     let cli = Cli::try_parse_from(["trusty-mpm", "repair", "deploy"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Repair {
             action: RepairAction::Deploy { force },
         } => {
@@ -379,7 +379,7 @@ fn cli_parses_repair_deploy() {
 fn cli_parses_repair_deploy_force() {
     // `tm repair deploy --force` must parse with force=true.
     let cli = Cli::try_parse_from(["trusty-mpm", "repair", "deploy", "--force"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Repair {
             action: RepairAction::Deploy { force },
         } => {
@@ -394,7 +394,7 @@ fn cli_parses_repair_deploy_force() {
 #[test]
 fn cli_parses_rm_standalone() {
     let cli = Cli::try_parse_from(["trusty-mpm", "rm", "my-proj"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Rm { alias, root } => {
             assert_eq!(alias, "my-proj");
             assert_eq!(root, None);
@@ -407,7 +407,7 @@ fn cli_parses_rm_standalone() {
 fn cli_parses_rm_with_root() {
     let cli =
         Cli::try_parse_from(["trusty-mpm", "rm", "my-proj", "--root", "/tmp/custom"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Rm { alias, root } => {
             assert_eq!(alias, "my-proj");
             assert_eq!(root.as_deref(), Some("/tmp/custom"));
@@ -424,7 +424,7 @@ fn cli_rm_requires_alias() {
 #[test]
 fn cli_parses_update_standalone() {
     let cli = Cli::try_parse_from(["trusty-mpm", "update", "my-proj"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Update { alias, root } => {
             assert_eq!(alias.as_deref(), Some("my-proj"));
             assert_eq!(root, None);
@@ -437,7 +437,7 @@ fn cli_parses_update_standalone() {
 fn cli_parses_update_all_standalone() {
     // `tm update` without alias should update all loaded aliases.
     let cli = Cli::try_parse_from(["trusty-mpm", "update"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Update { alias, root } => {
             assert_eq!(alias, None);
             assert_eq!(root, None);
@@ -449,7 +449,7 @@ fn cli_parses_update_all_standalone() {
 #[test]
 fn cli_parses_update_with_root() {
     let cli = Cli::try_parse_from(["trusty-mpm", "update", "--root", "/tmp/r"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Update { alias, root } => {
             assert_eq!(alias, None);
             assert_eq!(root.as_deref(), Some("/tmp/r"));
@@ -665,7 +665,7 @@ fn cli_parses_sessctl_run() {
     // What: assert parse round-trip for the run subcommand.
     // Test: direct parse via Cli::try_parse_from.
     let cli = Cli::try_parse_from(["trusty-mpm", "sessctl", "run", "my-proj"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Sessctl {
             action: SessctlAction::Run {
                 project_id, tmux, ..
@@ -684,7 +684,7 @@ fn cli_parses_sessctl_run_tmux() {
     // What: assert `tmux == true` when the flag is present.
     // Test: direct parse via Cli::try_parse_from.
     let cli = Cli::try_parse_from(["trusty-mpm", "sessctl", "run", "--tmux", "proj"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Sessctl {
             action: SessctlAction::Run { tmux, .. },
         } => assert!(tmux),
@@ -698,7 +698,7 @@ fn cli_parses_sessctl_connect() {
     // What: assert the session_id field is populated.
     // Test: direct parse via Cli::try_parse_from.
     let cli = Cli::try_parse_from(["trusty-mpm", "sessctl", "connect", "my-proj-0"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Sessctl {
             action: SessctlAction::Connect { session_id },
         } => assert_eq!(session_id, "my-proj-0"),
@@ -713,7 +713,7 @@ fn cli_parses_sessctl_stop() {
     // What: assert force defaults to false.
     // Test: direct parse via Cli::try_parse_from.
     let cli = Cli::try_parse_from(["trusty-mpm", "sessctl", "stop", "my-proj-0"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Sessctl {
             action: SessctlAction::Stop { session_id, force },
         } => {
@@ -731,7 +731,7 @@ fn cli_parses_sessctl_stop_force() {
     // Test: direct parse via Cli::try_parse_from.
     let cli =
         Cli::try_parse_from(["trusty-mpm", "sessctl", "stop", "--force", "my-proj-0"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Sessctl {
             action: SessctlAction::Stop { force, .. },
         } => assert!(force),
@@ -745,7 +745,7 @@ fn cli_parses_sessctl_auth() {
     // What: assert the session_id field is populated.
     // Test: direct parse via Cli::try_parse_from.
     let cli = Cli::try_parse_from(["trusty-mpm", "sessctl", "auth", "my-proj-0"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Sessctl {
             action: SessctlAction::Auth { session_id },
         } => assert_eq!(session_id, "my-proj-0"),
@@ -760,7 +760,7 @@ fn cli_parses_sessctl_list() {
     // What: assert defaults are applied.
     // Test: direct parse via Cli::try_parse_from.
     let cli = Cli::try_parse_from(["trusty-mpm", "sessctl", "list"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Sessctl {
             action: SessctlAction::List { project, format },
         } => {
@@ -786,7 +786,7 @@ fn cli_parses_sessctl_list_with_project_and_json() {
         "json",
     ])
     .unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Sessctl {
             action: SessctlAction::List { project, format },
         } => {

@@ -366,6 +366,7 @@ mod tests {
             runtime: Default::default(),
             ephemeral: false,
             workspace_owned: false,
+            source_id: None,
         }
     }
 
