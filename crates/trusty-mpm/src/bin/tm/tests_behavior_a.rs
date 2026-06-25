@@ -61,7 +61,7 @@ fn project_init_keeps_existing_config() {
 #[test]
 fn cli_parses_install_no_force() {
     let cli = Cli::try_parse_from(["trusty-mpm", "install"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Install { force } => assert!(!force),
         other => panic!("expected Install, got {other:?}"),
     }
@@ -70,7 +70,7 @@ fn cli_parses_install_no_force() {
 #[test]
 fn cli_parses_install_with_force() {
     let cli = Cli::try_parse_from(["trusty-mpm", "install", "--force"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Install { force } => assert!(force),
         other => panic!("expected Install, got {other:?}"),
     }
@@ -79,7 +79,7 @@ fn cli_parses_install_with_force() {
 #[test]
 fn cli_parses_hook() {
     let cli = Cli::try_parse_from(["trusty-mpm", "hook"]).unwrap();
-    assert!(matches!(cli.command, Command::Hook));
+    assert!(matches!(cli.command.unwrap(), Command::Hook));
 }
 
 /// Why: when `CLAUDE_MPM_SUB_AGENT` is present in the env, the hook
@@ -251,7 +251,7 @@ fn install_then_deploy_deploys_skills() {
 fn cli_parses_optimizer_status() {
     let cli = Cli::try_parse_from(["trusty-mpm", "optimizer", "status"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Optimizer {
             action: OptimizerAction::Status
         }
@@ -261,7 +261,7 @@ fn cli_parses_optimizer_status() {
 #[test]
 fn cli_parses_optimizer_set() {
     let cli = Cli::try_parse_from(["trusty-mpm", "optimizer", "set", "trim"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Optimizer {
             action: OptimizerAction::Set { level },
         } => assert!(matches!(level, CliCompressionLevel::Trim)),
@@ -272,7 +272,7 @@ fn cli_parses_optimizer_set() {
 #[test]
 fn cli_parses_session_events() {
     let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "events", "abc-123"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Session {
             action: SessionAction::Events { id_or_name },
         } => assert_eq!(id_or_name, "abc-123"),
@@ -284,7 +284,7 @@ fn cli_parses_session_events() {
 fn cli_parses_session_breakers() {
     let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "breakers"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Session {
             action: SessionAction::Breakers
         }
@@ -295,7 +295,7 @@ fn cli_parses_session_breakers() {
 fn cli_parses_session_pause() {
     let cli =
         Cli::try_parse_from(["trusty-mpm", "sessions", "pause", "tmpm-quiet-falcon"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Session {
             action: SessionAction::Pause { id_or_name, note },
         } => {
@@ -317,7 +317,7 @@ fn cli_parses_session_pause_with_note() {
         "stepping away",
     ])
     .unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Session {
             action: SessionAction::Pause { id_or_name, note },
         } => {
@@ -331,7 +331,7 @@ fn cli_parses_session_pause_with_note() {
 #[test]
 fn cli_parses_session_resume() {
     let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "resume", "abc-123"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Session {
             action: SessionAction::Resume { id_or_name },
         } => assert_eq!(id_or_name, "abc-123"),
@@ -342,7 +342,7 @@ fn cli_parses_session_resume() {
 #[test]
 fn cli_parses_session_run() {
     let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "run", "abc-123", "help me"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Session {
             action:
                 SessionAction::Run {
@@ -370,7 +370,7 @@ fn cli_parses_session_run_with_summarize() {
         "--summarize",
     ])
     .unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Session {
             action: SessionAction::Run { summarize, .. },
         } => assert!(summarize),
@@ -381,7 +381,7 @@ fn cli_parses_session_run_with_summarize() {
 #[test]
 fn cli_parses_session_output_defaults() {
     let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "output", "abc-123"]).unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Session {
             action:
                 SessionAction::Output {
@@ -409,7 +409,7 @@ fn cli_parses_session_output_with_lines() {
         "120",
     ])
     .unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Session {
             action: SessionAction::Output { lines, .. },
         } => assert_eq!(lines, 120),
@@ -427,7 +427,7 @@ fn cli_parses_session_output_with_summarize() {
         "--summarize",
     ])
     .unwrap();
-    match cli.command {
+    match cli.command.unwrap() {
         Command::Session {
             action: SessionAction::Output { summarize, .. },
         } => assert!(summarize),
@@ -482,7 +482,7 @@ fn cli_session_run_requires_command() {
 fn cli_parses_overseer_status() {
     let cli = Cli::try_parse_from(["trusty-mpm", "overseer", "status"]).unwrap();
     assert!(matches!(
-        cli.command,
+        cli.command.unwrap(),
         Command::Overseer {
             action: OverseerAction::Status
         }

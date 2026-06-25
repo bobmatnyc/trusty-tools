@@ -116,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
     // + bug-capture layer; short-lived CLI invocations skip subscriber init.
     if matches!(
         cli.command,
-        Command::Daemon { .. } | Command::Supervisor { .. }
+        Some(Command::Daemon { .. }) | Some(Command::Supervisor { .. })
     ) {
         #[cfg(feature = "daemon")]
         {
@@ -195,9 +195,10 @@ async fn main() -> anyhow::Result<()> {
     // here — rather than inside the async `prune_idle` — guarantees no live async
     // resource (the reqwest client, JoinSet tasks) is skipped over by exiting.
     let result = match cli.command {
-        Command::Status => status(&client, &url).await,
-        Command::Start => start(&client, &url).await,
-        Command::Serve { stdio } => {
+        None => commands::guided::run_guided_default(&client, &url).await,
+        Some(Command::Status) => status(&client, &url).await,
+        Some(Command::Start) => start(&client, &url).await,
+        Some(Command::Serve { stdio }) => {
             if stdio {
                 // #1221: MCP stdio bridge — forward JSON-RPC to the daemon's
                 // loopback POST /rpc, auto-starting the daemon and reconnecting
@@ -207,42 +208,42 @@ async fn main() -> anyhow::Result<()> {
                 start(&client, &url).await
             }
         }
-        Command::Stop => stop_daemon().await,
-        Command::Restart => restart(&client, &url).await,
-        Command::Project { action } => project(&client, &url, action).await,
-        Command::Session { action } => session(&client, &url, action).await,
-        Command::Events => commands::misc::events(&client, &url).await,
-        Command::Doctor => doctor(&url).await,
-        Command::Health => health(&url).await,
-        Command::Tui {
+        Some(Command::Stop) => stop_daemon().await,
+        Some(Command::Restart) => restart(&client, &url).await,
+        Some(Command::Project { action }) => project(&client, &url, action).await,
+        Some(Command::Session { action }) => session(&client, &url, action).await,
+        Some(Command::Events) => commands::misc::events(&client, &url).await,
+        Some(Command::Doctor) => doctor(&url).await,
+        Some(Command::Health) => health(&url).await,
+        Some(Command::Tui {
             url: tui_url,
             interval_ms,
-        } => {
+        }) => {
             let resolved = trusty_mpm::core::resolve_daemon_url(Some(&tui_url));
             trusty_mpm::tui::run(resolved, interval_ms).await
         }
-        Command::Gui => launch_gui(),
-        Command::Telegram { cmd } => telegram(&url, cmd).await,
-        Command::Slack { cmd } => slack(cmd).await,
-        Command::Install { force } => install(force),
-        Command::Hook => hook(&client, &url).await,
-        Command::Daemon {
+        Some(Command::Gui) => launch_gui(),
+        Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
+        Some(Command::Slack { cmd }) => slack(cmd).await,
+        Some(Command::Install { force }) => install(force),
+        Some(Command::Hook) => hook(&client, &url).await,
+        Some(Command::Daemon {
             addr,
             tailscale,
             mcp,
-        } => run_daemon(addr, tailscale, mcp).await,
-        Command::Supervisor {
+        }) => run_daemon(addr, tailscale, mcp).await,
+        Some(Command::Supervisor {
             addr,
             interval,
             auto_resume,
             no_classify,
-        } => commands::supervisor::run_supervisor(addr, interval, auto_resume, no_classify).await,
-        Command::Launch { dir, style } => launch(&client, &url, dir, style).await,
-        Command::Connect { dir } => connect(&client, &url, dir).await,
-        Command::Attach { target, json } => attach_cmd(&client, &url, &target, json).await,
-        Command::Optimizer { action } => optimizer(&client, &url, action).await,
-        Command::Overseer { action } => overseer(&client, &url, action).await,
-        Command::Coordinator { message, action } => {
+        }) => commands::supervisor::run_supervisor(addr, interval, auto_resume, no_classify).await,
+        Some(Command::Launch { dir, style }) => launch(&client, &url, dir, style).await,
+        Some(Command::Connect { dir }) => connect(&client, &url, dir).await,
+        Some(Command::Attach { target, json }) => attach_cmd(&client, &url, &target, json).await,
+        Some(Command::Optimizer { action }) => optimizer(&client, &url, action).await,
+        Some(Command::Overseer { action }) => overseer(&client, &url, action).await,
+        Some(Command::Coordinator { message, action }) => {
             // DOC-14 SM-STDIO (#1291): `tm sm serve --stdio` runs the JSON-RPC
             // over STDIO adapter; a plain `tm sm <message>` chats as before.
             match action {
@@ -256,50 +257,50 @@ async fn main() -> anyhow::Result<()> {
                 },
             }
         }
-        Command::Services { action } => services(action),
-        Command::Repair { action } => {
+        Some(Command::Services { action }) => services(action),
+        Some(Command::Repair { action }) => {
             use cli::RepairAction;
             match action {
                 RepairAction::Deploy { force } => repair_deploy(force),
             }
         }
-        Command::Catalog { action } => commands::managed::catalog(action).await,
-        Command::Ticket {
+        Some(Command::Catalog { action }) => commands::managed::catalog(action).await,
+        Some(Command::Ticket {
             issue,
             system,
             notes,
             runtime,
-        } => commands::ticket::ticket(&client, &url, issue, system, notes, runtime).await,
-        Command::Issue { cmd, system } => commands::issue::issue(cmd, system),
-        Command::Watch { cmd } => dispatch_watch(&client, &url, cmd).await,
+        }) => commands::ticket::ticket(&client, &url, issue, system, notes, runtime).await,
+        Some(Command::Issue { cmd, system }) => commands::issue::issue(cmd, system),
+        Some(Command::Watch { cmd }) => dispatch_watch(&client, &url, cmd).await,
         // #1045: the metaharness boots standalone (no daemon, no HTTP client).
         // The handler is async because `meta run` (#1049/#1051) launches a real
         // `claude` tmux session and `--demo` polls for it to exit. A demo
         // verification failure/timeout returns `Err`, which `main` maps to a
         // non-zero process exit (the #1051 acceptance criterion).
-        Command::Meta { action } => commands::meta::meta(action).await,
+        Some(Command::Meta { action }) => commands::meta::meta(action).await,
 
         // DOC-24: standalone managed driver commands.
         // Each command resolves ManagedPaths once at entry (closes #1566):
         // --root flag > TRUSTY_MPM_ROOT env > XDG config file > default.
-        Command::Register {
+        Some(Command::Register {
             alias,
             url,
             force,
             root,
-        } => {
+        }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::register_cmd(&paths, &alias, &url, force)
         }
-        Command::LsAliases { json, root } => {
+        Some(Command::LsAliases { json, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::ls_cmd(&paths, json)
         }
-        Command::Load { alias, root } => {
+        Some(Command::Load { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::load_cmd(&paths, &alias)
         }
-        Command::Run { alias, task, root } => {
+        Some(Command::Run { alias, task, root }) => {
             // F5: --task is not yet implemented in the MVP standalone driver.
             // Per spec (DOC-24), autonomous/task dispatch is the session-manager
             // layer, not `tm run`. Warn clearly so the flag is not silently
@@ -314,23 +315,25 @@ async fn main() -> anyhow::Result<()> {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::run_cmd(&paths, &alias)
         }
-        Command::Path { alias, root } => {
+        Some(Command::Path { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::path_cmd(&paths, &alias)
         }
-        Command::Login { root } => {
+        Some(Command::Login { root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::login_cmd(&paths)
         }
-        Command::Rm { alias, root } => {
+        Some(Command::Rm { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::rm_cmd(&paths, &alias)
         }
-        Command::Update { alias, root } => {
+        Some(Command::Update { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::update_cmd(&paths, alias.as_deref())
         }
-        Command::Sessctl { action } => commands::sessctl::dispatch(&client, &url, action).await,
+        Some(Command::Sessctl { action }) => {
+            commands::sessctl::dispatch(&client, &url, action).await
+        }
     };
 
     // Top-level exit-code translation: a `tm sessions prune-idle` that found the

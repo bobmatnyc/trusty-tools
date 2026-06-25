@@ -104,6 +104,8 @@ impl SessionManager {
             // Adopted sessions point at a pre-existing pane: the SM did NOT
             // create the workspace, so decommission must never delete it (#1511).
             workspace_owned: false,
+            // Adopted sessions have no tracked source project.
+            source_id: None,
         };
 
         // ── Atomic already-adopted check + upsert under ONE held write guard ──────

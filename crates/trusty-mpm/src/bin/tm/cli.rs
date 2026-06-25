@@ -30,16 +30,26 @@ pub(crate) const DEFAULT_URL: &str = trusty_mpm::core::DEFAULT_DAEMON_URL;
 pub(crate) const DEFAULT_ADDR: &str = trusty_mpm::core::DEFAULT_DAEMON_ADDR;
 
 /// trusty-mpm command-line interface.
+///
+/// When invoked without a subcommand (#1708) the guided default fires:
+/// the daemon's in-project spawn path is called for the current directory,
+/// reconnecting to an existing session or provisioning a new worktree.
 #[derive(Debug, Parser)]
-#[command(name = "trusty-mpm", version, about = "trusty-mpm — unified binary")]
+#[command(
+    name = "trusty-mpm",
+    version,
+    about = "trusty-mpm — unified binary",
+    subcommand_required = false,
+    arg_required_else_help = false
+)]
 pub(crate) struct Cli {
     /// Base URL of the trusty-mpm daemon (used by the thin CLI subcommands).
     #[arg(long, env = "TRUSTY_MPM_URL", default_value = DEFAULT_URL, global = true)]
     pub(crate) url: String,
 
-    /// Subcommand to run.
+    /// Subcommand to run. When absent, the guided default fires (#1708).
     #[command(subcommand)]
-    pub(crate) command: Command,
+    pub(crate) command: Option<Command>,
 }
 
 /// Top-level CLI subcommands.

@@ -120,6 +120,18 @@ pub async fn serve_http(
         info!("orphan-GC disabled via TRUSTY_MPM_ORPHAN_GC");
     }
 
+    // Run inproject-hygiene for all managed base clones (#1709):
+    // fetch, hard-reset to default branch, prune stale worktrees.
+    // This is intentionally synchronous (git subprocess calls) so we offload it
+    // to a blocking thread. Failures are logged as warnings; they do not block
+    // the daemon from starting.
+    {
+        let repos_root = managed_routes::inproject::repos_root();
+        tokio::task::spawn_blocking(move || {
+            managed_routes::inproject_hygiene::run_hygiene_for_all_bases(&repos_root);
+        });
+    }
+
     let app = api::router(Arc::clone(&state));
     info!("daemon listening; press Ctrl-C to stop");
     // `into_make_service_with_connect_info` makes the peer `SocketAddr` available

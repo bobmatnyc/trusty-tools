@@ -28,6 +28,8 @@ use crate::session_manager::{ManagedSessionId, SessionRecord};
 
 mod fleet;
 pub mod front_gate;
+pub mod inproject;
+pub mod inproject_hygiene;
 mod lifecycle;
 pub mod prune;
 pub use fleet::{FleetByProjectResponse, FleetProjectGroup, fleet_by_project_route};
@@ -198,6 +200,12 @@ pub struct SessionSummary {
     pub pending_decision: Option<String>,
     /// Proposed default answer to the pending decision.
     pub proposed_default: Option<String>,
+    /// Source project identity (`owner/repo`) for in-project sessions (#1707).
+    ///
+    /// Why: the in-project spawn path records the GitHub identity so callers can
+    /// filter sessions by project and reconnect to existing ones.
+    /// `None` for sessions not created via the in-project path.
+    pub source_id: Option<String>,
 }
 
 /// Request body for POST /api/v1/sessions/managed/{id}/send.
@@ -355,6 +363,7 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         last_activity_at: r.last_activity_at.map(|t| t.to_rfc3339()),
         pending_decision: r.pending_decision.clone(),
         proposed_default: r.proposed_default.clone(),
+        source_id: r.source_id.clone(),
     }
 }
 
@@ -522,11 +531,23 @@ pub async fn adopt_existing_session(
 ///
 /// Why: the calling agentic process polls this to see all running sessions,
 /// their state, and pending decisions.
-/// What: returns all session records as a JSON list of summaries.
-/// Test: list handler test.
-pub async fn list_managed_sessions(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
+/// What: returns all session records as a JSON list of summaries. When the
+/// optional `?source_id=<id>` query parameter is present, only sessions whose
+/// `source_id` matches exactly are returned.
+/// Test: list handler test; list-with-source-id-filter test.
+pub async fn list_managed_sessions(
+    State(state): State<Arc<DaemonState>>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
     let mgr = state.session_manager().await;
-    let sessions: Vec<SessionSummary> = mgr.list().await.iter().map(record_to_summary).collect();
+    let sid_filter = q.get("source_id").map(String::as_str);
+    let sessions: Vec<SessionSummary> = mgr
+        .list()
+        .await
+        .iter()
+        .filter(|r| sid_filter.is_none_or(|sid| r.source_id.as_deref() == Some(sid)))
+        .map(record_to_summary)
+        .collect();
     Json(ListSessionsResponse { sessions })
 }
 

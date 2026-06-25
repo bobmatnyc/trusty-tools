@@ -10,6 +10,7 @@
 //! `tests.rs`.
 
 pub(crate) mod daemon;
+pub(crate) mod guided;
 pub(crate) mod install;
 pub(crate) mod issue;
 pub(crate) mod launch;

@@ -389,6 +389,10 @@ impl SessionManager {
             // adopt (#1433), and reconcile all pass `false` (safe default —
             // prefer NOT deleting over accidental deletion).
             workspace_owned: owned,
+            // source_id is set post-creation by the in-project spawn path
+            // (via SessionManager::set_source_id); `create_with_id` itself
+            // never knows the source project — it is set by the caller.
+            source_id: None,
         };
 
         // Persist the record. On failure the freshly-created tmux session has
@@ -772,6 +776,8 @@ impl SessionManager {
                     // did not create the workspace; decommission must not delete
                     // it (#1511).
                     workspace_owned: false,
+                    // External sessions have no tracked source project.
+                    source_id: None,
                 };
                 guard.upsert(external).await?;
                 report.external_adopted.push(name.clone());
@@ -934,6 +940,26 @@ impl SessionManager {
         record.pending_decision = Some(decision.to_string());
         record.proposed_default = proposed_default.map(str::to_string);
         record.last_activity_at = Some(Utc::now());
+        self.store.write().await.upsert(record).await?;
+        Ok(())
+    }
+
+    /// Record a source project identity on a session.
+    ///
+    /// Why: the in-project spawn path (#1706) associates a session with a
+    /// specific `owner/repo` so callers can later filter sessions by project
+    /// and reconnect instead of spawning duplicates. Setting it post-creation
+    /// (rather than via `create_with_id`) keeps the manager's SINGLE generic
+    /// create path clean of in-project concerns.
+    /// What: looks up the record, sets `source_id`, and persists. No tmux I/O.
+    /// Test: covered transitively by the in-project spawn integration tests.
+    pub async fn set_source_id(
+        &self,
+        id: &ManagedSessionId,
+        source_id: &str,
+    ) -> Result<(), ManagedError> {
+        let mut record = self.get(id).await?;
+        record.source_id = Some(source_id.to_string());
         self.store.write().await.upsert(record).await?;
         Ok(())
     }
