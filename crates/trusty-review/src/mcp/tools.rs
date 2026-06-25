@@ -220,6 +220,7 @@ async fn call_review_pr(args: &Value, state: &AppState) -> Result<Value, ToolErr
         trigger: TriggerDecision::ForceDryRun,
         run_mode: RunMode::Serve,
         allow_posting: false,
+        caller_context: crate::pipeline::runner::CallerContext::default(),
     };
 
     info!(owner, repo, pr, reviewer_model, "mcp: review_pr");
@@ -271,6 +272,7 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
         trigger: TriggerDecision::ForceDryRun,
         run_mode: RunMode::Serve,
         allow_posting: false,
+        caller_context: crate::pipeline::runner::CallerContext::default(),
     };
 
     info!(bytes = diff.len(), reviewer_model, "mcp: review_diff");

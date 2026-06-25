@@ -348,6 +348,7 @@ async fn verify_confirmed_keeps_and_block_holds() {
         &mut findings,
         None,
         None,
+        None,
     )
     .await;
     assert_eq!(
@@ -374,6 +375,7 @@ async fn verify_refuted_demotes_and_block_relaxes() {
         "+ some diff",
         Verdict::Block,
         &mut findings,
+        None,
         None,
         None,
     )
@@ -404,6 +406,7 @@ async fn verify_no_candidates_is_noop() {
         &mut findings,
         None,
         None,
+        None,
     )
     .await;
     assert_eq!(verdict, Verdict::Approve);
@@ -424,6 +427,7 @@ async fn verify_unknown_is_passthrough() {
         "diff",
         Verdict::Unknown,
         &mut findings,
+        None,
         None,
         None,
     )
@@ -449,6 +453,7 @@ async fn verify_model_unavailable_marks_error_refuted_and_preserves_verdict() {
         "+ diff",
         Verdict::Block,
         &mut findings,
+        None,
         None,
         None,
     )
@@ -478,6 +483,7 @@ async fn verify_truncated_response_is_truncation_refuted() {
         &mut findings,
         None,
         None,
+        None,
     )
     .await;
     assert!(matches!(
@@ -497,6 +503,7 @@ async fn verify_truncation_preserves_primary_verdict() {
         "+ diff",
         Verdict::Block,
         &mut findings,
+        None,
         None,
         None,
     )
@@ -537,6 +544,7 @@ async fn verify_join_handle_regression_pr720() {
         &mut findings_1,
         None,
         None,
+        None,
     )
     .await;
     assert!(matches!(
@@ -558,6 +566,7 @@ async fn verify_join_handle_regression_pr720() {
         diff,
         Verdict::RequestChanges,
         &mut findings_2,
+        None,
         None,
         None,
     )
@@ -587,6 +596,7 @@ async fn verify_approve_two_advisory_medium_stays_approve() {
         "+ advisory diff",
         Verdict::Approve,
         &mut findings,
+        None,
         None,
         None,
     )

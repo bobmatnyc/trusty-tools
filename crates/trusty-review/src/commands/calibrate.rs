@@ -27,7 +27,7 @@ use trusty_review::{
         search_client::HttpSearchClient,
     },
     models::Finding,
-    pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
+    pipeline::{CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision, run_review},
 };
 
 use super::run::build_deps_async;
@@ -380,6 +380,7 @@ async fn run_pipeline_for_entry(
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false, // NEVER post during calibration — always dry-run
+        caller_context: CallerContext::default(),
     };
 
     let result = run_review(config, input, deps).await;

@@ -211,6 +211,21 @@ pub struct ReviewContext {
     /// findings; the `floor` is applied deterministically by the runner AFTER
     /// the LLM response, not by the model itself.
     pub coverage_contrib: Option<CoverageVerdictContrib>,
+    /// Caller-supplied PR description prose (#1618).  `None`/empty ⇒ no section.
+    ///
+    /// Rendered as a `## PR Description` block.  On the local-diff path this is
+    /// the only source of the PR description (no GitHub fetch); on the GitHub path
+    /// it supplements the fetched metadata when the caller passes richer prose.
+    pub pr_description: Option<String>,
+    /// Caller-supplied human review/issue discussion — author rationale (#1618).
+    ///
+    /// Rendered as a `## PR Discussion / Author Rationale` block.  `None`/empty ⇒
+    /// no section.
+    pub pr_discussion: Option<String>,
+    /// Caller-supplied referenced/related code the diff depends on (#1618).
+    ///
+    /// Rendered as a `## Referenced Code` block.  `None`/empty ⇒ no section.
+    pub referenced_code: Option<String>,
 }
 
 // ─── System prompt ────────────────────────────────────────────────────────────

@@ -73,7 +73,7 @@ pub async fn probe_verifier_liveness(
     // Empty diff is intentional: we only care whether the MODEL responds, not
     // about the judgment.  The verifier will likely REFUTE (finding not in
     // diff) — that is a perfectly healthy response and means the model is alive.
-    let req = build_verify_request(verifier_model, "", &probe_finding, None, Some(16));
+    let req = build_verify_request(verifier_model, "", &probe_finding, None, Some(16), None);
 
     match verifier.complete(req).await {
         Ok(_) => {

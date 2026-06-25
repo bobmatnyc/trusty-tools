@@ -27,7 +27,7 @@ use crate::integrations::{
 use crate::llm::{LlmError, LlmProvider, LlmRequest, LlmResponse};
 use crate::models::{ReviewStatus, Verdict};
 use crate::pipeline::diff::{DIFF_TRUNCATED_MARKER, DiffSource, RENDER_TRUNCATED_MARKER};
-use crate::pipeline::runner::{ReviewDeps, ReviewInput, run_review};
+use crate::pipeline::runner::{CallerContext, ReviewDeps, ReviewInput, run_review};
 use crate::pipeline::trigger::TriggerDecision;
 
 // ── Recording fake LLM ───────────────────────────────────────────────────────
@@ -184,6 +184,7 @@ fn input(source: DiffSource) -> ReviewInput {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     }
 }
 

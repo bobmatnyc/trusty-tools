@@ -21,7 +21,10 @@ use trusty_review::{
         subprocess_analyze_client::SubprocessAnalyzeClient,
     },
     llm::build_provider,
-    pipeline::{DiffSource, ReviewDeps, ReviewInput, TriggerDecision, log_json_path, run_review},
+    pipeline::{
+        CallerContext, DiffSource, ReviewDeps, ReviewInput, TriggerDecision, log_json_path,
+        run_review,
+    },
 };
 
 use crate::cli_verify;
@@ -113,6 +116,7 @@ pub async fn cmd_run(config: ReviewConfig, args: RunArgs) -> Result<()> {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: true,
+        caller_context: CallerContext::default(),
     };
 
     let result = run_review(&config_with_overrides, input, deps).await;
