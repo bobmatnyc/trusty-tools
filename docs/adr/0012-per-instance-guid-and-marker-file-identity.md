@@ -1,7 +1,8 @@
 # 0012. Per-instance GUID and marker-file canonical identity for trusty-search indexes
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-25
+- **Accepted:** 2026-06-25
 - **Scope:** trusty-search (index discovery, registration, move-relink,
   same-GUID collapse). Cross-concerns: trusty-memory (project vs session identity),
   trusty-agents (worktree tracking), trusty-controller (registry/palace sync).
