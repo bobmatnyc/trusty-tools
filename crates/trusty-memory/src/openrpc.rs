@@ -53,11 +53,20 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
     use scopes::*;
     let s: &[&str] = match name {
         // Read-only / query
-        "memory_recall" | "memory_recall_deep" | "memory_recall_all" | "memory_list"
-        | "palace_list" | "palace_info" | "kg_query" | "kg_gaps" | "list_prompt_facts"
-        | "get_prompt_context" | "console_metrics" | "chat_session_get" | "chat_session_list" => {
-            &[MEMORY_READ]
-        }
+        "memory_recall"
+        | "memory_recall_deep"
+        | "memory_recall_all"
+        | "memory_list"
+        | "palace_list"
+        | "palace_info"
+        | "kg_query"
+        | "kg_gaps"
+        | "list_prompt_facts"
+        | "get_prompt_context"
+        | "console_metrics"
+        | "chat_session_get"
+        | "chat_session_list"
+        | "chat_session_recall" => &[MEMORY_READ],
 
         // Mutating
         "memory_remember"
@@ -74,7 +83,10 @@ pub fn scopes_for_tool(name: &str) -> Vec<String> {
         | "memory_send_message"
         | "chat_session_create"
         | "chat_session_add_turn"
-        | "dream_consolidate_room" => &[MEMORY_WRITE],
+        | "chat_session_delete"
+        | "chat_turn_append"
+        | "dream_consolidate_room"
+        | "palace_dream" => &[MEMORY_WRITE],
 
         // Bootstrap mutates the KG from external project files; it belongs
         // in the dedicated knowledge.write scope (issue #60).

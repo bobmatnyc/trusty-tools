@@ -93,8 +93,10 @@ async fn tools_list_returns_all_tools() {
     // `palace_delete`; the #180 follow-up adds `palace_update` on top
     // of the 22-tool baseline; issue #537 adds `upgrade`;
     // issue #1104 adds `console_metrics`; spec-001 adds the four
-    // `chat_session_*` tools and `dream_consolidate_room`.
-    assert_eq!(tools.len(), 30);
+    // `chat_session_*` tools and `dream_consolidate_room`;
+    // issue #1720 adds `chat_session_recall`, `chat_session_delete`,
+    // `chat_turn_append`; issue #1721 adds `palace_dream`.
+    assert_eq!(tools.len(), 34);
 }
 
 #[tokio::test]

@@ -46,10 +46,11 @@ use anyhow::Result;
 use serde_json::Value;
 
 use chat_ops::{
-    handle_chat_session_add_turn, handle_chat_session_create, handle_chat_session_get,
-    handle_chat_session_list,
+    handle_chat_session_add_turn, handle_chat_session_create, handle_chat_session_delete,
+    handle_chat_session_get, handle_chat_session_list, handle_chat_session_recall,
+    handle_chat_turn_append,
 };
-use dream_ops::handle_dream_consolidate_room;
+use dream_ops::{handle_dream_consolidate_room, handle_palace_dream};
 use kg_ops::{
     handle_add_alias, handle_discover_aliases, handle_get_prompt_context, handle_kg_assert,
     handle_kg_bootstrap, handle_kg_gaps, handle_kg_query, handle_list_prompt_facts,
@@ -106,8 +107,12 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "chat_session_create" => handle_chat_session_create(state, args).await,
         "chat_session_add_turn" => handle_chat_session_add_turn(state, args).await,
         "chat_session_get" => handle_chat_session_get(state, args).await,
+        "chat_session_recall" => handle_chat_session_recall(state, args).await,
         "chat_session_list" => handle_chat_session_list(state, args).await,
+        "chat_session_delete" => handle_chat_session_delete(state, args).await,
+        "chat_turn_append" => handle_chat_turn_append(state, args).await,
         "dream_consolidate_room" => handle_dream_consolidate_room(state, args).await,
+        "palace_dream" => handle_palace_dream(state, args).await,
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }

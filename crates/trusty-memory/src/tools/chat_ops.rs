@@ -1,4 +1,4 @@
-//! Chat-session MCP tool handlers (spec-001 Phase 2).
+//! Chat-session MCP tool handlers (spec-001 Phase 2, issue #1720).
 //!
 //! Why: trusty-memory already owns a redb-backed `ChatSessionStore` per palace
 //! (used by the HTTP chat UI), but it was unreachable over MCP. Applications
@@ -8,10 +8,11 @@
 //! directly — deliberately NOT routing through `memory_remember`, whose
 //! signal/noise + 5-minute dedup gates are hostile to sequential conversational
 //! turns.
-//! What: four `pub(crate) async fn handle_chat_session_*` handlers wrapping the
-//! existing store methods (`create_session` / `upsert_session` / `get_session`
-//! / `list_sessions`). Visibility is `pub(crate)` so the dispatcher in
-//! `tools::mod` can route to them.
+//! What: six `pub(crate) async fn handle_chat_session_*` / `handle_chat_turn_*`
+//! handlers wrapping the existing store methods (`create_session` /
+//! `upsert_session` / `get_session` / `list_sessions` / `delete_session`).
+//! Visibility is `pub(crate)` so the dispatcher in `tools::mod` can route
+//! to them.
 //! Test: `crates/trusty-memory/tests/chat_mcp.rs`.
 
 use crate::AppState;
@@ -169,5 +170,97 @@ pub(crate) async fn handle_chat_session_list(state: &AppState, args: Value) -> R
     Ok(json!({
         "sessions": serde_json::to_value(page)?,
         "total_count": total_count,
+    }))
+}
+
+/// Delete a chat session from a palace.
+///
+/// Why: applications need lifecycle control over sessions; without deletion,
+/// disk usage grows unbounded and audit history clutters list views.
+/// What: calls `ChatSessionStore::delete_session`, which is a no-op (not an
+/// error) when the session id is unknown so the operation is idempotent.
+/// Test: `chat_session_delete_removes_session` in `tests/chat_mcp.rs`.
+pub(crate) async fn handle_chat_session_delete(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "chat_session_delete")?;
+    let session_id = args
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("chat_session_delete: missing 'session_id'"))?;
+    let store = state.session_store(&palace)?;
+    store.delete_session(session_id)?;
+    Ok(json!({ "deleted": session_id }))
+}
+
+/// Alias for `chat_session_get` — retrieve a full session with all turns.
+///
+/// Why: issue #1720 specifies both `chat_session_get` and
+/// `chat_session_recall` as MCP tool names; the spec favours "recall" for
+/// the agent-facing surface and "get" for the programmatic surface. Both
+/// route to the same underlying `ChatSessionStore::get_session` so callers
+/// can use whichever name their workflow favours.
+/// What: delegates to `handle_chat_session_get` after rewriting the tool
+/// name in errors for correct attribution.
+/// Test: `chat_session_recall_returns_history` in `tests/chat_mcp.rs`.
+pub(crate) async fn handle_chat_session_recall(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "chat_session_recall")?;
+    let session_id = args
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("chat_session_recall: missing 'session_id'"))?;
+    let store = state.session_store(&palace)?;
+    let session = store
+        .get_session(session_id)?
+        .ok_or_else(|| anyhow!("chat_session_recall: session not found: {session_id}"))?;
+    Ok(serde_json::to_value(session)?)
+}
+
+/// Append a prompt/response PAIR to a session as two consecutive messages.
+///
+/// Why: issue #1720 specifies `chat_turn_append(palace, session_id, prompt,
+/// response)` as the primary way to store a complete conversational turn —
+/// the caller supplies both sides of the exchange in one call so they are
+/// atomically appended. `chat_session_add_turn` remains for callers that
+/// need to stream a single message at a time.
+/// What: validates args, loads the existing history, appends a `user` message
+/// (the prompt) immediately followed by an `assistant` message (the response),
+/// and writes back via `upsert_session`. Returns the updated `message_count`
+/// and `updated_at`.
+/// Test: `chat_turn_append_stores_pair` in `tests/chat_mcp.rs`.
+pub(crate) async fn handle_chat_turn_append(state: &AppState, args: Value) -> Result<Value> {
+    let palace = resolve_palace(state, &args, "chat_turn_append")?;
+    let session_id = args
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("chat_turn_append: missing 'session_id'"))?;
+    let prompt = args
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("chat_turn_append: missing 'prompt'"))?;
+    let response = args
+        .get("response")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("chat_turn_append: missing 'response'"))?;
+
+    let store = state.session_store(&palace)?;
+    let mut history = store
+        .get_session(session_id)?
+        .map(|s| s.history)
+        .unwrap_or_default();
+    history.push(ChatMessage {
+        role: "user".to_string(),
+        content: prompt.to_string(),
+    });
+    history.push(ChatMessage {
+        role: "assistant".to_string(),
+        content: response.to_string(),
+    });
+    store.upsert_session(session_id, &history)?;
+
+    let session = store
+        .get_session(session_id)?
+        .ok_or_else(|| anyhow!("chat_turn_append: session vanished after write"))?;
+    Ok(json!({
+        "message_count": session.history.len(),
+        "updated_at": session.updated_at,
     }))
 }
