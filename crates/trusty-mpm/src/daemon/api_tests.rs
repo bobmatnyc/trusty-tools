@@ -598,6 +598,8 @@ async fn coordinator_chat_routes_prefixed_message() {
     assert!(resp.command_output.is_some());
 }
 
+// The /api-docs routes only exist when the `swagger-ui` feature is active.
+#[cfg(feature = "swagger-ui")]
 #[tokio::test]
 async fn openapi_spec_is_valid() {
     // `GET /api-docs/openapi.json` must return 200 with a document that

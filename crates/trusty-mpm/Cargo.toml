@@ -28,8 +28,15 @@ daemon = ["mcp",
           "dep:tokio-stream", "dep:futures",
           "dep:dashmap", "dep:parking_lot",
           "dep:notify", "dep:tracing-appender",
-          "dep:utoipa-swagger-ui",
           "dep:tokio-util"]
+
+# `swagger-ui` adds utoipa-swagger-ui to the daemon HTTP server so the
+# built-in API explorer is reachable at `/api-docs`. NOT included in
+# `daemon` by default so offline or air-gapped builds (which cannot pull
+# the swagger-ui static assets) can compile with `--no-default-features
+# --features daemon`. Enable with `--features swagger-ui` when you want
+# the in-process explorer (closes #1694).
+swagger-ui = ["dep:utoipa-swagger-ui"]
 
 # `mcp` gates the MCP server library module.
 # (`async-trait`, used by the OrchestratorBackend trait, is now an always-on
