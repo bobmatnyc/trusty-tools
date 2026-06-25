@@ -99,7 +99,7 @@ pub async fn handle_console_metrics(state: &AppState, _args: Value) -> Result<Va
 
     // Open each palace and aggregate statistics on the blocking thread pool.
     // `PalaceRegistry::open_palace` does synchronous FS I/O (loads metadata,
-    // opens SQLite/usearch files) so it must not run on the async executor.
+    // opens redb/usearch files) so it must not run on the async executor.
     let root2 = state.data_root.clone();
     let registry = state.registry.clone();
     let stats =
@@ -131,7 +131,7 @@ pub async fn handle_console_metrics(state: &AppState, _args: Value) -> Result<Va
 ///
 /// Why: Extracted as a free function so it can run entirely on the
 /// `spawn_blocking` thread pool — `open_palace` does synchronous FS I/O
-/// (`std::fs`, SQLite, usearch file open) that must not block the async
+/// (`std::fs`, redb, usearch file open) that must not block the async
 /// executor.
 /// What: Iterates `palace_infos`; the first MAX_PALACES_IN_REPORT produce full
 /// entries in `palace_entries`; the remainder contribute only to the totals.

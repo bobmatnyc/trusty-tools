@@ -161,7 +161,7 @@ pub fn build_prompt_context(triples: &[(String, String, String)]) -> String {
 /// the fact, so a single MCP connection sees aliases / conventions from
 /// every project namespace. Reading once into a `Vec<(String, String,
 /// String)>` keeps the formatter side-effect-free and lets tests build
-/// fixtures without touching SQLite.
+/// fixtures without touching redb.
 /// What: Iterates every palace handle currently registered, calls
 /// `list_active` with a generous limit, and filters each batch through
 /// `is_hot_predicate`. A palace whose KG fails to read is logged at `warn`

@@ -1177,10 +1177,10 @@ impl AppState {
 
     /// Open (or return cached) the chat-session store for a palace.
     ///
-    /// Why: Chat session persistence lives in a dedicated SQLite file under
-    /// the palace's data dir (`chat_sessions.db`) so it doesn't intermingle
+    /// Why: Chat session persistence lives in a dedicated redb file under
+    /// the palace's data dir (`chat_sessions.redb`) so it doesn't intermingle
     /// with the KG's transactional load. The store is cheap to clone via
-    /// `Arc` but the underlying r2d2 pool should be reused, so cache by id.
+    /// `Arc` but the underlying connection should be reused, so cache by id.
     /// What: Creates the palace data dir if missing, opens (or reuses) a
     /// `ChatSessionStore` and stashes an `Arc` in the DashMap.
     /// Test: Indirectly via the session HTTP handlers in `web::tests`.

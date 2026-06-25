@@ -181,7 +181,7 @@ pub(crate) async fn chat_handler(
          service running locally on this user's machine. trusty-memory stores \
          knowledge in named \"palaces\" — isolated memory namespaces, each with \
          its own vector index (usearch HNSW) and temporal knowledge graph \
-         (SQLite). Memories are organized as Palace -> Wing -> Room -> Closet \
+         (redb). Memories are organized as Palace -> Wing -> Room -> Closet \
          -> Drawer, where a Drawer is an atomic memory unit.\n\
          There are currently {palace_count} palace(s) on this machine.\n",
     ));
