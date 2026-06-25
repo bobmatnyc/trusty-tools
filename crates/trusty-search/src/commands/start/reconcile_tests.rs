@@ -416,7 +416,10 @@ async fn reconcile_up_to_date_index_is_noop() {
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
     });
 
-    reconcile_one_index(Arc::clone(&handle)).await;
+    let summary = Arc::new(std::sync::Mutex::new(
+        crate::service::server::ReconcileSummary::default(),
+    ));
+    reconcile_one_index(Arc::clone(&handle), summary).await;
 
     let stored = handle.indexed_head_sha.read().await.clone();
     assert_eq!(
@@ -480,7 +483,10 @@ async fn reconcile_stale_index_stamps_new_sha() {
         walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
     });
 
-    reconcile_one_index(Arc::clone(&handle)).await;
+    let summary = Arc::new(std::sync::Mutex::new(
+        crate::service::server::ReconcileSummary::default(),
+    ));
+    reconcile_one_index(Arc::clone(&handle), summary).await;
 
     let stored = handle.indexed_head_sha.read().await.clone();
     assert_eq!(
@@ -570,4 +576,220 @@ async fn apply_delta_total_failure_does_not_stamp() {
         handle.last_indexed_at.read().await.is_some(),
         "last_indexed_at must be stamped when guard does not suppress"
     );
+}
+
+// ── mtime-path unit tests ─────────────────────────────────────────────────────
+
+/// Why: `collect_stale_files_by_mtime` must detect a file whose mtime is
+/// strictly after `since_unix` and exclude a file that predates it.
+/// Test: write two files into a tempdir (one fresh, one old), call the
+/// function, and assert only the fresh file is returned.
+#[test]
+fn mtime_walk_finds_newer_file_and_skips_older() {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+
+    // Write an "old" file with mtime 1000 seconds after epoch.
+    let old_file = root.join("old.rs");
+    std::fs::write(&old_file, "fn old() {}").expect("write old");
+    let old_time = UNIX_EPOCH + Duration::from_secs(1000);
+    filetime::set_file_mtime(&old_file, filetime::FileTime::from_system_time(old_time))
+        .expect("set mtime old");
+
+    // Write a "new" file with mtime 5000 seconds after epoch.
+    let new_file = root.join("new.rs");
+    std::fs::write(&new_file, "fn new() {}").expect("write new");
+    let new_time = UNIX_EPOCH + Duration::from_secs(5000);
+    filetime::set_file_mtime(&new_file, filetime::FileTime::from_system_time(new_time))
+        .expect("set mtime new");
+
+    // Threshold: 2000 seconds after epoch — only the "new" file is stale.
+    let stale = collect_stale_files_by_mtime(root, 2000);
+
+    assert_eq!(
+        stale.len(),
+        1,
+        "expected exactly one stale file; got {stale:?}"
+    );
+    assert!(
+        stale[0] == "new.rs" || stale[0].ends_with("new.rs"),
+        "stale file must be new.rs, got {:?}",
+        stale[0]
+    );
+}
+
+/// Why: files inside excluded directories (e.g. `node_modules/`) must not
+/// appear in the mtime-stale list — same skip rules as the git path.
+/// Test: create `node_modules/pkg/index.js` with a fresh mtime; assert it
+/// is excluded by `collect_stale_files_by_mtime`.
+#[test]
+fn mtime_walk_skips_excluded_dir() {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let nm = root.join("node_modules").join("pkg");
+    std::fs::create_dir_all(&nm).expect("create node_modules/pkg");
+    let excluded = nm.join("index.js");
+    std::fs::write(&excluded, "module.exports = {}").expect("write");
+    let new_time = UNIX_EPOCH + Duration::from_secs(9999);
+    filetime::set_file_mtime(&excluded, filetime::FileTime::from_system_time(new_time))
+        .expect("set mtime");
+
+    let stale = collect_stale_files_by_mtime(root, 0);
+    // node_modules must be pruned; no stale files should be returned.
+    assert!(
+        stale.is_empty(),
+        "files inside node_modules must be excluded; got {stale:?}"
+    );
+}
+
+/// Why: when the stale file count exceeds `FULL_REINDEX_THRESHOLD`, the
+/// function must return at least `FULL_REINDEX_THRESHOLD + 1` entries so
+/// the caller can detect the threshold breach.
+/// Test: create `FULL_REINDEX_THRESHOLD + 5` fresh files; verify the cap.
+#[test]
+fn mtime_walk_caps_at_threshold_plus_one() {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let n = crate::commands::start::reconcile::FULL_REINDEX_THRESHOLD + 5;
+    for i in 0..n {
+        let p = root.join(format!("file_{i}.rs"));
+        std::fs::write(&p, "fn f() {}").expect("write");
+        let t = UNIX_EPOCH + Duration::from_secs(9999);
+        filetime::set_file_mtime(&p, filetime::FileTime::from_system_time(t)).expect("mtime");
+    }
+    let stale = collect_stale_files_by_mtime(root, 0);
+    assert_eq!(
+        stale.len(),
+        crate::commands::start::reconcile::FULL_REINDEX_THRESHOLD + 1,
+        "result must be capped at FULL_REINDEX_THRESHOLD + 1"
+    );
+}
+
+/// Why: a non-git index with no `last_indexed_unix` must be skipped (not
+/// full-reindexed) so boot does not thrash on first-run indexes.
+/// Test: build a minimal non-git handle with `indexed_head_sha = None`;
+/// call `reconcile_one_index`; assert `delta_reindexed`, `fell_back_to_full`,
+/// and `up_to_date` all remain 0 and `skipped_no_data` becomes 1.
+#[tokio::test]
+async fn mtime_reconcile_skips_never_indexed_non_git_index() {
+    use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
+    use crate::service::server::ReconcileSummary;
+    use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
+
+    // A tempdir that is NOT a git repo and has no `last_indexed_unix` in any
+    // registry (the reconcile function calls `load_index_registry()` which
+    // returns empty for a fresh tempdir).
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let handle = Arc::new(IndexHandle {
+        id: IndexId::new("ts-mtime-never-indexed"),
+        indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(
+            "ts-mtime-never-indexed",
+            dir.path(),
+        ))),
+        root_path: dir.path().to_path_buf(),
+        include_paths: vec![],
+        exclude_globs: vec![],
+        extensions: vec![],
+        domain_terms: vec![],
+        include_docs: true,
+        respect_gitignore: true,
+        extra_skip_dirs: vec![],
+        data_file_max_bytes: 0,
+        path_filter: vec![],
+        context_embedding: Arc::new(RwLock::new(None)),
+        context_summary: Arc::new(RwLock::new(None)),
+        indexed_head_sha: Arc::new(RwLock::new(None)), // non-git / never indexed
+        last_indexed_at: Arc::new(RwLock::new(None)),
+        lexical_only: false,
+        skip_kg: false,
+        defer_embed: false,
+        stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
+            chunk_count: 0,
+            hnsw_snapshot_ready: false,
+            graph_node_count: 0,
+            lexical_only: false,
+            skip_kg: false,
+            corpus_open_failed: false,
+        }))),
+        search_pressure: Arc::new(tokio::sync::Notify::new()),
+        walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
+    });
+
+    let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    let s = summary.lock().expect("summary lock");
+    assert_eq!(
+        s.skipped_no_data, 1,
+        "must be skipped (no last_indexed_unix)"
+    );
+    assert_eq!(s.delta_reindexed, 0, "must not be delta-reindexed");
+    assert_eq!(s.fell_back_to_full, 0, "must not fall back to full");
+    assert_eq!(s.up_to_date, 0, "must not be marked up-to-date");
+}
+
+/// Why: `reconcile_one_index` must count `up_to_date` in the summary when
+/// the git-path index is already at HEAD.
+/// Test: set `indexed_head_sha = current HEAD` on a real git repo; call
+/// `reconcile_one_index`; assert `up_to_date = 1`, others = 0.
+#[tokio::test]
+async fn reconcile_summary_counts_up_to_date() {
+    use crate::core::registry::{IndexHandle, IndexId, WalkDiagnostics};
+    use crate::service::server::ReconcileSummary;
+    use crate::service::warm_boot::{derive_warm_boot_stages, WarmBootInputs};
+
+    let (_dir, first_sha, root) = init_git_repo_with_file("main.rs", "fn main() {}");
+
+    let handle = Arc::new(IndexHandle {
+        id: IndexId::new("ts-summary-uptodate"),
+        indexer: Arc::new(RwLock::new(crate::core::CodeIndexer::new(
+            "ts-summary-uptodate",
+            &root,
+        ))),
+        root_path: root.clone(),
+        include_paths: vec![],
+        exclude_globs: vec![],
+        extensions: vec![],
+        domain_terms: vec![],
+        include_docs: true,
+        respect_gitignore: true,
+        extra_skip_dirs: vec![],
+        data_file_max_bytes: 0,
+        path_filter: vec![],
+        context_embedding: Arc::new(RwLock::new(None)),
+        context_summary: Arc::new(RwLock::new(None)),
+        indexed_head_sha: Arc::new(RwLock::new(Some(first_sha.clone()))),
+        last_indexed_at: Arc::new(RwLock::new(None)),
+        lexical_only: false,
+        skip_kg: false,
+        defer_embed: false,
+        stages: Arc::new(RwLock::new(derive_warm_boot_stages(WarmBootInputs {
+            chunk_count: 0,
+            hnsw_snapshot_ready: false,
+            graph_node_count: 0,
+            lexical_only: false,
+            skip_kg: false,
+            corpus_open_failed: false,
+        }))),
+        search_pressure: Arc::new(tokio::sync::Notify::new()),
+        walk_diagnostics: Arc::new(RwLock::new(WalkDiagnostics::default())),
+    });
+
+    let summary = Arc::new(std::sync::Mutex::new(ReconcileSummary::default()));
+    reconcile_one_index(Arc::clone(&handle), Arc::clone(&summary)).await;
+
+    let s = summary.lock().expect("summary lock");
+    assert_eq!(
+        s.up_to_date, 1,
+        "up-to-date index must increment up_to_date"
+    );
+    assert_eq!(s.delta_reindexed, 0);
+    assert_eq!(s.fell_back_to_full, 0);
 }

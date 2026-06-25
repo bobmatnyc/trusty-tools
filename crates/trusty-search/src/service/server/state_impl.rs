@@ -84,6 +84,10 @@ impl SearchAppState {
             // Issue #1621: empty until indexes register; populated by the
             // warm-boot restore + `POST /indexes` paths.
             watcher_manager: crate::service::watcher_manager::WatcherManager::new(),
+            // Issue #1672: zeroed summary; populated by reconcile_stale_indexes.
+            reconcile_summary: Arc::new(std::sync::Mutex::new(
+                crate::service::server::state::ReconcileSummary::default(),
+            )),
         }
     }
 

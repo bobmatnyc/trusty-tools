@@ -11085,6 +11085,7 @@ dependencies = [
  "dirs 5.0.1",
  "dotenvy",
  "eventsource-stream",
+ "filetime",
  "fs4 0.8.4",
  "futures",
  "futures-util",
