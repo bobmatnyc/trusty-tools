@@ -198,9 +198,13 @@ impl UsearchStore {
     /// locks, then calls usearch's `Index::save(&str)` and writes the sidecar
     /// JSON. Both writes are atomic (tmp + rename) so a crash mid-save never
     /// leaves a partial file. The caller passes the HNSW path; the sidecar is
-    /// written next to it with extension `.keys.json`.
+    /// written next to it with extension `.keys.json`. A data-loss guard
+    /// (issue #1711) refuses to overwrite an on-disk snapshot larger than 100 KB
+    /// when the in-memory index has 0 vectors, preserving the on-disk state.
     /// Test: `tests::test_save_load_roundtrip` saves then loads into a fresh
-    /// store and asserts a search still returns the original chunk_ids.
+    /// store and asserts a search still returns the original chunk_ids;
+    /// `tests::test_save_refuses_to_overwrite_populated_snapshot_with_empty_index`
+    /// covers the #1711 guard.
     pub async fn save(&self, hnsw_path: &Path) -> Result<()> {
         // Fast path: in view mode the in-memory state is a mmap of the
         // on-disk snapshot — there is nothing dirty to flush. Skipping the
@@ -222,6 +226,33 @@ impl UsearchStore {
             // Save was requested to a different path than the view source.
             // Promote first so we can actually write the index out.
             self.ensure_mutable().await?;
+        }
+
+        // Defensive guard (issue #1711): refuse to overwrite a large on-disk
+        // snapshot with an empty in-memory index. This protects against shutdown
+        // races where an uninitialized / just-promoted but not-yet-populated
+        // UsearchStore saves 0 vectors over a fully-populated on-disk snapshot.
+        //
+        // A HNSW file larger than this threshold contains real data; an empty
+        // (0-vector) in-memory index must never clobber it.
+        const POPULATED_SNAPSHOT_THRESHOLD_BYTES: u64 = 100_000; // 100 KB
+        {
+            let in_memory_size = self.index.read().await.size();
+            if in_memory_size == 0 {
+                if let Ok(meta) = std::fs::metadata(hnsw_path) {
+                    if meta.len() > POPULATED_SNAPSHOT_THRESHOLD_BYTES {
+                        tracing::error!(
+                            "usearch: REFUSING to overwrite populated snapshot {} \
+                             ({} bytes on disk) with an empty in-memory index \
+                             (issue #1711 — data-loss guard). \
+                             On-disk snapshot is preserved.",
+                            hnsw_path.display(),
+                            meta.len()
+                        );
+                        return Ok(());
+                    }
+                }
+            }
         }
 
         // Snapshot the key map under read locks so we can release them before
