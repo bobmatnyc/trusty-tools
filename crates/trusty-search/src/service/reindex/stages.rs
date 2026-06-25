@@ -39,7 +39,7 @@ pub(super) const REINDEX_PROGRESS_TTL_SECS: u64 = 60;
 /// timestamps so external dashboards can compute stage durations without
 /// inferring them from event ordering. Centralising the formatter keeps
 /// the timestamp shape consistent across every transition.
-pub(crate) fn now_rfc3339() -> String {
+pub(super) fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339()
 }
 

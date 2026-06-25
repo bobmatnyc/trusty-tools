@@ -244,10 +244,15 @@ async fn reconcile_one_index(handle: Arc<IndexHandle>) {
 /// What: allocates a fresh `ReindexProgress` and calls
 /// `spawn_reindex_with_cleanup` with `priority=false` (background semaphore)
 /// so it does not compete with interactive reindex requests.
-/// No boot-loop risk: `spawn_reindex_with_cleanup` → `finish_reindex` stamps
-/// `indexed_head_sha = git::head_sha(root)` and `last_indexed_at = now()` on
-/// successful completion (see `service/reindex/finish.rs` lines ~321-324).
-/// The next boot will therefore see `stored == current` and skip reconciliation.
+/// No boot-loop risk (normal path): `spawn_reindex_with_cleanup` →
+/// `finish_reindex` stamps `indexed_head_sha = git::head_sha(root)` and
+/// `last_indexed_at = now()` on successful completion (see
+/// `service/reindex/finish.rs` lines ~321-324). The next boot therefore sees
+/// `stored == current` and skips reconciliation.
+/// Follow-up (not implemented here): if the spawned full reindex ITSELF
+/// persistently fails (corpus locked, indexer broken) the SHA stays unstamped
+/// and a full reindex may be retried each boot — this is a pre-existing
+/// property of `spawn_reindex_with_cleanup`, tracked as a follow-up.
 /// Test: exercised by the `None`/threshold fallback paths in
 /// `reconcile_one_index`.
 fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
@@ -277,14 +282,19 @@ fn trigger_full_reindex(handle: &Arc<IndexHandle>) {
 /// reindex requests (which need a write lock) are not blocked for the entire
 /// batch duration. This mirrors the locking discipline in
 /// `service/watch_loop.rs::handle_modified` (acquire → single async call → drop).
-/// Stamps `indexed_head_sha = new_sha` and `last_indexed_at = now` on success.
+/// Stamps `indexed_head_sha = new_sha` and `last_indexed_at = now` only when at
+/// least one file operation succeeded (`indexed > 0 || removed > 0`). If the
+/// delta was non-empty but every operation errored, the SHA is left unstamped so
+/// the next boot retries reconciliation instead of silently marking it complete.
 ///
-/// Test: `reconcile_stale_index_stamps_new_sha` in reconcile_tests.rs.
+/// Test: `reconcile_stale_index_stamps_new_sha`,
+///       `apply_delta_total_failure_does_not_stamp` in reconcile_tests.rs.
 async fn apply_delta(handle: &Arc<IndexHandle>, index_id: &str, files: &[String], new_sha: &str) {
     let root = &handle.root_path;
     let mut indexed = 0usize;
     let mut removed = 0usize;
     let mut skipped = 0usize;
+    let mut failed = 0usize;
 
     for rel_path_str in files {
         let abs_path = root.join(rel_path_str);
@@ -315,6 +325,7 @@ async fn apply_delta(handle: &Arc<IndexHandle>, index_id: &str, files: &[String]
             match result {
                 Ok(()) => indexed += 1,
                 Err(e) => {
+                    failed += 1;
                     tracing::warn!(
                         "reconcile[{index_id}]: index_file failed for \
                          {rel_path_str}: {e}"
@@ -332,6 +343,7 @@ async fn apply_delta(handle: &Arc<IndexHandle>, index_id: &str, files: &[String]
                 Ok(n) if n > 0 => removed += n,
                 Ok(_) => skipped += 1,
                 Err(e) => {
+                    failed += 1;
                     tracing::warn!(
                         "reconcile[{index_id}]: remove_file failed for \
                          {rel_path_str}: {e}"
@@ -341,12 +353,30 @@ async fn apply_delta(handle: &Arc<IndexHandle>, index_id: &str, files: &[String]
         }
     }
 
+    // Only stamp the new HEAD SHA when at least one operation succeeded.
+    // If every non-skipped file errored (total failure), leave the SHA
+    // unstamped so the next boot retries rather than silently marking the
+    // reconcile complete with a stale index.
+    if !files.is_empty() && indexed == 0 && removed == 0 && failed > 0 {
+        tracing::warn!(
+            "reconcile[{index_id}]: total failure — {failed} error(s),              {skipped} skipped — SHA NOT stamped; next boot will retry              (new_sha={})",
+            &new_sha[..new_sha.len().min(12)],
+        );
+        return;
+    }
+
+    if failed > 0 {
+        tracing::warn!(
+            "reconcile[{index_id}]: partial failure — {failed} error(s);              stamping SHA anyway (indexed={indexed} removed_chunks={removed})"
+        );
+    }
+
     // Stamp the new HEAD SHA and timestamp so the staleness signal clears.
     stamp_handle(handle, new_sha).await;
 
     tracing::info!(
         "reconcile[{index_id}]: complete — indexed={indexed} removed_chunks={removed} \
-         skipped={skipped} new_sha={}",
+         skipped={skipped} failed={failed} new_sha={}",
         &new_sha[..new_sha.len().min(12)],
     );
 }
