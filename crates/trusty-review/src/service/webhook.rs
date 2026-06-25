@@ -288,6 +288,7 @@ pub async fn handle_github_webhook(
             trigger,
             run_mode: RunMode::Serve,
             allow_posting: true,
+            caller_context: crate::pipeline::runner::CallerContext::default(),
         };
 
         let result = run_review(&state_clone.config, input, deps).await;

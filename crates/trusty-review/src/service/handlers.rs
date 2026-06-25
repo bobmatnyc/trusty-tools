@@ -231,9 +231,16 @@ pub struct StatusResponse {
 /// to review; optional `local_diff` allows direct diff text injection (useful
 /// for CI pipelines that have already fetched the diff).
 /// What: `owner`/`repo`/`pr` identify a GitHub PR; `local_diff_text` is an
-/// alternative to GitHub fetch (raw unified-diff string).
-/// Test: `review_endpoint_with_fake_deps_returns_result`.
-#[derive(Debug, Deserialize)]
+/// alternative to GitHub fetch (raw unified-diff string).  `pr_description`,
+/// `pr_discussion`, and `referenced_code` are OPTIONAL caller-supplied context
+/// (#1618): they let a caller hand the reviewer/verifier the PR prose, the human
+/// review/issue discussion (author rationale), and any related/referenced source
+/// the diff depends on.  All three are most important on the `local_diff_text`
+/// path, where there is NO GitHub fetch, so the caller is the only source of this
+/// context.  They are `Option`, default `None`, so existing callers are unaffected.
+/// Test: `review_request_deserializes_without_optional_context`,
+/// `review_request_deserializes_with_optional_context`.
+#[derive(Debug, Default, Deserialize)]
 pub struct ReviewRequest {
     /// GitHub organisation/user (required unless `local_diff_text` is set).
     pub owner: Option<String>,
@@ -243,6 +250,23 @@ pub struct ReviewRequest {
     pub pr: Option<u64>,
     /// Raw unified-diff text (alternative to GitHub fetch; always dry-run).
     pub local_diff_text: Option<String>,
+    /// Caller-supplied PR body/description prose (#1618).  Rendered to the
+    /// reviewer as a `## PR Description` section and passed to the verifier as
+    /// author rationale.  On the local-diff path this is the only source of the
+    /// PR description (no GitHub fetch).
+    #[serde(default)]
+    pub pr_description: Option<String>,
+    /// Caller-supplied, concatenated human review/issue comments — the author's
+    /// rationale (#1618).  Rendered to the reviewer as a `## PR Discussion /
+    /// Author Rationale` section and passed to the verifier so it can refute a
+    /// finding the author has already empirically addressed.
+    #[serde(default)]
+    pub pr_discussion: Option<String>,
+    /// Caller-supplied referenced/related code or domain context the diff depends
+    /// on (#1618), e.g. an upstream source/contract file.  Rendered to the
+    /// reviewer as a `## Referenced Code` section.
+    #[serde(default)]
+    pub referenced_code: Option<String>,
 }
 
 // ─── Status computation ───────────────────────────────────────────────────────
@@ -414,6 +438,14 @@ pub async fn handle_review(
         trigger: TriggerDecision::ForceDryRun,
         run_mode: RunMode::Serve,
         allow_posting: false,
+        // Thread caller-supplied PR context (#1618) into the runner.  On the
+        // local-diff path this is the only source of PR description / discussion /
+        // referenced code (no GitHub fetch).
+        caller_context: crate::pipeline::runner::CallerContext {
+            pr_description: req.pr_description.clone(),
+            pr_discussion: req.pr_discussion.clone(),
+            referenced_code: req.referenced_code.clone(),
+        },
     };
 
     state.in_flight.fetch_add(1, Ordering::Relaxed);

@@ -293,6 +293,7 @@ async fn run_review_with_fake_provider_approves() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -326,6 +327,7 @@ async fn run_review_request_changes_parsed_correctly() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::request_changes()), None);
 
@@ -347,6 +349,7 @@ async fn run_review_fail_safe_on_llm_error() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::errors("simulated transport error")), None);
 
@@ -379,6 +382,7 @@ async fn run_review_truncated_output_is_unknown() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::truncated_at_ceiling()), None);
 
@@ -444,6 +448,7 @@ async fn run_review_oversized_single_hunk_fails_closed_to_unknown() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     // FakeLlm would APPROVE the chunk if it were ever consulted — proving the
     // backstop fires (the chunk is failed-closed before any partial APPROVE).
@@ -491,6 +496,7 @@ async fn run_review_under_cap_diff_is_not_flagged_truncated() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -679,6 +685,7 @@ async fn run_review_search_down_skips_when_required() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()), // would APPROVE if ever consulted
@@ -726,6 +733,7 @@ async fn run_review_analyze_down_skips_when_required() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()),
@@ -764,6 +772,7 @@ async fn run_review_search_down_degraded_when_optout() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()),
@@ -807,6 +816,7 @@ async fn run_review_both_healthy_completes_authoritative() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -840,6 +850,7 @@ async fn run_review_local_diff_skips_github() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -861,6 +872,7 @@ async fn run_review_missing_diff_file_sets_error() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ReviewDeps {
         llm: Arc::new(FakeLlm::approves()),
@@ -895,6 +907,7 @@ async fn run_review_local_diff_is_dry_run_and_not_posted() {
         trigger: TriggerDecision::ForceLive, // would post if GitHub-sourced
         run_mode: RunMode::Serve,
         allow_posting: true,
+        caller_context: CallerContext::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -922,6 +935,7 @@ async fn run_review_writes_dry_run_log_on_log_only_path() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
 
@@ -952,6 +966,7 @@ async fn run_review_verification_refutes_and_relaxes_verdict() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ready_deps(
         Arc::new(FakeLlm::request_changes()), // 1 medium finding → REQUEST_CHANGES
@@ -994,6 +1009,7 @@ async fn run_review_verification_confirms_and_preserves_verdict() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ready_deps(
         Arc::new(FakeLlm::request_changes()),
@@ -1026,6 +1042,7 @@ async fn run_review_verification_disabled_skips_round() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     // A REFUTED verifier is wired in but must NOT be consulted when disabled.
     let deps = ready_deps(
@@ -1095,6 +1112,7 @@ async fn envelope_grade_tracks_verdict_after_verification_relaxation_1486() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ready_deps(
         Arc::new(FakeLlm {
@@ -1162,6 +1180,7 @@ async fn envelope_grade_stays_block_when_high_effort_confirmed_1486() {
         trigger: TriggerDecision::None,
         run_mode: RunMode::Cli,
         allow_posting: false,
+        caller_context: CallerContext::default(),
     };
     let deps = ready_deps(
         Arc::new(FakeLlm {
@@ -1229,4 +1248,47 @@ diff --git a/src/db.rs b/src/db.rs
     );
     assert_eq!(result.inline_comments[0].path, "src/db.rs");
     assert_eq!(result.inline_comments[0].line, 2);
+}
+
+/// `build_author_rationale` returns None when neither input is present (#1618).
+///
+/// Why: with no caller context the verifier prompt must be unchanged.
+#[test]
+fn build_author_rationale_none_when_empty() {
+    use crate::pipeline::runner_helpers::build_author_rationale;
+    assert!(build_author_rationale(None, None).is_none());
+    // Whitespace-only inputs are treated as absent.
+    assert!(build_author_rationale(Some("  "), Some("\n\t")).is_none());
+}
+
+/// `build_author_rationale` folds description + discussion under headings (#1618).
+///
+/// Why: the verifier needs the author's words under clear labels; the combined
+/// block is what `maybe_verify` passes through.
+#[test]
+fn build_author_rationale_combines_present_fields() {
+    use crate::pipeline::runner_helpers::build_author_rationale;
+    let out = build_author_rationale(Some("Adds retry guard."), Some("Checked the source."))
+        .expect("present fields yield Some");
+    assert!(out.contains("## PR Description"));
+    assert!(out.contains("Adds retry guard."));
+    assert!(out.contains("## PR Discussion / Author Rationale"));
+    assert!(out.contains("Checked the source."));
+}
+
+/// `build_author_rationale` includes only the present field (#1618).
+///
+/// Why: a caller may supply just the discussion (or just the description); the
+/// block must contain only what was given, with no empty heading for the other.
+#[test]
+fn build_author_rationale_single_field_only() {
+    use crate::pipeline::runner_helpers::build_author_rationale;
+    let only_disc = build_author_rationale(None, Some("Author checked the data source."))
+        .expect("discussion present yields Some");
+    assert!(only_disc.contains("## PR Discussion / Author Rationale"));
+    assert!(only_disc.contains("Author checked the data source."));
+    assert!(
+        !only_disc.contains("## PR Description"),
+        "absent description must not render a heading"
+    );
 }

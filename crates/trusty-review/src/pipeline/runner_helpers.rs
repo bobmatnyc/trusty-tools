@@ -31,6 +31,43 @@ use crate::{
 
 use super::runner::{ReviewDeps, ReviewInput};
 
+/// Combine caller-supplied PR description + discussion into a single author-
+/// rationale block for the adversarial verifier (#1618).
+///
+/// Why: the verifier can refute a finding the author has already empirically
+/// addressed (e.g. "checked the data source; no values exceed X; contract owner
+/// agreed"), but only if it sees the author's own words.  The reviewer renders
+/// description and discussion as separate sections; the verifier just needs the
+/// combined prose as context, so we fold them into one labelled block here.
+/// What: returns `None` when BOTH inputs are absent/blank (verifier prompt stays
+/// unchanged for existing callers); otherwise returns the present pieces joined
+/// under `## PR Description` / `## PR Discussion / Author Rationale` sub-headings.
+/// Provider-agnostic — just the caller's free-form prose.
+/// Test: `build_author_rationale_*` (runner_tests.rs) and
+/// `verify_request_includes_author_rationale` (verify_prompt_tests.rs).
+pub(super) fn build_author_rationale(
+    pr_description: Option<&str>,
+    pr_discussion: Option<&str>,
+) -> Option<String> {
+    let desc = pr_description.map(str::trim).filter(|t| !t.is_empty());
+    let disc = pr_discussion.map(str::trim).filter(|t| !t.is_empty());
+    if desc.is_none() && disc.is_none() {
+        return None;
+    }
+    let mut out = String::new();
+    if let Some(d) = desc {
+        out.push_str("## PR Description\n\n");
+        out.push_str(d);
+        out.push_str("\n\n");
+    }
+    if let Some(d) = disc {
+        out.push_str("## PR Discussion / Author Rationale\n\n");
+        out.push_str(d);
+        out.push('\n');
+    }
+    Some(out.trim_end().to_string())
+}
+
 /// Derive (verdict, floor_grade, original_llm_grade) from a `ParsedReview`.
 ///
 /// Why: extracted to keep `run_review` under the line cap and make it testable.

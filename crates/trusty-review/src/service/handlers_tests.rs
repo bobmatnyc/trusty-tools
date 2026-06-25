@@ -170,6 +170,57 @@ fn test_state_with_failing_search() -> AppState {
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
+/// `ReviewRequest` deserializes from a body WITHOUT the optional context fields
+/// (#1618 back-compat).
+///
+/// Why: existing callers send only owner/repo/pr (or local_diff_text); adding the
+/// new `#[serde(default)]` Option fields must not break them — the missing keys
+/// default to None.
+#[test]
+fn review_request_deserializes_without_optional_context() {
+    let body = r#"{"owner":"acme","repo":"backend","pr":42}"#;
+    let req: ReviewRequest = serde_json::from_str(body).expect("legacy body must deserialize");
+    assert_eq!(req.owner.as_deref(), Some("acme"));
+    assert_eq!(req.pr, Some(42));
+    assert!(
+        req.pr_description.is_none(),
+        "pr_description defaults to None"
+    );
+    assert!(
+        req.pr_discussion.is_none(),
+        "pr_discussion defaults to None"
+    );
+    assert!(
+        req.referenced_code.is_none(),
+        "referenced_code defaults to None"
+    );
+}
+
+/// `ReviewRequest` deserializes WITH the optional context fields (#1618).
+///
+/// Why: the new fields must round-trip from the wire so callers can supply PR
+/// description, discussion, and referenced code under exactly these names.
+#[test]
+fn review_request_deserializes_with_optional_context() {
+    let body = r#"{
+        "local_diff_text": "+fn x() {}\n",
+        "pr_description": "Adds a retry guard.",
+        "pr_discussion": "Author: checked the source; no values exceed the cap.",
+        "referenced_code": "pub const CAP: u32 = 100;"
+    }"#;
+    let req: ReviewRequest =
+        serde_json::from_str(body).expect("body with context must deserialize");
+    assert_eq!(req.pr_description.as_deref(), Some("Adds a retry guard."));
+    assert_eq!(
+        req.pr_discussion.as_deref(),
+        Some("Author: checked the source; no values exceed the cap.")
+    );
+    assert_eq!(
+        req.referenced_code.as_deref(),
+        Some("pub const CAP: u32 = 100;")
+    );
+}
+
 #[test]
 fn resolve_diff_source_requires_owner_repo_pr() {
     use super::resolve_diff_source;
@@ -178,6 +229,7 @@ fn resolve_diff_source_requires_owner_repo_pr() {
         repo: None,
         pr: None,
         local_diff_text: None,
+        ..Default::default()
     };
     let result = resolve_diff_source(&req);
     assert!(
@@ -194,6 +246,7 @@ fn resolve_diff_source_github_all_present() {
         repo: Some("backend".to_string()),
         pr: Some(42),
         local_diff_text: None,
+        ..Default::default()
     };
     let source = resolve_diff_source(&req).expect("should succeed");
     match source {
@@ -216,6 +269,7 @@ fn resolve_diff_source_local_diff_text() {
         repo: None,
         pr: None,
         local_diff_text: Some("+fn hello() {}\n".to_string()),
+        ..Default::default()
     };
     let source = resolve_diff_source(&req).expect("local_diff_text should succeed");
     assert!(
@@ -258,6 +312,7 @@ async fn review_handler_bad_request_missing_fields() {
         repo: None,
         pr: None,
         local_diff_text: None,
+        ..Default::default()
     };
     let response = handle_review(State(state), Json(req)).await;
     let resp: axum::response::Response = response.into_response();

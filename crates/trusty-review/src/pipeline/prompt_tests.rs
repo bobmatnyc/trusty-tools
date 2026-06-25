@@ -164,6 +164,98 @@ fn build_review_prompt_includes_diff() {
     assert!((req.temperature - REVIEWER_TEMPERATURE).abs() < f32::EPSILON);
 }
 
+/// Caller-supplied PR context (#1618) appears in the reviewer user message under
+/// the agreed section headings when provided.
+///
+/// Why: the reviewer must SEE the PR description, author rationale, and referenced
+/// code so it can judge the diff against the author's intent — especially on the
+/// local-diff path where there is no GitHub fetch.
+/// What: builds a context with all three caller fields set, asserts each heading
+/// and its body text appear in `messages[0].content`.
+#[test]
+fn prompt_includes_caller_context() {
+    let context = ReviewContext {
+        pr_description: Some("Adds a retry guard around the emitter.".to_string()),
+        pr_discussion: Some(
+            "Author: checked the data source; no values exceed the cap.".to_string(),
+        ),
+        referenced_code: Some("pub const CAP: u32 = 100;".to_string()),
+        ..Default::default()
+    };
+    let req = build_review_prompt(
+        "acme",
+        "backend",
+        &sample_meta(),
+        "+fn x() {}",
+        &context,
+        "",
+        "openai/gpt-5.4-mini-20260317",
+        &stock_voice(),
+    );
+    let content = &req.messages[0].content;
+    assert!(
+        content.contains("## PR Description"),
+        "reviewer message must include the PR Description heading"
+    );
+    assert!(
+        content.contains("Adds a retry guard around the emitter."),
+        "reviewer message must include the PR description body"
+    );
+    assert!(
+        content.contains("## PR Discussion / Author Rationale"),
+        "reviewer message must include the PR Discussion heading"
+    );
+    assert!(
+        content.contains("checked the data source"),
+        "reviewer message must include the author rationale body"
+    );
+    assert!(
+        content.contains("## Referenced Code"),
+        "reviewer message must include the Referenced Code heading"
+    );
+    assert!(
+        content.contains("pub const CAP: u32 = 100;"),
+        "reviewer message must include the referenced code body"
+    );
+}
+
+/// Absent caller context (#1618) produces NO empty sections — back-compat.
+///
+/// Why: callers that pass no extra context (the existing behaviour) must get a
+/// reviewer message with none of the new headings, so nothing regresses.
+/// What: builds an empty context, asserts none of the three headings appear and
+/// a whitespace-only field is treated as absent.
+#[test]
+fn prompt_omits_absent_caller_context() {
+    // All None.
+    let mut context = empty_context();
+    // A whitespace-only field must be treated as absent (no empty heading).
+    context.pr_discussion = Some("   \n  ".to_string());
+    let req = build_review_prompt(
+        "acme",
+        "backend",
+        &sample_meta(),
+        "+fn x() {}",
+        &context,
+        "",
+        "openai/gpt-5.4-mini-20260317",
+        &stock_voice(),
+    );
+    let content = &req.messages[0].content;
+    assert!(
+        !content.contains("## PR Description"),
+        "absent PR description must not render a heading"
+    );
+    assert!(
+        !content.contains("## PR Discussion / Author Rationale"),
+        "whitespace-only discussion must not render a heading"
+    );
+    assert!(
+        !content.contains("## Referenced Code"),
+        "absent referenced code must not render a heading"
+    );
+}
+
 #[test]
 fn prompt_includes_context_blocks() {
     use crate::integrations::search_client::SearchResult;
@@ -190,6 +282,7 @@ fn prompt_includes_context_blocks() {
         }],
         apex_results: vec![],
         coverage_contrib: None,
+        ..Default::default()
     };
 
     let req = build_review_prompt(

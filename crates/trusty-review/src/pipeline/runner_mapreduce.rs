@@ -32,7 +32,10 @@ use crate::{
         parser::ParsedReview,
         prompt::{ReviewContext, ReviewPrMeta},
         runner::{ReviewDeps, ReviewInput},
-        runner_helpers::{abort_dry, apply_grade_and_floor, attach_inline_comments, finalize_run},
+        runner_helpers::{
+            abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
+            finalize_run,
+        },
         verify::maybe_verify,
         voice_config::build_voice_config,
     },
@@ -163,7 +166,16 @@ pub(super) async fn run_mapreduce_branch(
     };
 
     let degraded_reason = run.degraded_reason.clone();
-    fold_reduced_into_result(config, deps, &mut result, parsed, &run, synthesis_active).await;
+    fold_reduced_into_result(
+        config,
+        input,
+        deps,
+        &mut result,
+        parsed,
+        &run,
+        synthesis_active,
+    )
+    .await;
 
     // Honest partial-coverage labelling (analogous to the #1638 truncation
     // marker): when some files could not be reviewed the review is non-
@@ -233,6 +245,7 @@ pub(super) async fn run_mapreduce_branch(
 /// Test: covered by the map-reduce runner integration tests.
 async fn fold_reduced_into_result(
     config: &ReviewConfig,
+    input: &ReviewInput,
     deps: &ReviewDeps,
     result: &mut ReviewResult,
     parsed: ParsedReview,
@@ -248,6 +261,10 @@ async fn fold_reduced_into_result(
     //   When the two-tier floor (#1665) changed the verdict, the two grades differ
     //   and downstream telemetry can detect the flooring.  When no floor fired,
     //   both are equal (same behaviour as before #1665).
+    //
+    // Both grades are Option<Grade> (#1474 parity): None for an UNKNOWN verdict.
+    // The synthesis path is always a real verdict (not UNKNOWN), so Some() wraps
+    // the concrete grades to keep the type consistent with apply_grade_and_floor.
     let (final_verdict, final_grade, original_llm_grade) = if synthesis_active {
         // Synthesis path (#1663): verdict is already floored by apply_synthesis_floor.
         // Re-applying derive_verdict_with_grade would wrongly re-add the count
@@ -264,9 +281,14 @@ async fn fold_reduced_into_result(
             .as_deref()
             .and_then(|s| s.parse().ok())
             .unwrap_or(final_grade);
-        (parsed.verdict.clone(), final_grade, pre_floor_grade)
+        (
+            parsed.verdict.clone(),
+            Some(final_grade),
+            Some(pre_floor_grade),
+        )
     } else {
         // Mechanical path: apply the full severity floor via apply_grade_and_floor.
+        // Returns Option<Grade> for each — None when the verdict is UNKNOWN (#1474).
         apply_grade_and_floor(&parsed)
     };
 
@@ -280,19 +302,30 @@ async fn fold_reduced_into_result(
     let mut findings = parsed.findings;
     // Verification round — re-derives the verdict from surviving findings.  The
     // verifier sees the RAW diff so it can check any finding's location.
+    // Pass the caller-supplied PR description + discussion as author rationale
+    // (#1618) so the adversarial verifier can REFUTE a finding the author has
+    // already empirically addressed.  `build_author_rationale` returns None when
+    // neither is present, leaving the verifier prompt unchanged for existing callers.
+    let author_rationale = build_author_rationale(
+        input.caller_context.pr_description.as_deref(),
+        input.caller_context.pr_discussion.as_deref(),
+    );
     result.verdict = maybe_verify(
         config,
         deps.verifier.as_ref(),
         &run.raw_diff,
         final_verdict,
         &mut findings,
+        author_rationale.as_deref(),
     )
     .await;
     result.findings = findings;
 
     // Envelope grade: clamp the original (pre-floor) grade to the post-
     // verification verdict (closes #1486 parity with the unified path).
-    result.grade = Some(clamp_grade_to_verdict(original_llm_grade, &result.verdict).to_string());
+    // None when UNKNOWN (#1474 parity) — never emits "F" for un-reviewable diffs.
+    result.grade =
+        original_llm_grade.map(|g| clamp_grade_to_verdict(g, &result.verdict).to_string());
 
     // Inline per-line comments from the RAW diff (#1414 parity).
     attach_inline_comments(result, &run.raw_diff);

@@ -52,6 +52,26 @@ pub(super) fn build_user_message(
     }
     msg.push_str("```\n\n");
 
+    // Caller-supplied PR context (#1618): description, discussion (author
+    // rationale), and referenced code.  Each is rendered ONLY when present and
+    // non-empty, so absent fields produce no empty sections.  On the local-diff
+    // path these are the only source of this context (no GitHub fetch).
+    push_prose_section(
+        &mut msg,
+        "## PR Description",
+        context.pr_description.as_deref(),
+    );
+    push_prose_section(
+        &mut msg,
+        "## PR Discussion / Author Rationale",
+        context.pr_discussion.as_deref(),
+    );
+    push_code_section(
+        &mut msg,
+        "## Referenced Code",
+        context.referenced_code.as_deref(),
+    );
+
     // Code search context block.
     if !context.search_results.is_empty() {
         msg.push_str("## Related code (from trusty-search)\n\n");
@@ -162,4 +182,44 @@ pub(super) fn build_user_message(
     );
 
     msg
+}
+
+/// Append a labelled prose section to `msg` only when `body` is present and
+/// non-empty after trimming (#1618).
+///
+/// Why: caller-supplied context (PR description / discussion) must render as a
+/// clearly-labelled section the model can attribute to the author — and an absent
+/// or whitespace-only field must produce NO section (no empty headings).
+/// What: writes `<heading>\n\n<trimmed body>\n\n` when `body` has content;
+/// otherwise a no-op.
+/// Test: `prompt_includes_caller_context`, `prompt_omits_absent_caller_context`.
+fn push_prose_section(msg: &mut String, heading: &str, body: Option<&str>) {
+    let Some(text) = body.map(str::trim).filter(|t| !t.is_empty()) else {
+        return;
+    };
+    msg.push_str(heading);
+    msg.push_str("\n\n");
+    msg.push_str(text);
+    msg.push_str("\n\n");
+}
+
+/// Append a labelled fenced-code section to `msg` only when `body` is present and
+/// non-empty after trimming (#1618).
+///
+/// Why: caller-supplied referenced code reads best inside a code fence so the
+/// model treats it as source rather than prose; an absent field renders nothing.
+/// What: writes `<heading>\n\n```\n<trimmed body>\n```\n\n` when `body` has
+/// content; otherwise a no-op.
+/// Test: `prompt_includes_caller_context`, `prompt_omits_absent_caller_context`.
+fn push_code_section(msg: &mut String, heading: &str, body: Option<&str>) {
+    let Some(text) = body.map(str::trim).filter(|t| !t.is_empty()) else {
+        return;
+    };
+    msg.push_str(heading);
+    msg.push_str("\n\n```\n");
+    msg.push_str(text);
+    if !text.ends_with('\n') {
+        msg.push('\n');
+    }
+    msg.push_str("```\n\n");
 }
