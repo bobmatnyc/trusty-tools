@@ -204,6 +204,87 @@ mod tests {
     }
 
     #[test]
+    fn drawer_completed_at_round_trips_through_redb() {
+        // spec-001: a Task drawer's type and optional completed_at timestamp
+        // must survive a write/read through the new on-disk field.
+        use crate::memory_core::palace::DrawerType;
+        let (_d, kg) = open_kg();
+        let mut drawer =
+            Drawer::new(Uuid::new_v4(), "ship v2 milestone").with_type(DrawerType::Task);
+        let done = chrono::Utc::now();
+        drawer.completed_at = Some(done);
+        kg.upsert_drawer(&drawer).unwrap();
+
+        let loaded = kg.load_drawers().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].drawer_type, DrawerType::Task);
+        assert!(loaded[0].expires_at.is_none(), "tasks never expire");
+        let got = loaded[0].completed_at.expect("completed_at persisted");
+        // redb stores millisecond precision; compare at that granularity.
+        assert_eq!(got.timestamp_millis(), done.timestamp_millis());
+    }
+
+    #[test]
+    fn pre_task_drawer_row_migrates_completed_at_to_none() {
+        // spec-001 migration regression: a drawer row written *before* the
+        // `completed_at_ms` field existed (the #61-era `PreTaskDrawerRecord`
+        // layout) must still decode. Postcard is positional, so decoding such
+        // bytes as the current `DrawerRecord` fails and the reader falls back
+        // through `PreTaskDrawerRecord` — see the fallback chain in
+        // `read_ops.rs::load_drawers`. The migrated row must keep its
+        // drawer_type / expires_at and default `completed_at` to `None`.
+        use crate::memory_core::palace::DrawerType;
+        use crate::memory_core::store::kg_store::{DRAWERS, encode_value};
+        use redb::Database;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kg.redb");
+        let id = Uuid::new_v4();
+
+        // Write the legacy-shaped bytes directly, then drop the raw handle so
+        // `KgStoreRedb::open` can acquire its own (redb forbids two in-process
+        // handles to one file).
+        {
+            let old = super::super::types::PreTaskDrawerRecord {
+                room_id: Uuid::new_v4().to_string(),
+                content: "pre-spec-001 task row".to_string(),
+                importance: 0.6,
+                tags: vec!["legacy".to_string()],
+                source_file: None,
+                created_at_ms: 1_700_000_000_000,
+                drawer_type: Some("Task".to_string()),
+                expires_at_ms: None,
+            };
+            let bytes = encode_value(&old).expect("encode legacy record");
+            let db = Database::create(&path).expect("create redb");
+            let wtx = db.begin_write().expect("begin write");
+            {
+                let mut table = wtx.open_table(DRAWERS).expect("open drawers");
+                table
+                    .insert(id.as_bytes().as_slice(), bytes.as_slice())
+                    .expect("insert legacy drawer");
+            }
+            wtx.commit().expect("commit");
+        }
+
+        let kg = KgStoreRedb::open(&path).expect("reopen via KgStoreRedb");
+        let loaded = kg.load_drawers().expect("load drawers");
+        assert_eq!(loaded.len(), 1, "legacy row must decode, not be skipped");
+        assert_eq!(loaded[0].id, id);
+        assert_eq!(loaded[0].content, "pre-spec-001 task row");
+        assert_eq!(
+            loaded[0].drawer_type,
+            DrawerType::Task,
+            "drawer_type preserved through migration"
+        );
+        assert!(loaded[0].expires_at.is_none());
+        assert!(
+            loaded[0].completed_at.is_none(),
+            "missing completed_at_ms field must migrate to None"
+        );
+    }
+
+    #[test]
     fn load_drawer_ids_matches_load_drawers() {
         let (_d, kg) = open_kg();
         let room = Uuid::new_v4();

@@ -92,8 +92,9 @@ async fn tools_list_returns_all_tools() {
     // Issue #99 added `memory_send_message`; issue #180 added
     // `palace_delete`; the #180 follow-up adds `palace_update` on top
     // of the 22-tool baseline; issue #537 adds `upgrade`;
-    // issue #1104 adds `console_metrics`.
-    assert_eq!(tools.len(), 25);
+    // issue #1104 adds `console_metrics`; spec-001 adds the four
+    // `chat_session_*` tools and `dream_consolidate_room`.
+    assert_eq!(tools.len(), 30);
 }
 
 #[tokio::test]

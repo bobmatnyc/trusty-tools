@@ -623,6 +623,95 @@ async fn dream_cycle_semantic_consolidation_with_mock() {
     assert!(has_canonical, "canonical drawer must be present");
 }
 
+/// Why: spec-001 — `DrawerType::Task` drawers must never be fed to the
+/// semantic consolidator, so they can never be superseded by a canonical
+/// summary. This guards the snapshot filter in `semantic_consolidation_pass`.
+/// What: plants two Task drawers, injects a MockInference that WOULD merge any
+/// drawers it is handed, runs a dream cycle, and asserts the consolidator was
+/// never called (call_count == 0), no canonical drawer was created, and both
+/// Task drawers survive unchanged.
+/// Test: This test itself.
+#[tokio::test]
+async fn dream_cycle_semantic_consolidation_skips_task_drawers() {
+    use crate::memory_core::palace::DrawerType;
+    use crate::memory_core::retrieval::RememberOptions;
+    use crate::memory_core::semantic_consolidation::{
+        ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+    };
+
+    let handle = open_test_handle("dream-semantic-task-skip").await;
+
+    let task_opts = || RememberOptions {
+        force: true,
+        classify_as: Some(DrawerType::Task),
+        ..RememberOptions::default()
+    };
+    let id1 = handle
+        .remember_with_options(
+            "Goal: migrate the chat store to redb".into(),
+            RoomType::Planning,
+            vec![],
+            0.7,
+            task_opts(),
+        )
+        .await
+        .unwrap();
+    let id2 = handle
+        .remember_with_options(
+            "Milestone: ship the MCP chat-session tools".into(),
+            RoomType::Planning,
+            vec![],
+            0.6,
+            task_opts(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(handle.drawers.read().len(), 2);
+
+    // A mock that would merge anything it is handed — it must never be called.
+    let actions = vec![ConsolidationAction::Merge {
+        canonical_content: "tasks should NOT be merged".to_string(),
+        superseded_ids: vec![id1, id2],
+    }];
+    let mock = std::sync::Arc::new(MockInference::new(actions));
+    let call_count = mock.call_count.clone();
+    let cfg = SemanticConsolidationConfig {
+        enabled: true,
+        ..Default::default()
+    };
+    let consolidator = std::sync::Arc::new(SemanticConsolidator::new(mock, cfg));
+
+    let dreamer = Dreamer::with_consolidator(
+        DreamConfig {
+            dedup_threshold: 0.999,
+            semantic: SemanticConsolidationConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            ..DreamConfig::default()
+        },
+        consolidator,
+    );
+
+    let stats = dreamer.dream_cycle(&handle).await.unwrap();
+
+    assert_eq!(
+        stats.semantically_consolidated, 0,
+        "Task drawers must not be consolidated"
+    );
+    assert_eq!(
+        call_count.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "consolidator must never be called when only Task drawers exist"
+    );
+    let ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert!(
+        ids.contains(&id1) && ids.contains(&id2),
+        "both tasks survive"
+    );
+    assert_eq!(handle.drawers.read().len(), 2, "no canonical drawer added");
+}
+
 /// Why: When no inference backend is configured, the semantic phase must
 /// silently skip without error and the dream cycle must complete normally
 /// with the same behavior as pre-#87.
@@ -1114,6 +1203,284 @@ async fn dream_cycle_recall_benchmark_disabled() {
     assert_eq!(
         stats.drawers_after, 1,
         "drawers_after must still be counted"
+    );
+}
+
+// ─── spec-001 Phase 3: on-demand room-scoped consolidation ───────────────────
+
+/// Why: `dream_consolidate_room` must scope to a single room — drawers in other
+/// rooms must not even reach the consolidator.
+/// What: seeds two aged Planning drawers, runs `consolidate_scoped` first for
+/// Backend (no aged drawers there) and asserts the consolidator is never called
+/// and nothing changes, then for Planning and asserts the two originals are
+/// consolidated into one summary and evicted.
+/// Test: this function.
+#[tokio::test]
+async fn consolidate_scoped_filters_by_room() {
+    use crate::memory_core::semantic_consolidation::{
+        ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+    };
+    use std::sync::atomic::Ordering;
+
+    let handle = open_test_handle("scoped-room-filter").await;
+    let p1 = handle
+        .remember(
+            "planning note one about the roadmap".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+    let p2 = handle
+        .remember(
+            "planning note two about the roadmap".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+    // Age both past the default 7-day window.
+    {
+        let mut drawers = handle.drawers.write();
+        for d in drawers.iter_mut() {
+            d.created_at = Utc::now() - ChronoDuration::days(30);
+        }
+    }
+
+    let mock = std::sync::Arc::new(MockInference::new(vec![ConsolidationAction::Merge {
+        canonical_content: "roadmap planning summary".to_string(),
+        superseded_ids: vec![p1, p2],
+    }]));
+    let call_count = mock.call_count.clone();
+    let consolidator = std::sync::Arc::new(SemanticConsolidator::new(
+        mock,
+        SemanticConsolidationConfig {
+            enabled: true,
+            ..Default::default()
+        },
+    ));
+    let cfg = DreamConfig::default();
+
+    // Backend has no aged drawers => consolidator never runs, nothing changes.
+    let backend = consolidate_scoped(
+        &handle,
+        &cfg,
+        Some(RoomType::Backend),
+        7,
+        Some(consolidator.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(backend, RoomConsolidationStats::default());
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        0,
+        "wrong room must not consolidate"
+    );
+    assert_eq!(handle.drawers.read().len(), 2);
+
+    // Planning has the two aged drawers => one summary created, both evicted.
+    let planning = consolidate_scoped(
+        &handle,
+        &cfg,
+        Some(RoomType::Planning),
+        7,
+        Some(consolidator),
+    )
+    .await
+    .unwrap();
+    assert_eq!(planning.summary_facts_created, 1);
+    assert_eq!(planning.facts_evicted, 2);
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        1,
+        "consolidator ran once for Planning"
+    );
+    let ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert!(
+        !ids.contains(&p1) && !ids.contains(&p2),
+        "superseded originals evicted"
+    );
+}
+
+/// Why: Task drawers must never be consolidated, even by the on-demand tool.
+/// What: seeds two aged Task drawers, runs `consolidate_scoped` with a mock that
+/// would merge them, and asserts the consolidator is never called and both
+/// tasks survive.
+/// Test: this function.
+#[tokio::test]
+async fn consolidate_scoped_skips_task_drawers() {
+    use crate::memory_core::palace::DrawerType;
+    use crate::memory_core::retrieval::RememberOptions;
+    use crate::memory_core::semantic_consolidation::{
+        ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+    };
+    use std::sync::atomic::Ordering;
+
+    let handle = open_test_handle("scoped-task-skip").await;
+    let task_opts = || RememberOptions {
+        force: true,
+        classify_as: Some(DrawerType::Task),
+        ..RememberOptions::default()
+    };
+    let t1 = handle
+        .remember_with_options(
+            "Goal: keep this forever".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+            task_opts(),
+        )
+        .await
+        .unwrap();
+    let t2 = handle
+        .remember_with_options(
+            "Goal: and this one too".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+            task_opts(),
+        )
+        .await
+        .unwrap();
+    {
+        let mut drawers = handle.drawers.write();
+        for d in drawers.iter_mut() {
+            d.created_at = Utc::now() - ChronoDuration::days(30);
+        }
+    }
+
+    let mock = std::sync::Arc::new(MockInference::new(vec![ConsolidationAction::Merge {
+        canonical_content: "tasks must NOT merge".to_string(),
+        superseded_ids: vec![t1, t2],
+    }]));
+    let call_count = mock.call_count.clone();
+    let consolidator = std::sync::Arc::new(SemanticConsolidator::new(
+        mock,
+        SemanticConsolidationConfig {
+            enabled: true,
+            ..Default::default()
+        },
+    ));
+
+    let stats = consolidate_scoped(
+        &handle,
+        &DreamConfig::default(),
+        None,
+        7,
+        Some(consolidator),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        stats,
+        RoomConsolidationStats::default(),
+        "task-only palace yields no work"
+    );
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        0,
+        "consolidator never sees Task drawers"
+    );
+    let ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert!(ids.contains(&t1) && ids.contains(&t2), "both tasks survive");
+}
+
+/// Why: when no inference backend is configured the tool must no-op cleanly.
+/// What: with the OpenRouter env key removed, default config, and no injected
+/// consolidator, `consolidate_scoped` returns zero counts without error.
+/// Test: this function.
+#[tokio::test]
+async fn consolidate_scoped_no_inference_is_noop() {
+    let _guard = EnvVarGuard::remove("OPENROUTER_API_KEY");
+    let handle = open_test_handle("scoped-no-inference").await;
+    handle
+        .remember("some aged fact".into(), RoomType::Backend, vec![], 0.5)
+        .await
+        .unwrap();
+    let stats = consolidate_scoped(&handle, &DreamConfig::default(), None, 7, None)
+        .await
+        .unwrap();
+    assert_eq!(stats, RoomConsolidationStats::default());
+}
+
+/// Why: `max_age_days <= 0` is a guard value meaning "consolidate nothing".
+/// Regression for the off-by-zero bug where a cutoff of `now` made *every*
+/// drawer — including freshly created ones — eligible, evicting the whole room.
+/// What: seeds two recent (NOT aged) drawers plus a mock consolidator that would
+/// merge them, then calls `consolidate_scoped` with `max_age_days = 0` and a
+/// negative value; asserts zero counts, the consolidator never runs, and both
+/// recent drawers survive.
+/// Test: this function.
+#[tokio::test]
+async fn consolidate_scoped_non_positive_age_is_noop() {
+    use crate::memory_core::semantic_consolidation::{
+        ConsolidationAction, MockInference, SemanticConsolidationConfig, SemanticConsolidator,
+    };
+
+    let handle = open_test_handle("scoped-non-positive-age").await;
+    let r1 = handle
+        .remember(
+            "recent planning note one".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+    let r2 = handle
+        .remember(
+            "recent planning note two".into(),
+            RoomType::Planning,
+            vec![],
+            0.5,
+        )
+        .await
+        .unwrap();
+    // Deliberately leave `created_at` at "now" — these drawers are NOT aged.
+
+    let mock = std::sync::Arc::new(MockInference::new(vec![ConsolidationAction::Merge {
+        canonical_content: "must NOT merge recent drawers".to_string(),
+        superseded_ids: vec![r1, r2],
+    }]));
+    let call_count = mock.call_count.clone();
+    let consolidator = std::sync::Arc::new(SemanticConsolidator::new(
+        mock,
+        SemanticConsolidationConfig {
+            enabled: true,
+            ..Default::default()
+        },
+    ));
+    let cfg = DreamConfig::default();
+
+    for age in [0_i64, -5] {
+        let stats = consolidate_scoped(
+            &handle,
+            &cfg,
+            Some(RoomType::Planning),
+            age,
+            Some(consolidator.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            stats,
+            RoomConsolidationStats::default(),
+            "max_age_days={age} must consolidate/evict nothing"
+        );
+    }
+
+    assert_eq!(
+        call_count.load(Ordering::Relaxed),
+        0,
+        "consolidator must never run for a non-positive age window"
+    );
+    let ids: Vec<Uuid> = handle.drawers.read().iter().map(|d| d.id).collect();
+    assert!(
+        ids.contains(&r1) && ids.contains(&r2),
+        "recent drawers must survive a non-positive age window"
     );
 }
 

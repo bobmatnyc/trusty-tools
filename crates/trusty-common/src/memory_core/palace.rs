@@ -121,6 +121,13 @@ pub enum DrawerType {
     AgentNote,
     /// Git commit message captured by a hook.
     Commit,
+    /// Task / goal / milestone (spec-001). Protected from the dream cycle:
+    /// never evicted (regardless of age or importance) and never consolidated.
+    /// Use for long-lived context an application must re-derive across
+    /// sessions. An optional [`Drawer::completed_at`] marks a task done; once
+    /// set, the drawer becomes eligible for *manual* cleanup but is still never
+    /// auto-evicted.
+    Task,
     /// Legacy / unclassified (the serde default for backward compat).
     #[default]
     Unknown,
@@ -139,8 +146,22 @@ impl DrawerType {
             DrawerType::SessionEvent => "SessionEvent",
             DrawerType::AgentNote => "AgentNote",
             DrawerType::Commit => "Commit",
+            DrawerType::Task => "Task",
             DrawerType::Unknown => "Unknown",
         }
+    }
+
+    /// Whether this drawer type is protected from the dream cycle.
+    ///
+    /// Why (spec-001): `Task` drawers hold goals/checkpoints an application
+    /// must survive history compaction; the dream cycle's eviction and
+    /// consolidation passes consult this so the protection lives in one place
+    /// rather than being re-derived at every call site.
+    /// What: returns `true` only for `DrawerType::Task`.
+    /// Test: `task_drawer_is_protected` in this module; behavioural coverage in
+    /// `tests/memory_palace.rs` and the dream cycle tests.
+    pub fn is_protected(&self) -> bool {
+        matches!(self, DrawerType::Task)
     }
 }
 
@@ -170,6 +191,13 @@ pub struct Drawer {
     /// events default to a 7-day TTL; user facts never expire.
     #[serde(default)]
     pub expires_at: Option<DateTime<Utc>>,
+    /// spec-001: completion timestamp for `DrawerType::Task` drawers. `None`
+    /// for an open task (and for every non-Task drawer). Setting it marks the
+    /// task done so the application can treat it as eligible for manual
+    /// cleanup; it never triggers automatic eviction. Legacy rows decode to
+    /// `None` via `#[serde(default)]`.
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
 }
 
 impl Drawer {
@@ -192,6 +220,7 @@ impl Drawer {
             access_count: 0,
             drawer_type: DrawerType::Unknown,
             expires_at: None,
+            completed_at: None,
         }
     }
 
@@ -263,7 +292,32 @@ mod tests {
         assert_eq!(DrawerType::SessionEvent.as_str(), "SessionEvent");
         assert_eq!(DrawerType::AgentNote.as_str(), "AgentNote");
         assert_eq!(DrawerType::Commit.as_str(), "Commit");
+        assert_eq!(DrawerType::Task.as_str(), "Task");
         assert_eq!(DrawerType::Unknown.as_str(), "Unknown");
+    }
+
+    #[test]
+    fn task_drawer_is_protected() {
+        assert!(DrawerType::Task.is_protected());
+        for t in [
+            DrawerType::UserFact,
+            DrawerType::SessionEvent,
+            DrawerType::AgentNote,
+            DrawerType::Commit,
+            DrawerType::Unknown,
+        ] {
+            assert!(!t.is_protected(), "{t:?} must not be protected");
+        }
+    }
+
+    #[test]
+    fn task_drawer_has_no_default_ttl() {
+        // Task drawers must never auto-expire — `with_type` only sets a TTL for
+        // SessionEvent, so Task falls through with `expires_at == None`.
+        let d = Drawer::new(Uuid::new_v4(), "ship v2").with_type(DrawerType::Task);
+        assert_eq!(d.drawer_type, DrawerType::Task);
+        assert!(d.expires_at.is_none(), "task drawers never expire");
+        assert!(d.completed_at.is_none(), "fresh task is not completed");
     }
 
     #[test]

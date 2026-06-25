@@ -21,5 +21,6 @@ mod tests;
 // ── Public re-exports ────────────────────────────────────────────────────────
 
 pub use config::{DreamConfig, DreamStats, PersistedDreamStats};
+pub use cycle::{RoomConsolidationStats, consolidate_scoped};
 pub use dreamer::Dreamer;
 pub use helpers::extract_keywords;

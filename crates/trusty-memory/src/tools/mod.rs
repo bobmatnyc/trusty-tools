@@ -20,7 +20,9 @@
 //! - `kg_query(palace, subject)`                    -> Vec<Triple>
 
 pub mod bm25;
+pub mod chat_ops;
 pub mod definitions;
+pub mod dream_ops;
 pub mod helpers;
 pub mod kg_ops;
 pub mod memory_ops;
@@ -43,6 +45,11 @@ use crate::AppState;
 use anyhow::Result;
 use serde_json::Value;
 
+use chat_ops::{
+    handle_chat_session_add_turn, handle_chat_session_create, handle_chat_session_get,
+    handle_chat_session_list,
+};
+use dream_ops::handle_dream_consolidate_room;
 use kg_ops::{
     handle_add_alias, handle_discover_aliases, handle_get_prompt_context, handle_kg_assert,
     handle_kg_bootstrap, handle_kg_gaps, handle_kg_query, handle_list_prompt_facts,
@@ -96,6 +103,11 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
         "memory_send_message" => handle_memory_send_message(state, args).await,
         "upgrade" => handle_upgrade_tool(state, args).await,
         "console_metrics" => crate::console_metrics::handle_console_metrics(state, args).await,
+        "chat_session_create" => handle_chat_session_create(state, args).await,
+        "chat_session_add_turn" => handle_chat_session_add_turn(state, args).await,
+        "chat_session_get" => handle_chat_session_get(state, args).await,
+        "chat_session_list" => handle_chat_session_list(state, args).await,
+        "dream_consolidate_room" => handle_dream_consolidate_room(state, args).await,
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }
