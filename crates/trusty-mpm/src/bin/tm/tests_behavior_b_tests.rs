@@ -796,3 +796,118 @@ fn cli_parses_sessctl_list_with_project_and_json() {
         other => panic!("expected sessctl list, got {other:?}"),
     }
 }
+
+// ── Regression tests for #1724 (guided-default fallback pollution guard) ──────
+
+/// Why (#1724): the guided-default fallback MUST NOT deploy framework files
+/// into a GitHub-backed git project's live checkout, even when the daemon is
+/// unreachable. This test locks in that guarantee.
+/// What: creates a temp directory, initialises a git repo inside it, sets a
+/// fake GitHub remote URL, pre-creates a stub base clone (so `ensure_base_clone`
+/// short-circuits without a network call), and calls `fallback_protected`
+/// directly with the daemon set to an unreachable address. Asserts that no
+/// framework files (`.trusty-mpm/`, `CLAUDE.md`, `.mcp.json`, `.claude/`) exist
+/// in the temp directory after the call.
+/// Test: this is the test.
+#[tokio::test]
+async fn guided_fallback_never_pollutes_github_git_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+
+    // Build a minimal git repository at `project` with a fake GitHub remote.
+    // We use `git init` + `git remote add` so `get_origin_url` (which shells
+    // out to `git config --get remote.origin.url`) returns a parseable URL.
+    let git_init_ok = std::process::Command::new("git")
+        .arg("init")
+        .current_dir(project)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !git_init_ok {
+        // git binary unavailable in this environment; skip gracefully.
+        eprintln!(
+            "guided_fallback_never_pollutes_github_git_checkout: git not available, skipping"
+        );
+        return;
+    }
+    let _ = std::process::Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/trusty-ci-nonexistent/no-repo-1724.git",
+        ])
+        .current_dir(project)
+        .status();
+
+    // Pre-create a stub base clone so `ensure_base_clone` returns immediately
+    // (it checks `base/.git` and returns Ok when found), avoiding any real
+    // network call. `create_session_worktree` will fail because the stub is
+    // not a real git repository — the error path is the one we want to test.
+    //
+    // SAFETY: env-var mutation is accepted by the project convention (same
+    // pattern as crates/trusty-mpm/src/core/trusty_tools_config.rs tests).
+    // The test mutates TRUSTY_MPM_REPOS_ROOT to a unique tempdir so it does
+    // not conflict with concurrently-running tests on different paths.
+    let repos_root = tempfile::tempdir().unwrap();
+    let fake_base = repos_root
+        .path()
+        .join("trusty-ci-nonexistent")
+        .join("no-repo-1724");
+    std::fs::create_dir_all(fake_base.join(".git")).unwrap();
+
+    let prev = std::env::var(trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV).ok();
+    unsafe {
+        std::env::set_var(
+            trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV,
+            repos_root.path(),
+        );
+    }
+
+    // Call the protected fallback with an unreachable daemon URL and our fake
+    // git project as the working directory.
+    let client = reqwest::Client::new();
+    let result =
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project).await;
+
+    // Restore the env var regardless of the outcome.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(
+                trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV,
+                v,
+            ),
+            None => {
+                std::env::remove_var(trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV)
+            }
+        }
+    }
+
+    // ── Acceptance criterion (#1724) ─────────────────────────────────────────
+    // None of the framework files that `prepare_session_with_style` writes must
+    // appear inside the live git checkout.
+    assert!(
+        !project.join("CLAUDE.md").exists(),
+        "#1724: CLAUDE.md must NOT be written to the live git checkout"
+    );
+    assert!(
+        !project.join(".mcp.json").exists(),
+        "#1724: .mcp.json must NOT be written to the live git checkout"
+    );
+    assert!(
+        !project.join(".trusty-mpm").exists(),
+        "#1724: .trusty-mpm dir must NOT be created in the live git checkout"
+    );
+    assert!(
+        !project.join(".claude").exists(),
+        "#1724: .claude dir must NOT be created in the live git checkout"
+    );
+
+    // The function must return Err (refused to deploy) rather than silently
+    // falling through to a live-checkout deploy.
+    assert!(
+        result.is_err(),
+        "#1724: fallback must Err rather than deploy to the live checkout; \
+         got Ok which means framework files may have been written"
+    );
+}
