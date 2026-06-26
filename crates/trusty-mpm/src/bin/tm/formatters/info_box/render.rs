@@ -9,6 +9,8 @@
 //! `welcome_panel_omits_commits_when_empty`, `welcome_panel_truncates_subject`,
 //! `welcome_panel_services_up_vs_down`, `welcome_panel_no_checkmark_on_not_detected`.
 
+use unicode_width::UnicodeWidthStr as _;
+
 use super::{DaemonInfo, LOGO, LOGO_COLS, WelcomeData};
 
 // ── Public render entry point ─────────────────────────────────────────────────
@@ -151,14 +153,20 @@ fn format_service_row(name: &str, status: &str) -> String {
 
 // ── String helpers ────────────────────────────────────────────────────────────
 
-/// Estimate display width as Unicode scalar count.
+/// Measure the terminal display width of `s` in columns.
 ///
-/// Why: `str::len()` counts bytes; `.chars().count()` is correct for the
-/// ASCII + block chars used throughout this module.
-/// What: returns `s.chars().count()`.
-/// Test: indirectly by render tests.
+/// Why: `str::len()` counts bytes; `.chars().count()` counts codepoints — both
+/// undercount CJK / wide characters (e.g. `'修'` renders as 2 columns). Without
+/// the correct column count the closing `│` border misaligns and
+/// `truncate_display` cuts one column short per wide char.
+/// What: delegates to `unicode_width::UnicodeWidthStr::width()` which follows
+/// Unicode Standard Annex #11 (East Asian Width), returning 2 for wide chars
+/// and 1 for narrow/ASCII chars.
+/// Test: `display_len_ascii_equals_char_count`,
+/// `display_len_cjk_wider_than_char_count`,
+/// `welcome_panel_cjk_commit_box_alignment`.
 pub(crate) fn display_len(s: &str) -> usize {
-    s.chars().count()
+    s.width()
 }
 
 /// Pad `s` with trailing spaces to `width` display columns.
@@ -176,17 +184,33 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
     }
 }
 
-/// Truncate `s` to at most `max_cols` display columns.
+/// Truncate `s` to at most `max_cols` display columns, appending `…`.
 ///
-/// Why: commit subjects can be very long; truncation keeps panel width sane.
-/// What: iterates chars until `max_cols - 1` are accumulated, then appends
-/// `…` (U+2026) if any chars were cut.
-/// Test: `welcome_panel_truncates_subject`.
+/// Why: commit subjects can be very long; truncation keeps the panel width
+/// sane. Using `chars().take(n)` is wrong for wide (CJK) characters — each
+/// takes 2 columns but only 1 codepoint. This function accumulates column
+/// widths correctly.
+/// What: iterates chars, accumulating `unicode_width` column counts. Stops
+/// before exceeding `max_cols - 1` columns (1 reserved for `…`), then appends
+/// `…` (U+2026). Returns `s` unchanged when it already fits within `max_cols`.
+/// Test: `welcome_panel_truncates_subject`,
+/// `truncate_display_cjk_respects_column_budget`.
 fn truncate_display(s: String, max_cols: usize) -> String {
     if display_len(&s) <= max_cols {
         return s;
     }
-    let truncated: String = s.chars().take(max_cols - 1).collect();
+    // Budget: max_cols - 1 columns for text, 1 for the ellipsis.
+    let budget = max_cols.saturating_sub(1);
+    let mut cols_used: usize = 0;
+    let mut truncated = String::new();
+    for ch in s.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+        if cols_used + ch_width > budget {
+            break;
+        }
+        cols_used += ch_width;
+        truncated.push(ch);
+    }
     format!("{truncated}\u{2026}")
 }
 
@@ -387,6 +411,22 @@ mod tests {
     }
 
     #[test]
+    fn display_len_ascii_equals_char_count() {
+        // For plain ASCII, display width == char count.
+        let s = "hello world";
+        assert_eq!(display_len(s), s.chars().count());
+    }
+
+    #[test]
+    fn display_len_cjk_wider_than_char_count() {
+        // Each CJK character is 1 codepoint but 2 display columns.
+        // "修复" = 2 chars, 4 display columns.
+        let s = "修复";
+        assert_eq!(s.chars().count(), 2, "codepoint count");
+        assert_eq!(display_len(s), 4, "display width must be 4 for 2 CJK chars");
+    }
+
+    #[test]
     fn truncate_display_short_string_unchanged() {
         let s = "hello".to_string();
         assert_eq!(truncate_display(s.clone(), 80), s);
@@ -397,7 +437,51 @@ mod tests {
         let s = "a".repeat(70);
         let result = truncate_display(s, 60);
         assert!(result.ends_with('\u{2026}'), "must end with ellipsis");
-        assert!(result.chars().count() <= 60, "must be at most 60 cols");
+        assert!(display_len(&result) <= 60, "must be at most 60 cols");
+    }
+
+    #[test]
+    fn truncate_display_cjk_respects_column_budget() {
+        // "feat: " = 6 ascii cols, then 27 CJK chars × 2 cols = 54 cols.
+        // Total = 60 cols. max_cols = 20.
+        // Budget = 19 cols: "feat: " (6) + 6 CJK × 2 (12) = 18 cols, then ellipsis.
+        let s = format!("feat: {}", "修".repeat(27));
+        assert!(display_len(&s) > 20, "sanity: input is wide");
+        let result = truncate_display(s, 20);
+        assert!(
+            result.ends_with('\u{2026}'),
+            "must end with ellipsis: {result:?}"
+        );
+        assert!(
+            display_len(&result) <= 20,
+            "truncated result must fit in 20 cols, got {} cols: {result:?}",
+            display_len(&result)
+        );
+    }
+
+    #[test]
+    fn welcome_panel_cjk_commit_box_alignment() {
+        // A commit with a CJK subject must not break the box geometry.
+        let data = WelcomeData {
+            recent_commits: vec![CommitLine {
+                sha: "abc1234".to_string(),
+                age: "1h".to_string(),
+                subject: "feat: 修复登录问题并优化性能".to_string(),
+            }],
+            ..base_data()
+        };
+        let out = render_welcome_panel(&data);
+        // Every line in the box must start with `│` and end with `│`.
+        for line in out.lines() {
+            if line.starts_with('\u{2502}') {
+                assert!(
+                    line.ends_with('\u{2502}'),
+                    "box border must close with │: {line:?}"
+                );
+            }
+        }
+        // The commit sha must appear in the output.
+        assert!(out.contains("abc1234"), "sha must be present");
     }
 
     /// Smoke test: render and print the panel with representative data.

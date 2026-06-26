@@ -106,6 +106,7 @@ sha2 = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 libc = "0.2"
+unicode-width = "0.2"
 
 # CLI / TUI / Telegram (trusty-mpm-tui, trusty-mpm-telegram).
 ratatui = "0.29"

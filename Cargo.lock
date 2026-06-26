@@ -10997,6 +10997,7 @@ dependencies = [
  "trusty-agents-common",
  "trusty-common",
  "trusty-review",
+ "unicode-width 0.2.0",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",

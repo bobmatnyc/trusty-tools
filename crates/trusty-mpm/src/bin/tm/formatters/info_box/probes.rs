@@ -3,11 +3,15 @@
 //! Why: every datum shown in the panel that requires a subprocess or network
 //! call must be bounded so the panel never hangs before launch.
 //! What: `probe_recent_commits` runs `git log` in a background thread and
-//! waits ≤150 ms; `try_get_session_count` probes the daemon's `/sessions`
-//! endpoint; `shorten_git_age` compresses git's verbose relative-time strings.
+//! waits ≤150 ms; `run_git_log` spawns the subprocess and installs a 3-second
+//! watchdog that sends SIGKILL so no git process ever lingers on a slow or
+//! network-mounted filesystem; `try_get_session_count` probes the daemon's
+//! `/sessions` endpoint; `shorten_git_age` compresses git's verbose
+//! relative-time strings.
 //! Test: `probe_commits_returns_empty_for_non_git_dir`,
 //! `shorten_age_*` in the inline test module below.
 
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -34,20 +38,52 @@ pub(crate) fn probe_recent_commits(workdir: &str) -> Vec<CommitLine> {
         .unwrap_or_default()
 }
 
-/// Run `git log` and parse up to 5 commits from `workdir`.
+/// Spawn `git log`, install a 3-second SIGKILL watchdog, and collect output.
 ///
-/// Why: separating the subprocess from the channel/timeout pattern makes
-/// each part unit-testable independently.
-/// What: runs `git -C <workdir> log --oneline -5 --format=%h|%cr|%s` and
-/// parses each line into a [`CommitLine`]. Returns `None` on failure.
+/// Why: `Command::output()` cannot be interrupted — on a slow or
+/// network-mounted `.git`, it can block for minutes. The caller's
+/// `recv_timeout(150 ms)` only bounds the panel render path; without a real
+/// subprocess kill the git child process would keep running in the spawned
+/// thread long after the panel has been shown. The watchdog closes that gap:
+/// the process is forcibly killed ≤3 seconds after spawn regardless of
+/// whether the caller already moved on.
+/// What: spawns the child with piped stdout; the watchdog thread sleeps 3 s
+/// then sends SIGKILL via the child PID (Unix) or `child.kill()` on Windows.
+/// `wait_with_output()` collects stdout+status; a non-zero exit or parse
+/// failure returns `None`.
 /// Test: indirect — covered by `probe_recent_commits` tests.
 fn run_git_log(workdir: &str) -> Option<Vec<CommitLine>> {
-    let out = std::process::Command::new("git")
+    let child = std::process::Command::new("git")
         .arg("-C")
         .arg(workdir)
         .args(["log", "--oneline", "-5", "--format=%h|%cr|%s"])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
+
+    // Watchdog: kill the child after 3 s so it never lingers on a slow FS
+    // even after the panel recv_timeout(150ms) already fired in the caller.
+    let pid = child.id();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(3));
+        #[cfg(unix)]
+        // SAFETY: `kill(pid, SIGKILL)` is async-signal-safe; pid is a valid
+        // u32 from Child::id(); the process may already be gone — errno ESRCH
+        // is harmless.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+        #[cfg(not(unix))]
+        {
+            // On non-Unix platforms use the std API (best-effort).
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .status();
+        }
+    });
+
+    let out = child.wait_with_output().ok()?;
     if !out.status.success() {
         return None;
     }
