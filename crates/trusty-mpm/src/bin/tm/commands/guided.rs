@@ -117,6 +117,10 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
 /// What: case-insensitive substring match for `"github.com"` in the raw URL —
 /// catches both HTTPS (`https://github.com/…`) and SSH (`git@github.com:…`)
 /// forms without adding a URL-parsing dependency.
+/// Known limitation: a hostname such as `github.mycompany.com` does NOT match
+/// since `"github.mycompany.com".contains("github.com")` is false. URLs like
+/// `https://notgithub.com/a/b.git` also do not match. Both cases fall through
+/// to the non-GitHub refusal path — safe but not redirected.
 /// Test: `guided_fallback_blocks_non_github_git_checkout` verifies a Gitea URL
 /// is NOT treated as GitHub; `guided_fallback_never_pollutes_github_git_checkout`
 /// verifies a real GitHub URL is recognised.
@@ -124,38 +128,72 @@ fn is_github_remote(url: &str) -> bool {
     url.to_ascii_lowercase().contains("github.com")
 }
 
+/// Detect the git working-tree root at any depth by shelling to git.
+///
+/// Why: `cwd.join(".git").exists()` only fires when `cwd` IS the repo root.
+/// Operators commonly run `tm` from a nested subdirectory (e.g. `~/project/src/`);
+/// the shallow check would miss the repo, bypass the live-checkout guard, and
+/// allow `launch(None)` to write framework files into that subdir (#1724 gap).
+/// What: runs `git -C <cwd> rev-parse --show-toplevel`; returns the absolute
+/// repo root on success, `None` when cwd is not inside any git working tree
+/// (plain directory or bare repo). Bare repos (`--git-dir` succeeds but
+/// `--show-toplevel` does not) are treated as non-git — deploying into a bare
+/// repo has no live-checkout to protect.
+/// Test: `guided_fallback_blocks_github_git_from_subdirectory` calls
+/// `fallback_protected` from a nested subdir and asserts the protection fires.
+fn find_git_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let root = String::from_utf8_lossy(&out.stdout);
+    let root = root.trim();
+    if root.is_empty() {
+        return None;
+    }
+    Some(std::path::PathBuf::from(root))
+}
+
 /// Daemon-unreachable fallback that protects ALL live git checkouts (#1724).
 ///
 /// Why: the guided default MUST NOT deploy framework files into ANY git
 /// project's live checkout, even when the daemon is down. The invariant is:
-/// if `.git` is detected, the live working tree is never written to.
+/// if cwd is inside a git working tree (at ANY depth), it is never written to.
 /// What: three-way dispatch on cwd:
-///   (1) GitHub-backed git project → delegate to [`redirect_to_managed_clone`]
-///       which provisions (or reuses) the protected base clone and per-session
-///       worktree, then calls `launch()` against THAT workspace, never the live
-///       checkout.
-///   (2) Non-GitHub git project (non-GitHub remote or no remote) → return an
-///       actionable `Err`; the live checkout is never touched.
-///   (3) Non-git directory (no `.git`) → classic `tm launch` path; there is no
-///       working tree to protect, consistent with the daemon's local-path fast
-///       path for plain directories.
-/// Test: `guided_fallback_never_pollutes_github_git_checkout` and
-/// `guided_fallback_blocks_non_github_git_checkout` in `tests_behavior_b_tests.rs`.
+///   (1) Inside a GitHub-backed git working tree → delegate to
+///       [`redirect_to_managed_clone`] which provisions (or reuses) the protected
+///       base clone and per-session worktree, then calls `launch()` against THAT
+///       workspace, never the live checkout. Uses the repo ROOT (not cwd) to
+///       read the origin remote — correct even from subdirectories.
+///   (2) Inside a non-GitHub git working tree (non-GitHub remote or no remote)
+///       → return an actionable `Err`; the live checkout is never touched.
+///   (3) Not inside any git working tree (plain directory or bare repo) →
+///       classic `tm launch` path; there is no live checkout to protect,
+///       consistent with the daemon's local-path fast path.
+/// Test: `guided_fallback_never_pollutes_github_git_checkout`,
+/// `guided_fallback_blocks_non_github_git_checkout`,
+/// `guided_fallback_blocks_github_git_from_subdirectory`, and
+/// `guided_fallback_redirect_success_worktree_not_live_checkout` in
+/// `tests_behavior_b_tests.rs`.
 pub(crate) async fn fallback_protected(
     client: &reqwest::Client,
     url: &str,
     cwd: &std::path::Path,
 ) -> anyhow::Result<()> {
-    if cwd.join(".git").exists() {
-        // Any git working tree is protected from in-place framework-file
-        // deployment (#1724). Dispatch on remote type:
-        //   • GitHub remote (github.com host) → redirect to managed clone.
-        //   • Non-GitHub remote or no remote   → actionable Err; never deploy.
+    if let Some(git_root) = find_git_root(cwd) {
+        // cwd is inside a git working tree (at any depth) — protect it.
+        // Read the origin remote from the REPO ROOT so subdirectory calls
+        // find the same remote as top-level calls would.
         //
         // NOTE: `parse_github_path` accepts *any* remote URL (not just GitHub);
-        // we therefore check for "github.com" in the URL explicitly rather than
-        // relying on a successful parse alone.
-        let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(cwd);
+        // we therefore gate on `is_github_remote` (github.com substring) to
+        // distinguish GitHub from Gitea/GitLab/bare-SSH remotes.
+        let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&git_root);
 
         if let Some(ref raw_url) = origin_url
             && is_github_remote(raw_url)
@@ -164,7 +202,7 @@ pub(crate) async fn fallback_protected(
             return redirect_to_managed_clone(client, url, cwd, raw_url).await;
         }
 
-        // Non-GitHub remote or no remote at all: refuse to write to the live tree.
+        // Non-GitHub remote or no remote: refuse to write to the live tree.
         let remote_desc = origin_url.as_deref().unwrap_or("(no remote configured)");
         eprintln!(
             "tm: daemon unreachable — refusing to deploy into live git checkout.\n\
@@ -176,11 +214,11 @@ pub(crate) async fn fallback_protected(
             "daemon unreachable: live git checkout at '{}' is protected — \
              auto-managed clones require a GitHub remote; \
              start the daemon with `tm start` first",
-            cwd.display()
+            git_root.display()
         );
     }
 
-    // Non-git directory: classic tm launch path (no working tree to protect).
+    // Not inside a git working tree: classic tm launch path.
     super::launch::launch(client, url, None, None).await
 }
 
