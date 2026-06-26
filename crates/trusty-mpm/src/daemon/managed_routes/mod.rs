@@ -320,9 +320,13 @@ pub struct ActivityResponse {
 ///
 /// Why: the MCP tools return JSON values (not axum responses); reusing the same
 /// field set as [`SpawnResponse`]/[`SessionSummary`] keeps the MCP and HTTP
-/// payloads consistent for the driver skill.
-/// What: maps the record to a JSON object including the derived `attach_cmd`.
-/// Test: covered by `crate::daemon::mcp_session` tests that assert echoed fields.
+/// payloads consistent for the driver skill. `source_id` is included so MCP
+/// callers can filter or reconnect by project identity, matching what the HTTP
+/// `GET /api/v1/sessions/managed` path already exposes (#1733).
+/// What: maps the record to a JSON object including the derived `attach_cmd`
+/// and `source_id` (null when the session has no project identity).
+/// Test: `serializers_include_source_id` unit test in this module; also covered
+/// by `crate::daemon::mcp_session` tests that assert echoed fields.
 pub fn record_to_json(r: &SessionRecord) -> serde_json::Value {
     serde_json::json!({
         "id": r.id.to_string(),
@@ -337,6 +341,7 @@ pub fn record_to_json(r: &SessionRecord) -> serde_json::Value {
         "runtime": r.runtime.as_str(),
         "pending_decision": r.pending_decision,
         "proposed_default": r.proposed_default,
+        "source_id": r.source_id,
     })
 }
 
@@ -883,3 +888,6 @@ pub async fn get_session_activity(
     })
     .into_response()
 }
+
+#[cfg(test)]
+mod tests;
