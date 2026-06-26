@@ -6,8 +6,10 @@
 //! in-project spawn path (#1706) is the right action: it either reconnects to
 //! an existing session for the same project (#1707) or creates a fresh
 //! per-session worktree, then attaches the terminal to it. Outside a git repo
-//! (or when no GitHub remote is found), falling back to `tm launch` (the full
+//! entirely (no `.git` directory), falling back to `tm launch` (the full
 //! framework-deploy path) preserves existing behaviour for non-git directories.
+//! Any git working tree — GitHub-backed or not — is protected from in-place
+//! framework-file deployment (#1724).
 //!
 //! What: [`run_guided_default`] detects the current directory, queries the
 //! managed spawn endpoint, and then attaches the terminal to the resulting
@@ -106,37 +108,79 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
     fallback_protected(client, url, &cwd).await
 }
 
-/// Daemon-unreachable fallback that protects live git checkouts (#1724).
+/// Return true when the remote URL targets github.com (any transport).
 ///
-/// Why: the guided default MUST NOT deploy framework files into a GitHub-backed
-/// git project's live checkout even when the daemon is down. The daemon's
-/// in-project spawn path (#1706) provides this guarantee when the daemon is
-/// running; this function preserves it when the daemon is unreachable.
-/// What: detects whether `cwd` is a GitHub-backed git project. If yes, delegates
-/// to [`redirect_to_managed_clone`] which sets up (or reuses) the protected base
-/// clone and creates a per-session worktree so `launch()` targets THAT workspace,
-/// never the live checkout. Non-GitHub git projects and non-git directories fall
-/// through to the classic `tm launch` path — consistent with the daemon's own
-/// local-path fast path for those cases.
-/// Test: `guided_fallback_never_pollutes_github_git_checkout` in
-/// `tests_behavior_b_tests.rs`.
+/// Why: `parse_github_path` from `trusty-common` accepts *any* git remote URL,
+/// not just GitHub ones. We need a host-specific guard so that non-GitHub git
+/// projects (Gitea, GitLab, bare SSH, etc.) are refused rather than having a
+/// clone attempt made against an unrecognised host (#1724 residual gap).
+/// What: case-insensitive substring match for `"github.com"` in the raw URL —
+/// catches both HTTPS (`https://github.com/…`) and SSH (`git@github.com:…`)
+/// forms without adding a URL-parsing dependency.
+/// Test: `guided_fallback_blocks_non_github_git_checkout` verifies a Gitea URL
+/// is NOT treated as GitHub; `guided_fallback_never_pollutes_github_git_checkout`
+/// verifies a real GitHub URL is recognised.
+fn is_github_remote(url: &str) -> bool {
+    url.to_ascii_lowercase().contains("github.com")
+}
+
+/// Daemon-unreachable fallback that protects ALL live git checkouts (#1724).
+///
+/// Why: the guided default MUST NOT deploy framework files into ANY git
+/// project's live checkout, even when the daemon is down. The invariant is:
+/// if `.git` is detected, the live working tree is never written to.
+/// What: three-way dispatch on cwd:
+///   (1) GitHub-backed git project → delegate to [`redirect_to_managed_clone`]
+///       which provisions (or reuses) the protected base clone and per-session
+///       worktree, then calls `launch()` against THAT workspace, never the live
+///       checkout.
+///   (2) Non-GitHub git project (non-GitHub remote or no remote) → return an
+///       actionable `Err`; the live checkout is never touched.
+///   (3) Non-git directory (no `.git`) → classic `tm launch` path; there is no
+///       working tree to protect, consistent with the daemon's local-path fast
+///       path for plain directories.
+/// Test: `guided_fallback_never_pollutes_github_git_checkout` and
+/// `guided_fallback_blocks_non_github_git_checkout` in `tests_behavior_b_tests.rs`.
 pub(crate) async fn fallback_protected(
     client: &reqwest::Client,
     url: &str,
     cwd: &std::path::Path,
 ) -> anyhow::Result<()> {
-    // Only GitHub-backed git projects need the managed-clone redirect.
-    // Non-GitHub git projects and non-git directories match the daemon's
-    // local-path fast path and may deploy locally — consistent behaviour.
-    if cwd.join(".git").exists()
-        && let Some(origin_url) = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(cwd)
-        && trusty_common::github_path::parse_github_path(&origin_url).is_some()
-    {
-        // GitHub project: redirect deploy to the protected managed clone.
-        return redirect_to_managed_clone(client, url, cwd, &origin_url).await;
+    if cwd.join(".git").exists() {
+        // Any git working tree is protected from in-place framework-file
+        // deployment (#1724). Dispatch on remote type:
+        //   • GitHub remote (github.com host) → redirect to managed clone.
+        //   • Non-GitHub remote or no remote   → actionable Err; never deploy.
+        //
+        // NOTE: `parse_github_path` accepts *any* remote URL (not just GitHub);
+        // we therefore check for "github.com" in the URL explicitly rather than
+        // relying on a successful parse alone.
+        let origin_url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(cwd);
+
+        if let Some(ref raw_url) = origin_url
+            && is_github_remote(raw_url)
+        {
+            // GitHub project: redirect deploy to the protected managed clone.
+            return redirect_to_managed_clone(client, url, cwd, raw_url).await;
+        }
+
+        // Non-GitHub remote or no remote at all: refuse to write to the live tree.
+        let remote_desc = origin_url.as_deref().unwrap_or("(no remote configured)");
+        eprintln!(
+            "tm: daemon unreachable — refusing to deploy into live git checkout.\n\
+             tm: Auto-protected managed clones require a GitHub remote \
+             (detected remote: {remote_desc}).\n\
+             tm: Start the daemon with `tm start`, then run `tm` again."
+        );
+        anyhow::bail!(
+            "daemon unreachable: live git checkout at '{}' is protected — \
+             auto-managed clones require a GitHub remote; \
+             start the daemon with `tm start` first",
+            cwd.display()
+        );
     }
 
-    // Non-GitHub git project or non-git directory: classic tm launch path.
+    // Non-git directory: classic tm launch path (no working tree to protect).
     super::launch::launch(client, url, None, None).await
 }
 

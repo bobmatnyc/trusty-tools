@@ -911,3 +911,129 @@ async fn guided_fallback_never_pollutes_github_git_checkout() {
          got Ok which means framework files may have been written"
     );
 }
+
+/// Why (#1724 residual gap): the protected-checkout guarantee MUST hold for ANY
+/// git project, not only GitHub-backed ones. A git repo with a non-GitHub remote
+/// (e.g. a Gitea, GitLab, or bare SSH URL) or with NO remote configured must
+/// also be refused — the fallback must return `Err` and leave the live working
+/// tree untouched.
+/// What: inits a real git repo, adds a non-GitHub remote URL, then calls
+/// `fallback_protected` directly. Asserts that the four framework artifacts are
+/// absent and the call returns `Err`.
+/// Test: this is the test.
+#[tokio::test]
+async fn guided_fallback_blocks_non_github_git_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+
+    // Build a minimal git repo with a non-GitHub (Gitea) remote.
+    let git_init_ok = std::process::Command::new("git")
+        .arg("init")
+        .current_dir(project)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !git_init_ok {
+        eprintln!("guided_fallback_blocks_non_github_git_checkout: git not available, skipping");
+        return;
+    }
+    // Add a non-GitHub remote to confirm it is not parsed as a GitHub project.
+    let _ = std::process::Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://gitea.example.com/org/repo.git",
+        ])
+        .current_dir(project)
+        .status();
+
+    // Call the protected fallback with an unreachable daemon URL.
+    let client = reqwest::Client::new();
+    let result =
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project).await;
+
+    // ── Acceptance criterion (#1724 residual gap) ────────────────────────────
+    // None of the framework files must appear in the live git checkout.
+    assert!(
+        !project.join("CLAUDE.md").exists(),
+        "#1724: CLAUDE.md must NOT be written to a non-GitHub git checkout"
+    );
+    assert!(
+        !project.join(".mcp.json").exists(),
+        "#1724: .mcp.json must NOT be written to a non-GitHub git checkout"
+    );
+    assert!(
+        !project.join(".trusty-mpm").exists(),
+        "#1724: .trusty-mpm dir must NOT be created in a non-GitHub git checkout"
+    );
+    assert!(
+        !project.join(".claude").exists(),
+        "#1724: .claude dir must NOT be created in a non-GitHub git checkout"
+    );
+
+    // The fallback must refuse with Err, not silently deploy.
+    assert!(
+        result.is_err(),
+        "#1724: fallback must Err for non-GitHub git checkout; \
+         got Ok which means framework files may have been deployed"
+    );
+
+    // Verify it's the REFUSAL error, not a network-error from a clone attempt.
+    // If is_github_remote() incorrectly accepts non-GitHub URLs, it would try
+    // to clone from gitea.example.com and fail with a network error instead.
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        err_msg.contains("auto-managed clones require a GitHub remote")
+            || err_msg.contains("live git checkout"),
+        "#1724: error message must explain the protection; got: {err_msg}"
+    );
+}
+
+/// Why (#1724 non-git path): the protected-checkout guarantee applies only to git
+/// projects. A plain directory (no `.git`) should still reach the classic `tm launch`
+/// path — framework-file deployment into plain dirs is the intended behaviour and
+/// is not in scope of #1724. This test verifies the fallback does NOT blindly block
+/// all directories, only git working trees.
+/// What: creates a temp dir with NO `.git`, calls `fallback_protected`. The classic
+/// path calls `launch()` which will fail to connect to the unreachable daemon URL —
+/// but it must not panic, and must not pretend it's a git-protection refusal.
+/// Test: this is the test.
+#[tokio::test]
+async fn guided_fallback_non_git_dir_reaches_launch_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+
+    // No git init — plain directory.
+    assert!(
+        !project.join(".git").exists(),
+        "test precondition: must NOT be a git repo"
+    );
+
+    // Call the protected fallback with an unreachable daemon URL.
+    let client = reqwest::Client::new();
+    let result =
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project).await;
+
+    // The result must be Err (daemon is unreachable so launch() will fail),
+    // but it must NOT be the git-protection refusal error message.
+    assert!(
+        result.is_err(),
+        "non-git fallback must Err (daemon unreachable)"
+    );
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        !err_msg.contains("live git checkout"),
+        "#1724: non-git dir must NOT hit the git-protection refusal path; got: {err_msg}"
+    );
+    assert!(
+        !err_msg.contains("auto-managed clones require"),
+        "#1724: non-git dir must NOT show GitHub-remote hint; got: {err_msg}"
+    );
+
+    // Framework files must not have been created (daemon was unreachable).
+    assert!(
+        !project.join("CLAUDE.md").exists(),
+        "CLAUDE.md must not exist when daemon is unreachable"
+    );
+}
