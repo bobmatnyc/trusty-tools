@@ -393,6 +393,7 @@ impl SessionManager {
             // (via SessionManager::set_source_id); `create_with_id` itself
             // never knows the source project — it is set by the caller.
             source_id: None,
+            claude_session_id: None,
         };
 
         // Persist the record. On failure the freshly-created tmux session has
@@ -778,6 +779,7 @@ impl SessionManager {
                     workspace_owned: false,
                     // External sessions have no tracked source project.
                     source_id: None,
+                    claude_session_id: None,
                 };
                 guard.upsert(external).await?;
                 report.external_adopted.push(name.clone());

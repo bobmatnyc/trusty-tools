@@ -582,6 +582,7 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
         ephemeral: false,
         workspace_owned: false,
         source_id: None,
+        claude_session_id: None,
     };
     // A record whose tmux session will NOT be found (simulating reboot).
     let rebooted_record = SessionRecord {
@@ -602,6 +603,7 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
         ephemeral: false,
         workspace_owned: false,
         source_id: None,
+        claude_session_id: None,
     };
     {
         let mut store = mgr.store.write().await;
@@ -664,6 +666,7 @@ async fn manager_reconcile_skips_decommissioned() {
         ephemeral: false,
         workspace_owned: false,
         source_id: None,
+        claude_session_id: None,
     };
     {
         let mut store = mgr.store.write().await;
@@ -1383,6 +1386,7 @@ async fn seed_record(
         ephemeral,
         workspace_owned: false,
         source_id: None,
+        claude_session_id: None,
     };
     mgr.store
         .write()
@@ -1803,6 +1807,7 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
             ephemeral,
             workspace_owned: false,
             source_id: None,
+            claude_session_id: None,
         };
         mgr.store.write().await.upsert(record).await.expect("seed");
     }
@@ -1885,6 +1890,7 @@ async fn manager_decommission_unowned_skips_deletion() {
         // workspace_owned = false — the SM did NOT create this directory.
         workspace_owned: false,
         source_id: None,
+        claude_session_id: None,
     };
     mgr.store.write().await.upsert(record).await.unwrap();
 

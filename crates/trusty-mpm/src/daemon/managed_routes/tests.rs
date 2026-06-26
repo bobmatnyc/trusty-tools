@@ -33,6 +33,7 @@ fn make_record(source_id: Option<&str>) -> SessionRecord {
         ephemeral: false,
         workspace_owned: false,
         source_id: source_id.map(String::from),
+        claude_session_id: None,
     }
 }
 

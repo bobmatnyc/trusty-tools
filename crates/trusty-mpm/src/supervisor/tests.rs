@@ -175,6 +175,7 @@ async fn seed_sessions(
             ephemeral: false,
             workspace_owned: false,
             source_id: None,
+            claude_session_id: None,
         };
         store.upsert(rec).await.expect("seed upsert");
         ids.push(id);
@@ -303,6 +304,7 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
         ephemeral: false,
         workspace_owned: false,
         source_id: None,
+        claude_session_id: None,
     }
 }
 
