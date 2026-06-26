@@ -10,10 +10,8 @@
 use serde::Deserialize;
 
 use crate::commands::project::resolve_dir;
-use crate::formatters::banner::{
-    fallback_session_name, normalize_workdir, print_launch_banner,
-    print_launch_banner_reconnecting, tmux_has_session,
-};
+use crate::formatters::banner::{fallback_session_name, normalize_workdir, tmux_has_session};
+use crate::formatters::info_box::{DaemonInfo, print_info_box};
 
 /// `launch` subcommand — launch a configured claude session and attach to it.
 ///
@@ -48,7 +46,8 @@ pub(crate) async fn launch(
         && !existing.is_empty()
         && tmux_has_session(&existing)
     {
-        print_launch_banner_reconnecting(&workdir, &existing);
+        let d = DaemonInfo::from_lock_file().probe_session_count(url);
+        print_info_box(&workdir, &existing, true, &d);
         let status = std::process::Command::new("tmux")
             .args(["attach-session", "-t", &existing])
             .status()?;
@@ -141,14 +140,14 @@ pub(crate) async fn launch(
         prompt_path.as_deref(),
     );
 
-    // 5. Print the summary banner. The "Prompt:" line shows the canonical
-    //    `~/.trusty-mpm/framework/instructions/INSTRUCTIONS.md` source path
-    //    when it was installed, not the per-session temp copy.
-    print_launch_banner(
-        &workdir,
-        &tmux_name,
-        instructions_path.as_deref().or(prompt_path.as_deref()),
-    );
+    // 5. Print the compact info box. The old full-screen banner is replaced by
+    //    the compact `╭─╮` box that shows version, project, daemon, and tools.
+    {
+        let d = DaemonInfo::from_lock_file().probe_session_count(url);
+        print_info_box(&workdir, &tmux_name, false, &d);
+    }
+    // Silence unused imports from the instructions-path resolution above.
+    let _ = instructions_path;
 
     // 6. Create a detached tmux session in the project directory.
     let new_session = std::process::Command::new("tmux")
@@ -234,7 +233,8 @@ pub(crate) async fn connect(
         && !existing.is_empty()
         && tmux_has_session(&existing)
     {
-        print_launch_banner_reconnecting(&workdir, &existing);
+        let d = DaemonInfo::from_lock_file().probe_session_count(url);
+        print_info_box(&workdir, &existing, true, &d);
         let status = std::process::Command::new("tmux")
             .args(["attach-session", "-t", &existing])
             .status()?;
@@ -280,9 +280,12 @@ pub(crate) async fn connect(
         }
     };
 
-    // 3. Print the summary banner. The "Prompt:" line is "(default)" — `connect`
-    //    writes no system-prompt file.
-    print_launch_banner(&workdir, &tmux_name, None);
+    // 3. Print the compact info box — `connect` skips deployment so the box
+    //    is the only context the operator sees before tmux takes over.
+    {
+        let d = DaemonInfo::from_lock_file().probe_session_count(url);
+        print_info_box(&workdir, &tmux_name, false, &d);
+    }
 
     // 4. Create the tmux host idempotently. `new-session -A` attaches to an
     //    existing session and creates a detached one (`-d`) otherwise; the
