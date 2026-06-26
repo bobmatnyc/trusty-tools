@@ -5,16 +5,20 @@ use std::future::IntoFuture;
 ///
 /// Why: lets the executor be tested against the genuine daemon routes
 /// without a live daemon, tmux, or external network.
-/// What: builds `api::router(DaemonState::shared())`, binds an ephemeral
-/// port, serves it on a background task, and returns the state plus base URL.
+/// What: builds `api::router(DaemonState::with_root_isolated_managed(...))`,
+/// binds an ephemeral port, serves it on a background task, and returns the
+/// state plus base URL. The managed-session store is rooted in a throwaway
+/// temp directory and backed by a no-op tmux driver so `reconcile_on_boot`
+/// never adopts the operator's live `tmpm-*` sessions into the test store
+/// (#1734). The framework root (pairing, audit log) is also pointed at the
+/// temp dir so tests never read or write the operator's real `~/.trusty-mpm`.
 /// Test: used by the `execute_*` tests below.
 async fn spawn_test_daemon() -> (std::sync::Arc<crate::daemon::state::DaemonState>, String) {
     use crate::daemon::{api, state::DaemonState};
-    // Root the daemon's persisted state at a throwaway temp directory so
-    // pairing tests never read (or write) the operator's real pairing
-    // record. `keep` leaks the directory so it outlives the server task.
+    // `keep` converts TempDir into a PathBuf that persists beyond this scope
+    // so the directory outlives the background server task.
     let root = tempfile::tempdir().unwrap().keep();
-    let state = std::sync::Arc::new(DaemonState::with_root(root));
+    let state = std::sync::Arc::new(DaemonState::with_root_isolated_managed(root).await);
     let router = api::router(std::sync::Arc::clone(&state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

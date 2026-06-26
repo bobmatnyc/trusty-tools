@@ -535,6 +535,40 @@ impl DaemonState {
         state
     }
 
+    /// Construct test state whose managed sessions use a no-op tmux driver (#1734).
+    ///
+    /// Why: tests that exercise the managed-session API surface (health, managed-list,
+    /// etc.) must not pick up the operator's live tmux sessions. The lazy
+    /// `session_manager()` initialiser calls `RealTmuxDriver::discover()` followed by
+    /// `reconcile_on_boot`, which adopts any `tmpm-*` sessions from the host into the
+    /// store — breaking assertions that expect an empty list on a developer machine
+    /// that has real managed sessions. Pre-seeding the `managed_sessions` OnceCell
+    /// here with a `NoopTmuxDriver`-backed manager prevents that: the cell is already
+    /// full when the first request arrives so `session_manager()` returns the
+    /// pre-built instance without ever calling the real tmux binary or reading the
+    /// operator's `sessions.json`.
+    /// What: calls `with_root(root.clone())` for an isolated framework root (pairing,
+    /// audit log, optimizer — all under the temp dir), then builds a `SessionManager`
+    /// over `root/session-manager` with `NoopTmuxDriver` and pre-seeds the
+    /// `managed_sessions` OnceCell before any request fires.
+    /// Test: `execute_health_against_test_daemon`,
+    /// `execute_managed_list_against_test_daemon` in `client::executor::tests`.
+    #[cfg(test)]
+    pub async fn with_root_isolated_managed(root: std::path::PathBuf) -> Self {
+        use crate::session_manager::SessionManager;
+        use crate::session_manager::real_tmux::NoopTmuxDriver;
+        let data_dir = root.join("session-manager");
+        let _ = tokio::fs::create_dir_all(&data_dir).await;
+        let noop_tmux: std::sync::Arc<dyn crate::session_manager::ManagedTmuxDriver> =
+            std::sync::Arc::new(NoopTmuxDriver);
+        let mgr = SessionManager::new(&data_dir, noop_tmux)
+            .await
+            .expect("temp-dir noop session store must load");
+        let state = Self::with_root(root);
+        let _ = state.managed_sessions.set(std::sync::Arc::new(mgr));
+        state
+    }
+
     /// Inject a pre-built Session Manager agent for testing the SM endpoint path.
     ///
     /// Why: the `coordinator/chat` SM-path tests (SM-7) need a `DaemonState`
