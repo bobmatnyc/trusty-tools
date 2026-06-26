@@ -155,14 +155,17 @@ pub async fn resolve_daemon_url_probing(
 /// Why: used by `resolve_daemon_url_probing` to validate stale explicit URLs
 /// before committing to them. A 500 ms timeout keeps the probe imperceptible
 /// to the user while still covering slow loopback responses.
-/// What: sends `GET <url>/health`; returns `true` if the response has any 2xx
-/// status, `false` on error (connection refused, timeout, etc.).
+/// What: sends `GET <url>/health` (trailing slash on `url` is stripped first
+/// to avoid the double-slash path `//health`); returns `true` if the response
+/// has any 2xx status, `false` on error (connection refused, timeout, etc.).
 /// Test: `probing_resolver_falls_back_when_explicit_unreachable`,
-/// `probing_resolver_wins_when_explicit_reachable`.
+/// `probing_resolver_wins_when_explicit_reachable`,
+/// `probe_url_trims_trailing_slash`.
 async fn probe_url(client: &reqwest::Client, url: &str) -> bool {
     use std::time::Duration;
+    let base = url.trim_end_matches('/');
     let probe = client
-        .get(format!("{url}/health"))
+        .get(format!("{base}/health"))
         .timeout(Duration::from_millis(500))
         .send()
         .await;
@@ -345,6 +348,52 @@ mod tests {
         assert_eq!(
             result, url,
             "reachable explicit URL must win over lock file / default"
+        );
+    }
+
+    /// Trailing slash on the base URL must not produce a double-slash path.
+    ///
+    /// Why: `probe_url("http://…:PORT/")` previously produced
+    /// `GET http://…:PORT//health` — the double slash could cause 404s on
+    /// strict HTTP servers, making a live daemon appear unreachable. The fix
+    /// trims the trailing slash before appending `/health`.
+    /// What: binds a TCP listener that echoes the request line in its 200
+    /// response body; asserts the captured path is `/health` not `//health`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn probe_url_trims_trailing_slash() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local_addr");
+
+        // Capture the request line so we can assert on the path.
+        let (path_tx, path_rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            if let Ok((sock, _)) = listener.accept().await {
+                let (reader, mut writer) = sock.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                // First line is the request line, e.g. "GET /health HTTP/1.1"
+                let req_line = lines.next_line().await.unwrap().unwrap_or_default();
+                let _ = path_tx.send(req_line);
+                let _ = writer
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        // URL with trailing slash — must probe `/health`, not `//health`.
+        let url_with_slash = format!("http://{addr}/");
+        probe_url(&client, &url_with_slash).await;
+
+        let req_line = path_rx.await.expect("request line captured");
+        // The path segment must be exactly "/health" with no double slash.
+        assert!(
+            req_line.starts_with("GET /health "),
+            "probe must request /health (no double slash); got: {req_line:?}"
         );
     }
 }
