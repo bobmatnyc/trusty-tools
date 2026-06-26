@@ -1211,10 +1211,13 @@ pub async fn ingest_hook(
 /// (`tm hook`) now also embeds the caller's `cwd` in the payload (issue #1744);
 /// this function uses that `cwd` to find the Active managed session running in that
 /// directory and persists the UUID.
-/// What: extracts `cwd` from `payload["cwd"]`; finds the first Active managed
-/// session whose `workspace_path` or `cwd` matches; calls
-/// `SessionManager::set_claude_session_id`. Best-effort — any failure is logged
-/// and silently swallowed so a missing correlation never blocks the hook response.
+/// What: extracts `cwd` from `payload["cwd"]`; canonicalizes it and each record's
+/// `workspace_path`/`cwd` (falling back to raw path on error so macOS
+/// `/private/tmp` ↔ `/tmp` symlinks resolve); finds Active managed sessions whose
+/// path matches. If more than one Active session matches the cwd (ambiguous) the
+/// correlation is skipped with a warning to avoid mis-attribution. Single match →
+/// `SessionManager::set_claude_session_id`. Best-effort — failures are logged and
+/// silently swallowed so a missing correlation never blocks the hook response.
 /// Test: `session_start_hook_correlates_claude_id` in `api_tests.rs`.
 async fn correlate_session_start(
     state: &Arc<DaemonState>,
@@ -1225,26 +1228,53 @@ async fn correlate_session_start(
         Some(s) if !s.is_empty() => s,
         _ => return,
     };
-    let cwd = std::path::Path::new(cwd_str);
+    // Canonicalize hook cwd (resolves /tmp ↔ /private/tmp on macOS).
+    let hook_cwd =
+        std::fs::canonicalize(cwd_str).unwrap_or_else(|_| std::path::PathBuf::from(cwd_str));
+
     let mgr = state.session_manager().await;
     let records = mgr.list().await;
-    let matched = records.iter().find(|r| {
-        matches!(r.state, crate::session_manager::ManagedSessionState::Active)
-            && (r.workspace_path.as_deref() == Some(cwd) || r.cwd == cwd)
-    });
-    if let Some(r) = matched {
-        let id = r.id;
-        match mgr.set_claude_session_id(&id, claude_session_id).await {
-            Ok(()) => tracing::info!(
-                managed_id = %id,
-                claude_session_id = %claude_session_id,
+
+    // Collect ALL matching Active sessions to detect ambiguous cwd.
+    let matched: Vec<_> = records
+        .iter()
+        .filter(|r| {
+            if !matches!(r.state, crate::session_manager::ManagedSessionState::Active) {
+                return false;
+            }
+            let ws_canon = r
+                .workspace_path
+                .as_ref()
+                .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
+            let cwd_canon = std::fs::canonicalize(&r.cwd).unwrap_or_else(|_| r.cwd.clone());
+            ws_canon.as_deref() == Some(hook_cwd.as_path()) || cwd_canon == hook_cwd
+        })
+        .collect();
+
+    match matched.len() {
+        0 => {} // no Active managed session at this cwd — silent, not an error
+        1 => {
+            let id = matched[0].id;
+            match mgr.set_claude_session_id(&id, claude_session_id).await {
+                Ok(()) => tracing::info!(
+                    managed_id = %id,
+                    claude_session_id = %claude_session_id,
+                    cwd = %cwd_str,
+                    "SessionStart: linked Claude session to managed session (#1744)"
+                ),
+                Err(e) => tracing::warn!(
+                    managed_id = %id,
+                    "SessionStart: failed to persist claude_session_id: {e}"
+                ),
+            }
+        }
+        n => {
+            tracing::warn!(
                 cwd = %cwd_str,
-                "SessionStart: linked Claude session to managed session (#1744)"
-            ),
-            Err(e) => tracing::warn!(
-                managed_id = %id,
-                "SessionStart: failed to persist claude_session_id: {e}"
-            ),
+                n,
+                "SessionStart: {n} Active managed sessions share the same cwd — \
+                 skipping claude_session_id attribution to avoid mis-assignment (#1744)"
+            );
         }
     }
 }

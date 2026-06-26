@@ -2110,3 +2110,36 @@ async fn shutdown_calls_graceful_stop_for_active_sessions() {
         "shutdown must ultimately kill_session for every Active session"
     );
 }
+
+#[tokio::test]
+async fn claude_session_id_persists_on_session() {
+    // Why (#1744): set_claude_session_id must survive a store reload so that
+    // resume_managed can read the id back after a daemon restart.
+    // What: create a session, write the id via hook_sync, reload from disk,
+    // assert the id is present on the re-read record.
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+
+    mgr.set_claude_session_id(&record.id, "uuid-abc-123")
+        .await
+        .expect("set_claude_session_id");
+
+    let reloaded = mgr.get(&record.id).await.expect("get after set");
+    assert_eq!(
+        reloaded.claude_session_id.as_deref(),
+        Some("uuid-abc-123"),
+        "claude_session_id must survive a store reload (#1744)"
+    );
+}

@@ -433,11 +433,12 @@ impl DaemonState {
     /// disappears (detected via `driver.list_sessions()`). The `SessionEnd` hook
     /// handles the common case immediately; this is the safety net for the rare
     /// cases where the hook did not fire (daemon restart race, hook misconfiguration).
-    /// What: lists live tmux session names via `driver`; for every Active managed
-    /// session whose `tmux_name` is absent from the live set, calls
-    /// `SessionManager::stop` (best-effort kill + mark Stopped). Failures are
-    /// logged and silently ignored so the caller's reap loop continues unaffected.
-    /// Test: `reap_dead_managed_sessions_marks_stopped` in `super::tests`.
+    /// What: calls `driver.list_sessions()` to build a live-name set, then
+    /// delegates to [`Self::reap_managed_against`]. On driver error logs a warning
+    /// and returns without touching the store (fail-safe: better to leave a stale
+    /// Active record than to incorrectly mark a running session Stopped).
+    /// Test: `reap_dead_managed_sessions_marks_stopped` in `super::tests` via
+    /// `reap_managed_against`.
     pub async fn reap_dead_managed_sessions(&self, driver: &TmuxDriver) {
         let live: std::collections::HashSet<String> = match driver.list_sessions() {
             Ok(s) => s.into_iter().map(|s| s.name).collect(),
@@ -446,6 +447,20 @@ impl DaemonState {
                 return;
             }
         };
+        self.reap_managed_against(&live).await;
+    }
+
+    /// Core of the managed-session reaper: stop every Active session not in `live`.
+    ///
+    /// Why: extracted from [`Self::reap_dead_managed_sessions`] so tests can
+    /// exercise the stop logic with a pre-built live set without requiring a real
+    /// `TmuxDriver` or tmux binary. The outer function handles the tmux call;
+    /// this method is the deterministic, testable heart.
+    /// What: for every Active managed session whose `tmux_name` is absent from
+    /// `live`, calls `SessionManager::stop` (best-effort kill + mark Stopped).
+    /// Failures are logged and swallowed so the caller's reap loop continues.
+    /// Test: `reap_dead_managed_sessions_marks_stopped` in `super::tests`.
+    pub(crate) async fn reap_managed_against(&self, live: &std::collections::HashSet<String>) {
         let mgr = self.session_manager().await;
         let records = mgr.list().await;
         for r in records {

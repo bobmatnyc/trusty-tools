@@ -167,6 +167,15 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// same env-scrub and isolation flags as `spawn`.
     /// What: resolves the claude binary, pre-seeds home trust (same as `spawn`),
     /// then sends [`resume_command`] with the optional id to the tmux pane.
+    /// Fallback behavior: if `claude_session_id` is `Some(id)` but that conversation
+    /// no longer exists on disk (e.g. `.claude/projects/` was deleted), Claude Code
+    /// will print an error and the pane will appear dead. The daemon detects this
+    /// within 60 s via the reap loop and marks the session Stopped. A warning is
+    /// logged here so operators can diagnose the dead pane from the daemon log
+    /// without needing to read the tmux pane directly. Pro-active pane-exit
+    /// detection and automatic fallback to `--continue` is not implemented here
+    /// because it would require polling the pane output, coupling this sync method
+    /// to async infrastructure. Open a follow-up if that behavior is needed.
     /// Test: `spawn_resume_with_id_uses_resume_flag`,
     /// `spawn_resume_without_id_uses_continue_flag`.
     fn spawn_resume(
@@ -183,6 +192,15 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
                     .into(),
             )
         })?;
+        if let Some(id) = claude_session_id {
+            tracing::warn!(
+                session = %tmux_name,
+                claude_session_id = %id,
+                "resuming with --resume <id>; if conversation no longer exists on \
+                 disk, Claude Code will error — the reap loop will detect and mark \
+                 Stopped within ~60 s (#1744)"
+            );
+        }
         debug!(
             session = %tmux_name,
             cwd = %cwd.display(),
