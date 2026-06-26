@@ -196,9 +196,12 @@ impl<G: GitBackend> CatalogSync<G> {
     /// Why: the session manager calls this on `tm catalog sync` and optionally
     /// on daemon start to ensure agents/skills are available.
     /// What: checks the sentinel file's mtime against the TTL; if the TTL has
-    /// not expired (and force=false), skips the fetch. Otherwise clones the
-    /// catalog repo into catalog_dir and writes the sentinel.
-    /// Test: catalog_sync_fetches_on_first_call, catalog_sync_skips_on_ttl_valid.
+    /// not expired (and force=false), skips the fetch. Otherwise decides whether
+    /// to clone fresh, update in place, or recover a corrupt/wrong-remote checkout
+    /// (see `ensure_repo`) then writes the sentinel.
+    /// Test: catalog_sync_fetches_on_first_call, catalog_sync_skips_on_ttl_valid,
+    /// catalog_sync_second_sync_succeeds, catalog_sync_corrupt_dir_reclones,
+    /// catalog_sync_wrong_remote_reclones.
     pub fn sync(&self, force: bool) -> Result<CatalogSyncResult, CatalogError> {
         if !force && self.ttl_valid() {
             debug!(dir = %self.catalog_dir.display(), "catalog TTL valid; skipping fetch");
@@ -211,13 +214,11 @@ impl<G: GitBackend> CatalogSync<G> {
 
         info!(repo = %self.repo_url, git_ref = %self.git_ref, dir = %self.catalog_dir.display(), "syncing catalog");
 
-        // Clone into a temporary subdir then move, to avoid partial state.
-        let clone_target = self.catalog_dir.join("repo");
-        std::fs::create_dir_all(&clone_target)?;
+        // Ensure the catalog parent directory exists before any git operation.
+        std::fs::create_dir_all(&self.catalog_dir)?;
 
-        self.git
-            .clone_repo(&self.repo_url, &self.git_ref, &clone_target)
-            .map_err(|e| CatalogError::Git(e.to_string()))?;
+        let clone_target = self.catalog_dir.join("repo");
+        self.ensure_repo(&clone_target)?;
 
         // Write the sentinel to record when we last synced.
         let sentinel = self.catalog_dir.join(SYNC_SENTINEL);
@@ -236,6 +237,81 @@ impl<G: GitBackend> CatalogSync<G> {
             agent_count,
             skill_count,
         })
+    }
+
+    /// Idempotently bring the repo checkout at `target` up to date.
+    ///
+    /// Why: this is the core fix for #1751 — the previous code always called
+    /// `git clone` which fails when the directory already exists. This function
+    /// decides clone-vs-update-vs-reclone so a second sync always succeeds.
+    /// What: three cases:
+    ///   1. `target` absent → fresh clone.
+    ///   2. `target` is a git repo whose `origin` matches `repo_url` → fetch +
+    ///      hard-reset (update in place).
+    ///   3. `target` is not a git repo, or has the wrong `origin`, or
+    ///      fetch/reset fails → remove `target` and re-clone.
+    ///
+    /// Test: `catalog_sync_second_sync_succeeds` (case 2),
+    /// `catalog_sync_corrupt_dir_reclones` (case 3, non-git dir),
+    /// `catalog_sync_wrong_remote_reclones` (case 3, wrong remote).
+    fn ensure_repo(&self, target: &Path) -> Result<(), CatalogError> {
+        if !target.exists() {
+            return self.do_clone(target);
+        }
+        if !self.git.is_git_repo(target) {
+            warn!(path = %target.display(), "catalog dir exists but is not a git repo; re-cloning");
+            guard_remove(target, &self.catalog_dir)?;
+            return self.do_clone(target);
+        }
+        match self.git.remote_url(target) {
+            Ok(ref url) if urls_match(url, &self.repo_url) => {
+                info!(dir = %target.display(), "catalog repo up to date remote; fetching updates");
+                self.do_update(target)
+            }
+            Ok(actual) => {
+                warn!(
+                    actual = %actual,
+                    expected = %self.repo_url,
+                    "catalog repo has wrong remote; re-cloning"
+                );
+                guard_remove(target, &self.catalog_dir)?;
+                self.do_clone(target)
+            }
+            Err(e) => {
+                warn!(err = %e, "catalog repo appears corrupt; re-cloning");
+                guard_remove(target, &self.catalog_dir)?;
+                self.do_clone(target)
+            }
+        }
+    }
+
+    /// Clone the repo into `target` (case 1 of `ensure_repo`).
+    ///
+    /// Why: thin wrapper that translates ProvisionError → CatalogError.
+    /// What: delegates to `self.git.clone_repo` with the configured URL and ref.
+    /// Test: exercised by catalog_sync_fetches_on_first_call.
+    fn do_clone(&self, target: &Path) -> Result<(), CatalogError> {
+        self.git
+            .clone_repo(&self.repo_url, &self.git_ref, target)
+            .map_err(|e| CatalogError::Git(e.to_string()))
+    }
+
+    /// Update an existing valid checkout in place (case 2 of `ensure_repo`).
+    ///
+    /// Why: fetch + hard-reset is idempotent and handles local drift without a
+    /// full re-clone; falls back to re-clone if the update itself fails.
+    /// What: calls `self.git.fetch_and_reset`; on failure removes `target` and
+    /// calls `do_clone` to recover.
+    /// Test: exercised by catalog_sync_second_sync_succeeds.
+    fn do_update(&self, target: &Path) -> Result<(), CatalogError> {
+        match self.git.fetch_and_reset(target, &self.git_ref) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                warn!(err = %e, "catalog fetch/reset failed; re-cloning from scratch");
+                guard_remove(target, &self.catalog_dir)?;
+                self.do_clone(target)
+            }
+        }
     }
 
     /// Return true if the catalog was synced within the TTL window.
@@ -366,6 +442,72 @@ impl<G: GitBackend> CatalogSync<G> {
     pub fn catalog_root(&self) -> &Path {
         &self.catalog_dir
     }
+}
+
+/// Safely remove the catalog repo directory, refusing to delete outside the catalog root.
+///
+/// Why: guards against bugs and symlink-escape attacks that could accidentally
+/// remove an arbitrary path; canonicalizing both paths before comparison eliminates
+/// `..` traversal and symlink tricks.
+/// What: canonicalizes `target` and `catalog_dir` (both must exist at call time —
+/// `catalog_dir` was created by `create_dir_all` and `target` exists by caller
+/// precondition), rejects if `canon_target == canon_catalog` (never remove the
+/// catalog root itself), rejects if `canon_target` is not strictly under
+/// `canon_catalog`, then calls `remove_dir_all`.
+/// Test: guard_remove_rejects_path_outside_catalog.
+fn guard_remove(target: &Path, catalog_dir: &Path) -> Result<(), CatalogError> {
+    let canon_target = target.canonicalize().map_err(CatalogError::Io)?;
+    let canon_catalog = catalog_dir.canonicalize().map_err(CatalogError::Io)?;
+    if canon_target == canon_catalog {
+        return Err(CatalogError::Git(format!(
+            "safety: refusing to remove catalog root '{}'",
+            target.display()
+        )));
+    }
+    if !canon_target.starts_with(&canon_catalog) {
+        return Err(CatalogError::Git(format!(
+            "safety: refusing to remove '{}' — not inside catalog dir '{}'",
+            target.display(),
+            catalog_dir.display()
+        )));
+    }
+    std::fs::remove_dir_all(target).map_err(CatalogError::Io)
+}
+
+/// Return true if two git remote URLs refer to the same repository.
+///
+/// Why: `git remote get-url` and the configured URL may differ by trailing
+/// slash or `.git` suffix; normalising before comparison avoids spurious
+/// re-clones when the URL forms are equivalent.
+/// What: lower-cases both URLs and strips trailing `/` and `.git`.
+/// Test: urls_match_normalises_variants.
+fn urls_match(a: &str, b: &str) -> bool {
+    normalize_repo_url(a) == normalize_repo_url(b)
+}
+
+/// Normalise a git remote URL to a canonical form for comparison.
+///
+/// Why: two URLs for the same repository can differ in protocol (ssh vs https),
+/// `.git` suffix, trailing slash, and case — without normalization they falsely
+/// mismatch and trigger a spurious destructive re-clone.
+/// What: converts `git@host:owner/repo` to `https://host/owner/repo`, strips
+/// trailing `/` and `.git`, then lowercases the result.
+/// Test: urls_match_normalises_variants.
+fn normalize_repo_url(url: &str) -> String {
+    // Convert SSH git@ form to HTTPS before further normalization.
+    let https_form = if let Some(rest) = url.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            format!("https://{host}/{path}")
+        } else {
+            url.to_owned()
+        }
+    } else {
+        url.to_owned()
+    };
+    https_form
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_lowercase()
 }
 
 /// Return the file stems in a directory (for flat-file layouts like agents).
@@ -621,4 +763,72 @@ mod tests {
             "agents from legacy path: {agents:?}"
         );
     }
+
+    #[test]
+    fn guard_remove_rejects_path_outside_catalog() {
+        // Verify canonicalized guard rejects paths outside the catalog boundary
+        // and also refuses to remove the catalog root itself.
+        let root = TempDir::new().unwrap();
+        let catalog_dir = root.path().join("catalog");
+        std::fs::create_dir_all(&catalog_dir).unwrap();
+        let outside = root.path().join("not-catalog");
+        std::fs::create_dir_all(&outside).unwrap();
+        // Sibling directory outside catalog must be rejected.
+        assert!(
+            guard_remove(&outside, &catalog_dir).is_err(),
+            "path outside catalog must be rejected"
+        );
+        // Removing the catalog root itself must also be rejected.
+        assert!(
+            guard_remove(&catalog_dir, &catalog_dir).is_err(),
+            "catalog root itself must be rejected"
+        );
+    }
+
+    #[test]
+    fn urls_match_normalises_variants() {
+        // SSH and HTTPS forms of the same repo must match.
+        assert!(
+            urls_match(
+                "git@github.com:owner/repo.git",
+                "https://github.com/owner/repo"
+            ),
+            "ssh↔https must match"
+        );
+        // Trailing slash must not prevent a match.
+        assert!(
+            urls_match(
+                "https://github.com/owner/repo/",
+                "https://github.com/owner/repo"
+            ),
+            "trailing slash must be ignored"
+        );
+        // .git suffix must not prevent a match.
+        assert!(
+            urls_match(
+                "https://github.com/owner/repo.git",
+                "https://github.com/owner/repo"
+            ),
+            ".git suffix must be stripped"
+        );
+        // Case insensitivity.
+        assert!(
+            urls_match(
+                "HTTPS://GitHub.com/Owner/Repo",
+                "https://github.com/owner/repo"
+            ),
+            "comparison must be case-insensitive"
+        );
+        // Different repos must NOT match.
+        assert!(
+            !urls_match(
+                "https://github.com/owner/repo-a",
+                "https://github.com/owner/repo-b"
+            ),
+            "distinct repos must not match"
+        );
+    }
 }
+
+// #1751 idempotency tests (uses public API → lives in crates/trusty-mpm/tests/).
+// See: tests/catalog_sync_idempotent.rs

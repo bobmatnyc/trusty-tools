@@ -55,11 +55,11 @@ pub struct PreparedWorkspace {
     pub branch: String,
 }
 
-/// Trait seam over git operations used by the provisioner.
+/// Trait seam over git operations used by the provisioner and catalog sync.
 ///
-/// Why: the provisioner must be testable without a real git remote or network
-/// access; the trait lets tests inject a FakeGitBackend.
-/// What: clone and checkout operations on a target path.
+/// Why: both the workspace provisioner and catalog sync must be testable without
+/// a real git remote or network; the trait lets tests inject a FakeGitBackend.
+/// What: clone, inspect, and update operations on a target path.
 /// Test: FakeGitBackend in this module's test section.
 pub trait GitBackend: Send + Sync {
     /// Clone repo_url at git_ref into target_dir.
@@ -73,6 +73,35 @@ pub trait GitBackend: Send + Sync {
         git_ref: &str,
         target_dir: &Path,
     ) -> Result<(), ProvisionError>;
+
+    /// Return true if `dir` contains a valid git repository.
+    ///
+    /// Why: catalog sync must distinguish a valid checkout from an absent or
+    /// corrupt directory so it can decide whether to clone, update, or re-clone.
+    /// What: checks for the presence of a `.git` subdirectory (or `.git` file
+    /// for worktrees) inside `dir`.
+    /// Test: FakeGitBackend checks for the `.git/` dir it creates during clone.
+    fn is_git_repo(&self, dir: &Path) -> bool;
+
+    /// Return the URL of the `origin` remote configured in `dir`.
+    ///
+    /// Why: catalog sync verifies the existing checkout points at the expected
+    /// remote before deciding to update in place vs. re-clone.
+    /// What: queries the git configuration of the repository at `dir` for the
+    /// `origin` remote URL.
+    /// Test: FakeGitBackend reads from the `.git/config` it writes during clone.
+    fn remote_url(&self, dir: &Path) -> Result<String, ProvisionError>;
+
+    /// Fetch the specific `git_ref` from `origin` and hard-reset to `FETCH_HEAD`.
+    ///
+    /// Why: catalog sync updates an existing valid checkout in place so local
+    /// drift (manual edits, partial state) can never block the update; using
+    /// FETCH_HEAD avoids `origin/<ref>` which only works for branches, not tags
+    /// or SHAs.
+    /// What: runs `git -C dir fetch origin <git_ref>` then
+    /// `git -C dir reset --hard FETCH_HEAD` — works for branches, tags, and SHAs.
+    /// Test: FakeGitBackend returns Ok(()) without performing real git operations.
+    fn fetch_and_reset(&self, dir: &Path, git_ref: &str) -> Result<(), ProvisionError>;
 }
 
 /// Real git backend that shells out to the `git` binary.
@@ -120,27 +149,98 @@ impl GitBackend for RealGitBackend {
             )))
         }
     }
+
+    fn is_git_repo(&self, dir: &Path) -> bool {
+        // `.git` can be a directory (normal clone) or a file (worktree).
+        let dot_git = dir.join(".git");
+        dot_git.is_dir() || dot_git.is_file()
+    }
+
+    fn remote_url(&self, dir: &Path) -> Result<String, ProvisionError> {
+        use std::process::Command;
+        let dir_s = dir.to_string_lossy();
+        let out = Command::new("git")
+            .args(["-C", &dir_s, "remote", "get-url", "origin"])
+            .output()
+            .map_err(|e| ProvisionError::Git(format!("git remote get-url exec failed: {e}")))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        } else {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            Err(ProvisionError::Git(format!(
+                "git remote get-url failed: {stderr}"
+            )))
+        }
+    }
+
+    fn fetch_and_reset(&self, dir: &Path, git_ref: &str) -> Result<(), ProvisionError> {
+        use std::process::Command;
+        let dir_s = dir.to_string_lossy();
+        // Fetch the specific ref so tags and SHAs work correctly.
+        // `git fetch origin <ref>` writes FETCH_HEAD; `git reset --hard FETCH_HEAD`
+        // then works for branches, tags, and commit SHAs alike — unlike
+        // `origin/<ref>` which only resolves for branches.
+        let fetch = Command::new("git")
+            .args(["-C", &dir_s, "fetch", "origin", git_ref])
+            .output()
+            .map_err(|e| ProvisionError::Git(format!("git fetch exec failed: {e}")))?;
+        if !fetch.status.success() {
+            let stderr = String::from_utf8_lossy(&fetch.stderr);
+            return Err(ProvisionError::Git(format!("git fetch failed: {stderr}")));
+        }
+        let reset = Command::new("git")
+            .args(["-C", &dir_s, "reset", "--hard", "FETCH_HEAD"])
+            .output()
+            .map_err(|e| ProvisionError::Git(format!("git reset exec failed: {e}")))?;
+        if reset.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&reset.stderr);
+            Err(ProvisionError::Git(format!("git reset failed: {stderr}")))
+        }
+    }
 }
 
 /// Fake git backend for unit tests.
 ///
 /// Why: unit tests must not require a real git remote or network.
 /// What: records clone calls and creates the target directory to simulate a checkout.
-/// Test: used by every WorkspaceProvisioner unit test.
+/// Use `new()` for a permissive fake; use `new_strict()` to simulate real `git clone`
+/// exit-128 failures when the target directory already exists.
+/// Test: used by every WorkspaceProvisioner unit test and catalog_sync_idempotent tests.
 pub struct FakeGitBackend {
     /// Calls recorded for assertions.
     pub calls: std::sync::Mutex<Vec<(String, String, PathBuf)>>,
+    /// When true, clone_repo returns an error if target_dir already exists,
+    /// mirroring real `git clone` exit 128 behaviour.
+    strict: bool,
 }
 
 impl FakeGitBackend {
-    /// Construct a new FakeGitBackend with an empty call log.
+    /// Construct a new FakeGitBackend with an empty call log (permissive mode).
     ///
     /// Why: tests need a fresh call log for each test case.
-    /// What: initialises the Mutex-guarded vec.
+    /// What: initialises the Mutex-guarded vec with `strict = false`.
     /// Test: used in every provisioner unit test.
     pub fn new() -> Self {
         Self {
             calls: std::sync::Mutex::new(Vec::new()),
+            strict: false,
+        }
+    }
+
+    /// Construct a FakeGitBackend that fails `clone_repo` when the target already exists.
+    ///
+    /// Why: the idempotency regression test (`catalog_sync_second_sync_succeeds`)
+    /// must fail against pre-fix unconditional-clone code and pass only when
+    /// `ensure_repo` routes the second call to the update path instead of re-cloning.
+    /// What: same as `new()` but `strict = true`; clone_repo returns
+    /// `ProvisionError::Git` (simulating exit 128) if the target directory exists.
+    /// Test: catalog_sync_second_sync_succeeds.
+    pub fn new_strict() -> Self {
+        Self {
+            calls: std::sync::Mutex::new(Vec::new()),
+            strict: true,
         }
     }
 }
@@ -163,8 +263,54 @@ impl GitBackend for FakeGitBackend {
             git_ref.to_owned(),
             target_dir.to_owned(),
         ));
-        // Create the directory to simulate a successful clone.
-        std::fs::create_dir_all(target_dir)?;
+        // In strict mode, mirror real `git clone` exit 128: fail when target exists.
+        // This makes catalog_sync_second_sync_succeeds a genuine regression guard —
+        // it fails against pre-fix unconditional-clone code and passes only when
+        // ensure_repo routes the second call to fetch_and_reset instead of clone.
+        if self.strict && target_dir.exists() {
+            return Err(ProvisionError::Git(format!(
+                "git clone failed (exit 128): destination path '{}' already exists and is not an empty directory",
+                target_dir.display()
+            )));
+        }
+        // Simulate a clone: create a minimal .git/config so is_git_repo and
+        // remote_url work correctly in subsequent calls (e.g. second sync).
+        let git_dir = target_dir.join(".git");
+        std::fs::create_dir_all(&git_dir)?;
+        let config = format!(
+            "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = {repo_url}\n"
+        );
+        std::fs::write(git_dir.join("config"), config)?;
+        Ok(())
+    }
+
+    fn is_git_repo(&self, dir: &Path) -> bool {
+        dir.join(".git").is_dir()
+    }
+
+    fn remote_url(&self, dir: &Path) -> Result<String, ProvisionError> {
+        // Read the URL from the fake .git/config written during clone_repo.
+        let config_path = dir.join(".git").join("config");
+        let content = std::fs::read_to_string(&config_path)
+            .map_err(|e| ProvisionError::Git(format!("no .git/config: {e}")))?;
+        let mut in_origin = false;
+        for line in content.lines() {
+            let t = line.trim();
+            if t == "[remote \"origin\"]" {
+                in_origin = true;
+            } else if t.starts_with('[') {
+                in_origin = false;
+            } else if in_origin && let Some(url) = t.strip_prefix("url = ") {
+                return Ok(url.to_owned());
+            }
+        }
+        Err(ProvisionError::Git(
+            "no origin remote in .git/config".to_owned(),
+        ))
+    }
+
+    fn fetch_and_reset(&self, _dir: &Path, _git_ref: &str) -> Result<(), ProvisionError> {
+        // Fake: always succeeds — no network or filesystem operation needed.
         Ok(())
     }
 }
