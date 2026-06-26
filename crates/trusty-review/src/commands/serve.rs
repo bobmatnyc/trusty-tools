@@ -95,7 +95,7 @@ pub async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
             let value: DeferredStateValue = match build_app_state(config_for_bg).await {
                 Ok(state) => {
                     info!("trusty-review AppState ready — tool calls now accepted");
-                    Some(Ok(state))
+                    Some(Ok(Arc::new(state)))
                 }
                 Err(e) => {
                     error!("trusty-review AppState build failed: {e:#}");

@@ -337,15 +337,16 @@ async fn deferred_dispatch_tool_call_when_sender_dropped() {
 /// A tool call when AppState is ready dispatches normally to the review pipeline.
 ///
 /// Why: the happy path must work correctly after the deferred build completes.
-/// What: sends `Some(Ok(test_state()))` on the channel, then dispatches
-/// `review_health` and asserts the health response is well-formed.
+/// What: sends `Some(Ok(Arc::new(test_state())))` on the channel (matching the
+/// `Arc<AppState>` in `DeferredStateValue`), then dispatches `review_health`
+/// and asserts the health response is well-formed.
 /// Test: self-contained; uses the same `FakeLlm` / `FakeSearch` stubs as other
 /// dispatch tests.
 #[tokio::test]
 async fn deferred_dispatch_tool_call_when_ready() {
     let state = test_state();
     let (tx, rx) = tokio::sync::watch::channel::<DeferredStateValue>(None);
-    tx.send(Some(Ok(state))).unwrap();
+    tx.send(Some(Ok(Arc::new(state)))).unwrap();
     let req = make_req("review_health", json!({}));
     let resp = dispatch_deferred(req, rx).await;
     let result = resp.result.expect("expected result from deferred dispatch");
@@ -353,6 +354,51 @@ async fn deferred_dispatch_tool_call_when_ready() {
     let health: Value = serde_json::from_str(text).expect("valid health JSON");
     assert_eq!(health["status"], "ok");
     assert!(health["version"].is_string());
+}
+
+/// The 30-second warmup timeout branch returns INTERNAL_ERROR with the warming-up message.
+///
+/// Why: validates that tool calls arriving before AppState is ready receive a
+/// clear, actionable error rather than hanging indefinitely — the key safety
+/// net for the `dispatch_deferred` timeout path.
+/// What: uses Tokio's paused clock (`start_paused = true`) so `advance(31 s)`
+/// fires the internal 30-second `tokio::time::timeout` instantly without any
+/// real wall-clock wait.  The watch channel never receives a value, simulating
+/// an in-progress (or stalled) background build.
+/// Test: gated `#[ignore]` because paused-clock tests require `tokio::test`
+/// with `start_paused = true` and can be flaky under high parallel test load.
+/// Run explicitly: `cargo test -p trusty-review -- --include-ignored
+/// deferred_dispatch_tool_call_times_out_warming_up`.
+#[tokio::test(start_paused = true)]
+#[ignore = "paused-clock test — run with --include-ignored"]
+async fn deferred_dispatch_tool_call_times_out_warming_up() {
+    use std::time::Duration;
+
+    // Channel with no value ever sent — background build is still "in progress".
+    let (_tx, rx) = tokio::sync::watch::channel::<DeferredStateValue>(None);
+    let req = make_req("review_health", json!({}));
+
+    // tokio::join! polls both futures concurrently.  With the clock paused,
+    // dispatch_deferred parks on wait_for.  advance(31 s) fires the 30-second
+    // timeout, waking dispatch_deferred which then returns the graceful error.
+    let (resp, _) = tokio::join!(
+        dispatch_deferred(req, rx),
+        tokio::time::advance(Duration::from_secs(31)),
+    );
+
+    let err = resp
+        .error
+        .expect("warmup timeout must produce a JSON-RPC error");
+    assert_eq!(
+        err.code,
+        error_codes::INTERNAL_ERROR,
+        "warmup timeout must return INTERNAL_ERROR"
+    );
+    assert!(
+        err.message.contains("warming up"),
+        "error must mention 'warming up', got: {}",
+        err.message
+    );
 }
 
 /// Binary stdio smoke test: spawn `trusty-review serve --stdio`, send MCP

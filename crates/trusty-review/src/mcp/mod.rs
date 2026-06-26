@@ -74,11 +74,13 @@ pub async fn run(state: AppState) -> Result<()> {
 /// Why: the MCP stdio loop must answer `initialize` before `AppState` is ready
 /// (the background build may take 7+ seconds on broken Bedrock creds).  This
 /// three-state value lets the dispatcher distinguish "still building" (`None`),
-/// "ready" (`Some(Ok(…))`), and "failed" (`Some(Err(reason))`).
-/// What: `None` on channel creation; the background task sends `Some(Ok(state))`
-/// or `Some(Err(reason))` when the build completes.
+/// "ready" (`Some(Ok(…))`), and "failed" (`Some(Err(reason))`).  `Arc`
+/// avoids cloning all 15+ `String` fields of `AppState` on every tool call —
+/// the dispatcher does one atomic refcount bump per call instead.
+/// What: `None` on channel creation; the background task sends
+/// `Some(Ok(Arc::new(state)))` or `Some(Err(reason))` when the build completes.
 /// Test: `deferred_dispatch_*` tests in `mcp_tests.rs` cover all three states.
-pub type DeferredStateValue = Option<Result<AppState, String>>;
+pub type DeferredStateValue = Option<Result<Arc<AppState>, String>>;
 
 /// Start the MCP stdio loop with deferred `AppState` construction (issue #1739).
 ///
@@ -157,7 +159,7 @@ pub(crate) async fn dispatch_deferred(
     // watch::Ref (RwLockReadGuard) is definitively dropped before the next
     // .await point — required for the enclosing future to satisfy Send.
     const WARMUP_TIMEOUT: Duration = Duration::from_secs(30);
-    let state_outcome: Result<AppState, String> = {
+    let state_outcome: Result<Arc<AppState>, String> = {
         let timed = tokio::time::timeout(WARMUP_TIMEOUT, state_rx.wait_for(|v| v.is_some())).await;
         match timed {
             Err(_elapsed) => {
@@ -181,10 +183,11 @@ pub(crate) async fn dispatch_deferred(
                 );
             }
             Ok(Ok(guard)) => {
-                // Clone the owned value out of the Ref.  The guard is dropped
-                // at the end of this block — before the .await below.
+                // Clone Arc out of the Ref — one atomic refcount bump instead of
+                // a full AppState copy.  The guard is dropped at the end of this
+                // block (before the dispatch(...).await below).
                 match &*guard {
-                    Some(Ok(state)) => Ok(state.clone()),
+                    Some(Ok(arc)) => Ok(Arc::clone(arc)),
                     Some(Err(reason)) => Err(reason.clone()),
                     None => unreachable!("wait_for guarantees the predicate is satisfied"),
                 }
@@ -198,7 +201,7 @@ pub(crate) async fn dispatch_deferred(
             error_codes::INTERNAL_ERROR,
             format!("server initialization failed: {reason}"),
         ),
-        // AppState is ready — delegate to the normal synchronous dispatcher.
+        // AppState is ready — Arc::deref gives &AppState for the dispatch call.
         Ok(state) => dispatch(req, &state).await,
     }
 }
