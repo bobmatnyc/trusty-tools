@@ -9,10 +9,10 @@
 //! protected fallback (#1724) ensures the live checkout is never touched.
 //!
 //! What: [`run_guided_default`] orchestrates detection, listing, and dispatch.
-//! [`derive_project`] derives the `source_id` and managed workspace from the
-//! git origin. [`fallback_protected`] is the three-way dispatch for the daemon-
-//! unreachable path; it is also the target for non-GitHub projects. The helpers
-//! for display and the TTY picker are in the lower sections of this file.
+//! [`derive_project`] derives the `source_id`, managed workspace, and git root.
+//! [`fallback_protected`] is the three-way dispatch for the daemon-unreachable
+//! path; it is also the target for non-GitHub projects. The TTY picker is
+//! split into a pure `parse_picker_choice` + an I/O driver `run_tty_picker`.
 //!
 //! Test: unit tests for detection and fallback live in `tests_behavior_b_tests.rs`
 //! (#1724 regression suite) and `tests_behavior_c_tests.rs` (#1705 new UX suite);
@@ -36,6 +36,28 @@ struct SpawnManagedResponse {
     state: String,
 }
 
+/// Decision returned by [`parse_picker_choice`].
+///
+/// Why: extracting the parse-and-decide logic from the I/O driver makes it
+/// unit-testable without stdin/tmux. The driver calls parse, checks the variant,
+/// and shells out only for Resume and LaunchNew.
+/// What: four variants cover every valid and invalid input the picker can receive.
+/// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
+/// `guided_picker_bare_enter_with_sessions_resumes_first`,
+/// `guided_picker_q_returns_quit`, `guided_picker_numeric_valid_resumes`,
+/// `guided_picker_numeric_launch_new`, `guided_picker_unrecognised_input`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PickerDecision {
+    /// Resume the session at 0-based index into the sessions slice.
+    Resume(usize),
+    /// Launch a brand-new session.
+    LaunchNew,
+    /// User chose to quit without action.
+    Quit,
+    /// Input was not recognised; the caller quits cleanly.
+    Unrecognised,
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 /// Bare `tm` guided default — detect project, list sessions, and offer a picker.
@@ -49,9 +71,10 @@ struct SpawnManagedResponse {
 /// CWD is a GitHub-backed git project; (2) falls through to
 /// [`fallback_protected`] for every other case (daemon unreachable, non-GitHub
 /// remote, non-git directory). Non-TTY piped invocations print project + session
-/// info and exit 0 without hanging for input (#1705 AC-7).
+/// info and exit 0 without hanging for input (#1705 AC-7). Subdir launches
+/// pass the git root as `repo_url` so the daemon sets `source_id` correctly.
 /// Test: `guided_derive_project_returns_none_for_non_git`,
-/// `guided_non_tty_prints_hint_and_returns_ok`,
+/// `guided_non_tty_gate_returns_false_skips_stdin`,
 /// `guided_fallback_never_pollutes_github_git_checkout` (#1724).
 pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("cannot resolve current directory")?;
@@ -59,17 +82,24 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
     eprintln!("tm: no subcommand — using guided default for {workdir}");
 
     // Try the rich UX when CWD is a GitHub-backed git project.
-    if let Some((source_id, workspace)) = derive_project(&cwd) {
+    if let Some((source_id, workspace, git_root)) = derive_project(&cwd) {
+        // Pass the git root as repo_url so daemon detects .git at root even
+        // when tm is invoked from a subdirectory (#1705 LOW fix).
+        let repo_url = git_root.to_string_lossy().to_string();
         match list_project_sessions(client, url, &source_id).await {
             Ok(sessions) => {
                 use std::io::IsTerminal as _;
-                print_project_context(&source_id, &workspace, &sessions);
-                return if std::io::stdin().is_terminal() {
-                    run_tty_picker(client, url, &workdir, &sessions).await
-                } else {
-                    print_non_tty_hint(&source_id, &sessions);
-                    Ok(())
-                };
+                // tty_gate prints project context; returns true when stdin is a
+                // TTY and the picker should run, false for non-TTY exit.
+                if !tty_gate(
+                    std::io::stdin().is_terminal(),
+                    &source_id,
+                    &workspace,
+                    &sessions,
+                ) {
+                    return Ok(());
+                }
+                return run_tty_picker(client, url, &repo_url, &sessions).await;
             }
             Err(e) => {
                 eprintln!("tm: daemon unreachable ({e}); falling back");
@@ -86,18 +116,24 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
 
 // ── Project derivation ───────────────────────────────────────────────────────
 
-/// Derive the GitHub `source_id` and managed workspace from `cwd`.
+/// Derive the GitHub `source_id`, managed workspace, and git root from `cwd`.
 ///
 /// Why: the picker needs the `owner/repo` identity (for filtering sessions by
-/// `source_id`) and the managed workspace path (for display) before contacting
-/// the daemon — both come from the local git config.
+/// `source_id`), the managed workspace path (for display), and the git root
+/// path (to pass as `repo_url` so the daemon sets `source_id` correctly even
+/// when `tm` is invoked from a subdirectory — #1705 LOW fix).
 /// What: finds the git root, reads `remote.origin.url`, guards that it is a
 /// GitHub URL, parses `owner/repo` via `parse_github_path`, and returns
-/// `(source_id, workspace_path)` where `source_id = "owner/repo"` and
-/// `workspace_path = <repos_root>/owner/repo`.
+/// `(source_id, workspace_path, git_root)` where `source_id = "owner/repo"`,
+/// `workspace_path = <repos_root>/owner/repo`, and `git_root` is the absolute
+/// path of the repository root.
 /// Test: `guided_derive_project_returns_none_for_non_git`,
-/// `guided_derive_project_returns_none_for_non_github_remote`.
-pub(crate) fn derive_project(cwd: &std::path::Path) -> Option<(String, std::path::PathBuf)> {
+/// `guided_derive_project_returns_none_for_non_github_remote`,
+/// `guided_derive_project_accepts_github_https_remote`,
+/// `guided_derive_project_returns_some_from_subdir`.
+pub(crate) fn derive_project(
+    cwd: &std::path::Path,
+) -> Option<(String, std::path::PathBuf, std::path::PathBuf)> {
     use trusty_mpm::daemon::managed_routes::inproject;
     let git_root = find_git_root(cwd)?;
     let origin_url = inproject::get_origin_url(&git_root)?;
@@ -107,7 +143,7 @@ pub(crate) fn derive_project(cwd: &std::path::Path) -> Option<(String, std::path
     let gh = trusty_common::github_path::parse_github_path(&origin_url)?;
     let source_id = format!("{}/{}", gh.owner, gh.repo);
     let workspace = inproject::base_clone_path(&gh.owner, &gh.repo);
-    Some((source_id, workspace))
+    Some((source_id, workspace, git_root))
 }
 
 // ── Daemon communication ─────────────────────────────────────────────────────
@@ -120,7 +156,9 @@ pub(crate) fn derive_project(cwd: &std::path::Path) -> Option<(String, std::path
 /// What: GETs the managed-list endpoint with the query param and deserializes
 /// the sessions array. Returns `Err` when the daemon is unreachable or the
 /// request fails — the caller uses this as a signal to fall back.
-/// Test: `guided_list_project_sessions_parses_empty_response`.
+/// Test: requires a live daemon; covered by the e2e test suite
+/// (`tests/session_manager_mvp.rs`) and integration tests in
+/// `tests_behavior_c_tests.rs::guided_list_sessions_mock_response`.
 async fn list_project_sessions(
     client: &reqwest::Client,
     base_url: &str,
@@ -136,7 +174,33 @@ async fn list_project_sessions(
     Ok(body.sessions)
 }
 
-// ── Display helpers ──────────────────────────────────────────────────────────
+// ── Display / TTY-gate helpers ────────────────────────────────────────────────
+
+/// Print project context and decide whether to run the interactive picker.
+///
+/// Why: a testable seam over `std::io::stdin().is_terminal()`. By injecting
+/// `is_tty`, callers in tests can exercise the non-TTY branch without a live
+/// stdin — confirming that the branch returns `false` (no picker needed) and
+/// thus prevents any attempt to read from stdin (#1705 AC-7 / HIGH-2b).
+/// What: always calls [`print_project_context`]. If `is_tty = false`, also
+/// calls [`print_non_tty_hint`] and returns `false`. If `is_tty = true`,
+/// returns `true` (caller should invoke [`run_tty_picker`]).
+/// Test: `guided_non_tty_gate_returns_false_skips_stdin`,
+/// `guided_tty_gate_returns_true_for_tty`.
+pub(crate) fn tty_gate(
+    is_tty: bool,
+    source_id: &str,
+    workspace: &std::path::Path,
+    sessions: &[trusty_mpm::client::ManagedSessionSummary],
+) -> bool {
+    print_project_context(source_id, workspace, sessions);
+    if !is_tty {
+        print_non_tty_hint(source_id, sessions);
+        false
+    } else {
+        true
+    }
+}
 
 /// Print the detected project and session list to stderr.
 ///
@@ -145,7 +209,8 @@ async fn list_project_sessions(
 /// and which sessions are available before being prompted.
 /// What: prints the source_id, workspace path, and a numbered session list (or
 /// "(none)" when empty). All output goes to stderr (stdout stays clean).
-/// Test: `guided_print_project_context_does_not_panic`.
+/// Test: `guided_print_project_context_does_not_panic_no_sessions`,
+/// `guided_print_project_context_does_not_panic_with_sessions`.
 pub(crate) fn print_project_context(
     source_id: &str,
     workspace: &std::path::Path,
@@ -179,7 +244,9 @@ pub(crate) fn print_project_context(
 /// block the caller forever; print the context and exit cleanly instead (#1705 AC-7).
 /// What: emits one-line notice + resume/launch hints to stderr. The caller
 /// returns `Ok(())` immediately after.
-/// Test: `guided_non_tty_prints_hint_and_returns_ok`.
+/// Test: `guided_print_non_tty_hint_does_not_panic_no_sessions`,
+/// `guided_print_non_tty_hint_does_not_panic_with_sessions`,
+/// `guided_non_tty_gate_returns_false_skips_stdin`.
 pub(crate) fn print_non_tty_hint(
     source_id: &str,
     sessions: &[trusty_mpm::client::ManagedSessionSummary],
@@ -197,24 +264,62 @@ pub(crate) fn print_non_tty_hint(
 
 // ── TTY picker ───────────────────────────────────────────────────────────────
 
+/// Parse one line of picker input into a [`PickerDecision`].
+///
+/// Why: separating parse-and-decide from the I/O driver makes the dispatch
+/// logic unit-testable without needing a real stdin, tmux, or daemon.
+/// What: `session_count` is the number of existing sessions in the menu (the
+/// menu slot `session_count + 1` is always "launch new").
+///   • `"q"` / `"Q"` → `Quit`
+///   • empty / whitespace → `Resume(0)` when `session_count > 0`, else `LaunchNew`
+///   • `N` (1..=session_count) → `Resume(N-1)` (0-based index)
+///   • `session_count + 1` → `LaunchNew`
+///   • anything else → `Unrecognised`
+/// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
+/// `guided_picker_bare_enter_with_sessions_resumes_first`,
+/// `guided_picker_q_returns_quit`, `guided_picker_Q_returns_quit`,
+/// `guided_picker_numeric_valid_resumes`, `guided_picker_numeric_launch_new`,
+/// `guided_picker_out_of_range_unrecognised`,
+/// `guided_picker_non_numeric_unrecognised`.
+pub(crate) fn parse_picker_choice(line: &str, session_count: usize) -> PickerDecision {
+    let choice = line.trim();
+    if choice.eq_ignore_ascii_case("q") {
+        return PickerDecision::Quit;
+    }
+    if choice.is_empty() {
+        return if session_count > 0 {
+            PickerDecision::Resume(0)
+        } else {
+            PickerDecision::LaunchNew
+        };
+    }
+    if let Ok(n) = choice.parse::<usize>() {
+        if n >= 1 && n <= session_count {
+            return PickerDecision::Resume(n - 1);
+        }
+        if n == session_count + 1 {
+            return PickerDecision::LaunchNew;
+        }
+    }
+    PickerDecision::Unrecognised
+}
+
 /// Interactive numbered picker (TTY mode only).
 ///
 /// Why: a simple numbered menu is the lowest-friction way to resume or launch
 /// without requiring the operator to remember session names or UUIDs.
-/// What: prints the menu, reads one line from stdin, and dispatches:
-///   • bare Enter / "1" (sessions exist) → resume most recent;
-///   • bare Enter (no sessions) → launch new;
-///   • numeric N (1..=len) → resume session N;
-///   • numeric N == len+1 → launch new;
-///   • "q"/"Q" → quit cleanly;
-///   • anything else → print hint and quit.
-/// Default when sessions exist: resume most recent (bare Enter = [1]).
-/// Test: `guided_tty_picker_dispatches_new_when_no_sessions`,
-/// `guided_tty_picker_quit_returns_ok`.
+/// What: prints the menu, reads one line from stdin, delegates to
+/// [`parse_picker_choice`], and dispatches. Side-effect-free parse logic lives
+/// in `parse_picker_choice` and is unit-tested independently.
+///   • `Resume(i)` → [`tmux_attach`] the session at index `i`;
+///   • `LaunchNew` → [`launch_new_session_and_attach`];
+///   • `Quit` / `Unrecognised` → print notice and return `Ok`.
+/// Test: `parse_picker_choice` is the testable seam; I/O path is exercised by
+/// manual smoke tests and the e2e suite.
 async fn run_tty_picker(
     client: &reqwest::Client,
     url: &str,
-    workdir: &str,
+    repo_url: &str,
     sessions: &[trusty_mpm::client::ManagedSessionSummary],
 ) -> anyhow::Result<()> {
     eprintln!();
@@ -236,32 +341,19 @@ async fn run_tty_picker(
     std::io::stdin()
         .read_line(&mut line)
         .context("failed to read choice from stdin")?;
-    let choice = line.trim();
 
-    if choice.eq_ignore_ascii_case("q") {
-        eprintln!("tm: quit.");
-        return Ok(());
-    }
-
-    if choice.is_empty() {
-        // Bare Enter: resume most recent when sessions exist, else launch new.
-        return if let Some(s) = sessions.first() {
-            tmux_attach(&s.name)
-        } else {
-            launch_new_session_and_attach(client, url, workdir).await
-        };
-    }
-
-    if let Ok(n) = choice.parse::<usize>() {
-        if n >= 1 && n <= sessions.len() {
-            return tmux_attach(&sessions[n - 1].name);
-        } else if n == new_idx {
-            return launch_new_session_and_attach(client, url, workdir).await;
+    match parse_picker_choice(&line, sessions.len()) {
+        PickerDecision::Quit => {
+            eprintln!("tm: quit.");
+            Ok(())
+        }
+        PickerDecision::Resume(i) => tmux_attach(&sessions[i].name),
+        PickerDecision::LaunchNew => launch_new_session_and_attach(client, url, repo_url).await,
+        PickerDecision::Unrecognised => {
+            eprintln!("tm: unrecognised choice '{}'; quitting.", line.trim());
+            Ok(())
         }
     }
-
-    eprintln!("tm: unrecognised choice '{choice}'; quitting.");
-    Ok(())
 }
 
 /// Invoke `tmux attach-session -t <name>` and await exit.
@@ -287,22 +379,24 @@ fn tmux_attach(name: &str) -> anyhow::Result<()> {
 ///
 /// Why: "launch new" in the picker must use the daemon's protected managed-clone
 /// spawn path — NEVER write framework files into the live checkout (#1724).
-/// What: POSTs `{"repo_url": workdir, "ref": "HEAD", "task": ""}` to
-/// `/api/v1/sessions/managed`; the daemon detects the GitHub project in `workdir`,
-/// provisions a per-session worktree in the base clone, and returns the session
-/// name. Then attaches via [`tmux_attach`].
+/// What: POSTs `{"repo_url": repo_url, "ref": "HEAD", "task": ""}` to
+/// `/api/v1/sessions/managed`. `repo_url` MUST be the git working-tree root
+/// (not a subdirectory), so the daemon finds `.git` and sets `source_id`
+/// correctly — enabling future `list_project_sessions` to show this session.
+/// The daemon provisions a per-session worktree in the base clone and returns
+/// the session name. Then attaches via [`tmux_attach`].
 /// Test: covered by the `POST /api/v1/sessions/managed` integration tests in
 /// `tests/session_manager_mvp.rs`.
 async fn launch_new_session_and_attach(
     client: &reqwest::Client,
     url: &str,
-    workdir: &str,
+    repo_url: &str,
 ) -> anyhow::Result<()> {
     eprintln!("tm: launching new session…");
     let resp = client
         .post(format!("{url}/api/v1/sessions/managed"))
         .json(&serde_json::json!({
-            "repo_url": workdir,
+            "repo_url": repo_url,
             "ref": "HEAD",
             "task": "",
         }))
