@@ -1,9 +1,10 @@
 //! Unit tests for `apply_catalog` (HR-3 rebuild offer).
 //!
 //! Why: the apply path must be verifiable offline — a `FakeGitBackend` simulates
-//! the catalog checkout (creating only the `repo` dir), the test seeds catalog
-//! agent/skill files into it, and the assertions cover redeploy + staleness-clear
-//! and the opt-in prune (including that prune spares user-owned files).
+//! the catalog checkout, the test seeds catalog agent/skill files into it (along
+//! with a minimal `.git/config` so `ensure_repo` takes the idempotent update path),
+//! and the assertions cover redeploy + staleness-clear and the opt-in prune
+//! (including that prune spares user-owned files).
 //! What: build a hermetic `FrameworkPaths` under a tempdir, write a project
 //! manifest selecting the CATALOG source, run `apply_catalog`, and assert the
 //! deployed files + a subsequent `detect_for_framework` reports fresh.
@@ -16,9 +17,32 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
+/// Mark `<catalog>/repo` as a valid git checkout so `ensure_repo` takes the
+/// idempotent update path (fetch+reset via `FakeGitBackend`, a no-op) rather
+/// than treating the pre-seeded directory as corrupt and wiping it.
+///
+/// Why: `CatalogSync::ensure_repo` (fix for #1751) now checks for `.git/`
+/// before deciding whether to clone or update in place. Test helpers that
+/// pre-seed catalog content must create this marker so the seeded files survive
+/// the sync call inside `apply_catalog`.
+/// What: writes a minimal `.git/config` with the default catalog remote URL at
+/// `<catalog>/repo/.git/config`, idempotently.
+/// Test: called by the seeding helpers below.
+fn mark_catalog_repo_as_valid(catalog_root: &Path) {
+    let git_dir = catalog_root.join("repo/.git");
+    fs::create_dir_all(&git_dir).unwrap();
+    // Use the same URL as DEFAULT_CATALOG_REPO in catalog_sync.rs.
+    fs::write(
+        git_dir.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://github.com/bobmatnyc/claude-mpm\n",
+    )
+    .unwrap();
+}
+
 /// Seed a catalog agent file at the layout `CatalogSync` writes
 /// (`<catalog>/repo/.claude/agents/<stem>.md`).
 fn seed_catalog_agent(catalog_root: &Path, stem: &str, body: &str) {
+    mark_catalog_repo_as_valid(catalog_root);
     let dir = catalog_root.join("repo/.claude/agents");
     fs::create_dir_all(&dir).unwrap();
     fs::write(
@@ -30,6 +54,7 @@ fn seed_catalog_agent(catalog_root: &Path, stem: &str, body: &str) {
 
 /// Seed a catalog skill file at `<catalog>/repo/.claude/skills/<stem>.md`.
 fn seed_catalog_skill(catalog_root: &Path, stem: &str, body: &str) {
+    mark_catalog_repo_as_valid(catalog_root);
     let dir = catalog_root.join("repo/.claude/skills");
     fs::create_dir_all(&dir).unwrap();
     fs::write(

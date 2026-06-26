@@ -55,11 +55,11 @@ pub struct PreparedWorkspace {
     pub branch: String,
 }
 
-/// Trait seam over git operations used by the provisioner.
+/// Trait seam over git operations used by the provisioner and catalog sync.
 ///
-/// Why: the provisioner must be testable without a real git remote or network
-/// access; the trait lets tests inject a FakeGitBackend.
-/// What: clone and checkout operations on a target path.
+/// Why: both the workspace provisioner and catalog sync must be testable without
+/// a real git remote or network; the trait lets tests inject a FakeGitBackend.
+/// What: clone, inspect, and update operations on a target path.
 /// Test: FakeGitBackend in this module's test section.
 pub trait GitBackend: Send + Sync {
     /// Clone repo_url at git_ref into target_dir.
@@ -73,6 +73,33 @@ pub trait GitBackend: Send + Sync {
         git_ref: &str,
         target_dir: &Path,
     ) -> Result<(), ProvisionError>;
+
+    /// Return true if `dir` contains a valid git repository.
+    ///
+    /// Why: catalog sync must distinguish a valid checkout from an absent or
+    /// corrupt directory so it can decide whether to clone, update, or re-clone.
+    /// What: checks for the presence of a `.git` subdirectory (or `.git` file
+    /// for worktrees) inside `dir`.
+    /// Test: FakeGitBackend checks for the `.git/` dir it creates during clone.
+    fn is_git_repo(&self, dir: &Path) -> bool;
+
+    /// Return the URL of the `origin` remote configured in `dir`.
+    ///
+    /// Why: catalog sync verifies the existing checkout points at the expected
+    /// remote before deciding to update in place vs. re-clone.
+    /// What: queries the git configuration of the repository at `dir` for the
+    /// `origin` remote URL.
+    /// Test: FakeGitBackend reads from the `.git/config` it writes during clone.
+    fn remote_url(&self, dir: &Path) -> Result<String, ProvisionError>;
+
+    /// Fetch from `origin` and hard-reset the working tree to `origin/<git_ref>`.
+    ///
+    /// Why: catalog sync updates an existing valid checkout in place so local
+    /// drift (manual edits, partial state) can never block the update.
+    /// What: runs `git -C dir fetch origin` then
+    /// `git -C dir reset --hard origin/<git_ref>`.
+    /// Test: FakeGitBackend returns Ok(()) without performing real git operations.
+    fn fetch_and_reset(&self, dir: &Path, git_ref: &str) -> Result<(), ProvisionError>;
 }
 
 /// Real git backend that shells out to the `git` binary.
@@ -120,6 +147,53 @@ impl GitBackend for RealGitBackend {
             )))
         }
     }
+
+    fn is_git_repo(&self, dir: &Path) -> bool {
+        // `.git` can be a directory (normal clone) or a file (worktree).
+        let dot_git = dir.join(".git");
+        dot_git.is_dir() || dot_git.is_file()
+    }
+
+    fn remote_url(&self, dir: &Path) -> Result<String, ProvisionError> {
+        use std::process::Command;
+        let dir_s = dir.to_string_lossy();
+        let out = Command::new("git")
+            .args(["-C", &dir_s, "remote", "get-url", "origin"])
+            .output()
+            .map_err(|e| ProvisionError::Git(format!("git remote get-url exec failed: {e}")))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        } else {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            Err(ProvisionError::Git(format!(
+                "git remote get-url failed: {stderr}"
+            )))
+        }
+    }
+
+    fn fetch_and_reset(&self, dir: &Path, git_ref: &str) -> Result<(), ProvisionError> {
+        use std::process::Command;
+        let dir_s = dir.to_string_lossy();
+        let fetch = Command::new("git")
+            .args(["-C", &dir_s, "fetch", "origin"])
+            .output()
+            .map_err(|e| ProvisionError::Git(format!("git fetch exec failed: {e}")))?;
+        if !fetch.status.success() {
+            let stderr = String::from_utf8_lossy(&fetch.stderr);
+            return Err(ProvisionError::Git(format!("git fetch failed: {stderr}")));
+        }
+        let reset_ref = format!("origin/{git_ref}");
+        let reset = Command::new("git")
+            .args(["-C", &dir_s, "reset", "--hard", &reset_ref])
+            .output()
+            .map_err(|e| ProvisionError::Git(format!("git reset exec failed: {e}")))?;
+        if reset.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&reset.stderr);
+            Err(ProvisionError::Git(format!("git reset failed: {stderr}")))
+        }
+    }
 }
 
 /// Fake git backend for unit tests.
@@ -163,8 +237,44 @@ impl GitBackend for FakeGitBackend {
             git_ref.to_owned(),
             target_dir.to_owned(),
         ));
-        // Create the directory to simulate a successful clone.
-        std::fs::create_dir_all(target_dir)?;
+        // Simulate a clone: create a minimal .git/config so is_git_repo and
+        // remote_url work correctly in subsequent calls (e.g. second sync).
+        let git_dir = target_dir.join(".git");
+        std::fs::create_dir_all(&git_dir)?;
+        let config = format!(
+            "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = {repo_url}\n"
+        );
+        std::fs::write(git_dir.join("config"), config)?;
+        Ok(())
+    }
+
+    fn is_git_repo(&self, dir: &Path) -> bool {
+        dir.join(".git").is_dir()
+    }
+
+    fn remote_url(&self, dir: &Path) -> Result<String, ProvisionError> {
+        // Read the URL from the fake .git/config written during clone_repo.
+        let config_path = dir.join(".git").join("config");
+        let content = std::fs::read_to_string(&config_path)
+            .map_err(|e| ProvisionError::Git(format!("no .git/config: {e}")))?;
+        let mut in_origin = false;
+        for line in content.lines() {
+            let t = line.trim();
+            if t == "[remote \"origin\"]" {
+                in_origin = true;
+            } else if t.starts_with('[') {
+                in_origin = false;
+            } else if in_origin && let Some(url) = t.strip_prefix("url = ") {
+                return Ok(url.to_owned());
+            }
+        }
+        Err(ProvisionError::Git(
+            "no origin remote in .git/config".to_owned(),
+        ))
+    }
+
+    fn fetch_and_reset(&self, _dir: &Path, _git_ref: &str) -> Result<(), ProvisionError> {
+        // Fake: always succeeds — no network or filesystem operation needed.
         Ok(())
     }
 }
