@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "trusty-mpm: unified multi-agent orchestration platform (core, daemon, CLI, TUI, Telegram)"
+exclude = ["/.claude/", "/.trusty-mpm/", "/CLAUDE.md"]
 
 # ── Feature flags ─────────────────────────────────────────────────────────────
 #
