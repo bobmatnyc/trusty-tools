@@ -2,6 +2,7 @@ use super::settings::{
     clean_global_trusty_memory_hooks, deploy_output_style, inject_trusty_memory_mcp,
     inject_trusty_search_mcp, preseed_workspace_trust, register_project_index,
     trusty_memory_mcp_value, trusty_search_mcp_value, write_output_style, write_project_hooks,
+    write_status_line,
 };
 use super::*;
 use tempfile::tempdir;
@@ -1573,5 +1574,70 @@ fn prepare_session_config_style_overrides_manifest() {
         value["outputStyle"],
         serde_json::json!("trusty-mpm-teacher"),
         "config [style] active must override the manifest's style"
+    );
+}
+
+// ── write_status_line tests ───────────────────────────────────────────────────
+
+#[test]
+fn write_status_line_injects_when_absent() {
+    // When no settings.json exists, write_status_line creates it with statusLine.
+    let tmp = tempdir().unwrap();
+    write_status_line(tmp.path()).expect("write succeeds");
+    let raw = std::fs::read_to_string(tmp.path().join(".claude").join("settings.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(v["statusLine"]["type"], "command", "type must be command");
+    assert_eq!(
+        v["statusLine"]["command"], "tm statusline",
+        "command must be tm statusline"
+    );
+    assert_eq!(v["statusLine"]["padding"], 0, "padding must be 0");
+}
+
+#[test]
+fn write_status_line_skips_when_already_set() {
+    // When statusLine already exists, write_status_line must not overwrite it.
+    let tmp = tempdir().unwrap();
+    let claude_dir = tmp.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    let existing =
+        serde_json::json!({"statusLine": {"type": "command", "command": "my custom cmd"}});
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string_pretty(&existing).unwrap(),
+    )
+    .unwrap();
+    write_status_line(tmp.path()).expect("write succeeds without modifying");
+    let raw = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        v["statusLine"]["command"], "my custom cmd",
+        "existing statusLine must not be overwritten"
+    );
+}
+
+#[test]
+fn write_status_line_preserves_user_config() {
+    // Existing keys in settings.json must survive the write_status_line call.
+    let tmp = tempdir().unwrap();
+    let claude_dir = tmp.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    let existing = serde_json::json!({"outputStyle": "trusty-mpm-research", "someKey": true});
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::to_string_pretty(&existing).unwrap(),
+    )
+    .unwrap();
+    write_status_line(tmp.path()).expect("write succeeds");
+    let raw = std::fs::read_to_string(claude_dir.join("settings.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        v["outputStyle"], "trusty-mpm-research",
+        "outputStyle must be preserved"
+    );
+    assert_eq!(v["someKey"], true, "arbitrary keys must be preserved");
+    assert_eq!(
+        v["statusLine"]["command"], "tm statusline",
+        "statusLine must be injected"
     );
 }

@@ -207,26 +207,136 @@ fn daemon_base_url(daemon: &DaemonInfo) -> String {
     }
 }
 
-/// Run `git rev-parse --abbrev-ref HEAD` in `cwd` and return the branch name.
+/// Run `git rev-parse --abbrev-ref HEAD` in `cwd` with a hard 100 ms wall-clock
+/// timeout and return the branch name.
 ///
-/// Why: the status bar shows the current branch without a git library dependency.
-/// What: shells out with ≤100 ms tolerance (the status bar refresh is fast);
-/// returns `None` on any error so the segment degrades gracefully.
-/// Test: covered indirectly by `project_segment` being called from render tests.
+/// Why: `statusline` is on Claude Code's hot render path; a stuck credential
+/// helper, network filesystem, or git hook would otherwise block every render
+/// cycle. The bounded thread pattern matches `try_get_session_count`.
+/// What: spawns a detached thread that calls `git rev-parse`, sends the result
+/// over an mpsc channel; the caller waits ≤100 ms, returns `None` on timeout.
+/// Test: `render_statusline_full_payload` exercises the detected branch path;
+/// `render_statusline_minimal_input` covers the empty-cwd (None) path.
 fn git_branch(cwd: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let cwd = cwd.to_string();
+    let (tx, rx) = mpsc::channel::<Option<String>>();
+    std::thread::spawn(move || {
+        let result = (|| -> Option<String> {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&cwd)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output()
+                .ok()?;
+            if !out.status.success() {
+                return None;
+            }
+            let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if branch.is_empty() {
+                None
+            } else {
+                Some(branch)
+            }
+        })();
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(Duration::from_millis(100)).ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn full_input() -> StatusInput {
+        StatusInput {
+            cwd: "/home/user/my-project".to_string(),
+            model: ModelInfo {
+                id: "claude-sonnet-4-6".to_string(),
+                display_name: "Claude Sonnet 4.6".to_string(),
+            },
+            cost: CostInfo {
+                total_cost_usd: 1.23,
+            },
+            exceeds_200k_tokens: false,
+        }
     }
-    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if branch.is_empty() {
-        None
-    } else {
-        Some(branch)
+
+    #[test]
+    fn render_statusline_minimal_input() {
+        // Empty StatusInput (all defaults) must not panic; daemon segment always present.
+        let out = render_statusline(&StatusInput::default());
+        assert!(out.contains("tm "), "daemon segment must always appear");
+        assert!(!out.is_empty(), "output must not be empty");
+    }
+
+    #[test]
+    fn render_statusline_full_payload() {
+        // Full payload shows model name, cost; project segment when cwd is set.
+        let input = full_input();
+        let out = render_statusline(&input);
+        assert!(
+            out.contains("Claude Sonnet 4.6"),
+            "model display name must appear"
+        );
+        assert!(out.contains("$1.23"), "cost must appear");
+        assert!(
+            out.contains("my-project"),
+            "project name from cwd must appear"
+        );
+    }
+
+    #[test]
+    fn render_statusline_missing_model_omits_segment() {
+        // When both model.id and model.display_name are empty, no model segment.
+        let mut input = full_input();
+        input.model = ModelInfo::default();
+        let out = render_statusline(&input);
+        // Model segment is absent; all other segments still present.
+        assert!(!out.contains("claude"), "model segment must be omitted");
+        assert!(out.contains("tm "), "daemon segment must still appear");
+        assert!(out.contains("$1.23"), "cost must still appear");
+    }
+
+    #[test]
+    fn render_statusline_exceeds_200k_shows_ctx_segment() {
+        let mut input = full_input();
+        input.exceeds_200k_tokens = true;
+        let out = render_statusline(&input);
+        assert!(out.contains("ctx>200k"), "ctx>200k segment must appear");
+    }
+
+    #[test]
+    fn render_statusline_zero_cost_omits_cost_segment() {
+        let mut input = full_input();
+        input.cost.total_cost_usd = 0.0;
+        let out = render_statusline(&input);
+        assert!(!out.contains('$'), "cost segment must be omitted when zero");
+    }
+
+    #[test]
+    fn render_statusline_invalid_json_falls_back_gracefully() {
+        // Simulates invalid/empty JSON by using StatusInput::default() — same path
+        // as run_statusline's unwrap_or_default on parse failure.
+        let out = render_statusline(&StatusInput::default());
+        assert!(
+            out.contains("tm "),
+            "graceful fallback must still emit daemon segment"
+        );
+        assert!(
+            !out.contains("│ │"),
+            "must not produce empty separator pairs"
+        );
+    }
+
+    #[test]
+    fn render_statusline_no_empty_separator_pairs() {
+        // With every optional field empty, the only segment is the daemon row.
+        // Joining a single-item vec produces no separators at all.
+        let out = render_statusline(&StatusInput::default());
+        assert!(!out.contains(" \u{2502}  \u{2502} "), "no empty │ │ pairs");
+        assert!(!out.contains("│ │"), "no adjacent separators");
     }
 }

@@ -129,8 +129,8 @@ pub(crate) fn render_info_box(
         rows.push(format!("session     \u{21a9} reconnecting  ({tmux_name})"));
     }
     rows.push(daemon_row);
-    rows.push(format!("memory      {memory}  \u{2713}"));
-    rows.push(format!("search      {search}  \u{2713}"));
+    rows.push(detected_row("memory     ", &memory));
+    rows.push(detected_row("search     ", &search));
     rows.push("^b d  detach".to_string());
 
     // Compute the right-column display width from the longest row.
@@ -179,6 +179,21 @@ pub(crate) fn print_info_box(
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
+
+/// Format a tool-detection row, appending ✓ only when the tool was detected.
+///
+/// Why: appending ✓ unconditionally made "(not detected)" rows render as
+/// `memory   (not detected)  ✓`, which is visually contradictory (#1738 review).
+/// What: returns `"{label}  {value}  ✓"` when `value != "(not detected)"`,
+/// otherwise `"{label}  {value}"` (no checkmark).
+/// Test: `detected_row_checkmark_when_detected`, `detected_row_no_checkmark_when_not_detected`.
+fn detected_row(label: &str, value: &str) -> String {
+    if value != "(not detected)" {
+        format!("{label} {value}  \u{2713}")
+    } else {
+        format!("{label} {value}")
+    }
+}
 
 /// Format the daemon row: online shows addr + count, offline shows `○ offline`.
 ///
@@ -307,4 +322,103 @@ pub(crate) fn try_get_session_count(base_url: &str) -> Option<usize> {
         let _ = tx.send(count);
     });
     rx.recv_timeout(Duration::from_millis(200)).ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn online(port: u16) -> DaemonInfo {
+        DaemonInfo {
+            addr: format!("127.0.0.1:{port}"),
+            online: true,
+            session_count: None,
+        }
+    }
+
+    fn offline() -> DaemonInfo {
+        DaemonInfo::default()
+    }
+
+    #[test]
+    fn info_box_renders_online() {
+        let out = render_info_box(
+            "/home/user/my-project",
+            "tmpm-my-project",
+            false,
+            &online(7880),
+        );
+        assert!(out.contains("\u{25cf}"), "expected ● online marker");
+        assert!(out.contains(":7880"), "expected port in daemon row");
+        assert!(out.contains("my-project"), "expected project name");
+        assert!(!out.contains("reconnecting"), "must not show reconnecting");
+    }
+
+    #[test]
+    fn info_box_renders_offline() {
+        let out = render_info_box(
+            "/home/user/my-project",
+            "tmpm-my-project",
+            false,
+            &offline(),
+        );
+        assert!(out.contains("\u{25cb}"), "expected ○ offline marker");
+        assert!(out.contains("offline"), "expected offline label");
+        assert!(!out.contains("reconnecting"), "must not show reconnecting");
+    }
+
+    #[test]
+    fn info_box_renders_reconnecting() {
+        let out = render_info_box("/home/user/my-project", "tmpm-my-project", true, &offline());
+        assert!(out.contains("reconnecting"), "expected reconnecting hint");
+        assert!(
+            out.contains("tmpm-my-project"),
+            "expected session name in reconnect row"
+        );
+    }
+
+    #[test]
+    fn info_box_renders_with_count() {
+        let d = online(7880).with_count(3);
+        let out = render_info_box("/home/user/proj", "sess", false, &d);
+        assert!(out.contains("(3)"), "expected session count");
+    }
+
+    #[test]
+    fn detected_row_checkmark_when_detected() {
+        let row = detected_row("memory   ", "trusty-memory");
+        assert!(row.contains('\u{2713}'), "✓ must appear for detected tool");
+        assert!(
+            !row.contains("(not detected)"),
+            "must not show not-detected text"
+        );
+    }
+
+    #[test]
+    fn detected_row_no_checkmark_when_not_detected() {
+        let row = detected_row("memory   ", "(not detected)");
+        assert!(
+            !row.contains('\u{2713}'),
+            "✓ must NOT appear when not detected"
+        );
+        assert!(
+            row.contains("(not detected)"),
+            "must preserve (not detected) text"
+        );
+    }
+
+    #[test]
+    fn info_box_no_checkmark_on_not_detected_lines() {
+        // Verify the rendered box never places ✓ on a "(not detected)" line.
+        // In CI neither binary is on PATH, so at least one will be not-detected.
+        let out = render_info_box("/tmp/proj", "sess", false, &offline());
+        for line in out.lines() {
+            if line.contains("(not detected)") {
+                assert!(
+                    !line.contains('\u{2713}'),
+                    "✓ must not appear on a (not detected) line: {line:?}"
+                );
+            }
+        }
+    }
 }
