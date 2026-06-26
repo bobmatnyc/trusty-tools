@@ -633,6 +633,16 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: MetaAction,
     },
+
+    /// Read Claude Code statusLine JSON from stdin and print one compact line.
+    ///
+    /// Why: Claude Code's `statusLine` hook calls this command on every render
+    /// cycle; this handler parses the hook JSON and emits one compact segment
+    /// string for the status bar.
+    /// What: reads a JSON object from stdin, renders segments (project, model,
+    /// daemon, cost), exits 0. Missing or invalid fields degrade gracefully.
+    /// Test: `cli_parses_statusline` in `tests.rs`.
+    Statusline,
 }
 
 /// Verbs for the `tm sessctl` SESSCTL control-plane command group (WI-2 #1593).

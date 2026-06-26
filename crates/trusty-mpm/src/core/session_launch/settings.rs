@@ -851,6 +851,51 @@ pub(super) fn clean_global_trusty_memory_hooks(settings_path: &Path) -> Result<(
     Ok(())
 }
 
+/// Inject `"statusLine": {"type":"command","command":"tm statusline","padding":0}`
+/// into `<project>/.claude/settings.json` when the key is absent.
+///
+/// Why: the `tm statusline` handler renders a compact status bar segment for
+/// every Claude Code render cycle; injecting it at session prep time wires it up
+/// automatically so operators do not have to configure it manually.
+/// What: reads the existing `.claude/settings.json` (or `{}` when absent/invalid),
+/// inserts the `statusLine` key ONLY when it is not already present (never
+/// overwrites the user's existing value), and writes the file back pretty-printed.
+/// Test: `write_status_line_injects_when_absent`,
+/// `write_status_line_skips_when_already_set`,
+/// `write_status_line_preserves_user_config`.
+pub(super) fn write_status_line(project_dir: &Path) -> Result<(), PrepError> {
+    let claude_dir = project_dir.join(".claude");
+    std::fs::create_dir_all(&claude_dir).map_err(|source| PrepError::Io {
+        path: claude_dir.clone(),
+        source,
+    })?;
+    let settings_path = claude_dir.join("settings.json");
+    let mut settings: serde_json::Value = std::fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    let obj = match settings.as_object_mut() {
+        Some(o) => o,
+        None => return Ok(()),
+    };
+    // Only inject when absent — never clobber the user's existing statusLine.
+    if obj.contains_key("statusLine") {
+        return Ok(());
+    }
+    obj.insert(
+        "statusLine".to_string(),
+        serde_json::json!({"type": "command", "command": "tm statusline", "padding": 0}),
+    );
+    let serialized = serde_json::to_string_pretty(&settings)
+        .map_err(|err| PrepError::Deploy(err.to_string()))?;
+    std::fs::write(&settings_path, serialized).map_err(|source| PrepError::Io {
+        path: settings_path,
+        source,
+    })?;
+    Ok(())
+}
+
 /// Whether a hook handler group is a `trusty-memory` entry.
 ///
 /// Why: identifies the groups [`clean_global_trusty_memory_hooks`] must drop.

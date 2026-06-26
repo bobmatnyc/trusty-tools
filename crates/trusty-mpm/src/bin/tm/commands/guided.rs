@@ -100,6 +100,15 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
                 ) {
                     return Ok(());
                 }
+                // Show the compact info box before the TTY picker.
+                let daemon = crate::formatters::info_box::DaemonInfo::from_lock_file()
+                    .with_count(sessions.len());
+                crate::formatters::info_box::print_info_box(
+                    &cwd.to_string_lossy(),
+                    &source_id,
+                    false,
+                    &daemon,
+                );
                 return run_tty_picker(client, url, &repo_url, &sessions).await;
             }
             Err(e) => {

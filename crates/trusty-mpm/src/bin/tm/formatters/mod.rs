@@ -6,5 +6,6 @@
 //! Test: formatters are exercised by the unit tests in `tests.rs`.
 
 pub(crate) mod banner;
+pub(crate) mod info_box;
 pub(crate) mod services;
 pub(crate) mod session;

@@ -27,7 +27,7 @@ use crate::core::skill_deployer::{DeployStats, deploy_skills_filtered};
 use settings::{
     deploy_output_style, inject_trusty_memory_mcp, inject_trusty_search_mcp,
     preseed_workspace_trust_home, register_project_index, remove_global_trusty_memory_hooks,
-    write_output_style, write_project_hooks,
+    write_output_style, write_project_hooks, write_status_line,
 };
 
 /// Outcome of the pre-launch preparation for one session.
@@ -323,6 +323,13 @@ fn prepare_session_inner(
     // still launches, it just shows the operator's default style.
     if let Err(err) = write_output_style(project_dir, Some(active_style_id)) {
         tracing::warn!("failed to set trusty-mpm output style: {err}");
+    }
+
+    // Inject `tm statusline` into the project's `.claude/settings.json` so
+    // Claude Code shows live context in its status bar. Only sets the key when
+    // absent (never clobbers the user's existing statusLine). Non-fatal.
+    if let Err(err) = write_status_line(project_dir) {
+        tracing::warn!("failed to write statusLine config: {err}");
     }
 
     // Write the `trusty-memory` hook block into the project settings so the

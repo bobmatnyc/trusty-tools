@@ -11,9 +11,13 @@
 //! `normalize_workdir_strips_trailing_slash` in `tests.rs`.
 
 /// Left indent applied to every line of the full-screen launch banner.
+// Only used by the test-only splash functions below; suppress the dead-code lint
+// without a file-wide suppressor so future unused items are still caught (#1738).
+#[allow(dead_code)]
 pub(crate) const BANNER_INDENT: &str = "   ";
 
 /// Width of the session-info separator line drawn in the launch banner.
+#[allow(dead_code)]
 pub(crate) const BANNER_SEPARATOR_WIDTH: usize = 53;
 
 /// The ASCII-art robot mascot drawn at the top of the launch banner.
@@ -22,6 +26,7 @@ pub(crate) const BANNER_SEPARATOR_WIDTH: usize = 53;
 /// taken over the terminal" feel as claude-mpm's startup screen.
 /// What: a multi-line string-art robot; each line is printed verbatim with the
 /// shared [`BANNER_INDENT`].
+#[allow(dead_code)]
 pub(crate) const BANNER_ROBOT: &[&str] = &[
     "                                             ",
     "                    .}##-                    ",
@@ -57,6 +62,7 @@ pub(crate) const BANNER_ROBOT: &[&str] = &[
 /// Why: a large title makes the banner read as a deliberate splash screen
 /// rather than a stray log line.
 /// What: six rows of unicode block-drawing glyphs plus a spaced-out subtitle.
+#[allow(dead_code)]
 pub(crate) const BANNER_TITLE: &[&str] = &[
     "████████╗██████╗ ██╗   ██╗███████╗████████╗██╗   ██╗",
     "╚══██╔══╝██╔══██╗██║   ██║██╔════╝╚══██╔══╝╚██╗ ██╔╝",
@@ -102,6 +108,7 @@ pub(crate) fn terminal_width() -> usize {
 /// action line reads "Reconnecting..." instead of "Launching claude...".
 /// Test: `launch_banner_contains_session_fields`,
 /// `launch_banner_marks_reconnect`.
+#[allow(dead_code)]
 pub(crate) fn render_launch_banner(
     workdir: &str,
     tmux_name: &str,
@@ -176,6 +183,7 @@ pub(crate) fn render_launch_banner(
 /// the indented session-info block, queries the terminal width once (kept for
 /// future centering), then sleeps one second so the banner is legible.
 /// Test: `launch_banner_does_not_panic`.
+#[allow(dead_code)]
 pub(crate) fn print_launch_banner(
     workdir: &str,
     tmux_name: &str,
@@ -198,6 +206,7 @@ pub(crate) fn print_launch_banner(
 /// a `Status:` row noting the reconnect, then pauses one second so the banner
 /// is legible before `tmux` takes over.
 /// Test: `launch_reconnect_banner_does_not_panic`.
+#[allow(dead_code)]
 pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
     let _ = terminal_width();
     print!(
