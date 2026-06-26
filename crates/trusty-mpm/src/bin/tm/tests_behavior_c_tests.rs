@@ -371,6 +371,5 @@ fn make_session(
         pending_decision: None,
         proposed_default: None,
         source_id: None,
-        claude_session_id: None,
     }
 }

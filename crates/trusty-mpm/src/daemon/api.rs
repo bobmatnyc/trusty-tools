@@ -1185,11 +1185,102 @@ pub async fn ingest_hook(
         tracing::info!("auto-registered session on SessionStart: {session:?}");
     }
 
+    // #1744: correlate Claude session id → managed session on SessionStart;
+    // immediately mark the managed session Stopped on SessionEnd.
+    if post.event == HookEvent::SessionStart {
+        correlate_session_start(&state, &post.session_id, &post.payload).await;
+    }
+    if post.event == HookEvent::SessionEnd {
+        handle_session_end(&state, &post.session_id).await;
+    }
+
     match HookService::new(&state).process(session, post.event, post.payload) {
         HookDecision::Block { reason } => Err(DaemonError::OverseerBlocked { reason }),
         _ => Ok(Json(HookAcceptedResponse {
             accepted: post.event,
         })),
+    }
+}
+
+/// Link a `SessionStart` Claude session UUID to the right managed session record.
+///
+/// Why (#1744): when `resume` calls `spawn_resume` with `--resume <id>`, it needs
+/// the Claude Code internal session UUID persisted on the `SessionRecord`. The only
+/// reliable source is the `SessionStart` hook, which fires as Claude Code starts
+/// and delivers `CLAUDE_SESSION_ID` via the environment. The hook handler
+/// (`tm hook`) now also embeds the caller's `cwd` in the payload (issue #1744);
+/// this function uses that `cwd` to find the Active managed session running in that
+/// directory and persists the UUID.
+/// What: extracts `cwd` from `payload["cwd"]`; finds the first Active managed
+/// session whose `workspace_path` or `cwd` matches; calls
+/// `SessionManager::set_claude_session_id`. Best-effort — any failure is logged
+/// and silently swallowed so a missing correlation never blocks the hook response.
+/// Test: `session_start_hook_correlates_claude_id` in `api_tests.rs`.
+async fn correlate_session_start(
+    state: &Arc<DaemonState>,
+    claude_session_id: &str,
+    payload: &serde_json::Value,
+) {
+    let cwd_str = match payload["cwd"].as_str() {
+        Some(s) if !s.is_empty() => s,
+        _ => return,
+    };
+    let cwd = std::path::Path::new(cwd_str);
+    let mgr = state.session_manager().await;
+    let records = mgr.list().await;
+    let matched = records.iter().find(|r| {
+        matches!(r.state, crate::session_manager::ManagedSessionState::Active)
+            && (r.workspace_path.as_deref() == Some(cwd) || r.cwd == cwd)
+    });
+    if let Some(r) = matched {
+        let id = r.id;
+        match mgr.set_claude_session_id(&id, claude_session_id).await {
+            Ok(()) => tracing::info!(
+                managed_id = %id,
+                claude_session_id = %claude_session_id,
+                cwd = %cwd_str,
+                "SessionStart: linked Claude session to managed session (#1744)"
+            ),
+            Err(e) => tracing::warn!(
+                managed_id = %id,
+                "SessionStart: failed to persist claude_session_id: {e}"
+            ),
+        }
+    }
+}
+
+/// Immediately mark a managed session Stopped on `SessionEnd`.
+///
+/// Why (#1744): without this, a managed session that exits ungracefully (tmux
+/// pane killed, terminal closed) stays `Active` in the store until the 60-second
+/// reap loop fires. On `SessionEnd`, Claude Code's internal session has already
+/// ended; marking the managed session `Stopped` immediately keeps the daemon's
+/// view consistent and lets the operator see the correct state right away.
+/// What: searches Active managed sessions for one whose `claude_session_id`
+/// matches the hook's `session_id`; calls `SessionManager::stop` which kills the
+/// tmux session (best-effort, already gone) and marks the record `Stopped`.
+/// Best-effort — failures are logged and swallowed so the hook response is unaffected.
+/// Test: `session_end_hook_marks_managed_stopped` in `api_tests.rs`.
+async fn handle_session_end(state: &Arc<DaemonState>, claude_session_id: &str) {
+    let mgr = state.session_manager().await;
+    let records = mgr.list().await;
+    let matched = records.iter().find(|r| {
+        matches!(r.state, crate::session_manager::ManagedSessionState::Active)
+            && r.claude_session_id.as_deref() == Some(claude_session_id)
+    });
+    if let Some(r) = matched {
+        let id = r.id;
+        match mgr.stop(&id).await {
+            Ok(_) => tracing::info!(
+                managed_id = %id,
+                claude_session_id = %claude_session_id,
+                "SessionEnd: marked managed session Stopped immediately (#1744)"
+            ),
+            Err(e) => tracing::warn!(
+                managed_id = %id,
+                "SessionEnd: failed to mark managed session Stopped: {e}"
+            ),
+        }
     }
 }
 

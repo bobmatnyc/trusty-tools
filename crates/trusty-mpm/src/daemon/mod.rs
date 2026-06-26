@@ -306,6 +306,8 @@ async fn reap_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cancellati
                             result.stopped
                         );
                     }
+                    // #1744: also reap managed sessions whose tmux session has gone.
+                    state.reap_dead_managed_sessions(&driver).await;
                 }
             }
         }

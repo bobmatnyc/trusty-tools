@@ -717,12 +717,21 @@ pub async fn resume_managed(
         .unwrap_or_else(|| record.cwd.clone());
     let tmux_arc = mgr.tmux_driver();
     let adapter = build_adapter(record.runtime, tmux_arc);
-    if let Err(e) = adapter.spawn(&record.tmux_name, &workspace, &record.task) {
+    // #1744: prefer --resume <id> when a claude_session_id was captured at
+    // SessionStart; fall back to --continue (most-recent conversation in the
+    // workspace) when the id is absent. ClaudeCodeAdapter overrides spawn_resume
+    // to implement this; TcodeAdapter's default delegates to plain spawn.
+    if let Err(e) = adapter.spawn_resume(
+        &record.tmux_name,
+        &workspace,
+        &record.task,
+        record.claude_session_id.as_deref(),
+    ) {
         warn!(
             id = %record.id,
             name = %record.tmux_name,
             runtime = %record.runtime.as_str(),
-            "resume_managed: runtime adapter spawn failed: {e}"
+            "resume_managed: runtime adapter spawn_resume failed: {e}"
         );
         let _ = mgr
             .mark_errored(&record.id, &format!("resume spawn failed: {e}"))

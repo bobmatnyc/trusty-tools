@@ -192,10 +192,16 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
     let event = std::env::var("CLAUDE_HOOK_EVENT").unwrap_or_else(|_| "Unknown".to_string());
     let session_id = std::env::var("CLAUDE_SESSION_ID").unwrap_or_default();
 
+    // Include the caller's cwd so the daemon can correlate this SessionStart
+    // event to the right managed session by workspace_path (issue #1744).
+    let cwd = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.to_str().map(str::to_owned))
+        .unwrap_or_default();
     let body = serde_json::json!({
         "session_id": session_id,
         "event": event,
-        "payload": {}
+        "payload": { "cwd": cwd }
     });
 
     // Best-effort POST — any failure (daemon down, network blip, malformed
