@@ -22,12 +22,25 @@ fn make_sync(dir: &std::path::Path) -> CatalogSync<FakeGitBackend> {
 
 /// Why: regression test for #1751 — a second forced sync must succeed via the
 /// update path (fetch+reset), not fail with "already exists" from git clone.
-/// What: first sync clones, second forced sync updates in place.
+/// Uses `FakeGitBackend::new_strict()` so clone_repo returns exit-128 when the
+/// target already exists; the test FAILS against pre-fix unconditional-clone code
+/// and PASSES only when `ensure_repo` routes the second call to fetch_and_reset.
+/// What: first sync clones (target absent → clone path succeeds), second forced
+/// sync detects a valid checkout with the correct remote and takes the update path.
 /// Test: this is the test.
 #[test]
 fn catalog_sync_second_sync_succeeds() {
     let root = tempfile::TempDir::new().unwrap();
-    let sync = make_sync(root.path());
+    // Strict fake: clone_repo returns an error if the target dir already exists,
+    // mirroring real `git clone` exit 128. This turns the test into a genuine
+    // regression guard — it would panic on r2 if ensure_repo called clone_repo
+    // unconditionally (pre-fix behaviour) instead of routing to fetch_and_reset.
+    let sync = CatalogSync::with_repo(
+        FakeGitBackend::new_strict(),
+        root.path().to_owned(),
+        "https://github.com/bobmatnyc/claude-mpm",
+        "main",
+    );
 
     let r1 = sync.sync(false).unwrap();
     assert!(r1.fetched, "first sync must fetch");
@@ -37,7 +50,8 @@ fn catalog_sync_second_sync_succeeds() {
     );
 
     // Force a second sync — repo dir exists with valid .git; must NOT fail with
-    // "already exists" but take the update path (fetch+reset via FakeGitBackend).
+    // "already exists" (strict fake would return Err if clone_repo were called)
+    // but instead take the update path (fetch_and_reset via FakeGitBackend).
     let r2 = sync.sync(true).unwrap();
     assert!(r2.fetched, "forced second sync must report fetched=true");
 }

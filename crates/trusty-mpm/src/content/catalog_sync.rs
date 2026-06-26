@@ -446,13 +446,25 @@ impl<G: GitBackend> CatalogSync<G> {
 
 /// Safely remove the catalog repo directory, refusing to delete outside the catalog root.
 ///
-/// Why: guards against bugs that could accidentally remove an arbitrary path; the
-/// remove target must always be a subdirectory of the catalog root.
-/// What: returns an error if `target` is not rooted under `catalog_dir`, otherwise
-/// calls `remove_dir_all`.
+/// Why: guards against bugs and symlink-escape attacks that could accidentally
+/// remove an arbitrary path; canonicalizing both paths before comparison eliminates
+/// `..` traversal and symlink tricks.
+/// What: canonicalizes `target` and `catalog_dir` (both must exist at call time —
+/// `catalog_dir` was created by `create_dir_all` and `target` exists by caller
+/// precondition), rejects if `canon_target == canon_catalog` (never remove the
+/// catalog root itself), rejects if `canon_target` is not strictly under
+/// `canon_catalog`, then calls `remove_dir_all`.
 /// Test: guard_remove_rejects_path_outside_catalog.
 fn guard_remove(target: &Path, catalog_dir: &Path) -> Result<(), CatalogError> {
-    if !target.starts_with(catalog_dir) {
+    let canon_target = target.canonicalize().map_err(CatalogError::Io)?;
+    let canon_catalog = catalog_dir.canonicalize().map_err(CatalogError::Io)?;
+    if canon_target == canon_catalog {
+        return Err(CatalogError::Git(format!(
+            "safety: refusing to remove catalog root '{}'",
+            target.display()
+        )));
+    }
+    if !canon_target.starts_with(&canon_catalog) {
         return Err(CatalogError::Git(format!(
             "safety: refusing to remove '{}' — not inside catalog dir '{}'",
             target.display(),
@@ -473,8 +485,27 @@ fn urls_match(a: &str, b: &str) -> bool {
     normalize_repo_url(a) == normalize_repo_url(b)
 }
 
+/// Normalise a git remote URL to a canonical form for comparison.
+///
+/// Why: two URLs for the same repository can differ in protocol (ssh vs https),
+/// `.git` suffix, trailing slash, and case — without normalization they falsely
+/// mismatch and trigger a spurious destructive re-clone.
+/// What: converts `git@host:owner/repo` to `https://host/owner/repo`, strips
+/// trailing `/` and `.git`, then lowercases the result.
+/// Test: urls_match_normalises_variants.
 fn normalize_repo_url(url: &str) -> String {
-    url.trim_end_matches('/')
+    // Convert SSH git@ form to HTTPS before further normalization.
+    let https_form = if let Some(rest) = url.strip_prefix("git@") {
+        if let Some((host, path)) = rest.split_once(':') {
+            format!("https://{host}/{path}")
+        } else {
+            url.to_owned()
+        }
+    } else {
+        url.to_owned()
+    };
+    https_form
+        .trim_end_matches('/')
         .trim_end_matches(".git")
         .to_lowercase()
 }
@@ -730,6 +761,71 @@ mod tests {
         assert!(
             agents.contains(&"legacy-agent".to_owned()),
             "agents from legacy path: {agents:?}"
+        );
+    }
+
+    #[test]
+    fn guard_remove_rejects_path_outside_catalog() {
+        // Verify canonicalized guard rejects paths outside the catalog boundary
+        // and also refuses to remove the catalog root itself.
+        let root = TempDir::new().unwrap();
+        let catalog_dir = root.path().join("catalog");
+        std::fs::create_dir_all(&catalog_dir).unwrap();
+        let outside = root.path().join("not-catalog");
+        std::fs::create_dir_all(&outside).unwrap();
+        // Sibling directory outside catalog must be rejected.
+        assert!(
+            guard_remove(&outside, &catalog_dir).is_err(),
+            "path outside catalog must be rejected"
+        );
+        // Removing the catalog root itself must also be rejected.
+        assert!(
+            guard_remove(&catalog_dir, &catalog_dir).is_err(),
+            "catalog root itself must be rejected"
+        );
+    }
+
+    #[test]
+    fn urls_match_normalises_variants() {
+        // SSH and HTTPS forms of the same repo must match.
+        assert!(
+            urls_match(
+                "git@github.com:owner/repo.git",
+                "https://github.com/owner/repo"
+            ),
+            "ssh↔https must match"
+        );
+        // Trailing slash must not prevent a match.
+        assert!(
+            urls_match(
+                "https://github.com/owner/repo/",
+                "https://github.com/owner/repo"
+            ),
+            "trailing slash must be ignored"
+        );
+        // .git suffix must not prevent a match.
+        assert!(
+            urls_match(
+                "https://github.com/owner/repo.git",
+                "https://github.com/owner/repo"
+            ),
+            ".git suffix must be stripped"
+        );
+        // Case insensitivity.
+        assert!(
+            urls_match(
+                "HTTPS://GitHub.com/Owner/Repo",
+                "https://github.com/owner/repo"
+            ),
+            "comparison must be case-insensitive"
+        );
+        // Different repos must NOT match.
+        assert!(
+            !urls_match(
+                "https://github.com/owner/repo-a",
+                "https://github.com/owner/repo-b"
+            ),
+            "distinct repos must not match"
         );
     }
 }

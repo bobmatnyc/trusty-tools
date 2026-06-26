@@ -92,12 +92,14 @@ pub trait GitBackend: Send + Sync {
     /// Test: FakeGitBackend reads from the `.git/config` it writes during clone.
     fn remote_url(&self, dir: &Path) -> Result<String, ProvisionError>;
 
-    /// Fetch from `origin` and hard-reset the working tree to `origin/<git_ref>`.
+    /// Fetch the specific `git_ref` from `origin` and hard-reset to `FETCH_HEAD`.
     ///
     /// Why: catalog sync updates an existing valid checkout in place so local
-    /// drift (manual edits, partial state) can never block the update.
-    /// What: runs `git -C dir fetch origin` then
-    /// `git -C dir reset --hard origin/<git_ref>`.
+    /// drift (manual edits, partial state) can never block the update; using
+    /// FETCH_HEAD avoids `origin/<ref>` which only works for branches, not tags
+    /// or SHAs.
+    /// What: runs `git -C dir fetch origin <git_ref>` then
+    /// `git -C dir reset --hard FETCH_HEAD` — works for branches, tags, and SHAs.
     /// Test: FakeGitBackend returns Ok(()) without performing real git operations.
     fn fetch_and_reset(&self, dir: &Path, git_ref: &str) -> Result<(), ProvisionError>;
 }
@@ -174,17 +176,20 @@ impl GitBackend for RealGitBackend {
     fn fetch_and_reset(&self, dir: &Path, git_ref: &str) -> Result<(), ProvisionError> {
         use std::process::Command;
         let dir_s = dir.to_string_lossy();
+        // Fetch the specific ref so tags and SHAs work correctly.
+        // `git fetch origin <ref>` writes FETCH_HEAD; `git reset --hard FETCH_HEAD`
+        // then works for branches, tags, and commit SHAs alike — unlike
+        // `origin/<ref>` which only resolves for branches.
         let fetch = Command::new("git")
-            .args(["-C", &dir_s, "fetch", "origin"])
+            .args(["-C", &dir_s, "fetch", "origin", git_ref])
             .output()
             .map_err(|e| ProvisionError::Git(format!("git fetch exec failed: {e}")))?;
         if !fetch.status.success() {
             let stderr = String::from_utf8_lossy(&fetch.stderr);
             return Err(ProvisionError::Git(format!("git fetch failed: {stderr}")));
         }
-        let reset_ref = format!("origin/{git_ref}");
         let reset = Command::new("git")
-            .args(["-C", &dir_s, "reset", "--hard", &reset_ref])
+            .args(["-C", &dir_s, "reset", "--hard", "FETCH_HEAD"])
             .output()
             .map_err(|e| ProvisionError::Git(format!("git reset exec failed: {e}")))?;
         if reset.status.success() {
@@ -200,21 +205,42 @@ impl GitBackend for RealGitBackend {
 ///
 /// Why: unit tests must not require a real git remote or network.
 /// What: records clone calls and creates the target directory to simulate a checkout.
-/// Test: used by every WorkspaceProvisioner unit test.
+/// Use `new()` for a permissive fake; use `new_strict()` to simulate real `git clone`
+/// exit-128 failures when the target directory already exists.
+/// Test: used by every WorkspaceProvisioner unit test and catalog_sync_idempotent tests.
 pub struct FakeGitBackend {
     /// Calls recorded for assertions.
     pub calls: std::sync::Mutex<Vec<(String, String, PathBuf)>>,
+    /// When true, clone_repo returns an error if target_dir already exists,
+    /// mirroring real `git clone` exit 128 behaviour.
+    strict: bool,
 }
 
 impl FakeGitBackend {
-    /// Construct a new FakeGitBackend with an empty call log.
+    /// Construct a new FakeGitBackend with an empty call log (permissive mode).
     ///
     /// Why: tests need a fresh call log for each test case.
-    /// What: initialises the Mutex-guarded vec.
+    /// What: initialises the Mutex-guarded vec with `strict = false`.
     /// Test: used in every provisioner unit test.
     pub fn new() -> Self {
         Self {
             calls: std::sync::Mutex::new(Vec::new()),
+            strict: false,
+        }
+    }
+
+    /// Construct a FakeGitBackend that fails `clone_repo` when the target already exists.
+    ///
+    /// Why: the idempotency regression test (`catalog_sync_second_sync_succeeds`)
+    /// must fail against pre-fix unconditional-clone code and pass only when
+    /// `ensure_repo` routes the second call to the update path instead of re-cloning.
+    /// What: same as `new()` but `strict = true`; clone_repo returns
+    /// `ProvisionError::Git` (simulating exit 128) if the target directory exists.
+    /// Test: catalog_sync_second_sync_succeeds.
+    pub fn new_strict() -> Self {
+        Self {
+            calls: std::sync::Mutex::new(Vec::new()),
+            strict: true,
         }
     }
 }
@@ -237,6 +263,16 @@ impl GitBackend for FakeGitBackend {
             git_ref.to_owned(),
             target_dir.to_owned(),
         ));
+        // In strict mode, mirror real `git clone` exit 128: fail when target exists.
+        // This makes catalog_sync_second_sync_succeeds a genuine regression guard —
+        // it fails against pre-fix unconditional-clone code and passes only when
+        // ensure_repo routes the second call to fetch_and_reset instead of clone.
+        if self.strict && target_dir.exists() {
+            return Err(ProvisionError::Git(format!(
+                "git clone failed (exit 128): destination path '{}' already exists and is not an empty directory",
+                target_dir.display()
+            )));
+        }
         // Simulate a clone: create a minimal .git/config so is_git_repo and
         // remote_url work correctly in subsequent calls (e.g. second sync).
         let git_dir = target_dir.join(".git");
