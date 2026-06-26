@@ -45,7 +45,8 @@ struct SpawnManagedResponse {
 /// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
 /// `guided_picker_bare_enter_with_sessions_resumes_first`,
 /// `guided_picker_q_returns_quit`, `guided_picker_numeric_valid_resumes`,
-/// `guided_picker_numeric_launch_new`, `guided_picker_unrecognised_input`.
+/// `guided_picker_numeric_launch_new`, `guided_picker_out_of_range_unrecognised`,
+/// `guided_picker_non_numeric_unrecognised`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PickerDecision {
     /// Resume the session at 0-based index into the sessions slice.
@@ -73,7 +74,7 @@ pub(crate) enum PickerDecision {
 /// remote, non-git directory). Non-TTY piped invocations print project + session
 /// info and exit 0 without hanging for input (#1705 AC-7). Subdir launches
 /// pass the git root as `repo_url` so the daemon sets `source_id` correctly.
-/// Test: `guided_derive_project_returns_none_for_non_git`,
+/// Test: `guided_derive_project_returns_none_for_non_git_dir`,
 /// `guided_non_tty_gate_returns_false_skips_stdin`,
 /// `guided_fallback_never_pollutes_github_git_checkout` (#1724).
 pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
@@ -127,8 +128,8 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
 /// `(source_id, workspace_path, git_root)` where `source_id = "owner/repo"`,
 /// `workspace_path = <repos_root>/owner/repo`, and `git_root` is the absolute
 /// path of the repository root.
-/// Test: `guided_derive_project_returns_none_for_non_git`,
-/// `guided_derive_project_returns_none_for_non_github_remote`,
+/// Test: `guided_derive_project_returns_none_for_non_git_dir`,
+/// `guided_derive_project_rejects_non_github_remote`,
 /// `guided_derive_project_accepts_github_https_remote`,
 /// `guided_derive_project_returns_some_from_subdir`.
 pub(crate) fn derive_project(
@@ -158,7 +159,7 @@ pub(crate) fn derive_project(
 /// request fails — the caller uses this as a signal to fall back.
 /// Test: requires a live daemon; covered by the e2e test suite
 /// (`tests/session_manager_mvp.rs`) and integration tests in
-/// `tests_behavior_c_tests.rs::guided_list_sessions_mock_response`.
+/// requires a live daemon; covered by the e2e test suite.
 async fn list_project_sessions(
     client: &reqwest::Client,
     base_url: &str,
@@ -277,7 +278,7 @@ pub(crate) fn print_non_tty_hint(
 ///   • anything else → `Unrecognised`
 /// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
 /// `guided_picker_bare_enter_with_sessions_resumes_first`,
-/// `guided_picker_q_returns_quit`, `guided_picker_Q_returns_quit`,
+/// `guided_picker_q_returns_quit`, `guided_picker_q_uppercase_returns_quit`,
 /// `guided_picker_numeric_valid_resumes`, `guided_picker_numeric_launch_new`,
 /// `guided_picker_out_of_range_unrecognised`,
 /// `guided_picker_non_numeric_unrecognised`.
