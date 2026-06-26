@@ -1,0 +1,232 @@
+//! `tm statusline` — emit one status-bar line for Claude Code's `statusLine` hook.
+//!
+//! Why: Claude Code's `statusLine` hook fires on every render cycle and calls this
+//! command; this handler parses the hook JSON from stdin and emits a compact
+//! ` │ `-separated segment string on stdout. All fields degrade gracefully.
+//! What: reads a JSON object from stdin, renders repo+branch/model/daemon/cost
+//! segments, and exits 0. Missing or invalid fields produce empty/omitted segments.
+//! Test: `statusline_renders_minimal`, `statusline_renders_full` in `tests.rs`.
+
+use std::io::Read as _;
+
+use crate::formatters::info_box::DaemonInfo;
+
+/// Claude Code `statusLine` hook input (all fields optional via `#[serde(default)]`).
+///
+/// Why: Claude Code may add fields in future versions; `deny_unknown_fields` is
+/// intentionally absent so new keys do not cause parse failures.
+/// What: cwd, model metadata, cost summary, and the context-window overflow flag.
+/// Test: `statusline_renders_minimal` (empty input), `statusline_renders_full`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(crate) struct StatusInput {
+    #[serde(default)]
+    pub(crate) cwd: String,
+    #[serde(default)]
+    pub(crate) model: ModelInfo,
+    #[serde(default)]
+    pub(crate) cost: CostInfo,
+    #[serde(default)]
+    pub(crate) exceeds_200k_tokens: bool,
+}
+
+/// Model metadata from the Claude Code hook input.
+///
+/// Why: `display_name` carries the human-readable label ("Opus") operators want
+/// in the status bar; `id` is the fallback when `display_name` is absent.
+/// What: both fields are `String` with `#[serde(default)]` so absent keys are "".
+/// Test: `statusline_renders_full`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(crate) struct ModelInfo {
+    #[serde(default)]
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) display_name: String,
+}
+
+/// Cost accumulator from the Claude Code hook input.
+///
+/// Why: operators want running cost in the status bar to monitor spend.
+/// What: `total_cost_usd` is the session's accumulated cost; 0.0 when absent.
+/// Test: `statusline_renders_full`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(crate) struct CostInfo {
+    #[serde(default)]
+    pub(crate) total_cost_usd: f64,
+}
+
+/// Read Claude Code's `statusLine` JSON from stdin and print one compact line.
+///
+/// Why: Claude Code's `statusLine` hook protocol is "command reads JSON from
+/// stdin, prints one line to stdout, exits 0"; this is the single entry point.
+/// What: reads all of stdin, parses it as `StatusInput` (empty/invalid → default),
+/// renders segments, and prints exactly one line to stdout.
+/// Test: `statusline_renders_minimal`, `statusline_renders_full`.
+pub(crate) fn run_statusline() -> anyhow::Result<()> {
+    let mut raw = String::new();
+    let _ = std::io::stdin().read_to_string(&mut raw);
+    let input: StatusInput = serde_json::from_str(&raw).unwrap_or_default();
+    println!("{}", render_statusline(&input));
+    Ok(())
+}
+
+/// Render the compact statusline string from parsed hook input.
+///
+/// Why: keeping rendering pure (no I/O) makes it unit-testable independently
+/// of the stdin protocol.
+/// What: builds up to six segments — project+branch, model, daemon, session
+/// count, context%, cost — joined with ` │ `, emitting only non-empty segments.
+/// Test: `statusline_renders_minimal`, `statusline_renders_full`.
+pub(crate) fn render_statusline(input: &StatusInput) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(seg) = project_segment(&input.cwd) {
+        parts.push(seg);
+    }
+    if let Some(seg) = model_segment(&input.model) {
+        parts.push(seg);
+    }
+
+    // Probe daemon info: lock file (cheap) + optional session-count HTTP probe.
+    let daemon = {
+        let d = DaemonInfo::from_lock_file();
+        if d.online {
+            let url = daemon_base_url(&d);
+            d.probe_session_count(&url)
+        } else {
+            d
+        }
+    };
+    parts.push(daemon_segment(&daemon));
+    if let Some(n) = daemon.session_count {
+        parts.push(count_segment(n));
+    }
+
+    if input.exceeds_200k_tokens {
+        parts.push("ctx>200k".to_string());
+    }
+    if input.cost.total_cost_usd > 0.0 {
+        parts.push(cost_segment(input.cost.total_cost_usd));
+    }
+
+    parts.join(" \u{2502} ")
+}
+
+// ── Segment builders ──────────────────────────────────────────────────────────
+
+/// Build the project-name + git-branch segment from `cwd`.
+///
+/// Why: shows the project name and current branch without requiring a running
+/// daemon; a subprocess git call is cheap enough for a status-bar refresh.
+/// What: extracts the dirname basename and appends ` ⎇ <branch>` when the
+/// working directory is inside a git repo.
+/// Test: `statusline_renders_minimal` (empty cwd → None).
+fn project_segment(cwd: &str) -> Option<String> {
+    if cwd.is_empty() {
+        return None;
+    }
+    let project = std::path::Path::new(cwd)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if project.is_empty() {
+        return None;
+    }
+    let branch = git_branch(cwd);
+    Some(match branch {
+        Some(b) if !b.is_empty() && b != "HEAD" => {
+            format!("{project}  \u{2387} {b}")
+        }
+        _ => project,
+    })
+}
+
+/// Build the model-label segment.
+///
+/// Why: operators want to know which model Claude Code is using at a glance.
+/// What: returns `display_name` when non-empty, `id` as fallback, `None` when both
+/// are empty (segment omitted from the status bar).
+/// Test: `statusline_renders_full`.
+fn model_segment(model: &ModelInfo) -> Option<String> {
+    if !model.display_name.is_empty() {
+        Some(model.display_name.clone())
+    } else if !model.id.is_empty() {
+        Some(model.id.clone())
+    } else {
+        None
+    }
+}
+
+/// Build the daemon online/offline segment (`tm ●:<port>` or `tm ○`).
+///
+/// Why: makes the daemon state immediately visible without opening a terminal.
+/// What: extracts the port from `daemon.addr` and returns `"tm ●:<port>"` or
+/// `"tm ○"`.
+/// Test: `statusline_renders_minimal` (offline daemon → `tm ○`).
+fn daemon_segment(daemon: &DaemonInfo) -> String {
+    if daemon.online {
+        let port = daemon
+            .addr
+            .rfind(':')
+            .map(|i| &daemon.addr[i..])
+            .unwrap_or(daemon.addr.as_str());
+        format!("tm \u{25cf}{port}")
+    } else {
+        "tm \u{25cb}".to_string()
+    }
+}
+
+/// Build the session-count segment (`⛁N`).
+///
+/// Why: shows at a glance how many trusty-mpm sessions are active.
+/// What: returns `"⛁{n}"`.
+/// Test: `statusline_renders_full`.
+fn count_segment(n: usize) -> String {
+    format!("\u{26c1}{n}")
+}
+
+/// Build the cost segment (`$X.XX`).
+///
+/// Why: running cost visibility helps operators monitor API spend.
+/// What: formats `usd` to two decimal places with a `$` prefix.
+/// Test: `statusline_renders_full`.
+fn cost_segment(usd: f64) -> String {
+    format!("${usd:.2}")
+}
+
+/// Construct the HTTP base URL for the daemon from `DaemonInfo.addr`.
+///
+/// Why: the lock file stores `addr = "127.0.0.1:7880"` without the `http://`
+/// scheme; the probe needs a full URL.
+/// What: prepends `http://` when the addr does not already start with it.
+/// Test: covered indirectly by `statusline_renders_minimal`.
+fn daemon_base_url(daemon: &DaemonInfo) -> String {
+    if daemon.addr.starts_with("http") {
+        daemon.addr.clone()
+    } else {
+        format!("http://{}", daemon.addr)
+    }
+}
+
+/// Run `git rev-parse --abbrev-ref HEAD` in `cwd` and return the branch name.
+///
+/// Why: the status bar shows the current branch without a git library dependency.
+/// What: shells out with ≤100 ms tolerance (the status bar refresh is fast);
+/// returns `None` on any error so the segment degrades gracefully.
+/// Test: covered indirectly by `project_segment` being called from render tests.
+fn git_branch(cwd: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
+}

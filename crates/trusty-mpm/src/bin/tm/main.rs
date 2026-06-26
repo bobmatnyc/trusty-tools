@@ -342,6 +342,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Sessctl { action }) => {
             commands::sessctl::dispatch(&client, &url, action).await
         }
+        Some(Command::Statusline) => commands::statusline::run_statusline(),
     };
 
     // Top-level exit-code translation: a `tm sessions prune-idle` that found the
