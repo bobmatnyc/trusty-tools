@@ -423,4 +423,63 @@ impl DaemonState {
             .map(|e| e.value().clone())
             .collect()
     }
+
+    /// Reap managed sessions whose tmux session has disappeared.
+    ///
+    /// Why (#1744): the 60-second reap loop only handled legacy in-memory
+    /// sessions. Managed sessions that exit ungracefully (terminal kill, tmux pane
+    /// close) would stay `Active` in the store for up to 60 seconds. Running this
+    /// in the reap loop transitions them to `Stopped` as soon as their tmux session
+    /// disappears (detected via `driver.list_sessions()`). The `SessionEnd` hook
+    /// handles the common case immediately; this is the safety net for the rare
+    /// cases where the hook did not fire (daemon restart race, hook misconfiguration).
+    /// What: calls `driver.list_sessions()` to build a live-name set, then
+    /// delegates to [`Self::reap_managed_against`]. On driver error logs a warning
+    /// and returns without touching the store (fail-safe: better to leave a stale
+    /// Active record than to incorrectly mark a running session Stopped).
+    /// Test: `reap_dead_managed_sessions_marks_stopped` in `super::tests` via
+    /// `reap_managed_against`.
+    pub async fn reap_dead_managed_sessions(&self, driver: &TmuxDriver) {
+        let live: std::collections::HashSet<String> = match driver.list_sessions() {
+            Ok(s) => s.into_iter().map(|s| s.name).collect(),
+            Err(e) => {
+                tracing::warn!("managed reap skipped — tmux list-sessions failed: {e}");
+                return;
+            }
+        };
+        self.reap_managed_against(&live).await;
+    }
+
+    /// Core of the managed-session reaper: stop every Active session not in `live`.
+    ///
+    /// Why: extracted from [`Self::reap_dead_managed_sessions`] so tests can
+    /// exercise the stop logic with a pre-built live set without requiring a real
+    /// `TmuxDriver` or tmux binary. The outer function handles the tmux call;
+    /// this method is the deterministic, testable heart.
+    /// What: for every Active managed session whose `tmux_name` is absent from
+    /// `live`, calls `SessionManager::stop` (best-effort kill + mark Stopped).
+    /// Failures are logged and swallowed so the caller's reap loop continues.
+    /// Test: `reap_dead_managed_sessions_marks_stopped` in `super::tests`.
+    pub(crate) async fn reap_managed_against(&self, live: &std::collections::HashSet<String>) {
+        let mgr = self.session_manager().await;
+        let records = mgr.list().await;
+        for r in records {
+            if matches!(r.state, crate::session_manager::ManagedSessionState::Active)
+                && !live.contains(&r.tmux_name)
+            {
+                match mgr.stop(&r.id).await {
+                    Ok(_) => tracing::info!(
+                        id = %r.id,
+                        name = %r.tmux_name,
+                        "reaper: marked managed session Stopped (tmux gone, #1744)"
+                    ),
+                    Err(e) => tracing::warn!(
+                        id = %r.id,
+                        name = %r.tmux_name,
+                        "reaper: failed to mark managed session Stopped: {e}"
+                    ),
+                }
+            }
+        }
+    }
 }

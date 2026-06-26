@@ -1479,3 +1479,153 @@ fn resolve_token_full_chain_coverage() {
         "resolve_token must return None when nothing configured: {none_tok:?}"
     );
 }
+
+// ─── #1744 hook-correlation tests ──────────────────────────────────────────
+
+/// Helper: build a DaemonState with a SessionManager that has one Active managed
+/// session at `workspace_path = ws`. Returns (state, managed_id, tmux_name).
+async fn make_state_with_active_managed(
+    ws: std::path::PathBuf,
+) -> (
+    Arc<DaemonState>,
+    crate::session_manager::ManagedSessionId,
+    String,
+) {
+    use crate::session_manager::{ManagedSessionState, SessionManager};
+    use std::sync::Arc as SArc;
+
+    // Inline minimal fake that allows create/kill/list.
+    struct MinFake {
+        sessions: std::sync::Mutex<Vec<String>>,
+    }
+    impl crate::session_manager::ManagedTmuxDriver for MinFake {
+        fn create_session(
+            &self,
+            name: &str,
+            _: &str,
+        ) -> Result<(), crate::session_manager::ManagedError> {
+            self.sessions.lock().unwrap().push(name.to_owned());
+            Ok(())
+        }
+        fn kill_session(&self, name: &str) -> Result<(), crate::session_manager::ManagedError> {
+            self.sessions.lock().unwrap().retain(|n| n != name);
+            Ok(())
+        }
+        fn send_line(&self, _: &str, _: &str) -> Result<(), crate::session_manager::ManagedError> {
+            Ok(())
+        }
+        fn capture(
+            &self,
+            _: &str,
+            _: usize,
+        ) -> Result<String, crate::session_manager::ManagedError> {
+            Ok(String::new())
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, crate::session_manager::ManagedError> {
+            Ok(self.sessions.lock().unwrap().clone())
+        }
+    }
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fake: SArc<dyn crate::session_manager::ManagedTmuxDriver> = SArc::new(MinFake {
+        sessions: std::sync::Mutex::new(Vec::new()),
+    });
+    let mgr = SessionManager::new(tmp.path(), fake).await.unwrap();
+
+    // Create a session, then promote it to Active via set_workspace.
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(ws.clone()),
+            None,
+            Some(ws.clone()),
+            None,
+            None,
+        )
+        .await
+        .expect("create managed session");
+    let id = record.id;
+    let tmux_name = record.tmux_name.clone();
+    mgr.set_workspace(&id, ws, ManagedSessionState::Active)
+        .await
+        .expect("set Active");
+
+    let mgr_arc = SArc::new(mgr);
+    // _tmp must be kept alive; we leak it into the TempDir box to avoid drop.
+    let state = DaemonState::with_session_manager(mgr_arc);
+    // Keep _tmp alive by boxing — the TempDir is intentionally leaked here so the
+    // test can complete. This is acceptable in a short-lived test process.
+    std::mem::forget(tmp);
+    (Arc::new(state), id, tmux_name)
+}
+
+#[tokio::test]
+async fn session_start_hook_correlates_claude_id() {
+    // Why (#1744): ingest_hook(SessionStart) must call correlate_session_start,
+    // which stores the claude_session_id on the matching Active managed session.
+    // This is the end-to-end proof that the hook wiring reaches the store write.
+    let ws = std::path::PathBuf::from("/tmp/test-ws-correlate");
+    let (state, managed_id, _) = make_state_with_active_managed(ws.clone()).await;
+
+    // Claude Code's CLAUDE_SESSION_ID is always a UUID; ingest_hook validates it.
+    let claude_id = "550e8400-e29b-41d4-a716-446655440001";
+    let post = HookPost {
+        session_id: claude_id.to_string(),
+        event: HookEvent::SessionStart,
+        payload: serde_json::json!({ "cwd": ws.to_str().unwrap() }),
+    };
+    let result = ingest_hook(State(Arc::clone(&state)), Json(post)).await;
+    assert!(
+        result.is_ok(),
+        "ingest_hook(SessionStart) must succeed: {result:?}"
+    );
+
+    let mgr = state.session_manager().await;
+    let record = mgr.get(&managed_id).await.expect("get managed session");
+    assert_eq!(
+        record.claude_session_id.as_deref(),
+        Some(claude_id),
+        "SessionStart hook must persist claude_session_id on matched managed session (#1744)"
+    );
+}
+
+#[tokio::test]
+async fn session_end_hook_marks_managed_stopped() {
+    // Why (#1744): ingest_hook(SessionEnd) must call handle_session_end, which
+    // immediately transitions the Active managed session to Stopped. This is the
+    // end-to-end proof that a SessionEnd hook reaches the store write.
+    let ws = std::path::PathBuf::from("/tmp/test-ws-session-end");
+    let (state, managed_id, _) = make_state_with_active_managed(ws.clone()).await;
+
+    // Claude Code's CLAUDE_SESSION_ID is always a UUID; use a valid one.
+    let claude_id = "550e8400-e29b-41d4-a716-446655440002";
+    {
+        let mgr = state.session_manager().await;
+        mgr.set_claude_session_id(&managed_id, claude_id)
+            .await
+            .expect("set claude_session_id for end test");
+    }
+
+    // Now fire the SessionEnd hook with the same claude_id.
+    let post = HookPost {
+        session_id: claude_id.to_string(),
+        event: HookEvent::SessionEnd,
+        payload: serde_json::json!({}),
+    };
+    let result = ingest_hook(State(Arc::clone(&state)), Json(post)).await;
+    assert!(
+        result.is_ok(),
+        "ingest_hook(SessionEnd) must succeed: {result:?}"
+    );
+
+    let mgr = state.session_manager().await;
+    let record = mgr
+        .get(&managed_id)
+        .await
+        .expect("get managed session after SessionEnd");
+    assert_eq!(
+        record.state,
+        crate::session_manager::ManagedSessionState::Stopped,
+        "SessionEnd hook must immediately mark the managed session Stopped (#1744)"
+    );
+}

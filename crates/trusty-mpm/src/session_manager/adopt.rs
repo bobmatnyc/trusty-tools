@@ -106,6 +106,7 @@ impl SessionManager {
             workspace_owned: false,
             // Adopted sessions have no tracked source project.
             source_id: None,
+            claude_session_id: None,
         };
 
         // ── Atomic already-adopted check + upsert under ONE held write guard ──────

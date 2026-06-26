@@ -15,17 +15,25 @@
 
 use std::path::Path;
 
-/// Build the MPM lifecycle hook additions JSON block (PreToolUse / PostToolUse / Stop).
+/// Build the MPM lifecycle hook additions JSON block (five events).
 ///
 /// Why: every call site — the managed global config writer AND `tm install` — must
 /// use the exact same shape so [`trusty_common::claude_config::merge_hook_entries`]
 /// can dedup by deep equality without producing duplicates. Centralising the literal
 /// here means the managed path and the `install` path can never silently diverge.
-/// What: returns a JSON object with `hooks.PreToolUse`, `hooks.PostToolUse`, and
-/// `hooks.Stop` arrays. `PostToolUse` is marked `async: true` so Claude Code does
-/// not block waiting for the daemon to ingest tool results; the other two use short
-/// synchronous timeouts.
-/// Test: `test_mpm_hook_additions_has_three_events`,
+/// `SessionStart` and `SessionEnd` (#1744) are required so the daemon can capture
+/// the Claude Code internal session UUID (for `--resume`) and immediately mark a
+/// session Stopped when Claude Code exits, even on ungraceful exits. Without these
+/// two events wired, `correlate_session_start` and `handle_session_end` in
+/// `daemon/api.rs` receive no traffic and `claude_session_id` stays `None` forever.
+/// The `merge_hook_entries` dedup logic preserves any existing `SessionStart` entry
+/// (e.g. `trusty-memory inbox-check` from the project-level config) — adding the
+/// `trusty-mpm hook` entry alongside it does NOT clobber the memory hook.
+/// What: returns a JSON object with five `hooks` arrays:
+/// `PreToolUse`, `PostToolUse` (async), `Stop`, `SessionStart`, `SessionEnd`.
+/// `PostToolUse` is marked `async: true` so Claude Code does not block waiting for
+/// the daemon to ingest tool results; the other four use short synchronous timeouts.
+/// Test: `test_mpm_hook_additions_has_five_events`,
 /// covered by `test_ensure_managed_hooks_writes_triad`.
 pub fn mpm_hook_additions() -> serde_json::Value {
     serde_json::json!({
@@ -48,6 +56,22 @@ pub fn mpm_hook_additions() -> serde_json::Value {
                 }]
             }],
             "Stop": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": "trusty-mpm hook",
+                    "timeout": 5
+                }]
+            }],
+            "SessionStart": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": "trusty-mpm hook",
+                    "timeout": 5
+                }]
+            }],
+            "SessionEnd": [{
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
@@ -104,12 +128,22 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_mpm_hook_additions_has_three_events() {
+    fn test_mpm_hook_additions_has_five_events() {
+        // #1744: SessionStart/SessionEnd must be present so the daemon receives
+        // them for claude_session_id capture and immediate-Stopped marking.
         let v = mpm_hook_additions();
         let hooks = v.get("hooks").expect("missing 'hooks' key");
         assert!(hooks.get("PreToolUse").is_some(), "missing PreToolUse");
         assert!(hooks.get("PostToolUse").is_some(), "missing PostToolUse");
         assert!(hooks.get("Stop").is_some(), "missing Stop");
+        assert!(
+            hooks.get("SessionStart").is_some(),
+            "missing SessionStart (#1744)"
+        );
+        assert!(
+            hooks.get("SessionEnd").is_some(),
+            "missing SessionEnd (#1744)"
+        );
     }
 
     // WI-3 HOOK-CLEAN test: after ensure_managed_hooks, settings.json contains
@@ -141,6 +175,14 @@ mod tests {
         assert!(
             hooks.get("Stop").is_some(),
             "settings.json must contain hooks.Stop after ensure_managed_hooks"
+        );
+        assert!(
+            hooks.get("SessionStart").is_some(),
+            "settings.json must contain hooks.SessionStart after ensure_managed_hooks (#1744)"
+        );
+        assert!(
+            hooks.get("SessionEnd").is_some(),
+            "settings.json must contain hooks.SessionEnd after ensure_managed_hooks (#1744)"
         );
 
         // Verify the command in at least one event references trusty-mpm.

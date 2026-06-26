@@ -226,6 +226,22 @@ pub struct SessionRecord {
     /// sessions spawned via the old paths carry no project identity.
     #[serde(default)]
     pub source_id: Option<String>,
+
+    /// The Claude Code internal session UUID captured from the `SessionStart` hook.
+    ///
+    /// Why (#1744): when a managed session exits ungracefully (terminal closed,
+    /// tmux pane killed without `/quit`), resume can restore the prior
+    /// conversation by passing `--resume <id>` to the new `claude` process.
+    /// This field holds the UUID that Claude Code assigns to its own session,
+    /// delivered via the `CLAUDE_SESSION_ID` env var and forwarded through the
+    /// `SessionStart` hook. Without it, resume falls back to `--continue`
+    /// (most-recent conversation in the workspace) or a fresh launch.
+    ///
+    /// `#[serde(default)]` keeps records persisted before this field existed
+    /// deserializable — they load with `claude_session_id = None`, which is
+    /// correct: legacy sessions have no captured id and fall back gracefully.
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
 }
 
 /// Error types for session record operations.
@@ -289,6 +305,7 @@ mod tests {
             ephemeral: false,
             workspace_owned: false,
             source_id: None,
+            claude_session_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -319,6 +336,7 @@ mod tests {
             ephemeral: false,
             workspace_owned: false,
             source_id: None,
+            claude_session_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -347,6 +365,7 @@ mod tests {
             ephemeral: false,
             workspace_owned: false,
             source_id: None,
+            claude_session_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -400,6 +419,7 @@ mod tests {
             ephemeral: false,
             workspace_owned: false,
             source_id: None,
+            claude_session_id: None,
         };
         record.runtime = crate::runtime::RuntimeKind::Tcode;
         let json = serde_json::to_string(&record).expect("serialize");
@@ -457,6 +477,7 @@ mod tests {
             ephemeral: true,
             workspace_owned: false,
             source_id: None,
+            claude_session_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -513,6 +534,7 @@ mod tests {
             ephemeral: false,
             workspace_owned: true,
             source_id: None,
+            claude_session_id: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");

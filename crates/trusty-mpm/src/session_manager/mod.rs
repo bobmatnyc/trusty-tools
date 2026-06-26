@@ -10,6 +10,7 @@
 
 pub mod adopt;
 pub mod decommission;
+pub mod hook_sync;
 pub mod manager;
 pub mod prune;
 pub mod record;

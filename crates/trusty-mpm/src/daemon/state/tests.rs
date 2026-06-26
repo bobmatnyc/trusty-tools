@@ -626,3 +626,89 @@ fn concurrent_pairing_confirms() {
         "pending code file must be absent after a winning confirm"
     );
 }
+
+// ─── #1744 managed reap tests ───────────────────────────────────────────────
+
+/// Inline minimal [`crate::session_manager::ManagedTmuxDriver`] for reap tests.
+struct MinFakeDriver {
+    sessions: std::sync::Mutex<Vec<String>>,
+}
+impl MinFakeDriver {
+    fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            sessions: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+}
+impl crate::session_manager::ManagedTmuxDriver for MinFakeDriver {
+    fn create_session(
+        &self,
+        name: &str,
+        _: &str,
+    ) -> Result<(), crate::session_manager::ManagedError> {
+        self.sessions.lock().unwrap().push(name.to_owned());
+        Ok(())
+    }
+    fn kill_session(&self, name: &str) -> Result<(), crate::session_manager::ManagedError> {
+        self.sessions.lock().unwrap().retain(|n| n != name);
+        Ok(())
+    }
+    fn send_line(&self, _: &str, _: &str) -> Result<(), crate::session_manager::ManagedError> {
+        Ok(())
+    }
+    fn capture(&self, _: &str, _: usize) -> Result<String, crate::session_manager::ManagedError> {
+        Ok(String::new())
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, crate::session_manager::ManagedError> {
+        Ok(self.sessions.lock().unwrap().clone())
+    }
+}
+
+#[tokio::test]
+async fn reap_dead_managed_sessions_marks_stopped() {
+    // Why (#1744): reap_managed_against must mark Active managed sessions Stopped
+    // when their tmux_name is absent from the live set.
+    // What: seed one Active session; call reap_managed_against with an empty live
+    // set (simulating the tmux pane having gone away); assert Stopped.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fake = MinFakeDriver::new();
+    let mgr = crate::session_manager::SessionManager::new(tmp.path(), fake)
+        .await
+        .expect("session manager");
+    let mgr = std::sync::Arc::new(mgr);
+
+    // Create a session and promote to Active.
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/test-reap")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    let id = record.id;
+    mgr.set_workspace(
+        &id,
+        PathBuf::from("/tmp/test-reap"),
+        crate::session_manager::ManagedSessionState::Active,
+    )
+    .await
+    .expect("set Active");
+
+    // Wire into a DaemonState via with_session_manager.
+    let state = DaemonState::with_session_manager(std::sync::Arc::clone(&mgr));
+
+    // Simulate the tmux session being gone: pass an empty live set.
+    let live = std::collections::HashSet::new();
+    state.reap_managed_against(&live).await;
+
+    let after = mgr.get(&id).await.expect("get after reap");
+    assert_eq!(
+        after.state,
+        crate::session_manager::ManagedSessionState::Stopped,
+        "reap_managed_against must mark Active session Stopped when tmux_name absent (#1744)"
+    );
+}

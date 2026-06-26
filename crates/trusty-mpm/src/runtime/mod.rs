@@ -71,6 +71,31 @@ pub trait RuntimeAdapter: Send + Sync {
     /// Test: `claude_code_adapter_spawn_sends_env_scrub_command`.
     fn spawn(&self, tmux_name: &str, cwd: &Path, task: &str) -> Result<(), RuntimeError>;
 
+    /// Start the runtime in a RESUME context — prefer conversation continuity.
+    ///
+    /// Why (#1744): when resuming a managed session that exited ungracefully
+    /// (tmux pane killed, terminal closed without `/quit`), the operator wants
+    /// the prior conversation restored. Passing `--resume <claude_session_id>`
+    /// restores the exact Claude Code conversation; `--continue` resumes the
+    /// most-recent one when the id is unknown; plain `spawn` starts fresh.
+    /// The default implementation delegates to [`Self::spawn`] (no resume flag),
+    /// which is correct for the `tcode` adapter and any other runtime that does
+    /// not support conversation continuity.
+    /// What: same contract as `spawn` but with an optional `claude_session_id` for
+    /// the `--resume` flag. Called by `resume_managed` instead of `spawn`.
+    /// Test: `spawn_resume_with_id_uses_resume_flag`,
+    /// `spawn_resume_without_id_uses_continue_flag` in `claude_code` tests.
+    fn spawn_resume(
+        &self,
+        tmux_name: &str,
+        cwd: &Path,
+        task: &str,
+        claude_session_id: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        let _ = claude_session_id;
+        self.spawn(tmux_name, cwd, task)
+    }
+
     /// Return a short human-readable name for this runtime backend.
     ///
     /// Why: logs and status responses need to identify which runtime is in use

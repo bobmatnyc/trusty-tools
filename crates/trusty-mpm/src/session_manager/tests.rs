@@ -582,6 +582,7 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
         ephemeral: false,
         workspace_owned: false,
         source_id: None,
+        claude_session_id: None,
     };
     // A record whose tmux session will NOT be found (simulating reboot).
     let rebooted_record = SessionRecord {
@@ -602,6 +603,7 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
         ephemeral: false,
         workspace_owned: false,
         source_id: None,
+        claude_session_id: None,
     };
     {
         let mut store = mgr.store.write().await;
@@ -664,6 +666,7 @@ async fn manager_reconcile_skips_decommissioned() {
         ephemeral: false,
         workspace_owned: false,
         source_id: None,
+        claude_session_id: None,
     };
     {
         let mut store = mgr.store.write().await;
@@ -1383,6 +1386,7 @@ async fn seed_record(
         ephemeral,
         workspace_owned: false,
         source_id: None,
+        claude_session_id: None,
     };
     mgr.store
         .write()
@@ -1803,6 +1807,7 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
             ephemeral,
             workspace_owned: false,
             source_id: None,
+            claude_session_id: None,
         };
         mgr.store.write().await.upsert(record).await.expect("seed");
     }
@@ -1885,6 +1890,7 @@ async fn manager_decommission_unowned_skips_deletion() {
         // workspace_owned = false — the SM did NOT create this directory.
         workspace_owned: false,
         source_id: None,
+        claude_session_id: None,
     };
     mgr.store.write().await.upsert(record).await.unwrap();
 
@@ -2102,5 +2108,38 @@ async fn shutdown_calls_graceful_stop_for_active_sessions() {
     assert!(
         kills.iter().any(|n| n == &tmux_name),
         "shutdown must ultimately kill_session for every Active session"
+    );
+}
+
+#[tokio::test]
+async fn claude_session_id_persists_on_session() {
+    // Why (#1744): set_claude_session_id must survive a store reload so that
+    // resume_managed can read the id back after a daemon restart.
+    // What: create a session, write the id via hook_sync, reload from disk,
+    // assert the id is present on the re-read record.
+    let dir = TempDir::new().unwrap();
+    let (mgr, _fake) = make_manager(&dir).await;
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+
+    mgr.set_claude_session_id(&record.id, "uuid-abc-123")
+        .await
+        .expect("set_claude_session_id");
+
+    let reloaded = mgr.get(&record.id).await.expect("get after set");
+    assert_eq!(
+        reloaded.claude_session_id.as_deref(),
+        Some("uuid-abc-123"),
+        "claude_session_id must survive a store reload (#1744)"
     );
 }

@@ -367,6 +367,7 @@ mod tests {
             ephemeral: false,
             workspace_owned: false,
             source_id: None,
+            claude_session_id: None,
         }
     }
 
