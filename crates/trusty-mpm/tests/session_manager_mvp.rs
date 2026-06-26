@@ -1167,3 +1167,147 @@ async fn prune_route_rejects_bad_state() {
         "an unknown prune filter must yield 400"
     );
 }
+
+// ── #1730: list_managed_sessions ?source_id= filter + serialization ───────────
+//
+// These tests call `list_managed_sessions` directly (same axum-extractor pattern
+// as the prune route tests above) against a hermetic `DaemonState`.  Two sessions
+// are seeded: one with `source_id = "owner/repo"` (set via `set_source_id`) and
+// one plain session with no source_id.  The three filter branches are exercised:
+// known source_id → only matching session; unknown source_id → empty; no param →
+// all sessions.  A fourth assertion checks the JSON payload carries `source_id`.
+
+/// Managed-session list: `?source_id=` filter returns only matching sessions (#1730).
+///
+/// Why: the `GET /api/v1/sessions/managed?source_id=owner/repo` endpoint must
+/// return ONLY sessions bound to that project. Without correct serialization +
+/// server-side filter, `tm` guided-default shows sessions from other repos or
+/// returns none for a fabricated source_id.
+/// What: seeds one in-project session (source_id="owner/repo") and one plain
+/// session (no source_id), then asserts three filter variants: known source_id
+/// returns one matching session, unknown source_id returns zero, absent param
+/// returns at least both seeded sessions. A fourth check asserts the `source_id`
+/// field is present in the serialized JSON payload.
+/// NOTE: `DaemonState::with_root` calls `reconcile_on_boot` which may adopt live
+/// host `tmpm-*` sessions (source_id=None) into the temp store. Adopted external
+/// sessions have `source_id=None` so they cannot contaminate Cases 1 or 2 (which
+/// filter by a specific/non-existent source_id). Case 3 therefore asserts >= 2
+/// rather than == 2 to be host-environment-agnostic.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn list_managed_sessions_source_id_filter() {
+    use std::collections::HashMap;
+    use trusty_mpm::daemon::managed_routes::list_managed_sessions;
+
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root(root.path().to_path_buf()));
+    let mgr = state.session_manager().await;
+
+    // Session A: in-project session — source_id will be set to "owner/repo".
+    let id_a = ResumeSessionId::new();
+    let ws_a = root.path().join(format!("{id_a}-src-filter-a"));
+    let rec_a = mgr
+        .create_with_id(
+            id_a,
+            "source-id-filter-test-a".to_string(),
+            Some(ws_a.clone()),
+            None,
+            Some(ws_a),
+            Some("https://github.com/owner/repo".to_string()),
+            Some("main".to_string()),
+            ResumeRuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session A");
+    mgr.set_source_id(&id_a, "owner/repo")
+        .await
+        .expect("set source_id on session A");
+    let _reap_a = reap_on_drop(&state, &rec_a.tmux_name).await;
+
+    // Session B: plain session — no source_id set.
+    let id_b = ResumeSessionId::new();
+    let ws_b = root.path().join(format!("{id_b}-src-filter-b"));
+    let rec_b = mgr
+        .create_with_id(
+            id_b,
+            "source-id-filter-test-b".to_string(),
+            Some(ws_b.clone()),
+            None,
+            Some(ws_b),
+            Some("https://github.com/other/lib".to_string()),
+            Some("main".to_string()),
+            ResumeRuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session B");
+    let _reap_b = reap_on_drop(&state, &rec_b.tmux_name).await;
+
+    // ── Case 1: known source_id → only session A is returned ─────────────────
+    // External adopted sessions have source_id=None so they never match.
+    let q = HashMap::from([("source_id".to_string(), "owner/repo".to_string())]);
+    let (status, body) = decode_response(
+        list_managed_sessions(axum::extract::State(state.clone()), axum::extract::Query(q)).await,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let sessions = body["sessions"].as_array().expect("sessions array");
+    assert_eq!(
+        sessions.len(),
+        1,
+        "known source_id must return exactly one session, got {body}"
+    );
+    assert_eq!(
+        sessions[0]["id"].as_str(),
+        Some(id_a.to_string().as_str()),
+        "the returned session must be session A"
+    );
+    // source_id must be present in the JSON payload (#1730).
+    assert_eq!(
+        sessions[0]["source_id"].as_str(),
+        Some("owner/repo"),
+        "source_id must be serialized in the session payload"
+    );
+
+    // ── Case 2: unknown source_id → empty list ────────────────────────────────
+    // External adopted sessions also have source_id=None so they don't contaminate.
+    let q = HashMap::from([("source_id".to_string(), "totally/random-xyz".to_string())]);
+    let (status, body) = decode_response(
+        list_managed_sessions(axum::extract::State(state.clone()), axum::extract::Query(q)).await,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let sessions = body["sessions"].as_array().expect("sessions array");
+    assert_eq!(
+        sessions.len(),
+        0,
+        "unknown source_id must return an empty list, got {body}"
+    );
+
+    // ── Case 3: no ?source_id param → at least both seeded sessions returned ──
+    // May include external tmux sessions adopted by reconcile_on_boot on the host.
+    let q: HashMap<String, String> = HashMap::new();
+    let (status, body) = decode_response(
+        list_managed_sessions(axum::extract::State(state.clone()), axum::extract::Query(q)).await,
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    let sessions = body["sessions"].as_array().expect("sessions array");
+    assert!(
+        sessions.len() >= 2,
+        "no source_id param must return at least the two seeded sessions, got {body}"
+    );
+    // Both seeded session IDs must appear in the unfiltered list.
+    let ids: Vec<&str> = sessions.iter().filter_map(|s| s["id"].as_str()).collect();
+    assert!(
+        ids.contains(&id_a.to_string().as_str()),
+        "session A must appear in unfiltered list; ids={ids:?}"
+    );
+    assert!(
+        ids.contains(&id_b.to_string().as_str()),
+        "session B must appear in unfiltered list; ids={ids:?}"
+    );
+}

@@ -370,5 +370,6 @@ fn make_session(
         last_activity_at: last_activity_at.map(str::to_owned),
         pending_decision: None,
         proposed_default: None,
+        source_id: None,
     }
 }

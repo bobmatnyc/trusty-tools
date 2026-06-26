@@ -354,6 +354,7 @@ fn managed_session_summary_deserializes() {
         "last_activity_at": "2026-06-19T01:00:00Z",
         "pending_decision": "overwrite?",
         "proposed_default": "yes",
+        "source_id": "owner/repo",
     });
     let s: ManagedSessionSummary = serde_json::from_value(json).unwrap();
     assert_eq!(s.id, "00000000-0000-0000-0000-000000000001");
@@ -361,6 +362,8 @@ fn managed_session_summary_deserializes() {
     assert_eq!(s.state, "running");
     assert_eq!(s.created_at.as_deref(), Some("2026-06-19T00:00:00Z"));
     assert_eq!(s.pending_decision.as_deref(), Some("overwrite?"));
+    // source_id round-trips (#1730).
+    assert_eq!(s.source_id.as_deref(), Some("owner/repo"));
 
     // Minimal body: only the always-present fields.
     let lean = serde_json::json!({"id": "x", "name": "n", "state": "stopped"});
@@ -370,6 +373,8 @@ fn managed_session_summary_deserializes() {
     // An absent `created_at` deserializes to `None`, not an empty string.
     assert!(s.created_at.is_none());
     assert!(s.pending_decision.is_none());
+    // An absent `source_id` defaults to None (legacy sessions without it).
+    assert!(s.source_id.is_none());
 }
 
 #[test]

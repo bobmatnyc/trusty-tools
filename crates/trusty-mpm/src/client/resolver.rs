@@ -180,6 +180,7 @@ mod tests {
             last_activity_at: None,
             pending_decision: None,
             proposed_default: None,
+            source_id: None,
         };
         let items = vec![summary("m-1", "tmpm-red-owl"), summary("m-2", "api")];
         assert_eq!(

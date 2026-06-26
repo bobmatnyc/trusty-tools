@@ -394,6 +394,13 @@ pub struct ManagedSessionSummary {
     /// Proposed default answer to the pending decision.
     #[serde(default)]
     pub proposed_default: Option<String>,
+    /// Source project identity (`owner/repo`) for in-project sessions (#1730).
+    ///
+    /// Why: in-project sessions record which GitHub project they belong to so
+    /// callers can filter sessions by project via `?source_id=`. `None` for
+    /// sessions created outside the in-project spawn path.
+    #[serde(default)]
+    pub source_id: Option<String>,
 }
 
 /// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).
