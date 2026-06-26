@@ -40,6 +40,10 @@ mod tests_behavior_a;
 #[path = "tests_behavior_b_tests.rs"]
 mod tests_behavior_b;
 
+#[cfg(test)]
+#[path = "tests_behavior_c_tests.rs"]
+mod tests_behavior_c;
+
 /// Lazy-loaded help configuration for "did you mean?" suggestions (issue #216).
 ///
 /// Why: the YAML help bundle is checked in as a string literal; loading it
