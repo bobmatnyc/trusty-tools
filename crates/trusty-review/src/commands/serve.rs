@@ -4,8 +4,10 @@
 //! The `--stdio` flag runs the MCP stdio JSON-RPC loop; without it the standard
 //! axum HTTP daemon starts on the configured port.
 //!
-//! What: builds `AppState` (LLM + verifier + search + analyze + dedup store),
-//! then either calls `serve_http` (HTTP mode) or `mcp::run` (stdio mode).
+//! What: for `--stdio`, spawns `build_app_state` in a background task and calls
+//! `mcp::run_deferred` immediately so the MCP `initialize` handshake is answered
+//! before any network or credential calls are made (issue #1739).  For HTTP mode,
+//! builds `AppState` synchronously then calls `serve_http`.
 //!
 //! Test: `cargo run -p trusty-review --features http-server -- serve --help`
 //! must exit 0; endpoint tests live in `service::handlers` and
@@ -14,7 +16,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use trusty_review::{
     config::ReviewConfig,
@@ -22,6 +24,7 @@ use trusty_review::{
         search_client::HttpSearchClient, subprocess_analyze_client::SubprocessAnalyzeClient,
     },
     llm::build_provider,
+    mcp::DeferredStateValue,
     pipeline::enforce_verifier_liveness,
     service::{AppState, DEFAULT_PORT, serve as serve_http},
 };
@@ -66,21 +69,48 @@ pub struct ServeArgs {
 /// Execute the `serve` subcommand.
 ///
 /// Why: the HTTP and MCP stdio daemon modes share the same dependency-building
-/// logic; only the final transport differs.
-/// What: builds `AppState`, then either calls `serve_http` (TCP mode) or
-/// `mcp::run` (stdio mode).  All logs go to stderr; stdout stays clean.
-/// Test: see module doc.
+/// logic; only the final transport and startup sequencing differ.  For stdio
+/// (issue #1739) `AppState` is built in the background so the MCP `initialize`
+/// handshake is answered in <1 ms regardless of provider or credential state.
+/// For HTTP, `AppState` is built synchronously (no strict deadline).
+/// What: for `--stdio`, spawns `build_app_state` as a background tokio task,
+/// then calls `mcp::run_deferred` with the watch receiver immediately.  For
+/// HTTP mode, builds `AppState` then calls `serve_http`.  All logs go to
+/// stderr; stdout stays clean.
+/// Test: see module doc; MCP deferred path is smoke-tested with broken Bedrock
+/// creds (initialize must respond in <1.5 s without the env-var workaround).
 pub async fn cmd_serve(config: ReviewConfig, args: ServeArgs) -> Result<()> {
-    // Build deps shared between both modes.
-    let state = build_app_state(config.clone()).await?;
-
     #[cfg(feature = "mcp")]
     if args.stdio {
-        info!("trusty-review MCP stdio service starting");
-        return trusty_review::mcp::run(state).await;
+        // ── Deferred-startup path (issue #1739) ──────────────────────────────
+        // Start the MCP stdio loop BEFORE building AppState so the `initialize`
+        // handshake (sent immediately by Claude Code, ~1.5 s deadline) is
+        // answered in <1 ms.  AppState construction — which may include a real
+        // Bedrock Converse API call for liveness probing — runs in a background
+        // task and feeds the watch channel when it finishes.
+        info!("trusty-review MCP stdio service starting (deferred AppState build, issue #1739)");
+        let (state_tx, state_rx) = tokio::sync::watch::channel::<DeferredStateValue>(None);
+        let config_for_bg = config.clone();
+        tokio::spawn(async move {
+            let value: DeferredStateValue = match build_app_state(config_for_bg).await {
+                Ok(state) => {
+                    info!("trusty-review AppState ready — tool calls now accepted");
+                    Some(Ok(Arc::new(state)))
+                }
+                Err(e) => {
+                    error!("trusty-review AppState build failed: {e:#}");
+                    Some(Err(format!("{e:#}")))
+                }
+            };
+            // Ignore SendError: it means the stdio loop already exited (EOF).
+            let _ = state_tx.send(value);
+        });
+        return trusty_review::mcp::run_deferred(state_rx).await;
     }
 
-    // HTTP mode.
+    // ── HTTP mode: synchronous build (no strict startup deadline) ────────────
+    let state = build_app_state(config.clone()).await?;
+
     use std::net::SocketAddr;
     let addr: SocketAddr = format!("{}:{}", args.bind, args.port)
         .parse()

@@ -1,12 +1,14 @@
-//! Unit and integration tests for `mcp::dispatch`.
+//! Unit and integration tests for `mcp::dispatch` and `mcp::dispatch_deferred`.
 //!
 //! Why: split from `mcp/mod.rs` to keep that file under the 500-line cap while
-//! preserving full test coverage for the MCP dispatcher, tools/list handler,
-//! and the binary stdio smoke test (#950).
+//! preserving full test coverage for the MCP dispatcher, deferred-startup path
+//! (issue #1739), tools/list handler, and the binary stdio smoke test (#950).
 //! What: exercises `dispatch` with synthetic `Request` values for initialize,
 //! tools/list, tools/call, notification suppression, and error paths; also
-//! includes the in-process tools/list name-verification test and the
-//! #[ignore]-gated binary stdio spawn test (closes #950).
+//! covers `dispatch_deferred` for the three deferred-state outcomes (not-yet-
+//! ready/dropped-sender, build-failed, and ready); includes the in-process
+//! tools/list name-verification test and the #[ignore]-gated binary stdio
+//! spawn test (closes #950).
 //! Test: this is the test module; each `#[test]` / `#[tokio::test]` is a
 //! self-contained unit or integration test.
 
@@ -207,6 +209,195 @@ async fn dispatch_tools_list_three_tools_names_verified() {
         names, expected,
         "tools/list returned unexpected set: {:?}",
         names
+    );
+}
+
+// ── dispatch_deferred tests (issue #1739) ──────────────────────────────────
+//
+// These tests verify the deferred-startup invariant: `initialize` and
+// `tools/list` must be answered without waiting for AppState, while tool
+// calls gracefully handle all three channel states (not ready / failed / ok).
+
+/// `initialize` must respond immediately without consulting `state_rx`.
+///
+/// Why: validates the core #1739 invariant — the handshake response is
+/// produced before ANY background build completes, even when the watch
+/// channel was never sent a value.
+/// What: creates a watch channel that never receives a value (simulating an
+/// in-progress background build) and asserts `initialize` still returns the
+/// expected `serverInfo` immediately.
+/// Test: self-contained; no real providers.
+#[tokio::test]
+async fn deferred_dispatch_initialize_needs_no_state() {
+    // Sender is kept alive (never sends a value) — simulates AppState still building.
+    let (_tx, rx) = tokio::sync::watch::channel::<DeferredStateValue>(None);
+    let req = make_req("initialize", json!({}));
+    let resp = dispatch_deferred(req, rx).await;
+    let result = resp.result.expect("initialize must return a result");
+    assert_eq!(result["serverInfo"]["name"], "trusty-review");
+    assert!(result["serverInfo"]["version"].is_string());
+    assert_eq!(result["protocolVersion"], "2024-11-05");
+}
+
+/// `notifications/initialized` must be suppressed without consulting `state_rx`.
+///
+/// Why: notification suppression is a protocol requirement; it must work before
+/// AppState is ready so Claude Code's post-initialize notification is handled
+/// correctly in the deferred path.
+/// What: watch channel never receives a value; asserts the notification response
+/// has `suppress = true`.
+/// Test: self-contained; no real providers.
+#[tokio::test]
+async fn deferred_dispatch_notification_suppressed_without_state() {
+    let (_tx, rx) = tokio::sync::watch::channel::<DeferredStateValue>(None);
+    let req = Request {
+        jsonrpc: Some("2.0".into()),
+        id: None,
+        method: "notifications/initialized".into(),
+        params: None,
+    };
+    let resp = dispatch_deferred(req, rx).await;
+    assert!(
+        resp.suppress,
+        "notification must be suppressed without AppState"
+    );
+}
+
+/// `tools/list` must respond immediately without consulting `state_rx`.
+///
+/// Why: Claude Code requests tools/list right after initialize; answering it
+/// instantly lets the operator see tool metadata even before credentials are
+/// validated.
+/// What: watch channel never receives a value; asserts a non-empty tools array
+/// is returned.
+/// Test: self-contained; no real providers.
+#[tokio::test]
+async fn deferred_dispatch_tools_list_needs_no_state() {
+    let (_tx, rx) = tokio::sync::watch::channel::<DeferredStateValue>(None);
+    let req = make_req("tools/list", json!({}));
+    let resp = dispatch_deferred(req, rx).await;
+    let result = resp.result.expect("tools/list must return a result");
+    assert!(
+        result["tools"].as_array().is_some_and(|t| !t.is_empty()),
+        "tools/list must return a non-empty array"
+    );
+}
+
+/// A tool call when the background build failed returns a graceful JSON-RPC error.
+///
+/// Why: broken credentials should not crash the process or return a confusing
+/// error; the operator needs a clear actionable message.
+/// What: sends `Some(Err("bad creds"))` on the channel, then dispatches a
+/// `review_health` call and asserts `INTERNAL_ERROR` with the failure reason.
+/// Test: self-contained; no real providers.
+#[tokio::test]
+async fn deferred_dispatch_tool_call_when_build_failed() {
+    let (tx, rx) = tokio::sync::watch::channel::<DeferredStateValue>(None);
+    tx.send(Some(Err("bad creds: profile not found".to_string())))
+        .unwrap();
+    let req = make_req("review_health", json!({}));
+    let resp = dispatch_deferred(req, rx).await;
+    let err = resp.error.expect("expected JSON-RPC error");
+    assert_eq!(
+        err.code,
+        error_codes::INTERNAL_ERROR,
+        "failed build must return INTERNAL_ERROR"
+    );
+    assert!(
+        err.message.contains("initialization failed"),
+        "error message must mention initialization failure, got: {}",
+        err.message
+    );
+}
+
+/// A tool call when the watch sender is dropped (no value ever sent) returns a
+/// graceful JSON-RPC error.
+///
+/// Why: if the background task panics before sending any value the sender is
+/// dropped; `wait_for` then returns `RecvError`. The dispatcher must handle
+/// this cleanly rather than panicking.
+/// What: drops the sender immediately (no value sent) and asserts `INTERNAL_ERROR`.
+/// Test: self-contained; no real providers.
+#[tokio::test]
+async fn deferred_dispatch_tool_call_when_sender_dropped() {
+    let (tx, rx) = tokio::sync::watch::channel::<DeferredStateValue>(None);
+    // Drop the sender without ever sending a ready value.
+    drop(tx);
+    let req = make_req("review_health", json!({}));
+    let resp = dispatch_deferred(req, rx).await;
+    let err = resp.error.expect("expected JSON-RPC error");
+    assert_eq!(err.code, error_codes::INTERNAL_ERROR);
+    assert!(
+        err.message.contains("initialization failed"),
+        "dropped-sender must report initialization failure, got: {}",
+        err.message
+    );
+}
+
+/// A tool call when AppState is ready dispatches normally to the review pipeline.
+///
+/// Why: the happy path must work correctly after the deferred build completes.
+/// What: sends `Some(Ok(Arc::new(test_state())))` on the channel (matching the
+/// `Arc<AppState>` in `DeferredStateValue`), then dispatches `review_health`
+/// and asserts the health response is well-formed.
+/// Test: self-contained; uses the same `FakeLlm` / `FakeSearch` stubs as other
+/// dispatch tests.
+#[tokio::test]
+async fn deferred_dispatch_tool_call_when_ready() {
+    let state = test_state();
+    let (tx, rx) = tokio::sync::watch::channel::<DeferredStateValue>(None);
+    tx.send(Some(Ok(Arc::new(state)))).unwrap();
+    let req = make_req("review_health", json!({}));
+    let resp = dispatch_deferred(req, rx).await;
+    let result = resp.result.expect("expected result from deferred dispatch");
+    let text = result["content"][0]["text"].as_str().expect("text field");
+    let health: Value = serde_json::from_str(text).expect("valid health JSON");
+    assert_eq!(health["status"], "ok");
+    assert!(health["version"].is_string());
+}
+
+/// The 30-second warmup timeout branch returns INTERNAL_ERROR with the warming-up message.
+///
+/// Why: validates that tool calls arriving before AppState is ready receive a
+/// clear, actionable error rather than hanging indefinitely — the key safety
+/// net for the `dispatch_deferred` timeout path.
+/// What: uses Tokio's paused clock (`start_paused = true`) so `advance(31 s)`
+/// fires the internal 30-second `tokio::time::timeout` instantly without any
+/// real wall-clock wait.  The watch channel never receives a value, simulating
+/// an in-progress (or stalled) background build.
+/// Test: gated `#[ignore]` because paused-clock tests require `tokio::test`
+/// with `start_paused = true` and can be flaky under high parallel test load.
+/// Run explicitly: `cargo test -p trusty-review -- --include-ignored
+/// deferred_dispatch_tool_call_times_out_warming_up`.
+#[tokio::test(start_paused = true)]
+#[ignore = "paused-clock test — run with --include-ignored"]
+async fn deferred_dispatch_tool_call_times_out_warming_up() {
+    use std::time::Duration;
+
+    // Channel with no value ever sent — background build is still "in progress".
+    let (_tx, rx) = tokio::sync::watch::channel::<DeferredStateValue>(None);
+    let req = make_req("review_health", json!({}));
+
+    // tokio::join! polls both futures concurrently.  With the clock paused,
+    // dispatch_deferred parks on wait_for.  advance(31 s) fires the 30-second
+    // timeout, waking dispatch_deferred which then returns the graceful error.
+    let (resp, _) = tokio::join!(
+        dispatch_deferred(req, rx),
+        tokio::time::advance(Duration::from_secs(31)),
+    );
+
+    let err = resp
+        .error
+        .expect("warmup timeout must produce a JSON-RPC error");
+    assert_eq!(
+        err.code,
+        error_codes::INTERNAL_ERROR,
+        "warmup timeout must return INTERNAL_ERROR"
+    );
+    assert!(
+        err.message.contains("warming up"),
+        "error must mention 'warming up', got: {}",
+        err.message
     );
 }
 

@@ -7,22 +7,29 @@
 //!
 //! What: `run(state)` builds the shared state once and calls
 //! `trusty_common::mcp::run_stdio_loop`, which reads JSON-RPC requests
-//! line-by-line from stdin and writes responses to stdout.  `dispatch` handles
-//! `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, and
-//! bare method names.  All tracing goes to stderr; stdout is the transport.
+//! line-by-line from stdin and writes responses to stdout.  `run_deferred`
+//! answers `initialize` immediately and builds `AppState` lazily so the
+//! startup handshake is never delayed by provider/network calls (issue #1739).
+//! `dispatch` handles `initialize`, `notifications/initialized`, `tools/list`,
+//! `tools/call`, and bare method names.  All tracing goes to stderr; stdout is
+//! the transport.
 //!
 //! Test: `dispatch_initialize_returns_server_info`,
 //! `dispatch_tools_list_returns_three_tools`,
 //! `dispatch_unknown_tool_returns_method_not_found`,
-//! `dispatch_notification_is_suppressed`.
+//! `dispatch_notification_is_suppressed`,
+//! `deferred_dispatch_initialize_needs_no_state`,
+//! `deferred_dispatch_tool_call_when_ready`.
 
 pub mod console_metrics;
 pub mod tools;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::Value;
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use trusty_common::mcp::{Request, Response, error_codes, initialize_response, run_stdio_loop};
@@ -58,6 +65,145 @@ pub async fn run(state: AppState) -> Result<()> {
         async move { dispatch(req, &state).await }
     })
     .await
+}
+
+// ─── Deferred-startup entry point (issue #1739) ──────────────────────────────
+
+/// The value type carried by the deferred-state watch channel.
+///
+/// Why: the MCP stdio loop must answer `initialize` before `AppState` is ready
+/// (the background build may take 7+ seconds on broken Bedrock creds).  This
+/// three-state value lets the dispatcher distinguish "still building" (`None`),
+/// "ready" (`Some(Ok(…))`), and "failed" (`Some(Err(reason))`).  `Arc`
+/// avoids cloning all 15+ `String` fields of `AppState` on every tool call —
+/// the dispatcher does one atomic refcount bump per call instead.
+/// What: `None` on channel creation; the background task sends
+/// `Some(Ok(Arc::new(state)))` or `Some(Err(reason))` when the build completes.
+/// Test: `deferred_dispatch_*` tests in `mcp_tests.rs` cover all three states.
+pub type DeferredStateValue = Option<Result<Arc<AppState>, String>>;
+
+/// Start the MCP stdio loop with deferred `AppState` construction (issue #1739).
+///
+/// Why: the MCP `initialize` handshake has a ~1.5 s deadline — Claude Code
+/// marks the server DEGRADED if the response is not received in time.
+/// `build_app_state` can take 7+ seconds when Bedrock credentials are broken.
+/// This entry-point answers `initialize` in <1 ms and defers provider/liveness
+/// calls to a background task, removing the startup race entirely.
+/// What: calls `run_stdio_loop` with `dispatch_deferred`, which handles protocol-
+/// level methods (`initialize`, `notifications/initialized`, `tools/list`)
+/// synchronously and awaits `state_rx` (with a 30 s timeout) for tool calls.
+/// The caller is responsible for spawning the background build and feeding
+/// results into the matching `watch::Sender<DeferredStateValue>`.
+/// Test: `deferred_dispatch_initialize_needs_no_state`,
+/// `deferred_dispatch_tool_call_when_ready`,
+/// `deferred_dispatch_tool_call_when_build_failed`,
+/// `deferred_dispatch_tool_call_when_sender_dropped` in `mcp_tests.rs`.
+pub async fn run_deferred(state_rx: watch::Receiver<DeferredStateValue>) -> Result<()> {
+    run_stdio_loop(move |req| {
+        let rx = state_rx.clone();
+        async move { dispatch_deferred(req, rx).await }
+    })
+    .await
+}
+
+/// Dispatch an MCP request when `AppState` is being built lazily in the
+/// background.
+///
+/// Why: see `run_deferred` — the dispatcher must answer `initialize` and
+/// `tools/list` immediately (they need no `AppState`), while tool calls can
+/// legitimately wait for the background build to finish.
+/// What: routes protocol-level methods without touching `state_rx`; for all
+/// other methods it awaits `state_rx.wait_for(|v| v.is_some())` with a
+/// 30-second timeout and then delegates to the regular `dispatch`.  A
+/// graceful JSON-RPC error is returned if the build times out or fails instead
+/// of panicking or hanging.
+/// Test: see `run_deferred` test list above.
+pub(crate) async fn dispatch_deferred(
+    req: Request,
+    mut state_rx: watch::Receiver<DeferredStateValue>,
+) -> Response {
+    let is_notification = req.id.is_none();
+    let id = req.id.clone();
+
+    if req.jsonrpc.as_deref() != Some("2.0") {
+        if is_notification {
+            return Response::suppressed();
+        }
+        return Response::err(id, error_codes::INVALID_REQUEST, "jsonrpc must be \"2.0\"");
+    }
+
+    // Protocol-level methods that need no AppState → answered immediately,
+    // BEFORE waiting for the background build.  This is the invariant that
+    // makes the initialize handshake fast even with broken credentials.
+    match req.method.as_str() {
+        "initialize" => {
+            return Response::ok(
+                id,
+                initialize_response("trusty-review", env!("CARGO_PKG_VERSION"), None),
+            );
+        }
+        "notifications/initialized" | "initialized" => {
+            return Response::suppressed();
+        }
+        "tools/list" => {
+            return Response::ok(id, serde_json::json!({ "tools": tool_descriptors() }));
+        }
+        _ => {}
+    }
+
+    // All other methods require AppState.  Await the background build with a
+    // generous timeout — a well-provisioned host should finish in < 5 s even
+    // with liveness probes; 30 s guards against severe but recoverable delays.
+    //
+    // IMPORTANT: extract an owned value inside a scoped block so the non-Send
+    // watch::Ref (RwLockReadGuard) is definitively dropped before the next
+    // .await point — required for the enclosing future to satisfy Send.
+    const WARMUP_TIMEOUT: Duration = Duration::from_secs(30);
+    let state_outcome: Result<Arc<AppState>, String> = {
+        let timed = tokio::time::timeout(WARMUP_TIMEOUT, state_rx.wait_for(|v| v.is_some())).await;
+        match timed {
+            Err(_elapsed) => {
+                warn!(
+                    method = req.method.as_str(),
+                    "tool call received before AppState was ready (30 s warmup timeout)"
+                );
+                return Response::err(
+                    id,
+                    error_codes::INTERNAL_ERROR,
+                    "server is still warming up, retry shortly",
+                );
+            }
+            Ok(Err(_recv_err)) => {
+                // Sender dropped without ever sending a value — background task
+                // exited before it could report success or failure.
+                return Response::err(
+                    id,
+                    error_codes::INTERNAL_ERROR,
+                    "server initialization failed — check credentials and restart",
+                );
+            }
+            Ok(Ok(guard)) => {
+                // Clone Arc out of the Ref — one atomic refcount bump instead of
+                // a full AppState copy.  The guard is dropped at the end of this
+                // block (before the dispatch(...).await below).
+                match &*guard {
+                    Some(Ok(arc)) => Ok(Arc::clone(arc)),
+                    Some(Err(reason)) => Err(reason.clone()),
+                    None => unreachable!("wait_for guarantees the predicate is satisfied"),
+                }
+            } // guard (RwLockReadGuard / watch::Ref) dropped here — .await is now safe
+        }
+    };
+
+    match state_outcome {
+        Err(reason) => Response::err(
+            id,
+            error_codes::INTERNAL_ERROR,
+            format!("server initialization failed: {reason}"),
+        ),
+        // AppState is ready — Arc::deref gives &AppState for the dispatch call.
+        Ok(state) => dispatch(req, &state).await,
+    }
 }
 
 /// Build a fully-wired trusty-review [`AppState`] from environment + config file.
