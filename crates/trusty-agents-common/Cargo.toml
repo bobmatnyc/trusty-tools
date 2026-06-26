@@ -1,7 +1,6 @@
 [package]
 name = "trusty-agents-common"
 version = "0.1.3"
-publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
