@@ -1,3 +1,8 @@
+// Why: `tm launch` and `tm connect` now use the compact `info_box` banner, but
+// the test suite in `tests.rs` still exercises these functions to guard against
+// formatting regressions. Suppressing dead_code here avoids the CI noise while
+// keeping the existing test coverage intact (#1738).
+#![allow(dead_code)]
 //! Launch-banner rendering for `tm launch` and `tm connect`.
 //!
 //! Why: the full-screen ASCII-art banner is ~130 lines of data and ~100 lines
