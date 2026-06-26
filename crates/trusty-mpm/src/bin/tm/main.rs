@@ -190,9 +190,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let client = reqwest::Client::new();
-    // Resolve the daemon URL once: explicit --url/TRUSTY_MPM_URL wins, then
-    // lock file (daemon may bind to an ephemeral port), then default.
-    let url = trusty_mpm::core::resolve_daemon_url(Some(&cli.url));
+    // Resolve the daemon URL once: explicit --url/TRUSTY_MPM_URL wins (but only
+    // when reachable), then lock file (daemon may bind to an ephemeral port),
+    // then default. Using the probing variant prevents a stale TRUSTY_MPM_URL
+    // (e.g. :7881 while the daemon is on :7880) from permanently breaking `tm`
+    // (#1731). Non-default explicit URLs that ARE reachable still win
+    // immediately so `--url http://…:9999` continues to work.
+    let url = trusty_mpm::core::resolve_daemon_url_probing(&client, Some(&cli.url)).await;
     // Why: handlers return `anyhow::Result`; we capture the dispatch result here
     // so the top-level boundary can translate the typed `PruneError::SmUnavailable`
     // (issue #1313) into the documented exit code 75. Doing the `process::exit`

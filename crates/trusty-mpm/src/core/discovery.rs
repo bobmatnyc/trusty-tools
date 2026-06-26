@@ -102,6 +102,76 @@ pub fn resolve_daemon_url(explicit: Option<&str>) -> String {
         .to_string()
 }
 
+/// Resolve the daemon URL with reachability probing for explicit overrides.
+///
+/// Why: `resolve_daemon_url` treats an explicit non-default URL (e.g. a stale
+/// `TRUSTY_MPM_URL=http://127.0.0.1:7881`) as unconditionally winning, even
+/// when the daemon is no longer listening there. A stale env var therefore
+/// permanently breaks `tm` guided-default until the env is corrected, because
+/// the lock file (which records the daemon's actual bound address) is never
+/// consulted (#1731). This async variant probes the explicit URL before
+/// committing to it; on failure it falls through to the lock file and then
+/// the compiled-in default — exactly the fallback chain users expect.
+/// What: follows the same three-step priority order as `resolve_daemon_url`,
+/// but step 1 is gated on a 500 ms health probe.
+///
+/// 1. `explicit` (non-empty, non-default) — accepted only if reachable
+/// 2. Lock file `~/.trusty-mpm/daemon.lock` (if present and PID alive)
+/// 3. `DEFAULT_DAEMON_URL`
+///
+/// A reachable explicit URL wins immediately without consulting the lock file
+/// so a deliberately non-default daemon address (`--url http://…:9999`) still
+/// works.
+/// Test: `probing_resolver_falls_back_when_explicit_unreachable` and
+/// `probing_resolver_wins_when_explicit_reachable` below.
+pub async fn resolve_daemon_url_probing(
+    client: &reqwest::Client,
+    explicit: Option<&str>,
+) -> String {
+    // Step 1: if the caller supplied a real override (non-empty, non-default),
+    // probe it.  Only skip the probe when the "explicit" URL is actually the
+    // clap-injected default — identical behaviour to resolve_daemon_url so
+    // callers that pass DEFAULT_DAEMON_URL always see the lock file win.
+    if let Some(url) = explicit
+        && !url.is_empty()
+        && url != DEFAULT_DAEMON_URL
+    {
+        if probe_url(client, url).await {
+            return url.to_string();
+        }
+        // Probe failed: fall through to lock file, then hard default.
+        if let Some(lock_url) = read_lock_file_url() {
+            return lock_url;
+        }
+        return DEFAULT_DAEMON_URL.to_string();
+    }
+
+    // No real explicit override: delegate to the sync resolver.
+    resolve_daemon_url(explicit)
+}
+
+/// Probe a URL for reachability with a short timeout.
+///
+/// Why: used by `resolve_daemon_url_probing` to validate stale explicit URLs
+/// before committing to them. A 500 ms timeout keeps the probe imperceptible
+/// to the user while still covering slow loopback responses.
+/// What: sends `GET <url>/health` (trailing slash on `url` is stripped first
+/// to avoid the double-slash path `//health`); returns `true` if the response
+/// has any 2xx status, `false` on error (connection refused, timeout, etc.).
+/// Test: `probing_resolver_falls_back_when_explicit_unreachable`,
+/// `probing_resolver_wins_when_explicit_reachable`,
+/// `probe_url_trims_trailing_slash`.
+async fn probe_url(client: &reqwest::Client, url: &str) -> bool {
+    use std::time::Duration;
+    let base = url.trim_end_matches('/');
+    let probe = client
+        .get(format!("{base}/health"))
+        .timeout(Duration::from_millis(500))
+        .send()
+        .await;
+    probe.map(|r| r.status().is_success()).unwrap_or(false)
+}
+
 /// Read the daemon URL from the lock file if present and the PID is alive.
 fn read_lock_file_url() -> Option<String> {
     let path = lock_file_path();
@@ -209,6 +279,121 @@ mod tests {
         assert_eq!(
             path.parent().and_then(|p| p.file_name()),
             Some(std::ffi::OsStr::new(FRAMEWORK_DIR_NAME))
+        );
+    }
+
+    // ── resolve_daemon_url_probing tests (#1731) ─────────────────────────────
+
+    /// Stale explicit URL (unreachable) falls back to lock file or default (#1731).
+    ///
+    /// Why: `TRUSTY_MPM_URL=http://127.0.0.1:1` is never reachable (port 1 is
+    /// reserved and never listening). The probing resolver must skip it and
+    /// return either the lock-file URL (if the daemon is running and has written
+    /// one) or `DEFAULT_DAEMON_URL` — never the unreachable stale value.
+    /// What: calls `resolve_daemon_url_probing` with the reserved port; asserts
+    /// the result is a valid HTTP URL that is NOT the stale value.
+    /// Test: this test.
+    #[tokio::test]
+    async fn probing_resolver_falls_back_when_explicit_unreachable() {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .expect("build client");
+        let stale = "http://127.0.0.1:1"; // port 1 is reserved, always refused
+        let result = resolve_daemon_url_probing(&client, Some(stale)).await;
+        // Must return a valid HTTP URL.
+        assert!(
+            result.starts_with("http"),
+            "expected HTTP URL, got: {result}"
+        );
+        // Must NOT lock onto the unreachable stale URL.
+        assert_ne!(
+            result, stale,
+            "probing resolver must not return the unreachable stale URL"
+        );
+    }
+
+    /// Reachable explicit URL wins immediately, lock file is not consulted (#1731).
+    ///
+    /// Why: a deliberately non-default URL (`--url http://…:9999`) must still
+    /// win when the daemon is reachable at that address. The probe must not
+    /// cause a regression for the `tm --url <custom>` workflow.
+    /// What: binds a minimal TCP listener that responds with HTTP 200 on any
+    /// connection, calls `resolve_daemon_url_probing` with that address, and
+    /// asserts the result equals the listener's address.
+    /// Test: this test.
+    #[tokio::test]
+    async fn probing_resolver_wins_when_explicit_reachable() {
+        use tokio::io::AsyncWriteExt as _;
+
+        // Bind to an ephemeral port and respond HTTP 200 to the first connection.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local_addr");
+        let url = format!("http://{addr}");
+
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // A minimal HTTP/1.1 200 response is enough for reqwest to
+                // call `r.status().is_success()`.
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                    .await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let result = resolve_daemon_url_probing(&client, Some(&url)).await;
+        assert_eq!(
+            result, url,
+            "reachable explicit URL must win over lock file / default"
+        );
+    }
+
+    /// Trailing slash on the base URL must not produce a double-slash path.
+    ///
+    /// Why: `probe_url("http://…:PORT/")` previously produced
+    /// `GET http://…:PORT//health` — the double slash could cause 404s on
+    /// strict HTTP servers, making a live daemon appear unreachable. The fix
+    /// trims the trailing slash before appending `/health`.
+    /// What: binds a TCP listener that echoes the request line in its 200
+    /// response body; asserts the captured path is `/health` not `//health`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn probe_url_trims_trailing_slash() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local_addr");
+
+        // Capture the request line so we can assert on the path.
+        let (path_tx, path_rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            if let Ok((sock, _)) = listener.accept().await {
+                let (reader, mut writer) = sock.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                // First line is the request line, e.g. "GET /health HTTP/1.1"
+                let req_line = lines.next_line().await.unwrap().unwrap_or_default();
+                let _ = path_tx.send(req_line);
+                let _ = writer
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        // URL with trailing slash — must probe `/health`, not `//health`.
+        let url_with_slash = format!("http://{addr}/");
+        probe_url(&client, &url_with_slash).await;
+
+        let req_line = path_rx.await.expect("request line captured");
+        // The path segment must be exactly "/health" with no double slash.
+        assert!(
+            req_line.starts_with("GET /health "),
+            "probe must request /health (no double slash); got: {req_line:?}"
         );
     }
 }
