@@ -796,3 +796,449 @@ fn cli_parses_sessctl_list_with_project_and_json() {
         other => panic!("expected sessctl list, got {other:?}"),
     }
 }
+
+// ── Regression tests for #1724 (guided-default fallback pollution guard) ──────
+
+/// Why (#1724): the guided-default fallback MUST NOT deploy framework files
+/// into a GitHub-backed git project's live checkout, even when the daemon is
+/// unreachable. This test locks in that guarantee.
+/// What: creates a temp directory, initialises a git repo inside it, sets a
+/// fake GitHub remote URL, pre-creates a stub base clone (so `ensure_base_clone`
+/// short-circuits without a network call), and calls `fallback_protected`
+/// directly with the daemon set to an unreachable address. Asserts that no
+/// framework files (`.trusty-mpm/`, `CLAUDE.md`, `.mcp.json`, `.claude/`) exist
+/// in the temp directory after the call.
+/// Test: this is the test. Annotated `serial` because it mutates `TRUSTY_MPM_REPOS_ROOT`.
+#[tokio::test]
+#[serial_test::serial]
+async fn guided_fallback_never_pollutes_github_git_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+
+    // Build a minimal git repository at `project` with a fake GitHub remote.
+    // We use `git init` + `git remote add` so `get_origin_url` (which shells
+    // out to `git config --get remote.origin.url`) returns a parseable URL.
+    let git_init_ok = std::process::Command::new("git")
+        .arg("init")
+        .current_dir(project)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !git_init_ok {
+        // git binary unavailable in this environment; skip gracefully.
+        eprintln!(
+            "guided_fallback_never_pollutes_github_git_checkout: git not available, skipping"
+        );
+        return;
+    }
+    let _ = std::process::Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/trusty-ci-nonexistent/no-repo-1724.git",
+        ])
+        .current_dir(project)
+        .status();
+
+    // Pre-create a stub base clone so `ensure_base_clone` returns immediately
+    // (it checks `base/.git` and returns Ok when found), avoiding any real
+    // network call. `create_session_worktree` will fail because the stub is
+    // not a real git repository — the error path is the one we want to test.
+    //
+    // SAFETY: env-var mutation is accepted by the project convention (same
+    // pattern as crates/trusty-mpm/src/core/trusty_tools_config.rs tests).
+    // The test mutates TRUSTY_MPM_REPOS_ROOT to a unique tempdir so it does
+    // not conflict with concurrently-running tests on different paths.
+    let repos_root = tempfile::tempdir().unwrap();
+    let fake_base = repos_root
+        .path()
+        .join("trusty-ci-nonexistent")
+        .join("no-repo-1724");
+    std::fs::create_dir_all(fake_base.join(".git")).unwrap();
+
+    let prev = std::env::var(trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV).ok();
+    unsafe {
+        std::env::set_var(
+            trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV,
+            repos_root.path(),
+        );
+    }
+
+    // Call the protected fallback with an unreachable daemon URL and our fake
+    // git project as the working directory.
+    let client = reqwest::Client::new();
+    let result =
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project).await;
+
+    // Restore the env var regardless of the outcome.
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(
+                trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV,
+                v,
+            ),
+            None => {
+                std::env::remove_var(trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV)
+            }
+        }
+    }
+
+    // ── Acceptance criterion (#1724) ─────────────────────────────────────────
+    // None of the framework files that `prepare_session_with_style` writes must
+    // appear inside the live git checkout.
+    assert!(
+        !project.join("CLAUDE.md").exists(),
+        "#1724: CLAUDE.md must NOT be written to the live git checkout"
+    );
+    assert!(
+        !project.join(".mcp.json").exists(),
+        "#1724: .mcp.json must NOT be written to the live git checkout"
+    );
+    assert!(
+        !project.join(".trusty-mpm").exists(),
+        "#1724: .trusty-mpm dir must NOT be created in the live git checkout"
+    );
+    assert!(
+        !project.join(".claude").exists(),
+        "#1724: .claude dir must NOT be created in the live git checkout"
+    );
+
+    // The function must return Err (refused to deploy) rather than silently
+    // falling through to a live-checkout deploy.
+    assert!(
+        result.is_err(),
+        "#1724: fallback must Err rather than deploy to the live checkout; \
+         got Ok which means framework files may have been written"
+    );
+}
+
+/// Why (#1724 residual gap): the protected-checkout guarantee MUST hold for ANY
+/// git project, not only GitHub-backed ones. A git repo with a non-GitHub remote
+/// (e.g. a Gitea, GitLab, or bare SSH URL) or with NO remote configured must
+/// also be refused — the fallback must return `Err` and leave the live working
+/// tree untouched.
+/// What: inits a real git repo, adds a non-GitHub remote URL, then calls
+/// `fallback_protected` directly. Asserts that the four framework artifacts are
+/// absent and the call returns `Err`.
+/// Test: this is the test.
+#[tokio::test]
+async fn guided_fallback_blocks_non_github_git_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+
+    // Build a minimal git repo with a non-GitHub (Gitea) remote.
+    let git_init_ok = std::process::Command::new("git")
+        .arg("init")
+        .current_dir(project)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !git_init_ok {
+        eprintln!("guided_fallback_blocks_non_github_git_checkout: git not available, skipping");
+        return;
+    }
+    // Add a non-GitHub remote to confirm it is not parsed as a GitHub project.
+    let _ = std::process::Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://gitea.example.com/org/repo.git",
+        ])
+        .current_dir(project)
+        .status();
+
+    // Call the protected fallback with an unreachable daemon URL.
+    let client = reqwest::Client::new();
+    let result =
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project).await;
+
+    // ── Acceptance criterion (#1724 residual gap) ────────────────────────────
+    // None of the framework files must appear in the live git checkout.
+    assert!(
+        !project.join("CLAUDE.md").exists(),
+        "#1724: CLAUDE.md must NOT be written to a non-GitHub git checkout"
+    );
+    assert!(
+        !project.join(".mcp.json").exists(),
+        "#1724: .mcp.json must NOT be written to a non-GitHub git checkout"
+    );
+    assert!(
+        !project.join(".trusty-mpm").exists(),
+        "#1724: .trusty-mpm dir must NOT be created in a non-GitHub git checkout"
+    );
+    assert!(
+        !project.join(".claude").exists(),
+        "#1724: .claude dir must NOT be created in a non-GitHub git checkout"
+    );
+
+    // The fallback must refuse with Err, not silently deploy.
+    assert!(
+        result.is_err(),
+        "#1724: fallback must Err for non-GitHub git checkout; \
+         got Ok which means framework files may have been deployed"
+    );
+
+    // Verify it's the REFUSAL error, not a network-error from a clone attempt.
+    // If is_github_remote() incorrectly accepts non-GitHub URLs, it would try
+    // to clone from gitea.example.com and fail with a network error instead.
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        err_msg.contains("auto-managed clones require a GitHub remote")
+            || err_msg.contains("live git checkout"),
+        "#1724: error message must explain the protection; got: {err_msg}"
+    );
+}
+
+/// Why (#1724 non-git path): the protected-checkout guarantee applies only to git
+/// projects. A plain directory (no `.git`) should still reach the classic `tm launch`
+/// path — framework-file deployment into plain dirs is the intended behaviour and
+/// is not in scope of #1724. This test verifies the fallback does NOT blindly block
+/// all directories, only git working trees.
+/// What: creates a temp dir with NO `.git`, calls `fallback_protected`. The classic
+/// path calls `launch()` which will fail to connect to the unreachable daemon URL —
+/// but it must not panic, and must not pretend it's a git-protection refusal.
+/// Test: this is the test.
+#[tokio::test]
+async fn guided_fallback_non_git_dir_reaches_launch_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path();
+
+    // No git init — plain directory.
+    assert!(
+        !project.join(".git").exists(),
+        "test precondition: must NOT be a git repo"
+    );
+
+    // Call the protected fallback with an unreachable daemon URL.
+    let client = reqwest::Client::new();
+    let result =
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project).await;
+
+    // The result must be Err (daemon is unreachable so launch() will fail),
+    // but it must NOT be the git-protection refusal error message.
+    assert!(
+        result.is_err(),
+        "non-git fallback must Err (daemon unreachable)"
+    );
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        !err_msg.contains("live git checkout"),
+        "#1724: non-git dir must NOT hit the git-protection refusal path; got: {err_msg}"
+    );
+    assert!(
+        !err_msg.contains("auto-managed clones require"),
+        "#1724: non-git dir must NOT show GitHub-remote hint; got: {err_msg}"
+    );
+
+    // Framework files must not have been created (daemon was unreachable).
+    assert!(
+        !project.join("CLAUDE.md").exists(),
+        "CLAUDE.md must not exist when daemon is unreachable"
+    );
+}
+
+/// Why (#1724 HIGH gap): `fallback_protected` previously used `cwd.join(".git").exists()`
+/// which only fires when `cwd` IS the repo root. Running `tm` from a subdirectory
+/// (e.g. `~/project/src/`) silently bypassed the guard and called `launch(None)`,
+/// resolving to `cwd` and deploying framework files into the live tree. This test
+/// covers that scenario for a GitHub-backed project: the guard must detect the git
+/// repo root at any depth and refuse to deploy.
+/// What: creates a real git repo, creates a nested `src/module/` subdir, and calls
+/// `fallback_protected` from within that subdir. Asserts no framework files appear
+/// anywhere in the repo tree and that the call returns `Err`.
+/// Test: this is the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn guided_fallback_blocks_github_git_from_subdirectory() {
+    let repo_dir = tempfile::tempdir().unwrap();
+    let git_init_ok = std::process::Command::new("git")
+        .arg("init")
+        .current_dir(repo_dir.path())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !git_init_ok {
+        eprintln!("guided_fallback_blocks_github_git_from_subdirectory: git unavailable, skipping");
+        return;
+    }
+    let _ = std::process::Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/trusty-ci-nonexistent/subdir-test-1724.git",
+        ])
+        .current_dir(repo_dir.path())
+        .status();
+
+    // Run from a NESTED subdirectory inside the repo.
+    let subdir = repo_dir.path().join("src").join("module");
+    std::fs::create_dir_all(&subdir).unwrap();
+
+    let client = reqwest::Client::new();
+    let result =
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", &subdir).await;
+
+    // ── Acceptance criterion (#1724 HIGH gap) ────────────────────────────────
+    // No framework files must exist anywhere in the repo tree.
+    assert!(
+        !repo_dir.path().join("CLAUDE.md").exists(),
+        "#1724: CLAUDE.md must NOT appear in repo root when called from subdir"
+    );
+    assert!(
+        !subdir.join("CLAUDE.md").exists(),
+        "#1724: CLAUDE.md must NOT appear in the subdir"
+    );
+    assert!(
+        !repo_dir.path().join(".mcp.json").exists(),
+        "#1724: .mcp.json must NOT appear in repo root"
+    );
+    assert!(
+        !subdir.join(".mcp.json").exists(),
+        "#1724: .mcp.json must NOT appear in the subdir"
+    );
+    // The call must return Err (refused or clone attempt failed — not deployed).
+    assert!(
+        result.is_err(),
+        "#1724: fallback from subdir must Err, not deploy to the live tree"
+    );
+}
+
+/// Why (#1724 success path): proves that when `redirect_to_managed_clone` succeeds
+/// (base clone exists as a real git repo so `create_session_worktree` can create a
+/// worktree), `launch()` is called with `Some(worktree)` — not `None` — so
+/// framework files go to the worktree, never to the live checkout.
+/// What: (1) creates a real git base clone (git init + empty commit); (2) sets
+/// `TRUSTY_MPM_REPOS_ROOT` to point at it; (3) creates a live checkout with a
+/// matching GitHub remote; (4) calls `fallback_protected`; (5) asserts live
+/// checkout is clean AND at least one per-session worktree was created under the
+/// base clone (proving `launch(Some(worktree))` was invoked, not `launch(None)`).
+/// Test: this is the test. Annotated `serial` because it mutates `TRUSTY_MPM_REPOS_ROOT`.
+#[tokio::test]
+#[serial_test::serial]
+async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
+    // ── Set up a real git base clone (minimal: init + one empty commit) ──────
+    let repos_root = tempfile::tempdir().unwrap();
+    // Repo path must match parse_github_path("https://github.com/test-owner-1724/test-repo-1724.git")
+    let base = repos_root
+        .path()
+        .join("test-owner-1724")
+        .join("test-repo-1724");
+    std::fs::create_dir_all(&base).unwrap();
+
+    let git_init_ok = std::process::Command::new("git")
+        .arg("init")
+        .current_dir(&base)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !git_init_ok {
+        eprintln!(
+            "guided_fallback_redirect_success_worktree_not_live_checkout: git unavailable, skipping"
+        );
+        return;
+    }
+    // Configure minimal git identity so commit doesn't fail.
+    let _ = std::process::Command::new("git")
+        .args([
+            "-C",
+            base.to_str().unwrap(),
+            "config",
+            "user.email",
+            "ci@test.invalid",
+        ])
+        .status();
+    let _ = std::process::Command::new("git")
+        .args(["-C", base.to_str().unwrap(), "config", "user.name", "CI"])
+        .status();
+    // One empty commit gives us a HEAD branch so `git worktree add` succeeds.
+    let commit_ok = std::process::Command::new("git")
+        .args([
+            "-C",
+            base.to_str().unwrap(),
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !commit_ok {
+        eprintln!(
+            "guided_fallback_redirect_success_worktree_not_live_checkout: git commit failed, skipping"
+        );
+        return;
+    }
+
+    // ── Set up a live checkout with the matching GitHub remote ───────────────
+    let live_dir = tempfile::tempdir().unwrap();
+    let _ = std::process::Command::new("git")
+        .arg("init")
+        .current_dir(live_dir.path())
+        .status();
+    let _ = std::process::Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/test-owner-1724/test-repo-1724.git",
+        ])
+        .current_dir(live_dir.path())
+        .status();
+
+    // ── Point REPOS_ROOT at our temp dir (RAII: restore on scope exit) ───────
+    let repos_root_key = trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV;
+    let prev_repos_root = std::env::var(repos_root_key).ok();
+    unsafe { std::env::set_var(repos_root_key, repos_root.path()) };
+
+    let client = reqwest::Client::new();
+    let _result =
+        crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", live_dir.path())
+            .await;
+
+    // Restore env var immediately (before assertions that might panic).
+    unsafe {
+        match prev_repos_root {
+            Some(ref v) => std::env::set_var(repos_root_key, v),
+            None => std::env::remove_var(repos_root_key),
+        }
+    }
+
+    // ── Acceptance criteria (#1724 success path) ─────────────────────────────
+    // Live checkout must be untouched.
+    assert!(
+        !live_dir.path().join("CLAUDE.md").exists(),
+        "#1724: CLAUDE.md must NOT appear in the live checkout after redirect"
+    );
+    assert!(
+        !live_dir.path().join(".mcp.json").exists(),
+        "#1724: .mcp.json must NOT appear in the live checkout after redirect"
+    );
+    assert!(
+        !live_dir.path().join(".trusty-mpm").exists(),
+        "#1724: .trusty-mpm must NOT be created in the live checkout"
+    );
+    assert!(
+        !live_dir.path().join(".claude").exists(),
+        "#1724: .claude must NOT be created in the live checkout"
+    );
+    // A per-session worktree must have been created inside the base clone,
+    // proving `launch(Some(worktree))` was called, not `launch(None)`.
+    let worktrees_dir = base.join("worktrees");
+    assert!(
+        worktrees_dir.exists(),
+        "#1724: worktrees/ dir must exist under base clone after successful redirect"
+    );
+    let sessions: Vec<_> = std::fs::read_dir(&worktrees_dir)
+        .expect("worktrees dir must be listable")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(
+        !sessions.is_empty(),
+        "#1724: at least one per-session worktree must be present, proving \
+         launch(Some(worktree)) was invoked rather than launch(None)"
+    );
+}
