@@ -1,29 +1,33 @@
-//! Bare `tm` guided default mode (#1708).
+//! Bare `tm` guided default mode — session picker (#1705, #1708).
 //!
 //! Why: typing `tm` alone — with no subcommand — should do the most useful
-//! thing for the operator's current context rather than printing help and
-//! exiting. Inside a git repository with a GitHub remote, the daemon's
-//! in-project spawn path (#1706) is the right action: it either reconnects to
-//! an existing session for the same project (#1707) or creates a fresh
-//! per-session worktree, then attaches the terminal to it. Outside a git repo
-//! entirely (no `.git` directory), falling back to `tm launch` (the full
-//! framework-deploy path) preserves existing behaviour for non-git directories.
-//! Any git working tree — GitHub-backed or not — is protected from in-place
-//! framework-file deployment (#1724).
+//! thing for the operator's current context. Inside a GitHub-backed git
+//! repository with a reachable daemon, the guided default (#1705) queries the
+//! daemon for existing sessions bound to the detected `owner/repo`, shows them
+//! in a numbered list, and lets the operator resume or launch with a single key.
+//! When the daemon is unreachable or the project is not GitHub-backed, the
+//! protected fallback (#1724) ensures the live checkout is never touched.
 //!
-//! What: [`run_guided_default`] detects the current directory, queries the
-//! managed spawn endpoint, and then attaches the terminal to the resulting
-//! tmux session. A reconnect is fully transparent — the operator sees the same
-//! `tmux attach-session -t <name>` outcome whether the session is new or reused.
+//! What: [`run_guided_default`] orchestrates detection, listing, and dispatch.
+//! [`derive_project`] derives the `source_id` and managed workspace from the
+//! git origin. [`fallback_protected`] is the three-way dispatch for the daemon-
+//! unreachable path; it is also the target for non-GitHub projects. The helpers
+//! for display and the TTY picker are in the lower sections of this file.
 //!
-//! Test: the happy-path and fallback branches are unit-tested in
-//! `tests_behavior_a.rs`; the daemon interaction is exercised via the managed
-//! spawn integration tests.
+//! Test: unit tests for detection and fallback live in `tests_behavior_b_tests.rs`
+//! (#1724 regression suite) and `tests_behavior_c_tests.rs` (#1705 new UX suite);
+//! the managed-spawn integration path is exercised by `tests/session_manager_mvp.rs`.
 
 use anyhow::Context as _;
 use serde::Deserialize;
 
 /// Response shape for `POST /api/v1/sessions/managed` (subset we need).
+///
+/// Why: a local type avoids depending on the daemon's internal DTO from the
+/// CLI binary crate; the fields we care about are `name` and `state`.
+/// What: mirrors `daemon::managed_routes::SpawnResponse` for the two fields
+/// the guided default uses.
+/// Test: covered indirectly by `launch_new_session_and_attach`.
 #[derive(Debug, Deserialize)]
 struct SpawnManagedResponse {
     #[serde(default)]
@@ -32,34 +36,269 @@ struct SpawnManagedResponse {
     state: String,
 }
 
-/// Bare `tm` guided default — detect context and spawn or reconnect (#1708).
+// ── Entry point ──────────────────────────────────────────────────────────────
+
+/// Bare `tm` guided default — detect project, list sessions, and offer a picker.
 ///
-/// Why: operators invoke `tm` without a subcommand from inside a project
-/// directory; the guided default eliminates the need to remember whether to
-/// type `tm launch`, `tm connect`, `tm sessions new`, or a managed-route
-/// command — the daemon decides based on the directory's git identity.
-/// What: (1) resolves the current working directory; (2) if the daemon is
-/// reachable, posts `POST /api/v1/sessions/managed` with `repo_url = <cwd>` —
-/// the daemon's in-project spawn path handles reconnect (Active session for the
-/// same `owner/repo` is returned immediately) and new-session creation
-/// (a per-session worktree is provisioned); (3) attaches to the resulting tmux
-/// session name. When the daemon is unreachable or the spawn fails, delegates
-/// to [`fallback_protected`] which preserves the live-checkout guarantee (#1724).
-/// Test: `guided_fallback_never_pollutes_github_git_checkout` in
-/// `tests_behavior_b_tests.rs` (verifies no framework files in live checkout);
-/// `guided_default_attaches_on_success` (mocked daemon response).
+/// Why: operators who type `tm` from inside a project directory should not
+/// have to remember `tm sessions new`, `tm connect`, or `tm attach <name>` —
+/// the guided default derives the project identity, shows existing sessions,
+/// and lets them resume or launch in one step. The live checkout is NEVER
+/// written to; all managed sessions run in the protected base-clone workspace.
+/// What: (1) tries the rich picker UX when the daemon is reachable and the
+/// CWD is a GitHub-backed git project; (2) falls through to
+/// [`fallback_protected`] for every other case (daemon unreachable, non-GitHub
+/// remote, non-git directory). Non-TTY piped invocations print project + session
+/// info and exit 0 without hanging for input (#1705 AC-7).
+/// Test: `guided_derive_project_returns_none_for_non_git`,
+/// `guided_non_tty_prints_hint_and_returns_ok`,
+/// `guided_fallback_never_pollutes_github_git_checkout` (#1724).
 pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
-    // 1. Resolve the current directory.
     let cwd = std::env::current_dir().context("cannot resolve current directory")?;
     let workdir = cwd.to_string_lossy().to_string();
-
     eprintln!("tm: no subcommand — using guided default for {workdir}");
 
-    // 2. Try the managed spawn/reconnect via the daemon.
-    //    The daemon's in-project spawn path handles all cases:
-    //    - Git repo with GitHub remote → reconnect or new worktree session.
-    //    - Non-git dir or no GitHub remote → local-path fast path.
-    //    We keep the task and git_ref minimal so the daemon picks sensible defaults.
+    // Try the rich UX when CWD is a GitHub-backed git project.
+    if let Some((source_id, workspace)) = derive_project(&cwd) {
+        match list_project_sessions(client, url, &source_id).await {
+            Ok(sessions) => {
+                use std::io::IsTerminal as _;
+                print_project_context(&source_id, &workspace, &sessions);
+                return if std::io::stdin().is_terminal() {
+                    run_tty_picker(client, url, &workdir, &sessions).await
+                } else {
+                    print_non_tty_hint(&source_id, &sessions);
+                    Ok(())
+                };
+            }
+            Err(e) => {
+                eprintln!("tm: daemon unreachable ({e}); falling back");
+            }
+        }
+    }
+
+    // Daemon unreachable OR not a GitHub project: protected fallback (#1724).
+    // For GitHub projects this redirects to the managed-clone workspace.
+    // For non-GitHub git projects it refuses (live-checkout guard).
+    // For non-git directories it falls through to the classic `tm launch` path.
+    fallback_protected(client, url, &cwd).await
+}
+
+// ── Project derivation ───────────────────────────────────────────────────────
+
+/// Derive the GitHub `source_id` and managed workspace from `cwd`.
+///
+/// Why: the picker needs the `owner/repo` identity (for filtering sessions by
+/// `source_id`) and the managed workspace path (for display) before contacting
+/// the daemon — both come from the local git config.
+/// What: finds the git root, reads `remote.origin.url`, guards that it is a
+/// GitHub URL, parses `owner/repo` via `parse_github_path`, and returns
+/// `(source_id, workspace_path)` where `source_id = "owner/repo"` and
+/// `workspace_path = <repos_root>/owner/repo`.
+/// Test: `guided_derive_project_returns_none_for_non_git`,
+/// `guided_derive_project_returns_none_for_non_github_remote`.
+pub(crate) fn derive_project(cwd: &std::path::Path) -> Option<(String, std::path::PathBuf)> {
+    use trusty_mpm::daemon::managed_routes::inproject;
+    let git_root = find_git_root(cwd)?;
+    let origin_url = inproject::get_origin_url(&git_root)?;
+    if !is_github_remote(&origin_url) {
+        return None;
+    }
+    let gh = trusty_common::github_path::parse_github_path(&origin_url)?;
+    let source_id = format!("{}/{}", gh.owner, gh.repo);
+    let workspace = inproject::base_clone_path(&gh.owner, &gh.repo);
+    Some((source_id, workspace))
+}
+
+// ── Daemon communication ─────────────────────────────────────────────────────
+
+/// Fetch managed sessions for a project via `GET /api/v1/sessions/managed?source_id`.
+///
+/// Why: the picker only shows sessions that belong to the current project; the
+/// `?source_id=<owner/repo>` filter keeps the response small regardless of how
+/// many total sessions the daemon manages.
+/// What: GETs the managed-list endpoint with the query param and deserializes
+/// the sessions array. Returns `Err` when the daemon is unreachable or the
+/// request fails — the caller uses this as a signal to fall back.
+/// Test: `guided_list_project_sessions_parses_empty_response`.
+async fn list_project_sessions(
+    client: &reqwest::Client,
+    base_url: &str,
+    source_id: &str,
+) -> anyhow::Result<Vec<trusty_mpm::client::ManagedSessionSummary>> {
+    let resp = client
+        .get(format!("{base_url}/api/v1/sessions/managed"))
+        .query(&[("source_id", source_id)])
+        .send()
+        .await?
+        .error_for_status()?;
+    let body: trusty_mpm::client::ManagedListResponse = resp.json().await?;
+    Ok(body.sessions)
+}
+
+// ── Display helpers ──────────────────────────────────────────────────────────
+
+/// Print the detected project and session list to stderr.
+///
+/// Why: the operator needs to see at a glance which project was detected, where
+/// the managed workspace lives (so it is clear the live checkout is untouched),
+/// and which sessions are available before being prompted.
+/// What: prints the source_id, workspace path, and a numbered session list (or
+/// "(none)" when empty). All output goes to stderr (stdout stays clean).
+/// Test: `guided_print_project_context_does_not_panic`.
+pub(crate) fn print_project_context(
+    source_id: &str,
+    workspace: &std::path::Path,
+    sessions: &[trusty_mpm::client::ManagedSessionSummary],
+) {
+    eprintln!("tm: project:   {source_id}");
+    eprintln!(
+        "tm: workspace: {} (live checkout is NOT touched)",
+        workspace.display()
+    );
+    if sessions.is_empty() {
+        eprintln!("tm: sessions:  (none)");
+    } else {
+        eprintln!("tm: sessions:");
+        for (i, s) in sessions.iter().enumerate() {
+            let activity = s.last_activity_at.as_deref().unwrap_or("—");
+            eprintln!(
+                "tm:   [{}] {}  state={}  last={}",
+                i + 1,
+                s.name,
+                s.state,
+                activity
+            );
+        }
+    }
+}
+
+/// Print a non-TTY degradation notice and actionable hints.
+///
+/// Why: when stdin is not a TTY (CI, pipes, scripts), hanging for input would
+/// block the caller forever; print the context and exit cleanly instead (#1705 AC-7).
+/// What: emits one-line notice + resume/launch hints to stderr. The caller
+/// returns `Ok(())` immediately after.
+/// Test: `guided_non_tty_prints_hint_and_returns_ok`.
+pub(crate) fn print_non_tty_hint(
+    source_id: &str,
+    sessions: &[trusty_mpm::client::ManagedSessionSummary],
+) {
+    eprintln!("tm: (stdin is not a TTY — run `tm` from an interactive terminal to use the picker)");
+    if sessions.is_empty() {
+        eprintln!("tm: to launch a new session: start the daemon and run `tm` from a TTY");
+    } else {
+        let n = sessions.len();
+        eprintln!("tm: {n} session(s) found for {source_id}");
+        eprintln!("tm: to resume: tmux attach-session -t {}", sessions[0].name);
+        eprintln!("tm: to launch: run `tm` from an interactive terminal");
+    }
+}
+
+// ── TTY picker ───────────────────────────────────────────────────────────────
+
+/// Interactive numbered picker (TTY mode only).
+///
+/// Why: a simple numbered menu is the lowest-friction way to resume or launch
+/// without requiring the operator to remember session names or UUIDs.
+/// What: prints the menu, reads one line from stdin, and dispatches:
+///   • bare Enter / "1" (sessions exist) → resume most recent;
+///   • bare Enter (no sessions) → launch new;
+///   • numeric N (1..=len) → resume session N;
+///   • numeric N == len+1 → launch new;
+///   • "q"/"Q" → quit cleanly;
+///   • anything else → print hint and quit.
+/// Default when sessions exist: resume most recent (bare Enter = [1]).
+/// Test: `guided_tty_picker_dispatches_new_when_no_sessions`,
+/// `guided_tty_picker_quit_returns_ok`.
+async fn run_tty_picker(
+    client: &reqwest::Client,
+    url: &str,
+    workdir: &str,
+    sessions: &[trusty_mpm::client::ManagedSessionSummary],
+) -> anyhow::Result<()> {
+    eprintln!();
+    let new_idx = sessions.len() + 1;
+    if sessions.is_empty() {
+        eprintln!("tm:   [Enter] launch new session");
+        eprintln!("tm:   [q]     quit");
+    } else {
+        for (i, s) in sessions.iter().enumerate() {
+            eprintln!("tm:   [{}] resume {}", i + 1, s.name);
+        }
+        eprintln!("tm:   [{new_idx}] launch new session");
+        eprintln!("tm:   [q] quit");
+        eprintln!("tm: default: [1] resume most recent");
+    }
+    eprint!("tm: > ");
+
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("failed to read choice from stdin")?;
+    let choice = line.trim();
+
+    if choice.eq_ignore_ascii_case("q") {
+        eprintln!("tm: quit.");
+        return Ok(());
+    }
+
+    if choice.is_empty() {
+        // Bare Enter: resume most recent when sessions exist, else launch new.
+        return if let Some(s) = sessions.first() {
+            tmux_attach(&s.name)
+        } else {
+            launch_new_session_and_attach(client, url, workdir).await
+        };
+    }
+
+    if let Ok(n) = choice.parse::<usize>() {
+        if n >= 1 && n <= sessions.len() {
+            return tmux_attach(&sessions[n - 1].name);
+        } else if n == new_idx {
+            return launch_new_session_and_attach(client, url, workdir).await;
+        }
+    }
+
+    eprintln!("tm: unrecognised choice '{choice}'; quitting.");
+    Ok(())
+}
+
+/// Invoke `tmux attach-session -t <name>` and await exit.
+///
+/// Why: resuming a session means handing the terminal over to tmux.
+/// What: shells out to `tmux attach-session -t <name>` and waits; returns
+/// `Err` if tmux exits with a non-zero status.
+/// Test: exercised indirectly by the picker flow; mocked in unit tests via
+/// process stubs.
+fn tmux_attach(name: &str) -> anyhow::Result<()> {
+    eprintln!("tm: attaching to session '{name}'");
+    let status = std::process::Command::new("tmux")
+        .args(["attach-session", "-t", name])
+        .status()
+        .context("failed to invoke tmux")?;
+    if !status.success() {
+        anyhow::bail!("tmux attach-session exited with failure");
+    }
+    Ok(())
+}
+
+/// POST a new managed session to the daemon and attach to it.
+///
+/// Why: "launch new" in the picker must use the daemon's protected managed-clone
+/// spawn path — NEVER write framework files into the live checkout (#1724).
+/// What: POSTs `{"repo_url": workdir, "ref": "HEAD", "task": ""}` to
+/// `/api/v1/sessions/managed`; the daemon detects the GitHub project in `workdir`,
+/// provisions a per-session worktree in the base clone, and returns the session
+/// name. Then attaches via [`tmux_attach`].
+/// Test: covered by the `POST /api/v1/sessions/managed` integration tests in
+/// `tests/session_manager_mvp.rs`.
+async fn launch_new_session_and_attach(
+    client: &reqwest::Client,
+    url: &str,
+    workdir: &str,
+) -> anyhow::Result<()> {
+    eprintln!("tm: launching new session…");
     let resp = client
         .post(format!("{url}/api/v1/sessions/managed"))
         .json(&serde_json::json!({
@@ -68,45 +307,24 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
             "task": "",
         }))
         .send()
-        .await;
+        .await
+        .context("managed spawn POST failed")?;
 
-    match resp {
-        Ok(r) if r.status().is_success() => match r.json::<SpawnManagedResponse>().await {
-            Ok(body) if !body.name.is_empty() => {
-                eprintln!("tm: attaching to session '{}' ({})", body.name, body.state);
-                let status = std::process::Command::new("tmux")
-                    .args(["attach-session", "-t", &body.name])
-                    .status()
-                    .context("failed to invoke tmux")?;
-                if !status.success() {
-                    anyhow::bail!("tmux attach-session exited with failure");
-                }
-                return Ok(());
-            }
-            Ok(_) => {
-                eprintln!("tm: daemon returned empty session name; falling back");
-            }
-            Err(e) => {
-                eprintln!("tm: failed to parse daemon response ({e}); falling back");
-            }
-        },
-        Ok(r) => {
-            eprintln!(
-                "tm: daemon returned {} for managed spawn; falling back",
-                r.status()
-            );
-        }
-        Err(e) => {
-            eprintln!("tm: daemon unreachable ({e}); falling back");
-        }
+    if !resp.status().is_success() {
+        anyhow::bail!("daemon returned {} for managed spawn", resp.status());
     }
-
-    // 3. Daemon unreachable or spawn failed — delegate to the protected fallback.
-    //    This NEVER deploys framework files into a GitHub-backed live checkout
-    //    (#1724): GitHub projects are redirected to their managed-clone workspace;
-    //    non-git directories retain the classic `tm launch` behaviour.
-    fallback_protected(client, url, &cwd).await
+    let body: SpawnManagedResponse = resp
+        .json()
+        .await
+        .context("failed to parse managed spawn response")?;
+    if body.name.is_empty() {
+        anyhow::bail!("daemon returned empty session name from managed spawn");
+    }
+    eprintln!("tm: session '{}' created ({})", body.name, body.state);
+    tmux_attach(&body.name)
 }
+
+// ── Fallback (daemon-unreachable / non-GitHub) path ─────────────────────────
 
 /// Return true when the remote URL targets github.com (any transport).
 ///
