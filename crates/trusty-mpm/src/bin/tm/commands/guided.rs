@@ -21,6 +21,8 @@
 use anyhow::Context as _;
 use serde::Deserialize;
 
+use crate::formatters::banner::tmux_has_session;
+
 /// Response shape for `POST /api/v1/sessions/managed` (subset we need).
 ///
 /// Why: a local type avoids depending on the daemon's internal DTO from the
@@ -339,11 +341,18 @@ async fn run_tty_picker(
         eprintln!("tm:   [q]     quit");
     } else {
         for (i, s) in sessions.iter().enumerate() {
-            eprintln!("tm:   [{}] resume {}", i + 1, s.name);
+            // Show "restart" for sessions that are stopped/errored — they have no
+            // live tmux session and will be restarted via the daemon (#1742).
+            let verb = if matches!(s.state.as_str(), "stopped" | "errored") {
+                "restart"
+            } else {
+                "resume"
+            };
+            eprintln!("tm:   [{}] {} {} ({})", i + 1, verb, s.name, s.state);
         }
         eprintln!("tm:   [{new_idx}] launch new session");
         eprintln!("tm:   [q] quit");
-        eprintln!("tm: default: [1] resume most recent");
+        eprintln!("tm: default: [1] resume/restart most recent");
     }
     eprint!("tm: > ");
 
@@ -357,13 +366,108 @@ async fn run_tty_picker(
             eprintln!("tm: quit.");
             Ok(())
         }
-        PickerDecision::Resume(i) => tmux_attach(&sessions[i].name),
+        // #1742: route through daemon resume when the session is stopped or its
+        // tmux session is absent — never raw-attach a non-live session.
+        PickerDecision::Resume(i) => resume_guided_session(client, url, &sessions[i]).await,
         PickerDecision::LaunchNew => launch_new_session_and_attach(client, url, repo_url).await,
         PickerDecision::Unrecognised => {
             eprintln!("tm: unrecognised choice '{}'; quitting.", line.trim());
             Ok(())
         }
     }
+}
+
+/// Decide whether a guided resume must restart the session through the daemon.
+///
+/// Why: a stopped/errored managed session has no live tmux session; calling
+/// `tmux attach-session` against it fails with "can't find session" (#1742).
+/// Both the daemon-recorded state and the live tmux liveness are checked
+/// independently — either condition alone requires the daemon restart path.
+/// What: returns `true` when `state` is `"stopped"` or `"errored"`, OR when
+/// `tmux_live` is `false`. Returns `false` only when the session is in an active
+/// state AND its tmux session is confirmed live.
+/// Test: `guided_resume_needs_restart_*` in `tests_behavior_c_tests.rs`.
+pub(crate) fn needs_restart(state: &str, tmux_live: bool) -> bool {
+    !tmux_live || matches!(state, "stopped" | "errored")
+}
+
+/// Restart (if needed) then attach to a managed session from the guided picker.
+///
+/// Why: the guided picker must handle stopped sessions gracefully (#1742). A
+/// direct `tmux attach-session` against a stopped session exits with failure
+/// ("can't find session"); this function first asks the daemon to restart the
+/// tmux session when the liveness or state check shows it is absent, then
+/// attaches. On daemon errors a clear, actionable message is printed and `Err`
+/// is returned — the raw tmux failure is never surfaced.
+/// What: (1) calls `tmux_has_session` to check liveness; (2) if restart is
+/// needed, POSTs `{url}/api/v1/sessions/managed/{id}/resume`; (3) on daemon
+/// error (404/409/network) prints an actionable hint and returns `Err`; (4) on
+/// success (or no restart needed), delegates to `tmux_attach`.
+/// Test: `needs_restart` is the testable pure seam; the I/O path is exercised by
+/// the e2e suite and manual smoke tests.
+async fn resume_guided_session(
+    client: &reqwest::Client,
+    url: &str,
+    session: &trusty_mpm::client::ManagedSessionSummary,
+) -> anyhow::Result<()> {
+    let tmux_live = tmux_has_session(&session.name);
+    if needs_restart(&session.state, tmux_live) {
+        eprintln!(
+            "tm: session '{}' is {} (tmux session {}); restarting via daemon…",
+            session.name,
+            session.state,
+            if tmux_live { "present" } else { "absent" },
+        );
+        let resp = match client
+            .post(format!(
+                "{url}/api/v1/sessions/managed/{}/resume",
+                session.id
+            ))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "tm: daemon unreachable — cannot restart session '{}': {e}",
+                    session.name
+                );
+                eprintln!("tm: start the daemon with `tm start`, then run `tm` again.");
+                anyhow::bail!("daemon unreachable; cannot restart stopped session: {e}");
+            }
+        };
+        match resp.status() {
+            reqwest::StatusCode::NOT_FOUND => {
+                eprintln!(
+                    "tm: session '{}' not found on daemon; it may have been decommissioned.",
+                    session.name
+                );
+                eprintln!(
+                    "tm: run `tm sessions ls` to see current sessions, \
+                     or press [Enter] to launch a new one."
+                );
+                anyhow::bail!("session '{}' not found on daemon", session.name);
+            }
+            reqwest::StatusCode::CONFLICT => {
+                let msg = resp.text().await.unwrap_or_default();
+                eprintln!("tm: cannot restart session '{}': {}", session.name, msg);
+                eprintln!("tm: run `tm sessions ls` to see the current state.");
+                anyhow::bail!("cannot restart session '{}': {msg}", session.name);
+            }
+            s if !s.is_success() => {
+                eprintln!(
+                    "tm: daemon returned {s} restarting session '{}'; cannot attach.",
+                    session.name
+                );
+                eprintln!("tm: start the daemon with `tm start`, then run `tm` again.");
+                anyhow::bail!("daemon returned {s} restarting session '{}'", session.name);
+            }
+            _ => {
+                eprintln!("tm: session restarted — attaching…");
+            }
+        }
+    }
+    tmux_attach(&session.name)
 }
 
 /// Invoke `tmux attach-session -t <name>` and await exit.

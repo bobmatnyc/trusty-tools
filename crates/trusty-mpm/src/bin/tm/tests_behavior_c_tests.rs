@@ -12,8 +12,8 @@
 use std::path::PathBuf;
 
 use crate::commands::guided::{
-    PickerDecision, derive_project, fallback_protected, parse_picker_choice, print_non_tty_hint,
-    print_project_context, tty_gate,
+    PickerDecision, derive_project, fallback_protected, needs_restart, parse_picker_choice,
+    print_non_tty_hint, print_project_context, tty_gate,
 };
 
 // ── parse_picker_choice ───────────────────────────────────────────────────────
@@ -372,4 +372,77 @@ fn make_session(
         proposed_default: None,
         source_id: None,
     }
+}
+
+// ── needs_restart (#1742) ─────────────────────────────────────────────────────
+
+#[test]
+fn guided_resume_needs_restart_stopped_no_tmux() {
+    // Why: a stopped session with no live tmux session is the primary bug case
+    // (#1742) — direct attach fails; daemon restart is required.
+    assert!(
+        needs_restart("stopped", false),
+        "stopped session with absent tmux must need restart"
+    );
+}
+
+#[test]
+fn guided_resume_needs_restart_stopped_with_tmux() {
+    // Why: even if a tmux session exists but the daemon records state=stopped,
+    // we must route through the daemon restart to re-register the runtime.
+    assert!(
+        needs_restart("stopped", true),
+        "stopped state alone requires restart regardless of tmux liveness"
+    );
+}
+
+#[test]
+fn guided_resume_needs_restart_errored_no_tmux() {
+    // Why: errored sessions are resumable through the daemon but have no live
+    // runtime; direct attach would fail identically to stopped.
+    assert!(
+        needs_restart("errored", false),
+        "errored session with absent tmux must need restart"
+    );
+}
+
+#[test]
+fn guided_resume_needs_restart_errored_with_tmux() {
+    // Why: errored state alone mandates the daemon restart path regardless of
+    // whether a stale tmux shell happens to linger.
+    assert!(
+        needs_restart("errored", true),
+        "errored state alone requires restart"
+    );
+}
+
+#[test]
+fn guided_resume_needs_restart_active_no_tmux() {
+    // Why: if the daemon records the session as active but the tmux session is
+    // absent (e.g. after a reboot before reconcile runs), a direct attach would
+    // fail — restart is still required.
+    assert!(
+        needs_restart("active", false),
+        "active state with absent tmux must need restart"
+    );
+}
+
+#[test]
+fn guided_resume_no_restart_active_with_tmux() {
+    // Why: happy path — active session with a confirmed-live tmux session should
+    // attach directly with no daemon round-trip (regression guard).
+    assert!(
+        !needs_restart("active", true),
+        "active session with live tmux must not need restart"
+    );
+}
+
+#[test]
+fn guided_resume_no_restart_provisioning_with_tmux() {
+    // Why: a provisioning session has an active tmux session being set up;
+    // direct attach is safe and the daemon is already working.
+    assert!(
+        !needs_restart("provisioning", true),
+        "provisioning session with live tmux must not need restart"
+    );
 }
