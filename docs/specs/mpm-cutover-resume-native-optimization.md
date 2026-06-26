@@ -100,7 +100,7 @@ Extract the existing `OutputStyle` enum and prompt-fragment logic from trusty-ag
 
 1. **Shared crate for single source of truth:** Move `OutputStyle` and fragment constants to `trusty-agents-common`; both trusty-agents and trusty-mpm import from it.
 2. **Refactor trusty-agents (no behavior change):** Trusty-agents consumes the shared module; no logic change, only imports.
-3. **Configurable at prompt-assembly time:** On/off and style level set via config file or CLI, consistent with trusty-agents exposure.
+3. **Config source (RESOLVED):** On/off and style level are configured via `~/.trusty-mpm/framework/hooks/optimizer.toml`, with environment-variable override for CI/testing. Consistent with trusty-agents exposure.
 4. **Distinction:** This is **output-style injection** (reduces OUTPUT tokens), not the **tool-output compression** in `core/compress.rs` (`CompressionLevel::Caveman`). Both use "caveman" terminology but solve different problems.
 
 ### Parity Notes
@@ -145,7 +145,7 @@ Configuration remains in `~/.trusty-mpm/framework/hooks/optimizer.toml`; default
 
 1. **Native in-tree filters only:** Do **not** shell out to or bundle the external `codejunkie99/ztk` Zig binary. Keep it pure-Rust, single-install clean.
 2. **Extend existing abstraction:** Add filters as a new mode/tier in `CompressionLevel` enum and wired at the single existing seam (`optimize_tool_output`).
-3. **Domain-aware (not regex-only):** Recognize command type (git, cargo, ls, grep) and apply targeted truncation rules, not generic line-count caps.
+3. **v1 filter granularity (RESOLVED):** v1 recognizes ONLY `git`, `cargo`, `ls`, `grep`; additional command domains are added in future PRs via separate issues.
 
 ### Parity Notes
 
@@ -182,6 +182,8 @@ The `tm` launch banner lives at `crates/trusty-mpm/src/bin/tm/formatters/banner.
 ```
 
 This makes optimization status visible to users during startup, reaching parity with claude-mpm's transparency.
+
+**Telemetry (DEFERRED):** The OptimizationPipeline does NOT own optimization-effectiveness telemetry in v1; that is deferred to a follow-on feature ticket and measurement strategy.
 
 ---
 
