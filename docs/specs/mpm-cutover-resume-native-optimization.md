@@ -28,38 +28,45 @@ All three features unify under a thin `OptimizationPipeline` abstraction, with s
 
 ### Goal
 
-During migration, users may pause work under claude-mpm (Python tool) and resume under trusty-mpm (Rust). The `tm session resume` CLI command (and the delegating `/mpm-session-resume` skill) must discover and render paused-session context from both formats, defaulting to the current repo but optionally scanning all known machine-local checkouts.
+During migration, users may pause work under claude-mpm (Python tool) and resume under trusty-mpm (Rust). The `tm session resume` CLI command (and the delegating `/mpm-session-resume` skill) must discover and render paused-session context from both formats, defaulting to the current repo but optionally scanning all machine-local checkouts where claude-mpm ran.
 
 ### Behavior & Scope
 
 **Default (no flags):** Scan the current repo only.
 - Trusty-mpm native format: `.trusty-mpm/sessions/session-*.md` (markdown headers: `## Summary`, `## Completed`, `## In Progress`, `## Next Steps`, `## Git Context`) + `LATEST-SESSION.txt`.
-- Claude-mpm format to parse (NEW): `.claude-mpm/sessions/session-*.json` with fields `project_path`, `git_context`, `summary`, `accomplishments`, `next_steps`, `TaskList` (JSON), + `LATEST-SESSION.txt`.
+- Claude-mpm format to parse (NEW): `.claude-mpm/sessions/session-*.json` (with fields: `session_id`, `paused_at`, `duration_hours`, `context_usage`, `conversation`, `git_context`, `active_context`, `important_reminders`, `resume_instructions`, `open_questions`, `performance_metrics`, `todos`, `task_list`, `version`, `build`, `project_path`); also `LATEST-SESSION.txt` (small human-readable pointer with lines: `Latest Session:`, `Paused At:`, `Project:`, `Files:`, `Quick Resume:`).
+- Render both formats into a UNIFIED list sorted newest-first by pause time, each entry format-labeled (trusty-mpm vs claude-mpm).
 
-**`--all-projects` flag:** Enumerate every machine-local checkout via the existing `ProjectDiscovery` (reads `~/.claude/projects/` directory names, reverses them back to real paths), then scan both formats in each.
+**`--all-projects` flag:** Enumerate machine-wide resumable sessions via claude-mpm's own registry at `~/.claude-mpm/session-registry.db` (SQLite DB with `sessions` table: `session_id`, `project_path`, `project_name`, `started_at`, `last_active`, `status`, `pid`). Algorithm:
+  1. SELECT DISTINCT `project_path` (newest `last_active` first).
+  2. Filter to surviving directories (skip deleted/ephemeral paths).
+  3. For each path, verify live pause file: `<path>/.claude-mpm/sessions/LATEST-SESSION.txt` and/or `<path>/.claude-mpm/sessions/session-*.json`. Pause file exists only when actually paused (ground-truth for "resumable").
+  4. Collect resumable sessions, sorted newest-first by pause time. (Optionally also sweep trusty-mpm `.trusty-mpm/sessions/` machine-wide; see open questions.)
 
-**Resume semantics:** Render the paused context (summary, accomplishments, next_steps, TaskList) into the conversation as context — do **not** re-spawn a process.
+**Resume semantics:** Render paused context (digest fields: `resume_instructions`, `important_reminders`, `open_questions`, `todos`, `task_list`, `git_context`, `paused_at`, `context_usage`) into the conversation as context — do **not** dump full `conversation` field (often very large) — do **not** re-spawn a process.
 
 ### Integration Points
 
 | File | Purpose |
 |------|---------|
-| `crates/trusty-mpm/src/core/project_discovery.rs` | Reuse `ProjectDiscovery::discover` / `discover_in` to enumerate `~/.claude/projects/`, returns `path + last_session + session_count`. Exposed as `GET /projects/discover`. |
-| `crates/trusty-mpm/src/bin/tm/commands/session/resume.rs` | Implement native session-finding and rendering logic. |
+| `crates/trusty-mpm/src/core/claude_mpm_registry.rs` (NEW) | Read machine-wide claude-mpm registry at `~/.claude-mpm/session-registry.db` (SQLite); filter to surviving paths with live pause files. Dependency: `rusqlite`. Mark all code `// CUTOVER BRIDGE — remove post-migration (#<tracking-issue>)`. |
+| `crates/trusty-mpm/src/bin/tm/commands/session/resume.rs` | Implement native session-finding (both local formats + machine-wide claude-mpm via registry) and rendering logic. |
 | `crates/trusty-mpm/src/assets/skills/mpm-session-resume.md` | Skill file (bundled via `core/bundle_skills.rs:98`); today pure bash, CWD-only. Update to delegate to `tm session resume --all-projects`. |
 | `crates/trusty-mpm/src/daemon/api.rs` | Existing pause/resume handler (line ~961); no changes needed for session discovery. |
 
 ### Locked Decisions
 
-1. **Single code path in Rust CLI:** Implement discovery + rendering in `tm session resume`; the bash skill delegates to it.
-2. **Claude-mpm format is **temporary**.** Mark all claude-mpm-JSON-reading code with `// CUTOVER BRIDGE — remove post-migration (#<tracking-issue>)`.
-3. **No project-registry changes needed:** Registry stores repo URLs; `~/.claude/projects/` already provides the path inventory.
-4. **Permanence:** File a dedicated deletion-tracking GitHub issue to rip out claude-mpm parsing once migration is complete.
+1. **Machine-wide discovery via claude-mpm registry DB:** Don't rely on `ProjectDiscovery` / `~/.claude/projects/` (only 38% coverage). Read SQLite registry directly; it is ground-truth. **Rationale:** claude-mpm projects are discovered only when Claude Code is opened with that exact dir as cwd; the registry captures all projects where claude-mpm ran, including worktrees and repos outside the Claude Code inventory.
+2. **Single code path in Rust CLI:** Implement discovery + rendering in `tm session resume` (with `--all-projects` flag); the bash skill delegates to it.
+3. **Claude-mpm format is temporary.** Mark all claude-mpm-DB-reading and JSON-parsing code with `// CUTOVER BRIDGE — remove post-migration (#<tracking-issue>)`.
+4. **No `ProjectDiscovery` for claude-mpm.** Drop it as the discovery surface for this feature; it is no longer used.
+5. **Permanence:** File a dedicated deletion-tracking GitHub issue to rip out claude-mpm parsing once migration is complete.
 
 ### Cleanup / Migration Notes
 
-- The JSON parser is a temporary bridge; every function and block must be annotated with the deprecation comment.
+- The SQLite registry reader and JSON parser are temporary bridges; every function and block must be annotated with the deprecation comment.
 - The deletion tracking issue becomes a tech-debt ticket that unblocks post-migration cleanup.
+- Optional: 8 projects use older `<project>/.claude-mpm/logs/sessions/` layout (earlier claude-mpm versions); the bridge may optionally scan this path as a fallback (mark low-priority).
 
 ---
 
@@ -182,7 +189,7 @@ This makes optimization status visible to users during startup, reaching parity 
 
 | Issue | Title | Depends On | Notes |
 |-------|-------|-----------|-------|
-| #TBD-A | Cutover: Resume bridge (claude-mpm JSON + ProjectDiscovery) | — | Standalone; implement `tm session resume --all-projects`. Mark claude-mpm parser `// CUTOVER BRIDGE`. |
+| #TBD-A | Cutover: Resume bridge (claude-mpm JSON + registry DB + `--all-projects` flag) | — | Standalone; implement `tm session resume --all-projects`. Add `rusqlite` dependency; new `claude_mpm_registry.rs` module. Mark claude-mpm JSON reader + registry reader `// CUTOVER BRIDGE`. |
 | #TBD-A-CLEANUP | Post-Migration: Remove claude-mpm JSON parsing from resume bridge | #TBD-A | Tech-debt tracking ticket; unblocks deletion post-migration. |
 | #TBD-B | Native caveman prompt optimization (shared OutputStyle + trusty-mpm wiring) | — | Extract `OutputStyle` to `trusty-agents-common`; update trusty-agents imports; wire trusty-mpm. Recommend isolated worktree. |
 | #TBD-C | Native ztk-style tool-call compression (command-domain-aware filters) | — | Extend `CompressionLevel`; add domain-aware filter logic; no call-site changes. Recommend isolated worktree. |
@@ -200,10 +207,13 @@ This makes optimization status visible to users during startup, reaching parity 
 
 ### Open Questions
 
-1. **Fallback behavior if both formats exist in a repo:** Should `tm session resume` prefer the more recent file (by mtime), or trusty-mpm format by default? Recommend: Trusty-mpm format first, then claude-mpm if not found.
-2. **OutputStyle config source for trusty-mpm:** CLI flag, config file, env var, or combination? Recommend: Config file (`optimizer.toml`), with env-var override for CI/testing.
-3. **ztk filter granularity:** How many commands to recognize in v1 (git, cargo, ls, grep only) vs. future expansion? Recommend: v1 covers git/cargo/ls/grep; future PRs add more domains.
-4. **OptimizationPipeline scope:** Should it also orchestrate logging/telemetry for optimization effectiveness? Defer to post-B/C refinement phase.
+1. **Dual-format collision (RESOLVED):** When both trusty-mpm and claude-mpm sessions exist in a repo, present unified list sorted newest-first by pause time, each entry format-labeled. No silent preference needed.
+2. **`--all-projects` scope for trusty-mpm:** Should the flag ALSO sweep trusty-mpm `.trusty-mpm/sessions/` across machine-local checkouts, or is claude-mpm registry sweep sufficient for cutover? Recommend: Primarily claude-mpm (cutover focus); trusty-mpm machine-wide sweep is optional secondary feature for v1.
+3. **Registry DB performance:** On machines with ~850 distinct `project_path` values in the registry, is stat + read-one-file filtering fast enough (recommend <1s total)? This is low-risk; path existence check and single `LATEST-SESSION.txt` read are cheap operations.
+4. **Older layout variant:** Should the bridge also check `<project>/.claude-mpm/logs/sessions/` (used by ~8 projects on older claude-mpm versions)? Recommend: Optional, low-priority fallback for v1; mark as nice-to-have post-cutover.
+5. **OutputStyle config source for trusty-mpm (Deliverable B):** CLI flag, config file, env var, or combination? Recommend: Config file (`optimizer.toml`), with env-var override for CI/testing.
+6. **ztk filter granularity (Deliverable C):** How many commands to recognize in v1 (git, cargo, ls, grep only) vs. future expansion? Recommend: v1 covers git/cargo/ls/grep; future PRs add more domains.
+7. **OptimizationPipeline scope:** Should it also orchestrate logging/telemetry for optimization effectiveness? Defer to post-B/C refinement phase.
 
 ### Non-Goals
 
