@@ -12,8 +12,8 @@
 use std::path::PathBuf;
 
 use crate::commands::guided::{
-    PickerDecision, derive_project, fallback_protected, parse_picker_choice, print_non_tty_hint,
-    print_project_context, tty_gate,
+    PickerDecision, derive_project, fallback_protected, is_zombie, needs_restart,
+    parse_picker_choice, print_non_tty_hint, print_project_context, tty_gate,
 };
 
 // ── parse_picker_choice ───────────────────────────────────────────────────────
@@ -372,4 +372,106 @@ fn make_session(
         proposed_default: None,
         source_id: None,
     }
+}
+
+// ── needs_restart (#1742) ─────────────────────────────────────────────────────
+// `needs_restart` is now state-only: it returns true iff the daemon's /resume
+// endpoint can accept the session (Stopped/Errored only). The active-but-tmux-
+// absent case is handled by `is_zombie` below.
+
+#[test]
+fn guided_resume_needs_restart_stopped() {
+    // Why: stopped state means no live runtime; daemon restart is required (#1742).
+    // tmux liveness is irrelevant — the daemon makes the decision based on state.
+    assert!(needs_restart("stopped"), "stopped state must need restart");
+}
+
+#[test]
+fn guided_resume_needs_restart_errored() {
+    // Why: errored sessions are resumable through the daemon (Stopped|Errored are
+    // the only accepted states for /resume); direct attach would fail.
+    assert!(needs_restart("errored"), "errored state must need restart");
+}
+
+#[test]
+fn guided_resume_no_restart_active() {
+    // Why: active state — daemon's /resume rejects it with 409; not the restart path.
+    // (The active-but-tmux-absent case is caught by is_zombie before we'd POST.)
+    assert!(
+        !needs_restart("active"),
+        "active state must not need daemon restart"
+    );
+}
+
+#[test]
+fn guided_resume_no_restart_provisioning() {
+    // Why: provisioning state — daemon is already setting up the session.
+    assert!(
+        !needs_restart("provisioning"),
+        "provisioning must not need restart"
+    );
+}
+
+#[test]
+fn guided_resume_no_restart_decommissioned() {
+    // Why: decommissioned sessions have no workspace; /resume returns 409.
+    // is_zombie handles the absent-tmux case before we'd attempt a POST.
+    assert!(
+        !needs_restart("decommissioned"),
+        "decommissioned must not need restart"
+    );
+}
+
+// ── is_zombie (#1742 adversarial follow-up) ───────────────────────────────────
+// A zombie is a session whose daemon state is NOT stopped/errored (i.e., active
+// or provisioning) but whose tmux session has disappeared. The daemon's /resume
+// endpoint would return 409 for these — leading to a permanent dead end. The
+// correct recovery is: `tm sessions stop <id>` then `tm` again.
+
+#[test]
+fn guided_resume_is_zombie_active_no_tmux() {
+    // Why: active + tmux absent is the canonical zombie case — daemon thinks it's
+    // running but tmux is gone. We must bail with an actionable message, not POST.
+    assert!(
+        is_zombie("active", false),
+        "active + no tmux must be detected as zombie"
+    );
+}
+
+#[test]
+fn guided_resume_is_zombie_provisioning_no_tmux() {
+    // Why: provisioning + tmux absent is also a zombie (daemon is setting up a
+    // session whose tmux vanished). Same actionable bail applies.
+    assert!(
+        is_zombie("provisioning", false),
+        "provisioning + no tmux must be detected as zombie"
+    );
+}
+
+#[test]
+fn guided_resume_not_zombie_stopped_no_tmux() {
+    // Why: stopped + no tmux is NOT a zombie — it is the normal restart case where
+    // the daemon's /resume will recreate the tmux session. Must not bail.
+    assert!(
+        !is_zombie("stopped", false),
+        "stopped + no tmux is a restart case, not a zombie"
+    );
+}
+
+#[test]
+fn guided_resume_not_zombie_errored_no_tmux() {
+    // Why: errored + no tmux is also a restart case, not a zombie.
+    assert!(
+        !is_zombie("errored", false),
+        "errored + no tmux is a restart case, not a zombie"
+    );
+}
+
+#[test]
+fn guided_resume_not_zombie_active_with_tmux() {
+    // Why: active + tmux live is the happy-path attach case — no zombie, no restart.
+    assert!(
+        !is_zombie("active", true),
+        "active + live tmux is the normal attach path, not a zombie"
+    );
 }
