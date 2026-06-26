@@ -940,10 +940,26 @@ async fn front_gate_answer_unblocks_spawn() {
 /// What: spawns `tm --url http://127.0.0.1:<dead> sessions prune-idle --json` and
 /// asserts the process exits with status code 75. Uses `CARGO_BIN_EXE_tm`
 /// (set by Cargo for integration tests) so no extra dev-dependency is needed.
+/// A hermetic HOME is planted with a lock file that anchors the lock-file
+/// fallback in `resolve_daemon_url_probing` (#1731) to the same dead port,
+/// preventing a live daemon on the default port from intercepting resolution.
 /// Test: this test.
 #[test]
 fn cli_prune_idle_unreachable_exit_code() {
     use std::process::Command;
+
+    // Plant a hermetic HOME so `resolve_daemon_url_probing` (#1731) cannot fall
+    // back to a real daemon's `~/.trusty-mpm/daemon.lock`. The fake lock file
+    // points at the same dead port with our PID (alive) so the staleness check
+    // in `read_lock_file_url` passes and the file is not silently discarded.
+    let fake_home = tempfile::tempdir().expect("create temp home");
+    let lock_dir = fake_home.path().join(".trusty-mpm");
+    std::fs::create_dir_all(&lock_dir).expect("create .trusty-mpm under fake HOME");
+    let lock_content = format!(
+        "addr = \"http://127.0.0.1:1\"\npid = {}\n",
+        std::process::id()
+    );
+    std::fs::write(lock_dir.join("daemon.lock"), &lock_content).expect("write fake daemon.lock");
 
     // 127.0.0.1:1 is a reserved/dead port: connecting there fails fast with a
     // transport error, which is exactly the SM-unavailable (exit 75) path.
@@ -956,6 +972,7 @@ fn cli_prune_idle_unreachable_exit_code() {
             "prune-idle",
             "--json",
         ])
+        .env("HOME", fake_home.path())
         .output()
         .expect("spawn tm binary");
 
