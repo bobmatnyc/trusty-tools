@@ -79,7 +79,9 @@ pub fn find_paused_sessions(project_dir: &Path) -> anyhow::Result<Vec<PausedSess
 
     // ── trusty-mpm native format (.md) ───────────────────────────────────────
     let tm_sessions_dir = project_dir.join(".trusty-mpm").join("sessions");
-    if tm_sessions_dir.is_dir() && let Ok(rd) = std::fs::read_dir(&tm_sessions_dir) {
+    if tm_sessions_dir.is_dir()
+        && let Ok(rd) = std::fs::read_dir(&tm_sessions_dir)
+    {
         for entry in rd.flatten() {
             let name = entry.file_name().into_string().unwrap_or_default();
             if name.starts_with("session-")
