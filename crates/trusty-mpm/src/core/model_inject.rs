@@ -71,14 +71,14 @@ pub const SETTING_SOURCES_FLAG: &str = "--setting-sources project,local";
 
 /// The permission-mode flag every trusty-mpm-spawned `claude` carries.
 ///
-/// Why (issue #1269): tm runs Claude Code in an interactive tmux pane; without
-/// a non-interactive permission mode, Claude blocks on per-tool permission
-/// prompts and the injected task stalls. `acceptEdits` lets the unattended
-/// session make edits without prompting while stopping short of the fully
-/// unguarded `bypassPermissions` (reserved for sandboxed/provisioned runs).
+/// Why: tm runs Claude Code in unattended orchestration mode; `--dangerously-skip-permissions`
+/// allows the session to operate without any permission prompts, which is required
+/// for fully automated multi-agent orchestration where no human is present to approve
+/// individual tool calls. This is appropriate because tm sessions run in provisioned,
+/// tm-controlled tmux panes under the operator's explicit supervision.
 /// What: the literal flag string appended to every launch command.
 /// Test: `claude_command_includes_permission_mode`.
-pub const PERMISSION_MODE_FLAG: &str = "--permission-mode acceptEdits";
+pub const PERMISSION_MODE_FLAG: &str = "--dangerously-skip-permissions";
 
 /// Build the full `claude` command string for `tmux send-keys`.
 ///
@@ -145,7 +145,7 @@ mod tests {
     use super::*;
 
     /// The isolation + unattended suffix every command now carries (#1269).
-    const FLAGS: &str = "--setting-sources project,local --permission-mode acceptEdits";
+    const FLAGS: &str = "--setting-sources project,local --dangerously-skip-permissions";
 
     #[test]
     fn claude_command_bare() {
@@ -199,11 +199,17 @@ mod tests {
 
     #[test]
     fn claude_command_includes_permission_mode() {
-        // Why (#1269): unattended sessions must not block on permission prompts.
+        // Why: unattended orchestration sessions must not block on permission prompts;
+        // bypass-permissions mode is required for fully automated multi-agent workflows.
         let cmd = build_claude_command(Some("sonnet"), None);
         assert!(
-            cmd.contains("--permission-mode acceptEdits"),
-            "missing permission-mode flag: {cmd}"
+            cmd.contains("--dangerously-skip-permissions"),
+            "missing bypass-permissions flag: {cmd}"
+        );
+        // Must not carry the old acceptEdits flag.
+        assert!(
+            !cmd.contains("acceptEdits"),
+            "old acceptEdits flag must not be present: {cmd}"
         );
     }
 

@@ -94,7 +94,16 @@ pub(crate) async fn session(
             match new_session {
                 Ok(status) if status.success() => {
                     let send = std::process::Command::new("tmux")
-                        .args(["send-keys", "-t", &body.name, "claude", "Enter"])
+                        .args([
+                            "send-keys",
+                            "-t",
+                            &body.name,
+                            &format!(
+                                "claude {}",
+                                trusty_mpm::core::model_inject::PERMISSION_MODE_FLAG
+                            ),
+                            "Enter",
+                        ])
                         .status();
                     match send {
                         Ok(s) if s.success() => {

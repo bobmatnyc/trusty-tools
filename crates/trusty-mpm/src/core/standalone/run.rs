@@ -35,16 +35,19 @@ use super::registry::ManagedRegistry;
 /// WI-10 two-path auth model is encoded here: when `api_key` is `Some(_)`, the
 /// `--bare` flag is added so Claude Code bypasses keychain/OAuth and uses the
 /// API key directly; otherwise the keychain entry created by `tm login` is used.
+/// `--dangerously-skip-permissions` is always added for fully unattended orchestration
+/// (consistent with all other tm-initiated Claude launches).
 /// Stdio is set to `Stdio::inherit()` explicitly so the attended interactive
 /// session is always connected to the terminal, even if a future caller switches
 /// from `.status()` to `.output()`.
 /// What: returns a `Command` with program `"claude"`, cwd `repo_path`,
 /// env `CLAUDE_CONFIG_DIR=<claude_config_dir>`, stdin/stdout/stderr set to
-/// `Stdio::inherit()`, and (when `api_key` is `Some(s)` with a non-empty `s`)
-/// the `--bare` arg. Does NOT spawn.
+/// `Stdio::inherit()`, `--dangerously-skip-permissions`, and (when `api_key` is
+/// `Some(s)` with a non-empty `s`) the `--bare` arg. Does NOT spawn.
 /// Test: `test_build_launch_command_sets_env_and_cwd`,
 /// `test_build_launch_command_adds_bare_with_api_key`,
-/// `test_build_launch_command_no_bare_without_api_key`.
+/// `test_build_launch_command_no_bare_without_api_key`,
+/// `test_build_launch_command_includes_bypass_permissions`.
 pub fn build_launch_command(
     repo_path: &Path,
     claude_config_dir: &Path,
@@ -56,6 +59,9 @@ pub fn build_launch_command(
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
+    // Always add bypass-permissions for fully automated orchestration (consistent with
+    // all other tm launch paths that use PERMISSION_MODE_FLAG).
+    cmd.arg(crate::core::model_inject::PERMISSION_MODE_FLAG);
     // WI-10: when ANTHROPIC_API_KEY is set, add --bare so Claude Code bypasses
     // keychain/OAuth reads and uses the API key directly. When the key is absent
     // the session relies on the keychain entry created by `tm login`.
@@ -296,6 +302,38 @@ mod tests {
         assert!(
             !args3.iter().any(|a| a == &std::ffi::OsStr::new("--bare")),
             "--bare must not be present for whitespace-only key; got {args3:?}"
+        );
+    }
+
+    // Every `tm run` launch must carry the bypass-permissions flag so unattended
+    // orchestration never blocks on interactive prompts.
+    #[test]
+    fn test_build_launch_command_includes_bypass_permissions() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        let cfg = tmp.path().join("claude-config");
+
+        // Without API key.
+        let cmd = build_launch_command(&repo, &cfg, None);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert!(
+            args.iter()
+                .any(|a| *a == std::ffi::OsStr::new("--dangerously-skip-permissions")),
+            "expected --dangerously-skip-permissions in args (no key); got {args:?}"
+        );
+
+        // With API key (--bare should co-exist with bypass flag).
+        let cmd2 = build_launch_command(&repo, &cfg, Some("sk-ant-test-key"));
+        let args2: Vec<_> = cmd2.get_args().collect();
+        assert!(
+            args2
+                .iter()
+                .any(|a| *a == std::ffi::OsStr::new("--dangerously-skip-permissions")),
+            "expected --dangerously-skip-permissions with api key; got {args2:?}"
+        );
+        assert!(
+            args2.iter().any(|a| *a == std::ffi::OsStr::new("--bare")),
+            "expected --bare to co-exist with bypass flag; got {args2:?}"
         );
     }
 

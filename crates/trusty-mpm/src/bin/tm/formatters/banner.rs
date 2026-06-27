@@ -10,10 +10,9 @@
 //! Test: `launch_banner_*`, `terminal_width_is_positive`,
 //! `normalize_workdir_strips_trailing_slash` in `tests.rs`.
 
+use colored::Colorize as _;
+
 /// Left indent applied to every line of the full-screen launch banner.
-// Only used by the test-only splash functions below; suppress the dead-code lint
-// without a file-wide suppressor so future unused items are still caught (#1738).
-#[allow(dead_code)]
 pub(crate) const BANNER_INDENT: &str = "   ";
 
 /// Width of the session-info separator line drawn in the launch banner.
@@ -26,7 +25,6 @@ pub(crate) const BANNER_SEPARATOR_WIDTH: usize = 53;
 /// taken over the terminal" feel as claude-mpm's startup screen.
 /// What: a multi-line string-art robot; each line is printed verbatim with the
 /// shared [`BANNER_INDENT`].
-#[allow(dead_code)]
 pub(crate) const BANNER_ROBOT: &[&str] = &[
     "                                             ",
     "                    .}##-                    ",
@@ -62,7 +60,6 @@ pub(crate) const BANNER_ROBOT: &[&str] = &[
 /// Why: a large title makes the banner read as a deliberate splash screen
 /// rather than a stray log line.
 /// What: six rows of unicode block-drawing glyphs plus a spaced-out subtitle.
-#[allow(dead_code)]
 pub(crate) const BANNER_TITLE: &[&str] = &[
     "████████╗██████╗ ██╗   ██╗███████╗████████╗██╗   ██╗",
     "╚══██╔══╝██╔══██╗██║   ██║██╔════╝╚══██╔══╝╚██╗ ██╔╝",
@@ -72,6 +69,69 @@ pub(crate) const BANNER_TITLE: &[&str] = &[
     "   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝      ╚═╝   ",
     "             M U L T I - A G E N T   P M",
 ];
+
+/// Rust-color gradient palette applied row-by-row across the robot art.
+///
+/// Why: a smooth gradient from dark rust (top) through burnt orange (middle)
+/// to amber (lower) turns the monochrome ASCII art into a recognizable brand
+/// color without requiring a terminfo capability beyond 24-bit truecolor.
+/// What: 27-element array of `(r, g, b)` tuples, one per robot row (indexed
+/// by row position 0–26); interpolated across three anchor colors.
+/// Test: `robot_gradient_has_correct_length`.
+const ROBOT_GRADIENT: [(u8, u8, u8); 27] = {
+    // Anchor colors:
+    //   top    → dark rust    (183, 65, 14)
+    //   middle → burnt orange (205,100, 30)
+    //   lower  → amber        (224,140, 60)
+    // Linear interpolation across 27 rows in two segments:
+    //   rows 0–13: dark rust → burnt orange
+    //   rows 14–26: burnt orange → amber
+    [
+        (183, 65, 14),
+        (185, 68, 15),
+        (187, 72, 16),
+        (189, 76, 17),
+        (191, 80, 18),
+        (193, 83, 19),
+        (195, 87, 20),
+        (197, 91, 21),
+        (199, 94, 22),
+        (201, 97, 24),
+        (202, 98, 25),
+        (203, 99, 27),
+        (204, 99, 28),
+        (205, 100, 30),
+        (206, 103, 32),
+        (208, 106, 34),
+        (210, 109, 36),
+        (212, 112, 38),
+        (214, 115, 40),
+        (216, 118, 43),
+        (217, 121, 46),
+        (219, 124, 48),
+        (220, 127, 50),
+        (221, 130, 53),
+        (222, 133, 55),
+        (223, 137, 58),
+        (224, 140, 60),
+    ]
+};
+
+/// Colorize a single robot-art row with the rust gradient.
+///
+/// Why: applying the gradient row-by-row produces a smooth top-to-bottom
+/// color wash without any per-character logic.
+/// What: looks up `(r, g, b)` from [`ROBOT_GRADIENT`] for `row_idx` (clamped
+/// to 26) and applies `colored::Colorize::truecolor` to the line. When color
+/// is disabled (e.g. `NO_COLOR` or non-TTY), `colored` degrades gracefully to
+/// plain text.
+/// Test: `robot_row_colorize_produces_escape_sequences`,
+/// `robot_row_colorize_plain_when_disabled`.
+pub(crate) fn colorize_robot_row(row_idx: usize, line: &str) -> String {
+    let idx = row_idx.min(ROBOT_GRADIENT.len() - 1);
+    let (r, g, b) = ROBOT_GRADIENT[idx];
+    line.truecolor(r, g, b).to_string()
+}
 
 /// Query the terminal width in columns, falling back to 80 when unknown.
 ///
@@ -102,10 +162,10 @@ pub(crate) fn terminal_width() -> usize {
 ///
 /// Why: keeping the banner pure (string in, string out) makes it trivially
 /// testable and lets [`print_launch_banner`] stay a thin print wrapper.
-/// What: builds the cleared-screen escape sequence, the ASCII robot, the
-/// "TRUSTY" wordmark, and an indented session-info block. When
-/// `reconnect_session` is `Some`, a `Status:` row is added and the closing
-/// action line reads "Reconnecting..." instead of "Launching claude...".
+/// What: builds the cleared-screen escape sequence, the ASCII robot (rust-
+/// gradient colorized), the "TRUSTY" wordmark, and an indented session-info
+/// block. When `reconnect_session` is `Some`, a `Status:` row is added and the
+/// closing action line reads "Reconnecting..." instead of "Launching claude...".
 /// Test: `launch_banner_contains_session_fields`,
 /// `launch_banner_marks_reconnect`.
 #[allow(dead_code)]
@@ -120,9 +180,9 @@ pub(crate) fn render_launch_banner(
     out.push_str("\x1B[2J\x1B[1;1H");
 
     out.push('\n');
-    for line in BANNER_ROBOT {
+    for (idx, line) in BANNER_ROBOT.iter().enumerate() {
         out.push_str(BANNER_INDENT);
-        out.push_str(line);
+        out.push_str(&colorize_robot_row(idx, line));
         out.push('\n');
     }
     out.push('\n');
@@ -175,46 +235,76 @@ pub(crate) fn render_launch_banner(
     out
 }
 
-/// Print the full-screen `tm launch` banner, then pause briefly.
+/// Print the full-screen `tm launch` banner with the rich info panel beneath.
 ///
 /// Why: `tm launch` should give the operator a readable splash screen before
-/// the terminal is taken over by `claude`/`tmux`.
-/// What: clears the screen, prints the ASCII robot, the "TRUSTY" wordmark, and
-/// the indented session-info block, queries the terminal width once (kept for
-/// future centering), then sleeps one second so the banner is legible.
+/// the terminal is taken over by `claude`/`tmux`. The robot clears the screen
+/// for visual impact; the info panel below provides rich operational context
+/// (daemon, session count, services, commits, commands).
+/// What: clears the screen, prints the rust-gradient ASCII robot, the "TRUSTY"
+/// wordmark, and then delegates to `info_box::print_welcome_panel` (which adds
+/// its `╭─╮` box with daemon/service/commit/command info). Pauses 1 s total
+/// (the info-box's own sleep covers it). `prompt_path` is accepted for API
+/// symmetry with the old signature; the path is shown by the info panel.
 /// Test: `launch_banner_does_not_panic`.
-#[allow(dead_code)]
 pub(crate) fn print_launch_banner(
     workdir: &str,
     tmux_name: &str,
-    prompt_path: Option<&std::path::Path>,
+    _prompt_path: Option<&std::path::Path>,
 ) {
     let _ = terminal_width();
-    print!(
-        "{}",
-        render_launch_banner(workdir, tmux_name, prompt_path, None)
-    );
+    // Print screen-clear + robot + title (no 1-s sleep here; info-box sleeps).
+    print!("{}", render_robot_splash(false));
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    std::thread::sleep(std::time::Duration::from_secs(1));
+    // Render the rich info panel directly below (it owns the 1-s sleep).
+    let daemon = super::info_box::DaemonInfo::from_lock_file();
+    super::info_box::print_welcome_panel(workdir, tmux_name, false, daemon);
+}
+
+/// Print the full-screen robot banner without the info panel (for tests/reconnect).
+///
+/// Why: renders the robot + title block as a pure string so test callers can
+/// assert content without going through the I/O path.
+/// What: `\x1B[2J\x1B[1;1H` clear + colorized robot rows + TRUSTY title.
+/// Test: `launch_banner_does_not_panic`, `launch_reconnect_banner_does_not_panic`.
+pub(crate) fn render_robot_splash(reconnecting: bool) -> String {
+    let mut out = String::new();
+    out.push_str("\x1B[2J\x1B[1;1H");
+    out.push('\n');
+    for (idx, line) in BANNER_ROBOT.iter().enumerate() {
+        out.push_str(BANNER_INDENT);
+        out.push_str(&colorize_robot_row(idx, line));
+        out.push('\n');
+    }
+    out.push('\n');
+    for line in BANNER_TITLE {
+        out.push_str(BANNER_INDENT);
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+    if reconnecting {
+        out.push_str(BANNER_INDENT);
+        out.push_str("Reconnecting...");
+        out.push('\n');
+    }
+    out
 }
 
 /// Print the full-screen `tm launch` banner with a "reconnecting" status line.
 ///
 /// Why: when `tm launch` attaches to a pre-existing session the operator should
 /// see that no new session was created.
-/// What: prints the same full-screen banner as [`print_launch_banner`] but with
-/// a `Status:` row noting the reconnect, then pauses one second so the banner
-/// is legible before `tmux` takes over.
+/// What: prints the same full-screen robot banner followed by the rich info-box
+/// (reconnect mode) and pauses one second so the banner is legible before
+/// `tmux` takes over.
 /// Test: `launch_reconnect_banner_does_not_panic`.
-#[allow(dead_code)]
 pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
     let _ = terminal_width();
-    print!(
-        "{}",
-        render_launch_banner(workdir, tmux_name, None, Some(tmux_name))
-    );
+    print!("{}", render_robot_splash(false));
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    std::thread::sleep(std::time::Duration::from_secs(1));
+    let daemon = super::info_box::DaemonInfo::from_lock_file();
+    super::info_box::print_welcome_panel(workdir, tmux_name, true, daemon);
 }
 
 /// Detect whether the `trusty-memory` MCP integration is available.
