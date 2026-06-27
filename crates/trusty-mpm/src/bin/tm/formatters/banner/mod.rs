@@ -6,9 +6,13 @@
 //! What: `render_launch_banner`, `print_launch_banner`,
 //! `print_launch_banner_reconnecting`, `terminal_width`, `detect_memory`,
 //! `detect_tool`, `dirs_config_dir`, `binary_on_path`, `fallback_session_name`,
-//! `normalize_workdir`, `tmux_has_session`.
+//! `normalize_workdir`, `tmux_has_session`. The two-panel compositor lives in
+//! the `two_panel` submodule.
 //! Test: `launch_banner_*`, `terminal_width_is_positive`,
-//! `normalize_workdir_strips_trailing_slash` in `tests.rs`.
+//! `normalize_workdir_strips_trailing_slash` in `tests.rs`;
+//! `two_panel_*` in `two_panel::tests`.
+
+pub(crate) mod two_panel;
 
 use colored::Colorize as _;
 
@@ -78,14 +82,7 @@ pub(crate) const BANNER_TITLE: &[&str] = &[
 /// What: 27-element array of `(r, g, b)` tuples, one per robot row (indexed
 /// by row position 0–26); interpolated across three anchor colors.
 /// Test: `robot_gradient_has_correct_length`.
-const ROBOT_GRADIENT: [(u8, u8, u8); 27] = {
-    // Anchor colors:
-    //   top    → dark rust    (183, 65, 14)
-    //   middle → burnt orange (205,100, 30)
-    //   lower  → amber        (224,140, 60)
-    // Linear interpolation across 27 rows in two segments:
-    //   rows 0–13: dark rust → burnt orange
-    //   rows 14–26: burnt orange → amber
+pub(crate) const ROBOT_GRADIENT: [(u8, u8, u8); 27] = {
     [
         (183, 65, 14),
         (185, 68, 15),
@@ -235,33 +232,6 @@ pub(crate) fn render_launch_banner(
     out
 }
 
-/// Print the banner to stdout for preview — no screen-clear, no sleep.
-///
-/// Why: `tm banner` lets the operator eyeball the colored robot + welcome panel
-/// without launching Claude or waiting a full second. Skipping the
-/// `\x1B[2J\x1B[1;1H` clear preserves the operator's scrollback, and the
-/// absence of the 1-second sleep makes iteration fast.
-/// What: renders the robot art + TRUSTY wordmark (without the screen-clear
-/// escape) followed by the rich info-box welcome panel (without the sleep).
-/// When the daemon is down the panel degrades gracefully (offline row, no HTTP
-/// probes needed). When `reconnecting` is `true`, the panel shows the
-/// reconnecting status row instead of Memory/Search/Prompt.
-/// Test: `banner_preview_does_not_panic` in `tests.rs`.
-pub(crate) fn print_banner_preview(reconnecting: bool) {
-    // Robot art without the full-screen clear so scrollback is preserved.
-    print!("{}", render_robot_splash_no_clear(reconnecting));
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-
-    // Gather env-available data (best-effort; graceful when daemon is down).
-    let workdir = std::env::current_dir()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| ".".to_string());
-    let session_name = fallback_session_name(std::path::Path::new(&workdir));
-    let daemon = super::info_box::DaemonInfo::from_lock_file();
-    // Print the panel without the 1-second pause.
-    super::info_box::print_welcome_panel_no_sleep(&workdir, &session_name, reconnecting, daemon);
-}
-
 /// Render the robot art + TRUSTY wordmark without the full-screen clear escape.
 ///
 /// Why: `tm banner` preview must not wipe the operator's scrollback. This
@@ -272,7 +242,6 @@ pub(crate) fn print_banner_preview(reconnecting: bool) {
 /// Test: `banner_preview_does_not_panic`.
 pub(crate) fn render_robot_splash_no_clear(reconnecting: bool) -> String {
     let mut out = String::new();
-    // Intentionally no screen-clear here — this is the preview / no-clear variant.
     out.push('\n');
     for (idx, line) in BANNER_ROBOT.iter().enumerate() {
         out.push_str(BANNER_INDENT);
@@ -298,26 +267,32 @@ pub(crate) fn render_robot_splash_no_clear(reconnecting: bool) -> String {
 ///
 /// Why: `tm launch` should give the operator a readable splash screen before
 /// the terminal is taken over by `claude`/`tmux`. The robot clears the screen
-/// for visual impact; the info panel below provides rich operational context
-/// (daemon, session count, services, commits, commands).
-/// What: clears the screen, prints the rust-gradient ASCII robot, the "TRUSTY"
-/// wordmark, and then delegates to `info_box::print_welcome_panel` (which adds
-/// its `╭─╮` box with daemon/service/commit/command info). Pauses 1 s total
-/// (the info-box's own sleep covers it). `prompt_path` is accepted for API
-/// symmetry with the old signature; the path is shown by the info panel.
+/// for visual impact; the info panel below provides rich operational context.
+/// What: clears the screen, then renders the two-panel layout on wide terminals
+/// (≥`two_panel::MIN_WIDTH_TWO_PANEL` cols) or the stacked layout on narrow
+/// terminals. Pauses 1 s total (the info-box's own sleep covers it).
 /// Test: `launch_banner_does_not_panic`.
 pub(crate) fn print_launch_banner(
     workdir: &str,
     tmux_name: &str,
     _prompt_path: Option<&std::path::Path>,
 ) {
-    let _ = terminal_width();
-    // Print screen-clear + robot + title (no 1-s sleep here; info-box sleeps).
-    print!("{}", render_robot_splash(false));
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-    // Render the rich info panel directly below (it owns the 1-s sleep).
+    let w = terminal_width();
     let daemon = super::info_box::DaemonInfo::from_lock_file();
-    super::info_box::print_welcome_panel(workdir, tmux_name, false, daemon);
+    let data = super::info_box::gather_welcome_data(workdir, tmux_name, false, daemon);
+
+    if let Some(panel) = two_panel::render_two_panel_banner(&data, w, false) {
+        println!("\x1B[2J\x1B[1;1H");
+        print!("{panel}");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    } else {
+        // Narrow fallback: stacked layout.
+        print!("{}", render_robot_splash(false));
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let daemon2 = super::info_box::DaemonInfo::from_lock_file();
+        super::info_box::print_welcome_panel(workdir, tmux_name, false, daemon2);
+    }
 }
 
 /// Print the full-screen robot banner without the info panel (for tests/reconnect).
@@ -354,16 +329,62 @@ pub(crate) fn render_robot_splash(reconnecting: bool) -> String {
 ///
 /// Why: when `tm launch` attaches to a pre-existing session the operator should
 /// see that no new session was created.
-/// What: prints the same full-screen robot banner followed by the rich info-box
-/// (reconnect mode) and pauses one second so the banner is legible before
-/// `tmux` takes over.
+/// What: on wide terminals renders the two-panel layout with the reconnecting
+/// state shown in both panels; on narrow terminals falls back to the stacked
+/// layout with the rich info-box (reconnect mode).
 /// Test: `launch_reconnect_banner_does_not_panic`.
 pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
-    let _ = terminal_width();
-    print!("{}", render_robot_splash(false));
-    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let w = terminal_width();
     let daemon = super::info_box::DaemonInfo::from_lock_file();
-    super::info_box::print_welcome_panel(workdir, tmux_name, true, daemon);
+    let data = super::info_box::gather_welcome_data(workdir, tmux_name, true, daemon);
+
+    if let Some(panel) = two_panel::render_two_panel_banner(&data, w, true) {
+        println!("\x1B[2J\x1B[1;1H");
+        print!("{panel}");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    } else {
+        print!("{}", render_robot_splash(false));
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let daemon2 = super::info_box::DaemonInfo::from_lock_file();
+        super::info_box::print_welcome_panel(workdir, tmux_name, true, daemon2);
+    }
+}
+
+/// Print the banner to stdout for preview — no screen-clear, no sleep.
+///
+/// Why: `tm banner` lets the operator eyeball the colored robot + welcome panel
+/// without launching Claude or waiting a full second. Skipping the
+/// `\x1B[2J\x1B[1;1H` clear preserves the operator's scrollback, and the
+/// absence of the 1-second sleep makes iteration fast.
+/// What: on wide terminals renders the two-panel layout (no screen-clear).
+/// On narrow terminals falls back to robot art + stacked info box.
+/// Test: `banner_preview_does_not_panic` in `tests.rs`.
+pub(crate) fn print_banner_preview(reconnecting: bool) {
+    let w = terminal_width();
+    let workdir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
+    let session_name = fallback_session_name(std::path::Path::new(&workdir));
+    let daemon = super::info_box::DaemonInfo::from_lock_file();
+    let data = super::info_box::gather_welcome_data(&workdir, &session_name, reconnecting, daemon);
+
+    if let Some(panel) = two_panel::render_two_panel_banner(&data, w, reconnecting) {
+        // No screen-clear for preview — preserve scrollback.
+        print!("\n{panel}");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    } else {
+        // Narrow fallback: stacked layout (no screen-clear).
+        print!("{}", render_robot_splash_no_clear(reconnecting));
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+        let daemon2 = super::info_box::DaemonInfo::from_lock_file();
+        super::info_box::print_welcome_panel_no_sleep(
+            &workdir,
+            &session_name,
+            reconnecting,
+            daemon2,
+        );
+    }
 }
 
 /// Detect whether the `trusty-memory` MCP integration is available.

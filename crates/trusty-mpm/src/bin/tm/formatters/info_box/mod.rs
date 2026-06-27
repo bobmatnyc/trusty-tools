@@ -11,7 +11,7 @@
 //! backward-compat `info_box_renders_*` in the inline tests below.
 
 mod probes;
-mod render;
+pub(crate) mod render;
 
 use std::path::Path;
 use std::time::Duration;
@@ -295,6 +295,20 @@ fn read_lock_addr() -> Option<String> {
     }
     let _ = pid;
     addr
+}
+
+// ── Two-panel compositor bridge ───────────────────────────────────────────────
+
+/// Return the welcome-panel content rows without drawing a box frame.
+///
+/// Why: the two-panel banner compositor (`banner::two_panel`) needs the raw
+/// row strings to fill the right panel at the compositor-determined width,
+/// without the fixed-width `╭─╮` box that `render_welcome_panel` draws.
+/// What: delegates to `render::build_rows(data)` — the same row builder used
+/// by `render_welcome_panel`, so content is identical in both layouts.
+/// Test: `two_panel_compose_alignment` in `banner::two_panel::tests`.
+pub(crate) fn render_info_box_rows(data: &WelcomeData) -> Vec<String> {
+    render::build_rows(data)
 }
 
 // ── Backward-compat render wrapper ────────────────────────────────────────────
