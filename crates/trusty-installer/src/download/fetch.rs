@@ -214,7 +214,7 @@ pub fn extract_binaries(tarball: &Path, dest_dir: &Path) -> anyhow::Result<Vec<S
 /// writes to `dest_dir/.<name>.tmp.<pid>`, sets mode 0755, then renames into
 /// `dest_dir/<name>`. Returns the list of successfully placed binary paths.
 ///
-/// Test: `tests::place_binaries_atomic`.
+/// Test: `tests::place_binaries_atomic`, `tests::place_binaries_rename_failure_returns_error`.
 pub fn place_binaries(
     src_dir: &Path,
     dest_dir: &Path,
@@ -247,16 +247,16 @@ pub fn place_binaries(
                 .with_context(|| format!("setting permissions on {}", tmp_path.display()))?;
         }
 
-        // Atomic rename — if this fails, remove the temp file to avoid litter.
-        std::fs::rename(&tmp_path, &dest_path).unwrap_or_else(|_| {
+        // Atomic rename — propagate errors so a failed rename never silently
+        // reports success when a stale binary already exists at dest_path.
+        // On failure, remove the temp file to avoid litter before returning.
+        if let Err(e) = std::fs::rename(&tmp_path, &dest_path) {
             let _ = std::fs::remove_file(&tmp_path);
-        });
-
-        if dest_path.exists() {
-            placed.push(dest_path);
-        } else {
-            return Err(anyhow!("rename of {name} into install dir failed"));
+            return Err(anyhow::Error::new(e)
+                .context(format!("renaming temp file to {}", dest_path.display())));
         }
+
+        placed.push(dest_path);
     }
 
     Ok(placed)
@@ -453,5 +453,59 @@ mod tests {
         assert_eq!(placed.len(), 1);
         assert!(dest.join("bin-a").exists());
         assert!(!dest.join("bin-b").exists());
+    }
+
+    /// Why: Guards against the false-success bug where a failed rename was
+    /// swallowed and `dest_path.exists()` on a pre-existing binary returned true,
+    /// making the caller believe the NEW binary was installed when it wasn't.
+    ///
+    /// What: Pre-places a "stale" binary at the destination. Then makes the dest
+    /// dir read-only so the rename of the temp file into it must fail (on POSIX,
+    /// `rename(2)` requires write permission on the destination directory). Asserts
+    /// `place_binaries` returns `Err` — not `Ok` with the stale path.
+    ///
+    /// Test: This is the test. Marked `#[cfg(unix)]` because Windows permission
+    /// semantics differ and the read-only-dir trick does not reliably block rename.
+    #[test]
+    #[cfg(unix)]
+    fn place_binaries_rename_failure_returns_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dest = dir.path().join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dest).unwrap();
+
+        // Write source binary.
+        std::fs::write(src.join("my-bin"), b"new version").unwrap();
+
+        // Pre-place a stale binary in dest so dest_path.exists() would be true
+        // even if the rename fails.
+        std::fs::write(dest.join("my-bin"), b"old version").unwrap();
+
+        // Make dest read-only so rename into it fails.
+        let ro_perms = std::fs::Permissions::from_mode(0o555);
+        std::fs::set_permissions(&dest, ro_perms).unwrap();
+
+        let names = vec!["my-bin".to_owned()];
+        let result = place_binaries(&src, &dest, &names);
+
+        // Restore write permission before asserting (so tempdir cleanup succeeds).
+        let rw_perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&dest, rw_perms).unwrap();
+
+        // Must be an error — not a silent success pointing at the stale binary.
+        assert!(
+            result.is_err(),
+            "expected place_binaries to return Err when rename fails, got Ok"
+        );
+
+        // Confirm the stale content is still there (the new binary was NOT placed).
+        let content = std::fs::read(dest.join("my-bin")).unwrap();
+        assert_eq!(
+            content, b"old version",
+            "stale binary should still be in place after failed rename"
+        );
     }
 }
