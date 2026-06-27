@@ -17,7 +17,7 @@ use crate::cli::{
 use crate::formatters::banner::{
     BANNER_ROBOT, colorize_robot_row, fallback_session_name, normalize_workdir,
     print_launch_banner, print_launch_banner_reconnecting, render_launch_banner,
-    render_robot_splash, terminal_width,
+    render_robot_splash, terminal_width, wordmark_lines,
 };
 use crate::formatters::session::short_id;
 
@@ -326,7 +326,11 @@ fn launch_banner_contains_session_fields() {
     assert!(banner.contains("tmpm-quiet-falcon"));
     assert!(banner.contains("/tmp/INSTRUCTIONS.md"));
     assert!(banner.contains("Launching claude..."));
-    assert!(banner.contains("TRUSTY") || banner.contains("M U L T I"));
+    // Plain-text wordmark: "trusty" (lowercase) replaces the old block-art.
+    assert!(
+        banner.contains("trusty"),
+        "plain-text wordmark must appear in banner"
+    );
 }
 
 #[test]
@@ -1640,19 +1644,26 @@ fn robot_row_colorize_preserves_text() {
 #[test]
 fn robot_splash_contains_robot_and_title() {
     // Why: `render_robot_splash` is the pure renderer used by the print functions;
-    // it must include both the screen-clear escape and the TRUSTY wordmark.
+    // it must include both the screen-clear escape and the plain-text wordmark.
     // What: render the splash (no reconnecting flag), assert key structural markers.
     // Test: call with reconnecting=false to get the normal launch splash.
+    colored::control::set_override(false);
     let splash = render_robot_splash(false);
     assert!(
         splash.starts_with("\x1B[2J\x1B[1;1H"),
         "splash must start with screen-clear: {splash:?}"
     );
-    // TRUSTY title block must appear (any row from BANNER_TITLE).
+    // Plain-text "trusty" label replaces the old block-art BANNER_TITLE.
     assert!(
-        splash.contains("M U L T I - A G E N T"),
-        "TRUSTY wordmark must be in splash"
+        splash.contains("trusty"),
+        "plain-text wordmark 'trusty' must be in splash"
     );
+    // Version string must follow on the next line.
+    assert!(
+        splash.contains(env!("CARGO_PKG_VERSION")),
+        "version must appear in splash"
+    );
+    colored::control::unset_override();
 }
 
 #[test]
@@ -1714,7 +1725,7 @@ fn banner_preview_no_clear_escape() {
     // Why: `render_robot_splash_no_clear` must NOT begin with the full-screen
     // clear sequence — that would wipe the user's scrollback during a preview.
     // What: call the no-clear variant and assert the `\x1B[2J\x1B[1;1H` prefix
-    // is absent, while the TRUSTY wordmark is still present.
+    // is absent, while the plain-text wordmark is still present.
     // Test: direct string assertion.
     colored::control::set_override(false);
     let splash = crate::formatters::banner::render_robot_splash_no_clear(false);
@@ -1722,9 +1733,30 @@ fn banner_preview_no_clear_escape() {
         !splash.starts_with("\x1B[2J\x1B[1;1H"),
         "no-clear variant must not contain the screen-clear escape"
     );
+    // Plain-text "trusty" label replaces the old block-art.
     assert!(
-        splash.contains("M U L T I - A G E N T"),
-        "TRUSTY wordmark must still appear in no-clear variant"
+        splash.contains("trusty"),
+        "plain-text wordmark 'trusty' must still appear in no-clear variant"
+    );
+    colored::control::unset_override();
+}
+
+#[test]
+fn wordmark_lines_contain_trusty_and_version() {
+    // Why: `wordmark_lines` is the single source of truth for the banner label
+    // and version; asserting both values here catches accidental regressions.
+    // What: with colour disabled so the output is plain text, verify that line 0
+    // contains "trusty" and line 1 contains the crate version.
+    // Test: direct function call with colour override off.
+    colored::control::set_override(false);
+    let [label, version] = wordmark_lines();
+    assert!(
+        label.contains("trusty"),
+        "wordmark label must contain 'trusty': {label:?}"
+    );
+    assert!(
+        version.contains(env!("CARGO_PKG_VERSION")),
+        "wordmark version line must contain the crate version: {version:?}"
     );
     colored::control::unset_override();
 }

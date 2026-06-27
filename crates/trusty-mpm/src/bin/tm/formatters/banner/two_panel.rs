@@ -14,7 +14,7 @@
 use colored::Colorize as _;
 use unicode_width::UnicodeWidthStr as _;
 
-use super::{BANNER_ROBOT, BANNER_TITLE, colorize_robot_row};
+use super::{BANNER_ROBOT, colorize_robot_row, wordmark_lines};
 use crate::formatters::info_box::{WelcomeData, render_info_box_rows};
 
 // ── Layout constants ──────────────────────────────────────────────────────────
@@ -157,34 +157,19 @@ fn build_left_lines(inner_width: usize, reconnecting: bool) -> Vec<String> {
     // Blank separator.
     lines.push(" ".repeat(inner_width));
 
-    // TRUSTY wordmark.
-    for &title_row in BANNER_TITLE {
-        let row_cols = title_row.width();
+    // Plain-text "trusty" label + version — two lines replacing the old block-art wordmark.
+    for wm_line in wordmark_lines() {
+        let bare = strip_ansi(&wm_line);
+        let row_cols = bare.width();
         let pad_l = (inner_width.saturating_sub(row_cols)) / 2;
         let pad_r = inner_width.saturating_sub(row_cols + pad_l);
         lines.push(format!(
             "{}{}{}",
             " ".repeat(pad_l),
-            title_row,
+            wm_line,
             " ".repeat(pad_r)
         ));
     }
-
-    // Blank separator.
-    lines.push(" ".repeat(inner_width));
-
-    // Version line.
-    let version = env!("CARGO_PKG_VERSION");
-    let ver_str = format!("v{version}");
-    let ver_cols = ver_str.width();
-    let pad_l = (inner_width.saturating_sub(ver_cols)) / 2;
-    let pad_r = inner_width.saturating_sub(ver_cols + pad_l);
-    lines.push(format!(
-        "{}{}{}",
-        " ".repeat(pad_l),
-        ver_str,
-        " ".repeat(pad_r)
-    ));
 
     // Reconnecting indicator.
     if reconnecting {

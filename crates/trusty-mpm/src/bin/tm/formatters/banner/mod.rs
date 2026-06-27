@@ -59,20 +59,45 @@ pub(crate) const BANNER_ROBOT: &[&str] = &[
     "                                             ",
 ];
 
-/// The block-character "TRUSTY" wordmark drawn below the robot.
+/// Amber rust tone used for the plain-text wordmark label.
 ///
-/// Why: a large title makes the banner read as a deliberate splash screen
-/// rather than a stray log line.
-/// What: six rows of unicode block-drawing glyphs plus a spaced-out subtitle.
-pub(crate) const BANNER_TITLE: &[&str] = &[
-    "████████╗██████╗ ██╗   ██╗███████╗████████╗██╗   ██╗",
-    "╚══██╔══╝██╔══██╗██║   ██║██╔════╝╚══██╔══╝╚██╗ ██╔╝",
-    "   ██║   ██████╔╝██║   ██║███████╗   ██║    ╚████╔╝ ",
-    "   ██║   ██╔══██╗██║   ██║╚════██║   ██║     ╚██╔╝  ",
-    "   ██║   ██║  ██║╚██████╔╝███████║   ██║      ██║   ",
-    "   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝      ╚═╝   ",
-    "             M U L T I - A G E N T   P M",
-];
+/// Why: reuses the warm amber from the bottom of the robot gradient so the
+/// wordmark reads as part of the same brand palette without repeating the full
+/// gradient computation.
+/// What: RGB values `(224, 140, 60)` — the last entry in `ROBOT_GRADIENT`.
+/// Test: visual inspection via `tm banner`.
+const WORDMARK_R: u8 = 224;
+const WORDMARK_G: u8 = 140;
+const WORDMARK_B: u8 = 60;
+
+/// Muted dark-rust tone for the version line beneath the wordmark.
+///
+/// Why: the version number should be present but not compete with the label.
+/// What: RGB values `(140, 60, 20)` — darker than the wordmark amber.
+/// Test: visual inspection via `tm banner`.
+const VERSION_R: u8 = 140;
+const VERSION_G: u8 = 60;
+const VERSION_B: u8 = 20;
+
+/// Build the two-line plain-text wordmark: `trusty` (bold amber) + version (dimmed rust).
+///
+/// Why: replaces the bulky 7-row block-art `BANNER_TITLE` with a single-line
+/// label that is lighter, faster to scan, and stays under the SLOC cap.
+/// What: returns a `[String; 2]` — `lines[0]` is the colourised `"trusty"` label,
+/// `lines[1]` is the colourised `"v{CARGO_PKG_VERSION}"` version string. Both
+/// degrade gracefully to plain text when `colored` colour is disabled.
+/// Test: `wordmark_lines_contain_trusty_and_version`.
+pub(crate) fn wordmark_lines() -> [String; 2] {
+    use colored::Colorize as _;
+    let label = "trusty"
+        .truecolor(WORDMARK_R, WORDMARK_G, WORDMARK_B)
+        .bold()
+        .to_string();
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"))
+        .truecolor(VERSION_R, VERSION_G, VERSION_B)
+        .to_string();
+    [label, version]
+}
 
 /// Rust-color gradient palette applied row-by-row across the robot art.
 ///
@@ -183,9 +208,9 @@ pub(crate) fn render_launch_banner(
         out.push('\n');
     }
     out.push('\n');
-    for line in BANNER_TITLE {
+    for line in wordmark_lines() {
         out.push_str(BANNER_INDENT);
-        out.push_str(line);
+        out.push_str(&line);
         out.push('\n');
     }
     out.push('\n');
@@ -249,9 +274,9 @@ pub(crate) fn render_robot_splash_no_clear(reconnecting: bool) -> String {
         out.push('\n');
     }
     out.push('\n');
-    for line in BANNER_TITLE {
+    for line in wordmark_lines() {
         out.push_str(BANNER_INDENT);
-        out.push_str(line);
+        out.push_str(&line);
         out.push('\n');
     }
     out.push('\n');
@@ -311,9 +336,9 @@ pub(crate) fn render_robot_splash(reconnecting: bool) -> String {
         out.push('\n');
     }
     out.push('\n');
-    for line in BANNER_TITLE {
+    for line in wordmark_lines() {
         out.push_str(BANNER_INDENT);
-        out.push_str(line);
+        out.push_str(&line);
         out.push('\n');
     }
     out.push('\n');
