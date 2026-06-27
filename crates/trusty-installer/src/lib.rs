@@ -5,7 +5,8 @@
 //! command handler unit-testable without spawning a subprocess.
 //!
 //! What: Re-exports the public submodules: `cli` (clap structs), `commands`
-//! (per-command handlers), `output` (human and JSON renderers), and `scope`
+//! (per-command handlers), `download` (prebuilt-binary download layer, Phase 2
+//! #1760), `output` (human and JSON renderers), and `scope`
 //! (project-scope detection helpers).
 //!
 //! Test: `cargo test -p trusty-installer` exercises the arg-parsing round-trips
@@ -13,5 +14,6 @@
 
 pub mod cli;
 pub mod commands;
+pub mod download;
 pub mod output;
 pub mod scope;

@@ -283,15 +283,22 @@ fn build_apply_inputs(
     }
 }
 
-/// Apply every candidate upgrade, restarting daemons cleanly.
+/// Apply every candidate upgrade, prebuilt-first with cargo fallback, restarting daemons.
 ///
-/// Why: The async apply core; daemons must restart via the connection-safe path.
-/// What: For each candidate, daemons go through `upgrade_and_restart` (which may
-/// self-restart under launchd — but tctl is not itself launchd-supervised, so it
-/// returns the restart hint); non-daemons through `perform_upgrade` +
-/// `verify_installed_binary`. Renders a per-member narration line + a final
-/// component table.
-/// Test: Side-effecting; the report shaping is tested via `UpgradeReport`.
+/// Why: Prebuilt binaries upgrade in seconds without requiring a Rust toolchain;
+/// the cargo path is the universal fallback for unsupported platforms and failures.
+/// Daemons must restart via the connection-safe path after upgrade.
+///
+/// What: For each candidate, attempts a prebuilt download (Phase 2 / #1760):
+/// - Non-daemons: `try_install_prebuilt` → fallback to `perform_upgrade` +
+///   `verify_installed_binary`.
+/// - Daemons: `try_install_prebuilt` (updates the binary on disk) → fallback to
+///   `upgrade_and_restart` (cargo install + connection-safe restart).
+///
+/// Renders a per-member narration line + a final component table.
+///
+/// Test: Side-effecting; the prebuilt routing and report shaping are tested via
+/// `UpgradeReport` and `crate::download::tests`.
 async fn apply_all(candidates: &[UpdateCandidate], json: bool) -> Vec<UpgradeOutcome> {
     let narr = narrator(json);
     let mut tracker = ComponentTracker::new(narr.output());
@@ -299,18 +306,8 @@ async fn apply_all(candidates: &[UpdateCandidate], json: bool) -> Vec<UpgradeOut
 
     for c in candidates {
         let _ = narr.info(&format!("upgrading {} → {}", c.crate_name, c.latest));
-        let result = if c.daemon {
-            trusty_common::update::upgrade_and_restart(&c.crate_name, &c.binary)
-                .await
-                .map(|hint| hint.unwrap_or_else(|| "restarted".to_owned()))
-        } else {
-            match trusty_common::update::perform_upgrade(&c.crate_name).await {
-                Ok(()) => trusty_common::update::verify_installed_binary(&c.binary)
-                    .await
-                    .map(|()| format!("upgraded to {}", c.latest)),
-                Err(e) => Err(e),
-            }
-        };
+
+        let result = upgrade_one(c).await;
 
         match result {
             Ok(detail) => {
@@ -335,6 +332,78 @@ async fn apply_all(candidates: &[UpdateCandidate], json: bool) -> Vec<UpgradeOut
         let _ = tracker.print();
     }
     outcomes
+}
+
+/// Upgrade a single candidate, prebuilt-first with cargo/restart fallback.
+///
+/// Why: Extracted from `apply_all` to keep the loop body readable and to allow
+/// the `?` operator to propagate errors cleanly per-candidate.
+///
+/// What: Tries `try_install_prebuilt`; on success the binary is on disk. For
+/// daemons, always runs the restart step (via `upgrade_and_restart` or a
+/// post-placement restart) to activate the new binary. On fallback, runs
+/// `upgrade_and_restart` (daemons) or `perform_upgrade` +
+/// `verify_installed_binary` (non-daemons). Returns a human detail string.
+///
+/// Test: Side-effecting; covered indirectly.
+async fn upgrade_one(c: &UpdateCandidate) -> anyhow::Result<String> {
+    use crate::download::{self, Outcome};
+
+    let install_dir = download::default_install_dir().unwrap_or_else(|| {
+        let cargo_home = std::env::var("CARGO_HOME").unwrap_or_default();
+        if cargo_home.is_empty() {
+            dirs::home_dir()
+                .map(|h| h.join(".cargo").join("bin"))
+                .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"))
+        } else {
+            std::path::PathBuf::from(&cargo_home).join("bin")
+        }
+    });
+
+    let outcome = download::try_install_prebuilt(&c.crate_name, &install_dir).await;
+
+    match outcome {
+        Outcome::Installed { version, .. } => {
+            tracing::info!(crate_name = %c.crate_name, %version, "upgraded from prebuilt");
+            if c.daemon {
+                // Binary is now on disk at install_dir; trigger a daemon restart.
+                // We do this via upgrade_and_restart so the connection-safe
+                // restart protocol (SIGTERM + drain + launchd KeepAlive) is followed.
+                // The `perform_upgrade` step inside upgrade_and_restart is a no-op
+                // if the binary is already current, so this is safe.
+                let hint = trusty_common::update::upgrade_and_restart(&c.crate_name, &c.binary)
+                    .await
+                    .map(|h| h.unwrap_or_else(|| "restarted".to_owned()))?;
+                Ok(hint)
+            } else {
+                trusty_common::update::verify_installed_binary(&c.binary).await?;
+                Ok(format!("upgraded to {version}"))
+            }
+        }
+        Outcome::Fallback { reason } => {
+            tracing::info!(crate_name = %c.crate_name, %reason, "prebuilt unavailable; using cargo install");
+            // Verify cargo is available before attempting the fallback.
+            which::which("cargo").map_err(|_| {
+                anyhow::anyhow!(
+                    "no Rust toolchain found on PATH (cargo not available); \
+                     cannot fall back to `cargo install {}`",
+                    c.crate_name
+                )
+            })?;
+            if c.daemon {
+                trusty_common::update::upgrade_and_restart(&c.crate_name, &c.binary)
+                    .await
+                    .map(|hint| hint.unwrap_or_else(|| "restarted".to_owned()))
+            } else {
+                match trusty_common::update::perform_upgrade(&c.crate_name).await {
+                    Ok(()) => trusty_common::update::verify_installed_binary(&c.binary)
+                        .await
+                        .map(|()| format!("upgraded to {}", c.latest)),
+                    Err(e) => Err(e),
+                }
+            }
+        }
+    }
 }
 
 /// Render the human-readable upgrade summary footer.

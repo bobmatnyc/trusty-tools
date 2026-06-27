@@ -103,6 +103,12 @@ base64 = "0.22"
 jsonwebtoken = "9"
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
+# Gzip decompression for prebuilt-binary tarballs (trusty-installer Phase 2).
+flate2 = "1"
+# Tar archive extraction for prebuilt-binary tarballs (trusty-installer Phase 2).
+tar = "0.4"
+# Semantic-version parsing for GitHub release tag comparison (trusty-installer Phase 2).
+semver = { version = "1", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 libc = "0.2"
