@@ -419,3 +419,17 @@ fn yes_short_flag() {
     assert!(long.yes);
     assert!(short.yes);
 }
+
+/// `trusty-installer self-update` parses to `Commands::SelfUpdate` (Phase 3).
+#[test]
+fn parse_self_update() {
+    let cli = Cli::try_parse_from(["trusty-installer", "self-update"]).expect("self-update parses");
+    assert!(matches!(cli.command, Commands::SelfUpdate));
+}
+
+/// `tctl self-update` resolves identically (alias binary same entry point).
+#[test]
+fn tctl_alias_self_update() {
+    let cli = Cli::try_parse_from(["tctl", "self-update"]).expect("tctl self-update parses");
+    assert!(matches!(cli.command, Commands::SelfUpdate));
+}
