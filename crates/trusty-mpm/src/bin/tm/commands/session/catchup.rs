@@ -7,19 +7,22 @@
 //! from either format in the current conversation without re-spawning the old
 //! Python tool.
 //! What: resolves the project directory, discovers paused sessions via
-//! [`trusty_mpm::core::native_session_finder`], renders the digest, and prints
-//! it to stdout. With `--all-projects` it also enumerates machine-wide projects
-//! via the claude-mpm session registry DB.
-//! Test: `handle_catchup_prints_no_sessions_when_empty`,
-//! `handle_catchup_all_projects_noop_without_registry` in the inline test block.
+//! [`trusty_mpm::core::native_session_finder`], renders the digest (with git
+//! and palace activity via the catch-up runtime), and prints it to stdout.
+//! With `--all-projects` it also enumerates machine-wide projects via the
+//! claude-mpm session registry DB.
+//! Manual catchup (both full and non-full) does NOT advance the watermark;
+//! only auto-inject on session start advances it (PR4).
+//! Test: `handle_catchup_no_sessions_produces_notice`,
+//! `handle_catchup_full_flag_is_accepted` in the inline test block.
 //!
 // CUTOVER BRIDGE (claude-mpm format parsing) — remove post-migration (#1762)
 
 use std::path::PathBuf;
 
 use trusty_mpm::core::{
+    catchup::{CatchupOptions, run_catchup},
     claude_mpm_registry::{default_registry_path, discover_claude_mpm_projects},
-    native_session_finder::{find_paused_sessions, render_resume_context},
 };
 
 use crate::commands::project::resolve_dir;
@@ -28,19 +31,15 @@ use crate::commands::project::resolve_dir;
 ///
 /// Why: provides the catch-up entry-point for `tm sessions catchup`.
 /// What: collects project directories to scan (cwd always included; registry
-/// projects appended when `all_projects` is set), calls `find_paused_sessions`
-/// for each, renders the catch-up with `render_resume_context`, and prints to
-/// stdout. `full` is accepted for forward-compat with PR2 watermark logic; in
-/// PR1 it is a no-op (forces full history, equivalent to the current default).
+/// projects appended when `all_projects` is set), runs the catch-up runtime
+/// (watermark-aware when `full=false`, full history when `full=true`), and
+/// prints the digest to stdout. Manual catchup does NOT advance the watermark —
+/// only auto-inject on session start does.
 /// Test: `cli_parses_session_catchup` in `tests.rs` exercises the parse path;
 /// the handler itself is smoke-tested by `handle_catchup_*` below.
 ///
 // CUTOVER BRIDGE — remove post-migration (#1762)
 pub(crate) async fn handle_catchup(all_projects: bool, full: bool) -> anyhow::Result<()> {
-    // `full` is accepted for API-surface completeness (PR2 will wire watermark
-    // logic here). For now it has no effect — all history is always included.
-    let _ = full; // forward-compat placeholder
-
     let mut project_dirs: Vec<PathBuf> = vec![resolve_dir(None)?];
 
     // CUTOVER BRIDGE — remove post-migration (#1762)
@@ -61,34 +60,35 @@ pub(crate) async fn handle_catchup(all_projects: bool, full: bool) -> anyhow::Re
         }
     }
 
-    let mut all_sessions = Vec::new();
+    // Load config for the memory URL (fail-open to default).
+    let config = trusty_mpm::core::config::MpmConfig::load_default();
+    let memory_url =
+        std::env::var("TRUSTY_MEMORY_URL").unwrap_or_else(|_| "http://127.0.0.1:7990".to_string());
+
     for dir in &project_dirs {
-        match find_paused_sessions(dir) {
-            Ok(sessions) => all_sessions.extend(sessions),
-            Err(e) => {
-                eprintln!("warning: scanning {}: {e}", dir.display());
-            }
-        }
+        let opts = CatchupOptions {
+            project_dir: dir.clone(),
+            memory_url: memory_url.clone(),
+            include_git: config.catchup.include_git,
+            include_palace: config.catchup.include_palace,
+            git_limit: config.catchup.git_limit,
+            drawer_limit: config.catchup.drawer_limit,
+            // When full=true: ignore watermark (full history).
+            // When full=false: use watermark (incremental since last run).
+            full,
+        };
+        // Manual catchup never advances the watermark.
+        let context = run_catchup(&opts, false).await;
+        print!("{context}");
     }
-
-    // Re-sort the merged list newest-first.
-    all_sessions.sort_by(|a, b| match (a.sort_key(), b.sort_key()) {
-        (Some(ta), Some(tb)) => tb.cmp(&ta),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
-
-    let rendered = render_resume_context(&all_sessions);
-    print!("{rendered}");
 
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+    use trusty_mpm::core::native_session_finder::{find_paused_sessions, render_resume_context};
 
     #[tokio::test]
     async fn handle_catchup_no_sessions_produces_notice() {
@@ -104,7 +104,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_catchup_full_flag_is_accepted() {
-        // full=true should not error — it's a no-op in PR1.
+        // full=true should not error — it triggers full history mode.
         let tmp = TempDir::new().unwrap();
         let sessions = find_paused_sessions(tmp.path()).unwrap();
         let rendered = render_resume_context(&sessions);

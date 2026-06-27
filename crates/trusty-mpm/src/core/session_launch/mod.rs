@@ -59,6 +59,15 @@ pub struct PrepReport {
     /// `false` when writing the project hooks failed; the session still
     /// launches, it just won't fire the trusty-memory hooks.
     pub hooks_written: bool,
+    /// Incremental catch-up context to inject as seed context for this session.
+    ///
+    /// Populated when `config.catchup.auto` is true; `None` otherwise or when
+    /// the catch-up runtime fails (fail-open — never blocks session launch).
+    /// The caller (session start path) should print this after the normal
+    /// launch summary so the operator sees it in the terminal.
+    ///
+    // CUTOVER BRIDGE — remove post-migration (#1762)
+    pub catchup_context: Option<String>,
 }
 
 /// A failure raised while preparing a session for launch.
@@ -414,6 +423,30 @@ fn prepare_session_inner(
         }
     };
 
+    // DOC-28 cutover bridge — auto-inject catch-up as seed context (#1762).
+    // Fail-open: if catch-up fails for any reason (daemon not running, no git
+    // repo, runtime error), the session still launches; catchup_context is None.
+    // CUTOVER BRIDGE — remove post-migration (#1762)
+    let catchup_context = if config.catchup.auto {
+        let memory_url = std::env::var("TRUSTY_MEMORY_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:7990".to_string());
+        let opts = crate::core::catchup::CatchupOptions {
+            project_dir: project_dir.to_path_buf(),
+            memory_url,
+            include_git: config.catchup.include_git,
+            include_palace: config.catchup.include_palace,
+            git_limit: config.catchup.git_limit,
+            drawer_limit: config.catchup.drawer_limit,
+            // Auto-inject always uses the watermark (incremental).
+            full: false,
+        };
+        // Auto-inject advances the watermark so subsequent sessions are incremental.
+        let ctx = crate::core::catchup::run_catchup_blocking(opts, true);
+        if ctx.is_empty() { None } else { Some(ctx) }
+    } else {
+        None
+    };
+
     Ok(PrepReport {
         deploy,
         skill_deploy,
@@ -421,6 +454,7 @@ fn prepare_session_inner(
         stash,
         output_style,
         hooks_written,
+        catchup_context,
     })
 }
 

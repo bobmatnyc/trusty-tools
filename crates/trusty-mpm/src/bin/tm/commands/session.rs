@@ -67,6 +67,11 @@ pub(crate) async fn session(
                         "  Merged instructions written to {}",
                         report.stash.display()
                     );
+                    // DOC-28 cutover bridge: print catch-up digest as seed context.
+                    // CUTOVER BRIDGE — remove post-migration (#1762)
+                    if let Some(ctx) = report.catchup_context {
+                        println!("\n---\n\n## Recent Activity (catch-up)\n\n{ctx}");
+                    }
                 }
                 Err(err) => eprintln!("warning: session preparation failed: {err}"),
             }
