@@ -54,6 +54,12 @@ reqwest = { workspace = true }
 # Bash tool: process-group kill on Unix (setsid / kill syscalls)
 libc = { workspace = true }
 
+# DOC-28 catch-up digest for PM prompt seed context (#1762 PR2).
+# The `catchup` feature pulls in the incremental session/git/palace engine from
+# trusty-common so trusty-code can inject recent-activity context into the PM
+# prompt at task start without duplicating the engine here.
+trusty-common = { workspace = true, features = ["catchup"] }
+
 [dev-dependencies]
 # Async test runtime (events, build_info, perf async tests, tools tests)
 tokio = { workspace = true }

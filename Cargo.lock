@@ -10746,6 +10746,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "trusty-common",
  "uuid",
 ]
 
@@ -10900,7 +10901,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",

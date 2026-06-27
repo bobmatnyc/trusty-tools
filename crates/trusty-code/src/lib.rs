@@ -234,6 +234,19 @@ pub mod runner;
 /// Test: `run_task::tests::*` (all offline, mocked LLM).
 pub mod run_task;
 
+/// DOC-28 catch-up context injection for the PM prompt (#1762, PR2).
+///
+/// Why: The PM agent needs recent project-activity context (paused sessions,
+/// git commits, memory palace entries) at task start so it can orient without
+/// interrogating the operator. This module wraps the shared engine in
+/// trusty-common and exposes a single `pm_catchup_context` fn that is wired
+/// into the PM prompt path only (sub-agents receive `None`).
+/// What: `pm_catchup_context(project_dir) -> Option<String>` — async,
+/// fail-open (returns `None` on any error or empty result), never advances the
+/// watermark (advancement is owned by trusty-mpm `session_launch`).
+/// Test: `catchup::tests::pm_catchup_context_does_not_panic_on_empty_repo`.
+pub mod catchup;
+
 /// System-prompt assembly layer implementing the parity spec.
 ///
 /// Why: The cross-model comparison harness must assemble the same fixed

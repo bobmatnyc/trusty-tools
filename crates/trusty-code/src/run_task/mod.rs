@@ -123,7 +123,17 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
         Arc::clone(&transcript),
     ));
 
-    let pm_system = assemble_system_prompt(&pm_config, project_context.as_deref(), None);
+    // Inject DOC-28 catch-up digest as seed context into the PM prompt (#1762 PR2).
+    // The catch-up engine is async and fail-open: if the daemon is offline or the
+    // project has no activity, it returns None and the prompt is assembled without
+    // the section.  Sub-agents are NOT wired here; only the PM receives this digest.
+    let catchup_ctx = crate::catchup::pm_catchup_context(&params.project).await;
+
+    let pm_system = assemble_system_prompt(
+        &pm_config,
+        project_context.as_deref(),
+        catchup_ctx.as_deref(),
+    );
     let pm_loop = AgentLoop::new(
         AgentLoopConfig {
             model: pm_model.clone(),
