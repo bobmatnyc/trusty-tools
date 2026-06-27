@@ -1687,6 +1687,45 @@ fn robot_splash_gradient_rows_present() {
 }
 
 #[test]
+fn narrow_fallback_reconnect_splash_includes_reconnecting_text() {
+    // Why: `print_launch_banner_reconnecting` narrow fallback must pass
+    // `reconnecting=true` to `render_robot_splash` so the "Reconnecting..."
+    // label appears in the robot splash — matching the wide two-panel path
+    // where reconnect state shows in both panels.  Before the fix this branch
+    // incorrectly passed `false`, silently dropping the reconnect label.
+    // What: render the splash with reconnecting=true and assert the label is
+    // present; also confirm screen-clear is still there.
+    // Test: pure string assertion, no I/O side-effects.
+    colored::control::set_override(false);
+    let splash = render_robot_splash(true);
+    assert!(
+        splash.starts_with("\x1B[2J\x1B[1;1H"),
+        "narrow reconnect splash must still clear the screen"
+    );
+    assert!(
+        splash.contains("Reconnecting..."),
+        "narrow reconnect splash must contain 'Reconnecting...' label"
+    );
+    colored::control::unset_override();
+}
+
+#[test]
+fn narrow_fallback_launch_splash_does_not_include_reconnecting_text() {
+    // Why: the narrow launch path (non-reconnecting) must NOT show
+    // "Reconnecting..." in the robot splash — only the info panel below it
+    // shows launch context.
+    // What: render with reconnecting=false and confirm the label is absent.
+    // Test: pure string assertion.
+    colored::control::set_override(false);
+    let splash = render_robot_splash(false);
+    assert!(
+        !splash.contains("Reconnecting..."),
+        "normal launch splash must not contain 'Reconnecting...' label"
+    );
+    colored::control::unset_override();
+}
+
+#[test]
 fn cli_parses_banner() {
     // Why: `tm banner` must parse and default `--reconnecting` to false.
     // What: parse "banner" and assert the variant and flag are correct.

@@ -356,8 +356,11 @@ pub(crate) fn render_robot_splash(reconnecting: bool) -> String {
 /// see that no new session was created.
 /// What: on wide terminals renders the two-panel layout with the reconnecting
 /// state shown in both panels; on narrow terminals falls back to the stacked
-/// layout with the rich info-box (reconnect mode).
-/// Test: `launch_reconnect_banner_does_not_panic`.
+/// layout with the rich info-box (reconnect mode).  The narrow fallback passes
+/// `reconnecting=true` to `render_robot_splash` so the "Reconnecting..." text
+/// appears in the robot splash — matching the wide-path presentation.
+/// Test: `launch_reconnect_banner_does_not_panic`,
+/// `narrow_fallback_reconnect_splash_includes_reconnecting_text`.
 pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
     let w = terminal_width();
     let daemon = super::info_box::DaemonInfo::from_lock_file();
@@ -369,7 +372,10 @@ pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
         let _ = std::io::Write::flush(&mut std::io::stdout());
         std::thread::sleep(std::time::Duration::from_secs(1));
     } else {
-        print!("{}", render_robot_splash(false));
+        // Narrow fallback: stacked layout.  Pass reconnecting=true so the
+        // "Reconnecting..." label appears in the robot splash (matching the
+        // wide-path two-panel where the reconnect state is shown in both panels).
+        print!("{}", render_robot_splash(true));
         let _ = std::io::Write::flush(&mut std::io::stdout());
         let daemon2 = super::info_box::DaemonInfo::from_lock_file();
         super::info_box::print_welcome_panel(workdir, tmux_name, true, daemon2);
