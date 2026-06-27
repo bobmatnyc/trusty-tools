@@ -123,6 +123,29 @@ pub fn run(members: &[String], yes: bool, json: bool) -> i32 {
         return 3;
     }
 
+    // Phase 6: check external prerequisites for the selected members.
+    {
+        let crate_names: Vec<String> = selected.iter().map(|m| m.crate_name.clone()).collect();
+        let missing = super::prereqs::check_and_warn_real(&crate_names, json);
+        // If trusty-mpm is selected and tmux is missing, prompt (or warn in non-TTY/json).
+        let mpm_selected = selected.iter().any(|m| m.crate_name == "trusty-mpm");
+        let tmux_missing = missing.iter().any(|m| m.binary == "tmux");
+        if mpm_selected && tmux_missing {
+            if !json && super::progress_ui::is_tty() {
+                let q = "trusty-mpm requires tmux (not found). Continue anyway?";
+                if !super::progress_ui::prompt_yes_no(q) {
+                    eprintln!("tctl install: aborted (tmux not installed).");
+                    return 3;
+                }
+            } else if !json {
+                eprintln!(
+                    "tctl install: warning: trusty-mpm requires tmux which is not installed. \
+                     Continuing in non-interactive mode."
+                );
+            }
+        }
+    }
+
     // Confirm the blast radius unless --yes or non-interactive (#1316 default-safe).
     if !yes && super::progress_ui::is_tty() && !json {
         let names: Vec<&str> = selected.iter().map(|m| m.crate_name.as_str()).collect();
@@ -159,6 +182,13 @@ async fn install_all(selected: &[StableMember], json: bool) -> InstallReport {
     let narr = narrator(json);
     let _ = narr.info(&format!("installing {} component(s)", selected.len()));
 
+    // Resolve the install directory once for post-install hooks (Phase 7 & 8).
+    let install_dir = crate::download::default_install_dir().unwrap_or_else(|| {
+        dirs::home_dir()
+            .map(|h| h.join(".cargo").join("bin"))
+            .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"))
+    });
+
     let mut outcomes = Vec::with_capacity(selected.len());
     let mut tracker = ComponentTracker::new(narr.output());
 
@@ -172,6 +202,18 @@ async fn install_all(selected: &[StableMember], json: bool) -> InstallReport {
                     detail: "installed".to_owned(),
                 });
                 tracker.add(Component::new(m.binary.clone(), binary_size(&m.binary)));
+                // Phase 7: bootstrap trusty-mpm supervisor plist (fail-soft).
+                if m.crate_name == "trusty-mpm" {
+                    if let Err(e) = super::plist_bootstrap::install_mpm_supervisor() {
+                        let _ = narr.info(&format!(
+                            "warning: trusty-mpm supervisor bootstrap failed (non-fatal): {e}"
+                        ));
+                    }
+                }
+                // Phase 8: codesign + FDA guidance for trusty-search.
+                if m.crate_name == "trusty-search" {
+                    super::macos_signing::post_install_search(&install_dir, json);
+                }
             }
             Err(e) => {
                 let _ = narr.error(&format!("{}: {e}", m.crate_name));

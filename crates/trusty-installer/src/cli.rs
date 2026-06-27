@@ -306,6 +306,13 @@ pub enum Commands {
     /// With `--json`: emits the capability-discovery object (DOC-1 D3b / DOC-5 §4.2).
     Version,
 
+    /// Update `trusty-installer` itself to the latest published version.
+    ///
+    /// Attempts a prebuilt download; falls back to `cargo install --locked` when
+    /// no prebuilt is available. Prints a restart hint on success — does NOT
+    /// re-exec the updated binary. Use `--yes` to skip the crates.io version check.
+    SelfUpdate,
+
     /// Generic passthrough: `trusty-installer <tool> <verb> [args]` — any advertised verb. (DOC-1 D3c)
     ///
     /// The first token is the manifest member id; the remainder is forwarded as
