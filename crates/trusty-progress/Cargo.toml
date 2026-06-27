@@ -8,8 +8,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 # Published to crates.io as of #1332: required as a real registry dependency of
-# trusty-controller 0.2.0 (Phase-2 publish). The API has stabilised enough to
-# ship; the in-tree path dep still resolves locally via [workspace.dependencies].
+# trusty-installer (formerly trusty-controller) Phase-2 publish. The API has
+# stabilised enough to ship; the in-tree path dep still resolves locally via
+# [workspace.dependencies].
 
 [dependencies]
 indicatif = { workspace = true }

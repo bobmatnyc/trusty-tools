@@ -87,7 +87,7 @@ pub enum Commands {
 ///
 /// Why: `tctl` (the orchestrator, issue #1316) discovers the console URL by
 /// spawning `trusty-console port --json` and parsing the `{addr,port}`
-/// envelope (see trusty-controller `os_env.rs`). The verb must exist and be
+/// envelope (see trusty-installer `os_env.rs`). The verb must exist and be
 /// machine-readable for that discovery to work after the console is de-bundled
 /// from the host crates (#1318).
 /// What: A single `--json` flag selecting JSON output (default is a single
@@ -209,7 +209,7 @@ pub fn resolve_reported_addr() -> (String, u16) {
 /// Run the `port` subcommand: print the console's bound/default port and exit.
 ///
 /// Why: `tctl` console discovery spawns `trusty-console port --json` and
-/// parses a `{addr,port}` envelope (trusty-controller `os_env.rs`). This verb
+/// parses a `{addr,port}` envelope (trusty-installer `os_env.rs`). This verb
 /// is the contract that makes that discovery work; without it the call exits
 /// non-zero and console discovery is silently broken (the latent bug fixed by
 /// #1318).

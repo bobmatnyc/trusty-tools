@@ -290,15 +290,13 @@ jobs:
             AL2023_NO_DEFAULT="false"
             AL2023_FEATURES=""
 
-          elif [[ "$CRATE" == "trusty-controller" ]]; then
-            # Binaries: tctl
-            # Single [[bin]] `tctl` at src/main.rs confirmed in trusty-controller/Cargo.toml;
-            # no required-features on the bin target (edition 2021).
+          elif [[ "$CRATE" == "trusty-installer" ]]; then
+            # Binaries: trusty-installer + tctl (transitional alias, ADR-0013 / SPEC-INSTALLER-01)
+            # Two [[bin]] targets: `trusty-installer` (primary) and `tctl` (alias),
+            # both pointing at src/main.rs in trusty-installer/Cargo.toml.
             # No UI embedding, no ORT: no SKIP_UI_BUILD, no AL2023 variant.
-            # (#1316 / #1332): wired into the allowlist so tctl tags build + release
-            # instead of green-skipping as a library-only crate.
-            CARGO_PKG="trusty-controller"
-            BINARIES="tctl"
+            CARGO_PKG="trusty-installer"
+            BINARIES="trusty-installer tctl"
             SKIP_UI_BUILD="false"
             CARGO_FEATURES=""
             NO_DEFAULT_FEATURES="false"
@@ -357,12 +355,12 @@ jobs:
           # explicit config branch for it above. That is intentional (fail-safe, not
           # fail-loud), but it means a missing binary release is silent. (The former
           # `trusty-controller` / bin `tctl` gap from #1316 was closed in #1332 — it
-          # now has a config branch above and builds + releases normally.)
+          # was renamed to `trusty-installer` in #1757 with `tctl` as a transitional alias.)
           else
             echo "::notice title=Library-only crate — release skipped::Crate '$CRATE' is not in the binary-release allowlist; treating it as library-only and skipping the binary release gracefully (green, not an error)."
             echo "Binary-producing crates (built + released): trusty-search, trusty-memory,"
             echo "  trusty-analyze, trusty-review, trusty-mpm, trusty-git-analytics (tga),"
-            echo "  trusty-code, trusty-console, trusty-controller (tctl)."
+            echo "  trusty-code, trusty-console, trusty-installer (+ tctl alias)."
             echo "Library-only / internal crates (green-skip, no standalone binary):"
             echo "  trusty-common, trusty-bm25-daemon, trusty-embedderd, trusty-progress,"
             echo "  trusty-agents*, trusty-mpm-gui, tc-services, cto-assistant,"
@@ -1050,7 +1048,7 @@ jobs:
             # canonicalized to trusty-git-analytics in the parse step (#1128).
             trusty-git-analytics) INSTALL_BINS="tga" ;;
             trusty-code)     INSTALL_BINS="tcode" ;;
-            trusty-controller) INSTALL_BINS="tctl" ;;
+            trusty-installer) INSTALL_BINS="trusty-installer tctl" ;;
             *)               INSTALL_BINS="${CRATE}" ;;
           esac
 

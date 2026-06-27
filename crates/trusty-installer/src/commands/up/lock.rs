@@ -7,7 +7,7 @@
 //! implementation.
 //!
 //! What: `BootLock` is an RAII guard that holds an exclusive `flock` on
-//! `~/.trusty-tools/trusty-controller/ensure.lock` for its lifetime and releases
+//! `~/.trusty-tools/trusty-installer/ensure.lock` for its lifetime and releases
 //! it (and the fd) on drop. `acquire()` takes the lock (blocking, so the loser
 //! waits then proceeds to re-CHECK and no-op per DOC-3 §4 loser behavior);
 //! `try_acquire_at()` is a non-blocking variant used by the tests.
@@ -34,12 +34,12 @@ pub struct BootLock {
     path: PathBuf,
 }
 
-/// Resolve the default boot lock path: `~/.trusty-tools/trusty-controller/ensure.lock`.
+/// Resolve the default boot lock path: `~/.trusty-tools/trusty-installer/ensure.lock`.
 ///
-/// Why: Co-locates the lock with the #1220 controller config dir so all
-/// controller state lives under one root.
+/// Why: Co-locates the lock with the #1220 installer config dir so all
+/// installer state lives under one root.
 ///
-/// What: Joins `dirs::home_dir()` with `.trusty-tools/trusty-controller/ensure.lock`.
+/// What: Joins `dirs::home_dir()` with `.trusty-tools/trusty-installer/ensure.lock`.
 /// Returns `None` if the home dir is unresolvable.
 ///
 /// Test: `super::tests::lock_path_shape`.
@@ -47,7 +47,7 @@ pub fn lock_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     Some(
         home.join(".trusty-tools")
-            .join("trusty-controller")
+            .join("trusty-installer")
             .join("ensure.lock"),
     )
 }

@@ -1,4 +1,4 @@
-//! Unit tests for the `tctl up` boot orchestrator (DOC-12).
+//! Unit tests for the `trusty-installer up` boot orchestrator (DOC-12).
 //!
 //! Why: The orchestrator's behaviour is the load-bearing contract of DOC-12
 //! (gating, idempotency, opt-in, prompt-first upgrade, exit codes). These tests
@@ -9,12 +9,12 @@
 //! parse + precedence (§8), member ensure matrix (§3.4), claude-code flow (§6),
 //! the lock (§3.4), report exit codes (§5), and the end-to-end sequence (§3/§5).
 //!
-//! Test: This *is* the test module; `cargo test -p trusty-controller` runs it.
+//! Test: This *is* the test module; `cargo test -p trusty-installer` runs it.
 
 use std::cell::RefCell;
 
 use super::claude_code::{ensure_claude_code, ClaudeEnv, ClaudeOutcome};
-use super::config::{load_boot_config_from, AnalyzeMode, BootConfig};
+use super::config::{load_boot_config_from, migrate_config_dir, AnalyzeMode, BootConfig};
 use super::manifest::{
     analyze_core_targets, default_manifest, members_in_stage, BootPolicy, BootStage,
 };
@@ -53,7 +53,7 @@ fn default_manifest_matches_spec_table() {
     assert_eq!(con.stage, BootStage::Console);
     assert_eq!(con.policy, BootPolicy::AlwaysOn);
 
-    let ctl = by("trusty-controller");
+    let ctl = by("trusty-installer");
     assert_eq!(ctl.stage, BootStage::Control);
 
     let mpm = by("trusty-mpm");
@@ -82,7 +82,7 @@ fn analyze_core_targets_default() {
         "trusty-search",
         "trusty-memory",
         "trusty-analyze",
-        "trusty-controller",
+        "trusty-installer",
     ] {
         assert!(t.iter().any(|x| x == want), "missing {want}");
     }
@@ -167,6 +167,52 @@ fn config_parses_controller() {
 #[test]
 fn controller_default_off() {
     assert!(!BootConfig::default().controller.auto_update_check);
+}
+
+/// Why: ADR-0013 / SPEC-INSTALLER-01 Phase 1 requires idempotent migration of
+/// `~/.trusty-tools/trusty-controller/` → `~/.trusty-tools/trusty-installer/`
+/// so existing users do not start blank after the rename.
+/// What: Creates a temp base dir with a `trusty-controller/` subdir containing
+/// a config file, calls `migrate_config_dir`, and asserts the file moved to
+/// `trusty-installer/` while the old dir is gone.  Calls again (idempotent
+/// re-run) and asserts no error and the new dir still exists.  Also asserts
+/// that if the new dir already exists the old dir is left alone (no clobber).
+/// Test: This is the test.
+#[test]
+fn migrate_old_dir_to_new() {
+    let base = tempfile::tempdir().unwrap();
+    let old_dir = base.path().join("trusty-controller");
+    let new_dir = base.path().join("trusty-installer");
+
+    // ── Case 1: only old dir exists → rename to new ──────────────────────────
+    std::fs::create_dir_all(&old_dir).unwrap();
+    std::fs::write(old_dir.join("config.yaml"), "boot:\n  with_mpm: true\n").unwrap();
+    migrate_config_dir(base.path());
+    assert!(!old_dir.exists(), "old dir must be gone after migration");
+    assert!(new_dir.exists(), "new dir must exist after migration");
+    assert!(
+        new_dir.join("config.yaml").exists(),
+        "config.yaml must be in new dir"
+    );
+
+    // ── Case 2: idempotent — new dir already exists, no old dir ──────────────
+    migrate_config_dir(base.path()); // second call; must be a no-op
+    assert!(new_dir.exists(), "new dir still present after second call");
+
+    // ── Case 3: BOTH dirs exist → must NOT clobber the new dir ───────────────
+    std::fs::create_dir_all(&old_dir).unwrap();
+    std::fs::write(
+        old_dir.join("other.yaml"),
+        "controller:\n  auto_update_check: true\n",
+    )
+    .unwrap();
+    migrate_config_dir(base.path());
+    // New dir untouched; old dir still present (migration skipped).
+    assert!(
+        new_dir.join("config.yaml").exists(),
+        "new config.yaml preserved"
+    );
+    assert!(old_dir.exists(), "old dir left when new dir already exists");
 }
 
 // ── §4/§8 policy precedence ─────────────────────────────────────────────────────

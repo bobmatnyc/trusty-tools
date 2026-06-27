@@ -54,7 +54,7 @@ trusty-review = { path = "crates/trusty-review", version = "0.6.1" }
 # resolve in-tree.
 trusty-console = { path = "crates/trusty-console", version = "0.3.0" }
 # trusty-progress: shared rustup/cargo-style progress + status display (#1315).
-# Consumed by tctl for install/upgrade component rows; published library crate.
+# Consumed by trusty-installer for install/upgrade component rows; published library crate.
 trusty-progress = { path = "crates/trusty-progress", version = "0.1.0" }
 
 # ── Async runtime / HTTP ────────────────────────────────────────────────────

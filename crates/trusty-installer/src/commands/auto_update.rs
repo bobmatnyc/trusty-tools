@@ -49,7 +49,7 @@ pub fn notice_for(count: usize) -> Option<String> {
         return None;
     }
     Some(format!(
-        "{count} trusty update(s) available — run `tctl upgrade` to review and apply (nothing is changed without your confirmation)."
+        "{count} trusty update(s) available — run `trusty-installer upgrade` to review and apply (nothing is changed without your confirmation)."
     ))
 }
 
@@ -109,7 +109,7 @@ mod tests {
     fn notice_for_some() {
         let n = notice_for(3).expect("some");
         assert!(n.contains('3'));
-        assert!(n.contains("tctl upgrade"));
+        assert!(n.contains("trusty-installer upgrade"));
         assert!(n.contains("confirmation"));
     }
 }

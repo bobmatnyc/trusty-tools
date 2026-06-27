@@ -141,7 +141,7 @@ documentation.
 | `trusty-bm25-daemon` | Standalone BM25 full-text search daemon |
 | `trusty-code` | Code generation and analysis utilities |
 | `trusty-console` | Terminal UI for system monitoring |
-| `trusty-controller` | Infrastructure controller |
+| `trusty-installer` | Install/upgrade orchestrator (bins: `trusty-installer`, `tctl` alias; ADR-0013) |
 | `trusty-progress` | Progress tracking and reporting |
 | `trusty-review` | Code review automation and analysis |
 
@@ -208,7 +208,7 @@ curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.
 | `TRUSTY_FORCE=1` | Re-download even if already installed (same as `--force`) |
 | `TRUSTY_NO_MODIFY_PATH=1` | Don't modify your shell PATH |
 
-**Supported platforms:** macOS (Apple Silicon) and Linux (x86_64). For other platforms, build from source with `cargo install trusty-controller`.
+**Supported platforms:** macOS (Apple Silicon) and Linux (x86_64). For other platforms, build from source with `cargo install trusty-installer`.
 
 **Security:** The installer is served over HTTPS and every downloaded binary is SHA-256 verified against its published checksum. The installer script itself is not signed — review it before running if you require higher assurance: https://github.com/bobmatnyc/trusty-tools/blob/main/install.sh
 

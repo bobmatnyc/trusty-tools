@@ -142,7 +142,7 @@ impl BootMember {
 ///
 /// What: Returns the ordered member list: memory + search (`core`/`always_on`),
 /// trusty-analyze (`analysis`/`boot_analysis`), trusty-console
-/// (`console`/`always_on`), trusty-controller (`control`), and trusty-mpm
+/// (`console`/`always_on`), trusty-installer (`control`), and trusty-mpm
 /// (`orchestrator`/`opt_in`, with the `claude-code` runtime sub-table).
 ///
 /// Test: `tests::default_manifest_matches_spec_table`.
@@ -173,8 +173,8 @@ pub fn default_manifest() -> Vec<BootMember> {
             BootPolicy::AlwaysOn,
         ),
         BootMember::daemon(
-            "trusty-controller",
-            "tctl",
+            "trusty-installer",
+            "trusty-installer",
             BootStage::Control,
             BootPolicy::OnDemand,
         ),
@@ -201,7 +201,7 @@ pub fn default_manifest() -> Vec<BootMember> {
 /// the controller.
 ///
 /// What: Returns the §3.3 worked-example default set: `trusty-common`,
-/// `trusty-search`, `trusty-memory`, `trusty-analyze`, `trusty-controller`.
+/// `trusty-search`, `trusty-memory`, `trusty-analyze`, `trusty-installer`.
 /// The system manifest may override this (handled by the config layer).
 ///
 /// Test: `tests::analyze_core_targets_default`.
@@ -211,7 +211,7 @@ pub fn analyze_core_targets() -> Vec<String> {
         "trusty-search".to_owned(),
         "trusty-memory".to_owned(),
         "trusty-analyze".to_owned(),
-        "trusty-controller".to_owned(),
+        "trusty-installer".to_owned(),
     ]
 }
 

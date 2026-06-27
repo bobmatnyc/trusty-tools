@@ -361,7 +361,7 @@ pub mod port;
 
 /// Canonical project-slug derivation (issue #1348).
 ///
-/// Why: trusty-memory and trusty-controller both need the identical
+/// Why: trusty-memory and trusty-installer both need the identical
 /// directory-basename/repo-name → slug rule (the trusty-memory daemon's
 /// `validate_palace_name` rejects a palace whose slug disagrees with the one it
 /// re-derives). Centralising the rule here makes it the single source of truth

@@ -125,7 +125,7 @@ impl UpgradeReport {
 ///
 /// What: With `--check`, delegates to the read-only `updates` listing. Otherwise
 /// gathers candidates, presents them, runs the pure confirm-then-apply gate, and
-/// applies only on `Apply`. `exclude_self` drops `trusty-controller`/`tctl` from
+/// applies only on `Apply`. `exclude_self` drops `trusty-installer`/`tctl` from
 /// the set (avoids upgrading the running binary mid-flight). Returns the exit code.
 ///
 /// Test: `tests::run_check_is_readonly` (delegation); the apply path is
@@ -157,7 +157,9 @@ pub fn run(
         return 3;
     }
     if exclude_self {
-        selected.retain(|m| m.crate_name != "trusty-controller" && m.binary != "tctl");
+        // Exclude both the primary name and the transitional alias binary name
+        // so --exclude-self works regardless of which binary the user invoked.
+        selected.retain(|m| m.crate_name != "trusty-installer" && m.binary != "trusty-installer");
     }
 
     // Build ONE runtime for the whole command: candidate gathering and applying
@@ -478,7 +480,7 @@ mod tests {
     /// the apply path. This performs a live crates.io probe, so it is
     /// `#[ignore]`-tagged to keep CI fast and offline-deterministic.
     /// What: Calls `run` with `check = true`; asserts exit 0 (read-only).
-    /// Test: `cargo test -p trusty-controller -- --include-ignored`.
+    /// Test: `cargo test -p trusty-installer -- --include-ignored`.
     #[test]
     #[ignore = "performs a live crates.io probe; run with --include-ignored"]
     fn run_check_is_readonly() {

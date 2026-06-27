@@ -360,7 +360,7 @@ The following crates are available on the tap with auto-bumped, pre-built bottle
 - `trusty-review`
 - `trusty-git-analytics` (tga)
 
-**Note**: `trusty-code` (`tcode`) and `trusty-controller` (`tctl`) are not yet on the tap; they will be added as those crates reach release maturity.
+**Note**: `trusty-code` (`tcode`) and `trusty-installer` (`tctl` transitional alias) are not yet on the tap; they will be added as those crates reach release maturity.
 
 ### Installation UX
 

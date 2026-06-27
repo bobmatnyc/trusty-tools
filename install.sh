@@ -6,18 +6,20 @@
 #   curl -sSf <url> | sh -s -- -y        # non-interactive
 #   TRUSTY_VERSION=0.2.0 sh install.sh   # pin version
 #
-# Why: Give users a rustup-style one-liner to install the `tctl` control-plane
-#      binary and bootstrap the rest of the trusty-tools platform, without
-#      requiring a Rust toolchain or manual download/verify/extract steps.
-# What: Detects platform, resolves the latest (or pinned) trusty-controller
-#      release, downloads + checksum-verifies the tarball, installs `tctl`,
-#      optionally fixes PATH, then runs `tctl install` to finish bootstrap.
+# Why: Give users a rustup-style one-liner to install the `trusty-installer`
+#      control-plane binary and bootstrap the rest of the trusty-tools platform,
+#      without requiring a Rust toolchain or manual download/verify/extract steps.
+#      The `tctl` transitional alias binary is also installed (ADR-0013 / SPEC-INSTALLER-01).
+# What: Detects platform, resolves the latest (or pinned) trusty-installer
+#      release, downloads + checksum-verifies the tarball, installs
+#      `trusty-installer` (and the `tctl` alias), optionally fixes PATH, then
+#      runs `trusty-installer install` to finish bootstrap.
 # Test: `sh -n install.sh` for POSIX syntax; `shellcheck --shell=sh install.sh`
 #      for lint; manual run on macOS arm64 + Linux x86_64; run with
 #      TRUSTY_VERSION pinned and TRUSTY_YES=1 to exercise non-interactive paths.
 #
 # Environment variables:
-#   TRUSTY_VERSION         Pin tctl version (e.g. "0.2.0")
+#   TRUSTY_VERSION         Pin trusty-installer version (e.g. "0.2.0")
 #   TRUSTY_INSTALL_DIR     Install dir (default: ~/.local/bin)
 #   TRUSTY_YES             Set to 1 to skip all prompts (same as -y)
 #   TRUSTY_NO_MODIFY_PATH  Set to 1 to skip PATH modification
@@ -34,8 +36,8 @@ set -e
 # Constants — keep all magic strings here, not scattered through the script.
 # ---------------------------------------------------------------------------
 REPO="bobmatnyc/trusty-tools"
-CRATE="trusty-controller"
-BIN="tctl"
+CRATE="trusty-installer"
+BIN="trusty-installer"
 
 REPO_URL="https://github.com/${REPO}"
 API_RELEASES_URL="https://api.github.com/repos/${REPO}/releases"
@@ -154,10 +156,10 @@ detect_sha_tool() {
 # ---------------------------------------------------------------------------
 
 # Why: Allow pinning a version, otherwise discover the newest published
-#      trusty-controller release so the one-liner always installs latest.
+#      trusty-installer release so the one-liner always installs latest.
 # What: Echo a bare version (e.g. "0.2.0"). Honors TRUSTY_VERSION if set.
 # Test: With TRUSTY_VERSION=0.2.0 echoes 0.2.0 (no network); unset, parses the
-#      releases API and echoes the first trusty-controller-v* tag's version.
+#      releases API and echoes the first trusty-installer-v* tag's version.
 resolve_version() {
     if [ -n "${TRUSTY_VERSION:-}" ]; then
         # Tolerate a leading tag prefix or 'v' if the user pasted a full tag.
@@ -172,7 +174,7 @@ resolve_version() {
 
     say "Resolving latest ${CRATE} release..." >&2
 
-    # Fetch the releases list and extract the first trusty-controller-v* tag.
+    # Fetch the releases list and extract the first trusty-installer-v* tag.
     # No jq required — grep/sed only.
     _ver="$(
         curl -sSfL "${API_RELEASES_URL}" \
