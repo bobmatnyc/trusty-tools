@@ -134,6 +134,12 @@ aws-config = { workspace = true, optional = true }
 aws-sdk-bedrockruntime = { workspace = true, optional = true }
 aws-types = { workspace = true, optional = true }
 
+# Optional: enabled by the `catchup` feature (DOC-28 cutover bridge, #1762).
+# rusqlite is used only by the `mpm_registry` submodule to read the
+# claude-mpm session-registry SQLite DB. All other catch-up deps (chrono,
+# reqwest, dirs, serde, serde_json, anyhow, tokio) are already unconditional.
+rusqlite = { workspace = true, optional = true }
+
 # launchd module is macOS-only and needs getuid(2) for the gui/<uid> domain.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
@@ -177,6 +183,14 @@ postcard = { workspace = true }
 
 [features]
 default = []
+# Enables the `catchup` module: DOC-28 incremental catch-up engine for the
+# trusty-mpm ↔ trusty-code cutover bridge (#1762). Provides
+# `CatchupOptions`, `generate_catchup_context`, `run_catchup`,
+# `run_catchup_blocking`, and the per-source submodules (`git`, `palace`,
+# `state`, `session_finder`, `mpm_session`, `mpm_registry`). Pulls in
+# `rusqlite` for the claude-mpm session-registry reader; all other deps are
+# already unconditional in this crate.
+catchup = ["dep:rusqlite"]
 # Enables the `server` module: standard axum middleware stack (CORS, trace,
 # gzip) and a fast-fail reqwest client for daemon-to-daemon calls.
 axum-server = ["dep:axum", "dep:tower-http"]

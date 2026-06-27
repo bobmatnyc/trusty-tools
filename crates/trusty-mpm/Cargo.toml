@@ -142,6 +142,9 @@ trusty-common = { workspace = true, features = [
     "crate-config",
     "console-metrics",
     "intent-source",
+    # DOC-28 catch-up engine (PR1, #1762): moves the catch-up module out of
+    # trusty-mpm/src/core/ into trusty-common so trusty-code can share it.
+    "catchup",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by
@@ -185,11 +188,9 @@ unicode-width.workspace = true
 # Portable executable lookup on PATH (replaces the non-portable `which` shell-out
 # in the tcode runtime adapter's availability probe — see #1213).
 which.workspace = true
-# SQLite reader for the claude-mpm session-registry.db (DOC-28 cutover bridge,
-# #1762). The bundled feature compiles SQLite from source so there is no system
-# SQLite dependency. All code that reads this DB is annotated with
-# // CUTOVER BRIDGE — remove post-migration (#1762).
-rusqlite = { workspace = true }
+# rusqlite: formerly a direct dep for the claude-mpm session-registry reader
+# (DOC-28 cutover bridge, #1762). Now consumed transitively via
+# trusty-common/catchup feature — removed from direct deps (PR1, refs #1762).
 
 # ── Optional dependencies (feature-gated) ────────────────────────────────────
 
