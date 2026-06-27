@@ -5,11 +5,11 @@
 //! and dropping the inner frames gives more usable width for content.
 //! What: `render_two_panel_banner` (same public signature as before) produces a
 //! single rounded box whose title bar carries `Trusty MPM v{VERSION}`. Inside,
-//! wide terminals (≥ MIN_WIDTH_TWO_PANEL) get the shrunken robot (left) and
+//! wide terminals (≥ MIN_WIDTH_TWO_PANEL) get the clipped art image (left) and
 //! info content (right) separated by a tinted `│` vertical divider (` │ `);
 //! narrow terminals get a stacked layout inside the same box. Very narrow
 //! (< MIN_WIDTH_BOX) returns `None` so callers can fall back to plain output.
-//! Test: `single_box_title_bar_contains_version`, `robot_shrink_has_fewer_rows`,
+//! Test: `single_box_title_bar_contains_version`, `image_clip_correct_rows`,
 //! `right_col_no_inner_border`, `reconnect_label_in_narrow_box`,
 //! `two_panel_compose_alignment`, `two_panel_version_present`,
 //! `wide_layout_has_vertical_divider`.
@@ -17,7 +17,7 @@
 use colored::Colorize as _;
 use unicode_width::UnicodeWidthStr as _;
 
-use super::{BANNER_ROBOT, colorize_robot_row};
+use super::{IMAGE_CLIP_COLS, clip_and_shade_image};
 use crate::formatters::info_box::{WelcomeData, render_info_box_rows};
 
 // ── Layout constants ──────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ pub(crate) const MIN_WIDTH_TWO_PANEL: usize = 90;
 /// Minimum terminal width to render any outer box at all.
 const MIN_WIDTH_BOX: usize = 40;
 
-/// Three-character gutter between the robot column and the info column: ` │ `.
+/// Three-character gutter between the image column and the info column: ` │ `.
 ///
 /// The middle character is a tinted `│` vertical divider; the flanking spaces
 /// provide visual breathing room. Total gutter width must match the rendered
@@ -57,7 +57,7 @@ const DIVIDER_BOTTOM: char = '┴';
 ///
 /// Why: a single outer box with version in the title bar is more cohesive than
 /// two separate side-by-side frames. Signature is unchanged so callers need no edits.
-/// What: wide terminals (≥ MIN_WIDTH_TWO_PANEL) show the shrunken robot (left),
+/// What: wide terminals (≥ MIN_WIDTH_TWO_PANEL) show the clipped art image (left),
 /// 1-char gutter, and info content (right) inside one `╭─╮` box. Narrow
 /// terminals stack the same content vertically. Very narrow (< MIN_WIDTH_BOX)
 /// returns `None`.
@@ -71,20 +71,20 @@ pub(crate) fn render_two_panel_banner(
         return None;
     }
 
-    let shrunk = shrink_robot();
-    let robot_cols = shrunk.iter().map(|(_, s)| s.width()).max().unwrap_or(36);
+    let image_lines = clip_and_shade_image();
+    let image_cols = IMAGE_CLIP_COLS;
 
     let inner = term_width.saturating_sub(2);
 
     if term_width >= MIN_WIDTH_TWO_PANEL {
-        let right_col = inner.saturating_sub(robot_cols + GUTTER);
+        let right_col = inner.saturating_sub(image_cols + GUTTER);
         if right_col >= 10 {
             return Some(render_wide_box(
                 data,
                 term_width,
                 reconnecting,
-                &shrunk,
-                robot_cols,
+                &image_lines,
+                image_cols,
                 right_col,
             ));
         }
@@ -94,37 +94,9 @@ pub(crate) fn render_two_panel_banner(
         data,
         term_width,
         reconnecting,
-        &shrunk,
-        robot_cols,
+        &image_lines,
+        image_cols,
     ))
-}
-
-// ── Robot shrink ──────────────────────────────────────────────────────────────
-
-/// Shrink the robot art by ~20%: drop every 5th row and every 5th column.
-///
-/// Why: the full 27×45 robot is too wide for the left column of a single outer
-/// box on typical terminals. Dropping 1-in-5 rows and 1-in-5 columns gives
-/// ~22×36, a ~20% linear reduction that preserves the visual shape.
-/// What: keeps rows where `idx % 5 != 4` (22 of 27) and chars where
-/// `col_idx % 5 != 4` (36 of 45). Returns `Vec<(orig_row_idx, text)>` so
-/// callers can look up the original gradient colour via `colorize_robot_row`.
-/// Test: `robot_shrink_has_fewer_rows`.
-fn shrink_robot() -> Vec<(usize, String)> {
-    BANNER_ROBOT
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| idx % 5 != 4)
-        .map(|(orig_idx, &row)| {
-            let shrunk: String = row
-                .chars()
-                .enumerate()
-                .filter(|(ci, _)| ci % 5 != 4)
-                .map(|(_, c)| c)
-                .collect();
-            (orig_idx, shrunk)
-        })
-        .collect()
 }
 
 // ── Title bar ────────────────────────────────────────────────────────────────
@@ -152,19 +124,19 @@ fn render_title_bar(term_width: usize) -> String {
 
 /// Render the wide (≥ MIN_WIDTH_TWO_PANEL) two-column single-box banner.
 ///
-/// Why: wide terminals have enough room to show robot (left) and info (right)
-/// side by side without wrapping. A tinted vertical divider makes the column
-/// boundary visually explicit without adding a full inner frame.
-/// What: title bar on top, `robot_cols`-wide left col + ` │ ` divider (3 chars,
+/// Why: wide terminals have enough room to show the art image (left) and info
+/// (right) side by side without wrapping. A tinted vertical divider makes the
+/// column boundary visually explicit without adding a full inner frame.
+/// What: title bar on top, `left_col`-wide left col + ` │ ` divider (3 chars,
 /// tinted rust) + `right_col`-wide right col, bottom border with `┴` at the
-/// divider column. Height = max(robot rows, info rows).
+/// divider column. Height = max(image rows, info rows).
 /// Test: `two_panel_compose_alignment`, `right_col_no_inner_border`,
 /// `wide_layout_has_vertical_divider`.
 fn render_wide_box(
     data: &WelcomeData,
     term_width: usize,
     reconnecting: bool,
-    shrunk: &[(usize, String)],
+    image_lines: &[String],
     left_col: usize,
     right_col: usize,
 ) -> String {
@@ -172,14 +144,14 @@ fn render_wide_box(
 
     let right_lines = build_right_lines(data, right_col);
 
-    // Colorize shrunk robot rows and right-pad to left_col.
-    let mut left_lines: Vec<String> = shrunk
+    // Pad image rows to left_col. Image lines are already per-char colorized;
+    // measure display width via strip_ansi.
+    let mut left_lines: Vec<String> = image_lines
         .iter()
-        .map(|(orig_idx, row)| {
-            let raw_cols = row.width();
-            let colored = colorize_robot_row(*orig_idx, row);
+        .map(|row| {
+            let raw_cols = strip_ansi(row).width();
             let pad = left_col.saturating_sub(raw_cols);
-            format!("{colored}{}", " ".repeat(pad))
+            format!("{row}{}", " ".repeat(pad))
         })
         .collect();
 
@@ -239,17 +211,17 @@ fn render_wide_box(
 /// Render the narrow (< MIN_WIDTH_TWO_PANEL) stacked single-box banner.
 ///
 /// Why: on terminals narrower than MIN_WIDTH_TWO_PANEL the right column would
-/// be too narrow to read. Stacking robot then info vertically inside the same
+/// be too narrow to read. Stacking art image then info vertically inside the same
 /// outer box preserves the brand frame while fitting the content.
-/// What: title bar, centred robot rows, optional "Reconnecting..." label,
+/// What: title bar, centred image rows, optional "Reconnecting..." label,
 /// left-aligned info rows, bottom border. All inside the single outer box.
 /// Test: `reconnect_label_in_narrow_box`.
 fn render_narrow_box(
     data: &WelcomeData,
     term_width: usize,
     reconnecting: bool,
-    shrunk: &[(usize, String)],
-    _robot_cols: usize,
+    image_lines: &[String],
+    _image_cols: usize,
 ) -> String {
     let inner = term_width.saturating_sub(2);
 
@@ -257,15 +229,14 @@ fn render_narrow_box(
     out.push_str(&render_title_bar(term_width));
     out.push('\n');
 
-    // Robot rows — centred within inner.
-    for (orig_idx, row) in shrunk {
-        let raw_cols = row.width();
+    // Image rows — centred within inner.
+    for row in image_lines {
+        let raw_cols = strip_ansi(row).width();
         let pad_l = (inner.saturating_sub(raw_cols)) / 2;
         let pad_r = inner.saturating_sub(raw_cols + pad_l);
-        let colored = colorize_robot_row(*orig_idx, row);
         out.push_str(&tint_border(&VERT.to_string()));
         out.push_str(&" ".repeat(pad_l));
-        out.push_str(&colored);
+        out.push_str(row);
         out.push_str(&" ".repeat(pad_r));
         out.push_str(&tint_border(&VERT.to_string()));
         out.push('\n');
@@ -477,33 +448,51 @@ pub(crate) mod tests {
         colored::control::unset_override();
     }
 
-    /// Shrunken robot has fewer rows than the original BANNER_ROBOT.
+    /// Clipped image has exactly IMAGE_CLIP_ROWS rows.
     #[test]
-    fn robot_shrink_has_fewer_rows() {
-        let shrunk = shrink_robot();
-        assert!(
-            shrunk.len() < BANNER_ROBOT.len(),
-            "shrunk robot ({} rows) must have fewer rows than original ({})",
-            shrunk.len(),
-            BANNER_ROBOT.len()
+    fn image_clip_correct_rows() {
+        let lines = super::super::clip_and_shade_image();
+        assert_eq!(
+            lines.len(),
+            super::super::IMAGE_CLIP_ROWS,
+            "clipped image must have exactly IMAGE_CLIP_ROWS ({}) rows, got {}",
+            super::super::IMAGE_CLIP_ROWS,
+            lines.len()
         );
-        // ~20% reduction: expect between 18 and 25 rows.
         assert!(
-            shrunk.len() >= 18 && shrunk.len() <= 25,
-            "shrunk robot must be ~20% smaller: got {} rows",
-            shrunk.len()
+            lines.len() >= 30 && lines.len() <= 36,
+            "clipped rows ({}) must be within 30–36",
+            lines.len()
         );
     }
 
-    /// Shrunken robot rows are narrower than the original rows.
+    /// Each row of the clipped image has exactly IMAGE_CLIP_COLS display columns.
     #[test]
-    fn robot_shrink_narrower_columns() {
-        let shrunk = shrink_robot();
-        let orig_max = BANNER_ROBOT.iter().map(|r| r.len()).max().unwrap_or(0);
-        let shrunk_max = shrunk.iter().map(|(_, s)| s.len()).max().unwrap_or(0);
+    fn image_clip_correct_cols() {
+        colored::control::set_override(false);
+        let lines = super::super::clip_and_shade_image();
+        let expected = super::super::IMAGE_CLIP_COLS;
+        for (i, line) in lines.iter().enumerate() {
+            let bare = strip_ansi(line);
+            let width = bare.width();
+            assert_eq!(
+                width, expected,
+                "row {i} display width ({width}) must equal IMAGE_CLIP_COLS ({expected})"
+            );
+        }
+        colored::control::unset_override();
+    }
+
+    /// Non-space art characters always emit truecolor escapes.
+    #[test]
+    fn image_shading_emits_truecolor() {
+        // clip_and_shade_image emits raw ANSI truecolor escapes directly
+        // (not via the `colored` global state) so this test needs no override.
+        let lines = super::super::clip_and_shade_image();
+        let any_colored = lines.iter().any(|l| l.contains("\x1B[38;2;"));
         assert!(
-            shrunk_max < orig_max,
-            "shrunk robot cols ({shrunk_max}) must be fewer than original ({orig_max})"
+            any_colored,
+            "clipped image must always emit truecolor escapes for non-space chars"
         );
     }
 
@@ -513,15 +502,11 @@ pub(crate) mod tests {
         colored::control::set_override(false);
         let data = base_data();
         let out = render_two_panel_banner(&data, 120, false).expect("banner");
-        // The right-column content rows are the lines between the first and last.
-        // Inner border chars must not appear inside content rows (only the outer │ starts each line).
         for line in out.lines() {
             let bare = strip_ansi(line);
-            // Skip the top/bottom border lines.
             if bare.starts_with('╭') || bare.starts_with('╰') {
                 continue;
             }
-            // Content rows: strip outer │ on each side, check interior for forbidden chars.
             let inner: String = bare.chars().skip(1).collect();
             let inner_trimmed = inner.trim_end_matches('│');
             for ch in ['╭', '╮', '╰', '╯'] {
@@ -568,7 +553,6 @@ pub(crate) mod tests {
         let data = data_with_commits();
         colored::control::set_override(false);
         let out = render_two_panel_banner(&data, 130, false).expect("wide banner");
-        // Every content row (starts with │) must end with │.
         for line in out.lines() {
             let bare = strip_ansi(line);
             if bare.starts_with('│') {
@@ -638,17 +622,6 @@ pub(crate) mod tests {
         colored::control::unset_override();
     }
 
-    /// ROBOT_GRADIENT has an entry for every row of the original BANNER_ROBOT.
-    #[test]
-    fn robot_gradient_matches_original_row_count() {
-        use super::super::ROBOT_GRADIENT;
-        assert_eq!(
-            ROBOT_GRADIENT.len(),
-            BANNER_ROBOT.len(),
-            "ROBOT_GRADIENT length must match BANNER_ROBOT row count"
-        );
-    }
-
     /// `strip_ansi` correctly removes SGR colour escapes.
     #[test]
     fn strip_ansi_removes_color_codes() {
@@ -667,7 +640,9 @@ pub(crate) mod tests {
         let mut checked = 0usize;
         for line in out.lines() {
             let bare = strip_ansi(line);
-            if bare.is_empty() { continue; }
+            if bare.is_empty() {
+                continue;
+            }
             assert_eq!(bare.width(), 120, "line width mismatch: {bare:?}");
             if bare.starts_with('│') {
                 let chars: Vec<char> = bare.chars().collect();

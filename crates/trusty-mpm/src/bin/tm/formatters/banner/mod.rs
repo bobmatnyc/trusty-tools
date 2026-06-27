@@ -7,104 +7,117 @@
 //! `print_banner_preview`, `terminal_width`, `detect_memory`, `detect_tool`,
 //! `dirs_config_dir`, `binary_on_path`, `fallback_session_name`,
 //! `normalize_workdir`, `tmux_has_session`. The single-box compositor lives in
-//! the `two_panel` submodule.
+//! the `two_panel` submodule. Image clipping and rust-shading live here.
 //! Test: `launch_banner_*`, `terminal_width_is_positive`,
 //! `normalize_workdir_strips_trailing_slash` in `tests.rs`;
 //! `two_panel_*` in `two_panel::tests`.
 
 pub(crate) mod two_panel;
 
-use colored::Colorize as _;
+// ── Embedded ASCII-art image ──────────────────────────────────────────────────
 
-/// The ASCII-art robot mascot drawn at the top of the launch banner.
+/// Raw ASCII-art image embedded at compile time.
 ///
-/// Why: a recognizable centerpiece gives `tm launch` the same "the tool has
-/// taken over the terminal" feel as claude-mpm's startup screen.
-/// What: a multi-line string-art robot; each line is 45 display columns wide.
-/// Test: `robot_shrink_has_fewer_rows` in `two_panel::tests`.
-pub(crate) const BANNER_ROBOT: &[&str] = &[
-    "                                             ",
-    "                    .}##-                    ",
-    "                    }#+#}                    ",
-    "                   .}#-#}.                   ",
-    "               ^]}#}##+##}#}]^               ",
-    "            ^}}]<^++]#<#]++^^<}}<            ",
-    "          <}]^++++++<#}#<++---+^]}]          ",
-    "        ^}]+--++++++<###<+---+---+<}^        ",
-    "       <}<+---++---+<###<-+--------^}<       ",
-    "      -}<+-+^<<^+---+}##+---+^^<+---^}+      ",
-    "     .]}++<}}<<]}]+-+}##--+]}]<<]}<--]].     ",
-    "   ^#}#]^]].     ^#^-}##-^#<      ]]+]#}#^   ",
-    "   }}]#]<#+       ]]+}#}-]}       -#<]#<}}   ",
-    " ]##}<#]^}^      .}<-<#<.<}-      ^}^<#<}##] ",
-    "<}^}}<#]-^}}-   <#<--<#<--<#<   -}}^-<}^}}+}<",
-    "-#]}}^#]---^]##}^---.^#^-..-^}##]+..-]#^}}]#-",
-    "  +#}^#]-----.----....+..............<#^]#+  ",
-    "   }}^#]-----..--....................<}^}}   ",
-    "   }}<#]--...--........   ........ ..<#^}}   ",
-    "   ]}<#]-....--.........    .........<#^}]   ",
-    "   ^}}#]^^++--------------.-...---++^]#]}^   ",
-    "    }}]]}}}}##}}}}}}}}}}}}}}}}}##}}]]]]}}    ",
-    "    }}+-----<#+     .   .     -#<-.----}]    ",
-    "    -#<-----<}+  ..           -}<-...-<#-    ",
-    "     .}}<+--<#+..             -}<-.-^}}.     ",
-    "        ^}#}##}}}}}}}}}}}}}}}}}##}#}^        ",
-    "                                             ",
-];
+/// Why: shipping the art as a sidecar `.txt` keeps the source file readable
+/// and avoids escaping every special Unicode glyph in a Rust string literal.
+/// What: 46-line × up to 120-col artwork; clipped to the focal figure window
+/// by `clip_and_shade_image`.
+/// Test: `image_embedded_correct_dims` in `two_panel::tests`.
+pub(crate) const BANNER_IMAGE: &str = include_str!("image.txt");
 
-/// Rust-color gradient palette applied row-by-row across the robot art.
-///
-/// Why: a smooth gradient from dark rust (top) through burnt orange (middle)
-/// to amber (lower) turns the monochrome ASCII art into a recognizable brand
-/// color without requiring a terminfo capability beyond 24-bit truecolor.
-/// What: 27-element array of `(r, g, b)` tuples, one per robot row (0–26);
-/// each shrunk row looks up its original index via `colorize_robot_row`.
-/// Test: `robot_gradient_matches_original_row_count` in `two_panel::tests`.
-pub(crate) const ROBOT_GRADIENT: [(u8, u8, u8); 27] = {
-    [
-        (183, 65, 14),
-        (185, 68, 15),
-        (187, 72, 16),
-        (189, 76, 17),
-        (191, 80, 18),
-        (193, 83, 19),
-        (195, 87, 20),
-        (197, 91, 21),
-        (199, 94, 22),
-        (201, 97, 24),
-        (202, 98, 25),
-        (203, 99, 27),
-        (204, 99, 28),
-        (205, 100, 30),
-        (206, 103, 32),
-        (208, 106, 34),
-        (210, 109, 36),
-        (212, 112, 38),
-        (214, 115, 40),
-        (216, 118, 43),
-        (217, 121, 46),
-        (219, 124, 48),
-        (220, 127, 50),
-        (221, 130, 53),
-        (222, 133, 55),
-        (223, 137, 58),
-        (224, 140, 60),
-    ]
-};
+// ── Clip-window constants ─────────────────────────────────────────────────────
 
-/// Colorize a single robot-art row with the rust gradient.
+/// First row to include (0-indexed, inclusive).
+pub(crate) const CLIP_ROW_START: usize = 0;
+/// One-past-the-last row to include (0-indexed, exclusive).
+pub(crate) const CLIP_ROW_END: usize = 34;
+/// First column to include (0-indexed, inclusive).
+pub(crate) const CLIP_COL_START: usize = 9;
+/// One-past-the-last column to include (0-indexed, exclusive).
+pub(crate) const CLIP_COL_END: usize = 61;
+/// Display width of the clipped image in columns.
+pub(crate) const IMAGE_CLIP_COLS: usize = CLIP_COL_END - CLIP_COL_START;
+/// Number of rows in the clipped image.
+pub(crate) const IMAGE_CLIP_ROWS: usize = CLIP_ROW_END - CLIP_ROW_START;
+
+// ── Per-character rust brightness shading ─────────────────────────────────────
+
+/// Map a glyph to its rust-palette RGB triple.
 ///
-/// Why: applying the gradient row-by-row produces a smooth top-to-bottom
-/// color wash without any per-character logic.
-/// What: looks up `(r, g, b)` from [`ROBOT_GRADIENT`] for `row_idx` (clamped
-/// to 26) and applies `colored::Colorize::truecolor` to the line. When color
-/// is disabled (e.g. `NO_COLOR` or non-TTY), `colored` degrades gracefully to
-/// plain text.
-/// Test: `robot_row_colorize_preserves_text`.
-pub(crate) fn colorize_robot_row(row_idx: usize, line: &str) -> String {
-    let idx = row_idx.min(ROBOT_GRADIENT.len() - 1);
-    let (r, g, b) = ROBOT_GRADIENT[idx];
-    line.truecolor(r, g, b).to_string()
+/// Why: dense ink characters should appear lighter (amber) and fine marks
+/// darker (deep rust) so the image reads as a lit 3-D relief.
+/// What: three buckets — dense glyphs → amber `(224,140,60)`,
+/// medium glyphs → mid-rust `(205,100,30)`, light marks → dark rust
+/// `(120,50,10)`, unclassified → base rust `(183,65,14)`.
+/// Test: `image_shading_emits_truecolor` in `two_panel::tests`.
+pub(crate) fn shade_bucket(c: char) -> (u8, u8, u8) {
+    match c {
+        // Dense — heavy ink / filled blocks
+        'I' | '∏' | '♦' | '∇' | '√' | '≥' | '≤' | '█' | '▓' | '▌' | '▐' | '@' | '#' =>
+        {
+            (224, 140, 60) // amber
+        }
+        // Medium — moderate ink
+        'i' | 'l' | '!' | '<' | '>' | '+' | '=' | '/' | '\\' | '≈' | '∫' | '∑' => {
+            (205, 100, 30) // mid rust
+        }
+        // Light — fine marks
+        '.' | ',' | ':' | ';' | '°' | '⋆' | '•' | '◦' | '~' | '-' => {
+            (120, 50, 10) // dark rust
+        }
+        // Unclassified (±, ÷, ×, ∂, ♫, ≠, etc.) — base rust
+        _ => (183, 65, 14),
+    }
+}
+
+/// Clip the ASCII-art image to the focal window and apply per-char rust shading.
+///
+/// Why: the raw image is ~80 cols × 46 rows; clipping to the dense figure
+/// mass gives a ~52 × 34 crop that fits the banner's left column without
+/// downsampling or averaging (native character resolution preserved).
+/// What: slices rows `[CLIP_ROW_START, CLIP_ROW_END)` and chars
+/// `[CLIP_COL_START, CLIP_COL_END)` from `BANNER_IMAGE`; applies
+/// `shade_bucket` per non-space character; pads short lines to `IMAGE_CLIP_COLS`.
+/// Spaces are passed through uncoloured (transparent).  Each row is already
+/// coloured via truecolor escapes; consumers measure display width via
+/// `strip_ansi` + `unicode_width`.
+/// Test: `image_clip_correct_rows`, `image_clip_correct_cols`,
+/// `image_shading_emits_truecolor` in `two_panel::tests`.
+pub(crate) fn clip_and_shade_image() -> Vec<String> {
+    BANNER_IMAGE
+        .lines()
+        .skip(CLIP_ROW_START)
+        .take(IMAGE_CLIP_ROWS)
+        .map(|line| {
+            let chars: Vec<char> = line.chars().collect();
+            let len = chars.len();
+            let col_start = CLIP_COL_START.min(len);
+            let col_end = CLIP_COL_END.min(len);
+
+            let mut row = String::with_capacity(IMAGE_CLIP_COLS * 24);
+            let mut display_cols: usize = 0;
+
+            for &c in &chars[col_start..col_end] {
+                if c == ' ' {
+                    row.push(' ');
+                } else {
+                    // Emit raw truecolor escape directly rather than via the
+                    // `colored` crate so the output is stable regardless of the
+                    // global `colored` override state (which is shared across
+                    // parallel tests and can race). strip_ansi in two_panel.rs
+                    // handles `\x1B[…m` sequences correctly for width math.
+                    let (r, g, b) = shade_bucket(c);
+                    row.push_str(&format!("\x1B[38;2;{r};{g};{b}m{c}\x1B[0m"));
+                }
+                display_cols += 1;
+            }
+            // Pad with spaces to reach IMAGE_CLIP_COLS.
+            for _ in display_cols..IMAGE_CLIP_COLS {
+                row.push(' ');
+            }
+            row
+        })
+        .collect()
 }
 
 /// Query the terminal width in columns, falling back to 80 when unknown.
@@ -188,7 +201,7 @@ pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
 
 /// Print the banner to stdout for preview — no screen-clear, no sleep.
 ///
-/// Why: `tm banner` lets the operator eyeball the colored robot + welcome panel
+/// Why: `tm banner` lets the operator eyeball the colored image + welcome panel
 /// without launching Claude or waiting a full second. Skipping the
 /// `\x1B[2J\x1B[1;1H` clear preserves the operator's scrollback, and the
 /// absence of the 1-second sleep makes iteration fast.

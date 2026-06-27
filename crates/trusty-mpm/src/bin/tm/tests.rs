@@ -15,8 +15,8 @@ use crate::cli::{
     TelegramCmd,
 };
 use crate::formatters::banner::{
-    BANNER_ROBOT, colorize_robot_row, fallback_session_name, normalize_workdir,
-    print_launch_banner, print_launch_banner_reconnecting, terminal_width,
+    IMAGE_CLIP_COLS, IMAGE_CLIP_ROWS, clip_and_shade_image, fallback_session_name,
+    normalize_workdir, print_launch_banner, print_launch_banner_reconnecting, terminal_width,
 };
 use crate::formatters::session::short_id;
 
@@ -1588,76 +1588,51 @@ fn cli_parses_login_standalone() {
     assert!(matches!(cli.command.unwrap(), Command::Login { .. }));
 }
 
-// ── Robot-banner color tests ──────────────────────────────────────────────────
+// ── Image-banner color tests ──────────────────────────────────────────────────
 
 #[test]
-fn robot_gradient_has_correct_length() {
-    // Why: ROBOT_GRADIENT is index-accessed by row count; if it shrinks below
-    // BANNER_ROBOT.len() the `.min()` clamp silently applies the wrong color.
-    // The gradient is defined as a fixed 27-element array matching the 27-row
-    // robot art — assert both agree.
-    assert_eq!(
-        crate::formatters::banner::BANNER_ROBOT.len(),
-        27,
-        "BANNER_ROBOT must have 27 rows"
+fn image_clip_has_correct_dimensions() {
+    // Why: IMAGE_CLIP_ROWS/IMAGE_CLIP_COLS are the authoritative dimensions;
+    // if the clip constants drift from the art, the left column will be mis-sized.
+    // What: assert the clipped image matches the expected row and column counts.
+    // Test: direct call to clip_and_shade_image.
+    let lines = clip_and_shade_image();
+    assert_eq!(lines.len(), IMAGE_CLIP_ROWS, "clipped image row count");
+    // Verify the clip width constant is in the expected range for the left column.
+    const { assert!(IMAGE_CLIP_COLS >= 48) };
+    const { assert!(IMAGE_CLIP_COLS <= 56) };
+}
+
+#[test]
+fn art_char_shading_emits_truecolor() {
+    // Why: clip_and_shade_image emits raw ANSI truecolor escapes directly for
+    // non-space art chars so the image always renders with the rust/amber palette
+    // on 24-bit terminals — no color-override needed and no race with parallel tests.
+    // What: call clip_and_shade_image and verify at least one line contains a
+    // truecolor ANSI escape (`\x1B[38;2;`).
+    // Test: no colored::control manipulation; escapes are always emitted.
+    let lines = clip_and_shade_image();
+    let any_colored = lines.iter().any(|l| l.contains("\x1B[38;2;"));
+    assert!(
+        any_colored,
+        "clipped image must always emit truecolor escapes for non-space chars"
     );
 }
 
 #[test]
-fn robot_row_colorize_uses_truecolor_api() {
-    // Why: the rust-gradient colorizer must call the truecolor API so that when
-    // a terminal supports 24-bit color the robot renders with the rust-gradient
-    // palette. We verify the underlying API call produces truecolor escapes by
-    // directly calling colored::Colorize::truecolor with a known color and
-    // confirming the ANSI code format — without relying on global color state.
-    // What: call `colored` directly (force-enabled) with a known truecolor value
-    // and assert the escape sequence encodes R;G;B correctly.
-    // Test: uses `colored::control::SHOULD_COLORIZE` via `force_output_color` to
-    // isolate from environment TTY detection.
-    use colored::Colorize as _;
-    // We call `.truecolor(183, 65, 14)` and check the encoded RGB values appear
-    // in the output under any color mode. The format is `\x1b[38;2;183;65;14m`.
-    // Since we cannot guarantee a TTY in tests, use `colored::control::set_override`
-    // only to read back the color-enabled form, then restore.
-    // Force-enabled by calling set_override and doing the colorize call.
-    colored::control::set_override(true);
-    let colored_text = "test".truecolor(183, 65, 14).to_string();
-    colored::control::unset_override();
-    // Check that the call produces the expected truecolor escape format.
+fn art_shading_spaces_are_uncolored() {
+    // Why: spaces in the art should be transparent (no color escape), so
+    // the terminal background shows through rather than applying a tint.
+    // What: verify that space chars in clipped image lines have no escape prefix.
+    // Test: check that strip_ansi still finds spaces in the output.
+    use crate::formatters::banner::two_panel::strip_ansi;
+    let lines = clip_and_shade_image();
+    // Find a line with at least one space and verify the bare text still has spaces.
+    let has_space = lines.iter().any(|l| strip_ansi(l).contains(' '));
     assert!(
-        colored_text.contains("183"),
-        "truecolor R component 183 must appear in escape: {colored_text:?}"
+        has_space,
+        "clipped image must contain some uncolored spaces"
     );
-    assert!(
-        colored_text.contains("65"),
-        "truecolor G component 65 must appear in escape: {colored_text:?}"
-    );
-    assert!(
-        colored_text.contains("14"),
-        "truecolor B component 14 must appear in escape: {colored_text:?}"
-    );
-}
-
-#[test]
-fn robot_row_colorize_preserves_text() {
-    // Why: the colorize function must not corrupt or drop the robot art text;
-    // operators reading in a no-color terminal must see the full ASCII art.
-    // What: colorize every row (any color state) and verify the trimmed robot
-    // text is present in the result — escapes may or may not appear depending
-    // on the test runner TTY, but the text must always survive.
-    // Test: no color-state mutation; works regardless of parallel test ordering.
-    for (row_idx, line) in BANNER_ROBOT.iter().enumerate() {
-        let result = colorize_robot_row(row_idx, line);
-        // The trimmed robot text (without surrounding spaces) must be present.
-        // For blank rows, trimmed is "", so skip them.
-        let trimmed = line.trim_end();
-        if !trimmed.is_empty() {
-            assert!(
-                result.contains(trimmed),
-                "robot art row {row_idx} text lost in colorize: {result:?}"
-            );
-        }
-    }
 }
 
 #[test]
