@@ -126,6 +126,48 @@ pub struct ManifestConfig {
     pub ttl_hours: Option<u64>,
 }
 
+/// `[catchup]` section — incremental catch-up runtime (DOC-28 / #1762).
+///
+/// Why: the catch-up runtime is opt-in and its behaviour (which sources to
+/// query, how many items to surface) should be configurable without editing
+/// code. This section provides a persistent, file-based alternative to env vars.
+/// What: boolean and numeric fields controlling the three catch-up sources
+/// (paused sessions, git commits, palace drawers) and the item limits for each.
+/// `auto` enables automatic injection of the catch-up digest when a new
+/// native `tm` session starts.
+/// Test: `config_catchup_defaults_parse`, `config_catchup_section_parses`.
+///
+// CUTOVER BRIDGE — remove post-migration (#1762)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatchupConfig {
+    /// Whether to automatically inject the catch-up digest on session start.
+    ///
+    /// `true` → catch-up is generated and appended as seed context when a new
+    /// `tm sessions start` is executed. `false` → only the manual
+    /// `tm sessions catchup` command triggers a digest.
+    pub auto: bool,
+    /// Whether to include git commit history in the digest.
+    pub include_git: bool,
+    /// Whether to include palace drawer inspection in the digest.
+    pub include_palace: bool,
+    /// Maximum number of recent git commits to surface.
+    pub git_limit: usize,
+    /// Maximum number of recent palace drawers to surface.
+    pub drawer_limit: usize,
+}
+
+impl Default for CatchupConfig {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            include_git: true,
+            include_palace: true,
+            git_limit: 50,
+            drawer_limit: 15,
+        }
+    }
+}
+
 /// `[pm]` section — PM-layer toggles.
 ///
 /// Why: the circuit-breaker and other PM-layer features need user-facing
@@ -206,6 +248,15 @@ pub struct MpmConfig {
     /// [`crate::core::output_style::StyleConfig`].
     #[serde(default)]
     pub style: crate::core::output_style::StyleConfig,
+
+    /// `[catchup]` — incremental catch-up runtime (DOC-28 / #1762).
+    ///
+    /// Absent section → all defaults (auto-inject on, all sources enabled,
+    /// git_limit=50, drawer_limit=15). Present only during the migration
+    /// window.
+    // CUTOVER BRIDGE — remove post-migration (#1762)
+    #[serde(default)]
+    pub catchup: CatchupConfig,
 }
 
 // ──────────────────────────────────────────────
@@ -564,6 +615,41 @@ opus = "claude-opus-4-7"
         assert_eq!(cfg.expand_model_alias("haiku"), "claude-haiku-4-5");
         assert_eq!(cfg.expand_model_alias("sonnet"), "claude-sonnet-4-5");
         assert_eq!(cfg.expand_model_alias("opus"), "claude-opus-4-5");
+    }
+
+    #[test]
+    fn config_catchup_defaults_parse() {
+        // An absent [catchup] section must silently yield the default struct.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = MpmConfig::load(dir.path());
+        assert!(cfg.catchup.auto, "auto defaults to true");
+        assert!(cfg.catchup.include_git, "include_git defaults to true");
+        assert!(
+            cfg.catchup.include_palace,
+            "include_palace defaults to true"
+        );
+        assert_eq!(cfg.catchup.git_limit, 50);
+        assert_eq!(cfg.catchup.drawer_limit, 15);
+    }
+
+    #[test]
+    fn config_catchup_section_parses() {
+        // A full [catchup] section must override all defaults.
+        let dir = tempfile::TempDir::new().unwrap();
+        let toml = r#"
+[catchup]
+auto = false
+include_git = false
+include_palace = true
+git_limit = 25
+drawer_limit = 5
+"#;
+        let cfg = load_from_str(dir.path(), toml);
+        assert!(!cfg.catchup.auto);
+        assert!(!cfg.catchup.include_git);
+        assert!(cfg.catchup.include_palace);
+        assert_eq!(cfg.catchup.git_limit, 25);
+        assert_eq!(cfg.catchup.drawer_limit, 5);
     }
 
     #[test]
