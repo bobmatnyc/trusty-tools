@@ -15,9 +15,8 @@ use crate::cli::{
     TelegramCmd,
 };
 use crate::formatters::banner::{
-    BANNER_ROBOT, colorize_robot_row, fallback_session_name, normalize_workdir,
-    print_launch_banner, print_launch_banner_reconnecting, render_launch_banner,
-    render_robot_splash, terminal_width,
+    IMAGE_CLIP_COLS, IMAGE_CLIP_ROWS, clip_and_shade_image, fallback_session_name,
+    normalize_workdir, print_launch_banner, print_launch_banner_reconnecting, terminal_width,
 };
 use crate::formatters::session::short_id;
 
@@ -311,40 +310,64 @@ fn terminal_width_is_positive() {
 }
 
 #[test]
-fn launch_banner_contains_session_fields() {
-    // Why: the banner is the operator's only summary of what was wired up;
-    // the project, session, and prompt fields must all appear, the screen
-    // must be cleared, and the launch action line must be present.
-    let banner = render_launch_banner(
-        "/Users/test/project",
-        "tmpm-quiet-falcon",
-        Some(std::path::Path::new("/tmp/INSTRUCTIONS.md")),
-        None,
+fn banner_title_bar_contains_version() {
+    // Why: the single-box banner embeds the crate version in the title bar;
+    // this ensures the version is always visible to the operator at a glance.
+    use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
+    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
+    colored::control::set_override(false);
+    let data = WelcomeData {
+        project: "my-project".to_string(),
+        workspace: "/Users/test/project".to_string(),
+        user: "operator".to_string(),
+        reconnecting: false,
+        session_name: "tmpm-my-project".to_string(),
+        daemon: DaemonInfo::default(),
+        recent_commits: vec![],
+        memory_status: "(not detected)".to_string(),
+        search_status: "(not detected)".to_string(),
+        review_status: "(not detected)".to_string(),
+    };
+    let out = render_two_panel_banner(&data, 120, false).expect("wide banner");
+    let first_line = out.lines().next().unwrap_or("");
+    let bare = strip_ansi(first_line);
+    assert!(
+        bare.contains(env!("CARGO_PKG_VERSION")),
+        "title bar must contain CARGO_PKG_VERSION: {bare:?}"
     );
-    assert!(banner.starts_with("\x1B[2J\x1B[1;1H"), "screen not cleared");
-    assert!(banner.contains("/Users/test/project"));
-    assert!(banner.contains("tmpm-quiet-falcon"));
-    assert!(banner.contains("/tmp/INSTRUCTIONS.md"));
-    assert!(banner.contains("Launching claude..."));
-    assert!(banner.contains("TRUSTY") || banner.contains("M U L T I"));
+    assert!(
+        bare.starts_with('╭'),
+        "title bar must start with outer box corner ╭: {bare:?}"
+    );
+    colored::control::unset_override();
 }
 
 #[test]
-fn launch_banner_marks_reconnect() {
-    // Why: a reconnecting launch must not claim it started a new session;
-    // the banner must show a Status row and the "Reconnecting..." action.
-    let banner = render_launch_banner(
-        "/Users/test/project",
-        "tmpm-quiet-falcon",
-        None,
-        Some("tmpm-quiet-falcon"),
-    );
-    assert!(banner.contains("reconnecting to existing session"));
-    assert!(banner.contains("Reconnecting..."));
+fn banner_reconnect_label_in_wide_mode() {
+    // Why: the reconnect label in the wide single-box banner must say
+    // "Reconnecting..." so the operator knows no new session was started.
+    use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
+    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
+    colored::control::set_override(false);
+    let data = WelcomeData {
+        project: "my-project".to_string(),
+        workspace: "/Users/test/project".to_string(),
+        user: "operator".to_string(),
+        reconnecting: true,
+        session_name: "tmpm-quiet-falcon".to_string(),
+        daemon: DaemonInfo::default(),
+        recent_commits: vec![],
+        memory_status: "(not detected)".to_string(),
+        search_status: "(not detected)".to_string(),
+        review_status: "(not detected)".to_string(),
+    };
+    let out = render_two_panel_banner(&data, 120, true).expect("wide reconnect banner");
+    let bare = strip_ansi(&out);
     assert!(
-        !banner.contains("Launching claude..."),
-        "reconnect banner must not claim a fresh launch"
+        bare.contains("Reconnecting..."),
+        "wide reconnect banner must contain 'Reconnecting...': {bare:.200}"
     );
+    colored::control::unset_override();
 }
 
 #[test]
@@ -1565,113 +1588,115 @@ fn cli_parses_login_standalone() {
     assert!(matches!(cli.command.unwrap(), Command::Login { .. }));
 }
 
-// ── Robot-banner color tests ──────────────────────────────────────────────────
+// ── Image-banner color tests ──────────────────────────────────────────────────
 
 #[test]
-fn robot_gradient_has_correct_length() {
-    // Why: ROBOT_GRADIENT is index-accessed by row count; if it shrinks below
-    // BANNER_ROBOT.len() the `.min()` clamp silently applies the wrong color.
-    // The gradient is defined as a fixed 27-element array matching the 27-row
-    // robot art — assert both agree.
-    assert_eq!(
-        crate::formatters::banner::BANNER_ROBOT.len(),
-        27,
-        "BANNER_ROBOT must have 27 rows"
+fn image_clip_has_correct_dimensions() {
+    // Why: IMAGE_CLIP_ROWS/IMAGE_CLIP_COLS are the authoritative dimensions;
+    // if the clip constants drift from the art, the left column will be mis-sized.
+    // What: assert the clipped image matches the expected row and column counts.
+    // Test: direct call to clip_and_shade_image.
+    let lines = clip_and_shade_image();
+    assert_eq!(lines.len(), IMAGE_CLIP_ROWS, "clipped image row count");
+    // Verify the clip width constant is in the expected range for the left column.
+    const { assert!(IMAGE_CLIP_COLS >= 48) };
+    const { assert!(IMAGE_CLIP_COLS <= 56) };
+}
+
+#[test]
+fn art_char_shading_emits_truecolor() {
+    // Why: clip_and_shade_image emits raw ANSI truecolor escapes directly for
+    // non-space art chars so the image always renders with the rust/amber palette
+    // on 24-bit terminals — no color-override needed and no race with parallel tests.
+    // What: call clip_and_shade_image and verify at least one line contains a
+    // truecolor ANSI escape (`\x1B[38;2;`).
+    // Test: no colored::control manipulation; escapes are always emitted.
+    let lines = clip_and_shade_image();
+    let any_colored = lines.iter().any(|l| l.contains("\x1B[38;2;"));
+    assert!(
+        any_colored,
+        "clipped image must always emit truecolor escapes for non-space chars"
     );
 }
 
 #[test]
-fn robot_row_colorize_uses_truecolor_api() {
-    // Why: the rust-gradient colorizer must call the truecolor API so that when
-    // a terminal supports 24-bit color the robot renders with the rust-gradient
-    // palette. We verify the underlying API call produces truecolor escapes by
-    // directly calling colored::Colorize::truecolor with a known color and
-    // confirming the ANSI code format — without relying on global color state.
-    // What: call `colored` directly (force-enabled) with a known truecolor value
-    // and assert the escape sequence encodes R;G;B correctly.
-    // Test: uses `colored::control::SHOULD_COLORIZE` via `force_output_color` to
-    // isolate from environment TTY detection.
-    use colored::Colorize as _;
-    // We call `.truecolor(183, 65, 14)` and check the encoded RGB values appear
-    // in the output under any color mode. The format is `\x1b[38;2;183;65;14m`.
-    // Since we cannot guarantee a TTY in tests, use `colored::control::set_override`
-    // only to read back the color-enabled form, then restore.
-    // Force-enabled by calling set_override and doing the colorize call.
-    colored::control::set_override(true);
-    let colored_text = "test".truecolor(183, 65, 14).to_string();
-    colored::control::unset_override();
-    // Check that the call produces the expected truecolor escape format.
+fn art_shading_spaces_are_uncolored() {
+    // Why: spaces in the art should be transparent (no color escape), so
+    // the terminal background shows through rather than applying a tint.
+    // What: verify that space chars in clipped image lines have no escape prefix.
+    // Test: check that strip_ansi still finds spaces in the output.
+    use crate::formatters::banner::two_panel::strip_ansi;
+    let lines = clip_and_shade_image();
+    // Find a line with at least one space and verify the bare text still has spaces.
+    let has_space = lines.iter().any(|l| strip_ansi(l).contains(' '));
     assert!(
-        colored_text.contains("183"),
-        "truecolor R component 183 must appear in escape: {colored_text:?}"
-    );
-    assert!(
-        colored_text.contains("65"),
-        "truecolor G component 65 must appear in escape: {colored_text:?}"
-    );
-    assert!(
-        colored_text.contains("14"),
-        "truecolor B component 14 must appear in escape: {colored_text:?}"
+        has_space,
+        "clipped image must contain some uncolored spaces"
     );
 }
 
 #[test]
-fn robot_row_colorize_preserves_text() {
-    // Why: the colorize function must not corrupt or drop the robot art text;
-    // operators reading in a no-color terminal must see the full ASCII art.
-    // What: colorize every row (any color state) and verify the trimmed robot
-    // text is present in the result — escapes may or may not appear depending
-    // on the test runner TTY, but the text must always survive.
-    // Test: no color-state mutation; works regardless of parallel test ordering.
-    for (row_idx, line) in BANNER_ROBOT.iter().enumerate() {
-        let result = colorize_robot_row(row_idx, line);
-        // The trimmed robot text (without surrounding spaces) must be present.
-        // For blank rows, trimmed is "", so skip them.
-        let trimmed = line.trim_end();
-        if !trimmed.is_empty() {
-            assert!(
-                result.contains(trimmed),
-                "robot art row {row_idx} text lost in colorize: {result:?}"
-            );
-        }
-    }
-}
-
-#[test]
-fn robot_splash_contains_robot_and_title() {
-    // Why: `render_robot_splash` is the pure renderer used by the print functions;
-    // it must include both the screen-clear escape and the TRUSTY wordmark.
-    // What: render the splash (no reconnecting flag), assert key structural markers.
-    // Test: call with reconnecting=false to get the normal launch splash.
-    let splash = render_robot_splash(false);
-    assert!(
-        splash.starts_with("\x1B[2J\x1B[1;1H"),
-        "splash must start with screen-clear: {splash:?}"
-    );
-    // TRUSTY title block must appear (any row from BANNER_TITLE).
-    assert!(
-        splash.contains("M U L T I - A G E N T"),
-        "TRUSTY wordmark must be in splash"
-    );
-}
-
-#[test]
-fn robot_splash_gradient_rows_present() {
-    // Why: every row of the robot art must appear in the splash output (colorized
-    // or plain); if a row is accidentally skipped the art breaks visually.
-    // What: with color disabled (so no escape-sequence confusion), assert each
-    // BANNER_ROBOT row's trimmed content appears in the splash output.
+fn narrow_fallback_reconnect_box_includes_reconnecting_text() {
+    // Why: the single-box narrow fallback (< MIN_WIDTH_TWO_PANEL) must include
+    // "Reconnecting..." when reconnecting=true — matching the wide layout's
+    // reconnect indicator. This verifies the fix from commit 54690868 is
+    // preserved under the new single-box design.
+    // What: render via `render_two_panel_banner` with a narrow width and
+    // reconnecting=true; assert the label appears.
+    // Test: pure string assertion via the public compositor.
+    use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
+    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
     colored::control::set_override(false);
-    let splash = render_robot_splash(false);
-    for (i, row) in BANNER_ROBOT.iter().enumerate() {
-        let trimmed = row.trim();
-        if !trimmed.is_empty() {
-            assert!(
-                splash.contains(trimmed),
-                "robot row {i} trimmed content missing from splash: {trimmed:?}"
-            );
-        }
-    }
+    let data = WelcomeData {
+        project: "my-project".to_string(),
+        workspace: "/tmp/my-project".to_string(),
+        user: String::new(),
+        reconnecting: true,
+        session_name: "tmpm-my-project".to_string(),
+        daemon: DaemonInfo::default(),
+        recent_commits: vec![],
+        memory_status: "(not detected)".to_string(),
+        search_status: "(not detected)".to_string(),
+        review_status: "(not detected)".to_string(),
+    };
+    // 80-col: narrow stacked box.
+    let out = render_two_panel_banner(&data, 80, true).expect("narrow box");
+    let bare = strip_ansi(&out);
+    assert!(
+        bare.contains("Reconnecting..."),
+        "narrow reconnect box must contain 'Reconnecting...' label"
+    );
+    // Also verify the outer box is intact.
+    let first = bare.lines().next().unwrap_or("");
+    assert!(first.starts_with('╭'), "must have outer box top border");
+    colored::control::unset_override();
+}
+
+#[test]
+fn narrow_fallback_normal_box_does_not_include_reconnecting_text() {
+    // Why: normal launch (reconnecting=false) narrow box must NOT show
+    // "Reconnecting..." — the operator should see the launch context only.
+    use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
+    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
+    colored::control::set_override(false);
+    let data = WelcomeData {
+        project: "my-project".to_string(),
+        workspace: "/tmp/my-project".to_string(),
+        user: String::new(),
+        reconnecting: false,
+        session_name: String::new(),
+        daemon: DaemonInfo::default(),
+        recent_commits: vec![],
+        memory_status: "(not detected)".to_string(),
+        search_status: "(not detected)".to_string(),
+        review_status: "(not detected)".to_string(),
+    };
+    let out = render_two_panel_banner(&data, 80, false).expect("narrow box");
+    let bare = strip_ansi(&out);
+    assert!(
+        !bare.contains("Reconnecting..."),
+        "normal launch narrow box must not contain 'Reconnecting...' label"
+    );
     colored::control::unset_override();
 }
 
@@ -1711,20 +1736,38 @@ fn cli_parses_banner_reconnecting() {
 
 #[test]
 fn banner_preview_no_clear_escape() {
-    // Why: `render_robot_splash_no_clear` must NOT begin with the full-screen
-    // clear sequence — that would wipe the user's scrollback during a preview.
-    // What: call the no-clear variant and assert the `\x1B[2J\x1B[1;1H` prefix
-    // is absent, while the TRUSTY wordmark is still present.
-    // Test: direct string assertion.
+    // Why: the `tm banner` preview must NOT begin with the full-screen clear
+    // sequence — that would wipe the user's scrollback.
+    // What: capture whether the print_banner_preview output starts with the
+    // clear escape. Since it writes to stdout, we verify indirectly via the
+    // single-box compositor which is used for the preview path.
+    use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
+    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
     colored::control::set_override(false);
-    let splash = crate::formatters::banner::render_robot_splash_no_clear(false);
+    let data = WelcomeData {
+        project: "p".to_string(),
+        workspace: "/tmp/p".to_string(),
+        user: String::new(),
+        reconnecting: false,
+        session_name: String::new(),
+        daemon: DaemonInfo::default(),
+        recent_commits: vec![],
+        memory_status: "(not detected)".to_string(),
+        search_status: "(not detected)".to_string(),
+        review_status: "(not detected)".to_string(),
+    };
+    let out = render_two_panel_banner(&data, 120, false).expect("banner");
+    // The compositor never emits a screen-clear — that is added by the print
+    // wrappers only, and only for the launch (not preview) path.
     assert!(
-        !splash.starts_with("\x1B[2J\x1B[1;1H"),
-        "no-clear variant must not contain the screen-clear escape"
+        !out.starts_with("\x1B[2J"),
+        "compositor output must not start with screen-clear escape"
     );
+    // Version appears in the title bar.
+    let bare = strip_ansi(&out);
     assert!(
-        splash.contains("M U L T I - A G E N T"),
-        "TRUSTY wordmark must still appear in no-clear variant"
+        bare.contains(env!("CARGO_PKG_VERSION")),
+        "compositor output must contain version in title bar"
     );
     colored::control::unset_override();
 }

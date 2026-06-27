@@ -54,11 +54,13 @@ pub(crate) fn render_welcome_panel(data: &WelcomeData) -> String {
 /// Build all right-column rows for the welcome panel.
 ///
 /// Why: separating row construction from box-drawing keeps each part small
-/// and independently testable.
+/// and independently testable. Also consumed by the two-panel compositor
+/// (`banner::two_panel`) to populate the right panel without re-implementing
+/// the row-building logic.
 /// What: returns rows in display order: header, project/workspace, optional
 /// reconnecting, optional commit section, service section, commands section.
-/// Test: covered by `render_welcome_panel` tests.
-fn build_rows(data: &WelcomeData) -> Vec<String> {
+/// Test: covered by `render_welcome_panel` tests; `two_panel_compose_alignment`.
+pub(crate) fn build_rows(data: &WelcomeData) -> Vec<String> {
     let version = env!("CARGO_PKG_VERSION");
     let workspace = super::abbreviate_home(&data.workspace);
 

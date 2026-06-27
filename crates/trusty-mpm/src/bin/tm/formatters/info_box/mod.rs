@@ -11,7 +11,7 @@
 //! backward-compat `info_box_renders_*` in the inline tests below.
 
 mod probes;
-mod render;
+pub(crate) mod render;
 
 use std::path::Path;
 use std::time::Duration;
@@ -205,26 +205,6 @@ pub(crate) fn print_welcome_panel(
     std::thread::sleep(Duration::from_secs(1));
 }
 
-/// Print the welcome panel to stdout and flush — without the 1-second sleep.
-///
-/// Why: `tm banner` preview renders the same panel as the launch path but
-/// must exit immediately so the operator can iterate quickly. Factoring out
-/// the no-sleep variant avoids duplicating the gather+render logic and keeps
-/// the sleep strictly inside `print_welcome_panel` (the launch path).
-/// What: calls `gather_welcome_data` + `render_welcome_panel`, prints to
-/// stdout, flushes, and returns — no sleep.
-/// Test: `banner_preview_does_not_panic` in `tests.rs`.
-pub(crate) fn print_welcome_panel_no_sleep(
-    workdir: &str,
-    session_name: &str,
-    reconnecting: bool,
-    daemon: DaemonInfo,
-) {
-    let data = gather_welcome_data(workdir, session_name, reconnecting, daemon);
-    print!("{}", render::render_welcome_panel(&data));
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-}
-
 /// Backward-compatible alias — calls `print_welcome_panel`.
 ///
 /// Why: existing call sites in `launch.rs` and `guided.rs` use `print_info_box`;
@@ -295,6 +275,20 @@ fn read_lock_addr() -> Option<String> {
     }
     let _ = pid;
     addr
+}
+
+// ── Two-panel compositor bridge ───────────────────────────────────────────────
+
+/// Return the welcome-panel content rows without drawing a box frame.
+///
+/// Why: the two-panel banner compositor (`banner::two_panel`) needs the raw
+/// row strings to fill the right panel at the compositor-determined width,
+/// without the fixed-width `╭─╮` box that `render_welcome_panel` draws.
+/// What: delegates to `render::build_rows(data)` — the same row builder used
+/// by `render_welcome_panel`, so content is identical in both layouts.
+/// Test: `two_panel_compose_alignment` in `banner::two_panel::tests`.
+pub(crate) fn render_info_box_rows(data: &WelcomeData) -> Vec<String> {
+    render::build_rows(data)
 }
 
 // ── Backward-compat render wrapper ────────────────────────────────────────────
