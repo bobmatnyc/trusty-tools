@@ -9,6 +9,7 @@
 //! Test: each module has its own unit tests; integration coverage lives in
 //! `tests.rs`.
 
+pub(crate) mod banner;
 pub(crate) mod daemon;
 pub(crate) mod guided;
 pub(crate) mod install;

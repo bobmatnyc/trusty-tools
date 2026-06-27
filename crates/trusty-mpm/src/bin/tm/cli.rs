@@ -643,6 +643,23 @@ pub(crate) enum Command {
     /// daemon, cost), exits 0. Missing or invalid fields degrade gracefully.
     /// Test: `cli_parses_statusline` in `tests.rs`.
     Statusline,
+
+    /// Preview the launch banner in the current terminal without starting Claude.
+    ///
+    /// Why: operators and developers need a way to eyeball the colored robot
+    /// art, TRUSTY wordmark, and rich welcome panel without running a full
+    /// `tm launch` session. The `--reconnecting` flag renders the alternate
+    /// reconnect variant (same banner but with the reconnecting status row).
+    /// What: renders the robot splash (without the full-screen clear, so
+    /// scrollback is preserved) followed by the info-box welcome panel (without
+    /// the 1-second sleep). Service/daemon data reflects the current environment
+    /// — graceful when the daemon is not running.
+    /// Test: `cli_parses_banner`, `cli_parses_banner_reconnecting` in `tests.rs`.
+    Banner {
+        /// Preview the reconnect variant (shows the "reconnecting" status row).
+        #[arg(long)]
+        reconnecting: bool,
+    },
 }
 
 /// Verbs for the `tm sessctl` SESSCTL control-plane command group (WI-2 #1593).
