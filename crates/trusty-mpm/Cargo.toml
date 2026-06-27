@@ -185,6 +185,11 @@ unicode-width.workspace = true
 # Portable executable lookup on PATH (replaces the non-portable `which` shell-out
 # in the tcode runtime adapter's availability probe — see #1213).
 which.workspace = true
+# SQLite reader for the claude-mpm session-registry.db (DOC-28 cutover bridge,
+# #1762). The bundled feature compiles SQLite from source so there is no system
+# SQLite dependency. All code that reads this DB is annotated with
+# // CUTOVER BRIDGE — remove post-migration (#1762).
+rusqlite = { workspace = true }
 
 # ── Optional dependencies (feature-gated) ────────────────────────────────────
 

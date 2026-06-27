@@ -1395,6 +1395,31 @@ pub(crate) enum SessionAction {
     /// count torn down.
     /// Test: `cli_parses_session_decommission_ephemeral`.
     DecommissionEphemeral,
+    /// Print a cross-format catch-up digest for paused sessions (DOC-28 cutover bridge).
+    ///
+    /// Why: during migration from claude-mpm to trusty-mpm, paused sessions may
+    /// exist in both the legacy JSON format (`.claude-mpm/sessions/`) and the
+    /// native markdown format (`.trusty-mpm/sessions/`). `catchup` merges both
+    /// and renders a work-context digest so the PM can restore full context
+    /// without re-spawning the old tool.
+    /// What: scans the current project (and, with `--all-projects`, every project
+    /// registered in `~/.claude-mpm/session-registry.db`); calls
+    /// `native_session_finder::find_paused_sessions` + `render_resume_context`
+    /// and prints the resulting markdown to stdout.
+    /// The `--full` flag is accepted for forward-compatibility with PR2 (watermark
+    /// logic); for PR1 it forces full history and is otherwise a no-op.
+    /// Test: `cli_parses_session_catchup` in `tests.rs`.
+    ///
+    // CUTOVER BRIDGE — remove post-migration (#1762)
+    Catchup {
+        /// Also enumerate machine-wide projects via the claude-mpm session registry.
+        #[arg(long)]
+        all_projects: bool,
+        /// Force full history mode (watermark logic lands in PR2; accepted now for
+        /// forward-compatibility).
+        #[arg(long)]
+        full: bool,
+    },
     /// Prune managed sessions by state + compact tombstones (#1508).
     ///
     /// Why: ONE tool to (a) tear down ephemeral/stopped sessions and (b) compact

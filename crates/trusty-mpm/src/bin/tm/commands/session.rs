@@ -1,15 +1,20 @@
 //! `session` command handler.
 //!
 //! Why: session lifecycle operations (start, stop, list, clean, info, events,
-//! breakers, pause, resume, run, output, instructions) form a cohesive group
-//! that benefits from a dedicated file.
+//! breakers, pause, resume, catchup, run, output, instructions) form a cohesive
+//! group that benefits from a dedicated file.
 //! What: the `session` dispatcher function and its private helpers
 //! `emit_managed_alias_notice`, `compose_session_instructions`. The managed
 //! verbs (`new`/`ls`/`send`/`answer`/`attach`/`stop`/`resume`/`decommission`)
 //! route through the shared chat-core layer (`commands::managed_route`); the
 //! id-or-name resolution for both managed and project sessions goes through the
-//! one canonical `client::resolve_target`.
-//! Test: `cli_parses_session_*`, `compose_session_instructions_*` in `tests.rs`.
+//! one canonical `client::resolve_target`. `catchup` is handled by the
+//! DOC-28 cutover bridge in the `catchup` submodule.
+//! Test: `cli_parses_session_*`, `cli_parses_session_catchup`,
+//! `compose_session_instructions_*` in `tests.rs`.
+
+// CUTOVER BRIDGE submodule — remove post-migration (#1762)
+pub(crate) mod catchup;
 
 use serde::Deserialize;
 
@@ -304,6 +309,11 @@ pub(crate) async fn session(
                     println!("{:<24} {:<12} {}", r.agent, state, failures);
                 }
             }
+        }
+        // DOC-28 cutover bridge — dispatches to session/catchup.rs
+        // CUTOVER BRIDGE — remove post-migration (#1762)
+        SessionAction::Catchup { all_projects, full } => {
+            catchup::handle_catchup(all_projects, full).await?;
         }
         SessionAction::Pause { id_or_name, note } => {
             let resp = client
