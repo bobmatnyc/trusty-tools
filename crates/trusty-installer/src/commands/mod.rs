@@ -20,6 +20,7 @@ pub mod install;
 pub mod lifecycle;
 pub mod macos_signing;
 pub mod passthrough;
+pub mod picker;
 pub mod plist_bootstrap;
 pub mod plist_label;
 pub mod port;
