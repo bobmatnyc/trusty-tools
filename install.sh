@@ -299,9 +299,10 @@ maybe_update_path() {
 # Why: Verify integrity before trusting a downloaded binary; never install an
 #      asset whose checksum does not match the published .sha256.
 # What: Download .sha256 + tarball into the temp dir, verify with the detected
-#      sha tool, then extract the `tctl` binary into the install dir with exec
-#      permissions.
-# Test: Point at a known release; on match the binary lands in the install dir;
+#      sha tool, then extract the `trusty-installer` primary binary AND the `tctl`
+#      transitional alias (if present in the archive) into the install dir with
+#      exec permissions.
+# Test: Point at a known release; on match both binaries land in the install dir;
 #      corrupt the tarball and confirm verification aborts non-zero.
 download_and_install() {
     _version="$1"
@@ -342,36 +343,44 @@ download_and_install() {
     tar -xzf "${TMP_DIR}/${_archive}" -C "${TMP_DIR}" \
         || die "failed to extract ${_archive}"
 
-    _src_bin="${TMP_DIR}/${_extract_dir}/${BIN}"
-    if [ ! -f "${_src_bin}" ]; then
-        die "expected binary not found in archive: ${_extract_dir}/${BIN}"
-    fi
-
+    # Install each binary from the archive. The primary binary (trusty-installer)
+    # must be present; the transitional alias (tctl) is installed if found in the
+    # archive but is not required — older releases may not include it.
     mkdir -p "${_install_dir}" || die "failed to create install dir ${_install_dir}"
-    _tmp_bin="${_install_dir}/.${BIN}.tmp.$$"
-    if ! install -m 0755 "${_src_bin}" "${_tmp_bin}" 2>/dev/null; then
-        cp "${_src_bin}" "${_tmp_bin}" \
-            || die "failed to copy binary to ${_install_dir}"
-        chmod 0755 "${_tmp_bin}" \
-            || die "failed to set permissions on temp install binary"
-    fi
-    mv "${_tmp_bin}" "${_install_dir}/${BIN}" || {
-        rm -f "${_tmp_bin}"
-        die "failed to move binary into place at ${_install_dir}/${BIN}"
-    }
-
-    say "Installed ${BIN} to ${_install_dir}/${BIN}"
+    for _bin_name in "${BIN}" tctl; do
+        _src_bin="${TMP_DIR}/${_extract_dir}/${_bin_name}"
+        if [ ! -f "${_src_bin}" ]; then
+            if [ "${_bin_name}" = "${BIN}" ]; then
+                die "expected binary not found in archive: ${_extract_dir}/${_bin_name}"
+            else
+                # tctl alias is optional; skip silently if not present.
+                continue
+            fi
+        fi
+        _tmp_bin="${_install_dir}/.${_bin_name}.tmp.$$"
+        if ! install -m 0755 "${_src_bin}" "${_tmp_bin}" 2>/dev/null; then
+            cp "${_src_bin}" "${_tmp_bin}" \
+                || die "failed to copy binary to ${_install_dir}"
+            chmod 0755 "${_tmp_bin}" \
+                || die "failed to set permissions on temp install binary"
+        fi
+        mv "${_tmp_bin}" "${_install_dir}/${_bin_name}" || {
+            rm -f "${_tmp_bin}"
+            die "failed to move binary into place at ${_install_dir}/${_bin_name}"
+        }
+        say "Installed ${_bin_name} to ${_install_dir}/${_bin_name}"
+    done
 }
 
 # ---------------------------------------------------------------------------
 # Post-install bootstrap + notices
 # ---------------------------------------------------------------------------
 
-# Why: tctl bootstraps the rest of the platform; running it completes setup.
+# Why: trusty-installer bootstraps the rest of the platform; running it completes setup.
 #      Use the freshly-installed binary by absolute path so we do not depend
 #      on the (possibly not-yet-updated) PATH.
-# What: Invoke `tctl install` (or `tctl install -y` in non-interactive mode),
-#      then print the macOS Full Disk Access note (macOS only).
+# What: Invoke `trusty-installer install` (or `trusty-installer install -y` in
+#      non-interactive mode), then print the macOS Full Disk Access note (macOS only).
 # Test: Confirm the binary at its absolute path is invoked; in non-interactive
 #      mode the -y flag is passed; on macOS the FDA box is printed.
 post_install() {
@@ -485,8 +494,9 @@ main() {
     say "Version:     ${_version}"
     say "Install dir: ${_install_dir}"
 
-    # Idempotency: if tctl is on PATH and already the target version, skip
-    # download. We still run `tctl install` below (it is itself idempotent).
+    # Idempotency: if trusty-installer is on PATH and already the target version,
+    # skip download. We still run `trusty-installer install` below (it is itself
+    # idempotent).
     _existing="$(command -v "${BIN}" 2>/dev/null || true)"
     _need_install="1"
     if [ "${FORCE_INSTALL}" != "1" ] && [ -n "${_existing}" ]; then

@@ -1,6 +1,6 @@
 # 0006. Name the stack control plane `trusty-controller` (binary `tctl`)
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0013](./0013-rename-trusty-controller-to-trusty-installer.md)
 - **Date:** 2026-06-08
 - **Scope:** Workspace-wide (new crate `trusty-controller`; adds `tctl` to the
   CLAUDE.md abbreviation table; consumed by the entire trusty-controller design

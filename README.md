@@ -191,7 +191,7 @@ Install the full trusty-tools platform with one command (no Rust toolchain requi
 curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh
 ```
 
-This downloads the prebuilt `tctl` controller binary (SHA-256 verified), installs it to `~/.local/bin`, and runs `tctl install` to set up the rest of the platform (search, memory, analyze, review, console).
+This downloads the prebuilt `trusty-installer` binary (SHA-256 verified), installs it to `~/.local/bin`, and runs `trusty-installer install` to set up the rest of the platform (search, memory, analyze, review, console). The `tctl` transitional alias is also installed, so existing muscle-memory commands (`tctl install`, `tctl status`, etc.) continue to work.
 
 **Non-interactive** (CI / scripted):
 ```bash

@@ -132,6 +132,15 @@ impl Default for BootSection {
 /// (see `commands::auto_update`). It only *notifies*; applying always requires
 /// explicit confirmation via `trusty-installer upgrade`.
 ///
+/// **YAML key stability (ADR-0013 back-compat):** The on-disk YAML key is
+/// `controller:` and MUST remain `controller:` to preserve backwards
+/// compatibility with config files written before the `trusty-controller` →
+/// `trusty-installer` rename. Do NOT change the YAML key. The Rust struct name
+/// `ControllerSection` mirrors the key intentionally; renaming the struct would
+/// be a no-op for users but could be done with `#[serde(rename = "controller")]`
+/// if the struct name is ever updated. The serialized key is the contract; the
+/// Rust name is an internal detail.
+///
 /// Test: `super::tests::config_parses_controller`, `super::tests::controller_default_off`.
 #[derive(Clone, Debug, PartialEq, Eq, Default, Deserialize)]
 #[serde(default)]
@@ -158,6 +167,10 @@ pub struct BootConfig {
     /// Override of the §3.3 core-analysis target set (empty = default).
     pub analyze_core_targets: Vec<String>,
     /// Controller-level settings (#1316 auto-update opt-in).
+    ///
+    /// YAML key `controller:` is intentionally retained for backwards
+    /// compatibility with the pre-rename `trusty-controller` config format
+    /// (ADR-0013). Do not change this field name or its serde representation.
     pub controller: ControllerSection,
 }
 

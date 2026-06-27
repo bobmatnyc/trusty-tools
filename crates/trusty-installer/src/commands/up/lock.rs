@@ -1,6 +1,6 @@
-//! System-scope advisory lock for `tctl up` (DOC-12 §3.4 / DOC-3 §4).
+//! System-scope advisory lock for `trusty-installer up` (DOC-12 §3.4 / DOC-3 §4).
 //!
-//! Why: STAGE 0 must serialise concurrent `tctl up` invocations (e.g. a launchd
+//! Why: STAGE 0 must serialise concurrent `trusty-installer up` invocations (e.g. a launchd
 //! boot trigger racing a manual run) so the always-on core is never
 //! double-started. DOC-3 §4 specifies a filesystem advisory lock (`ensure.lock`)
 //! around the system-mutating stages; this is the controller's flock(2)-based

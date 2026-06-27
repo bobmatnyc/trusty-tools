@@ -159,7 +159,14 @@ pub fn run(
     if exclude_self {
         // Exclude both the primary name and the transitional alias binary name
         // so --exclude-self works regardless of which binary the user invoked.
-        selected.retain(|m| m.crate_name != "trusty-installer" && m.binary != "trusty-installer");
+        // Also exclude "tctl" by binary name as belt-and-suspenders: trusty-installer
+        // is not in stable_set(), so this guard would only fire if the alias were
+        // ever added to the set — but we want to be explicit about the intent.
+        selected.retain(|m| {
+            m.crate_name != "trusty-installer"
+                && m.binary != "trusty-installer"
+                && m.binary != "tctl"
+        });
     }
 
     // Build ONE runtime for the whole command: candidate gathering and applying
