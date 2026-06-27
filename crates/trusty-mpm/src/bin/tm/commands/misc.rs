@@ -26,6 +26,19 @@ use crate::types::EventRow;
 /// is what matters; the canonical value used by spawn helpers is `"1"`.
 pub(crate) const SUB_AGENT_ENV: &str = trusty_common::claude_config::CLAUDE_MPM_SUB_AGENT_ENV_VAR;
 
+/// Opt-out environment variable that disables the hook handler entirely.
+///
+/// Why: provides an escape hatch for any environment (CI, SAM deploys, custom
+/// build shells) where the hook must not fire at all — without requiring the
+/// user to uninstall it from `.claude/settings.json`. Sitting alongside the
+/// `SUB_AGENT_ENV` guard makes the two opt-out mechanisms symmetric and
+/// discoverable. Setting this in the build shell's env is sufficient; no
+/// Claude Code restart is required (it is read per-invocation).
+/// What: the literal env var name `"TRUSTY_MPM_DISABLE_HOOKS"`. Presence
+/// (any value) causes the hook handler to short-circuit immediately.
+/// Test: `hook_disable_env_short_circuits` in `tests_behavior_a.rs`.
+pub(crate) const DISABLE_HOOKS_ENV: &str = "TRUSTY_MPM_DISABLE_HOOKS";
+
 /// `status` subcommand — probe daemon health and list sessions.
 ///
 /// Why: the first thing an operator runs to see if the daemon is alive.
@@ -172,17 +185,26 @@ fn status_icon(status: trusty_mpm::core::doctor::CheckStatus) -> &'static str {
 /// nested MPM sub-agents from doubling every tool call in the audit feed, the
 /// very first thing the handler does is check `CLAUDE_MPM_SUB_AGENT`; when
 /// that env var is present the handler exits 0 immediately without contacting
-/// the daemon.
+/// the daemon. `TRUSTY_MPM_DISABLE_HOOKS` provides an additional escape hatch
+/// for any environment (SAM deploys, CI, stripped-PATH build shells) where
+/// the hook must not fire at all.
 /// What: reads the event name from `CLAUDE_HOOK_EVENT` and the session id
 /// from `CLAUDE_SESSION_ID` (both populated by Claude Code; missing values
 /// degrade to placeholders so the daemon still gets a record). POSTs to
-/// `<url>/hooks` with a JSON body and a 2-second timeout. Every failure path
-/// returns `Ok(())` — failing the hook would block the user's prompt.
-/// Test: `cli_parses_hook` covers parse routing; the guard branch is
-/// exercised via the inline `hook_guard_short_circuits` test.
+/// `<url>/hooks` with a 500 ms connect timeout and a 2-second total timeout.
+/// Every failure path returns `Ok(())` — failing the hook would block the
+/// user's prompt.
+/// Test: `cli_parses_hook` covers parse routing; the guard branches are
+/// exercised via `hook_guard_short_circuits` and
+/// `hook_disable_env_short_circuits` in `tests_behavior_a.rs`.
 pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
-    // Guard FIRST so no I/O happens inside MPM-spawned sub-agents.
+    // Guard 1: suppress inside MPM-spawned sub-agents.
     if std::env::var_os(SUB_AGENT_ENV).is_some() {
+        return Ok(());
+    }
+    // Guard 2: universal opt-out for build shells / CI that can't remove the
+    // hook from settings.json without a restart.
+    if std::env::var_os(DISABLE_HOOKS_ENV).is_some() {
         return Ok(());
     }
 
@@ -204,14 +226,37 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         "payload": { "cwd": cwd }
     });
 
+    // Build a hook-specific client with a tight connect timeout so a
+    // pathological OS-level TCP-connect stall never eats into the 2 s
+    // total budget. The shared `client` parameter is used for all other
+    // subcommands; for the hook we build a short-lived client here so
+    // the connect guard applies only to this hot path.
+    let hook_client = match reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(500))
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            // Client build failure is programmer-class; degrade to the
+            // shared client (no connect timeout) rather than blocking.
+            let req = client
+                .post(format!("{url}/hooks"))
+                .timeout(std::time::Duration::from_secs(2))
+                .json(&body)
+                .send();
+            let _ = req.await;
+            return Ok(());
+        }
+    };
+
     // Best-effort POST — any failure (daemon down, network blip, malformed
     // url) becomes a silent Ok(()) so Claude Code never sees a non-zero exit.
-    let req = client
+    let _ = hook_client
         .post(format!("{url}/hooks"))
-        .timeout(std::time::Duration::from_secs(2))
         .json(&body)
-        .send();
-    let _ = req.await;
+        .send()
+        .await;
     Ok(())
 }
 
