@@ -4,7 +4,8 @@
 //! cap while retaining full test coverage of the patch_one / hook installation
 //! logic. All tests exercise the same items as before via `use super::*`.
 //! What: tests for patch_one (creates file, idempotency, hook install,
-//! session-start upgrade, legacy-shape upgrade, unrelated key preservation).
+//! session-start upgrade, legacy-shape upgrade, unrelated key preservation,
+//! absolute-path hook commands).
 //! Test: this file is the test suite; run with `cargo test -p trusty-memory`.
 
 use super::*;
@@ -21,7 +22,7 @@ fn patch_one_creates_missing_file() {
     let path = tmp.path().join("settings.json");
     let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
 
-    let outcome = patch_one(&path, &entry).expect("patch ok");
+    let outcome = patch_one(&path, &entry, None).expect("patch ok");
     assert!(outcome.mcp_wrote, "first patch writes the MCP entry");
     assert!(outcome.hook_wrote, "first patch installs the hook");
 
@@ -35,7 +36,8 @@ fn patch_one_creates_missing_file() {
     let hook_entries = value["hooks"][HOOK_EVENT].as_array().unwrap();
     assert_eq!(hook_entries.len(), 1, "exactly one matcher block");
     let inner = hook_entries[0]["hooks"].as_array().unwrap();
-    assert_eq!(inner[0]["command"], HOOK_COMMAND);
+    // With exe=None the command falls back to the bare name.
+    assert_eq!(inner[0]["command"], HOOK_COMMAND_BARE);
     assert_eq!(inner[0]["type"], "command");
     assert_eq!(inner[0]["timeout"], HOOK_TIMEOUT_MS);
 
@@ -49,9 +51,53 @@ fn patch_one_creates_missing_file() {
         "exactly one SessionStart matcher block"
     );
     let ss_inner = ss_entries[0]["hooks"].as_array().unwrap();
-    assert_eq!(ss_inner[0]["command"], INBOX_CHECK_HOOK_COMMAND);
+    assert_eq!(ss_inner[0]["command"], INBOX_CHECK_HOOK_COMMAND_BARE);
     assert_eq!(ss_inner[0]["type"], "command");
     assert_eq!(ss_inner[0]["timeout"], HOOK_TIMEOUT_MS);
+}
+
+/// Why: hooks must embed an absolute binary path so they fire even in
+/// environments where ~/.cargo/bin is not on PATH (closes the claude-mpm
+/// class of bug where a global hook broke a SAM `make deploy`).
+/// What: passes an absolute exe path to `patch_one`, asserts the written
+/// hook commands start with '/' and end with the correct sub-command.
+#[test]
+fn patch_one_installs_hook_with_absolute_path() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("settings.json");
+    let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
+    let fake_exe = std::path::PathBuf::from("/usr/local/bin/trusty-memory");
+
+    let outcome = patch_one(&path, &entry, Some(&fake_exe)).expect("patch ok");
+    assert!(outcome.mcp_wrote);
+    assert!(outcome.hook_wrote);
+
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+    let prompt_cmd = value["hooks"][HOOK_EVENT][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        prompt_cmd.starts_with('/'),
+        "prompt-context command must be absolute, got: {prompt_cmd:?}"
+    );
+    assert!(
+        prompt_cmd.ends_with(" prompt-context"),
+        "prompt-context command must end with ' prompt-context', got: {prompt_cmd:?}"
+    );
+
+    let inbox_cmd = value["hooks"][SESSION_START_HOOK_EVENT][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        inbox_cmd.starts_with('/'),
+        "inbox-check command must be absolute, got: {inbox_cmd:?}"
+    );
+    assert!(
+        inbox_cmd.ends_with(" inbox-check"),
+        "inbox-check command must end with ' inbox-check', got: {inbox_cmd:?}"
+    );
 }
 
 /// Why: regression for issue #99 — when a user has the UserPromptSubmit
@@ -74,7 +120,7 @@ fn patch_one_installs_session_start_hook_when_upgrading() {
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": HOOK_COMMAND,
+                    "command": HOOK_COMMAND_BARE,
                     "timeout": HOOK_TIMEOUT_MS,
                 }]
             }]
@@ -82,7 +128,7 @@ fn patch_one_installs_session_start_hook_when_upgrading() {
     });
     std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
 
-    let outcome = patch_one(&path, &entry).expect("patch ok");
+    let outcome = patch_one(&path, &entry, None).expect("patch ok");
     assert!(!outcome.mcp_wrote);
     assert!(outcome.hook_wrote, "SessionStart hook must be added");
 
@@ -91,11 +137,11 @@ fn patch_one_installs_session_start_hook_when_upgrading() {
     // Existing UserPromptSubmit is preserved exactly.
     let ups = value["hooks"][HOOK_EVENT].as_array().unwrap();
     assert_eq!(ups.len(), 1);
-    assert_eq!(ups[0]["hooks"][0]["command"], HOOK_COMMAND);
+    assert_eq!(ups[0]["hooks"][0]["command"], HOOK_COMMAND_BARE);
     // New SessionStart is present.
     let ss = value["hooks"][SESSION_START_HOOK_EVENT].as_array().unwrap();
     assert_eq!(ss.len(), 1);
-    assert_eq!(ss[0]["hooks"][0]["command"], INBOX_CHECK_HOOK_COMMAND);
+    assert_eq!(ss[0]["hooks"][0]["command"], INBOX_CHECK_HOOK_COMMAND_BARE);
 }
 
 /// Why (issue #126): regression for the realistic upgrade scenario the
@@ -129,14 +175,14 @@ fn patch_one_adds_session_start_when_legacy_user_prompt_submit_has_different_sha
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
-                    "command": HOOK_COMMAND,
+                    "command": HOOK_COMMAND_BARE,
                 }]
             }]
         }
     });
     std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
 
-    let outcome = patch_one(&path, &entry).expect("patch ok");
+    let outcome = patch_one(&path, &entry, None).expect("patch ok");
     assert!(!outcome.mcp_wrote, "MCP entry already canonical");
     assert!(
         outcome.hook_wrote,
@@ -151,7 +197,7 @@ fn patch_one_adds_session_start_when_legacy_user_prompt_submit_has_different_sha
         .as_array()
         .expect("SessionStart array exists");
     assert_eq!(ss.len(), 1, "exactly one SessionStart matcher block");
-    assert_eq!(ss[0]["hooks"][0]["command"], INBOX_CHECK_HOOK_COMMAND);
+    assert_eq!(ss[0]["hooks"][0]["command"], INBOX_CHECK_HOOK_COMMAND_BARE);
     assert_eq!(ss[0]["hooks"][0]["timeout"], HOOK_TIMEOUT_MS);
 
     // UserPromptSubmit: the legacy entry is preserved AND the canonical
@@ -178,11 +224,11 @@ fn patch_one_is_idempotent() {
     let path = tmp.path().join("settings.json");
     let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
 
-    let first = patch_one(&path, &entry).unwrap();
+    let first = patch_one(&path, &entry, None).unwrap();
     assert!(first.mcp_wrote && first.hook_wrote, "first patch writes");
     let after_first = std::fs::read_to_string(&path).unwrap();
 
-    let second = patch_one(&path, &entry).unwrap();
+    let second = patch_one(&path, &entry, None).unwrap();
     assert!(
         !second.mcp_wrote && !second.hook_wrote,
         "second patch is no-op"
@@ -216,7 +262,7 @@ fn patch_one_preserves_unrelated_keys() {
     std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
 
     let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
-    let outcome = patch_one(&path, &entry).expect("patch ok");
+    let outcome = patch_one(&path, &entry, None).expect("patch ok");
     assert!(outcome.mcp_wrote);
     assert!(outcome.hook_wrote);
 
@@ -232,7 +278,7 @@ fn patch_one_preserves_unrelated_keys() {
     assert_eq!(stop[0]["hooks"][0]["command"], "echo bye");
     // And our UserPromptSubmit hook was added.
     let ups = value["hooks"][HOOK_EVENT].as_array().unwrap();
-    assert_eq!(ups[0]["hooks"][0]["command"], HOOK_COMMAND);
+    assert_eq!(ups[0]["hooks"][0]["command"], HOOK_COMMAND_BARE);
 }
 
 /// Why: when the MCP entry is already present but the hook is new (a
@@ -253,7 +299,7 @@ fn patch_one_installs_hook_when_mcp_already_present() {
     });
     std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
 
-    let outcome = patch_one(&path, &entry).expect("patch ok");
+    let outcome = patch_one(&path, &entry, None).expect("patch ok");
     assert!(!outcome.mcp_wrote, "MCP entry already present");
     assert!(outcome.hook_wrote, "hook freshly installed");
 }
@@ -283,7 +329,7 @@ fn patch_one_upgrades_serve_entry_to_serve_stdio() {
     std::fs::write(&path, serde_json::to_string_pretty(&seed).unwrap()).unwrap();
 
     let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
-    let outcome = patch_one(&path, &entry).expect("patch ok");
+    let outcome = patch_one(&path, &entry, None).expect("patch ok");
     assert!(
         outcome.mcp_wrote,
         "old args:[\"serve\"] entry must be rewritten to args:[\"serve\",\"--stdio\"]"

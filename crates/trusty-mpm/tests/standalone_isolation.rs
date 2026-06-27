@@ -193,9 +193,14 @@ fn hook_triad_written_to_settings_json() {
     let pre_cmd = pre[0]["hooks"][0]["command"]
         .as_str()
         .expect("PreToolUse hook must have a 'command' field");
-    assert_eq!(
-        pre_cmd, "trusty-mpm hook",
-        "PreToolUse hook command must be 'trusty-mpm hook'"
+    // The command is now emitted as an absolute binary path followed by " hook"
+    // (to avoid PATH dependency in stripped-env build shells). In test context
+    // `current_exe()` returns the test binary rather than `trusty-mpm`, so we
+    // assert the structural invariant: ends with " hook" and is a non-empty
+    // string — the binary name is irrelevant to the hook-dispatch mechanism.
+    assert!(
+        pre_cmd.ends_with(" hook") && !pre_cmd.is_empty(),
+        "PreToolUse hook command must end with ' hook', got: {pre_cmd:?}"
     );
     // PreToolUse is synchronous: no async:true.
     let pre_async = pre[0]["hooks"][0].get("async");
@@ -216,9 +221,9 @@ fn hook_triad_written_to_settings_json() {
     let post_cmd = post[0]["hooks"][0]["command"]
         .as_str()
         .expect("PostToolUse hook must have a 'command' field");
-    assert_eq!(
-        post_cmd, "trusty-mpm hook",
-        "PostToolUse hook command must be 'trusty-mpm hook'"
+    assert!(
+        post_cmd.ends_with(" hook"),
+        "PostToolUse hook command must end with ' hook', got: {post_cmd:?}"
     );
     // PostToolUse is async to avoid blocking Claude on daemon ingestion.
     let post_async = post[0]["hooks"][0]
@@ -239,9 +244,9 @@ fn hook_triad_written_to_settings_json() {
     let stop_cmd = stop[0]["hooks"][0]["command"]
         .as_str()
         .expect("Stop hook must have a 'command' field");
-    assert_eq!(
-        stop_cmd, "trusty-mpm hook",
-        "Stop hook command must be 'trusty-mpm hook'"
+    assert!(
+        stop_cmd.ends_with(" hook"),
+        "Stop hook command must end with ' hook', got: {stop_cmd:?}"
     );
 }
 

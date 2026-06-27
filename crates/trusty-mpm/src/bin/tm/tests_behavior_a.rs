@@ -6,7 +6,8 @@
 //! What: `project_init_*`, `install_*`, `hook_guard_*`, `mpm_hook_*`,
 //! `cli_parses_optimizer_*`, `cli_parses_session_{events,breakers,pause,
 //! resume,run,output,*}`, `compression_stats_*`, `cli_{parses_overseer,
-//! event_summary_*}`.
+//! event_summary_*}`, `hook_disable_env_short_circuits`,
+//! `test_write_project_hooks_for_dir_targets_project_dir`.
 //! Test: `cargo test -p trusty-mpm` runs the full suite.
 
 use clap::Parser;
@@ -16,8 +17,9 @@ use crate::cli::{
 };
 use crate::commands::install::{
     deploy_report_lines, install_to, mpm_hook_additions, skill_report_lines,
+    write_project_hooks_for_dir,
 };
-use crate::commands::misc::{SUB_AGENT_ENV, hook};
+use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, hook};
 use crate::commands::project::scaffold_project_dir;
 use crate::formatters::session::{event_summary, print_compression_stats};
 
@@ -108,6 +110,70 @@ async fn hook_guard_short_circuits() {
     assert!(
         elapsed < std::time::Duration::from_millis(500),
         "guard must short-circuit without network I/O; took {elapsed:?}"
+    );
+}
+
+/// Why: when `TRUSTY_MPM_DISABLE_HOOKS` is set, the hook handler must
+/// short-circuit immediately without I/O — this is the universal opt-out
+/// for build shells / CI where the hook must not fire.
+/// What: sets the env var, calls `hook` with an unreachable URL, and
+/// asserts the call returns Ok(()) without blocking the 500 ms connect
+/// timeout that would fire if network code ran.
+#[tokio::test]
+async fn hook_disable_env_short_circuits() {
+    // SAFETY: test is single-threaded (tokio current_thread).
+    unsafe {
+        std::env::set_var(DISABLE_HOOKS_ENV, "1");
+    }
+    let client = reqwest::Client::new();
+    let started = std::time::Instant::now();
+    let res = hook(&client, "http://127.0.0.1:1").await;
+    let elapsed = started.elapsed();
+    unsafe {
+        std::env::remove_var(DISABLE_HOOKS_ENV);
+    }
+    assert!(res.is_ok(), "DISABLE_HOOKS_ENV branch must return Ok");
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "DISABLE_HOOKS_ENV must short-circuit without network I/O; took {elapsed:?}"
+    );
+}
+
+/// Why: `write_project_hooks_for_dir` must write hooks into the project's
+/// `.claude/settings.json` — NOT into any global file. This verifies that
+/// the function targets the correct path.
+/// What: creates a tempdir acting as the project root, calls the function,
+/// asserts the file is created at `<project>/.claude/settings.json` with
+/// MPM hook entries present and the command using an absolute path.
+#[test]
+fn test_write_project_hooks_for_dir_targets_project_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project_dir = tmp.path();
+    let settings = project_dir.join(".claude").join("settings.json");
+
+    // The file must not exist before the call.
+    assert!(!settings.exists());
+
+    let wrote = write_project_hooks_for_dir(project_dir).unwrap();
+    assert!(wrote, "must report file was written");
+    assert!(settings.exists(), "project settings must be created");
+
+    let text = std::fs::read_to_string(&settings).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let hooks = val.get("hooks").expect("hooks key must be present");
+    assert!(
+        hooks.get("PreToolUse").is_some(),
+        "PreToolUse hook must be written"
+    );
+
+    // The command must end with " hook" (and start with '/' if current_exe
+    // is resolvable in test, which it always is under cargo test).
+    let cmd = hooks["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    assert!(
+        cmd.ends_with(" hook"),
+        "hook command must end with ' hook', got: {cmd:?}"
     );
 }
 

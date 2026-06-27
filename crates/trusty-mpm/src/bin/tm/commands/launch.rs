@@ -67,6 +67,18 @@ pub(crate) async fn launch(
         eprintln!("warning: session preparation failed: {err}");
     }
 
+    // 2b. Write project-scoped MPM hooks into <project>/.claude/settings.json.
+    //     Project-scoped hooks fire only inside this project directory so they
+    //     cannot break unrelated build environments or foreign repos. This mirrors
+    //     trusty-memory's pattern: strip global hooks first, then write local ones.
+    //     Both steps are best-effort — a failure is logged but never fatal.
+    if let Err(e) = crate::commands::install::remove_global_trusty_mpm_hooks() {
+        eprintln!("warning: could not remove global MPM hooks: {e:#}");
+    }
+    if let Err(e) = crate::commands::install::write_project_hooks_for_dir(&path) {
+        eprintln!("warning: could not write project-scoped MPM hooks: {e:#}");
+    }
+
     // 3. Register the session with the daemon. The tmux name is derived from
     //    the project folder (`tmpm-<folder>`); we send it so the daemon's
     //    registry stays consistent with the tmux session we create below. When

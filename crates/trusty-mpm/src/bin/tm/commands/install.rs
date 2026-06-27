@@ -4,7 +4,8 @@
 //! assembles the PM prompt, deploys agents and skills, and wires Claude Code
 //! hooks — and benefits from its own file so it stays reviewable.
 //! What: `install`, `install_claude_hooks`, `mpm_hook_additions`, `install_to`,
-//! `deploy_report_lines`, `skill_report_lines`.
+//! `deploy_report_lines`, `skill_report_lines`, `remove_global_trusty_mpm_hooks`,
+//! `write_project_hooks_for_dir`.
 //! Test: `install_writes_all_artifacts`, `install_skips_existing_without_force`,
 //! `install_claude_hooks_is_idempotent`, `install_then_deploy_deploys_skills`.
 
@@ -75,7 +76,8 @@ pub(crate) fn install(force: bool) -> anyhow::Result<()> {
 
     // Wire the MPM lifecycle hooks into every Claude settings file on the
     // machine. Per-file failures are non-fatal so one bad file does not sink
-    // the whole install.
+    // the whole install. Uses absolute-path hook commands resolved from the
+    // currently-running binary so hooks fire even in stripped-PATH environments.
     if let Err(e) = install_claude_hooks() {
         eprintln!("warning: failed to install Claude Code hooks: {e:#}");
     }
@@ -90,10 +92,12 @@ pub(crate) fn install(force: bool) -> anyhow::Result<()> {
 /// Why: without these hooks the daemon never receives Claude Code lifecycle
 /// events, so the circuit breaker, audit log, and dashboard all sit blind.
 /// `tm install` is the canonical point to wire them up — running it twice
-/// must produce identical files (idempotency requirement).
+/// must produce identical files (idempotency requirement). The hook command
+/// is emitted as an absolute path to the running binary so it fires even in
+/// build shells where `~/.cargo/bin` is not on `$PATH`.
 /// What: discovers every `.claude/settings*.json` under `$HOME` via
 /// [`trusty_common::claude_config::discover_claude_settings`], loads each
-/// one, deep-merges the MPM hook block using
+/// one, deep-merges the MPM hook block (with absolute binary path) using
 /// [`trusty_common::claude_config::merge_hook_entries`], and writes the
 /// result back atomically when it differs from disk. Falls back to creating
 /// `~/.claude/settings.json` when no settings files exist. Returns a count
@@ -113,7 +117,9 @@ pub(crate) fn install_claude_hooks() -> anyhow::Result<usize> {
         home.display()
     );
 
-    let additions = mpm_hook_additions();
+    // Resolve the absolute binary path once at install time.
+    let exe = trusty_mpm::core::standalone::hooks::resolve_current_exe();
+    let additions = mpm_hook_additions_with_exe(exe.as_deref());
     let files = discover_claude_settings(&home, default_settings_max_depth());
 
     let target_files: Vec<std::path::PathBuf> = if files.is_empty() {
@@ -189,6 +195,40 @@ pub(crate) fn install_claude_hooks() -> anyhow::Result<usize> {
     Ok(changed)
 }
 
+/// Strip trusty-mpm global hook entries from all discovered Claude settings files.
+///
+/// Why: `tm install` previously wrote hooks into every discovered global
+/// settings file. After switching to project-scoped hooks, these global
+/// entries must be cleaned up so hooks no longer fire in unrelated projects
+/// (mirrors `remove_global_trusty_memory_hooks` in trusty-memory). Non-fatal
+/// per-file errors are swallowed so one bad file does not abort cleanup.
+/// What: delegates to
+/// [`trusty_mpm::core::standalone::hooks::remove_global_trusty_mpm_hooks`].
+/// Returns the count of files modified.
+/// Test: see `hooks.rs` tests for the underlying logic; this is a thin
+/// re-export.
+pub(crate) fn remove_global_trusty_mpm_hooks() -> anyhow::Result<usize> {
+    trusty_mpm::core::standalone::hooks::remove_global_trusty_mpm_hooks()
+}
+
+/// Write project-scoped MPM hooks into `<project_dir>/.claude/settings.json`.
+///
+/// Why: project-scoped hooks fire only inside the specific project directory,
+/// so they cannot break unrelated build environments or foreign repos —
+/// unlike global hooks. This mirrors trusty-memory's approach of writing
+/// project-local hook entries at session start.
+/// What: resolves `<project_dir>/.claude/settings.json` and calls
+/// [`trusty_mpm::core::standalone::hooks::write_project_hooks`] with the
+/// absolute exe path from `current_exe()`. Returns `true` if the file was
+/// updated (new or changed), `false` when already configured.
+/// Test: `test_write_project_hooks_for_dir_targets_project_dir` in
+/// `tests_behavior_a.rs`.
+pub(crate) fn write_project_hooks_for_dir(project_dir: &std::path::Path) -> anyhow::Result<bool> {
+    let settings_path = project_dir.join(".claude").join("settings.json");
+    let exe = trusty_mpm::core::standalone::hooks::resolve_current_exe();
+    trusty_mpm::core::standalone::hooks::write_project_hooks(&settings_path, exe.as_deref())
+}
+
 /// Build the MPM lifecycle hook additions JSON block.
 ///
 /// Why: every call site (the install handler and its unit test) needs the
@@ -198,10 +238,25 @@ pub(crate) fn install_claude_hooks() -> anyhow::Result<usize> {
 /// [`trusty_mpm::core::standalone::hooks::mpm_hook_additions`] so the managed
 /// driver (`ensure_global_config_dir`) and the install path both use the same
 /// literal (WI-3).
-/// What: delegates to the shared library function.
+/// What: delegates to the shared library function with no exe override.
 /// Test: covered indirectly by `install_claude_hooks_is_idempotent`.
+/// Only used in tests (idempotency / merge-shape tests in `tests_behavior_a.rs`).
+#[cfg(test)]
 pub(crate) fn mpm_hook_additions() -> serde_json::Value {
     trusty_mpm::core::standalone::hooks::mpm_hook_additions()
+}
+
+/// Build the MPM hook additions block with an explicit exe path.
+///
+/// Why: `install_claude_hooks` resolves the binary path once and passes it
+/// through so every settings file receives the same absolute command.
+/// What: delegates to
+/// [`trusty_mpm::core::standalone::hooks::mpm_hook_additions_with_exe`].
+/// Test: covered by `install_claude_hooks_is_idempotent`.
+pub(crate) fn mpm_hook_additions_with_exe(
+    exe_override: Option<&std::path::Path>,
+) -> serde_json::Value {
+    trusty_mpm::core::standalone::hooks::mpm_hook_additions_with_exe(exe_override)
 }
 
 /// Render per-file status lines for an agent [`DeployResult`].

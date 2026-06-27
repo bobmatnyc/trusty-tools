@@ -64,25 +64,64 @@ const HOOK_EVENT: &str = "UserPromptSubmit";
 /// settings JSON.
 const SESSION_START_HOOK_EVENT: &str = "SessionStart";
 
-/// Shell command Claude Code invokes for the UserPromptSubmit hook.
+/// Bare fallback for the UserPromptSubmit hook when absolute-path resolution fails.
 ///
-/// Why: routing through the installed `trusty-memory` binary (rather than a
-/// raw curl + jq pipeline) means the hook benefits from the central
-/// `CLAUDE_MPM_SUB_AGENT` guard, the soft-failure semantics, and the
-/// `read_daemon_addr` discovery — none of which can be replicated in a
-/// shell one-liner.
-/// What: the bare command. Claude Code resolves it via PATH; if the user has
-/// installed trusty-memory via `cargo install`, it will be on PATH.
-const HOOK_COMMAND: &str = "trusty-memory prompt-context";
+/// Why: if `current_exe()` is unavailable, we still need a working hook command.
+/// The bare name degrades to PATH-resolution, which is the pre-hardening behaviour.
+/// What: `"trusty-memory prompt-context"`.
+const HOOK_COMMAND_BARE: &str = "trusty-memory prompt-context";
 
-/// Shell command Claude Code invokes for the SessionStart hook (issue #99).
+/// Bare fallback for the SessionStart inbox-check hook.
 ///
-/// Why: the receiver's inter-project inbox is delivered exactly once per
-/// session; `inbox-check` does the daemon round-trip, prints the messages
-/// to stdout (where Claude Code injects them), and atomically marks them
-/// read so the next session does not redeliver.
-/// What: the bare command, found by Claude Code via PATH.
-const INBOX_CHECK_HOOK_COMMAND: &str = "trusty-memory inbox-check";
+/// Why: parallel to `HOOK_COMMAND_BARE` — keeps behaviour working when the
+/// absolute-path resolution is unavailable.
+/// What: `"trusty-memory inbox-check"`.
+const INBOX_CHECK_HOOK_COMMAND_BARE: &str = "trusty-memory inbox-check";
+
+/// Build the `"trusty-memory prompt-context"` command with an optional absolute
+/// binary path prefix.
+///
+/// Why: using the absolute path avoids a PATH lookup at hook fire-time, which
+/// prevents the "hook fails to launch" class of bug in build shells or
+/// stripped-PATH environments (the claude-mpm SAM-deploy pattern). Falls back
+/// to the bare name when the path cannot be resolved.
+/// What: `"<abs-path> prompt-context"` when `exe` is `Some` and absolute;
+/// `HOOK_COMMAND_BARE` otherwise.
+/// Test: `patch_one_installs_hook_with_absolute_path` in `setup_tests.rs`.
+fn hook_command(exe: Option<&std::path::Path>) -> String {
+    match exe {
+        Some(p) if p.is_absolute() => format!("{} prompt-context", p.display()),
+        _ => HOOK_COMMAND_BARE.to_string(),
+    }
+}
+
+/// Build the `"trusty-memory inbox-check"` command with an optional absolute
+/// binary path prefix.
+///
+/// Why: same reasoning as [`hook_command`] — absolute path avoids PATH lookup
+/// at hook fire-time.
+/// What: `"<abs-path> inbox-check"` when `exe` is `Some` and absolute;
+/// `INBOX_CHECK_HOOK_COMMAND_BARE` otherwise.
+/// Test: `patch_one_installs_hook_with_absolute_path` in `setup_tests.rs`.
+fn inbox_check_command(exe: Option<&std::path::Path>) -> String {
+    match exe {
+        Some(p) if p.is_absolute() => format!("{} inbox-check", p.display()),
+        _ => INBOX_CHECK_HOOK_COMMAND_BARE.to_string(),
+    }
+}
+
+/// Resolve and canonicalize the current executable path for use at setup time.
+///
+/// Why: called once during `handle_setup` before any chdir so the path is
+/// stable for the lifetime of the install. The result is threaded through to
+/// [`prompt_context_hook_additions`] and [`merge_prompt_context_hook`].
+/// What: returns `Some(canonicalized_path)` or `None` on failure.
+/// Test: covered indirectly by `patch_one_installs_hook_with_absolute_path`.
+fn resolve_setup_exe() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.canonicalize().ok().or(Some(p)))
+}
 
 /// Hook command timeout in milliseconds.
 ///
@@ -368,6 +407,10 @@ fn patch_claude_settings_phase() -> Result<SettingsPatchSummary> {
         home.display()
     );
 
+    // Resolve the binary path once at the start of the phase so every
+    // settings file gets the same absolute hook command.
+    let exe = resolve_setup_exe();
+
     let entry = mcp_server_entry(MCP_SERVER_KEY, &["serve", "--stdio"]);
     let files = discover_claude_settings(&home, default_settings_max_depth());
 
@@ -378,7 +421,7 @@ fn patch_claude_settings_phase() -> Result<SettingsPatchSummary> {
             "·".dimmed(),
             fallback.display()
         );
-        let outcome = patch_one(&fallback, &entry)?;
+        let outcome = patch_one(&fallback, &entry, exe.as_deref())?;
         return Ok(SettingsPatchSummary {
             mcp_changed: outcome.mcp_wrote as usize,
             hooks_changed: outcome.hook_wrote as usize,
@@ -392,7 +435,7 @@ fn patch_claude_settings_phase() -> Result<SettingsPatchSummary> {
     );
     let mut summary = SettingsPatchSummary::default();
     for path in &files {
-        match patch_one(path, &entry) {
+        match patch_one(path, &entry, exe.as_deref()) {
             Ok(outcome) => {
                 summary.mcp_changed += outcome.mcp_wrote as usize;
                 summary.hooks_changed += outcome.hook_wrote as usize;
@@ -437,13 +480,18 @@ fn patch_claude_settings_phase() -> Result<SettingsPatchSummary> {
 /// reports `(already configured)` on the second pass.
 /// What: calls [`patch_mcp_server`] to upsert the MCP entry, then loads the
 /// resulting file, runs [`merge_hook_entries`] with the trusty-memory hook
-/// additions, and writes the merged JSON back atomically when it differs
-/// from what is already on disk.
+/// additions (with absolute binary path when `exe` is provided), and writes
+/// the merged JSON back atomically when it differs from what is already on disk.
 /// Test: `patch_one_creates_missing_file`, `patch_one_is_idempotent`,
-/// `patch_one_installs_hook`, `patch_one_preserves_unrelated_keys`.
-fn patch_one(path: &Path, entry: &serde_json::Value) -> Result<PatchOutcome> {
+/// `patch_one_installs_hook`, `patch_one_preserves_unrelated_keys`,
+/// `patch_one_installs_hook_with_absolute_path`.
+fn patch_one(
+    path: &Path,
+    entry: &serde_json::Value,
+    exe: Option<&std::path::Path>,
+) -> Result<PatchOutcome> {
     let mcp_wrote = patch_mcp_server(path, MCP_SERVER_KEY, entry)?;
-    let hook_wrote = merge_prompt_context_hook(path)?;
+    let hook_wrote = merge_prompt_context_hook(path, exe)?;
     Ok(PatchOutcome {
         mcp_wrote,
         hook_wrote,
@@ -460,11 +508,16 @@ fn patch_one(path: &Path, entry: &serde_json::Value) -> Result<PatchOutcome> {
 /// Issue #99 added the `SessionStart` block for inter-project inbox
 /// delivery; it shares the same shape and timeout as the prompt-context
 /// hook so existing operators don't have to reason about two policies.
+/// When `exe` is `Some`, the hook commands are emitted as absolute paths so
+/// they fire even in stripped-PATH environments (the claude-mpm SAM pattern).
 /// What: returns a JSON object with both the `UserPromptSubmit` event
 /// (running `prompt-context`) and the `SessionStart` event (running
-/// `inbox-check`).
-/// Test: `patch_one_installs_hook`, `patch_one_installs_session_start_hook`.
-fn prompt_context_hook_additions() -> Value {
+/// `inbox-check`), optionally prefixed with the absolute binary path.
+/// Test: `patch_one_installs_hook`, `patch_one_installs_session_start_hook`,
+/// `patch_one_installs_hook_with_absolute_path` in `setup_tests.rs`.
+fn prompt_context_hook_additions(exe: Option<&std::path::Path>) -> Value {
+    let prompt_cmd = hook_command(exe);
+    let inbox_cmd = inbox_check_command(exe);
     json!({
         "hooks": {
             HOOK_EVENT: [
@@ -473,7 +526,7 @@ fn prompt_context_hook_additions() -> Value {
                     "hooks": [
                         {
                             "type": "command",
-                            "command": HOOK_COMMAND,
+                            "command": prompt_cmd,
                             "timeout": HOOK_TIMEOUT_MS,
                         }
                     ],
@@ -485,7 +538,7 @@ fn prompt_context_hook_additions() -> Value {
                     "hooks": [
                         {
                             "type": "command",
-                            "command": INBOX_CHECK_HOOK_COMMAND,
+                            "command": inbox_cmd,
                             "timeout": HOOK_TIMEOUT_MS,
                         }
                     ],
@@ -502,14 +555,15 @@ fn prompt_context_hook_additions() -> Value {
 /// is what makes Claude Code call `trusty-memory prompt-context` before
 /// every user prompt and inject its stdout. Without this merge, the daemon
 /// would be reachable but no prompt-context block would ever appear in the
-/// model's input.
+/// model's input. `exe` is forwarded to [`prompt_context_hook_additions`]
+/// so the command is emitted as an absolute path when available.
 /// What: reads the existing settings (missing file → `{}`), runs the shared
-/// [`merge_hook_entries`] helper to fold in `prompt_context_hook_additions()`,
+/// [`merge_hook_entries`] helper to fold in `prompt_context_hook_additions(exe)`,
 /// and writes the result back atomically when it differs from the input.
 /// Returns `true` when the file was rewritten and `false` when the hook was
 /// already present (idempotent re-run).
 /// Test: `patch_one_installs_hook`, `patch_one_is_idempotent`.
-fn merge_prompt_context_hook(path: &Path) -> Result<bool> {
+fn merge_prompt_context_hook(path: &Path, exe: Option<&std::path::Path>) -> Result<bool> {
     let original: Value = match std::fs::read_to_string(path) {
         Ok(s) if s.trim().is_empty() => Value::Object(serde_json::Map::new()),
         Ok(s) => serde_json::from_str(&s)
@@ -520,7 +574,7 @@ fn merge_prompt_context_hook(path: &Path) -> Result<bool> {
                 .with_context(|| format!("read settings file {}", path.display()))
         }
     };
-    let additions = prompt_context_hook_additions();
+    let additions = prompt_context_hook_additions(exe);
     let merged = merge_hook_entries(&original, &additions);
     if merged == original {
         return Ok(false);
