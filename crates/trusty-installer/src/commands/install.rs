@@ -94,15 +94,41 @@ impl InstallReport {
 ///
 /// Why: Phase-1 entry point for the system install flow (#1316 priority 1).
 ///
-/// What: Resolves `members` against the stable set (empty = all). On a TTY
-/// without `--yes`, confirms the blast radius before installing. Installs each
-/// member in topological order, rendering progress rows; emits either the human
-/// component table + summary or the `--json` [`InstallReport`]. Returns the
-/// process exit code.
+/// What: Resolves `members` against the stable set (empty = all). When no
+/// members are given AND stdin is a TTY AND `--json` is not set, presents the
+/// Phase-4 interactive component picker so the operator can choose a subset
+/// without needing to know crate names. On a TTY without `--yes`, confirms the
+/// blast radius before installing. Installs each member in topological order,
+/// rendering progress rows; emits either the human component table + summary or
+/// the `--json` [`InstallReport`]. Returns the process exit code.
 ///
 /// Test: `tests::run_unknown_member_is_error`; the install path itself is
 /// side-effecting (`cargo install`) and validated manually.
 pub fn run(members: &[String], yes: bool, json: bool) -> i32 {
+    // Phase 4: interactive component picker.
+    // Only activates when: no explicit members, stdin is a TTY, and not --json.
+    // When members are passed, or in --json / non-TTY mode, behaviour is unchanged.
+    let members_override: Vec<String>;
+    let members = if members.is_empty() && !json && super::progress_ui::is_tty() {
+        let all = super::stable_set::stable_set();
+        match super::picker::prompt_picker(&all) {
+            Ok(chosen) => {
+                if chosen.is_empty() {
+                    eprintln!("tctl install: no components selected — nothing to do.");
+                    return 0;
+                }
+                members_override = chosen.iter().map(|m| m.crate_name.clone()).collect();
+                &members_override
+            }
+            Err(e) => {
+                eprintln!("tctl install: {e}");
+                return 3;
+            }
+        }
+    } else {
+        members
+    };
+
     let (selected, unknown) = select_members(members);
 
     if !unknown.is_empty() {
