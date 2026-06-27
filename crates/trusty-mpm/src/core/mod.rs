@@ -19,6 +19,10 @@ pub mod budget;
 pub mod bundle;
 pub mod circuit;
 pub mod claude_config;
+// DOC-28 cutover bridge: cross-format session discovery — CUTOVER BRIDGE — remove post-migration (#1762)
+pub mod claude_mpm_registry;
+pub mod claude_mpm_session;
+
 pub mod compress;
 pub mod config;
 pub mod connect;
@@ -39,6 +43,8 @@ pub mod manifest;
 pub mod memory;
 pub mod model_inject;
 pub mod names;
+// DOC-28 cutover bridge: unified session finder — CUTOVER BRIDGE — remove post-migration (#1762)
+pub mod native_session_finder;
 pub mod output_style;
 pub mod output_style_deployer;
 pub mod overseer;

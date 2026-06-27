@@ -2,7 +2,7 @@
 name: mpm-session-resume
 description: Load context from paused session
 user-invocable: true
-version: "1.0.0"
+version: "1.1.0"
 category: mpm-command
 tags: [mpm-command, session, pm-recommended]
 effort: medium
@@ -11,117 +11,98 @@ effort: medium
 # /mpm-session-resume
 
 Load and display context from a paused session to restore full work context.
+Handles both the native trusty-mpm format and the legacy claude-mpm format
+(DOC-28 cutover bridge, #1762).
 
 ## What This Does
 
 When invoked, this skill:
-1. Scans the project-local session store at `.trusty-mpm/sessions/` for paused sessions
-2. Loads the most recent session (by file modification time) or a specific session
-3. Validates that the session belongs to the current project
-4. Calculates time elapsed since pause and git changes since pause
-5. Displays a formatted resume prompt with summary, accomplishments, and next steps
-6. Loads the session data so the PM can continue work with full context
+1. Delegates cross-format session discovery to `tm sessions catchup`
+2. Renders a unified catch-up digest (newest-first) covering both
+   `.trusty-mpm/sessions/` (native) and `.claude-mpm/sessions/` (legacy)
+3. Optionally scans machine-wide projects via `--all-projects`
+4. Displays a formatted resume prompt so the PM can continue with full context
 
 ## Usage
 
 ```
-/mpm-session-resume                    # resume most recent session
-/mpm-session-resume <session-id>       # resume by specific session ID
+/mpm-session-resume                    # catch-up from current project
+/mpm-session-resume --all-projects    # also scan machine-wide claude-mpm projects
 ```
 
 ## PM Instructions for Resuming a Session
 
 When invoked, the PM MUST:
 
-1. **Check for session files:**
+1. **Run the catch-up command** to get the unified session digest:
    ```bash
-   ls .trusty-mpm/sessions/ 2>/dev/null || echo "No sessions found"
-   cat .trusty-mpm/sessions/LATEST-SESSION.txt 2>/dev/null
+   tm sessions catchup
+   # or, to include all machine-wide projects:
+   tm sessions catchup --all-projects
    ```
 
-2. **Load the session file** (most recent or specified):
-   ```bash
-   cat .trusty-mpm/sessions/session-{YYYYMMDD-HHMMSS}.md
-   ```
-
-3. **Check current git state** to reconcile with session state:
+2. **Check current git state** to reconcile with session state:
    ```bash
    git log --oneline -5
    git status
    ```
 
-4. **Display resume context** to the user:
-   ```
-   Resuming from previous session
+3. **Present the catch-up output** to the user and confirm which session to
+   resume from (when multiple sessions are listed).
 
-   Paused: {time elapsed} ago
-   Branch: {git branch}
+4. **Restore todo state** from the session snapshot.
 
-   Last session accomplished:
-   - {completed item 1}
-   - {completed item 2}
+5. **Confirm with user** before proceeding with work.
 
-   In progress at pause:
-   - {in-progress item 1}
+## Session Storage Locations
 
-   Next steps:
-   - {next step 1}
-   - {next step 2}
-
-   Git changes since pause:
-   - {commits added since pause}
-
-   Continue from: {recommended next action}
-   ```
-
-5. **Restore todo state** from the session snapshot
-
-6. **Confirm with user** before proceeding with work
-
-## Session Storage Location
-
-**Session location:** project-local `.trusty-mpm/sessions/`
-
+**trusty-mpm native format (current):**
 ```
 <project-root>/.trusty-mpm/sessions/
-├── LATEST-SESSION.txt                  # Pointer to most recent session
-└── session-YYYYMMDD-HHMMSS.md          # Human-readable session state
+├── LATEST-SESSION.txt          # Pointer to most recent session
+└── session-YYYYMMDD-HHMMSS.md  # Human-readable session state
 ```
 
-Resume reads the `.md` file. Sessions are project-scoped — you will never
-accidentally load a session from a different project.
+**claude-mpm legacy format (cutover bridge):**
+```
+<project-root>/.claude-mpm/sessions/
+├── LATEST-SESSION.txt          # Pointer to most recent session
+└── session-YYYYMMDD-HHMMSS.json  # JSON digest
+```
+
+Sessions from both locations are merged and sorted newest-first by the
+`tm sessions catchup` command.
 
 ## What Gets Loaded
 
-**From the paused session:**
-- Session ID and pause timestamp
-- Git branch, recent commits, and file status at pause
-- Summary, accomplishments, and next steps
+**Common across both formats:**
+- Pause timestamp
+- Git context (branch, recent commits, file status)
+- Summary / resume instructions
 - Task state (pending/in-progress tasks at pause time)
-- Context message (if provided at pause)
+- Important reminders and open questions
 
-**Calculated at resume time:**
-- Human-readable time elapsed
-- Git commits added since pause
-- File changes since pause
+**NOT loaded (even if present):**
+- Raw `conversation` history (too large; the digest fields are sufficient)
 
 ## No Sessions Found
 
 If no sessions exist:
 ```
-No paused sessions found in .trusty-mpm/sessions/
-
-To create a paused session, use: /mpm-session-pause
+No paused sessions found.
 ```
+
+To create a paused session, use: `/mpm-session-pause`
 
 ## Notes
 
-- Sessions are read-only at resume time — the file is not deleted after loading.
+- Sessions are read-only at resume time.
 - Auto-pause at 90% context creates sessions automatically; this skill reads them.
-- Multiple sessions are listed most-recent-first; the latest is loaded by default.
-- Session files are project-scoped — never loads sessions from a different project directory.
+- Multiple sessions are listed most-recent-first; the latest is the default.
+- Session files are project-scoped by default; `--all-projects` expands the scan.
 
 ## Related Commands
 
 - `/mpm-session-pause` — Pause current session and save state
+- `tm sessions catchup --all-projects` — Scan all machine-wide projects
 - See `mpm-session-management` skill for full context management guide

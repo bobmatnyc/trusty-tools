@@ -1153,6 +1153,44 @@ fn cli_session_prune_requires_state() {
 }
 
 #[test]
+fn cli_parses_session_catchup() {
+    // DOC-28 PR1 (#1762): `tm sessions catchup --all-projects --full` must parse
+    // cleanly and deliver the expected field values.
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "sessions",
+        "catchup",
+        "--all-projects",
+        "--full",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::Catchup { all_projects, full },
+        } => {
+            assert!(all_projects, "--all-projects should be true");
+            assert!(full, "--full should be true");
+        }
+        other => panic!("expected session catchup, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_catchup_defaults() {
+    // DOC-28 PR1 (#1762): bare `tm sessions catchup` defaults to false for both flags.
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "catchup"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::Catchup { all_projects, full },
+        } => {
+            assert!(!all_projects, "--all-projects should default to false");
+            assert!(!full, "--full should default to false");
+        }
+        other => panic!("expected session catchup, got {other:?}"),
+    }
+}
+
+#[test]
 fn deprecation_notice_format() {
     // The deprecation helper renders a stable, single-line message (#1205).
     // We assert the pure message builder since the eprintln side-effect itself
