@@ -6,12 +6,13 @@
 //! What: `render_two_panel_banner` (same public signature as before) produces a
 //! single rounded box whose title bar carries `Trusty MPM v{VERSION}`. Inside,
 //! wide terminals (≥ MIN_WIDTH_TWO_PANEL) get the shrunken robot (left) and
-//! info content (right) separated by a 1-char gutter; narrow terminals get a
-//! stacked layout inside the same box. Very narrow (< MIN_WIDTH_BOX) returns
-//! `None` so callers can fall back to plain output.
+//! info content (right) separated by a tinted `│` vertical divider (` │ `);
+//! narrow terminals get a stacked layout inside the same box. Very narrow
+//! (< MIN_WIDTH_BOX) returns `None` so callers can fall back to plain output.
 //! Test: `single_box_title_bar_contains_version`, `robot_shrink_has_fewer_rows`,
 //! `right_col_no_inner_border`, `reconnect_label_in_narrow_box`,
-//! `two_panel_compose_alignment`, `two_panel_version_present`.
+//! `two_panel_compose_alignment`, `two_panel_version_present`,
+//! `wide_layout_has_vertical_divider`.
 
 use colored::Colorize as _;
 use unicode_width::UnicodeWidthStr as _;
@@ -28,8 +29,12 @@ pub(crate) const MIN_WIDTH_TWO_PANEL: usize = 90;
 /// Minimum terminal width to render any outer box at all.
 const MIN_WIDTH_BOX: usize = 40;
 
-/// One-character gutter between the robot column and the info column.
-const GUTTER: usize = 1;
+/// Three-character gutter between the robot column and the info column: ` │ `.
+///
+/// The middle character is a tinted `│` vertical divider; the flanking spaces
+/// provide visual breathing room. Total gutter width must match the rendered
+/// ` ` + `│` + ` ` = 3 display columns in every interior row.
+const GUTTER: usize = 3;
 
 /// Muted rust colour for outer-box borders.
 const BORDER_R: u8 = 120;
@@ -43,6 +48,8 @@ const BL: char = '╰';
 const BR: char = '╯';
 const HORIZ: char = '─';
 const VERT: char = '│';
+/// Bottom connector for the vertical divider where it meets the bottom border.
+const DIVIDER_BOTTOM: char = '┴';
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
@@ -146,10 +153,13 @@ fn render_title_bar(term_width: usize) -> String {
 /// Render the wide (≥ MIN_WIDTH_TWO_PANEL) two-column single-box banner.
 ///
 /// Why: wide terminals have enough room to show robot (left) and info (right)
-/// side by side without wrapping.
-/// What: title bar on top, `robot_cols`-wide left col + 1-char gutter +
-/// `right_col`-wide right col, bottom border. Height = max(robot rows, info rows).
-/// Test: `two_panel_compose_alignment`, `right_col_no_inner_border`.
+/// side by side without wrapping. A tinted vertical divider makes the column
+/// boundary visually explicit without adding a full inner frame.
+/// What: title bar on top, `robot_cols`-wide left col + ` │ ` divider (3 chars,
+/// tinted rust) + `right_col`-wide right col, bottom border with `┴` at the
+/// divider column. Height = max(robot rows, info rows).
+/// Test: `two_panel_compose_alignment`, `right_col_no_inner_border`,
+/// `wide_layout_has_vertical_divider`.
 fn render_wide_box(
     data: &WelcomeData,
     term_width: usize,
@@ -204,13 +214,20 @@ fn render_wide_box(
             .unwrap_or_else(|| " ".repeat(right_col));
         out.push_str(&tint_border(&VERT.to_string()));
         out.push_str(&left);
-        out.push_str(&" ".repeat(GUTTER));
+        out.push_str(&format!(" {} ", tint_border(&VERT.to_string())));
         out.push_str(&right);
         out.push_str(&tint_border(&VERT.to_string()));
         out.push('\n');
     }
 
-    let bottom = format!("{BL}{}{BR}", HORIZ.to_string().repeat(inner));
+    // Bottom border: ┴ at the divider column (left_col+1 within inner dashes).
+    // `inner = left_col + GUTTER + right_col` with right_col ≥ 10, so the
+    // subtraction `inner - left_col - 2` is always ≥ right_col - 1 > 0.
+    let bottom = format!(
+        "{BL}{}{DIVIDER_BOTTOM}{}{BR}",
+        HORIZ.to_string().repeat(left_col + 1),
+        HORIZ.to_string().repeat(inner - left_col - 2)
+    );
     out.push_str(&tint_border(&bottom));
     out.push('\n');
 
@@ -638,5 +655,28 @@ pub(crate) mod tests {
         let colored = "\x1B[38;2;183;65;14mhello\x1B[0m world";
         let bare = strip_ansi(colored);
         assert_eq!(bare, "hello world");
+    }
+
+    /// Wide layout has a `│` vertical divider between columns; every line is
+    /// exactly `term_width` display columns wide.
+    #[test]
+    fn wide_layout_has_vertical_divider() {
+        colored::control::set_override(false);
+        let data = base_data();
+        let out = render_two_panel_banner(&data, 120, false).expect("wide banner");
+        let mut checked = 0usize;
+        for line in out.lines() {
+            let bare = strip_ansi(line);
+            if bare.is_empty() { continue; }
+            assert_eq!(bare.width(), 120, "line width mismatch: {bare:?}");
+            if bare.starts_with('│') {
+                let chars: Vec<char> = bare.chars().collect();
+                let inner = &chars[1..chars.len().saturating_sub(1)];
+                assert!(inner.contains(&'│'), "no interior │ divider in: {bare:?}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no content lines found in wide banner");
+        colored::control::unset_override();
     }
 }
