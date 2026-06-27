@@ -17,6 +17,8 @@ pub mod artifact;
 pub mod auto_resume;
 pub mod budget;
 pub mod bundle;
+// DOC-28 cutover bridge: incremental catch-up runtime — CUTOVER BRIDGE — remove post-migration (#1762)
+pub mod catchup;
 pub mod circuit;
 pub mod claude_config;
 // DOC-28 cutover bridge: cross-format session discovery — CUTOVER BRIDGE — remove post-migration (#1762)
