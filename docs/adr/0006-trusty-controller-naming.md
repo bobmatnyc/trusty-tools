@@ -5,7 +5,7 @@
 - **Scope:** Workspace-wide (new crate `trusty-controller`; adds `tctl` to the
   CLAUDE.md abbreviation table; consumed by the entire trusty-controller design
   set under `docs/trusty-controller/research/02-design/`)
-- **Supersedes / Superseded by:** —
+- **Supersedes / Superseded by:** Superseded by ADR-0013 (rename to `trusty-installer`)
 
 ## Context
 

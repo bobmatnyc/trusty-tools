@@ -27,8 +27,8 @@ use super::RuntimeError;
 /// The `--setting-sources project,local` flag isolates the session from the
 /// operator's interfering global `~/.claude/settings.json` hooks (issue #1269 /
 /// step 4) without touching `~/.claude.json` (so OAuth is preserved), and
-/// `--permission-mode acceptEdits` keeps the unattended session from blocking on
-/// per-tool permission prompts (issue #1269). The isolation flags reuse the
+/// `--dangerously-skip-permissions` keeps the unattended orchestration session
+/// from blocking on per-tool permission prompts (issue #1269). The isolation flags reuse the
 /// shared [`crate::core::model_inject::SETTING_SOURCES_FLAG`] /
 /// [`crate::core::model_inject::PERMISSION_MODE_FLAG`] constants so this spawn
 /// path and the CLI launch path can never drift.
@@ -261,16 +261,22 @@ mod tests {
 
     #[test]
     fn spawn_command_contains_isolation_flags() {
-        // Why (#1269): the session_manager spawn path must isolate from the
-        // user's global settings and run unattended, exactly like the CLI path.
+        // Why: the session_manager spawn path must isolate from the user's global
+        // settings and run fully unattended (bypass all permission prompts) so
+        // multi-agent orchestration never stalls on interactive approval dialogs.
         let cmd = spawn_command("claude");
         assert!(
             cmd.contains("--setting-sources project,local"),
             "spawn command must isolate settings: {cmd}"
         );
         assert!(
-            cmd.contains("--permission-mode acceptEdits"),
-            "spawn command must set unattended permission mode: {cmd}"
+            cmd.contains("--dangerously-skip-permissions"),
+            "spawn command must bypass permissions for unattended orchestration: {cmd}"
+        );
+        // Must not carry the old acceptEdits flag.
+        assert!(
+            !cmd.contains("acceptEdits"),
+            "old acceptEdits flag must not be present: {cmd}"
         );
     }
 

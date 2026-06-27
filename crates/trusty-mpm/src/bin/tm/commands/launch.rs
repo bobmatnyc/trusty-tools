@@ -10,8 +10,10 @@
 use serde::Deserialize;
 
 use crate::commands::project::resolve_dir;
-use crate::formatters::banner::{fallback_session_name, normalize_workdir, tmux_has_session};
-use crate::formatters::info_box::{DaemonInfo, print_info_box};
+use crate::formatters::banner::{
+    fallback_session_name, normalize_workdir, print_launch_banner,
+    print_launch_banner_reconnecting, tmux_has_session,
+};
 
 /// `launch` subcommand — launch a configured claude session and attach to it.
 ///
@@ -46,8 +48,8 @@ pub(crate) async fn launch(
         && !existing.is_empty()
         && tmux_has_session(&existing)
     {
-        let d = DaemonInfo::from_lock_file().probe_session_count(url);
-        print_info_box(&workdir, &existing, true, &d);
+        // Full-screen robot splash + rich info panel (reconnect mode).
+        print_launch_banner_reconnecting(&workdir, &existing);
         let status = std::process::Command::new("tmux")
             .args(["attach-session", "-t", &existing])
             .status()?;
@@ -152,12 +154,11 @@ pub(crate) async fn launch(
         prompt_path.as_deref(),
     );
 
-    // 5. Print the compact info box. The old full-screen banner is replaced by
-    //    the compact `╭─╮` box that shows version, project, daemon, and tools.
-    {
-        let d = DaemonInfo::from_lock_file().probe_session_count(url);
-        print_info_box(&workdir, &tmux_name, false, &d);
-    }
+    // 5. Print the full-screen robot splash then the rich info panel beneath.
+    //    The banner clears the screen; the info panel provides daemon/service/commit
+    //    context. `print_launch_banner` delegates to `print_welcome_panel` for the
+    //    rich panel and its 1-s sleep, so no additional sleep is needed here.
+    print_launch_banner(&workdir, &tmux_name, prompt_path.as_deref());
     // Silence unused imports from the instructions-path resolution above.
     let _ = instructions_path;
 
@@ -245,8 +246,8 @@ pub(crate) async fn connect(
         && !existing.is_empty()
         && tmux_has_session(&existing)
     {
-        let d = DaemonInfo::from_lock_file().probe_session_count(url);
-        print_info_box(&workdir, &existing, true, &d);
+        // Full-screen robot splash + rich info panel (reconnect mode).
+        print_launch_banner_reconnecting(&workdir, &existing);
         let status = std::process::Command::new("tmux")
             .args(["attach-session", "-t", &existing])
             .status()?;
@@ -292,12 +293,8 @@ pub(crate) async fn connect(
         }
     };
 
-    // 3. Print the compact info box — `connect` skips deployment so the box
-    //    is the only context the operator sees before tmux takes over.
-    {
-        let d = DaemonInfo::from_lock_file().probe_session_count(url);
-        print_info_box(&workdir, &tmux_name, false, &d);
-    }
+    // 3. Print the full-screen robot splash + rich info panel before tmux takes over.
+    print_launch_banner(&workdir, &tmux_name, None);
 
     // 4. Create the tmux host idempotently. `new-session -A` attaches to an
     //    existing session and creates a detached one (`-d`) otherwise; the
@@ -311,11 +308,15 @@ pub(crate) async fn connect(
         anyhow::bail!("failed to create tmux session {tmux_name} in {workdir}");
     }
 
-    // 5. Start bare `claude` inside a freshly-created session. `connect` does
-    //    not compose a `--append-system-prompt` — it does no deployment.
+    // 5. Start `claude` with bypass-permissions inside a freshly-created session.
+    //    `connect` does not compose a `--append-system-prompt` — it does no deployment.
     if !already_running {
+        let claude_cmd = format!(
+            "claude {}",
+            trusty_mpm::core::model_inject::PERMISSION_MODE_FLAG
+        );
         let send = std::process::Command::new("tmux")
-            .args(["send-keys", "-t", &tmux_name, "claude", "Enter"])
+            .args(["send-keys", "-t", &tmux_name, &claude_cmd, "Enter"])
             .status();
         if !matches!(send, Ok(s) if s.success()) {
             anyhow::bail!("tmux session {tmux_name} created but failed to start claude");
