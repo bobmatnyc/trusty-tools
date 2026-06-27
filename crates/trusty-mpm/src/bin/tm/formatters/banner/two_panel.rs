@@ -157,7 +157,7 @@ fn build_left_lines(inner_width: usize, reconnecting: bool) -> Vec<String> {
     // Blank separator.
     lines.push(" ".repeat(inner_width));
 
-    // Plain-text "trusty" label + version — two lines replacing the old block-art wordmark.
+    // Plain-text "trusty-mpm" label + version — two lines replacing the old block-art wordmark.
     for wm_line in wordmark_lines() {
         let bare = strip_ansi(&wm_line);
         let row_cols = bare.width();

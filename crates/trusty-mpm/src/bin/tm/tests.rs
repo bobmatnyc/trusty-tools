@@ -326,9 +326,9 @@ fn launch_banner_contains_session_fields() {
     assert!(banner.contains("tmpm-quiet-falcon"));
     assert!(banner.contains("/tmp/INSTRUCTIONS.md"));
     assert!(banner.contains("Launching claude..."));
-    // Plain-text wordmark: "trusty" (lowercase) replaces the old block-art.
+    // Plain-text wordmark: "trusty-mpm" (lowercase) replaces the old block-art.
     assert!(
-        banner.contains("trusty"),
+        banner.contains("trusty-mpm"),
         "plain-text wordmark must appear in banner"
     );
 }
@@ -1653,10 +1653,10 @@ fn robot_splash_contains_robot_and_title() {
         splash.starts_with("\x1B[2J\x1B[1;1H"),
         "splash must start with screen-clear: {splash:?}"
     );
-    // Plain-text "trusty" label replaces the old block-art BANNER_TITLE.
+    // Plain-text "trusty-mpm" label replaces the old block-art BANNER_TITLE.
     assert!(
-        splash.contains("trusty"),
-        "plain-text wordmark 'trusty' must be in splash"
+        splash.contains("trusty-mpm"),
+        "plain-text wordmark 'trusty-mpm' must be in splash"
     );
     // Version string must follow on the next line.
     assert!(
@@ -1733,10 +1733,10 @@ fn banner_preview_no_clear_escape() {
         !splash.starts_with("\x1B[2J\x1B[1;1H"),
         "no-clear variant must not contain the screen-clear escape"
     );
-    // Plain-text "trusty" label replaces the old block-art.
+    // Plain-text "trusty-mpm" label replaces the old block-art.
     assert!(
-        splash.contains("trusty"),
-        "plain-text wordmark 'trusty' must still appear in no-clear variant"
+        splash.contains("trusty-mpm"),
+        "plain-text wordmark 'trusty-mpm' must still appear in no-clear variant"
     );
     colored::control::unset_override();
 }
@@ -1746,13 +1746,13 @@ fn wordmark_lines_contain_trusty_and_version() {
     // Why: `wordmark_lines` is the single source of truth for the banner label
     // and version; asserting both values here catches accidental regressions.
     // What: with colour disabled so the output is plain text, verify that line 0
-    // contains "trusty" and line 1 contains the crate version.
+    // contains "trusty-mpm" and line 1 contains the crate version.
     // Test: direct function call with colour override off.
     colored::control::set_override(false);
     let [label, version] = wordmark_lines();
     assert!(
-        label.contains("trusty"),
-        "wordmark label must contain 'trusty': {label:?}"
+        label.contains("trusty-mpm"),
+        "wordmark label must contain 'trusty-mpm': {label:?}"
     );
     assert!(
         version.contains(env!("CARGO_PKG_VERSION")),

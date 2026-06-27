@@ -79,17 +79,17 @@ const VERSION_R: u8 = 140;
 const VERSION_G: u8 = 60;
 const VERSION_B: u8 = 20;
 
-/// Build the two-line plain-text wordmark: `trusty` (bold amber) + version (dimmed rust).
+/// Build the two-line plain-text wordmark: `trusty-mpm` (bold amber) + version (dimmed rust).
 ///
 /// Why: replaces the bulky 7-row block-art `BANNER_TITLE` with a single-line
 /// label that is lighter, faster to scan, and stays under the SLOC cap.
-/// What: returns a `[String; 2]` — `lines[0]` is the colourised `"trusty"` label,
+/// What: returns a `[String; 2]` — `lines[0]` is the colourised `"trusty-mpm"` label,
 /// `lines[1]` is the colourised `"v{CARGO_PKG_VERSION}"` version string. Both
 /// degrade gracefully to plain text when `colored` colour is disabled.
 /// Test: `wordmark_lines_contain_trusty_and_version`.
 pub(crate) fn wordmark_lines() -> [String; 2] {
     use colored::Colorize as _;
-    let label = "trusty"
+    let label = "trusty-mpm"
         .truecolor(WORDMARK_R, WORDMARK_G, WORDMARK_B)
         .bold()
         .to_string();
