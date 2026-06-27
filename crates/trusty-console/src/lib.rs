@@ -24,8 +24,8 @@ use trusty_common::{init_tracing, shutdown_signal, write_daemon_addr};
 /// Default console HTTP bind address (used for both serve and `port` reporting).
 ///
 /// Why: A single constant keeps the serve default and the `port` verb's
-/// fallback in lock-step so `tctl` never discovers a port the console would
-/// not actually bind to.
+/// fallback in lock-step so `trusty-installer` (`tctl`) never discovers a port
+/// the console would not actually bind to.
 /// What: `127.0.0.1:7788` — the canonical localhost console address.
 /// Test: `test_resolve_reported_addr_default` asserts the `port` verb falls
 /// back to this value's host/port when no discovery file is present.
@@ -71,8 +71,8 @@ pub struct Cli {
 /// Available subcommands.
 ///
 /// Why: `serve` runs the dashboard; `port` is a non-serving contract verb that
-/// reports the console's bound (or default) port so orchestrators like `tctl`
-/// can discover/launch the console without parsing logs.
+/// reports the console's bound (or default) port so orchestrators like
+/// `trusty-installer` (`tctl`) can discover/launch the console without parsing logs.
 /// What: Clap enum; each variant carries its own args.
 /// Test: Subcommand selection tested via `Cli::parse_from`.
 #[derive(Debug, Subcommand)]
@@ -85,18 +85,18 @@ pub enum Commands {
 
 /// Arguments for `trusty-console port`.
 ///
-/// Why: `tctl` (the orchestrator, issue #1316) discovers the console URL by
-/// spawning `trusty-console port --json` and parsing the `{addr,port}`
-/// envelope (see trusty-controller `os_env.rs`). The verb must exist and be
-/// machine-readable for that discovery to work after the console is de-bundled
-/// from the host crates (#1318).
+/// Why: `trusty-installer` (`tctl`) (the orchestrator, issue #1316) discovers
+/// the console URL by spawning `trusty-console port --json` and parsing the
+/// `{addr,port}` envelope (see trusty-installer `os_env.rs`). The verb must
+/// exist and be machine-readable for that discovery to work after the console is
+/// de-bundled from the host crates (#1318).
 /// What: A single `--json` flag selecting JSON output (default is a single
 /// human-readable port line).
 /// Test: `test_port_args_json_flag` / `test_port_args_default` below.
 #[derive(Debug, Parser)]
 pub struct PortArgs {
     /// Emit a JSON envelope `{"addr":"<host>","port":<u16>}` instead of a bare
-    /// port number. Consumed by `tctl` console discovery.
+    /// port number. Consumed by `trusty-installer` (`tctl`) console discovery.
     #[arg(long, default_value_t = false)]
     pub json: bool,
 }
@@ -186,8 +186,8 @@ pub async fn run_from(argv: Vec<String>) -> Result<()> {
 /// Resolve the console's reportable HTTP address (host, port).
 ///
 /// Why: The `port` verb must report the LIVE port of a running console when
-/// one exists, falling back to the default otherwise — so `tctl` discovery
-/// (issue #1316) points at the real dashboard, not a guess.
+/// one exists, falling back to the default otherwise — so `trusty-installer`
+/// (`tctl`) discovery (issue #1316) points at the real dashboard, not a guess.
 /// What: Reads the `trusty-console` discovery file via
 /// `trusty_common::read_daemon_addr`; on a parseable `host:port` returns that
 /// pair, else falls back to ([`DEFAULT_HTTP`] host, [`DEFAULT_PORT`]). Never
@@ -208,11 +208,11 @@ pub fn resolve_reported_addr() -> (String, u16) {
 
 /// Run the `port` subcommand: print the console's bound/default port and exit.
 ///
-/// Why: `tctl` console discovery spawns `trusty-console port --json` and
-/// parses a `{addr,port}` envelope (trusty-controller `os_env.rs`). This verb
-/// is the contract that makes that discovery work; without it the call exits
-/// non-zero and console discovery is silently broken (the latent bug fixed by
-/// #1318).
+/// Why: `trusty-installer` (`tctl`) console discovery spawns
+/// `trusty-console port --json` and parses a `{addr,port}` envelope
+/// (trusty-installer `os_env.rs`). This verb is the contract that makes that
+/// discovery work; without it the call exits non-zero and console discovery is
+/// silently broken (the latent bug fixed by #1318).
 /// What: Resolves the reportable address; with `--json` prints
 /// `{"addr":"<host>","port":<u16>}` to stdout, otherwise prints the bare port.
 /// Returns `Ok(())`.
@@ -544,7 +544,7 @@ mod tests {
         }
     }
 
-    /// Why: `tctl` invokes `trusty-console port --json`; the flag must parse.
+    /// Why: `trusty-installer` (`tctl`) invokes `trusty-console port --json`; the flag must parse.
     /// What: parses `port --json` and asserts `json == true`.
     /// Test: this test itself.
     #[test]
@@ -557,8 +557,8 @@ mod tests {
     }
 
     /// Why: when no console has written a discovery file, the reported port
-    /// must fall back to the canonical default so `tctl` still gets a usable
-    /// address.
+    /// must fall back to the canonical default so `trusty-installer` (`tctl`)
+    /// still gets a usable address.
     /// What: calls `resolve_reported_addr` under an isolated data dir (no
     /// discovery file present) and asserts the default host/port.
     /// Test: this test itself; uses the data-dir override env to avoid reading
@@ -588,7 +588,7 @@ mod tests {
     }
 
     /// Why: the JSON envelope emitted by `run_port` must be valid JSON with the
-    /// `addr` and `port` keys that `tctl`'s `parse_console_port` consumes.
+    /// `addr` and `port` keys that `trusty-installer` (`tctl`) `parse_console_port` consumes.
     /// What: builds the same envelope `run_port` prints and round-trips it
     /// through serde to assert structure.
     /// Test: this test itself.

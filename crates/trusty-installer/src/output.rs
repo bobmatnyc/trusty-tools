@@ -1,4 +1,4 @@
-//! Human and JSON output renderers for `tctl`.
+//! Human and JSON output renderers for `trusty-installer`.
 //!
 //! Why: Centralising rendering logic avoids scattering `println!`/`serde_json`
 //! calls across every command handler, and makes the output shapes testable in
@@ -53,7 +53,7 @@ pub fn print_not_yet_implemented(command: &str, json: bool) {
         println!("{}", serde_json::to_string_pretty(&nyi).unwrap_or_default());
     } else {
         println!(
-            "tctl {}: not yet implemented (Phase 0 scaffold). \
+            "trusty-installer {}: not yet implemented (Phase 0 scaffold). \
              See https://github.com/bobmatnyc/trusty-tools/issues/920 for the roadmap.",
             nyi.command
         );
@@ -69,13 +69,13 @@ pub fn print_not_yet_implemented(command: &str, json: bool) {
 /// line, or the JSON capability-discovery object
 /// `{"tool","tool_version","stack_version","contract_floor","contract_target"}`.
 ///
-/// Test: Call with `json = false` and check stdout contains `"tctl v"`;
-/// call with `json = true` and parse the output as JSON, asserting `"tool"` == `"trusty-controller"`.
+/// Test: Call with `json = false` and check stdout contains `"trusty-installer v"`;
+/// call with `json = true` and parse the output as JSON, asserting `"tool"` == `"trusty-installer"`.
 pub fn print_version(json: bool, stack_version: &str) {
     let tool_version = env!("CARGO_PKG_VERSION");
     if json {
         let obj = serde_json::json!({
-            "tool": "trusty-controller",
+            "tool": "trusty-installer",
             "tool_version": tool_version,
             "stack_version": stack_version,
             "contract_floor": 1,
@@ -83,7 +83,9 @@ pub fn print_version(json: bool, stack_version: &str) {
         });
         println!("{}", serde_json::to_string_pretty(&obj).unwrap_or_default());
     } else {
-        println!("tctl v{tool_version}  stack_version: {stack_version}  contract_floor: 1");
+        println!(
+            "trusty-installer v{tool_version}  stack_version: {stack_version}  contract_floor: 1"
+        );
     }
 }
 
@@ -118,7 +120,7 @@ impl NotYetImplemented {
             command: command.to_owned(),
             phase: "0",
             message: format!(
-                "`tctl {command}` is scaffolded but not yet fully implemented. \
+                "`trusty-installer {command}` is scaffolded but not yet fully implemented. \
                  See issue #920."
             ),
         }

@@ -1,4 +1,4 @@
-//! CLI argument definitions for `tctl`.
+//! CLI argument definitions for `trusty-installer` (alias: `tctl`).
 //!
 //! Why: Centralising the clap derive structs here keeps `main.rs` as a pure
 //! dispatcher and makes the surface testable without spawning a subprocess —
@@ -9,28 +9,31 @@
 //! Commands not yet fully implemented return a structured `not-yet-implemented`
 //! result rather than panicking (see `commands::not_yet_implemented`).
 //!
-//! Test: `Cli::try_parse_from(["tctl","version"])` → `Ok(_)`;
-//! `Cli::try_parse_from(["tctl","stack","health"])` → `Ok(_)`;
-//! bare `tctl` with no subcommand → `Err` (arg_required_else_help = true).
+//! Test: `Cli::try_parse_from(["trusty-installer","version"])` → `Ok(_)`;
+//! `Cli::try_parse_from(["trusty-installer","stack","health"])` → `Ok(_)`;
+//! bare `trusty-installer` with no subcommand → `Err` (arg_required_else_help = true).
+//! The `tctl` alias binary resolves to the same binary and accepts the same args.
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-/// `tctl` — thin control plane for the claude-mpm stack.
+/// `trusty-installer` — thin control plane for the claude-mpm stack.
 ///
 /// Why: Single entry point that installs, upgrades, restarts, and inspects
 /// every member of the trusty-* / claude-mpm stack through a uniform contract.
 ///
 /// What: Parses global flags and dispatches to the appropriate subcommand
 /// handler. Every subcommand is either backed by a real implementation or
-/// returns a structured `not-yet-implemented` stub (Phase 0).
+/// returns a structured `not-yet-implemented` stub (Phase 0). Also available
+/// as `tctl` (transitional alias — ADR-0013 / SPEC-INSTALLER-01 Phase 1).
 ///
-/// Test: `tctl --help` prints the full command surface; `tctl version` prints
-/// the Phase-0 version envelope; `tctl stack health` returns a stub rollup.
+/// Test: `trusty-installer --help` prints the full command surface;
+/// `trusty-installer version` prints the Phase-0 version envelope;
+/// `trusty-installer stack health` returns a stub rollup.
 #[derive(Parser, Debug)]
 #[command(
-    name = "tctl",
+    name = "trusty-installer",
     version,
     author,
     propagate_version = true,
@@ -96,7 +99,7 @@ pub enum ScopeArg {
     All,
 }
 
-/// CLI value for `tctl up --analyze-core` (DOC-12 §3.5).
+/// CLI value for `trusty-installer up --analyze-core` (DOC-12 §3.5).
 ///
 /// Why: A clap-facing enum keeps the `--analyze-core blocking|background|skip`
 /// surface declarative while the orchestrator works in terms of
@@ -115,7 +118,7 @@ pub enum AnalyzeCoreArg {
     Skip,
 }
 
-/// All `tctl` subcommands.
+/// All `trusty-installer` subcommands.
 ///
 /// Why: A single enum over the entire DOC-5 §1.1 command tree lets the
 /// dispatcher in `main.rs` be a simple `match` with no ambient state.
@@ -130,7 +133,7 @@ pub enum AnalyzeCoreArg {
 /// `tests::cli` in `cli.rs`.
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// `tctl up` — boot the whole stack: always-on core → analyze → console → opt-in mpm. (DOC-12)
+    /// `trusty-installer up` — boot the whole stack: always-on core → analyze → console → opt-in mpm. (DOC-12)
     ///
     /// The first-loaded control plane's boot orchestrator. Idempotent and
     /// restart-safe: a second `up` on a healthy stack is an all-no-op. Brings
@@ -171,13 +174,13 @@ pub enum Commands {
 
     /// Upgrade the stack (or named members) to the BOM-pinned versions, then restart. (DOC-9)
     ///
-    /// `tctl update` is a visible alias. Non-interactive: add `--yes` or `-y`.
+    /// `trusty-installer update` is a visible alias. Non-interactive: add `--yes` or `-y`.
     #[command(visible_alias = "update")]
     Upgrade {
         /// Specific member(s) to upgrade; omit for all enabled members.
         members: Vec<String>,
 
-        /// List what would change without actually upgrading (`tctl updates`).
+        /// List what would change without actually upgrading (`trusty-installer updates`).
         #[arg(long)]
         check: bool,
 
@@ -185,7 +188,7 @@ pub enum Commands {
         #[arg(long)]
         latest: bool,
 
-        /// Do not upgrade `tctl` itself; upgrade other members only.
+        /// Do not upgrade `trusty-installer` itself; upgrade other members only.
         #[arg(long)]
         exclude_self: bool,
     },
@@ -222,7 +225,7 @@ pub enum Commands {
         members: Vec<String>,
     },
 
-    /// Restart all daemons + the controller UI service — system scope. (DOC-5 §7)
+    /// Restart all daemons + the installer UI service — system scope. (DOC-5 §7)
     ///
     /// Uses SIGTERM (graceful drain) rather than SIGKILL (#534). Non-interactive:
     /// add `--yes`.
@@ -246,8 +249,8 @@ pub enum Commands {
 
     /// Print a member daemon's bound port/address — clean stdout. (DOC-7)
     ///
-    /// `tctl` does not host its own HTTP server; this reports the bound address
-    /// of a managed daemon read from its `http_addr` discovery file (via
+    /// `trusty-installer` does not host its own HTTP server; this reports the bound
+    /// address of a managed daemon read from its `http_addr` discovery file (via
     /// `trusty_common::read_daemon_addr`). Defaults to `trusty-search` when no
     /// member is named.
     ///
@@ -278,7 +281,7 @@ pub enum Commands {
         json_port: bool,
     },
 
-    /// Controller-side conformance self-check of a member. (DOC-6 §8)
+    /// Installer-side conformance self-check of a member. (DOC-6 §8)
     ///
     /// Validates that the named member speaks the DOC-1 contract envelope,
     /// advertises `verbs[]`, and correctly redacts secrets.
@@ -291,29 +294,29 @@ pub enum Commands {
         member: Option<String>,
     },
 
-    /// Print or open the controller web-UI URL. (DOC-7)
+    /// Print or open the installer web-UI URL. (DOC-7)
     Ui {
         /// Print the URL without launching a browser.
         #[arg(long)]
         print: bool,
     },
 
-    /// `tctl version` — print tctl's own version + embedded stack_version + contract floor.
+    /// `trusty-installer version` — print own version + embedded stack_version + contract floor.
     ///
     /// With `--json`: emits the capability-discovery object (DOC-1 D3b / DOC-5 §4.2).
     Version,
 
-    /// Generic passthrough: `tctl <tool> <verb> [args]` — any advertised verb. (DOC-1 D3c)
+    /// Generic passthrough: `trusty-installer <tool> <verb> [args]` — any advertised verb. (DOC-1 D3c)
     ///
     /// The first token is the manifest member id; the remainder is forwarded as
-    /// `<binary> <verb> [args] --scope <S> --json`. The controller validates
+    /// `<binary> <verb> [args] --scope <S> --json`. The installer validates
     /// the member id against the manifest and the verb against the member's
     /// advertised `verbs[]` before invoking.
     #[command(external_subcommand)]
     Passthrough(Vec<String>),
 }
 
-/// Stack-wide rollup subcommands (under `tctl stack`).
+/// Stack-wide rollup subcommands (under `trusty-installer stack`).
 ///
 /// Why: `stack` nesting disambiguates the whole-stack rollup from a per-member
 /// op reached via the passthrough (DOC-5 §1.4).
@@ -321,8 +324,8 @@ pub enum Commands {
 /// What: `stack health` — fast liveness sweep; `stack doctor` — deep diagnostic
 /// sweep. Both render the DOC-4 tools×scope matrix + verdict.
 ///
-/// Test: `tctl stack health` parses to `Commands::Stack(StackCmd::Health)`;
-/// `tctl stack doctor` parses to `Commands::Stack(StackCmd::Doctor { member: None })`.
+/// Test: `trusty-installer stack health` parses to `Commands::Stack(StackCmd::Health)`;
+/// `trusty-installer stack doctor` parses to `Commands::Stack(StackCmd::Doctor { member: None })`.
 #[derive(Subcommand, Debug)]
 pub enum StackCmd {
     /// Fast liveness sweep → tools×scope matrix + verdict. (DOC-4)

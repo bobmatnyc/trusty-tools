@@ -98,17 +98,18 @@ impl Runner for SystemRunner {
     }
 
     fn install(&self, member: &BootMember) -> anyhow::Result<()> {
-        // Auto-install via the controller's own install verb so the install
-        // mechanics (DOC-8) stay in one place. `tctl` is on PATH by definition
-        // when `tctl up` is running, so this self-dispatch is safe.
-        let status = Command::new("tctl")
+        // Auto-install via the installer's own install verb so the install
+        // mechanics (DOC-8) stay in one place. `trusty-installer` is on PATH by
+        // definition when `trusty-installer up` is running, so this self-dispatch
+        // is safe. (The `tctl` alias also works during the transition period.)
+        let status = Command::new("trusty-installer")
             .args(["install", &member.id, "--yes"])
             .status()?;
         if status.success() {
             Ok(())
         } else {
             anyhow::bail!(
-                "`tctl install {} --yes` exited with status {status}",
+                "`trusty-installer install {} --yes` exited with status {status}",
                 member.id
             )
         }

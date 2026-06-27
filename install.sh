@@ -6,18 +6,20 @@
 #   curl -sSf <url> | sh -s -- -y        # non-interactive
 #   TRUSTY_VERSION=0.2.0 sh install.sh   # pin version
 #
-# Why: Give users a rustup-style one-liner to install the `tctl` control-plane
-#      binary and bootstrap the rest of the trusty-tools platform, without
-#      requiring a Rust toolchain or manual download/verify/extract steps.
-# What: Detects platform, resolves the latest (or pinned) trusty-controller
-#      release, downloads + checksum-verifies the tarball, installs `tctl`,
-#      optionally fixes PATH, then runs `tctl install` to finish bootstrap.
+# Why: Give users a rustup-style one-liner to install the `trusty-installer`
+#      control-plane binary and bootstrap the rest of the trusty-tools platform,
+#      without requiring a Rust toolchain or manual download/verify/extract steps.
+#      The `tctl` transitional alias binary is also installed (ADR-0013 / SPEC-INSTALLER-01).
+# What: Detects platform, resolves the latest (or pinned) trusty-installer
+#      release, downloads + checksum-verifies the tarball, installs
+#      `trusty-installer` (and the `tctl` alias), optionally fixes PATH, then
+#      runs `trusty-installer install` to finish bootstrap.
 # Test: `sh -n install.sh` for POSIX syntax; `shellcheck --shell=sh install.sh`
 #      for lint; manual run on macOS arm64 + Linux x86_64; run with
 #      TRUSTY_VERSION pinned and TRUSTY_YES=1 to exercise non-interactive paths.
 #
 # Environment variables:
-#   TRUSTY_VERSION         Pin tctl version (e.g. "0.2.0")
+#   TRUSTY_VERSION         Pin trusty-installer version (e.g. "0.2.0")
 #   TRUSTY_INSTALL_DIR     Install dir (default: ~/.local/bin)
 #   TRUSTY_YES             Set to 1 to skip all prompts (same as -y)
 #   TRUSTY_NO_MODIFY_PATH  Set to 1 to skip PATH modification
@@ -34,8 +36,8 @@ set -e
 # Constants — keep all magic strings here, not scattered through the script.
 # ---------------------------------------------------------------------------
 REPO="bobmatnyc/trusty-tools"
-CRATE="trusty-controller"
-BIN="tctl"
+CRATE="trusty-installer"
+BIN="trusty-installer"
 
 REPO_URL="https://github.com/${REPO}"
 API_RELEASES_URL="https://api.github.com/repos/${REPO}/releases"
@@ -154,10 +156,10 @@ detect_sha_tool() {
 # ---------------------------------------------------------------------------
 
 # Why: Allow pinning a version, otherwise discover the newest published
-#      trusty-controller release so the one-liner always installs latest.
+#      trusty-installer release so the one-liner always installs latest.
 # What: Echo a bare version (e.g. "0.2.0"). Honors TRUSTY_VERSION if set.
 # Test: With TRUSTY_VERSION=0.2.0 echoes 0.2.0 (no network); unset, parses the
-#      releases API and echoes the first trusty-controller-v* tag's version.
+#      releases API and echoes the first trusty-installer-v* tag's version.
 resolve_version() {
     if [ -n "${TRUSTY_VERSION:-}" ]; then
         # Tolerate a leading tag prefix or 'v' if the user pasted a full tag.
@@ -172,7 +174,7 @@ resolve_version() {
 
     say "Resolving latest ${CRATE} release..." >&2
 
-    # Fetch the releases list and extract the first trusty-controller-v* tag.
+    # Fetch the releases list and extract the first trusty-installer-v* tag.
     # No jq required — grep/sed only.
     _ver="$(
         curl -sSfL "${API_RELEASES_URL}" \
@@ -297,9 +299,10 @@ maybe_update_path() {
 # Why: Verify integrity before trusting a downloaded binary; never install an
 #      asset whose checksum does not match the published .sha256.
 # What: Download .sha256 + tarball into the temp dir, verify with the detected
-#      sha tool, then extract the `tctl` binary into the install dir with exec
-#      permissions.
-# Test: Point at a known release; on match the binary lands in the install dir;
+#      sha tool, then extract the `trusty-installer` primary binary AND the `tctl`
+#      transitional alias (if present in the archive) into the install dir with
+#      exec permissions.
+# Test: Point at a known release; on match both binaries land in the install dir;
 #      corrupt the tarball and confirm verification aborts non-zero.
 download_and_install() {
     _version="$1"
@@ -340,36 +343,44 @@ download_and_install() {
     tar -xzf "${TMP_DIR}/${_archive}" -C "${TMP_DIR}" \
         || die "failed to extract ${_archive}"
 
-    _src_bin="${TMP_DIR}/${_extract_dir}/${BIN}"
-    if [ ! -f "${_src_bin}" ]; then
-        die "expected binary not found in archive: ${_extract_dir}/${BIN}"
-    fi
-
+    # Install each binary from the archive. The primary binary (trusty-installer)
+    # must be present; the transitional alias (tctl) is installed if found in the
+    # archive but is not required — older releases may not include it.
     mkdir -p "${_install_dir}" || die "failed to create install dir ${_install_dir}"
-    _tmp_bin="${_install_dir}/.${BIN}.tmp.$$"
-    if ! install -m 0755 "${_src_bin}" "${_tmp_bin}" 2>/dev/null; then
-        cp "${_src_bin}" "${_tmp_bin}" \
-            || die "failed to copy binary to ${_install_dir}"
-        chmod 0755 "${_tmp_bin}" \
-            || die "failed to set permissions on temp install binary"
-    fi
-    mv "${_tmp_bin}" "${_install_dir}/${BIN}" || {
-        rm -f "${_tmp_bin}"
-        die "failed to move binary into place at ${_install_dir}/${BIN}"
-    }
-
-    say "Installed ${BIN} to ${_install_dir}/${BIN}"
+    for _bin_name in "${BIN}" tctl; do
+        _src_bin="${TMP_DIR}/${_extract_dir}/${_bin_name}"
+        if [ ! -f "${_src_bin}" ]; then
+            if [ "${_bin_name}" = "${BIN}" ]; then
+                die "expected binary not found in archive: ${_extract_dir}/${_bin_name}"
+            else
+                # tctl alias is optional; skip silently if not present.
+                continue
+            fi
+        fi
+        _tmp_bin="${_install_dir}/.${_bin_name}.tmp.$$"
+        if ! install -m 0755 "${_src_bin}" "${_tmp_bin}" 2>/dev/null; then
+            cp "${_src_bin}" "${_tmp_bin}" \
+                || die "failed to copy binary to ${_install_dir}"
+            chmod 0755 "${_tmp_bin}" \
+                || die "failed to set permissions on temp install binary"
+        fi
+        mv "${_tmp_bin}" "${_install_dir}/${_bin_name}" || {
+            rm -f "${_tmp_bin}"
+            die "failed to move binary into place at ${_install_dir}/${_bin_name}"
+        }
+        say "Installed ${_bin_name} to ${_install_dir}/${_bin_name}"
+    done
 }
 
 # ---------------------------------------------------------------------------
 # Post-install bootstrap + notices
 # ---------------------------------------------------------------------------
 
-# Why: tctl bootstraps the rest of the platform; running it completes setup.
+# Why: trusty-installer bootstraps the rest of the platform; running it completes setup.
 #      Use the freshly-installed binary by absolute path so we do not depend
 #      on the (possibly not-yet-updated) PATH.
-# What: Invoke `tctl install` (or `tctl install -y` in non-interactive mode),
-#      then print the macOS Full Disk Access note (macOS only).
+# What: Invoke `trusty-installer install` (or `trusty-installer install -y` in
+#      non-interactive mode), then print the macOS Full Disk Access note (macOS only).
 # Test: Confirm the binary at its absolute path is invoked; in non-interactive
 #      mode the -y flag is passed; on macOS the FDA box is printed.
 post_install() {
@@ -483,8 +494,9 @@ main() {
     say "Version:     ${_version}"
     say "Install dir: ${_install_dir}"
 
-    # Idempotency: if tctl is on PATH and already the target version, skip
-    # download. We still run `tctl install` below (it is itself idempotent).
+    # Idempotency: if trusty-installer is on PATH and already the target version,
+    # skip download. We still run `trusty-installer install` below (it is itself
+    # idempotent).
     _existing="$(command -v "${BIN}" 2>/dev/null || true)"
     _need_install="1"
     if [ "${FORCE_INSTALL}" != "1" ] && [ -n "${_existing}" ]; then

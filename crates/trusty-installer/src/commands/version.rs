@@ -1,4 +1,4 @@
-//! `tctl version` — emit tctl's own version + embedded stack_version + contract floor.
+//! `trusty-installer version` — emit trusty-installer's version + embedded stack_version + contract floor.
 //!
 //! Why: `version` is the capability-discovery entry point (DOC-1 D3b / DOC-5
 //! §4.2). It is fully implemented in Phase 0 so the CLI surface is immediately
@@ -9,8 +9,8 @@
 //! `--json` is set, emits the DOC-5 capability-discovery object
 //! `{"tool","tool_version","stack_version","contract_floor","contract_target"}`.
 //!
-//! Test: Run `tctl version` and assert stdout contains `"tctl v"`. Run
-//! `tctl version --json` and parse the JSON; assert `"tool"` == `"trusty-controller"`.
+//! Test: Run `trusty-installer version` and assert stdout contains `"trusty-installer v"`. Run
+//! `trusty-installer version --json` and parse the JSON; assert `"tool"` == `"trusty-installer"`.
 
 use crate::output;
 
@@ -23,11 +23,11 @@ use crate::output;
 ///
 /// What: A constant `&str` used by `run` and surfaced in the `--json` output.
 ///
-/// Test: The integration test for `tctl version --json` asserts
+/// Test: The integration test for `trusty-installer version --json` asserts
 /// `stack_version == PHASE0_STACK_VERSION`.
 pub const PHASE0_STACK_VERSION: &str = "0.0.0-scaffold";
 
-/// Handle the `tctl version` subcommand.
+/// Handle the `trusty-installer version` subcommand.
 ///
 /// Why: Dispatches to the renderer so `main.rs` stays as a thin shim.
 ///

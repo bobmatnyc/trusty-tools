@@ -1,20 +1,21 @@
-//! `tctl` — thin control plane for the claude-mpm stack.
+//! `trusty-installer` — thin control plane for the claude-mpm stack.
 //!
 //! Why: Single entry point that parses CLI args and dispatches to per-command
-//! handlers in `trusty_controller`. Keeping `main.rs` as a pure shim ensures
+//! handlers in `trusty_installer`. Keeping `main.rs` as a pure shim ensures
 //! all testable logic lives in the library crate.
 //!
 //! What: Initialises tracing (to stderr per the repo rule), parses the
 //! `Cli` struct via clap, then dispatches on `Cli.command` to the appropriate
-//! handler in `trusty_controller::commands`. Returns the appropriate process
-//! exit code.
+//! handler in `trusty_installer::commands`. Returns the appropriate process
+//! exit code. This binary is installed as both `trusty-installer` (primary)
+//! and `tctl` (transitional alias — ADR-0013 / SPEC-INSTALLER-01 Phase 1).
 //!
-//! Test: `cargo run -p trusty-controller -- --help` prints the Phase-0 surface.
-//! `cargo test -p trusty-controller` exercises all command handlers and the
+//! Test: `cargo run -p trusty-installer -- --help` prints the Phase-0 surface.
+//! `cargo test -p trusty-installer` exercises all command handlers and the
 //! clap arg-parsing round-trips in `cli::tests`.
 
 use clap::Parser;
-use trusty_controller::{
+use trusty_installer::{
     cli::{Cli, Commands, StackCmd},
     commands::{
         config, doctor, ensure, install, lifecycle, passthrough, port, run_up, stack, status, ui,
@@ -70,8 +71,8 @@ fn dispatch(cli: Cli) {
             wait,
             skip_claude_upgrade,
         } => {
-            // `tctl up` is the one command with a meaningful process exit code
-            // (DOC-12 §5: 0 healthy / 2 degraded / 1 core hard-failure), so it
+            // `trusty-installer up` is the one command with a meaningful process exit
+            // code (DOC-12 §5: 0 healthy / 2 degraded / 1 core hard-failure), so it
             // exits directly with that code rather than falling through to 0.
             let code = run_up(
                 with_mpm,

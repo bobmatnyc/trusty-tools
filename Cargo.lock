@@ -10836,27 +10836,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "trusty-controller"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "clap",
- "dirs 5.0.1",
- "libc",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "serde_yaml",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "trusty-common",
- "trusty-progress",
- "which 6.0.3",
-]
-
-[[package]]
 name = "trusty-cto-db"
 version = "0.1.3"
 dependencies = [
@@ -10905,6 +10884,27 @@ dependencies = [
  "tracing",
  "trusty-common",
  "uuid",
+]
+
+[[package]]
+name = "trusty-installer"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dirs 5.0.1",
+ "libc",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trusty-common",
+ "trusty-progress",
+ "which 6.0.3",
 ]
 
 [[package]]

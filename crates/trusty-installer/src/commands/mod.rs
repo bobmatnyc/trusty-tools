@@ -1,4 +1,4 @@
-//! Per-command handlers for `tctl`.
+//! Per-command handlers for `trusty-installer`.
 //!
 //! Why: Keeping each command in its own submodule prevents `mod.rs` from
 //! becoming a monolith (500-line cap; CLAUDE.md) and lets each handler be
@@ -9,7 +9,7 @@
 //! `NotYetImplemented`; fully-implemented commands (currently only `version`)
 //! perform real work.
 //!
-//! Test: Each module has its own test section; `cargo test -p trusty-controller`
+//! Test: Each module has its own test section; `cargo test -p trusty-installer`
 //! runs them all.
 
 pub mod auto_update;

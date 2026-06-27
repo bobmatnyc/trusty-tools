@@ -26,7 +26,7 @@ trusty-tools/               # workspace root
 │   ├── trusty-agents-common/ # trusty-agents common API types (publish=false)
 │   ├── trusty-agents-local/ # trusty-agents local execution (publish=false)
 │   ├── trusty-code/         # per-project Claude-Code-compatible MPM orchestration harness (bin: tcode); Phase 0 scaffold; extraction tracked in #587
-│   └── trusty-controller/   # thin control plane for the claude-mpm stack (bin: tctl); Phase 0 scaffold; RFC tracked in #920
+│   └── trusty-installer/    # install/upgrade orchestrator (bins: trusty-installer, tctl alias); ADR-0013 / SPEC-INSTALLER-01; RFC tracked in #920
 └── .gitignore
 ```
 
@@ -57,6 +57,6 @@ Detailed implementation information for each crate lives in its own documentatio
 - **trusty-agents-common** — see `crates/trusty-agents-common/README.md` (common API types for trusty-agents, publish=false)
 - **trusty-agents-local** — see `crates/trusty-agents-local/README.md` (local execution engine for trusty-agents, publish=false)
 - **trusty-git-analytics** — see `crates/trusty-git-analytics/README.md` and `docs/trusty-git-analytics/`
-- **trusty-controller** — see `crates/trusty-controller/README.md` and `docs/trusty-controller/` (Phase 0 scaffold, bin: `tctl`; publish=false until Phase 1+; RFC #920)
+- **trusty-installer** — see `crates/trusty-installer/README.md` and `docs/trusty-installer/` (install/upgrade orchestrator, bins: `trusty-installer` + `tctl` transitional alias; ADR-0013; RFC #920; renamed from `trusty-controller` in #1757)
 
 For license details, check each crate's `Cargo.toml`: most are **Elastic License 2.0**, but `trusty-memory`, `trusty-analyze`, and a few others are **MIT**.

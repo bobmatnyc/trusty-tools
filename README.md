@@ -141,7 +141,7 @@ documentation.
 | `trusty-bm25-daemon` | Standalone BM25 full-text search daemon |
 | `trusty-code` | Code generation and analysis utilities |
 | `trusty-console` | Terminal UI for system monitoring |
-| `trusty-controller` | Infrastructure controller |
+| `trusty-installer` | Install/upgrade orchestrator (bins: `trusty-installer`, `tctl` alias; ADR-0013) |
 | `trusty-progress` | Progress tracking and reporting |
 | `trusty-review` | Code review automation and analysis |
 
@@ -191,7 +191,7 @@ Install the full trusty-tools platform with one command (no Rust toolchain requi
 curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh
 ```
 
-This downloads the prebuilt `tctl` controller binary (SHA-256 verified), installs it to `~/.local/bin`, and runs `tctl install` to set up the rest of the platform (search, memory, analyze, review, console).
+This downloads the prebuilt `trusty-installer` binary (SHA-256 verified), installs it to `~/.local/bin`, and runs `trusty-installer install` to set up the rest of the platform (search, memory, analyze, review, console). The `tctl` transitional alias is also installed, so existing muscle-memory commands (`tctl install`, `tctl status`, etc.) continue to work.
 
 **Non-interactive** (CI / scripted):
 ```bash
@@ -208,7 +208,7 @@ curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.
 | `TRUSTY_FORCE=1` | Re-download even if already installed (same as `--force`) |
 | `TRUSTY_NO_MODIFY_PATH=1` | Don't modify your shell PATH |
 
-**Supported platforms:** macOS (Apple Silicon) and Linux (x86_64). For other platforms, build from source with `cargo install trusty-controller`.
+**Supported platforms:** macOS (Apple Silicon) and Linux (x86_64). For other platforms, build from source with `cargo install trusty-installer`.
 
 **Security:** The installer is served over HTTPS and every downloaded binary is SHA-256 verified against its published checksum. The installer script itself is not signed — review it before running if you require higher assurance: https://github.com/bobmatnyc/trusty-tools/blob/main/install.sh
 

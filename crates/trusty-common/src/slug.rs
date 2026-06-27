@@ -1,8 +1,8 @@
 //! Canonical project-slug derivation shared across the trusty-* workspace.
 //!
 //! Why: trusty-memory derives palace names from a directory basename (and from
-//! arbitrary repo names supplied on the CLI), and trusty-controller's `tctl
-//! ensure` must produce the *byte-for-byte identical* slug or the trusty-memory
+//! arbitrary repo names supplied on the CLI), and trusty-installer's
+//! `ensure` must produce the *byte-for-byte identical* slug or the trusty-memory
 //! daemon rejects `POST /api/v1/palaces` with a 400 (its `validate_palace_name`
 //! re-derives the slug and compares). Before #1348 each crate carried its own
 //! copy of the rule, a silent-divergence hazard: a tweak in one would let the
@@ -11,7 +11,7 @@
 //!
 //! What: [`slugify_string`] — the one canonicalisation function. trusty-memory
 //! re-exports it as `trusty_memory::messaging::slugify_string` (a thin shim) and
-//! trusty-controller calls it directly.
+//! trusty-installer calls it directly.
 //!
 //! Test: `cargo test -p trusty-common -- slug::tests` pins the canonical
 //! behaviour here; the consuming crates inherit it transitively.
@@ -67,7 +67,7 @@ mod tests {
     use super::*;
 
     /// Why: this is the canonical behaviour both trusty-memory and
-    /// trusty-controller depend on; pinning every representative case here
+    /// trusty-installer depend on; pinning every representative case here
     /// guarantees the rule cannot silently change for either consumer.
     /// What: case folding, `_`/space/tab → `-`, hyphen-run collapse, `.git`
     /// strip, leading/trailing trim, foreign-char stripping, and the empty
@@ -87,7 +87,7 @@ mod tests {
         assert_eq!(slugify_string("trusty/tools!"), "trustytools");
         // Multiple consecutive hyphens collapse to one.
         assert_eq!(slugify_string("foo--bar"), "foo-bar");
-        // Mixed separators + leading/trailing junk (trusty-controller parity).
+        // Mixed separators + leading/trailing junk (trusty-installer parity).
         assert_eq!(slugify_string("My_Cool Project"), "my-cool-project");
         assert_eq!(slugify_string("  --weird__name--  "), "weird-name");
         assert_eq!(slugify_string("!!!"), "");

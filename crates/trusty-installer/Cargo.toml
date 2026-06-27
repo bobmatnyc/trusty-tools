@@ -1,5 +1,5 @@
 [package]
-name = "trusty-controller"
+name = "trusty-installer"
 version = "0.2.0"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
@@ -13,9 +13,16 @@ rust-version.workspace = true
 authors.workspace = true
 
 [lib]
-name = "trusty_controller"
+name = "trusty_installer"
 path = "src/lib.rs"
 
+[[bin]]
+name = "trusty-installer"
+path = "src/main.rs"
+
+# Transitional alias: `tctl` stays on PATH so existing scripts and muscle
+# memory work during the migration period. Both binaries share the same
+# main.rs entry point. (Phase 1 / ADR-0013 / SPEC-INSTALLER-01)
 [[bin]]
 name = "tctl"
 path = "src/main.rs"
@@ -28,7 +35,7 @@ clap = { workspace = true }
 # Serialisation for --json output (DOC-5 §4.2)
 serde = { workspace = true }
 serde_json = { workspace = true }
-# Boot-policy config parsing (~/.trusty-tools/trusty-controller/config.yaml, #1220 / DOC-12 §8)
+# Boot-policy config parsing (~/.trusty-tools/trusty-installer/config.yaml, #1220 / DOC-12 §8)
 serde_yaml = { workspace = true }
 # Home-directory resolution for the #1220 config path + lock state dir
 dirs = { workspace = true }
@@ -36,9 +43,9 @@ dirs = { workspace = true }
 which = { workspace = true }
 # Async runtime for parallel member probes (DOC-5 §2, DOC-4 §1.3)
 tokio = { workspace = true }
-# flock(2)-based system advisory lock for `tctl up` idempotency/concurrency (DOC-12 §3.4 / DOC-3 §4)
+# flock(2)-based system advisory lock for `trusty-installer up` idempotency/concurrency (DOC-12 §3.4 / DOC-3 §4)
 libc = { workspace = true }
-# HTTP client for `tctl ensure` project-setup stages (POST /indexes → trusty-search,
+# HTTP client for `trusty-installer ensure` project-setup stages (POST /indexes → trusty-search,
 # POST /api/v1/palaces → trusty-memory) and `--wait` readiness polling against the
 # daemon /health endpoints (#1341). Reuses the workspace reqwest (rustls-tls).
 reqwest = { workspace = true }
@@ -46,7 +53,7 @@ reqwest = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Shared update primitives (check_crates_io, perform_upgrade, verify_installed_binary,
-# is_launchd_supervised, upgrade_and_restart) reused by tctl updates/upgrade.
+# is_launchd_supervised, upgrade_and_restart) reused by trusty-installer updates/upgrade.
 # The `update-check` feature gates the `trusty_common::update` module exposing
 # those primitives (it adds zero new transitive deps; the flag controls module
 # compilation only).

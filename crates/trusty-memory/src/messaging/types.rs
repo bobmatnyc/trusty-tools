@@ -196,7 +196,7 @@ pub fn slugify_for_palace(path: &Path) -> Result<String> {
 /// Why: exposed separately so the CLI can slugify an arbitrary repo name
 /// (e.g. from `--to my_project`) without re-deriving from a path. As of #1348
 /// the implementation lives in `trusty-common` as the single source of truth
-/// (shared with trusty-controller's `tctl ensure`); this is a re-export shim
+/// (shared with `trusty-installer ensure`); this is a re-export shim
 /// kept so the many `trusty_memory::messaging::slugify_string` call sites do
 /// not churn.
 /// What: re-exports [`trusty_common::slugify_string`] verbatim.
