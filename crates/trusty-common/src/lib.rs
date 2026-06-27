@@ -475,6 +475,22 @@ pub mod tracing_init;
 /// Test: `chat_message_round_trips`, `openrouter_chat_rejects_empty_key`.
 pub mod openrouter_legacy;
 
+/// Incremental catch-up engine for the DOC-28 cutover bridge (#1762).
+///
+/// Why: when a native `tm` session starts, the operator needs a summary of
+/// activity since the last session (paused sessions, git commits, memory palace
+/// drawers). Hosting the engine here lets both trusty-mpm and (eventually)
+/// trusty-code share it without code duplication.
+/// What: gated behind the `catchup` feature (pulls in `rusqlite` via the
+/// `mpm_registry` submodule). Exposes `catchup::{CatchupOptions, run_catchup,
+/// run_catchup_blocking, generate_catchup_context, …}` plus per-source
+/// submodules (`git`, `palace`, `state`, `session_finder`, `mpm_session`,
+/// `mpm_registry`).
+/// Test: `cargo test -p trusty-common --features catchup`.
+// CUTOVER BRIDGE — remove post-migration (#1762)
+#[cfg(feature = "catchup")]
+pub mod catchup;
+
 // ─── Re-exports preserving the pre-split public API ───────────────────────
 
 pub use chat::{
