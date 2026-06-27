@@ -235,6 +235,65 @@ pub(crate) fn render_launch_banner(
     out
 }
 
+/// Print the banner to stdout for preview — no screen-clear, no sleep.
+///
+/// Why: `tm banner` lets the operator eyeball the colored robot + welcome panel
+/// without launching Claude or waiting a full second. Skipping the
+/// `\x1B[2J\x1B[1;1H` clear preserves the operator's scrollback, and the
+/// absence of the 1-second sleep makes iteration fast.
+/// What: renders the robot art + TRUSTY wordmark (without the screen-clear
+/// escape) followed by the rich info-box welcome panel (without the sleep).
+/// When the daemon is down the panel degrades gracefully (offline row, no HTTP
+/// probes needed). When `reconnecting` is `true`, the panel shows the
+/// reconnecting status row instead of Memory/Search/Prompt.
+/// Test: `banner_preview_does_not_panic` in `tests.rs`.
+pub(crate) fn print_banner_preview(reconnecting: bool) {
+    // Robot art without the full-screen clear so scrollback is preserved.
+    print!("{}", render_robot_splash_no_clear(reconnecting));
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    // Gather env-available data (best-effort; graceful when daemon is down).
+    let workdir = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".to_string());
+    let session_name = fallback_session_name(std::path::Path::new(&workdir));
+    let daemon = super::info_box::DaemonInfo::from_lock_file();
+    // Print the panel without the 1-second pause.
+    super::info_box::print_welcome_panel_no_sleep(&workdir, &session_name, reconnecting, daemon);
+}
+
+/// Render the robot art + TRUSTY wordmark without the full-screen clear escape.
+///
+/// Why: `tm banner` preview must not wipe the operator's scrollback. This
+/// helper is identical to [`render_robot_splash`] except it omits the
+/// `\x1B[2J\x1B[1;1H` sequence at the top.
+/// What: colorized robot rows + TRUSTY title block, optionally followed by
+/// `"Reconnecting..."` when `reconnecting` is `true`.
+/// Test: `banner_preview_does_not_panic`.
+pub(crate) fn render_robot_splash_no_clear(reconnecting: bool) -> String {
+    let mut out = String::new();
+    // Intentionally no screen-clear here — this is the preview / no-clear variant.
+    out.push('\n');
+    for (idx, line) in BANNER_ROBOT.iter().enumerate() {
+        out.push_str(BANNER_INDENT);
+        out.push_str(&colorize_robot_row(idx, line));
+        out.push('\n');
+    }
+    out.push('\n');
+    for line in BANNER_TITLE {
+        out.push_str(BANNER_INDENT);
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+    if reconnecting {
+        out.push_str(BANNER_INDENT);
+        out.push_str("Reconnecting...");
+        out.push('\n');
+    }
+    out
+}
+
 /// Print the full-screen `tm launch` banner with the rich info panel beneath.
 ///
 /// Why: `tm launch` should give the operator a readable splash screen before

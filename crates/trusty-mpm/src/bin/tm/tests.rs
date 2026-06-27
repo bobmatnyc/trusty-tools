@@ -1674,3 +1674,68 @@ fn robot_splash_gradient_rows_present() {
     }
     colored::control::unset_override();
 }
+
+#[test]
+fn cli_parses_banner() {
+    // Why: `tm banner` must parse and default `--reconnecting` to false.
+    // What: parse "banner" and assert the variant and flag are correct.
+    // Test: direct clap parse.
+    use crate::cli::{Cli, Command};
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["tm", "banner"]).expect("banner must parse");
+    assert!(
+        matches!(
+            cli.command,
+            Some(Command::Banner {
+                reconnecting: false
+            })
+        ),
+        "expected Banner {{ reconnecting: false }}"
+    );
+}
+
+#[test]
+fn cli_parses_banner_reconnecting() {
+    // Why: `tm banner --reconnecting` must set the flag to true.
+    // What: parse "banner --reconnecting" and assert the reconnecting flag.
+    // Test: direct clap parse.
+    use crate::cli::{Cli, Command};
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["tm", "banner", "--reconnecting"])
+        .expect("banner --reconnecting must parse");
+    assert!(
+        matches!(cli.command, Some(Command::Banner { reconnecting: true })),
+        "expected Banner {{ reconnecting: true }}"
+    );
+}
+
+#[test]
+fn banner_preview_no_clear_escape() {
+    // Why: `render_robot_splash_no_clear` must NOT begin with the full-screen
+    // clear sequence — that would wipe the user's scrollback during a preview.
+    // What: call the no-clear variant and assert the `\x1B[2J\x1B[1;1H` prefix
+    // is absent, while the TRUSTY wordmark is still present.
+    // Test: direct string assertion.
+    colored::control::set_override(false);
+    let splash = crate::formatters::banner::render_robot_splash_no_clear(false);
+    assert!(
+        !splash.starts_with("\x1B[2J\x1B[1;1H"),
+        "no-clear variant must not contain the screen-clear escape"
+    );
+    assert!(
+        splash.contains("M U L T I - A G E N T"),
+        "TRUSTY wordmark must still appear in no-clear variant"
+    );
+    colored::control::unset_override();
+}
+
+#[test]
+fn banner_preview_does_not_panic() {
+    // Why: `print_banner_preview` probes env/files that may or may not be present;
+    // it must never panic in a clean environment.
+    // What: call print_banner_preview with both reconnecting states; assert no panic.
+    // Test: if the function returns, the assertion is trivially met.
+    // Note: output goes to stdout; suppress by redirecting in the test environment.
+    crate::formatters::banner::print_banner_preview(false);
+    crate::formatters::banner::print_banner_preview(true);
+}

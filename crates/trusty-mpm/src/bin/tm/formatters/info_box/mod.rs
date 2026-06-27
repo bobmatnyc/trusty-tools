@@ -205,6 +205,26 @@ pub(crate) fn print_welcome_panel(
     std::thread::sleep(Duration::from_secs(1));
 }
 
+/// Print the welcome panel to stdout and flush — without the 1-second sleep.
+///
+/// Why: `tm banner` preview renders the same panel as the launch path but
+/// must exit immediately so the operator can iterate quickly. Factoring out
+/// the no-sleep variant avoids duplicating the gather+render logic and keeps
+/// the sleep strictly inside `print_welcome_panel` (the launch path).
+/// What: calls `gather_welcome_data` + `render_welcome_panel`, prints to
+/// stdout, flushes, and returns — no sleep.
+/// Test: `banner_preview_does_not_panic` in `tests.rs`.
+pub(crate) fn print_welcome_panel_no_sleep(
+    workdir: &str,
+    session_name: &str,
+    reconnecting: bool,
+    daemon: DaemonInfo,
+) {
+    let data = gather_welcome_data(workdir, session_name, reconnecting, daemon);
+    print!("{}", render::render_welcome_panel(&data));
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+}
+
 /// Backward-compatible alias — calls `print_welcome_panel`.
 ///
 /// Why: existing call sites in `launch.rs` and `guided.rs` use `print_info_box`;
