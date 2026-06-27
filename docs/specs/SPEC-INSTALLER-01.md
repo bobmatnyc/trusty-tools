@@ -137,6 +137,18 @@ The work breaks into 8 independent phases (can ship in any order after Phase 1):
 **Config migration:** Idempotent on every startup (check old dir exists, new doesn't, then move). Log to user.  
 **crates.io:** Publish NEW `trusty-installer` crate. Old `trusty-controller` stays published but marked deprecated.  
 
+### Hook Robustness Invariant
+
+Any Claude Code hooks wired during install (e.g., Claude hooks bundled as part of the `tm install` workflow or trusty-search daemon setup) MUST satisfy these five constraints to prevent global hooks from failing unrelated builds:
+
+1. **Absolute-path resolution:** Hook executables MUST be resolved via `current_exe()` or absolute path discovery, never via bare PATH lookups. This prevents stale symbolic links or name collisions when PATH is long or contains shadowed binaries.
+2. **Project-scoped, not globally merged:** Hooks MUST be wired into project-specific `~/.trusty-tools/<project>/.claude/settings*.json` or isolated per-daemon config, not merged into every `~/.claude/settings*.json` or `~/.claude/settings.local.json`. This limits blast radius to intentional integrations only.
+3. **Fail-open on error/timeout:** Hooks MUST always exit with code 0 (success) even when encountering errors, network timeouts, or missing dependencies. Failing hooks block tool invocations and can break unrelated build workflows (e.g., a foreign `make deploy` calling `cargo build`). Return the original input unchanged rather than failing the tool call.
+4. **Bounded execution:** Hooks MUST have connect and request timeouts (recommend ≤5s total, with <1s for local checks). This prevents hangs from blocking tool calls during build orchestration.
+5. **Opt-out capability:** The installer MUST respect `TRUSTY_MPM_DISABLE_HOOKS=1` environment variable to disable hook injection entirely. This allows users to run unrelated builds (e.g., SAM, CDK, bazel) without interference.
+
+This invariant is structural and MUST be preserved as new hooks are added (e.g., optimizer compression hooks, pre-call validators). PR #1756 (hook-hardening) and the claude-mpm ztk-shell-hook failure (where a global compression hook broke a SAM build on a long PATH) established why this matters: fail-open + project-scoped + timeout-bounded hooks can never cause collateral damage to unrelated workflows.  
+
 ---
 
 ## 9. Success Criteria
