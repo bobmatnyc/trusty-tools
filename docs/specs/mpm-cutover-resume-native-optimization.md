@@ -146,6 +146,7 @@ Configuration remains in `~/.trusty-mpm/framework/hooks/optimizer.toml`; default
 1. **Native in-tree filters only:** Do **not** shell out to or bundle the external `codejunkie99/ztk` Zig binary. Keep it pure-Rust, single-install clean.
 2. **Extend existing abstraction:** Add filters as a new mode/tier in `CompressionLevel` enum and wired at the single existing seam (`optimize_tool_output`).
 3. **v1 filter granularity (RESOLVED):** v1 recognizes ONLY `git`, `cargo`, `ls`, `grep`; additional command domains are added in future PRs via separate issues.
+4. **Fail-open invariant:** The tool-output optimizer and native ztk filters MUST be fail-open and in-process — infallible (return the original payload unchanged on any error or edge case), bounded, with NO shell-out and NO `$PATH` dependency. This structural choice avoids the claude-mpm ztk-shell-hook failure mode where a global `sh -c` compression hook broke an unrelated SAM build on a long PATH. The implementation today (infallible `optimize_tool_output`, pure in-process Rust compression) already holds this invariant; it MUST be preserved as ztk filters are added. See PR #1756 for details on hook-hardening.
 
 ### Parity Notes
 
