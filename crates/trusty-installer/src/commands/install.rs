@@ -3,19 +3,22 @@
 //! Why: The one-time entry point that brings a machine to a fully-installed
 //! stack. Installs the canonical, topologically-ordered stable set as a unit so
 //! the platform comes up coherent rather than drifting member-by-member.
-//! Idempotent: an already-installed member is re-run through `cargo install`
-//! (cheap no-op when current) and reported.
+//! Idempotent: an already-installed member is re-run through the prebuilt-first
+//! path (Phase 2 / #1760) or `cargo install` (cheap no-op when current) and reported.
 //!
 //! What: Resolves the requested members against [`super::stable_set`], installs
-//! each in order via `trusty_common::update::perform_upgrade` (= `cargo install
-//! <crate> --locked`), health-gates each freshly-installed binary with
-//! `verify_installed_binary`, and renders rustup-style per-tool component rows
-//! via `trusty-progress`. Honours `--yes` (non-interactive) and `--json`
-//! (machine output). Returns a process exit code: 0 all installed, 2 one or more
-//! failed.
+//! each in order via the prebuilt-first strategy: on a Tier-1 platform a prebuilt
+//! tarball is downloaded, SHA-256 verified, and atomically placed into the install
+//! directory (`~/.local/bin` by default). On non-Tier-1 platforms (or when the
+//! prebuilt download fails) the code falls back to
+//! `trusty_common::update::perform_upgrade` (= `cargo install <crate> --locked`),
+//! verifying cargo is present first. Each freshly-installed binary is
+//! health-gated with `verify_installed_binary`. Progress rows are rendered via
+//! `trusty-progress`. Honours `--yes` (non-interactive) and `--json` (machine
+//! output). Returns a process exit code: 0 all installed, 2 one or more failed.
 //!
 //! Test: `tests` covers the JSON envelope shaping (`build_report`) and the
-//! unknown-member handling; the network/`cargo install` path is side-effecting
+//! unknown-member handling; the network / `cargo install` path is side-effecting
 //! and validated manually.
 
 use serde::Serialize;
@@ -188,13 +191,56 @@ async fn install_all(selected: &[StableMember], json: bool) -> InstallReport {
     InstallReport::build(outcomes)
 }
 
-/// Install + health-gate a single member.
+/// Install + health-gate a single member, prebuilt-first with cargo fallback.
 ///
-/// Why: One member's full install step, composed from the shared primitives.
-/// What: `perform_upgrade(crate)` then `verify_installed_binary(binary)`.
-/// Test: Side-effecting; covered indirectly.
+/// Why: Prebuilt binaries install in seconds without requiring a Rust toolchain;
+/// the cargo path is the universal fallback for unsupported platforms and failures.
+///
+/// What: Resolves the install directory (prefers `~/.local/bin` to avoid cdhash
+/// issues on macOS; falls back to cargo path via `perform_upgrade` when prebuilt
+/// fails). Calls `crate::download::try_install_prebuilt`; on `Outcome::Fallback`
+/// emits a narration line and delegates to `perform_upgrade`. In both cases
+/// health-gates with `verify_installed_binary`.
+///
+/// Test: Side-effecting; the fallback routing and shaping are unit-tested in
+/// `crate::download::tests`.
 async fn install_one(m: &StableMember) -> anyhow::Result<()> {
-    trusty_common::update::perform_upgrade(&m.crate_name).await?;
+    use crate::download::{self, Outcome};
+
+    // Resolve the install directory — prefer ~/.local/bin (the default used by
+    // install.sh) so the prebuilt binary lands where the user expects; fall back
+    // to the cargo-install path when it cannot be determined.
+    let install_dir = download::default_install_dir().unwrap_or_else(|| {
+        // Fallback: CARGO_HOME/bin or ~/.cargo/bin.
+        let cargo_home = std::env::var("CARGO_HOME").unwrap_or_default();
+        if cargo_home.is_empty() {
+            dirs::home_dir()
+                .map(|h| h.join(".cargo").join("bin"))
+                .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin"))
+        } else {
+            std::path::PathBuf::from(&cargo_home).join("bin")
+        }
+    });
+
+    let outcome = download::try_install_prebuilt(&m.crate_name, &install_dir).await;
+    match outcome {
+        Outcome::Installed { version, .. } => {
+            tracing::info!(crate_name = %m.crate_name, %version, "installed from prebuilt");
+        }
+        Outcome::Fallback { reason } => {
+            tracing::info!(crate_name = %m.crate_name, %reason, "prebuilt unavailable; using cargo install");
+            // Verify cargo is available before attempting the fallback.
+            which::which("cargo").map_err(|_| {
+                anyhow::anyhow!(
+                    "no Rust toolchain found on PATH (cargo not available); \
+                     cannot fall back to `cargo install {}`",
+                    m.crate_name
+                )
+            })?;
+            trusty_common::update::perform_upgrade(&m.crate_name).await?;
+        }
+    }
+
     trusty_common::update::verify_installed_binary(&m.binary).await
 }
 

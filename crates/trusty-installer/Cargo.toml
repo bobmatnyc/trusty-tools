@@ -47,8 +47,17 @@ tokio = { workspace = true }
 libc = { workspace = true }
 # HTTP client for `trusty-installer ensure` project-setup stages (POST /indexes → trusty-search,
 # POST /api/v1/palaces → trusty-memory) and `--wait` readiness polling against the
-# daemon /health endpoints (#1341). Reuses the workspace reqwest (rustls-tls).
+# daemon /health endpoints (#1341). Also used for prebuilt-binary downloads (Phase 2 / #1760).
+# Reuses the workspace reqwest (rustls-tls).
 reqwest = { workspace = true }
+# SHA-256 verification for prebuilt-binary tarballs (Phase 2 / #1760).
+sha2 = { workspace = true }
+# Gzip decompression for prebuilt-binary tarballs (Phase 2 / #1760).
+flate2 = { workspace = true }
+# Tar archive extraction for prebuilt-binary tarballs (Phase 2 / #1760).
+tar = { workspace = true }
+# Semantic-version parsing for GitHub release tag resolution (Phase 2 / #1760).
+semver = { workspace = true }
 # Structured logging to stderr (CLAUDE.md: logs → stderr, stdout = data)
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -61,7 +70,9 @@ trusty-common = { workspace = true, features = ["update-check"] }
 # Rustup/cargo-style progress display (#1315): Narrator `info:` lines + the
 # right-aligned ComponentTracker table for install/upgrade rows.
 trusty-progress = { workspace = true }
+# Temp-directory helpers: used in production code by the prebuilt download layer
+# (Phase 2 / #1760) to stage downloads atomically before placing binaries, and in
+# tests for integration-test isolation.
+tempfile = { workspace = true }
 
 [dev-dependencies]
-# Temporary directory helpers for integration test isolation
-tempfile = { workspace = true }
