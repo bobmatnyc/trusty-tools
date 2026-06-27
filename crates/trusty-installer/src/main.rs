@@ -18,8 +18,8 @@ use clap::Parser;
 use trusty_installer::{
     cli::{Cli, Commands, StackCmd},
     commands::{
-        config, doctor, ensure, install, lifecycle, passthrough, port, run_up, stack, status, ui,
-        updates, upgrade, version,
+        config, doctor, ensure, install, lifecycle, passthrough, port, run_up, self_update, stack,
+        status, ui, updates, upgrade, version,
     },
 };
 
@@ -160,6 +160,10 @@ fn dispatch(cli: Cli) {
 
         Commands::Ui { print } => {
             std::process::exit(ui::run(print, json));
+        }
+
+        Commands::SelfUpdate => {
+            std::process::exit(self_update::run(json));
         }
 
         Commands::Passthrough(args) => {
