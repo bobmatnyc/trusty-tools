@@ -16,8 +16,7 @@ use crate::cli::{
 };
 use crate::formatters::banner::{
     BANNER_ROBOT, colorize_robot_row, fallback_session_name, normalize_workdir,
-    print_launch_banner, print_launch_banner_reconnecting, render_launch_banner,
-    render_robot_splash, terminal_width, wordmark_lines,
+    print_launch_banner, print_launch_banner_reconnecting, terminal_width,
 };
 use crate::formatters::session::short_id;
 
@@ -311,44 +310,64 @@ fn terminal_width_is_positive() {
 }
 
 #[test]
-fn launch_banner_contains_session_fields() {
-    // Why: the banner is the operator's only summary of what was wired up;
-    // the project, session, and prompt fields must all appear, the screen
-    // must be cleared, and the launch action line must be present.
-    let banner = render_launch_banner(
-        "/Users/test/project",
-        "tmpm-quiet-falcon",
-        Some(std::path::Path::new("/tmp/INSTRUCTIONS.md")),
-        None,
-    );
-    assert!(banner.starts_with("\x1B[2J\x1B[1;1H"), "screen not cleared");
-    assert!(banner.contains("/Users/test/project"));
-    assert!(banner.contains("tmpm-quiet-falcon"));
-    assert!(banner.contains("/tmp/INSTRUCTIONS.md"));
-    assert!(banner.contains("Launching claude..."));
-    // Plain-text wordmark: "trusty-mpm" (lowercase) replaces the old block-art.
+fn banner_title_bar_contains_version() {
+    // Why: the single-box banner embeds the crate version in the title bar;
+    // this ensures the version is always visible to the operator at a glance.
+    use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
+    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
+    colored::control::set_override(false);
+    let data = WelcomeData {
+        project: "my-project".to_string(),
+        workspace: "/Users/test/project".to_string(),
+        user: "operator".to_string(),
+        reconnecting: false,
+        session_name: "tmpm-my-project".to_string(),
+        daemon: DaemonInfo::default(),
+        recent_commits: vec![],
+        memory_status: "(not detected)".to_string(),
+        search_status: "(not detected)".to_string(),
+        review_status: "(not detected)".to_string(),
+    };
+    let out = render_two_panel_banner(&data, 120, false).expect("wide banner");
+    let first_line = out.lines().next().unwrap_or("");
+    let bare = strip_ansi(first_line);
     assert!(
-        banner.contains("trusty-mpm"),
-        "plain-text wordmark must appear in banner"
+        bare.contains(env!("CARGO_PKG_VERSION")),
+        "title bar must contain CARGO_PKG_VERSION: {bare:?}"
     );
+    assert!(
+        bare.starts_with('╭'),
+        "title bar must start with outer box corner ╭: {bare:?}"
+    );
+    colored::control::unset_override();
 }
 
 #[test]
-fn launch_banner_marks_reconnect() {
-    // Why: a reconnecting launch must not claim it started a new session;
-    // the banner must show a Status row and the "Reconnecting..." action.
-    let banner = render_launch_banner(
-        "/Users/test/project",
-        "tmpm-quiet-falcon",
-        None,
-        Some("tmpm-quiet-falcon"),
-    );
-    assert!(banner.contains("reconnecting to existing session"));
-    assert!(banner.contains("Reconnecting..."));
+fn banner_reconnect_label_in_wide_mode() {
+    // Why: the reconnect label in the wide single-box banner must say
+    // "Reconnecting..." so the operator knows no new session was started.
+    use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
+    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
+    colored::control::set_override(false);
+    let data = WelcomeData {
+        project: "my-project".to_string(),
+        workspace: "/Users/test/project".to_string(),
+        user: "operator".to_string(),
+        reconnecting: true,
+        session_name: "tmpm-quiet-falcon".to_string(),
+        daemon: DaemonInfo::default(),
+        recent_commits: vec![],
+        memory_status: "(not detected)".to_string(),
+        search_status: "(not detected)".to_string(),
+        review_status: "(not detected)".to_string(),
+    };
+    let out = render_two_panel_banner(&data, 120, true).expect("wide reconnect banner");
+    let bare = strip_ansi(&out);
     assert!(
-        !banner.contains("Launching claude..."),
-        "reconnect banner must not claim a fresh launch"
+        bare.contains("Reconnecting..."),
+        "wide reconnect banner must contain 'Reconnecting...': {bare:.200}"
     );
+    colored::control::unset_override();
 }
 
 #[test]
@@ -1642,85 +1661,66 @@ fn robot_row_colorize_preserves_text() {
 }
 
 #[test]
-fn robot_splash_contains_robot_and_title() {
-    // Why: `render_robot_splash` is the pure renderer used by the print functions;
-    // it must include both the screen-clear escape and the plain-text wordmark.
-    // What: render the splash (no reconnecting flag), assert key structural markers.
-    // Test: call with reconnecting=false to get the normal launch splash.
+fn narrow_fallback_reconnect_box_includes_reconnecting_text() {
+    // Why: the single-box narrow fallback (< MIN_WIDTH_TWO_PANEL) must include
+    // "Reconnecting..." when reconnecting=true — matching the wide layout's
+    // reconnect indicator. This verifies the fix from commit 54690868 is
+    // preserved under the new single-box design.
+    // What: render via `render_two_panel_banner` with a narrow width and
+    // reconnecting=true; assert the label appears.
+    // Test: pure string assertion via the public compositor.
+    use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
+    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
     colored::control::set_override(false);
-    let splash = render_robot_splash(false);
+    let data = WelcomeData {
+        project: "my-project".to_string(),
+        workspace: "/tmp/my-project".to_string(),
+        user: String::new(),
+        reconnecting: true,
+        session_name: "tmpm-my-project".to_string(),
+        daemon: DaemonInfo::default(),
+        recent_commits: vec![],
+        memory_status: "(not detected)".to_string(),
+        search_status: "(not detected)".to_string(),
+        review_status: "(not detected)".to_string(),
+    };
+    // 80-col: narrow stacked box.
+    let out = render_two_panel_banner(&data, 80, true).expect("narrow box");
+    let bare = strip_ansi(&out);
     assert!(
-        splash.starts_with("\x1B[2J\x1B[1;1H"),
-        "splash must start with screen-clear: {splash:?}"
+        bare.contains("Reconnecting..."),
+        "narrow reconnect box must contain 'Reconnecting...' label"
     );
-    // Plain-text "trusty-mpm" label replaces the old block-art BANNER_TITLE.
-    assert!(
-        splash.contains("trusty-mpm"),
-        "plain-text wordmark 'trusty-mpm' must be in splash"
-    );
-    // Version string must follow on the next line.
-    assert!(
-        splash.contains(env!("CARGO_PKG_VERSION")),
-        "version must appear in splash"
-    );
+    // Also verify the outer box is intact.
+    let first = bare.lines().next().unwrap_or("");
+    assert!(first.starts_with('╭'), "must have outer box top border");
     colored::control::unset_override();
 }
 
 #[test]
-fn robot_splash_gradient_rows_present() {
-    // Why: every row of the robot art must appear in the splash output (colorized
-    // or plain); if a row is accidentally skipped the art breaks visually.
-    // What: with color disabled (so no escape-sequence confusion), assert each
-    // BANNER_ROBOT row's trimmed content appears in the splash output.
+fn narrow_fallback_normal_box_does_not_include_reconnecting_text() {
+    // Why: normal launch (reconnecting=false) narrow box must NOT show
+    // "Reconnecting..." — the operator should see the launch context only.
+    use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
+    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
     colored::control::set_override(false);
-    let splash = render_robot_splash(false);
-    for (i, row) in BANNER_ROBOT.iter().enumerate() {
-        let trimmed = row.trim();
-        if !trimmed.is_empty() {
-            assert!(
-                splash.contains(trimmed),
-                "robot row {i} trimmed content missing from splash: {trimmed:?}"
-            );
-        }
-    }
-    colored::control::unset_override();
-}
-
-#[test]
-fn narrow_fallback_reconnect_splash_includes_reconnecting_text() {
-    // Why: `print_launch_banner_reconnecting` narrow fallback must pass
-    // `reconnecting=true` to `render_robot_splash` so the "Reconnecting..."
-    // label appears in the robot splash — matching the wide two-panel path
-    // where reconnect state shows in both panels.  Before the fix this branch
-    // incorrectly passed `false`, silently dropping the reconnect label.
-    // What: render the splash with reconnecting=true and assert the label is
-    // present; also confirm screen-clear is still there.
-    // Test: pure string assertion, no I/O side-effects.
-    colored::control::set_override(false);
-    let splash = render_robot_splash(true);
+    let data = WelcomeData {
+        project: "my-project".to_string(),
+        workspace: "/tmp/my-project".to_string(),
+        user: String::new(),
+        reconnecting: false,
+        session_name: String::new(),
+        daemon: DaemonInfo::default(),
+        recent_commits: vec![],
+        memory_status: "(not detected)".to_string(),
+        search_status: "(not detected)".to_string(),
+        review_status: "(not detected)".to_string(),
+    };
+    let out = render_two_panel_banner(&data, 80, false).expect("narrow box");
+    let bare = strip_ansi(&out);
     assert!(
-        splash.starts_with("\x1B[2J\x1B[1;1H"),
-        "narrow reconnect splash must still clear the screen"
-    );
-    assert!(
-        splash.contains("Reconnecting..."),
-        "narrow reconnect splash must contain 'Reconnecting...' label"
-    );
-    colored::control::unset_override();
-}
-
-#[test]
-fn narrow_fallback_launch_splash_does_not_include_reconnecting_text() {
-    // Why: the narrow launch path (non-reconnecting) must NOT show
-    // "Reconnecting..." in the robot splash — only the info panel below it
-    // shows launch context.
-    // What: render with reconnecting=false and confirm the label is absent.
-    // Test: pure string assertion.
-    colored::control::set_override(false);
-    let splash = render_robot_splash(false);
-    assert!(
-        !splash.contains("Reconnecting..."),
-        "normal launch splash must not contain 'Reconnecting...' label"
+        !bare.contains("Reconnecting..."),
+        "normal launch narrow box must not contain 'Reconnecting...' label"
     );
     colored::control::unset_override();
 }
@@ -1761,41 +1761,38 @@ fn cli_parses_banner_reconnecting() {
 
 #[test]
 fn banner_preview_no_clear_escape() {
-    // Why: `render_robot_splash_no_clear` must NOT begin with the full-screen
-    // clear sequence — that would wipe the user's scrollback during a preview.
-    // What: call the no-clear variant and assert the `\x1B[2J\x1B[1;1H` prefix
-    // is absent, while the plain-text wordmark is still present.
-    // Test: direct string assertion.
+    // Why: the `tm banner` preview must NOT begin with the full-screen clear
+    // sequence — that would wipe the user's scrollback.
+    // What: capture whether the print_banner_preview output starts with the
+    // clear escape. Since it writes to stdout, we verify indirectly via the
+    // single-box compositor which is used for the preview path.
+    use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
+    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
     colored::control::set_override(false);
-    let splash = crate::formatters::banner::render_robot_splash_no_clear(false);
+    let data = WelcomeData {
+        project: "p".to_string(),
+        workspace: "/tmp/p".to_string(),
+        user: String::new(),
+        reconnecting: false,
+        session_name: String::new(),
+        daemon: DaemonInfo::default(),
+        recent_commits: vec![],
+        memory_status: "(not detected)".to_string(),
+        search_status: "(not detected)".to_string(),
+        review_status: "(not detected)".to_string(),
+    };
+    let out = render_two_panel_banner(&data, 120, false).expect("banner");
+    // The compositor never emits a screen-clear — that is added by the print
+    // wrappers only, and only for the launch (not preview) path.
     assert!(
-        !splash.starts_with("\x1B[2J\x1B[1;1H"),
-        "no-clear variant must not contain the screen-clear escape"
+        !out.starts_with("\x1B[2J"),
+        "compositor output must not start with screen-clear escape"
     );
-    // Plain-text "trusty-mpm" label replaces the old block-art.
+    // Version appears in the title bar.
+    let bare = strip_ansi(&out);
     assert!(
-        splash.contains("trusty-mpm"),
-        "plain-text wordmark 'trusty-mpm' must still appear in no-clear variant"
-    );
-    colored::control::unset_override();
-}
-
-#[test]
-fn wordmark_lines_contain_trusty_and_version() {
-    // Why: `wordmark_lines` is the single source of truth for the banner label
-    // and version; asserting both values here catches accidental regressions.
-    // What: with colour disabled so the output is plain text, verify that line 0
-    // contains "trusty-mpm" and line 1 contains the crate version.
-    // Test: direct function call with colour override off.
-    colored::control::set_override(false);
-    let [label, version] = wordmark_lines();
-    assert!(
-        label.contains("trusty-mpm"),
-        "wordmark label must contain 'trusty-mpm': {label:?}"
-    );
-    assert!(
-        version.contains(env!("CARGO_PKG_VERSION")),
-        "wordmark version line must contain the crate version: {version:?}"
+        bare.contains(env!("CARGO_PKG_VERSION")),
+        "compositor output must contain version in title bar"
     );
     colored::control::unset_override();
 }

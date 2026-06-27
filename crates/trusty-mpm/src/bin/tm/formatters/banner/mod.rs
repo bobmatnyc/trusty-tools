@@ -1,12 +1,12 @@
 //! Launch-banner rendering for `tm launch` and `tm connect`.
 //!
-//! Why: the full-screen ASCII-art banner is ~130 lines of data and ~100 lines
+//! Why: the full-screen ASCII-art banner is ~130 lines of data and ~80 lines
 //! of rendering logic; keeping it separate from the launch handler keeps that
 //! file under the 500-line cap and makes it trivially testable in isolation.
-//! What: `render_launch_banner`, `print_launch_banner`,
-//! `print_launch_banner_reconnecting`, `terminal_width`, `detect_memory`,
-//! `detect_tool`, `dirs_config_dir`, `binary_on_path`, `fallback_session_name`,
-//! `normalize_workdir`, `tmux_has_session`. The two-panel compositor lives in
+//! What: `print_launch_banner`, `print_launch_banner_reconnecting`,
+//! `print_banner_preview`, `terminal_width`, `detect_memory`, `detect_tool`,
+//! `dirs_config_dir`, `binary_on_path`, `fallback_session_name`,
+//! `normalize_workdir`, `tmux_has_session`. The single-box compositor lives in
 //! the `two_panel` submodule.
 //! Test: `launch_banner_*`, `terminal_width_is_positive`,
 //! `normalize_workdir_strips_trailing_slash` in `tests.rs`;
@@ -16,19 +16,12 @@ pub(crate) mod two_panel;
 
 use colored::Colorize as _;
 
-/// Left indent applied to every line of the full-screen launch banner.
-pub(crate) const BANNER_INDENT: &str = "   ";
-
-/// Width of the session-info separator line drawn in the launch banner.
-#[allow(dead_code)]
-pub(crate) const BANNER_SEPARATOR_WIDTH: usize = 53;
-
 /// The ASCII-art robot mascot drawn at the top of the launch banner.
 ///
 /// Why: a recognizable centerpiece gives `tm launch` the same "the tool has
 /// taken over the terminal" feel as claude-mpm's startup screen.
-/// What: a multi-line string-art robot; each line is printed verbatim with the
-/// shared [`BANNER_INDENT`].
+/// What: a multi-line string-art robot; each line is 45 display columns wide.
+/// Test: `robot_shrink_has_fewer_rows` in `two_panel::tests`.
 pub(crate) const BANNER_ROBOT: &[&str] = &[
     "                                             ",
     "                    .}##-                    ",
@@ -59,54 +52,14 @@ pub(crate) const BANNER_ROBOT: &[&str] = &[
     "                                             ",
 ];
 
-/// Amber rust tone used for the plain-text wordmark label.
-///
-/// Why: reuses the warm amber from the bottom of the robot gradient so the
-/// wordmark reads as part of the same brand palette without repeating the full
-/// gradient computation.
-/// What: RGB values `(224, 140, 60)` — the last entry in `ROBOT_GRADIENT`.
-/// Test: visual inspection via `tm banner`.
-const WORDMARK_R: u8 = 224;
-const WORDMARK_G: u8 = 140;
-const WORDMARK_B: u8 = 60;
-
-/// Muted dark-rust tone for the version line beneath the wordmark.
-///
-/// Why: the version number should be present but not compete with the label.
-/// What: RGB values `(140, 60, 20)` — darker than the wordmark amber.
-/// Test: visual inspection via `tm banner`.
-const VERSION_R: u8 = 140;
-const VERSION_G: u8 = 60;
-const VERSION_B: u8 = 20;
-
-/// Build the two-line plain-text wordmark: `trusty-mpm` (bold amber) + version (dimmed rust).
-///
-/// Why: replaces the bulky 7-row block-art `BANNER_TITLE` with a single-line
-/// label that is lighter, faster to scan, and stays under the SLOC cap.
-/// What: returns a `[String; 2]` — `lines[0]` is the colourised `"trusty-mpm"` label,
-/// `lines[1]` is the colourised `"v{CARGO_PKG_VERSION}"` version string. Both
-/// degrade gracefully to plain text when `colored` colour is disabled.
-/// Test: `wordmark_lines_contain_trusty_and_version`.
-pub(crate) fn wordmark_lines() -> [String; 2] {
-    use colored::Colorize as _;
-    let label = "trusty-mpm"
-        .truecolor(WORDMARK_R, WORDMARK_G, WORDMARK_B)
-        .bold()
-        .to_string();
-    let version = format!("v{}", env!("CARGO_PKG_VERSION"))
-        .truecolor(VERSION_R, VERSION_G, VERSION_B)
-        .to_string();
-    [label, version]
-}
-
 /// Rust-color gradient palette applied row-by-row across the robot art.
 ///
 /// Why: a smooth gradient from dark rust (top) through burnt orange (middle)
 /// to amber (lower) turns the monochrome ASCII art into a recognizable brand
 /// color without requiring a terminfo capability beyond 24-bit truecolor.
-/// What: 27-element array of `(r, g, b)` tuples, one per robot row (indexed
-/// by row position 0–26); interpolated across three anchor colors.
-/// Test: `robot_gradient_has_correct_length`.
+/// What: 27-element array of `(r, g, b)` tuples, one per robot row (0–26);
+/// each shrunk row looks up its original index via `colorize_robot_row`.
+/// Test: `robot_gradient_matches_original_row_count` in `two_panel::tests`.
 pub(crate) const ROBOT_GRADIENT: [(u8, u8, u8); 27] = {
     [
         (183, 65, 14),
@@ -147,8 +100,7 @@ pub(crate) const ROBOT_GRADIENT: [(u8, u8, u8); 27] = {
 /// to 26) and applies `colored::Colorize::truecolor` to the line. When color
 /// is disabled (e.g. `NO_COLOR` or non-TTY), `colored` degrades gracefully to
 /// plain text.
-/// Test: `robot_row_colorize_produces_escape_sequences`,
-/// `robot_row_colorize_plain_when_disabled`.
+/// Test: `robot_row_colorize_preserves_text`.
 pub(crate) fn colorize_robot_row(row_idx: usize, line: &str) -> String {
     let idx = row_idx.min(ROBOT_GRADIENT.len() - 1);
     let (r, g, b) = ROBOT_GRADIENT[idx];
@@ -180,122 +132,13 @@ pub(crate) fn terminal_width() -> usize {
     80
 }
 
-/// Render the full-screen `tm launch` banner into a single string.
-///
-/// Why: keeping the banner pure (string in, string out) makes it trivially
-/// testable and lets [`print_launch_banner`] stay a thin print wrapper.
-/// What: builds the cleared-screen escape sequence, the ASCII robot (rust-
-/// gradient colorized), the "TRUSTY" wordmark, and an indented session-info
-/// block. When `reconnect_session` is `Some`, a `Status:` row is added and the
-/// closing action line reads "Reconnecting..." instead of "Launching claude...".
-/// Test: `launch_banner_contains_session_fields`,
-/// `launch_banner_marks_reconnect`.
-#[allow(dead_code)]
-pub(crate) fn render_launch_banner(
-    workdir: &str,
-    tmux_name: &str,
-    prompt_path: Option<&std::path::Path>,
-    reconnect_session: Option<&str>,
-) -> String {
-    let mut out = String::new();
-    // Clear the screen and home the cursor so the banner owns the terminal.
-    out.push_str("\x1B[2J\x1B[1;1H");
-
-    out.push('\n');
-    for (idx, line) in BANNER_ROBOT.iter().enumerate() {
-        out.push_str(BANNER_INDENT);
-        out.push_str(&colorize_robot_row(idx, line));
-        out.push('\n');
-    }
-    out.push('\n');
-    for line in wordmark_lines() {
-        out.push_str(BANNER_INDENT);
-        out.push_str(&line);
-        out.push('\n');
-    }
-    out.push('\n');
-
-    let separator = "─".repeat(BANNER_SEPARATOR_WIDTH);
-    let field =
-        |label: &str, value: &str| -> String { format!("{BANNER_INDENT}{label:<9}:  {value}\n") };
-
-    let memory = detect_memory();
-    let search = detect_tool("trusty-search");
-    let prompt = match prompt_path {
-        Some(p) => p.display().to_string(),
-        None => "(default)".to_string(),
-    };
-
-    out.push_str(BANNER_INDENT);
-    out.push_str(&separator);
-    out.push('\n');
-    out.push_str(&field("Project", workdir));
-    out.push_str(&field("Session", tmux_name));
-    if let Some(session) = reconnect_session {
-        out.push_str(&field(
-            "Status",
-            &format!("↩  reconnecting to existing session ({session})"),
-        ));
-    } else {
-        out.push_str(&field("Memory", &format!("{memory}  ✓")));
-        out.push_str(&field("Search", &format!("{search}  ✓")));
-        out.push_str(&field("Prompt", &prompt));
-    }
-    out.push_str(BANNER_INDENT);
-    out.push_str(&separator);
-    out.push('\n');
-    out.push('\n');
-
-    let action = if reconnect_session.is_some() {
-        "Reconnecting..."
-    } else {
-        "Launching claude..."
-    };
-    out.push_str(BANNER_INDENT);
-    out.push_str(action);
-    out.push('\n');
-    out
-}
-
-/// Render the robot art + TRUSTY wordmark without the full-screen clear escape.
-///
-/// Why: `tm banner` preview must not wipe the operator's scrollback. This
-/// helper is identical to [`render_robot_splash`] except it omits the
-/// `\x1B[2J\x1B[1;1H` sequence at the top.
-/// What: colorized robot rows + TRUSTY title block, optionally followed by
-/// `"Reconnecting..."` when `reconnecting` is `true`.
-/// Test: `banner_preview_does_not_panic`.
-pub(crate) fn render_robot_splash_no_clear(reconnecting: bool) -> String {
-    let mut out = String::new();
-    out.push('\n');
-    for (idx, line) in BANNER_ROBOT.iter().enumerate() {
-        out.push_str(BANNER_INDENT);
-        out.push_str(&colorize_robot_row(idx, line));
-        out.push('\n');
-    }
-    out.push('\n');
-    for line in wordmark_lines() {
-        out.push_str(BANNER_INDENT);
-        out.push_str(&line);
-        out.push('\n');
-    }
-    out.push('\n');
-    if reconnecting {
-        out.push_str(BANNER_INDENT);
-        out.push_str("Reconnecting...");
-        out.push('\n');
-    }
-    out
-}
-
-/// Print the full-screen `tm launch` banner with the rich info panel beneath.
+/// Print the full-screen `tm launch` banner (single outer box).
 ///
 /// Why: `tm launch` should give the operator a readable splash screen before
-/// the terminal is taken over by `claude`/`tmux`. The robot clears the screen
-/// for visual impact; the info panel below provides rich operational context.
-/// What: clears the screen, then renders the two-panel layout on wide terminals
-/// (≥`two_panel::MIN_WIDTH_TWO_PANEL` cols) or the stacked layout on narrow
-/// terminals. Pauses 1 s total (the info-box's own sleep covers it).
+/// the terminal is taken over by `claude`/`tmux`. The single-box banner clears
+/// the screen for visual impact; the info panel provides rich operational context.
+/// What: clears the screen, then renders the single-box layout via
+/// `two_panel::render_two_panel_banner`. Pauses 1 s after rendering.
 /// Test: `launch_banner_does_not_panic`.
 pub(crate) fn print_launch_banner(
     workdir: &str,
@@ -312,55 +155,20 @@ pub(crate) fn print_launch_banner(
         let _ = std::io::Write::flush(&mut std::io::stdout());
         std::thread::sleep(std::time::Duration::from_secs(1));
     } else {
-        // Narrow fallback: stacked layout.
-        print!("{}", render_robot_splash(false));
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-        let daemon2 = super::info_box::DaemonInfo::from_lock_file();
-        super::info_box::print_welcome_panel(workdir, tmux_name, false, daemon2);
+        // Extremely narrow terminal (< 40 cols) — very rare.
+        println!("\x1B[2J\x1B[1;1H");
+        println!("Trusty MPM v{}", env!("CARGO_PKG_VERSION"));
+        println!("Launching...");
     }
-}
-
-/// Print the full-screen robot banner without the info panel (for tests/reconnect).
-///
-/// Why: renders the robot + title block as a pure string so test callers can
-/// assert content without going through the I/O path.
-/// What: `\x1B[2J\x1B[1;1H` clear + colorized robot rows + TRUSTY title.
-/// Test: `launch_banner_does_not_panic`, `launch_reconnect_banner_does_not_panic`.
-pub(crate) fn render_robot_splash(reconnecting: bool) -> String {
-    let mut out = String::new();
-    out.push_str("\x1B[2J\x1B[1;1H");
-    out.push('\n');
-    for (idx, line) in BANNER_ROBOT.iter().enumerate() {
-        out.push_str(BANNER_INDENT);
-        out.push_str(&colorize_robot_row(idx, line));
-        out.push('\n');
-    }
-    out.push('\n');
-    for line in wordmark_lines() {
-        out.push_str(BANNER_INDENT);
-        out.push_str(&line);
-        out.push('\n');
-    }
-    out.push('\n');
-    if reconnecting {
-        out.push_str(BANNER_INDENT);
-        out.push_str("Reconnecting...");
-        out.push('\n');
-    }
-    out
 }
 
 /// Print the full-screen `tm launch` banner with a "reconnecting" status line.
 ///
 /// Why: when `tm launch` attaches to a pre-existing session the operator should
 /// see that no new session was created.
-/// What: on wide terminals renders the two-panel layout with the reconnecting
-/// state shown in both panels; on narrow terminals falls back to the stacked
-/// layout with the rich info-box (reconnect mode).  The narrow fallback passes
-/// `reconnecting=true` to `render_robot_splash` so the "Reconnecting..." text
-/// appears in the robot splash — matching the wide-path presentation.
-/// Test: `launch_reconnect_banner_does_not_panic`,
-/// `narrow_fallback_reconnect_splash_includes_reconnecting_text`.
+/// What: on terminals >= MIN_WIDTH_BOX renders the single-box banner with
+/// reconnecting state shown. On very narrow terminals falls back to plain text.
+/// Test: `launch_reconnect_banner_does_not_panic`.
 pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
     let w = terminal_width();
     let daemon = super::info_box::DaemonInfo::from_lock_file();
@@ -372,13 +180,9 @@ pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
         let _ = std::io::Write::flush(&mut std::io::stdout());
         std::thread::sleep(std::time::Duration::from_secs(1));
     } else {
-        // Narrow fallback: stacked layout.  Pass reconnecting=true so the
-        // "Reconnecting..." label appears in the robot splash (matching the
-        // wide-path two-panel where the reconnect state is shown in both panels).
-        print!("{}", render_robot_splash(true));
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-        let daemon2 = super::info_box::DaemonInfo::from_lock_file();
-        super::info_box::print_welcome_panel(workdir, tmux_name, true, daemon2);
+        println!("\x1B[2J\x1B[1;1H");
+        println!("Trusty MPM v{}", env!("CARGO_PKG_VERSION"));
+        println!("Reconnecting...");
     }
 }
 
@@ -388,8 +192,8 @@ pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
 /// without launching Claude or waiting a full second. Skipping the
 /// `\x1B[2J\x1B[1;1H` clear preserves the operator's scrollback, and the
 /// absence of the 1-second sleep makes iteration fast.
-/// What: on wide terminals renders the two-panel layout (no screen-clear).
-/// On narrow terminals falls back to robot art + stacked info box.
+/// What: on terminals >= MIN_WIDTH_BOX renders the single-box banner (no
+/// screen-clear). On very narrow terminals prints a minimal plain-text banner.
 /// Test: `banner_preview_does_not_panic` in `tests.rs`.
 pub(crate) fn print_banner_preview(reconnecting: bool) {
     let w = terminal_width();
@@ -401,20 +205,13 @@ pub(crate) fn print_banner_preview(reconnecting: bool) {
     let data = super::info_box::gather_welcome_data(&workdir, &session_name, reconnecting, daemon);
 
     if let Some(panel) = two_panel::render_two_panel_banner(&data, w, reconnecting) {
-        // No screen-clear for preview — preserve scrollback.
         print!("\n{panel}");
         let _ = std::io::Write::flush(&mut std::io::stdout());
     } else {
-        // Narrow fallback: stacked layout (no screen-clear).
-        print!("{}", render_robot_splash_no_clear(reconnecting));
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-        let daemon2 = super::info_box::DaemonInfo::from_lock_file();
-        super::info_box::print_welcome_panel_no_sleep(
-            &workdir,
-            &session_name,
-            reconnecting,
-            daemon2,
-        );
+        println!("Trusty MPM v{}", env!("CARGO_PKG_VERSION"));
+        if reconnecting {
+            println!("Reconnecting...");
+        }
     }
 }
 
