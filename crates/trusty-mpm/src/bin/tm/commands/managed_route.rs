@@ -296,7 +296,11 @@ mod tests {
             Some(TrustyCommand::ManagedDecommission { .. })
         ));
         assert!(matches!(
-            to_command(&SessionAction::Ls { json: false }),
+            to_command(&SessionAction::Ls {
+                json: false,
+                source_id: None,
+                current: false
+            }),
             Some(TrustyCommand::ManagedList)
         ));
     }

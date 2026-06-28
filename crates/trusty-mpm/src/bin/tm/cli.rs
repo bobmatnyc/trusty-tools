@@ -1271,12 +1271,28 @@ pub(crate) enum SessionAction {
     /// List managed sessions (session-manager MVP).
     ///
     /// Why: operators need to see every managed session and its pending decision.
-    /// What: GETs `/api/v1/sessions/managed` and renders a table or JSON.
-    /// Test: `cli_parses_session_ls`.
+    /// What: GETs `/api/v1/sessions/managed` (with optional source_id filter) and
+    /// renders a table or JSON. `--current` scopes to sessions for the cwd's repo.
+    /// Test: `cli_parses_session_ls`, `cli_parses_session_ls_source_id`,
+    /// `cli_parses_session_ls_current`.
     Ls {
         /// Output as JSON instead of a table.
         #[arg(long)]
         json: bool,
+        /// Filter to sessions for this `owner/repo` slug.
+        ///
+        /// Why: with 149+ sessions `ls` is a firehose — scoping by project is the
+        /// first thing every operator reaches for. Passed as `?source_id=` to the
+        /// daemon, which already supports the query parameter.
+        #[arg(long)]
+        source_id: Option<String>,
+        /// Derive source_id from the cwd's git remote (shorthand for --source-id).
+        ///
+        /// Why: in a project checkout `--current` is more ergonomic than copying the
+        /// full `owner/repo` slug from the URL. Mutually exclusive with `--source-id`
+        /// (the last one wins if both are supplied, but prefer one at a time).
+        #[arg(long)]
+        current: bool,
     },
     /// Show recent activity for a managed session.
     ///

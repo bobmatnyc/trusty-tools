@@ -386,6 +386,8 @@ fn make_session(
         pending_decision: None,
         proposed_default: None,
         source_id: None,
+        task: None,
+        cwd: None,
     }
 }
 

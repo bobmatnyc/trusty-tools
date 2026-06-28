@@ -935,7 +935,7 @@ fn cli_parses_session_ls() {
     let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "ls", "--json"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
-            action: SessionAction::Ls { json },
+            action: SessionAction::Ls { json, .. },
         } => assert!(json),
         other => panic!("expected session ls, got {other:?}"),
     }
