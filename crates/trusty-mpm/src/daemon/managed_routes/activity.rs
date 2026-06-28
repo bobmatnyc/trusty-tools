@@ -102,13 +102,18 @@ pub async fn get_session_activity(
         }
     };
 
+    // Capture the last 60 pane lines — always available, no LLM key required.
     let pane_text = mgr
         .capture_pane(&id, 60)
         .await
         .unwrap_or_else(|_| String::new());
 
+    // Determine runtime_active from tmux presence (independent of LLM classifier).
     let runtime_active = mgr.tmux_driver().session_exists(&record.tmux_name);
 
+    // Run the optional LLM classifier. `ActivityMonitor::check` converts
+    // `MissingApiKey` to an `Unknown` verdict non-erroring — the raw pane is
+    // always available regardless of whether a key is configured.
     let monitor = state.activity_monitor();
     let result = match monitor.check(&id_str, &pane_text).await {
         Ok(r) => r,

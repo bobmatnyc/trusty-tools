@@ -556,15 +556,9 @@ mod tests {
 
     #[test]
     fn short_timestamp_formats_correctly() {
-        assert_eq!(
-            short_timestamp("2025-06-27T14:32:00Z"),
-            "2025-06-27 14:32"
-        );
+        assert_eq!(short_timestamp("2025-06-27T14:32:00Z"), "2025-06-27 14:32");
         assert_eq!(short_timestamp("short"), "short");
-        assert_eq!(
-            short_timestamp("2025-06-27T14:32"),
-            "2025-06-27 14:32"
-        );
+        assert_eq!(short_timestamp("2025-06-27T14:32"), "2025-06-27 14:32");
     }
 
     #[test]
@@ -578,7 +572,9 @@ mod tests {
             "workspace_path_was": "/some/workspace/path"
         });
         assert_eq!(
-            owned_removed.get("workspace_removed").and_then(|v| v.as_bool()),
+            owned_removed
+                .get("workspace_removed")
+                .and_then(|v| v.as_bool()),
             Some(true)
         );
         assert_eq!(

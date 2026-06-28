@@ -512,22 +512,44 @@ fn emit_managed_alias_notice(action: &SessionAction) {
     }
 }
 
-/// Derive the `owner/repo` source_id from the cwd's git remote for `--current`.
+/// Derive the `owner/repo` source_id from a git directory for `--current`.
 ///
-/// Why: `tm sessions ls --current` is a common ergonomic alias for
-/// `--source-id <owner/repo>`; having the CLI derive it from `git config
-/// remote.origin.url` avoids requiring the operator to copy-paste the slug.
-/// What: resolves the cwd, runs `git -C <cwd> config --get remote.origin.url`,
-/// and parses the result via `parse_github_path`. Returns `Some("owner/repo")`
-/// on success; `None` when not in a git repo or the remote URL is not a GitHub
-/// URL (both cases are silently ignored — the caller just treats them as "no
-/// filter").
+/// Why: extracted from `derive_source_id_from_cwd` so the git-remote resolution
+/// is unit-testable with a path argument rather than the process cwd (which would
+/// require `std::env::set_current_dir`, a process-global, non-thread-safe call).
+/// What: runs `git -C <dir> config --get remote.origin.url` and parses the result
+/// via `parse_github_path`. Returns `Some("owner/repo")` on success; `None` when
+/// not in a git repo or the remote URL is not a GitHub URL.
 /// Test: `derive_source_id_from_cwd_returns_none_without_git` (unit).
-fn derive_source_id_from_cwd() -> Option<String> {
-    let cwd = std::env::current_dir().ok()?;
-    let url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(&cwd)?;
+fn derive_source_id_from_path(dir: &std::path::Path) -> Option<String> {
+    let url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(dir)?;
     let gh = trusty_common::github_path::parse_github_path(&url)?;
     Some(format!("{}/{}", gh.owner, gh.repo))
+}
+
+/// Derive the `owner/repo` source_id from the process cwd for `--current`.
+///
+/// Why: thin wrapper over `derive_source_id_from_path` for the CLI call site;
+/// separating cwd resolution from git-remote parsing keeps the impl testable.
+/// What: reads `std::env::current_dir()` and delegates to `derive_source_id_from_path`.
+/// Returns `Some("owner/repo")` on success; `None` on any failure (both cases silently
+/// ignored — the caller treats None as "no filter").
+/// Test: `derive_source_id_from_cwd_returns_none_without_git` (unit via path variant).
+fn derive_source_id_from_cwd() -> Option<String> {
+    derive_source_id_from_path(&std::env::current_dir().ok()?)
+}
+
+/// Return true when `session` matches `id_or_name` by id or tmux name.
+///
+/// Why: extracted from `info_from_managed_store` so the match predicate is
+/// unit-testable without requiring an HTTP call.
+/// What: compares `session["id"]` and `session["name"]` against `id_or_name`;
+/// returns true on either match.
+/// Test: `info_managed_fallback_matches_by_id_and_name`.
+fn matches_session(session: &serde_json::Value, id_or_name: &str) -> bool {
+    let id_match = session.get("id").and_then(|v| v.as_str()) == Some(id_or_name);
+    let name_match = session.get("name").and_then(|v| v.as_str()) == Some(id_or_name);
+    id_match || name_match
 }
 
 /// Fetch the managed session list and find a session matching `id_or_name`.
@@ -535,35 +557,40 @@ fn derive_source_id_from_cwd() -> Option<String> {
 /// Why: `tm sessions info` queries the project-session store first; managed
 /// sessions live in a separate store and return 404 there. This fallback
 /// prevents the confusing "not found" message for sessions that ARE visible in
-/// `tm sessions ls`.
-/// What: GETs `/api/v1/sessions/managed`, searches by id-exact then name-exact,
-/// returns the first match as a `serde_json::Value` (ready to pretty-print).
-/// Returns `None` when the daemon is unreachable or no match is found.
-/// Test: `info_managed_fallback_matches_by_id_and_name` (unit).
+/// `tm sessions ls`. Non-404 HTTP errors are logged as warnings so daemon 5xx
+/// responses are not silently swallowed as "not found".
+/// What: GETs `/api/v1/sessions/managed`, searches by id-exact then name-exact
+/// via `matches_session`, returns the first match as a `serde_json::Value`.
+/// Returns `None` when the daemon is unreachable, returns a non-success status,
+/// or no session matches.
+/// Test: `info_managed_fallback_matches_by_id_and_name` (unit on match predicate);
+/// HTTP path covered by the integration test.
 async fn info_from_managed_store(
     client: &reqwest::Client,
     url: &str,
     id_or_name: &str,
 ) -> Option<serde_json::Value> {
-    let raw = client
+    let resp = client
         .get(format!("{url}/api/v1/sessions/managed"))
         .send()
         .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .text()
-        .await
         .ok()?;
+    let status = resp.status();
+    if !status.is_success() {
+        if status != reqwest::StatusCode::NOT_FOUND {
+            tracing::warn!(
+                "managed store lookup failed with HTTP {status} — \
+                 'session not found' may mask a daemon error"
+            );
+        }
+        return None;
+    }
+    let raw = resp.text().await.ok()?;
     let resp: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let sessions = resp.get("sessions")?.as_array()?;
     sessions
         .iter()
-        .find(|s| {
-            let id_match = s.get("id").and_then(|v| v.as_str()) == Some(id_or_name);
-            let name_match = s.get("name").and_then(|v| v.as_str()) == Some(id_or_name);
-            id_match || name_match
-        })
+        .find(|s| matches_session(s, id_or_name))
         .cloned()
 }
 
@@ -621,3 +648,8 @@ pub(crate) fn compose_session_instructions(
 
     Ok((resolved_prompt, output, stash))
 }
+
+// Unit tests live in session_tests.rs (test-file budget: 1500 SLOC).
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod tests;

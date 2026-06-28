@@ -1289,9 +1289,9 @@ pub(crate) enum SessionAction {
         /// Derive source_id from the cwd's git remote (shorthand for --source-id).
         ///
         /// Why: in a project checkout `--current` is more ergonomic than copying the
-        /// full `owner/repo` slug from the URL. Mutually exclusive with `--source-id`
-        /// (the last one wins if both are supplied, but prefer one at a time).
-        #[arg(long)]
+        /// full `owner/repo` slug from the URL. Mutually exclusive with `--source-id`;
+        /// passing both is a parse error.
+        #[arg(long, conflicts_with = "source_id")]
         current: bool,
     },
     /// Show recent activity for a managed session.

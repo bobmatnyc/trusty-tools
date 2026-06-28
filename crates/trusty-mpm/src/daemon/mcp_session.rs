@@ -127,7 +127,7 @@ pub async fn session_decommission(
     let mgr = state.session_manager().await;
     mgr.decommission(&id)
         .await
-        .map(|r| record_to_json(&r))
+        .map(|(r, _workspace_removed)| record_to_json(&r))
         .map_err(managed_err)
 }
 

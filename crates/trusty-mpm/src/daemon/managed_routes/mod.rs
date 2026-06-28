@@ -776,16 +776,17 @@ pub async fn decommission_managed_session(
         Err((code, msg)) => return (code, msg).into_response(),
     };
     let mgr = state.session_manager().await;
-    // Capture ownership + workspace path BEFORE decommission clears them in the
-    // tombstone. The daemon checks `workspace_owned && path_still_exists` after
-    // the call to determine whether `remove_dir_all` actually ran.
+    // Pre-fetch the record to obtain the workspace_path BEFORE the tombstone clears
+    // it. `decommission` now returns `workspace_removed` directly (no TOCTOU
+    // filesystem re-check); `workspace_path_was` for the CLI's `git worktree prune`
+    // hint must still be captured here since the tombstone nulls it out.
     let pre = mgr.get(&id).await.ok();
     let pre_owned = pre.as_ref().map(|r| r.workspace_owned).unwrap_or(false);
     let pre_ws = pre.and_then(|r| r.workspace_path);
     match mgr.decommission(&id).await {
-        Ok(record) => {
-            let workspace_removed =
-                pre_owned && pre_ws.as_ref().map(|p| !p.exists()).unwrap_or(false);
+        Ok((record, workspace_removed)) => {
+            // workspace_path_was: only meaningful for owned sessions (those where
+            // `decommission_with_root` might have removed the directory).
             let workspace_path_was = if pre_owned {
                 pre_ws.map(|p| p.to_string_lossy().into_owned())
             } else {

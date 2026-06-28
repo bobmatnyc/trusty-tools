@@ -942,6 +942,70 @@ fn cli_parses_session_ls() {
 }
 
 #[test]
+fn cli_parses_session_ls_source_id() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "sessions",
+        "ls",
+        "--source-id",
+        "myorg/myrepo",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action:
+                SessionAction::Ls {
+                    source_id,
+                    current,
+                    json,
+                },
+        } => {
+            assert_eq!(source_id, Some("myorg/myrepo".to_string()));
+            assert!(!current);
+            assert!(!json);
+        }
+        other => panic!("expected session ls, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_ls_current() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "ls", "--current"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action:
+                SessionAction::Ls {
+                    current,
+                    source_id,
+                    json,
+                },
+        } => {
+            assert!(current);
+            assert!(source_id.is_none());
+            assert!(!json);
+        }
+        other => panic!("expected session ls, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_session_ls_source_id_and_current_conflict() {
+    // --current conflicts_with --source-id: clap must reject both together.
+    let result = Cli::try_parse_from([
+        "trusty-mpm",
+        "sessions",
+        "ls",
+        "--current",
+        "--source-id",
+        "foo/bar",
+    ]);
+    assert!(
+        result.is_err(),
+        "passing both --current and --source-id must be a parse error"
+    );
+}
+
+#[test]
 fn cli_parses_session_activity() {
     let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "activity", "abc"]).unwrap();
     match cli.command.unwrap() {
