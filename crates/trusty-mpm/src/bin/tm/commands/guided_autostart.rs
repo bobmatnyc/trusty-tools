@@ -3,8 +3,8 @@
 //! Why: bare `tm` should bring the trusty-mpm daemon up automatically when
 //! it is unreachable, so the operator gets the full picker UX without having
 //! to run `tm start` first.
-//! What: [`ensure_daemon_started`] checks for a launchd supervisor plist
-//! (preferred: reboot-durable) and falls back to a detached direct spawn.
+//! What: [`ensure_daemon_started`] checks for a launchd supervisor plist on
+//! macOS (preferred: reboot-durable) and falls back to a detached direct spawn.
 //! Both paths poll `/health` via lock-file URL resolution for up to 5 s and
 //! return the resolved daemon URL on success.
 //! Test: [`supervisor_plist_path_has_expected_components`] verifies the path
@@ -37,7 +37,7 @@ pub(crate) fn supervisor_plist_path() -> std::path::PathBuf {
         .join(format!("{SUPERVISOR_PLIST_LABEL}.plist"))
 }
 
-/// Outcome of a `launchctl bootstrap` attempt.
+/// Outcome of a `launchctl bootstrap` attempt (macOS only).
 ///
 /// Why: distinguishes "already running" (EALREADY) from "truly unavailable" so
 /// `ensure_daemon_started` can skip the lock-delete+spawn step when launchd
@@ -45,9 +45,8 @@ pub(crate) fn supervisor_plist_path() -> std::path::PathBuf {
 /// What: three variants — `Launched` (exit 0), `AlreadyLoaded` (exit 37 /
 /// EALREADY or matching stderr), `Unavailable` (plist absent, `id -u` failed,
 /// or unknown non-zero exit).
-/// Test: covered indirectly by the launchd e2e smoke test; `Unavailable` path
-/// is exercised by the detached-spawn unit path.
-#[derive(Debug, PartialEq)]
+/// Test: covered indirectly by the launchd e2e smoke test.
+#[cfg(target_os = "macos")]
 enum LaunchctlOutcome {
     /// launchd accepted the bootstrap command — daemon is now (re)starting.
     Launched,
@@ -67,46 +66,54 @@ enum LaunchctlOutcome {
 /// What: (1) on macOS, if the supervisor plist exists, issues
 /// `launchctl bootstrap gui/<uid> <plist>` for reboot-durable startup and
 /// skips the spawn step when the service is already loaded (EALREADY);
-/// (2) when launchd is unavailable or the plist is absent, removes any stale
-/// lock file and spawns the current executable with the `daemon` subcommand in
-/// a detached process; (3) polls `/health` every 500 ms for up to 5 s via
-/// lock-file URL resolution; (4) returns the resolved daemon URL on success or
-/// `Err` on timeout. The `_url` parameter is intentionally unused: after
-/// auto-start the lock file records the actual bound address.
+/// (2) when launchd is unavailable, the plist is absent, or on non-macOS,
+/// removes any stale lock file and spawns the current executable with the
+/// `daemon` subcommand in a detached process; (3) polls `/health` every 500 ms
+/// for up to 5 s via lock-file URL resolution; (4) returns the resolved daemon
+/// URL on success or `Err` on timeout. The `_url` parameter is intentionally
+/// unused: after auto-start the lock file records the actual bound address.
 /// Test: launchd path requires a macOS launchd environment; detached-spawn and
 /// polling paths are covered by the guided-default e2e smoke test.
 pub(crate) async fn ensure_daemon_started(
     client: &reqwest::Client,
     _url: &str,
 ) -> anyhow::Result<String> {
-    let plist_path = supervisor_plist_path();
-    match try_launchctl_start(&plist_path) {
-        LaunchctlOutcome::Launched | LaunchctlOutcome::AlreadyLoaded => {
-            // launchd owns the service — no second spawn needed.
-        }
-        LaunchctlOutcome::Unavailable => {
-            // launchd not available or plist absent — fall back to detached
-            // spawn, the same approach used by `commands::daemon::start`.
-            let lock_path = trusty_mpm::core::lock_file_path();
-            let _ = std::fs::remove_file(&lock_path);
-            let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
-            std::fs::create_dir_all(&root).context("create framework dir for daemon log")?;
-            let log_path = root.join("daemon.log");
-            let log_file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .context("open daemon log file")?;
-            let log_copy = log_file.try_clone().context("clone log file handle")?;
-            let exe = std::env::current_exe().context("resolve current executable path")?;
-            std::process::Command::new(&exe)
-                .arg("daemon")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::from(log_file))
-                .stderr(std::process::Stdio::from(log_copy))
-                .spawn()
-                .context("spawn daemon process")?;
-        }
+    // Determine whether we need to spawn a new daemon process.
+    // On macOS: prefer launchctl; spawn only when launchd cannot help.
+    // On all other platforms: always spawn directly.
+    #[cfg(target_os = "macos")]
+    let needs_spawn = {
+        let plist_path = supervisor_plist_path();
+        matches!(
+            try_launchctl_start(&plist_path),
+            LaunchctlOutcome::Unavailable
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
+    let needs_spawn = true;
+
+    if needs_spawn {
+        // launchd not available or plist absent — fall back to detached spawn,
+        // the same approach used by `commands::daemon::start`.
+        let lock_path = trusty_mpm::core::lock_file_path();
+        let _ = std::fs::remove_file(&lock_path);
+        let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
+        std::fs::create_dir_all(&root).context("create framework dir for daemon log")?;
+        let log_path = root.join("daemon.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .context("open daemon log file")?;
+        let log_copy = log_file.try_clone().context("clone log file handle")?;
+        let exe = std::env::current_exe().context("resolve current executable path")?;
+        std::process::Command::new(&exe)
+            .arg("daemon")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(log_copy))
+            .spawn()
+            .context("spawn daemon process")?;
     }
 
     // Poll until healthy or timeout (5 s). Re-resolve from the lock file each
@@ -127,11 +134,11 @@ pub(crate) async fn ensure_daemon_started(
 /// Why: `launchctl bootstrap` is preferred over a bare process spawn because
 /// launchd registers the unit for reboot-durability and respawn-on-crash. The
 /// detached-spawn fallback is session-only (no reboot durability).
-/// What: on macOS, if `plist_path` exists, resolves the current user UID via
-/// `id -u`, then runs `launchctl bootstrap gui/<uid> <plist>`. Returns
-/// `Launched` on exit 0, `AlreadyLoaded` on exit 37 (EALREADY) or when stderr
-/// contains "already bootstrapped"/"service already loaded", and `Unavailable`
-/// in all other cases (plist absent, `id -u` failure, unknown launchctl error).
+/// What: if `plist_path` exists, resolves the current user UID via `id -u`,
+/// then runs `launchctl bootstrap gui/<uid> <plist>`. Returns `Launched` on
+/// exit 0, `AlreadyLoaded` on exit 37 (EALREADY) or when stderr contains
+/// "already bootstrapped"/"service already loaded", and `Unavailable` in all
+/// other cases (plist absent, `id -u` failure, unknown launchctl error).
 /// Test: requires a real macOS launchd environment; covered by e2e smoke test.
 #[cfg(target_os = "macos")]
 fn try_launchctl_start(plist_path: &std::path::Path) -> LaunchctlOutcome {
@@ -171,11 +178,6 @@ fn try_launchctl_start(plist_path: &std::path::Path) -> LaunchctlOutcome {
     {
         return LaunchctlOutcome::AlreadyLoaded;
     }
-    LaunchctlOutcome::Unavailable
-}
-
-#[cfg(not(target_os = "macos"))]
-fn try_launchctl_start(_plist_path: &std::path::Path) -> LaunchctlOutcome {
     LaunchctlOutcome::Unavailable
 }
 
