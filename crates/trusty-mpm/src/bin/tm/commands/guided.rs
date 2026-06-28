@@ -21,6 +21,7 @@
 use anyhow::Context as _;
 use serde::Deserialize;
 
+pub(crate) use super::guided_autostart::github_host;
 use crate::formatters::banner::tmux_has_session;
 
 /// Response shape for `POST /api/v1/sessions/managed` (subset we need).
@@ -84,38 +85,51 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
     let workdir = cwd.to_string_lossy().to_string();
     eprintln!("tm: no subcommand — using guided default for {workdir}");
 
+    // Use a mutable URL so that a successful auto-start can update it to the
+    // actual bound address discovered via the lock file.
+    let mut effective_url = url.to_string();
+
     // Try the rich UX when CWD is a GitHub-backed git project.
     if let Some((source_id, workspace, git_root)) = derive_project(&cwd) {
         // Pass the git root as repo_url so daemon detects .git at root even
         // when tm is invoked from a subdirectory (#1705 LOW fix).
         let repo_url = git_root.to_string_lossy().to_string();
-        match list_project_sessions(client, url, &source_id).await {
-            Ok(sessions) => {
-                use std::io::IsTerminal as _;
-                // tty_gate prints project context; returns true when stdin is a
-                // TTY and the picker should run, false for non-TTY exit.
-                if !tty_gate(
-                    std::io::stdin().is_terminal(),
+
+        // First attempt: daemon may already be up.
+        if let Some(r) = try_show_picker(
+            client,
+            &effective_url,
+            &source_id,
+            &workspace,
+            &repo_url,
+            &cwd,
+        )
+        .await
+        {
+            return r;
+        }
+
+        // Daemon unreachable — try to auto-start it transparently.
+        eprintln!("tm: daemon not running — starting it…");
+        match super::guided_autostart::ensure_daemon_started(client, &effective_url).await {
+            Ok(new_url) => {
+                effective_url = new_url;
+                // Retry the full picker flow with the freshly-started daemon.
+                if let Some(r) = try_show_picker(
+                    client,
+                    &effective_url,
                     &source_id,
                     &workspace,
-                    &sessions,
-                ) {
-                    return Ok(());
+                    &repo_url,
+                    &cwd,
+                )
+                .await
+                {
+                    return r;
                 }
-                // Show the compact info box before the TTY picker.
-                let daemon = crate::formatters::info_box::DaemonInfo::from_lock_file()
-                    .with_count(sessions.len());
-                crate::formatters::info_box::print_info_box(
-                    &cwd.to_string_lossy(),
-                    &source_id,
-                    false,
-                    &daemon,
-                );
-                return run_tty_picker(client, url, &repo_url, &sessions).await;
+                eprintln!("tm: daemon started but sessions still unreachable; falling back");
             }
-            Err(e) => {
-                eprintln!("tm: daemon unreachable ({e}); falling back");
-            }
+            Err(e) => eprintln!("tm: auto-start failed ({e}); falling back to offline mode"),
         }
     }
 
@@ -123,7 +137,43 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
     // For GitHub projects this redirects to the managed-clone workspace.
     // For non-GitHub git projects it refuses (live-checkout guard).
     // For non-git directories it falls through to the classic `tm launch` path.
-    fallback_protected(client, url, &cwd).await
+    fallback_protected(client, &effective_url, &cwd).await
+}
+
+/// Attempt to list sessions and display the interactive picker for a GitHub project.
+///
+/// Why: the same "list sessions → tty-gate → info-box → picker" sequence is
+/// needed both on the initial attempt and after a successful auto-start. A shared
+/// helper keeps `run_guided_default` DRY and avoids divergence between the two
+/// call sites.
+/// What: calls `list_project_sessions`; on Err (daemon unreachable) returns
+/// `None` so the caller can try auto-start. On Ok, runs the tty-gate and the
+/// picker, returning `Some(result)`. The `None`/`Some` distinction is the
+/// daemon-reachable signal — it does NOT indicate picker success or failure.
+/// Test: indirectly covered by guided-default e2e tests; the pure sub-functions
+/// (`tty_gate`, `parse_picker_choice`) are unit-tested independently.
+async fn try_show_picker(
+    client: &reqwest::Client,
+    url: &str,
+    source_id: &str,
+    workspace: &std::path::Path,
+    repo_url: &str,
+    cwd: &std::path::Path,
+) -> Option<anyhow::Result<()>> {
+    let sessions = list_project_sessions(client, url, source_id).await.ok()?;
+    use std::io::IsTerminal as _;
+    if !tty_gate(
+        std::io::stdin().is_terminal(),
+        source_id,
+        workspace,
+        &sessions,
+    ) {
+        return Some(Ok(()));
+    }
+    let daemon =
+        crate::formatters::info_box::DaemonInfo::from_lock_file().with_count(sessions.len());
+    crate::formatters::info_box::print_info_box(&cwd.to_string_lossy(), source_id, false, &daemon);
+    Some(run_tty_picker(client, url, repo_url, &sessions).await)
 }
 
 // ── Project derivation ───────────────────────────────────────────────────────
@@ -617,24 +667,32 @@ async fn launch_new_session_and_attach(
 
 // ── Fallback (daemon-unreachable / non-GitHub) path ─────────────────────────
 
-/// Return true when the remote URL targets github.com (any transport).
+/// Return true when the remote URL targets GitHub (any transport or SSH alias).
 ///
 /// Why: `parse_github_path` from `trusty-common` accepts *any* git remote URL,
 /// not just GitHub ones. We need a host-specific guard so that non-GitHub git
 /// projects (Gitea, GitLab, bare SSH, etc.) are refused rather than having a
-/// clone attempt made against an unrecognised host (#1724 residual gap).
-/// What: case-insensitive substring match for `"github.com"` in the raw URL —
-/// catches both HTTPS (`https://github.com/…`) and SSH (`git@github.com:…`)
-/// forms without adding a URL-parsing dependency.
-/// Known limitation: a hostname such as `github.mycompany.com` does NOT match
-/// since `"github.mycompany.com".contains("github.com")` is false. URLs like
-/// `https://notgithub.com/a/b.git` also do not match. Both cases fall through
-/// to the non-GitHub refusal path — safe but not redirected.
-/// Test: `guided_fallback_blocks_non_github_git_checkout` verifies a Gitea URL
-/// is NOT treated as GitHub; `guided_fallback_never_pollutes_github_git_checkout`
-/// verifies a real GitHub URL is recognised.
-fn is_github_remote(url: &str) -> bool {
-    url.to_ascii_lowercase().contains("github.com")
+/// clone attempt made against an unrecognised host (#1724 residual gap). We
+/// also need to recognise GitHub repos accessed via multi-account SSH host
+/// aliases (e.g. `git@github-duetto:owner/repo.git` via `~/.ssh/config`).
+/// What: extracts the host via [`github_host`], then accepts it when:
+///   (a) host == `"github.com"` (the canonical GitHub host), OR
+///   (b) host starts with `"github-"` or `"github_"` (SSH alias convention —
+///       e.g. `github-duetto`, `github-work`, `github_personal`).
+/// Decision — GitHub Enterprise (`github.mycompany.com`): NOT matched. GHE
+/// uses a dot separator after `github`, and the broader managed-clone
+/// infrastructure is not tested against GHE; erring on the side of safety
+/// avoids an unexpected redirect for GHE users.
+/// Does NOT match: `githubusercontent.com` (the `u` after `github` is
+/// alphanumeric, so neither rule fires), `gitlab.com`, `bitbucket.org`, or
+/// any other host.
+/// Test: `is_github_remote_*` unit tests in `tests_behavior_c_tests.rs`;
+/// `guided_fallback_never_pollutes_github_git_checkout` (real `github.com` URL);
+/// `guided_fallback_blocks_non_github_git_checkout` (Gitea URL must be blocked).
+pub(crate) fn is_github_remote(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let host = github_host(&lower);
+    host == "github.com" || host.starts_with("github-") || host.starts_with("github_")
 }
 
 /// Detect the git working-tree root at any depth by shelling to git.
