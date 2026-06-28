@@ -25,6 +25,9 @@ mod tests;
 #[cfg(test)]
 mod restart_tests;
 
+#[cfg(test)]
+mod backfill_tests;
+
 /// Real tmux driver adapter — only available when the `daemon` feature (and thus
 /// the daemon's `TmuxDriver`) is compiled in.
 #[cfg(feature = "daemon")]

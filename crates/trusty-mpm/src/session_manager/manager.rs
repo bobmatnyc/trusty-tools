@@ -747,6 +747,14 @@ impl SessionManager {
                     to_resume.push(record.id);
                 }
             }
+            // Backfill source_id (#1780): derive owner/repo from workspace git
+            // remote when missing. Idempotent — already-set records are skipped.
+            // Failures (no git, no remote, no GitHub URL) are silently ignored:
+            // one bad record must never abort the whole reconcile pass.
+            if record.source_id.is_none() {
+                record.source_id = super::adopt::derive_source_id_for_record(&record)
+                    .inspect(|sid| info!(name = %record.tmux_name, source_id = %sid, "reconcile: backfilled source_id"));
+            }
             guard.upsert(record).await?;
         }
 

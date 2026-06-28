@@ -8,16 +8,45 @@
 //! adoption. It lives in its own module so [`manager`](super::manager) stays under
 //! the 500-SLOC production cap.
 //! What: an inherent `impl SessionManager` block adding
-//! [`SessionManager::adopt_existing`].
-//! Test: `manager_adopt_existing_*` in `super::tests`.
+//! [`SessionManager::adopt_existing`]; a free helper
+//! [`derive_source_id_for_record`] used by the reconcile backfill (#1780).
+//! Test: `manager_adopt_existing_*` in `super::tests`;
+//! `derive_source_id_*` unit tests at the bottom of this module.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use tracing::info;
 
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+
+/// Derive the `source_id` (`"owner/repo"`) for a session record from its workspace git remote.
+///
+/// Why (#1780): the reconcile backfill needs to populate `source_id` for records
+/// that were stored before the field existed or that were auto-adopted without one.
+/// Centralising the derivation here keeps `manager.rs` under its 500-SLOC cap and
+/// makes the logic independently unit-testable.
+/// What: tries `workspace_path` first (if the directory exists); falls back to
+/// `cwd` when it is not the sentinel `/unknown` and still exists on disk.
+/// Calls `trusty_common::github_path::derive_github_path`, which shells to
+/// `git config --get remote.origin.url` — no network. Returns `None` when no
+/// usable path is available, the directory is not a git repo, or the remote URL
+/// is not parseable as a `owner/repo` identity; callers skip gracefully in that case.
+/// Test: `derive_source_id_ssh_remote`, `derive_source_id_https_remote`,
+/// `derive_source_id_none_for_no_remote`, `derive_source_id_none_for_unknown_path`.
+pub(super) fn derive_source_id_for_record(record: &SessionRecord) -> Option<String> {
+    let path: &Path = record
+        .workspace_path
+        .as_deref()
+        .filter(|p| p.is_dir())
+        .or_else(|| {
+            let c = record.cwd.as_path();
+            (c != Path::new("/unknown") && c.is_dir()).then_some(c)
+        })?;
+    let gh = trusty_common::github_path::derive_github_path(path)?;
+    Some(format!("{}/{}", gh.owner, gh.repo))
+}
 
 impl SessionManager {
     /// Adopt an EXISTING, unmanaged tmux session into the durable store (#1433).
@@ -130,5 +159,143 @@ impl SessionManager {
             "adopted existing tmux session into the managed store"
         );
         Ok(record)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn make_record_with_workspace(workspace: PathBuf) -> SessionRecord {
+        SessionRecord {
+            id: ManagedSessionId::new(),
+            tmux_name: "tmpm-test".into(),
+            cwd: workspace.clone(),
+            task: "test".into(),
+            state: crate::session_manager::ManagedSessionState::Active,
+            created_at: Utc::now(),
+            last_activity_at: None,
+            workspace_path: Some(workspace),
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: false,
+            source_id: None,
+            claude_session_id: None,
+        }
+    }
+
+    fn make_record_unknown_cwd() -> SessionRecord {
+        SessionRecord {
+            id: ManagedSessionId::new(),
+            tmux_name: "tmpm-external".into(),
+            cwd: PathBuf::from("/unknown"),
+            task: "externally created".into(),
+            state: crate::session_manager::ManagedSessionState::Active,
+            created_at: Utc::now(),
+            last_activity_at: None,
+            workspace_path: None,
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: false,
+            source_id: None,
+            claude_session_id: None,
+        }
+    }
+
+    /// Why: SSH scp-style remotes must yield a slugified owner/repo.
+    /// Test: itself.
+    #[test]
+    fn derive_source_id_ssh_remote() {
+        let tmp = TempDir::new().expect("tempdir");
+        let dir = tmp.path();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init"]) {
+            return; // no git on runner
+        }
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:test-owner/my-repo.git",
+        ]);
+        let record = make_record_with_workspace(dir.to_path_buf());
+        let sid = derive_source_id_for_record(&record).expect("should derive");
+        assert_eq!(sid, "test-owner/my-repo");
+    }
+
+    /// Why: HTTPS remotes must also yield a parseable owner/repo.
+    /// Test: itself.
+    #[test]
+    fn derive_source_id_https_remote() {
+        let tmp = TempDir::new().expect("tempdir");
+        let dir = tmp.path();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if !git(&["init"]) {
+            return;
+        }
+        git(&[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme-org/my-project.git",
+        ]);
+        let record = make_record_with_workspace(dir.to_path_buf());
+        let sid = derive_source_id_for_record(&record).expect("should derive");
+        assert_eq!(sid, "acme-org/my-project");
+    }
+
+    /// Why: a workspace with no git remote must return None gracefully.
+    /// Test: itself.
+    #[test]
+    fn derive_source_id_none_for_no_remote() {
+        let tmp = TempDir::new().expect("tempdir");
+        let dir = tmp.path();
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .arg("init")
+            .output()
+            .ok();
+        let record = make_record_with_workspace(dir.to_path_buf());
+        // No remote configured → derive must return None (never panic).
+        assert!(derive_source_id_for_record(&record).is_none());
+    }
+
+    /// Why: externally-adopted sessions with cwd="/unknown" and no workspace_path
+    /// must return None gracefully — never error the reconcile loop.
+    /// Test: itself.
+    #[test]
+    fn derive_source_id_none_for_unknown_path() {
+        let record = make_record_unknown_cwd();
+        assert!(derive_source_id_for_record(&record).is_none());
     }
 }
