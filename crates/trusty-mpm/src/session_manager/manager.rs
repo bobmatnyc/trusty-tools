@@ -717,7 +717,7 @@ impl SessionManager {
 
         let mut report = ReconcileReport::default();
         let mut guard = self.store.write().await;
-        let all_records = guard.all().await?;
+        let mut all_records = guard.all().await?;
 
         // Build a set of store-known tmux names.
         let known_names: std::collections::HashSet<String> =
@@ -725,6 +725,11 @@ impl SessionManager {
 
         // Collect ids of sessions to auto-resume after the write guard is released.
         let mut to_resume: Vec<ManagedSessionId> = Vec::new();
+
+        // Backfill source_id (#1780) before the loop — one spawn_blocking for
+        // all N null-source_id records instead of N blocking git calls inside
+        // the async loop. Idempotent; failures are silently skipped per record.
+        super::adopt::backfill_source_ids(&mut all_records).await;
 
         // Reconcile store records against live sessions.
         for mut record in all_records {
@@ -746,14 +751,6 @@ impl SessionManager {
                 if auto_resume {
                     to_resume.push(record.id);
                 }
-            }
-            // Backfill source_id (#1780): derive owner/repo from workspace git
-            // remote when missing. Idempotent — already-set records are skipped.
-            // Failures (no git, no remote, no GitHub URL) are silently ignored:
-            // one bad record must never abort the whole reconcile pass.
-            if record.source_id.is_none() {
-                record.source_id = super::adopt::derive_source_id_for_record(&record)
-                    .inspect(|sid| info!(name = %record.tmux_name, source_id = %sid, "reconcile: backfilled source_id"));
             }
             guard.upsert(record).await?;
         }

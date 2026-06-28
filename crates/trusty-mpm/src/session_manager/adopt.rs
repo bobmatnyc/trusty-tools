@@ -48,6 +48,52 @@ pub(super) fn derive_source_id_for_record(record: &SessionRecord) -> Option<Stri
     Some(format!("{}/{}", gh.owner, gh.repo))
 }
 
+/// Batch-derive `source_id` for all records missing it in one `spawn_blocking`.
+///
+/// Why (#1780): shelling to `git config --get remote.origin.url` inside an
+/// async loop would block the tokio executor for every null-source_id record
+/// at daemon boot time (136 sessions observed in the fleet). A single
+/// `spawn_blocking` call batches all N derivations on one thread-pool thread,
+/// freeing the async executor immediately.
+/// What: collects `(index, path)` pairs for non-Decommissioned records with
+/// `source_id == None`, derives all in one `spawn_blocking`, then writes
+/// results back in-place by index. Records where derivation fails (no git,
+/// no remote, non-GitHub URL, `/unknown`) are left unchanged — one bad record
+/// never aborts the pass.
+/// Test: `backfill_tests::reconcile_backfills_source_id_from_workspace_git_remote`
+/// (Active path) and `backfill_tests::reconcile_backfills_source_id_for_stopped_record`
+/// (Stopped path).
+pub(super) async fn backfill_source_ids(records: &mut [SessionRecord]) {
+    // Collect (record_index, cloned_record) for records that need derivation.
+    // The clone is cheap (SessionRecord is a small owned-data struct) and lets
+    // derive_source_id_for_record run inside the spawn_blocking closure.
+    let to_derive: Vec<(usize, SessionRecord)> = records
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            r.source_id.is_none() && !matches!(r.state, ManagedSessionState::Decommissioned)
+        })
+        .map(|(i, r)| (i, r.clone()))
+        .collect();
+    if to_derive.is_empty() {
+        return;
+    }
+    let derived: Vec<(usize, Option<String>)> = tokio::task::spawn_blocking(move || {
+        to_derive
+            .into_iter()
+            .map(|(idx, record)| (idx, derive_source_id_for_record(&record)))
+            .collect()
+    })
+    .await
+    .unwrap_or_default();
+    for (idx, sid) in derived {
+        if let Some(s) = sid {
+            info!(name = %records[idx].tmux_name, source_id = %s, "reconcile: backfilled source_id");
+            records[idx].source_id = Some(s);
+        }
+    }
+}
+
 impl SessionManager {
     /// Adopt an EXISTING, unmanaged tmux session into the durable store (#1433).
     ///
