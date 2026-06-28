@@ -12,6 +12,7 @@
 pub(crate) mod banner;
 pub(crate) mod daemon;
 pub(crate) mod guided;
+pub(crate) mod guided_autostart;
 pub(crate) mod install;
 pub(crate) mod issue;
 pub(crate) mod launch;

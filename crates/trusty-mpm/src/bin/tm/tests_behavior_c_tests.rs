@@ -12,8 +12,8 @@
 use std::path::PathBuf;
 
 use crate::commands::guided::{
-    PickerDecision, derive_project, fallback_protected, is_zombie, needs_restart,
-    parse_picker_choice, print_non_tty_hint, print_project_context, tty_gate,
+    PickerDecision, derive_project, fallback_protected, github_host, is_github_remote, is_zombie,
+    needs_restart, parse_picker_choice, print_non_tty_hint, print_project_context, tty_gate,
 };
 
 // ── parse_picker_choice ───────────────────────────────────────────────────────
@@ -473,5 +473,239 @@ fn guided_resume_not_zombie_active_with_tmux() {
     assert!(
         !is_zombie("active", true),
         "active + live tmux is the normal attach path, not a zombie"
+    );
+}
+
+// ── is_github_remote (Change 2: SSH alias support) ───────────────────────────
+
+#[test]
+fn is_github_remote_accepts_github_com_ssh() {
+    // Why: `git@github.com:o/r.git` is the canonical SSH GitHub URL.
+    assert!(
+        is_github_remote("git@github.com:o/r.git"),
+        "github.com SSH must be recognised as GitHub"
+    );
+}
+
+#[test]
+fn is_github_remote_accepts_github_com_https() {
+    // Why: `https://github.com/o/r.git` is the canonical HTTPS GitHub URL.
+    assert!(
+        is_github_remote("https://github.com/o/r.git"),
+        "github.com HTTPS must be recognised as GitHub"
+    );
+}
+
+#[test]
+fn is_github_remote_accepts_github_hyphen_alias() {
+    // Why: `git@github-duetto:duettoresearch/aria.git` is the real-world repro
+    // case from the issue. Multi-account SSH aliases use `github-<name>`.
+    assert!(
+        is_github_remote("git@github-duetto:duettoresearch/aria.git"),
+        "github-<alias> SSH remote must be recognised as GitHub"
+    );
+}
+
+#[test]
+fn is_github_remote_accepts_github_alias_ssh_url_style() {
+    // Why: `ssh://git@github-work/o/r` uses scheme-URL form with an alias host.
+    assert!(
+        is_github_remote("ssh://git@github-work/o/r"),
+        "ssh:// github-<alias> must be recognised as GitHub"
+    );
+}
+
+#[test]
+fn is_github_remote_accepts_github_underscore_alias() {
+    // Why: some operators use underscores in their SSH config host aliases
+    // (e.g. `github_personal`). The rule covers `-` and `_` separators.
+    assert!(
+        is_github_remote("git@github_personal:user/repo.git"),
+        "github_<alias> SSH remote must be recognised as GitHub"
+    );
+}
+
+#[test]
+fn is_github_remote_rejects_gitlab() {
+    // Why: GitLab URLs must NEVER be treated as GitHub to avoid an unexpected
+    // managed-clone redirect for non-GitHub projects.
+    assert!(
+        !is_github_remote("git@gitlab.com:o/r.git"),
+        "gitlab.com must NOT be recognised as GitHub"
+    );
+}
+
+#[test]
+fn is_github_remote_rejects_bitbucket() {
+    // Why: Bitbucket is not GitHub; the guard must block it.
+    assert!(
+        !is_github_remote("https://bitbucket.org/o/r"),
+        "bitbucket.org must NOT be recognised as GitHub"
+    );
+}
+
+#[test]
+fn is_github_remote_rejects_githubusercontent() {
+    // Why: `raw.githubusercontent.com` contains `github` but is a content
+    // delivery host, not a clone remote. The host does NOT start with
+    // `github-` or `github_`, and it is not `github.com`, so it must be
+    // blocked. (Cloning from this host would fail anyway, but blocking it
+    // prevents a misleading redirect attempt.)
+    assert!(
+        !is_github_remote("https://raw.githubusercontent.com/o/r/file"),
+        "githubusercontent.com must NOT be recognised as GitHub"
+    );
+}
+
+#[test]
+fn is_github_remote_accepts_github_com_https_with_port() {
+    // Why: `https://github.com:443/o/r.git` is a valid remote URL (explicit
+    // port). The old substring-match handled this; the host-based approach
+    // regressed on it because `split('/').next()` returned `"github.com:443"`.
+    // This is the regression guard for the port-stripping fix.
+    assert!(
+        is_github_remote("https://github.com:443/o/r.git"),
+        "https://github.com:443/… must be recognised as GitHub (port stripped)"
+    );
+}
+
+#[test]
+fn is_github_remote_rejects_gitea_with_github_in_path() {
+    // Why: a self-hosted Gitea whose URL happens to mention "github" in the
+    // path (e.g. a mirror) must not be treated as GitHub.
+    assert!(
+        !is_github_remote("https://gitea.example.com/mirrors/github-fork.git"),
+        "gitea host with github in path must NOT match"
+    );
+}
+
+// ── github_host extraction ────────────────────────────────────────────────────
+
+#[test]
+fn github_host_extracts_scp_style() {
+    // Why: the most common GitHub remote form is scp-style `git@HOST:path`.
+    assert_eq!(
+        github_host("git@github-duetto:duettoresearch/aria.git"),
+        "github-duetto"
+    );
+    assert_eq!(github_host("git@github.com:owner/repo.git"), "github.com");
+}
+
+#[test]
+fn github_host_extracts_https() {
+    // Why: HTTPS remotes use scheme-URL form `https://HOST/path`.
+    assert_eq!(
+        github_host("https://github.com/owner/repo.git"),
+        "github.com"
+    );
+    assert_eq!(github_host("https://gitlab.com/o/r"), "gitlab.com");
+}
+
+#[test]
+fn github_host_extracts_ssh_url_with_user() {
+    // Why: `ssh://git@HOST/path` is the RFC-compliant SSH URL form.
+    assert_eq!(github_host("ssh://git@github-work/o/r"), "github-work");
+}
+
+// ── derive_project accepts SSH alias remote ──────────────────────────────────
+
+#[test]
+fn guided_derive_project_accepts_github_ssh_alias() {
+    // Why: `derive_project` uses `is_github_remote` internally. With the
+    // SSH-alias fix, a repo whose origin is `git@github-duetto:owner/repo.git`
+    // must return Some with the correct source_id.
+    let tmp = tempdir_with_name("trusty_test_github_alias_derive_1705");
+    let ok = git_init_with_commit(&tmp);
+    if !ok {
+        return;
+    }
+    git_remote_add(&tmp, "git@github-duetto:duettoresearch/aria.git");
+    let result = derive_project(&tmp);
+    match result {
+        Some((source_id, _workspace, _git_root)) => {
+            assert_eq!(
+                source_id, "duettoresearch/aria",
+                "source_id must be parsed correctly from alias remote"
+            );
+        }
+        None => panic!("expected Some for GitHub SSH alias remote, got None"),
+    }
+}
+
+// ── fallback_protected with SSH alias does not hit GitHub-remote refusal ─────
+
+#[tokio::test]
+#[serial_test::serial]
+async fn guided_fallback_does_not_refuse_github_ssh_alias_remote() {
+    // Why: before this fix, `git@github-duetto:duettoresearch/aria.git`
+    // triggered the "Auto-protected managed clones require a GitHub remote"
+    // error because `is_github_remote` only matched `github.com`. The SSH alias
+    // host `github-duetto` was not recognised, so `fallback_protected` fell
+    // into the non-GitHub refusal path. This test locks in the fix.
+    // What: creates a real git repo, sets the SSH-alias remote, and calls
+    // `fallback_protected`. Asserts the result is NOT the GitHub-remote
+    // refusal error. (It may still be an Err from the clone attempt failing
+    // due to the daemon being unreachable — that is expected and acceptable.)
+    // Test: this is the test; annotated `serial` because it may set REPOS_ROOT.
+    let dir = tempdir_with_name("trusty_test_github_alias_fallback_1705");
+    let ok = std::process::Command::new("git")
+        .arg("init")
+        .current_dir(&dir)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!(
+            "guided_fallback_does_not_refuse_github_ssh_alias_remote: git unavailable, skipping"
+        );
+        return;
+    }
+    let _ = std::process::Command::new("git")
+        .args([
+            "remote",
+            "add",
+            "origin",
+            "git@github-duetto:duettoresearch/aria.git",
+        ])
+        .current_dir(&dir)
+        .status();
+
+    // Point REPOS_ROOT at a tempdir so we don't pollute the real repos root
+    // and to make `ensure_base_clone` fail fast (base/.git absent → clone
+    // attempt → network failure → Err, which is what we want to assert on).
+    let repos_root = tempfile::tempdir().unwrap();
+    let repos_root_key = trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV;
+    let prev = std::env::var(repos_root_key).ok();
+    unsafe { std::env::set_var(repos_root_key, repos_root.path()) };
+
+    let client = reqwest::Client::new();
+    let result = fallback_protected(&client, "http://127.0.0.1:1", &dir).await;
+
+    unsafe {
+        match prev {
+            Some(v) => std::env::set_var(repos_root_key, v),
+            None => std::env::remove_var(repos_root_key),
+        }
+    }
+
+    // The call must fail (daemon unreachable + clone fails), but NOT with the
+    // "requires a GitHub remote" refusal message.
+    assert!(
+        result.is_err(),
+        "fallback must Err (daemon unreachable / clone fails)"
+    );
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        !err_msg.contains("auto-managed clones require a GitHub remote"),
+        "SSH alias remote must NOT trigger GitHub-remote refusal; got: {err_msg}"
+    );
+    // Also confirm no framework files landed in the live checkout.
+    assert!(
+        !dir.join("CLAUDE.md").exists(),
+        "CLAUDE.md must NOT appear in the live checkout"
+    );
+    assert!(
+        !dir.join(".mcp.json").exists(),
+        ".mcp.json must NOT appear in the live checkout"
     );
 }
