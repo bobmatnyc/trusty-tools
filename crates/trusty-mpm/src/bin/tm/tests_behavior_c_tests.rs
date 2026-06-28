@@ -10,7 +10,21 @@
 //! no network or tmux required.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
+use crate::commands::first_run::needs_first_run_clone;
+
+/// Serialises tests that set REPOS_ROOT_ENV via std::env::set_var.
+///
+/// Why: `std::env::set_var` is not thread-safe across concurrent tests (#1780).
+/// Two tests that both manipulate the same env key will race unless they acquire
+/// this lock first.
+/// What: a module-level Mutex<()>; tests hold it for the duration of their
+/// set_var / call / restore cycle so the env change is never visible to another
+/// concurrent test.
+/// Test: prevents `needs_first_run_clone_returns_none_when_clone_exists` from
+/// racing `needs_first_run_clone_returns_some_when_no_clone`.
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
     PickerDecision, derive_project, fallback_protected, github_host, is_github_remote, is_zombie,
     needs_restart, non_github_refusal_message, parse_picker_choice, print_non_tty_hint,
@@ -709,6 +723,121 @@ async fn guided_fallback_does_not_refuse_github_ssh_alias_remote() {
         !dir.join(".mcp.json").exists(),
         ".mcp.json must NOT appear in the live checkout"
     );
+}
+
+// ── needs_first_run_clone (#1780) ─────────────────────────────────────────────
+
+/// Why: a non-directory path (URL, non-existent path) must return None — no git
+/// operation is attempted; the check is a fast-path guard.
+/// Test: itself.
+#[test]
+fn needs_first_run_clone_returns_none_for_non_dir() {
+    assert!(needs_first_run_clone("https://github.com/owner/repo.git").is_none());
+    assert!(needs_first_run_clone("/nonexistent/path/that/does/not/exist").is_none());
+    assert!(needs_first_run_clone("").is_none());
+}
+
+/// Why: when the base clone directory already exists, the fn must return None
+/// so the "first run" message is NOT emitted on subsequent `tm` invocations.
+/// Test: itself.
+#[test]
+fn needs_first_run_clone_returns_none_when_clone_exists() {
+    use std::process::Command;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path();
+
+    // Init git and add a GitHub origin.
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if !git(&["init"]) {
+        return; // no git on runner
+    }
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@github.com:owner/already-cloned.git",
+    ]);
+
+    // Simulate the base clone already being present by creating the expected dir.
+    let repos_env_key = trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV;
+    let tmp_repos = tempfile::TempDir::new().unwrap();
+    let base = tmp_repos.path().join("owner").join("already-cloned");
+    std::fs::create_dir_all(base.join(".git")).unwrap();
+
+    let prev = std::env::var(repos_env_key).ok();
+    let result = {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+        unsafe { std::env::set_var(repos_env_key, tmp_repos.path()) };
+        let r = needs_first_run_clone(&dir.to_string_lossy());
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(repos_env_key, v),
+                None => std::env::remove_var(repos_env_key),
+            }
+        }
+        r
+    };
+    assert!(
+        result.is_none(),
+        "base clone exists → must return None (no first-run message)"
+    );
+}
+
+/// Why: the first `tm` invocation returns Some when the clone directory is absent,
+/// giving the caller the project id and path to emit a "cloning…" message before
+/// the blocking daemon request. This is the primary FIX 2 path (#1780).
+/// Test: itself.
+#[test]
+fn needs_first_run_clone_returns_some_when_no_clone() {
+    use std::process::Command;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path();
+
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if !git(&["init"]) {
+        return;
+    }
+    git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@github.com:myorg/my-new-project.git",
+    ]);
+
+    // Point repos root at an empty temp dir so the base clone definitely does NOT exist.
+    let repos_env_key = trusty_mpm::daemon::managed_routes::inproject::REPOS_ROOT_ENV;
+    let tmp_repos = tempfile::TempDir::new().unwrap();
+    let prev = std::env::var(repos_env_key).ok();
+    let result = {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+        unsafe { std::env::set_var(repos_env_key, tmp_repos.path()) };
+        let r = needs_first_run_clone(&dir.to_string_lossy());
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(repos_env_key, v),
+                None => std::env::remove_var(repos_env_key),
+            }
+        }
+        r
+    };
+    let (proj, _path) = result.expect("must return Some for a first-run scenario");
+    assert_eq!(proj, "myorg/my-new-project");
 }
 
 // ── non_github_refusal_message (#1777) ───────────────────────────────────────

@@ -23,6 +23,7 @@
 use anyhow::Context as _;
 use serde::Deserialize;
 
+use super::first_run::needs_first_run_clone;
 pub(crate) use super::guided_autostart::github_host;
 use crate::formatters::banner::tmux_has_session;
 
@@ -641,6 +642,13 @@ async fn launch_new_session_and_attach(
     url: &str,
     repo_url: &str,
 ) -> anyhow::Result<()> {
+    let first_run = needs_first_run_clone(repo_url);
+    if let Some((ref proj, ref path)) = first_run {
+        eprintln!(
+            "tm: first run for {proj} — cloning into {}, this may take a few minutes…",
+            path.display()
+        );
+    }
     eprintln!("tm: launching new session…");
     let resp = client
         .post(format!("{url}/api/v1/sessions/managed"))
@@ -662,6 +670,9 @@ async fn launch_new_session_and_attach(
         .context("failed to parse managed spawn response")?;
     if body.name.is_empty() {
         anyhow::bail!("daemon returned empty session name from managed spawn");
+    }
+    if first_run.is_some() {
+        eprintln!("tm: clone complete — workspace ready");
     }
     eprintln!("tm: session '{}' created ({})", body.name, body.state);
     tmux_attach(&body.name)
@@ -742,10 +753,7 @@ fn find_git_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     }
     let root = String::from_utf8_lossy(&out.stdout);
     let root = root.trim();
-    if root.is_empty() {
-        return None;
-    }
-    Some(std::path::PathBuf::from(root))
+    (!root.is_empty()).then_some(std::path::PathBuf::from(root))
 }
 
 /// Daemon-unreachable fallback that protects ALL live git checkouts (#1724).
