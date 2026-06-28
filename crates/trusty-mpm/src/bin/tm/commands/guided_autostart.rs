@@ -12,7 +12,7 @@
 
 use anyhow::Context as _;
 
-/// The launchd label for the trusty-mpm supervisor plist.
+/// The launchd label for the trusty-mpm supervisor plist (macOS only).
 ///
 /// Why: the identical string appears as `PLIST_LABEL` in `trusty-installer`;
 /// defining it here avoids importing that crate (which would create a circular
@@ -21,6 +21,7 @@ use anyhow::Context as _;
 /// What: `"com.trusty.mpm.supervisor"`.
 /// Test: `supervisor_plist_path_has_expected_components` derives the filename
 /// from this constant and asserts it matches the expected plist basename.
+#[cfg(target_os = "macos")]
 pub(crate) const SUPERVISOR_PLIST_LABEL: &str = "com.trusty.mpm.supervisor";
 
 /// Resolve the expected macOS LaunchAgents path for the supervisor plist.
@@ -29,6 +30,7 @@ pub(crate) const SUPERVISOR_PLIST_LABEL: &str = "com.trusty.mpm.supervisor";
 /// plist is installed before deciding between launchd-start and detached-spawn.
 /// What: returns `~/Library/LaunchAgents/com.trusty.mpm.supervisor.plist`.
 /// Test: `supervisor_plist_path_has_expected_components`.
+#[cfg(target_os = "macos")]
 pub(crate) fn supervisor_plist_path() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -233,6 +235,7 @@ mod tests {
     /// What: asserts the filename is `<LABEL>.plist` and the parent dir is
     /// `LaunchAgents`.
     /// Test: this test.
+    #[cfg(target_os = "macos")]
     #[test]
     fn supervisor_plist_path_has_expected_components() {
         let path = supervisor_plist_path();
