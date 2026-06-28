@@ -7,11 +7,11 @@
 //! binary's parent directory. On success prints a restart hint (does NOT re-exec).
 //! On fallback, attempts `cargo install trusty-installer --locked` if cargo is on
 //! PATH; otherwise prints a manual install hint. Before either attempt, the target
-//! directory is probed for writability — a non-writable dir aborts immediately
-//! with an actionable error (no misleading "updated" report when the binary on
-//! PATH was never replaced).
+//! directory is probed for writability — a `PermissionDenied` result aborts with
+//! an actionable error; transient I/O errors (ENOSPC, races, etc.) fall through
+//! to the prebuilt-attempt + cargo-fallback path, which already handles failures.
 //!
-//! Test: `tests` covers writability detection, the Outcome→message mapping,
+//! Test: `tests` covers the probe tri-state, the Outcome→message mapping,
 //! and the cargo-fallback location-divergence warning as pure functions; the live
 //! network + cargo paths are side-effecting and gated behind `#[ignore]`.
 
@@ -20,28 +20,89 @@ use std::path::{Path, PathBuf};
 use crate::commands::progress_ui::narrator;
 use crate::download::{self, Outcome};
 
+/// Outcome of probing a directory for writability.
+///
+/// Why: Distinguishes a genuine permission denial (should abort up-front) from a
+/// transient I/O error (should fall through so the existing cargo fallback can
+/// still succeed). A plain `bool` loses that distinction and causes a behavioral
+/// regression: hard-aborting on ENOSPC removes a previously-working code path.
+///
+/// What: `Writable` — probe succeeded; `PermissionDenied` — the OS rejected the
+/// create with EPERM/EACCES; `Other(e)` — any other I/O error.
+///
+/// Test: `tests::probe_writable_temp_dir`, `tests::probe_nonwritable_dir` (unix),
+///       `tests::probe_nonexistent_dir_is_other`.
+#[derive(Debug)]
+pub enum WriteProbe {
+    /// The directory accepted a temp-file create; it is writable.
+    Writable,
+    /// The OS returned `PermissionDenied`; the directory is not writable.
+    PermissionDenied,
+    /// A different I/O error occurred; writability is inconclusive.
+    Other(std::io::Error),
+}
+
+/// Probe whether a directory is writable by creating and immediately removing a temp file.
+///
+/// Why: Mode-bit checks alone are unreliable (ACLs, immutable flags, cross-user
+/// ownership). A create-and-remove probe is the portable, non-destructive way to
+/// confirm actual write access on both macOS and Linux. Returning a tri-state
+/// instead of `bool` preserves the distinction between "denied" (abort) and
+/// "other error" (fall through).
+///
+/// What: Calls `tempfile::Builder::new().tempfile_in(dir)`. On success the temp
+/// file is removed on drop; returns `WriteProbe::Writable`. On `Err`, inspects
+/// the `io::ErrorKind`: `PermissionDenied` → `WriteProbe::PermissionDenied`;
+/// everything else → `WriteProbe::Other(e)`.
+///
+/// Test: `tests::probe_writable_temp_dir`, `tests::probe_nonwritable_dir` (unix),
+///       `tests::probe_nonexistent_dir_is_other`.
+pub fn probe_install_dir(dir: &Path) -> WriteProbe {
+    match tempfile::Builder::new().tempfile_in(dir) {
+        Ok(_) => WriteProbe::Writable,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                WriteProbe::PermissionDenied
+            } else {
+                WriteProbe::Other(e)
+            }
+        }
+    }
+}
+
 /// Handle `trusty-installer self-update`.
 ///
 /// Why: Provides a zero-friction update path for the installer binary itself,
 /// leveraging the same prebuilt-first strategy as `tctl install`.
 ///
 /// What: Resolves the install directory from `current_exe()` parent (or the
-/// default install dir as fallback), probes the directory for writability and
-/// aborts with an actionable error if it is not writable, then calls
+/// default install dir as fallback), probes the directory — aborting only on
+/// `PermissionDenied` (transient errors fall through), then calls
 /// `try_install_prebuilt("trusty-installer", &dir)` and either prints the
 /// restart hint or falls back to cargo with a truthful install-location message.
 ///
-/// Test: `tests::outcome_installed_message`, `tests::nonwritable_dir_is_detected`,
-///       `tests::cargo_fallback_different_dir_message`.
+/// Test: `tests::outcome_installed_message`, `tests::probe_nonwritable_dir`,
+///       `tests::cargo_updated_different_dir`.
 pub fn run(json: bool) -> i32 {
     let narr = narrator(json);
     let install_dir = resolve_install_dir();
 
-    // Up-front writability check (approach a): probe before any download so we
-    // never report "updated" when the target directory cannot be written to.
-    if !is_dir_writable(&install_dir) {
-        let _ = narr.error(&unwritable_dir_error(&install_dir));
-        return 1;
+    // Up-front writability probe: abort only on PermissionDenied.
+    // Transient errors (ENOSPC, NotADirectory races, etc.) fall through so the
+    // existing prebuilt-attempt + cargo-fallback path can still succeed.
+    match probe_install_dir(&install_dir) {
+        WriteProbe::Writable => {}
+        WriteProbe::PermissionDenied => {
+            let _ = narr.error(&unwritable_dir_error(&install_dir));
+            return 1;
+        }
+        WriteProbe::Other(e) => {
+            tracing::warn!(
+                dir = %install_dir.display(),
+                error = %e,
+                "install-dir writability probe inconclusive; proceeding with self-update"
+            );
+        }
     }
 
     let outcome = crate::commands::runtime::block_on(download::try_install_prebuilt(
@@ -84,22 +145,7 @@ fn resolve_install_dir() -> PathBuf {
     download::default_install_dir().unwrap_or_else(|| PathBuf::from("/usr/local/bin"))
 }
 
-/// Probe whether a directory is writable by creating and immediately removing a temp file.
-///
-/// Why: Mode-bit checks alone are unreliable (ACLs, immutable flags, cross-user
-/// ownership). A create-and-remove probe is the portable, non-destructive way to
-/// confirm actual write access on both macOS and Linux without leaving any trace.
-///
-/// What: Uses `tempfile::Builder::new().tempfile_in(dir)` — the temp file is
-/// removed on drop if the call succeeds. Returns `true` iff the probe succeeds.
-///
-/// Test: `tests::writable_temp_dir_is_detected`, `tests::nonwritable_dir_is_detected`.
-pub fn is_dir_writable(dir: &Path) -> bool {
-    // tempfile_in creates a file and registers it for removal on drop — no litter.
-    tempfile::Builder::new().tempfile_in(dir).is_ok()
-}
-
-/// Format the error message for a non-writable install directory.
+/// Format the error message for a permission-denied install directory.
 ///
 /// Why: Separating message text from the I/O path lets unit tests verify the
 /// string without needing a real non-writable directory on the filesystem.
@@ -263,36 +309,58 @@ mod tests {
         assert!(!p.as_os_str().is_empty());
     }
 
-    /// Why: A writable directory must pass the probe so the up-front check in
-    ///      `run()` does not block installs into user-owned directories.
+    /// Why: A writable directory must yield `WriteProbe::Writable` so the up-front
+    ///      check in `run()` does not block installs into user-owned directories.
     /// What: Creates a temp dir (always writable by the process owner), calls
-    ///       `is_dir_writable`, asserts true.
+    ///       `probe_install_dir`, asserts `Writable`.
     /// Test: This is the test.
     #[test]
-    fn writable_temp_dir_is_detected() {
+    fn probe_writable_temp_dir() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(is_dir_writable(dir.path()), "temp dir should be writable");
+        assert!(
+            matches!(probe_install_dir(dir.path()), WriteProbe::Writable),
+            "temp dir must be Writable"
+        );
     }
 
-    /// Why: A non-writable directory must be detected before any download attempt,
-    ///      preventing the misleading-success bug where the binary on PATH was not
-    ///      replaced but "updated" was reported anyway.
+    /// Why: A read-only directory must yield `WriteProbe::PermissionDenied` so
+    ///      `run()` aborts with an actionable error before attempting any download.
     /// What: Creates a temp dir, removes write permission (0o555), calls
-    ///       `is_dir_writable`, asserts false. Restores permissions before asserting
-    ///       so temp-dir cleanup succeeds.
+    ///       `probe_install_dir`, asserts `PermissionDenied`. Restores permissions
+    ///       before asserting so temp-dir cleanup succeeds.
     /// Test: This is the test. Unix-only — Windows read-only-dir semantics differ.
     #[test]
     #[cfg(unix)]
-    fn nonwritable_dir_is_detected() {
+    fn probe_nonwritable_dir_is_permission_denied() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let ro = std::fs::Permissions::from_mode(0o555);
         std::fs::set_permissions(dir.path(), ro).unwrap();
-        let writable = is_dir_writable(dir.path());
+        let result = probe_install_dir(dir.path());
         // Restore before asserting so tempdir cleanup does not fail.
         let rw = std::fs::Permissions::from_mode(0o755);
         std::fs::set_permissions(dir.path(), rw).unwrap();
-        assert!(!writable, "read-only dir must not be detected as writable");
+        assert!(
+            matches!(result, WriteProbe::PermissionDenied),
+            "read-only dir must yield PermissionDenied"
+        );
+    }
+
+    /// Why: A transient / non-permission I/O error must NOT hard-abort the
+    ///      self-update — it must fall through so the prebuilt-attempt and cargo-
+    ///      fallback paths can still succeed. This guards against the behavioral
+    ///      regression where ENOSPC or a missing path caused an unnecessary abort.
+    /// What: Probes a nonexistent path; the OS returns `NotFound` (not
+    ///       `PermissionDenied`). Asserts `WriteProbe::Other` is returned,
+    ///       which the `run()` match arm falls through rather than aborting.
+    /// Test: This is the test.
+    #[test]
+    fn probe_nonexistent_dir_is_other_not_permission_denied() {
+        let result = probe_install_dir(std::path::Path::new("/nonexistent/path/that/cannot/exist"));
+        assert!(
+            matches!(result, WriteProbe::Other(_)),
+            "nonexistent path must yield WriteProbe::Other, not PermissionDenied"
+        );
     }
 
     /// Why: The unwritable-dir error must name the directory so the user knows
