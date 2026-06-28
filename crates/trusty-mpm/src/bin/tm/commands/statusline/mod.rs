@@ -5,20 +5,26 @@
 //! ` │ `-separated segment string on stdout. All fields degrade gracefully.
 //! What: reads a JSON object from stdin, renders repo+branch/model/daemon/cost
 //! segments, and exits 0. Missing or invalid fields produce empty/omitted segments.
-//! Test: `statusline_renders_minimal`, `statusline_renders_full` in `tests.rs`.
+//! Test: `render_statusline_minimal_input`, `render_statusline_full_payload` in tests.
+
+pub(crate) mod compaction;
 
 use std::io::Read as _;
 
 use crate::formatters::info_box::DaemonInfo;
+use compaction::{ContextWindow, compaction_segment};
 
 /// Claude Code `statusLine` hook input (all fields optional via `#[serde(default)]`).
 ///
 /// Why: Claude Code may add fields in future versions; `deny_unknown_fields` is
 /// intentionally absent so new keys do not cause parse failures.
-/// What: cwd, model metadata, cost summary, and the context-window overflow flag.
-/// Test: `statusline_renders_minimal` (empty input), `statusline_renders_full`.
+/// What: cwd, model metadata, cost summary, context-window data, and the
+/// context-window overflow flag.
+/// Test: `render_statusline_minimal_input` (empty input), `render_statusline_full_payload`.
 #[derive(Debug, Default, serde::Deserialize)]
 pub(crate) struct StatusInput {
+    #[serde(default)]
+    pub(crate) session_id: String,
     #[serde(default)]
     pub(crate) cwd: String,
     #[serde(default)]
@@ -27,6 +33,8 @@ pub(crate) struct StatusInput {
     pub(crate) cost: CostInfo,
     #[serde(default)]
     pub(crate) exceeds_200k_tokens: bool,
+    #[serde(default)]
+    pub(crate) context_window: Option<ContextWindow>,
 }
 
 /// Model metadata from the Claude Code hook input.
@@ -34,7 +42,7 @@ pub(crate) struct StatusInput {
 /// Why: `display_name` carries the human-readable label ("Opus") operators want
 /// in the status bar; `id` is the fallback when `display_name` is absent.
 /// What: both fields are `String` with `#[serde(default)]` so absent keys are "".
-/// Test: `statusline_renders_full`.
+/// Test: `render_statusline_full_payload`.
 #[derive(Debug, Default, serde::Deserialize)]
 pub(crate) struct ModelInfo {
     #[serde(default)]
@@ -47,7 +55,7 @@ pub(crate) struct ModelInfo {
 ///
 /// Why: operators want running cost in the status bar to monitor spend.
 /// What: `total_cost_usd` is the session's accumulated cost; 0.0 when absent.
-/// Test: `statusline_renders_full`.
+/// Test: `render_statusline_full_payload`.
 #[derive(Debug, Default, serde::Deserialize)]
 pub(crate) struct CostInfo {
     #[serde(default)]
@@ -60,7 +68,7 @@ pub(crate) struct CostInfo {
 /// stdin, prints one line to stdout, exits 0"; this is the single entry point.
 /// What: reads all of stdin, parses it as `StatusInput` (empty/invalid → default),
 /// renders segments, and prints exactly one line to stdout.
-/// Test: `statusline_renders_minimal`, `statusline_renders_full`.
+/// Test: `render_statusline_minimal_input`, `render_statusline_full_payload`.
 pub(crate) fn run_statusline() -> anyhow::Result<()> {
     let mut raw = String::new();
     let _ = std::io::stdin().read_to_string(&mut raw);
@@ -71,11 +79,12 @@ pub(crate) fn run_statusline() -> anyhow::Result<()> {
 
 /// Render the compact statusline string from parsed hook input.
 ///
-/// Why: keeping rendering pure (no I/O) makes it unit-testable independently
-/// of the stdin protocol.
-/// What: builds up to six segments — project+branch, model, daemon, session
-/// count, context%, cost — joined with ` │ `, emitting only non-empty segments.
-/// Test: `statusline_renders_minimal`, `statusline_renders_full`.
+/// Why: keeping rendering pure (no mandatory I/O) makes it unit-testable
+/// independently of the stdin protocol.
+/// What: builds up to seven segments — project+branch, model, daemon, session
+/// count, context%, compaction efficiency, cost — joined with ` │ `, emitting
+/// only non-empty segments.
+/// Test: `render_statusline_minimal_input`, `render_statusline_full_payload`.
 pub(crate) fn render_statusline(input: &StatusInput) -> String {
     let mut parts: Vec<String> = Vec::new();
 
@@ -104,6 +113,12 @@ pub(crate) fn render_statusline(input: &StatusInput) -> String {
     if input.exceeds_200k_tokens {
         parts.push("ctx>200k".to_string());
     }
+
+    // Compaction efficiency / live context fill.
+    if let Some(seg) = compaction_segment(&input.session_id, input.context_window.as_ref()) {
+        parts.push(seg);
+    }
+
     if input.cost.total_cost_usd > 0.0 {
         parts.push(cost_segment(input.cost.total_cost_usd));
     }
@@ -119,7 +134,7 @@ pub(crate) fn render_statusline(input: &StatusInput) -> String {
 /// daemon; a subprocess git call is cheap enough for a status-bar refresh.
 /// What: extracts the dirname basename and appends ` ⎇ <branch>` when the
 /// working directory is inside a git repo.
-/// Test: `statusline_renders_minimal` (empty cwd → None).
+/// Test: `render_statusline_minimal_input` (empty cwd → None).
 fn project_segment(cwd: &str) -> Option<String> {
     if cwd.is_empty() {
         return None;
@@ -143,9 +158,9 @@ fn project_segment(cwd: &str) -> Option<String> {
 /// Build the model-label segment.
 ///
 /// Why: operators want to know which model Claude Code is using at a glance.
-/// What: returns `display_name` when non-empty, `id` as fallback, `None` when both
-/// are empty (segment omitted from the status bar).
-/// Test: `statusline_renders_full`.
+/// What: returns `display_name` when non-empty, `id` as fallback, `None` when
+/// both are empty (segment omitted from the status bar).
+/// Test: `render_statusline_full_payload`.
 fn model_segment(model: &ModelInfo) -> Option<String> {
     if !model.display_name.is_empty() {
         Some(model.display_name.clone())
@@ -161,7 +176,7 @@ fn model_segment(model: &ModelInfo) -> Option<String> {
 /// Why: makes the daemon state immediately visible without opening a terminal.
 /// What: extracts the port from `daemon.addr` and returns `"tm ●:<port>"` or
 /// `"tm ○"`.
-/// Test: `statusline_renders_minimal` (offline daemon → `tm ○`).
+/// Test: `render_statusline_minimal_input` (offline daemon → `tm ○`).
 fn daemon_segment(daemon: &DaemonInfo) -> String {
     if daemon.online {
         let port = daemon
@@ -179,7 +194,7 @@ fn daemon_segment(daemon: &DaemonInfo) -> String {
 ///
 /// Why: shows at a glance how many trusty-mpm sessions are active.
 /// What: returns `"⛁{n}"`.
-/// Test: `statusline_renders_full`.
+/// Test: `render_statusline_full_payload`.
 fn count_segment(n: usize) -> String {
     format!("\u{26c1}{n}")
 }
@@ -188,7 +203,7 @@ fn count_segment(n: usize) -> String {
 ///
 /// Why: running cost visibility helps operators monitor API spend.
 /// What: formats `usd` to two decimal places with a `$` prefix.
-/// Test: `statusline_renders_full`.
+/// Test: `render_statusline_full_payload`.
 fn cost_segment(usd: f64) -> String {
     format!("${usd:.2}")
 }
@@ -198,7 +213,7 @@ fn cost_segment(usd: f64) -> String {
 /// Why: the lock file stores `addr = "127.0.0.1:7880"` without the `http://`
 /// scheme; the probe needs a full URL.
 /// What: prepends `http://` when the addr does not already start with it.
-/// Test: covered indirectly by `statusline_renders_minimal`.
+/// Test: covered indirectly by `render_statusline_minimal_input`.
 fn daemon_base_url(daemon: &DaemonInfo) -> String {
     if daemon.addr.starts_with("http") {
         daemon.addr.clone()
@@ -249,9 +264,11 @@ fn git_branch(cwd: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use compaction::ContextWindow;
 
     fn full_input() -> StatusInput {
         StatusInput {
+            session_id: String::new(),
             cwd: "/home/user/my-project".to_string(),
             model: ModelInfo {
                 id: "claude-sonnet-4-6".to_string(),
@@ -261,6 +278,7 @@ mod tests {
                 total_cost_usd: 1.23,
             },
             exceeds_200k_tokens: false,
+            context_window: None,
         }
     }
 
@@ -294,7 +312,6 @@ mod tests {
         let mut input = full_input();
         input.model = ModelInfo::default();
         let out = render_statusline(&input);
-        // Model segment is absent; all other segments still present.
         assert!(!out.contains("claude"), "model segment must be omitted");
         assert!(out.contains("tm "), "daemon segment must still appear");
         assert!(out.contains("$1.23"), "cost must still appear");
@@ -334,9 +351,39 @@ mod tests {
     #[test]
     fn render_statusline_no_empty_separator_pairs() {
         // With every optional field empty, the only segment is the daemon row.
-        // Joining a single-item vec produces no separators at all.
         let out = render_statusline(&StatusInput::default());
         assert!(!out.contains(" \u{2502}  \u{2502} "), "no empty │ │ pairs");
         assert!(!out.contains("│ │"), "no adjacent separators");
+    }
+
+    #[test]
+    fn render_statusline_with_context_window_shows_live_fill() {
+        // When session_id is empty, compaction_segment returns None; ctx% is skipped.
+        // When session_id is present and no state file exists, shows live fill.
+        // We test via render_compaction_segment directly to avoid real file I/O.
+        use compaction::{CompactionState, render_compaction_segment};
+
+        let state = CompactionState::default();
+        let cw = ContextWindow {
+            total_input_tokens: 82_000,
+            context_window_size: 200_000,
+            used_percentage: 41.0,
+        };
+        let seg = render_compaction_segment(&state, &cw);
+        assert_eq!(seg.as_deref(), Some("ctx 41%"));
+    }
+
+    #[test]
+    fn render_statusline_with_context_window_no_session_id_omits_segment() {
+        // session_id="" → compaction_segment() → None → no compaction segment
+        let mut input = full_input();
+        input.context_window = Some(ContextWindow {
+            total_input_tokens: 82_000,
+            context_window_size: 200_000,
+            used_percentage: 41.0,
+        });
+        let out = render_statusline(&input);
+        // No compaction/ctx segment because session_id is empty
+        assert!(!out.contains("ctx "), "no ctx segment without session_id");
     }
 }
