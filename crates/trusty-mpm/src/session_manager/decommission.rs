@@ -51,7 +51,10 @@ impl SessionManager {
     /// is gone from disk and the record state is `Decommissioned`.
     /// `manager_decommission_unowned_skips_deletion` — asserts that decommissioning
     /// a local-path/adopt record does NOT delete the directory.
-    pub async fn decommission(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
+    pub async fn decommission(
+        &self,
+        id: &ManagedSessionId,
+    ) -> Result<(SessionRecord, bool), ManagedError> {
         let config = TrustyToolsConfig::load();
         let managed_root = workspace_root(&config);
         self.decommission_with_root(id, &managed_root).await
@@ -65,13 +68,17 @@ impl SessionManager {
     /// parallel tests; injecting the root avoids that entirely.
     /// What: identical teardown logic as the public `decommission` but resolves the
     /// managed root from the caller-supplied `managed_root` instead of the config.
+    /// Returns `(SessionRecord, workspace_removed)` where `workspace_removed` is
+    /// `true` ONLY when `remove_dir_all` actually ran — callers must not infer this
+    /// from a post-call filesystem check (TOCTOU: owned workspace already absent
+    /// before decommission would give a false-positive filesystem result).
     /// Test: called by `manager_decommission_removes_workspace` (which passes a
     /// TempDir as the managed root, removing the need for `set_var`).
     pub(crate) async fn decommission_with_root(
         &self,
         id: &ManagedSessionId,
         managed_root: &Path,
-    ) -> Result<SessionRecord, ManagedError> {
+    ) -> Result<(SessionRecord, bool), ManagedError> {
         let mut record = self.get(id).await?;
 
         // Kill the runtime (best-effort).
@@ -82,6 +89,8 @@ impl SessionManager {
         }
 
         // Guard: only remove the workspace directory if the SM provisioned it.
+        // Track whether remove_dir_all ACTUALLY RAN (not inferred from filesystem).
+        let mut workspace_removed = false;
         if let Some(ref ws) = record.workspace_path {
             if !record.workspace_owned {
                 // Unowned workspace (local-path spawn or adopt): never delete.
@@ -99,6 +108,7 @@ impl SessionManager {
                     // Benign: the workspace was removed before decommission ran
                     // (e.g. a prior partial teardown). The tombstone is still
                     // written below; no further disk action is needed.
+                    // workspace_removed stays false — we did NOT remove it.
                     tracing::debug!(
                         id = %id,
                         workspace = %ws.display(),
@@ -124,6 +134,7 @@ impl SessionManager {
                                 format!("remove workspace {:?}: {e}", ws),
                             ))
                         })?;
+                        workspace_removed = true;
                         info!(
                             id = %id,
                             workspace = %ws.display(),
@@ -140,7 +151,7 @@ impl SessionManager {
         record.state = ManagedSessionState::Decommissioned;
         self.store.write().await.upsert(record.clone()).await?;
         info!(id = %id, name = %record.tmux_name, "managed session decommissioned");
-        Ok(record)
+        Ok((record, workspace_removed))
     }
 
     /// Mark a session's workspace as SM-owned (provisioned by clone) or unowned.

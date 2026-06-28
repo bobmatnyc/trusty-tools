@@ -26,12 +26,14 @@ use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
 use crate::session_manager::{ManagedSessionId, SessionRecord};
 
+pub mod activity;
 mod fleet;
 pub mod front_gate;
 pub mod inproject;
 pub mod inproject_hygiene;
 mod lifecycle;
 pub mod prune;
+pub use activity::{ActivityResponse, get_session_activity};
 pub use fleet::{FleetByProjectResponse, FleetProjectGroup, fleet_by_project_route};
 pub use front_gate::{
     ConformanceGate, FrontGateOutcome, HeadlessApproval, IsrConformanceGate, run_front_gate,
@@ -176,7 +178,7 @@ pub struct ListSessionsResponse {
 /// Why: the list endpoint returns less detail than the single-session endpoint;
 /// keeping a summary type avoids serializing the full record in list responses.
 /// What: id, name, state, workspace_path, repo_url, branch, timestamps,
-/// pending_decision, proposed_default.
+/// task, cwd, pending_decision, proposed_default, source_id.
 /// Test: list handler test.
 #[derive(Debug, Serialize)]
 pub struct SessionSummary {
@@ -206,6 +208,42 @@ pub struct SessionSummary {
     /// filter sessions by project and reconnect to existing ones.
     /// `None` for sessions not created via the in-project path.
     pub source_id: Option<String>,
+    /// Task description for the session (additive; absent for legacy records).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// Working directory for the session (additive; absent for legacy records).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+/// Response body for POST /api/v1/sessions/managed/{id}/decommission.
+///
+/// Why: the decommission operation may or may not physically remove the workspace
+/// directory (it is skipped for un-owned workspaces such as local-path or adopted
+/// sessions). The CLI must surface an honest message, so the daemon reports what
+/// actually happened via `workspace_removed`. `workspace_path_was` lets the CLI
+/// locate the base git repo for `git worktree prune` without requiring a second
+/// lookup — the path is gone from disk but the parent dir still exists.
+/// What: extends the flat session summary with a `workspace_removed` bool that is
+/// `true` only when `remove_dir_all` succeeded (the workspace was owned and got
+/// deleted from disk), and `workspace_path_was` (the pre-tombstone path) when the
+/// session had an owned workspace.
+/// Test: `decommission_workspace_removed_reflects_ownership` in managed_routes tests.
+#[derive(Debug, Serialize)]
+pub struct DecommissionResponse {
+    /// Flat session summary (post-tombstone: state=decommissioned, workspace_path=None).
+    #[serde(flatten)]
+    pub summary: SessionSummary,
+    /// Whether the workspace directory was actually removed from disk.
+    ///
+    /// `true`  → SM-owned workspace was deleted by this call.
+    /// `false` → workspace was not owned (adopt/local-path) or was already absent.
+    pub workspace_removed: bool,
+    /// Pre-decommission workspace path string, when the session was owned (`None`
+    /// for adopted/local-path sessions where the workspace was never SM-owned).
+    /// Used by the CLI to locate the base git repo and run `git worktree prune`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_path_was: Option<String>,
 }
 
 /// Request body for POST /api/v1/sessions/managed/{id}/send.
@@ -268,54 +306,6 @@ pub struct AttachCmdResponse {
     pub attach_cmd: String,
 }
 
-/// Response body for GET /api/v1/sessions/managed/{id}/activity.
-///
-/// Why: the calling agentic process needs the full activity picture without
-/// requiring an LLM key — raw pane content and structured lifecycle fields are
-/// always available; the LLM classification is an optional overlay when
-/// OpenRouter is configured. This lets the calling agentic process do its own
-/// inference over the raw pane content.
-/// What: always-present fields: `raw_pane` (last 60 lines), `runtime_active`
-/// (tmux session alive or not), `pending_decision`, `proposed_default`. LLM
-/// fields (`state`, `summary`, `confidence`, `classification`) are populated
-/// when the classifier ran successfully; `classification` is `null` when the
-/// key is absent or the classifier was not invoked.
-/// Test: activity route handler test; `activity_no_key_returns_raw_pane` test.
-#[derive(Debug, Serialize)]
-pub struct ActivityResponse {
-    /// Raw pane content (last 60 lines). Always present so the calling agentic
-    /// process can reason over the raw terminal output directly.
-    pub raw_pane: String,
-    /// Whether the tmux runtime session is currently alive.
-    pub runtime_active: bool,
-    /// Activity state from LLM classification: working, idle, blocked_on_permission,
-    /// errored, done, unknown. Populated from classifier verdict or "unknown".
-    pub state: String,
-    /// Human-readable summary of what the session is doing (from LLM or fallback).
-    pub summary: String,
-    /// Confidence of the classification (0.0–1.0). 0.0 when no classifier ran.
-    pub confidence: f32,
-    /// True when the verdict was served from the content-hash cache.
-    pub cache_hit: bool,
-    /// Input token count for this check (0 on cache hit or no classifier).
-    pub input_tokens: u32,
-    /// Output token count for this check (0 on cache hit or no classifier).
-    pub output_tokens: u32,
-    /// Latency in milliseconds for this check.
-    pub latency_ms: u64,
-    /// Cumulative input tokens across all checks for this session.
-    pub total_input_tokens: u64,
-    /// Cumulative output tokens across all checks for this session.
-    pub total_output_tokens: u64,
-    /// LLM classification result. `null` when no OpenRouter key or classifier
-    /// not configured; string state name when classifier ran.
-    pub classification: Option<String>,
-    /// A pending decision question, if surfaced by a previous activity check.
-    pub pending_decision: Option<String>,
-    /// Proposed default answer to the pending decision.
-    pub proposed_default: Option<String>,
-}
-
 /// Serialize a [`SessionRecord`] to the flat JSON shape the MCP tools return.
 ///
 /// Why: the MCP tools return JSON values (not axum responses); reusing the same
@@ -333,6 +323,8 @@ pub fn record_to_json(r: &SessionRecord) -> serde_json::Value {
         "name": r.tmux_name,
         "state": r.state.to_string(),
         "workspace_path": r.workspace_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+        "cwd": r.cwd.to_string_lossy().to_string(),
+        "task": r.task,
         "repo_url": r.repo_url,
         "branch": r.branch,
         "created_at": r.created_at.to_rfc3339(),
@@ -369,6 +361,8 @@ pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
         pending_decision: r.pending_decision.clone(),
         proposed_default: r.proposed_default.clone(),
         source_id: r.source_id.clone(),
+        task: Some(r.task.clone()),
+        cwd: Some(r.cwd.to_string_lossy().to_string()),
     }
 }
 
@@ -767,8 +761,12 @@ pub async fn resume_managed_session(
 /// Why: the ONLY operation that removes the workspace from disk. Unlike `stop`,
 /// decommission is terminal — no further `resume` is possible.
 /// What: delegates to SessionManager::decommission (kills runtime, removes
-/// workspace dir, marks record Decommissioned). A tombstone record is kept.
-/// Test: `manager_decommission_removes_workspace`.
+/// workspace dir when owned, marks record Decommissioned). Returns a
+/// [`DecommissionResponse`] that includes `workspace_removed` so callers can
+/// display an honest message reflecting whether the filesystem was actually
+/// mutated (e.g. adopted/local-path workspaces are NEVER deleted).
+/// Test: `manager_decommission_removes_workspace`;
+/// `decommission_workspace_removed_reflects_ownership`.
 pub async fn decommission_managed_session(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id_str): AxumPath<String>,
@@ -778,8 +776,29 @@ pub async fn decommission_managed_session(
         Err((code, msg)) => return (code, msg).into_response(),
     };
     let mgr = state.session_manager().await;
+    // Pre-fetch the record to obtain the workspace_path BEFORE the tombstone clears
+    // it. `decommission` now returns `workspace_removed` directly (no TOCTOU
+    // filesystem re-check); `workspace_path_was` for the CLI's `git worktree prune`
+    // hint must still be captured here since the tombstone nulls it out.
+    let pre = mgr.get(&id).await.ok();
+    let pre_owned = pre.as_ref().map(|r| r.workspace_owned).unwrap_or(false);
+    let pre_ws = pre.and_then(|r| r.workspace_path);
     match mgr.decommission(&id).await {
-        Ok(record) => Json(record_to_summary(&record)).into_response(),
+        Ok((record, workspace_removed)) => {
+            // workspace_path_was: only meaningful for owned sessions (those where
+            // `decommission_with_root` might have removed the directory).
+            let workspace_path_was = if pre_owned {
+                pre_ws.map(|p| p.to_string_lossy().into_owned())
+            } else {
+                None
+            };
+            Json(DecommissionResponse {
+                summary: record_to_summary(&record),
+                workspace_removed,
+                workspace_path_was,
+            })
+            .into_response()
+        }
         Err(crate::session_manager::ManagedError::SessionNotFound(_)) => {
             (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
         }
@@ -801,92 +820,6 @@ pub async fn stop_managed_session(
     AxumPath(id_str): AxumPath<String>,
 ) -> impl IntoResponse {
     stop_managed_session_runtime(State(state), AxumPath(id_str)).await
-}
-
-/// GET /api/v1/sessions/managed/{id}/activity — inspect session activity.
-///
-/// Why: the calling agentic process needs to know whether the session is
-/// working, idle, blocked, errored, or done WITHOUT requiring an LLM key.
-/// The raw pane content is ALWAYS returned so the calling agentic process can
-/// perform its own inference. The OpenRouter LLM classifier is invoked ONLY
-/// when configured (i.e. when OPENROUTER_API_KEY is set).
-/// What: captures the pane via the session's tmux driver (last 60 lines);
-/// determines `runtime_active` from tmux presence; calls `ActivityMonitor::check`
-/// — which already converts `MissingApiKey` to an Unknown verdict non-erroring —
-/// and returns the verdict alongside `raw_pane` and `classification` (null when
-/// no classifier ran or key absent).
-/// The hash-skip cache and cost instrumentation remain active for the
-/// optional-classifier path.
-/// Test: `activity_no_key_returns_raw_pane` in tests/session_manager_mvp.rs;
-/// `handler_activity_cache_hit`.
-pub async fn get_session_activity(
-    State(state): State<Arc<DaemonState>>,
-    AxumPath(id_str): AxumPath<String>,
-) -> impl IntoResponse {
-    let id = match parse_id(&id_str) {
-        Ok(id) => id,
-        Err((code, msg)) => return (code, msg).into_response(),
-    };
-    let mgr = state.session_manager().await;
-    let record = match mgr.get(&id).await {
-        Ok(r) => r,
-        Err(_) => {
-            return (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response();
-        }
-    };
-
-    // Capture the last 60 pane lines (may return empty string when tmux is gone).
-    let pane_text = mgr
-        .capture_pane(&id, 60)
-        .await
-        .unwrap_or_else(|_| String::new());
-
-    // Determine runtime_active from the driver directly.
-    let runtime_active = mgr.tmux_driver().session_exists(&record.tmux_name);
-
-    // Run the activity check through the shared ActivityMonitor.
-    // ActivityMonitor::check already handles MissingApiKey non-erroring — it
-    // converts it to an Unknown verdict with 0 tokens. We never propagate
-    // ActivityError to the HTTP response; unknown is a valid result.
-    let monitor = state.activity_monitor();
-    let result = match monitor.check(&id_str, &pane_text).await {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(session = %id_str, "activity check error (non-key): {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("activity check failed: {e}"),
-            )
-                .into_response();
-        }
-    };
-
-    // Determine whether the LLM actually classified (vs. falling back to Unknown
-    // due to missing key). classification is null when no key / no LLM ran.
-    let api_key_present = std::env::var("OPENROUTER_API_KEY").is_ok();
-    let classification = if api_key_present {
-        Some(format!("{:?}", result.verdict.state).to_lowercase())
-    } else {
-        None
-    };
-
-    Json(ActivityResponse {
-        raw_pane: pane_text,
-        runtime_active,
-        state: format!("{:?}", result.verdict.state).to_lowercase(),
-        summary: result.verdict.summary,
-        confidence: result.verdict.confidence,
-        cache_hit: result.cache_hit,
-        input_tokens: result.cost.input_tokens,
-        output_tokens: result.cost.output_tokens,
-        latency_ms: result.cost.latency_ms,
-        total_input_tokens: result.tally.total_input_tokens,
-        total_output_tokens: result.tally.total_output_tokens,
-        classification,
-        pending_decision: record.pending_decision,
-        proposed_default: record.proposed_default,
-    })
-    .into_response()
 }
 
 #[cfg(test)]

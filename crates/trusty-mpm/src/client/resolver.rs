@@ -181,6 +181,8 @@ mod tests {
             pending_decision: None,
             proposed_default: None,
             source_id: None,
+            task: None,
+            cwd: None,
         };
         let items = vec![summary("m-1", "tmpm-red-owl"), summary("m-2", "api")];
         assert_eq!(

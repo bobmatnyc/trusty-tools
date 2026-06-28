@@ -386,6 +386,8 @@ fn make_session(
         pending_decision: None,
         proposed_default: None,
         source_id: None,
+        task: None,
+        cwd: None,
     }
 }
 
@@ -739,8 +741,11 @@ fn needs_first_run_clone_returns_none_for_non_dir() {
 
 /// Why: when the base clone directory already exists, the fn must return None
 /// so the "first run" message is NOT emitted on subsequent `tm` invocations.
-/// Test: itself.
+/// Test: itself. Marked `#[serial_test::serial]` so it cannot run concurrently
+/// with other env-mutating tests (especially b-tests that also mutate
+/// TRUSTY_MPM_REPOS_ROOT without holding ENV_MUTEX).
 #[test]
+#[serial_test::serial]
 fn needs_first_run_clone_returns_none_when_clone_exists() {
     use std::process::Command;
     let tmp = tempfile::TempDir::new().unwrap();
@@ -794,8 +799,11 @@ fn needs_first_run_clone_returns_none_when_clone_exists() {
 /// Why: the first `tm` invocation returns Some when the clone directory is absent,
 /// giving the caller the project id and path to emit a "cloning…" message before
 /// the blocking daemon request. This is the primary FIX 2 path (#1780).
-/// Test: itself.
+/// Test: itself. Marked `#[serial_test::serial]` so it cannot run concurrently
+/// with other env-mutating tests (especially b-tests that also mutate
+/// TRUSTY_MPM_REPOS_ROOT without holding ENV_MUTEX).
 #[test]
+#[serial_test::serial]
 fn needs_first_run_clone_returns_some_when_no_clone() {
     use std::process::Command;
     let tmp = tempfile::TempDir::new().unwrap();

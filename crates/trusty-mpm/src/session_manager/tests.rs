@@ -515,10 +515,16 @@ async fn manager_decommission_removes_workspace() {
         .expect("create");
 
     // Decommission using the injectable root — no unsafe env mutation.
-    let tombstone = mgr
+    let (tombstone, workspace_removed) = mgr
         .decommission_with_root(&record.id, managed_root.path())
         .await
         .expect("decommission");
+
+    // decommission_with_root must report that it actually removed the directory.
+    assert!(
+        workspace_removed,
+        "workspace_removed must be true for an owned, existing workspace"
+    );
 
     // State must be Decommissioned.
     assert_eq!(tombstone.state, ManagedSessionState::Decommissioned);
@@ -1895,10 +1901,16 @@ async fn manager_decommission_unowned_skips_deletion() {
     mgr.store.write().await.upsert(record).await.unwrap();
 
     // Decommission must SUCCEED (return Ok) but NOT delete the directory.
-    let tombstone = mgr
+    let (tombstone, workspace_removed) = mgr
         .decommission(&id)
         .await
         .expect("decommission of an unowned record must succeed (skip deletion, not error)");
+
+    // workspace_removed must be false — we did NOT remove an unowned directory.
+    assert!(
+        !workspace_removed,
+        "workspace_removed must be false for an unowned (adopted/local-path) workspace"
+    );
 
     // The record must be tombstoned.
     assert_eq!(

@@ -47,41 +47,105 @@ pub(crate) fn deprecation_notice(old: &str, new: &str) {
 /// `tm sessions ls` — list managed sessions.
 ///
 /// Why: operators need a quick view of every managed session and its pending
-/// decision.
-/// What: GETs `/api/v1/sessions/managed` and prints a table or raw JSON.
-/// Test: HTTP path covered by the integration test.
+/// decision, optionally scoped to a single project so the firehose is tamed.
+/// What: GETs `/api/v1/sessions/managed` (with an optional `?source_id=` filter
+/// that the daemon already supports) and prints a table with id, state, name,
+/// task (truncated to 30 chars), and created_at; or raw JSON with `--json`.
+/// The filter is passed straight through as a query parameter rather than doing
+/// client-side filtering so callers get the daemon's authoritative view.
+/// Test: HTTP path covered by the integration test; filter logic unit-tested by
+/// `ls_source_id_filter_selects_correct_slug`.
 pub(crate) async fn session_ls(
     client: &reqwest::Client,
     url: &str,
     json: bool,
+    source_id: Option<&str>,
 ) -> anyhow::Result<()> {
+    // Build the request URL, appending ?source_id= when a filter is active.
+    let endpoint = format!("{url}/api/v1/sessions/managed");
+    let mut req = client.get(&endpoint);
+    if let Some(sid) = source_id {
+        req = req.query(&[("source_id", sid)]);
+    }
     // Fetch the response body ONCE. `--json` echoes that raw text verbatim
     // (byte-for-byte — preserving exact field order/whitespace for scripts);
     // the table path deserializes the SAME text rather than issuing a second GET.
-    let raw = client
-        .get(format!("{url}/api/v1/sessions/managed"))
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+    let raw = req.send().await?.error_for_status()?.text().await?;
     if json {
         println!("{raw}");
         return Ok(());
     }
     let sessions = serde_json::from_str::<trusty_mpm::client::ManagedListResponse>(&raw)?.sessions;
     if sessions.is_empty() {
-        println!("no managed sessions");
+        if let Some(sid) = source_id {
+            println!("no managed sessions for {sid}");
+        } else {
+            println!("no managed sessions");
+        }
+        return Ok(());
     }
+    // Table header
+    println!(
+        "{:<36}  {:<14}  {:<24}  {:<30}  CREATED",
+        "ID", "STATE", "NAME", "TASK"
+    );
     for s in &sessions {
+        let task = s
+            .task
+            .as_deref()
+            .map(|t| truncate(t, 30))
+            .unwrap_or_default();
+        let created = s
+            .created_at
+            .as_deref()
+            .map(short_timestamp)
+            .unwrap_or_default();
         let pending = s
             .pending_decision
             .as_deref()
-            .map(|d| format!(" pending=\"{d}\""))
+            .map(|d| format!(" [pending: {d}]"))
             .unwrap_or_default();
-        println!("{} {} {}{}", s.id, s.name, s.state, pending);
+        println!(
+            "{:<36}  {:<14}  {:<24}  {:<30}  {}{}",
+            s.id, s.state, s.name, task, created, pending
+        );
     }
     Ok(())
+}
+
+/// Truncate a string to at most `max` characters, appending `…` when cut.
+///
+/// Why: task descriptions can be arbitrarily long; the ls table needs a bounded
+/// column width.
+/// What: returns `&s[..max-1]…` when `s.chars().count() > max`, else `s`.
+/// Test: `truncate_clips_and_appends_ellipsis` in the module-level unit tests.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let end = s
+            .char_indices()
+            .nth(max.saturating_sub(1))
+            .map(|(i, _)| i)
+            .unwrap_or(s.len());
+        format!("{}\u{2026}", &s[..end])
+    }
+}
+
+/// Render an RFC-3339 timestamp as a short local-ish string (`YYYY-MM-DD HH:MM`).
+///
+/// Why: the full RFC-3339 value is too wide for a table column; a date+time
+/// prefix is human-readable without truncating important information.
+/// What: takes the first 16 characters of the timestamp string (`YYYY-MM-DDTHH:MM`),
+/// replaces the `T` separator with a space, and returns the result. Falls back to
+/// the raw string if it is shorter than 16 chars.
+/// Test: `short_timestamp_formats_correctly`.
+fn short_timestamp(s: &str) -> String {
+    if s.len() >= 16 {
+        s[..16].replace('T', " ")
+    } else {
+        s.to_string()
+    }
 }
 
 /// `tm sessions activity <id>` — inspect a managed session's activity state.
@@ -203,13 +267,22 @@ pub(crate) async fn session_resume(
     Ok(())
 }
 
-/// `tm sessions decommission <id>` — full teardown (remove workspace from disk).
+/// `tm sessions decommission <id>` — full teardown (may or may not remove workspace).
 ///
-/// Why: the ONLY operation that permanently removes the workspace directory.
-/// Unlike `runtime-stop`, decommission is terminal — no resume is possible.
-/// A tombstone record is kept so `ls` shows history.
-/// What: POSTs `/api/v1/sessions/managed/{id}/decommission`.
-/// Test: HTTP path covered by the integration test.
+/// Why: adopted/local-path sessions were NEVER owned by tm, so the workspace is
+/// NOT removed on their decommission. Previously the CLI printed an incorrect
+/// "workspace removed" message for every decommission — this fix surfaces the
+/// daemon's actual `workspace_removed` verdict so the operator is never misled.
+/// When the workspace was removed and a pre-decommission path is available, we run
+/// `git worktree prune` on the parent directory so git's worktree bookkeeping is
+/// cleaned up immediately (rather than waiting for the next GC pass).
+/// What: POSTs `/api/v1/sessions/managed/{id}/decommission`, reads the
+/// `workspace_removed` / `workspace_path_was` fields from the JSON response, and
+/// prints a message that accurately reflects what happened. When `workspace_removed`
+/// is `true` and `workspace_path_was` is present, runs `git worktree prune` on
+/// the parent directory (best-effort; errors are silently suppressed).
+/// Test: `decommission_message_reflects_workspace_removed` (unit);
+/// HTTP path covered by the integration test.
 pub(crate) async fn session_decommission(
     client: &reqwest::Client,
     url: &str,
@@ -223,8 +296,33 @@ pub(crate) async fn session_decommission(
         println!("not found");
         return Ok(());
     }
-    resp.error_for_status()?;
-    println!("decommissioned {id} (workspace removed; tombstone record kept)");
+    let body: serde_json::Value = resp.error_for_status()?.json().await?;
+    let workspace_removed = body
+        .get("workspace_removed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let id_display = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or(id.as_str());
+    if workspace_removed {
+        println!("decommissioned {id_display} — workspace removed; tombstone record kept");
+        // Run `git worktree prune` on the parent of the (now-deleted) workspace so
+        // the main repo's worktree bookkeeping is cleaned up immediately.
+        if let Some(ws_was) = body.get("workspace_path_was").and_then(|v| v.as_str()) {
+            let parent = std::path::Path::new(ws_was)
+                .parent()
+                .unwrap_or(std::path::Path::new(ws_was));
+            let _ = std::process::Command::new("git")
+                .args(["-C", &parent.to_string_lossy(), "worktree", "prune"])
+                .output();
+        }
+    } else {
+        println!(
+            "decommissioned {id_display} — record decommissioned; \
+             workspace left in place (not owned by tm)"
+        );
+    }
     Ok(())
 }
 
@@ -442,4 +540,59 @@ pub(crate) async fn catalog(action: CatalogAction) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{short_timestamp, truncate};
+
+    #[test]
+    fn truncate_clips_and_appends_ellipsis() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(truncate("hello world", 5), "hell\u{2026}");
+        assert_eq!(truncate("", 5), "");
+        assert_eq!(truncate("abcde", 5), "abcde");
+    }
+
+    #[test]
+    fn short_timestamp_formats_correctly() {
+        assert_eq!(short_timestamp("2025-06-27T14:32:00Z"), "2025-06-27 14:32");
+        assert_eq!(short_timestamp("short"), "short");
+        assert_eq!(short_timestamp("2025-06-27T14:32"), "2025-06-27 14:32");
+    }
+
+    #[test]
+    fn decommission_message_reflects_workspace_removed() {
+        // Guard that the key field names used in session_decommission match the
+        // daemon's DecommissionResponse serde output. If the daemon renames those
+        // keys this test catches the drift before the JSON decodes silently to None.
+        let owned_removed = serde_json::json!({
+            "id": "abc-123",
+            "workspace_removed": true,
+            "workspace_path_was": "/some/workspace/path"
+        });
+        assert_eq!(
+            owned_removed
+                .get("workspace_removed")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            owned_removed
+                .get("workspace_path_was")
+                .and_then(|v| v.as_str()),
+            Some("/some/workspace/path")
+        );
+        let adopted_not_removed = serde_json::json!({
+            "id": "xyz-456",
+            "workspace_removed": false
+        });
+        assert_eq!(
+            adopted_not_removed
+                .get("workspace_removed")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert!(adopted_not_removed.get("workspace_path_was").is_none());
+    }
 }

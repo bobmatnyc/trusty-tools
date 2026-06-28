@@ -84,3 +84,79 @@ fn serializers_include_source_id() {
         "record_to_summary must carry None source_id when absent"
     );
 }
+
+/// Verify that `DecommissionResponse.workspace_removed` correctly reflects
+/// workspace ownership rather than being inferred from the post-call filesystem.
+///
+/// Why: the TOCTOU issue (#1788 review) means a post-hoc `!p.exists()` check
+/// gives `workspace_removed=true` even for workspaces that were ALREADY absent
+/// before decommission ran. The response struct must be populated from the value
+/// returned by `decommission_with_root` (which tracks whether `remove_dir_all`
+/// actually ran), not from a filesystem re-check.
+/// What: validates the `DecommissionResponse` serde contract — `workspace_removed`
+/// is a bool present in the JSON, and `workspace_path_was` is an optional string
+/// present only for owned sessions.
+/// Test: this test; the runtime path is covered by
+/// `manager_decommission_removes_workspace` (owned=true → workspace_removed=true)
+/// and `manager_decommission_unowned_skips_deletion` (owned=false → false).
+#[test]
+fn decommission_workspace_removed_reflects_ownership() {
+    use super::{DecommissionResponse, SessionSummary};
+
+    // ── owned session: workspace_removed = true, workspace_path_was = Some ──
+    let owned_summary = SessionSummary {
+        id: "abc-123".into(),
+        name: "tmpm-test".into(),
+        state: "decommissioned".into(),
+        workspace_path: None, // cleared in tombstone
+        repo_url: None,
+        branch: None,
+        created_at: "2025-06-28T00:00:00Z".into(),
+        last_activity_at: None,
+        pending_decision: None,
+        proposed_default: None,
+        source_id: None,
+        task: None,
+        cwd: None,
+    };
+    let resp_owned = DecommissionResponse {
+        summary: owned_summary,
+        workspace_removed: true,
+        workspace_path_was: Some("/workspaces/trusty-mpm/session-abc".into()),
+    };
+    let json = serde_json::to_value(&resp_owned).unwrap();
+    assert_eq!(json["workspace_removed"], true, "owned: must be true");
+    assert_eq!(
+        json["workspace_path_was"].as_str(),
+        Some("/workspaces/trusty-mpm/session-abc"),
+        "owned: workspace_path_was must be present"
+    );
+
+    // ── unowned session: workspace_removed = false, workspace_path_was absent ──
+    let unowned_summary = SessionSummary {
+        id: "xyz-456".into(),
+        name: "tmpm-adopted".into(),
+        state: "decommissioned".into(),
+        workspace_path: None,
+        repo_url: None,
+        branch: None,
+        created_at: "2025-06-28T00:00:00Z".into(),
+        last_activity_at: None,
+        pending_decision: None,
+        proposed_default: None,
+        source_id: None,
+        task: None,
+        cwd: None,
+    };
+    let resp_unowned = DecommissionResponse {
+        summary: unowned_summary,
+        workspace_removed: false,
+        workspace_path_was: None,
+    };
+    let json2 = serde_json::to_value(&resp_unowned).unwrap();
+    assert_eq!(json2["workspace_removed"], false, "unowned: must be false");
+    assert!(
+        json2.get("workspace_path_was").is_none(),
+        "unowned: workspace_path_was must be absent (skip_serializing_if = None)"
+    );
+}

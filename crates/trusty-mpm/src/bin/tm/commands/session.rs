@@ -234,7 +234,18 @@ pub(crate) async fn session(
             });
             match found {
                 Some(s) => println!("{}", serde_json::to_string_pretty(s)?),
-                None => println!("session '{id_or_name}' not found"),
+                None => {
+                    // Fall back: the id/name may belong to a MANAGED session
+                    // (SM sessions live in the managed store, not the project-session
+                    // store). Fetch the managed list and search there too before
+                    // giving up. This fixes the gap where `tm sessions info <uuid>`
+                    // printed "not found" for sessions visible in `tm sessions ls`.
+                    let managed = info_from_managed_store(client, url, &id_or_name).await;
+                    match managed {
+                        Some(val) => println!("{}", serde_json::to_string_pretty(&val)?),
+                        None => println!("session '{id_or_name}' not found"),
+                    }
+                }
             }
         }
         SessionAction::Instructions { dir } => {
@@ -415,10 +426,21 @@ pub(crate) async fn session(
             }
         }
         // ── Managed session-manager actions ──────────────────────────────────
-        // `--json` ls keeps the raw daemon-JSON passthrough (chat-core returns a
-        // structured result, not the verbatim wire bytes scripts expect).
-        SessionAction::Ls { json: true } => {
-            crate::commands::managed::session_ls(client, url, true).await?
+        // All `ls` variants are routed through the direct HTTP path so the
+        // `?source_id=` filter and the extended table columns (task, created_at)
+        // work regardless of the `--json` flag. `--json` keeps the raw
+        // daemon-JSON passthrough byte-for-byte (scripts rely on this).
+        SessionAction::Ls {
+            json,
+            source_id,
+            current,
+        } => {
+            let sid: Option<String> = if current {
+                derive_source_id_from_cwd()
+            } else {
+                source_id
+            };
+            crate::commands::managed::session_ls(client, url, json, sid.as_deref()).await?
         }
         // `activity` stays on the raw path: its CLI output carries confidence,
         // token, cache, and latency detail that `CommandResult::ManagedActivity`
@@ -490,6 +512,88 @@ fn emit_managed_alias_notice(action: &SessionAction) {
     }
 }
 
+/// Derive the `owner/repo` source_id from a git directory for `--current`.
+///
+/// Why: extracted from `derive_source_id_from_cwd` so the git-remote resolution
+/// is unit-testable with a path argument rather than the process cwd (which would
+/// require `std::env::set_current_dir`, a process-global, non-thread-safe call).
+/// What: runs `git -C <dir> config --get remote.origin.url` and parses the result
+/// via `parse_github_path`. Returns `Some("owner/repo")` on success; `None` when
+/// not in a git repo or the remote URL is not a GitHub URL.
+/// Test: `derive_source_id_from_cwd_returns_none_without_git` (unit).
+fn derive_source_id_from_path(dir: &std::path::Path) -> Option<String> {
+    let url = trusty_mpm::daemon::managed_routes::inproject::get_origin_url(dir)?;
+    let gh = trusty_common::github_path::parse_github_path(&url)?;
+    Some(format!("{}/{}", gh.owner, gh.repo))
+}
+
+/// Derive the `owner/repo` source_id from the process cwd for `--current`.
+///
+/// Why: thin wrapper over `derive_source_id_from_path` for the CLI call site;
+/// separating cwd resolution from git-remote parsing keeps the impl testable.
+/// What: reads `std::env::current_dir()` and delegates to `derive_source_id_from_path`.
+/// Returns `Some("owner/repo")` on success; `None` on any failure (both cases silently
+/// ignored — the caller treats None as "no filter").
+/// Test: `derive_source_id_from_cwd_returns_none_without_git` (unit via path variant).
+fn derive_source_id_from_cwd() -> Option<String> {
+    derive_source_id_from_path(&std::env::current_dir().ok()?)
+}
+
+/// Return true when `session` matches `id_or_name` by id or tmux name.
+///
+/// Why: extracted from `info_from_managed_store` so the match predicate is
+/// unit-testable without requiring an HTTP call.
+/// What: compares `session["id"]` and `session["name"]` against `id_or_name`;
+/// returns true on either match.
+/// Test: `info_managed_fallback_matches_by_id_and_name`.
+fn matches_session(session: &serde_json::Value, id_or_name: &str) -> bool {
+    let id_match = session.get("id").and_then(|v| v.as_str()) == Some(id_or_name);
+    let name_match = session.get("name").and_then(|v| v.as_str()) == Some(id_or_name);
+    id_match || name_match
+}
+
+/// Fetch the managed session list and find a session matching `id_or_name`.
+///
+/// Why: `tm sessions info` queries the project-session store first; managed
+/// sessions live in a separate store and return 404 there. This fallback
+/// prevents the confusing "not found" message for sessions that ARE visible in
+/// `tm sessions ls`. Non-404 HTTP errors are logged as warnings so daemon 5xx
+/// responses are not silently swallowed as "not found".
+/// What: GETs `/api/v1/sessions/managed`, searches by id-exact then name-exact
+/// via `matches_session`, returns the first match as a `serde_json::Value`.
+/// Returns `None` when the daemon is unreachable, returns a non-success status,
+/// or no session matches.
+/// Test: `info_managed_fallback_matches_by_id_and_name` (unit on match predicate);
+/// HTTP path covered by the integration test.
+async fn info_from_managed_store(
+    client: &reqwest::Client,
+    url: &str,
+    id_or_name: &str,
+) -> Option<serde_json::Value> {
+    let resp = client
+        .get(format!("{url}/api/v1/sessions/managed"))
+        .send()
+        .await
+        .ok()?;
+    let status = resp.status();
+    if !status.is_success() {
+        if status != reqwest::StatusCode::NOT_FOUND {
+            tracing::warn!(
+                "managed store lookup failed with HTTP {status} — \
+                 'session not found' may mask a daemon error"
+            );
+        }
+        return None;
+    }
+    let raw = resp.text().await.ok()?;
+    let resp: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let sessions = resp.get("sessions")?.as_array()?;
+    sessions
+        .iter()
+        .find(|s| matches_session(s, id_or_name))
+        .cloned()
+}
+
 /// Run the instruction merge pipeline and stash the override-resolved PM prompt.
 ///
 /// Why: `session start` and `session instructions` both need the effective PM
@@ -544,3 +648,8 @@ pub(crate) fn compose_session_instructions(
 
     Ok((resolved_prompt, output, stash))
 }
+
+// Unit tests live in session_tests.rs (test-file budget: 1500 SLOC).
+#[cfg(test)]
+#[path = "session_tests.rs"]
+mod tests;
