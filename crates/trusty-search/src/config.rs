@@ -15,6 +15,52 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Configuration for the `trusty-search prune` command (issue #1782).
+///
+/// Why: idle index pruning is a destructive operation, so it defaults to
+///      report-only (dry-run). Every deletion requires explicit operator
+///      opt-in via `enabled = true` plus the `--apply` flag.
+/// What: holds `enabled` (global gate), `max_idle_days` (retention threshold),
+///       and `protected_indexes` (ids that are never pruned regardless).
+///       All fields have serde defaults so existing config files that predate
+///       this struct keep loading without any YAML change.
+/// Test: `prune_config_defaults` and `prune_config_roundtrip` in this module.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AutoPruneConfig {
+    /// Global gate. When `false` (the default), `--apply` is rejected with a
+    /// clear error so no accidental deletion can happen without a config edit.
+    /// Set to `true` to allow `trusty-search prune --apply` to delete indexes.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Days of query-idle time before an index becomes eligible for pruning.
+    /// Default 30. An index last searched more than this many days ago is
+    /// listed as eligible. Indexes with no query timestamp at all (never
+    /// searched since the daemon started tracking) are NOT eligible — they
+    /// are treated as "unknown" to avoid surprising deletes on fresh installs.
+    #[serde(default = "default_max_idle_days")]
+    pub max_idle_days: u32,
+
+    /// Index ids that must NEVER be pruned, even with `--apply`. Exact match
+    /// against the index id string (same as the `id` field in `indexes.toml`).
+    #[serde(default)]
+    pub protected_indexes: Vec<String>,
+}
+
+fn default_max_idle_days() -> u32 {
+    30
+}
+
+impl Default for AutoPruneConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_idle_days: default_max_idle_days(),
+            protected_indexes: Vec::new(),
+        }
+    }
+}
+
 /// Top-level configuration document.
 ///
 /// Why: keeps two distinct kinds of user state side-by-side: directories to scan
@@ -39,6 +85,13 @@ pub struct GlobalConfig {
     /// removes them when the user runs `index remove`.
     #[serde(default)]
     pub collections: Vec<CollectionConfig>,
+
+    /// Idle-index pruning configuration (issue #1782). All fields default to
+    /// safe values (`enabled = false`, `max_idle_days = 30`), so existing
+    /// config files that do not contain an `auto_prune:` key continue to
+    /// load without error — they simply see the report-only defaults.
+    #[serde(default)]
+    pub auto_prune: AutoPruneConfig,
 }
 
 /// One explicit collection entry — a named index pointing at a directory.
@@ -266,6 +319,7 @@ mod tests {
                 exclude: vec!["target/".into()],
                 domain_terms: vec!["embedding".into()],
             }],
+            ..Default::default()
         };
         cfg.save_to(&path).unwrap();
         let loaded = GlobalConfig::load_from(&path).unwrap();
@@ -341,6 +395,56 @@ mod tests {
         assert!(removed.is_some());
         assert_eq!(removed.unwrap().name, "proj");
         assert!(cfg.collections.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Why: pins the default values for `AutoPruneConfig` so a missing
+    ///      `auto_prune:` key in `config.yaml` always loads as report-only.
+    /// What: constructs a default and asserts each field.
+    /// Test: this test.
+    #[test]
+    fn prune_config_defaults() {
+        let cfg = AutoPruneConfig::default();
+        assert!(!cfg.enabled, "default must be disabled (report-only)");
+        assert_eq!(cfg.max_idle_days, 30);
+        assert!(cfg.protected_indexes.is_empty());
+    }
+
+    /// Why: `GlobalConfig` with an `auto_prune:` block must survive a
+    ///      save/load round-trip without data loss.
+    /// What: serialises a `GlobalConfig` with a non-default `auto_prune` block
+    ///       and asserts it loads back with the same values.
+    /// Test: this test.
+    #[test]
+    fn prune_config_roundtrip() {
+        let dir = unique_tmp("prune-rt");
+        let path = dir.join("config.yaml");
+        let cfg = GlobalConfig {
+            auto_prune: AutoPruneConfig {
+                enabled: true,
+                max_idle_days: 14,
+                protected_indexes: vec!["trusty-tools".into()],
+            },
+            ..Default::default()
+        };
+        cfg.save_to(&path).unwrap();
+        let loaded = GlobalConfig::load_from(&path).unwrap();
+        assert_eq!(cfg, loaded);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Why: existing `config.yaml` files without `auto_prune:` must keep
+    ///      loading correctly after the field is added to `GlobalConfig`.
+    /// What: write a YAML file with no `auto_prune` key, load it, assert the
+    ///       field defaults to `AutoPruneConfig::default()`.
+    /// Test: this test.
+    #[test]
+    fn prune_config_missing_key_loads_as_default() {
+        let dir = unique_tmp("prune-missing");
+        let path = dir.join("config.yaml");
+        fs::write(&path, "scan_paths: []\ncollections: []\n").unwrap();
+        let cfg = GlobalConfig::load_from(&path).unwrap();
+        assert_eq!(cfg.auto_prune, AutoPruneConfig::default());
         let _ = fs::remove_dir_all(&dir);
     }
 
