@@ -19,7 +19,6 @@
 
 use anyhow::Result;
 use colored::Colorize;
-use std::io::{BufRead, Write};
 
 use crate::service::persistence::{
     indexes_toml_path, load_index_registry_at, save_index_registry_at, PersistedIndex,
@@ -131,7 +130,7 @@ pub(crate) fn handle_prune_orphans_at(
             println!("Aborted (non-interactive mode).");
             return Ok(());
         }
-        if !confirm(&format!(
+        if !super::confirm(&format!(
             "Remove {} orphaned registration(s) from indexes.toml?",
             count
         ))? {
@@ -151,20 +150,6 @@ pub(crate) fn handle_prune_orphans_at(
     );
 
     Ok(())
-}
-
-/// Why: keep the y/N prompt isolated so tests bypass it via `interactive=false`.
-/// What: prints `<prompt> [y/N] ` to stdout, reads one line from stdin, returns
-/// `true` when the trimmed reply starts with `y` or `Y`. Empty input → false.
-/// Test: side-effect-only; exercised manually.
-fn confirm(prompt: &str) -> Result<bool> {
-    print!("{} [y/N] ", prompt);
-    std::io::stdout().flush().ok();
-    let stdin = std::io::stdin();
-    let mut line = String::new();
-    stdin.lock().read_line(&mut line)?;
-    let answer = line.trim();
-    Ok(matches!(answer.chars().next(), Some('y') | Some('Y')))
 }
 
 #[cfg(test)]

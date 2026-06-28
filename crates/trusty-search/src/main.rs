@@ -712,6 +712,51 @@ enum Commands {
         yes: bool,
     },
 
+    /// Remove idle indexes that have not been searched for N days (issue #1782)
+    ///
+    /// Works OFFLINE — no daemon required. Reads indexes.toml and computes
+    /// each index's idle age from its `last_queried_unix` timestamp (falling
+    /// back to `last_indexed_unix`). Indexes with no recorded timestamp are
+    /// left untouched (safety-first for fresh installs or pre-tracking builds).
+    ///
+    /// DEFAULT: dry-run — lists what WOULD be deleted with idle age and disk
+    /// size. Nothing is deleted until you pass --apply. Protected indexes
+    /// (configured via `auto_prune.protected_indexes` in
+    /// `~/.config/trusty-search/config.yaml`) are always shown as SKIPPED.
+    ///
+    /// OPERATOR WORKFLOW:
+    ///   1. Run without flags to review what would be pruned.
+    ///   2. Optionally edit `~/.config/trusty-search/config.yaml` to set
+    ///      `auto_prune.protected_indexes` for indexes you never want pruned.
+    ///   3. Re-run with --apply (and optionally --yes) to delete.
+    ///
+    /// NOTE: deleting an index means a full re-index is needed to restore
+    /// search coverage. Use this command to reclaim disk, not as routine
+    /// maintenance.
+    ///
+    /// Examples:
+    ///   trusty-search prune                    # dry-run: list eligible indexes
+    ///   trusty-search prune --max-idle-days 60 # custom threshold
+    ///   trusty-search prune --apply            # delete eligible indexes (interactive)
+    ///   trusty-search prune --apply --yes      # non-interactive delete
+    #[command(display_order = 28, name = "prune")]
+    Prune {
+        /// Actually delete eligible indexes. Without this flag, only a report
+        /// is printed (dry-run). Protecting indexes via the config file's
+        /// `auto_prune.protected_indexes` list takes precedence over --apply.
+        #[arg(long)]
+        apply: bool,
+
+        /// Override the idle-day threshold for this run (default: value from
+        /// `auto_prune.max_idle_days` in config, or 30 if not configured).
+        #[arg(long, value_name = "DAYS")]
+        max_idle_days: Option<u32>,
+
+        /// Skip the interactive confirmation prompt when --apply is given.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
     /// Wire trusty-search into Claude Code's settings.json files
     ///
     /// Scans `$HOME` for every `.claude/settings*.json` and idempotently
@@ -1375,6 +1420,14 @@ async fn run() -> Result<()> {
 
         Commands::PruneOrphans { dry_run, yes } => {
             commands::prune_orphans::handle_prune_orphans(dry_run, yes)?;
+        }
+
+        Commands::Prune {
+            apply,
+            max_idle_days,
+            yes,
+        } => {
+            commands::prune::handle_prune(apply, yes, max_idle_days)?;
         }
 
         Commands::Setup => {

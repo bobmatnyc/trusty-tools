@@ -56,6 +56,7 @@ pub mod migrate_storage;
 pub mod monitor;
 pub mod port;
 pub(crate) mod prior_index_count;
+pub mod prune;
 pub mod prune_orphans;
 pub mod query;
 pub mod reindex;
@@ -70,3 +71,22 @@ pub mod status;
 pub mod stop;
 pub mod upgrade;
 pub mod watch;
+
+/// Shared y/N confirmation prompt used by `prune` and `prune-orphans`.
+///
+/// Why: both prune commands need the same interactive confirmation gate;
+///      extracting here removes duplication and makes the UX consistent.
+/// What: prints `<prompt> [y/N] ` to stdout, reads one line from stdin,
+///       returns `true` when the trimmed reply starts with `y` or `Y`.
+/// Test: bypassed in callers via `interactive=false`; always returns `false`
+///       without consuming stdin when the caller skips it.
+pub(crate) fn confirm(prompt: &str) -> anyhow::Result<bool> {
+    use std::io::{BufRead, Write};
+    print!("{} [y/N] ", prompt);
+    std::io::stdout().flush().ok();
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line)?;
+    let answer = line.trim();
+    Ok(matches!(answer.chars().next(), Some('y') | Some('Y')))
+}
