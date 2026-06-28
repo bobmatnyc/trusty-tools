@@ -165,6 +165,8 @@ chrono.workspace = true
 gray_matter.workspace = true
 walkdir.workspace = true
 dirs.workspace = true
+# Used by statusline/compaction.rs for atomic state-file writes (NamedTempFile::persist).
+tempfile.workspace = true
 sha2.workspace = true
 regex.workspace = true
 jsonwebtoken.workspace = true

@@ -368,7 +368,6 @@ mod tests {
             total_input_tokens: 82_000,
             context_window_size: 200_000,
             used_percentage: 41.0,
-            ..Default::default()
         };
         let seg = render_compaction_segment(&state, &cw);
         assert_eq!(seg.as_deref(), Some("ctx 41%"));
@@ -382,7 +381,6 @@ mod tests {
             total_input_tokens: 82_000,
             context_window_size: 200_000,
             used_percentage: 41.0,
-            ..Default::default()
         });
         let out = render_statusline(&input);
         // No compaction/ctx segment because session_id is empty

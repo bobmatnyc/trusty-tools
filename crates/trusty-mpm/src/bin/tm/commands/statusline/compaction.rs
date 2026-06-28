@@ -5,14 +5,19 @@
 //! `~/.trusty-mpm/statusline/<session_id>.json` so the statusline can show how
 //! much the last auto-compaction shrank the context window.
 //! What: persists a `CompactionState` (running peak + last compaction record)
-//! keyed by `session_id`. Pure helper functions (`humanize_tokens`,
-//! `update_state`) are side-effect-free and unit-testable without I/O.
+//! keyed by `session_id`. All filesystem I/O runs in a detached thread bounded
+//! by a 100 ms wall-clock timeout so it can never stall the render path. Saves
+//! are skipped on no-op ticks. Atomic writes use `NamedTempFile::persist`.
 //! Test: `humanize_tokens_examples`, `compaction_detection_sequence`,
-//! `state_round_trip`, `graceful_on_missing_fields` in the inline test module.
+//! `state_round_trip`, `rejects_path_traversal_session_id` in inline tests.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 
 // ── Input types (deserialised from Claude Code stdin) ─────────────────────────
 
@@ -21,10 +26,9 @@ use serde::{Deserialize, Serialize};
 /// Why: exposes both raw token counts (for precise compaction delta) and the
 /// pre-computed percentage (as a fallback when size is unknown).
 /// What: all fields default so older Claude Code versions that omit
-/// `context_window` entirely still parse without error. `current_usage` is
-/// `None` while a compaction is in flight and `Some` once the next API call
-/// completes; we store it as an opaque `serde_json::Value` because we only
-/// test for null-vs-non-null.
+/// `context_window` entirely still parse without error. Extra JSON fields
+/// (e.g. `current_usage`, `total_output_tokens`) are silently ignored because
+/// `deny_unknown_fields` is absent.
 /// Test: `render_statusline_with_context_window` in mod.rs tests.
 #[derive(Debug, Default, Clone, Deserialize)]
 pub(crate) struct ContextWindow {
@@ -34,9 +38,6 @@ pub(crate) struct ContextWindow {
     pub context_window_size: u64,
     #[serde(default)]
     pub used_percentage: f64,
-    /// `None` during compaction; `Some(...)` once the next API round-trip completes.
-    #[serde(default)]
-    pub current_usage: Option<serde_json::Value>,
 }
 
 // ── Persisted state ───────────────────────────────────────────────────────────
@@ -47,16 +48,13 @@ pub(crate) struct ContextWindow {
 /// Why: the statusline binary is invoked fresh on every render tick; this state
 /// file bridges invocations so the segment can show a compaction that happened
 /// several ticks ago.
-/// What: tracks the highest `total_input_tokens` seen (`peak_input_tokens`),
-/// whether the previous tick's `current_usage` was null, and the most recent
-/// compaction record.
+/// What: tracks the highest `total_input_tokens` seen (`peak_input_tokens`)
+/// and the most recent compaction record.
 /// Test: `state_round_trip`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct CompactionState {
     #[serde(default)]
     pub peak_input_tokens: u64,
-    #[serde(default)]
-    pub prev_current_usage_was_null: bool,
     #[serde(default)]
     pub last_compaction: Option<CompactionRecord>,
 }
@@ -93,20 +91,21 @@ pub(crate) fn humanize_tokens(n: u64) -> String {
     }
 }
 
-/// Apply one context-window reading to the mutable `CompactionState`.
+/// Apply one context-window reading to `CompactionState`; returns `true` when
+/// the state was modified and a save is warranted.
 ///
 /// Why: keeping detection logic pure (no I/O) allows exhaustive unit testing
-/// of the heuristic without touching the filesystem.
-/// What: when `cur > 0`, detects a compaction if `cur` has dropped below
-/// 60 % of `peak` AND the absolute drop exceeds 10 000 tokens; on detection,
-/// records the event and resets `peak` to `cur`; otherwise advances `peak`.
-/// The `current_usage_is_null` flag is stored for the next call.
-/// Test: `compaction_detection_sequence`.
-pub(crate) fn update_state(state: &mut CompactionState, cur: u64, current_usage_is_null: bool) {
+/// of the heuristic without touching the filesystem. The `bool` return avoids
+/// unnecessary disk writes on every no-op render tick.
+/// What: when `cur == 0` returns `false` immediately. Otherwise detects a
+/// compaction if `cur` has dropped below 60 % of `peak` AND the absolute drop
+/// exceeds 10 000 tokens; on detection records the event and resets `peak` to
+/// `cur` (returns `true`). Advances `peak` when `cur > peak` (returns `true`).
+/// Returns `false` when nothing changed.
+/// Test: `compaction_detection_sequence`, `zero_cur_returns_false`.
+pub(crate) fn update_state(state: &mut CompactionState, cur: u64) -> bool {
     if cur == 0 {
-        // No usable token info this tick; just record the null flag.
-        state.prev_current_usage_was_null = current_usage_is_null;
-        return;
+        return false;
     }
 
     let peak = state.peak_input_tokens;
@@ -123,15 +122,31 @@ pub(crate) fn update_state(state: &mut CompactionState, cur: u64, current_usage_
                 reclaimed_pct,
             });
             state.peak_input_tokens = cur;
-            state.prev_current_usage_was_null = current_usage_is_null;
-            return;
+            return true;
         }
     }
 
     if cur > state.peak_input_tokens {
         state.peak_input_tokens = cur;
+        return true;
     }
-    state.prev_current_usage_was_null = current_usage_is_null;
+
+    false
+}
+
+/// Return `true` when `s` is a safe session identifier: non-empty and composed
+/// entirely of ASCII alphanumeric characters, underscores, or hyphens.
+///
+/// Why: `session_id` is attacker-influenceable (it comes from Claude Code's
+/// stdin JSON); allowing arbitrary strings in `state_file_path` would expose a
+/// path-traversal vulnerability (`../../.bashrc` or `/tmp/evil`).
+/// What: rejects any `s` that contains `/`, `.`, or any other character outside
+/// `[A-Za-z0-9_-]`; also rejects the empty string.
+/// Test: `rejects_path_traversal_session_id`.
+fn is_valid_session_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 // ── I/O helpers ───────────────────────────────────────────────────────────────
@@ -150,19 +165,29 @@ pub(crate) fn load_state_from(path: &Path) -> CompactionState {
     .unwrap_or_default()
 }
 
-/// Write `state` to `path`, creating parent directories as needed; silently
-/// discards all errors so a filesystem issue never breaks the statusline.
+/// Write `state` to `path` atomically using a temp-file-then-rename strategy,
+/// creating parent directories as needed; silently discards all errors so a
+/// filesystem issue never breaks the statusline.
 ///
-/// Why: the statusline must never fail or block due to transient I/O problems.
-/// What: `create_dir_all` + atomic `write`; every fallible step uses `.ok()`.
-/// Test: `state_round_trip` (nested-dir variant).
+/// Why: a plain `fs::write` is truncate-then-write; an unclean kill between
+/// those two operations leaves a partial/zero-byte file that silently resets
+/// `peak_input_tokens` and clears `last_compaction` on the next render. The
+/// `NamedTempFile::persist` pattern avoids this: the rename(2) syscall is
+/// atomic on POSIX, so readers always see either the old or the new file.
+/// What: creates a `NamedTempFile` in the same directory as `path` (ensuring
+/// same filesystem for `rename`), writes bytes, then renames to `path`. On any
+/// error the temp file is cleaned up by `NamedTempFile`'s `Drop` impl.
+/// Test: `state_round_trip` (verifies correct round-trip after atomic save).
 pub(crate) fn save_state_to(path: &Path, state: &CompactionState) {
     let _ = (|| -> Option<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).ok()?;
-        }
+        let dir = path.parent()?;
+        std::fs::create_dir_all(dir).ok()?;
         let bytes = serde_json::to_vec(state).ok()?;
-        std::fs::write(path, bytes).ok()
+        let mut tmp = NamedTempFile::new_in(dir).ok()?;
+        tmp.write_all(&bytes).ok()?;
+        // On failure, PersistError::Drop cleans up the temp file.
+        let _ = tmp.persist(path);
+        Some(())
     })();
 }
 
@@ -183,31 +208,45 @@ pub(crate) fn state_file_path(session_id: &str) -> Option<PathBuf> {
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Run one compaction-tracking cycle and return the displayable segment string.
+/// Run one compaction-tracking cycle inside a bounded thread and return the
+/// displayable segment string, or `None` on timeout / missing inputs.
 ///
-/// Why: wraps the load/update/save cycle so `render_statusline` stays free of
-/// I/O concerns; every error path degrades gracefully to `None`.
-/// What: returns `None` when `session_id` is empty or `context_window` is
-/// absent; otherwise persists state, then returns either
-/// `"⤵ {before}→{after} ({pct}%)"` (post-compaction) or `"ctx {pct}%"` (live fill).
-/// Test: `graceful_on_missing_fields`; integration via `render_statusline`.
+/// Why: `tm statusline` is on Claude Code's hot render path; a stuck NFS
+/// mount, full disk, or slow credential helper in `load_state_from` /
+/// `save_state_to` would stall every render cycle. The bounded-thread +
+/// `recv_timeout(100 ms)` pattern matches `git_branch` in `mod.rs`.
+/// What: validates `session_id` against `[A-Za-z0-9_-]+` (rejects empty /
+/// path-traversal IDs); then spawns a detached thread that loads state,
+/// conditionally updates + saves (skipped when `cur==0` or state unchanged),
+/// and sends back the rendered segment. The caller waits ≤100 ms.
+/// Test: `graceful_on_missing_fields`, `rejects_path_traversal_session_id`.
 pub(crate) fn compaction_segment(
     session_id: &str,
     context_window: Option<&ContextWindow>,
 ) -> Option<String> {
-    if session_id.is_empty() {
+    if !is_valid_session_id(session_id) {
         return None;
     }
     let cw = context_window?;
-    let cur = cw.total_input_tokens;
     let path = state_file_path(session_id)?;
+    let cur = cw.total_input_tokens;
+    // Clone only what crosses the thread boundary.
+    let cw2 = cw.clone();
 
-    let mut state = load_state_from(&path);
-    let usage_is_null = cw.current_usage.is_none();
-    update_state(&mut state, cur, usage_is_null);
-    save_state_to(&path, &state);
+    let (tx, rx) = mpsc::channel::<Option<String>>();
+    std::thread::spawn(move || {
+        let mut state = load_state_from(&path);
+        if cur > 0 {
+            // update_state returns true only when state actually changed.
+            if update_state(&mut state, cur) {
+                save_state_to(&path, &state);
+            }
+        }
+        // cur==0 → skip update+save; still read+render so last_compaction shows.
+        let _ = tx.send(render_compaction_segment(&state, &cw2));
+    });
 
-    render_compaction_segment(&state, cw)
+    rx.recv_timeout(Duration::from_millis(100)).ok().flatten()
 }
 
 /// Render the compaction segment string from persisted state and context window.
@@ -276,25 +315,30 @@ mod tests {
         let mut state = CompactionState::default();
 
         // Rising context: no compaction
-        update_state(&mut state, 50_000, false);
+        assert!(
+            update_state(&mut state, 50_000),
+            "peak advance must return true"
+        );
         assert_eq!(state.peak_input_tokens, 50_000);
         assert!(state.last_compaction.is_none());
 
-        update_state(&mut state, 100_000, false);
+        assert!(update_state(&mut state, 100_000));
         assert_eq!(state.peak_input_tokens, 100_000);
         assert!(state.last_compaction.is_none());
 
-        update_state(&mut state, 182_000, false);
+        assert!(update_state(&mut state, 182_000));
         assert_eq!(state.peak_input_tokens, 182_000);
         assert!(state.last_compaction.is_none());
 
         // Compaction: drop to 58k (< 60% of 182k = 109.2k, drop = 124k > 10k)
-        update_state(&mut state, 58_000, true);
+        assert!(
+            update_state(&mut state, 58_000),
+            "compaction must return true"
+        );
         assert!(state.last_compaction.is_some());
         let rec = state.last_compaction.as_ref().unwrap();
         assert_eq!(rec.before, 182_000);
         assert_eq!(rec.after, 58_000);
-        // reclaimed ≈ 68.13 %
         assert!(
             (rec.reclaimed_pct - 68.13).abs() < 0.1,
             "reclaimed_pct = {}",
@@ -303,7 +347,7 @@ mod tests {
         assert_eq!(state.peak_input_tokens, 58_000);
 
         // Resumes growing: compaction record retained, peak advances
-        update_state(&mut state, 60_000, false);
+        assert!(update_state(&mut state, 60_000));
         assert_eq!(state.peak_input_tokens, 60_000);
         assert!(state.last_compaction.is_some());
     }
@@ -311,29 +355,87 @@ mod tests {
     #[test]
     fn small_drop_not_detected_as_compaction() {
         let mut state = CompactionState::default();
-        update_state(&mut state, 100_000, false);
-        // Drop only 5 k — below 10 k absolute threshold
-        update_state(&mut state, 95_000, false);
+        update_state(&mut state, 100_000);
+        // Drop only 5 k — below 10 k absolute threshold → no change
+        let changed = update_state(&mut state, 95_000);
+        assert!(
+            !changed,
+            "sub-threshold drop must not be detected as compaction"
+        );
         assert!(state.last_compaction.is_none());
     }
 
     #[test]
     fn moderate_drop_ratio_above_threshold_not_detected() {
         let mut state = CompactionState::default();
-        update_state(&mut state, 100_000, false);
+        update_state(&mut state, 100_000);
         // 70 % of peak → ratio 0.7 > 0.6, not detected
-        update_state(&mut state, 70_000, false);
+        let changed = update_state(&mut state, 70_000);
+        assert!(!changed, "above-ratio drop must not be detected");
         assert!(state.last_compaction.is_none());
     }
 
     #[test]
-    fn zero_cur_skips_peak_update() {
+    fn zero_cur_returns_false() {
         let mut state = CompactionState::default();
-        update_state(&mut state, 100_000, false);
-        update_state(&mut state, 0, true); // cur=0 → skip update, record null flag
-        assert_eq!(state.peak_input_tokens, 100_000);
+        update_state(&mut state, 100_000);
+        let changed = update_state(&mut state, 0); // cur=0 → no-op
+        assert!(!changed, "cur=0 must return false (no save needed)");
+        assert_eq!(state.peak_input_tokens, 100_000, "peak must be unchanged");
         assert!(state.last_compaction.is_none());
-        assert!(state.prev_current_usage_was_null);
+    }
+
+    #[test]
+    fn unchanged_state_returns_false() {
+        let mut state = CompactionState::default();
+        update_state(&mut state, 100_000);
+        // Same value as current peak → no change
+        let changed = update_state(&mut state, 100_000);
+        assert!(!changed, "cur == peak must return false");
+        // Slightly below peak but above 60% and below 10k drop → no change
+        let changed2 = update_state(&mut state, 95_000);
+        assert!(!changed2, "small drop must return false");
+    }
+
+    // ── session_id validation ─────────────────────────────────────────────────
+
+    #[test]
+    fn valid_session_id_accepted() {
+        assert!(is_valid_session_id("abc-123_XYZ"));
+        assert!(is_valid_session_id("a"));
+        assert!(is_valid_session_id("session-id-with-dashes"));
+        assert!(is_valid_session_id("ABC0123456789"));
+    }
+
+    #[test]
+    fn rejects_path_traversal_session_id() {
+        // None of these should pass validation; compaction_segment returns None
+        // immediately without any filesystem access.
+        for bad in &[
+            "../../evil",
+            "../evil",
+            "/tmp/evil",
+            "evil/subdir",
+            "evil.json",
+            "",
+            "has space",
+            "has\nnewline",
+        ] {
+            assert!(
+                !is_valid_session_id(bad),
+                "expected validation failure for: {bad:?}"
+            );
+            // Verify no file access: compaction_segment must return None
+            let cw = ContextWindow {
+                total_input_tokens: 100_000,
+                context_window_size: 200_000,
+                ..Default::default()
+            };
+            assert!(
+                compaction_segment(bad, Some(&cw)).is_none(),
+                "compaction_segment must return None for bad id: {bad:?}"
+            );
+        }
     }
 
     // ── State file I/O ────────────────────────────────────────────────────────
@@ -348,10 +450,9 @@ mod tests {
         assert_eq!(loaded.peak_input_tokens, 0);
         assert!(loaded.last_compaction.is_none());
 
-        // Write and read back
+        // Write (atomically) and read back
         let state = CompactionState {
             peak_input_tokens: 182_000,
-            prev_current_usage_was_null: false,
             last_compaction: Some(CompactionRecord {
                 before: 182_000,
                 after: 58_000,
@@ -384,7 +485,6 @@ mod tests {
     fn render_segment_after_compaction() {
         let state = CompactionState {
             peak_input_tokens: 58_000,
-            prev_current_usage_was_null: false,
             last_compaction: Some(CompactionRecord {
                 before: 182_000,
                 after: 58_000,
@@ -395,7 +495,6 @@ mod tests {
             total_input_tokens: 60_000,
             context_window_size: 200_000,
             used_percentage: 30.0,
-            ..Default::default()
         };
         let seg = render_compaction_segment(&state, &cw).unwrap();
         assert!(seg.contains("182k"), "got: {seg}");
@@ -412,7 +511,6 @@ mod tests {
             total_input_tokens: 82_000,
             context_window_size: 200_000,
             used_percentage: 20.0, // ignored when raw counts are available
-            ..Default::default()
         };
         let seg = render_compaction_segment(&state, &cw).unwrap();
         assert_eq!(seg, "ctx 41%", "got: {seg}");
@@ -425,7 +523,6 @@ mod tests {
             total_input_tokens: 0,
             context_window_size: 0,
             used_percentage: 41.0,
-            ..Default::default()
         };
         let seg = render_compaction_segment(&state, &cw).unwrap();
         assert_eq!(seg, "ctx 41%");
@@ -442,9 +539,10 @@ mod tests {
 
     #[test]
     fn graceful_on_missing_fields() {
-        // Empty session_id → None (no filesystem access)
+        // Invalid session_id → None (no filesystem access)
         assert!(compaction_segment("", None).is_none());
-        // No context_window → None (no filesystem access)
-        assert!(compaction_segment("some-session-id", None).is_none());
+        assert!(compaction_segment("../bad", None).is_none());
+        // Valid session_id, no context_window → None (no filesystem access)
+        assert!(compaction_segment("valid-session-id", None).is_none());
     }
 }
