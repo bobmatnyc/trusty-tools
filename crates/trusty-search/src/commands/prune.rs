@@ -9,9 +9,8 @@
 //! What: reads `indexes.toml` (offline, no daemon required), computes each
 //! index's idle age from `last_queried_unix` (falling back to
 //! `last_indexed_unix`), and classifies each entry as Eligible / Protected /
-//! NotTracked. Default mode is DRY-RUN (print only). `--apply` deletes
-//! eligible, non-protected indexes via the existing
-//! `remove_index_registry_entry` + `remove_index_data_dir` offline path.
+//! NotTracked / Recent. Default mode is DRY-RUN (print only). `--apply`
+//! deletes eligible, non-protected indexes via offline deletion helpers.
 //!
 //! Safety contract:
 //! - Dry-run is the default — `--apply` must be explicit.
@@ -21,9 +20,15 @@
 //!   `last_indexed_unix = None`) are NOT eligible — they may have been freshly
 //!   created or belong to a pre-tracking installation; deleting them would be
 //!   surprising.
-//! - The global `enabled` gate in `auto_prune.enabled` must be `true` OR the
-//!   user must pass `--apply`; the explicit CLI flag is sufficient operator
-//!   intent for the manual command.
+//! - The `auto_prune.enabled` config flag governs the daemon-side scheduled
+//!   sweep. The manual `prune --apply` command does NOT require `enabled=true`
+//!   — explicit use of `--apply` is sufficient operator intent. Set `enabled`
+//!   to opt in to future daemon-driven automatic deletion.
+//! - Malformed config (YAML parse error): propagated as an error when `--apply`
+//!   is active so that a corrupt config cannot silently empty `protected_indexes`
+//!   and delete something that should be protected. Dry-runs warn but proceed.
+//! - Stop the daemon before `--apply` to avoid a race between the daemon's
+//!   periodic `last_queried_unix` flush and the registry save here.
 //!
 //! Persistence approach: `last_queried_unix` is already written to
 //! `indexes.toml` by the daemon search handler (rate-limited to at most once
@@ -37,22 +42,17 @@
 //! periodically when `auto_prune.enabled = true`. The manual command is the
 //! must-have for this PR.
 //!
-//! Test: `prune_dry_run_lists_but_does_not_delete`,
-//! `prune_apply_deletes_only_eligible`,
-//! `prune_apply_skips_protected`,
-//! `prune_not_tracked_is_not_eligible`,
-//! `prune_eligibility_boundary`.
+//! Test: `prune_tests` module (`src/commands/prune_tests.rs`).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use colored::Colorize;
-use std::io::{BufRead, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::{AutoPruneConfig, GlobalConfig};
 use crate::service::persistence::{
-    index_data_dir, indexes_toml_path, load_index_registry_at, remove_index_data_dir,
-    remove_index_registry_entry_at, PersistedIndex,
+    data_dir, indexes_toml_path, load_index_registry_at, remove_index_data_dir,
+    save_index_registry_at, PersistedIndex,
 };
 
 /// Decision for one index entry (computed by [`classify_entry`]).
@@ -60,7 +60,7 @@ use crate::service::persistence::{
 /// Why: keeping the classification pure lets unit tests verify eligibility
 ///      without touching the filesystem.
 /// What: each variant carries metadata needed for the report / deletion.
-/// Test: covered by eligibility unit tests below.
+/// Test: covered by eligibility unit tests in `prune_tests`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PruneDecision {
     /// Index is idle for longer than `max_idle_days` and not protected.
@@ -90,7 +90,8 @@ pub(crate) enum PruneDecision {
 ///       Returns `NotTracked` when both are absent. Otherwise computes elapsed
 ///       days and compares to `max_idle_days`. Protected entries always return
 ///       `Protected` regardless of age.
-/// Test: `prune_eligibility_boundary`, `prune_not_tracked_is_not_eligible`.
+/// Test: `prune_eligibility_boundary`, `prune_not_tracked_is_not_eligible` in
+///       `prune_tests`.
 pub(crate) fn classify_entry(
     entry: &PersistedIndex,
     cfg: &AutoPruneConfig,
@@ -128,8 +129,8 @@ pub(crate) fn classify_entry(
 /// Why: raw byte counts are hard to read in a terminal table; operators
 ///      care about MB/GB-scale disk reclaim.
 /// What: returns e.g. `"42.3 MB"`, `"1.2 GB"`, `"512 KB"`.
-/// Test: `format_bytes_display_cases`.
-fn format_bytes(bytes: u64) -> String {
+/// Test: `format_bytes_display_cases` in `prune_tests`.
+pub(crate) fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1_024;
     const MB: u64 = 1_024 * KB;
     const GB: u64 = 1_024 * MB;
@@ -147,16 +148,45 @@ fn format_bytes(bytes: u64) -> String {
 /// Entry point for `trusty-search prune [--max-idle-days N] [--apply] [--yes]`.
 ///
 /// Why: keep the CLI handler thin; all logic in `handle_prune_at` which is
-///      testable with path-injectable helpers.
-/// What: resolves config + registry paths, delegates to `handle_prune_at`.
-/// Test: covered by `handle_prune_at` unit tests.
+///      testable with injected config / path / size_fn / now_unix.
+/// What: loads `GlobalConfig`, applies CLI overrides, delegates to
+///       `handle_prune_at`. When `--apply` is active a malformed config is a
+///       hard error (so corrupt config cannot silence `protected_indexes`).
+///       A dry-run emits a warning and proceeds with defaults.
+/// Test: covered by `handle_prune_at` unit tests in `prune_tests`.
 pub fn handle_prune(apply: bool, yes: bool, max_idle_days_override: Option<u32>) -> Result<()> {
     let toml_path = indexes_toml_path()?;
+
+    // Load global config for prune settings.
+    let prune_cfg = match GlobalConfig::load() {
+        Ok(cfg) => cfg.auto_prune,
+        Err(e) => {
+            if apply {
+                // CRITICAL: malformed config when --apply is active could
+                // silently clear protected_indexes and delete protected data.
+                return Err(e).context(
+                    "config.yaml is malformed — refusing --apply to protect \
+                     indexes listed in auto_prune.protected_indexes. \
+                     Fix config.yaml or remove the file to reset to defaults.",
+                );
+            }
+            // Dry-run: warn and proceed with defaults (no deletions happen).
+            eprintln!(
+                "{} config.yaml could not be parsed ({}); proceeding with defaults \
+                 for dry-run. Protected indexes may not be highlighted correctly.",
+                "warning:".yellow().bold(),
+                e
+            );
+            AutoPruneConfig::default()
+        }
+    };
+
     handle_prune_at(
         &toml_path,
         apply,
         yes,
         max_idle_days_override,
+        prune_cfg,
         /*interactive=*/ true,
         /*size_fn=*/ default_size_fn,
         /*now_unix=*/ current_unix(),
@@ -168,23 +198,25 @@ pub fn handle_prune(apply: bool, yes: bool, max_idle_days_override: Option<u32>)
 /// Why: unit tests need a tempfile registry without touching the user's real
 ///      `indexes.toml`. `interactive=false` skips the stdin confirmation
 ///      prompt. `size_fn` and `now_unix` are injected to keep tests
-///      deterministic without real on-disk data or actual time.
+///      deterministic without real on-disk data or actual time. `prune_cfg`
+///      is injected so tests can exercise protected_indexes without a real
+///      GlobalConfig on disk.
 /// What: classifies every registry entry, prints the report, optionally deletes
 ///       eligible non-protected entries when `apply=true` and confirmed.
-/// Test: all `prune_*` unit tests call this variant.
+///       Registry removal is done as a single batched save; on-disk data dirs
+///       are removed after the registry write.
+/// Test: all `prune_*` unit tests in `prune_tests` call this variant.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_prune_at(
     toml_path: &Path,
     apply: bool,
     yes: bool,
     max_idle_days_override: Option<u32>,
+    mut prune_cfg: AutoPruneConfig,
     interactive: bool,
     size_fn: impl Fn(&str) -> Option<u64>,
     now_unix: u64,
 ) -> Result<()> {
-    // Load global config for prune settings; fall back to defaults on error.
-    let mut prune_cfg = GlobalConfig::load().unwrap_or_default().auto_prune;
-
     // CLI override takes precedence over config.
     if let Some(days) = max_idle_days_override {
         prune_cfg.max_idle_days = days;
@@ -198,22 +230,24 @@ pub(crate) fn handle_prune_at(
     }
 
     // Classify every entry.
-    let classifications: Vec<(&PersistedIndex, PruneDecision)> = entries
+    // Use owned PersistedIndex clones in `classifications` so that the borrow
+    // on `entries` can be released before the batch-save move.
+    let classifications: Vec<(PersistedIndex, PruneDecision)> = entries
         .iter()
         .map(|e| {
             let decision = classify_entry(e, &prune_cfg, now_unix, &size_fn);
-            (e, decision)
+            (e.clone(), decision)
         })
         .collect();
 
     // Collect eligible entries (those we WOULD delete with --apply).
-    let eligible: Vec<(&PersistedIndex, u64, Option<u64>)> = classifications
+    let eligible: Vec<(PersistedIndex, u64, Option<u64>)> = classifications
         .iter()
         .filter_map(|(e, d)| match d {
             PruneDecision::Eligible {
                 idle_days,
                 size_bytes,
-            } => Some((*e, *idle_days, *size_bytes)),
+            } => Some((e.clone(), *idle_days, *size_bytes)),
             _ => None,
         })
         .collect();
@@ -221,7 +255,9 @@ pub(crate) fn handle_prune_at(
     let total_freeable: u64 = eligible.iter().filter_map(|(_, _, sz)| *sz).sum();
 
     // Print the report table.
-    print_report(&classifications, &prune_cfg);
+    let class_refs: Vec<(&PersistedIndex, &PruneDecision)> =
+        classifications.iter().map(|(e, d)| (e, d)).collect();
+    print_report(&class_refs, &prune_cfg);
 
     if eligible.is_empty() {
         println!(
@@ -262,7 +298,7 @@ pub(crate) fn handle_prune_at(
             println!("Aborted (non-interactive mode).");
             return Ok(());
         }
-        if !confirm(&format!(
+        if !super::confirm(&format!(
             "Permanently delete {} index(es) from the registry and disk?",
             eligible.len()
         ))? {
@@ -271,39 +307,45 @@ pub(crate) fn handle_prune_at(
         }
     }
 
-    // Delete each eligible index from registry + disk.
+    // Batch-remove eligible entries from the registry in one atomic save.
+    // This prevents N separate load-retain-save cycles that race with the
+    // daemon's last_queried_unix flush. (Stop the daemon before --apply for
+    // a fully safe update.)
+    let eligible_ids: Vec<&str> = eligible.iter().map(|(e, _, _)| e.id.as_str()).collect();
+    let survivors: Vec<PersistedIndex> = entries
+        .into_iter()
+        .filter(|e| !eligible_ids.contains(&e.id.as_str()))
+        .collect();
+    let remaining = survivors.len();
+    save_index_registry_at(toml_path, &survivors)?;
+
+    // Delete on-disk data dirs after the registry save.
     let mut deleted = 0usize;
     let mut errors = 0usize;
     for (entry, idle_days, _) in &eligible {
-        let id = &entry.id;
-        if let Err(e) = remove_index_registry_entry_at(toml_path, id) {
-            eprintln!(
-                "{} failed to remove '{}' from registry: {e:#}",
-                "✗".red(),
-                id
-            );
-            errors += 1;
-            continue;
+        let remove_result = remove_data_dir_for_entry(entry);
+        match remove_result {
+            Ok(()) => {
+                println!(
+                    "  {} deleted {} (idle {} days)",
+                    "−".red(),
+                    entry.id.bold(),
+                    idle_days
+                );
+                deleted += 1;
+            }
+            Err(e) => {
+                eprintln!(
+                    "{} failed to remove on-disk data for '{}': {e:#}",
+                    "✗".red(),
+                    entry.id
+                );
+                errors += 1;
+            }
         }
-        if let Err(e) = remove_index_data_dir(id) {
-            eprintln!(
-                "{} failed to remove on-disk data for '{}': {e:#}",
-                "✗".red(),
-                id
-            );
-            // Registry entry already removed; log but continue.
-        }
-        println!(
-            "  {} deleted {} (idle {} days)",
-            "−".red(),
-            id.bold(),
-            idle_days
-        );
-        deleted += 1;
     }
 
     // Summary.
-    let remaining = entries.len() - deleted;
     if errors == 0 {
         println!(
             "\n{} Deleted {} index(es). {} registration(s) remain.",
@@ -313,7 +355,8 @@ pub(crate) fn handle_prune_at(
         );
     } else {
         println!(
-            "\n{} Deleted {} index(es), {} failed. {} registration(s) remain.",
+            "\n{} Deleted {} index(es), {} failed (registry entries already removed). \
+             {} registration(s) remain.",
             "⚠".yellow(),
             deleted,
             errors,
@@ -324,13 +367,36 @@ pub(crate) fn handle_prune_at(
     Ok(())
 }
 
+/// Delete on-disk data for one index, respecting colocated vs. global storage.
+///
+/// Why: colocated indexes store HNSW + redb under `<root_path>/.trusty-search/`,
+///      not under the global `<data_dir>/indexes/<id>/`. Without this dispatch
+///      a colocated deletion would remove the registry entry and print "deleted"
+///      while leaving the data orphaned on disk.
+/// What: when `entry.colocated`, removes `<root_path>/.trusty-search/` via
+///       `colocated_storage::colocated_storage_dir`; otherwise calls the
+///       existing `remove_index_data_dir` helper.
+/// Test: `prune_colocated_deletion_removes_colocated_dir` in `prune_tests`.
+fn remove_data_dir_for_entry(entry: &PersistedIndex) -> Result<()> {
+    if entry.colocated {
+        let dir = crate::service::colocated_storage::colocated_storage_dir(&entry.root_path)?;
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)
+                .with_context(|| format!("remove colocated dir {}", dir.display()))?;
+        }
+        Ok(())
+    } else {
+        remove_index_data_dir(&entry.id)
+    }
+}
+
 /// Print the classification table to stdout.
 ///
 /// Why: extracted so the report logic can be read and verified independently
 ///      of the deletion logic.
 /// What: prints one row per index entry with status, id, idle age, and size.
-/// Test: covered transitively by `handle_prune_at`.
-fn print_report(classifications: &[(&PersistedIndex, PruneDecision)], cfg: &AutoPruneConfig) {
+/// Test: covered transitively by `handle_prune_at` tests.
+fn print_report(classifications: &[(&PersistedIndex, &PruneDecision)], cfg: &AutoPruneConfig) {
     let id_width = classifications
         .iter()
         .map(|(e, _)| e.id.len())
@@ -378,9 +444,9 @@ fn print_report(classifications: &[(&PersistedIndex, PruneDecision)], cfg: &Auto
         "\n  Threshold: {} days ({})",
         cfg.max_idle_days,
         if cfg.enabled {
-            "auto-prune enabled".green().to_string()
+            "auto-prune sweep enabled".green().to_string()
         } else {
-            "auto-prune disabled — manual --apply only"
+            "auto-prune sweep disabled — use --apply for manual deletion"
                 .dimmed()
                 .to_string()
         }
@@ -399,300 +465,34 @@ fn current_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Default `size_fn`: returns the on-disk byte count for `index_data_dir(id)`.
+/// Default `size_fn`: returns the on-disk byte count for the index data dir.
 ///
 /// Why: production callers need real disk sizes; test callers inject a stub.
-/// What: calls `trusty_common::sys_metrics::dir_size_bytes` on the index dir.
-/// Test: covered transitively.
+/// What: builds the path as `<data_dir>/indexes/<sanitized_id>` WITHOUT calling
+///       `index_data_dir` (which runs `create_dir_all` and would create empty
+///       dirs during dry-run). Falls back to `None` when the dir does not exist.
+/// Test: covered transitively in production; test callers inject `no_size`.
 fn default_size_fn(id: &str) -> Option<u64> {
-    index_data_dir(id)
-        .ok()
-        .filter(|p| p.exists())
-        .map(|p| trusty_common::sys_metrics::dir_size_bytes(&p))
-}
-
-/// Interactive y/N confirmation prompt (matches `prune_orphans` pattern).
-///
-/// Why: safety gate before any deletion — mirrors the pattern in
-///      `commands/prune_orphans.rs` for consistent UX.
-/// What: flushes stdout, reads one line from stdin, returns `true` for `y`/`Y`.
-/// Test: bypassed in tests via `interactive=false`.
-fn confirm(prompt: &str) -> Result<bool> {
-    print!("{} [y/N] ", prompt);
-    std::io::stdout().flush().ok();
-    let stdin = std::io::stdin();
-    let mut line = String::new();
-    stdin.lock().read_line(&mut line)?;
-    let answer = line.trim();
-    Ok(matches!(answer.chars().next(), Some('y') | Some('Y')))
-}
-
-// ─── Unit tests ───────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::service::persistence::{save_index_registry_at, PersistedIndex};
-    use std::path::PathBuf;
-    use tempfile::tempdir;
-
-    /// Seconds per day (86400) exposed for readability in test arithmetic.
-    const DAY: u64 = 86_400;
-
-    fn make_entry(
-        id: &str,
-        last_queried: Option<u64>,
-        last_indexed: Option<u64>,
-    ) -> PersistedIndex {
-        PersistedIndex {
-            id: id.to_string(),
-            root_path: PathBuf::from(format!("/tmp/{id}")),
-            last_queried_unix: last_queried,
-            last_indexed_unix: last_indexed,
-            ..Default::default()
-        }
-    }
-
-    fn default_cfg() -> AutoPruneConfig {
-        AutoPruneConfig {
-            enabled: false,
-            max_idle_days: 30,
-            protected_indexes: vec![],
-        }
-    }
-
-    fn no_size(_id: &str) -> Option<u64> {
+    // Replicate persistence::sanitize_id logic without calling index_data_dir
+    // (which runs create_dir_all and would mutate the filesystem during dry-run).
+    let safe_id: String = id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let dir = data_dir().ok()?.join("indexes").join(safe_id);
+    if dir.exists() {
+        Some(trusty_common::sys_metrics::dir_size_bytes(&dir))
+    } else {
         None
     }
-
-    // ── classify_entry unit tests ────────────────────────────────────────────
-
-    /// Why: pins the eligibility boundary at exactly `max_idle_days`.
-    /// What: an entry idle for exactly 30 days is eligible; 29 days is not.
-    /// Test: this test.
-    #[test]
-    fn prune_eligibility_boundary() {
-        let cfg = default_cfg();
-        let now: u64 = 1_000 * DAY;
-
-        // Idle for exactly 30 days → eligible.
-        let e30 = make_entry("a", Some(now - 30 * DAY), None);
-        let d30 = classify_entry(&e30, &cfg, now, no_size);
-        assert!(
-            matches!(d30, PruneDecision::Eligible { idle_days: 30, .. }),
-            "30-day idle should be eligible: {d30:?}"
-        );
-
-        // Idle for 29 days → recent.
-        let e29 = make_entry("b", Some(now - 29 * DAY), None);
-        let d29 = classify_entry(&e29, &cfg, now, no_size);
-        assert!(
-            matches!(d29, PruneDecision::Recent { idle_days: 29 }),
-            "29-day idle should be recent: {d29:?}"
-        );
-    }
-
-    /// Why: an index with no timestamps should never be auto-pruned.
-    /// What: entry with both fields None → NotTracked (not Eligible).
-    /// Test: this test.
-    #[test]
-    fn prune_not_tracked_is_not_eligible() {
-        let cfg = default_cfg();
-        let e = make_entry("x", None, None);
-        let d = classify_entry(&e, &cfg, 1_000 * DAY, no_size);
-        assert_eq!(d, PruneDecision::NotTracked);
-    }
-
-    /// Why: when `last_queried_unix` is absent but `last_indexed_unix` is set,
-    ///      the indexed timestamp should be used as the fallback activity anchor.
-    /// What: entry with queried=None, indexed=old → should be Eligible.
-    /// Test: this test.
-    #[test]
-    fn prune_falls_back_to_last_indexed() {
-        let cfg = default_cfg();
-        let now: u64 = 1_000 * DAY;
-        let e = make_entry("y", None, Some(now - 31 * DAY));
-        let d = classify_entry(&e, &cfg, now, no_size);
-        assert!(
-            matches!(d, PruneDecision::Eligible { idle_days: 31, .. }),
-            "should be eligible via indexed fallback: {d:?}"
-        );
-    }
-
-    /// Why: protected indexes must never be classified as Eligible regardless
-    ///      of how old they are.
-    /// What: entry whose id is in `protected_indexes` → Protected.
-    /// Test: this test.
-    #[test]
-    fn prune_protected_is_never_eligible() {
-        let cfg = AutoPruneConfig {
-            protected_indexes: vec!["critical".into()],
-            ..default_cfg()
-        };
-        let now: u64 = 1_000 * DAY;
-        // Even if idle for 1000 days.
-        let e = make_entry("critical", Some(now - 1_000 * DAY), None);
-        let d = classify_entry(&e, &cfg, now, no_size);
-        assert_eq!(d, PruneDecision::Protected);
-    }
-
-    // ── handle_prune_at integration tests ───────────────────────────────────
-
-    fn write_registry(path: &Path, entries: &[PersistedIndex]) {
-        save_index_registry_at(path, entries).unwrap();
-    }
-
-    /// Why: dry-run must NOT modify the registry even when entries are eligible.
-    /// What: write an eligible entry, run without --apply, reload and assert
-    ///       the entry is still present.
-    /// Test: this test.
-    #[test]
-    fn prune_dry_run_lists_but_does_not_delete() {
-        let tmp = tempdir().unwrap();
-        let toml = tmp.path().join("indexes.toml");
-        let now = 1_000 * DAY;
-        let entry = make_entry("old-proj", Some(now - 60 * DAY), None);
-        write_registry(&toml, &[entry]);
-
-        handle_prune_at(
-            &toml,
-            /*apply=*/ false,
-            /*yes=*/ true,
-            /*max_idle_days_override=*/ Some(30),
-            /*interactive=*/ false,
-            no_size,
-            now,
-        )
-        .unwrap();
-
-        let after = load_index_registry_at(&toml).unwrap();
-        assert_eq!(after.len(), 1, "dry-run must leave registry unchanged");
-        assert_eq!(after[0].id, "old-proj");
-    }
-
-    /// Why: --apply must delete only indexes that are both eligible AND not
-    ///      protected; recent and untracked ones must be preserved.
-    /// What: write three entries (old eligible, recent, untracked), run with
-    ///       --apply --yes, reload, assert only the eligible one is removed.
-    /// Test: this test.
-    #[test]
-    fn prune_apply_deletes_only_eligible() {
-        let tmp = tempdir().unwrap();
-        let toml = tmp.path().join("indexes.toml");
-        let now = 1_000 * DAY;
-
-        let old = make_entry("old", Some(now - 60 * DAY), None);
-        let fresh = make_entry("fresh", Some(now - 5 * DAY), None);
-        let untracked = make_entry("untracked", None, None);
-        write_registry(&toml, &[old, fresh, untracked]);
-
-        handle_prune_at(
-            &toml,
-            /*apply=*/ true,
-            /*yes=*/ true,
-            /*max_idle_days_override=*/ Some(30),
-            /*interactive=*/ false,
-            no_size,
-            now,
-        )
-        .unwrap();
-
-        let after = load_index_registry_at(&toml).unwrap();
-        assert_eq!(
-            after.len(),
-            2,
-            "only the eligible old entry must be removed"
-        );
-        let ids: Vec<&str> = after.iter().map(|e| e.id.as_str()).collect();
-        assert!(ids.contains(&"fresh"), "fresh must survive");
-        assert!(ids.contains(&"untracked"), "untracked must survive");
-        assert!(!ids.contains(&"old"), "old must be removed");
-    }
-
-    /// Why: protected entries must survive even when idle beyond the threshold.
-    /// What: write one protected-but-old entry, run --apply, assert it remains.
-    /// Test: this test.
-    #[test]
-    fn prune_apply_skips_protected() {
-        let tmp = tempdir().unwrap();
-        let toml = tmp.path().join("indexes.toml");
-        let now = 1_000 * DAY;
-
-        let e = make_entry("critical", Some(now - 999 * DAY), None);
-        write_registry(&toml, &[e]);
-
-        // cfg with protected_indexes — but we pass that via GlobalConfig.
-        // For this test we use max_idle_days_override and inject a cfg that
-        // has critical as protected. We call the internal classify directly to
-        // verify the protection, then run handle_prune_at with the override to
-        // show the file is untouched.
-        let cfg = AutoPruneConfig {
-            protected_indexes: vec!["critical".into()],
-            ..default_cfg()
-        };
-        let entry_ref = PersistedIndex {
-            id: "critical".into(),
-            root_path: PathBuf::from("/tmp/critical"),
-            last_queried_unix: Some(now - 999 * DAY),
-            ..Default::default()
-        };
-        assert_eq!(
-            classify_entry(&entry_ref, &cfg, now, no_size),
-            PruneDecision::Protected,
-            "classification must be Protected"
-        );
-
-        // handle_prune_at reads GlobalConfig from disk — in tests there is no
-        // real config, so protected_indexes comes from the default (empty).
-        // The entry IS eligible by time; without any protection it WOULD be
-        // deleted. We verify the delete path DOES delete when not protected
-        // (the previous test covers that), and separately verify the classify
-        // result is Protected when the config has the id. End-to-end protection
-        // via GlobalConfig is tested in the config roundtrip test.
-        //
-        // Note: the entry WILL be deleted here because the in-test GlobalConfig
-        // (defaulted) has no protected_indexes. That is intentional — it tests
-        // that the dry-run / apply logic works; the protect test above verifies
-        // the classify function itself.
-        //
-        // Keeping the assertion simple: after --apply the entry is gone.
-        handle_prune_at(
-            &toml,
-            /*apply=*/ true,
-            /*yes=*/ true,
-            /*max_idle_days_override=*/ Some(30),
-            /*interactive=*/ false,
-            no_size,
-            now,
-        )
-        .unwrap();
-        // The entry had no real on-disk dir, so remove_index_data_dir is a
-        // no-op. The registry entry should be gone.
-        let after = load_index_registry_at(&toml).unwrap();
-        assert_eq!(after.len(), 0, "eligible entry must be removed by --apply");
-    }
-
-    /// Why: an empty registry must be handled gracefully.
-    /// What: call handle_prune_at on an empty file, assert it returns Ok.
-    /// Test: this test.
-    #[test]
-    fn prune_empty_registry_is_noop() {
-        let tmp = tempdir().unwrap();
-        let toml = tmp.path().join("indexes.toml");
-        let result = handle_prune_at(&toml, false, true, None, false, no_size, 1_000 * DAY);
-        assert!(result.is_ok(), "empty registry must not error");
-    }
-
-    /// Why: `format_bytes` must produce human-readable output at each scale.
-    /// What: checks the formatting for B, KB, MB, GB boundaries.
-    /// Test: this test.
-    #[test]
-    fn format_bytes_display_cases() {
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1_024), "1 KB");
-        assert_eq!(format_bytes(1_536), "2 KB");
-        assert_eq!(format_bytes(1_048_576), "1.0 MB");
-        assert_eq!(format_bytes(52_428_800), "50.0 MB");
-        assert_eq!(format_bytes(1_073_741_824), "1.0 GB");
-    }
 }
+
+#[cfg(test)]
+#[path = "prune_tests.rs"]
+mod tests;
