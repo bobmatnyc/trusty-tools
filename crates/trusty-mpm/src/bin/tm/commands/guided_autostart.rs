@@ -37,21 +37,42 @@ pub(crate) fn supervisor_plist_path() -> std::path::PathBuf {
         .join(format!("{SUPERVISOR_PLIST_LABEL}.plist"))
 }
 
+/// Outcome of a `launchctl bootstrap` attempt.
+///
+/// Why: distinguishes "already running" (EALREADY) from "truly unavailable" so
+/// `ensure_daemon_started` can skip the lock-delete+spawn step when launchd
+/// already owns the service, preventing a double-start race.
+/// What: three variants — `Launched` (exit 0), `AlreadyLoaded` (exit 37 /
+/// EALREADY or matching stderr), `Unavailable` (plist absent, `id -u` failed,
+/// or unknown non-zero exit).
+/// Test: covered indirectly by the launchd e2e smoke test; `Unavailable` path
+/// is exercised by the detached-spawn unit path.
+#[derive(Debug, PartialEq)]
+enum LaunchctlOutcome {
+    /// launchd accepted the bootstrap command — daemon is now (re)starting.
+    Launched,
+    /// launchd reports the service is already bootstrapped (exit 37 / EALREADY).
+    /// No second spawn is needed — proceed straight to the health-poll loop.
+    AlreadyLoaded,
+    /// launchctl is not available, the plist is absent, or bootstrap failed for
+    /// an unknown reason. Fall back to a detached direct spawn.
+    Unavailable,
+}
+
 /// Ensure the trusty-mpm daemon is running, starting it if unreachable.
 ///
 /// Why: bare `tm` in the guided-default flow should not require the operator
 /// to run `tm start` manually first. This helper transparently starts the
 /// daemon so the picker UX appears on every invocation.
-/// What: (1) on macOS, if the supervisor plist exists at
-/// `~/Library/LaunchAgents/com.trusty.mpm.supervisor.plist`, issues
-/// `launchctl bootstrap gui/<uid> <plist>` for reboot-durable startup;
-/// (2) otherwise removes any stale lock file and spawns the current executable
-/// with the `daemon` subcommand in a detached process (same logic as
-/// `commands::daemon::start`); (3) polls `/health` every 500 ms for up to 5 s
-/// via lock-file URL resolution; (4) returns the resolved daemon URL on success
-/// or `Err` on timeout. The `_url` parameter is intentionally unused: after
-/// auto-start the lock file records the actual bound address, which may differ
-/// from the stale or default URL the caller held.
+/// What: (1) on macOS, if the supervisor plist exists, issues
+/// `launchctl bootstrap gui/<uid> <plist>` for reboot-durable startup and
+/// skips the spawn step when the service is already loaded (EALREADY);
+/// (2) when launchd is unavailable or the plist is absent, removes any stale
+/// lock file and spawns the current executable with the `daemon` subcommand in
+/// a detached process; (3) polls `/health` every 500 ms for up to 5 s via
+/// lock-file URL resolution; (4) returns the resolved daemon URL on success or
+/// `Err` on timeout. The `_url` parameter is intentionally unused: after
+/// auto-start the lock file records the actual bound address.
 /// Test: launchd path requires a macOS launchd environment; detached-spawn and
 /// polling paths are covered by the guided-default e2e smoke test.
 pub(crate) async fn ensure_daemon_started(
@@ -59,28 +80,33 @@ pub(crate) async fn ensure_daemon_started(
     _url: &str,
 ) -> anyhow::Result<String> {
     let plist_path = supervisor_plist_path();
-    if !try_launchctl_start(&plist_path) {
-        // launchd not available or plist absent — fall back to detached spawn,
-        // the same approach used by `commands::daemon::start`.
-        let lock_path = trusty_mpm::core::lock_file_path();
-        let _ = std::fs::remove_file(&lock_path);
-        let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
-        std::fs::create_dir_all(&root).context("create framework dir for daemon log")?;
-        let log_path = root.join("daemon.log");
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .context("open daemon log file")?;
-        let log_copy = log_file.try_clone().context("clone log file handle")?;
-        let exe = std::env::current_exe().context("resolve current executable path")?;
-        std::process::Command::new(&exe)
-            .arg("daemon")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::from(log_file))
-            .stderr(std::process::Stdio::from(log_copy))
-            .spawn()
-            .context("spawn daemon process")?;
+    match try_launchctl_start(&plist_path) {
+        LaunchctlOutcome::Launched | LaunchctlOutcome::AlreadyLoaded => {
+            // launchd owns the service — no second spawn needed.
+        }
+        LaunchctlOutcome::Unavailable => {
+            // launchd not available or plist absent — fall back to detached
+            // spawn, the same approach used by `commands::daemon::start`.
+            let lock_path = trusty_mpm::core::lock_file_path();
+            let _ = std::fs::remove_file(&lock_path);
+            let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
+            std::fs::create_dir_all(&root).context("create framework dir for daemon log")?;
+            let log_path = root.join("daemon.log");
+            let log_file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .context("open daemon log file")?;
+            let log_copy = log_file.try_clone().context("clone log file handle")?;
+            let exe = std::env::current_exe().context("resolve current executable path")?;
+            std::process::Command::new(&exe)
+                .arg("daemon")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::from(log_file))
+                .stderr(std::process::Stdio::from(log_copy))
+                .spawn()
+                .context("spawn daemon process")?;
+        }
     }
 
     // Poll until healthy or timeout (5 s). Re-resolve from the lock file each
@@ -102,15 +128,15 @@ pub(crate) async fn ensure_daemon_started(
 /// launchd registers the unit for reboot-durability and respawn-on-crash. The
 /// detached-spawn fallback is session-only (no reboot durability).
 /// What: on macOS, if `plist_path` exists, resolves the current user UID via
-/// `id -u`, then runs `launchctl bootstrap gui/<uid> <plist>`. Returns `true`
-/// when the command exits 0. Returns `false` on non-macOS, when the plist is
-/// absent, when `id -u` fails, or when `launchctl` exits non-zero (e.g. already
-/// loaded — the caller falls through to the polling wait either way).
+/// `id -u`, then runs `launchctl bootstrap gui/<uid> <plist>`. Returns
+/// `Launched` on exit 0, `AlreadyLoaded` on exit 37 (EALREADY) or when stderr
+/// contains "already bootstrapped"/"service already loaded", and `Unavailable`
+/// in all other cases (plist absent, `id -u` failure, unknown launchctl error).
 /// Test: requires a real macOS launchd environment; covered by e2e smoke test.
 #[cfg(target_os = "macos")]
-fn try_launchctl_start(plist_path: &std::path::Path) -> bool {
+fn try_launchctl_start(plist_path: &std::path::Path) -> LaunchctlOutcome {
     if !plist_path.exists() {
-        return false;
+        return LaunchctlOutcome::Unavailable;
     }
     let uid = std::process::Command::new("id")
         .arg("-u")
@@ -120,23 +146,37 @@ fn try_launchctl_start(plist_path: &std::path::Path) -> bool {
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     if uid.is_empty() {
-        return false;
+        return LaunchctlOutcome::Unavailable;
     }
     let domain = format!("gui/{uid}");
     let plist_str = match plist_path.to_str() {
         Some(s) => s,
-        None => return false,
+        None => return LaunchctlOutcome::Unavailable,
     };
-    std::process::Command::new("launchctl")
+    let output = match std::process::Command::new("launchctl")
         .args(["bootstrap", &domain, plist_str])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return LaunchctlOutcome::Unavailable,
+    };
+    if output.status.success() {
+        return LaunchctlOutcome::Launched;
+    }
+    // exit 37 = EALREADY; some launchctl versions surface this in stderr instead.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.code() == Some(37)
+        || stderr.contains("already bootstrapped")
+        || stderr.contains("service already loaded")
+    {
+        return LaunchctlOutcome::AlreadyLoaded;
+    }
+    LaunchctlOutcome::Unavailable
 }
 
 #[cfg(not(target_os = "macos"))]
-fn try_launchctl_start(_plist_path: &std::path::Path) -> bool {
-    false
+fn try_launchctl_start(_plist_path: &std::path::Path) -> LaunchctlOutcome {
+    LaunchctlOutcome::Unavailable
 }
 
 /// Extract the host token from a git remote URL (lowercased input expected).
@@ -145,19 +185,21 @@ fn try_launchctl_start(_plist_path: &std::path::Path) -> bool {
 /// the whole string, so that `github-duetto` SSH aliases are matched without
 /// also matching unrelated hosts that happen to contain `"github"`.
 /// What: handles scp-style (`git@HOST:path` → `HOST`), `https://[user@]HOST/…`,
-/// and `ssh://[user@]HOST/…`. Returns the full input when no host can be
-/// extracted — the caller's equality checks will then simply fail safely.
+/// and `ssh://[user@]HOST/…`. Strips any trailing `:<port>` from scheme-style
+/// URLs so `github.com:443` → `github.com`. Returns the full input when no
+/// host can be extracted — the caller's equality checks will then simply fail.
 /// Test: `is_github_remote_*` tests in `tests_behavior_c_tests.rs` exercise
 /// this indirectly; `github_host_*` tests verify extraction directly.
 pub(crate) fn github_host(lower_url: &str) -> &str {
-    // scp-style: git@HOST:path  — HOST is between '@' and ':'
+    // scp-style: git@HOST:path  — HOST is between '@' and first ':'
+    // (no port in scp-style; the ':' separates host from path)
     if let Some(at) = lower_url.find('@') {
         let after = &lower_url[at + 1..];
         if let Some(col) = after.find(':') {
             return &after[..col];
         }
     }
-    // scheme-URL: [scheme://][user@]HOST[/path]
+    // scheme-URL: [scheme://][user@]HOST[:port][/path]
     let without_scheme = lower_url
         .find("://")
         .map(|i| &lower_url[i + 3..])
@@ -166,7 +208,16 @@ pub(crate) fn github_host(lower_url: &str) -> &str {
         .find('@')
         .map(|i| &without_scheme[i + 1..])
         .unwrap_or(without_scheme);
-    after_userinfo.split('/').next().unwrap_or(after_userinfo)
+    let host_with_port = after_userinfo.split('/').next().unwrap_or(after_userinfo);
+    // Strip optional :<port> suffix (e.g. "github.com:443" → "github.com").
+    // Only strip when the suffix is all ASCII digits to avoid mangling IPv6.
+    if let Some(colon) = host_with_port.rfind(':') {
+        let port_str = &host_with_port[colon + 1..];
+        if !port_str.is_empty() && port_str.chars().all(|c| c.is_ascii_digit()) {
+            return &host_with_port[..colon];
+        }
+    }
+    host_with_port
 }
 
 #[cfg(test)]
@@ -197,6 +248,33 @@ mod tests {
         assert_eq!(
             parent, "LaunchAgents",
             "plist must live in ~/Library/LaunchAgents/"
+        );
+    }
+
+    /// Verify github_host strips a port suffix from scheme-style URLs.
+    ///
+    /// Why: `https://github.com:443/o/r.git` is a valid remote URL but the
+    /// old code returned `"github.com:443"`, causing `is_github_remote` to
+    /// return false — a regression vs the previous substring-match approach.
+    /// What: asserts `github_host` strips `":443"` so `is_github_remote` fires.
+    /// Test: this test; regression guard for the port-stripping fix.
+    #[test]
+    fn github_host_strips_port_from_https_url() {
+        assert_eq!(
+            github_host("https://github.com:443/owner/repo.git"),
+            "github.com",
+            "port suffix must be stripped from https:// URLs"
+        );
+        assert_eq!(
+            github_host("ssh://git@github-work:2222/o/r.git"),
+            "github-work",
+            "port suffix must be stripped from ssh:// URLs with userinfo"
+        );
+        // scp-style has no port — unchanged
+        assert_eq!(
+            github_host("git@github.com:owner/repo.git"),
+            "github.com",
+            "scp-style host must be unaffected"
         );
     }
 }

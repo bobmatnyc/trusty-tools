@@ -558,6 +558,18 @@ fn is_github_remote_rejects_githubusercontent() {
 }
 
 #[test]
+fn is_github_remote_accepts_github_com_https_with_port() {
+    // Why: `https://github.com:443/o/r.git` is a valid remote URL (explicit
+    // port). The old substring-match handled this; the host-based approach
+    // regressed on it because `split('/').next()` returned `"github.com:443"`.
+    // This is the regression guard for the port-stripping fix.
+    assert!(
+        is_github_remote("https://github.com:443/o/r.git"),
+        "https://github.com:443/… must be recognised as GitHub (port stripped)"
+    );
+}
+
+#[test]
 fn is_github_remote_rejects_gitea_with_github_in_path() {
     // Why: a self-hosted Gitea whose URL happens to mention "github" in the
     // path (e.g. a mirror) must not be treated as GitHub.
