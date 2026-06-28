@@ -11,8 +11,10 @@
 //! What: [`run_guided_default`] orchestrates detection, listing, and dispatch.
 //! [`derive_project`] derives the `source_id`, managed workspace, and git root.
 //! [`fallback_protected`] is the three-way dispatch for the daemon-unreachable
-//! path; it is also the target for non-GitHub projects. The TTY picker is
-//! split into a pure `parse_picker_choice` + an I/O driver `run_tty_picker`.
+//! path; it is also the target for non-GitHub projects. [`non_github_refusal_message`]
+//! is the pure helper that produces the accurate refusal text for the
+//! non-GitHub-remote case (see #1777). The TTY picker is split into a pure
+//! `parse_picker_choice` + an I/O driver `run_tty_picker`.
 //!
 //! Test: unit tests for detection and fallback live in `tests_behavior_b_tests.rs`
 //! (#1724 regression suite) and `tests_behavior_c_tests.rs` (#1705 new UX suite);
@@ -667,6 +669,26 @@ async fn launch_new_session_and_attach(
 
 // ── Fallback (daemon-unreachable / non-GitHub) path ─────────────────────────
 
+/// Build the user-facing refusal notice for a non-GitHub-remote refusal.
+///
+/// Why: the non-GitHub-remote branch of [`fallback_protected`] previously
+/// printed "daemon unreachable" wording, which is wrong when the daemon IS
+/// running — the refusal is purely because `tm` only auto-manages GitHub
+/// repositories. Extracting the message into a pure helper makes it
+/// unit-testable without capturing stderr.
+/// What: returns a three-line notice that names the non-GitHub remote as the
+/// reason for refusal and reassures the operator that the live checkout was
+/// not modified. The caller prints via `eprintln!` and then bails.
+/// Test: `guided_non_github_refusal_message_*` in `tests_behavior_c_tests.rs`.
+pub(crate) fn non_github_refusal_message(remote_desc: &str) -> String {
+    format!(
+        "tm: not auto-managing this project — `tm` auto-manages GitHub repositories only.\n\
+         tm: detected non-GitHub remote: {remote_desc}.\n\
+         tm: your live checkout was not touched. \
+         (Use an explicit `tm` subcommand to work here manually.)"
+    )
+}
+
 /// Return true when the remote URL targets GitHub (any transport or SSH alias).
 ///
 /// Why: `parse_github_path` from `trusty-common` accepts *any* git remote URL,
@@ -770,17 +792,15 @@ pub(crate) async fn fallback_protected(
         }
 
         // Non-GitHub remote or no remote: refuse to write to the live tree.
+        // NOTE: the daemon's reachability is irrelevant here — this branch is
+        // reached even when the daemon is UP. The real reason for refusal is
+        // that `tm` only auto-manages GitHub repositories (#1777).
         let remote_desc = origin_url.as_deref().unwrap_or("(no remote configured)");
-        eprintln!(
-            "tm: daemon unreachable — refusing to deploy into live git checkout.\n\
-             tm: Auto-protected managed clones require a GitHub remote \
-             (detected remote: {remote_desc}).\n\
-             tm: Start the daemon with `tm start`, then run `tm` again."
-        );
+        eprintln!("{}", non_github_refusal_message(remote_desc));
         anyhow::bail!(
-            "daemon unreachable: live git checkout at '{}' is protected — \
+            "not auto-managing: live git checkout at '{}' is a non-GitHub repository — \
              auto-managed clones require a GitHub remote; \
-             start the daemon with `tm start` first",
+             use an explicit `tm` subcommand to work here manually",
             git_root.display()
         );
     }
