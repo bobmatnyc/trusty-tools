@@ -13,7 +13,8 @@ use std::path::PathBuf;
 
 use crate::commands::guided::{
     PickerDecision, derive_project, fallback_protected, github_host, is_github_remote, is_zombie,
-    needs_restart, parse_picker_choice, print_non_tty_hint, print_project_context, tty_gate,
+    needs_restart, non_github_refusal_message, parse_picker_choice, print_non_tty_hint,
+    print_project_context, tty_gate,
 };
 
 // ── parse_picker_choice ───────────────────────────────────────────────────────
@@ -707,5 +708,82 @@ async fn guided_fallback_does_not_refuse_github_ssh_alias_remote() {
     assert!(
         !dir.join(".mcp.json").exists(),
         ".mcp.json must NOT appear in the live checkout"
+    );
+}
+
+// ── non_github_refusal_message (#1777) ───────────────────────────────────────
+// These tests verify the message helper introduced to fix the misleading
+// "daemon unreachable" wording shown when the actual reason for refusal is
+// "not a GitHub remote". The helper is pure — no stderr capture needed.
+
+#[test]
+fn guided_non_github_refusal_message_does_not_mention_daemon_or_start() {
+    // Why: the old message wrongly said "daemon unreachable" even when the
+    // daemon is running. The new message must never reference daemon
+    // reachability or the `tm start` command (#1777).
+    // What: call the helper with a GitLab remote and assert forbidden phrases
+    // are absent.
+    // Test: this is the test.
+    let msg = non_github_refusal_message("git@gitlab.com:org/repo.git");
+    assert!(
+        !msg.contains("daemon unreachable"),
+        "refusal message must NOT blame the daemon: {msg}"
+    );
+    assert!(
+        !msg.contains("tm start"),
+        "refusal message must NOT instruct to start the daemon: {msg}"
+    );
+    assert!(
+        !msg.contains("Start the daemon"),
+        "refusal message must NOT mention starting the daemon: {msg}"
+    );
+}
+
+#[test]
+fn guided_non_github_refusal_message_explains_github_only_policy() {
+    // Why: operators need to understand the actual reason — `tm` auto-manages
+    // GitHub repositories only, not Gitea/GitLab/bare-SSH remotes.
+    // What: asserts the message names "GitHub" as the requirement.
+    // Test: this is the test.
+    let msg = non_github_refusal_message("https://gitea.example.com/org/repo.git");
+    assert!(
+        msg.contains("GitHub"),
+        "refusal must name GitHub as the auto-management requirement: {msg}"
+    );
+    assert!(
+        msg.to_lowercase().contains("auto-manag"),
+        "refusal must mention auto-management scope: {msg}"
+    );
+}
+
+#[test]
+fn guided_non_github_refusal_message_includes_detected_remote() {
+    // Why: showing the detected remote URL in the message lets the operator
+    // immediately confirm which remote triggered the refusal — useful when
+    // running `tm` in a repo with multiple or aliased remotes.
+    // What: asserts the passed-in remote string appears verbatim in the output.
+    // Test: this is the test.
+    let remote = "git@gitlab.com:myorg/myrepo.git";
+    let msg = non_github_refusal_message(remote);
+    assert!(
+        msg.contains(remote),
+        "refusal must echo the detected remote ({remote}): {msg}"
+    );
+}
+
+#[test]
+fn guided_non_github_refusal_message_reassures_live_checkout_untouched() {
+    // Why: the operator may be anxious that `tm` modified their working tree.
+    // The message must clearly state the live checkout was not touched.
+    // What: asserts the reassurance phrase appears in the output.
+    // Test: this is the test.
+    let msg = non_github_refusal_message("https://bitbucket.org/org/repo.git");
+    assert!(
+        msg.contains("live checkout"),
+        "refusal must reassure that the live checkout was not touched: {msg}"
+    );
+    assert!(
+        msg.contains("not touched"),
+        "refusal must use the phrase 'not touched': {msg}"
     );
 }
