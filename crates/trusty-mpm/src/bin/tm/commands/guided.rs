@@ -21,6 +21,7 @@
 use anyhow::Context as _;
 use serde::Deserialize;
 
+use super::first_run::needs_first_run_clone;
 pub(crate) use super::guided_autostart::github_host;
 use crate::formatters::banner::tmux_has_session;
 
@@ -639,6 +640,13 @@ async fn launch_new_session_and_attach(
     url: &str,
     repo_url: &str,
 ) -> anyhow::Result<()> {
+    let first_run = needs_first_run_clone(repo_url);
+    if let Some((ref proj, ref path)) = first_run {
+        eprintln!(
+            "tm: first run for {proj} — cloning into {}, this may take a few minutes…",
+            path.display()
+        );
+    }
     eprintln!("tm: launching new session…");
     let resp = client
         .post(format!("{url}/api/v1/sessions/managed"))
@@ -660,6 +668,9 @@ async fn launch_new_session_and_attach(
         .context("failed to parse managed spawn response")?;
     if body.name.is_empty() {
         anyhow::bail!("daemon returned empty session name from managed spawn");
+    }
+    if first_run.is_some() {
+        eprintln!("tm: clone complete — workspace ready");
     }
     eprintln!("tm: session '{}' created ({})", body.name, body.state);
     tmux_attach(&body.name)
