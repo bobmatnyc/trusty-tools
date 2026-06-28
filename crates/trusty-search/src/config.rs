@@ -18,18 +18,19 @@ use std::path::{Path, PathBuf};
 /// Configuration for the `trusty-search prune` command (issue #1782).
 ///
 /// Why: idle index pruning is a destructive operation, so it defaults to
-///      report-only (dry-run). Every deletion requires explicit operator
-///      opt-in via `enabled = true` plus the `--apply` flag.
-/// What: holds `enabled` (global gate), `max_idle_days` (retention threshold),
-///       and `protected_indexes` (ids that are never pruned regardless).
+///      report-only (dry-run). Every deletion requires the explicit `--apply`
+///      flag on the CLI.
+/// What: holds `enabled` (future daemon sweep gate), `max_idle_days` (retention
+///       threshold), and `protected_indexes` (ids that are never pruned).
 ///       All fields have serde defaults so existing config files that predate
 ///       this struct keep loading without any YAML change.
 /// Test: `prune_config_defaults` and `prune_config_roundtrip` in this module.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AutoPruneConfig {
-    /// Global gate. When `false` (the default), `--apply` is rejected with a
-    /// clear error so no accidental deletion can happen without a config edit.
-    /// Set to `true` to allow `trusty-search prune --apply` to delete indexes.
+    /// Controls the future daemon-side scheduled sweep. When `false` (the
+    /// default) the daemon will not automatically prune idle indexes. Has no
+    /// effect on the manual `trusty-search prune --apply` command — the CLI
+    /// `--apply` flag is its own opt-in and does NOT check this field.
     #[serde(default)]
     pub enabled: bool,
 

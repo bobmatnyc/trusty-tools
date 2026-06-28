@@ -330,10 +330,17 @@ pub fn index_data_dir(index_id: &str) -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Crate-internal wrapper exposing [`sanitize_id`] for callers that need to
-/// derive the same on-disk path as [`index_data_dir`] without triggering its
-/// `create_dir_all` side effect.
-pub(crate) fn sanitize_id_for_path(id: &str) -> String {
+/// Public wrapper exposing [`sanitize_id`] for callers — including the binary's
+/// command handlers — that need to derive the same on-disk path as
+/// [`index_data_dir`] without triggering its `create_dir_all` side effect.
+///
+/// Why: the binary's `commands/` modules cannot access `pub(crate)` items from
+///      the library; making this `pub` lets `prune::default_size_fn` compute the
+///      canonical index data-dir path without calling `index_data_dir`.
+/// What: returns `sanitize_id(id)` — the exact same path component used by
+///       `index_data_dir`, `remove_index_data_dir`, and `hnsw_path`.
+/// Test: covered transitively by `prune_tests::prune_*` tests.
+pub fn sanitize_id_for_path(id: &str) -> String {
     sanitize_id(id)
 }
 

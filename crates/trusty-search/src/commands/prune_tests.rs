@@ -348,3 +348,129 @@ fn format_bytes_display_cases() {
     assert_eq!(format_bytes(52_428_800), "50.0 MB");
     assert_eq!(format_bytes(1_073_741_824), "1.0 GB");
 }
+
+/// Why: when a colocated index's root_path no longer exists on disk the prune
+///      command must not create any ghost directories as a side effect. This was
+///      the case when `colocated_storage_dir()` (which calls `create_dir_all`)
+///      was used instead of building the path directly.
+/// What: write a colocated registry entry whose root_path does NOT exist, run
+///       --apply, assert the entry is removed from the registry AND no new
+///       directory is created at the expected colocated path.
+/// Test: this test.
+#[test]
+fn prune_colocated_absent_root_creates_no_dirs() {
+    use crate::service::colocated_storage::COLOCATED_DIR_NAME;
+
+    let tmp = tempdir().unwrap();
+    let toml = tmp.path().join("indexes.toml");
+
+    // root_path points to a directory that does NOT exist on disk.
+    let absent_root = tmp.path().join("ghost-project");
+    assert!(
+        !absent_root.exists(),
+        "setup: root_path must not exist for this test"
+    );
+    let colocated_dir = absent_root.join(COLOCATED_DIR_NAME);
+
+    let now = 1_000 * DAY;
+    let entry = PersistedIndex {
+        id: "ghost".to_string(),
+        root_path: absent_root.clone(),
+        last_queried_unix: Some(now - 90 * DAY),
+        colocated: true,
+        ..Default::default()
+    };
+    write_registry(&toml, &[entry]);
+
+    handle_prune_at(
+        &toml,
+        /*apply=*/ true,
+        /*yes=*/ true,
+        /*max_idle_days_override=*/ Some(30),
+        default_cfg(),
+        /*interactive=*/ false,
+        no_size,
+        now,
+    )
+    .unwrap();
+
+    // Registry entry must be removed.
+    let after = load_index_registry_at(&toml).unwrap();
+    assert_eq!(after.len(), 0, "registry entry must be pruned");
+
+    // Crucially, no ghost directory must have been created.
+    assert!(
+        !colocated_dir.exists(),
+        "absent root must not have been created as a side effect"
+    );
+    assert!(
+        !absent_root.exists(),
+        "root_path must not have been created as a side effect"
+    );
+}
+
+/// Why: a malformed `config.yaml` could silently empty `protected_indexes`,
+///      which would let previously-protected indexes be deleted. The command must
+///      refuse `--apply` when the config cannot be parsed.
+/// What: write a YAML-invalid config file, call `handle_prune_configured` with
+///       `apply=true`, assert the call returns `Err` before touching the registry.
+/// Test: this test.
+#[test]
+fn prune_malformed_config_aborts_apply() {
+    let tmp = tempdir().unwrap();
+    let config_path = tmp.path().join("config.yaml");
+    // Write deliberately malformed YAML.
+    std::fs::write(&config_path, "auto_prune: : : not valid yaml\n").unwrap();
+
+    // We don't need a real registry because the error must fire before the
+    // TOML path is resolved (config load is intentionally first).
+    let result = handle_prune_configured(
+        Some(&config_path),
+        /*apply=*/ true,
+        /*yes=*/ true,
+        /*max_idle_days_override=*/ None,
+    );
+    assert!(
+        result.is_err(),
+        "malformed config + --apply must return Err"
+    );
+    let msg = format!("{:#}", result.unwrap_err());
+    assert!(
+        msg.contains("malformed") || msg.contains("YAML") || msg.contains("yaml"),
+        "error message should mention the config problem: {msg}"
+    );
+}
+
+/// Why: `--max-idle-days 0` would make every tracked index immediately eligible,
+///      which is almost certainly a user mistake. The guard must reject it.
+/// What: call `handle_prune_at` with `max_idle_days_override = Some(0)` on a
+///       non-empty registry, assert the call returns `Err`.
+/// Test: this test.
+#[test]
+fn prune_max_idle_days_zero_is_rejected() {
+    let tmp = tempdir().unwrap();
+    let toml = tmp.path().join("indexes.toml");
+    let now = 1_000 * DAY;
+    let entry = make_entry("some-index", Some(now - 5 * DAY), None);
+    write_registry(&toml, &[entry]);
+
+    let result = handle_prune_at(
+        &toml,
+        /*apply=*/ false,
+        /*yes=*/ true,
+        /*max_idle_days_override=*/ Some(0),
+        default_cfg(),
+        /*interactive=*/ false,
+        no_size,
+        now,
+    );
+    assert!(
+        result.is_err(),
+        "--max-idle-days 0 must be rejected with an error"
+    );
+    let msg = format!("{:#}", result.unwrap_err());
+    assert!(
+        msg.contains("at least 1") || msg.contains("max-idle-days"),
+        "error should mention the constraint: {msg}"
+    );
+}
