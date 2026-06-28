@@ -7,9 +7,11 @@
 //! binary's parent directory. On success prints a restart hint (does NOT re-exec).
 //! On fallback, attempts `cargo install trusty-installer --locked` if cargo is on
 //! PATH; otherwise prints a manual install hint. Before either attempt, the target
-//! directory is probed for writability — a `PermissionDenied` result aborts with
-//! an actionable error; transient I/O errors (ENOSPC, races, etc.) fall through
-//! to the prebuilt-attempt + cargo-fallback path, which already handles failures.
+//! directory is probed for writability — `PermissionDenied`, `StorageFull`, and
+//! `ReadOnlyFilesystem` all abort up-front with distinct actionable errors (all
+//! three predict that the subsequent write into the same directory will also fail);
+//! genuinely transient/inconclusive errors fall through to the prebuilt-attempt +
+//! cargo-fallback path.
 //!
 //! Test: `tests` covers the probe tri-state, the Outcome→message mapping,
 //! and the cargo-fallback location-divergence warning as pure functions; the live
@@ -22,51 +24,77 @@ use crate::download::{self, Outcome};
 
 /// Outcome of probing a directory for writability.
 ///
-/// Why: Distinguishes a genuine permission denial (should abort up-front) from a
-/// transient I/O error (should fall through so the existing cargo fallback can
-/// still succeed). A plain `bool` loses that distinction and causes a behavioral
-/// regression: hard-aborting on ENOSPC removes a previously-working code path.
+/// Why: Distinguishes error kinds that PREDICT write failure at the target path
+/// (should abort early with an actionable message) from genuinely transient or
+/// inconclusive errors (should fall through so the prebuilt + cargo-fallback paths
+/// can still succeed). A plain `bool` collapses this distinction and either
+/// hard-aborts on transient errors (behavioral regression) or falls through on
+/// ENOSPC/RO-FS (wastes network/CPU before failing anyway).
 ///
-/// What: `Writable` — probe succeeded; `PermissionDenied` — the OS rejected the
-/// create with EPERM/EACCES; `Other(e)` — any other I/O error.
+/// What: `Writable` — probe succeeded; `PermissionDenied` — EPERM/EACCES;
+/// `StorageFull` — ENOSPC (no free space; writes at this path will fail);
+/// `ReadOnlyFilesystem` — EROFS (filesystem is read-only; writes will fail);
+/// `Other(e)` — any other I/O error (inconclusive; fall through).
 ///
 /// Test: `tests::probe_writable_temp_dir`, `tests::probe_nonwritable_dir` (unix),
-///       `tests::probe_nonexistent_dir_is_other`.
+///       `tests::classify_storage_full_aborts`,
+///       `tests::classify_read_only_filesystem_aborts`,
+///       `tests::classify_interrupted_is_other`.
 #[derive(Debug)]
 pub enum WriteProbe {
     /// The directory accepted a temp-file create; it is writable.
     Writable,
     /// The OS returned `PermissionDenied`; the directory is not writable.
     PermissionDenied,
+    /// The filesystem has no free space; writes at this location will fail.
+    StorageFull,
+    /// The filesystem is mounted read-only; writes at this location will fail.
+    ReadOnlyFilesystem,
     /// A different I/O error occurred; writability is inconclusive.
     Other(std::io::Error),
+}
+
+/// Classify an `io::Error` from a write probe into the appropriate `WriteProbe`.
+///
+/// Why: Extracting the mapping from `io::ErrorKind` to `WriteProbe` variant makes
+/// the decision logic independently testable without needing to produce rare OS
+/// conditions (ENOSPC, read-only filesystem) in tests.
+///
+/// What: Maps the three "predicts-write-failure" kinds to their named variants;
+/// everything else (e.g. `Interrupted`, `NotFound`) → `WriteProbe::Other` so the
+/// caller falls through to the prebuilt + cargo-fallback path. Uses only stable
+/// `ErrorKind` variants available since Rust 1.83 (well within MSRV 1.91).
+///
+/// Test: `tests::classify_permission_denied_aborts`,
+///       `tests::classify_storage_full_aborts`,
+///       `tests::classify_read_only_filesystem_aborts`,
+///       `tests::classify_interrupted_is_other`.
+pub fn classify_probe_error(e: std::io::Error) -> WriteProbe {
+    match e.kind() {
+        std::io::ErrorKind::PermissionDenied => WriteProbe::PermissionDenied,
+        std::io::ErrorKind::StorageFull => WriteProbe::StorageFull,
+        std::io::ErrorKind::ReadOnlyFilesystem => WriteProbe::ReadOnlyFilesystem,
+        _ => WriteProbe::Other(e),
+    }
 }
 
 /// Probe whether a directory is writable by creating and immediately removing a temp file.
 ///
 /// Why: Mode-bit checks alone are unreliable (ACLs, immutable flags, cross-user
 /// ownership). A create-and-remove probe is the portable, non-destructive way to
-/// confirm actual write access on both macOS and Linux. Returning a tri-state
-/// instead of `bool` preserves the distinction between "denied" (abort) and
-/// "other error" (fall through).
+/// confirm actual write access on both macOS and Linux.
 ///
 /// What: Calls `tempfile::Builder::new().tempfile_in(dir)`. On success the temp
-/// file is removed on drop; returns `WriteProbe::Writable`. On `Err`, inspects
-/// the `io::ErrorKind`: `PermissionDenied` → `WriteProbe::PermissionDenied`;
-/// everything else → `WriteProbe::Other(e)`.
+/// file is removed on drop; returns `WriteProbe::Writable`. On `Err`, delegates
+/// to `classify_probe_error` which maps the three "predicts-write-failure" kinds
+/// to named abort variants and everything else to `WriteProbe::Other`.
 ///
 /// Test: `tests::probe_writable_temp_dir`, `tests::probe_nonwritable_dir` (unix),
 ///       `tests::probe_nonexistent_dir_is_other`.
 pub fn probe_install_dir(dir: &Path) -> WriteProbe {
     match tempfile::Builder::new().tempfile_in(dir) {
         Ok(_) => WriteProbe::Writable,
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::PermissionDenied {
-                WriteProbe::PermissionDenied
-            } else {
-                WriteProbe::Other(e)
-            }
-        }
+        Err(e) => classify_probe_error(e),
     }
 }
 
@@ -76,10 +104,11 @@ pub fn probe_install_dir(dir: &Path) -> WriteProbe {
 /// leveraging the same prebuilt-first strategy as `tctl install`.
 ///
 /// What: Resolves the install directory from `current_exe()` parent (or the
-/// default install dir as fallback), probes the directory — aborting only on
-/// `PermissionDenied` (transient errors fall through), then calls
-/// `try_install_prebuilt("trusty-installer", &dir)` and either prints the
-/// restart hint or falls back to cargo with a truthful install-location message.
+/// default install dir as fallback), probes the directory with `probe_install_dir`
+/// — aborting on `PermissionDenied`, `StorageFull`, and `ReadOnlyFilesystem`
+/// (all predict the subsequent write will fail), falling through on other errors —
+/// then calls `try_install_prebuilt("trusty-installer", &dir)` and either prints
+/// the restart hint or falls back to cargo with a truthful location message.
 ///
 /// Test: `tests::outcome_installed_message`, `tests::probe_nonwritable_dir`,
 ///       `tests::cargo_updated_different_dir`.
@@ -87,13 +116,21 @@ pub fn run(json: bool) -> i32 {
     let narr = narrator(json);
     let install_dir = resolve_install_dir();
 
-    // Up-front writability probe: abort only on PermissionDenied.
-    // Transient errors (ENOSPC, NotADirectory races, etc.) fall through so the
-    // existing prebuilt-attempt + cargo-fallback path can still succeed.
+    // Up-front writability probe: abort on the three error kinds that predict
+    // write failure at this path. Genuinely transient/inconclusive errors fall
+    // through — the prebuilt attempt and cargo fallback already handle failures.
     match probe_install_dir(&install_dir) {
         WriteProbe::Writable => {}
         WriteProbe::PermissionDenied => {
             let _ = narr.error(&unwritable_dir_error(&install_dir));
+            return 1;
+        }
+        WriteProbe::StorageFull => {
+            let _ = narr.error(&storage_full_error(&install_dir));
+            return 1;
+        }
+        WriteProbe::ReadOnlyFilesystem => {
+            let _ = narr.error(&read_only_fs_error(&install_dir));
             return 1;
         }
         WriteProbe::Other(e) => {
@@ -158,6 +195,38 @@ pub fn unwritable_dir_error(dir: &Path) -> String {
         "self-update aborted: install directory `{}` is not writable.\n\
          Fix: run with elevated permissions (e.g. `sudo tctl self-update`), or\n\
          install manually: `cargo install trusty-installer --locked`",
+        dir.display()
+    )
+}
+
+/// Format the error message when the install directory's filesystem is full.
+///
+/// Why: Separated from I/O so unit tests can verify the message text without
+/// actually filling a disk.
+///
+/// What: Returns an actionable error string naming `dir` and the disk-full cause.
+///
+/// Test: `tests::storage_full_error_names_path`.
+pub fn storage_full_error(dir: &Path) -> String {
+    format!(
+        "self-update aborted: not enough free space in `{}`.\n\
+         Free up disk space, then retry: `tctl self-update`",
+        dir.display()
+    )
+}
+
+/// Format the error message when the install directory is on a read-only filesystem.
+///
+/// Why: Separated from I/O so unit tests can verify the message text without
+/// needing a real read-only filesystem mount.
+///
+/// What: Returns an actionable error string naming `dir` and the RO-filesystem cause.
+///
+/// Test: `tests::read_only_fs_error_names_path`.
+pub fn read_only_fs_error(dir: &Path) -> String {
+    format!(
+        "self-update aborted: `{}` is on a read-only filesystem.\n\
+         Remount read-write or install manually: `cargo install trusty-installer --locked`",
         dir.display()
     )
 }
@@ -361,6 +430,79 @@ mod tests {
             matches!(result, WriteProbe::Other(_)),
             "nonexistent path must yield WriteProbe::Other, not PermissionDenied"
         );
+    }
+
+    /// Why: `classify_probe_error` must map `PermissionDenied` → abort, so the
+    ///      pure classification logic is verifiable without a read-only directory.
+    /// What: Constructs a synthetic `PermissionDenied` error, calls
+    ///       `classify_probe_error`, asserts `WriteProbe::PermissionDenied`.
+    /// Test: This is the test.
+    #[test]
+    fn classify_permission_denied_aborts() {
+        let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        assert!(matches!(
+            classify_probe_error(e),
+            WriteProbe::PermissionDenied
+        ));
+    }
+
+    /// Why: `StorageFull` (ENOSPC) predicts that the subsequent prebuilt write and
+    ///      cargo install into the SAME directory will also fail, so falling through
+    ///      wastes work. The classifier must map it to an abort variant.
+    /// What: Constructs a synthetic `StorageFull` error, calls `classify_probe_error`,
+    ///       asserts `WriteProbe::StorageFull`.
+    /// Test: This is the test (does NOT fill a real disk).
+    #[test]
+    fn classify_storage_full_aborts() {
+        let e = std::io::Error::new(std::io::ErrorKind::StorageFull, "no space");
+        assert!(matches!(classify_probe_error(e), WriteProbe::StorageFull));
+    }
+
+    /// Why: `ReadOnlyFilesystem` (EROFS) predicts the same write-failure as
+    ///      StorageFull and PermissionDenied; the classifier must abort, not fall through.
+    /// What: Constructs a synthetic `ReadOnlyFilesystem` error, calls
+    ///       `classify_probe_error`, asserts `WriteProbe::ReadOnlyFilesystem`.
+    /// Test: This is the test (does NOT need a real RO mount).
+    #[test]
+    fn classify_read_only_filesystem_aborts() {
+        let e = std::io::Error::new(std::io::ErrorKind::ReadOnlyFilesystem, "ro");
+        assert!(matches!(
+            classify_probe_error(e),
+            WriteProbe::ReadOnlyFilesystem
+        ));
+    }
+
+    /// Why: Transient errors (e.g. `Interrupted`) must NOT abort the self-update;
+    ///      they must fall through so the prebuilt/cargo path can still succeed.
+    /// What: Constructs a synthetic `Interrupted` error, calls `classify_probe_error`,
+    ///       asserts `WriteProbe::Other` (fall-through decision).
+    /// Test: This is the test.
+    #[test]
+    fn classify_interrupted_is_other() {
+        let e = std::io::Error::new(std::io::ErrorKind::Interrupted, "signal");
+        assert!(matches!(classify_probe_error(e), WriteProbe::Other(_)));
+    }
+
+    /// Why: The storage-full error must name the directory so the user knows
+    ///      exactly where free space is needed.
+    /// What: Calls `storage_full_error` with a synthetic path; asserts the path appears.
+    /// Test: This is the test.
+    #[test]
+    fn storage_full_error_names_path() {
+        let path = PathBuf::from("/usr/local/bin");
+        let msg = storage_full_error(&path);
+        assert!(msg.contains("/usr/local/bin"), "error must name the dir");
+    }
+
+    /// Why: The read-only filesystem error must name the directory and suggest a fix.
+    /// What: Calls `read_only_fs_error` with a synthetic path; asserts both.
+    /// Test: This is the test.
+    #[test]
+    fn read_only_fs_error_names_path() {
+        let path = PathBuf::from("/usr/local/bin");
+        let msg = read_only_fs_error(&path);
+        assert!(msg.contains("/usr/local/bin"), "error must name the dir");
+        assert!(msg.contains("read-only"), "error must mention read-only");
     }
 
     /// Why: The unwritable-dir error must name the directory so the user knows
