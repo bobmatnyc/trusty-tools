@@ -401,6 +401,21 @@ pub struct ManagedSessionSummary {
     /// sessions created outside the in-project spawn path.
     #[serde(default)]
     pub source_id: Option<String>,
+    /// Task description for the session (additive field; absent for legacy records).
+    ///
+    /// Why: the `tm sessions ls` table needs a task column to distinguish sessions
+    /// without attaching; this mirrors the `SessionRecord::task` field now surfaced
+    /// in `SessionSummary`. Old daemon responses without the field deserialize as
+    /// `None`.
+    #[serde(default)]
+    pub task: Option<String>,
+    /// Working directory for the session (additive; absent for legacy records).
+    ///
+    /// Why: `tm sessions info` and the ls table need to show where the session is
+    /// running; this mirrors `SessionRecord::cwd` now surfaced in `SessionSummary`.
+    /// Old daemon responses without the field deserialize as `None`.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).
