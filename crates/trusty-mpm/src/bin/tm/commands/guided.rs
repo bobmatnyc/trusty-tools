@@ -753,10 +753,7 @@ fn find_git_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
     }
     let root = String::from_utf8_lossy(&out.stdout);
     let root = root.trim();
-    if root.is_empty() {
-        return None;
-    }
-    Some(std::path::PathBuf::from(root))
+    (!root.is_empty()).then_some(std::path::PathBuf::from(root))
 }
 
 /// Daemon-unreachable fallback that protects ALL live git checkouts (#1724).
