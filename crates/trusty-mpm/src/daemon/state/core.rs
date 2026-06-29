@@ -535,35 +535,64 @@ impl DaemonState {
         state
     }
 
-    /// Construct test state whose managed sessions use a no-op tmux driver (#1734).
+    /// Construct test state whose managed sessions use a fake no-op tmux driver
+    /// (#1734, #1790).
     ///
-    /// Why: tests that exercise the managed-session API surface (health, managed-list,
-    /// etc.) must not pick up the operator's live tmux sessions. The lazy
-    /// `session_manager()` initialiser calls `RealTmuxDriver::discover()` followed by
-    /// `reconcile_on_boot`, which adopts any `tmpm-*` sessions from the host into the
-    /// store — breaking assertions that expect an empty list on a developer machine
-    /// that has real managed sessions. Pre-seeding the `managed_sessions` OnceCell
-    /// here with a `NoopTmuxDriver`-backed manager prevents that: the cell is already
-    /// full when the first request arrives so `session_manager()` returns the
-    /// pre-built instance without ever calling the real tmux binary or reading the
-    /// operator's `sessions.json`.
-    /// What: calls `with_root(root.clone())` for an isolated framework root (pairing,
+    /// Why: tests that exercise the managed-session API surface must NEVER touch
+    /// the production `~/.trusty-mpm` store nor spawn real `tmpm-*` tmux sessions.
+    ///
+    /// The lazy `session_manager()` initialiser calls `RealTmuxDriver::discover()`
+    /// followed by `reconcile_on_boot`, which (a) adopts any `tmpm-*` sessions from
+    /// the host into the test-owned store and (b) creates real tmux sessions through
+    /// `create_with_id`. Those real sessions escape into the host and get adopted by
+    /// the production daemon's next `reconcile_on_boot`, polluting
+    /// `~/.trusty-mpm/session-manager/sessions.json` with phantom sessions (#1790).
+    ///
+    /// Pre-seeding the `managed_sessions` OnceCell here with a
+    /// `FakeNoopTmuxDriver`-backed manager prevents both failure modes:
+    /// - The cell is already full when the first request fires, so the real tmux
+    ///   binary is never invoked and the operator's `sessions.json` is never read.
+    /// - `FakeNoopTmuxDriver::create_session` returns `Ok(())` without running
+    ///   `tmux`, so tests that seed sessions via `create_with_id` produce record-only
+    ///   state with no real pane on the host.
+    /// - `FakeNoopTmuxDriver::list_sessions` returns an empty list, so
+    ///   `reconcile_on_boot` (not called here) would never adopt real host sessions.
+    ///
+    /// What: asserts `root` is NOT the production `~/.trusty-mpm` (fail-fast guard),
+    /// calls `with_root(root.clone())` for an isolated framework root (pairing,
     /// audit log, optimizer — all under the temp dir), then builds a `SessionManager`
-    /// over `root/session-manager` with `NoopTmuxDriver` and pre-seeds the
+    /// over `root/session-manager` with `FakeNoopTmuxDriver` and pre-seeds the
     /// `managed_sessions` OnceCell before any request fires.
     /// Test: `execute_health_against_test_daemon`,
-    /// `execute_managed_list_against_test_daemon` in `client::executor::tests`.
-    #[cfg(test)]
+    /// `execute_managed_list_against_test_daemon` in `client::executor::tests`;
+    /// all session-manager handler tests in `tests/session_manager_mvp.rs` (#1790).
+    ///
+    /// Note: not gated on `#[cfg(test)]` so that integration tests in `tests/`
+    /// (which compile the library without the `test` cfg) can call it. Never
+    /// called in production binaries.
+    #[doc(hidden)]
     pub async fn with_root_isolated_managed(root: std::path::PathBuf) -> Self {
         use crate::session_manager::SessionManager;
-        use crate::session_manager::real_tmux::NoopTmuxDriver;
+        use crate::session_manager::real_tmux::FakeNoopTmuxDriver;
+
+        // Hard guard: a test must NEVER bind to the production managed store.
+        // Fail loudly here so the culprit test is easy to identify (#1790).
+        if let Some(home) = dirs::home_dir() {
+            let prod_root = home.join(".trusty-mpm");
+            assert_ne!(
+                root, prod_root,
+                "with_root_isolated_managed must NOT point at the production \
+                 store (~/.trusty-mpm). Pass a tempfile::TempDir path instead."
+            );
+        }
+
         let data_dir = root.join("session-manager");
         let _ = tokio::fs::create_dir_all(&data_dir).await;
-        let noop_tmux: std::sync::Arc<dyn crate::session_manager::ManagedTmuxDriver> =
-            std::sync::Arc::new(NoopTmuxDriver);
-        let mgr = SessionManager::new(&data_dir, noop_tmux)
+        let fake_tmux: std::sync::Arc<dyn crate::session_manager::ManagedTmuxDriver> =
+            std::sync::Arc::new(FakeNoopTmuxDriver);
+        let mgr = SessionManager::new(&data_dir, fake_tmux)
             .await
-            .expect("temp-dir noop session store must load");
+            .expect("temp-dir fake-noop session store must load");
         let state = Self::with_root(root);
         let _ = state.managed_sessions.set(std::sync::Arc::new(mgr));
         state
