@@ -40,18 +40,28 @@ pub const REPOS_ROOT_ENV: &str = "TRUSTY_MPM_REPOS_ROOT";
 /// Test: `repos_root_default_ends_with_canonical_segment`.
 pub const DEFAULT_REPOS_DIR: &str = "trusty-mpm-projects";
 
-/// Resolve the absolute root for base clones.
+/// Resolve the absolute root for base clones, with an optional direct override.
 ///
-/// Why: the base-clone path needs ONE answer for "where do managed base clones
-/// live?", with precedence TRUSTY_MPM_REPOS_ROOT env > TRUSTY_MPM_WORKSPACE_ROOT
-/// env > config template > built-in `~/trusty-mpm-projects` (#1803).
-/// What: checks TRUSTY_MPM_REPOS_ROOT first (backward compat), then delegates
-/// to `workspace_root()` from `trusty_tools_config` for the canonical resolution.
-/// Falls back to `/tmp/trusty-mpm-projects` only when the home directory is
-/// unresolvable AND nothing absolute was supplied.
-/// Test: `repos_root_default_ends_with_canonical_segment`.
-pub fn repos_root() -> PathBuf {
+/// Why: tests that control the repos root must not mutate process-wide env vars
+/// (which races other threads). Exposing the override as a parameter lets callers
+/// supply the value directly without `set_var` / `remove_var`.
+/// What: `env_override` wins over the `TRUSTY_MPM_REPOS_ROOT` env var, which
+/// wins over `workspace_root()`. Falls back to `/tmp/trusty-mpm-projects` only
+/// when the home directory is unresolvable AND nothing absolute was supplied.
+/// Test: `repos_root_default_ends_with_canonical_segment`; `base_clone_path_respects_repos_root_override` (integration).
+pub fn repos_root_from(env_override: Option<&str>) -> PathBuf {
     let home = dirs::home_dir();
+
+    // Direct in-process override (highest priority — used by tests to avoid env mutation).
+    if let Some(raw) = env_override {
+        let raw = raw.trim();
+        if !raw.is_empty() {
+            return match &home {
+                Some(h) => expand_tilde_repos(raw, h),
+                None => PathBuf::from(raw),
+            };
+        }
+    }
 
     // TRUSTY_MPM_REPOS_ROOT env override (backward compat, wins over workspace_root).
     if let Ok(raw) = std::env::var(REPOS_ROOT_ENV) {
@@ -68,6 +78,20 @@ pub fn repos_root() -> PathBuf {
     // > config template > ~/trusty-mpm-projects).
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     crate::core::trusty_tools_config::workspace_root(&config)
+}
+
+/// Resolve the absolute root for base clones.
+///
+/// Why: the base-clone path needs ONE answer for "where do managed base clones
+/// live?", with precedence TRUSTY_MPM_REPOS_ROOT env > TRUSTY_MPM_WORKSPACE_ROOT
+/// env > config template > built-in `~/trusty-mpm-projects` (#1803).
+/// What: delegates to [`repos_root_from`] with no in-process override, reading
+/// `TRUSTY_MPM_REPOS_ROOT` from the environment as usual.
+/// Falls back to `/tmp/trusty-mpm-projects` only when the home directory is
+/// unresolvable AND nothing absolute was supplied.
+/// Test: `repos_root_default_ends_with_canonical_segment`.
+pub fn repos_root() -> PathBuf {
+    repos_root_from(None)
 }
 
 /// Expand a leading `~` in a path string to `home`.
@@ -196,16 +220,20 @@ pub fn create_session_worktree(
     Ok(worktree_path)
 }
 
-/// Idempotently add `.worktrees/` to the base clone's `.git/info/exclude`.
+/// Best-effort-idempotent: add `.worktrees/` to the base clone's `.git/info/exclude`.
 ///
 /// Why: per-session worktrees live at `<base>/.worktrees/<session-id>/`; without
 /// a gitignore entry `git status` inside the base clone reports the `.worktrees/`
 /// directory as untracked, polluting the output for every harness that runs there.
 /// Adding to `.git/info/exclude` (not `.gitignore`) keeps the entry local to the
 /// clone and does not affect any committed `.gitignore`.
-/// What: creates `<base>/.git/info/` if absent, then appends `.worktrees/` to
-/// `<base>/.git/info/exclude` unless it is already present (idempotent). Returns
-/// `Ok(())` on success or when the entry already exists; propagates I/O errors.
+/// What: creates `<base>/.git/info/` if absent, then reads the current exclude
+/// file and appends `.worktrees/` only when the entry is absent. The read-then-
+/// append window means concurrent callers racing at first launch may each observe
+/// an absent entry and both append — resulting in a duplicate line. Git tolerates
+/// duplicate patterns (same set is matched), so this is safe; single-caller
+/// invocations are strictly idempotent. Returns `Ok(())` on success or when the
+/// entry already exists; propagates I/O errors.
 /// Test: `ensure_worktrees_gitignored_idempotent`.
 pub fn ensure_worktrees_gitignored(base_path: &Path) -> Result<(), String> {
     let info_dir = base_path.join(".git").join("info");
@@ -382,19 +410,82 @@ mod tests {
     fn session_worktree_path_uses_dot_prefix() {
         // create_session_worktree must place the worktree at <base>/.worktrees/<id>
         // (dot-prefixed) so it is gitignored via .git/info/exclude (#1803).
+        // We call the PRODUCTION function against a real temporary git repository
+        // (with an initial commit so `git worktree add` can branch from HEAD) and
+        // assert: (a) path is under <base>/.worktrees/, (b) ends with session id,
+        // (c) the directory actually exists after the call.
+        //
+        // Non-tautology proof: `expected_parent` is hardcoded as `base.join(".worktrees")`
+        // — NOT derived from production code. If `create_session_worktree` changed
+        // to `base_path.join("worktrees").join(...)` the `starts_with` assertion
+        // would fail because `base/worktrees/<id>` does NOT start with `base/.worktrees`.
         let tmp = tempfile::TempDir::new().expect("tmp dir");
         let base = tmp.path();
+
+        // Initialise a real git repo so `git worktree add` can run.
+        let init = std::process::Command::new("git")
+            .args(["init", base.to_str().expect("base is utf8")])
+            .output()
+            .expect("git init");
+        assert!(
+            init.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+
+        // Configure identity (required for `git commit`).
+        for (k, v) in [("user.email", "test@example.com"), ("user.name", "Test")] {
+            let ok = std::process::Command::new("git")
+                .args(["-C", base.to_str().expect("base is utf8"), "config", k, v])
+                .status()
+                .expect("git config");
+            assert!(ok.success(), "git config {k} failed");
+        }
+
+        // Create an initial commit so HEAD exists and `git worktree add -b` works.
+        std::fs::write(base.join("README"), b"init").expect("write README");
+        let add = std::process::Command::new("git")
+            .args(["-C", base.to_str().expect("base is utf8"), "add", "."])
+            .status()
+            .expect("git add");
+        assert!(add.success(), "git add failed");
+        let commit = std::process::Command::new("git")
+            .args([
+                "-C",
+                base.to_str().expect("base is utf8"),
+                "commit",
+                "-m",
+                "init",
+            ])
+            .status()
+            .expect("git commit");
+        assert!(commit.success(), "git commit failed");
+
+        // Call the production function.
         let id = ManagedSessionId::new();
-        let expected = base.join(".worktrees").join(id.to_string());
-        // We cannot run git worktree add here (no git repo), but we CAN verify
-        // that the PATH FORMULA is correct by reconstructing it:
-        let actual = base.join(".worktrees").join(id.to_string());
-        assert_eq!(actual, expected, ".worktrees/<id> path must match");
-        // Negative: old path ('worktrees/<id>') must NOT be the formula.
-        let old_path = base.join("worktrees").join(id.to_string());
-        assert_ne!(
-            old_path, expected,
-            "new path must differ from the old non-dot-prefixed formula"
+        let worktree_path = create_session_worktree(base, &id)
+            .expect("create_session_worktree must succeed on a real git repo");
+
+        // (a) Path must be under <base>/.worktrees/ — hardcoded, not from production.
+        let expected_parent = base.join(".worktrees");
+        assert!(
+            worktree_path.starts_with(&expected_parent),
+            "worktree must be under <base>/.worktrees/, got {}",
+            worktree_path.display()
+        );
+
+        // (b) Path must end with the session id.
+        assert!(
+            worktree_path.ends_with(id.to_string()),
+            "worktree path must end with session id {id}, got {}",
+            worktree_path.display()
+        );
+
+        // (c) The directory must actually exist (git worktree was created on disk).
+        assert!(
+            worktree_path.is_dir(),
+            "worktree directory must exist on disk, got {}",
+            worktree_path.display()
         );
     }
 
