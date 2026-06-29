@@ -176,7 +176,7 @@ async fn try_show_picker(
     let daemon =
         crate::formatters::info_box::DaemonInfo::from_lock_file().with_count(sessions.len());
     crate::formatters::info_box::print_info_box(&cwd.to_string_lossy(), source_id, false, &daemon);
-    Some(run_tty_picker(client, url, repo_url, &sessions).await)
+    Some(run_tty_picker(client, url, repo_url, source_id, sessions).await)
 }
 
 // ── Project derivation ───────────────────────────────────────────────────────
@@ -282,23 +282,14 @@ pub(crate) fn print_project_context(
     sessions: &[trusty_mpm::client::ManagedSessionSummary],
 ) {
     eprintln!("tm: project:   {source_id}");
-    eprintln!(
-        "tm: workspace: {} (live checkout is NOT touched)",
-        workspace.display()
-    );
+    eprintln!("tm: workspace: {} (live checkout is NOT touched)", workspace.display());
     if sessions.is_empty() {
         eprintln!("tm: sessions:  (none)");
     } else {
         eprintln!("tm: sessions:");
         for (i, s) in sessions.iter().enumerate() {
             let activity = s.last_activity_at.as_deref().unwrap_or("—");
-            eprintln!(
-                "tm:   [{}] {}  state={}  last={}",
-                i + 1,
-                s.name,
-                s.state,
-                activity
-            );
+            eprintln!("tm:   [{}] {}  state={}  last={}", i + 1, s.name, s.state, activity);
         }
     }
 }
@@ -372,63 +363,69 @@ pub(crate) fn parse_picker_choice(line: &str, session_count: usize) -> PickerDec
 /// Interactive numbered picker (TTY mode only).
 ///
 /// Why: a simple numbered menu is the lowest-friction way to resume or launch
-/// without requiring the operator to remember session names or UUIDs.
-/// What: prints the menu, reads one line from stdin, delegates to
-/// [`parse_picker_choice`], and dispatches. Side-effect-free parse logic lives
-/// in `parse_picker_choice` and is unit-tested independently.
+/// without requiring the operator to remember session names or UUIDs. After a
+/// detach, the picker is redisplayed rather than exiting to the shell — the
+/// common "pick → Ctrl-b d → pick again" flow stays in one command.
+/// What: loops: print menu, read one line, dispatch, then re-fetch the session
+/// list so the next iteration shows current state. Exits cleanly on `Quit`,
+/// EOF (Ctrl-D), or unrecognised input; propagates attach/launch errors.
 ///   • `Resume(i)` → [`resume_guided_session`] which handles daemon restart
 ///     when needed and then calls [`tmux_attach`] internally;
 ///   • `LaunchNew` → [`launch_new_session_and_attach`];
-///   • `Quit` / `Unrecognised` → print notice and return `Ok`.
+///   • `Quit` / EOF / `Unrecognised` → print notice and return `Ok`.
 /// Test: `parse_picker_choice` is the testable seam; I/O path is exercised by
 /// manual smoke tests and the e2e suite.
 async fn run_tty_picker(
     client: &reqwest::Client,
     url: &str,
     repo_url: &str,
-    sessions: &[trusty_mpm::client::ManagedSessionSummary],
+    source_id: &str,
+    mut sessions: Vec<trusty_mpm::client::ManagedSessionSummary>,
 ) -> anyhow::Result<()> {
-    eprintln!();
-    let new_idx = sessions.len() + 1;
-    if sessions.is_empty() {
-        eprintln!("tm:   [Enter] launch new session");
-        eprintln!("tm:   [q]     quit");
-    } else {
-        for (i, s) in sessions.iter().enumerate() {
-            // Show "restart" for sessions that are stopped/errored — they have no
-            // live tmux session and will be restarted via the daemon (#1742).
-            let verb = if matches!(s.state.as_str(), "stopped" | "errored") {
-                "restart"
-            } else {
-                "resume"
-            };
-            eprintln!("tm:   [{}] {} {} ({})", i + 1, verb, s.name, s.state);
+    loop {
+        eprintln!();
+        let new_idx = sessions.len() + 1;
+        if sessions.is_empty() {
+            eprintln!("tm:   [Enter] launch new session");
+            eprintln!("tm:   [q]     quit");
+        } else {
+            for (i, s) in sessions.iter().enumerate() {
+                // Show "restart" for sessions that are stopped/errored — they have no
+                // live tmux session and will be restarted via the daemon (#1742).
+                let verb = if matches!(s.state.as_str(), "stopped" | "errored") { "restart" } else { "resume" };
+                eprintln!("tm:   [{}] {} {} ({})", i + 1, verb, s.name, s.state);
+            }
+            eprintln!("tm:   [{new_idx}] launch new session");
+            eprintln!("tm:   [q] quit");
+            eprintln!("tm: default: [1] resume/restart most recent");
         }
-        eprintln!("tm:   [{new_idx}] launch new session");
-        eprintln!("tm:   [q] quit");
-        eprintln!("tm: default: [1] resume/restart most recent");
-    }
-    eprint!("tm: > ");
+        eprint!("tm: > ");
 
-    let mut line = String::new();
-    std::io::stdin()
-        .read_line(&mut line)
-        .context("failed to read choice from stdin")?;
+        let mut line = String::new();
+        let n = std::io::stdin()
+            .read_line(&mut line)
+            .context("failed to read choice from stdin")?;
+        if n == 0 { break; } // EOF (Ctrl-D): exit cleanly.
 
-    match parse_picker_choice(&line, sessions.len()) {
-        PickerDecision::Quit => {
-            eprintln!("tm: quit.");
-            Ok(())
+        match parse_picker_choice(&line, sessions.len()) {
+            PickerDecision::Quit => {
+                eprintln!("tm: quit.");
+                break;
+            }
+            // #1742: route through daemon resume when the session is stopped or its
+            // tmux session is absent — never raw-attach a non-live session.
+            PickerDecision::Resume(i) => resume_guided_session(client, url, &sessions[i]).await?,
+            PickerDecision::LaunchNew => launch_new_session_and_attach(client, url, repo_url).await?,
+            PickerDecision::Unrecognised => {
+                eprintln!("tm: unrecognised choice '{}'; quitting.", line.trim());
+                break;
+            }
         }
-        // #1742: route through daemon resume when the session is stopped or its
-        // tmux session is absent — never raw-attach a non-live session.
-        PickerDecision::Resume(i) => resume_guided_session(client, url, &sessions[i]).await,
-        PickerDecision::LaunchNew => launch_new_session_and_attach(client, url, repo_url).await,
-        PickerDecision::Unrecognised => {
-            eprintln!("tm: unrecognised choice '{}'; quitting.", line.trim());
-            Ok(())
-        }
+
+        // Detached or session ended — re-fetch the list before redisplaying.
+        sessions = list_project_sessions(client, url, source_id).await.context("refresh sessions")?;
     }
+    Ok(())
 }
 
 /// Decide whether a guided resume must restart the session through the daemon.
