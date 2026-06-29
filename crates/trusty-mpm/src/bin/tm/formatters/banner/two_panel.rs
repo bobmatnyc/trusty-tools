@@ -625,7 +625,7 @@ pub(crate) mod tests {
         colored::control::unset_override();
     }
 
-/// Reconnecting state shows the reconnecting label in the wide layout.
+    /// Reconnecting state shows the reconnecting label in the wide layout.
     #[test]
     fn two_panel_reconnecting_shows_indicator() {
         colored::control::set_override(false);

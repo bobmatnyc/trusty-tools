@@ -176,10 +176,10 @@ pub(crate) fn gather_welcome_data(
         });
 
     // Resolve the managed workspace path (`~/trusty-mpm-projects/<owner>/<repo>`).
-    // This is where trusty-mpm manages a clone of the project independently of
-    // the user's live checkout; the banner should show this path rather than the
-    // live cwd.  Falls back to `workdir` when the GitHub identity cannot be
-    // derived (e.g. no git remote).
+    // Since #1590, `tm launch` provisions and opens the tmux session inside this
+    // managed clone, so the banner path matches the real session location.
+    // Falls back to `workdir` when the GitHub identity cannot be derived
+    // (e.g. no git remote).
     let workspace = match &github_path {
         Some(gp) => {
             let cfg = trusty_mpm::core::trusty_tools_config::TrustyToolsConfig::load();
