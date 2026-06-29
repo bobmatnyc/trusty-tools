@@ -1328,3 +1328,46 @@ async fn list_managed_sessions_source_id_filter() {
         "session B must appear in unfiltered list; ids={ids:?}"
     );
 }
+
+/// A GitHub `repo_url` must produce a project-identifiable session name (#1789).
+///
+/// Why: pins the `parse_github_path → gh.repo → build_managed_session_name`
+/// chain at the manager's call site. If `GithubPath.repo` were ever renamed or
+/// `parse_github_path` changed its extraction contract, the manager would
+/// silently fall back to `tmpm-local-<8hex>` with no compile or existing-test
+/// error. This integration test catches that regression without spawning real tmux.
+/// What: creates a managed session with a real GitHub HTTPS `repo_url` via
+/// `SessionManager::create` (backed by a fake tmux driver) and asserts the
+/// resulting `tmux_name` starts with `tmpm-trusty-tools-` (not `tmpm-local-`).
+/// Test: this function IS the test.
+#[tokio::test]
+async fn session_manager_github_repo_url_produces_project_name() {
+    let dir = TempDir::new().unwrap();
+    let tmux = RecordingTmux::new();
+    let mgr = SessionManager::new(dir.path(), tmux)
+        .await
+        .expect("manager");
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/ws")),
+            None,                                                     // no name_hint
+            None,                                                     // no workspace_path
+            Some("https://github.com/bobmatnyc/trusty-tools".into()), // repo_url
+            None,                                                     // no branch
+        )
+        .await
+        .expect("create");
+
+    assert!(
+        record.tmux_name.starts_with("tmpm-trusty-tools-"),
+        "a GitHub repo_url must produce tmpm-<repo>-<8hex>, got: {}",
+        record.tmux_name
+    );
+    assert!(
+        !record.tmux_name.starts_with("tmpm-local-"),
+        "must not fall through to tmpm-local-<8hex> when repo_url is a GitHub URL: {}",
+        record.tmux_name
+    );
+}

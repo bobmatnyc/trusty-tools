@@ -153,11 +153,22 @@ fn slug_project(name: &str) -> String {
 ///   scheme so operators can distinguish "I know which project this is"
 ///   (`tmpm-trusty-tools-abc12345`) from "this is a local directory session"
 ///   (`tmpm-local-abc12345`).
+/// - `project` should be the repo segment only, NOT `owner/repo`. The caller
+///   is responsible for extracting `GithubPath.repo` before calling here. A
+///   pre-slugified input (e.g. the string already from `slugify_component`) is
+///   safe: `slug_project` is idempotent.
 ///
 /// Test: `build_managed_session_name_github_project`,
 /// `build_managed_session_name_none_fallback`,
 /// `build_managed_session_name_sanitized_repo` in the test module.
 pub fn build_managed_session_name(project: Option<&str>, session_id: &uuid::Uuid) -> String {
+    // Guard against callers passing `owner/repo` instead of just `repo`. The
+    // slash would sanitize to a dash and silently produce `owner-repo-<8hex>`,
+    // making the name unrecognisably long. This fires only in dev/test builds.
+    debug_assert!(
+        project.is_none_or(|p| !p.contains('/')),
+        "build_managed_session_name: pass the repo segment only, not owner/repo — got {project:?}"
+    );
     let short_id = &session_id.simple().to_string()[..8];
     match project.map(slug_project) {
         Some(slug) if !slug.is_empty() => format!("{PREFIX}{slug}-{short_id}"),
@@ -247,6 +258,14 @@ mod tests {
         // Any generated name is, by construction, managed.
         let id = Uuid::parse_str("367c6c51-1025-419c-b6d6-be9a753e8914").unwrap();
         assert!(is_managed_session_name(&name_from_uuid(&id)));
+        // Names produced by build_managed_session_name must also be managed.
+        assert!(is_managed_session_name(&build_managed_session_name(
+            Some("trusty-tools"),
+            &id
+        )));
+        assert!(is_managed_session_name(&build_managed_session_name(
+            None, &id
+        )));
     }
 
     #[test]
