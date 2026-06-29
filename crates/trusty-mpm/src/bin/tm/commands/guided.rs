@@ -201,10 +201,7 @@ pub(crate) fn derive_project(
 ) -> Option<(String, std::path::PathBuf, std::path::PathBuf)> {
     use trusty_mpm::daemon::managed_routes::inproject;
     let git_root = find_git_root(cwd)?;
-    let origin_url = inproject::get_origin_url(&git_root)?;
-    if !is_github_remote(&origin_url) {
-        return None;
-    }
+    let origin_url = inproject::get_origin_url(&git_root).filter(|u| is_github_remote(u))?;
     let gh = trusty_common::github_path::parse_github_path(&origin_url)?;
     let source_id = format!("{}/{}", gh.owner, gh.repo);
     let workspace = inproject::base_clone_path(&gh.owner, &gh.repo);
@@ -261,10 +258,8 @@ pub(crate) fn tty_gate(
     print_project_context(source_id, workspace, sessions);
     if !is_tty {
         print_non_tty_hint(source_id, sessions);
-        false
-    } else {
-        true
     }
+    is_tty
 }
 
 /// Print the detected project and session list to stderr.
@@ -282,14 +277,22 @@ pub(crate) fn print_project_context(
     sessions: &[trusty_mpm::client::ManagedSessionSummary],
 ) {
     eprintln!("tm: project:   {source_id}");
-    eprintln!("tm: workspace: {} (live checkout is NOT touched)", workspace.display());
+    eprintln!(
+        "tm: workspace: {} (live checkout is NOT touched)",
+        workspace.display()
+    );
     if sessions.is_empty() {
         eprintln!("tm: sessions:  (none)");
     } else {
         eprintln!("tm: sessions:");
         for (i, s) in sessions.iter().enumerate() {
             let activity = s.last_activity_at.as_deref().unwrap_or("—");
-            eprintln!("tm:   [{}] {}  state={}  last={}", i + 1, s.name, s.state, activity);
+            eprintln!(
+                "tm:   [{}] {}  state={}  last={activity}",
+                i + 1,
+                s.name,
+                s.state
+            );
         }
     }
 }
@@ -392,7 +395,8 @@ async fn run_tty_picker(
             for (i, s) in sessions.iter().enumerate() {
                 // Show "restart" for sessions that are stopped/errored — they have no
                 // live tmux session and will be restarted via the daemon (#1742).
-                let verb = if matches!(s.state.as_str(), "stopped" | "errored") { "restart" } else { "resume" };
+                let stopped = matches!(s.state.as_str(), "stopped" | "errored");
+                let verb = if stopped { "restart" } else { "resume" };
                 eprintln!("tm:   [{}] {} {} ({})", i + 1, verb, s.name, s.state);
             }
             eprintln!("tm:   [{new_idx}] launch new session");
@@ -405,7 +409,9 @@ async fn run_tty_picker(
         let n = std::io::stdin()
             .read_line(&mut line)
             .context("failed to read choice from stdin")?;
-        if n == 0 { break; } // EOF (Ctrl-D): exit cleanly.
+        if n == 0 {
+            break;
+        } // EOF (Ctrl-D): exit cleanly.
 
         match parse_picker_choice(&line, sessions.len()) {
             PickerDecision::Quit => {
@@ -415,7 +421,9 @@ async fn run_tty_picker(
             // #1742: route through daemon resume when the session is stopped or its
             // tmux session is absent — never raw-attach a non-live session.
             PickerDecision::Resume(i) => resume_guided_session(client, url, &sessions[i]).await?,
-            PickerDecision::LaunchNew => launch_new_session_and_attach(client, url, repo_url).await?,
+            PickerDecision::LaunchNew => {
+                launch_new_session_and_attach(client, url, repo_url).await?
+            }
             PickerDecision::Unrecognised => {
                 eprintln!("tm: unrecognised choice '{}'; quitting.", line.trim());
                 break;
@@ -423,7 +431,9 @@ async fn run_tty_picker(
         }
 
         // Detached or session ended — re-fetch the list before redisplaying.
-        sessions = list_project_sessions(client, url, source_id).await.context("refresh sessions")?;
+        sessions = list_project_sessions(client, url, source_id)
+            .await
+            .context("re-fetch")?;
     }
     Ok(())
 }
@@ -616,9 +626,7 @@ fn tmux_attach(name: &str) -> anyhow::Result<()> {
         .args(["attach-session", "-t", name])
         .status()
         .context("failed to invoke tmux")?;
-    if !status.success() {
-        anyhow::bail!("tmux attach-session exited with failure");
-    }
+    anyhow::ensure!(status.success(), "tmux attach-session exited with failure");
     Ok(())
 }
 
@@ -665,9 +673,10 @@ async fn launch_new_session_and_attach(
         .json()
         .await
         .context("failed to parse managed spawn response")?;
-    if body.name.is_empty() {
-        anyhow::bail!("daemon returned empty session name from managed spawn");
-    }
+    anyhow::ensure!(
+        !body.name.is_empty(),
+        "daemon returned empty session name from managed spawn"
+    );
     if first_run.is_some() {
         eprintln!("tm: clone complete — workspace ready");
     }
@@ -744,10 +753,8 @@ fn find_git_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
         .arg(cwd)
         .args(["rev-parse", "--show-toplevel"])
         .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
+        .ok()
+        .filter(|o| o.status.success())?;
     let root = String::from_utf8_lossy(&out.stdout);
     let root = root.trim();
     (!root.is_empty()).then_some(std::path::PathBuf::from(root))

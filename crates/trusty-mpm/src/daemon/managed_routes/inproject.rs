@@ -121,9 +121,14 @@ pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), Strin
         })?;
     }
 
+    // Use the parent of base_path (just created above) as cwd so a deleted
+    // inherited cwd cannot cause git to fail at startup with "fatal: Unable to
+    // read current working directory" (exit 128) → HTTP 500 on managed-spawn.
+    let cwd = base_path.parent().unwrap_or(std::path::Path::new("/"));
     let out = std::process::Command::new("git")
         .args(["clone", "--no-local", origin_url])
         .arg(base_path)
+        .current_dir(cwd)
         .output()
         .map_err(|e| format!("inproject: git clone failed to spawn: {e}"))?;
 

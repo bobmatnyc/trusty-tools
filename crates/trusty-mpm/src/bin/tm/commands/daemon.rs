@@ -132,8 +132,11 @@ pub(crate) async fn start(client: &reqwest::Client, url: &str) -> anyhow::Result
     // Remove any stale lock file before spawning so we can detect the new write.
     let _ = std::fs::remove_file(&lock_path);
     let exe = std::env::current_exe()?;
+    // Set a stable cwd so the spawned daemon never inherits a deleted directory.
+    let stable_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
     std::process::Command::new(&exe)
         .arg("daemon")
+        .current_dir(&stable_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(stdout))
         .stderr(std::process::Stdio::from(stderr))
