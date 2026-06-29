@@ -131,6 +131,61 @@ impl ManagedTmuxDriver for NoopTmuxDriver {
     }
 }
 
+/// A silent no-op tmux driver used in tests that need to create session records
+/// without spawning any real tmux process.
+///
+/// Why: tests that exercise session-manager business logic (lifecycle transitions,
+/// route handlers, prune/decommission) must not spawn real `tmpm-*` tmux
+/// sessions. Real sessions created by tests escape into the host and get adopted
+/// by the production daemon's `reconcile_on_boot`, polluting `~/.trusty-mpm`
+/// with phantom sessions (issue #1790). `NoopTmuxDriver` is the production
+/// "tmux unavailable" fallback and intentionally returns `Err` on `create_session`
+/// — the wrong behavior for tests that call `create_with_id`. This driver instead
+/// accepts every mutating call as a silent no-op so session records can be seeded
+/// freely without touching real tmux.
+/// What: `create_session` and `kill_session` return `Ok(())` silently; `send_line`
+/// returns `Ok(())` silently; `capture` returns an empty string; `list_sessions`
+/// returns an empty list so `reconcile_on_boot` sees no live sessions and marks
+/// stored records `Stopped` (never adopts real host sessions).
+/// Test: used by [`DaemonState::with_root_isolated_managed`] — the sole test
+/// constructor that pre-seeds the `managed_sessions` OnceCell so the lazy
+/// initialiser never touches the real tmux binary.
+///
+/// Note: compiled unconditionally under the `daemon` feature (not `#[cfg(test)]`)
+/// so integration tests in `tests/` can reference it; never called in production.
+#[doc(hidden)]
+pub struct FakeNoopTmuxDriver;
+
+impl ManagedTmuxDriver for FakeNoopTmuxDriver {
+    fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+
+    fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+
+    fn send_line(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+
+    fn send_keys_literal(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+
+    fn send_interrupt(&self, _name: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+        Ok(String::new())
+    }
+
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        Ok(Vec::new())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,5 +195,28 @@ mod tests {
         // Construction only succeeds when `tmux` is on PATH; in CI it may not be,
         // so we only assert the call does not panic and returns a typed result.
         let _ = RealTmuxDriver::discover();
+    }
+
+    #[test]
+    fn fake_noop_driver_accepts_create_session() {
+        // Why: regression guard that FakeNoopTmuxDriver::create_session returns
+        // Ok so test code that seeds session records never hits TmuxUnavailable.
+        let driver = FakeNoopTmuxDriver;
+        assert!(
+            driver.create_session("tmpm-test-abc123", "/tmp").is_ok(),
+            "FakeNoopTmuxDriver::create_session must succeed"
+        );
+    }
+
+    #[test]
+    fn fake_noop_driver_list_sessions_is_empty() {
+        // Why: list_sessions must return empty so reconcile_on_boot never adopts
+        // real host sessions into the test-owned store.
+        let driver = FakeNoopTmuxDriver;
+        let sessions = driver.list_sessions().expect("list_sessions ok");
+        assert!(
+            sessions.is_empty(),
+            "FakeNoopTmuxDriver must see no live sessions"
+        );
     }
 }

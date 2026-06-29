@@ -41,3 +41,9 @@ pub use store::{SessionStore, StoreError};
 
 #[cfg(feature = "daemon")]
 pub use real_tmux::RealTmuxDriver;
+
+// FakeNoopTmuxDriver is compiled unconditionally under `daemon` (not #[cfg(test)])
+// so that integration tests in `tests/` can reference it via
+// `DaemonState::with_root_isolated_managed`. It is never called in production.
+#[cfg(feature = "daemon")]
+pub use real_tmux::FakeNoopTmuxDriver;
