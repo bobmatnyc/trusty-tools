@@ -299,7 +299,8 @@ mod tests {
             to_command(&SessionAction::Ls {
                 json: false,
                 source_id: None,
-                current: false
+                current: false,
+                all: false,
             }),
             Some(TrustyCommand::ManagedList)
         ));

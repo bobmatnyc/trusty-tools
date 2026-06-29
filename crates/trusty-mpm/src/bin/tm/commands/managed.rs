@@ -44,6 +44,36 @@ pub(crate) fn deprecation_notice(old: &str, new: &str) {
     eprintln!("{}", deprecation_message(old, new));
 }
 
+/// Return true when a session state should be shown in the default picker/list view.
+///
+/// Why: decommissioned tombstones accumulate without bound (#1809); operators
+/// don't want 230+ dead records cluttering the picker and `tm sessions ls`. This
+/// predicate is the single source of truth for which states are "live" so the
+/// picker and the `sessions list` table use identical logic.
+/// What: returns `false` for `"decommissioned"` (the sole dead/tombstone state);
+/// returns `true` for every other state (active, provisioning, stopped, errored).
+/// Test: `picker_filter_excludes_decommissioned_keeps_active` in
+/// `tests_behavior_c_tests.rs`.
+pub(crate) fn is_live_session_state(state: &str) -> bool {
+    state != "decommissioned"
+}
+
+/// Filter a session list to only live sessions for display in the picker (#1809).
+///
+/// Why: the picker must never show decommissioned tombstones by default; the
+/// `--all` opt-in re-enables them for `tm sessions ls` via this module's path.
+/// What: retains only sessions whose `state` passes `is_live_session_state`.
+/// Test: `picker_filter_excludes_decommissioned_keeps_active` in
+/// `tests_behavior_c_tests.rs`.
+pub(crate) fn filter_live_sessions(
+    sessions: Vec<ManagedSessionSummary>,
+) -> Vec<ManagedSessionSummary> {
+    sessions
+        .into_iter()
+        .filter(|s| is_live_session_state(&s.state))
+        .collect()
+}
+
 /// `tm sessions ls` — list managed sessions.
 ///
 /// Why: operators need a quick view of every managed session and its pending
@@ -51,15 +81,20 @@ pub(crate) fn deprecation_notice(old: &str, new: &str) {
 /// What: GETs `/api/v1/sessions/managed` (with an optional `?source_id=` filter
 /// that the daemon already supports) and prints a table with id, state, name,
 /// task (truncated to 30 chars), and created_at; or raw JSON with `--json`.
-/// The filter is passed straight through as a query parameter rather than doing
-/// client-side filtering so callers get the daemon's authoritative view.
+/// By default, decommissioned tombstone sessions are hidden from the table (#1809);
+/// `--all` (i.e. `all=true`) opts in to the full unfiltered list. The `--json`
+/// path always returns the raw daemon response unfiltered.
+/// The source_id filter is passed straight through as a query parameter rather
+/// than doing client-side filtering so callers get the daemon's authoritative view.
 /// Test: HTTP path covered by the integration test; filter logic unit-tested by
-/// `ls_source_id_filter_selects_correct_slug`.
+/// `ls_source_id_filter_selects_correct_slug`,
+/// `picker_filter_excludes_decommissioned_keeps_active`.
 pub(crate) async fn session_ls(
     client: &reqwest::Client,
     url: &str,
     json: bool,
     source_id: Option<&str>,
+    all: bool,
 ) -> anyhow::Result<()> {
     // Build the request URL, appending ?source_id= when a filter is active.
     let endpoint = format!("{url}/api/v1/sessions/managed");
@@ -72,10 +107,20 @@ pub(crate) async fn session_ls(
     // the table path deserializes the SAME text rather than issuing a second GET.
     let raw = req.send().await?.error_for_status()?.text().await?;
     if json {
+        // Raw JSON passthrough is always unfiltered — scripts rely on byte-for-byte.
         println!("{raw}");
         return Ok(());
     }
-    let sessions = serde_json::from_str::<trusty_mpm::client::ManagedListResponse>(&raw)?.sessions;
+    let fetched = serde_json::from_str::<trusty_mpm::client::ManagedListResponse>(&raw)?.sessions;
+    // #1809: filter decommissioned tombstones from the default table view.
+    let sessions: Vec<_> = if all {
+        fetched
+    } else {
+        fetched
+            .into_iter()
+            .filter(|s| is_live_session_state(&s.state))
+            .collect()
+    };
     if sessions.is_empty() {
         if let Some(sid) = source_id {
             println!("no managed sessions for {sid}");

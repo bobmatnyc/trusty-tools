@@ -203,6 +203,35 @@ pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
     }
 }
 
+/// Print the two-panel daily banner for the no-subcommand `tm` guided flow (#1808).
+///
+/// Why: the daily `tm` banner should visually match `tm banner` — version in the
+/// title bar (not as a separate content row), 24-row clipped art, and
+/// project/workspace fields — instead of the compact 3-row LOGO via
+/// `render_welcome_panel`. No screen-clear and no sleep since the session picker
+/// follows immediately below. Non-TTY callers are already gated out by `tty_gate`
+/// before this is invoked.
+/// What: builds `WelcomeData` from `workdir` (derives github project + workspace),
+/// renders via `render_two_panel_banner`, and prints to stdout. On very narrow
+/// terminals (<MIN_WIDTH_BOX cols) prints a one-line plain-text fallback.
+/// Test: `daily_banner_two_panel_version_in_title_bar` in `tests.rs`.
+pub(crate) fn print_daily_banner(workdir: &str, daemon: &super::info_box::DaemonInfo) {
+    let w = terminal_width();
+    // Rebuild DaemonInfo by value (no Clone on purpose — same pattern as print_info_box).
+    let d = super::info_box::DaemonInfo {
+        addr: daemon.addr.clone(),
+        online: daemon.online,
+        session_count: daemon.session_count,
+    };
+    let data = super::info_box::gather_welcome_data(workdir, "", false, d, None);
+    if let Some(panel) = two_panel::render_two_panel_banner(&data, w, false) {
+        print!("\n{panel}");
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    } else {
+        println!("Trusty MPM v{}", env!("CARGO_PKG_VERSION"));
+    }
+}
+
 /// Print the banner to stdout for preview — no screen-clear, no sleep.
 ///
 /// Why: `tm banner` lets the operator eyeball the colored image + welcome panel

@@ -11,7 +11,10 @@
 
 use unicode_width::UnicodeWidthStr as _;
 
-use super::{DaemonInfo, LOGO, LOGO_COLS, WelcomeData};
+use super::{DaemonInfo, WelcomeData};
+// LOGO / LOGO_COLS are only used by render_welcome_panel which is test-only.
+#[cfg(test)]
+use super::{LOGO, LOGO_COLS};
 
 // ── Public render entry point ─────────────────────────────────────────────────
 
@@ -24,6 +27,9 @@ use super::{DaemonInfo, LOGO, LOGO_COLS, WelcomeData};
 /// TM commands cheat-sheet. Width adapts to the longest content line.
 /// Test: `welcome_panel_renders_online`, `welcome_panel_renders_offline`,
 /// `welcome_panel_renders_reconnecting`, `welcome_panel_shows_commits`.
+/// Note: kept for test coverage of `build_rows`; production path uses the
+/// two-panel compositor via `render_info_box_rows` + `banner::two_panel`.
+#[cfg(test)]
 pub(crate) fn render_welcome_panel(data: &WelcomeData) -> String {
     let rows = build_rows(data);
     let right_w = rows.iter().map(|r| display_len(r)).max().unwrap_or(30);
@@ -177,6 +183,8 @@ pub(crate) fn display_len(s: &str) -> usize {
 /// What: appends `(width - display_len(s))` spaces; returns `s` unchanged
 /// when already ≥ `width` columns.
 /// Test: indirectly by render tests.
+/// Note: only called from `render_welcome_panel` which is test-only.
+#[cfg(test)]
 pub(crate) fn pad_to(s: &str, width: usize) -> String {
     let len = display_len(s);
     if len >= width {

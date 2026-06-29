@@ -4,9 +4,12 @@
 //! service status, and command reminders) before tmux takes over the terminal;
 //! a compact `╭─╮` box conveys that without the old full-screen screen-wipe.
 //! What: `WelcomeData` holds all panel data; `gather_welcome_data` does bounded
-//! probes (≤150 ms each); `render_welcome_panel` builds the box string (pure);
-//! `print_welcome_panel` = gather + render + flush + sleep. `DaemonInfo` reads
-//! the lock file and optionally probes the HTTP API.
+//! probes (≤150 ms each); `render_welcome_panel` builds the box string (pure).
+//! `DaemonInfo` reads the lock file and optionally probes the HTTP API.
+//! The no-subcommand `tm` daily banner uses `banner::print_daily_banner` which
+//! routes through `render_two_panel_banner` instead of the compact LOGO path
+//! (#1808). `print_launch_banner` / `print_launch_banner_reconnecting` in
+//! `banner/mod.rs` handle `tm launch` and `tm connect` banners.
 //! Test: `welcome_panel_renders_*` in `render.rs`; `probe_*` in `probes.rs`;
 //! backward-compat `info_box_renders_*` in the inline tests below.
 
@@ -14,7 +17,6 @@ mod probes;
 pub(crate) mod render;
 
 use std::path::Path;
-use std::time::Duration;
 
 // ── Logo ──────────────────────────────────────────────────────────────────────
 
@@ -23,6 +25,8 @@ use std::time::Duration;
 /// Why: fills the left column of the panel, giving `tm` a visual identity.
 /// What: block-drawing characters space-padded to a uniform 13-column width.
 /// Test: `welcome_panel_renders_online` checks the box renders without panic.
+/// Only consumed by the test-only `render_welcome_panel` box renderer.
+#[cfg(test)]
 pub(crate) const LOGO: [&str; 3] = [
     "▐▛███▜▌      ", // 7 display cols + 6 spaces = 13
     "▝▜█████▛▘    ", // 9 display cols + 4 spaces = 13
@@ -30,6 +34,8 @@ pub(crate) const LOGO: [&str; 3] = [
 ];
 
 /// Display-column width of each logo line.
+/// Only consumed by the test-only `render_welcome_panel` box renderer.
+#[cfg(test)]
 pub(crate) const LOGO_COLS: usize = 13;
 
 // ── DaemonInfo ────────────────────────────────────────────────────────────────
@@ -220,49 +226,6 @@ pub(crate) fn gather_welcome_data(
         search_status,
         review_status,
     }
-}
-
-// ── Print entry points ────────────────────────────────────────────────────────
-
-/// Print the welcome panel to stdout, flush, and pause 1 second.
-///
-/// Why: the panel must be visible before tmux takes over the terminal; the
-/// 1-second pause gives the operator time to read it (#1743).
-/// What: calls `gather_welcome_data`, then `render_welcome_panel`, prints
-/// the result to stdout, flushes, and sleeps 1 s.
-/// Test: `welcome_panel_renders_online` (no panic; sleep not unit-tested).
-pub(crate) fn print_welcome_panel(
-    workdir: &str,
-    session_name: &str,
-    reconnecting: bool,
-    daemon: DaemonInfo,
-) {
-    let data = gather_welcome_data(workdir, session_name, reconnecting, daemon, None);
-    print!("{}", render::render_welcome_panel(&data));
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-    std::thread::sleep(Duration::from_secs(1));
-}
-
-/// Backward-compatible alias — calls `print_welcome_panel`.
-///
-/// Why: existing call sites in `launch.rs` and `guided.rs` use `print_info_box`;
-/// this alias avoids touching those call sites in the same commit.
-/// What: delegates directly to `print_welcome_panel` with identical parameters.
-/// Test: covered by the same paths as `print_welcome_panel`.
-pub(crate) fn print_info_box(
-    workdir: &str,
-    session_name: &str,
-    reconnecting: bool,
-    daemon: &DaemonInfo,
-) {
-    // Rebuild DaemonInfo from its fields (no Clone derive on purpose — keeps the
-    // struct lean; the call sites always have a fresh DaemonInfo).
-    let d = DaemonInfo {
-        addr: daemon.addr.clone(),
-        online: daemon.online,
-        session_count: daemon.session_count,
-    };
-    print_welcome_panel(workdir, session_name, reconnecting, d);
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────

@@ -434,13 +434,14 @@ pub(crate) async fn session(
             json,
             source_id,
             current,
+            all,
         } => {
             let sid: Option<String> = if current {
                 derive_source_id_from_cwd()
             } else {
                 source_id
             };
-            crate::commands::managed::session_ls(client, url, json, sid.as_deref()).await?
+            crate::commands::managed::session_ls(client, url, json, sid.as_deref(), all).await?
         }
         // `activity` stays on the raw path: its CLI output carries confidence,
         // token, cache, and latency detail that `CommandResult::ManagedActivity`

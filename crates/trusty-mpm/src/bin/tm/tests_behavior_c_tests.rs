@@ -30,6 +30,7 @@ use crate::commands::guided::{
     needs_restart, non_github_refusal_message, parse_picker_choice, print_non_tty_hint,
     print_project_context, tty_gate,
 };
+use crate::commands::managed::{filter_live_sessions, is_live_session_state};
 
 // ── parse_picker_choice ───────────────────────────────────────────────────────
 
@@ -923,4 +924,183 @@ fn guided_non_github_refusal_message_reassures_live_checkout_untouched() {
         msg.contains("not touched"),
         "refusal must use the phrase 'not touched': {msg}"
     );
+}
+
+// ── #1809: decommissioned-tombstone filter ────────────────────────────────────
+
+#[test]
+fn picker_filter_live_state_excludes_decommissioned() {
+    // Why (#1809): `is_live_session_state` is the canonical predicate for
+    // "should this session appear in the picker / sessions list by default?".
+    // Test: concrete state → expected bool, not derived from the same expression.
+    assert!(
+        !is_live_session_state("decommissioned"),
+        "decommissioned must be excluded from default view"
+    );
+    // Active sessions must always be visible.
+    assert!(
+        is_live_session_state("active"),
+        "active must be included in default view"
+    );
+    // Stopped/errored sessions can still be resumed — they must show.
+    assert!(
+        is_live_session_state("stopped"),
+        "stopped must be included in default view"
+    );
+    assert!(
+        is_live_session_state("errored"),
+        "errored must be included in default view"
+    );
+    // Provisioning sessions are in-flight — they must show.
+    assert!(
+        is_live_session_state("provisioning"),
+        "provisioning must be included in default view"
+    );
+}
+
+#[test]
+fn picker_filter_excludes_decommissioned_keeps_active() {
+    // Why (#1809): `filter_live_sessions` must drop decommissioned tombstones and
+    // retain all other states. We construct a mixed slice and assert concrete counts
+    // and membership — not the same expression used to compute the filter.
+    let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
+        serde_json::from_value(serde_json::json!([
+            { "id": "a1", "name": "sess-active",        "state": "active" },
+            { "id": "b2", "name": "sess-dead-1",        "state": "decommissioned" },
+            { "id": "c3", "name": "sess-stopped",       "state": "stopped" },
+            { "id": "d4", "name": "sess-dead-2",        "state": "decommissioned" },
+            { "id": "e5", "name": "sess-provisioning",  "state": "provisioning" },
+        ]))
+        .expect("test data must deserialize");
+
+    let filtered = filter_live_sessions(sessions);
+
+    // Exactly 3 of the 5 sessions survive the filter.
+    assert_eq!(
+        filtered.len(),
+        3,
+        "filter must keep exactly 3 live sessions (active, stopped, provisioning)"
+    );
+    // Active session must be present.
+    assert!(
+        filtered.iter().any(|s| s.state == "active"),
+        "active session must survive filter"
+    );
+    // Stopped session must be present (can be resumed).
+    assert!(
+        filtered.iter().any(|s| s.state == "stopped"),
+        "stopped session must survive filter"
+    );
+    // Provisioning session must be present (in-flight).
+    assert!(
+        filtered.iter().any(|s| s.state == "provisioning"),
+        "provisioning session must survive filter"
+    );
+    // Neither decommissioned session must appear.
+    assert!(
+        !filtered.iter().any(|s| s.state == "decommissioned"),
+        "decommissioned tombstones must be excluded"
+    );
+}
+
+#[test]
+fn picker_filter_all_live_sessions_unchanged() {
+    // Why: when no sessions are decommissioned, `filter_live_sessions` must
+    // return all sessions unchanged — no unexpected truncation.
+    let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
+        serde_json::from_value(serde_json::json!([
+            { "id": "x1", "name": "sess-a", "state": "active" },
+            { "id": "x2", "name": "sess-b", "state": "stopped" },
+            { "id": "x3", "name": "sess-c", "state": "errored" },
+        ]))
+        .expect("test data must deserialize");
+
+    let filtered = filter_live_sessions(sessions);
+    assert_eq!(
+        filtered.len(),
+        3,
+        "all-live input must pass through unchanged (3 sessions)"
+    );
+}
+
+#[test]
+fn picker_filter_all_decommissioned_returns_empty() {
+    // Why: if every session is decommissioned, the picker must show an empty list
+    // (not crash or return some sessions).
+    let sessions: Vec<trusty_mpm::client::ManagedSessionSummary> =
+        serde_json::from_value(serde_json::json!([
+            { "id": "z1", "name": "old-1", "state": "decommissioned" },
+            { "id": "z2", "name": "old-2", "state": "decommissioned" },
+        ]))
+        .expect("test data must deserialize");
+
+    let filtered = filter_live_sessions(sessions);
+    assert!(
+        filtered.is_empty(),
+        "all-decommissioned input must produce empty list"
+    );
+}
+
+// ── #1808: daily banner uses two-panel renderer ───────────────────────────────
+
+#[test]
+fn daily_banner_two_panel_version_in_title_bar_not_content() {
+    // Why (#1808): the daily `tm` banner must use `render_two_panel_banner`
+    // so the version appears in the title bar (first line, starts with ╭) and
+    // NOT as a separate content row. The compact `render_welcome_panel` path
+    // always puts `"trusty-mpm vX.Y.Z"` in the first content row, which is the
+    // old behaviour we are replacing.
+    // What: builds WelcomeData (same shape the daily banner path uses) and checks
+    // the two-panel output for the invariants that distinguish the new path.
+    use crate::formatters::banner::two_panel::{render_two_panel_banner, strip_ansi};
+    use crate::formatters::info_box::{DaemonInfo, WelcomeData};
+
+    colored::control::set_override(false);
+    let data = WelcomeData {
+        project: "owner/repo".to_string(),
+        workspace: "/home/alice/trusty-mpm-projects/owner/repo".to_string(),
+        user: "alice".to_string(),
+        reconnecting: false,
+        session_name: String::new(),
+        daemon: DaemonInfo::default(),
+        recent_commits: vec![],
+        memory_status: "(not detected)".to_string(),
+        search_status: "(not detected)".to_string(),
+        review_status: "(not detected)".to_string(),
+    };
+
+    let version = env!("CARGO_PKG_VERSION");
+    let banner =
+        render_two_panel_banner(&data, 120, false).expect("120-col terminal must produce banner");
+    let bare = strip_ansi(&banner);
+
+    // 1. Version appears exactly once — in the title bar, never in content rows.
+    let count = bare.matches(version).count();
+    assert_eq!(
+        count, 1,
+        "version must appear exactly once (title bar only); found {count}"
+    );
+
+    // 2. First line (title bar) starts with ╭ and contains the version.
+    let first = bare.lines().next().unwrap_or("");
+    assert!(
+        first.starts_with('╭'),
+        "title bar must start with ╭: {first:?}"
+    );
+    assert!(
+        first.contains(version),
+        "title bar must contain the version: {first:?}"
+    );
+
+    // 3. Content rows must NOT contain the version string as a standalone line.
+    // (The title bar is line 0; content rows follow.)
+    for (i, line) in bare.lines().enumerate().skip(1) {
+        // Content lines must not reproduce the version outside the border.
+        let inner = line.trim_start_matches('│').trim_end_matches('│').trim();
+        assert!(
+            !inner.starts_with(&format!("trusty-mpm v{version}")),
+            "content row {i} must not carry the version line: {line:?}"
+        );
+    }
+    colored::control::unset_override();
 }
