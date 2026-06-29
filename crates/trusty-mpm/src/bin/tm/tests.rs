@@ -287,11 +287,12 @@ fn fallback_session_name_uses_folder() {
 fn launch_banner_does_not_panic() {
     // Why: the banner does width math and probes PATH; exercise it to catch
     // arithmetic underflow or formatting regressions.
-    print_launch_banner("/Users/test/project", "tmpm-quiet-falcon", None);
+    print_launch_banner("/Users/test/project", "tmpm-quiet-falcon", None, None);
     print_launch_banner(
         "/Users/test/project",
         "tmpm-quiet-falcon",
         Some(std::path::Path::new("/tmp/system-prompt.txt")),
+        None,
     );
 }
 

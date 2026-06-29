@@ -159,10 +159,12 @@ pub(crate) fn print_launch_banner(
     workdir: &str,
     tmux_name: &str,
     _prompt_path: Option<&std::path::Path>,
+    managed_path: Option<&std::path::Path>,
 ) {
     let w = terminal_width();
     let daemon = super::info_box::DaemonInfo::from_lock_file();
-    let data = super::info_box::gather_welcome_data(workdir, tmux_name, false, daemon);
+    let data =
+        super::info_box::gather_welcome_data(workdir, tmux_name, false, daemon, managed_path);
 
     if let Some(panel) = two_panel::render_two_panel_banner(&data, w, false) {
         println!("\x1B[2J\x1B[1;1H");
@@ -187,7 +189,7 @@ pub(crate) fn print_launch_banner(
 pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
     let w = terminal_width();
     let daemon = super::info_box::DaemonInfo::from_lock_file();
-    let data = super::info_box::gather_welcome_data(workdir, tmux_name, true, daemon);
+    let data = super::info_box::gather_welcome_data(workdir, tmux_name, true, daemon, None);
 
     if let Some(panel) = two_panel::render_two_panel_banner(&data, w, true) {
         println!("\x1B[2J\x1B[1;1H");
@@ -217,7 +219,8 @@ pub(crate) fn print_banner_preview(reconnecting: bool) {
         .unwrap_or_else(|_| ".".to_string());
     let session_name = fallback_session_name(std::path::Path::new(&workdir));
     let daemon = super::info_box::DaemonInfo::from_lock_file();
-    let data = super::info_box::gather_welcome_data(&workdir, &session_name, reconnecting, daemon);
+    let data =
+        super::info_box::gather_welcome_data(&workdir, &session_name, reconnecting, daemon, None);
 
     if let Some(panel) = two_panel::render_two_panel_banner(&data, w, reconnecting) {
         print!("\n{panel}");

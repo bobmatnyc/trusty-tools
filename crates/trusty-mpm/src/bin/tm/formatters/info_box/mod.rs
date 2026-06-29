@@ -159,6 +159,7 @@ pub(crate) fn gather_welcome_data(
     session_name: &str,
     reconnecting: bool,
     daemon: DaemonInfo,
+    managed_path: Option<&Path>,
 ) -> WelcomeData {
     let workdir_path = Path::new(workdir);
 
@@ -175,18 +176,27 @@ pub(crate) fn gather_welcome_data(
                 .unwrap_or_else(|| workdir.to_string())
         });
 
-    // Resolve the managed workspace path (`~/trusty-mpm-projects/<owner>/<repo>`).
-    // Since #1590, `tm launch` provisions and opens the tmux session inside this
-    // managed clone, so the banner path matches the real session location.
-    // Falls back to `workdir` when the GitHub identity cannot be derived
-    // (e.g. no git remote).
-    let workspace = match &github_path {
-        Some(gp) => {
-            let cfg = trusty_mpm::core::trusty_tools_config::TrustyToolsConfig::load();
-            let managed = trusty_mpm::core::trusty_tools_config::workspace_subpath(&cfg, gp);
-            managed.to_string_lossy().into_owned()
+    // Resolve the workspace path shown in the panel.
+    //
+    // When `managed_path` is provided (i.e. the caller already provisioned the
+    // session worktree), display it verbatim — this is the real session directory
+    // (`<base>/.worktrees/<session-id>/`) and must NOT be re-derived via
+    // `workspace_subpath` which would strip the session subdir (#1803, #1794).
+    //
+    // When `managed_path` is None (pre-launch picker, reconnect banner, or any
+    // context where no session has been provisioned yet), fall back to deriving
+    // the repo base `~/trusty-mpm-projects/<owner>/<repo>` via `workspace_subpath`.
+    let workspace = if let Some(mp) = managed_path {
+        mp.to_string_lossy().into_owned()
+    } else {
+        match &github_path {
+            Some(gp) => {
+                let cfg = trusty_mpm::core::trusty_tools_config::TrustyToolsConfig::load();
+                let managed = trusty_mpm::core::trusty_tools_config::workspace_subpath(&cfg, gp);
+                managed.to_string_lossy().into_owned()
+            }
+            None => workdir.to_string(),
         }
-        None => workdir.to_string(),
     };
 
     let user = std::env::var("USER")
@@ -227,7 +237,7 @@ pub(crate) fn print_welcome_panel(
     reconnecting: bool,
     daemon: DaemonInfo,
 ) {
-    let data = gather_welcome_data(workdir, session_name, reconnecting, daemon);
+    let data = gather_welcome_data(workdir, session_name, reconnecting, daemon, None);
     print!("{}", render::render_welcome_panel(&data));
     let _ = std::io::Write::flush(&mut std::io::stdout());
     std::thread::sleep(Duration::from_secs(1));

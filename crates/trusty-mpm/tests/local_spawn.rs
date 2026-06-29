@@ -431,3 +431,33 @@ fn spawn_managed_local_errors_on_no_remote() {
          got: {error_msg}"
     );
 }
+
+/// `base_clone_path` must resolve to `<REPOS_ROOT_ENV>/<owner>/<repo>` when the
+/// env var is set — preserving backward compat with tests that control the root.
+///
+/// Why: tests that mutate TRUSTY_MPM_REPOS_ROOT to a tempdir still work after
+/// the #1803 re-root, because REPOS_ROOT_ENV beats workspace_root().
+/// Test: this function IS the test.
+#[test]
+fn base_clone_path_respects_repos_root_env() {
+    use trusty_mpm::daemon::managed_routes::inproject::{REPOS_ROOT_ENV, base_clone_path};
+
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    let prev = std::env::var(REPOS_ROOT_ENV).ok();
+    unsafe { std::env::set_var(REPOS_ROOT_ENV, tmp.path()) };
+
+    let base = base_clone_path("myorg", "myrepo");
+
+    unsafe {
+        match prev {
+            Some(ref v) => std::env::set_var(REPOS_ROOT_ENV, v),
+            None => std::env::remove_var(REPOS_ROOT_ENV),
+        }
+    }
+
+    let expected = tmp.path().join("myorg").join("myrepo");
+    assert_eq!(
+        base, expected,
+        "base_clone_path must respect REPOS_ROOT_ENV override"
+    );
+}
