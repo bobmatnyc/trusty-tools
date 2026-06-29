@@ -146,20 +146,48 @@ pub(crate) struct CommitLine {
 ///
 /// Why: separating gathering from rendering lets us unit-test the renderer with
 /// hand-crafted `WelcomeData` values.
-/// What: reads `$USER`, probes recent commits (≤150 ms), and detects services
-/// using the banner helpers. All probes are time-bounded — the function never
-/// blocks the launch path.
-/// Test: indirectly by `print_welcome_panel` smoke tests.
+/// What: reads `$USER`, derives the `owner/repo` identity from the git remote
+/// (falls back to the folder name when outside a git repo), resolves the
+/// managed workspace path (`~/trusty-mpm-projects/<owner>/<repo>`), probes
+/// recent commits (≤150 ms), and detects services using the banner helpers.
+/// All probes are time-bounded — the function never blocks the launch path.
+/// Test: indirectly by `print_welcome_panel` smoke tests; the owner/repo and
+/// managed-path derivations are exercised by the underlying helpers in
+/// `trusty_common::github_path` and `trusty_mpm::core::trusty_tools_config`.
 pub(crate) fn gather_welcome_data(
     workdir: &str,
     session_name: &str,
     reconnecting: bool,
     daemon: DaemonInfo,
 ) -> WelcomeData {
-    let project = Path::new(workdir)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| workdir.to_string());
+    let workdir_path = Path::new(workdir);
+
+    // Derive the GitHub `owner/repo` identity from the git remote.  Falls back
+    // to the folder name when the directory is not a git repo or has no origin.
+    let github_path = trusty_common::github_path::derive_github_path(workdir_path);
+    let project = github_path
+        .as_ref()
+        .map(|gp| gp.rel_path())
+        .unwrap_or_else(|| {
+            workdir_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| workdir.to_string())
+        });
+
+    // Resolve the managed workspace path (`~/trusty-mpm-projects/<owner>/<repo>`).
+    // This is where trusty-mpm manages a clone of the project independently of
+    // the user's live checkout; the banner should show this path rather than the
+    // live cwd.  Falls back to `workdir` when the GitHub identity cannot be
+    // derived (e.g. no git remote).
+    let workspace = match &github_path {
+        Some(gp) => {
+            let cfg = trusty_mpm::core::trusty_tools_config::TrustyToolsConfig::load();
+            let managed = trusty_mpm::core::trusty_tools_config::workspace_subpath(&cfg, gp);
+            managed.to_string_lossy().into_owned()
+        }
+        None => workdir.to_string(),
+    };
 
     let user = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
@@ -172,7 +200,7 @@ pub(crate) fn gather_welcome_data(
 
     WelcomeData {
         project,
-        workspace: workdir.to_string(),
+        workspace,
         user,
         reconnecting,
         session_name: session_name.to_string(),
@@ -284,11 +312,24 @@ fn read_lock_addr() -> Option<String> {
 /// Why: the two-panel banner compositor (`banner::two_panel`) needs the raw
 /// row strings to fill the right panel at the compositor-determined width,
 /// without the fixed-width `╭─╮` box that `render_welcome_panel` draws.
-/// What: delegates to `render::build_rows(data)` — the same row builder used
-/// by `render_welcome_panel`, so content is identical in both layouts.
-/// Test: `two_panel_compose_alignment` in `banner::two_panel::tests`.
+/// The first row (`"trusty-mpm vX.Y.Z"`) is omitted here because the
+/// two-panel banner already embeds the version in its title bar border — the
+/// standalone `render_welcome_panel` box (no title bar) keeps it via
+/// `build_rows` directly.
+/// What: calls `render::build_rows(data)`, drops the first element (the
+/// version line), and returns the remainder. Content is otherwise identical
+/// to the standalone panel, so both layouts share the same row-building logic.
+/// Test: `two_panel_compose_alignment` in `banner::two_panel::tests`;
+/// `right_panel_starts_with_welcome` in `banner::two_panel::tests`.
 pub(crate) fn render_info_box_rows(data: &WelcomeData) -> Vec<String> {
-    render::build_rows(data)
+    let mut rows = render::build_rows(data);
+    // Drop the "trusty-mpm vX.Y.Z" header — the two-panel title bar already
+    // shows it. The standalone render_welcome_panel (no title bar) retains it
+    // by calling build_rows directly without going through this function.
+    if !rows.is_empty() {
+        rows.remove(0);
+    }
+    rows
 }
 
 // ── Backward-compat render wrapper ────────────────────────────────────────────

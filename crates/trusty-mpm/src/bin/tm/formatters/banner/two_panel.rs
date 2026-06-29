@@ -460,8 +460,8 @@ pub(crate) mod tests {
             lines.len()
         );
         assert!(
-            lines.len() >= 30 && lines.len() <= 36,
-            "clipped rows ({}) must be within 30–36",
+            lines.len() >= 20 && lines.len() <= 28,
+            "clipped rows ({}) must be within 20–28 (CLIP_ROW_END=24)",
             lines.len()
         );
     }
@@ -608,7 +608,24 @@ pub(crate) mod tests {
         colored::control::unset_override();
     }
 
-    /// Reconnecting state shows the reconnecting label in the wide layout.
+    /// The two-panel banner must not repeat the version in the right panel:
+    /// the title bar already shows it.  The full banner has exactly one copy.
+    #[test]
+    fn right_panel_omits_version_line() {
+        colored::control::set_override(false);
+        let data = base_data();
+        let version = env!("CARGO_PKG_VERSION");
+        let out = render_two_panel_banner(&data, 120, false).expect("wide banner");
+        let bare = strip_ansi(&out);
+        let count = bare.matches(version).count();
+        assert_eq!(
+            count, 1,
+            "version string must appear exactly once (title bar only); found {count}"
+        );
+        colored::control::unset_override();
+    }
+
+/// Reconnecting state shows the reconnecting label in the wide layout.
     #[test]
     fn two_panel_reconnecting_shows_indicator() {
         colored::control::set_override(false);
