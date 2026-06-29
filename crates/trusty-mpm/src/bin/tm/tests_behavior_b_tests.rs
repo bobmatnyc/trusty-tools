@@ -1227,18 +1227,18 @@ async fn guided_fallback_redirect_success_worktree_not_live_checkout() {
     );
     // A per-session worktree must have been created inside the base clone,
     // proving `launch(Some(worktree))` was called, not `launch(None)`.
-    let worktrees_dir = base.join("worktrees");
+    let worktrees_dir = base.join(".worktrees");
     assert!(
         worktrees_dir.exists(),
-        "#1724: worktrees/ dir must exist under base clone after successful redirect"
+        "#1724 #1803: .worktrees/ dir must exist under base clone after successful redirect"
     );
     let sessions: Vec<_> = std::fs::read_dir(&worktrees_dir)
-        .expect("worktrees dir must be listable")
+        .expect(".worktrees dir must be listable")
         .filter_map(|e| e.ok())
         .collect();
     assert!(
         !sessions.is_empty(),
-        "#1724: at least one per-session worktree must be present, proving \
-         launch(Some(worktree)) was invoked rather than launch(None)"
+        "#1724 #1803: at least one per-session worktree must be present under .worktrees/, \
+         proving launch(Some(worktree)) was invoked rather than launch(None)"
     );
 }

@@ -431,3 +431,31 @@ fn spawn_managed_local_errors_on_no_remote() {
          got: {error_msg}"
     );
 }
+
+/// `repos_root_from` must resolve to the supplied override path, independent of
+/// the environment — preserving backward compat with tests that control the root.
+///
+/// Why: the old test mutated `TRUSTY_MPM_REPOS_ROOT` via `unsafe { set_var }`,
+/// which races other threads reading the same env var. `repos_root_from` accepts
+/// a direct in-process override so the test can pass the value without any env
+/// mutation or `unsafe` block.
+/// What: passes a tempdir path as `env_override` and asserts the returned root
+/// matches; then joins `owner/repo` to confirm the full clone path is correct.
+/// Test: this function IS the test.
+#[test]
+fn base_clone_path_respects_repos_root_override() {
+    use trusty_mpm::daemon::managed_routes::inproject::repos_root_from;
+
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    let override_str = tmp.path().to_str().expect("tmp path is utf8");
+
+    // No env mutation — pass the override directly to repos_root_from.
+    let root = repos_root_from(Some(override_str));
+    let base = root.join("myorg").join("myrepo");
+
+    let expected = tmp.path().join("myorg").join("myrepo");
+    assert_eq!(
+        base, expected,
+        "repos_root_from with a direct override must resolve to <override>/<owner>/<repo>"
+    );
+}

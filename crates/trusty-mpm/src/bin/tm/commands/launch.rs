@@ -97,21 +97,54 @@ pub(crate) async fn launch(
         // TODO(follow-up): prepare_session_with_repo_url_and_style
     }
 
-    // 7. Provision the managed workspace: shallow-clone origin + deploy .claude.
-    //    `provision_in` handles the full deploy (agents, skills, palace pin) via
-    //    `prepare_session_with_repo_url` — no separate `prepare_session_with_style`
-    //    call is needed. This step can take 5–30 s for a first clone.
+    // 7. Provision the managed workspace using the shared base-clone + per-session
+    //    worktree mechanism (#1803). This matches what `tm` (guided default) does
+    //    via the daemon's `spawn_managed_inproject` path — both now converge on the
+    //    SAME base clone at `~/trusty-mpm-projects/<owner>/<repo>/` and the SAME
+    //    per-session worktree at `<base>/.worktrees/<session-id>/`.
+    //    Step 7a creates or reuses the shared base clone (idempotent); step 7b adds
+    //    a fresh git worktree for this session; step 7c deploys `.claude` into the
+    //    worktree so the session has the framework available.
     eprintln!("provisioning managed workspace...");
     let session_uuid = trusty_mpm::session_manager::ManagedSessionId::new();
-    let provisioner = trusty_mpm::provisioner::WorkspaceProvisioner::new(
-        trusty_mpm::provisioner::RealGitBackend,
-        std::path::PathBuf::new(),
-    );
-    let prepared = provisioner
-        .provision_in(&project_dir, &session_uuid, &origin_url, "", "")
-        .map_err(|e| anyhow::anyhow!("failed to provision managed workspace: {e}"))?;
 
-    let managed_path = prepared.path;
+    // 7a. Ensure the shared base clone exists. Idempotent: returns immediately when
+    //     `<project_dir>/.git` is already present so a second `tm launch` reuses
+    //     the existing clone rather than re-cloning.
+    trusty_mpm::daemon::managed_routes::inproject::ensure_base_clone(&origin_url, &project_dir)
+        .map_err(|e| anyhow::anyhow!("failed to provision base clone: {e}"))?;
+
+    // 7b. Create a per-session git worktree at `<project_dir>/.worktrees/<session-id>/`.
+    //     Each session gets an isolated branch so concurrent sessions never collide.
+    let managed_path = trusty_mpm::daemon::managed_routes::inproject::create_session_worktree(
+        &project_dir,
+        &session_uuid,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to create session worktree: {e}"))?;
+
+    // 7c. Deploy the `.claude` framework into the worktree (best-effort).
+    //     Non-fatal: a deploy failure never aborts the session — the operator can
+    //     run `tm install` / `tm catalog sync` to populate agents manually.
+    {
+        let fw = trusty_mpm::core::paths::FrameworkPaths::default();
+        if let Err(e) = trusty_mpm::core::session_launch::prepare_session_with_repo_url(
+            &fw,
+            &managed_path,
+            Some(&origin_url),
+        ) {
+            tracing::warn!(
+                "session prep failed for worktree {} (non-fatal): {e}",
+                managed_path.display()
+            );
+        }
+        // Pre-seed workspace trust so claude starts without blocking prompts.
+        if let Err(e) = trusty_mpm::core::home_trust_seed::preseed_home_trust(&managed_path) {
+            tracing::warn!(
+                "home trust pre-seed failed for {} (non-fatal): {e}",
+                managed_path.display()
+            );
+        }
+    }
     let managed_workdir = managed_path.to_string_lossy().to_string();
 
     // 8. Write project-scoped MPM hooks into the managed clone (NOT the live checkout).
@@ -195,8 +228,14 @@ pub(crate) async fn launch(
     );
 
     // 11. Print the full-screen robot splash then the rich info panel.
-    //     The banner shows the MANAGED workdir so the user knows where the session runs.
-    print_launch_banner(&managed_workdir, &tmux_name, prompt_path.as_deref());
+    //     Pass the real managed worktree path so the banner shows the session
+    //     directory (not just the base project dir).
+    print_launch_banner(
+        &live_workdir,
+        &tmux_name,
+        prompt_path.as_deref(),
+        Some(&managed_path),
+    );
     let _ = instructions_path;
 
     // 12. Create a detached tmux session rooted at the MANAGED clone directory.
@@ -333,7 +372,7 @@ pub(crate) async fn connect(
     };
 
     // 3. Print the full-screen robot splash + rich info panel before tmux takes over.
-    print_launch_banner(&workdir, &tmux_name, None);
+    print_launch_banner(&workdir, &tmux_name, None, None);
 
     // 4. Create the tmux host idempotently. `new-session -A` attaches to an
     //    existing session and creates a detached one (`-d`) otherwise; the
@@ -476,9 +515,9 @@ mod tests {
     #[test]
     fn session_matches_workdir_prefix_and_exact() {
         let project_dir = "/home/bob/trusty-mpm-projects/owner/repo";
-        let session_wd = "/home/bob/trusty-mpm-projects/owner/repo/abc-123-uuid";
+        let session_wd = "/home/bob/trusty-mpm-projects/owner/repo/.worktrees/abc-123-uuid";
 
-        // Prefix match: session workdir is under project_dir → match.
+        // Prefix match: session workdir is under project_dir (in .worktrees/) → match.
         assert!(session_matches_workdir(
             session_wd,
             "/other/live/dir",
@@ -534,9 +573,9 @@ mod tests {
             "/other/live",
             Some(project_dir)
         ));
-        // `/owner/repo/<id>` MUST match `/owner/repo`.
+        // `/owner/repo/.worktrees/<id>` MUST match `/owner/repo`.
         assert!(session_matches_workdir(
-            "/projects/owner/repo/some-uuid",
+            "/projects/owner/repo/.worktrees/some-uuid",
             "/other/live",
             Some(project_dir)
         ));

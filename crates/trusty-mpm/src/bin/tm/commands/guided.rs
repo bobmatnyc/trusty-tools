@@ -190,8 +190,8 @@ async fn try_show_picker(
 /// What: finds the git root, reads `remote.origin.url`, guards that it is a
 /// GitHub URL, parses `owner/repo` via `parse_github_path`, and returns
 /// `(source_id, workspace_path, git_root)` where `source_id = "owner/repo"`,
-/// `workspace_path = <repos_root>/owner/repo`, and `git_root` is the absolute
-/// path of the repository root.
+/// `workspace_path = ~/trusty-mpm-projects/<owner>/<repo>` (the canonical base),
+/// and `git_root` is the absolute path of the repository root.
 /// Test: `guided_derive_project_returns_none_for_non_git_dir`,
 /// `guided_derive_project_rejects_non_github_remote`,
 /// `guided_derive_project_accepts_github_https_remote`,
@@ -825,8 +825,8 @@ pub(crate) async fn fallback_protected(
 ///
 /// Why: when the daemon is unreachable and the current directory is a GitHub-backed
 /// git project, framework files must go into the managed-clone workspace
-/// (`~/trusty-tools/repos/<owner>/<repo>/worktrees/<session-id>/`), never
-/// into the operator's live checkout (#1724).
+/// (`~/trusty-mpm-projects/<owner>/<repo>/.worktrees/<session-id>/`), never
+/// into the operator's live checkout (#1724, #1803).
 /// What: (1) parses `owner/repo` from `origin_url`; (2) ensures the protected
 /// base clone exists (`ensure_base_clone` is idempotent — returns immediately when
 /// the clone already exists); (3) creates a per-session git worktree inside the
