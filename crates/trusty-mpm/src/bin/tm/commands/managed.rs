@@ -116,10 +116,7 @@ pub(crate) async fn session_ls(
     let sessions: Vec<_> = if all {
         fetched
     } else {
-        fetched
-            .into_iter()
-            .filter(|s| is_live_session_state(&s.state))
-            .collect()
+        filter_live_sessions(fetched)
     };
     if sessions.is_empty() {
         if let Some(sid) = source_id {
