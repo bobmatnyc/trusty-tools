@@ -135,8 +135,12 @@ impl GitBackend for RealGitBackend {
         }
         args.push(repo_url);
         args.push(&dir_str);
+        // Use the destination's parent as cwd so a deleted inherited cwd cannot
+        // cause git to fail with "fatal: Unable to read current working directory".
+        let cwd = target_dir.parent().unwrap_or(std::path::Path::new("/"));
         let out = Command::new("git")
             .args(&args)
+            .current_dir(cwd)
             .output()
             .map_err(|e| ProvisionError::Git(format!("git clone exec failed: {e}")))?;
         if out.status.success() {

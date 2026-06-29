@@ -25,6 +25,21 @@ use std::net::SocketAddr;
 pub(crate) async fn run_daemon(addr: SocketAddr, tailscale: bool, mcp: bool) -> anyhow::Result<()> {
     use std::io::ErrorKind;
 
+    // Anchor cwd to a stable directory so that git subprocesses spawned later
+    // never fail with "fatal: Unable to read current working directory" when the
+    // inherited cwd has been deleted (e.g. a /private/tmp session dir cleaned up
+    // by the OS). This is a best-effort set: we ignore the result so a read-only
+    // filesystem cannot prevent the daemon from starting.
+    // Why: daemon cwd is inherited by every subprocess (git clone, git worktree).
+    // What: chdir to home on startup; fall back to "/" if home is unavailable.
+    // Test: side-effect-only; verified via the managed-spawn integration suite
+    //       and the git-clone defensive current_dir() added at each call site.
+    if let Some(home) = dirs::home_dir() {
+        let _ = std::env::set_current_dir(&home);
+    } else {
+        let _ = std::env::set_current_dir("/");
+    }
+
     let state = trusty_mpm::daemon::DaemonState::shared();
     if mcp {
         return trusty_mpm::daemon::run_mcp(state).await;

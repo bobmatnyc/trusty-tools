@@ -179,8 +179,11 @@ pub async fn ensure_daemon_up(config: &DaemonBridgeConfig) -> Result<String> {
     eprintln!("\u{25cf} Starting {} daemon\u{2026}", config.service_name);
 
     let exe = std::env::current_exe().map_err(|e| anyhow!("could not resolve current_exe: {e}"))?;
+    // Set a stable cwd so the spawned daemon never inherits a deleted directory.
+    let stable_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
     std::process::Command::new(&exe)
         .args(&config.spawn_args)
+        .current_dir(&stable_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
