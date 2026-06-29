@@ -351,6 +351,15 @@ async fn spawn_managed_inproject(
     write_task_md(&worktree, &params.task, session_id);
 
     let mgr = state.session_manager().await;
+    // Pass a canonical GitHub HTTPS URL as repo_url so the session-manager can
+    // derive the project name (`tmpm-<repo>-<8hex>`) for the tmux session name
+    // (issue #1789). Using a synthetic HTTPS URL is safe: `parse_github_path`
+    // normalises both SSH and HTTPS forms to the same `{ owner, repo }` pair, and
+    // this URL is the real origin of the base clone (it was derived from the
+    // operator's local `remote.origin.url`). The record stores it as `repo_url`
+    // which gives `tm sessions ls` useful project context even for in-project
+    // sessions that did not clone a fresh workspace.
+    let synthetic_repo_url = format!("https://github.com/{owner}/{repo}");
     let record = mgr
         .create_with_id(
             *session_id,
@@ -358,7 +367,7 @@ async fn spawn_managed_inproject(
             Some(worktree.clone()),
             params.name_hint.clone(),
             Some(worktree.clone()),
-            None, // no remote repo_url — the worktree IS the workspace
+            Some(synthetic_repo_url),
             None,
             runtime,
             params.ephemeral.unwrap_or(false),

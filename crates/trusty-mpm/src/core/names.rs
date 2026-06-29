@@ -84,11 +84,97 @@ pub fn name_from_uuid(uuid: &Uuid) -> String {
 /// the dashboard; truncating the folder keeps `tmpm-<folder>` glanceable.
 const MAX_FOLDER_LEN: usize = 20;
 
+/// Maximum length of the repo-slug portion inside a project-derived session name.
+///
+/// Why: the full name is `tmpm-<slug>-<8hex>` (5 + 1 + slug + 1 + 8 chars).
+/// Capping the slug at 24 keeps the total under 40 chars — well within tmux's
+/// practical limit — while still being uniquely identifiable.
+const MAX_REPO_SLUG_LEN: usize = 24;
+
 /// Fallback session name used when a directory yields an empty folder slug.
 ///
 /// Why: a path like `/` or `///` sanitizes to nothing; a session still needs a
 /// stable, valid tmux name.
 const DIR_FALLBACK: &str = "tmpm-session";
+
+/// Sanitize a repository name to a tmux-safe kebab-case slug.
+///
+/// Why: repo names may contain uppercase letters, dots, underscores, or other
+/// characters that are not valid in tmux session names (which forbit `.` and `:`)
+/// or that make names hard to type. Centralising the sanitization keeps the
+/// `build_managed_session_name` logic pure and testable.
+/// What: lowercases the input, maps runs of non-`[a-z0-9]` characters to a
+/// single `-`, strips leading/trailing dashes, and caps the result at
+/// [`MAX_REPO_SLUG_LEN`] chars (stripping any trailing dash left by the cut).
+/// Returns an empty string when nothing alphanumeric survives.
+/// Test: `slug_project_sanitizes_dots_colons_uppercase`,
+/// `slug_project_collapses_and_trims`, `slug_project_truncates` in the test module.
+fn slug_project(name: &str) -> String {
+    let mut slug = String::with_capacity(name.len());
+    let mut prev_dash = true; // start true → leading dash dropped
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.extend(ch.to_lowercase());
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.len() > MAX_REPO_SLUG_LEN {
+        slug.truncate(MAX_REPO_SLUG_LEN);
+        while slug.ends_with('-') {
+            slug.pop();
+        }
+    }
+    slug
+}
+
+/// Build a human-identifiable managed session name incorporating the project.
+///
+/// Why: `tmpm-<adjective>-<noun>` names are glanceable but tell the operator
+/// nothing about which project a session belongs to. Operators running `tmux ls`
+/// should be able to tell at a glance which repo each session targets (issue
+/// #1789). The short-id suffix ensures uniqueness even when the same repo spawns
+/// several parallel sessions.
+/// What: returns `tmpm-<slug>-<short-id>` when `project` is `Some` (where
+/// `<slug>` is the sanitized repo name and `<short-id>` is the first 8 hex
+/// characters of `session_id`). When `project` is `None` (no GitHub remote /
+/// not a git repo) returns `tmpm-local-<short-id>` as the fallback.
+///
+/// Design decisions:
+/// - The **repo name only** is used as the slug (not `owner-repo`) because the
+///   repo alone is identifiable in most single-org setups; `owner-repo` would
+///   push the total length up and clutter `tmux ls`.
+/// - The fallback is `tmpm-local-<short-id>` rather than the adjective+noun
+///   scheme so operators can distinguish "I know which project this is"
+///   (`tmpm-trusty-tools-abc12345`) from "this is a local directory session"
+///   (`tmpm-local-abc12345`).
+/// - `project` should be the repo segment only, NOT `owner/repo`. The caller
+///   is responsible for extracting `GithubPath.repo` before calling here. A
+///   pre-slugified input (e.g. the string already from `slugify_component`) is
+///   safe: `slug_project` is idempotent.
+///
+/// Test: `build_managed_session_name_github_project`,
+/// `build_managed_session_name_none_fallback`,
+/// `build_managed_session_name_sanitized_repo` in the test module.
+pub fn build_managed_session_name(project: Option<&str>, session_id: &uuid::Uuid) -> String {
+    // Guard against callers passing `owner/repo` instead of just `repo`. The
+    // slash would sanitize to a dash and silently produce `owner-repo-<8hex>`,
+    // making the name unrecognisably long. This fires only in dev/test builds.
+    debug_assert!(
+        project.is_none_or(|p| !p.contains('/')),
+        "build_managed_session_name: pass the repo segment only, not owner/repo — got {project:?}"
+    );
+    let short_id = &session_id.simple().to_string()[..8];
+    match project.map(slug_project) {
+        Some(slug) if !slug.is_empty() => format!("{PREFIX}{slug}-{short_id}"),
+        _ => format!("{PREFIX}local-{short_id}"),
+    }
+}
 
 /// Derive a session name from a project directory's basename.
 ///
@@ -172,6 +258,14 @@ mod tests {
         // Any generated name is, by construction, managed.
         let id = Uuid::parse_str("367c6c51-1025-419c-b6d6-be9a753e8914").unwrap();
         assert!(is_managed_session_name(&name_from_uuid(&id)));
+        // Names produced by build_managed_session_name must also be managed.
+        assert!(is_managed_session_name(&build_managed_session_name(
+            Some("trusty-tools"),
+            &id
+        )));
+        assert!(is_managed_session_name(&build_managed_session_name(
+            None, &id
+        )));
     }
 
     #[test]
@@ -266,5 +360,102 @@ mod tests {
         assert_eq!(name_from_dir(Path::new("/")), "tmpm-session");
         assert_eq!(name_from_dir(Path::new("/x/----")), "tmpm-session");
         assert_eq!(name_from_dir(Path::new("")), "tmpm-session");
+    }
+
+    // ── build_managed_session_name ───────────────────────────────────────────
+
+    /// Why: the primary use-case is a GitHub-sourced session where the repo name
+    /// is known; the resulting name must be `tmpm-<repo>-<8hex>` and be tmux-safe.
+    /// Test: itself.
+    #[test]
+    fn build_managed_session_name_github_project() {
+        let id = Uuid::parse_str("aad055ec-8014-cd16-f000-000000000000").unwrap();
+        let name = build_managed_session_name(Some("trusty-tools"), &id);
+        assert_eq!(name, "tmpm-trusty-tools-aad055ec");
+    }
+
+    /// Why: when no GitHub project can be determined the name must fall back to
+    /// `tmpm-local-<8hex>` so the session is identifiable as a local session.
+    /// Test: itself.
+    #[test]
+    fn build_managed_session_name_none_fallback() {
+        let id = Uuid::parse_str("aad055ec-8014-cd16-f000-000000000000").unwrap();
+        let name = build_managed_session_name(None, &id);
+        assert_eq!(name, "tmpm-local-aad055ec");
+    }
+
+    /// Why: repo names from GitHub may contain dots (`.`), colons (`:`),
+    /// uppercase letters, or other chars tmux session names cannot contain.
+    /// slug_project must remove them all.
+    /// Test: itself.
+    #[test]
+    fn slug_project_sanitizes_dots_colons_uppercase() {
+        // Dots and colons → dash; uppercase → lowercase.
+        assert_eq!(slug_project("My.Repo:v2"), "my-repo-v2");
+        // All-uppercase.
+        assert_eq!(slug_project("TRUSTY_TOOLS"), "trusty-tools");
+        // Leading/trailing separators stripped.
+        assert_eq!(slug_project("...repo..."), "repo");
+    }
+
+    /// Why: consecutive non-alphanumeric runs must collapse to a single dash
+    /// so the slug stays readable.
+    /// Test: itself.
+    #[test]
+    fn slug_project_collapses_and_trims() {
+        assert_eq!(slug_project("my__repo--v2"), "my-repo-v2");
+        assert_eq!(
+            slug_project("--leading-and-trailing--"),
+            "leading-and-trailing"
+        );
+    }
+
+    /// Why: very long repo names must be truncated so the total session name
+    /// stays under practical tmux limits; no trailing dash after truncation.
+    /// Test: itself.
+    #[test]
+    fn slug_project_truncates() {
+        let long = "this-is-a-very-long-repository-name-that-exceeds-the-cap";
+        let slug = slug_project(long);
+        assert!(
+            slug.len() <= MAX_REPO_SLUG_LEN,
+            "slug must be ≤ {MAX_REPO_SLUG_LEN} chars: {slug}"
+        );
+        assert!(
+            !slug.ends_with('-'),
+            "no trailing dash after truncation: {slug}"
+        );
+    }
+
+    /// Why: a sanitized repo slug derived from an `owner/repo` input (the full
+    /// `source_id`) must produce the REPO portion only — the slash becomes a
+    /// dash, so `bobmatnyc/trusty-tools` → `bobmatnyc-trusty-tools`. Callers
+    /// must pass only the repo name to get `tmpm-trusty-tools-<8hex>`.
+    /// Test: itself.
+    #[test]
+    fn build_managed_session_name_sanitized_repo() {
+        let id = Uuid::parse_str("aad055ec-8014-cd16-f000-000000000000").unwrap();
+        // Uppercase, dots, colons stripped; short-id appended.
+        let name = build_managed_session_name(Some("My.Repo:v2"), &id);
+        assert_eq!(name, "tmpm-my-repo-v2-aad055ec");
+        // An empty-after-sanitize input falls back to local.
+        let name2 = build_managed_session_name(Some("..."), &id);
+        assert_eq!(name2, "tmpm-local-aad055ec");
+    }
+
+    /// Why: collision-freedom guarantee — the short-id suffix must be present
+    /// even when multiple sessions target the same repo.
+    /// Test: itself.
+    #[test]
+    fn build_managed_session_name_short_id_present() {
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        let n1 = build_managed_session_name(Some("trusty-tools"), &id1);
+        let n2 = build_managed_session_name(Some("trusty-tools"), &id2);
+        // Both start with the repo slug.
+        assert!(n1.starts_with("tmpm-trusty-tools-"), "n1={n1}");
+        assert!(n2.starts_with("tmpm-trusty-tools-"), "n2={n2}");
+        // But they differ (with overwhelming probability) because the UUID suffix differs.
+        assert_ne!(n1, n2, "distinct UUIDs should produce distinct names");
     }
 }
