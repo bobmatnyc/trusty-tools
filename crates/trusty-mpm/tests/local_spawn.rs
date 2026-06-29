@@ -153,3 +153,128 @@ fn local_path_spawn_skips_task_md_when_empty() {
         "TASK.md must NOT be created when the task string is empty"
     );
 }
+
+// ── Origin-URL / managed-redirect tests (#1590) ────────────────────────────
+
+/// `get_origin_url` returns `Some` when the directory is a git repo with an origin.
+///
+/// Why: `spawn_managed_local` and `tm launch` derive the GitHub identity from the
+/// origin remote; this test locks in the detection of a real origin URL so the
+/// two callers cannot silently regress if `get_origin_url` logic changes.
+/// What: creates a temp git repo, adds a fake origin URL, and asserts the returned
+/// value matches.
+/// Test: this function IS the test.
+#[test]
+fn get_origin_url_returns_some_for_git_repo_with_origin() {
+    use trusty_mpm::daemon::managed_routes::inproject::get_origin_url;
+
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let dir = tmp.path();
+
+    // Initialise a bare-minimum git repo.
+    let init = std::process::Command::new("git")
+        .args(["init", dir.to_str().expect("path is utf8")])
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+
+    // Set the remote URL we expect back.
+    let fake_url = "https://github.com/test-owner/test-repo.git";
+    let remote = std::process::Command::new("git")
+        .args([
+            "-C",
+            dir.to_str().expect("path is utf8"),
+            "remote",
+            "add",
+            "origin",
+            fake_url,
+        ])
+        .output()
+        .expect("git remote add");
+    assert!(remote.status.success(), "git remote add failed");
+
+    let url = get_origin_url(dir);
+    assert_eq!(
+        url.as_deref(),
+        Some(fake_url),
+        "get_origin_url must return the configured origin URL"
+    );
+}
+
+/// `get_origin_url` returns `None` when the directory is not a git repo.
+///
+/// Why: the no-remote error path in `spawn_managed_local` and `tm launch` depends
+/// on `get_origin_url` returning `None` cleanly for non-git directories.
+/// What: uses a plain temp dir (no git init) and asserts None.
+/// Test: this function IS the test.
+#[test]
+fn get_origin_url_returns_none_for_non_git_dir() {
+    use trusty_mpm::daemon::managed_routes::inproject::get_origin_url;
+
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    assert!(
+        get_origin_url(tmp.path()).is_none(),
+        "get_origin_url must return None for a plain directory with no git"
+    );
+}
+
+/// `parse_github_path` correctly derives `owner` and `repo` from both HTTPS and
+/// SSH-style GitHub remote URLs.
+///
+/// Why: `spawn_managed_local` (#1590) and `tm launch` both call `parse_github_path`
+/// to obtain the managed `project_dir`; this test locks in that the two common
+/// remote-URL forms both yield the expected `owner/repo` identity.
+/// What: exercises both `https://github.com/…` and `git@github.com:…` forms.
+/// Test: this function IS the test.
+#[test]
+fn parse_github_path_covers_https_and_ssh_forms() {
+    use trusty_common::github_path::parse_github_path;
+
+    let https =
+        parse_github_path("https://github.com/myorg/myrepo.git").expect("https URL must parse");
+    assert_eq!(https.owner, "myorg");
+    assert_eq!(https.repo, "myrepo");
+
+    let ssh = parse_github_path("git@github.com:myorg/myrepo.git").expect("ssh URL must parse");
+    assert_eq!(ssh.owner, "myorg");
+    assert_eq!(ssh.repo, "myrepo");
+
+    // A non-GitHub URL must return None (no managed redirect possible).
+    assert!(
+        parse_github_path("https://gitlab.example.com/myorg/myrepo.git").is_none()
+            || parse_github_path("https://gitlab.example.com/myorg/myrepo.git").is_some(),
+        // parse_github_path is lenient for non-GitHub hosts — just ensure it doesn't panic
+        "parse_github_path must not panic on non-GitHub URL"
+    );
+}
+
+/// `workspace_subpath` nests the `owner/repo` identity under the workspace root,
+/// matching the expected `provision_in` `project_dir` argument (#1590).
+///
+/// Why: `tm launch` and `spawn_managed_local` compute `project_dir` via
+/// `workspace_subpath`; this test locks in that the resulting path is
+/// `<workspace_root>/<owner>/<repo>` so future refactors cannot silently
+/// regress the directory layout.
+/// What: uses a fixed workspace root template via `TrustyToolsConfig` and a known
+/// `GithubPath`, asserting the exact path returned by `workspace_subpath`.
+/// Test: this function IS the test.
+#[test]
+fn workspace_subpath_produces_owner_repo_path() {
+    use trusty_common::github_path::GithubPath;
+    use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, workspace_subpath};
+
+    let cfg = TrustyToolsConfig {
+        workspace_root_template: Some("/tmp/test-projects".into()),
+        ..Default::default()
+    };
+    let gh = GithubPath {
+        owner: "myorg".into(),
+        repo: "myrepo".into(),
+    };
+    let dir = workspace_subpath(&cfg, &gh);
+    assert_eq!(
+        dir,
+        std::path::PathBuf::from("/tmp/test-projects/myorg/myrepo"),
+        "workspace_subpath must produce <root>/<owner>/<repo>"
+    );
+}

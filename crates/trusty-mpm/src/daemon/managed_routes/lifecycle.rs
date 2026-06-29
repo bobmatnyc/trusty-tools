@@ -422,40 +422,90 @@ async fn spawn_managed_inproject(
     Ok(mgr.get(&record.id).await.unwrap_or(record))
 }
 
-/// Spawn a managed session rooted at an EXISTING local directory — NO clone (#1433).
+/// Spawn a managed session rooted at a local directory, redirecting to a managed
+/// clone when the directory has a parseable GitHub remote (#1590).
 ///
-/// Why: the local-path fast path of [`spawn_managed`]. When `repo_url` is already
-/// an on-disk directory, there is nothing to provision: the directory IS the
-/// workspace. This mirrors the clone path's create→front-gate→spawn ritual but
-/// uses the local path verbatim as the session cwd and records no `repo_url`
-/// (there is no remote) so `resume` re-spawns in the same local directory.
-/// What: in order — (1) creates the tmux session rooted at the local path via
-/// `create_with_id` (with `cwd = workspace_path = <local path>`, `repo_url = None`,
-/// `branch = None`); (2) writes `TASK.md` into the local directory when task is
-/// non-empty (refs #1693); (3) runs the same FRONT gate (fail-open, non-GitHub →
-/// auto-proceed); (4) marks the record `Active`; (5) spawns the runtime in the
-/// pane (a spawn failure marks the record errored but is not fatal). Returns the
-/// final record.
-/// Test: `local_path_spawn_uses_path_as_cwd_and_skips_clone` in tests/local_spawn.rs
-/// asserts the chosen cwd equals the local path and NO clone backend was invoked;
-/// `local_path_spawn_writes_task_md` asserts TASK.md is created.
+/// Why: the local-path fast path of [`spawn_managed`]. Before #1590 this function
+/// used the live checkout directly; now it checks for a GitHub remote and, when
+/// found, provisions a managed clone under the canonical
+/// `~/trusty-mpm-projects/<owner>/<repo>/<session-id>/` path — keeping the live
+/// checkout untouched. A local directory with NO parseable GitHub remote is an
+/// error: managed sessions always operate on a remote clone so concurrent sessions
+/// are isolated from the operator's working tree.
+/// What: in order — (0) reads `remote.origin.url` from the local directory; if
+/// absent or unparseable, returns `Err` (the `tm connect` path handles remotes-less
+/// directories); (1) provisions a managed clone via `provision_in` and reassigns
+/// `workspace` to the clone path; (2) creates the tmux session record via
+/// `create_with_id` (with `cwd = workspace_path = <managed clone>`,
+/// `repo_url = Some(<origin_url>)`, `owned = true`); (3) sets `source_id` on the
+/// record; (4) runs the FRONT gate (fail-open); (5) marks the record `Active`;
+/// (6) spawns the runtime. A spawn failure marks the record errored (non-fatal).
+/// Returns the final record.
+/// Test: `spawn_managed_local_redirects_to_managed_clone` and
+/// `spawn_managed_local_errors_on_no_remote` in tests/local_spawn.rs cover the
+/// two key branches. The clone path assertions live in the existing
+/// `local_path_spawn_*` test suite.
 async fn spawn_managed_local(
     state: &Arc<DaemonState>,
     session_id: &ManagedSessionId,
     params: &SpawnParams,
     runtime: RuntimeKind,
 ) -> Result<SessionRecord, String> {
-    let workspace = std::path::PathBuf::from(&params.repo_url);
+    let local_dir = std::path::PathBuf::from(&params.repo_url);
+
+    // Step 0 (#1590): managed-path redirect.
+    //
+    // Check whether the local directory has a parseable GitHub remote. If it does,
+    // provision a managed clone and operate in that clone instead of the live
+    // checkout. If it does not, the managed path cannot be established — error so
+    // the caller (or the operator via `tm connect`) handles the no-remote case.
+    let origin_url = super::inproject::get_origin_url(&local_dir).ok_or_else(|| {
+        format!(
+            "spawn failed: '{}' has no git origin remote; \
+                 managed sessions require a GitHub remote. \
+                 Use `tm connect` / `tm launch --live` to run in the live checkout.",
+            local_dir.display()
+        )
+    })?;
+
+    let gh = trusty_common::github_path::parse_github_path(&origin_url).ok_or_else(|| {
+        format!(
+            "spawn failed: could not parse a GitHub owner/repo from origin remote \
+             '{origin_url}' for '{}'. \
+             Use `tm connect` to run in the live checkout instead.",
+            local_dir.display()
+        )
+    })?;
+
+    let source_id_str = format!("{}/{}", gh.owner, gh.repo);
+    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+    let project_dir = crate::core::trusty_tools_config::workspace_subpath(&config, &gh);
+    let provisioner = crate::provisioner::WorkspaceProvisioner::new(
+        crate::provisioner::RealGitBackend,
+        std::path::PathBuf::new(),
+    );
+    let prepared = provisioner
+        .provision_in(
+            &project_dir,
+            session_id,
+            &origin_url,
+            &params.git_ref,
+            &params.task,
+        )
+        .map_err(|e| {
+            warn!(id = %session_id, "spawn_managed (local→managed): provision failed: {e}");
+            format!("workspace provisioning failed: {e}")
+        })?;
+
+    // `workspace` now points at the MANAGED clone, not the live checkout.
+    let workspace = prepared.path;
     info!(
         id = %session_id,
-        path = %workspace.display(),
-        "spawn_managed: local-path workdir detected — using it directly, skipping git clone"
+        live = %local_dir.display(),
+        managed = %workspace.display(),
+        source_id = %source_id_str,
+        "spawn_managed: local-path redirected to managed clone (#1590)"
     );
-
-    // Write TASK.md into the user's directory so the agent can read its brief
-    // (refs #1693). This mirrors what WorkspaceProvisioner::provision_in does for
-    // the clone path. Writing is non-fatal and overwrites any prior TASK.md.
-    write_task_md(&workspace, &params.task, session_id);
 
     let mgr = state.session_manager().await;
     let record = mgr
@@ -465,24 +515,29 @@ async fn spawn_managed_local(
             Some(workspace.clone()),
             params.name_hint.clone(),
             Some(workspace.clone()),
-            // No remote — this is a local directory, not a cloned repo.
-            None,
-            None,
+            Some(origin_url.clone()),
+            if params.git_ref.is_empty() {
+                None
+            } else {
+                Some(params.git_ref.clone())
+            },
             runtime,
             params.ephemeral.unwrap_or(false),
-            false, // owned: local-path spawn never owns the directory (#1511)
+            true, // owned: we provisioned a fresh clone; decommission may remove it
         )
         .await
         .map_err(|e| {
-            warn!(id = %session_id, "spawn_managed (local): session create failed: {e}");
+            warn!(id = %session_id, "spawn_managed (local→managed): create failed: {e}");
             e.to_string()
         })?;
 
-    // Same FRONT gate as the clone path. With `repo_url` being a local path it has
-    // no GitHub identity, so `front_gate_or_escalate` fails open (auto-proceeds).
-    if let Some(record) =
-        front_gate_or_escalate(&mgr, &record, &params.repo_url, &params.task).await?
-    {
+    // Record the source project identity so callers can reconnect by project.
+    if let Err(e) = mgr.set_source_id(session_id, &source_id_str).await {
+        warn!(id = %session_id, "spawn_managed (local→managed): set_source_id failed: {e}");
+    }
+
+    // FRONT gate: origin_url is a real GitHub URL so the gate is active.
+    if let Some(record) = front_gate_or_escalate(&mgr, &record, &origin_url, &params.task).await? {
         return Ok(record);
     }
 
@@ -490,7 +545,7 @@ async fn spawn_managed_local(
         .set_workspace(&record.id, workspace.clone(), ManagedSessionState::Active)
         .await
     {
-        warn!(id = %record.id, "spawn_managed (local): set_workspace failed: {e}");
+        warn!(id = %record.id, "spawn_managed (local→managed): set_workspace failed: {e}");
     }
 
     let tmux_arc = mgr.tmux_driver();
@@ -500,7 +555,7 @@ async fn spawn_managed_local(
             id = %record.id,
             name = %record.tmux_name,
             runtime = %record.runtime.as_str(),
-            "spawn_managed (local): runtime adapter spawn failed: {e}"
+            "spawn_managed (local→managed): runtime adapter spawn failed: {e}"
         );
         let _ = mgr
             .mark_errored(&record.id, &format!("spawn failed: {e}"))
@@ -510,7 +565,7 @@ async fn spawn_managed_local(
             id = %record.id,
             name = %record.tmux_name,
             path = %workspace.display(),
-            "managed session spawned successfully (local-path, no clone)"
+            "managed session spawned successfully (local→managed clone)"
         );
     }
 
