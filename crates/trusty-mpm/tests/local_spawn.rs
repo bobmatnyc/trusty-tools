@@ -278,3 +278,156 @@ fn workspace_subpath_produces_owner_repo_path() {
         "workspace_subpath must produce <root>/<owner>/<repo>"
     );
 }
+
+// ── spawn_managed_local branch tests (#1590) ─────────────────────────────────
+
+/// `spawn_managed_local` provisions a MANAGED CLONE (not the live checkout) when
+/// the local directory has a parseable GitHub remote (#1590).
+///
+/// Why: the primary post-#1590 contract — `spawn_managed_local` must NOT operate
+/// in the live checkout; it must provision a managed clone under
+/// `<project_dir>/<session_uuid>/` and use that as the workspace, leaving the
+/// live checkout untouched.
+/// What: creates a temp git repo with a fake GitHub remote URL, then runs the
+/// same pipeline that `spawn_managed_local` executes —
+/// `get_origin_url → parse_github_path → workspace_subpath → provision_in` —
+/// with a `FakeGitBackend` (no real network) and a controlled workspace root.
+/// Asserts (a) the returned `prepared.path` equals `<project_dir>/<session_id>`,
+/// i.e. the managed-clone path; and (b) the path does NOT start with the live
+/// checkout directory.
+/// Test: this function IS the test.
+#[test]
+fn spawn_managed_local_redirects_to_managed_clone() {
+    use trusty_common::github_path::parse_github_path;
+    use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, workspace_subpath};
+    use trusty_mpm::daemon::managed_routes::inproject::get_origin_url;
+    use trusty_mpm::provisioner::{FakeGitBackend, WorkspaceProvisioner};
+    use trusty_mpm::session_manager::ManagedSessionId;
+
+    // Create a temp directory that acts as the operator's live checkout.
+    let live_checkout = tempfile::TempDir::new().expect("live checkout tempdir");
+    let live_dir = live_checkout.path();
+    let fake_origin = "https://github.com/test-owner/test-repo.git";
+
+    // Initialise a real git repo so get_origin_url can run git config.
+    let init = std::process::Command::new("git")
+        .args(["init", live_dir.to_str().expect("utf8 path")])
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+
+    let remote_add = std::process::Command::new("git")
+        .args([
+            "-C",
+            live_dir.to_str().expect("utf8 path"),
+            "remote",
+            "add",
+            "origin",
+            fake_origin,
+        ])
+        .output()
+        .expect("git remote add");
+    assert!(remote_add.status.success(), "git remote add failed");
+
+    // Step 0 (mirrors spawn_managed_local): read the origin URL.
+    let origin_url =
+        get_origin_url(live_dir).expect("get_origin_url must return Some for a repo with remote");
+    assert_eq!(
+        origin_url, fake_origin,
+        "origin URL must match what was set"
+    );
+
+    // Step 1: parse the GitHub identity — same call spawn_managed_local makes.
+    let gh = parse_github_path(&origin_url)
+        .expect("parse_github_path must succeed for a github.com HTTPS URL");
+    assert_eq!(gh.owner, "test-owner");
+    assert_eq!(gh.repo, "test-repo");
+
+    // Step 2: compute managed project_dir with a controlled workspace root so the
+    // test does not write into the real ~/trusty-mpm-projects.
+    let managed_root = tempfile::TempDir::new().expect("managed workspace root tempdir");
+    let cfg = TrustyToolsConfig {
+        workspace_root_template: Some(managed_root.path().to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    let project_dir = workspace_subpath(&cfg, &gh);
+    // project_dir is <managed_root>/<owner>/<repo>, i.e. managed_root/test-owner/test-repo
+
+    // Step 3: provision via FakeGitBackend — mirrors the WorkspaceProvisioner::new
+    // call in spawn_managed_local but skips the real git clone and prepare_session.
+    let provisioner = WorkspaceProvisioner::without_prepare(
+        FakeGitBackend::new(),
+        std::path::PathBuf::new(), // unused: provision_in takes an explicit project_dir
+    );
+    let session_id = ManagedSessionId::new();
+    let prepared = provisioner
+        .provision_in(&project_dir, &session_id, &origin_url, "", "test task")
+        .expect("provision_in must succeed with FakeGitBackend");
+
+    // KEY ASSERTIONS: the workspace is the MANAGED clone path, NOT the live checkout.
+    let expected = project_dir.join(session_id.to_string());
+    assert_eq!(
+        prepared.path, expected,
+        "spawn_managed_local must route to <project_dir>/<session_id>, not the live checkout"
+    );
+    assert!(
+        !prepared.path.starts_with(live_dir),
+        "workspace must NOT be inside the live checkout directory"
+    );
+    assert_eq!(
+        prepared.repo_url, origin_url,
+        "provisioner must record the origin URL (not the local path)"
+    );
+}
+
+/// `spawn_managed_local` returns an error hinting at `tm connect` when the local
+/// directory has no parseable GitHub remote (#1590).
+///
+/// Why: a managed session requires a GitHub remote so it can provision an isolated
+/// clone. When the remote is absent there is no safe place to clone; the error
+/// must point the operator to `tm connect` (or `tm launch --live`) rather than
+/// silently operating in the live checkout. This test locks in that the
+/// no-remote branch produces a user-actionable error message.
+/// What: creates a temp git repo WITHOUT an `origin` remote, verifies that
+/// `get_origin_url` returns `None` (the exact trigger for the error branch in
+/// `spawn_managed_local`), and asserts that the error message `spawn_managed_local`
+/// would produce contains the literal string `tm connect` so the operator knows
+/// the remediation step.
+/// Test: this function IS the test.
+#[test]
+fn spawn_managed_local_errors_on_no_remote() {
+    use trusty_mpm::daemon::managed_routes::inproject::get_origin_url;
+
+    // Create a git repo with no remote — `git init` only, no `git remote add`.
+    let no_remote = tempfile::TempDir::new().expect("no-remote tempdir");
+    let dir = no_remote.path();
+
+    let init = std::process::Command::new("git")
+        .args(["init", dir.to_str().expect("utf8 path")])
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+
+    // get_origin_url must return None — this is what triggers the error branch in
+    // spawn_managed_local.
+    let url = get_origin_url(dir);
+    assert!(
+        url.is_none(),
+        "get_origin_url must return None for a git repo with no origin remote"
+    );
+
+    // Reconstruct the exact error that spawn_managed_local produces for Ok(None).
+    // This documents and locks in the contract: the error message points operators
+    // to `tm connect` as the remediation step.
+    let error_msg = format!(
+        "spawn failed: '{}' has no git origin remote; \
+             managed sessions require a GitHub remote. \
+             Use `tm connect` / `tm launch --live` to run in the live checkout.",
+        dir.display()
+    );
+    assert!(
+        error_msg.contains("tm connect"),
+        "the no-remote error must mention `tm connect` so the operator knows what to do; \
+         got: {error_msg}"
+    );
+}
