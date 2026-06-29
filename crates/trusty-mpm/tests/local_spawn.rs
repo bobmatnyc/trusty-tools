@@ -239,13 +239,13 @@ fn parse_github_path_covers_https_and_ssh_forms() {
     assert_eq!(ssh.owner, "myorg");
     assert_eq!(ssh.repo, "myrepo");
 
-    // A non-GitHub URL must return None (no managed redirect possible).
-    assert!(
-        parse_github_path("https://gitlab.example.com/myorg/myrepo.git").is_none()
-            || parse_github_path("https://gitlab.example.com/myorg/myrepo.git").is_some(),
-        // parse_github_path is lenient for non-GitHub hosts — just ensure it doesn't panic
-        "parse_github_path must not panic on non-GitHub URL"
-    );
+    // `parse_github_path` is intentionally lenient and parses any `host:owner/repo`
+    // shape — including non-github.com hosts — without panicking. The key contract
+    // tested above is that BOTH common github.com forms (HTTPS and SSH) return the
+    // correct owner/repo pair. We don't assert a specific value for a non-GitHub
+    // URL here since the function's leniency is by design; calling it on an
+    // arbitrary host URL must not panic.
+    let _ = parse_github_path("https://gitlab.example.com/myorg/myrepo.git");
 }
 
 /// `workspace_subpath` nests the `owner/repo` identity under the workspace root,

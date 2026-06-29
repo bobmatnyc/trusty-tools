@@ -65,14 +65,15 @@ pub(crate) async fn launch(
     let project_dir = trusty_mpm::core::trusty_tools_config::workspace_subpath(&cfg, &gh);
     let project_dir_str = project_dir.to_string_lossy().to_string();
 
-    // 4. Reconnect check — prefix-match any session whose workdir lives under the
-    //    canonical project dir. The per-session UUID means an exact-match would
+    // 4. Reconnect check — prefix-match any LIVE session whose workdir lives under
+    //    the canonical project dir. The per-session UUID means an exact-match would
     //    never find an existing session; a prefix match reconnects to the last live
-    //    session for this project.
+    //    session for this project. Liveness is checked inside `find_existing_session`
+    //    so ALL candidates are evaluated (not just the first one returned by the
+    //    daemon), which correctly handles projects with stale historical sessions.
     if let Some(existing) =
         find_existing_session(client, url, &live_workdir, Some(&project_dir_str)).await
         && !existing.is_empty()
-        && tmux_has_session(&existing)
     {
         print_launch_banner_reconnecting(&live_workdir, &existing);
         let status = std::process::Command::new("tmux")
@@ -277,12 +278,12 @@ pub(crate) async fn connect(
     let path = path.canonicalize().unwrap_or(path);
     let workdir = path.to_string_lossy().to_string();
 
-    // 1b. Reconnect to an existing live session for this directory if one
+    // 1b. Reconnect to an existing LIVE session for this directory if one
     //     exists — `connect` is idempotent by design. No project_dir prefix-match
-    //     since `connect` always works on the live checkout.
+    //     since `connect` always works on the live checkout. Liveness is checked
+    //     inside `find_existing_session` so stale historical sessions don't block.
     if let Some(existing) = find_existing_session(client, url, &workdir, None).await
         && !existing.is_empty()
-        && tmux_has_session(&existing)
     {
         // Full-screen robot splash + rich info panel (reconnect mode).
         print_launch_banner_reconnecting(&workdir, &existing);
@@ -371,21 +372,24 @@ pub(crate) async fn connect(
     Ok(())
 }
 
-/// Find a live session whose `workdir` matches `workdir` (exact) or lies under
-/// `project_dir` (prefix, for managed-clone reconnect).
+/// Find the first LIVE session whose `workdir` matches `workdir` (exact) or lies
+/// under `project_dir` (prefix, for managed-clone reconnect).
 ///
 /// Why: `tm launch` uses a managed clone with a per-session UUID subdirectory, so
 /// exact-matching `workdir` would never reconnect; a prefix-match on the canonical
 /// `project_dir` (`~/trusty-mpm-projects/<owner>/<repo>`) reconnects to the last
 /// live session for the same project. `tm connect` always passes `project_dir =
 /// None` so it retains the original exact-match semantics.
-/// What: fetches `GET /sessions`, normalizes each `workdir` (strip trailing slash,
-/// canonicalize), and returns the first matching session's `tmux_name`. "Matching"
-/// means either an exact match against `workdir` OR (when `project_dir` is
-/// `Some`) a prefix match where the session's normalized workdir starts with the
-/// normalized project dir + `/`.
-/// Test: `normalize_workdir_strips_trailing_slash`; the prefix-match logic is
-/// tested by `session_matches_workdir_prefix_and_exact` unit tests below.
+/// Liveness (`tmux has-session`) is checked HERE (not at the call site) so ALL
+/// candidates are evaluated — not just the first workdir-matching one. This prevents
+/// a project with stale historical sessions from blocking reconnect to a later live one.
+/// What: fetches `GET /sessions`, iterates all rows, skips empty tmux names and
+/// sessions where `tmux has-session` fails, and returns the first matching live
+/// session's `tmux_name`. `workdir`/`project_dir` matching is delegated to
+/// [`session_matches_workdir`]. Returns `None` when the daemon is unreachable or no
+/// live matching session exists.
+/// Test: `session_matches_workdir_*` unit tests cover the matching logic;
+/// `normalize_workdir_strips_trailing_slash` covers the normalization invariant.
 async fn find_existing_session(
     client: &reqwest::Client,
     url: &str,
@@ -405,7 +409,9 @@ async fn find_existing_session(
     let rows: Vec<Row> = resp.error_for_status().ok()?.json().await.ok()?;
     rows.into_iter()
         .find(|r| {
-            !r.tmux_name.is_empty() && session_matches_workdir(&r.workdir, workdir, project_dir)
+            !r.tmux_name.is_empty()
+                && session_matches_workdir(&r.workdir, workdir, project_dir)
+                && tmux_has_session(&r.tmux_name)
         })
         .map(|r| r.tmux_name)
 }
