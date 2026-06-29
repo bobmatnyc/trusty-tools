@@ -20,7 +20,7 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use crate::core::names::{name_from_dir, name_from_uuid};
+use crate::core::names::{build_managed_session_name, name_from_dir};
 use crate::core::sm::control::Submit;
 
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
@@ -265,8 +265,9 @@ impl SessionManager {
     /// Why: `POST /api/v1/sessions/managed` needs the full create-name-record-spawn
     /// flow in one operation so the HTTP handler stays thin.
     /// What: derives the tmux name from `name_hint` (→ `name_from_dir`) or from
-    /// the generated UUID (→ `name_from_uuid`), creates the tmux session via the
-    /// driver, persists a [`SessionRecord`] in state `Provisioning`, and returns it.
+    /// the `repo_url` GitHub identity (→ `build_managed_session_name`, #1789),
+    /// creates the tmux session via the driver, persists a [`SessionRecord`] in
+    /// state `Provisioning`, and returns it.
     /// The runtime backend defaults to [`crate::runtime::RuntimeKind::ClaudeCode`]
     /// so callers that do not care about the backend keep the pre-#1203 behavior.
     /// Test: `manager_create_record`.
@@ -329,13 +330,29 @@ impl SessionManager {
         owned: bool,
     ) -> Result<SessionRecord, ManagedError> {
         let cwd = cwd.unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")));
+        // Name selection priority (issue #1789):
+        //   1. Explicit `name_hint` from the user → honor unchanged (→ `tmpm-<hint-slug>`).
+        //   2. GitHub-parseable `repo_url`         → `tmpm-<repo>-<8hex>` (project-identifiable).
+        //   3. No project determined                → `tmpm-local-<8hex>` (fallback).
+        //
+        // The cwd-basename scheme is intentionally removed: for the clone path the
+        // cwd is `<workspace-root>/<owner>/<repo>/<session-id>/` whose BASENAME is
+        // the UUID — not useful. For the in-project path the basename is also the
+        // UUID. For the local-path spawn (no `repo_url`) the new `tmpm-local-<8hex>`
+        // fallback is explicit and avoids the misleading appearance of being a
+        // project-linked session.
         let tmux_name = if let Some(hint) = name_hint {
-            // Treat the hint as a path basename to get the slug convention.
+            // Explicit name hint from the user — treat the hint as a path basename
+            // to match pre-#1789 behaviour (callers may pass a bare "ticket-1234"
+            // or a directory path like "/repos/project").
             name_from_dir(Path::new(&hint))
-        } else if cwd != dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")) {
-            name_from_dir(&cwd)
         } else {
-            name_from_uuid(id.as_uuid())
+            // Derive project from repo_url if it carries a parseable GitHub identity.
+            let project = repo_url
+                .as_deref()
+                .and_then(trusty_common::github_path::parse_github_path)
+                .map(|gh| gh.repo);
+            build_managed_session_name(project.as_deref(), id.as_uuid())
         };
 
         // Detect collision before creating tmux session.
