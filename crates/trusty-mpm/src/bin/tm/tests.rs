@@ -959,11 +959,13 @@ fn cli_parses_session_ls_source_id() {
                     source_id,
                     current,
                     json,
+                    all,
                 },
         } => {
             assert_eq!(source_id, Some("myorg/myrepo".to_string()));
             assert!(!current);
             assert!(!json);
+            assert!(!all, "--all must default to false");
         }
         other => panic!("expected session ls, got {other:?}"),
     }
@@ -979,11 +981,13 @@ fn cli_parses_session_ls_current() {
                     current,
                     source_id,
                     json,
+                    all,
                 },
         } => {
             assert!(current);
             assert!(source_id.is_none());
             assert!(!json);
+            assert!(!all, "--all must default to false");
         }
         other => panic!("expected session ls, got {other:?}"),
     }
@@ -1004,6 +1008,21 @@ fn cli_session_ls_source_id_and_current_conflict() {
         result.is_err(),
         "passing both --current and --source-id must be a parse error"
     );
+}
+
+#[test]
+fn cli_parses_session_ls_all() {
+    // Why (#1809): `--all` must opt in to showing decommissioned tombstones.
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "ls", "--all"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::Ls { all, json, .. },
+        } => {
+            assert!(all, "--all flag must parse to true");
+            assert!(!json);
+        }
+        other => panic!("expected session ls --all, got {other:?}"),
+    }
 }
 
 #[test]

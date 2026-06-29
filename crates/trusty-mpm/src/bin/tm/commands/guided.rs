@@ -25,6 +25,7 @@ use serde::Deserialize;
 
 use super::first_run::needs_first_run_clone;
 pub(crate) use super::guided_autostart::github_host;
+use super::managed::filter_live_sessions;
 use crate::formatters::banner::tmux_has_session;
 
 /// Response shape for `POST /api/v1/sessions/managed` (subset we need).
@@ -145,16 +146,16 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
 
 /// Attempt to list sessions and display the interactive picker for a GitHub project.
 ///
-/// Why: the same "list sessions → tty-gate → info-box → picker" sequence is
-/// needed both on the initial attempt and after a successful auto-start. A shared
-/// helper keeps `run_guided_default` DRY and avoids divergence between the two
-/// call sites.
-/// What: calls `list_project_sessions`; on Err (daemon unreachable) returns
-/// `None` so the caller can try auto-start. On Ok, runs the tty-gate and the
-/// picker, returning `Some(result)`. The `None`/`Some` distinction is the
-/// daemon-reachable signal — it does NOT indicate picker success or failure.
+/// Why: the same "list sessions → two-panel-banner → picker" sequence is needed
+/// both on the initial attempt and after a successful auto-start. A shared helper
+/// keeps `run_guided_default` DRY and avoids divergence between the two call sites.
+/// What: calls `list_project_sessions`, filters out decommissioned tombstones
+/// (#1809), runs the tty-gate, renders the two-panel daily banner (#1808), then
+/// hands off to the picker. Returns `None` when the daemon is unreachable so the
+/// caller can try auto-start; returns `Some(result)` once the daemon responded.
 /// Test: indirectly covered by guided-default e2e tests; the pure sub-functions
-/// (`tty_gate`, `parse_picker_choice`) are unit-tested independently.
+/// (`tty_gate`, `parse_picker_choice`, `is_live_session_state`) are unit-tested
+/// independently.
 async fn try_show_picker(
     client: &reqwest::Client,
     url: &str,
@@ -163,7 +164,8 @@ async fn try_show_picker(
     repo_url: &str,
     cwd: &std::path::Path,
 ) -> Option<anyhow::Result<()>> {
-    let sessions = list_project_sessions(client, url, source_id).await.ok()?;
+    // #1809: exclude decommissioned tombstones from the picker by default.
+    let sessions = filter_live_sessions(list_project_sessions(client, url, source_id).await.ok()?);
     use std::io::IsTerminal as _;
     if !tty_gate(
         std::io::stdin().is_terminal(),
@@ -173,9 +175,11 @@ async fn try_show_picker(
     ) {
         return Some(Ok(()));
     }
+    // #1808: render the same two-panel banner as `tm banner` — version in the
+    // title bar, 24-row clipped art, project/workspace fields — no sleep.
     let daemon =
         crate::formatters::info_box::DaemonInfo::from_lock_file().with_count(sessions.len());
-    crate::formatters::info_box::print_info_box(&cwd.to_string_lossy(), source_id, false, &daemon);
+    crate::formatters::banner::print_daily_banner(&cwd.to_string_lossy(), &daemon);
     Some(run_tty_picker(client, url, repo_url, source_id, sessions).await)
 }
 
@@ -431,9 +435,9 @@ async fn run_tty_picker(
         }
 
         // Detached or session ended — re-fetch the list before redisplaying.
-        sessions = list_project_sessions(client, url, source_id)
-            .await
-            .context("re-fetch")?;
+        // #1809: apply the same tombstone filter on the re-fetched list.
+        let r = list_project_sessions(client, url, source_id).await?;
+        sessions = filter_live_sessions(r);
     }
     Ok(())
 }
