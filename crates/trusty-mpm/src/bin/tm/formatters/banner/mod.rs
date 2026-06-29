@@ -30,7 +30,9 @@ pub(crate) const BANNER_IMAGE: &str = include_str!("image.txt");
 /// First row to include (0-indexed, inclusive).
 pub(crate) const CLIP_ROW_START: usize = 0;
 /// One-past-the-last row to include (0-indexed, exclusive).
-pub(crate) const CLIP_ROW_END: usize = 34;
+/// Reduced from 34 to 24 to trim the blank footer rows at the bottom of the
+/// robot art and make the rendered banner less tall.
+pub(crate) const CLIP_ROW_END: usize = 24;
 /// First column to include (0-indexed, inclusive).
 pub(crate) const CLIP_COL_START: usize = 9;
 /// One-past-the-last column to include (0-indexed, exclusive).
