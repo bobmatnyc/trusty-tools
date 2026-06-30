@@ -20,6 +20,45 @@ use colored::Colorize as _;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr as _;
 
+// ── RAII color-disable guard ──────────────────────────────────────────────────
+
+/// RAII guard that disables `colored` output for the duration of a scope.
+///
+/// Why: calling `colored::control::set_override(false)` then `unset_override()`
+/// manually is not panic-safe — a panic between the two leaves global color state
+/// permanently disabled for all subsequent tests or output. A Drop guard restores
+/// the override unconditionally even when the scope exits via panic or early return.
+/// What: on construction calls `set_override(false)` when `active` is true;
+/// on `drop` calls `unset_override()`. When `active` is false, no-ops both.
+/// Test: `no_color_guard_restores_on_drop`.
+pub(crate) struct NoColorGuard {
+    active: bool,
+}
+
+impl NoColorGuard {
+    /// Create a guard that disables color when `disable` is `true`.
+    ///
+    /// Why: callers detect non-TTY and pass `!is_tty`; this keeps the
+    /// call site clean (`let _g = NoColorGuard::new(!is_tty)`).
+    /// What: sets `colored::control::set_override(false)` immediately when
+    /// `disable` is true; otherwise constructs a no-op guard.
+    /// Test: `no_color_guard_restores_on_drop`.
+    pub(crate) fn new(disable: bool) -> Self {
+        if disable {
+            colored::control::set_override(false);
+        }
+        Self { active: disable }
+    }
+}
+
+impl Drop for NoColorGuard {
+    fn drop(&mut self) {
+        if self.active {
+            colored::control::unset_override();
+        }
+    }
+}
+
 // ── Per-character rust brightness shading ─────────────────────────────────────
 
 /// Map a glyph to its rust-palette RGB triple.
@@ -226,9 +265,8 @@ pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
 pub(crate) fn print_daily_banner(workdir: &str, daemon: &super::info_box::DaemonInfo) {
     use std::io::IsTerminal as _;
     let is_tty = std::io::stdout().is_terminal();
-    if !is_tty {
-        colored::control::set_override(false);
-    }
+    // RAII guard: restores color state on return OR on panic — not panic-safe without it.
+    let _color_guard = NoColorGuard::new(!is_tty);
     let w = terminal_width();
     // Rebuild DaemonInfo by value (no Clone on purpose — same pattern as print_info_box).
     let d = super::info_box::DaemonInfo {
@@ -242,9 +280,6 @@ pub(crate) fn print_daily_banner(workdir: &str, daemon: &super::info_box::Daemon
         let _ = std::io::Write::flush(&mut std::io::stdout());
     } else {
         println!("Trusty MPM v{}", env!("CARGO_PKG_VERSION"));
-    }
-    if !is_tty {
-        colored::control::unset_override();
     }
 }
 
@@ -260,9 +295,8 @@ pub(crate) fn print_daily_banner(workdir: &str, daemon: &super::info_box::Daemon
 pub(crate) fn print_banner_preview(reconnecting: bool) {
     use std::io::IsTerminal as _;
     let is_tty = std::io::stdout().is_terminal();
-    if !is_tty {
-        colored::control::set_override(false);
-    }
+    // RAII guard: restores color state on return OR on panic — not panic-safe without it.
+    let _color_guard = NoColorGuard::new(!is_tty);
     let w = terminal_width();
     let workdir = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
@@ -280,9 +314,6 @@ pub(crate) fn print_banner_preview(reconnecting: bool) {
         if reconnecting {
             println!("Reconnecting...");
         }
-    }
-    if !is_tty {
-        colored::control::unset_override();
     }
 }
 
