@@ -14,6 +14,7 @@ use crate::cli::{
     CatalogAction, Cli, Command, DEFAULT_URL, MetaAction, ProjectAction, SessionAction, SlackCmd,
     TelegramCmd,
 };
+use crate::commands::misc::{CATALOG_STALE_MSG, CATALOG_UNKNOWN_MSG, NON_GIT_FALLBACK_HINT};
 use crate::formatters::banner::{
     fallback_session_name, normalize_workdir, print_launch_banner,
     print_launch_banner_reconnecting, terminal_width,
@@ -1712,6 +1713,10 @@ fn cli_parses_login_standalone() {
 
 // ── Image-banner color tests ──────────────────────────────────────────────────
 
+// Serialize all tests that mutate `colored`'s global override so they do not
+// race each other (cargo test runs threads concurrently within the binary).
+static COLOR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn image_clip_has_correct_dimensions() {
     // Why: auto-sizing must produce rows that match the art's actual line count
@@ -1733,19 +1738,42 @@ fn image_clip_has_correct_dimensions() {
 
 #[test]
 fn art_char_shading_emits_truecolor() {
-    // Why: shade_image emits raw ANSI truecolor escapes directly for non-space
-    // art chars so the image always renders with the rust/amber palette on 24-bit
-    // terminals — no color-override needed and no race with parallel tests.
-    // What: call shade_image on the embedded default and verify at least one line
+    // Why: shade_image now respects the colored global state so non-TTY banner
+    // callers can suppress ANSI escapes (#1839 Fix 3). Force color on so the
+    // assertion holds in CI regardless of environment settings.
+    // What: call shade_image with color enabled and verify at least one line
     // contains a truecolor ANSI escape (`\x1B[38;2;`).
-    // Test: no colored::control manipulation; escapes are always emitted.
+    // Test: holds COLOR_LOCK to prevent concurrent color-state tests from racing.
+    let _guard = COLOR_LOCK.lock().unwrap();
+    colored::control::set_override(true);
     use crate::formatters::banner::{shade_image, source::DEFAULT_BANNER_ART};
     let (lines, _) = shade_image(DEFAULT_BANNER_ART);
     let any_colored = lines.iter().any(|l| l.contains("\x1B[38;2;"));
     assert!(
         any_colored,
-        "shaded art must always emit truecolor escapes for non-space chars"
+        "shaded art must emit truecolor escapes when color is enabled"
     );
+    colored::control::unset_override();
+}
+
+#[test]
+fn art_shading_no_ansi_when_color_disabled() {
+    // Why: shade_image must suppress ANSI escapes when color is disabled so that
+    // banner output piped to a file or CI log is clean plain text (#1839 Fix 3).
+    // What: disable color via set_override(false), shade the default art, then
+    // assert no line contains an ANSI escape byte.
+    // Test: holds COLOR_LOCK to prevent concurrent color-state tests from racing.
+    let _guard = COLOR_LOCK.lock().unwrap();
+    colored::control::set_override(false);
+    use crate::formatters::banner::{shade_image, source::DEFAULT_BANNER_ART};
+    let (lines, _) = shade_image(DEFAULT_BANNER_ART);
+    for line in &lines {
+        assert!(
+            !line.contains('\x1B'),
+            "shade_image must not emit ANSI escapes when color is disabled: {line:?}"
+        );
+    }
+    colored::control::unset_override();
 }
 
 #[test]
@@ -1908,4 +1936,37 @@ fn banner_preview_does_not_panic() {
     // Note: output goes to stdout; suppress by redirecting in the test environment.
     crate::formatters::banner::print_banner_preview(false);
     crate::formatters::banner::print_banner_preview(true);
+}
+
+#[test]
+fn health_catalog_stale_message_contains_action() {
+    // Why: operators should see an actionable command when the catalog is stale
+    // or never synced — "updates available" without a fix is unhelpful (#1839 Fix 4).
+    // What: asserts against the production constants from misc.rs so any change to
+    // the actual output string is caught here rather than silently diverging.
+    // Test: if `CATALOG_STALE_MSG` or `CATALOG_UNKNOWN_MSG` in misc.rs no longer
+    // contains "tm catalog sync", this test fails and flags the regression.
+    assert!(
+        CATALOG_STALE_MSG.contains("tm catalog sync"),
+        "CATALOG_STALE_MSG must name the fix command: {CATALOG_STALE_MSG:?}"
+    );
+    assert!(
+        CATALOG_UNKNOWN_MSG.contains("tm catalog sync"),
+        "CATALOG_UNKNOWN_MSG must name the fix command: {CATALOG_UNKNOWN_MSG:?}"
+    );
+}
+
+#[test]
+fn non_git_dir_fallback_prints_help_hint() {
+    // Why: `tm` run from a non-git directory should exit cleanly with a help hint
+    // rather than an error exit code (#1839 Fix 2).
+    // What: asserts against `NON_GIT_FALLBACK_HINT` from misc.rs — the constant
+    // that `fallback_protected` in guided.rs actually passes to `eprintln!`. If
+    // the hint string is changed to drop "--help", this test catches it immediately.
+    // Test: if `NON_GIT_FALLBACK_HINT` no longer mentions "--help", this fails.
+    assert!(
+        NON_GIT_FALLBACK_HINT.contains("--help"),
+        "NON_GIT_FALLBACK_HINT must reference --help for discoverability: \
+         {NON_GIT_FALLBACK_HINT:?}"
+    );
 }

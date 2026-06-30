@@ -479,17 +479,20 @@ pub(crate) mod tests {
         colored::control::unset_override();
     }
 
-    /// Non-space art characters always emit truecolor escapes.
+    /// Non-space art characters emit truecolor escapes when color is enabled.
     #[test]
     fn image_shading_emits_truecolor() {
-        // shade_image emits raw ANSI truecolor escapes directly (not via the
-        // `colored` global state) so this test needs no override.
+        // shade_image now respects the colored global state (set_override) so
+        // that non-TTY callers can suppress escapes (#1839 Fix 3). Force color
+        // on here so the assertion holds regardless of CI environment settings.
+        colored::control::set_override(true);
         let (lines, _) = super::super::shade_image(super::super::source::DEFAULT_BANNER_ART);
         let any_colored = lines.iter().any(|l| l.contains("\x1B[38;2;"));
         assert!(
             any_colored,
-            "shaded art must always emit truecolor escapes for non-space chars"
+            "shaded art must emit truecolor escapes when color is enabled"
         );
+        colored::control::unset_override();
     }
 
     /// Auto-sizing picks up dimensions from a custom art string.

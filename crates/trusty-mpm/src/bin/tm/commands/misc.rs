@@ -39,6 +39,35 @@ pub(crate) const SUB_AGENT_ENV: &str = trusty_common::claude_config::CLAUDE_MPM_
 /// Test: `hook_disable_env_short_circuits` in `tests_behavior_a.rs`.
 pub(crate) const DISABLE_HOOKS_ENV: &str = "TRUSTY_MPM_DISABLE_HOOKS";
 
+/// Catalog status message shown when the catalog has never been synced.
+///
+/// Why: extracting this as a constant lets tests import the canonical string
+/// rather than asserting against a hardcoded copy that could silently diverge
+/// from the production output (#1839 review finding 4).
+/// What: the `catalog:` line shown by `tm health` for a brand-new install.
+/// Test: `health_catalog_stale_message_contains_action` in `tests.rs`.
+pub(crate) const CATALOG_UNKNOWN_MSG: &str = "never synced (run 'tm catalog sync' to initialize)";
+
+/// Catalog status message shown when the catalog is stale.
+///
+/// Why: same rationale as `CATALOG_UNKNOWN_MSG` — tests import the constant
+/// so a string regression is caught by the test, not silently ignored.
+/// What: the `catalog:` line shown by `tm health` when newer agents exist.
+/// Test: `health_catalog_stale_message_contains_action` in `tests.rs`.
+pub(crate) const CATALOG_STALE_MSG: &str = "updates available (run 'tm catalog sync' to update)";
+
+/// Help hint printed to stderr when `tm` is invoked outside a git project.
+///
+/// Why: extracting this as a constant lets the test in `tests.rs` import the
+/// actual production string rather than a hardcoded copy (#1839 review finding 4).
+/// `guided.rs` is at the 500-SLOC cap, so the constant lives here and is
+/// referenced from guided.rs via `super::misc::NON_GIT_FALLBACK_HINT`.
+/// What: the one-line hint printed (to stderr) by `fallback_protected` when the
+/// CWD is not inside any git working tree.
+/// Test: `non_git_dir_fallback_prints_help_hint` in `tests.rs`.
+pub(crate) const NON_GIT_FALLBACK_HINT: &str =
+    "tm: not in a git project — run 'tm --help' for available commands";
+
 /// `status` subcommand — probe daemon health and list sessions.
 ///
 /// Why: the first thing an operator runs to see if the daemon is alive.
@@ -142,9 +171,9 @@ pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
         }
         CommandResult::Health(report) => {
             let catalog = if report.catalog_unknown {
-                "never synced"
+                CATALOG_UNKNOWN_MSG
             } else if report.catalog_stale {
-                "updates available"
+                CATALOG_STALE_MSG
             } else {
                 "up to date"
             };

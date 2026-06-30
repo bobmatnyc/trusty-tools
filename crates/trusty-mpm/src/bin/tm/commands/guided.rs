@@ -22,11 +22,12 @@
 
 use anyhow::Context as _;
 use serde::Deserialize;
+use std::io::IsTerminal as _;
 
 use super::first_run::needs_first_run_clone;
 pub(crate) use super::guided_autostart::github_host;
 use super::managed::filter_live_sessions;
-use crate::formatters::banner::tmux_has_session;
+use crate::formatters::{banner::tmux_has_session, info_box::DaemonInfo};
 
 /// Response shape for `POST /api/v1/sessions/managed` (subset we need).
 ///
@@ -171,7 +172,6 @@ async fn try_show_picker(
 ) -> Option<anyhow::Result<()>> {
     // #1809: exclude decommissioned tombstones from the picker by default.
     let sessions = filter_live_sessions(list_project_sessions(client, url, source_id).await.ok()?);
-    use std::io::IsTerminal as _;
     if !tty_gate(
         std::io::stdin().is_terminal(),
         source_id,
@@ -182,8 +182,7 @@ async fn try_show_picker(
     }
     // #1808: render the same two-panel banner as `tm banner` — version in the
     // title bar, 24-row clipped art, project/workspace fields — no sleep.
-    let daemon =
-        crate::formatters::info_box::DaemonInfo::from_lock_file().with_count(sessions.len());
+    let daemon = DaemonInfo::from_lock_file_with_probe().with_count(sessions.len());
     crate::formatters::banner::print_daily_banner(&cwd.to_string_lossy(), &daemon);
     Some(run_tty_picker(client, url, repo_url, source_id, sessions).await)
 }
@@ -826,8 +825,9 @@ pub(crate) async fn fallback_protected(
         );
     }
 
-    // Not inside a git working tree: classic tm launch path.
-    super::launch::launch(client, url, None, None).await
+    // Not inside a git working tree: print a helpful note and exit cleanly (#1839).
+    eprintln!("{}", super::misc::NON_GIT_FALLBACK_HINT);
+    Ok(())
 }
 
 /// Redirect the guided-default fallback to the protected managed-clone workspace.

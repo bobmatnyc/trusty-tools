@@ -991,14 +991,13 @@ async fn guided_fallback_blocks_non_github_git_checkout() {
     );
 }
 
-/// Why (#1724 non-git path): the protected-checkout guarantee applies only to git
-/// projects. A plain directory (no `.git`) should still reach the classic `tm launch`
-/// path — framework-file deployment into plain dirs is the intended behaviour and
-/// is not in scope of #1724. This test verifies the fallback does NOT blindly block
-/// all directories, only git working trees.
-/// What: creates a temp dir with NO `.git`, calls `fallback_protected`. The classic
-/// path calls `launch()` which will fail to connect to the unreachable daemon URL —
-/// but it must not panic, and must not pretend it's a git-protection refusal.
+/// Why (#1724 non-git path + #1839 Fix 2): the protected-checkout guarantee applies
+/// only to git projects. A plain directory (no `.git`) should exit cleanly with a
+/// helpful hint rather than attempting `launch()` which would fail with a confusing
+/// daemon error. The fallback must NOT blindly block all directories, only git trees.
+/// What: creates a temp dir with NO `.git`, calls `fallback_protected`. Since #1839
+/// the non-git path returns `Ok(())` after printing a help hint to stderr — no
+/// daemon contact is made and no framework files are created.
 /// Test: this is the test.
 #[tokio::test]
 async fn guided_fallback_non_git_dir_reaches_launch_path() {
@@ -1011,31 +1010,22 @@ async fn guided_fallback_non_git_dir_reaches_launch_path() {
         "test precondition: must NOT be a git repo"
     );
 
-    // Call the protected fallback with an unreachable daemon URL.
+    // Call the protected fallback with any daemon URL — the non-git path now
+    // exits cleanly without contacting the daemon (#1839 Fix 2).
     let client = reqwest::Client::new();
     let result =
         crate::commands::guided::fallback_protected(&client, "http://127.0.0.1:1", project).await;
 
-    // The result must be Err (daemon is unreachable so launch() will fail),
-    // but it must NOT be the git-protection refusal error message.
+    // The result must be Ok(()) — no git repo means we print a help hint and exit 0.
     assert!(
-        result.is_err(),
-        "non-git fallback must Err (daemon unreachable)"
-    );
-    let err_msg = format!("{}", result.unwrap_err());
-    assert!(
-        !err_msg.contains("live git checkout"),
-        "#1724: non-git dir must NOT hit the git-protection refusal path; got: {err_msg}"
-    );
-    assert!(
-        !err_msg.contains("auto-managed clones require"),
-        "#1724: non-git dir must NOT show GitHub-remote hint; got: {err_msg}"
+        result.is_ok(),
+        "#1839: non-git dir must exit cleanly (Ok) with a help hint; got: {result:?}"
     );
 
-    // Framework files must not have been created (daemon was unreachable).
+    // Framework files must NOT have been created.
     assert!(
         !project.join("CLAUDE.md").exists(),
-        "CLAUDE.md must not exist when daemon is unreachable"
+        "CLAUDE.md must not exist for plain non-git directories"
     );
 }
 
