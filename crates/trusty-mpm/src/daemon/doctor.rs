@@ -58,7 +58,7 @@ pub async fn run_doctor(
     ];
     checks.push(check_memory(&home).await);
     checks.push(check_search(&home).await);
-    checks.push(check_worktrees(repos_root, active_workspace_paths));
+    checks.push(check_worktrees(repos_root, active_workspace_paths).await);
 
     DoctorReport::from_checks(checks)
 }
@@ -69,13 +69,18 @@ pub async fn run_doctor(
 /// that were decommissioned before this fix—or where `git worktree remove`
 /// failed—may leave stale `.worktrees/<session-id>/` directories on disk. This
 /// probe surfaces orphaned dirs so operators know to run
-/// `tm sessions prune --worktrees`.
-/// What: walks one level of `<repos_root>/<owner>/<repo>/.worktrees/` for every
-/// repo clone under `repos_root`; any leaf directory whose path is NOT present in
-/// `active_workspace_paths` is counted as an orphan. Reports `Ok` (no orphans),
-/// `Warn` (orphans found), or `Warn` (repos_root absent / unconfigured).
+/// `tm sessions prune --worktrees`. The filesystem walk is delegated to
+/// [`crate::session_manager::prune::find_orphaned_worktrees`] inside
+/// `spawn_blocking` so the async executor is not blocked by synchronous I/O.
+/// What: builds a canonicalized active-path set, then spawns a blocking task
+/// to walk `<repos_root>/<owner>/<repo>/.worktrees/`; any leaf directory not
+/// in the active set is counted as an orphan. Reports `Ok` (no orphans),
+/// `Warn` (orphans found), or `Ok` (repos_root absent / unconfigured).
 /// Test: `worktrees_no_orphans_is_ok`, `worktrees_with_orphan_is_warn`.
-fn check_worktrees(repos_root: Option<&Path>, active_workspace_paths: &[PathBuf]) -> DoctorCheck {
+async fn check_worktrees(
+    repos_root: Option<&Path>,
+    active_workspace_paths: &[PathBuf],
+) -> DoctorCheck {
     let Some(root) = repos_root else {
         // No managed workspace root configured — this is a normal state for
         // operators who don't use in-project worktree sessions (#1840).
@@ -94,50 +99,22 @@ fn check_worktrees(repos_root: Option<&Path>, active_workspace_paths: &[PathBuf]
     }
 
     // Build a canonicalized HashSet for O(1) lookup and symlink safety (Fix 1b, #1840).
+    let root = root.to_path_buf();
     let active_set: std::collections::HashSet<PathBuf> = active_workspace_paths
         .iter()
         .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
         .collect();
 
-    let mut orphans: Vec<PathBuf> = Vec::new();
-    // Walk owner/ dirs then repo/ dirs two levels deep.
-    let Ok(owner_entries) = std::fs::read_dir(root) else {
-        return DoctorCheck::new(
-            "worktrees",
-            CheckStatus::Warn,
-            format!("cannot read workspace root {}", root.display()),
-        );
-    };
-    for owner_entry in owner_entries.flatten() {
-        let owner_path = owner_entry.path();
-        if !owner_path.is_dir() {
-            continue;
-        }
-        let Ok(repo_entries) = std::fs::read_dir(&owner_path) else {
-            continue;
-        };
-        for repo_entry in repo_entries.flatten() {
-            let wt_dir = repo_entry.path().join(".worktrees");
-            if !wt_dir.is_dir() {
-                continue;
-            }
-            let Ok(wt_entries) = std::fs::read_dir(&wt_dir) else {
-                continue;
-            };
-            for wt_entry in wt_entries.flatten() {
-                let wt_path = wt_entry.path();
-                if !wt_path.is_dir() {
-                    continue;
-                }
-                // Canonicalize so symlinked paths compare equal to their targets.
-                let canonical_wt =
-                    std::fs::canonicalize(&wt_path).unwrap_or_else(|_| wt_path.clone());
-                if !active_set.contains(&canonical_wt) {
-                    orphans.push(wt_path);
-                }
-            }
-        }
-    }
+    // Delegate the blocking filesystem walk to spawn_blocking so the async
+    // executor is not stalled on directory I/O (#1840 F).
+    let orphans = tokio::task::spawn_blocking(move || {
+        crate::session_manager::prune::find_orphaned_worktrees(&root, &active_set)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!("doctor: worktree scan panicked: {e}");
+        Vec::new()
+    });
 
     if orphans.is_empty() {
         DoctorCheck::new("worktrees", CheckStatus::Ok, "no orphaned worktrees found")
@@ -593,17 +570,17 @@ mod tests {
         );
     }
 
-    #[test]
-    fn worktrees_no_repos_root_is_ok() {
+    #[tokio::test]
+    async fn worktrees_no_repos_root_is_ok() {
         // Fix 7 (#1840): absence of a managed workspace root is NORMAL — not every
         // operator uses in-project worktree sessions. Return Ok, not Warn.
-        let check = check_worktrees(None, &[]);
+        let check = check_worktrees(None, &[]).await;
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.message.contains("no managed workspace"));
     }
 
-    #[test]
-    fn worktrees_no_orphans_is_ok() {
+    #[tokio::test]
+    async fn worktrees_no_orphans_is_ok() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Create owner/repo/.worktrees/session-abc/ and register it as active.
@@ -614,12 +591,12 @@ mod tests {
             .join("session-abc");
         std::fs::create_dir_all(&wt).unwrap();
         let active = vec![wt];
-        let check = check_worktrees(Some(root), &active);
+        let check = check_worktrees(Some(root), &active).await;
         assert_eq!(check.status, CheckStatus::Ok);
     }
 
-    #[test]
-    fn worktrees_with_orphan_is_warn() {
+    #[tokio::test]
+    async fn worktrees_with_orphan_is_warn() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Create two worktrees; only one has an active session.
@@ -637,7 +614,7 @@ mod tests {
         std::fs::create_dir_all(&wt2).unwrap();
         // wt2 is orphaned (no active session).
         let active = vec![wt1];
-        let check = check_worktrees(Some(root), &active);
+        let check = check_worktrees(Some(root), &active).await;
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("1 orphaned"));
         assert!(check.message.contains("tm sessions prune --worktrees"));

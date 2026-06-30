@@ -52,16 +52,22 @@ fn is_session_worktree(path: &Path) -> bool {
 /// What: runs `git -C <repo-root> worktree remove --force <path>` where
 /// `<repo-root>` is the grandparent of the worktree directory
 /// (`path` → `.worktrees` → `<repo-root>`). Also runs
-/// `git -C <repo-root> worktree prune` on success to clear any stale git refs.
-/// Idempotent: if `path` is already absent, returns `false` immediately. On git
-/// failure, best-effort falls back to `remove_dir_all` and logs WARN.
-/// Returns `true` when the workspace was removed (either via git or fallback),
-/// `false` when it was already absent or all removal attempts failed.
+/// `git -C <repo-root> worktree prune` and `git -C <repo-root> branch -D <session>`
+/// on success to clear stale git refs and the session branch. `<session>` is
+/// the last component of `path` (the worktree dir name). Branch deletion is
+/// best-effort — "not found" is silently ignored since older sessions may not
+/// have a branch. OsStr-safe path args avoid lossy UTF-8 coercion (#1840).
+/// Idempotent: if `path` is already absent, returns `true` (already removed).
+/// On git failure, best-effort falls back to `remove_dir_all` and logs WARN.
+/// Returns `true` when the workspace was removed (either via git or fallback)
+/// or was already absent; `false` only when all removal attempts failed.
 /// Test: `is_session_worktree_absent_path_is_noop`; integration coverage via
 /// the decommission round-trip tests that set up real git worktrees.
 pub(super) fn remove_session_worktree(path: &Path) -> bool {
     if !path.exists() {
-        return false; // Already gone, idempotent.
+        // Already gone — either removed by a concurrent decommission or by a
+        // previous partial run. Treat as success (idempotent removal).
+        return true;
     }
     // The repo root is the grandparent of the worktree dir:
     // <repo-root>/.worktrees/<session-id>/ → grandparent = <repo-root>
@@ -75,15 +81,12 @@ pub(super) fn remove_session_worktree(path: &Path) -> bool {
             return false;
         }
     };
-    // Step 1: git worktree remove --force <path> (run from repo root)
+    // Step 1: git worktree remove --force <path> (run from repo root).
+    // Pass repo_root as an OsStr-safe Path arg to avoid lossy UTF-8 coercion (#1840).
     let out = std::process::Command::new("git")
-        .args([
-            "-C",
-            &repo_root.to_string_lossy(),
-            "worktree",
-            "remove",
-            "--force",
-        ])
+        .arg("-C")
+        .arg(repo_root)
+        .args(["worktree", "remove", "--force"])
         .arg(path)
         .output();
     let git_success = match out {
@@ -118,15 +121,53 @@ pub(super) fn remove_session_worktree(path: &Path) -> bool {
             false
         }
     };
-    // Step 2: git worktree prune to clear any stale git refs.
-    // Best-effort; a failure here is a minor annoyance (stale ref in git output)
-    // not a correctness failure.
     if git_success {
+        // Step 2: git worktree prune to clear any stale git worktree refs.
+        // Best-effort: a failure here is a minor annoyance (stale ref in git output),
+        // not a correctness failure.
         let prune_out = std::process::Command::new("git")
-            .args(["-C", &repo_root.to_string_lossy(), "worktree", "prune"])
+            .arg("-C")
+            .arg(repo_root)
+            .args(["worktree", "prune"])
             .output();
         if let Err(e) = prune_out {
             warn!(root = %repo_root.display(), "decommission: git worktree prune failed: {e}");
+        }
+
+        // Step 3: delete the session branch ref (if any). The branch name matches
+        // the worktree dir name. Ignore "not found" — the branch may not exist for
+        // older sessions that never created one (#1840).
+        if let Some(session_name) = path.file_name() {
+            let branch_out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo_root)
+                .args(["branch", "-D"])
+                .arg(session_name)
+                .output();
+            match branch_out {
+                Ok(o) if o.status.success() => {
+                    info!(
+                        path = %path.display(),
+                        "decommission: git branch -D {:?} (session ref cleaned)",
+                        session_name
+                    );
+                }
+                Ok(o) => {
+                    // Branch not found is expected for sessions that never created one.
+                    tracing::debug!(
+                        path = %path.display(),
+                        "decommission: git branch -D {:?} not needed: {}",
+                        session_name,
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        path = %path.display(),
+                        "decommission: git branch -D failed to spawn: {e}"
+                    );
+                }
+            }
         }
     }
     true // workspace was removed (either via git or fallback)
@@ -332,12 +373,16 @@ mod tests {
 
     #[test]
     fn is_session_worktree_absent_path_is_noop() {
-        // remove_session_worktree must return false without panicking when path is absent.
+        // remove_session_worktree must return true without panicking when path is
+        // already absent (#1840 D: idempotent — "already gone" is success).
         let absent = std::path::Path::new("/nonexistent/.worktrees/session-abc");
         // is_session_worktree: true (immediate parent is `.worktrees`)
         assert!(is_session_worktree(absent));
-        // remove_session_worktree: returns false idempotently (path.exists() == false)
+        // remove_session_worktree: returns true idempotently (path already absent)
         let result = remove_session_worktree(absent);
-        assert!(!result, "absent path must return false (already gone)");
+        assert!(
+            result,
+            "absent path should return true (idempotently removed)"
+        );
     }
 }

@@ -85,24 +85,34 @@ fn resume_command(
 /// Detect whether Claude Code has prior conversation history for `cwd` (#1840).
 ///
 /// Why: `claude --continue` exits with "No conversation found to continue" when
-/// no prior conversation exists for the workspace, immediately dropping to a
-/// bare shell. This guard prevents that error by only emitting `--continue`
-/// when evidence of a prior conversation exists.
-/// What: Claude Code stores per-project conversations in
-/// `~/.claude/projects/<encoded-path>/` where `<encoded-path>` is the absolute
-/// workspace path with `/` replaced by `-`. Returns `true` when that directory
-/// exists and contains at least one `.jsonl` file.
-/// Test: `has_prior_conversation_returns_false_for_fresh_workspace`.
+/// no prior conversation exists for the workspace. This guard prevents that error.
+/// What: delegates to [`has_prior_conversation_in`] with the standard
+/// `~/.claude/projects/` directory derived from `dirs::home_dir()`.
+/// Test: `has_prior_conversation_returns_false_for_fresh_workspace` exercises
+/// the inner function directly via `has_prior_conversation_in`.
 fn has_prior_conversation(cwd: &Path) -> bool {
     let Some(home) = dirs::home_dir() else {
         return false;
     };
-    let projects_dir = home.join(".claude").join("projects");
+    has_prior_conversation_in(cwd, &home.join(".claude").join("projects"))
+}
+
+/// Inner implementation of conversation-history detection, testable with injected dir.
+///
+/// Why: allows unit tests to pass a temp directory as `projects_dir` without
+/// mutating the `HOME` environment variable (which is thread-unsafe under parallel
+/// test execution). Separating the I/O root from the detection logic keeps the
+/// detection pure and mockable.
+/// What: returns `true` when `<projects_dir>/<encoded-cwd>/` exists and contains
+/// at least one `.jsonl` file. The encoded path replaces every `/` with `-`.
+/// A leading `/` becomes `-`, so `/private/tmp/foo` → `-private-tmp-foo`.
+/// Test: `has_prior_conversation_returns_false_for_fresh_workspace`,
+/// `has_prior_conversation_returns_true_when_jsonl_exists`.
+fn has_prior_conversation_in(cwd: &Path, projects_dir: &Path) -> bool {
     if !projects_dir.is_dir() {
         return false;
     }
     // Claude Code encodes the workspace path by replacing every '/' with '-'.
-    // A leading '/' becomes '-', so /private/tmp/foo → -private-tmp-foo.
     let encoded = cwd.to_string_lossy().replace('/', "-");
     let project_dir = projects_dir.join(&encoded);
     project_dir.is_dir()
@@ -421,35 +431,41 @@ mod tests {
 
     #[test]
     fn has_prior_conversation_returns_false_for_fresh_workspace() {
-        // Why (#1840): a fresh worktree or temp directory has no Claude
-        // conversation history; has_prior_conversation must return false so
-        // spawn_resume avoids the "No conversation found to continue" error.
-        // We isolate HOME so the test does not read the CI runner's actual
-        // ~/.claude/projects/ — on Unix, dirs::home_dir() reads the HOME env var.
-        let tmp_home = tempfile::tempdir().expect("tempdir for HOME");
-        let tmp_cwd = tempfile::tempdir().expect("tempdir for cwd");
-        // SAFETY: modifying HOME is inherently thread-unsafe; this test is designed
-        // to run in isolation. In practice cargo test does not parallelize tests
-        // within a single module by default, and no other test in this module
-        // modifies HOME.
-        let old_home = std::env::var("HOME").ok();
-        unsafe {
-            std::env::set_var("HOME", tmp_home.path());
-        }
-        let result = has_prior_conversation(tmp_cwd.path());
-        // Restore HOME regardless of the assertion outcome.
-        match old_home {
-            Some(h) => unsafe {
-                std::env::set_var("HOME", &h);
-            },
-            None => unsafe {
-                std::env::remove_var("HOME");
-            },
-        }
+        // Why (#1840): a fresh worktree has no Claude conversation history;
+        // has_prior_conversation must return false to avoid "No conversation found".
+        // Uses has_prior_conversation_in with a temp projects_dir — no HOME env
+        // mutation, making this test safe for parallel execution.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let projects_dir = tmp.path().join("projects");
+        // projects_dir does not exist → always returns false.
         assert!(
-            !result,
-            "fresh workspace with isolated HOME must have no prior conversation (cwd={:?})",
-            tmp_cwd.path()
+            !has_prior_conversation_in(tmp.path(), &projects_dir),
+            "no projects dir → false"
+        );
+        // Create the projects dir but with no entry for this workspace → still false.
+        std::fs::create_dir_all(&projects_dir).unwrap();
+        assert!(
+            !has_prior_conversation_in(tmp.path(), &projects_dir),
+            "projects dir exists but no entry for this workspace → false"
+        );
+    }
+
+    #[test]
+    fn has_prior_conversation_returns_true_when_jsonl_exists() {
+        // Why (#1840): verify the positive path — a workspace with a .jsonl file
+        // in its encoded project dir must return true.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("my-workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let projects_dir = tmp.path().join("projects");
+        // Encode the cwd path as Claude does: replace '/' with '-'.
+        let encoded = cwd.to_string_lossy().replace('/', "-");
+        let project_dir = projects_dir.join(&encoded);
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("session.jsonl"), "{}").unwrap();
+        assert!(
+            has_prior_conversation_in(&cwd, &projects_dir),
+            "workspace with .jsonl must return true"
         );
     }
 

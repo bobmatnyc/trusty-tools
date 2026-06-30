@@ -136,13 +136,23 @@ pub async fn get_session_activity(
     // an empty string. When no snapshot is available, still mark pane_stale=true
     // so callers can distinguish stopped-quiet from live-quiet (pane_stale=false
     // means the runtime IS active).
+    //
+    // Three possible pane states:
+    // 1. runtime_active=true,  pane_stale=false: live capture (may be empty if session is quiet)
+    // 2. runtime_active=false, pane_stale=true,  raw_pane non-empty: serving stop-time snapshot
+    // 3. runtime_active=false, pane_stale=true,  raw_pane empty: stopped, no snapshot available
     let (raw_pane, pane_stale) = if !runtime_active && pane_text.is_empty() {
-        let snapshot = record
-            .scrollback_path
-            .as_deref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .map(|s| tail_lines(&s, 60))
-            .filter(|s| !s.is_empty());
+        // Use tokio::fs::read_to_string to avoid blocking the async executor on
+        // synchronous file I/O (#1840 E).
+        let snapshot = if let Some(p) = record.scrollback_path.as_deref() {
+            tokio::fs::read_to_string(p)
+                .await
+                .ok()
+                .map(|s| tail_lines(&s, 60))
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
         match snapshot {
             Some(snap) => (snap, true),
             None => (String::new(), true), // stopped + no snapshot: pane_stale=true
