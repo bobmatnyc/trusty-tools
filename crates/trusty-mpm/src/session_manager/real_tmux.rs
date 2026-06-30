@@ -95,6 +95,10 @@ impl ManagedTmuxDriver for RealTmuxDriver {
             .map(|sessions| sessions.into_iter().map(|s| s.name).collect())
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
+
+    fn get_pane_cwd(&self, name: &str) -> Option<std::path::PathBuf> {
+        self.driver.pane_current_path(name)
+    }
 }
 
 /// A no-op tmux driver used when `tmux` is not installed.

@@ -143,6 +143,19 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// caller in the observe path needs a `try_from`.
     fn capture(&self, name: &str, lines: usize) -> Result<String, ManagedError>;
 
+    /// Return the pane's current working directory for snapshot-before-stop (#1816).
+    ///
+    /// Why: the idle auto-stop path captures cwd just before killing tmux so
+    /// `resume()` can restore the operator's working directory instead of always
+    /// starting at the workspace root. Returning `None` (the default) is safe —
+    /// resume falls back to `workspace_path`/`cwd` as before.
+    /// What: returns the `pane_current_path` tmux format string value, or `None`
+    /// if the driver does not support it or the call fails.
+    /// Test: `RealTmuxDriver` runs `tmux display-message`; fake drivers return `None`.
+    fn get_pane_cwd(&self, _name: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+
     /// Return all live tmux session names on the host.
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError>;
 
@@ -411,6 +424,8 @@ impl SessionManager {
             // never knows the source project — it is set by the caller.
             source_id: None,
             claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
         };
 
         // Persist the record. On failure the freshly-created tmux session has
@@ -523,31 +538,15 @@ impl SessionManager {
         }
     }
 
-    /// Inject text into a live session's tmux pane.
+    /// Inject text into a live session's tmux pane (Enter-submit variant).
     ///
     /// Why: `POST /api/v1/sessions/managed/{id}/send` lets the operator or
     /// automation feed text into a running session without attaching.
-    /// What: looks up the record, verifies it is not Stopped/Decommissioned,
-    /// calls `tmux.send_line(tmux_name, text)`, and updates `last_activity_at`.
+    /// What: delegates to `inject(id, text, Submit::Enter)` so all input-path
+    /// guard logic lives in one place.
     /// Test: `manager_send_input`.
     pub async fn send_input(&self, id: &ManagedSessionId, text: &str) -> Result<(), ManagedError> {
-        let mut record = self.get(id).await?;
-        if matches!(
-            record.state,
-            ManagedSessionState::Stopped | ManagedSessionState::Decommissioned
-        ) {
-            return Err(ManagedError::TmuxUnavailable(format!(
-                "session {} is {}; cannot inject input",
-                record.tmux_name, record.state
-            )));
-        }
-        self.tmux
-            .send_line(&record.tmux_name, text)
-            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
-
-        record.last_activity_at = Some(Utc::now());
-        self.store.write().await.upsert(record).await?;
-        Ok(())
+        self.inject(id, text, Submit::Enter).await
     }
 
     /// Inject text into a live session, committed per [`Submit`] (#1461).
@@ -640,6 +639,7 @@ impl SessionManager {
     /// workspace dir still exists on disk.
     pub async fn stop(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
         let mut record = self.get(id).await?;
+        super::snapshot::capture_into(&mut record, &*self.tmux).await;
         if let Err(e) = self.tmux.kill_session(&record.tmux_name) {
             warn!(name = %record.tmux_name, "kill_session failed (may already be gone): {e}");
         }
@@ -677,11 +677,13 @@ impl SessionManager {
             }
         }
 
-        // Use workspace_path as cwd if set, otherwise fall back to cwd.
-        let workdir = record
-            .workspace_path
-            .as_ref()
-            .unwrap_or(&record.cwd)
+        // Prefer last_cwd (captured at stop-time) → workspace_path → cwd (#1816).
+        let base = record
+            .last_cwd
+            .as_deref()
+            .or(record.workspace_path.as_deref());
+        let workdir = base
+            .unwrap_or(record.cwd.as_path())
             .to_string_lossy()
             .to_string();
 
@@ -802,6 +804,8 @@ impl SessionManager {
                     // External sessions have no tracked source project.
                     source_id: None,
                     claude_session_id: None,
+                    scrollback_path: None,
+                    last_cwd: None,
                 };
                 guard.upsert(external).await?;
                 report.external_adopted.push(name.clone());
