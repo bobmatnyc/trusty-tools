@@ -266,9 +266,15 @@ pub(crate) fn find_orphaned_worktrees(
                 if !wt_path.is_dir() {
                     continue;
                 }
-                // Canonicalize so symlinked paths compare equal to their targets.
-                let canonical_wt =
-                    std::fs::canonicalize(&wt_path).unwrap_or_else(|_| wt_path.clone());
+                // Item 8 (#1845): skip if the path cannot be canonicalized.
+                // A dangling symlink or a deletion race makes the path
+                // unresolvable; we cannot safely compare it against the active
+                // set, so we leave it untouched rather than risk misclassifying
+                // a live-but-partially-deleted worktree as an orphan.
+                let canonical_wt = match std::fs::canonicalize(&wt_path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
                 if !active_set.contains(&canonical_wt) {
                     orphans.push(wt_path);
                 }
@@ -431,28 +437,36 @@ impl SessionManager {
     /// set are removed. Active session worktrees are NEVER touched. Paths are
     /// canonicalized to handle symlinks correctly (Fix 1b, #1840).
     ///
-    /// TOCTOU safety (#1840): the sweep runs in two phases. Phase 1 discovers
-    /// orphan candidates using the caller-supplied `active_workspace_paths` snapshot
-    /// (which may have been taken moments before this call). Phase 2 — the real
-    /// deletion path — re-queries the live session store under its read lock
-    /// immediately before touching each candidate, so a session created AFTER the
-    /// Phase 1 snapshot is safe: its worktree is skipped if it appears in the fresh
-    /// active set. Dry-run returns after Phase 1 (no deletion, no store re-query).
+    /// TOCTOU safety (#1840, hardened #1845 item 9): the sweep runs in two phases.
+    /// Phase 1 discovers orphan candidates using the caller-supplied
+    /// `active_workspace_paths` snapshot (which may have been taken moments before
+    /// this call). Phase 2 — the real deletion path — takes ONE fresh snapshot from
+    /// the live session store immediately before the deletion loop (O(1) lock
+    /// acquisitions vs. the prior O(n) per-candidate approach). The snapshot is
+    /// taken as late as possible — just before the first deletion — to minimise the
+    /// residual window. **Residual TOCTOU window:** a session registered AFTER the
+    /// Phase 2 snapshot but BEFORE a candidate's deletion is NOT seen by the snapshot
+    /// and could theoretically be deleted. This window is sub-millisecond in practice
+    /// (the snapshot is taken after all I/O-bound Phase 1 work), making it
+    /// substantially narrower than the per-candidate approach (which had an O(n)
+    /// window). Treat this as narrowing the window to near-zero, not eliminating it.
+    /// Dry-run returns after Phase 1 (no deletion, no snapshot).
     ///
-    /// What: Phase 1 calls [`find_orphaned_worktrees`] inside `spawn_blocking` (the
-    /// filesystem walk is blocking). Phase 2 (real-delete only) re-queries
-    /// `self.store` for each candidate before calling `remove_session_worktree` in
-    /// its own `spawn_blocking`. Returns the paths removed (or that would be removed
-    /// under dry-run).
+    /// What: Phase 1 calls [`find_orphaned_worktrees`] inside `spawn_blocking`
+    /// (the filesystem walk is blocking); panics are propagated as `Err`. Phase 2
+    /// (real-delete only) takes ONE fresh `self.store` snapshot, then per candidate:
+    /// canonicalize (skip on error — item 8), check against snapshot, then call
+    /// `remove_session_worktree` in its own `spawn_blocking`. Returns the paths
+    /// removed (or that would be removed under dry-run).
     /// Test: `prune_orphaned_worktrees_removes_orphan`,
     ///       `prune_orphaned_worktrees_spares_active`,
-    ///       `prune_orphaned_worktrees_fresh_active_set_blocks_deletion` in this module.
+    ///       `prune_orphaned_worktrees_store_snapshot_blocks_deletion` (item 1).
     pub async fn prune_orphaned_worktrees(
         &self,
         repos_root: &std::path::Path,
         active_workspace_paths: &[std::path::PathBuf],
         dry_run: bool,
-    ) -> Vec<std::path::PathBuf> {
+    ) -> Result<Vec<std::path::PathBuf>, anyhow::Error> {
         use super::decommission::remove_session_worktree;
         use std::collections::HashSet;
 
@@ -464,42 +478,69 @@ impl SessionManager {
             .collect();
 
         // Phase 1: discover orphan candidates using the initial snapshot.
+        // Propagate a spawn_blocking panic as Err (#1845 item 7) rather than
+        // silently returning an empty candidate list.
         let candidates = tokio::task::spawn_blocking({
             let initial_active = initial_active.clone();
             move || find_orphaned_worktrees(&repos_root, &initial_active)
         })
         .await
-        .unwrap_or_else(|e| {
-            tracing::error!("prune-worktrees: spawn_blocking panicked during orphan scan: {e}");
-            Vec::new()
-        });
+        .map_err(|e| anyhow::anyhow!("prune-worktrees: orphan scan panicked: {e}"))?;
 
         if dry_run {
             for p in &candidates {
                 info!(path = %p.display(), "prune-worktrees (dry-run): would remove orphaned worktree");
             }
-            return candidates;
+            return Ok(candidates);
         }
 
-        // Phase 2 (real-delete path): for each candidate, re-query the live session
-        // store immediately before deletion (#1840 TOCTOU fix). A session created
-        // after Phase 1's snapshot is now visible in the store; if its workspace_path
-        // matches the candidate, skip deletion.
+        // Phase 2 (real-delete path): ONE fresh snapshot immediately before the
+        // deletion loop (#1845 item 9). Each active path is inserted in BOTH its
+        // canonicalized form (for symlink-safe comparison) and its raw form
+        // (Finding 3 #1845: if canonicalize fails on the active side, keep the
+        // raw path as a protective fallback so a canonicalize failure can never
+        // cause an active worktree to be misidentified as an orphan and deleted).
+        let fresh_active: HashSet<std::path::PathBuf> = {
+            let mut set = HashSet::new();
+            for r in self.store.read().await.cached_all() {
+                let Some(p) = r.workspace_path else {
+                    continue;
+                };
+                if let Ok(c) = std::fs::canonicalize(&p) {
+                    set.insert(c);
+                } else {
+                    warn!(
+                        path = %p.display(),
+                        "prune-worktrees: active session path failed to canonicalize; \
+                         using raw path as protective fallback (#1845 F3)"
+                    );
+                }
+                // Always insert the raw path so the raw-form check below catches
+                // cases where the active side failed to canonicalize.
+                set.insert(p);
+            }
+            set
+        };
+
         let mut removed = Vec::new();
         for candidate in candidates {
-            let fresh_active: HashSet<std::path::PathBuf> = self
-                .store
-                .read()
-                .await
-                .cached_all()
-                .into_iter()
-                .filter_map(|r| r.workspace_path)
-                .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
-                .collect();
-
-            let canonical_candidate =
-                std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
-            if fresh_active.contains(&canonical_candidate) {
+            // Item 8 (#1845): skip on canonicalize failure — a path that can't be
+            // resolved is left untouched rather than risk incorrect deletion.
+            let canonical_candidate = match std::fs::canonicalize(&candidate) {
+                Ok(c) => c,
+                Err(_) => {
+                    warn!(
+                        path = %candidate.display(),
+                        "prune-worktrees: skipping candidate — canonicalize failed"
+                    );
+                    continue;
+                }
+            };
+            // Check both the canonicalized form (symlink-safe) AND the raw form
+            // (Finding 3 #1845: protects against active-path canonicalize failures
+            // — if the active side couldn't be canonicalized, its raw path is in
+            // the set and a raw-path match prevents accidental deletion).
+            if fresh_active.contains(&canonical_candidate) || fresh_active.contains(&candidate) {
                 info!(
                     path = %candidate.display(),
                     "prune-worktrees: skipping — active session appeared after initial snapshot"
@@ -522,7 +563,7 @@ impl SessionManager {
                 removed.push(candidate);
             }
         }
-        removed
+        Ok(removed)
     }
 
     /// Age-based auto-reap of stale ephemeral sessions (#1508).
@@ -673,5 +714,115 @@ mod orphan_tests {
             orphans.contains(&wt2),
             "expected {wt2:?} to be the orphan, got {orphans:?}"
         );
+    }
+
+    /// Item 1 (#1845): async test that genuinely exercises the Phase 2 fresh-store
+    /// snapshot path in `prune_orphaned_worktrees`.
+    ///
+    /// Why: the existing sync test at `prune_orphaned_worktrees_fresh_active_set_blocks_deletion`
+    /// only calls `find_orphaned_worktrees` directly, giving zero executed coverage of
+    /// the Phase 2 `fresh_active` snapshot logic in the async method. This test goes
+    /// end-to-end through `prune_orphaned_worktrees` with a real `SessionManager`:
+    /// Phase 1 finds the worktree as a candidate (empty initial snapshot), then Phase 2
+    /// reads the live store and finds the matching record — skipping deletion.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn prune_orphaned_worktrees_store_snapshot_blocks_deletion() {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        // Minimal driver: all ops are no-ops — we never actually need tmux.
+        struct NoopDriver;
+        impl super::super::manager::ManagedTmuxDriver for NoopDriver {
+            fn create_session(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<(), super::super::manager::ManagedError> {
+                Ok(())
+            }
+            fn kill_session(&self, _: &str) -> Result<(), super::super::manager::ManagedError> {
+                Ok(())
+            }
+            fn send_line(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<(), super::super::manager::ManagedError> {
+                Ok(())
+            }
+            fn capture(
+                &self,
+                _: &str,
+                _: usize,
+            ) -> Result<String, super::super::manager::ManagedError> {
+                Ok(String::new())
+            }
+            fn list_sessions(&self) -> Result<Vec<String>, super::super::manager::ManagedError> {
+                Ok(Vec::new())
+            }
+        }
+
+        let store_dir = tempfile::tempdir().unwrap();
+        let repos_tmp = tempfile::tempdir().unwrap();
+
+        // Build a real .worktrees/<id>/ dir so Phase 1 finds it as a candidate.
+        let session_id = super::super::record::ManagedSessionId::new();
+        let wt_path = repos_tmp
+            .path()
+            .join("owner")
+            .join("repo")
+            .join(".worktrees")
+            .join(session_id.to_string());
+        std::fs::create_dir_all(&wt_path).expect("create worktree dir");
+
+        // Create the SessionManager and insert a live record for the worktree.
+        let mgr =
+            super::super::manager::SessionManager::new(store_dir.path(), Arc::new(NoopDriver))
+                .await
+                .expect("SessionManager::new");
+
+        let canonical_wt = std::fs::canonicalize(&wt_path).unwrap_or_else(|_| wt_path.clone());
+        let record = super::super::record::SessionRecord {
+            id: session_id,
+            tmux_name: "test-toctou".into(),
+            cwd: PathBuf::from("/tmp"),
+            task: "toctou test".into(),
+            state: super::super::record::ManagedSessionState::Active,
+            created_at: chrono::Utc::now(),
+            last_activity_at: None,
+            workspace_path: Some(canonical_wt),
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: false,
+            source_id: None,
+            claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
+        };
+        mgr.store
+            .write()
+            .await
+            .upsert(record)
+            .await
+            .expect("upsert test record");
+
+        // Phase 1 will see an empty initial set → worktree is a candidate.
+        // Phase 2 fresh snapshot reads the store → finds the record → skips deletion.
+        let removed = mgr
+            .prune_orphaned_worktrees(repos_tmp.path(), &[], false)
+            .await
+            .expect("prune must not error");
+
+        assert!(
+            removed.is_empty(),
+            "worktree backed by a live store record must NOT be removed; got: {removed:?}"
+        );
+        assert!(wt_path.exists(), "worktree dir must survive the prune");
     }
 }

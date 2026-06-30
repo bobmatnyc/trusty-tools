@@ -102,14 +102,28 @@ pub async fn prune_worktrees_route(
         .collect();
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     let repos_root = crate::core::trusty_tools_config::workspace_root(&config);
-    let removed = mgr
+    // Item 7 (#1845): propagate scan failures as HTTP 500 instead of silently
+    // returning an empty path list (which could mask the underlying error).
+    match mgr
         .prune_orphaned_worktrees(&repos_root, &active_workspace_paths, req.dry_run)
-        .await;
-    let paths: Vec<String> = removed
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-    Json(serde_json::json!({ "dry_run": req.dry_run, "paths": paths })).into_response()
+        .await
+    {
+        Ok(removed) => {
+            let paths: Vec<String> = removed
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect();
+            Json(serde_json::json!({ "dry_run": req.dry_run, "paths": paths })).into_response()
+        }
+        Err(e) => {
+            warn!("prune-worktrees route: orphan scan failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("orphan worktree scan failed: {e}"),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// POST /api/v1/sessions/managed/prune — by-state prune + compaction (#1508).

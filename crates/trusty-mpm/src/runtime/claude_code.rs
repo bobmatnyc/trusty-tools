@@ -497,16 +497,35 @@ mod tests {
 
     #[test]
     fn spawn_resume_without_id_no_prior_conv_sends_plain_spawn() {
-        // Why (#1840): when no claude_session_id is available AND the workspace
-        // has no prior conversation, spawn_resume must send a plain spawn
+        // Why (#1840, #1845 item 3): when no claude_session_id is available AND the
+        // workspace has no prior conversation, spawn_resume must send a plain spawn
         // (no --continue, no --resume) to avoid "No conversation found to continue".
-        if ClaudeCodeAdapter::resolve_claude().is_none() {
-            return;
+        //
+        // The command construction is tested via resume_command() directly with a fake
+        // binary so assertions ALWAYS run even when the `claude` binary is absent in CI.
+        // The adapter merely calls resume_command() with the same arguments; testing the
+        // function directly proves the selection logic without CI depending on claude.
+        let cmd = resume_command("__fake_claude__", None, false);
+        assert!(
+            !cmd.contains("--continue"),
+            "plain-spawn path must NOT use --continue: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--resume"),
+            "plain-spawn path must NOT use --resume: {cmd}"
+        );
+        assert!(
+            cmd.contains("env -u ANTHROPIC_API_KEY"),
+            "plain-spawn path must still scrub API key: {cmd}"
+        );
+
+        // Additionally verify the adapter-level plumbing when the binary is present.
+        let Some(_claude_bin) = ClaudeCodeAdapter::resolve_claude() else {
+            return; // core assertions above already ran; adapter path requires binary
         };
         let tmp = tempfile::tempdir().expect("tempdir");
         let fake = FakeTmux::new();
         let adapter = ClaudeCodeAdapter::new(fake.clone());
-        // Use the fresh temp dir as cwd — it has no Claude conversation history.
         adapter
             .spawn_resume("test-tmux-session", tmp.path(), "task", None)
             .expect("spawn_resume without id");
@@ -514,12 +533,12 @@ mod tests {
         assert_eq!(sends.len(), 1);
         assert!(
             !sends[0].1.contains("--continue"),
-            "spawn_resume without id + no prior conv must NOT use --continue: {}",
+            "adapter plain-spawn must NOT use --continue: {}",
             sends[0].1
         );
         assert!(
             !sends[0].1.contains("--resume"),
-            "spawn_resume without id must NOT use --resume: {}",
+            "adapter plain-spawn must NOT use --resume: {}",
             sends[0].1
         );
     }

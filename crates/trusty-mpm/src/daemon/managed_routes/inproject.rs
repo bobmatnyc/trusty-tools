@@ -216,6 +216,20 @@ pub fn create_session_worktree(
         ));
     }
 
+    // Item 5 (#1845): write the SM ownership sentinel so remove_session_worktree
+    // can confirm this directory was TM-created and not a user-owned path that
+    // happens to sit under a `.worktrees/` parent. The sentinel is best-effort:
+    // a failure here is a non-fatal warning; the worktree was created successfully
+    // and the naming-convention fallback in decommission.rs provides backward-compat.
+    let sentinel = worktree_path.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE);
+    if let Err(e) = std::fs::write(&sentinel, b"") {
+        warn!(
+            worktree = %worktree_path.display(),
+            sentinel = crate::session_manager::decommission::WORKTREE_SENTINEL_FILE,
+            "inproject: failed to write SM ownership sentinel (non-fatal): {e}"
+        );
+    }
+
     info!(worktree = %worktree_path.display(), "inproject: per-session worktree created");
     Ok(worktree_path)
 }
