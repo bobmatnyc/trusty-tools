@@ -355,7 +355,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         // Primary reverse-proxy: /api/{service}/{*path} (#1849 Phase 2).
         // {service} ∈ {search, memory, analyze, review, mpm}.
-        // No collision with /api/console/* — "console" is not a valid service key.
+        // No collision with /api/console/*: axum (matchit 0.8) routes literal
+        // segments before wildcard captures, so /api/console/* always wins.
+        // The proxy handler also rejects service_key == "console" explicitly as // pragma: allowlist secret
+        // a routing-independent second layer of defence.
         .route("/api/{service}/{*path}", any(crate::proxy::proxy_handler))
         // Deprecated alias: /proxy/{daemon}/{*path} → same handler with a trace log.
         // Kept for backward compatibility; callers should migrate to /api/{service}/*.
@@ -1149,6 +1152,28 @@ mod tests {
             resp.status(),
             StatusCode::SERVICE_UNAVAILABLE,
             "/proxy/mpm/health must return 503 (mpm in allowlist, cache cold), not 400"
+        );
+    }
+
+    /// Why: the "console" service key is reserved for the console's own
+    /// /api/console/* namespace.  Issuing a request like /api/console/hijack
+    /// must never reach the reverse-proxy and be forwarded to an upstream; the
+    /// explicit guard in proxy_handler must return 400 before full_id is called.
+    /// What: issues GET /api/console/hijack on a fresh state, asserts 400.
+    /// Test: this test itself (#1849 Phase 2 console-key reservation guard).
+    #[tokio::test]
+    async fn test_api_proxy_console_key_returns_400() {
+        let router = build_router(make_test_state());
+
+        let req = Request::builder()
+            .uri("/api/console/hijack")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "/api/console/<unregistered-path> must return 400 from the console guard, not 404"
         );
     }
 

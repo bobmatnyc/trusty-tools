@@ -48,6 +48,7 @@ pub mod poller;
 pub mod proxy;
 pub mod routes;
 pub mod server;
+pub(crate) mod url_util;
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 

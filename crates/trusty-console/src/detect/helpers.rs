@@ -108,21 +108,23 @@ pub(super) fn fetch_health_version(addr: &str) -> Option<String> {
 
 // ─── orchestrator ─────────────────────────────────────────────────────────────
 
-/// Strip any leading `http://` or `https://` scheme from a bare address string.
+/// Strip all leading `http://` or `https://` scheme prefixes from a bare
+/// address string.
 ///
 /// Why: Discovery addr files should contain bare `host:port` (e.g.
-/// `127.0.0.1:7788`), but a malformed or misconfigured file might include a
-/// scheme prefix.  Building `format!("http://{addr}")` with a scheme-prefixed
-/// addr produces a double-scheme URL (`http://http://127.0.0.1:7788`) that
-/// reqwest fails to parse.  Stripping exactly one leading scheme before
-/// composing guarantees a single well-formed `http://host:port` URL.
-/// What: Strips one leading `http://` or `https://` prefix if present; returns
-/// the original string slice otherwise (no allocation on the hot path).
-/// Test: `test_normalize_addr_*` below.
+/// `127.0.0.1:7788`), but a malformed or misconfigured file might include one
+/// or more scheme prefixes.  Building `format!("http://{addr}")` with a
+/// scheme-prefixed addr produces a double-scheme URL
+/// (`http://http://127.0.0.1:7788`) that reqwest fails to parse.
+/// Stripping all leading schemes before composing guarantees exactly one
+/// well-formed `http://host:port` URL.
+/// What: Delegates to `crate::url_util::strip_schemes` — the single shared
+/// implementation backing both this function and `proxy::routes::normalize_base_url`
+/// so the loop logic cannot drift between the two sites.  Returns a slice of
+/// `addr`, allocation-free on the hot path.
+/// Test: `test_normalize_addr_*` below; `url_util::tests` cover the core loop.
 fn normalize_addr(addr: &str) -> &str {
-    addr.strip_prefix("http://")
-        .or_else(|| addr.strip_prefix("https://"))
-        .unwrap_or(addr)
+    crate::url_util::strip_schemes(addr)
 }
 
 /// Run the standard P0 detection sequence for a service.

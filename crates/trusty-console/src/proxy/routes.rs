@@ -86,21 +86,21 @@ fn is_local_upstream(url: &str) -> bool {
 /// Stripping all leading scheme prefixes and re-adding exactly one `http://`
 /// ensures a single well-formed `http://host:port` URL regardless of how many
 /// schemes were stacked.  Idempotent on a correctly-formed URL.
-/// What: Loops stripping `http://` or `https://` prefixes until neither is
-/// present, then prepends `http://`.
+/// What: Delegates to `crate::url_util::strip_schemes` (the single shared
+/// implementation) so the loop logic cannot drift between this site and the
+/// connector layer.  Emits a `warn!` when `https://` is present — that
+/// indicates a misconfigured discovery file (all upstream connections are
+/// loopback HTTP only).
 /// Test: `test_normalize_base_url_*` below.
 pub fn normalize_base_url(url: &str) -> String {
-    let mut rest = url;
-    loop {
-        if let Some(s) = rest.strip_prefix("http://") {
-            rest = s;
-        } else if let Some(s) = rest.strip_prefix("https://") {
-            rest = s;
-        } else {
-            break;
-        }
+    if url.contains("https://") {
+        warn!(
+            "proxy: upstream base URL contains https:// — stripping to http:// \
+             (loopback upstream connections are HTTP only). \
+             Check the service's http_addr discovery file."
+        );
     }
-    format!("http://{rest}")
+    format!("http://{}", crate::url_util::strip_schemes(url))
 }
 
 /// Build the upstream URL from a base URL, sub-path, and optional query string.
@@ -168,6 +168,17 @@ pub async fn proxy_handler(
     Path((service_key, subpath)): Path<(String, String)>,
     req: Request,
 ) -> Response {
+    // Defensive guard: "console" is a reserved service key that routes to the
+    // console's own /api/console/* namespace.  Reject it explicitly here as a
+    // routing-independent second layer so the proxy can never target itself,
+    // even if axum's literal-segment priority were somehow bypassed.
+    if service_key.as_str() == "console" {
+        warn!(
+            "proxy: service_key 'console' is reserved and cannot be proxied (routing invariant violated)"
+        );
+        return error_response(StatusCode::BAD_REQUEST, "reserved service key");
+    }
+
     // Map short key → full id via the exhaustive match in full_id(), which is
     // the single source of truth for the proxy allowlist.
     let Some(full_service_id) = full_id(&service_key) else {
@@ -442,6 +453,36 @@ mod tests {
         // #1849 Phase 1: mpm must be in the allowlist.
         assert_eq!(full_id("mpm"), Some("trusty-mpm"));
         assert_eq!(full_id("unknown"), None);
+    }
+
+    /// Why: a double-scheme URL like `http://http://127.0.0.1:7878` must NOT
+    /// pass the SSRF guard — it starts with `http://http://`, not `http://127.`,
+    /// `http://[::1]`, or `http://localhost`.  This locks in the ordering
+    /// safety: normalize_base_url must run before is_local_upstream so the
+    /// guard only ever sees a clean single-scheme URL.
+    /// What: asserts is_local_upstream("http://http://127.0.0.1:7878") is false.
+    /// Test: this test itself (#1849 Phase 2 double-scheme SSRF regression guard).
+    #[test]
+    fn test_is_local_upstream_rejects_double_scheme() {
+        assert!(
+            !is_local_upstream("http://http://127.0.0.1:7878"),
+            "double-scheme URL must not pass the loopback guard"
+        );
+    }
+
+    /// Why: the "console" service key is reserved; full_id returns None for it
+    /// so it would be caught by the unknown-key guard — but the explicit
+    /// console check must fire first (defensive depth).
+    /// What: asserts full_id("console") is None (the allowlist does not list it).
+    /// Test: this test itself (unit-level guard; HTTP-level guard tested in
+    /// server.rs::test_api_proxy_console_key_returns_400).
+    #[test]
+    fn test_console_key_not_in_allowlist() {
+        assert_eq!(
+            full_id("console"),
+            None,
+            "console must never appear in the proxy allowlist"
+        );
     }
 
     /// Why: hop-by-hop headers must be stripped; safe headers must pass through.
