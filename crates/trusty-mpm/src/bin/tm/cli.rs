@@ -654,6 +654,12 @@ pub(crate) enum Command {
     /// scrollback is preserved) followed by the info-box welcome panel (without
     /// the 1-second sleep). Service/daemon data reflects the current environment
     /// — graceful when the daemon is not running.
+    ///
+    /// Banner art override (precedence: env var > persistent file > built-in default):
+    ///   • `TRUSTY_MPM_BANNER_FILE=<path>` — one-shot override via env var.
+    ///   • `~/.trusty-mpm/banner.txt` — persistent user-editable file (seeded
+    ///     from the embedded default on first run; edit freely).
+    ///
     /// Test: `cli_parses_banner`, `cli_parses_banner_reconnecting` in `tests.rs`.
     Banner {
         /// Preview the reconnect variant (shows the "reconnecting" status row).
