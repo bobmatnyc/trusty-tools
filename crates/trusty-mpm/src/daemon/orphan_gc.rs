@@ -339,9 +339,13 @@ impl OrphanGc {
     /// returns a [`SweepPlan`] whose `to_reap` is the intersection of this pass's
     /// candidates with the *previous* pass's candidates (the debounce). Updates
     /// `prev_candidates` to this pass's candidate set so the next sweep sees them.
-    /// Untracked-active managed sessions are counted in `warned` (and the caller
-    /// logs each); everything else is counted in `kept`.
-    /// Test: `debounce_skips_first_observation`, `debounce_reaps_second_observation`.
+    /// Tracked (healthy) sessions are counted in `kept` and logged at `debug!`.
+    /// Untracked-active managed sessions are counted in `warned` and logged at
+    /// `info!` (downgraded from `warn!` in #1813 — these are informational, not
+    /// emergencies; frequent `warn!` here was filling logs at 56 MB/day).
+    /// True anomalies (kill failures, degraded snapshots) remain at `warn!`.
+    /// Test: `debounce_skips_first_observation`, `debounce_reaps_second_observation`,
+    /// `gc_key_is_session_name_only_not_composite` (regression for #1813).
     pub fn plan_sweep(
         &mut self,
         panes: &[PaneInfo],
@@ -361,14 +365,23 @@ impl OrphanGc {
                 }
                 GcDecision::WarnUntrackedActive => {
                     plan.warned += 1;
-                    warn!(
+                    // Downgraded from warn! (#1813): an untracked active pane is
+                    // informational — we intentionally skip it every sweep. Logging
+                    // at warn! caused 56 MB/day of log growth for users with live
+                    // managed sessions. Reserve warn! for genuine anomalies.
+                    info!(
                         session = %pane.session_name,
                         command = %pane.pane_current_command,
-                        "untracked active managed session — not reaping"
+                        "orphan-GC: untracked active managed session — skipping"
                     );
                 }
-                GcDecision::Keep(_) => {
+                GcDecision::Keep(reason) => {
                     plan.kept += 1;
+                    debug!(
+                        session = %pane.session_name,
+                        ?reason,
+                        "orphan-GC: keeping tracked session"
+                    );
                 }
             }
         }
@@ -835,6 +848,78 @@ mod tests {
             after.to_reap.is_empty(),
             "reset must restart the debounce, got {:?}",
             after.to_reap
+        );
+    }
+
+    /// Regression test for #1813 (key-mismatch bug).
+    ///
+    /// The GC's lookup key MUST be the **session name alone**, never a composite
+    /// formed from `{session_name}_{pane_command}_{pane_pid}`. A composite key
+    /// (e.g. `tmpm-27f32eb2-ae6a-485b-a_zsh_45162`) would never match the tracked
+    /// set's plain session-name entries and would cause every tracked session to be
+    /// misclassified as `WarnUntrackedActive` — preventing any reaping forever while
+    /// generating constant warn-level log spam.
+    ///
+    /// Specifically verifies three properties:
+    /// (a) A tracked session running an active command is `Keep(TrackedManaged)`,
+    ///     NOT `WarnUntrackedActive` — proving the command and PID are NOT part of
+    ///     the lookup key.
+    /// (b) A genuinely-orphaned session (untracked + idle shell) is `ReapCandidate`.
+    /// (c) A tracked session running an idle shell is `Keep(TrackedManaged)`, NOT
+    ///     `ReapCandidate`.
+    #[test]
+    fn gc_key_is_session_name_only_not_composite() {
+        let tracked = tracked_with(&[], &["tmpm-my-session"]);
+
+        // (a) Tracked session running an active command → must be kept, not warned.
+        // The pane_current_command ("claude") and pane_pid (45162) must play NO
+        // part in the lookup; only session_name determines membership in `tracked`.
+        let decision = classify_session(
+            &PaneInfo {
+                session_name: "tmpm-my-session".to_string(),
+                pane_current_command: "claude".to_string(),
+                pane_pid: Some(45162),
+            },
+            &tracked,
+            &AlwaysIdleProbe,
+        );
+        assert_eq!(
+            decision,
+            GcDecision::Keep(KeepReason::TrackedManaged),
+            "(a) tracked active session must be Keep, not WarnUntrackedActive \
+             (key mismatch regression: composite key would never match)"
+        );
+
+        // (b) Genuinely-orphaned session (untracked + idle bare shell) → ReapCandidate.
+        let decision = classify_session(
+            &PaneInfo {
+                session_name: "tmpm-orphan".to_string(),
+                pane_current_command: "zsh".to_string(),
+                pane_pid: Some(99999),
+            },
+            &tracked,
+            &AlwaysIdleProbe,
+        );
+        assert_eq!(
+            decision,
+            GcDecision::ReapCandidate,
+            "(b) untracked idle managed session must be a ReapCandidate"
+        );
+
+        // (c) Tracked session running an idle shell → still kept, not reaped.
+        let decision = classify_session(
+            &PaneInfo {
+                session_name: "tmpm-my-session".to_string(),
+                pane_current_command: "zsh".to_string(),
+                pane_pid: Some(55555),
+            },
+            &tracked,
+            &AlwaysIdleProbe,
+        );
+        assert_eq!(
+            decision,
+            GcDecision::Keep(KeepReason::TrackedManaged),
+            "(c) tracked idle session must be Keep, not ReapCandidate"
         );
     }
 }
