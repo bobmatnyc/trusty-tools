@@ -461,7 +461,7 @@ pub(crate) mod tests {
         );
         assert!(
             lines.len() >= 12 && lines.len() <= 20,
-            "clipped rows ({}) must be within 12–20 (CLIP_ROW_END=16)",
+            "clipped rows ({}) must be within 12–20 (CLIP_ROW_END=14)",
             lines.len()
         );
     }

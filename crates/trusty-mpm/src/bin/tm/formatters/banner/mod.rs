@@ -99,7 +99,8 @@ pub(crate) fn clip_and_shade_image() -> Vec<String> {
         .map(|line| {
             let chars: Vec<char> = line.chars().collect();
             let len = chars.len();
-            let col_start = CLIP_COL_START; // 0 — no min needed
+            #[allow(clippy::unnecessary_min_or_max)] // guard retained for future non-zero re-crops
+            let col_start = CLIP_COL_START.min(len);
             let col_end = CLIP_COL_END.min(len);
 
             let mut row = String::with_capacity(IMAGE_CLIP_COLS * 24);
