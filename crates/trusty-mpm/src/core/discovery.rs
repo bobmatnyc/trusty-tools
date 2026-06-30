@@ -234,10 +234,27 @@ async fn resolve_daemon_url_via_gateway_inner(
     }
 
     // b) Gateway probe — build the gateway base URL and probe its /health.
-    //    The console proxies `GET /api/mpm/health` → daemon `GET /health`.
-    //    A 200 means the daemon is reachable through the gateway; use it.
+    //    `probe_url` appends "/health", so the actual request is:
+    //    `GET http://{console}/api/mpm/health`, which the console proxy
+    //    forwards to the daemon's `GET /health`.
+    //
+    //    IMPORTANT: use a **dedicated** short-timeout client for this probe,
+    //    independent of the caller's `client`. The caller's client (from
+    //    `reqwest::Client::new()` in main.rs) carries no timeout by default
+    //    (reqwest's default is effectively unlimited). A slow or unreachable
+    //    console must NEVER stall every `tm` command for up to 30 seconds —
+    //    the gateway probe must fail fast and fall through to the direct path.
+    //    The per-request `.timeout()` in `probe_url` provides a second line of
+    //    defense; the client-level timeout here is the primary guarantee.
+    let probe_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        // Client::builder().timeout(...).build() is infallible without custom
+        // TLS or certificate configuration — both are absent here.
+        .expect("gateway probe client is infallible");
+
     let gateway_base = format!("http://{console_addr}{GATEWAY_PATH}");
-    if probe_url(client, &gateway_base).await {
+    if probe_url(&probe_client, &gateway_base).await {
         return gateway_base;
     }
 
@@ -470,29 +487,41 @@ mod tests {
         );
     }
 
-    /// Gateway is used when the console probe returns 200.
+    /// Gateway is used when the console probe returns 200, and the probe
+    /// specifically targets `/api/mpm/health` — not the bare base URL.
     ///
     /// Why: the primary goal of gateway resolution — when the console is
     /// running and the daemon is reachable through it, all `tm` traffic should
-    /// route via `http://{console}/api/mpm`.
-    /// What: binds an ephemeral TCP listener that responds with HTTP 200, uses
-    /// its address as the injected `console_addr`, calls
-    /// `resolve_daemon_url_via_gateway_inner` with no explicit override, and
-    /// asserts the returned URL is the gateway base URL.
+    /// route via `http://{console}/api/mpm`. Confirming the probe path prevents
+    /// a regression where a bare GET /api/mpm (empty suffix) gets routed
+    /// differently from GET /api/mpm/health by the proxy, causing spurious
+    /// fallback to direct even when the gateway is healthy.
+    /// What: binds an ephemeral TCP listener that reads the request line and
+    /// asserts it is `GET /api/mpm/health …` before responding HTTP 200; uses
+    /// its address as the injected `console_addr`; calls
+    /// `resolve_daemon_url_via_gateway_inner` with no explicit override; asserts
+    /// the returned URL is the gateway base URL.
     /// Test: this test.
     #[tokio::test]
     async fn resolve_via_gateway_uses_gateway_when_probe_succeeds() {
-        use tokio::io::AsyncWriteExt as _;
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind listener");
         let addr = listener.local_addr().expect("local_addr");
 
-        // Respond HTTP 200 to any connection (simulates console + daemon healthy).
+        // Capture the request line to confirm the probe targets /api/mpm/health.
+        let (path_tx, path_rx) = tokio::sync::oneshot::channel::<String>();
         tokio::spawn(async move {
-            if let Ok((mut sock, _)) = listener.accept().await {
-                let _ = sock
+            if let Ok((sock, _)) = listener.accept().await {
+                let (reader, mut writer) = sock.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                let req_line = lines.next_line().await.unwrap().unwrap_or_default();
+                let _ = path_tx.send(req_line);
+                // Respond 200 only after capturing the line so the reqwest
+                // future sees the status and probe_url returns true.
+                let _ = writer
                     .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
                     .await;
             }
@@ -506,6 +535,13 @@ mod tests {
         assert_eq!(
             result, expected_gateway,
             "gateway URL must be returned when console probe succeeds"
+        );
+
+        // Verify the probe hit /api/mpm/health, not the bare /api/mpm base.
+        let req_line = path_rx.await.expect("request line must be captured");
+        assert!(
+            req_line.starts_with("GET /api/mpm/health "),
+            "gateway probe must target /api/mpm/health; got: {req_line:?}"
         );
     }
 

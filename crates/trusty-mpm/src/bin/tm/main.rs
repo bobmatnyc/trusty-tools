@@ -191,15 +191,16 @@ async fn main() -> anyhow::Result<()> {
 
     let client = reqwest::Client::new();
     // Resolve the daemon URL once with gateway-first probing:
-    //   1. Explicit --url/TRUSTY_MPM_URL (non-default) → use directly.
+    //   1. Explicit --url/TRUSTY_MPM_URL that is non-empty AND not equal to
+    //      DEFAULT_DAEMON_URL → use directly, bypassing the gateway.
+    //      (A value equal to DEFAULT_DAEMON_URL is treated as "no real override"
+    //      — the clap-injected default — so the gateway probe still runs.)
     //   2. trusty-console gateway (`http://{console}/api/mpm`) if the console is
     //      running and the daemon is reachable through it (#1849 Phase 2).
     //   3. Lock file (daemon may bind to an ephemeral port) → default.
     // The gateway path routes all `tm` traffic through the unified web UI while
     // preserving full direct-fallback behaviour when the console is absent.
-    // Explicit non-default URLs bypass the gateway so `--url http://…:9999`
-    // still works, and stale TRUSTY_MPM_URL values (#1731) are still probed
-    // before falling back.
+    // Stale TRUSTY_MPM_URL values (#1731) are still probed before falling back.
     let url = trusty_mpm::core::resolve_daemon_url_via_gateway(&client, Some(&cli.url)).await;
     // Why: handlers return `anyhow::Result`; we capture the dispatch result here
     // so the top-level boundary can translate the typed `PruneError::SmUnavailable`
