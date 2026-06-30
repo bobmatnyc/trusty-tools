@@ -31,10 +31,16 @@ use super::workspace_guard::is_safe_to_remove;
 /// worktree directories and stale git worktree refs. This predicate identifies
 /// the SM-worktree pattern so decommission can take targeted worktree-removal
 /// action for `workspace_owned = false` sessions.
-/// What: returns `true` when any component of `path` is exactly `.worktrees`.
+/// What: returns `true` when the path's immediate parent directory is named
+/// `.worktrees` — i.e. the path is `<base>/.worktrees/<session-id>`. Checking
+/// only the immediate parent (not any ancestor) prevents false positives for
+/// paths like `<base>/.worktrees/deep/nested` where `.worktrees` is a grandparent.
 /// Test: `is_session_worktree_detects_dot_worktrees_component`.
 fn is_session_worktree(path: &Path) -> bool {
-    path.components().any(|c| c.as_os_str() == ".worktrees")
+    path.parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n == ".worktrees")
+        .unwrap_or(false)
 }
 
 /// Remove an in-project per-session git worktree via `git worktree remove --force`.
@@ -43,35 +49,47 @@ fn is_session_worktree(path: &Path) -> bool {
 /// the git worktree entry (`.git/worktrees/<id>`) in the base clone, polluting
 /// `git worktree list` and `git branch` output. `git worktree remove --force`
 /// prunes both the directory AND the ref atomically, restoring a clean state.
-/// What: runs `git -C <parent> worktree remove --force <path>`. Idempotent: if
-/// `path` is already absent, skips silently. On git failure, best-effort falls
-/// back to `remove_dir_all` and logs WARN so the ref may still need manual pruning.
+/// What: runs `git -C <repo-root> worktree remove --force <path>` where
+/// `<repo-root>` is the grandparent of the worktree directory
+/// (`path` → `.worktrees` → `<repo-root>`). Also runs
+/// `git -C <repo-root> worktree prune` on success to clear any stale git refs.
+/// Idempotent: if `path` is already absent, returns `false` immediately. On git
+/// failure, best-effort falls back to `remove_dir_all` and logs WARN.
+/// Returns `true` when the workspace was removed (either via git or fallback),
+/// `false` when it was already absent or all removal attempts failed.
 /// Test: `is_session_worktree_absent_path_is_noop`; integration coverage via
 /// the decommission round-trip tests that set up real git worktrees.
-pub(super) fn remove_session_worktree(path: &Path) {
+pub(super) fn remove_session_worktree(path: &Path) -> bool {
     if !path.exists() {
-        return; // Idempotent: already gone.
+        return false; // Already gone, idempotent.
     }
-    let Some(parent) = path.parent() else {
-        warn!(
-            path = %path.display(),
-            "decommission: cannot determine parent of worktree path — skipping removal"
-        );
-        return;
+    // The repo root is the grandparent of the worktree dir:
+    // <repo-root>/.worktrees/<session-id>/ → grandparent = <repo-root>
+    let repo_root = match path.parent().and_then(|p| p.parent()) {
+        Some(r) => r,
+        None => {
+            warn!(
+                path = %path.display(),
+                "decommission: cannot determine repo root from worktree path — skipping git removal"
+            );
+            return false;
+        }
     };
+    // Step 1: git worktree remove --force <path> (run from repo root)
     let out = std::process::Command::new("git")
         .args([
             "-C",
-            &parent.to_string_lossy(),
+            &repo_root.to_string_lossy(),
             "worktree",
             "remove",
             "--force",
         ])
         .arg(path)
         .output();
-    match out {
+    let git_success = match out {
         Ok(o) if o.status.success() => {
             info!(path = %path.display(), "decommission: git worktree removed (incl. ref)");
+            true
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr);
@@ -83,7 +101,9 @@ pub(super) fn remove_session_worktree(path: &Path) {
             );
             if let Err(e) = std::fs::remove_dir_all(path) {
                 warn!(path = %path.display(), "decommission: fallback remove_dir_all failed: {e}");
+                return false;
             }
+            false // git remove failed, but dir removal succeeded
         }
         Err(e) => {
             warn!(
@@ -93,9 +113,23 @@ pub(super) fn remove_session_worktree(path: &Path) {
             );
             if let Err(e2) = std::fs::remove_dir_all(path) {
                 warn!(path = %path.display(), "decommission: fallback remove_dir_all also failed: {e2}");
+                return false;
             }
+            false
+        }
+    };
+    // Step 2: git worktree prune to clear any stale git refs.
+    // Best-effort; a failure here is a minor annoyance (stale ref in git output)
+    // not a correctness failure.
+    if git_success {
+        let prune_out = std::process::Command::new("git")
+            .args(["-C", &repo_root.to_string_lossy(), "worktree", "prune"])
+            .output();
+        if let Err(e) = prune_out {
+            warn!(root = %repo_root.display(), "decommission: git worktree prune failed: {e}");
         }
     }
+    true // workspace was removed (either via git or fallback)
 }
 
 impl SessionManager {
@@ -179,7 +213,7 @@ impl SessionManager {
                 // the git ref is also pruned.  The base clone directory is NEVER
                 // touched — only the leaf worktree path.
                 if is_session_worktree(ws) {
-                    remove_session_worktree(ws);
+                    workspace_removed = remove_session_worktree(ws);
                 } else {
                     warn!(
                         id = %id,
@@ -274,32 +308,36 @@ mod tests {
     fn is_session_worktree_detects_dot_worktrees_component() {
         // Why (#1840): decommission must detect the .worktrees/ pattern to know
         // when to call git worktree remove even for workspace_owned=false sessions.
+        // Checks the IMMEDIATE parent — not any ancestor — to avoid false positives.
+        // parent is `.worktrees` → true
         assert!(is_session_worktree(std::path::Path::new(
-            "/home/user/trusty-mpm-projects/owner/repo/.worktrees/abc-123"
+            "/home/user/repo/.worktrees/session-abc"
         )));
         assert!(is_session_worktree(std::path::Path::new(
             "/some/base/.worktrees/session-id"
         )));
-        // Non-worktree paths must return false.
+        // parent is `repo` (not `.worktrees`) → false
         assert!(!is_session_worktree(std::path::Path::new(
-            "/home/user/trusty-mpm-projects/owner/repo/session-id"
+            "/home/user/repo/session-id"
         )));
+        // parent is `deep` (not `.worktrees`), even though `.worktrees` is an ancestor → false
         assert!(!is_session_worktree(std::path::Path::new(
-            "/home/user/project"
+            "/base/.worktrees/deep/path"
         )));
-        // worktrees (no dot-prefix) must return false.
+        // parent is `worktrees` (no dot-prefix) → false
         assert!(!is_session_worktree(std::path::Path::new(
-            "/base/worktrees/session-id"
+            "/base/worktrees/session"
         )));
     }
 
     #[test]
     fn is_session_worktree_absent_path_is_noop() {
-        // remove_session_worktree must return without panicking when path is absent.
+        // remove_session_worktree must return false without panicking when path is absent.
         let absent = std::path::Path::new("/nonexistent/.worktrees/session-abc");
-        // is_session_worktree: true (has .worktrees component)
+        // is_session_worktree: true (immediate parent is `.worktrees`)
         assert!(is_session_worktree(absent));
-        // remove_session_worktree: returns silently (path.exists() == false)
-        remove_session_worktree(absent); // Must not panic or crash.
+        // remove_session_worktree: returns false idempotently (path.exists() == false)
+        let result = remove_session_worktree(absent);
+        assert!(!result, "absent path must return false (already gone)");
     }
 }

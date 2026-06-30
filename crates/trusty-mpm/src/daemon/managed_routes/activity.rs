@@ -22,6 +22,18 @@ use crate::daemon::state::DaemonState;
 
 use super::parse_id;
 
+/// Return the last `n` lines of `text` (for capping the scrollback snapshot).
+///
+/// Why: the scrollback file may be arbitrarily large; the activity response
+/// contract caps `raw_pane` at 60 lines, matching the live capture limit.
+/// What: splits on newlines, takes the trailing min(n, len) lines, re-joins.
+/// Test: covered by the activity handler returning capped content.
+fn tail_lines(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
 /// Response body for GET /api/v1/sessions/managed/{id}/activity.
 ///
 /// Why: the calling agentic process needs the full activity picture without
@@ -121,16 +133,19 @@ pub async fn get_session_activity(
 
     // #1840: when the runtime is stopped and the live capture is empty, serve
     // the stop-time scrollback snapshot so callers get SOME content rather than
-    // an empty string. Flag the response as `pane_stale=true` so callers know
-    // this is last-known-good data, not a real-time view.
+    // an empty string. When no snapshot is available, still mark pane_stale=true
+    // so callers can distinguish stopped-quiet from live-quiet (pane_stale=false
+    // means the runtime IS active).
     let (raw_pane, pane_stale) = if !runtime_active && pane_text.is_empty() {
         let snapshot = record
             .scrollback_path
             .as_deref()
-            .and_then(|p| std::fs::read_to_string(p).ok());
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|s| tail_lines(&s, 60))
+            .filter(|s| !s.is_empty());
         match snapshot {
-            Some(snap) if !snap.is_empty() => (snap, true),
-            _ => (pane_text, false),
+            Some(snap) => (snap, true),
+            None => (String::new(), true), // stopped + no snapshot: pane_stale=true
         }
     } else {
         (pane_text, false)

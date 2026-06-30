@@ -77,10 +77,12 @@ pub async fn run_doctor(
 /// Test: `worktrees_no_orphans_is_ok`, `worktrees_with_orphan_is_warn`.
 fn check_worktrees(repos_root: Option<&Path>, active_workspace_paths: &[PathBuf]) -> DoctorCheck {
     let Some(root) = repos_root else {
+        // No managed workspace root configured — this is a normal state for
+        // operators who don't use in-project worktree sessions (#1840).
         return DoctorCheck::new(
             "worktrees",
-            CheckStatus::Warn,
-            "no workspace root configured — cannot scan for orphaned worktrees",
+            CheckStatus::Ok,
+            "no managed workspace root configured — worktree scan skipped",
         );
     };
     if !root.is_dir() {
@@ -90,6 +92,12 @@ fn check_worktrees(repos_root: Option<&Path>, active_workspace_paths: &[PathBuf]
             format!("{} does not exist — no worktrees to check", root.display()),
         );
     }
+
+    // Build a canonicalized HashSet for O(1) lookup and symlink safety (Fix 1b, #1840).
+    let active_set: std::collections::HashSet<PathBuf> = active_workspace_paths
+        .iter()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
 
     let mut orphans: Vec<PathBuf> = Vec::new();
     // Walk owner/ dirs then repo/ dirs two levels deep.
@@ -121,7 +129,10 @@ fn check_worktrees(repos_root: Option<&Path>, active_workspace_paths: &[PathBuf]
                 if !wt_path.is_dir() {
                     continue;
                 }
-                if !active_workspace_paths.iter().any(|p| p == &wt_path) {
+                // Canonicalize so symlinked paths compare equal to their targets.
+                let canonical_wt =
+                    std::fs::canonicalize(&wt_path).unwrap_or_else(|_| wt_path.clone());
+                if !active_set.contains(&canonical_wt) {
                     orphans.push(wt_path);
                 }
             }
@@ -583,10 +594,12 @@ mod tests {
     }
 
     #[test]
-    fn worktrees_no_repos_root_is_warn() {
+    fn worktrees_no_repos_root_is_ok() {
+        // Fix 7 (#1840): absence of a managed workspace root is NORMAL — not every
+        // operator uses in-project worktree sessions. Return Ok, not Warn.
         let check = check_worktrees(None, &[]);
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(check.message.contains("no workspace root"));
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.message.contains("no managed workspace"));
     }
 
     #[test]

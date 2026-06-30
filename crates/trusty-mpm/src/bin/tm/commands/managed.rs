@@ -495,13 +495,15 @@ pub(crate) async fn session_prune_worktrees(
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let mut printed = 0usize;
     for p in &paths {
         if let Some(s) = p.as_str() {
             println!("{s}");
+            printed += 1;
         }
     }
     let verb = if dry_run { "would remove" } else { "removed" };
-    println!("{verb} {} orphaned worktree dir(s)", paths.len());
+    println!("{verb} {printed} orphaned worktree dir(s)");
     Ok(())
 }
 

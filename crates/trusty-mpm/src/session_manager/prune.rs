@@ -229,14 +229,15 @@ fn matches_filter(record: &SessionRecord, filter: PruneFilter) -> bool {
 /// Why: extracted from `SessionManager::prune_orphaned_worktrees` so the
 /// walk logic can be tested independently of the full session-manager setup.
 /// What: walks `<repos_root>/<owner>/<repo>/.worktrees/` (two levels deep);
-/// any leaf directory whose path is NOT in `active_workspace_paths` is
-/// collected as an orphan. A non-existent or unreadable `repos_root` returns
-/// an empty vec.
+/// any leaf directory whose canonicalized path is NOT in `active_set` is
+/// collected as an orphan. Using a `HashSet` with canonicalized paths avoids
+/// O(n×m) linear scan and correctly handles symlinked workspace paths. A
+/// non-existent or unreadable `repos_root` returns an empty vec.
 /// Test: `prune_orphaned_worktrees_spares_active`,
 ///       `prune_orphaned_worktrees_removes_orphan`.
 fn find_orphaned_worktrees(
     repos_root: &std::path::Path,
-    active_workspace_paths: &[std::path::PathBuf],
+    active_set: &std::collections::HashSet<std::path::PathBuf>,
 ) -> Vec<std::path::PathBuf> {
     let mut orphans = Vec::new();
     let Ok(owner_entries) = std::fs::read_dir(repos_root) else {
@@ -263,7 +264,10 @@ fn find_orphaned_worktrees(
                 if !wt_path.is_dir() {
                     continue;
                 }
-                if !active_workspace_paths.iter().any(|p| p == &wt_path) {
+                // Canonicalize so symlinked paths compare equal to their targets.
+                let canonical_wt =
+                    std::fs::canonicalize(&wt_path).unwrap_or_else(|_| wt_path.clone());
+                if !active_set.contains(&canonical_wt) {
                     orphans.push(wt_path);
                 }
             }
@@ -421,12 +425,15 @@ impl SessionManager {
     /// sweep removes them without touching any directory that still corresponds to a
     /// live session (i.e. whose path appears in `active_workspace_paths`).
     ///
-    /// SAFETY: only directories whose full path is NOT in `active_workspace_paths`
-    /// are removed. Active session worktrees are NEVER touched.
+    /// SAFETY: only directories whose full canonicalized path is NOT in the active
+    /// set are removed. Active session worktrees are NEVER touched. Paths are
+    /// canonicalized to handle symlinks correctly (Fix 1b, #1840).
     ///
-    /// What: calls [`find_orphaned_worktrees`] to enumerate stale dirs, then — when
-    /// `dry_run` is false — calls `git worktree remove --force` on each.
-    /// Returns the paths removed (or that would be removed under dry-run).
+    /// What: builds a canonicalized `HashSet` from `active_workspace_paths`, then
+    /// calls [`find_orphaned_worktrees`] inside `spawn_blocking` (the filesystem
+    /// walk and subprocess calls are both blocking) and — when `dry_run` is false —
+    /// calls `git worktree remove --force` on each orphan inside the same blocking
+    /// task. Returns the paths removed (or that would be removed under dry-run).
     /// Test: `prune_orphaned_worktrees_removes_orphan`,
     ///       `prune_orphaned_worktrees_spares_active` in this module.
     pub async fn prune_orphaned_worktrees(
@@ -435,19 +442,30 @@ impl SessionManager {
         active_workspace_paths: &[std::path::PathBuf],
         dry_run: bool,
     ) -> Vec<std::path::PathBuf> {
-        use super::decommission::remove_session_worktree;
-        let orphans = find_orphaned_worktrees(repos_root, active_workspace_paths);
-        if dry_run {
-            for p in &orphans {
-                info!(path = %p.display(), "prune-worktrees (dry-run): would remove orphaned worktree");
+        let repos_root = repos_root.to_path_buf();
+        // Build a canonicalized set for O(1) lookup and symlink safety.
+        let active: std::collections::HashSet<std::path::PathBuf> = active_workspace_paths
+            .iter()
+            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+            .collect();
+
+        tokio::task::spawn_blocking(move || {
+            use super::decommission::remove_session_worktree;
+            let orphans = find_orphaned_worktrees(&repos_root, &active);
+            if dry_run {
+                for p in &orphans {
+                    info!(path = %p.display(), "prune-worktrees (dry-run): would remove orphaned worktree");
+                }
+            } else {
+                for p in &orphans {
+                    info!(path = %p.display(), "prune-worktrees: removing orphaned worktree");
+                    remove_session_worktree(p);
+                }
             }
-        } else {
-            for p in &orphans {
-                info!(path = %p.display(), "prune-worktrees: removing orphaned worktree");
-                remove_session_worktree(p);
-            }
-        }
-        orphans
+            orphans
+        })
+        .await
+        .unwrap_or_default()
     }
 
     /// Age-based auto-reap of stale ephemeral sessions (#1508).
@@ -519,7 +537,10 @@ mod orphan_tests {
             .join(".worktrees")
             .join("live-session");
         std::fs::create_dir_all(&wt).unwrap();
-        let active = vec![wt.clone()];
+        let active: std::collections::HashSet<_> =
+            vec![std::fs::canonicalize(&wt).unwrap_or_else(|_| wt.clone())]
+                .into_iter()
+                .collect();
         let orphans = find_orphaned_worktrees(root, &active);
         assert!(
             orphans.is_empty(),
@@ -544,9 +565,16 @@ mod orphan_tests {
             .join("dead");
         std::fs::create_dir_all(&wt1).unwrap();
         std::fs::create_dir_all(&wt2).unwrap();
-        let active = vec![wt1];
+        let active: std::collections::HashSet<_> =
+            vec![std::fs::canonicalize(&wt1).unwrap_or_else(|_| wt1.clone())]
+                .into_iter()
+                .collect();
         let orphans = find_orphaned_worktrees(root, &active);
         assert_eq!(orphans.len(), 1);
-        assert_eq!(orphans[0], wt2);
+        // Ordering not guaranteed — use contains rather than indexed access.
+        assert!(
+            orphans.contains(&wt2),
+            "expected {wt2:?} to be the orphan, got {orphans:?}"
+        );
     }
 }

@@ -238,14 +238,17 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // Without this guard, --continue fails with "No conversation found" for
         // sessions that were stopped before claude ever ran (e.g. provisioning error,
         // or a fresh worktree that was never used).
-        let prior = claude_session_id.is_some() || has_prior_conversation(cwd);
+        // Compute file_history separately so the debug log reflects the actual
+        // filesystem check result rather than the combined (id || file) value.
+        let file_history = claude_session_id.is_none() && has_prior_conversation(cwd);
+        let prior = claude_session_id.is_some() || file_history;
         debug!(
             session = %tmux_name,
             cwd = %cwd.display(),
             task = %task,
             claude = %claude_bin,
             resume = claude_session_id.is_some(),
-            has_prior_conv = prior,
+            has_prior_conv = file_history, // reflects actual .jsonl file check, not the combined value
             "resuming claude-code in tmux pane"
         );
         if let Err(e) = crate::core::home_trust_seed::preseed_home_trust(cwd) {
@@ -421,14 +424,32 @@ mod tests {
         // Why (#1840): a fresh worktree or temp directory has no Claude
         // conversation history; has_prior_conversation must return false so
         // spawn_resume avoids the "No conversation found to continue" error.
-        let tmp = tempfile::tempdir().expect("tempdir");
-        // Temporarily override home to a dir with no .claude/projects/ so the
-        // test does not depend on the operator's actual conversation history.
-        // We can only test the "no ~/.claude/projects" branch cleanly.
+        // We isolate HOME so the test does not read the CI runner's actual
+        // ~/.claude/projects/ — on Unix, dirs::home_dir() reads the HOME env var.
+        let tmp_home = tempfile::tempdir().expect("tempdir for HOME");
+        let tmp_cwd = tempfile::tempdir().expect("tempdir for cwd");
+        // SAFETY: modifying HOME is inherently thread-unsafe; this test is designed
+        // to run in isolation. In practice cargo test does not parallelize tests
+        // within a single module by default, and no other test in this module
+        // modifies HOME.
+        let old_home = std::env::var("HOME").ok();
+        unsafe {
+            std::env::set_var("HOME", tmp_home.path());
+        }
+        let result = has_prior_conversation(tmp_cwd.path());
+        // Restore HOME regardless of the assertion outcome.
+        match old_home {
+            Some(h) => unsafe {
+                std::env::set_var("HOME", &h);
+            },
+            None => unsafe {
+                std::env::remove_var("HOME");
+            },
+        }
         assert!(
-            !has_prior_conversation(tmp.path()),
-            "fresh workspace must have no prior conversation (tmp={:?})",
-            tmp.path()
+            !result,
+            "fresh workspace with isolated HOME must have no prior conversation (cwd={:?})",
+            tmp_cwd.path()
         );
     }
 
