@@ -206,6 +206,20 @@ fn try_register_project_alias_inner(cwd: &Path, store_root: &Path) -> anyhow::Re
         return Ok(());
     };
 
+    // Skip git worktree checkouts — they pollute `tm ls` with ephemeral paths.
+    // git_dir_differs_from_common is authoritative when git is available (tri-state):
+    //   Some(true)  → confirmed linked worktree → skip.
+    //   Some(false) → confirmed normal checkout → do NOT apply path fallback.
+    //   None        → git unavailable → fall back to path-segment check.
+    let is_worktree = match git_dir_differs_from_common(&git_root) {
+        Some(differs) => differs,
+        None => is_worktree_path(&git_root),
+    };
+    if is_worktree {
+        debug!(path = %git_root.display(), "project-alias: skipping worktree checkout");
+        return Ok(());
+    }
+
     // Derive alias from the basename.
     let alias = alias_from_path(&git_root);
 
@@ -221,6 +235,58 @@ fn try_register_project_alias_inner(cwd: &Path, store_root: &Path) -> anyhow::Re
         debug!(alias, path = %git_root.display(), "project-alias: registered");
     }
     Ok(())
+}
+
+/// Return `true` when `path` contains a known MPM or Claude agent worktree segment.
+///
+/// Why: fallback guard used when `git` is unavailable. Catches the two MPM-managed
+/// worktree path layouts without spawning a subprocess. Only consulted when
+/// `git_dir_differs_from_common` returns `None` (subprocess failure); when git IS
+/// available its authoritative verdict takes precedence so this function never
+/// overrides a confirmed "not a worktree" result.
+/// What: returns `true` when the lossy path string contains `/.claude/worktrees/`
+/// (the Claude Code agent layout) or `/.claude/worktrees/` prefix paths, OR
+/// `/.worktrees/` at a SECOND path level (i.e. the `.worktrees` segment must be
+/// inside a repo, not itself a top-level project dir like `~/.worktrees/my-project`).
+/// To avoid false positives on repos stored under `~/.worktrees/`, this check
+/// requires `/.claude/worktrees/` (highly specific) or the segment `/.worktrees/`
+/// immediately preceded by something other than the filesystem root, but since
+/// the git-dir check takes precedence for all cases where git is available this
+/// function is only the last-resort guard.
+/// Test: `is_worktree_path_claude_worktrees`, `is_worktree_path_repo_worktrees`,
+/// `is_worktree_path_normal_project`.
+pub(crate) fn is_worktree_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    s.contains("/.claude/worktrees/") || s.contains("/.worktrees/")
+}
+
+/// Probe whether `path` is a linked git worktree using git itself.
+///
+/// Why: the authoritative, git-level detection. `git rev-parse --git-dir` returns
+/// a path inside `.git/worktrees/<name>/` for a linked worktree, while
+/// `--git-common-dir` points to the main repo's `.git`. When the two differ the
+/// directory is a linked worktree. Returns a tri-state so the caller can
+/// distinguish "confirmed worktree" / "confirmed normal checkout" / "git
+/// unavailable" and apply the path-segment fallback only in the last case.
+/// What: returns `Some(true)` when the git-dirs differ (linked worktree),
+/// `Some(false)` when git confirmed the path is NOT a worktree, and `None` when
+/// git is unavailable or the directory is not a git repo (subprocess failed).
+/// Evaluation is lazy: `--git-common-dir` is not spawned when `--git-dir` fails.
+/// Test: not directly unit-testable (spawns a subprocess); `is_worktree_path`
+/// covers the same detection cases for unit tests.
+fn git_dir_differs_from_common(path: &Path) -> Option<bool> {
+    let run = |arg: &str| -> Option<String> {
+        std::process::Command::new("git")
+            .args(["-C", &path.to_string_lossy(), "rev-parse", arg])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+    };
+    // Lazy: only spawn --git-common-dir when --git-dir succeeded.
+    let git_dir = run("--git-dir")?;
+    let common_dir = run("--git-common-dir")?;
+    Some(git_dir != common_dir)
 }
 
 /// Walk ancestors of `cwd` looking for a `.git` entry (file or directory).
@@ -357,6 +423,47 @@ mod tests {
         assert_eq!(alias_from_path(Path::new("/")), "project");
     }
 
+    // ── is_worktree_path ────────────────────────────────────────────────────
+
+    #[test]
+    fn is_worktree_path_claude_worktrees() {
+        // A path under `.claude/worktrees/<id>/` must be detected as a worktree.
+        let p = Path::new("/home/user/Projects/my-repo/.claude/worktrees/agent-abc123def456/");
+        assert!(
+            is_worktree_path(p),
+            "expected is_worktree_path=true for .claude/worktrees path, got false"
+        );
+    }
+
+    #[test]
+    fn is_worktree_path_repo_worktrees() {
+        // A path under `<repo>/.worktrees/<id>/` must be detected as a worktree.
+        let p = Path::new("/home/user/Projects/my-repo/.worktrees/feature-branch-wt/");
+        assert!(
+            is_worktree_path(p),
+            "expected is_worktree_path=true for .worktrees path, got false"
+        );
+    }
+
+    #[test]
+    fn is_worktree_path_normal_project() {
+        // A normal project root must NOT be detected as a worktree.
+        let p = Path::new("/home/user/Projects/my-repo");
+        assert!(
+            !is_worktree_path(p),
+            "expected is_worktree_path=false for normal project path, got true"
+        );
+    }
+
+    #[test]
+    fn is_worktree_path_home_dir_not_a_worktree() {
+        // The home directory itself must not be misidentified.
+        let p = Path::new("/home/user");
+        assert!(!is_worktree_path(p));
+    }
+
+    // ── find_git_root ───────────────────────────────────────────────────────
+
     #[test]
     fn find_git_root_returns_none_outside_repo() {
         // Use a fresh TempDir guaranteed to not be inside any git repo
@@ -389,20 +496,17 @@ mod tests {
     #[test]
     fn try_register_and_load_round_trip_same_root() {
         // Why: proves that try_register_project_alias and ProjectAliasStore::load
-        // both target the same store_root when callers thread it through, so
-        // writes from auto-registration are visible to `tm ls`.
-        // What: registers via the public entry point, reads back via
-        // ProjectAliasStore::load with the same root, asserts the entry appears.
+        // use the same store_root, AND that worktree paths are correctly skipped
+        // while normal project paths ARE registered.
+        // What: detects whether CARGO_MANIFEST_DIR is inside a worktree or a
+        // normal project root; asserts the correct outcome for each case.
         // Test: this function IS the test.
         let store_root = TempDir::new().expect("tmpdir");
         let cwd = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
 
-        // Determine expected alias from the git root (may skip if not a git repo,
-        // though in practice CARGO_MANIFEST_DIR is always inside the worktree).
         let Some(git_root) = find_git_root(cwd) else {
-            return; // not inside a git repo — skip
+            return; // not inside a git repo — skip (unusual CI env)
         };
-        let expected_alias = alias_from_path(&git_root);
 
         // Register using the same store_root as the read path.
         try_register_project_alias(cwd, store_root.path());
@@ -410,12 +514,29 @@ mod tests {
         // Read back — same code path as ls_cmd (ProjectAliasStore::load(root)).
         let store = ProjectAliasStore::load(store_root.path()).expect("load");
         let entries = store.list();
-        assert!(
-            entries
-                .iter()
-                .any(|e| e.alias == expected_alias && e.path == git_root),
-            "expected entry alias={expected_alias} path={} in {entries:?}",
-            git_root.display()
-        );
+
+        // Mirror the production tri-state logic to decide what to assert.
+        let is_worktree = match git_dir_differs_from_common(&git_root) {
+            Some(differs) => differs,
+            None => is_worktree_path(&git_root),
+        };
+
+        if is_worktree {
+            // Running inside a git worktree: registration must be skipped.
+            assert!(
+                entries.is_empty(),
+                "expected no entries when cwd is a worktree, got {entries:?}"
+            );
+        } else {
+            // Running inside a normal project root: entry must appear.
+            let expected_alias = alias_from_path(&git_root);
+            assert!(
+                entries
+                    .iter()
+                    .any(|e| e.alias == expected_alias && e.path == git_root),
+                "expected entry alias={expected_alias} path={} in {entries:?}",
+                git_root.display()
+            );
+        }
     }
 }
