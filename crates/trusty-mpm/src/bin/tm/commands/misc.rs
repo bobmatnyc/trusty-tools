@@ -155,14 +155,18 @@ pub(crate) async fn doctor(url: &str) -> anyhow::Result<()> {
 /// fresh, how big is the fleet?" probe. Routing it through the shared
 /// [`CommandExecutor`] (rather than a bespoke `reqwest` call here) means the CLI
 /// shares the exact `health` dispatch with every other adapter — a single source
-/// of truth per the chat-core nucleus.
+/// of truth per the chat-core nucleus. The `resolved:` line tells operators
+/// whether traffic is flowing via the trusty-console gateway or direct to the
+/// daemon, making the resolution path transparent (#1849 Phase 2).
 /// What: runs [`TrustyCommand::Health`] through the executor and prints a compact,
 /// scriptable summary. A dead daemon prints `daemon: unreachable` and is NOT an
-/// error exit (the probe succeeded in determining the daemon is down).
+/// error exit (the probe succeeded in determining the daemon is down). The
+/// `resolved:` line is printed only on success so unreachable output is unchanged.
 /// Test: `cli_parses_health` covers parsing; the executor's `execute_health_*`
 /// tests cover the live and dead-daemon report paths.
 pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
     use trusty_mpm::client::{CommandExecutor, CommandResult, TrustyCommand};
+    use trusty_mpm::core::GATEWAY_PATH;
 
     let executor = CommandExecutor::new(url.to_string());
     match executor.execute(TrustyCommand::Health).await {
@@ -177,7 +181,15 @@ pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
             } else {
                 "up to date"
             };
+            // Indicate the resolution path so operators can see whether traffic
+            // is flowing via the console gateway or direct to the daemon.
+            let resolved_via = if url.contains(GATEWAY_PATH) {
+                format!("via gateway {url}")
+            } else {
+                format!("direct {url}")
+            };
             println!("daemon: {} ({})", report.status, report.url);
+            println!("resolved: {resolved_via}");
             println!("catalog: {catalog}");
             println!(
                 "fleet: {} session(s), {} awaiting a decision",

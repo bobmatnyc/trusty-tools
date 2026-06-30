@@ -4,8 +4,11 @@
 //! The lock file records the actual address so clients always find it.
 //! What: `resolve_daemon_url` checks an explicit override first, then
 //! reads `~/.trusty-mpm/daemon.lock`, then falls back to the hard-coded
-//! default.
-//! Test: The unit tests below cover all three resolution paths.
+//! default. `resolve_daemon_url_via_gateway` additionally tries the
+//! trusty-console gateway first so all traffic can flow through the
+//! unified web UI when it is running.
+//! Test: The unit tests below cover all resolution paths, including the
+//! gateway probe, explicit-override bypass, and direct fallback.
 
 use std::path::PathBuf;
 
@@ -36,6 +39,26 @@ pub const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:7880";
 /// the [`default_url_matches_addr`] test guarantees the two stay in lockstep.
 /// Test: `default_url_matches_addr`.
 pub const DEFAULT_DAEMON_URL: &str = "http://127.0.0.1:7880";
+
+/// Default trusty-console HTTP address (host:port) used when the console's
+/// discovery file is absent or unreadable.
+///
+/// Why: trusty-console defaults to 127.0.0.1:7788; mirroring that here lets
+/// the gateway resolver fall back to the expected address without importing
+/// trusty-console (which would create a circular dependency between crates).
+/// What: the literal `"127.0.0.1:7788"`, matching `trusty_console::DEFAULT_HTTP`.
+/// Test: `resolve_via_gateway_falls_back_to_direct_on_probe_failure`.
+pub const DEFAULT_CONSOLE_ADDR: &str = "127.0.0.1:7788";
+
+/// Path at which the trusty-console proxies the MPM daemon.
+///
+/// Why: a single constant prevents the gateway path `/api/mpm` from being
+/// hard-coded in both the resolver and any caller that needs to detect whether
+/// a resolved URL is routing via the gateway (e.g. `tm health` display).
+/// What: the literal `"/api/mpm"` — appended to the console base URL to form
+/// the gateway base, e.g. `http://127.0.0.1:7788/api/mpm`.
+/// Test: `resolve_via_gateway_uses_gateway_when_probe_succeeds`.
+pub const GATEWAY_PATH: &str = "/api/mpm";
 
 /// Parse [`DEFAULT_DAEMON_ADDR`] into a [`SocketAddr`].
 ///
@@ -148,6 +171,97 @@ pub async fn resolve_daemon_url_probing(
 
     // No real explicit override: delegate to the sync resolver.
     resolve_daemon_url(explicit)
+}
+
+/// Resolve the daemon URL routing through the trusty-console gateway when
+/// possible, with seamless fallback to the direct daemon when the console is
+/// not running.
+///
+/// Why: when the trusty-console is up it proxies `ANY /api/mpm/{path}` to the
+/// MPM daemon, so all `tm` traffic can flow through the unified web UI — with
+/// future benefits like audit logging and auth. Direct fallback (lock file →
+/// default) ensures `tm` still works when the console is not running, with no
+/// operator action required. The gateway-first approach is gated on a live
+/// probe so a stale console discovery file never breaks the CLI.
+///
+/// Precedence:
+///   a) Explicit user override (non-empty, non-default `--url` /
+///      `TRUSTY_MPM_URL`) → use it directly; the operator chose a specific
+///      address, so the gateway is bypassed entirely.
+///   b) Gateway probe: read the console address from its discovery file
+///      (falling back to `DEFAULT_CONSOLE_ADDR`). Construct
+///      `http://{console}/api/mpm` and probe `GET .../health` with a 500 ms
+///      timeout. If it returns 200 → return the gateway base URL.
+///   c) Direct fallback: delegate to `resolve_daemon_url_probing` (lock file →
+///      `DEFAULT_DAEMON_URL`). This path is taken whenever the console is
+///      absent or the gateway probe fails.
+///
+/// Test: `resolve_via_gateway_explicit_override_wins`,
+///       `resolve_via_gateway_uses_gateway_when_probe_succeeds`,
+///       `resolve_via_gateway_falls_back_to_direct_on_probe_failure`.
+pub async fn resolve_daemon_url_via_gateway(
+    client: &reqwest::Client,
+    explicit: Option<&str>,
+) -> String {
+    let console_addr = trusty_common::read_daemon_addr("trusty-console")
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| DEFAULT_CONSOLE_ADDR.to_string());
+    resolve_daemon_url_via_gateway_inner(client, explicit, &console_addr).await
+}
+
+/// Inner implementation of the gateway resolver with an injected console addr.
+///
+/// Why: separates the file-system read (`read_daemon_addr`) from the probe
+/// logic so tests can supply a controlled address without touching disk or
+/// manipulating `$HOME`.
+/// What: implements the three-step precedence (explicit override → gateway
+/// probe → direct fallback) using the caller-supplied `console_addr`.
+/// Test: called directly by the `resolve_via_gateway_*` test cases.
+async fn resolve_daemon_url_via_gateway_inner(
+    client: &reqwest::Client,
+    explicit: Option<&str>,
+    console_addr: &str,
+) -> String {
+    // a) Explicit override — same "clap default is not a real override" rule as
+    //    the other resolvers. A non-default, non-empty explicit URL bypasses the
+    //    gateway entirely so `--url http://…:9999` continues to work.
+    if let Some(url) = explicit
+        && !url.is_empty()
+        && url != DEFAULT_DAEMON_URL
+    {
+        return url.to_string();
+    }
+
+    // b) Gateway probe — build the gateway base URL and probe its /health.
+    //    `probe_url` appends "/health", so the actual request is:
+    //    `GET http://{console}/api/mpm/health`, which the console proxy
+    //    forwards to the daemon's `GET /health`.
+    //
+    //    IMPORTANT: use a **dedicated** short-timeout client for this probe,
+    //    independent of the caller's `client`. The caller's client (from
+    //    `reqwest::Client::new()` in main.rs) carries no timeout by default
+    //    (reqwest's default is effectively unlimited). A slow or unreachable
+    //    console must NEVER stall every `tm` command for up to 30 seconds —
+    //    the gateway probe must fail fast and fall through to the direct path.
+    //    The per-request `.timeout()` in `probe_url` provides a second line of
+    //    defense; the client-level timeout here is the primary guarantee.
+    let probe_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(500))
+        .build()
+        // Client::builder().timeout(...).build() is infallible without custom
+        // TLS or certificate configuration — both are absent here.
+        .expect("gateway probe client is infallible");
+
+    let gateway_base = format!("http://{console_addr}{GATEWAY_PATH}");
+    if probe_url(&probe_client, &gateway_base).await {
+        return gateway_base;
+    }
+
+    // c) Direct fallback — console absent or gateway probe failed. Delegate to
+    //    the direct-daemon resolver chain (lock file → DEFAULT_DAEMON_URL) so
+    //    `tm` still works when only the daemon is running.
+    resolve_daemon_url_probing(client, explicit).await
 }
 
 /// Probe a URL for reachability with a short timeout.
@@ -348,6 +462,116 @@ mod tests {
         assert_eq!(
             result, url,
             "reachable explicit URL must win over lock file / default"
+        );
+    }
+
+    // ── resolve_daemon_url_via_gateway tests (#1849 Phase 2) ─────────────────
+
+    /// Explicit user-supplied URL bypasses the gateway entirely.
+    ///
+    /// Why: `--url http://…:9999` must still win when the operator deliberately
+    /// overrides the address. The gateway resolver must not intercept it.
+    /// What: calls `resolve_daemon_url_via_gateway_inner` with a non-default,
+    /// non-empty explicit URL and a dummy console addr; asserts the explicit
+    /// URL is returned unchanged.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_via_gateway_explicit_override_wins() {
+        let client = reqwest::Client::new();
+        let explicit = "http://127.0.0.1:9999";
+        let result =
+            resolve_daemon_url_via_gateway_inner(&client, Some(explicit), "127.0.0.1:1").await;
+        assert_eq!(
+            result, explicit,
+            "explicit override must win over gateway probe"
+        );
+    }
+
+    /// Gateway is used when the console probe returns 200, and the probe
+    /// specifically targets `/api/mpm/health` — not the bare base URL.
+    ///
+    /// Why: the primary goal of gateway resolution — when the console is
+    /// running and the daemon is reachable through it, all `tm` traffic should
+    /// route via `http://{console}/api/mpm`. Confirming the probe path prevents
+    /// a regression where a bare GET /api/mpm (empty suffix) gets routed
+    /// differently from GET /api/mpm/health by the proxy, causing spurious
+    /// fallback to direct even when the gateway is healthy.
+    /// What: binds an ephemeral TCP listener that reads the request line and
+    /// asserts it is `GET /api/mpm/health …` before responding HTTP 200; uses
+    /// its address as the injected `console_addr`; calls
+    /// `resolve_daemon_url_via_gateway_inner` with no explicit override; asserts
+    /// the returned URL is the gateway base URL.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_via_gateway_uses_gateway_when_probe_succeeds() {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("local_addr");
+
+        // Capture the request line to confirm the probe targets /api/mpm/health.
+        let (path_tx, path_rx) = tokio::sync::oneshot::channel::<String>();
+        tokio::spawn(async move {
+            if let Ok((sock, _)) = listener.accept().await {
+                let (reader, mut writer) = sock.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                let req_line = lines.next_line().await.unwrap().unwrap_or_default();
+                let _ = path_tx.send(req_line);
+                // Respond 200 only after capturing the line so the reqwest
+                // future sees the status and probe_url returns true.
+                let _ = writer
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                    .await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let console_addr = addr.to_string();
+        let result = resolve_daemon_url_via_gateway_inner(&client, None, &console_addr).await;
+
+        let expected_gateway = format!("http://{console_addr}{GATEWAY_PATH}");
+        assert_eq!(
+            result, expected_gateway,
+            "gateway URL must be returned when console probe succeeds"
+        );
+
+        // Verify the probe hit /api/mpm/health, not the bare /api/mpm base.
+        let req_line = path_rx.await.expect("request line must be captured");
+        assert!(
+            req_line.starts_with("GET /api/mpm/health "),
+            "gateway probe must target /api/mpm/health; got: {req_line:?}"
+        );
+    }
+
+    /// Direct fallback is used when the gateway probe fails.
+    ///
+    /// Why: when the console is not running (port 1 is always refused) the
+    /// resolver must fall through to the direct daemon chain, not return the
+    /// unreachable gateway URL.
+    /// What: calls `resolve_daemon_url_via_gateway_inner` with port 1 as the
+    /// console addr (always refused) and no explicit override; asserts the
+    /// result is a valid HTTP URL and NOT the failed gateway URL.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_via_gateway_falls_back_to_direct_on_probe_failure() {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(200))
+            .build()
+            .expect("build client");
+        // Port 1 is reserved and never listening — probe must fail immediately.
+        let dead_console = "127.0.0.1:1";
+        let result = resolve_daemon_url_via_gateway_inner(&client, None, dead_console).await;
+
+        let gateway_url = format!("http://{dead_console}{GATEWAY_PATH}");
+        assert!(
+            result.starts_with("http"),
+            "fallback must still return an HTTP URL, got: {result}"
+        );
+        assert_ne!(
+            result, gateway_url,
+            "must not return the unreachable gateway URL on probe failure"
         );
     }
 

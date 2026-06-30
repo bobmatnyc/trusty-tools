@@ -70,6 +70,13 @@ fn build_bridge_config() -> DaemonBridgeConfig {
         // arg is passed (matches `tm start`).
         spawn_args: vec!["daemon".to_string()],
         health_path: "/health".to_string(),
+        // INTENTIONALLY kept on the sync direct-lock resolver (#1849 Phase 2):
+        // the stdio bridge calls this closure on every reconnect to track the
+        // daemon's current port. The gateway resolver is async and requires a
+        // reqwest::Client; the `base_url_fn` signature is synchronous. Routing
+        // the MCP bridge through the gateway would also add latency on every
+        // JSON-RPC call and create a dependency on the console being up — an
+        // unacceptable regression for the core MCP path.
         base_url_fn: Box::new(|| trusty_mpm::core::resolve_daemon_url(None)),
         startup_timeout: None, // shared 30s default
         poll_interval: None,   // shared 500ms default

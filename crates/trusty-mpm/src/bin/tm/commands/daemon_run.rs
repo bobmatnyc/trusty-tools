@@ -52,6 +52,12 @@ pub(crate) async fn run_daemon(addr: SocketAddr, tailscale: bool, mcp: bool) -> 
     // original. `resolve_daemon_url` already validates the recorded PID is
     // alive (and clears stale lock files), so a `None`-ish result here means
     // either no lock exists or the recorded daemon is dead — proceed normally.
+    //
+    // INTENTIONALLY kept on the sync direct-lock resolver (#1849 Phase 2): the
+    // daemon is starting up here; the console gateway isn't relevant — and its
+    // async probe would require bootstrapping a reqwest::Client before the bind
+    // address is even known. Bootstrap circularity means only the lock file
+    // is authoritative at this point.
     let recorded_url = trusty_mpm::core::resolve_daemon_url(None);
     if recorded_url != trusty_mpm::core::DEFAULT_DAEMON_URL
         && trusty_common::probe_health(&recorded_url, "/health").await
