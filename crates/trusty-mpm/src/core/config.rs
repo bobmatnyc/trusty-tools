@@ -126,6 +126,68 @@ pub struct ManifestConfig {
     pub ttl_hours: Option<u64>,
 }
 
+/// `[idle_auto_stop]` section — opt-in idle auto-suspend feature (#1816).
+///
+/// Why: long-lived idle sessions consume Claude Max rate-limit slots and cloud
+/// costs without doing useful work. This section lets operators enable a
+/// background reaper that automatically stops idle sessions (keeping workspaces
+/// intact and resumable) and decommissions done sessions.
+/// What: boolean `enabled` flag (default `false`, zero-change), poll interval,
+/// and consecutive-hit thresholds for the stop and decommission decisions.
+/// Test: `config_idle_auto_stop_defaults`, `config_idle_auto_stop_section_parses`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdleAutoStopConfig {
+    /// Whether the idle auto-stop background loop is active.
+    ///
+    /// `false` (default) → feature is OFF, zero behavior change.
+    /// `true` → background loop polls sessions and auto-stops idle ones.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// How often (in seconds) to poll Active sessions and classify them.
+    ///
+    /// Default: 300 s (5 min). At `idle_consecutive_threshold = 3` this means
+    /// sessions are stopped after ~15 min of continuous idleness.
+    #[serde(default = "IdleAutoStopConfig::default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+
+    /// Number of consecutive `Idle` verdicts before a session is stopped.
+    ///
+    /// Default: 3 (at 5-min poll interval → ~15 min of continuous idleness).
+    /// Reset to 0 whenever the verdict is NOT `Idle`.
+    #[serde(default = "IdleAutoStopConfig::default_idle_consecutive_threshold")]
+    pub idle_consecutive_threshold: u32,
+
+    /// Number of consecutive `Done` verdicts before a session is decommissioned.
+    ///
+    /// Default: 1 (decommission on the first confirmed `Done` verdict).
+    #[serde(default = "IdleAutoStopConfig::default_done_consecutive_threshold")]
+    pub done_consecutive_threshold: u32,
+}
+
+impl IdleAutoStopConfig {
+    fn default_poll_interval_secs() -> u64 {
+        300
+    }
+    fn default_idle_consecutive_threshold() -> u32 {
+        3
+    }
+    fn default_done_consecutive_threshold() -> u32 {
+        1
+    }
+}
+
+impl Default for IdleAutoStopConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: Self::default_poll_interval_secs(),
+            idle_consecutive_threshold: Self::default_idle_consecutive_threshold(),
+            done_consecutive_threshold: Self::default_done_consecutive_threshold(),
+        }
+    }
+}
+
 /// `[catchup]` section — incremental catch-up runtime (DOC-28 / #1762).
 ///
 /// Why: the catch-up runtime is opt-in and its behaviour (which sources to
@@ -257,6 +319,13 @@ pub struct MpmConfig {
     // CUTOVER BRIDGE — remove post-migration (#1762)
     #[serde(default)]
     pub catchup: CatchupConfig,
+
+    /// `[idle_auto_stop]` — opt-in idle auto-suspend feature (#1816).
+    ///
+    /// Absent section → `enabled = false` (feature OFF, zero behavior change).
+    /// Set `enabled = true` to activate the background idle-reaper loop.
+    #[serde(default)]
+    pub idle_auto_stop: IdleAutoStopConfig,
 }
 
 // ──────────────────────────────────────────────
@@ -650,6 +719,54 @@ drawer_limit = 5
         assert!(cfg.catchup.include_palace);
         assert_eq!(cfg.catchup.git_limit, 25);
         assert_eq!(cfg.catchup.drawer_limit, 5);
+    }
+
+    #[test]
+    fn config_idle_auto_stop_defaults() {
+        // An absent [idle_auto_stop] section must yield disabled (false) with
+        // sensible numeric defaults — the zero-change guarantee for #1816.
+        let dir = tempfile::TempDir::new().unwrap();
+        let cfg = MpmConfig::load(dir.path());
+        assert!(
+            !cfg.idle_auto_stop.enabled,
+            "idle_auto_stop must default to disabled"
+        );
+        assert_eq!(cfg.idle_auto_stop.poll_interval_secs, 300);
+        assert_eq!(cfg.idle_auto_stop.idle_consecutive_threshold, 3);
+        assert_eq!(cfg.idle_auto_stop.done_consecutive_threshold, 1);
+    }
+
+    #[test]
+    fn config_idle_auto_stop_section_parses() {
+        // A full [idle_auto_stop] section must override all defaults.
+        let dir = tempfile::TempDir::new().unwrap();
+        let toml = r#"
+[idle_auto_stop]
+enabled = true
+poll_interval_secs = 120
+idle_consecutive_threshold = 5
+done_consecutive_threshold = 2
+"#;
+        let cfg = load_from_str(dir.path(), toml);
+        assert!(cfg.idle_auto_stop.enabled);
+        assert_eq!(cfg.idle_auto_stop.poll_interval_secs, 120);
+        assert_eq!(cfg.idle_auto_stop.idle_consecutive_threshold, 5);
+        assert_eq!(cfg.idle_auto_stop.done_consecutive_threshold, 2);
+    }
+
+    #[test]
+    fn config_idle_auto_stop_enabled_only_keeps_defaults() {
+        // Setting only `enabled = true` must leave numeric fields at defaults.
+        let dir = tempfile::TempDir::new().unwrap();
+        let toml = r#"
+[idle_auto_stop]
+enabled = true
+"#;
+        let cfg = load_from_str(dir.path(), toml);
+        assert!(cfg.idle_auto_stop.enabled);
+        assert_eq!(cfg.idle_auto_stop.poll_interval_secs, 300);
+        assert_eq!(cfg.idle_auto_stop.idle_consecutive_threshold, 3);
+        assert_eq!(cfg.idle_auto_stop.done_consecutive_threshold, 1);
     }
 
     #[test]
