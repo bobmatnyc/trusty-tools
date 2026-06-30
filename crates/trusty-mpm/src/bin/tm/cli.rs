@@ -93,16 +93,24 @@ pub(crate) enum Command {
     },
     /// Define and manage Claude Code sessions within a project.
     ///
-    /// Why (#1394): the invoked name is the plural `sessions` to match the
-    /// `/api/v1/sessions/*` HTTP API surface. The singular `session` spelling
-    /// is intentionally NOT accepted (no alias) so the CLI and API agree on one
-    /// name. The Rust variant stays `Session` (with an explicit
-    /// `#[command(name = "sessions")]`) to keep the `SessionAction` group and
-    /// every match arm coherent without renaming ~80 internal references.
+    /// Two distinct session families live under this command group:
+    ///
+    ///   Local project sessions (bound to the cwd, daemon-backed):
+    ///     start, stop, list, run, output, pause, resume, events, info, …
+    ///
+    ///   Managed fleet sessions (provisioned in isolated worktrees):
+    ///     new, ls, activity, send, answer, decommission, prune-idle, …
+    ///
+    /// Why (#1394, #1841): the invoked name is the plural `sessions` to match the
+    /// `/api/v1/sessions/*` HTTP API surface. The singular `session` spelling is
+    /// accepted as a visible alias (#1841) so both forms work ergonomically. The
+    /// Rust variant stays `Session` (with an explicit `#[command(name = "sessions")]`)
+    /// to keep the `SessionAction` group and every match arm coherent without renaming
+    /// ~80 internal references.
     /// What: the `tm sessions <action>` command group (`tui`, `ls`, `new`, …).
-    /// Test: `cli_parses_sessions_plural` / `cli_rejects_singular_session` in
+    /// Test: `cli_parses_sessions_plural` / `cli_session_alias_accepts_singular` in
     /// `tests.rs`.
-    #[command(name = "sessions")]
+    #[command(name = "sessions", visible_alias = "session")]
     Session {
         /// Session action to perform.
         #[command(subcommand)]
@@ -1139,8 +1147,16 @@ pub(crate) enum ProjectAction {
 }
 
 /// Actions for the `session` subcommand.
+///
+/// Two families coexist here (see `sessions --help` for the full description):
+///   - Local project sessions: start, stop, list, run, output, pause, resume, …
+///   - Managed fleet sessions: new, ls, activity, send, answer, decommission, …
 #[derive(Debug, Subcommand)]
 pub(crate) enum SessionAction {
+    // ── Local project sessions ─────────────────────────────────────────────
+    // These verbs operate on the current project directory and its daemon-backed
+    // session registry. They are NOT valid targets for managed-session IDs.
+    // ──────────────────────────────────────────────────────────────────────
     /// Start a new Claude Code session in the current/specified project.
     Start {
         /// Project directory for the new session (defaults to the cwd).
@@ -1245,6 +1261,10 @@ pub(crate) enum SessionAction {
         #[arg(long)]
         summarize: bool,
     },
+    // ── Managed fleet sessions ─────────────────────────────────────────────
+    // These verbs operate on provisioned worktree sessions in the managed store.
+    // They are NOT valid targets for local project-session IDs.
+    // ──────────────────────────────────────────────────────────────────────
     /// Spawn a new managed session from a repo + ref (session-manager MVP).
     ///
     /// Why: the session-manager MVP provisions an isolated workspace from a git

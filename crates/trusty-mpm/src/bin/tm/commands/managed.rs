@@ -113,8 +113,13 @@ pub(crate) async fn session_ls(
     }
     let fetched = serde_json::from_str::<trusty_mpm::client::ManagedListResponse>(&raw)?.sessions;
     // #1809: filter decommissioned tombstones from the default table view.
+    // #1841 Fix 4: when --all is requested, sort so active/stopped sessions come
+    // first and decommissioned tombstones come last (stable sort preserves relative
+    // order within each group).
     let sessions: Vec<_> = if all {
-        fetched
+        let mut s = fetched;
+        s.sort_by_key(|sess| u8::from(sess.state == "decommissioned"));
+        s
     } else {
         filter_live_sessions(fetched)
     };
@@ -132,11 +137,12 @@ pub(crate) async fn session_ls(
         "ID", "STATE", "NAME", "TASK"
     );
     for s in &sessions {
+        // #1841 Fix 3: show a descriptive placeholder for sessions with no task.
         let task = s
             .task
             .as_deref()
             .map(|t| truncate(t, 30))
-            .unwrap_or_default();
+            .unwrap_or_else(|| "(interactive)".to_string());
         let created = s
             .created_at
             .as_deref()
@@ -148,8 +154,14 @@ pub(crate) async fn session_ls(
             .map(|d| format!(" [pending: {d}]"))
             .unwrap_or_default();
         println!(
+            // #1841 Fix 5: truncate name with ellipsis when it exceeds column width.
             "{:<36}  {:<14}  {:<24}  {:<30}  {}{}",
-            s.id, s.state, s.name, task, created, pending
+            s.id,
+            s.state,
+            truncate(&s.name, 24),
+            task,
+            created,
+            pending
         );
     }
     Ok(())

@@ -585,17 +585,18 @@ fn cli_parses_sessions_plural() {
 }
 
 #[test]
-fn cli_rejects_singular_session() {
-    // #1394: the singular `session` spelling was renamed to `sessions` with NO
-    // alias kept. Parsing the singular name must fail with an
-    // unrecognized-subcommand error so the CLI and the HTTP API agree on one
-    // name. (The separate `session-manager` command is unaffected and remains.)
-    let err = Cli::try_parse_from(["trusty-mpm", "session", "list"]).unwrap_err();
-    assert_eq!(
-        err.kind(),
-        clap::error::ErrorKind::InvalidSubcommand,
-        "singular `session` must be rejected as an unrecognized subcommand"
-    );
+fn cli_session_alias_accepts_singular() {
+    // #1841 Fix 2: `session` (singular) is now a visible_alias for `sessions`.
+    // The plural form was the canonical name (#1394), but operators naturally
+    // type the singular. Both must parse identically.
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "list"])
+        .expect("singular `session` alias must be accepted (#1841)");
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::List { dir },
+        } => assert_eq!(dir, None, "no --dir flag → dir should be None"),
+        other => panic!("expected Session::List via alias, got {other:?}"),
+    }
 }
 
 #[test]
