@@ -13,6 +13,7 @@
 //! `capture_into_driver_failure_is_nonfatal`.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use tracing::{debug, warn};
 
@@ -36,6 +37,17 @@ const SCROLLBACK_LINES: usize = 5_000;
 /// stop so only the most recent snapshot is kept.
 /// Test: `capture_into_writes_scrollback_file`.
 const SCROLLBACK_SUBPATH: &str = ".trusty-mpm/scrollback.txt";
+
+/// Compiled regex for secret redaction; initialized once on first call.
+///
+/// Why: compiling a regex is expensive — a `OnceLock` amortises the cost
+/// across all snapshot writes (typically one per stopped session).
+/// What: matches four pattern families — explicit API-key env vars, `sk-*`
+/// tokens, Bearer tokens, and generic token/secret/password/api-key
+/// assignments — and captures prefix vs. secret as separate groups so the
+/// key name is preserved in the output.
+/// Test: `redaction_scrubs_secrets_before_write`.
+static REDACT_RE: OnceLock<regex::Regex> = OnceLock::new();
 
 /// Capture scrollback and cwd into `record` before the session's tmux pane is killed.
 ///
@@ -78,18 +90,112 @@ pub async fn capture_into(record: &mut SessionRecord, driver: &dyn ManagedTmuxDr
     }
 }
 
-/// Write `content` to `dest`, creating parent directories as needed.
+/// Write `content` to `dest` with secret redaction and restrictive permissions.
 ///
-/// Why: the snapshot directory (`<workspace>/.trusty-mpm/`) may not exist yet
-/// on the first stop of a session; creating it on demand avoids a separate
-/// provisioning step.
-/// What: runs `tokio::fs::create_dir_all` then `tokio::fs::write`.
-/// Test: exercised by `capture_into_writes_scrollback_file` (uses a temp dir).
+/// Why: pane scrollback is a classic secret-leak vector (API keys, Bearer
+/// tokens, env echoes). Redacting before write and restricting the file to
+/// 0600 / parent dir to 0700 provides defence-in-depth for other processes
+/// running as the same uid.
+/// What: creates parent dirs, sets the parent dir to 0700 (best-effort),
+/// redacts the content via [`redact_secrets`], and writes the file with mode
+/// 0600 on Unix (falling back to a plain async write on non-Unix).
+/// Test: `scrollback_file_has_restrictive_permissions`,
+/// `redaction_scrubs_secrets_before_write`.
 async fn write_scrollback(dest: &Path, content: &str) -> std::io::Result<()> {
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+    let parent = dest.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "scrollback path has no parent directory",
+        )
+    })?;
+    tokio::fs::create_dir_all(parent).await?;
+
+    // Best-effort: restrict the .trusty-mpm/ snapshot dir to owner-only.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await;
     }
-    tokio::fs::write(dest, content).await
+
+    let redacted = redact_secrets(content);
+
+    // On Unix: open with mode 0600 to avoid the create-then-chmod race window.
+    #[cfg(unix)]
+    secure_write(dest, redacted.as_bytes())?;
+    // On non-Unix: plain async write (no mode bits available).
+    #[cfg(not(unix))]
+    tokio::fs::write(dest, redacted.as_bytes()).await?;
+
+    Ok(())
+}
+
+/// Create (or truncate) `path` and write `data` with mode 0600 on Unix.
+///
+/// Why: `OpenOptions::mode()` is the only race-free way to create a file with
+/// restrictive permissions; a write-then-`chmod` sequence has a TOCTOU window.
+/// What: opens with `O_CREAT | O_TRUNC | O_WRONLY | mode=0o600` and writes
+/// `data` in a single blocking call.
+/// Test: `scrollback_file_has_restrictive_permissions`.
+#[cfg(unix)]
+fn secure_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(data)
+}
+
+/// Scrub obvious secrets from pane scrollback before persisting to disk.
+///
+/// Why: pane output frequently contains `export API_KEY=…`, echo of env vars,
+/// or `curl -H "Bearer …"` commands. A conservative redaction pass reduces
+/// secret exposure if the snapshot file is read by diagnostic tools or
+/// inadvertently synced.
+/// What: replaces the VALUE portion of four pattern families with
+/// `***REDACTED***`, preserving the key name / prefix for debuggability.
+/// Patterns (case-insensitive):
+/// 1. `ANTHROPIC_API_KEY=<value>` / `OPENROUTER_API_KEY=<value>` (explicit vars)
+/// 2. `sk-<alphanumeric>` (Anthropic / OpenAI-style tokens)
+/// 3. `Bearer <token>`
+/// 4. `(token|secret|password|api_key|api-key) [:=] <value>` (generic)
+///
+/// Test: `redaction_scrubs_secrets_before_write`.
+fn redact_secrets(content: &str) -> String {
+    let re = REDACT_RE.get_or_init(|| {
+        // Each alternation captures (prefix, secret) as consecutive groups:
+        //   alt 1: groups 1-2  — named API key env vars
+        //   alt 2: groups 3-4  — sk- token prefix + body
+        //   alt 3: groups 5-6  — Bearer + token
+        //   alt 4: groups 7-8  — generic key[:=]value
+        regex::Regex::new(concat!(
+            r"(?i)",
+            r"((?:anthropic|openrouter)_api_key\s*=\s*)(\S+)",
+            r"|",
+            r"(sk-)([A-Za-z0-9_-]+)",
+            r"|",
+            r"(bearer\s+)([A-Za-z0-9._-]+)",
+            r"|",
+            r"((?:token|secret|password|api[_-]?key)\s*[:=]\s*)(\S+)",
+        ))
+        .expect("REDACT_RE must compile — static pattern")
+    });
+    re.replace_all(content, |caps: &regex::Captures| {
+        let prefix = if caps.get(1).is_some() {
+            caps.get(1).map_or("", |m| m.as_str())
+        } else if caps.get(3).is_some() {
+            caps.get(3).map_or("", |m| m.as_str())
+        } else if caps.get(5).is_some() {
+            caps.get(5).map_or("", |m| m.as_str())
+        } else {
+            caps.get(7).map_or("", |m| m.as_str())
+        };
+        format!("{prefix}***REDACTED***")
+    })
+    .into_owned()
 }
 
 #[cfg(test)]
@@ -219,5 +325,65 @@ mod tests {
         let on_disk = std::fs::read_to_string(&path).expect("file must exist");
         assert_eq!(on_disk, "hello output");
         assert_eq!(record.last_cwd, Some(PathBuf::from("/repo/src")));
+    }
+
+    /// Why: the scrollback file must be readable only by the owner to prevent
+    /// other processes running as the same uid from reading captured secrets.
+    /// What: writes a snapshot to a temp dir and asserts the resulting file
+    /// has Unix permissions 0o600 (owner rw, group/other none).
+    /// Test: this is the test. Unix-only; skipped on non-Unix targets.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scrollback_file_has_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut record = make_record(Some(tmp.path().to_path_buf()));
+        let driver = StubDriver {
+            capture_result: Ok("output".into()),
+            cwd: None,
+        };
+        capture_into(&mut record, &driver).await;
+        let path = record.scrollback_path.expect("scrollback_path must be set");
+        let meta = std::fs::metadata(&path).expect("file must exist");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "scrollback file must be 0600, got {mode:o}");
+    }
+
+    /// Why: pane scrollback often contains API keys or Bearer tokens that must
+    /// not be persisted in plaintext; the redaction pass is the primary guard.
+    /// What: writes a snapshot containing `ANTHROPIC_API_KEY=sk-abc123` and
+    /// `Bearer xyz`; asserts both values are replaced with `***REDACTED***`
+    /// and the keys/prefixes remain visible.
+    /// Test: this is the test.
+    #[tokio::test]
+    async fn redaction_scrubs_secrets_before_write() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut record = make_record(Some(tmp.path().to_path_buf()));
+        let raw = "ANTHROPIC_API_KEY=sk-abc123\ncurl -H \"Bearer xyz\" https://api.example.com\n";
+        let driver = StubDriver {
+            capture_result: Ok(raw.into()),
+            cwd: None,
+        };
+        capture_into(&mut record, &driver).await;
+        let path = record.scrollback_path.expect("scrollback_path must be set");
+        let on_disk = std::fs::read_to_string(&path).expect("file must exist");
+        assert!(
+            !on_disk.contains("sk-abc123"),
+            "raw API key must not appear on disk: {on_disk:?}"
+        );
+        assert!(
+            !on_disk.contains("Bearer xyz"),
+            "raw Bearer token must not appear on disk: {on_disk:?}"
+        );
+        assert!(
+            on_disk.contains("***REDACTED***"),
+            "redaction marker must be present: {on_disk:?}"
+        );
+        assert!(
+            on_disk.contains("ANTHROPIC_API_KEY=***REDACTED***")
+                || on_disk.contains("API_KEY=***REDACTED***"),
+            "key name must be preserved: {on_disk:?}"
+        );
     }
 }
