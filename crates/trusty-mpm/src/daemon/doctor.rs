@@ -581,6 +581,11 @@ mod tests {
 
     #[tokio::test]
     async fn worktrees_no_orphans_is_ok() {
+        // Why (#1845 item 2): on macOS /tmp is a symlink to /private/tmp. If we pass the
+        // raw tempfile path as active (e.g. /tmp/…) but the walk canonicalises it to
+        // /private/tmp/…, the active-set lookup misses and a live worktree is falsely
+        // flagged as an orphan — causing a spurious CI failure. Canonicalize the active
+        // path in the test so the set membership check in find_orphaned_worktrees matches.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         // Create owner/repo/.worktrees/session-abc/ and register it as active.
@@ -590,7 +595,9 @@ mod tests {
             .join(".worktrees")
             .join("session-abc");
         std::fs::create_dir_all(&wt).unwrap();
-        let active = vec![wt];
+        // Canonicalize so /tmp vs /private/tmp symlink differences are resolved.
+        let canonical_wt = std::fs::canonicalize(&wt).unwrap_or(wt);
+        let active = vec![canonical_wt];
         let check = check_worktrees(Some(root), &active).await;
         assert_eq!(check.status, CheckStatus::Ok);
     }
