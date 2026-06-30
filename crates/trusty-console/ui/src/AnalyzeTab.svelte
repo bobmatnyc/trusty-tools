@@ -130,7 +130,7 @@
     clusters = [];
     try {
       // Use the console's own API route — the console calls trusty-analyze over
-      // stdio MCP internally. No /proxy/analyze usage from the browser (#1104).
+      // stdio MCP internally. No /api/analyze/* usage from the browser (#1104).
       const resp = await fetch(
         `/api/console/metrics/analyze/visualize?index=${encodeURIComponent(indexId)}`
       );

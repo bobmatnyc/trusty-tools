@@ -1,7 +1,7 @@
 //! `ServiceConnector` implementation for `trusty-mpm` (#1222, #1849).
 //!
 //! Why: the console's Overview must show trusty-mpm alongside the other services,
-//! and the `/proxy/mpm/*` reverse-proxy route (#1849 Phase 1) requires a live URL
+//! and the `/api/mpm/*` reverse-proxy route (#1849 Phase 2) requires a live URL
 //! from the connector so the proxy handler can resolve the upstream daemon.
 //! What: `MpmConnector` implements `ServiceConnector::detect()` using the standard
 //! `trusty-common` http_addr discovery file written by the daemon after bind
@@ -23,7 +23,7 @@ use super::helpers::{binary_on_path, detect_service, tcp_probe};
 /// ServiceConnector for `trusty-mpm`.
 ///
 /// Why: surfaces the running trusty-mpm daemon in the console Overview and
-/// enables the `/proxy/mpm/*` route by providing the daemon's live base URL
+/// enables the `/api/mpm/*` route by providing the daemon's live base URL
 /// via the standard `http_addr` discovery file (#1849 Phase 1). A backward-compat
 /// fallback reads the TOML lock file for daemons that pre-date the http_addr write.
 /// What: implements `detect()` using the standard `trusty-common` data-dir
