@@ -17,7 +17,7 @@
 use colored::Colorize as _;
 use unicode_width::UnicodeWidthStr as _;
 
-use super::{IMAGE_CLIP_COLS, clip_and_shade_image};
+use super::load_and_shade_banner;
 use crate::formatters::info_box::{WelcomeData, render_info_box_rows};
 
 // ── Layout constants ──────────────────────────────────────────────────────────
@@ -71,8 +71,7 @@ pub(crate) fn render_two_panel_banner(
         return None;
     }
 
-    let image_lines = clip_and_shade_image();
-    let image_cols = IMAGE_CLIP_COLS;
+    let (image_lines, image_cols) = load_and_shade_banner();
 
     let inner = term_width.saturating_sub(2);
 
@@ -448,36 +447,33 @@ pub(crate) mod tests {
         colored::control::unset_override();
     }
 
-    /// Clipped image has exactly IMAGE_CLIP_ROWS rows.
+    /// Shaded art rows match the actual line count of the embedded default.
     #[test]
     fn image_clip_correct_rows() {
-        let lines = super::super::clip_and_shade_image();
+        let (lines, _cols) = super::super::shade_image(super::super::source::DEFAULT_BANNER_ART);
+        let raw_count = super::super::source::DEFAULT_BANNER_ART.lines().count();
         assert_eq!(
             lines.len(),
-            super::super::IMAGE_CLIP_ROWS,
-            "clipped image must have exactly IMAGE_CLIP_ROWS ({}) rows, got {}",
-            super::super::IMAGE_CLIP_ROWS,
+            raw_count,
+            "shade_image must return one row per art line: expected {raw_count}, got {}",
             lines.len()
         );
-        assert!(
-            lines.len() >= 12 && lines.len() <= 20,
-            "clipped rows ({}) must be within 12–20 (CLIP_ROW_END=14)",
-            lines.len()
-        );
+        assert!(raw_count >= 2, "default art must have at least 2 lines");
     }
 
-    /// Each row of the clipped image has exactly IMAGE_CLIP_COLS display columns.
+    /// Each shaded row has the same display width (auto-sized to art max width).
     #[test]
     fn image_clip_correct_cols() {
         colored::control::set_override(false);
-        let lines = super::super::clip_and_shade_image();
-        let expected = super::super::IMAGE_CLIP_COLS;
+        let (lines, expected_cols) =
+            super::super::shade_image(super::super::source::DEFAULT_BANNER_ART);
+        assert!(expected_cols > 0, "auto-sized cols must be > 0");
         for (i, line) in lines.iter().enumerate() {
             let bare = strip_ansi(line);
             let width = bare.width();
             assert_eq!(
-                width, expected,
-                "row {i} display width ({width}) must equal IMAGE_CLIP_COLS ({expected})"
+                width, expected_cols,
+                "row {i} display width ({width}) must equal auto-sized cols ({expected_cols})"
             );
         }
         colored::control::unset_override();
@@ -486,14 +482,31 @@ pub(crate) mod tests {
     /// Non-space art characters always emit truecolor escapes.
     #[test]
     fn image_shading_emits_truecolor() {
-        // clip_and_shade_image emits raw ANSI truecolor escapes directly
-        // (not via the `colored` global state) so this test needs no override.
-        let lines = super::super::clip_and_shade_image();
+        // shade_image emits raw ANSI truecolor escapes directly (not via the
+        // `colored` global state) so this test needs no override.
+        let (lines, _) = super::super::shade_image(super::super::source::DEFAULT_BANNER_ART);
         let any_colored = lines.iter().any(|l| l.contains("\x1B[38;2;"));
         assert!(
             any_colored,
-            "clipped image must always emit truecolor escapes for non-space chars"
+            "shaded art must always emit truecolor escapes for non-space chars"
         );
+    }
+
+    /// Auto-sizing picks up dimensions from a custom art string.
+    #[test]
+    fn image_autosize_uses_art_dimensions() {
+        colored::control::set_override(false);
+        let custom_art = "ABC\nDE\nFGHI\n";
+        let (lines, cols) = super::super::shade_image(custom_art);
+        // "FGHI" is the widest line: 4 chars.
+        assert_eq!(cols, 4, "max width of 'FGHI' is 4");
+        assert_eq!(lines.len(), 3, "three non-empty lines");
+        // Each row must be padded to cols=4.
+        for (i, line) in lines.iter().enumerate() {
+            let bare = strip_ansi(line);
+            assert_eq!(bare.width(), 4, "row {i} must be padded to 4 display cols");
+        }
+        colored::control::unset_override();
     }
 
     /// The right-column content has no inner-box border chars (╭╮╰╯).

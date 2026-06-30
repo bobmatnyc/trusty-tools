@@ -15,8 +15,8 @@ use crate::cli::{
     TelegramCmd,
 };
 use crate::formatters::banner::{
-    IMAGE_CLIP_COLS, IMAGE_CLIP_ROWS, clip_and_shade_image, fallback_session_name,
-    normalize_workdir, print_launch_banner, print_launch_banner_reconnecting, terminal_width,
+    fallback_session_name, normalize_workdir, print_launch_banner,
+    print_launch_banner_reconnecting, terminal_width,
 };
 use crate::formatters::session::short_id;
 
@@ -1714,30 +1714,37 @@ fn cli_parses_login_standalone() {
 
 #[test]
 fn image_clip_has_correct_dimensions() {
-    // Why: IMAGE_CLIP_ROWS/IMAGE_CLIP_COLS are the authoritative dimensions;
-    // if the clip constants drift from the art, the left column will be mis-sized.
-    // What: assert the clipped image matches the expected row and column counts.
-    // Test: direct call to clip_and_shade_image.
-    let lines = clip_and_shade_image();
-    assert_eq!(lines.len(), IMAGE_CLIP_ROWS, "clipped image row count");
-    // Verify the clip width constant is in the expected range for the left column.
-    const { assert!(IMAGE_CLIP_COLS >= 48) };
-    const { assert!(IMAGE_CLIP_COLS <= 56) };
+    // Why: auto-sizing must produce rows that match the art's actual line count
+    // and all rows must have the same display width (the art's max width).
+    // What: call shade_image on the embedded default and check row count + col
+    // consistency.
+    // Test: direct call to shade_image with DEFAULT_BANNER_ART.
+    use crate::formatters::banner::{shade_image, source::DEFAULT_BANNER_ART};
+    let (lines, cols) = shade_image(DEFAULT_BANNER_ART);
+    let raw_count = DEFAULT_BANNER_ART.lines().count();
+    assert_eq!(
+        lines.len(),
+        raw_count,
+        "shade_image row count must match art line count"
+    );
+    assert!(cols > 0, "auto-sized cols must be > 0");
+    assert!(cols >= 28, "block-robot art is at least 28 columns wide");
 }
 
 #[test]
 fn art_char_shading_emits_truecolor() {
-    // Why: clip_and_shade_image emits raw ANSI truecolor escapes directly for
-    // non-space art chars so the image always renders with the rust/amber palette
-    // on 24-bit terminals — no color-override needed and no race with parallel tests.
-    // What: call clip_and_shade_image and verify at least one line contains a
-    // truecolor ANSI escape (`\x1B[38;2;`).
+    // Why: shade_image emits raw ANSI truecolor escapes directly for non-space
+    // art chars so the image always renders with the rust/amber palette on 24-bit
+    // terminals — no color-override needed and no race with parallel tests.
+    // What: call shade_image on the embedded default and verify at least one line
+    // contains a truecolor ANSI escape (`\x1B[38;2;`).
     // Test: no colored::control manipulation; escapes are always emitted.
-    let lines = clip_and_shade_image();
+    use crate::formatters::banner::{shade_image, source::DEFAULT_BANNER_ART};
+    let (lines, _) = shade_image(DEFAULT_BANNER_ART);
     let any_colored = lines.iter().any(|l| l.contains("\x1B[38;2;"));
     assert!(
         any_colored,
-        "clipped image must always emit truecolor escapes for non-space chars"
+        "shaded art must always emit truecolor escapes for non-space chars"
     );
 }
 
@@ -1745,16 +1752,14 @@ fn art_char_shading_emits_truecolor() {
 fn art_shading_spaces_are_uncolored() {
     // Why: spaces in the art should be transparent (no color escape), so
     // the terminal background shows through rather than applying a tint.
-    // What: verify that space chars in clipped image lines have no escape prefix.
+    // What: verify that space chars in shaded image lines have no escape prefix.
     // Test: check that strip_ansi still finds spaces in the output.
-    use crate::formatters::banner::two_panel::strip_ansi;
-    let lines = clip_and_shade_image();
-    // Find a line with at least one space and verify the bare text still has spaces.
+    use crate::formatters::banner::{
+        shade_image, source::DEFAULT_BANNER_ART, two_panel::strip_ansi,
+    };
+    let (lines, _) = shade_image(DEFAULT_BANNER_ART);
     let has_space = lines.iter().any(|l| strip_ansi(l).contains(' '));
-    assert!(
-        has_space,
-        "clipped image must contain some uncolored spaces"
-    );
+    assert!(has_space, "shaded art must contain some uncolored spaces");
 }
 
 #[test]

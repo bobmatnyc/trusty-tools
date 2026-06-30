@@ -7,61 +7,42 @@
 //! `print_banner_preview`, `terminal_width`, `detect_memory`, `detect_tool`,
 //! `dirs_config_dir`, `binary_on_path`, `fallback_session_name`,
 //! `normalize_workdir`, `tmux_has_session`. The single-box compositor lives in
-//! the `two_panel` submodule. Image clipping and rust-shading live here.
+//! the `two_panel` submodule. Banner loading lives in `source`. Auto-sized
+//! shading lives in `shade_image` / `load_and_shade_banner`.
 //! Test: `launch_banner_*`, `terminal_width_is_positive`,
 //! `normalize_workdir_strips_trailing_slash` in `tests.rs`;
-//! `two_panel_*` in `two_panel::tests`.
+//! `two_panel_*` in `two_panel::tests`; `banner_source_*` in `source::tests`.
 
+pub(crate) mod source;
 pub(crate) mod two_panel;
 
-// ── Embedded ASCII-art image ──────────────────────────────────────────────────
-
-/// Raw ASCII-art image embedded at compile time.
-///
-/// Why: shipping the art as a sidecar `.txt` keeps the source file readable
-/// and avoids escaping every special Unicode glyph in a Rust string literal.
-/// What: 16-line × 52-col kawaii row-of-three pixel-bot artwork; clipped to
-/// the focal figure window by `clip_and_shade_image`.
-/// Test: `image_clip_correct_rows` in `two_panel::tests`.
-pub(crate) const BANNER_IMAGE: &str = include_str!("image.txt");
-
-// ── Clip-window constants ─────────────────────────────────────────────────────
-
-/// First row to include (0-indexed, inclusive).
-pub(crate) const CLIP_ROW_START: usize = 0;
-/// One-past-the-last row to include (0-indexed, exclusive).
-/// Set to 14 to capture the heads-only kawaii row-of-three bot art.
-pub(crate) const CLIP_ROW_END: usize = 14;
-/// First column to include (0-indexed, inclusive).
-pub(crate) const CLIP_COL_START: usize = 0;
-/// One-past-the-last column to include (0-indexed, exclusive).
-pub(crate) const CLIP_COL_END: usize = 52;
-/// Display width of the clipped image in columns.
-pub(crate) const IMAGE_CLIP_COLS: usize = CLIP_COL_END - CLIP_COL_START;
-/// Number of rows in the clipped image.
-pub(crate) const IMAGE_CLIP_ROWS: usize = CLIP_ROW_END - CLIP_ROW_START;
+use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr as _;
 
 // ── Per-character rust brightness shading ─────────────────────────────────────
 
 /// Map a glyph to its rust-palette RGB triple.
 ///
-/// Why: bot outline chars should appear bright amber so the three kawaii bots
-/// read clearly against a dark terminal background; accent glyphs use mid-rust
-/// to add depth without competing with the main structure.
-/// What: four buckets —
-///   • amber `(224,140,60)`: box-drawing, block, face, and lightbulb glyphs
-///     used in the kawaii bot art (`┌─┐│└┘┬╷╶╴├┤▟▙^●◡⢀✲⡀`) plus legacy
-///     dense glyphs from the old art;
+/// Why: bot outline chars should appear bright amber so the block robots read
+/// clearly against a dark terminal background; accent glyphs use mid-rust to
+/// add depth without competing with the main structure.
+/// What: five buckets —
+///   • amber `(224,140,60)`: block, half-block, and face glyphs used in the
+///     block-robot art (`▄ ▀ █ ▓ ▌ ▐ ▟ ▙`), box-drawing chars, and face glyphs
+///     (`◉ ◔ ◕ • ◡ ▿ ⌣ ● ◻ ^ ⢀ ✲ ⡀`) from current and legacy art;
 ///   • mid-rust `(205,100,30)`: medium-ink marks;
-///   • dark rust `(120,50,10)`: fine marks;
+///   • dark rust `(120,50,10)`: fine punctuation marks;
 ///   • base rust `(183,65,14)`: everything else.
 /// Test: `image_shading_emits_truecolor` in `two_panel::tests`.
 pub(crate) fn shade_bucket(c: char) -> (u8, u8, u8) {
     match c {
-        // Amber — bot structure: box-drawing, block chars, face glyphs, lightbulb
-        '┌' | '─' | '┐' | '│' | '└' | '┘' | '┬' | '┴' | '├' | '┤' | '╷' | '╵' | '╶' | '╴'
-        | '▟' | '▙' | '▌' | '▐' | '█' | '▓'
-        | '^' | '●' | '◡' | '⢀' | '✲' | '⡀' | '◻'
+        // Amber — block structure: half-block, full-block, shade chars
+        '▄' | '▀' | '█' | '▓' | '▌' | '▐' | '▟' | '▙'
+        // Box-drawing chars (legacy kawaii bots)
+        | '┌' | '─' | '┐' | '│' | '└' | '┘' | '┬' | '┴' | '├' | '┤' | '╷' | '╵' | '╶' | '╴'
+        // Face glyphs — block robots and legacy
+        | '◉' | '◔' | '◕' | '•' | '◡' | '▿' | '⌣'
+        | '^' | '●' | '⢀' | '✲' | '⡀' | '◻'
         // Legacy dense glyphs from previous art
         | 'I' | '∏' | '♦' | '∇' | '√' | '≥' | '≤' | '@' | '#' => {
             (224, 140, 60) // bright amber
@@ -70,8 +51,8 @@ pub(crate) fn shade_bucket(c: char) -> (u8, u8, u8) {
         'i' | 'l' | '!' | '<' | '>' | '+' | '=' | '/' | '\\' | '≈' | '∫' | '∑' => {
             (205, 100, 30) // mid rust
         }
-        // Light — fine marks
-        '.' | ',' | ':' | ';' | '°' | '⋆' | '•' | '◦' | '~' | '-' => {
+        // Light — fine punctuation marks
+        '.' | ',' | ':' | ';' | '°' | '⋆' | '◦' | '~' | '-' => {
             (120, 50, 10) // dark rust
         }
         // Unclassified — base rust
@@ -79,54 +60,65 @@ pub(crate) fn shade_bucket(c: char) -> (u8, u8, u8) {
     }
 }
 
-/// Clip the ASCII-art image to the focal window and apply per-char rust shading.
+/// Shade an art string and return `(coloured_rows, max_display_cols)`.
 ///
-/// Why: the kawaii bot art is a compact 16-row × 52-col region; the clip
-/// window captures it at native character resolution without downsampling.
-/// What: slices rows `[CLIP_ROW_START, CLIP_ROW_END)` and chars
-/// `[CLIP_COL_START, CLIP_COL_END)` from `BANNER_IMAGE`; applies
-/// `shade_bucket` per non-space character; pads short lines to `IMAGE_CLIP_COLS`.
-/// Spaces are passed through uncoloured (transparent).  Each row is already
-/// coloured via truecolor escapes; consumers measure display width via
-/// `strip_ansi` + `unicode_width`.
-/// Test: `image_clip_correct_rows`, `image_clip_correct_cols`,
-/// `image_shading_emits_truecolor` in `two_panel::tests`.
-pub(crate) fn clip_and_shade_image() -> Vec<String> {
-    BANNER_IMAGE
-        .lines()
-        .skip(CLIP_ROW_START)
-        .take(IMAGE_CLIP_ROWS)
-        .map(|line| {
-            let chars: Vec<char> = line.chars().collect();
-            let len = chars.len();
-            #[allow(clippy::unnecessary_min_or_max)] // guard retained for future non-zero re-crops
-            let col_start = CLIP_COL_START.min(len);
-            let col_end = CLIP_COL_END.min(len);
+/// Why: auto-computing the display width from the actual art means an
+/// arbitrarily-sized user-edited file renders correctly without recompiling;
+/// all previous hard-coded CLIP_* constants are replaced by this measurement.
+/// What: iterates every line of `art`, colourises non-space chars via
+/// `shade_bucket`, pads each row to `max_display_cols` with spaces. Returns
+/// `(rows, max_display_cols)`. Spaces are transparent (no colour escape).
+/// Rows wider than `max_display_cols` are clipped gracefully (no panic).
+/// Test: `image_autosize_uses_art_dimensions`, `image_clip_correct_cols`
+/// in `two_panel::tests`.
+pub(crate) fn shade_image(art: &str) -> (Vec<String>, usize) {
+    let raw_lines: Vec<&str> = art.lines().collect();
+    let max_cols = raw_lines.iter().map(|l| l.width()).max().unwrap_or(0);
 
-            let mut row = String::with_capacity(IMAGE_CLIP_COLS * 24);
+    if max_cols == 0 || raw_lines.is_empty() {
+        return (Vec::new(), 0);
+    }
+
+    let rows = raw_lines
+        .iter()
+        .map(|line| {
+            let mut row = String::with_capacity(max_cols * 24);
             let mut display_cols: usize = 0;
 
-            for &c in &chars[col_start..col_end] {
+            for c in line.chars() {
+                let cw = UnicodeWidthChar::width(c).unwrap_or(1);
+                if display_cols + cw > max_cols {
+                    break; // clip gracefully — don't panic
+                }
                 if c == ' ' {
                     row.push(' ');
                 } else {
-                    // Emit raw truecolor escape directly rather than via the
-                    // `colored` crate so the output is stable regardless of the
-                    // global `colored` override state (which is shared across
-                    // parallel tests and can race). strip_ansi in two_panel.rs
-                    // handles `\x1B[…m` sequences correctly for width math.
                     let (r, g, b) = shade_bucket(c);
                     row.push_str(&format!("\x1B[38;2;{r};{g};{b}m{c}\x1B[0m"));
                 }
-                display_cols += 1;
+                display_cols += cw;
             }
-            // Pad with spaces to reach IMAGE_CLIP_COLS.
-            for _ in display_cols..IMAGE_CLIP_COLS {
+            // Pad to max_cols.
+            for _ in display_cols..max_cols {
                 row.push(' ');
             }
             row
         })
-        .collect()
+        .collect();
+
+    (rows, max_cols)
+}
+
+/// Load the banner art from disk (or embedded default) and shade it.
+///
+/// Why: decouples the renderer (`two_panel`) from the I/O of discovering and
+/// reading the user-editable banner file.
+/// What: calls `source::load_banner_art()` then `shade_image()`, returning
+/// `(coloured_rows, max_display_cols)`.
+/// Test: `image_autosize_uses_art_dimensions` in `two_panel::tests`.
+pub(crate) fn load_and_shade_banner() -> (Vec<String>, usize) {
+    let art = source::load_banner_art();
+    shade_image(&art)
 }
 
 /// Query the terminal width in columns, falling back to 80 when unknown.
