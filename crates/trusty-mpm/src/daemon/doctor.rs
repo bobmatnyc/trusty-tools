@@ -36,12 +36,18 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// Why: the single entry point behind `GET /api/v1/doctor` and `tm doctor` —
 /// running all probes here keeps the check set identical across every UI.
 /// What: runs the instruction / agent / skill filesystem probes, then the
-/// memory and search HTTP probes (each bounded by [`PROBE_TIMEOUT`]), and folds
-/// the five [`DoctorCheck`]s into a [`DoctorReport`] whose `overall` status is
-/// the worst of them. `project_dir`, when supplied, scopes the instruction
-/// probe to that project's `.trusty-mpm/last-instructions.md`.
-/// Test: `run_doctor_produces_five_checks`.
-pub async fn run_doctor(project_dir: Option<&Path>) -> DoctorReport {
+/// memory and search HTTP probes (each bounded by [`PROBE_TIMEOUT`]), and a
+/// worktree-orphan scan (Fix 1b, #1840), and folds the six [`DoctorCheck`]s
+/// into a [`DoctorReport`] whose `overall` status is the worst of them.
+/// `project_dir` scopes the instruction probe; `repos_root` (when `Some`)
+/// gives the managed workspace root for the worktree scan; `active_workspace_paths`
+/// is the full set of workspace paths currently registered to live sessions.
+/// Test: `run_doctor_produces_six_checks`.
+pub async fn run_doctor(
+    project_dir: Option<&Path>,
+    repos_root: Option<&Path>,
+    active_workspace_paths: &[PathBuf],
+) -> DoctorReport {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let paths = FrameworkPaths::default();
 
@@ -52,8 +58,76 @@ pub async fn run_doctor(project_dir: Option<&Path>) -> DoctorReport {
     ];
     checks.push(check_memory(&home).await);
     checks.push(check_search(&home).await);
+    checks.push(check_worktrees(repos_root, active_workspace_paths).await);
 
     DoctorReport::from_checks(checks)
+}
+
+/// Probe for orphaned per-session git worktrees under the managed workspace root.
+///
+/// Why: `decommission` now calls `git worktree remove` (#1840), but sessions
+/// that were decommissioned before this fix—or where `git worktree remove`
+/// failed—may leave stale `.worktrees/<session-id>/` directories on disk. This
+/// probe surfaces orphaned dirs so operators know to run
+/// `tm sessions prune --worktrees`. The filesystem walk is delegated to
+/// [`crate::session_manager::prune::find_orphaned_worktrees`] inside
+/// `spawn_blocking` so the async executor is not blocked by synchronous I/O.
+/// What: builds a canonicalized active-path set, then spawns a blocking task
+/// to walk `<repos_root>/<owner>/<repo>/.worktrees/`; any leaf directory not
+/// in the active set is counted as an orphan. Reports `Ok` (no orphans),
+/// `Warn` (orphans found), or `Ok` (repos_root absent / unconfigured).
+/// Test: `worktrees_no_orphans_is_ok`, `worktrees_with_orphan_is_warn`.
+async fn check_worktrees(
+    repos_root: Option<&Path>,
+    active_workspace_paths: &[PathBuf],
+) -> DoctorCheck {
+    let Some(root) = repos_root else {
+        // No managed workspace root configured — this is a normal state for
+        // operators who don't use in-project worktree sessions (#1840).
+        return DoctorCheck::new(
+            "worktrees",
+            CheckStatus::Ok,
+            "no managed workspace root configured — worktree scan skipped",
+        );
+    };
+    if !root.is_dir() {
+        return DoctorCheck::new(
+            "worktrees",
+            CheckStatus::Ok,
+            format!("{} does not exist — no worktrees to check", root.display()),
+        );
+    }
+
+    // Build a canonicalized HashSet for O(1) lookup and symlink safety (Fix 1b, #1840).
+    let root = root.to_path_buf();
+    let active_set: std::collections::HashSet<PathBuf> = active_workspace_paths
+        .iter()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
+
+    // Delegate the blocking filesystem walk to spawn_blocking so the async
+    // executor is not stalled on directory I/O (#1840 F).
+    let orphans = tokio::task::spawn_blocking(move || {
+        crate::session_manager::prune::find_orphaned_worktrees(&root, &active_set)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        tracing::error!("doctor: worktree scan panicked: {e}");
+        Vec::new()
+    });
+
+    if orphans.is_empty() {
+        DoctorCheck::new("worktrees", CheckStatus::Ok, "no orphaned worktrees found")
+    } else {
+        DoctorCheck::new(
+            "worktrees",
+            CheckStatus::Warn,
+            format!(
+                "{} orphaned worktree dir(s) found — run `tm sessions prune --worktrees` to remove",
+                orphans.len()
+            ),
+        )
+    }
 }
 
 /// Probe the instruction pipeline by looking for `last-instructions.md`.
@@ -479,13 +553,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_doctor_produces_five_checks() {
-        let report = run_doctor(None).await;
-        assert_eq!(report.checks.len(), 5);
+    async fn run_doctor_produces_six_checks() {
+        let report = run_doctor(None, None, &[]).await;
+        assert_eq!(report.checks.len(), 6);
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
-            ["instructions", "agents", "skills", "memory", "search"]
+            [
+                "instructions",
+                "agents",
+                "skills",
+                "memory",
+                "search",
+                "worktrees"
+            ]
         );
+    }
+
+    #[tokio::test]
+    async fn worktrees_no_repos_root_is_ok() {
+        // Fix 7 (#1840): absence of a managed workspace root is NORMAL — not every
+        // operator uses in-project worktree sessions. Return Ok, not Warn.
+        let check = check_worktrees(None, &[]).await;
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.message.contains("no managed workspace"));
+    }
+
+    #[tokio::test]
+    async fn worktrees_no_orphans_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Create owner/repo/.worktrees/session-abc/ and register it as active.
+        let wt = root
+            .join("owner")
+            .join("repo")
+            .join(".worktrees")
+            .join("session-abc");
+        std::fs::create_dir_all(&wt).unwrap();
+        let active = vec![wt];
+        let check = check_worktrees(Some(root), &active).await;
+        assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[tokio::test]
+    async fn worktrees_with_orphan_is_warn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Create two worktrees; only one has an active session.
+        let wt1 = root
+            .join("owner")
+            .join("repo")
+            .join(".worktrees")
+            .join("session-live");
+        let wt2 = root
+            .join("owner")
+            .join("repo")
+            .join(".worktrees")
+            .join("session-dead");
+        std::fs::create_dir_all(&wt1).unwrap();
+        std::fs::create_dir_all(&wt2).unwrap();
+        // wt2 is orphaned (no active session).
+        let active = vec![wt1];
+        let check = check_worktrees(Some(root), &active).await;
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("1 orphaned"));
+        assert!(check.message.contains("tm sessions prune --worktrees"));
     }
 }

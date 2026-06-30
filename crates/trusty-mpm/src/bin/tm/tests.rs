@@ -1238,6 +1238,31 @@ fn cli_session_prune_requires_state() {
 }
 
 #[test]
+fn cli_parses_session_prune_worktrees() {
+    // #1840: `prune-worktrees` with no flags defaults to dry-run (force=false).
+    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "prune-worktrees"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::PruneWorktrees { force },
+        } => {
+            assert!(!force, "default must be dry-run (force=false)");
+        }
+        other => panic!("expected session prune-worktrees, got {other:?}"),
+    }
+    // With --force, actually deletes.
+    let cli2 =
+        Cli::try_parse_from(["trusty-mpm", "sessions", "prune-worktrees", "--force"]).unwrap();
+    match cli2.command.unwrap() {
+        Command::Session {
+            action: SessionAction::PruneWorktrees { force },
+        } => {
+            assert!(force, "--force must set force=true");
+        }
+        other => panic!("expected session prune-worktrees, got {other:?}"),
+    }
+}
+
+#[test]
 fn cli_parses_session_catchup() {
     // DOC-28 PR1 (#1762): `tm sessions catchup --all-projects --full` must parse
     // cleanly and deliver the expected field values.

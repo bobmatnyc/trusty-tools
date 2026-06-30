@@ -246,7 +246,14 @@ pub(crate) async fn session_activity(
         }
     }
     if !a.raw_pane.is_empty() {
-        println!("--- raw pane (last 60 lines) ---");
+        // #1840: when the runtime is stopped and the live capture was empty, the
+        // daemon falls back to the stop-time scrollback snapshot. Display a clear
+        // annotation so operators know they're reading last-known-good data.
+        if a.pane_stale {
+            println!("--- pane content (stop-time scrollback snapshot — not real-time) ---");
+        } else {
+            println!("--- raw pane (last 60 lines) ---");
+        }
         println!("{}", a.raw_pane);
     }
     Ok(())
@@ -460,6 +467,43 @@ pub(crate) async fn session_prune(
     }
     let verb = if dry_run { "would prune" } else { "pruned" };
     println!("{verb} {} session(s) (filter={state})", sessions.len());
+    Ok(())
+}
+
+/// `tm sessions prune --worktrees [--dry-run]` — remove orphaned per-session worktrees (#1840).
+///
+/// Why: sessions decommissioned before Fix 1a (#1840), or where
+/// `git worktree remove` failed, leave stale `.worktrees/<session-id>/`
+/// directories on disk. This verb lets operators clean them up safely — only
+/// dirs without a corresponding active session are ever removed.
+/// What: POSTs `/api/v1/sessions/managed/prune-worktrees` with `{ dry_run }`;
+/// prints one path per removed (or would-remove) directory and a summary count.
+/// Test: HTTP path covered by integration test; CLI parse by `cli_parses_session_prune`.
+pub(crate) async fn session_prune_worktrees(
+    client: &reqwest::Client,
+    url: &str,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let resp = client
+        .post(format!("{url}/api/v1/sessions/managed/prune-worktrees"))
+        .json(&serde_json::json!({ "dry_run": dry_run }))
+        .send()
+        .await?;
+    let body: serde_json::Value = resp.error_for_status()?.json().await?;
+    let paths = body
+        .get("paths")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut printed = 0usize;
+    for p in &paths {
+        if let Some(s) = p.as_str() {
+            println!("{s}");
+            printed += 1;
+        }
+    }
+    let verb = if dry_run { "would remove" } else { "removed" };
+    println!("{verb} {printed} orphaned worktree dir(s)");
     Ok(())
 }
 

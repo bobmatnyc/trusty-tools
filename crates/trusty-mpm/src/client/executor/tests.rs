@@ -195,7 +195,8 @@ async fn execute_doctor_against_test_daemon() {
     let executor = CommandExecutor::new(url);
     match executor.execute(TrustyCommand::Doctor).await {
         CommandResult::Doctor(report) => {
-            assert_eq!(report.checks.len(), 5);
+            // #1840 added the worktrees check, bringing the total to 6.
+            assert_eq!(report.checks.len(), 6);
         }
         other => panic!("expected Doctor, got {other:?}"),
     }

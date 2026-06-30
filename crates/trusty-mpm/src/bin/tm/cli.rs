@@ -1473,6 +1473,22 @@ pub(crate) enum SessionAction {
         #[arg(long)]
         include_active: bool,
     },
+    /// Remove orphaned per-session git worktree directories (#1840).
+    ///
+    /// Why: sessions decommissioned before the Fix 1a worktree-removal patch,
+    /// or where `git worktree remove` failed, leave stale
+    /// `.worktrees/<session-id>/` directories on disk. This command removes
+    /// them safely — only directories without a corresponding active session
+    /// are ever touched. `tm doctor` reports the count of orphans and suggests
+    /// running this command.
+    /// What: POSTs `/api/v1/sessions/managed/prune-worktrees`; defaults to dry
+    /// run (pass `--force` to actually delete).
+    /// Test: `cli_parses_session_prune_worktrees`.
+    PruneWorktrees {
+        /// Actually delete orphaned dirs (default: dry-run / preview only).
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Actions for the `overseer` subcommand.

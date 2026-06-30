@@ -63,6 +63,55 @@ pub async fn decommission_ephemeral_route(
     }
 }
 
+/// Request body for POST /api/v1/sessions/managed/prune-worktrees (#1840).
+///
+/// Why: the orphaned-worktree sweep should default to dry-run so operators can
+/// preview what will be removed before committing.
+/// What: `dry_run` (default true — safe preview default).
+/// Test: integration test via `prune_worktrees_route`.
+#[derive(Debug, Deserialize)]
+pub struct PruneWorktreesRequest {
+    /// When true (the default), report orphans without deleting anything.
+    #[serde(default = "default_dry_run")]
+    pub dry_run: bool,
+}
+
+fn default_dry_run() -> bool {
+    true
+}
+
+/// POST /api/v1/sessions/managed/prune-worktrees — remove orphaned worktree dirs (#1840).
+///
+/// Why: sessions decommissioned before Fix 1a (#1840), or where
+/// `git worktree remove` failed, may leave stale `.worktrees/<session-id>/`
+/// directories. This endpoint removes them safely, never touching a directory
+/// that belongs to an active session.
+/// What: collects active workspace paths and the managed workspace root, then
+/// delegates to [`SessionManager::prune_orphaned_worktrees`]. Returns
+/// `{ dry_run, paths: ["..."] }`. Dry-run is the default.
+/// Test: `prune_worktrees_route_dry_run`.
+pub async fn prune_worktrees_route(
+    State(state): State<Arc<DaemonState>>,
+    Json(req): Json<PruneWorktreesRequest>,
+) -> impl IntoResponse {
+    let mgr = state.session_manager().await;
+    let records = mgr.list().await;
+    let active_workspace_paths: Vec<std::path::PathBuf> = records
+        .iter()
+        .filter_map(|r| r.workspace_path.clone())
+        .collect();
+    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+    let repos_root = crate::core::trusty_tools_config::workspace_root(&config);
+    let removed = mgr
+        .prune_orphaned_worktrees(&repos_root, &active_workspace_paths, req.dry_run)
+        .await;
+    let paths: Vec<String> = removed
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    Json(serde_json::json!({ "dry_run": req.dry_run, "paths": paths })).into_response()
+}
+
 /// POST /api/v1/sessions/managed/prune — by-state prune + compaction (#1508).
 ///
 /// Why: the general teardown tool, exposed so the legacy 239 stale records can be

@@ -605,10 +605,14 @@ pub struct ManagedAttachCmdResponse {
 /// Test: `managed_activity_response_deserializes`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ManagedActivityResponse {
-    /// Raw pane content (last 60 lines). Always present.
+    /// Raw pane content (last 60 lines, or stop-time scrollback when stale).
     pub raw_pane: String,
     /// Whether the tmux runtime session is currently alive.
     pub runtime_active: bool,
+    /// True when `raw_pane` was served from the persisted stop-time scrollback
+    /// snapshot rather than a live capture (#1840). Absent on old daemon responses.
+    #[serde(default)]
+    pub pane_stale: bool,
     /// Activity state from LLM classification, or `"unknown"`.
     pub state: String,
     /// Human-readable summary of what the session is doing.
