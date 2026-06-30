@@ -48,21 +48,27 @@ fn spawn_command(claude_bin: &str) -> String {
     )
 }
 
-/// Build a resume-aware Claude Code command.
+/// Build a resume-aware Claude Code command (#1744, #1840).
 ///
-/// Why (#1744): `resume_managed` must restore the prior conversation when one
-/// is known. `--resume <id>` restores the exact Claude Code conversation
-/// identified by `claude_session_id`; `--continue` resumes the most-recent
-/// conversation in the workspace when the id is absent (graceful degradation);
-/// neither flag is passed on a fresh spawn. All three share the same env-scrub
-/// and isolation flags as [`spawn_command`] so they are indistinguishable from
-/// the daemon's perspective except for the resume mode.
-/// What: given the resolved `claude_bin` and an optional `claude_session_id`,
-/// returns the full shell command string. `Some(id)` → `--resume <id>`.
-/// `None` → `--continue`.
+/// Why: `resume_managed` must restore the prior conversation when one is known.
+/// `--resume <id>` restores the exact Claude Code conversation identified by
+/// `claude_session_id`; `--continue` resumes the most-recent conversation in
+/// the workspace when the id is absent AND prior conversation history exists;
+/// neither flag is passed when there is no prior conversation, preventing the
+/// "No conversation found to continue" error that would otherwise drop the
+/// session to a bare shell (#1840).
+/// What: `Some(id)` → `--resume <id>`. `None, has_prior_conv=true` → `--continue`.
+/// `None, has_prior_conv=false` → plain spawn (no resume flag), so the session
+/// starts a fresh conversation instead of erroring. All three share the same
+/// env-scrub and isolation flags as [`spawn_command`].
 /// Test: `resume_command_with_id_uses_resume_flag`,
-/// `resume_command_without_id_uses_continue`.
-fn resume_command(claude_bin: &str, claude_session_id: Option<&str>) -> String {
+/// `resume_command_without_id_with_prior_conv_uses_continue`,
+/// `resume_command_without_id_no_prior_conv_uses_plain_spawn`.
+fn resume_command(
+    claude_bin: &str,
+    claude_session_id: Option<&str>,
+    has_prior_conv: bool,
+) -> String {
     let base = format!(
         "env -u ANTHROPIC_API_KEY {} {} {}",
         claude_bin,
@@ -71,8 +77,41 @@ fn resume_command(claude_bin: &str, claude_session_id: Option<&str>) -> String {
     );
     match claude_session_id {
         Some(id) => format!("{base} --resume {id}"),
-        None => format!("{base} --continue"),
+        None if has_prior_conv => format!("{base} --continue"),
+        None => base, // No prior conversation: start fresh to avoid "no conversation found".
     }
+}
+
+/// Detect whether Claude Code has prior conversation history for `cwd` (#1840).
+///
+/// Why: `claude --continue` exits with "No conversation found to continue" when
+/// no prior conversation exists for the workspace, immediately dropping to a
+/// bare shell. This guard prevents that error by only emitting `--continue`
+/// when evidence of a prior conversation exists.
+/// What: Claude Code stores per-project conversations in
+/// `~/.claude/projects/<encoded-path>/` where `<encoded-path>` is the absolute
+/// workspace path with `/` replaced by `-`. Returns `true` when that directory
+/// exists and contains at least one `.jsonl` file.
+/// Test: `has_prior_conversation_returns_false_for_fresh_workspace`.
+fn has_prior_conversation(cwd: &Path) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let projects_dir = home.join(".claude").join("projects");
+    if !projects_dir.is_dir() {
+        return false;
+    }
+    // Claude Code encodes the workspace path by replacing every '/' with '-'.
+    // A leading '/' becomes '-', so /private/tmp/foo → -private-tmp-foo.
+    let encoded = cwd.to_string_lossy().replace('/', "-");
+    let project_dir = projects_dir.join(&encoded);
+    project_dir.is_dir()
+        && std::fs::read_dir(&project_dir)
+            .map(|d| {
+                d.flatten()
+                    .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+            })
+            .unwrap_or(false)
 }
 
 /// Runtime adapter that launches Claude Code CLI inside a tmux session.
@@ -158,26 +197,20 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
     }
 
-    /// Resume Claude Code with conversation continuity.
+    /// Resume Claude Code with conversation continuity (#1744, #1840).
     ///
-    /// Why (#1744): `resume_managed` must restore the prior conversation rather
-    /// than starting fresh. If the stored `claude_session_id` is available,
-    /// `--resume <id>` restores the exact conversation; otherwise `--continue`
-    /// resumes the most-recent conversation in the workspace. Both paths share the
-    /// same env-scrub and isolation flags as `spawn`.
-    /// What: resolves the claude binary, pre-seeds home trust (same as `spawn`),
-    /// then sends [`resume_command`] with the optional id to the tmux pane.
-    /// Fallback behavior: if `claude_session_id` is `Some(id)` but that conversation
-    /// no longer exists on disk (e.g. `.claude/projects/` was deleted), Claude Code
-    /// will print an error and the pane will appear dead. The daemon detects this
-    /// within 60 s via the reap loop and marks the session Stopped. A warning is
-    /// logged here so operators can diagnose the dead pane from the daemon log
-    /// without needing to read the tmux pane directly. Pro-active pane-exit
-    /// detection and automatic fallback to `--continue` is not implemented here
-    /// because it would require polling the pane output, coupling this sync method
-    /// to async infrastructure. Open a follow-up if that behavior is needed.
+    /// Why: `resume_managed` must restore the prior conversation rather than
+    /// starting fresh. If the stored `claude_session_id` is available,
+    /// `--resume <id>` restores the exact conversation; when absent AND prior
+    /// conversation history is detected (via [`has_prior_conversation`]),
+    /// `--continue` resumes the most-recent conversation; when neither applies,
+    /// a plain spawn is used to avoid the "No conversation found to continue"
+    /// error that otherwise drops the session to a bare shell (#1840).
+    /// What: resolves the claude binary, pre-seeds home trust, checks for prior
+    /// conversation when `claude_session_id` is `None`, then sends the
+    /// appropriate [`resume_command`] to the tmux pane.
     /// Test: `spawn_resume_with_id_uses_resume_flag`,
-    /// `spawn_resume_without_id_uses_continue_flag`.
+    /// `spawn_resume_without_id_no_prior_conv_sends_plain_spawn`.
     fn spawn_resume(
         &self,
         tmux_name: &str,
@@ -201,12 +234,18 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
                  Stopped within ~60 s (#1744)"
             );
         }
+        // #1840: only use --continue when prior conversation history exists for cwd.
+        // Without this guard, --continue fails with "No conversation found" for
+        // sessions that were stopped before claude ever ran (e.g. provisioning error,
+        // or a fresh worktree that was never used).
+        let prior = claude_session_id.is_some() || has_prior_conversation(cwd);
         debug!(
             session = %tmux_name,
             cwd = %cwd.display(),
             task = %task,
             claude = %claude_bin,
             resume = claude_session_id.is_some(),
+            has_prior_conv = prior,
             "resuming claude-code in tmux pane"
         );
         if let Err(e) = crate::core::home_trust_seed::preseed_home_trust(cwd) {
@@ -217,7 +256,10 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             );
         }
         self.tmux
-            .send_line(tmux_name, &resume_command(&claude_bin, claude_session_id))
+            .send_line(
+                tmux_name,
+                &resume_command(&claude_bin, claude_session_id, prior),
+            )
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
     }
 
@@ -323,7 +365,7 @@ mod tests {
     fn resume_command_with_id_uses_resume_flag() {
         // Why (#1744): --resume <id> restores the exact prior conversation;
         // the test pins the contract so accidental regressions are caught early.
-        let cmd = resume_command("claude", Some("abc-123"));
+        let cmd = resume_command("claude", Some("abc-123"), false);
         assert!(
             cmd.contains("--resume abc-123"),
             "resume command must include --resume <id>: {cmd}"
@@ -339,17 +381,54 @@ mod tests {
     }
 
     #[test]
-    fn resume_command_without_id_uses_continue() {
-        // Why (#1744): when no claude_session_id is stored, --continue resumes
-        // the most-recent conversation in the workspace rather than starting fresh.
-        let cmd = resume_command("claude", None);
+    fn resume_command_without_id_with_prior_conv_uses_continue() {
+        // Why (#1744 / #1840): when no claude_session_id is stored but prior
+        // conversation history exists, --continue resumes the most-recent
+        // conversation in the workspace rather than starting fresh.
+        let cmd = resume_command("claude", None, true);
         assert!(
             cmd.contains("--continue"),
-            "resume command without id must use --continue: {cmd}"
+            "resume command without id + prior conv must use --continue: {cmd}"
         );
         assert!(
             !cmd.contains("--resume"),
             "resume command without id must NOT contain --resume: {cmd}"
+        );
+    }
+
+    #[test]
+    fn resume_command_without_id_no_prior_conv_uses_plain_spawn() {
+        // Why (#1840): when no claude_session_id is stored AND no prior
+        // conversation exists, --continue would error with "No conversation
+        // found to continue". The plain spawn starts a fresh session instead.
+        let cmd = resume_command("claude", None, false);
+        assert!(
+            !cmd.contains("--continue"),
+            "resume command without id + no prior conv must NOT use --continue: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--resume"),
+            "resume command without id must NOT use --resume: {cmd}"
+        );
+        assert!(
+            cmd.contains("env -u ANTHROPIC_API_KEY"),
+            "plain spawn command must still scrub API key: {cmd}"
+        );
+    }
+
+    #[test]
+    fn has_prior_conversation_returns_false_for_fresh_workspace() {
+        // Why (#1840): a fresh worktree or temp directory has no Claude
+        // conversation history; has_prior_conversation must return false so
+        // spawn_resume avoids the "No conversation found to continue" error.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Temporarily override home to a dir with no .claude/projects/ so the
+        // test does not depend on the operator's actual conversation history.
+        // We can only test the "no ~/.claude/projects" branch cleanly.
+        assert!(
+            !has_prior_conversation(tmp.path()),
+            "fresh workspace must have no prior conversation (tmp={:?})",
+            tmp.path()
         );
     }
 
@@ -380,22 +459,30 @@ mod tests {
     }
 
     #[test]
-    fn spawn_resume_without_id_uses_continue_flag() {
-        // Why (#1744): ClaudeCodeAdapter::spawn_resume must send --continue
-        // when no claude_session_id is available (graceful degradation).
+    fn spawn_resume_without_id_no_prior_conv_sends_plain_spawn() {
+        // Why (#1840): when no claude_session_id is available AND the workspace
+        // has no prior conversation, spawn_resume must send a plain spawn
+        // (no --continue, no --resume) to avoid "No conversation found to continue".
         if ClaudeCodeAdapter::resolve_claude().is_none() {
             return;
         };
+        let tmp = tempfile::tempdir().expect("tempdir");
         let fake = FakeTmux::new();
         let adapter = ClaudeCodeAdapter::new(fake.clone());
+        // Use the fresh temp dir as cwd — it has no Claude conversation history.
         adapter
-            .spawn_resume("tmpm-test", Path::new("/tmp"), "task", None)
+            .spawn_resume("test-tmux-session", tmp.path(), "task", None)
             .expect("spawn_resume without id");
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1);
         assert!(
-            sends[0].1.contains("--continue"),
-            "spawn_resume without id must use --continue: {}",
+            !sends[0].1.contains("--continue"),
+            "spawn_resume without id + no prior conv must NOT use --continue: {}",
+            sends[0].1
+        );
+        assert!(
+            !sends[0].1.contains("--resume"),
+            "spawn_resume without id must NOT use --resume: {}",
             sends[0].1
         );
     }
