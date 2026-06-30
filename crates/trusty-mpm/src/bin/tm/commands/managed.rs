@@ -508,10 +508,15 @@ pub(crate) async fn session_prune_worktrees(
         .cloned()
         .unwrap_or_default();
     let mut printed = 0usize;
+    // Item 6 (#1845): non-string entries in the `paths` array are unexpected
+    // (the server controls the format) but must not crash the CLI. Warn to
+    // stderr so the operator is aware, rather than silently dropping the entry.
     for p in &paths {
         if let Some(s) = p.as_str() {
             println!("{s}");
             printed += 1;
+        } else {
+            eprintln!("warning: prune-worktrees: unexpected non-string path entry: {p}");
         }
     }
     let verb = if dry_run { "would remove" } else { "removed" };
