@@ -156,10 +156,9 @@ pub(crate) async fn session(
                     .await?;
                 if resp.status() == reqwest::StatusCode::NOT_FOUND {
                     anyhow::bail!("session '{id_or_name}' not found");
-                } else {
-                    resp.error_for_status()?;
-                    println!("stopped {id_or_name}");
                 }
+                resp.error_for_status()?;
+                println!("stopped {id_or_name}");
             }
         }
         SessionAction::List { dir } => {
@@ -338,11 +337,10 @@ pub(crate) async fn session(
                 .await?;
             if resp.status() == reqwest::StatusCode::NOT_FOUND {
                 anyhow::bail!("session '{id_or_name}' not found");
-            } else {
-                let body: serde_json::Value = resp.error_for_status()?.json().await?;
-                let summary = body.get("summary").and_then(|v| v.as_str()).unwrap_or("");
-                println!("paused {id_or_name}: {summary}");
             }
+            let body: serde_json::Value = resp.error_for_status()?.json().await?;
+            let summary = body.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+            println!("paused {id_or_name}: {summary}");
         }
         SessionAction::Resume { id_or_name } => {
             // #1218: `resume` is managed-aware (mirrors `Stop`). A managed
@@ -417,12 +415,11 @@ pub(crate) async fn session(
                 .await?;
             if resp.status() == reqwest::StatusCode::NOT_FOUND {
                 anyhow::bail!("session '{id_or_name}' not found");
-            } else {
-                let body: serde_json::Value = resp.error_for_status()?.json().await?;
-                let output = body.get("output").and_then(|v| v.as_str()).unwrap_or("");
-                print!("{output}");
-                print_compression_stats(&body);
             }
+            let body: serde_json::Value = resp.error_for_status()?.json().await?;
+            let output = body.get("output").and_then(|v| v.as_str()).unwrap_or("");
+            print!("{output}");
+            print_compression_stats(&body);
         }
         // ── Managed session-manager actions ──────────────────────────────────
         // All `ls` variants are routed through the direct HTTP path so the
