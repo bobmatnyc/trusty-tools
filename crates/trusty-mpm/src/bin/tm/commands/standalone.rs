@@ -42,19 +42,39 @@ pub(crate) fn register_cmd(
 
 /// Handle `tm ls [--json]`.
 ///
-/// Why: operators need a quick overview of their registered aliases and which
-/// ones are ready to `run` (loaded vs. unloaded).
-/// What: lists all registry entries with loaded status; prints a human-readable
-/// table by default or a JSON array with `--json`.
+/// Why: operators need a quick overview of (a) local git project paths that
+/// `tm` has visited and auto-registered, and (b) the managed fleet aliases
+/// registered via `tm register`.
+/// What: prints two sections — "Local project aliases" (auto-populated from
+/// git roots visited by `tm`) and "Managed fleet aliases" (DOC-24 GitHub-URL
+/// entries). Empty sections are omitted. `--json` outputs a combined JSON
+/// object with both arrays for scripted consumers.
 /// Test: `cli_parses_ls` in tests.rs.
 pub(crate) fn ls_cmd(paths: &ManagedPaths, json: bool) -> anyhow::Result<()> {
     let root = &paths.root;
+
+    // Load the local project-path alias store (non-fatal if absent).
+    let local_entries = trusty_mpm::core::project_aliases::ProjectAliasStore::load(root)
+        .unwrap_or_default()
+        .list();
+
+    // Load the standalone managed-fleet registry.
     let registry = trusty_mpm::core::standalone::registry::ManagedRegistry::load(root)
         .with_context(|| format!("failed to load registry from {}", root.display()))?;
-    let entries = registry.list();
+    let fleet_entries = registry.list();
 
     if json {
-        let rows: Vec<serde_json::Value> = entries
+        // JSON output: combined object with two top-level keys.
+        let local_rows: Vec<serde_json::Value> = local_entries
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "alias": e.alias,
+                    "path": e.path,
+                })
+            })
+            .collect();
+        let fleet_rows: Vec<serde_json::Value> = fleet_entries
             .iter()
             .map(|e| {
                 serde_json::json!({
@@ -66,21 +86,70 @@ pub(crate) fn ls_cmd(paths: &ManagedPaths, json: bool) -> anyhow::Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
-    } else if entries.is_empty() {
-        println!("No aliases registered. Use `tm register <alias> <url>` to add one.");
-    } else {
-        println!("{:<20} {:<10} URL", "ALIAS", "LOADED");
-        println!("{}", "-".repeat(60));
-        for e in &entries {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "local_projects": local_rows,
+                "managed_fleet": fleet_rows,
+            }))?
+        );
+        return Ok(());
+    }
+
+    // Human-readable output.
+    if local_entries.is_empty() && fleet_entries.is_empty() {
+        println!("No aliases registered.");
+        println!("  Run `tm` from a git project to auto-register a local alias.");
+        println!("  Run `tm register <alias> <url>` to add a managed fleet alias.");
+        return Ok(());
+    }
+
+    // ── Section 1: Local project aliases ──────────────────────────────────
+    if !local_entries.is_empty() {
+        println!("Local project aliases ({}):", local_entries.len());
+        // Compute column widths for alignment.
+        let alias_w = local_entries
+            .iter()
+            .map(|e| e.alias.len())
+            .max()
+            .unwrap_or(5)
+            .max(5);
+        println!("  {:<alias_w$}  PATH", "ALIAS");
+        println!("  {}  {}", "─".repeat(alias_w), "─".repeat(40));
+        for e in &local_entries {
+            println!("  {:<alias_w$}  {}", e.alias, e.path.display());
+        }
+    }
+
+    // ── Section 2: Managed fleet aliases ──────────────────────────────────
+    if !fleet_entries.is_empty() {
+        if !local_entries.is_empty() {
+            println!();
+        }
+        println!("Managed fleet aliases ({}):", fleet_entries.len());
+        let alias_w = fleet_entries
+            .iter()
+            .map(|e| e.alias.len())
+            .max()
+            .unwrap_or(5)
+            .max(5);
+        println!("  {:<alias_w$}  {:<10}  URL", "ALIAS", "LOADED");
+        println!(
+            "  {}  {}  {}",
+            "─".repeat(alias_w),
+            "─".repeat(10),
+            "─".repeat(30)
+        );
+        for e in &fleet_entries {
             let loaded = if registry.is_loaded(&e.alias, root) {
                 "yes"
             } else {
                 "no"
             };
-            println!("{:<20} {:<10} {}", e.alias, loaded, e.url);
+            println!("  {:<alias_w$}  {:<10}  {}", e.alias, loaded, e.url);
         }
     }
+
     Ok(())
 }
 

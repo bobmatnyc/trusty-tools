@@ -55,6 +55,7 @@ pub mod paths;
 pub mod pid_registry;
 pub mod process;
 pub mod project;
+pub mod project_aliases;
 pub mod project_discovery;
 pub mod session;
 pub mod session_launch;

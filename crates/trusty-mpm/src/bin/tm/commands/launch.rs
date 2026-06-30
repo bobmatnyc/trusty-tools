@@ -98,6 +98,9 @@ pub(crate) async fn launch(
     // 1. Resolve the live source directory (absolute, so the banner is unambiguous).
     let live_path = resolve_dir(dir)?;
     let live_path = live_path.canonicalize().unwrap_or(live_path);
+
+    // Auto-register the git project root as a local path alias (non-fatal, silent).
+    super::managed_root::try_register_alias(&live_path);
     let live_workdir = live_path.to_string_lossy().to_string();
 
     // 2. Derive the GitHub identity from the origin remote.
@@ -384,6 +387,9 @@ pub(crate) async fn connect(
     let path = resolve_dir(dir)?;
     let path = path.canonicalize().unwrap_or(path);
     let workdir = path.to_string_lossy().to_string();
+
+    // Auto-register the git project root as a local path alias (non-fatal, silent).
+    super::managed_root::try_register_alias(&path);
 
     // 1b. Reconnect to an existing LIVE session for this directory if one
     //     exists — `connect` is idempotent by design. No project_dir prefix-match

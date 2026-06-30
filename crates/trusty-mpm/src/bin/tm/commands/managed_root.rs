@@ -93,6 +93,23 @@ struct XdgConfigFile {
 // Resolver
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Resolve the managed store root and auto-register `cwd` as a project alias.
+///
+/// Why: thin wrapper used by `run_guided_default`, `launch`, and `connect`
+/// so each call site stays at one SLOC while still using the same resolved
+/// root (via the four-level precedence chain) that `tm ls` reads from.
+/// What: resolves the managed paths with `cli_root = None` (honours
+/// `TRUSTY_MPM_ROOT` and config file), then calls
+/// `try_register_project_alias` non-fatally. Silently does nothing when
+/// root resolution fails.
+/// Test: the underlying pieces are exercised by `try_register_and_load_round_trip_same_root`
+/// in `core::project_aliases::tests` and by `test_resolve_default` here.
+pub(crate) fn try_register_alias(cwd: &std::path::Path) {
+    if let Ok(managed) = resolve_managed_paths(None) {
+        trusty_mpm::core::project_aliases::try_register_project_alias(cwd, &managed.root);
+    }
+}
+
 /// Resolve `ManagedPaths` using the four-level precedence.
 ///
 /// Why: centralises root resolution so every standalone command uses the same

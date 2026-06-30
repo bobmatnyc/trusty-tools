@@ -89,6 +89,11 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
     let workdir = cwd.to_string_lossy().to_string();
     eprintln!("tm: no subcommand — using guided default for {workdir}");
 
+    // Auto-register the git project root as a local path alias (non-fatal, silent).
+    // Why: every `tm` invocation from a git directory populates `tm ls` with
+    // the project's canonical name so operators can quickly find their projects.
+    super::managed_root::try_register_alias(&cwd);
+
     // Use a mutable URL so that a successful auto-start can update it to the
     // actual bound address discovered via the lock file.
     let mut effective_url = url.to_string();
