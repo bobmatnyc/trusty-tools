@@ -15,6 +15,66 @@ use crate::formatters::banner::{
     print_launch_banner_reconnecting, tmux_has_session,
 };
 
+/// RAII guard that kills a tmux session on drop unless explicitly disarmed.
+///
+/// Why: `launch()` and `connect()` create real tmux sessions; if any step after
+/// creation fails (e.g. `send-keys` error, or `attach-session` failing because
+/// there is no TTY available — which is always the case in integration tests),
+/// the session would otherwise be permanently orphaned, filling the host tmux
+/// with leaked `tmpm-*` sessions (#1815).
+/// What: on `drop` while armed, runs `tmux kill-session -t <name>` best-effort
+/// (ignores errors, since the session may already be gone). [`disarm`] turns
+/// `drop` into a no-op; call it before returning `Ok(())` so a session that
+/// the user successfully attached to persists for future re-attachment.
+/// Test: verified by `cargo test -p trusty-mpm --bin tm`; the before/after
+/// `tmpm-*` session count must be equal after the test run (issue #1815).
+struct LaunchSessionGuard {
+    name: String,
+    armed: bool,
+}
+
+impl LaunchSessionGuard {
+    /// Construct an armed guard owning `name`.
+    ///
+    /// Why: callers create the guard immediately after `tmux new-session` so the
+    /// cleanup window opens with no gap.
+    /// What: stores `name` with `armed = true`.
+    /// Test: see module-level doc.
+    fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            armed: true,
+        }
+    }
+
+    /// Transfer ownership away: `drop` becomes a no-op after this call.
+    ///
+    /// Why: a session the user successfully attached to must NOT be killed when
+    /// they detach; disarming transfers lifetime responsibility to the live tmux
+    /// server.
+    /// What: clears `armed`. Idempotent.
+    /// Test: see module-level doc.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for LaunchSessionGuard {
+    /// Why: the whole point — any error path between session creation and a
+    /// successful `attach-session` must reap the session so it cannot leak.
+    /// What: when `armed`, issues `tmux kill-session -t <name>` best-effort.
+    /// Never panics — `Drop` must not unwind.
+    /// Test: see module-level doc.
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = std::process::Command::new("tmux")
+            .args(["kill-session", "-t", &self.name])
+            .output();
+    }
+}
+
 /// `launch` subcommand — provision a managed clone and launch a configured session.
 ///
 /// Why: `tm launch` should reproduce the `claude-mpm` experience — one command
@@ -252,6 +312,11 @@ pub(crate) async fn launch(
     if !matches!(new_session, Ok(s) if s.success()) {
         anyhow::bail!("failed to create tmux session {tmux_name} in {managed_workdir}");
     }
+    // RAII guard — disarmed only after successful attach so the session persists
+    // when the user detaches normally. On any error path (including attach
+    // failing because there is no TTY, which is always the case in tests) the
+    // guard's Drop impl reaps the session, preventing leaks (#1815).
+    let mut session_guard = LaunchSessionGuard::new(&tmux_name);
 
     // 13. Start `claude` inside the tmux session.
     let send = std::process::Command::new("tmux")
@@ -291,6 +356,9 @@ pub(crate) async fn launch(
     if !status.success() {
         anyhow::bail!("tmux attach-session exited with failure");
     }
+    // Attach succeeded: the user detached normally. Disarm the guard so the
+    // session persists and can be resumed with `tmux attach -t <name>`.
+    session_guard.disarm();
     Ok(())
 }
 
@@ -385,6 +453,13 @@ pub(crate) async fn connect(
     if !matches!(new_session, Ok(s) if s.success()) {
         anyhow::bail!("failed to create tmux session {tmux_name} in {workdir}");
     }
+    // Guard only needed for freshly-created sessions; if the session was already
+    // running we must NOT kill it on attach failure — another user may be attached.
+    let mut session_guard = if already_running {
+        None
+    } else {
+        Some(LaunchSessionGuard::new(&tmux_name))
+    };
 
     // 5. Start `claude` with bypass-permissions inside a freshly-created session.
     //    `connect` does not compose a `--append-system-prompt` — it does no deployment.
@@ -407,6 +482,10 @@ pub(crate) async fn connect(
         .status()?;
     if !status.success() {
         anyhow::bail!("tmux attach-session exited with failure");
+    }
+    // Attach succeeded: disarm the guard so the session persists for re-attachment.
+    if let Some(ref mut g) = session_guard {
+        g.disarm();
     }
     Ok(())
 }
