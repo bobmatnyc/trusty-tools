@@ -247,7 +247,7 @@ mod tests {
             id: ManagedSessionId::new(),
             tmux_name: "tmpm-external".into(),
             cwd: PathBuf::from("/unknown"),
-            task: "externally created".into(),
+            task: "adopted session".into(),
             state: crate::session_manager::ManagedSessionState::Active,
             created_at: Utc::now(),
             last_activity_at: None,

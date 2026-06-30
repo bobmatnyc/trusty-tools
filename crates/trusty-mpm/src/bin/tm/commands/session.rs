@@ -155,7 +155,7 @@ pub(crate) async fn session(
                     .send()
                     .await?;
                 if resp.status() == reqwest::StatusCode::NOT_FOUND {
-                    println!("not found");
+                    anyhow::bail!("session '{id_or_name}' not found");
                 } else {
                     resp.error_for_status()?;
                     println!("stopped {id_or_name}");
@@ -243,7 +243,7 @@ pub(crate) async fn session(
                     let managed = info_from_managed_store(client, url, &id_or_name).await;
                     match managed {
                         Some(val) => println!("{}", serde_json::to_string_pretty(&val)?),
-                        None => println!("session '{id_or_name}' not found"),
+                        None => anyhow::bail!("session '{id_or_name}' not found"),
                     }
                 }
             }
@@ -268,8 +268,7 @@ pub(crate) async fn session(
             {
                 Some(id) => id,
                 None => {
-                    println!("session '{id_or_name}' not found");
-                    return Ok(());
+                    anyhow::bail!("session '{id_or_name}' not found");
                 }
             };
             #[derive(Deserialize)]
@@ -338,7 +337,7 @@ pub(crate) async fn session(
                 .send()
                 .await?;
             if resp.status() == reqwest::StatusCode::NOT_FOUND {
-                println!("session '{id_or_name}' not found");
+                anyhow::bail!("session '{id_or_name}' not found");
             } else {
                 let body: serde_json::Value = resp.error_for_status()?.json().await?;
                 let summary = body.get("summary").and_then(|v| v.as_str()).unwrap_or("");
@@ -362,7 +361,7 @@ pub(crate) async fn session(
                     .await?;
                 match resp.status() {
                     reqwest::StatusCode::NOT_FOUND => {
-                        println!("session '{id_or_name}' not found");
+                        anyhow::bail!("session '{id_or_name}' not found");
                     }
                     reqwest::StatusCode::CONFLICT => {
                         println!("session '{id_or_name}' is not paused");
@@ -389,7 +388,7 @@ pub(crate) async fn session(
                 .await?;
             match resp.status() {
                 reqwest::StatusCode::NOT_FOUND => {
-                    println!("session '{id_or_name}' not found");
+                    anyhow::bail!("session '{id_or_name}' not found");
                 }
                 reqwest::StatusCode::CONFLICT => {
                     println!("session '{id_or_name}' is stopped");
@@ -417,7 +416,7 @@ pub(crate) async fn session(
                 .send()
                 .await?;
             if resp.status() == reqwest::StatusCode::NOT_FOUND {
-                println!("session '{id_or_name}' not found");
+                anyhow::bail!("session '{id_or_name}' not found");
             } else {
                 let body: serde_json::Value = resp.error_for_status()?.json().await?;
                 let output = body.get("output").and_then(|v| v.as_str()).unwrap_or("");

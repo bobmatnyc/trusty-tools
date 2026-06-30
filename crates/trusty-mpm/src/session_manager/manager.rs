@@ -788,7 +788,7 @@ impl SessionManager {
                     id: ManagedSessionId::new(),
                     tmux_name: name.clone(),
                     cwd: PathBuf::from("/unknown"),
-                    task: "externally created".into(),
+                    task: "adopted session".into(),
                     state: ManagedSessionState::Active,
                     created_at: Utc::now(),
                     last_activity_at: None,
