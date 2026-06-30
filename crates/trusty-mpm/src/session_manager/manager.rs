@@ -680,10 +680,15 @@ impl SessionManager {
         // Prefer last_cwd (if it still exists on disk) → workspace_path → cwd (#1816).
         // The existence check guards against the case where last_cwd was deleted
         // between the stop and the resume (e.g. ephemeral workspace cleaned up).
+        // Use tokio::fs::try_exists to avoid blocking the async executor.
+        let cwd_ok = match record.last_cwd.as_deref() {
+            Some(p) => tokio::fs::try_exists(p).await.unwrap_or(false),
+            None => false,
+        };
         let workdir = record
             .last_cwd
             .as_deref()
-            .filter(|p| p.exists())
+            .filter(|_| cwd_ok)
             .or(record.workspace_path.as_deref())
             .unwrap_or(record.cwd.as_path())
             .to_string_lossy()

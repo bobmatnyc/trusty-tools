@@ -119,9 +119,16 @@ async fn write_scrollback(dest: &Path, content: &str) -> std::io::Result<()> {
 
     let redacted = redact_secrets(content);
 
-    // On Unix: open with mode 0600 to avoid the create-then-chmod race window.
+    // On Unix: offload the blocking OpenOptions write to a thread pool thread
+    // so we do not stall the Tokio executor during the file creation.
     #[cfg(unix)]
-    secure_write(dest, redacted.as_bytes())?;
+    {
+        let dest = dest.to_path_buf();
+        let data = redacted.into_bytes();
+        tokio::task::spawn_blocking(move || secure_write(&dest, &data))
+            .await
+            .map_err(std::io::Error::other)??;
+    }
     // On non-Unix: plain async write (no mode bits available).
     #[cfg(not(unix))]
     tokio::fs::write(dest, redacted.as_bytes()).await?;
@@ -381,9 +388,8 @@ mod tests {
             "redaction marker must be present: {on_disk:?}"
         );
         assert!(
-            on_disk.contains("ANTHROPIC_API_KEY=***REDACTED***")
-                || on_disk.contains("API_KEY=***REDACTED***"),
-            "key name must be preserved: {on_disk:?}"
+            on_disk.contains("ANTHROPIC_API_KEY=***REDACTED***"),
+            "full key name must be preserved: {on_disk:?}"
         );
     }
 }

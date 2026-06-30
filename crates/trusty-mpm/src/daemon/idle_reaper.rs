@@ -229,6 +229,8 @@ pub async fn idle_reaper_loop<P>(
     );
     let mut state = IdleReaperState::new();
     let mut tick = tokio::time::interval(interval);
+    tick.tick().await; // discard the immediate t=0 tick so newly-started sessions
+    // are not classified before any activity can register.
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
