@@ -22,6 +22,82 @@ use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::workspace_guard::is_safe_to_remove;
 
+/// True when `path` is an SM-created per-session git worktree (#1840).
+///
+/// Why: in-project sessions create their workspace at
+/// `<base>/.worktrees/<session-id>/` with `workspace_owned = false` — they do
+/// NOT own the base clone, but they DO own their worktree slice. The standard
+/// `workspace_owned` guard therefore skips removal entirely, leaving orphaned
+/// worktree directories and stale git worktree refs. This predicate identifies
+/// the SM-worktree pattern so decommission can take targeted worktree-removal
+/// action for `workspace_owned = false` sessions.
+/// What: returns `true` when any component of `path` is exactly `.worktrees`.
+/// Test: `is_session_worktree_detects_dot_worktrees_component`.
+fn is_session_worktree(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == ".worktrees")
+}
+
+/// Remove an in-project per-session git worktree via `git worktree remove --force`.
+///
+/// Why (#1840): `remove_dir_all` alone leaves the git ref (`session/<id>`) and
+/// the git worktree entry (`.git/worktrees/<id>`) in the base clone, polluting
+/// `git worktree list` and `git branch` output. `git worktree remove --force`
+/// prunes both the directory AND the ref atomically, restoring a clean state.
+/// What: runs `git -C <parent> worktree remove --force <path>`. Idempotent: if
+/// `path` is already absent, skips silently. On git failure, best-effort falls
+/// back to `remove_dir_all` and logs WARN so the ref may still need manual pruning.
+/// Test: `is_session_worktree_absent_path_is_noop`; integration coverage via
+/// the decommission round-trip tests that set up real git worktrees.
+pub(super) fn remove_session_worktree(path: &Path) {
+    if !path.exists() {
+        return; // Idempotent: already gone.
+    }
+    let Some(parent) = path.parent() else {
+        warn!(
+            path = %path.display(),
+            "decommission: cannot determine parent of worktree path — skipping removal"
+        );
+        return;
+    };
+    let out = std::process::Command::new("git")
+        .args([
+            "-C",
+            &parent.to_string_lossy(),
+            "worktree",
+            "remove",
+            "--force",
+        ])
+        .arg(path)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            info!(path = %path.display(), "decommission: git worktree removed (incl. ref)");
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            warn!(
+                path = %path.display(),
+                "decommission: git worktree remove --force failed ({}): {stderr}; \
+                 falling back to remove_dir_all",
+                o.status
+            );
+            if let Err(e) = std::fs::remove_dir_all(path) {
+                warn!(path = %path.display(), "decommission: fallback remove_dir_all failed: {e}");
+            }
+        }
+        Err(e) => {
+            warn!(
+                path = %path.display(),
+                "decommission: failed to spawn git for worktree removal: {e}; \
+                 falling back to remove_dir_all"
+            );
+            if let Err(e2) = std::fs::remove_dir_all(path) {
+                warn!(path = %path.display(), "decommission: fallback remove_dir_all also failed: {e2}");
+            }
+        }
+    }
+}
+
 impl SessionManager {
     /// Decommission a session: stop the runtime, remove the workspace from disk
     /// (ONLY if the SM provisioned it), and mark the record `Decommissioned`.
@@ -41,9 +117,13 @@ impl SessionManager {
     ///     few components). This belt-and-suspenders guard catches stale/incorrect
     ///     `workspace_owned` flags before disk mutation occurs.
     ///
-    /// When deletion is skipped (unowned or unsafe path), decommission still
-    /// transitions the record to `Decommissioned` and returns successfully — the
-    /// session becomes unreachable without deleting the user's directory.
+    /// #1840 worktree extension: even when `workspace_owned = false`, if the
+    /// workspace path is under a `.worktrees/` directory (an in-project per-session
+    /// worktree), the worktree IS removed via `git worktree remove --force`. The
+    /// base clone (`<base>/`) is NEVER touched — only the per-session leaf dir.
+    ///
+    /// When deletion is skipped (unowned non-worktree or unsafe path), decommission
+    /// still transitions the record to `Decommissioned` and returns successfully.
     ///
     /// What: delegates to [`decommission_with_root`](Self::decommission_with_root)
     /// with the config-derived managed root so callers remain env-agnostic.
@@ -93,14 +173,22 @@ impl SessionManager {
         let mut workspace_removed = false;
         if let Some(ref ws) = record.workspace_path {
             if !record.workspace_owned {
-                // Unowned workspace (local-path spawn or adopt): never delete.
-                warn!(
-                    id = %id,
-                    workspace = %ws.display(),
-                    "decommission: skipping workspace removal — not SM-owned \
-                     (local-path or adopted session); the directory was NOT \
-                     created by the session manager"
-                );
+                // Unowned workspace (local-path spawn or adopt): never bulk-delete.
+                // #1840: EXCEPTION — in-project per-session worktrees live under
+                // .worktrees/ and must be cleaned up via `git worktree remove` so
+                // the git ref is also pruned.  The base clone directory is NEVER
+                // touched — only the leaf worktree path.
+                if is_session_worktree(ws) {
+                    remove_session_worktree(ws);
+                } else {
+                    warn!(
+                        id = %id,
+                        workspace = %ws.display(),
+                        "decommission: skipping workspace removal — not SM-owned \
+                         (local-path or adopted session); the directory was NOT \
+                         created by the session manager"
+                    );
+                }
             } else {
                 // Owned workspace: check existence first so a path that is
                 // already gone is not misreported as a containment failure.
@@ -175,5 +263,43 @@ impl SessionManager {
         record.workspace_owned = owned;
         self.store.write().await.upsert(record).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_session_worktree_detects_dot_worktrees_component() {
+        // Why (#1840): decommission must detect the .worktrees/ pattern to know
+        // when to call git worktree remove even for workspace_owned=false sessions.
+        assert!(is_session_worktree(std::path::Path::new(
+            "/home/user/trusty-mpm-projects/owner/repo/.worktrees/abc-123"
+        )));
+        assert!(is_session_worktree(std::path::Path::new(
+            "/some/base/.worktrees/session-id"
+        )));
+        // Non-worktree paths must return false.
+        assert!(!is_session_worktree(std::path::Path::new(
+            "/home/user/trusty-mpm-projects/owner/repo/session-id"
+        )));
+        assert!(!is_session_worktree(std::path::Path::new(
+            "/home/user/project"
+        )));
+        // worktrees (no dot-prefix) must return false.
+        assert!(!is_session_worktree(std::path::Path::new(
+            "/base/worktrees/session-id"
+        )));
+    }
+
+    #[test]
+    fn is_session_worktree_absent_path_is_noop() {
+        // remove_session_worktree must return without panicking when path is absent.
+        let absent = std::path::Path::new("/nonexistent/.worktrees/session-abc");
+        // is_session_worktree: true (has .worktrees component)
+        assert!(is_session_worktree(absent));
+        // remove_session_worktree: returns silently (path.exists() == false)
+        remove_session_worktree(absent); // Must not panic or crash.
     }
 }

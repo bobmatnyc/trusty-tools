@@ -466,6 +466,10 @@ pub(crate) async fn session(
             crate::commands::managed::session_prune(client, url, state, dry_run, include_active)
                 .await?
         }
+        SessionAction::PruneWorktrees { force } => {
+            // `--force` means "actually delete"; absence means dry-run (#1840).
+            crate::commands::managed::session_prune_worktrees(client, url, !force).await?
+        }
         // The deprecated verbose aliases emit their deprecation notice, then
         // route through chat-core exactly like their canonical verb (#1205).
         action @ (SessionAction::ManagedStop { .. }

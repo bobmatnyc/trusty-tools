@@ -224,6 +224,54 @@ fn matches_filter(record: &SessionRecord, filter: PruneFilter) -> bool {
     }
 }
 
+/// Enumerate orphaned per-session worktree directories under `repos_root` (#1840).
+///
+/// Why: extracted from `SessionManager::prune_orphaned_worktrees` so the
+/// walk logic can be tested independently of the full session-manager setup.
+/// What: walks `<repos_root>/<owner>/<repo>/.worktrees/` (two levels deep);
+/// any leaf directory whose path is NOT in `active_workspace_paths` is
+/// collected as an orphan. A non-existent or unreadable `repos_root` returns
+/// an empty vec.
+/// Test: `prune_orphaned_worktrees_spares_active`,
+///       `prune_orphaned_worktrees_removes_orphan`.
+fn find_orphaned_worktrees(
+    repos_root: &std::path::Path,
+    active_workspace_paths: &[std::path::PathBuf],
+) -> Vec<std::path::PathBuf> {
+    let mut orphans = Vec::new();
+    let Ok(owner_entries) = std::fs::read_dir(repos_root) else {
+        return orphans;
+    };
+    for owner_entry in owner_entries.flatten() {
+        let owner_path = owner_entry.path();
+        if !owner_path.is_dir() {
+            continue;
+        }
+        let Ok(repo_entries) = std::fs::read_dir(&owner_path) else {
+            continue;
+        };
+        for repo_entry in repo_entries.flatten() {
+            let wt_dir = repo_entry.path().join(".worktrees");
+            if !wt_dir.is_dir() {
+                continue;
+            }
+            let Ok(wt_entries) = std::fs::read_dir(&wt_dir) else {
+                continue;
+            };
+            for wt_entry in wt_entries.flatten() {
+                let wt_path = wt_entry.path();
+                if !wt_path.is_dir() {
+                    continue;
+                }
+                if !active_workspace_paths.iter().any(|p| p == &wt_path) {
+                    orphans.push(wt_path);
+                }
+            }
+        }
+    }
+    orphans
+}
+
 impl SessionManager {
     /// Tear down EVERY ephemeral session — bulk teardown (#1508).
     ///
@@ -365,6 +413,43 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Remove orphaned per-session git worktrees from the managed workspace root (#1840).
+    ///
+    /// Why: `decommission` now calls `git worktree remove --force` for in-project
+    /// worktrees, but sessions decommissioned before the fix — or where the git
+    /// command failed — leave stale `.worktrees/<session-id>/` directories. This
+    /// sweep removes them without touching any directory that still corresponds to a
+    /// live session (i.e. whose path appears in `active_workspace_paths`).
+    ///
+    /// SAFETY: only directories whose full path is NOT in `active_workspace_paths`
+    /// are removed. Active session worktrees are NEVER touched.
+    ///
+    /// What: calls [`find_orphaned_worktrees`] to enumerate stale dirs, then — when
+    /// `dry_run` is false — calls `git worktree remove --force` on each.
+    /// Returns the paths removed (or that would be removed under dry-run).
+    /// Test: `prune_orphaned_worktrees_removes_orphan`,
+    ///       `prune_orphaned_worktrees_spares_active` in this module.
+    pub async fn prune_orphaned_worktrees(
+        &self,
+        repos_root: &std::path::Path,
+        active_workspace_paths: &[std::path::PathBuf],
+        dry_run: bool,
+    ) -> Vec<std::path::PathBuf> {
+        use super::decommission::remove_session_worktree;
+        let orphans = find_orphaned_worktrees(repos_root, active_workspace_paths);
+        if dry_run {
+            for p in &orphans {
+                info!(path = %p.display(), "prune-worktrees (dry-run): would remove orphaned worktree");
+            }
+        } else {
+            for p in &orphans {
+                info!(path = %p.display(), "prune-worktrees: removing orphaned worktree");
+                remove_session_worktree(p);
+            }
+        }
+        orphans
+    }
+
     /// Age-based auto-reap of stale ephemeral sessions (#1508).
     ///
     /// Why: a panicking or abandoned e2e test can leave an ephemeral session behind
@@ -416,5 +501,52 @@ impl SessionManager {
             }
         }
         Ok(reaped)
+    }
+}
+
+#[cfg(test)]
+mod orphan_tests {
+    use super::*;
+
+    #[test]
+    fn prune_orphaned_worktrees_spares_active() {
+        // A live session's worktree must never be returned as an orphan (#1840).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let wt = root
+            .join("owner")
+            .join("repo")
+            .join(".worktrees")
+            .join("live-session");
+        std::fs::create_dir_all(&wt).unwrap();
+        let active = vec![wt.clone()];
+        let orphans = find_orphaned_worktrees(root, &active);
+        assert!(
+            orphans.is_empty(),
+            "live session must not be listed as orphan"
+        );
+    }
+
+    #[test]
+    fn prune_orphaned_worktrees_collects_orphan() {
+        // A worktree with no active session must be listed as an orphan (#1840).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let wt1 = root
+            .join("owner")
+            .join("repo")
+            .join(".worktrees")
+            .join("live");
+        let wt2 = root
+            .join("owner")
+            .join("repo")
+            .join(".worktrees")
+            .join("dead");
+        std::fs::create_dir_all(&wt1).unwrap();
+        std::fs::create_dir_all(&wt2).unwrap();
+        let active = vec![wt1];
+        let orphans = find_orphaned_worktrees(root, &active);
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0], wt2);
     }
 }

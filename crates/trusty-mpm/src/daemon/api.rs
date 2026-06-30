@@ -119,8 +119,9 @@ pub use rpc::rpc_handler;
 use super::managed_routes::{
     adopt_existing_session, answer_session_decision, decommission_ephemeral_route,
     decommission_managed_session, fleet_by_project_route, get_attach_cmd, get_managed_session,
-    get_session_activity, list_managed_sessions, prune_managed_route, resume_managed_session,
-    send_to_session, spawn_session, stop_managed_session, stop_managed_session_runtime,
+    get_session_activity, list_managed_sessions, prune_managed_route, prune_worktrees_route,
+    resume_managed_session, send_to_session, spawn_session, stop_managed_session,
+    stop_managed_session_runtime,
 };
 
 /// Typed HTTP response bodies for every endpoint.
@@ -235,6 +236,12 @@ pub fn router(state: Arc<DaemonState>) -> Router {
             post(decommission_ephemeral_route),
         )
         .route("/api/v1/sessions/managed/prune", post(prune_managed_route))
+        // #1840: orphaned worktree prune. Literal segment registered BEFORE the
+        // `/{id}` param route.
+        .route(
+            "/api/v1/sessions/managed/prune-worktrees",
+            post(prune_worktrees_route),
+        )
         // #1586: fleet-by-project view. Literal `/fleet` registered BEFORE the
         // `/{id}` param route so it is never captured as an id (axum prefers
         // literal matches, but ordering makes the intent explicit).
@@ -1735,10 +1742,10 @@ pub struct DoctorQuery {
 /// every "is this wired correctly?" probe gives operators (and the `tm doctor`
 /// CLI / Telegram `/doctor` command) a single actionable verdict.
 /// What: delegates to [`super::doctor::run_doctor`], which probes the
-/// instruction pipeline, agent and skill deployment, and the trusty-memory /
-/// trusty-search sidecars, and returns the assembled [`DoctorReport`] as JSON.
-/// The endpoint always returns `200` — individual failures live in the report's
-/// per-check statuses, not the HTTP status.
+/// instruction pipeline, agent and skill deployment, the trusty-memory /
+/// trusty-search sidecars, AND orphaned git worktrees (#1840). The endpoint
+/// always returns `200` — individual failures live in the report's per-check
+/// statuses, not the HTTP status.
 /// Test: `doctor_endpoint_returns_report`.
 #[utoipa::path(
     get,
@@ -1748,10 +1755,27 @@ pub struct DoctorQuery {
     responses((status = 200, description = "Full diagnostic report"))
 )]
 pub async fn doctor(
-    State(_state): State<Arc<DaemonState>>,
+    State(state): State<Arc<DaemonState>>,
     Query(query): Query<DoctorQuery>,
 ) -> Json<crate::core::doctor::DoctorReport> {
-    Json(super::doctor::run_doctor(query.project.as_deref()).await)
+    // Collect active workspace paths for the worktree orphan check (#1840).
+    let mgr = state.session_manager().await;
+    let records = mgr.list().await;
+    let active_workspace_paths: Vec<PathBuf> = records
+        .iter()
+        .filter_map(|r| r.workspace_path.clone())
+        .collect();
+    // Derive the managed workspace root from config (same precedence as decommission).
+    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+    let repos_root = crate::core::trusty_tools_config::workspace_root(&config);
+    Json(
+        super::doctor::run_doctor(
+            query.project.as_deref(),
+            Some(&repos_root),
+            &active_workspace_paths,
+        )
+        .await,
+    )
 }
 
 // ── Bug-reporting HTTP endpoints (Phase 2 surface + Phase 3 filing) ──────────
