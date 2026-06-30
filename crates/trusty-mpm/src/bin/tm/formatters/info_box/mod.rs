@@ -76,6 +76,31 @@ impl DaemonInfo {
         }
     }
 
+    /// Probe daemon status via lock file addr + TCP connect (150 ms timeout).
+    ///
+    /// Why: `from_lock_file()` only checks PID liveness, which can disagree with
+    /// `tm health` when the binary was reinstalled or the PID drifted (#1839).
+    /// A TCP connect to the lock-file address (or the env/default URL when absent)
+    /// gives the same "is the port alive?" answer that the HTTP health probe uses,
+    /// so the banner and `tm health` agree on the daemon status.
+    /// What: reads `read_lock_addr()` for the addr; TCP-probes the result. When
+    /// the lock file is absent or the PID is stale, falls back to probing the
+    /// `TRUSTY_MPM_URL` env var or `DEFAULT_DAEMON_URL`. Sets `online` from the
+    /// TCP connect result (not the PID check).
+    /// Test: `probe_with_nonlistening_addr_returns_offline`.
+    pub(crate) fn from_lock_file_with_probe() -> Self {
+        let addr = read_lock_addr().or_else(probe_default_addr);
+        let Some(addr) = addr else {
+            return DaemonInfo::default();
+        };
+        let online = tcp_probe(&addr);
+        DaemonInfo {
+            addr,
+            online,
+            session_count: None,
+        }
+    }
+
     /// Attach a known session count (e.g. from the guided flow's session list).
     ///
     /// Why: the guided flow already fetched the session list so there is no need
@@ -225,6 +250,47 @@ pub(crate) fn gather_welcome_data(
         memory_status,
         search_status,
         review_status,
+    }
+}
+
+// ── TCP probe helpers ─────────────────────────────────────────────────────────
+
+/// Attempt a TCP connect to `addr` (host:port) with a 150 ms timeout.
+///
+/// Why: the banner must show the daemon as online only when the port is actually
+/// reachable — PID liveness alone does not guarantee the HTTP server is up (#1839).
+/// What: parses `addr` as a `SocketAddr`, calls `TcpStream::connect_timeout`.
+/// Returns `true` on success, `false` on any error (bad addr, connection refused, …).
+/// Test: `probe_with_nonlistening_addr_returns_offline`.
+pub(crate) fn tcp_probe(addr: &str) -> bool {
+    use std::net::TcpStream;
+    use std::time::Duration;
+    addr.parse::<std::net::SocketAddr>()
+        .ok()
+        .map(|sa| TcpStream::connect_timeout(&sa, Duration::from_millis(150)).is_ok())
+        .unwrap_or(false)
+}
+
+/// Build the fallback addr string (host:port) from env or the default URL.
+///
+/// Why: when the lock file is absent, we still try to probe the well-known
+/// default address so the banner shows the correct online state even when the
+/// daemon was started without a lock file or with a stale PID.
+/// What: reads `TRUSTY_MPM_URL` env var first (falls back to
+/// `DEFAULT_DAEMON_URL`), strips the `http(s)://` scheme, and returns the
+/// bare `host:port` string.
+/// Test: covered indirectly by `from_lock_file_with_probe`.
+fn probe_default_addr() -> Option<String> {
+    let url = std::env::var("TRUSTY_MPM_URL")
+        .unwrap_or_else(|_| trusty_mpm::core::DEFAULT_DAEMON_URL.to_string());
+    let stripped = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let bare = stripped.trim_end_matches('/');
+    if bare.is_empty() {
+        None
+    } else {
+        Some(bare.to_string())
     }
 }
 
@@ -414,6 +480,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn probe_with_nonlistening_addr_returns_offline() {
+        // Port 1 requires root to bind; on non-root systems connect always
+        // fails immediately — safe to use as a "definitely offline" probe.
+        assert!(
+            !tcp_probe("127.0.0.1:1"),
+            "TCP probe to port 1 must return offline (connection refused)"
+        );
+    }
+
+    #[test]
+    fn probe_with_invalid_addr_returns_offline() {
+        assert!(
+            !tcp_probe("not-a-valid-addr"),
+            "TCP probe to invalid addr must return offline"
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@
 pub(crate) mod source;
 pub(crate) mod two_panel;
 
+use colored::Colorize as _;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr as _;
 
@@ -79,6 +80,12 @@ pub(crate) fn shade_image(art: &str) -> (Vec<String>, usize) {
         return (Vec::new(), 0);
     }
 
+    // Probe colored's current control state so our raw truecolor escapes respect
+    // the same set_override(false) call that banner callers use for non-TTY mode.
+    // When set_override(false) is active, truecolor() returns bare text and the
+    // probe string has no ANSI escape — emitting raw escapes would bypass that.
+    let use_color = "a".truecolor(0, 0, 0).to_string().contains('\x1B');
+
     let rows = raw_lines
         .iter()
         .map(|line| {
@@ -92,9 +99,11 @@ pub(crate) fn shade_image(art: &str) -> (Vec<String>, usize) {
                 }
                 if c == ' ' {
                     row.push(' ');
-                } else {
+                } else if use_color {
                     let (r, g, b) = shade_bucket(c);
                     row.push_str(&format!("\x1B[38;2;{r};{g};{b}m{c}\x1B[0m"));
+                } else {
+                    row.push(c);
                 }
                 display_cols += cw;
             }
@@ -161,7 +170,7 @@ pub(crate) fn print_launch_banner(
     managed_path: Option<&std::path::Path>,
 ) {
     let w = terminal_width();
-    let daemon = super::info_box::DaemonInfo::from_lock_file();
+    let daemon = super::info_box::DaemonInfo::from_lock_file_with_probe();
     let data =
         super::info_box::gather_welcome_data(workdir, tmux_name, false, daemon, managed_path);
 
@@ -187,7 +196,7 @@ pub(crate) fn print_launch_banner(
 /// Test: `launch_reconnect_banner_does_not_panic`.
 pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
     let w = terminal_width();
-    let daemon = super::info_box::DaemonInfo::from_lock_file();
+    let daemon = super::info_box::DaemonInfo::from_lock_file_with_probe();
     let data = super::info_box::gather_welcome_data(workdir, tmux_name, true, daemon, None);
 
     if let Some(panel) = two_panel::render_two_panel_banner(&data, w, true) {
@@ -215,6 +224,11 @@ pub(crate) fn print_launch_banner_reconnecting(workdir: &str, tmux_name: &str) {
 /// terminals (<MIN_WIDTH_BOX cols) prints a one-line plain-text fallback.
 /// Test: `daily_banner_two_panel_version_in_title_bar` in `tests.rs`.
 pub(crate) fn print_daily_banner(workdir: &str, daemon: &super::info_box::DaemonInfo) {
+    use std::io::IsTerminal as _;
+    let is_tty = std::io::stdout().is_terminal();
+    if !is_tty {
+        colored::control::set_override(false);
+    }
     let w = terminal_width();
     // Rebuild DaemonInfo by value (no Clone on purpose — same pattern as print_info_box).
     let d = super::info_box::DaemonInfo {
@@ -229,6 +243,9 @@ pub(crate) fn print_daily_banner(workdir: &str, daemon: &super::info_box::Daemon
     } else {
         println!("Trusty MPM v{}", env!("CARGO_PKG_VERSION"));
     }
+    if !is_tty {
+        colored::control::unset_override();
+    }
 }
 
 /// Print the banner to stdout for preview — no screen-clear, no sleep.
@@ -241,12 +258,17 @@ pub(crate) fn print_daily_banner(workdir: &str, daemon: &super::info_box::Daemon
 /// screen-clear). On very narrow terminals prints a minimal plain-text banner.
 /// Test: `banner_preview_does_not_panic` in `tests.rs`.
 pub(crate) fn print_banner_preview(reconnecting: bool) {
+    use std::io::IsTerminal as _;
+    let is_tty = std::io::stdout().is_terminal();
+    if !is_tty {
+        colored::control::set_override(false);
+    }
     let w = terminal_width();
     let workdir = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| ".".to_string());
     let session_name = fallback_session_name(std::path::Path::new(&workdir));
-    let daemon = super::info_box::DaemonInfo::from_lock_file();
+    let daemon = super::info_box::DaemonInfo::from_lock_file_with_probe();
     let data =
         super::info_box::gather_welcome_data(&workdir, &session_name, reconnecting, daemon, None);
 
@@ -258,6 +280,9 @@ pub(crate) fn print_banner_preview(reconnecting: bool) {
         if reconnecting {
             println!("Reconnecting...");
         }
+    }
+    if !is_tty {
+        colored::control::unset_override();
     }
 }
 
