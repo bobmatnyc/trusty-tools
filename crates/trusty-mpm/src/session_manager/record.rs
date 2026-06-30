@@ -242,6 +242,29 @@ pub struct SessionRecord {
     /// correct: legacy sessions have no captured id and fall back gracefully.
     #[serde(default)]
     pub claude_session_id: Option<String>,
+
+    /// Path to the scrollback snapshot captured just before the session was stopped.
+    ///
+    /// Why (#1816): the idle auto-stop feature captures the pane's scrollback
+    /// before killing tmux so context is not lost. The file is written to
+    /// `<workspace_path>/.trusty-mpm/scrollback.txt`; this field records where
+    /// to find it so the resume path (and future tooling) can surface it.
+    ///
+    /// `#[serde(default)]` (→ `None`) keeps all pre-#1816 records deserializable
+    /// with no scrollback path — they resume normally without a snapshot.
+    #[serde(default)]
+    pub scrollback_path: Option<PathBuf>,
+
+    /// The pane's current working directory captured just before the session was stopped.
+    ///
+    /// Why (#1816): `resume()` restores the tmux session's working directory to
+    /// where the operator left off rather than falling back to the workspace root,
+    /// making context restoration more ergonomic.
+    ///
+    /// `#[serde(default)]` (→ `None`) keeps all pre-#1816 records deserializable —
+    /// they resume from `workspace_path` / `cwd` as before.
+    #[serde(default)]
+    pub last_cwd: Option<PathBuf>,
 }
 
 /// Error types for session record operations.
@@ -306,6 +329,8 @@ mod tests {
             workspace_owned: false,
             source_id: None,
             claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -337,6 +362,8 @@ mod tests {
             workspace_owned: false,
             source_id: None,
             claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -366,6 +393,8 @@ mod tests {
             workspace_owned: false,
             source_id: None,
             claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -420,6 +449,8 @@ mod tests {
             workspace_owned: false,
             source_id: None,
             claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
         };
         record.runtime = crate::runtime::RuntimeKind::Tcode;
         let json = serde_json::to_string(&record).expect("serialize");
@@ -478,6 +509,8 @@ mod tests {
             workspace_owned: false,
             source_id: None,
             claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
@@ -513,6 +546,72 @@ mod tests {
     }
 
     #[test]
+    fn record_without_scrollback_fields_defaults_to_none() {
+        // Why (#1816): pre-#1816 records have no `scrollback_path` or `last_cwd`
+        // keys; they MUST deserialize with both as `None` so resume continues to
+        // work from workspace_path/cwd as before — zero behavior change.
+        let legacy_json = serde_json::json!({
+            "id": ManagedSessionId::new(),
+            "tmux_name": "tmpm-legacy",
+            "cwd": "/tmp",
+            "task": "legacy task",
+            "state": "stopped",
+            "created_at": Utc::now().to_rfc3339(),
+            "last_activity_at": null,
+            "workspace_path": "/tmp/ws",
+            "repo_url": null,
+            "branch": null,
+            "pending_decision": null,
+            "proposed_default": null
+        })
+        .to_string();
+        let back: SessionRecord = serde_json::from_str(&legacy_json).expect("deserialize legacy");
+        assert!(
+            back.scrollback_path.is_none(),
+            "scrollback_path must default to None for legacy records"
+        );
+        assert!(
+            back.last_cwd.is_none(),
+            "last_cwd must default to None for legacy records"
+        );
+    }
+
+    #[test]
+    fn record_round_trips_scrollback_fields() {
+        // Why (#1816): records written after idle auto-stop must persist both
+        // scrollback_path and last_cwd so resume can restore context.
+        let record = SessionRecord {
+            id: ManagedSessionId::new(),
+            tmux_name: "tmpm-snap".into(),
+            cwd: PathBuf::from("/home/user/project"),
+            task: "add feature".into(),
+            state: ManagedSessionState::Stopped,
+            created_at: Utc::now(),
+            last_activity_at: None,
+            workspace_path: Some(PathBuf::from("/managed/ws")),
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: true,
+            source_id: None,
+            claude_session_id: None,
+            scrollback_path: Some(PathBuf::from("/managed/ws/.trusty-mpm/scrollback.txt")),
+            last_cwd: Some(PathBuf::from("/managed/ws/src")),
+        };
+        let json = serde_json::to_string(&record).expect("serialize");
+        let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.scrollback_path,
+            Some(PathBuf::from("/managed/ws/.trusty-mpm/scrollback.txt"))
+        );
+        assert_eq!(back.last_cwd, Some(PathBuf::from("/managed/ws/src")));
+    }
+
+    #[test]
     fn record_round_trips_workspace_owned_true() {
         // Why (#1511): a clone-provisioned session must persist workspace_owned=true
         // so decommission knows it is safe to remove the workspace.
@@ -535,6 +634,8 @@ mod tests {
             workspace_owned: true,
             source_id: None,
             claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
         };
         let json = serde_json::to_string(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_str(&json).expect("deserialize");

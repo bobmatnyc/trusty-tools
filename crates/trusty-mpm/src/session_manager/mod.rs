@@ -16,6 +16,7 @@ pub mod prune;
 pub mod record;
 pub mod restart_ops;
 pub mod session_guard;
+pub mod snapshot;
 pub mod store;
 pub mod workspace_guard;
 

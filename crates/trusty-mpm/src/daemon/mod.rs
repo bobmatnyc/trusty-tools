@@ -18,6 +18,7 @@ pub mod discover;
 pub mod discovery;
 pub mod doctor;
 pub mod error;
+pub mod idle_reaper;
 pub mod llm_overseer;
 pub mod lock;
 pub mod managed_routes;
@@ -110,6 +111,10 @@ pub async fn serve_http(
 
     // Spawn the periodic dead-session reaper with a cancel token.
     tokio::spawn(reap_loop(Arc::clone(&state), cancel.child_token()));
+
+    // Spawn the idle auto-stop reaper if enabled (#1816).
+    // Gated entirely behind `idle_auto_stop.enabled`; no-op when disabled.
+    spawn_idle_reaper_if_enabled(Arc::clone(&state), cancel.child_token()).await;
 
     // Orphan-GC: clean accumulated leaked managed sessions. Runs ONE sweep now
     // (boot cleanup of orphans inherited across restarts) and then periodically.
@@ -272,6 +277,97 @@ pub fn spawn_secondary_listener(state: Arc<DaemonState>, listener: tokio::net::T
             tracing::warn!("secondary listener failed: {e}");
         }
     });
+}
+
+/// Spawn the idle auto-stop background loop if `idle_auto_stop.enabled = true`.
+///
+/// Why: the feature is opt-in and must have ZERO overhead when disabled — this
+/// function is a thin gate that reads config and early-returns with a debug log
+/// when the feature flag is off. When enabled it builds a verdict provider from
+/// the daemon's `ActivityMonitor` and hands off to `idle_reaper_loop`.
+/// What: reads `MpmConfig::load_default().idle_auto_stop`; if disabled, returns
+/// immediately. If enabled, acquires the session manager and spawns
+/// `idle_reaper::idle_reaper_loop` as a background task with the provided
+/// `cancel` token.
+/// Test: the loop itself is tested in `idle_reaper::tests`; this wrapper is
+/// covered by the integration smoke-test (daemon starts without the feature).
+async fn spawn_idle_reaper_if_enabled(
+    state: Arc<DaemonState>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let cfg = crate::core::config::MpmConfig::load_default().idle_auto_stop;
+    if !cfg.enabled {
+        tracing::debug!("idle-reaper: disabled (idle_auto_stop.enabled = false); skipping");
+        return;
+    }
+    info!(
+        poll_secs = cfg.poll_interval_secs,
+        idle_threshold = cfg.idle_consecutive_threshold,
+        done_threshold = cfg.done_consecutive_threshold,
+        "idle-reaper: enabled; spawning background loop"
+    );
+    let mgr = state.session_manager().await;
+    // Cache mgr in the provider so verdict() does not re-acquire the lock on every poll.
+    let provider = Arc::new(DaemonVerdictProvider {
+        mgr: Arc::clone(&mgr),
+        state,
+    });
+    tokio::spawn(idle_reaper::idle_reaper_loop(mgr, cfg, provider, cancel));
+}
+
+/// Production `IdleVerdictProvider` backed by the daemon's `ActivityMonitor`.
+///
+/// Why: the idle reaper trait is injectable so unit tests can avoid LLM calls;
+/// the production implementation simply calls `ActivityMonitor::check` with the
+/// pane content captured from `DaemonState`.
+/// What: holds a cached `Arc<SessionManager>` (avoiding a lock acquisition per
+/// poll) plus `Arc<DaemonState>` for the shared `ActivityMonitor`. Converts
+/// `ActivityState` to a stable string via enum match — never via `{:?}` Debug
+/// repr which is not a stable API contract.
+/// Test: the trait is tested with `MockVerdictProvider` in `idle_reaper::tests`.
+struct DaemonVerdictProvider {
+    /// Cached session manager handle — acquired once at construction.
+    mgr: Arc<crate::session_manager::SessionManager>,
+    state: Arc<DaemonState>,
+}
+
+impl idle_reaper::IdleVerdictProvider for DaemonVerdictProvider {
+    async fn verdict(&self, session_name: &str) -> Option<String> {
+        use crate::activity::ActivityState;
+        // Capture the most recent pane output via the tmux driver (300 lines is
+        // enough for the LLM classifier). Note: TmuxDriver::capture() shells out
+        // via std::process::Command — the same blocking pattern used throughout
+        // the daemon (observe(), reap_loop, etc.); sub-millisecond latency is
+        // acceptable here and is consistent with the existing codebase.
+        let pane_text = self
+            .mgr
+            .tmux_driver()
+            .capture(session_name, 300)
+            .unwrap_or_default();
+        if pane_text.is_empty() {
+            return None;
+        }
+        // Use the shared ActivityMonitor (hash-cached — no LLM call if content unchanged).
+        let monitor = self.state.activity_monitor();
+        match monitor.check(session_name, &pane_text).await {
+            Ok(result) => {
+                // Match on the enum directly — Debug repr is not a stable contract.
+                let s = match result.verdict.state {
+                    ActivityState::Idle => "idle",
+                    ActivityState::Done => "done",
+                    ActivityState::Working => "working",
+                    ActivityState::BlockedOnPermission => "blocked-on-permission",
+                    ActivityState::Errored => "errored",
+                    ActivityState::Unknown => "unknown",
+                };
+                Some(s.to_string())
+            }
+            Err(e) => {
+                tracing::debug!(name = %session_name, "idle-reaper: activity check failed: {e}");
+                None
+            }
+        }
+    }
 }
 
 /// Interval between dead-session reap sweeps.

@@ -368,6 +368,40 @@ impl TmuxDriver {
         })
     }
 
+    /// Return the pane's current working directory via `display-message`.
+    ///
+    /// Why: the snapshot-before-stop path (#1816) needs the pane's cwd to
+    /// restore it on resume; `tmux display-message -p '#{pane_current_path}'`
+    /// is the standard mechanism. The call is best-effort — callers must handle
+    /// `None` gracefully (resume falls back to workspace_path/cwd).
+    /// What: runs `tmux display-message -t <name> -p '#{pane_current_path}'`,
+    /// trims the output, and returns `Some(path)` on success or `None` if the
+    /// session does not exist, tmux is unavailable, or the path is empty.
+    /// Test: exercised indirectly via `snapshot::capture_into` with a live tmux;
+    /// `RealTmuxDriver::get_pane_cwd` wraps this method.
+    pub fn pane_current_path(&self, session_name: &str) -> Option<std::path::PathBuf> {
+        let output = Command::new(&self.tmux_path)
+            .args([
+                "display-message",
+                "-t",
+                session_name,
+                "-p",
+                "#{pane_current_path}",
+            ])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8_lossy(&output.stdout);
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(trimmed))
+        }
+    }
+
     /// Register an external session for oversight without modifying it.
     ///
     /// Why: before trusty-mpm watches an externally-created session it records

@@ -56,6 +56,8 @@ fn session_with_repo(repo_url: &str) -> SessionRecord {
         workspace_owned: false,
         source_id: None,
         claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
     }
 }
 
@@ -79,6 +81,8 @@ fn session_no_repo() -> SessionRecord {
         workspace_owned: false,
         source_id: None,
         claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
     }
 }
 

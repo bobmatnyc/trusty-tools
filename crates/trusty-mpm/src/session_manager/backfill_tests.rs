@@ -79,6 +79,8 @@ async fn reconcile_backfills_source_id_from_workspace_git_remote() {
         workspace_owned: false,
         source_id: None, // the field we want backfilled
         claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
     };
     mgr.store.write().await.upsert(record).await.expect("seed");
 
@@ -162,6 +164,8 @@ async fn reconcile_backfills_source_id_for_stopped_record() {
         workspace_owned: false,
         source_id: None, // the field we want backfilled
         claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
     };
     mgr.store.write().await.upsert(record).await.expect("seed");
 
