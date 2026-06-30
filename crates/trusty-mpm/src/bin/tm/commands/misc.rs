@@ -142,9 +142,9 @@ pub(crate) async fn health(url: &str) -> anyhow::Result<()> {
         }
         CommandResult::Health(report) => {
             let catalog = if report.catalog_unknown {
-                "never synced"
+                "never synced (run 'tm catalog sync' to initialize)"
             } else if report.catalog_stale {
-                "updates available"
+                "updates available (run 'tm catalog sync' to update)"
             } else {
                 "up to date"
             };
