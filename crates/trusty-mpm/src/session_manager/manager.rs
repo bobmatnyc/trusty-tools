@@ -677,12 +677,14 @@ impl SessionManager {
             }
         }
 
-        // Prefer last_cwd (captured at stop-time) → workspace_path → cwd (#1816).
-        let base = record
+        // Prefer last_cwd (if it still exists on disk) → workspace_path → cwd (#1816).
+        // The existence check guards against the case where last_cwd was deleted
+        // between the stop and the resume (e.g. ephemeral workspace cleaned up).
+        let workdir = record
             .last_cwd
             .as_deref()
-            .or(record.workspace_path.as_deref());
-        let workdir = base
+            .filter(|p| p.exists())
+            .or(record.workspace_path.as_deref())
             .unwrap_or(record.cwd.as_path())
             .to_string_lossy()
             .to_string();

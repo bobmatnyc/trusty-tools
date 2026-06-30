@@ -98,8 +98,14 @@ pub enum ReaperDecision {
 /// against the thresholds. Returns `Stop` or `Decommission` when a threshold
 /// is first crossed; `Continue` otherwise. Verdicts outside `idle`/`done`
 /// reset both counters.
+///
+/// **Invariant:** callers MUST call [`IdleReaperState::remove`] immediately
+/// after receiving `Stop` or `Decommission` before the next poll iteration.
+/// `run_one_sweep` enforces this; tests verify it in
+/// `counter_cleared_after_stop_fires`.
 /// Test: `counter_increments_on_idle`, `counter_resets_on_non_idle`,
-/// `stop_fires_at_threshold`, `decommission_fires_at_done_threshold`.
+/// `stop_fires_at_threshold`, `decommission_fires_at_done_threshold`,
+/// `counter_cleared_after_stop_fires`.
 pub fn apply_verdict(
     counter: &mut SessionHitCounter,
     verdict: Option<&str>,
@@ -481,5 +487,44 @@ mod tests {
         handle
             .await
             .expect("idle_reaper_loop must not panic on cancel");
+    }
+
+    /// Why: enforces the remove-on-fire invariant — after Stop fires, the
+    /// loop removes the entry from `IdleReaperState`; the next poll for the
+    /// same id starts with a fresh counter at zero, preventing an immediate
+    /// re-fire on a stale counter.
+    /// What: drives a counter to Stop threshold, calls `state.remove()` (as
+    /// `run_one_sweep` does), then applies another idle verdict and asserts
+    /// the decision is `Continue` (counter restarted) rather than `Stop`.
+    /// Test: this test.
+    #[test]
+    fn counter_cleared_after_stop_fires() {
+        let id = ManagedSessionId::new();
+        let mut rs = IdleReaperState::new();
+        let c = cfg(2, 5);
+        // Drive to Stop.
+        let counter = rs.counter_mut(&id);
+        assert_eq!(
+            apply_verdict(counter, Some("idle"), &c),
+            ReaperDecision::Continue
+        );
+        assert_eq!(
+            apply_verdict(counter, Some("idle"), &c),
+            ReaperDecision::Stop
+        );
+        // Simulate run_one_sweep removing the counter before the next tick.
+        rs.remove(&id);
+        // Next tick: fresh counter — must not immediately re-fire.
+        let counter = rs.counter_mut(&id);
+        let decision = apply_verdict(counter, Some("idle"), &c);
+        assert_eq!(
+            decision,
+            ReaperDecision::Continue,
+            "counter must restart after remove; second idle must not immediately re-fire"
+        );
+        assert_eq!(
+            counter.idle_hits, 1,
+            "fresh counter must show exactly 1 idle hit"
+        );
     }
 }

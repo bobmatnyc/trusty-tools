@@ -307,7 +307,11 @@ async fn spawn_idle_reaper_if_enabled(
         "idle-reaper: enabled; spawning background loop"
     );
     let mgr = state.session_manager().await;
-    let provider = Arc::new(DaemonVerdictProvider { state });
+    // Cache mgr in the provider so verdict() does not re-acquire the lock on every poll.
+    let provider = Arc::new(DaemonVerdictProvider {
+        mgr: Arc::clone(&mgr),
+        state,
+    });
     tokio::spawn(idle_reaper::idle_reaper_loop(mgr, cfg, provider, cancel));
 }
 
@@ -316,19 +320,27 @@ async fn spawn_idle_reaper_if_enabled(
 /// Why: the idle reaper trait is injectable so unit tests can avoid LLM calls;
 /// the production implementation simply calls `ActivityMonitor::check` with the
 /// pane content captured from `DaemonState`.
-/// What: wraps `Arc<DaemonState>` and implements `IdleVerdictProvider` by
-/// calling `capture_pane` then `activity_monitor().check()`.
+/// What: holds a cached `Arc<SessionManager>` (avoiding a lock acquisition per
+/// poll) plus `Arc<DaemonState>` for the shared `ActivityMonitor`. Converts
+/// `ActivityState` to a stable string via enum match — never via `{:?}` Debug
+/// repr which is not a stable API contract.
 /// Test: the trait is tested with `MockVerdictProvider` in `idle_reaper::tests`.
 struct DaemonVerdictProvider {
+    /// Cached session manager handle — acquired once at construction.
+    mgr: Arc<crate::session_manager::SessionManager>,
     state: Arc<DaemonState>,
 }
 
 impl idle_reaper::IdleVerdictProvider for DaemonVerdictProvider {
     async fn verdict(&self, session_name: &str) -> Option<String> {
+        use crate::activity::ActivityState;
         // Capture the most recent pane output via the tmux driver (300 lines is
-        // enough for the LLM classifier).
-        let mgr = self.state.session_manager().await;
-        let pane_text = mgr
+        // enough for the LLM classifier). Note: TmuxDriver::capture() shells out
+        // via std::process::Command — the same blocking pattern used throughout
+        // the daemon (observe(), reap_loop, etc.); sub-millisecond latency is
+        // acceptable here and is consistent with the existing codebase.
+        let pane_text = self
+            .mgr
             .tmux_driver()
             .capture(session_name, 300)
             .unwrap_or_default();
@@ -339,8 +351,16 @@ impl idle_reaper::IdleVerdictProvider for DaemonVerdictProvider {
         let monitor = self.state.activity_monitor();
         match monitor.check(session_name, &pane_text).await {
             Ok(result) => {
-                let verdict = format!("{:?}", result.verdict.state).to_lowercase();
-                Some(verdict)
+                // Match on the enum directly — Debug repr is not a stable contract.
+                let s = match result.verdict.state {
+                    ActivityState::Idle => "idle",
+                    ActivityState::Done => "done",
+                    ActivityState::Working => "working",
+                    ActivityState::BlockedOnPermission => "blocked-on-permission",
+                    ActivityState::Errored => "errored",
+                    ActivityState::Unknown => "unknown",
+                };
+                Some(s.to_string())
             }
             Err(e) => {
                 tracing::debug!(name = %session_name, "idle-reaper: activity check failed: {e}");
