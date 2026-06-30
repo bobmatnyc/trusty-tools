@@ -59,6 +59,26 @@ pub fn read_daemon_addr(app_name: &str) -> Result<Option<String>> {
     }
 }
 
+/// Remove the daemon's HTTP address file from the app's data directory.
+///
+/// Why: On graceful shutdown the daemon should clean up its discovery file so
+/// that the console and CLI do not probe a stale address. Mirroring
+/// `write_daemon_addr` keeps the remove symmetric with the write.
+/// What: deletes `{resolve_data_dir(app_name)}/http_addr`; ignores
+/// `NotFound` (idempotent — already gone or never written). Propagates any
+/// other I/O error as `Err`.
+/// Test: `daemon_addr_remove_cleans_up` and `daemon_addr_remove_nonexistent_ok`.
+pub fn remove_daemon_addr(app_name: &str) -> Result<()> {
+    let dir = crate::data_dir::resolve_data_dir(app_name)?;
+    let path = dir.join(DAEMON_ADDR_FILENAME);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(anyhow::Error::new(e))
+            .with_context(|| format!("remove daemon addr at {}", path.display())),
+    }
+}
+
 /// Probe whether an existing daemon recorded at `addr_file` is healthy and,
 /// if so, return its base URL so the caller can refuse to start a duplicate.
 ///
@@ -219,5 +239,58 @@ mod tests {
             "address file must be preserved when the daemon is healthy"
         );
         let _ = server.await;
+    }
+
+    /// Why: write → remove → read must yield None (file cleaned up).
+    /// Test: this test.
+    #[test]
+    fn daemon_addr_remove_cleans_up() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile_like_dir();
+        unsafe {
+            std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp);
+        }
+        let app = format!(
+            "trusty-test-daemon-remove-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        write_daemon_addr(&app, "127.0.0.1:12345").unwrap();
+        remove_daemon_addr(&app).unwrap();
+        let got = read_daemon_addr(&app).unwrap();
+        unsafe {
+            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
+        }
+        assert!(
+            got.is_none(),
+            "addr file should be gone after remove, got {got:?}"
+        );
+    }
+
+    /// Why: removing an addr file that was never written must succeed (idempotent).
+    /// Test: this test.
+    #[test]
+    fn daemon_addr_remove_nonexistent_ok() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile_like_dir();
+        unsafe {
+            std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp);
+        }
+        let app = format!(
+            "trusty-test-daemon-remove-never-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let result = remove_daemon_addr(&app);
+        unsafe {
+            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
+        }
+        assert!(result.is_ok(), "removing non-existent addr must succeed");
     }
 }

@@ -104,8 +104,17 @@ pub(crate) async fn run_daemon(addr: SocketAddr, tailscale: bool, mcp: bool) -> 
         None
     };
 
-    // Write lock file so clients can discover us.
+    // Write lock file so clients can discover us (backward-compat for existing
+    // clients that parse the TOML lock directly, e.g. the old MpmConnector).
     trusty_mpm::daemon::lock::write_lock(&base_url, tailscale_url.as_deref());
+    // Also write the standard trusty-common http_addr file so the console's
+    // reverse proxy can discover the daemon address via the shared
+    // `read_daemon_addr` helper (#1849 Phase 1).
+    // Convention: store bare `host:port` (no http:// scheme) so that
+    // `detect_service` in trusty-console can TCP-probe it directly.
+    if let Err(e) = trusty_common::write_daemon_addr("trusty-mpm", &actual_addr.to_string()) {
+        tracing::warn!("failed to write trusty-mpm http_addr discovery file: {e:#}");
+    }
 
     // Auto-start the Telegram bot alongside the daemon when a bot token is
     // configured. `resolve_token` honours `.env.local` → `.env` → the process
@@ -128,6 +137,11 @@ pub(crate) async fn run_daemon(addr: SocketAddr, tailscale: bool, mcp: bool) -> 
             token.cancel();
         }
         trusty_mpm::daemon::lock::remove_lock();
+        // Remove the standard http_addr file so the console stops advertising
+        // this (now-dead) daemon address (#1849 Phase 1).
+        if let Err(e) = trusty_common::remove_daemon_addr("trusty-mpm") {
+            tracing::warn!("failed to remove trusty-mpm http_addr discovery file: {e:#}");
+        }
         std::process::exit(0);
     });
 

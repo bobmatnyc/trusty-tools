@@ -505,7 +505,9 @@ pub use port::bind_with_auto_port;
 pub use data_dir::{DATA_DIR_OVERRIDE_ENV, is_dir, resolve_data_dir, sanitize_data_root};
 
 // Daemon address
-pub use daemon_addr::{check_already_running, read_daemon_addr, write_daemon_addr};
+pub use daemon_addr::{
+    check_already_running, read_daemon_addr, remove_daemon_addr, write_daemon_addr,
+};
 
 // Health probe
 pub use health_probe::probe_health;

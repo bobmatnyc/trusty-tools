@@ -1060,6 +1060,28 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
+    /// Why: #1849 Phase 1 adds `mpm` to the proxy allowlist. A request to
+    /// `/proxy/mpm/health` must NOT return 400 (unknown daemon) — it must return
+    /// 503 (cache not yet populated) which proves the key is now in the allowlist.
+    /// What: issues GET /proxy/mpm/health on a fresh state (no poll),
+    /// asserts 503 SERVICE_UNAVAILABLE (not 400 BAD_REQUEST).
+    /// Test: this test itself (regression guard for #1849 Phase 1).
+    #[tokio::test]
+    async fn test_proxy_mpm_is_in_allowlist_cold_cache_returns_503() {
+        let router = build_router(make_test_state());
+
+        let req = Request::builder()
+            .uri("/proxy/mpm/health")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "/proxy/mpm/health must return 503 (mpm in allowlist, cache cold), not 400"
+        );
+    }
+
     /// Why: with an empty memory metrics cache the route must return 503 so the
     /// UI can show a "not yet available" state rather than empty JSON.
     /// What: issues GET /api/console/metrics/memory on a fresh state, asserts 503.
