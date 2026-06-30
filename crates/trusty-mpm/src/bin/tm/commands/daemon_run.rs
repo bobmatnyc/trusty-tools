@@ -110,7 +110,9 @@ pub(crate) async fn run_daemon(addr: SocketAddr, tailscale: bool, mcp: bool) -> 
     // Also write the standard trusty-common http_addr file so the console's
     // reverse proxy can discover the daemon address via the shared
     // `read_daemon_addr` helper (#1849 Phase 1).
-    if let Err(e) = trusty_common::write_daemon_addr("trusty-mpm", &base_url) {
+    // Convention: store bare `host:port` (no http:// scheme) so that
+    // `detect_service` in trusty-console can TCP-probe it directly.
+    if let Err(e) = trusty_common::write_daemon_addr("trusty-mpm", &actual_addr.to_string()) {
         tracing::warn!("failed to write trusty-mpm http_addr discovery file: {e:#}");
     }
 
