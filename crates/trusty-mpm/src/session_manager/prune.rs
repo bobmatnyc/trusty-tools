@@ -441,11 +441,16 @@ impl SessionManager {
     /// Phase 1 discovers orphan candidates using the caller-supplied
     /// `active_workspace_paths` snapshot (which may have been taken moments before
     /// this call). Phase 2 — the real deletion path — takes ONE fresh snapshot from
-    /// the live session store immediately before the deletion loop (rather than
-    /// re-querying per-candidate, which was O(n) lock acquisitions). A session
-    /// created after Phase 1's snapshot is safe: its worktree is skipped when its
-    /// canonicalized path appears in the single fresh snapshot. Dry-run returns
-    /// after Phase 1 (no deletion, no snapshot).
+    /// the live session store immediately before the deletion loop (O(1) lock
+    /// acquisitions vs. the prior O(n) per-candidate approach). The snapshot is
+    /// taken as late as possible — just before the first deletion — to minimise the
+    /// residual window. **Residual TOCTOU window:** a session registered AFTER the
+    /// Phase 2 snapshot but BEFORE a candidate's deletion is NOT seen by the snapshot
+    /// and could theoretically be deleted. This window is sub-millisecond in practice
+    /// (the snapshot is taken after all I/O-bound Phase 1 work), making it
+    /// substantially narrower than the per-candidate approach (which had an O(n)
+    /// window). Treat this as narrowing the window to near-zero, not eliminating it.
+    /// Dry-run returns after Phase 1 (no deletion, no snapshot).
     ///
     /// What: Phase 1 calls [`find_orphaned_worktrees`] inside `spawn_blocking`
     /// (the filesystem walk is blocking); panics are propagated as `Err`. Phase 2
@@ -489,20 +494,33 @@ impl SessionManager {
             return Ok(candidates);
         }
 
-        // Phase 2 (real-delete path): take ONE fresh active-set snapshot from the
-        // live store before the deletion loop (#1845 item 9 — O(1) lock acquisitions
-        // instead of O(n); TOCTOU correctness is preserved because the snapshot is
-        // taken after Phase 1's potentially-stale candidate list is built, so any
-        // session registered in the interim is visible here).
-        let fresh_active: HashSet<std::path::PathBuf> = self
-            .store
-            .read()
-            .await
-            .cached_all()
-            .into_iter()
-            .filter_map(|r| r.workspace_path)
-            .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
-            .collect();
+        // Phase 2 (real-delete path): ONE fresh snapshot immediately before the
+        // deletion loop (#1845 item 9). Each active path is inserted in BOTH its
+        // canonicalized form (for symlink-safe comparison) and its raw form
+        // (Finding 3 #1845: if canonicalize fails on the active side, keep the
+        // raw path as a protective fallback so a canonicalize failure can never
+        // cause an active worktree to be misidentified as an orphan and deleted).
+        let fresh_active: HashSet<std::path::PathBuf> = {
+            let mut set = HashSet::new();
+            for r in self.store.read().await.cached_all() {
+                let Some(p) = r.workspace_path else {
+                    continue;
+                };
+                if let Ok(c) = std::fs::canonicalize(&p) {
+                    set.insert(c);
+                } else {
+                    warn!(
+                        path = %p.display(),
+                        "prune-worktrees: active session path failed to canonicalize; \
+                         using raw path as protective fallback (#1845 F3)"
+                    );
+                }
+                // Always insert the raw path so the raw-form check below catches
+                // cases where the active side failed to canonicalize.
+                set.insert(p);
+            }
+            set
+        };
 
         let mut removed = Vec::new();
         for candidate in candidates {
@@ -518,7 +536,11 @@ impl SessionManager {
                     continue;
                 }
             };
-            if fresh_active.contains(&canonical_candidate) {
+            // Check both the canonicalized form (symlink-safe) AND the raw form
+            // (Finding 3 #1845: protects against active-path canonicalize failures
+            // — if the active side couldn't be canonicalized, its raw path is in
+            // the set and a raw-path match prevents accidental deletion).
+            if fresh_active.contains(&canonical_candidate) || fresh_active.contains(&candidate) {
                 info!(
                     path = %candidate.display(),
                     "prune-worktrees: skipping — active session appeared after initial snapshot"

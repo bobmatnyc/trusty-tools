@@ -314,36 +314,30 @@ impl SessionManager {
                     // call in spawn_blocking + tokio::time::timeout so a hung
                     // git process cannot stall the async executor indefinitely.
                     let ws_clone = ws.clone();
-                    let join = tokio::task::spawn_blocking(move || {
-                        remove_session_worktree(&ws_clone)
-                    });
-                    workspace_removed = match tokio::time::timeout(
-                        GIT_WORKTREE_REMOVE_TIMEOUT,
-                        join,
-                    )
-                    .await
-                    {
-                        Ok(Ok(removed)) => removed,
-                        Ok(Err(e)) => {
-                            warn!(
-                                id = %id,
-                                workspace = %ws.display(),
-                                "decommission: remove_session_worktree task panicked: {e}"
-                            );
-                            false
-                        }
-                        Err(_elapsed) => {
-                            warn!(
-                                id = %id,
-                                workspace = %ws.display(),
-                                timeout_secs = GIT_WORKTREE_REMOVE_TIMEOUT.as_secs(),
-                                "decommission: git worktree remove timed out after {}s; \
-                                 worktree may require manual cleanup",
-                                GIT_WORKTREE_REMOVE_TIMEOUT.as_secs()
-                            );
-                            false
-                        }
-                    };
+                    let join =
+                        tokio::task::spawn_blocking(move || remove_session_worktree(&ws_clone));
+                    workspace_removed =
+                        match tokio::time::timeout(GIT_WORKTREE_REMOVE_TIMEOUT, join).await {
+                            Ok(Ok(removed)) => removed,
+                            Ok(Err(e)) => {
+                                warn!(
+                                    id = %id,
+                                    workspace = %ws.display(),
+                                    "decommission: remove_session_worktree task panicked: {e}"
+                                );
+                                false
+                            }
+                            Err(_elapsed) => {
+                                warn!(
+                                    id = %id,
+                                    workspace = %ws.display(),
+                                    timeout_secs = GIT_WORKTREE_REMOVE_TIMEOUT.as_secs(),
+                                    "decommission: git worktree remove timed out; \
+                                     worktree may require manual cleanup"
+                                );
+                                false
+                            }
+                        };
                 } else {
                     warn!(
                         id = %id,
@@ -508,30 +502,28 @@ mod tests {
     /// Item 5 (#1845): sentinel gate allows removal when the sentinel IS present.
     ///
     /// Why: confirm the happy path — when the sentinel file exists, `remove_session_worktree`
-    /// proceeds through the sentinel check (it may still fail the git call, but that is
-    /// separate from the safety gate). We don't mock git here; we just verify the sentinel
-    /// check itself does NOT cause an early false return when the file is present.
-    /// Test: create a temp dir, write sentinel, call remove_session_worktree, check
-    /// it does NOT return false due to the sentinel check (it may fail for other reasons
-    /// like git not being configured, but that's a different error path).
+    /// passes the safety gate and removes the directory. We verify observable filesystem
+    /// state (`!path.exists()`) rather than the bool return value, which can vary with
+    /// filesystem permissions unrelated to the sentinel gate (Finding 2 #1845).
+    /// Test: create a temp dir, write sentinel, call remove_session_worktree, assert
+    /// the directory is gone — proving the gate was passed AND removal succeeded.
     #[test]
     fn sentinel_present_passes_safety_gate() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let wt_path = dir.path().to_path_buf();
+        // Keep the TempDir alive but prevent auto-cleanup on drop: we call
+        // remove_session_worktree (which deletes the directory) and then assert
+        // it is gone. `keep()` suppresses the automatic deletion so Drop does not
+        // fight with our explicit removal assertion.
+        let wt_path = dir.keep();
         // Write the sentinel to simulate an SM-created worktree.
         std::fs::write(wt_path.join(WORKTREE_SENTINEL_FILE), b"").expect("write sentinel");
-        // The sentinel check passes; git will fail because this isn't a real worktree,
-        // but remove_session_worktree falls back to remove_dir_all and returns true.
-        // Either way: it must NOT return false due to the sentinel gate alone.
-        // (If it does return false, it means sentinel check rejected it — the bug.)
-        let result = remove_session_worktree(&wt_path);
-        // With sentinel present, the gate is bypassed — git fails, fallback remove_dir_all
-        // either succeeds (true) or fails if the dir is already gone (also true via
-        // the idempotent early-return). We just assert we didn't get a sentinel-gate false.
-        // Since tempdir is a real dir (exists), the fallback should succeed = true.
+        // The sentinel check must pass (not return false early). The git call will fail
+        // because this is not a git worktree, but remove_session_worktree falls back
+        // to remove_dir_all. Assert the observable outcome: the directory is gone.
+        remove_session_worktree(&wt_path);
         assert!(
-            result,
-            "sentinel present: safety gate must not block removal (expected true from fallback)"
+            !wt_path.exists(),
+            "sentinel present: safety gate must pass and directory must be removed"
         );
     }
 }
