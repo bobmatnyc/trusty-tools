@@ -30,8 +30,8 @@ pub(crate) const BANNER_IMAGE: &str = include_str!("image.txt");
 /// First row to include (0-indexed, inclusive).
 pub(crate) const CLIP_ROW_START: usize = 0;
 /// One-past-the-last row to include (0-indexed, exclusive).
-/// Set to 16 to capture the full kawaii row-of-three bot art.
-pub(crate) const CLIP_ROW_END: usize = 16;
+/// Set to 14 to capture the heads-only kawaii row-of-three bot art.
+pub(crate) const CLIP_ROW_END: usize = 14;
 /// First column to include (0-indexed, inclusive).
 pub(crate) const CLIP_COL_START: usize = 0;
 /// One-past-the-last column to include (0-indexed, exclusive).
@@ -50,8 +50,8 @@ pub(crate) const IMAGE_CLIP_ROWS: usize = CLIP_ROW_END - CLIP_ROW_START;
 /// to add depth without competing with the main structure.
 /// What: four buckets —
 ///   • amber `(224,140,60)`: box-drawing, block, face, and lightbulb glyphs
-///     used in the kawaii bot art (`┌─┐│└┘┬╷▟▙^●◡⢀✲⡀◻`) plus legacy dense
-///     glyphs from the old art;
+///     used in the kawaii bot art (`┌─┐│└┘┬╷╶╴├┤▟▙^●◡⢀✲⡀`) plus legacy
+///     dense glyphs from the old art;
 ///   • mid-rust `(205,100,30)`: medium-ink marks;
 ///   • dark rust `(120,50,10)`: fine marks;
 ///   • base rust `(183,65,14)`: everything else.
@@ -59,7 +59,7 @@ pub(crate) const IMAGE_CLIP_ROWS: usize = CLIP_ROW_END - CLIP_ROW_START;
 pub(crate) fn shade_bucket(c: char) -> (u8, u8, u8) {
     match c {
         // Amber — bot structure: box-drawing, block chars, face glyphs, lightbulb
-        '┌' | '─' | '┐' | '│' | '└' | '┘' | '┬' | '┴' | '├' | '┤' | '╷' | '╵'
+        '┌' | '─' | '┐' | '│' | '└' | '┘' | '┬' | '┴' | '├' | '┤' | '╷' | '╵' | '╶' | '╴'
         | '▟' | '▙' | '▌' | '▐' | '█' | '▓'
         | '^' | '●' | '◡' | '⢀' | '✲' | '⡀' | '◻'
         // Legacy dense glyphs from previous art
