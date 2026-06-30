@@ -14,6 +14,7 @@ use crate::cli::{
     CatalogAction, Cli, Command, DEFAULT_URL, MetaAction, ProjectAction, SessionAction, SlackCmd,
     TelegramCmd,
 };
+use crate::commands::misc::{CATALOG_STALE_MSG, CATALOG_UNKNOWN_MSG, NON_GIT_FALLBACK_HINT};
 use crate::formatters::banner::{
     fallback_session_name, normalize_workdir, print_launch_banner,
     print_launch_banner_reconnecting, terminal_width,
@@ -1941,17 +1942,17 @@ fn banner_preview_does_not_panic() {
 fn health_catalog_stale_message_contains_action() {
     // Why: operators should see an actionable command when the catalog is stale
     // or never synced — "updates available" without a fix is unhelpful (#1839 Fix 4).
-    // What: verify the static string constants used in the health command output.
-    // Test: assert the strings contain 'tm catalog sync'.
-    let stale_msg = "updates available (run 'tm catalog sync' to update)";
-    let unknown_msg = "never synced (run 'tm catalog sync' to initialize)";
+    // What: asserts against the production constants from misc.rs so any change to
+    // the actual output string is caught here rather than silently diverging.
+    // Test: if `CATALOG_STALE_MSG` or `CATALOG_UNKNOWN_MSG` in misc.rs no longer
+    // contains "tm catalog sync", this test fails and flags the regression.
     assert!(
-        stale_msg.contains("tm catalog sync"),
-        "stale msg must name the fix command"
+        CATALOG_STALE_MSG.contains("tm catalog sync"),
+        "CATALOG_STALE_MSG must name the fix command: {CATALOG_STALE_MSG:?}"
     );
     assert!(
-        unknown_msg.contains("tm catalog sync"),
-        "never-synced msg must name the fix command"
+        CATALOG_UNKNOWN_MSG.contains("tm catalog sync"),
+        "CATALOG_UNKNOWN_MSG must name the fix command: {CATALOG_UNKNOWN_MSG:?}"
     );
 }
 
@@ -1959,12 +1960,13 @@ fn health_catalog_stale_message_contains_action() {
 fn non_git_dir_fallback_prints_help_hint() {
     // Why: `tm` run from a non-git directory should exit cleanly with a help hint
     // rather than an error exit code (#1839 Fix 2).
-    // What: verify that `non_github_refusal_message` is not called for non-git dirs;
-    // and verify the expected hint string exists in guided.rs for the non-git branch.
-    // Test: `fallback_protected` non-git path now returns Ok(()) with a hint.
-    let hint = "tm: not in a git project — run 'tm --help' for available commands";
+    // What: asserts against `NON_GIT_FALLBACK_HINT` from misc.rs — the constant
+    // that `fallback_protected` in guided.rs actually passes to `eprintln!`. If
+    // the hint string is changed to drop "--help", this test catches it immediately.
+    // Test: if `NON_GIT_FALLBACK_HINT` no longer mentions "--help", this fails.
     assert!(
-        hint.contains("--help"),
-        "hint must reference --help for discoverability"
+        NON_GIT_FALLBACK_HINT.contains("--help"),
+        "NON_GIT_FALLBACK_HINT must reference --help for discoverability: \
+         {NON_GIT_FALLBACK_HINT:?}"
     );
 }

@@ -826,7 +826,7 @@ pub(crate) async fn fallback_protected(
     }
 
     // Not inside a git working tree: print a helpful note and exit cleanly (#1839).
-    eprintln!("tm: not in a git project — run 'tm --help' for available commands");
+    eprintln!("{}", super::misc::NON_GIT_FALLBACK_HINT);
     Ok(())
 }
 
