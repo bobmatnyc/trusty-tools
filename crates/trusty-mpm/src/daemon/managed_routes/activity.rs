@@ -29,19 +29,27 @@ use super::parse_id;
 /// always available; the LLM classification is an optional overlay when
 /// OpenRouter is configured. This lets the calling agentic process do its own
 /// inference over the raw pane content.
-/// What: always-present fields: `raw_pane` (last 60 lines), `runtime_active`
-/// (tmux session alive or not), `pending_decision`, `proposed_default`. LLM
-/// fields (`state`, `summary`, `confidence`, `classification`) are populated
-/// when the classifier ran successfully; `classification` is `null` when the
-/// key is absent or the classifier was not invoked.
+/// What: always-present fields: `raw_pane` (last 60 lines or last-seen snapshot),
+/// `runtime_active` (tmux session alive or not), `pane_stale` (true when
+/// `raw_pane` was served from the stop-time scrollback snapshot rather than a
+/// live capture), `pending_decision`, `proposed_default`. LLM fields (`state`,
+/// `summary`, `confidence`, `classification`) are populated when the classifier
+/// ran successfully; `classification` is `null` when the key is absent or the
+/// classifier was not invoked.
 /// Test: activity route handler test; `activity_no_key_returns_raw_pane` test.
 #[derive(Debug, Serialize)]
 pub struct ActivityResponse {
-    /// Raw pane content (last 60 lines). Always present so the calling agentic
-    /// process can reason over the raw terminal output directly.
+    /// Raw pane content (last 60 lines, or the stop-time scrollback snapshot
+    /// when the runtime is stopped and the live capture is empty). Always
+    /// present so the calling agentic process can reason over terminal output.
     pub raw_pane: String,
     /// Whether the tmux runtime session is currently alive.
     pub runtime_active: bool,
+    /// True when `raw_pane` was served from the persisted stop-time scrollback
+    /// snapshot (i.e. the runtime is stopped and the live pane capture returned
+    /// empty). Callers should treat this as a last-known-good snapshot, not a
+    /// real-time view (#1840).
+    pub pane_stale: bool,
     /// Activity state from LLM classification: working, idle, blocked_on_permission,
     /// errored, done, unknown. Populated from classifier verdict or "unknown".
     pub state: String,
@@ -78,12 +86,12 @@ pub struct ActivityResponse {
 /// perform its own inference. The OpenRouter LLM classifier is invoked ONLY
 /// when configured (i.e. when OPENROUTER_API_KEY is set).
 /// What: captures the pane via the session's tmux driver (last 60 lines);
-/// determines `runtime_active` from tmux presence; calls `ActivityMonitor::check`
-/// — which already converts `MissingApiKey` to an Unknown verdict non-erroring —
-/// and returns the verdict alongside `raw_pane` and `classification` (null when
-/// no classifier ran or key absent).
-/// The hash-skip cache and cost instrumentation remain active for the
-/// optional-classifier path.
+/// determines `runtime_active` from tmux presence; when the runtime is stopped
+/// and the live capture is empty, falls back to the stop-time scrollback
+/// snapshot in `record.scrollback_path` and sets `pane_stale=true` (#1840);
+/// calls `ActivityMonitor::check` — which already converts `MissingApiKey` to
+/// an Unknown verdict non-erroring — and returns the verdict alongside
+/// `raw_pane` and `classification` (null when no classifier ran or key absent).
 /// Test: `activity_no_key_returns_raw_pane` in tests/session_manager_mvp.rs;
 /// `handler_activity_cache_hit`.
 pub async fn get_session_activity(
@@ -111,11 +119,28 @@ pub async fn get_session_activity(
     // Determine runtime_active from tmux presence (independent of LLM classifier).
     let runtime_active = mgr.tmux_driver().session_exists(&record.tmux_name);
 
+    // #1840: when the runtime is stopped and the live capture is empty, serve
+    // the stop-time scrollback snapshot so callers get SOME content rather than
+    // an empty string. Flag the response as `pane_stale=true` so callers know
+    // this is last-known-good data, not a real-time view.
+    let (raw_pane, pane_stale) = if !runtime_active && pane_text.is_empty() {
+        let snapshot = record
+            .scrollback_path
+            .as_deref()
+            .and_then(|p| std::fs::read_to_string(p).ok());
+        match snapshot {
+            Some(snap) if !snap.is_empty() => (snap, true),
+            _ => (pane_text, false),
+        }
+    } else {
+        (pane_text, false)
+    };
+
     // Run the optional LLM classifier. `ActivityMonitor::check` converts
     // `MissingApiKey` to an `Unknown` verdict non-erroring — the raw pane is
     // always available regardless of whether a key is configured.
     let monitor = state.activity_monitor();
-    let result = match monitor.check(&id_str, &pane_text).await {
+    let result = match monitor.check(&id_str, &raw_pane).await {
         Ok(r) => r,
         Err(e) => {
             warn!(session = %id_str, "activity check error (non-key): {e}");
@@ -135,8 +160,9 @@ pub async fn get_session_activity(
     };
 
     Json(ActivityResponse {
-        raw_pane: pane_text,
+        raw_pane,
         runtime_active,
+        pane_stale,
         state: format!("{:?}", result.verdict.state).to_lowercase(),
         summary: result.verdict.summary,
         confidence: result.verdict.confidence,
