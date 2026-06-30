@@ -86,13 +86,40 @@ pub fn detect_prereq_status(
     }
     for dir in extra_paths {
         let candidate = dir.join(binary);
-        if candidate.is_file() {
+        if is_executable_file(&candidate) {
             let path_str = candidate.to_string_lossy().into_owned();
             let version = version_fn(&path_str);
             return PrereqStatus::Found { version };
         }
     }
     PrereqStatus::Absent
+}
+
+/// Return `true` when `path` is a regular, executable file.
+///
+/// Why: A non-executable file at an extra path (e.g. `~/.claude/local/claude`
+/// that got placed without the executable bit) would otherwise produce a false
+/// `Found` result and print `✓ claude unknown version found`, masking a broken
+/// install. Checking executability prevents that false positive.
+///
+/// What: On Unix, checks that the file exists and has at least one executable
+/// bit set (`mode & 0o111 != 0`). On non-Unix platforms, falls back to a plain
+/// `is_file()` check (Windows executable detection is not bit-based).
+///
+/// Test: `tests::detect_found_in_extra_path` creates a `0o755` file and
+/// verifies it is detected; a `0o644` (non-executable) file would NOT match.
+fn is_executable_file(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        path.metadata()
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 /// Parse a version string from a binary's stdout output.
@@ -143,7 +170,6 @@ pub fn probe_version(binary: &str) -> Option<String> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
     /// Why: A binary on PATH must be found immediately via `check_fn`, and
@@ -161,13 +187,15 @@ mod tests {
         );
     }
 
-    /// Why: When PATH check fails but the binary exists in an extra path, it
-    /// must be detected and the version must be probed.
-    /// What: Creates a real temp file for the binary; check_fn returns false
-    /// but the file exists in extra_paths.
+    /// Why: When PATH check fails but the binary exists as an executable file in
+    /// an extra path, it must be detected and the version must be probed.
+    /// What: Creates a `0o755` temp file; check_fn returns false but the file
+    /// exists in extra_paths.
     /// Test: This is the test.
+    #[cfg(unix)]
     #[test]
     fn detect_found_in_extra_path() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new().expect("tmp dir");
         let bin_path = dir.path().join("claude");
         fs::write(&bin_path, b"#!/bin/sh\n").expect("write");
@@ -181,6 +209,25 @@ mod tests {
                 version: Some("1.2.3".to_owned())
             }
         );
+    }
+
+    /// Why: A file without the executable bit must NOT be treated as a found
+    /// binary — it could be a corrupt or partial install.
+    /// What: Creates a `0o644` temp file; asserts `detect_prereq_status` returns
+    /// `Absent` even though the file exists at the extra path.
+    /// Test: This is the test.
+    #[cfg(unix)]
+    #[test]
+    fn detect_non_executable_extra_path_is_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().expect("tmp dir");
+        let bin_path = dir.path().join("claude");
+        fs::write(&bin_path, b"#!/bin/sh\n").expect("write");
+        // 0o644 = readable but NOT executable.
+        fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o644)).expect("chmod");
+        let extra = vec![dir.path().to_owned()];
+        let status = detect_prereq_status("claude", &|_| false, &extra, &|_| Some("x".to_owned()));
+        assert_eq!(status, PrereqStatus::Absent);
     }
 
     /// Why: When PATH check fails and no extra path has the binary, the result
