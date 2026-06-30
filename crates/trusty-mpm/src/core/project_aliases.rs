@@ -90,13 +90,16 @@ impl ProjectAliasStore {
         let tmp_path = self.file_path.with_extension("json.tmp");
         std::fs::write(&tmp_path, &json)
             .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, &self.file_path).map_err(|e| {
-            anyhow::anyhow!(
+        if let Err(e) = std::fs::rename(&tmp_path, &self.file_path) {
+            // Best-effort cleanup: remove the leftover .json.tmp so it does not
+            // accumulate across repeated rename failures.
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(anyhow::anyhow!(
                 "failed to rename {} → {}: {e}",
                 tmp_path.display(),
                 self.file_path.display()
-            )
-        })?;
+            ));
+        }
         Ok(())
     }
 
@@ -106,7 +109,8 @@ impl ProjectAliasStore {
     /// site gets the same semantics without duplicating the logic.
     /// What: three outcomes:
     ///   • Identical entry already exists → no-op, returns `false`.
-    ///   • Alias exists with a *different* path → keep existing, log debug,
+    ///   • Alias exists with a *different* path → keep existing, log warn
+    ///     (visible at default log level so operator knows about the skip),
     ///     returns `false` (the caller should NOT save).
     ///   • Alias is new → insert, returns `true` (caller should save).
     /// Collision rule: keep existing. This is conservative — the first project
@@ -121,11 +125,12 @@ impl ProjectAliasStore {
                         "project-alias: already registered (same path); no-op"
                     );
                 } else {
-                    debug!(
+                    warn!(
                         alias,
                         existing = %entry.path.display(),
                         incoming = %path.display(),
-                        "project-alias: collision — keeping existing entry"
+                        "project-alias: collision — '{}' already points to a different path; use `tm register` to override",
+                        alias
                     );
                 }
                 return false;
