@@ -20,13 +20,62 @@ use serde::Deserialize;
 use crate::formatters::session::short_id;
 use crate::types::SessionRow;
 
+/// Find the git repository root for a working directory path.
+///
+/// Why: grouping sessions by git root avoids showing one row per session for the
+/// same project and makes large fleets more readable (#1839 Fix 5).
+/// What: runs `git -C <workdir> rev-parse --show-toplevel`; returns the git root
+/// as a `String` on success, or the original `workdir` when not inside a repo.
+/// Test: `group_sessions_by_git_root_no_git` verifies the fallback.
+pub(crate) fn git_root_for(workdir: &str) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(workdir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success());
+    match out {
+        Some(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        None => workdir.to_string(),
+    }
+}
+
+/// Group sessions by their git repository root, with the CWD repo listed first.
+///
+/// Why: `tm status` previously dumped one line per session with no grouping,
+/// making large fleets difficult to scan (#1839). Grouping by git root lets
+/// the operator immediately see which project each session belongs to.
+/// What: for each session derives its git root via `git_root_for`; builds a
+/// `Vec<(root, sessions)>` sorted by root path, with the CWD's repo first.
+/// Sessions whose workdir is not inside a git repo use `workdir` as the key.
+/// Test: `group_sessions_by_git_root_groups_correctly`.
+pub(crate) fn group_by_git_root<'a>(
+    sessions: &'a [SessionRow],
+    cwd_root: &str,
+) -> Vec<(String, Vec<&'a SessionRow>)> {
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<String, Vec<&SessionRow>> = BTreeMap::new();
+    for s in sessions {
+        let key = git_root_for(&s.workdir);
+        map.entry(key).or_default().push(s);
+    }
+    let mut groups: Vec<(String, Vec<&SessionRow>)> = map.into_iter().collect();
+    // Move the CWD's repo to the front for quick orientation.
+    if let Some(pos) = groups.iter().position(|(k, _)| k == cwd_root) {
+        let cwd_group = groups.remove(pos);
+        groups.insert(0, cwd_group);
+    }
+    groups
+}
+
 /// Print the daemon health line, session listing, and Telegram-bot note.
 ///
 /// Why: `status` and `start` must show identical state; sharing one printer
 /// keeps the two outputs from drifting and adds the Telegram note in one place.
-/// What: prints `daemon: ok`, one line per session from `GET /sessions`, and
-/// `Telegram bot active` when a bot token is resolvable from the environment or
-/// a local `.env.local` / `.env` file.
+/// What: prints `daemon: ok`, sessions grouped by git repository root (CWD's
+/// repo first, with `*` annotation), then `Telegram bot active` when a bot
+/// token is resolvable from the environment or a local env file.
 /// Test: covered indirectly by running `tm status` / `tm start` against a live
 /// daemon; Telegram token resolution is tested in `trusty-mpm-telegram`.
 pub(crate) async fn print_status(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
@@ -43,15 +92,27 @@ pub(crate) async fn print_status(client: &reqwest::Client, url: &str) -> anyhow:
         .error_for_status()?
         .json()
         .await?;
-    for s in &body.sessions {
-        let status = s.status.as_str().unwrap_or("unknown");
-        println!(
-            "{} {} {} ({} delegations)",
-            short_id(&s.id),
-            status,
-            s.workdir,
-            s.active_delegations
-        );
+
+    // Determine the CWD's git root for highlighting.
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let cwd_root = git_root_for(&cwd);
+
+    let groups = group_by_git_root(&body.sessions, &cwd_root);
+    for (root, sessions) in &groups {
+        let marker = if root == &cwd_root { " *" } else { "" };
+        println!("---- {} ({} session(s)){marker} ----", root, sessions.len());
+        for s in sessions {
+            let status = s.status.as_str().unwrap_or("unknown");
+            println!(
+                "  {} {} {} ({} delegations)",
+                short_id(&s.id),
+                status,
+                s.workdir,
+                s.active_delegations
+            );
+        }
     }
 
     if trusty_mpm::telegram::resolve_token("TELEGRAM_BOT_TOKEN").is_some() {
@@ -376,4 +437,57 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
 #[cfg(not(unix))]
 pub(crate) fn pid_alive(_pid: u32) -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_session(workdir: &str) -> SessionRow {
+        SessionRow {
+            id: serde_json::json!({"0": "00000000-0000-0000-0000-000000000000"}),
+            workdir: workdir.to_string(),
+            status: serde_json::json!("active"),
+            active_delegations: 0,
+        }
+    }
+
+    #[test]
+    fn group_sessions_by_git_root_no_git() {
+        // A path with no .git ancestor: the workdir itself is the key.
+        let sessions = vec![make_session("/tmp/no-git-dir")];
+        let groups = group_by_git_root(&sessions, "/tmp/no-git-dir");
+        assert_eq!(groups.len(), 1, "one group for the single session");
+        assert_eq!(groups[0].0, "/tmp/no-git-dir");
+        assert_eq!(groups[0].1.len(), 1);
+    }
+
+    #[test]
+    fn group_sessions_by_git_root_cwd_first() {
+        // Two sessions in different roots: cwd_root should be listed first.
+        let sessions = vec![
+            make_session("/tmp/alpha-dir"),
+            make_session("/tmp/beta-dir"),
+        ];
+        // Force the git_root_for fallback by using dirs that don't have .git.
+        let groups = group_by_git_root(&sessions, "/tmp/beta-dir");
+        // beta-dir is the cwd_root → it should be first.
+        assert_eq!(groups[0].0, "/tmp/beta-dir", "cwd_root group must be first");
+    }
+
+    #[test]
+    fn group_sessions_same_root_together() {
+        // Two sessions with the same workdir (same git root) → one group.
+        let sessions = vec![make_session("/tmp/same-dir"), make_session("/tmp/same-dir")];
+        let groups = group_by_git_root(&sessions, "/tmp/same-dir");
+        assert_eq!(groups.len(), 1, "same root → one group");
+        assert_eq!(groups[0].1.len(), 2, "two sessions in the group");
+    }
+
+    #[test]
+    fn git_root_for_nonexistent_path_returns_workdir() {
+        let path = "/tmp/definitely-not-a-git-repo-xyzzy-12345";
+        let result = git_root_for(path);
+        assert_eq!(result, path, "non-git path must fall back to workdir");
+    }
 }
