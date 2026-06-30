@@ -149,24 +149,34 @@ pub fn run(members: &[String], yes: bool, json: bool) -> i32 {
         return 3;
     }
 
-    // Phase 6: check external prerequisites for the selected members.
+    // Phase 6: detect and optionally install external prerequisites.
+    // Prints ✓ lines for found tools and offers interactive install for missing ones.
     {
+        use super::prereqs::phase::{run_prereq_phase, PrereqPhaseConfig};
         let crate_names: Vec<String> = selected.iter().map(|m| m.crate_name.clone()).collect();
-        let missing = super::prereqs::check_and_warn_real(&crate_names, json);
-        // If trusty-mpm is selected and tmux is missing, prompt (or warn in non-TTY/json).
+        let phase_result = run_prereq_phase(&PrereqPhaseConfig {
+            selected: &crate_names,
+            yes,
+            json,
+        });
+        // If trusty-mpm is selected and tmux is still missing after the phase,
+        // give the user one final chance to abort the overall install or continue.
         let mpm_selected = selected.iter().any(|m| m.crate_name == "trusty-mpm");
-        let tmux_missing = missing.iter().any(|m| m.binary == "tmux");
-        if mpm_selected && tmux_missing {
-            if !json && super::progress_ui::is_tty() {
-                let q = "trusty-mpm requires tmux (not found). Continue anyway?";
+        let tmux_still_missing = phase_result
+            .still_missing
+            .iter()
+            .any(|m| m.binary == "tmux");
+        if mpm_selected && tmux_still_missing {
+            if !json && super::progress_ui::is_tty() && !yes {
+                let q = "trusty-mpm requires tmux (still not installed). Continue install anyway?";
                 if !super::progress_ui::prompt_yes_no(q) {
                     eprintln!("tctl install: aborted (tmux not installed).");
                     return 3;
                 }
             } else if !json {
                 eprintln!(
-                    "tctl install: warning: trusty-mpm requires tmux which is not installed. \
-                     Continuing in non-interactive mode."
+                    "tctl install: warning: trusty-mpm requires tmux which is not installed; \
+                     managed sessions will not work until tmux is available."
                 );
             }
         }
