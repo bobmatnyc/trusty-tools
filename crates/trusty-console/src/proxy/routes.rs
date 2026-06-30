@@ -42,6 +42,8 @@ static HOP_BY_HOP: &[&str] = &[
 /// Why: The URL uses short names (`search`, `memory`, …) while `ServiceInfo.id`
 /// uses the full `trusty-*` prefix.  This function is the single source of
 /// truth for the proxy allowlist: `None` means the key is not permitted.
+/// `mpm` is added here in #1849 Phase 1 so `/proxy/mpm/*path` forwards to
+/// the live trusty-mpm daemon URL resolved from the connector's `ServiceInfo`.
 /// What: Returns the full service ID, or `None` for unknown/disallowed keys.
 /// Test: `test_daemon_key_mapping` below.
 fn full_id(daemon_key: &str) -> Option<&'static str> {
@@ -50,6 +52,10 @@ fn full_id(daemon_key: &str) -> Option<&'static str> {
         "memory" => Some("trusty-memory"),
         "analyze" => Some("trusty-analyze"),
         "review" => Some("trusty-review"),
+        // #1849 Phase 1: mpm added to the proxy allowlist so the console can
+        // forward requests to the live trusty-mpm HTTP daemon via its base URL
+        // resolved from the standard http_addr discovery file.
+        "mpm" => Some("trusty-mpm"),
         _ => None,
     }
 }
@@ -348,6 +354,8 @@ mod tests {
         assert_eq!(full_id("memory"), Some("trusty-memory"));
         assert_eq!(full_id("analyze"), Some("trusty-analyze"));
         assert_eq!(full_id("review"), Some("trusty-review"));
+        // #1849 Phase 1: mpm must be in the allowlist.
+        assert_eq!(full_id("mpm"), Some("trusty-mpm"));
         assert_eq!(full_id("unknown"), None);
     }
 

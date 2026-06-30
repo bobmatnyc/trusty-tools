@@ -1,33 +1,37 @@
-//! `ServiceConnector` implementation for `trusty-mpm` (#1222).
+//! `ServiceConnector` implementation for `trusty-mpm` (#1222, #1849).
 //!
 //! Why: the console's Overview must show trusty-mpm alongside the other services,
-//! and the Sessions tab depends on the trusty-mpm daemon being reachable. Unlike
-//! the other services (which write a plain `http_addr` file), the trusty-mpm
-//! daemon records its bound address in a TOML lock file at
-//! `~/.trusty-mpm/daemon.lock` (`addr = "http://127.0.0.1:<port>"`). This
-//! connector parses that lock file and TCP-probes the port.
-//! What: `MpmConnector` implements `ServiceConnector::detect()`: binary check →
-//! parse `daemon.lock` `addr` → TCP probe → `Running`/`Available`/`Absent`. The
-//! daemon's HTTP is internal plumbing (#1104); the console never calls it
-//! directly — the connector only probes liveness for the status badge.
+//! and the `/proxy/mpm/*` reverse-proxy route (#1849 Phase 1) requires a live URL
+//! from the connector so the proxy handler can resolve the upstream daemon.
+//! What: `MpmConnector` implements `ServiceConnector::detect()` using the standard
+//! `trusty-common` http_addr discovery file written by the daemon after bind
+//! (#1849 Phase 1). Primary path: binary check → `trusty-mpm` http_addr file
+//! (written via `write_daemon_addr`) → TCP probe → `Running`/`Available`/`Absent`.
+//! Backward-compat fallback: when the http_addr file is absent (old daemon that
+//! pre-dates #1849), the connector checks the TOML lock file `~/.trusty-mpm/
+//! daemon.lock` and reports Running without a URL (so the service badge is
+//! accurate but the proxy cannot reach it).
 //! Test: `mpm_connector_absent_binary`, `mpm_connector_parses_lock_addr`,
-//! `mpm_connector_no_lock_file` below.
+//! `mpm_connector_no_lock_file`, `mpm_connector_surfaces_url_via_http_addr` below.
 
 use std::path::PathBuf;
 
 use crate::connector::{ServiceConnector, ServiceInfo, ServiceStatus};
 
-use super::helpers::{binary_on_path, tcp_probe};
+use super::helpers::{binary_on_path, detect_service, tcp_probe};
 
 /// ServiceConnector for `trusty-mpm`.
 ///
-/// Why: trusty-mpm stores its daemon lock under `~/.trusty-mpm/daemon.lock`. The
-/// `addr` line there gives the exact loopback address the daemon bound (the port
-/// is dynamic/auto). When present and reachable the service is `Running`.
-/// What: implements `detect()` parsing the lock file's `addr` and TCP-probing it.
-/// Test: `mpm_connector_parses_lock_addr`, `mpm_connector_no_lock_file`.
+/// Why: surfaces the running trusty-mpm daemon in the console Overview and
+/// enables the `/proxy/mpm/*` route by providing the daemon's live base URL
+/// via the standard `http_addr` discovery file (#1849 Phase 1). A backward-compat
+/// fallback reads the TOML lock file for daemons that pre-date the http_addr write.
+/// What: implements `detect()` using the standard `trusty-common` data-dir
+/// discovery path (`resolve_data_dir("trusty-mpm")/http_addr`) as the primary
+/// source and the TOML lock at `~/.trusty-mpm/daemon.lock` as a fallback.
+/// Test: unit tests below; run with `cargo test -p trusty-console`.
 pub struct MpmConnector {
-    /// Override for the home directory (used in tests).
+    /// Override for the home directory (used in lock-file fallback tests).
     home_dir: Option<PathBuf>,
 }
 
@@ -43,7 +47,8 @@ impl MpmConnector {
 
     /// Create a connector that uses `home_dir` instead of the real home.
     ///
-    /// Why: unit tests must not read the real user's `~/.trusty-mpm`.
+    /// Why: unit tests for the lock-file fallback must not read the real user's
+    /// `~/.trusty-mpm`.
     /// What: stores `home_dir` for use in `lock_file_path()`.
     /// Test: `mpm_connector_parses_lock_addr`, `mpm_connector_no_lock_file`.
     #[cfg(test)]
@@ -119,14 +124,22 @@ impl ServiceConnector for MpmConnector {
         "Trusty MPM"
     }
 
-    /// Detect trusty-mpm status.
+    /// Detect trusty-mpm status, surfacing the daemon URL when reachable.
     ///
-    /// Why: reads `~/.trusty-mpm/daemon.lock` (TOML) — the file the daemon writes
-    /// after binding its (dynamic) port. The console only probes liveness; it
-    /// never calls the daemon HTTP directly (#1104).
-    /// What: binary check → parse lock `addr` → TCP probe → status. No discovery
-    /// file (or unreachable) with the binary present yields `Available`.
-    /// Test: `mpm_connector_parses_lock_addr`, `mpm_connector_no_lock_file`.
+    /// Why: Phase 1 (#1849) wires trusty-mpm into the console reverse proxy;
+    /// the proxy handler resolves the daemon base URL from the connector's
+    /// `ServiceInfo.url` field, so this method must surface a URL when the
+    /// daemon is reachable via the standard `http_addr` discovery file.
+    /// Primary path: binary check → `resolve_data_dir("trusty-mpm")/http_addr`
+    /// (written by the daemon via `write_daemon_addr` after bind) → TCP probe
+    /// → `Running` with `url: Some(base_url)`. If the http_addr file is absent
+    /// (old daemon that pre-dates #1849), falls back to the TOML lock file and
+    /// reports `Running` without a URL (proxy cannot reach it but the badge is
+    /// correct). Binary absent → `Absent`.
+    /// What: delegates to `detect_service()` for the http_addr path (which adds
+    /// the URL and version); the lock-file fallback uses a direct tcp_probe.
+    /// Test: `mpm_connector_surfaces_url_via_http_addr` (primary path),
+    /// `mpm_connector_parses_lock_addr` (fallback path).
     fn detect(&self) -> ServiceInfo {
         if !binary_on_path("trusty-mpm") {
             return ServiceInfo {
@@ -139,6 +152,22 @@ impl ServiceConnector for MpmConnector {
             };
         }
 
+        // Primary path: standard http_addr file written by #1849 daemon.
+        // `resolve_data_dir` is infallible in practice; degrade to the lock-file
+        // fallback if the data directory cannot be resolved.
+        if let Ok(dir) = trusty_common::resolve_data_dir("trusty-mpm") {
+            let addr_file = dir.join("http_addr");
+            if addr_file.exists() {
+                // Delegate to the shared helper which does addr-file read,
+                // TCP probe, version fetch, and builds ServiceInfo with url.
+                return detect_service(self.id(), self.display_name(), "trusty-mpm", addr_file);
+            }
+        }
+
+        // Backward-compat fallback: old daemons (pre-#1849) only write the TOML
+        // lock file. Report Running without a URL so the badge is correct, but
+        // the proxy cannot be used until the daemon is restarted with the new
+        // version that writes the http_addr file.
         if let Ok(body) = std::fs::read_to_string(self.lock_file_path())
             && let Some(addr) = parse_lock_addr(&body)
             && tcp_probe(&addr)
@@ -147,11 +176,13 @@ impl ServiceConnector for MpmConnector {
                 id: self.id().to_string(),
                 display_name: self.display_name().to_string(),
                 status: ServiceStatus::Running,
-                // The daemon HTTP is internal plumbing; do not surface a URL the
-                // operator might call directly (use the console's session routes).
                 version: None,
+                // URL intentionally absent: old daemon does not write http_addr,
+                // so the proxy allowlist cannot resolve a safe upstream URL.
                 url: None,
-                hint: None,
+                hint: Some(
+                    "daemon is running but pre-dates #1849 — restart to enable proxy".to_string(),
+                ),
             };
         }
 
@@ -172,7 +203,18 @@ impl ServiceConnector for MpmConnector {
 mod tests {
     use super::*;
     use std::fs;
+    use std::net::TcpListener;
     use tempfile::TempDir;
+    use trusty_common::DATA_DIR_OVERRIDE_ENV;
+
+    /// Mutex serialising tests that mutate `TRUSTY_DATA_DIR_OVERRIDE`.
+    ///
+    /// Why: concurrent tests that set the same env var race with each other
+    /// and with trusty-common's own test suite when run in the same binary.
+    /// Sharing one lock prevents spurious env-var clobber failures.
+    /// What: a `std::sync::Mutex<()>` locked by every env-mutating test.
+    /// Test: used by the tests in this module; not itself a test.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Why: the TCP probe needs a bare host:port; the parser must strip the TOML
     /// quoting and the `http://` scheme.
@@ -203,9 +245,6 @@ mod tests {
 
     /// Why: the key match must be EXACT — a different key whose name merely starts
     /// with `addr` (e.g. `addr_extra`) must NOT be mistaken for the `addr` line.
-    /// The old `strip_prefix("addr")` matched `addr_extra` and, after stripping
-    /// the leading ` _extra =` punctuation loosely, could have yielded a garbage
-    /// address. Here the lone non-`addr` key must parse to `None`.
     /// Test: this test (regression guard for review finding #4).
     #[test]
     fn parse_lock_addr_ignores_prefixed_key() {
@@ -227,7 +266,7 @@ mod tests {
     }
 
     /// Why: with no binary on PATH the connector must report Absent regardless of
-    /// any stray lock file.
+    /// any stale lock file.
     /// Test: this test.
     #[test]
     fn mpm_connector_absent_binary() {
@@ -242,33 +281,98 @@ mod tests {
     }
 
     /// Why: a stale lock pointing at a dead port must yield Available (binary
-    /// present) — never Running — because the TCP probe fails.
+    /// present) — never Running — because the TCP probe fails, and there is no
+    /// http_addr file to pick up.
     /// What: writes a lock with an unlikely port, calls detect(), and asserts the
     /// status is deterministic given binary presence.
     /// Test: this test.
     #[test]
     fn mpm_connector_parses_lock_addr() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = TempDir::new().expect("tempdir");
+        // Override data dir to a path that has NO http_addr file so the
+        // connector falls through to the lock-file path.
+        let data_tmp = TempDir::new().expect("data-tempdir");
+        unsafe {
+            std::env::set_var(DATA_DIR_OVERRIDE_ENV, data_tmp.path());
+        }
         let lock = tmp.path().join(".trusty-mpm").join("daemon.lock");
         fs::create_dir_all(lock.parent().expect("parent")).expect("mkdir");
         fs::write(&lock, "pid = 1\naddr = \"http://127.0.0.1:14998\"\n").expect("write");
         let info = MpmConnector::with_home(tmp.path().to_path_buf()).detect();
+        unsafe {
+            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
+        }
         if which::which("trusty-mpm").is_ok() {
-            // Binary present, dead port → Available (not Running).
+            // Binary present, no http_addr, dead lock port → Available (not Running).
             assert_eq!(info.status, ServiceStatus::Available);
         } else {
             assert_eq!(info.status, ServiceStatus::Absent);
         }
     }
 
-    /// Why: no lock file with the binary present must yield Available.
+    /// Why: no lock file and no http_addr with the binary present must yield
+    /// Available.
     /// Test: this test.
     #[test]
     fn mpm_connector_no_lock_file() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = TempDir::new().expect("tempdir");
+        let data_tmp = TempDir::new().expect("data-tempdir");
+        unsafe {
+            std::env::set_var(DATA_DIR_OVERRIDE_ENV, data_tmp.path());
+        }
         let info = MpmConnector::with_home(tmp.path().to_path_buf()).detect();
+        unsafe {
+            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
+        }
         if which::which("trusty-mpm").is_ok() {
             assert_eq!(info.status, ServiceStatus::Available);
+        } else {
+            assert_eq!(info.status, ServiceStatus::Absent);
+        }
+    }
+
+    /// Why: the primary path (#1849) must surface `url: Some(base_url)` when the
+    /// http_addr file exists and the port is reachable; this is what the proxy
+    /// handler reads to forward requests.
+    /// What: writes a valid addr to the standard http_addr file under a temp
+    /// TRUSTY_DATA_DIR_OVERRIDE, binds a real listening port so tcp_probe passes,
+    /// calls detect(), and asserts the url and Running status.
+    /// Test: this test (key regression guard for #1849 Phase 1).
+    #[test]
+    fn mpm_connector_surfaces_url_via_http_addr() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let data_tmp = TempDir::new().expect("data-tempdir");
+        unsafe {
+            std::env::set_var(DATA_DIR_OVERRIDE_ENV, data_tmp.path());
+        }
+        // Write the http_addr file with a listening port so tcp_probe passes.
+        let mpm_dir = data_tmp.path().join("trusty-mpm");
+        fs::create_dir_all(&mpm_dir).expect("mkdir");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind free port");
+        let addr = listener.local_addr().expect("local_addr").to_string();
+        fs::write(mpm_dir.join("http_addr"), &addr).expect("write addr");
+
+        let info = MpmConnector::new().detect();
+
+        // Drop listener after detect() so the port is open during the probe.
+        drop(listener);
+        unsafe {
+            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
+        }
+
+        if which::which("trusty-mpm").is_ok() {
+            assert_eq!(
+                info.status,
+                ServiceStatus::Running,
+                "http_addr present + port open must yield Running, got: {info:?}"
+            );
+            assert_eq!(
+                info.url,
+                Some(format!("http://{addr}")),
+                "Running status must include daemon base URL for proxy routing"
+            );
         } else {
             assert_eq!(info.status, ServiceStatus::Absent);
         }
