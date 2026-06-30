@@ -83,17 +83,28 @@ impl DaemonInfo {
     /// A TCP connect to the lock-file address (or the env/default URL when absent)
     /// gives the same "is the port alive?" answer that the HTTP health probe uses,
     /// so the banner and `tm health` agree on the daemon status.
-    /// What: reads `read_lock_addr()` for the addr; TCP-probes the result. When
-    /// the lock file is absent or the PID is stale, falls back to probing the
-    /// `TRUSTY_MPM_URL` env var or `DEFAULT_DAEMON_URL`. Sets `online` from the
-    /// TCP connect result (not the PID check).
-    /// Test: `probe_with_nonlistening_addr_returns_offline`.
+    /// What: reads `read_lock_addr()` for the addr; the lock file stores a full
+    /// HTTP URL (e.g. `http://127.0.0.1:7880`), so the raw value is passed
+    /// through `url_to_probe_addr` to extract a bare `host:port` before handing
+    /// it to `tcp_probe` (`to_socket_addrs` rejects scheme-prefixed strings and
+    /// would silently return offline — #1847). When the lock file is absent or
+    /// the PID is stale, falls back to probing `TRUSTY_MPM_URL` or
+    /// `DEFAULT_DAEMON_URL`. Sets `online` from the TCP connect result (not the
+    /// PID check).
+    /// Test: `probe_with_nonlistening_addr_returns_offline`,
+    /// `probe_url_addr_from_lock_file_succeeds` (live daemon on :7880).
     pub(crate) fn from_lock_file_with_probe() -> Self {
         let addr = read_lock_addr().or_else(probe_default_addr);
         let Some(addr) = addr else {
             return DaemonInfo::default();
         };
-        let online = tcp_probe(&addr);
+        // The lock file stores a full HTTP URL such as `http://127.0.0.1:7880`.
+        // `tcp_probe` calls `to_socket_addrs` which rejects scheme-prefixed
+        // strings and would always return `false` for a URL, making the banner
+        // show "daemon offline" even when the daemon is healthy (#1847).
+        // `url_to_probe_addr` strips the scheme and path, yielding `host:port`.
+        let probe_addr = url_to_probe_addr(&addr).unwrap_or_else(|| addr.clone());
+        let online = tcp_probe(&probe_addr);
         DaemonInfo {
             addr,
             online,
@@ -581,5 +592,36 @@ mod tests {
         assert!(url_to_probe_addr("").is_none());
         assert!(url_to_probe_addr("http://").is_none());
         assert!(url_to_probe_addr("http:///").is_none());
+    }
+
+    /// A scheme-prefixed URL such as `http://127.0.0.1:7880` (the format the
+    /// daemon lock file stores) must NOT be passed directly to `tcp_probe` —
+    /// `to_socket_addrs` rejects it and always returns `false`, making the
+    /// banner show "daemon offline" even when the daemon is healthy (#1847).
+    /// `url_to_probe_addr` must extract a bare `host:port` from such URLs.
+    ///
+    /// Why: this test documents the exact bug fixed in #1847 and prevents it
+    /// from regressing.  The daemon lock file writes `addr = "http://..."`, so
+    /// `read_lock_addr` returns a full URL.  `from_lock_file_with_probe` must
+    /// normalise the URL before calling `tcp_probe`.
+    /// Test: direct unit test of the normalization helper used in the fix.
+    #[test]
+    fn url_to_probe_addr_strips_http_scheme_from_lock_file_format() {
+        // This is the exact string the daemon lock file stores.
+        let lock_file_addr = "http://127.0.0.1:7880";
+        let probe_addr = url_to_probe_addr(lock_file_addr)
+            .expect("must convert http://127.0.0.1:7880 to a probe addr");
+        // Must be a bare host:port, not a URL — `to_socket_addrs` requires this.
+        assert_eq!(
+            probe_addr, "127.0.0.1:7880",
+            "url_to_probe_addr must strip scheme from lock-file URL format"
+        );
+        // Confirm the bare addr is usable by to_socket_addrs (doesn't panic/error
+        // on the conversion itself — whether the port is listening is irrelevant here).
+        use std::net::ToSocketAddrs as _;
+        assert!(
+            probe_addr.to_socket_addrs().is_ok(),
+            "probe_addr must be parseable by to_socket_addrs: {probe_addr:?}"
+        );
     }
 }
