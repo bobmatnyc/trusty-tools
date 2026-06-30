@@ -52,22 +52,31 @@ fn banner_file_path() -> Option<std::path::PathBuf> {
 /// Why: seeding the file makes it discoverable — the user can open
 /// `~/.trusty-mpm/banner.txt` and edit it without knowing where the default
 /// came from. Failure is non-fatal (read-only home, restricted container, etc.).
-/// What: creates `~/.trusty-mpm/` if absent, then writes `DEFAULT_BANNER_ART`
-/// only when the file does not already exist. Never overwrites.
-/// Test: `banner_source_first_run_writes_default`.
+/// What: creates `~/.trusty-mpm/` if absent, then atomically opens the file
+/// with `create_new` (O_CREAT|O_EXCL) and writes `DEFAULT_BANNER_ART`. The
+/// atomic open eliminates the TOCTOU window between an existence check and a
+/// subsequent write; `AlreadyExists` is treated as a benign no-op. Never
+/// overwrites an existing file.
+/// Test: `banner_source_first_run_writes_default`, `banner_source_first_run_no_overwrite`.
 pub(crate) fn write_default_if_absent() {
     let Some(path) = home_banner_path() else {
         return;
     };
-    if path.exists() {
-        return;
-    }
     if let Some(parent) = path.parent()
         && std::fs::create_dir_all(parent).is_err()
     {
         return;
     }
-    let _ = std::fs::write(&path, DEFAULT_BANNER_ART);
+    // Atomic exclusive create: AlreadyExists → benign no-op; any other error
+    // is also silently ignored (best-effort, non-fatal).
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let _ = f.write_all(DEFAULT_BANNER_ART.as_bytes());
+    }
 }
 
 /// Load the banner art text, preferring the user-editable override file.
@@ -145,7 +154,7 @@ mod tests {
     /// When the override file is present and non-empty, it is used.
     #[test]
     fn banner_source_override_file_used() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir();
         let file = dir.join("banner.txt");
         std::fs::write(&file, "CUSTOM ART\n").unwrap();
@@ -168,7 +177,7 @@ mod tests {
     /// When the override file is missing, the embedded default is returned.
     #[test]
     fn banner_source_missing_falls_back() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir();
         let file = dir.join("no-such.txt");
 
@@ -191,7 +200,7 @@ mod tests {
     /// default is returned.
     #[test]
     fn banner_source_empty_falls_back() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir();
         let file = dir.join("empty.txt");
         std::fs::write(&file, "   \n   \n").unwrap();
@@ -214,7 +223,7 @@ mod tests {
     /// Env-var path takes precedence over the home-dir path.
     #[test]
     fn banner_source_env_override_takes_precedence() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir();
         let env_file = dir.join("env-banner.txt");
         std::fs::write(&env_file, "ENV ART\n").unwrap();
@@ -253,7 +262,7 @@ mod tests {
     /// First run: default art is written to ~/.trusty-mpm/banner.txt.
     #[test]
     fn banner_source_first_run_writes_default() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fake_home = temp_dir().join("fresh-home");
         std::fs::create_dir_all(&fake_home).unwrap();
 
@@ -291,7 +300,7 @@ mod tests {
     /// First run does not overwrite an existing file.
     #[test]
     fn banner_source_first_run_no_overwrite() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fake_home = temp_dir().join("existing-home");
         let banner_dir = fake_home.join(".trusty-mpm");
         std::fs::create_dir_all(&banner_dir).unwrap();
