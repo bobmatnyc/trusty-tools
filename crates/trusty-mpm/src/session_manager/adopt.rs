@@ -182,6 +182,8 @@ impl SessionManager {
             // Adopted sessions have no tracked source project.
             source_id: None,
             claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
         };
 
         // ── Atomic already-adopted check + upsert under ONE held write guard ──────
@@ -235,6 +237,8 @@ mod tests {
             workspace_owned: false,
             source_id: None,
             claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
         }
     }
 
@@ -258,6 +262,8 @@ mod tests {
             workspace_owned: false,
             source_id: None,
             claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
         }
     }
 

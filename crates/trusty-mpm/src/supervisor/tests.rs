@@ -176,6 +176,8 @@ async fn seed_sessions(
             workspace_owned: false,
             source_id: None,
             claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
         };
         store.upsert(rec).await.expect("seed upsert");
         ids.push(id);
@@ -305,6 +307,8 @@ fn rec(state: ManagedSessionState, pending: Option<&str>) -> SessionRecord {
         workspace_owned: false,
         source_id: None,
         claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
     }
 }
 

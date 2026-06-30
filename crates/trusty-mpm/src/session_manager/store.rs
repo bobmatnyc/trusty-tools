@@ -368,6 +368,8 @@ mod tests {
             workspace_owned: false,
             source_id: None,
             claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
         }
     }
 

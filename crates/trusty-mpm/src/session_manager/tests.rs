@@ -548,6 +548,33 @@ async fn manager_decommission_removes_workspace() {
     assert!(after.workspace_path.is_none());
 }
 
+// Build a minimal Active session record for reconcile tests (avoids repeating
+// 20-field struct literals when only tmux_name / task / ws_path vary).
+fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str) -> SessionRecord {
+    SessionRecord {
+        id: ManagedSessionId::new(),
+        tmux_name: tmux_name.into(),
+        cwd: PathBuf::from("/tmp"),
+        task: task.into(),
+        state: ManagedSessionState::Active,
+        created_at: Utc::now(),
+        last_activity_at: None,
+        workspace_path: Some(PathBuf::from(ws_path)),
+        repo_url: None,
+        branch: None,
+        pending_decision: None,
+        proposed_default: None,
+        correlation: Default::default(),
+        runtime: Default::default(),
+        ephemeral: false,
+        workspace_owned: false,
+        source_id: None,
+        claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
+    }
+}
+
 /// Reconciliation with a gone tmux session must yield `Stopped` (resumable),
 /// not `Orphaned` or `Dead` (both imply the session is lost).
 ///
@@ -570,47 +597,10 @@ async fn manager_reconcile_gone_tmux_yields_stopped() {
 
     let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
 
-    let live_record = SessionRecord {
-        id: ManagedSessionId::new(),
-        tmux_name: "tmpm-live-session".into(),
-        cwd: PathBuf::from("/tmp"),
-        task: "live task".into(),
-        state: ManagedSessionState::Active,
-        created_at: Utc::now(),
-        last_activity_at: None,
-        workspace_path: Some(PathBuf::from("/tmp/live-ws")),
-        repo_url: None,
-        branch: None,
-        pending_decision: None,
-        proposed_default: None,
-        correlation: Default::default(),
-        runtime: Default::default(),
-        ephemeral: false,
-        workspace_owned: false,
-        source_id: None,
-        claude_session_id: None,
-    };
+    let live_record = make_active_test_record("tmpm-live-session", "live task", "/tmp/live-ws");
     // A record whose tmux session will NOT be found (simulating reboot).
-    let rebooted_record = SessionRecord {
-        id: ManagedSessionId::new(),
-        tmux_name: "tmpm-rebooted-session".into(),
-        cwd: PathBuf::from("/tmp"),
-        task: "rebooted task".into(),
-        state: ManagedSessionState::Active,
-        created_at: Utc::now(),
-        last_activity_at: None,
-        workspace_path: Some(PathBuf::from("/tmp/rebooted-ws")),
-        repo_url: None,
-        branch: None,
-        pending_decision: None,
-        proposed_default: None,
-        correlation: Default::default(),
-        runtime: Default::default(),
-        ephemeral: false,
-        workspace_owned: false,
-        source_id: None,
-        claude_session_id: None,
-    };
+    let rebooted_record =
+        make_active_test_record("tmpm-rebooted-session", "rebooted task", "/tmp/rebooted-ws");
     {
         let mut store = mgr.store.write().await;
         store.upsert(live_record.clone()).await.unwrap();
@@ -673,6 +663,8 @@ async fn manager_reconcile_skips_decommissioned() {
         workspace_owned: false,
         source_id: None,
         claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
     };
     {
         let mut store = mgr.store.write().await;
@@ -1393,6 +1385,8 @@ async fn seed_record(
         workspace_owned: false,
         source_id: None,
         claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
     };
     mgr.store
         .write()
@@ -1814,6 +1808,8 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
             workspace_owned: false,
             source_id: None,
             claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
         };
         mgr.store.write().await.upsert(record).await.expect("seed");
     }
@@ -1897,6 +1893,8 @@ async fn manager_decommission_unowned_skips_deletion() {
         workspace_owned: false,
         source_id: None,
         claude_session_id: None,
+        scrollback_path: None,
+        last_cwd: None,
     };
     mgr.store.write().await.upsert(record).await.unwrap();
 
