@@ -46,18 +46,28 @@ pub(crate) fn git_root_for(workdir: &str) -> String {
 /// Why: `tm status` previously dumped one line per session with no grouping,
 /// making large fleets difficult to scan (#1839). Grouping by git root lets
 /// the operator immediately see which project each session belongs to.
-/// What: for each session derives its git root via `git_root_for`; builds a
-/// `Vec<(root, sessions)>` sorted by root path, with the CWD's repo first.
+/// What: for each session derives its git root via `git_root_for`, memoizing
+/// results in a `HashMap` keyed by `workdir` so each unique working directory
+/// spawns at most one `git rev-parse` subprocess (O(unique_dirs) instead of
+/// O(n) subprocess spawns for n sessions). Builds a `Vec<(root, sessions)>`
+/// sorted by root path, with the CWD's repo first.
 /// Sessions whose workdir is not inside a git repo use `workdir` as the key.
 /// Test: `group_sessions_by_git_root_groups_correctly`.
 pub(crate) fn group_by_git_root<'a>(
     sessions: &'a [SessionRow],
     cwd_root: &str,
 ) -> Vec<(String, Vec<&'a SessionRow>)> {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap};
+    // Memoize git_root_for: many sessions may share the same workdir, but even
+    // when they don't, adjacent sessions often live in the same repo. One
+    // subprocess per unique workdir instead of one per session row.
+    let mut cache: HashMap<&str, String> = HashMap::new();
     let mut map: BTreeMap<String, Vec<&SessionRow>> = BTreeMap::new();
     for s in sessions {
-        let key = git_root_for(&s.workdir);
+        let key = cache
+            .entry(s.workdir.as_str())
+            .or_insert_with(|| git_root_for(&s.workdir))
+            .clone();
         map.entry(key).or_default().push(s);
     }
     let mut groups: Vec<(String, Vec<&SessionRow>)> = map.into_iter().collect();
