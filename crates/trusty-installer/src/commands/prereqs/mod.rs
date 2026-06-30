@@ -4,13 +4,19 @@
 //! will not pull in. Probing before install lets the operator fix the environment
 //! before a half-installed stack produces confusing runtime errors.
 //!
-//! What: Defines a prerequisite table (binary, what it is needed for, install
-//! hint) and `check_and_warn` which runs the table against the selected crates,
-//! emitting warnings for any missing tools. Only tools relevant to the selected
-//! members are checked.
+//! What: Defines the prerequisite table (`PREREQS`), the `check_and_warn` /
+//! `check_and_warn_real` compatibility functions (for callers that only need a
+//! simple presence check), and re-exports the focused sub-modules:
+//! - `detect` — binary detection + version query (extra-path fallback for claude).
+//! - `hints` — platform/pkg-mgr detection and OS-specific install-command selection.
+//! - `phase` — full check-confirm-offer-install-reverify phase orchestration.
 //!
-//! Test: `tests` validates the relevance filtering and the missing-tool detection
-//! using an injected checker function instead of real `which::which` calls.
+//! Test: `tests` validates the legacy `check_and_warn` relevance filtering and
+//! missing-tool detection; new sub-module tests live in their respective files.
+
+pub mod detect;
+pub mod hints;
+pub mod phase;
 
 use crate::commands::progress_ui::narrator;
 
@@ -21,7 +27,8 @@ use crate::commands::progress_ui::narrator;
 ///
 /// What: `binary` is the executable name probed with the checker; `required_for`
 /// is the human label; `affects` is the set of stable-set crate/binary names
-/// this prereq gates; `hint` is the install guidance emitted when missing.
+/// this prereq gates; `hint` is the legacy install guidance emitted when missing
+/// (the richer `phase` module uses `hints::install_hint_for` instead).
 ///
 /// Test: Used by `PREREQS` table and `check_and_warn`.
 pub struct Prereq {
@@ -31,7 +38,7 @@ pub struct Prereq {
     pub required_for: &'static str,
     /// Stable-set crate or binary names that need this prerequisite.
     pub affects: &'static [&'static str],
-    /// Install guidance printed when the binary is missing.
+    /// Install guidance printed when the binary is missing (legacy path).
     pub hint: &'static str,
 }
 
