@@ -108,6 +108,25 @@ pub(super) fn fetch_health_version(addr: &str) -> Option<String> {
 
 // ─── orchestrator ─────────────────────────────────────────────────────────────
 
+/// Strip all leading `http://` or `https://` scheme prefixes from a bare
+/// address string.
+///
+/// Why: Discovery addr files should contain bare `host:port` (e.g.
+/// `127.0.0.1:7788`), but a malformed or misconfigured file might include one
+/// or more scheme prefixes.  Building `format!("http://{addr}")` with a
+/// scheme-prefixed addr produces a double-scheme URL
+/// (`http://http://127.0.0.1:7788`) that reqwest fails to parse.
+/// Stripping all leading schemes before composing guarantees exactly one
+/// well-formed `http://host:port` URL.
+/// What: Delegates to `crate::url_util::strip_schemes` — the single shared
+/// implementation backing both this function and `proxy::routes::normalize_base_url`
+/// so the loop logic cannot drift between the two sites.  Returns a slice of
+/// `addr`, allocation-free on the hot path.
+/// Test: `test_normalize_addr_*` below; `url_util::tests` cover the core loop.
+fn normalize_addr(addr: &str) -> &str {
+    crate::url_util::strip_schemes(addr)
+}
+
 /// Run the standard P0 detection sequence for a service.
 ///
 /// Why: All three connectors use the same three-step sequence; extracting it
@@ -138,7 +157,11 @@ pub(super) fn detect_service(
     if let Some(addr) = read_addr_file(&addr_file)
         && tcp_probe(&addr)
     {
-        let base_url = format!("http://{addr}");
+        // Normalize the addr to strip any accidental scheme prefix before
+        // building the base URL — prevents a double-scheme like
+        // `http://http://127.0.0.1:7788` if the addr file was written with
+        // the scheme included (#1849 Phase 2 hardening).
+        let base_url = format!("http://{}", normalize_addr(&addr));
         let version = fetch_health_version(&addr);
         return ServiceInfo {
             id: id.to_string(),
@@ -238,5 +261,34 @@ mod tests {
     #[test]
     fn test_tcp_probe_malformed_addr() {
         assert!(!tcp_probe("not-an-addr"));
+    }
+
+    // ── normalize_addr ──────────────────────────────────────────────────────
+
+    /// Why: a bare `host:port` must pass through unchanged.
+    /// What: calls normalize_addr with `127.0.0.1:7788`; asserts no change.
+    /// Test: this test itself.
+    #[test]
+    fn test_normalize_addr_bare_unchanged() {
+        assert_eq!(normalize_addr("127.0.0.1:7788"), "127.0.0.1:7788");
+    }
+
+    /// Why: an addr file that was erroneously written with an `http://` scheme
+    /// (e.g. `http://127.0.0.1:7788`) must have the scheme stripped so that
+    /// `format!("http://{}", normalize_addr(...))` produces exactly one scheme.
+    /// What: calls normalize_addr with `http://127.0.0.1:7788`; asserts scheme
+    /// is stripped, returning `127.0.0.1:7788`.
+    /// Test: this test itself (double-scheme regression guard for #1849 Phase 2).
+    #[test]
+    fn test_normalize_addr_strips_http_scheme() {
+        assert_eq!(normalize_addr("http://127.0.0.1:7788"), "127.0.0.1:7788");
+    }
+
+    /// Why: an https-prefixed addr must also have the scheme stripped.
+    /// What: calls normalize_addr with `https://127.0.0.1:7788`; asserts `127.0.0.1:7788`.
+    /// Test: this test itself.
+    #[test]
+    fn test_normalize_addr_strips_https_scheme() {
+        assert_eq!(normalize_addr("https://127.0.0.1:7788"), "127.0.0.1:7788");
     }
 }

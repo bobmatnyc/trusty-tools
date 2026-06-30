@@ -11,8 +11,10 @@
 //!   - `GET /api/console/metrics/analyze/visualize?index=<id>` — graph+entities+clusters.
 //!   - `…/api/console/sessions/*` — the single HTTP front door for the trusty-mpm
 //!     session manager (#1222); handlers live in `crate::routes::sessions`.
-//!   - `ANY /proxy/{daemon}/{*path}` — reverse-proxy to live daemon (mpm is NOT
-//!     in the proxy allowlist — operators use `/api/console/sessions/*` instead).
+//!   - `ANY /api/{service}/{*path}` — reverse-proxy to live daemon via clean path
+//!     (#1849 Phase 2); `{service}` ∈ {search, memory, analyze, review, mpm}.
+//!   - `ANY /proxy/{daemon}/{*path}` — DEPRECATED alias; routes to the same
+//!     handler with a trace-level deprecation note.
 //!   - `GET /` and `GET /ui/*path` — serve the embedded Svelte SPA.
 //!
 //! All logs go to stderr; stdout is clean.
@@ -351,8 +353,19 @@ pub fn build_router(state: AppState) -> Router {
             "/api/console/metrics/analyze/visualize",
             get(analyze_visualize_handler),
         )
-        // Reverse-proxy: /proxy/{daemon}/{*path}
-        .route("/proxy/{daemon}/{*path}", any(crate::proxy::proxy_handler))
+        // Primary reverse-proxy: /api/{service}/{*path} (#1849 Phase 2).
+        // {service} ∈ {search, memory, analyze, review, mpm}.
+        // No collision with /api/console/*: axum (matchit 0.8) routes literal
+        // segments before wildcard captures, so /api/console/* always wins.
+        // The proxy handler also rejects service_key == "console" explicitly as // pragma: allowlist secret
+        // a routing-independent second layer of defence.
+        .route("/api/{service}/{*path}", any(crate::proxy::proxy_handler))
+        // Deprecated alias: /proxy/{daemon}/{*path} → same handler with a trace log.
+        // Kept for backward compatibility; callers should migrate to /api/{service}/*.
+        .route(
+            "/proxy/{daemon}/{*path}",
+            any(crate::proxy::deprecated_proxy_handler),
+        )
         .route("/", get(spa_index_handler))
         .route("/ui", get(spa_index_handler))
         .route("/ui/", get(spa_index_handler))
@@ -1028,11 +1041,88 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    /// Why: the proxy route for an unknown daemon key must return 400.
+    /// Why: the `/api/{service}/*` proxy route for an unknown service key must
+    /// return 400 (not a 404 route-miss, since the route pattern matches but the
+    /// handler rejects the key).
+    /// What: issues GET /api/unknown/health on the new primary path, asserts 400.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_api_proxy_unknown_service_returns_400() {
+        let router = build_router(make_test_state());
+
+        let req = Request::builder()
+            .uri("/api/unknown/health")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Why: the `/api/{service}/*` route for a known service that is not running
+    /// must return 503 (cache cold) — proves the route reaches the proxy handler.
+    /// What: issues GET /api/search/health on a fresh state (no poll),
+    /// asserts 503 SERVICE_UNAVAILABLE.
+    /// Test: this test itself (#1849 Phase 2 primary path).
+    #[tokio::test]
+    async fn test_api_proxy_known_service_cold_cache_returns_503() {
+        let router = build_router(make_test_state());
+
+        let req = Request::builder()
+            .uri("/api/search/health")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Why: `mpm` must be reachable via the new `/api/mpm/*` path and must NOT
+    /// return 400 (key absent from allowlist).
+    /// What: issues GET /api/mpm/health on a fresh state (no poll),
+    /// asserts 503 SERVICE_UNAVAILABLE (not 400 BAD_REQUEST).
+    /// Test: this test itself (#1849 Phase 2).
+    #[tokio::test]
+    async fn test_api_proxy_mpm_is_in_allowlist_cold_cache_returns_503() {
+        let router = build_router(make_test_state());
+
+        let req = Request::builder()
+            .uri("/api/mpm/health")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "/api/mpm/health must return 503 (mpm in allowlist, cache cold), not 400"
+        );
+    }
+
+    /// Why: the deprecated `/proxy/{daemon}/*` alias must still route to the
+    /// proxy handler; removing it would break external callers mid-migration.
+    /// What: issues GET /proxy/search/health on the deprecated path, asserts 503
+    /// (cache cold, not 404 route-miss or 400 key-rejected).
+    /// Test: this test itself (backward-compat guard for #1849 Phase 2).
+    #[tokio::test]
+    async fn test_deprecated_proxy_alias_still_routes() {
+        let router = build_router(make_test_state());
+
+        let req = Request::builder()
+            .uri("/proxy/search/health")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "/proxy/search/health must return 503 via deprecated alias, not 404"
+        );
+    }
+
+    /// Why: the deprecated `/proxy/*` alias must also reject unknown service keys
+    /// with 400, not a silent 404 — proves the handler still validates the key.
     /// What: issues GET /proxy/unknown/health, asserts 400.
     /// Test: this test itself.
     #[tokio::test]
-    async fn test_proxy_unknown_daemon_returns_400() {
+    async fn test_deprecated_proxy_alias_unknown_key_returns_400() {
         let router = build_router(make_test_state());
 
         let req = Request::builder()
@@ -1041,23 +1131,6 @@ mod tests {
             .expect("request");
         let resp = router.oneshot(req).await.expect("response");
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    /// Why: the proxy route for a known daemon that is not running must return
-    /// 503 (cache not populated) when no poll has occurred yet.
-    /// What: issues GET /proxy/search/health on a fresh state (no poll),
-    /// asserts 503 SERVICE_UNAVAILABLE.
-    /// Test: this test itself.
-    #[tokio::test]
-    async fn test_proxy_known_daemon_cold_cache_returns_503() {
-        let router = build_router(make_test_state());
-
-        let req = Request::builder()
-            .uri("/proxy/search/health")
-            .body(Body::empty())
-            .expect("request");
-        let resp = router.oneshot(req).await.expect("response");
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     /// Why: #1849 Phase 1 adds `mpm` to the proxy allowlist. A request to
@@ -1079,6 +1152,28 @@ mod tests {
             resp.status(),
             StatusCode::SERVICE_UNAVAILABLE,
             "/proxy/mpm/health must return 503 (mpm in allowlist, cache cold), not 400"
+        );
+    }
+
+    /// Why: the "console" service key is reserved for the console's own
+    /// /api/console/* namespace.  Issuing a request like /api/console/hijack
+    /// must never reach the reverse-proxy and be forwarded to an upstream; the
+    /// explicit guard in proxy_handler must return 400 before full_id is called.
+    /// What: issues GET /api/console/hijack on a fresh state, asserts 400.
+    /// Test: this test itself (#1849 Phase 2 console-key reservation guard).
+    #[tokio::test]
+    async fn test_api_proxy_console_key_returns_400() {
+        let router = build_router(make_test_state());
+
+        let req = Request::builder()
+            .uri("/api/console/hijack")
+            .body(Body::empty())
+            .expect("request");
+        let resp = router.oneshot(req).await.expect("response");
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "/api/console/<unregistered-path> must return 400 from the console guard, not 404"
         );
     }
 
