@@ -100,7 +100,7 @@ pub(crate) async fn launch(
     let live_path = live_path.canonicalize().unwrap_or(live_path);
 
     // Auto-register the git project root as a local path alias (non-fatal, silent).
-    trusty_mpm::core::project_aliases::try_register_project_alias(&live_path);
+    super::managed_root::try_register_alias(&live_path);
     let live_workdir = live_path.to_string_lossy().to_string();
 
     // 2. Derive the GitHub identity from the origin remote.
@@ -389,7 +389,7 @@ pub(crate) async fn connect(
     let workdir = path.to_string_lossy().to_string();
 
     // Auto-register the git project root as a local path alias (non-fatal, silent).
-    trusty_mpm::core::project_aliases::try_register_project_alias(&path);
+    super::managed_root::try_register_alias(&path);
 
     // 1b. Reconnect to an existing LIVE session for this directory if one
     //     exists — `connect` is idempotent by design. No project_dir prefix-match

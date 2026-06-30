@@ -92,7 +92,7 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
     // Auto-register the git project root as a local path alias (non-fatal, silent).
     // Why: every `tm` invocation from a git directory populates `tm ls` with
     // the project's canonical name so operators can quickly find their projects.
-    trusty_mpm::core::project_aliases::try_register_project_alias(&cwd);
+    super::managed_root::try_register_alias(&cwd);
 
     // Use a mutable URL so that a successful auto-start can update it to the
     // actual bound address discovered via the lock file.

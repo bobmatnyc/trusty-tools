@@ -173,14 +173,16 @@ pub fn alias_from_path(path: &Path) -> String {
 /// Why: `tm` should silently accumulate a map of visited git project roots so
 /// `tm ls` gives a quick overview without operator effort. The operation is
 /// fire-and-forget — it must never block or fail the calling command.
-/// What: resolves the git root via `git -C <cwd> rev-parse --show-toplevel`;
+/// What: resolves the git root by walking ancestors looking for a `.git` entry;
 /// if cwd is not inside a git repo, silently returns. Otherwise derives the
-/// alias from the basename, loads the store from `~/.trusty-mpm/`, calls
-/// `try_register`, and saves only when a new entry was added.
-/// Test: `try_register_project_alias_noop_outside_git` (integration-style;
-/// requires a tmpdir with no .git ancestor).
-pub fn try_register_project_alias(cwd: &Path) {
-    if let Err(e) = try_register_project_alias_inner(cwd) {
+/// alias from the basename, loads the store from `store_root` (the same root
+/// that `tm ls` reads from — callers resolve it once via `resolve_managed_paths`
+/// so write and read always agree), calls `try_register`, and saves only when a
+/// new entry was added.
+/// Test: `try_register_and_load_round_trip_same_root` proves the write-then-read
+/// path through the same configurable root.
+pub fn try_register_project_alias(cwd: &Path, store_root: &Path) {
+    if let Err(e) = try_register_project_alias_inner(cwd, store_root) {
         warn!("project-alias: auto-registration failed (non-fatal): {e}");
     }
 }
@@ -189,10 +191,11 @@ pub fn try_register_project_alias(cwd: &Path) {
 ///
 /// Why: wrapping the fallible logic lets `try_register_project_alias` present
 /// a non-fatal interface while keeping the inner code idiomatic with `?`.
-/// What: runs git, derives alias, loads store, registers, saves if needed.
+/// What: walks ancestors to find git root, derives alias, loads store from
+/// `store_root`, registers, saves if needed.
 /// Test: exercised via `try_register_project_alias` wrapper tests.
-fn try_register_project_alias_inner(cwd: &Path) -> anyhow::Result<()> {
-    // Resolve git root. Not a git repo → skip silently.
+fn try_register_project_alias_inner(cwd: &Path, store_root: &Path) -> anyhow::Result<()> {
+    // Resolve git root via ancestor walk. Not a git repo → skip silently.
     let Some(git_root) = find_git_root(cwd) else {
         debug!("project-alias: cwd is not inside a git repo; skipping");
         return Ok(());
@@ -201,13 +204,8 @@ fn try_register_project_alias_inner(cwd: &Path) -> anyhow::Result<()> {
     // Derive alias from the basename.
     let alias = alias_from_path(&git_root);
 
-    // Load the store from the default root (~/.trusty-mpm/).
-    let Some(home) = dirs::home_dir() else {
-        warn!("project-alias: cannot resolve home directory; skipping");
-        return Ok(());
-    };
-    let store_root = home.join(".trusty-mpm");
-    let mut store = ProjectAliasStore::load(&store_root)
+    // Load the store from the caller-provided root (same root that ls_cmd reads).
+    let mut store = ProjectAliasStore::load(store_root)
         .map_err(|e| anyhow::anyhow!("load project-paths: {e}"))?;
 
     // Register; save only when a new entry was added.
@@ -220,27 +218,23 @@ fn try_register_project_alias_inner(cwd: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run `git -C <cwd> rev-parse --show-toplevel` and return the root path.
+/// Walk ancestors of `cwd` looking for a `.git` entry (file or directory).
 ///
-/// Why: this is the canonical way to detect a git repository from any
-/// subdirectory without implementing a manual `.git` search.
-/// What: returns `None` when cwd is not inside a git working tree (non-git
-/// directory, bare repo, or git not on PATH).
-/// Test: `find_git_root_returns_none_outside_repo`.
+/// Why: replaces a `git -C <cwd> rev-parse --show-toplevel` subprocess,
+/// removing a fork+exec on every `tm` invocation and working without `git` on
+/// PATH. The `.git` entry is a directory for normal repos and a file for git
+/// worktrees and submodules — `Path::exists()` handles both.
+/// What: returns the first ancestor directory that contains a `.git` entry.
+/// Returns `None` when no such ancestor exists (non-git directory or bare repo).
+/// Test: `find_git_root_returns_none_outside_repo`,
+/// `find_git_root_returns_some_in_this_repo`.
 fn find_git_root(cwd: &Path) -> Option<PathBuf> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    let root = String::from_utf8_lossy(&out.stdout);
-    let root = root.trim();
-    if root.is_empty() {
-        return None;
+    for ancestor in cwd.ancestors() {
+        if ancestor.join(".git").exists() {
+            return Some(ancestor.to_path_buf());
+        }
     }
-    Some(PathBuf::from(root))
+    None
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -360,8 +354,10 @@ mod tests {
 
     #[test]
     fn find_git_root_returns_none_outside_repo() {
-        // /tmp is guaranteed to not be a git repo on CI.
-        let result = find_git_root(Path::new("/tmp"));
+        // Use a fresh TempDir guaranteed to not be inside any git repo
+        // (system temp directories sit outside all project trees).
+        let dir = TempDir::new().expect("tmpdir");
+        let result = find_git_root(dir.path());
         assert!(
             result.is_none(),
             "expected None for non-git dir, got {result:?}"
@@ -370,17 +366,51 @@ mod tests {
 
     #[test]
     fn find_git_root_returns_some_in_this_repo() {
-        // The worktree itself is a git repo, so this should succeed.
-        // We use the current file's directory as cwd.
+        // The worktree itself is a git repo (has a .git file at the worktree
+        // root). We use CARGO_MANIFEST_DIR (crates/trusty-mpm/) as cwd.
         let cwd = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let result = find_git_root(cwd);
         assert!(result.is_some(), "expected Some for cwd inside a git repo");
         let root = result.unwrap();
+        // The returned dir must contain a .git entry (file for worktrees, dir
+        // for normal repos; Path::exists covers both).
         assert!(
-            root.join(".git").exists() || root.join("../.git").exists() || {
-                // worktrees have a .git FILE, not a dir
-                root.join(".git").is_file()
-            }
+            root.join(".git").exists(),
+            ".git must exist at {}",
+            root.display()
+        );
+    }
+
+    #[test]
+    fn try_register_and_load_round_trip_same_root() {
+        // Why: proves that try_register_project_alias and ProjectAliasStore::load
+        // both target the same store_root when callers thread it through, so
+        // writes from auto-registration are visible to `tm ls`.
+        // What: registers via the public entry point, reads back via
+        // ProjectAliasStore::load with the same root, asserts the entry appears.
+        // Test: this function IS the test.
+        let store_root = TempDir::new().expect("tmpdir");
+        let cwd = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // Determine expected alias from the git root (may skip if not a git repo,
+        // though in practice CARGO_MANIFEST_DIR is always inside the worktree).
+        let Some(git_root) = find_git_root(cwd) else {
+            return; // not inside a git repo — skip
+        };
+        let expected_alias = alias_from_path(&git_root);
+
+        // Register using the same store_root as the read path.
+        try_register_project_alias(cwd, store_root.path());
+
+        // Read back — same code path as ls_cmd (ProjectAliasStore::load(root)).
+        let store = ProjectAliasStore::load(store_root.path()).expect("load");
+        let entries = store.list();
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.alias == expected_alias && e.path == git_root),
+            "expected entry alias={expected_alias} path={} in {entries:?}",
+            git_root.display()
         );
     }
 }
