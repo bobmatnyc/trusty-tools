@@ -20,9 +20,9 @@ pub(crate) mod two_panel;
 ///
 /// Why: shipping the art as a sidecar `.txt` keeps the source file readable
 /// and avoids escaping every special Unicode glyph in a Rust string literal.
-/// What: 46-line × up to 120-col artwork; clipped to the focal figure window
-/// by `clip_and_shade_image`.
-/// Test: `image_embedded_correct_dims` in `two_panel::tests`.
+/// What: 16-line × 52-col kawaii row-of-three pixel-bot artwork; clipped to
+/// the focal figure window by `clip_and_shade_image`.
+/// Test: `image_clip_correct_rows` in `two_panel::tests`.
 pub(crate) const BANNER_IMAGE: &str = include_str!("image.txt");
 
 // ── Clip-window constants ─────────────────────────────────────────────────────
@@ -30,13 +30,12 @@ pub(crate) const BANNER_IMAGE: &str = include_str!("image.txt");
 /// First row to include (0-indexed, inclusive).
 pub(crate) const CLIP_ROW_START: usize = 0;
 /// One-past-the-last row to include (0-indexed, exclusive).
-/// Reduced from 34 to 24 to trim the blank footer rows at the bottom of the
-/// robot art and make the rendered banner less tall.
-pub(crate) const CLIP_ROW_END: usize = 24;
+/// Set to 14 to capture the heads-only kawaii row-of-three bot art.
+pub(crate) const CLIP_ROW_END: usize = 14;
 /// First column to include (0-indexed, inclusive).
-pub(crate) const CLIP_COL_START: usize = 9;
+pub(crate) const CLIP_COL_START: usize = 0;
 /// One-past-the-last column to include (0-indexed, exclusive).
-pub(crate) const CLIP_COL_END: usize = 61;
+pub(crate) const CLIP_COL_END: usize = 52;
 /// Display width of the clipped image in columns.
 pub(crate) const IMAGE_CLIP_COLS: usize = CLIP_COL_END - CLIP_COL_START;
 /// Number of rows in the clipped image.
@@ -46,18 +45,26 @@ pub(crate) const IMAGE_CLIP_ROWS: usize = CLIP_ROW_END - CLIP_ROW_START;
 
 /// Map a glyph to its rust-palette RGB triple.
 ///
-/// Why: dense ink characters should appear lighter (amber) and fine marks
-/// darker (deep rust) so the image reads as a lit 3-D relief.
-/// What: three buckets — dense glyphs → amber `(224,140,60)`,
-/// medium glyphs → mid-rust `(205,100,30)`, light marks → dark rust
-/// `(120,50,10)`, unclassified → base rust `(183,65,14)`.
+/// Why: bot outline chars should appear bright amber so the three kawaii bots
+/// read clearly against a dark terminal background; accent glyphs use mid-rust
+/// to add depth without competing with the main structure.
+/// What: four buckets —
+///   • amber `(224,140,60)`: box-drawing, block, face, and lightbulb glyphs
+///     used in the kawaii bot art (`┌─┐│└┘┬╷╶╴├┤▟▙^●◡⢀✲⡀`) plus legacy
+///     dense glyphs from the old art;
+///   • mid-rust `(205,100,30)`: medium-ink marks;
+///   • dark rust `(120,50,10)`: fine marks;
+///   • base rust `(183,65,14)`: everything else.
 /// Test: `image_shading_emits_truecolor` in `two_panel::tests`.
 pub(crate) fn shade_bucket(c: char) -> (u8, u8, u8) {
     match c {
-        // Dense — heavy ink / filled blocks
-        'I' | '∏' | '♦' | '∇' | '√' | '≥' | '≤' | '█' | '▓' | '▌' | '▐' | '@' | '#' =>
-        {
-            (224, 140, 60) // amber
+        // Amber — bot structure: box-drawing, block chars, face glyphs, lightbulb
+        '┌' | '─' | '┐' | '│' | '└' | '┘' | '┬' | '┴' | '├' | '┤' | '╷' | '╵' | '╶' | '╴'
+        | '▟' | '▙' | '▌' | '▐' | '█' | '▓'
+        | '^' | '●' | '◡' | '⢀' | '✲' | '⡀' | '◻'
+        // Legacy dense glyphs from previous art
+        | 'I' | '∏' | '♦' | '∇' | '√' | '≥' | '≤' | '@' | '#' => {
+            (224, 140, 60) // bright amber
         }
         // Medium — moderate ink
         'i' | 'l' | '!' | '<' | '>' | '+' | '=' | '/' | '\\' | '≈' | '∫' | '∑' => {
@@ -67,16 +74,15 @@ pub(crate) fn shade_bucket(c: char) -> (u8, u8, u8) {
         '.' | ',' | ':' | ';' | '°' | '⋆' | '•' | '◦' | '~' | '-' => {
             (120, 50, 10) // dark rust
         }
-        // Unclassified (±, ÷, ×, ∂, ♫, ≠, etc.) — base rust
+        // Unclassified — base rust
         _ => (183, 65, 14),
     }
 }
 
 /// Clip the ASCII-art image to the focal window and apply per-char rust shading.
 ///
-/// Why: the raw image is ~80 cols × 46 rows; clipping to the dense figure
-/// mass gives a ~52 × 34 crop that fits the banner's left column without
-/// downsampling or averaging (native character resolution preserved).
+/// Why: the kawaii bot art is a compact 16-row × 52-col region; the clip
+/// window captures it at native character resolution without downsampling.
 /// What: slices rows `[CLIP_ROW_START, CLIP_ROW_END)` and chars
 /// `[CLIP_COL_START, CLIP_COL_END)` from `BANNER_IMAGE`; applies
 /// `shade_bucket` per non-space character; pads short lines to `IMAGE_CLIP_COLS`.
@@ -93,6 +99,7 @@ pub(crate) fn clip_and_shade_image() -> Vec<String> {
         .map(|line| {
             let chars: Vec<char> = line.chars().collect();
             let len = chars.len();
+            #[allow(clippy::unnecessary_min_or_max)] // guard retained for future non-zero re-crops
             let col_start = CLIP_COL_START.min(len);
             let col_end = CLIP_COL_END.min(len);
 
