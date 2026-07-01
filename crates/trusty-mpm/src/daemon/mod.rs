@@ -559,6 +559,25 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                     Ok(_) => {}
                     Err(e) => tracing::warn!("ephemeral auto-reap failed: {e}"),
                 }
+
+                // #1838: reap orphaned managed-clone worktree dirs whose session
+                // records are gone. Same self-healing rationale as the tmux orphan
+                // sweep above: the `.worktrees/<id>` tree under each managed base
+                // clone otherwise grows without bound (94 dirs observed for one
+                // project) because decommission-time cleanup (#1806/#1840) only
+                // covers sessions torn down AFTER that fix landed and the manual
+                // `tm sessions prune-worktrees` sweep is rarely run. Only leaf
+                // worktree dirs with NO live record are removed — active worktrees
+                // and the base clone are never touched. Inherits the orphan-GC env
+                // gate (`TRUSTY_MPM_ORPHAN_GC`) since it runs inside this loop.
+                let repos_root = managed_routes::inproject::repos_root();
+                match mgr.reap_orphaned_worktrees(&repos_root).await {
+                    Ok(removed) if !removed.is_empty() => {
+                        info!("orphan-GC reaped {} orphaned worktree dir(s)", removed.len());
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("orphan-GC worktree sweep failed: {e}"),
+                }
             }
         }
     }
