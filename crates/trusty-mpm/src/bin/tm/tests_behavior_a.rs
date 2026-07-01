@@ -280,12 +280,18 @@ fn install_then_deploy_deploys_skills() {
         &paths.claude_skills_dir(),
     )
     .unwrap();
-    // The full /tm- skill portfolio (14 skills + tm-doctor) deploys on first
-    // install (tm-skills-portfolio epic: the `example-skill.md` placeholder
-    // and the 11 mpm-* guidance skills no longer ship; the previously-orphaned
-    // tm-doctor.md is now wired in). Stats report stems (no .md suffix)
-    // because each skill lands as <dest>/<name>/SKILL.md to match Claude
-    // Code's native discovery format.
+    // The full /tm- skill portfolio deploys on first install: 16 skills total
+    // — 14 /tm- portfolio skills (tm-circuit-breaker, tm-verification-protocols,
+    // tm-tool-usage-guide, tm-git-file-tracking, tm-adr, tm-workflow,
+    // tm-agent-architecture, tm-postmortem, tm-bug-reporting,
+    // tm-teaching-templates, tm-ticketing, tm-pr-workflow,
+    // tm-delegation-patterns, tm-session-management) + tm-doctor + the tm
+    // overview skill (tm-skills-portfolio epic: the `example-skill.md`
+    // placeholder and the 11 mpm-* guidance skills no longer ship; the
+    // previously-orphaned tm-doctor.md is now wired in). See
+    // `bundle_tm_skills.rs`/`bundle_all.rs::ALL` for the authoritative list.
+    // Stats report stems (no .md suffix) because each skill lands as
+    // <dest>/<name>/SKILL.md to match Claude Code's native discovery format.
     assert!(
         result.deployed.contains(&"tm-circuit-breaker".to_string()),
         "tm-circuit-breaker must be deployed; got {:?}",

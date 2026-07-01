@@ -105,39 +105,80 @@ pub(super) fn check_agents(paths: &FrameworkPaths) -> DoctorCheck {
 /// Probe skill deployment under `~/.claude/skills/`.
 ///
 /// Why: skills extend the PM with reusable capabilities; their deployment is a
-/// separate step that may not have run yet.
+/// separate step that may not have run yet. Counting raw directory entries
+/// (`entries.flatten().count()`) previously let a stray `.DS_Store`, an
+/// unrelated subdirectory, or a symlink report a false-positive `Ok` with a
+/// non-zero count — undermining the same signal the A2 (`check_skill_source`)
+/// fix was meant to guarantee.
 /// What: `Fail` when `~/.claude/skills/` does not exist at all; `Warn` when it
-/// exists but is empty (skill deployment not yet implemented / not run); `Ok`
-/// when it holds at least one entry.
-/// Test: `skills_missing_dir_is_fail`, `skills_empty_dir_is_warn`.
+/// exists but holds no deployed skill (neither a `<name>/SKILL.md` directory —
+/// [`skill_deployer::deploy_skills`]'s actual on-disk format — nor a flat
+/// `.md` file); `Ok` when it holds at least one. This intentionally counts
+/// more than a plain `count_files_with_extension(&dir, "md")` would: that
+/// helper only sees flat `*.md` files, but real deploys land as
+/// `<dest>/<name>/SKILL.md`, so a naive flat-extension count would always
+/// read `0` against a correctly-populated production target.
+/// Test: `skills_missing_dir_is_fail`, `skills_empty_dir_is_warn`,
+/// `skills_dir_with_only_non_skill_entries_is_warn`, `skills_populated_dir_is_ok`.
 pub(super) fn check_skills(home: &Path) -> DoctorCheck {
     let dir = home.join(".claude").join("skills");
-    match std::fs::read_dir(&dir) {
-        Ok(entries) => {
-            let count = entries.flatten().count();
-            if count == 0 {
-                DoctorCheck::new(
-                    "skills",
-                    CheckStatus::Warn,
-                    format!(
-                        "{} exists but is empty — no skills deployed yet",
-                        dir.display()
-                    ),
-                )
-            } else {
-                DoctorCheck::new(
-                    "skills",
-                    CheckStatus::Ok,
-                    format!("{count} skill entr(ies) in {}", dir.display()),
-                )
-            }
-        }
-        Err(_) => DoctorCheck::new(
+    if !dir.is_dir() {
+        return DoctorCheck::new(
             "skills",
             CheckStatus::Fail,
             format!("{} does not exist", dir.display()),
-        ),
+        );
     }
+    let count = count_skill_entries(&dir);
+    if count == 0 {
+        DoctorCheck::new(
+            "skills",
+            CheckStatus::Warn,
+            format!(
+                "{} exists but has no deployed skills — no skills deployed yet",
+                dir.display()
+            ),
+        )
+    } else {
+        DoctorCheck::new(
+            "skills",
+            CheckStatus::Ok,
+            format!("{count} skill(s) in {}", dir.display()),
+        )
+    }
+}
+
+/// Count deployed skill entries directly under `dir`.
+///
+/// Why: [`check_skills`] inspects the deploy *target*, whose real format
+/// (`skill_deployer::deploy_skills`) is `<dest>/<name>/SKILL.md` — a
+/// directory per skill — not a flat `.md` file. A plain
+/// [`count_files_with_extension`] over the target would therefore always
+/// read `0` in production even when every skill deployed correctly, so this
+/// counts each entry that is either a directory containing `SKILL.md` (the
+/// real format) or a flat `*.md` file (accepted for forward/backward
+/// compatibility), and ignores everything else — stray dotfiles like
+/// `.DS_Store`, symlinks, and directories that hold no `SKILL.md`.
+/// What: returns the number of qualifying entries directly under `dir`.
+/// Test: `skills_populated_dir_is_ok`, `skills_dir_with_only_non_skill_entries_is_warn`.
+fn count_skill_entries(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                path.join("SKILL.md").is_file()
+            } else {
+                path.extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.eq_ignore_ascii_case("md"))
+                    .unwrap_or(false)
+            }
+        })
+        .count()
 }
 
 /// Probe the skill *source* directory (`FrameworkPaths::skill_source_dir()`).
@@ -236,6 +277,21 @@ mod tests {
     }
 
     #[test]
+    fn instructions_empty_file_is_fail() {
+        // The `Fail` branch (file present but empty) documented on
+        // `check_instructions` had no direct test coverage; an empty
+        // `last-instructions.md` means the pipeline wrote a stash file but
+        // never populated it, which is a real failure distinct from `Warn`
+        // (pipeline never ran at all).
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".trusty-mpm");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("last-instructions.md"), "").unwrap();
+        let check = check_instructions(Some(tmp.path()));
+        assert_eq!(check.status, CheckStatus::Fail);
+    }
+
+    #[test]
     fn agents_missing_dir_is_fail() {
         let tmp = tempfile::tempdir().unwrap();
         // `FrameworkPaths::under` derives `<base>/.claude/agents`, which does
@@ -291,6 +347,36 @@ mod tests {
         std::fs::write(skills.join("tm-doctor.md"), "skill").unwrap();
         let check = check_skills(tmp.path());
         assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn skills_dir_with_real_deploy_format_is_ok() {
+        // The real `skill_deployer::deploy_skills` target format is
+        // `<dest>/<name>/SKILL.md` (a directory per skill), not a flat `.md`
+        // file. `check_skills` must recognise this format, not just the flat
+        // fixture used by `skills_populated_dir_is_ok`.
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = tmp.path().join(".claude").join("skills");
+        let skill_dir = skills.join("tm-doctor");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "skill").unwrap();
+        let check = check_skills(tmp.path());
+        assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn skills_dir_with_only_non_skill_entries_is_warn() {
+        // Regression: a skills dir holding only a `.DS_Store` file and a
+        // subdirectory with no `SKILL.md` inside must NOT report `Ok` — the
+        // previous `entries.flatten().count()` implementation counted both
+        // as "skills" and reported a false-positive `Ok`.
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = tmp.path().join(".claude").join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::write(skills.join(".DS_Store"), b"\x00\x01").unwrap();
+        std::fs::create_dir_all(skills.join("not-a-skill")).unwrap();
+        let check = check_skills(tmp.path());
+        assert_eq!(check.status, CheckStatus::Warn);
     }
 
     #[test]
