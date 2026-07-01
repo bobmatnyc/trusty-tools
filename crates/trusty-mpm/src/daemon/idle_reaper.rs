@@ -7,7 +7,11 @@
 //! `SessionManager::stop()` / `decommission()` when the thresholds are crossed.
 //! The feature is completely OFF by default (`idle_auto_stop.enabled = false`
 //! in `~/.trusty-mpm/config.toml`) so existing installations see zero behavior
-//! change.
+//! change. There is a SECOND, teardown-safe gate: `idle_auto_stop.dry_run`
+//! (default `true`). While `dry_run` is set the loop classifies sessions and
+//! LOGS the stop/decommission it *would* perform but never tears anything down;
+//! an operator opts in to real teardown by setting `dry_run = false` (#1783,
+//! mirroring trusty-search's report-only-first auto-prune convention #1782).
 //! What: [`idle_reaper_loop`] is the `tokio::spawn` target; [`IdleReaperState`]
 //! holds the in-memory per-session counters; [`IdleVerdictProvider`] is the
 //! injectable seam that keeps unit tests free from LLM calls.
@@ -252,8 +256,10 @@ pub async fn idle_reaper_loop<P>(
 /// a single bad session never aborts the sweep.
 /// What: (1) lists all sessions, (2) prunes stale counters, (3) for each Active
 /// session calls the verdict provider, (4) calls `apply_verdict`, (5) fires the
-/// action if the decision warrants it.
-/// Test: covered indirectly via the public `apply_verdict` unit tests.
+/// action if the decision warrants it — UNLESS `cfg.dry_run` is set, in which
+/// case it only logs the action it would take and leaves the session untouched.
+/// Test: `sweep_dry_run_does_not_stop`, `sweep_live_stops_idle_session`,
+/// `sweep_live_decommissions_done_session`; decision logic via `apply_verdict`.
 async fn run_one_sweep<P: IdleVerdictProvider>(
     manager: &Arc<SessionManager>,
     cfg: &IdleAutoStopConfig,
@@ -288,12 +294,29 @@ async fn run_one_sweep<P: IdleVerdictProvider>(
                     "idle-reaper: no action"
                 );
             }
+            ReaperDecision::Stop if cfg.dry_run => {
+                // Report-only: log the action we WOULD take and leave the counter
+                // in place so the next sweep keeps reporting until the operator
+                // either acts on the session or clears `dry_run`.
+                info!(
+                    id = %record.id,
+                    name = %record.tmux_name,
+                    "idle-reaper (dry-run): would stop session (idle threshold reached); set idle_auto_stop.dry_run=false to enact"
+                );
+            }
             ReaperDecision::Stop => {
                 info!(id = %record.id, name = %record.tmux_name, "idle-reaper: idle threshold reached; stopping session");
                 state.remove(&record.id);
                 if let Err(e) = manager.stop(&record.id).await {
                     warn!(id = %record.id, "idle-reaper: stop failed: {e}");
                 }
+            }
+            ReaperDecision::Decommission if cfg.dry_run => {
+                info!(
+                    id = %record.id,
+                    name = %record.tmux_name,
+                    "idle-reaper (dry-run): would decommission session (done threshold reached); set idle_auto_stop.dry_run=false to enact"
+                );
             }
             ReaperDecision::Decommission => {
                 info!(id = %record.id, name = %record.tmux_name, "idle-reaper: done threshold reached; decommissioning session");
@@ -316,8 +339,11 @@ mod tests {
     use crate::core::config::IdleAutoStopConfig;
 
     fn cfg(idle: u32, done: u32) -> IdleAutoStopConfig {
+        // `dry_run: false` here so the `apply_verdict` decision-logic tests below
+        // exercise the enacting path; the sweep-level tests build their own cfg.
         IdleAutoStopConfig {
             enabled: true,
+            dry_run: false,
             poll_interval_secs: 300,
             idle_consecutive_threshold: idle,
             done_consecutive_threshold: done,
@@ -527,6 +553,130 @@ mod tests {
         assert_eq!(
             counter.idle_hits, 1,
             "fresh counter must show exactly 1 idle hit"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Sweep-level end-to-end tests (#1783): idle→stop and done→decommission,
+    // plus the report-only (dry_run) safety gate. These drive `run_one_sweep`
+    // against a real `SessionManager` (backed by a no-op tmux driver + temp
+    // store) so the full classify → decide → act path is exercised.
+    // ─────────────────────────────────────────────────────────────
+
+    use crate::session_manager::{FakeNoopTmuxDriver, ManagedSessionState, SessionManager};
+    use tempfile::TempDir;
+
+    /// A verdict provider that returns the same canned verdict for every session.
+    ///
+    /// Why: sweep tests must be deterministic and never touch an LLM or tmux —
+    /// this stub lets a test assert exactly what the reaper does for a fixed
+    /// classifier verdict.
+    /// What: returns `Some(self.0)` for every session name.
+    /// Test: used by the `sweep_*` tests below.
+    struct FixedVerdictProvider(&'static str);
+    impl IdleVerdictProvider for FixedVerdictProvider {
+        async fn verdict(&self, _: &str) -> Option<String> {
+            Some(self.0.to_string())
+        }
+    }
+
+    /// Build a manager with a no-op tmux driver and one session in `Active`.
+    ///
+    /// Why: `run_one_sweep` only considers `Active` sessions; `create` yields a
+    /// `Provisioning` record, so we drive it through stop→resume (both public,
+    /// both no-ops under the fake driver) to reach `Active` deterministically.
+    /// What: returns the `Arc<SessionManager>` and the new session's id.
+    /// Test: used by every `sweep_*` test below.
+    async fn manager_with_active_session(dir: &TempDir) -> (Arc<SessionManager>, ManagedSessionId) {
+        let mgr = SessionManager::new(dir.path(), Arc::new(FakeNoopTmuxDriver))
+            .await
+            .expect("manager");
+        let rec = mgr
+            .create(
+                "idle task".into(),
+                Some(dir.path().to_path_buf()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create");
+        // Provisioning → Stopped → Active (no-op tmux driver makes this a pure
+        // state transition with no real process work).
+        mgr.stop(&rec.id).await.expect("stop");
+        mgr.resume(&rec.id).await.expect("resume");
+        (Arc::new(mgr), rec.id)
+    }
+
+    async fn state_of(mgr: &SessionManager, id: &ManagedSessionId) -> ManagedSessionState {
+        mgr.list()
+            .await
+            .into_iter()
+            .find(|r| &r.id == id)
+            .expect("session present")
+            .state
+    }
+
+    /// Why: the report-only gate (#1783) must NEVER tear down a session — even
+    /// when the idle threshold is crossed — while `dry_run` is set.
+    /// What: runs one sweep with an always-idle provider, `dry_run = true`, and
+    /// `idle_threshold = 1`; asserts the session stays `Active`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn sweep_dry_run_does_not_stop() {
+        let dir = TempDir::new().unwrap();
+        let (mgr, id) = manager_with_active_session(&dir).await;
+        let mut c = cfg(1, 1);
+        c.dry_run = true;
+        let provider = FixedVerdictProvider("idle");
+        let mut rs = IdleReaperState::new();
+        run_one_sweep(&mgr, &c, &provider, &mut rs).await;
+        assert_eq!(
+            state_of(&mgr, &id).await,
+            ManagedSessionState::Active,
+            "dry-run sweep must NOT stop the session"
+        );
+    }
+
+    /// Why: with the report-only gate cleared, a session that crosses the idle
+    /// threshold must actually transition to `Stopped` (workspace intact).
+    /// What: runs one sweep with an always-idle provider, `dry_run = false`, and
+    /// `idle_threshold = 1`; asserts the session is `Stopped`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn sweep_live_stops_idle_session() {
+        let dir = TempDir::new().unwrap();
+        let (mgr, id) = manager_with_active_session(&dir).await;
+        let c = cfg(1, 1); // dry_run = false
+        let provider = FixedVerdictProvider("idle");
+        let mut rs = IdleReaperState::new();
+        run_one_sweep(&mgr, &c, &provider, &mut rs).await;
+        assert_eq!(
+            state_of(&mgr, &id).await,
+            ManagedSessionState::Stopped,
+            "live sweep must stop the idle session"
+        );
+    }
+
+    /// Why: a session the classifier reports as `done` must be decommissioned
+    /// (the terminal teardown) once the done threshold is crossed and `dry_run`
+    /// is cleared — this is the idle→decommission arm of #1783.
+    /// What: runs one sweep with an always-done provider, `dry_run = false`, and
+    /// `done_threshold = 1`; asserts the session is `Decommissioned`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn sweep_live_decommissions_done_session() {
+        let dir = TempDir::new().unwrap();
+        let (mgr, id) = manager_with_active_session(&dir).await;
+        let c = cfg(3, 1); // done_threshold = 1, dry_run = false
+        let provider = FixedVerdictProvider("done");
+        let mut rs = IdleReaperState::new();
+        run_one_sweep(&mgr, &c, &provider, &mut rs).await;
+        assert_eq!(
+            state_of(&mgr, &id).await,
+            ManagedSessionState::Decommissioned,
+            "live sweep must decommission the done session"
         );
     }
 }
