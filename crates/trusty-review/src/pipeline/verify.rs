@@ -20,8 +20,21 @@
 //! cannot silently auto-refute every finding.  See that module for the full incident
 //! rationale.
 //!
+//! ## Fail-open fix (#1876)
+//! A transient verifier error (rate limit, transport blip, upstream 5xx) is
+//! "unable to verify", not "the model refuted this finding".  Prior to #1876,
+//! `verify_one` mapped transient errors to plain `VerifyOutcome::Refuted` —
+//! structurally identical to a clean model REFUTED — which made
+//! `rederive_verdict` fail OPEN: a network hiccup on the ONLY candidate finding
+//! could collapse the whole review's baseline to APPROVE even though the model
+//! never rendered a judgment.  Transient errors now map to `ErrorRefuted`
+//! (matching the existing #726 treatment of config/lifecycle errors and
+//! truncated responses), so `rederive_verdict` preserves `primary_verdict`
+//! instead of discarding it.  See `verify_one` for the full rationale.
+//!
 //! Test: `verify_tests.rs` — candidate selection, CONFIRMED/REFUTED outcomes,
-//! verdict re-derivation, truncation regression (#726), and liveness-gate logic.
+//! verdict re-derivation, truncation regression (#726), transient-error
+//! fail-open regression (#1876), and liveness-gate logic.
 
 use std::sync::Arc;
 
@@ -205,25 +218,34 @@ pub async fn run_verification_round(
 ///       → keep `primary_verdict` (grounded critical evidence, e.g. BLOCK stays BLOCK)
 ///   a2) confirmed, but only Medium/Low-effort findings confirmed (#1015 + #1343)
 ///       → CAP (ceiling) the baseline at APPROVE*: `min(primary_verdict, APPROVE*)`.
-///         A lone confirmed Medium must not anchor REQUEST_CHANGES from a
-///         floor-driven escalation (#1015) — BUT confirming a non-High finding must
-///         ALSO never *raise* a clean APPROVE baseline to APPROVE* (#1343 runtime
-///         residual).  Using the severity-min of (primary, APPROVE*) is the
-///         source-of-truth reconciliation that mirrors grade.rs::derive_verdict: a
-///         confirmed `praise`/Low-effort finding can neither harden the verdict nor
-///         downgrade the grade when the model itself said APPROVE.
+///         BUT this is a ceiling on the *baseline input*, not on the final result:
+///         `derive_verdict(baseline, survivors)` below independently re-derives the
+///         severity floor from the surviving findings, and as of #1876 a single
+///         confirmed Medium finding with confidence > FLOOR_MIN_CONFIDENCE (0.80)
+///         floors to REQUEST_CHANGES on its own merits (see
+///         `grade::correctness_floor`) — so `stricter_of(baseline, floor)` still
+///         lands on REQUEST_CHANGES even though the *baseline* was capped at
+///         APPROVE*.  The cap's remaining purpose is narrower after #1876: it
+///         still stops a confirmed non-High finding from *raising* a clean model
+///         APPROVE baseline to APPROVE* on its own (#1343 runtime residual), and it
+///         still provides a floor of APPROVE* for a confirmed finding that does
+///         NOT individually clear the severity-floor confidence gate.
 ///   b)  clean model REFUTED, nothing confirmed
 ///       → drop to APPROVE baseline (escalation rested on refuted evidence)
-///   c)  all demotions are infra failures (TruncationRefuted/ErrorRefuted), no confirmed
-///       → preserve `primary_verdict` (do not discard on verifier infra failure, #726)
+///   c)  all demotions are infra / unable-to-verify failures (TruncationRefuted /
+///       ErrorRefuted — the latter now also covers transient errors, #1876), no
+///       confirmed → preserve `primary_verdict` (do not fail-open to APPROVE on
+///       verifier infra failure, #726 + #1876)
 ///
 /// `UNKNOWN` is handled by the caller and never reaches here.
 /// What: filters survivors (non-refuted), selects baseline (path a2 takes the
 /// severity-min of `primary_verdict` and APPROVE*), calls
 /// `derive_verdict(baseline, survivors)`.
 /// Test: `rederive_excludes_refuted_relaxes` (b), `rederive_keeps_confirmed_block` (a),
-/// `rederive_confirmed_medium_caps_at_approve_star` (a2 — #1015),
+/// `rederive_confirmed_medium_still_escalates_to_request_changes` (a2 — #1876,
+/// supersedes the pre-#1876 `..._caps_at_approve_star` expectation),
 /// `rederive_confirmed_praise_keeps_clean_approve` (a2 — #1343 runtime residual),
+/// `rederive_refuted_finding_does_not_clear_standing_medium_finding` (a2 — #1876),
 /// `rederive_error_refuted_preserves_primary_verdict` (c — #726),
 /// `rederive_truncation_refuted_preserves_primary_verdict` (c).
 fn rederive_verdict(
@@ -268,15 +290,18 @@ fn rederive_verdict(
         primary_verdict
     } else if any_confirmed {
         // Path (a2): confirmed evidence, but only Medium/Low tier.  Take the
-        // severity-MIN of the model's own verdict and APPROVE* (the advisory tier):
-        //   - primary=REQUEST_CHANGES/BLOCK → capped down to APPROVE* (#1015), so a
-        //     lone confirmed Medium cannot permanently anchor a floor-driven escalation.
+        // severity-MIN of the model's own verdict and APPROVE* (the advisory tier)
+        // as the BASELINE (not the final answer — see the Why above for #1876):
+        //   - primary=REQUEST_CHANGES/BLOCK → baseline capped down to APPROVE*
+        //     (#1015); `derive_verdict` below still re-escalates to REQUEST_CHANGES
+        //     when the surviving confirmed Medium clears FLOOR_MIN_CONFIDENCE (#1876).
         //   - primary=APPROVE → stays APPROVE (#1343 runtime residual): confirming a
         //     low-effort `praise` finding must NOT harden the verdict to APPROVE* nor
         //     downgrade the grade.  This is the same source-of-truth reconciliation
         //     grade.rs applies — the model's APPROVE review_body is authoritative.
         // `derive_verdict(baseline, survivors)` will still escalate further if the
-        // surviving findings warrant it (e.g. a surviving High → BLOCK).
+        // surviving findings warrant it (e.g. a surviving High → BLOCK, or as of
+        // #1876 a surviving confident Medium → REQUEST_CHANGES).
         verdict_min(primary_verdict, Verdict::ApproveWithReservations)
     } else if any_clean_refuted {
         // Path (b): at least one clean REFUTED from the model — escalation rested
@@ -372,13 +397,31 @@ struct VerifyJudgment {
 /// returned garbage", and preserve the model's escalation in the latter case.
 /// What: calls the verifier, parses the forced JSON judgment, and returns
 /// `Confirmed` / `Refuted` accordingly.  On an alarm-class `LlmError`, emits the
-/// signal and returns `ErrorRefuted`.  On a transient error returns plain `Refuted`
-/// (conservative: unverifiable via transient fault — not a structural problem).
-/// On a successful call that returns unparseable output returns `TruncationRefuted`
+/// signal and returns `ErrorRefuted`.  On a transient error ALSO returns
+/// `ErrorRefuted` (#1876 — see the Why below), never plain `Refuted`, because a
+/// transient fault is "unable to verify", not "the model refuted this".  On a
+/// successful call that returns unparseable output returns `TruncationRefuted`
 /// (structurally distinct from a clean REFUTED judgment).
+///
+/// #1876 fail-open fix: prior to this change, a transient error (rate limit,
+/// transport blip, upstream 5xx) mapped to plain `VerifyOutcome::Refuted` —
+/// structurally identical to a clean model REFUTED judgment. That made
+/// `rederive_verdict` treat "we could not reach the verifier" the same as "the
+/// verifier examined this and found it wrong": both set `any_clean_refuted =
+/// true`, which collapses the review's baseline to APPROVE (path b) when
+/// nothing else was confirmed. A shadow-eval showed this fail-open behavior
+/// contributing to REQUEST_CHANGES being silently downgraded to APPROVE. Mapping
+/// transient errors to `ErrorRefuted` instead routes them through
+/// `rederive_verdict` path (c) — "unable to verify" — which PRESERVES
+/// `primary_verdict` rather than discarding it, matching the existing #726
+/// treatment of config/lifecycle errors and truncated responses. The finding
+/// itself is still excluded from the severity floor either way (an unverified
+/// finding must not drive escalation on its own); only the *fail-open-to-APPROVE*
+/// side effect on the surrounding review is fixed.
 /// Test: `verify_one_confirmed`, `verify_one_refuted`,
 /// `verify_one_model_unavailable_emits_signal`,
-/// `verify_truncated_response_is_truncation_refuted`.
+/// `verify_truncated_response_is_truncation_refuted`,
+/// `verify_transient_error_marks_error_refuted_not_plain_refuted` (#1876).
 async fn verify_one(verifier: &Arc<dyn LlmProvider>, req: crate::llm::LlmRequest) -> VerifyOutcome {
     let model = req.model.clone();
     match verifier.complete(req).await {
@@ -404,11 +447,21 @@ async fn verify_one(verifier: &Arc<dyn LlmProvider>, req: crate::llm::LlmRequest
             VerifyOutcome::ErrorRefuted { error_class }
         }
         Err(e) => {
-            // Transient failure: we could not verify this finding, but the
-            // deployment is not broken.  Conservatively refuse to let an
-            // unverified finding drive a block.
-            warn!("verifier transient error (treating as REFUTED): {e}");
-            VerifyOutcome::Refuted
+            // Transient failure (#1876): we could not verify this finding, but
+            // the deployment is not broken and the model never rendered a
+            // judgment.  Fail toward CAUTION, not toward "this finding is
+            // wrong" — map to ErrorRefuted (not plain Refuted) so
+            // rederive_verdict preserves primary_verdict (path c) instead of
+            // fail-opening the whole review to APPROVE (path b).  This is not
+            // an alarm-worthy incident (no emit_verification_model_error call):
+            // rate limits and transport blips are expected operational noise,
+            // not a broken deployment.
+            let error_class = error_class(&e);
+            warn!(
+                error_class = %error_class,
+                "verifier transient error (treating as unable-to-verify, not refuted): {e}"
+            );
+            VerifyOutcome::ErrorRefuted { error_class }
         }
     }
 }

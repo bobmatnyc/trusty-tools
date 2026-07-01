@@ -27,25 +27,36 @@
 //! 2. SEVERITY FLOOR: take the stricter of (model-proposed, severity-derived).
 //!    As of #1015, Medium findings only count when `confidence > 0.80`
 //!    (`FLOOR_MIN_CONFIDENCE`); advisory-tier Medium findings (0.66–0.80)
-//!    must not force REQUEST_CHANGES on PRs the model judged clean.
+//!    must not force REQUEST_CHANGES on PRs the model judged clean.  As of
+//!    #1876, a SINGLE confident Medium finding is enough to floor to
+//!    REQUEST_CHANGES (previously this required ≥2) — see item 3 below for why
+//!    the count threshold was dropped rather than merely lowered.
 //!
-//! 3. SOURCE-OF-TRUTH RECONCILIATION (#1343): when the model's own verdict is a
-//!    clean `APPROVE`, a *count-based* REQUEST_CHANGES floor (≥2 Medium findings)
-//!    is capped at APPROVE* — it must not contradict the model's own APPROVE
-//!    review_body.  The grade is the model's primary signal; the count heuristic
-//!    may surface an advisory concern but may NOT harden an APPROVE into
-//!    REQUEST_CHANGES (which would loop the PM merge workflow forever).  A
-//!    High-effort (critical) finding is exempt — it still floors to BLOCK, because
-//!    BLOCK is grounded critical evidence, not a Medium-count heuristic.
+//! 3. SOURCE-OF-TRUTH RECONCILIATION (#1343, narrowed by #1876): when the
+//!    model's own verdict is a clean `APPROVE`, a *count-based* REQUEST_CHANGES
+//!    floor used to be capped at APPROVE* — the theory being that "≥2 weakly
+//!    grounded Mediums" was a heuristic weaker than the model's own holistic
+//!    judgment.  A recalibration shadow-eval (#1876, n=473) found this made the
+//!    reviewer dangerously lenient: verdict agreement was only 61.3%, and 89% of
+//!    reference-reviewer REQUEST_CHANGES cases were silently downgraded to
+//!    APPROVE.  `correctness_floor`'s Tier 2 no longer requires a *count* — ONE
+//!    finding that clears `FLOOR_MIN_CONFIDENCE` (0.80) is, by definition,
+//!    well-evidenced, so it now gets the same hard-floor treatment as a
+//!    High-effort finding (Tier 1) and a confident method-conformance divergence
+//!    (`conformance_floor`): it is NEVER capped back down merely because the
+//!    model's own verdict was a clean APPROVE.  There is therefore no longer a
+//!    "weak count heuristic" case for a reconciliation cap to protect, and the
+//!    cap has been removed (see `derive_verdict`'s doc comment for detail).
 //!
 //!   | Finding set                                          | Minimum floor   |
 //!   |------------------------------------------------------|-----------------|
 //!   | Any `High` effort (critical/high sev.)               | BLOCK           |
-//!   | ≥2 `Medium` effort with confidence > 0.80            | REQUEST_CHANGES |
-//!   | Exactly 1 `Medium` effort with confidence > 0.80     | APPROVE*        |
+//!   | ≥1 `Medium` effort with confidence > 0.80             | REQUEST_CHANGES |
 //!   | Only `Low` effort or no floor-counting findings      | APPROVE         |
 //!
-//!   The model can never soften a Critical or High finding below the floor.
+//!   The model can never soften a Critical, High, or confident-Medium finding
+//!   below the floor — none of the three tiers above are subject to the
+//!   APPROVE-review_body reconciliation cap.
 //!
 //! `Verdict::Unknown` is always preserved (pass-through) — the model has
 //! signalled the diff was unassessable and no rule applies.
@@ -73,7 +84,8 @@
 //!
 //! Test: `grade_critical_high_effort_yields_block`,
 //! `grade_two_medium_yields_request_changes`,
-//! `grade_one_medium_yields_approve_star`,
+//! `grade_one_medium_yields_request_changes` (#1876, supersedes the pre-#1876
+//! `..._yields_approve_star` expectation),
 //! `grade_only_low_yields_approve`,
 //! `grade_unknown_is_preserved`,
 //! `grade_floor_overrides_model_approve`,
@@ -87,7 +99,11 @@
 //! `derive_verdict_with_grade_severity_overrides_grade_a`,
 //! `floor_excludes_refuted_and_low_confidence_findings` (#1343),
 //! `approve_b_plus_survives_refuted_and_low_confidence_findings` (#1343),
-//! `approve_b_plus_two_high_conf_medium_caps_at_approve_star` (#1343),
+//! `grade_model_approve_confident_medium_still_escalates_to_request_changes` and
+//! `grade_model_approve_b_plus_confident_medium_escalates_to_request_changes`
+//! (#1876 — supersede the pre-#1876
+//! `..._caps_medium_count_floor_at_approve_star` / `..._two_high_conf_medium_
+//! caps_at_approve_star` expectations),
 //! `model_request_changes_review_body_still_surfaces_request_changes` (#1343),
 //! `high_effort_finding_still_overrides_approve` (#1343),
 //! `low_confidence_high_effort_finding_still_drives_floor` (PR #1350),
@@ -264,10 +280,25 @@ fn floor_count_min_confidence() -> f32 {
 /// 2. SEVERITY FLOOR (minimum): outside the override window, compute a floor from
 ///    the finding severity distribution (see `severity_floor`) and return
 ///    `max(model_proposed, floor)`.  The model can never soften a Critical/High
-///    finding to APPROVE*.
+///    finding — nor, as of #1876, a single confident Medium finding — below the
+///    floor, regardless of the model's own proposed verdict.
 ///
 /// Special case: `Verdict::Unknown` is always returned as-is — the model has
 /// determined the diff was unassessable and no floor or override applies.
+///
+/// ## #1343 reconciliation cap — removed by #1876
+/// A prior version of this function capped a *count-based* (≥2 Medium)
+/// REQUEST_CHANGES floor at APPROVE* whenever `model_proposed == Approve`, on
+/// the theory that a count heuristic was weaker evidence than the model's own
+/// holistic APPROVE.  #1876's shadow-eval showed this made the reviewer
+/// dangerously lenient (61.3% verdict agreement; 89% of reference
+/// REQUEST_CHANGES cases silently downgraded).  `correctness_floor`'s Tier 2 no
+/// longer needs ≥2 findings — ONE finding that clears `FLOOR_MIN_CONFIDENCE`
+/// is, by construction, well-evidenced, so every REQUEST_CHANGES floor this
+/// function can now produce is confidence-grounded, not count-based.  There is
+/// therefore no remaining "weak heuristic" case for a reconciliation cap to
+/// protect, and the cap was removed outright (see `severity_floor` /
+/// `correctness_floor` for the confidence gate that replaces it).
 ///
 /// Test: see module-level test list.
 pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict {
@@ -304,43 +335,18 @@ pub fn derive_verdict(model_proposed: Verdict, findings: &[Finding]) -> Verdict 
     }
 
     // Severity floor: take the stricter of model-proposed and severity-derived.
-    let mut floor = severity_floor(&substantive);
-
-    // #1343: source-of-truth reconciliation.  When the model holistically judged
-    // the change APPROVE, a *count-based* REQUEST_CHANGES floor (≥2 Medium findings)
-    // must NOT override that judgment into REQUEST_CHANGES — that is exactly the
-    // calibration bug where APPROVE/B+ drifted to REQUEST_CHANGES/D+.  Cap the
-    // count-based floor at APPROVE* (advisory) in that case.  High-effort findings
-    // are unaffected: a genuine critical (BLOCK floor) still escalates an APPROVE,
-    // because BLOCK is grounded critical evidence, not a count heuristic.
-    //
-    // #1359: a CONFIRMED method-conformance divergence (a conformance finding that
-    // clears FLOOR_MIN_CONFIDENCE = 0.80) is grounded explicit evidence — the diff
-    // contradicts a method the ticket/spec stated — NOT a Medium-count heuristic.
-    // Like the High-effort exemption, it is exempt from this cap so AC-8 holds: a
-    // model APPROVE + a confident conformance divergence still floors to
-    // REQUEST_CHANGES.  (A sub-0.80 conformance finding never reaches the
-    // RequestChanges floor in the first place — see `conformance_floor` — so the
-    // cap correctly still applies to advisory-only conformance, honouring AC-12.)
-    let has_confident_conformance = substantive.iter().any(|f| {
-        f.category == FindingCategory::MethodConformance && f.confidence >= floor_min_confidence()
-    });
-    if model_proposed == Verdict::Approve
-        && floor == Verdict::RequestChanges
-        && !has_confident_conformance
-    {
-        debug!(
-            "source-of-truth reconciliation: model APPROVE + count-based REQUEST_CHANGES floor \
-             → capping floor at APPROVE* (no Medium-count override of an APPROVE review_body)"
-        );
-        floor = Verdict::ApproveWithReservations;
-    }
-    // Traceability (PR #1350): this cap only relaxes the *upward* direction
-    // (an APPROVE review_body must not be hardened to REQUEST_CHANGES by a Medium
-    // count).  The symmetric *downward* direction — a model-proposed BLOCK being
-    // relaxed below the floor — is intentionally NOT handled here; it is covered by
-    // `stricter_of` below, which takes max(model, floor), so a model BLOCK can never
-    // be softened by a weaker floor.  See `grade_model_block_kept_when_no_critical_finding`.
+    // #1876: the pre-existing #1343 "cap a count-based REQUEST_CHANGES floor at
+    // APPROVE* when model_proposed==APPROVE" reconciliation has been removed.
+    // `correctness_floor`'s Tier 2 (below) now floors to REQUEST_CHANGES on a
+    // SINGLE confident (`confidence > FLOOR_MIN_CONFIDENCE`) Medium finding —
+    // the same hard-floor treatment already given to High-effort findings
+    // (Tier 1, BLOCK) and confident method-conformance divergences
+    // (`conformance_floor`, #1359).  Every REQUEST_CHANGES floor this function
+    // can produce is therefore confidence-grounded, not a "weak count
+    // heuristic", so it is never capped back down merely because the model's
+    // own verdict was a clean APPROVE — see the function doc for the shadow-eval
+    // rationale (#1876).
+    let floor = severity_floor(&substantive);
 
     let final_verdict = stricter_of(model_proposed.clone(), floor.clone());
 
@@ -424,22 +430,24 @@ fn is_high_severity(f: &Finding) -> bool {
 /// this function is called; by the time this is reached, the batch has at least
 /// one substantive finding.
 ///
-/// As of #1015, Medium findings only count toward the REQUEST_CHANGES and
-/// APPROVE* floors when their `confidence > FLOOR_MIN_CONFIDENCE` (0.80).
-/// Advisory-tier Medium findings (confidence 0.66–0.80) are speculative; they
-/// must not force REQUEST_CHANGES over-escalation on PRs the model holistically
-/// judged clean.  High-effort behavior is unchanged: any confirmed High finding
-/// still floors to BLOCK regardless of confidence.
+/// As of #1015, Medium findings only count toward the REQUEST_CHANGES floor
+/// when their `confidence > FLOOR_MIN_CONFIDENCE` (0.80).  Advisory-tier Medium
+/// findings (confidence 0.66–0.80) are speculative; they must not force
+/// REQUEST_CHANGES over-escalation on PRs the model holistically judged clean.
+/// High-effort behavior is unchanged: any confirmed High finding still floors
+/// to BLOCK regardless of confidence.  As of #1876, a SINGLE confident Medium
+/// finding is sufficient to floor to REQUEST_CHANGES (previously ≥2 were
+/// required, with exactly 1 capped at the weaker APPROVE*) — see the module doc
+/// for the shadow-eval rationale.
 ///
-/// What: applies the four-tier rule set:
+/// What: applies the three-tier rule set:
 ///
 /// 1. Any `High`-effort finding → BLOCK (Critical/High severity)
-/// 2. ≥2 `Medium`-effort findings with `confidence > 0.80` → REQUEST_CHANGES
-/// 3. Exactly 1 `Medium`-effort finding with `confidence > 0.80` → APPROVE*
-/// 4. Only `Low` / no floor-counting findings → APPROVE
+/// 2. ≥1 `Medium`-effort finding with `confidence > 0.80` → REQUEST_CHANGES
+/// 3. Only `Low` / no floor-counting findings → APPROVE
 ///
 /// Test: `grade_two_medium_yields_request_changes`,
-/// `grade_one_medium_yields_approve_star`,
+/// `grade_one_medium_yields_request_changes` (#1876),
 /// `grade_advisory_medium_below_floor_threshold_does_not_escalate`,
 /// `grade_high_confidence_medium_above_floor_threshold_escalates`.
 ///
@@ -447,7 +455,7 @@ fn is_high_severity(f: &Finding) -> bool {
 /// `is_substantive`, so this function only ever sees substantive findings.
 ///
 /// As of #1359 the floor is split by `FindingCategory`: correctness findings run
-/// the four-tier rule unchanged, while method-conformance findings run a separate,
+/// the three-tier rule above, while method-conformance findings run a separate,
 /// strictly-weaker rule (see [`conformance_floor`]) that caps at `REQUEST_CHANGES`
 /// and never contributes `BLOCK`.  The combined floor is the stricter of the two.
 fn severity_floor(findings: &[&Finding]) -> Verdict {
@@ -468,19 +476,23 @@ fn severity_floor(findings: &[&Finding]) -> Verdict {
     stricter_of(correctness_floor, conformance_floor)
 }
 
-/// The four-tier correctness floor (the pre-#1359 `severity_floor` body).
+/// The three-tier correctness floor (#1876 merged the old Tiers 2/3 — see below).
 ///
 /// Why: separating the correctness rule from the conformance rule (#1359) keeps
 /// each rule readable and lets the conformance rule be strictly weaker (capped at
-/// REQUEST_CHANGES) without touching the proven correctness tiers.
-/// What: applies the unchanged four-tier rule set over correctness findings:
+/// REQUEST_CHANGES) without touching the correctness tiers.  #1876 additionally
+/// collapsed the old count-gated Tier 2/3 split (≥2 Medium → REQUEST_CHANGES,
+/// exactly 1 → APPROVE*) into a single confidence-gated tier: a shadow-eval
+/// showed requiring a SECOND corroborating Medium finding before escalating was
+/// the single largest source of the reviewer under-firing REQUEST_CHANGES.
+/// What: applies the three-tier rule set over correctness findings:
 ///   1. Any `High`-effort finding → BLOCK
-///   2. ≥2 high-confidence Medium-effort findings → REQUEST_CHANGES
-///   3. Exactly 1 high-confidence Medium-effort finding → APPROVE*
-///   4. Only `Low` / no floor-counting findings → APPROVE
+///   2. ≥1 high-confidence (`confidence > FLOOR_MIN_CONFIDENCE`) Medium-effort
+///      finding → REQUEST_CHANGES
+///   3. Only `Low` / no floor-counting findings → APPROVE
 ///
 /// Test: `grade_two_medium_yields_request_changes`,
-///       `grade_one_medium_yields_approve_star`,
+///       `grade_one_medium_yields_request_changes` (#1876),
 ///       `grade_advisory_medium_below_floor_threshold_does_not_escalate`.
 fn correctness_floor(findings: &[&&Finding]) -> Verdict {
     if findings.is_empty() {
@@ -493,27 +505,25 @@ fn correctness_floor(findings: &[&&Finding]) -> Verdict {
     // Only count Medium findings whose confidence clears the floor threshold
     // (#1015: advisory-tier Medium findings must not force REQUEST_CHANGES).
     let medium_floor = floor_min_confidence();
-    let medium_count = findings
+    let has_confident_medium = findings
         .iter()
-        .filter(|f| f.effort == Effort::Medium && f.confidence > medium_floor)
-        .count();
+        .any(|f| f.effort == Effort::Medium && f.confidence > medium_floor);
 
     // Tier 1: any High-effort (critical/high severity) → BLOCK floor.
     if has_high {
         return Verdict::Block;
     }
 
-    // Tier 2: ≥2 high-confidence Medium-effort findings → REQUEST_CHANGES.
-    if medium_count >= 2 {
+    // Tier 2 (#1876): ANY single high-confidence Medium-effort finding →
+    // REQUEST_CHANGES.  A finding that clears FLOOR_MIN_CONFIDENCE (0.80) is,
+    // by definition, well-evidenced — it no longer needs a second corroborating
+    // Medium to escalate, matching the hard-floor treatment already given to
+    // High-effort findings (Tier 1).
+    if has_confident_medium {
         return Verdict::RequestChanges;
     }
 
-    // Tier 3: exactly 1 high-confidence Medium-effort finding → APPROVE*.
-    if medium_count == 1 {
-        return Verdict::ApproveWithReservations;
-    }
-
-    // Tier 4: only Low-effort, no findings, or all-advisory Medium findings.
+    // Tier 3: only Low-effort, no findings, or all-advisory Medium findings.
     Verdict::Approve
 }
 

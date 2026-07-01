@@ -228,16 +228,23 @@ fn rederive_keeps_confirmed_block() {
 }
 
 #[test]
-fn rederive_confirmed_medium_caps_at_approve_star() {
-    // Path (a2) — #1015: confirmed Medium-only caps baseline at APPROVE*; does not
-    // anchor REQUEST_CHANGES from a floor-driven escalation.
+fn rederive_confirmed_medium_still_escalates_to_request_changes() {
+    // Path (a2) — #1876 (supersedes the pre-#1876 #1015 expectation): the
+    // BASELINE is capped at APPROVE*, but `derive_verdict(baseline, survivors)`
+    // independently re-derives the severity floor from the surviving findings.
+    // A single confirmed Medium@0.85 (> FLOOR_MIN_CONFIDENCE) now floors to
+    // REQUEST_CHANGES on its own merits (`correctness_floor` Tier 2, #1876), so
+    // `stricter_of(baseline=APPROVE*, floor=REQUEST_CHANGES)` lands on
+    // REQUEST_CHANGES even though the baseline itself was capped.
     let mut med = finding(Effort::Medium, 0.85);
     apply_outcome(&mut med, VerifyOutcome::Confirmed);
     let verdict = rederive_verdict(Verdict::RequestChanges, true, false, &[med]);
     assert_eq!(
         verdict,
-        Verdict::ApproveWithReservations,
-        "confirmed Medium caps at APPROVE* (path a2 — #1015)"
+        Verdict::RequestChanges,
+        "a single confirmed high-confidence Medium must still escalate to \
+         REQUEST_CHANGES (path a2 + #1876 floor, supersedes the pre-#1876 \
+         APPROVE*-cap expectation)"
     );
 }
 
@@ -289,6 +296,8 @@ fn rederive_confirmed_high_effort_still_escalates_from_approve() {
 #[test]
 fn rederive_mixed_keeps_only_surviving_floor() {
     // Path (a2): High refuted + confirmed Medium@0.85, model said APPROVE*.
+    // #1876: the surviving Medium alone now floors to REQUEST_CHANGES (a single
+    // confident Medium is sufficient, superseding the pre-#1876 APPROVE* result).
     let mut high = finding(Effort::High, 0.95);
     apply_outcome(&mut high, VerifyOutcome::Refuted);
     let mut med = finding(Effort::Medium, 0.85);
@@ -296,8 +305,32 @@ fn rederive_mixed_keeps_only_surviving_floor() {
     let verdict = rederive_verdict(Verdict::ApproveWithReservations, true, true, &[high, med]);
     assert_eq!(
         verdict,
-        Verdict::ApproveWithReservations,
-        "surviving single Medium floors to APPROVE*; refuted High is excluded (path a)"
+        Verdict::RequestChanges,
+        "surviving single confident Medium floors to REQUEST_CHANGES; refuted \
+         High is excluded but does not silently clear the still-standing Medium \
+         (path a2 + #1876 floor)"
+    );
+}
+
+#[test]
+fn rederive_refuted_finding_does_not_clear_standing_medium_finding() {
+    // #1876 regression: a refuted High finding must not silently clear an
+    // unrelated, still-standing confirmed Medium finding down to the weaker
+    // APPROVE*/APPROVE baseline. Two findings originally drove BLOCK; the
+    // verifier refutes the High and confirms the Medium. The Medium alone now
+    // floors to REQUEST_CHANGES (single confident Medium, #1876), so the review
+    // does not silently soften just because one finding among several was
+    // refuted.
+    let mut high = finding(Effort::High, 0.95);
+    apply_outcome(&mut high, VerifyOutcome::Refuted);
+    let mut med = finding(Effort::Medium, 0.85);
+    apply_outcome(&mut med, VerifyOutcome::Confirmed);
+    let verdict = rederive_verdict(Verdict::Block, true, true, &[high, med]);
+    assert_eq!(
+        verdict,
+        Verdict::RequestChanges,
+        "a still-standing confirmed Medium must keep the review at REQUEST_CHANGES \
+         even though a different finding (the High) was refuted (#1876)"
     );
 }
 
@@ -469,6 +502,54 @@ async fn verify_model_unavailable_marks_error_refuted_and_preserves_verdict() {
     );
 }
 
+/// #1876 fail-open regression: a TRANSIENT (non-alarm) verifier error — rate
+/// limiting, a transport blip, an upstream 5xx — must map to `ErrorRefuted`
+/// ("unable to verify"), NOT plain `Refuted` ("the model refuted this").
+///
+/// Why: before this fix, `verify_one`'s transient-error branch returned plain
+/// `VerifyOutcome::Refuted`, structurally identical to a clean model REFUTED
+/// judgment. That set `any_clean_refuted = true` in `run_verification_round`,
+/// which sent `rederive_verdict` down path (b) — dropping the WHOLE review's
+/// baseline to APPROVE — even though the verifier never examined the finding at
+/// all (it just could not be reached). This is the textbook fail-open bug: an
+/// infrastructure hiccup silently downgraded a real BLOCK to APPROVE.
+/// What: a `LlmError::RateLimited` (a non-alarm, transient error per
+/// `LlmError::is_alarm`) on the ONLY candidate finding must record
+/// `ErrorRefuted` and take path (c) — preserve `primary_verdict` — instead of
+/// path (b) — collapse to APPROVE.
+/// Test: this test itself.
+#[tokio::test]
+async fn verify_transient_error_marks_error_refuted_not_plain_refuted() {
+    let verifier: Arc<dyn LlmProvider> = Arc::new(FailingVerifier {
+        make_err: || LlmError::RateLimited,
+    });
+    let mut findings = vec![finding(Effort::High, 0.95)];
+    let verdict = run_verification_round(
+        &verifier,
+        "m",
+        "+ diff",
+        Verdict::Block,
+        &mut findings,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        matches!(
+            findings[0].verified,
+            Some(VerifyOutcome::ErrorRefuted { .. })
+        ),
+        "a transient verifier error must map to ErrorRefuted, not plain Refuted (#1876)"
+    );
+    assert_eq!(
+        verdict,
+        Verdict::Block,
+        "a transient-error-only round must preserve primary_verdict (path c), \
+         not fail-open to APPROVE (path b) (#1876)"
+    );
+}
+
 // ── Truncation path (#726 regression) ─────────────────────────────────────────
 
 #[tokio::test]
@@ -516,7 +597,11 @@ async fn verify_truncation_preserves_primary_verdict() {
 }
 
 /// Regression for the dropped-JoinHandle true-positive (PR #720, #726 incident).
-/// Why: (a) CONFIRMED Medium → APPROVE* (path a2, #1015 — pre-#1015 was REQUEST_CHANGES);
+/// Why: (a) CONFIRMED Medium → REQUEST_CHANGES (path a2 baseline capped at
+/// APPROVE*, but the #1876 confidence-gated floor re-escalates a single
+/// confident Medium; pre-#1876 this landed on APPROVE*, and pre-#1015 on
+/// REQUEST_CHANGES via the old count heuristic — #1876 restores the
+/// REQUEST_CHANGES outcome via a confidence gate instead of a count gate);
 /// (b) TruncationRefuted must NOT collapse to APPROVE (path c, #726).
 /// Test: this test itself.
 #[tokio::test]
@@ -534,7 +619,9 @@ async fn verify_join_handle_regression_pr720() {
                 +    tokio::spawn(async move { warm_boot().await });\n\
                 +}\n";
 
-    // Sub-test (a): CONFIRMED Medium → path (a2): baseline=APPROVE*, stays APPROVE*.
+    // Sub-test (a): CONFIRMED Medium@0.85 → path (a2) baseline is capped at
+    // APPROVE*, but `derive_verdict`'s own floor re-escalates to REQUEST_CHANGES
+    // (#1876: a single confident Medium is sufficient — see `correctness_floor`).
     let mut findings_1 = vec![f.clone()];
     let v1 = run_verification_round(
         &confirmed_provider(),
@@ -551,11 +638,14 @@ async fn verify_join_handle_regression_pr720() {
         findings_1[0].verified,
         Some(VerifyOutcome::Confirmed)
     ));
-    // After #1015: a confirmed Medium caps at APPROVE* (path a2), not REQUEST_CHANGES.
+    // #1876: a confirmed high-confidence Medium re-escalates to REQUEST_CHANGES
+    // via derive_verdict's floor, even though the a2 baseline itself is capped
+    // at APPROVE* (supersedes the #1015-era APPROVE* result).
     assert_eq!(
         v1,
-        Verdict::ApproveWithReservations,
-        "CONFIRMED Medium → APPROVE* (path a2 — #1015)"
+        Verdict::RequestChanges,
+        "CONFIRMED Medium → REQUEST_CHANGES (path a2 baseline capped, floor \
+         re-escalates — #1876)"
     );
 
     // Sub-test (b): TruncationRefuted → verdict preserved (path c — #726).

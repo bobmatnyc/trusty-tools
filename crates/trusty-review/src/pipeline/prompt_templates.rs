@@ -44,8 +44,13 @@ a grade of "F" must have verdict BLOCK; a grade of "B-" or above must have verdi
 
 - Your default verdict is APPROVE (default grade A-). You bear the burden of proof to escalate.
 - APPROVE* requires at least one Medium finding. Do not emit APPROVE* with only Low findings.
-- REQUEST_CHANGES requires ALL THREE: (a) a specific wrong line cited verbatim,
-  (b) a traceable failure path, (c) a concrete fix proposed.
+- REQUEST_CHANGES requires strong evidence on AT LEAST TWO of these three
+  dimensions: (a) a specific wrong line cited verbatim, (b) a traceable failure
+  path, (c) a concrete fix proposed. Do NOT withhold REQUEST_CHANGES merely
+  because one dimension is thin — e.g. a clear failure path plus a concrete fix
+  is sufficient even when the line citation is only approximate, and a verbatim
+  line plus a concrete fix is sufficient even when the failure path is implicit
+  rather than spelled out step-by-step.
 - Do NOT emit UNKNOWN just because the PR is large; use it only when you
   genuinely cannot tell if the change is correct.
 - **Do not under-rate a clearly blocking issue as advisory.** If it would break
@@ -184,8 +189,13 @@ a grade of "F" must have verdict BLOCK; a grade of "B-" or above must have verdi
 
 - Your default verdict is APPROVE (default grade A-). You bear the burden of proof to escalate.
 - APPROVE* requires at least one Medium finding. Do not emit APPROVE* with only Low findings.
-- REQUEST_CHANGES requires ALL THREE: (a) a specific wrong line cited verbatim,
-  (b) a traceable failure path, (c) a concrete fix proposed.
+- REQUEST_CHANGES requires strong evidence on AT LEAST TWO of these three
+  dimensions: (a) a specific wrong line cited verbatim, (b) a traceable failure
+  path, (c) a concrete fix proposed. Do NOT withhold REQUEST_CHANGES merely
+  because one dimension is thin — e.g. a clear failure path plus a concrete fix
+  is sufficient even when the line citation is only approximate, and a verbatim
+  line plus a concrete fix is sufficient even when the failure path is implicit
+  rather than spelled out step-by-step.
 - Do NOT emit UNKNOWN just because the PR is large; use it only when you
   genuinely cannot tell if the change is correct.
 - **Do not under-rate a clearly blocking issue as advisory.** If it would break

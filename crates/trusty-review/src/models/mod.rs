@@ -149,7 +149,13 @@ impl std::fmt::Display for Effort {
 /// "refuted because of error", etc., to compute the correct verdict and emit
 /// the right alarm (spec §07 REV-606, source-analysis §12.1).
 /// What: `ErrorRefuted` carries the error class string so config/lifecycle
-/// failures are distinguishable in logs.
+/// failures are distinguishable in logs.  As of #1876 it also covers transient
+/// verifier errors (rate limit, transport, upstream 5xx) — NOT just
+/// config/lifecycle failures — because both are "unable to verify", a
+/// structurally different outcome from a clean model REFUTED (see
+/// `pipeline::verify::verify_one`).  Only config/lifecycle errors also emit the
+/// `verification_model_error` alarm signal; transient errors are expected
+/// operational noise and do not alarm.
 /// Test: `verify_outcome_serde_roundtrip`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -158,10 +164,16 @@ pub enum VerifyOutcome {
     Confirmed,
     /// Verifier LLM refuted the finding.
     Refuted,
-    /// Verifier call failed with a config/lifecycle error (see spec REV-340).
-    /// The finding is treated as refuted but an alarm is emitted.
+    /// Verifier call failed with a config/lifecycle error (see spec REV-340) or
+    /// a transient error (rate limit / transport / upstream 5xx, #1876). The
+    /// finding is excluded from the verdict floor like a refutation, but
+    /// `rederive_verdict` treats it as "unable to verify" rather than a clean
+    /// model REFUTED — it preserves `primary_verdict` instead of collapsing the
+    /// review to APPROVE. Only config/lifecycle errors also emit the
+    /// `verification_model_error` alarm.
     ErrorRefuted {
-        /// Human-readable error class (e.g. `"ModelNotFound"`, `"AccessDenied"`).
+        /// Human-readable error class (e.g. `"ModelNotFound"`, `"AccessDenied"`,
+        /// `"Transport"`, `"RateLimited"`, `"Upstream"`).
         error_class: String,
     },
     /// Verifier call failed due to truncation / context-length overrun.

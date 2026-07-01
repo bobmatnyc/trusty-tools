@@ -23,8 +23,9 @@ fn system_prompt_contains_policy() {
         "system prompt must state APPROVE-default policy"
     );
     assert!(
-        prompt.contains("REQUEST_CHANGES requires ALL THREE"),
-        "system prompt must specify the REQUEST_CHANGES gate"
+        prompt.contains("REQUEST_CHANGES requires strong evidence on AT LEAST TWO"),
+        "system prompt must specify the recalibrated (#1876) REQUEST_CHANGES gate — \
+         evidence on 2-of-3 dimensions, not a conjunctive AND of all three"
     );
     assert!(
         prompt.contains("BLOCK"),
