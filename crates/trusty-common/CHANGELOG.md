@@ -5,6 +5,20 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Added
+
+- wire trusty-mpm into console reverse proxy ([#1850](https://github.com/bobmatnyc/trusty-tools/pull/1850)) ([`970d297`](https://github.com/bobmatnyc/trusty-tools/commit/970d297bf9448cf74b3117445401524bd17b20e4))
+- detach returns to tm picker + daemon/clone cwd hardening ([#1795](https://github.com/bobmatnyc/trusty-tools/pull/1795)) ([`3b0e723`](https://github.com/bobmatnyc/trusty-tools/commit/3b0e7231e85ca8fbc53dbd55bb4968d4d96e811c))
+
+### Fixed
+
+- warn on skipped malformed claude-mpm session in catchup ([#1762](https://github.com/bobmatnyc/trusty-tools/pull/1762)) ([#1769](https://github.com/bobmatnyc/trusty-tools/pull/1769)) ([`e0b2e7c`](https://github.com/bobmatnyc/trusty-tools/commit/e0b2e7c47cc426d5dd19df37c08d54b53bd436e3))
+
+### Changed
+
+- extract DOC-28 catch-up engine behind catchup feature (PR1, #1762) ([`addfdbb`](https://github.com/bobmatnyc/trusty-tools/commit/addfdbb04ed78028887a0e782afe7cfe83c10b46))
 ## [0.18.0] — 2026-06-25
 
 ### Added
