@@ -27,6 +27,12 @@ surface, DOC-16).
 > the metaharness runner-core epic (#1045) and the interactive-TUI epic (#1272 /
 > DOC-16): #1045 builds the runner, #1272 builds the operator surface, and this
 > spec frames why the runner must be *autonomous*.
+>
+> **Conformance tracking:** DOC-29 (`docs/specs/mpm-behavior-conformance.md`) is
+> the canonical, testable source of truth for the primary trusty-mpm harness
+> behaviors (instruction assembly, self-awareness, memory integration, agent/skill
+> bundling, autonomous provisioning, content freshness) defined herein. Refer to
+> DOC-29 for conformance status and per-behavior test citations.
 
 ---
 
@@ -247,6 +253,13 @@ are explicitly post-MVP (§5).
 | Coordinator TUI | yes | **done** | — |
 
 ### 4.2 Partial
+
+> **Note:** This table is a historical compliance audit snapshot (2026-06-17).
+> For the canonical, up-to-date conformance status of the primary trusty-mpm
+> harness behaviors (HR-1, HR-2, HR-3, HR-4), refer to
+> [DOC-29 — Primary trusty-mpm Harness Behaviors — Conformance Matrix](./mpm-behavior-conformance.md).
+> DOC-29 consolidates these behaviors, adds test citations, and reflects current
+> implementation status as of the most recent pass.
 
 | Feature | claude-mpm has it | t-mpm status | Effort |
 |---|---|---|---|

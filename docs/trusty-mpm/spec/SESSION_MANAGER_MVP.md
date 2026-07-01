@@ -251,6 +251,12 @@ workflow, agents, skills, and memory. Instruction/prompt assembly stays in MPM;
 each harness implementation only **PROJECTS** that canonical context into the
 runtime's native format and deployment model.
 
+> **Conformance tracking:** [DOC-29 — Primary trusty-mpm Harness Behaviors](../../specs/mpm-behavior-conformance.md)
+> is the single canonical source of truth for testing and conformance verification of
+> these principles. It consolidates the testable behaviors (instruction assembly, agent
+> bundling, memory integration, etc.) scattered across this and other spec documents
+> into one conformance matrix with per-behavior test citations.
+
 - MPM assembles the canonical instruction bundle once (agents, skills, system
   prompt, `.mcp.json`, `.claude/settings.json`, memory palace links, hooks).
 - The `RuntimeAdapter` trait receives this bundle as input.

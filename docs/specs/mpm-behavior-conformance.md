@@ -261,11 +261,13 @@ tests are the direct confirmation that HR-2's precedence order is implemented,
 §3 HR-2 was written as pending near-term work; as of this pass it is wired
 into `prepare_session_inner` and unit-verified).
 
-**What was NOT run this pass:** a live end-to-end smoke test — a real
-`tm sessions new --repo <url> --ref main --task "…"` against a real tmux
-binary and a real git remote (`SESSION_MANAGER_MVP.md §13`, acceptance
-criteria 2/3/5/6/11/12; the crate's own `#[ignore]`-tagged
-`test_live_session_e2e`). Everything above is unit/fake-backend level.
+**What was NOT run this pass:** a full live end-to-end smoke test — the
+complete tmux spawn/observe/resume/decommission workflow. The crate includes
+a live-provisioning smoke test (`#[ignore]`-tagged `live_provision_real_repo`
+at `crates/trusty-mpm/tests/session_manager_mvp.rs:580`), which exercises
+workspace isolation and git/repo provisioning, but does not run the complete
+session lifecycle (that is, BHV-05's full spec is aspirational and not yet
+exercised end-to-end). Everything above is unit/fake-backend level.
 
 **Status:** PARTIALLY-IMPLEMENTED — unit-verified with fake backends (workspace
 isolation, naming, reconciliation, manifest precedence all pass); the
