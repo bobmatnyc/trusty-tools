@@ -83,7 +83,9 @@ impl Drop for LaunchSessionGuard {
 /// to it. The live checkout is NEVER touched: `.claude` is deployed into the managed
 /// clone, and the tmux cwd is the managed clone (#1590).
 /// What: resolves `dir`, derives the GitHub remote from its origin, provisions a
-/// managed clone under `~/trusty-mpm-projects/<owner>/<repo>/<id>/`, registers the
+/// shared base clone under `<repos_root>/<owner>/<repo>/` (resolved via the SAME
+/// `inproject::base_clone_path` the daemon uses, so both entry points agree — #1807)
+/// plus a per-session worktree, registers the
 /// session with the daemon, prints the banner, creates a detached tmux session
 /// running `claude` in the managed clone, and `attach`es to it. Errors with a
 /// `tm connect` hint when the directory has no parseable GitHub remote.
@@ -123,9 +125,16 @@ pub(crate) async fn launch(
     let source_id = format!("{}/{}", gh.owner, gh.repo);
 
     // 3. Compute the canonical managed project directory
-    //    (<workspace_root>/<owner>/<repo>/) using the same conventions as the daemon.
-    let cfg = trusty_mpm::core::trusty_tools_config::TrustyToolsConfig::load();
-    let project_dir = trusty_mpm::core::trusty_tools_config::workspace_subpath(&cfg, &gh);
+    //    (<repos_root>/<owner>/<repo>/) via the SAME resolver the daemon's
+    //    in-project spawn path uses (`base_clone_path` → `repos_root_from`), so
+    //    `tm launch` and daemon-spawned sessions can never diverge (#1807). This
+    //    resolver honours the full precedence chain — `TRUSTY_MPM_REPOS_ROOT` env
+    //    > `TRUSTY_MPM_WORKSPACE_ROOT` env > config `workspace_root_template` >
+    //    built-in `~/trusty-mpm-projects`. The pre-#1807 code called
+    //    `workspace_subpath`, which skipped `TRUSTY_MPM_REPOS_ROOT` entirely and
+    //    re-introduced the root divergence #1803 set out to eliminate.
+    let project_dir =
+        trusty_mpm::daemon::managed_routes::inproject::base_clone_path(&gh.owner, &gh.repo);
     let project_dir_str = project_dir.to_string_lossy().to_string();
 
     // 4. Reconnect check — prefix-match any LIVE session whose workdir lives under
