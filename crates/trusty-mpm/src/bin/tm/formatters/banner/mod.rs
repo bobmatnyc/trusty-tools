@@ -105,25 +105,25 @@ pub(crate) fn shade_bucket(c: char) -> (u8, u8, u8) {
 /// Why: auto-computing the display width from the actual art means an
 /// arbitrarily-sized user-edited file renders correctly without recompiling;
 /// all previous hard-coded CLIP_* constants are replaced by this measurement.
+/// Taking `use_color` as an explicit parameter (issue #1858) rather than
+/// probing the process-global `colored::control` override internally makes
+/// this function pure and deterministic: tests can exercise both the
+/// color-on and color-off paths directly, with no shared mutable state to
+/// race against other tests running in parallel threads.
 /// What: iterates every line of `art`, colourises non-space chars via
-/// `shade_bucket`, pads each row to `max_display_cols` with spaces. Returns
-/// `(rows, max_display_cols)`. Spaces are transparent (no colour escape).
-/// Rows wider than `max_display_cols` are clipped gracefully (no panic).
-/// Test: `image_autosize_uses_art_dimensions`, `image_clip_correct_cols`
-/// in `two_panel::tests`.
-pub(crate) fn shade_image(art: &str) -> (Vec<String>, usize) {
+/// `shade_bucket` when `use_color` is `true`, pads each row to
+/// `max_display_cols` with spaces. Returns `(rows, max_display_cols)`. Spaces
+/// are transparent (no colour escape) regardless of `use_color`. Rows wider
+/// than `max_display_cols` are clipped gracefully (no panic).
+/// Test: `image_autosize_uses_art_dimensions`, `image_clip_correct_cols`,
+/// `image_shading_emits_truecolor` in `two_panel::tests`.
+pub(crate) fn shade_image(art: &str, use_color: bool) -> (Vec<String>, usize) {
     let raw_lines: Vec<&str> = art.lines().collect();
     let max_cols = raw_lines.iter().map(|l| l.width()).max().unwrap_or(0);
 
     if max_cols == 0 || raw_lines.is_empty() {
         return (Vec::new(), 0);
     }
-
-    // Probe colored's current control state so our raw truecolor escapes respect
-    // the same set_override(false) call that banner callers use for non-TTY mode.
-    // When set_override(false) is active, truecolor() returns bare text and the
-    // probe string has no ANSI escape — emitting raw escapes would bypass that.
-    let use_color = "a".truecolor(0, 0, 0).to_string().contains('\x1B');
 
     let rows = raw_lines
         .iter()
@@ -160,13 +160,24 @@ pub(crate) fn shade_image(art: &str) -> (Vec<String>, usize) {
 /// Load the banner art from disk (or embedded default) and shade it.
 ///
 /// Why: decouples the renderer (`two_panel`) from the I/O of discovering and
-/// reading the user-editable banner file.
-/// What: calls `source::load_banner_art()` then `shade_image()`, returning
-/// `(coloured_rows, max_display_cols)`.
+/// reading the user-editable banner file. This is the one legitimate
+/// production read of `colored`'s global override: a real launch must follow
+/// whatever `NoColorGuard`/TTY detection has configured for the process, so
+/// the probe happens here, once, and is threaded into the now-pure
+/// `shade_image` rather than that function reading the global itself.
+/// What: calls `source::load_banner_art()`, probes `colored`'s current
+/// override via a throwaway `truecolor()` call, then calls
+/// `shade_image(&art, use_color)`, returning `(coloured_rows,
+/// max_display_cols)`.
 /// Test: `image_autosize_uses_art_dimensions` in `two_panel::tests`.
 pub(crate) fn load_and_shade_banner() -> (Vec<String>, usize) {
     let art = source::load_banner_art();
-    shade_image(&art)
+    // Probe colored's current control state so our raw truecolor escapes respect
+    // the same set_override(false) call that banner callers use for non-TTY mode.
+    // When set_override(false) is active, truecolor() returns bare text and the
+    // probe string has no ANSI escape — emitting raw escapes would bypass that.
+    let use_color = "a".truecolor(0, 0, 0).to_string().contains('\x1B');
+    shade_image(&art, use_color)
 }
 
 /// Query the terminal width in columns, falling back to 80 when unknown.

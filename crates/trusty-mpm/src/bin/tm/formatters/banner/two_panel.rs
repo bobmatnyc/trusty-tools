@@ -450,7 +450,8 @@ pub(crate) mod tests {
     /// Shaded art rows match the actual line count of the embedded default.
     #[test]
     fn image_clip_correct_rows() {
-        let (lines, _cols) = super::super::shade_image(super::super::source::DEFAULT_BANNER_ART);
+        let (lines, _cols) =
+            super::super::shade_image(super::super::source::DEFAULT_BANNER_ART, false);
         let raw_count = super::super::source::DEFAULT_BANNER_ART.lines().count();
         assert_eq!(
             lines.len(),
@@ -464,9 +465,8 @@ pub(crate) mod tests {
     /// Each shaded row has the same display width (auto-sized to art max width).
     #[test]
     fn image_clip_correct_cols() {
-        colored::control::set_override(false);
         let (lines, expected_cols) =
-            super::super::shade_image(super::super::source::DEFAULT_BANNER_ART);
+            super::super::shade_image(super::super::source::DEFAULT_BANNER_ART, false);
         assert!(expected_cols > 0, "auto-sized cols must be > 0");
         for (i, line) in lines.iter().enumerate() {
             let bare = strip_ansi(line);
@@ -476,31 +476,30 @@ pub(crate) mod tests {
                 "row {i} display width ({width}) must equal auto-sized cols ({expected_cols})"
             );
         }
-        colored::control::unset_override();
     }
 
     /// Non-space art characters emit truecolor escapes when color is enabled.
     #[test]
     fn image_shading_emits_truecolor() {
-        // shade_image now respects the colored global state (set_override) so
-        // that non-TTY callers can suppress escapes (#1839 Fix 3). Force color
-        // on here so the assertion holds regardless of CI environment settings.
-        colored::control::set_override(true);
-        let (lines, _) = super::super::shade_image(super::super::source::DEFAULT_BANNER_ART);
+        // Issue #1858: `shade_image` used to read the process-global
+        // `colored::control` override internally, so this test raced every
+        // sibling test in this file that flips the same global via
+        // `set_override(false)`. Now that `use_color` is an explicit
+        // parameter, this test needs no global mutation at all — it is fully
+        // deterministic and immune to parallel-test interleaving.
+        let (lines, _) = super::super::shade_image(super::super::source::DEFAULT_BANNER_ART, true);
         let any_colored = lines.iter().any(|l| l.contains("\x1B[38;2;"));
         assert!(
             any_colored,
             "shaded art must emit truecolor escapes when color is enabled"
         );
-        colored::control::unset_override();
     }
 
     /// Auto-sizing picks up dimensions from a custom art string.
     #[test]
     fn image_autosize_uses_art_dimensions() {
-        colored::control::set_override(false);
         let custom_art = "ABC\nDE\nFGHI\n";
-        let (lines, cols) = super::super::shade_image(custom_art);
+        let (lines, cols) = super::super::shade_image(custom_art, false);
         // "FGHI" is the widest line: 4 chars.
         assert_eq!(cols, 4, "max width of 'FGHI' is 4");
         assert_eq!(lines.len(), 3, "three non-empty lines");
@@ -509,7 +508,6 @@ pub(crate) mod tests {
             let bare = strip_ansi(line);
             assert_eq!(bare.width(), 4, "row {i} must be padded to 4 display cols");
         }
-        colored::control::unset_override();
     }
 
     /// The right-column content has no inner-box border chars (╭╮╰╯).
