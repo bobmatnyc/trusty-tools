@@ -42,10 +42,12 @@ use crate::project::{Project, ProjectRegistry, derive_name_from_url};
 /// `TRUSTY_MPM_WORKSPACE_ROOT` convention — operators (and tests) can flip the
 /// gate without editing `config.yaml`.
 /// What: `"TRUSTY_MPM_ALLOW_MCP_SPAWN"`; a truthy value (`"1"`/`"true"`/`"yes"`,
-/// case-insensitive) enables; anything else (including unset/empty) defers to
-/// config.
+/// case-insensitive) force-enables regardless of config; an explicit falsy
+/// value (`"0"`/`"false"`/`"no"`, case-insensitive) force-disables regardless
+/// of config; unset or empty defers entirely to config.
 /// Test: `tests::env_true_enables_regardless_of_config`,
-/// `tests::env_false_string_defers_to_config`.
+/// `tests::env_false_string_force_disables_regardless_of_config`,
+/// `tests::env_unset_defers_to_config`.
 pub const ALLOW_MCP_SPAWN_ENV: &str = "TRUSTY_MPM_ALLOW_MCP_SPAWN";
 
 /// Resolve whether MCP-initiated session spawning is currently permitted (#1836).
@@ -53,17 +55,26 @@ pub const ALLOW_MCP_SPAWN_ENV: &str = "TRUSTY_MPM_ALLOW_MCP_SPAWN";
 /// Why: the spawn path needs ONE answer, with the same env > config > default
 /// precedence pattern [`crate::core::trusty_tools_config::workspace_root`]
 /// already establishes, so the gate cannot silently diverge between callers.
-/// What: `TRUSTY_MPM_ALLOW_MCP_SPAWN` wins when set to a non-empty value;
-/// otherwise `config.daemon.allow_mcp_spawn`; otherwise the safe default
-/// `false`.
+/// An operator setting `TRUSTY_MPM_ALLOW_MCP_SPAWN=0` expects that to act as a
+/// deliberate, explicit override (force-disable) — not a silent no-op that
+/// falls through to whatever config says.
+/// What: three-state precedence. `TRUSTY_MPM_ALLOW_MCP_SPAWN` set to a truthy
+/// string (`"1"`/`"true"`/`"yes"`) force-enables; set to a falsy string
+/// (`"0"`/`"false"`/`"no"`) force-disables; unset, empty, or any other value
+/// defers to `config.daemon.allow_mcp_spawn`, defaulting to `false` if config
+/// is also silent.
 /// Test: `tests::default_is_disabled`, `tests::config_true_enables`,
-/// `tests::env_true_enables_regardless_of_config`.
+/// `tests::env_true_enables_regardless_of_config`,
+/// `tests::env_false_string_force_disables_regardless_of_config`,
+/// `tests::env_unset_defers_to_config`.
 #[must_use]
 pub fn mcp_spawn_enabled(config: &TrustyToolsConfig) -> bool {
     if let Ok(raw) = std::env::var(ALLOW_MCP_SPAWN_ENV) {
         let raw = raw.trim().to_ascii_lowercase();
-        if !raw.is_empty() {
-            return matches!(raw.as_str(), "1" | "true" | "yes");
+        match raw.as_str() {
+            "1" | "true" | "yes" => return true,
+            "0" | "false" | "no" => return false,
+            _ => {} // empty or unrecognised value: defer to config
         }
     }
     config
@@ -276,10 +287,9 @@ mod tests {
 
     #[test]
     #[serial]
-    fn env_false_string_defers_to_config() {
-        // An explicit non-truthy value must NOT itself disable when config says
-        // true — it simply defers precedence to config (only a recognised truthy
-        // string short-circuits to `true`; anything else falls through).
+    fn env_false_string_force_disables_regardless_of_config() {
+        // An explicit falsy env value is a deliberate override, not a
+        // "no-op" — it must force-disable even when config says `true`.
         let _env = EnvGuard::set("0");
         let cfg = TrustyToolsConfig {
             daemon: Some(DaemonConfig {
@@ -289,8 +299,40 @@ mod tests {
         };
         assert!(
             !mcp_spawn_enabled(&cfg),
-            "an explicit env=0 must NOT enable"
+            "an explicit env=0 must force-disable even when config=true"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn env_unset_defers_to_config() {
+        // With the env var absent entirely, config is authoritative — this is
+        // genuine deferral, distinct from the env=0 force-disable case above.
+        let _env = EnvGuard::unset();
+        let cfg = TrustyToolsConfig {
+            daemon: Some(DaemonConfig {
+                allow_mcp_spawn: Some(true),
+            }),
+            ..Default::default()
+        };
+        assert!(
+            mcp_spawn_enabled(&cfg),
+            "env unset must defer to config=true"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn env_empty_string_defers_to_config() {
+        // An empty (but set) env value is treated the same as unset: defer.
+        let _env = EnvGuard::set("");
+        let cfg = TrustyToolsConfig {
+            daemon: Some(DaemonConfig {
+                allow_mcp_spawn: Some(true),
+            }),
+            ..Default::default()
+        };
+        assert!(mcp_spawn_enabled(&cfg), "env='' must defer to config=true");
     }
 
     // ── looks_like_remote_url classification ────────────────────────────────
