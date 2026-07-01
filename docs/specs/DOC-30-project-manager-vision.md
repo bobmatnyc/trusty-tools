@@ -347,7 +347,7 @@ These **12 design decisions** have been resolved by the owner and are now LOCKED
 
 ### Phase 2: Milestone + Estimation
 - `Milestone` CRUD
-- `estimated_effort_hours` tracking + burn-down views
+- estimated_effort tier tracking + burn-down views (S/M/L/XL velocity)
 - TUI dashboard integration (DOC-16 / #1272)
 - Velocity calculation (moving average of actual vs. estimate)
 
@@ -369,7 +369,7 @@ These **12 design decisions** have been resolved by the owner and are now LOCKED
 | Document | Relationship |
 |----------|--------------|
 | **DOC-17 (Harness Runner Vision)** | PM orchestrates autonomous sessions per this vision |
-| **DOC-22 (Multi-Repo Routing)** | Complementary: routing is NL-implicit; PM is explicit |
+| **DOC-22 (Multi-Repo Routing)** | Hierarchical subordinate: DOC-22's NL→repo resolver is an internal input mechanism; PM is the primary user proxy (Decision #11) |
 | **DOC-23 (Learned Autonomy)** | PM observes autonomy signals; Session Manager drives them |
 | **DOC-29 (Behavior Conformance)** | PM will add SPEC-PM-01…XX rows in a future conformance update |
 | **DOC-14 (Session Manager Agent)** | PM orchestrates Sessions via this contract |
