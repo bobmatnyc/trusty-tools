@@ -32,6 +32,7 @@ pub mod front_gate;
 pub mod inproject;
 pub mod inproject_hygiene;
 mod lifecycle;
+mod mcp_spawn_gate;
 pub mod prune;
 pub use activity::{ActivityResponse, get_session_activity};
 pub use fleet::{FleetByProjectResponse, FleetProjectGroup, fleet_by_project_route};
@@ -438,6 +439,9 @@ pub async fn spawn_session(
         name_hint: req.name_hint,
         runtime: req.runtime,
         ephemeral: req.ephemeral,
+        // HTTP route == CLI-origin (`tm launch`/`tm ticket` client calls) —
+        // never subject to the MCP spawn gate (#1836/#1837).
+        mcp_initiated: false,
     };
 
     match spawn_managed(&state, params).await {

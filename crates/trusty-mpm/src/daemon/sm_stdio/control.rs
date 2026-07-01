@@ -135,6 +135,10 @@ impl SessionControl for DaemonSessionControl {
             name_hint: None,
             runtime: params.model,
             ephemeral: params.ephemeral,
+            // `sm.sessions.launch` is the SM-STDIO adapter (a distinct DOC-14
+            // subsystem, not the standard MCP tool surface) — never subject to
+            // the MCP spawn gate (#1836/#1837), matching `tm launch`/`tm ticket`.
+            mcp_initiated: false,
         };
         let record = spawn_managed(&self.state, spawn)
             .await
