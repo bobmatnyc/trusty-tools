@@ -132,17 +132,34 @@ pub struct ManifestConfig {
 /// costs without doing useful work. This section lets operators enable a
 /// background reaper that automatically stops idle sessions (keeping workspaces
 /// intact and resumable) and decommissions done sessions.
-/// What: boolean `enabled` flag (default `false`, zero-change), poll interval,
-/// and consecutive-hit thresholds for the stop and decommission decisions.
+/// What: boolean `enabled` flag (default `false`, zero-change), a `dry_run`
+/// report-only gate (default `true` — mirrors trusty-search's auto-prune
+/// convention, #1782/#1783: even after you enable the loop it only LOGS the
+/// stop/decommission it *would* perform until you opt in by setting
+/// `dry_run = false`), poll interval, and consecutive-hit thresholds for the
+/// stop and decommission decisions.
 /// Test: `config_idle_auto_stop_defaults`, `config_idle_auto_stop_section_parses`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdleAutoStopConfig {
     /// Whether the idle auto-stop background loop is active.
     ///
     /// `false` (default) → feature is OFF, zero behavior change.
-    /// `true` → background loop polls sessions and auto-stops idle ones.
+    /// `true` → background loop polls sessions and classifies idle ones.
     #[serde(default)]
     pub enabled: bool,
+
+    /// Report-only (dry-run) gate — the second, teardown-safe opt-in.
+    ///
+    /// `true` (default) → when the loop is enabled it only LOGS the
+    /// `stop`/`decommission` it *would* perform; no session is ever torn down.
+    /// `false` → the loop actually stops idle sessions and decommissions done
+    /// ones. This mirrors trusty-search's auto-prune "report-only by default,
+    /// opt-in to actually act" convention (#1782): enabling the feature and
+    /// enacting destructive teardown are two separate, deliberate steps so an
+    /// operator can watch the classifier's decisions for a few cycles before
+    /// letting it reap real sessions (#1783).
+    #[serde(default = "IdleAutoStopConfig::default_dry_run")]
+    pub dry_run: bool,
 
     /// How often (in seconds) to poll Active sessions and classify them.
     ///
@@ -166,6 +183,9 @@ pub struct IdleAutoStopConfig {
 }
 
 impl IdleAutoStopConfig {
+    fn default_dry_run() -> bool {
+        true
+    }
     fn default_poll_interval_secs() -> u64 {
         300
     }
@@ -181,6 +201,7 @@ impl Default for IdleAutoStopConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            dry_run: Self::default_dry_run(),
             poll_interval_secs: Self::default_poll_interval_secs(),
             idle_consecutive_threshold: Self::default_idle_consecutive_threshold(),
             done_consecutive_threshold: Self::default_done_consecutive_threshold(),
@@ -731,6 +752,10 @@ drawer_limit = 5
             !cfg.idle_auto_stop.enabled,
             "idle_auto_stop must default to disabled"
         );
+        assert!(
+            cfg.idle_auto_stop.dry_run,
+            "idle_auto_stop must default to report-only (dry_run = true) — #1783"
+        );
         assert_eq!(cfg.idle_auto_stop.poll_interval_secs, 300);
         assert_eq!(cfg.idle_auto_stop.idle_consecutive_threshold, 3);
         assert_eq!(cfg.idle_auto_stop.done_consecutive_threshold, 1);
@@ -743,12 +768,17 @@ drawer_limit = 5
         let toml = r#"
 [idle_auto_stop]
 enabled = true
+dry_run = false
 poll_interval_secs = 120
 idle_consecutive_threshold = 5
 done_consecutive_threshold = 2
 "#;
         let cfg = load_from_str(dir.path(), toml);
         assert!(cfg.idle_auto_stop.enabled);
+        assert!(
+            !cfg.idle_auto_stop.dry_run,
+            "explicit dry_run = false must disable report-only mode"
+        );
         assert_eq!(cfg.idle_auto_stop.poll_interval_secs, 120);
         assert_eq!(cfg.idle_auto_stop.idle_consecutive_threshold, 5);
         assert_eq!(cfg.idle_auto_stop.done_consecutive_threshold, 2);
@@ -756,7 +786,8 @@ done_consecutive_threshold = 2
 
     #[test]
     fn config_idle_auto_stop_enabled_only_keeps_defaults() {
-        // Setting only `enabled = true` must leave numeric fields at defaults.
+        // Setting only `enabled = true` must leave numeric fields at defaults
+        // AND keep dry_run at its report-only default (the teardown-safe gate).
         let dir = tempfile::TempDir::new().unwrap();
         let toml = r#"
 [idle_auto_stop]
@@ -764,6 +795,10 @@ enabled = true
 "#;
         let cfg = load_from_str(dir.path(), toml);
         assert!(cfg.idle_auto_stop.enabled);
+        assert!(
+            cfg.idle_auto_stop.dry_run,
+            "enabling the loop alone must NOT enact teardown — dry_run stays true (#1783)"
+        );
         assert_eq!(cfg.idle_auto_stop.poll_interval_secs, 300);
         assert_eq!(cfg.idle_auto_stop.idle_consecutive_threshold, 3);
         assert_eq!(cfg.idle_auto_stop.done_consecutive_threshold, 1);

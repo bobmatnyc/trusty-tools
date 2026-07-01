@@ -302,10 +302,16 @@ async fn spawn_idle_reaper_if_enabled(
         return;
     }
     info!(
+        dry_run = cfg.dry_run,
         poll_secs = cfg.poll_interval_secs,
         idle_threshold = cfg.idle_consecutive_threshold,
         done_threshold = cfg.done_consecutive_threshold,
-        "idle-reaper: enabled; spawning background loop"
+        "idle-reaper: enabled; spawning background loop{}",
+        if cfg.dry_run {
+            " (report-only — set idle_auto_stop.dry_run=false to enact teardown)"
+        } else {
+            ""
+        }
     );
     let mgr = state.session_manager().await;
     // Cache mgr in the provider so verdict() does not re-acquire the lock on every poll.
