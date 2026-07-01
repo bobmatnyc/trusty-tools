@@ -566,6 +566,37 @@ impl SessionManager {
         Ok(removed)
     }
 
+    /// Auto-reap orphaned per-session worktree dirs using the manager's own live
+    /// record set (#1838).
+    ///
+    /// Why: [`prune_orphaned_worktrees`](Self::prune_orphaned_worktrees) is only
+    /// invoked manually (the `tm sessions prune-worktrees` CLI / HTTP route), so
+    /// the managed-clone `.worktrees/<id>` tree still grows without bound — one
+    /// project accumulated 94 dead worktree dirs because nothing ran the sweep
+    /// automatically. This thin convenience wrapper lets the daemon's orphan-GC
+    /// loop reclaim orphaned worktree dirs on the SAME cadence it reaps orphaned
+    /// tmux sessions, without each caller re-assembling the active-path set.
+    /// What: snapshots every live record's `workspace_path` from the store as the
+    /// active set, then delegates to `prune_orphaned_worktrees` with
+    /// `dry_run = false`. The two-phase TOCTOU safety (a fresh store snapshot taken
+    /// immediately before deletion) and the "only leaf dirs under `.worktrees/`,
+    /// never the base clone" guard are inherited unchanged. Returns the paths removed.
+    /// Test: `reap_orphaned_worktrees_removes_orphan_preserves_live` in
+    /// `super::reap_orphaned_worktrees_tests`.
+    pub async fn reap_orphaned_worktrees(
+        &self,
+        repos_root: &std::path::Path,
+    ) -> Result<Vec<std::path::PathBuf>, anyhow::Error> {
+        let active: Vec<std::path::PathBuf> = self
+            .list()
+            .await
+            .into_iter()
+            .filter_map(|r| r.workspace_path)
+            .collect();
+        self.prune_orphaned_worktrees(repos_root, &active, false)
+            .await
+    }
+
     /// Age-based auto-reap of stale ephemeral sessions (#1508).
     ///
     /// Why: a panicking or abandoned e2e test can leave an ephemeral session behind
