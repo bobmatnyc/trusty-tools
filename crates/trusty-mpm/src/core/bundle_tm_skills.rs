@@ -1,0 +1,59 @@
+//! The `/tm-*` PM skill portfolio — constants embedding each bundled skill.
+//!
+//! Why: the `mpm-*` guidance skills (`bundle_skills.rs`) were a direct,
+//! mechanical port of claude-mpm's Python skill catalog — same names, same
+//! claude-mpm-flavored tool/path references (`~/.claude-mpm/`, Socket.IO
+//! dashboards on :8765, `mcp__mcp-ticketer__*`, `deepeval test --agent`). None
+//! of that matches trusty-mpm's actual Rust daemon/MCP-tool surface. This
+//! module holds the tm-native replacement catalog: same behavioral intent,
+//! rewritten against the real `mcp__trusty-mpm__*` / `mcp__trusty-memory__*` /
+//! `mcp__trusty-search__*` / `mcp__trusty-review__*` tool families, the real
+//! `.trusty-mpm/` paths, and the real agent roster.
+//! What: `pub const` strings for each `/tm-*` skill, embedded at compile time
+//! via `include_str!`. Re-exported by `bundle.rs`.
+//! Test: `bundle_tests.rs` — `tm_skills_are_in_bundle`,
+//! `tm_skills_have_frontmatter`, `constants_are_non_empty`.
+
+/// Circuit breaker enforcement patterns — the crown jewel of the portfolio.
+///
+/// Why: the PM's delegation discipline (CB#1-10, CB#14) is the single most
+/// consequential behavioral contract in the framework; agents need the full
+/// detection-pattern/violation/remediation reference, not just the summary
+/// table in `PM_INSTRUCTIONS.md`.
+/// What: embedded markdown skill file deployed to `skills/tm-circuit-breaker.md`.
+/// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
+pub const TM_CIRCUIT_BREAKER: &str = include_str!("../assets/skills/tm-circuit-breaker.md");
+
+/// QA verification gate and evidence standards.
+///
+/// Why: prevents the PM from claiming work complete without agent-produced
+/// evidence — the most common source of silent quality regressions.
+/// What: embedded markdown skill file deployed to `skills/tm-verification-protocols.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_VERIFICATION_PROTOCOLS: &str =
+    include_str!("../assets/skills/tm-verification-protocols.md");
+
+/// Detailed tool usage patterns for the PM's real MCP tool families.
+///
+/// Why: the PM needs a concrete reference for `mcp__trusty-mpm__*` /
+/// `mcp__trusty-memory__*` / `mcp__trusty-search__*` / `mcp__trusty-review__*`
+/// usage and the vector-search-first discipline.
+/// What: embedded markdown skill file deployed to `skills/tm-tool-usage-guide.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_TOOL_USAGE_GUIDE: &str = include_str!("../assets/skills/tm-tool-usage-guide.md");
+
+/// Immediate post-agent git file tracking protocol.
+///
+/// Why: untracked deliverables are lost between agent completion and session
+/// end; this skill enforces the blocking git-tracking gate (CB#4).
+/// What: embedded markdown skill file deployed to `skills/tm-git-file-tracking.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_GIT_FILE_TRACKING: &str = include_str!("../assets/skills/tm-git-file-tracking.md");
+
+/// Architecture Decision Records (Nygard template) discipline.
+///
+/// Why: significant, hard-to-reverse architectural decisions need a durable,
+/// discoverable record; this is opt-in guidance for when to write one.
+/// What: embedded markdown skill file deployed to `skills/tm-adr.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_ADR: &str = include_str!("../assets/skills/tm-adr.md");

@@ -74,7 +74,69 @@ fn constants_are_non_empty() {
     assert!(!MPM_SESSION_RESUME.trim().is_empty());
     assert!(!MPM_TOOL_USAGE_GUIDE.trim().is_empty());
     assert!(!TM_DOCTOR.trim().is_empty());
+    // /tm- portfolio (tm-skills-portfolio epic)
+    assert!(!TM_CIRCUIT_BREAKER.trim().is_empty());
+    assert!(!TM_VERIFICATION_PROTOCOLS.trim().is_empty());
+    assert!(!TM_TOOL_USAGE_GUIDE.trim().is_empty());
+    assert!(!TM_GIT_FILE_TRACKING.trim().is_empty());
+    assert!(!TM_ADR.trim().is_empty());
     assert!(!WHAT_IS_TRUSTY_MPM.trim().is_empty());
+}
+
+#[test]
+fn tm_skills_are_in_bundle() {
+    // The /tm- portfolio (tm-skills-portfolio epic) must be present in ALL so
+    // `trusty-mpm install` deploys every skill offline.
+    let skill_paths: Vec<&str> = ALL
+        .iter()
+        .filter(|a| a.rel_path.starts_with("skills/tm-"))
+        .map(|a| a.rel_path)
+        .collect();
+
+    for expected in &[
+        "skills/tm-doctor.md",
+        "skills/tm-circuit-breaker.md",
+        "skills/tm-verification-protocols.md",
+        "skills/tm-tool-usage-guide.md",
+        "skills/tm-git-file-tracking.md",
+        "skills/tm-adr.md",
+    ] {
+        assert!(
+            skill_paths.contains(expected),
+            "missing bundled /tm- skill: {expected}"
+        );
+    }
+}
+
+#[test]
+fn tm_skills_have_frontmatter() {
+    // Every /tm- skill must carry YAML frontmatter with a tm-native `name:`
+    // and must not leak unadapted claude-mpm references.
+    let skills = [
+        ("tm-circuit-breaker", TM_CIRCUIT_BREAKER),
+        ("tm-verification-protocols", TM_VERIFICATION_PROTOCOLS),
+        ("tm-tool-usage-guide", TM_TOOL_USAGE_GUIDE),
+        ("tm-git-file-tracking", TM_GIT_FILE_TRACKING),
+        ("tm-adr", TM_ADR),
+    ];
+    for (name, content) in skills {
+        assert!(
+            content.starts_with("---\n"),
+            "skill {name} is missing YAML frontmatter"
+        );
+        assert!(
+            content.contains(&format!("name: {name}")),
+            "skill {name} frontmatter name must match its file stem"
+        );
+        assert!(
+            !content.contains("claude-mpm") || content.contains("trusty-mpm"),
+            "skill {name} contains an unadapted claude-mpm reference"
+        );
+        assert!(
+            !content.contains(".claude-mpm/"),
+            "skill {name} references the legacy .claude-mpm/ path"
+        );
+    }
 }
 
 #[test]
@@ -218,12 +280,15 @@ fn bundle_table_is_complete() {
     //   mpm-bug-reporting, mpm-session-management, mpm-session-pause,
     //   mpm-session-resume, mpm-tool-usage-guide
     // A3: tm-doctor (1)
+    // /tm- portfolio in progress (tm-skills-portfolio epic): tm-circuit-breaker,
+    //   tm-verification-protocols, tm-tool-usage-guide, tm-git-file-tracking,
+    //   tm-adr (5 so far; more land incrementally, mpm-* removed at the end)
     // DOC-28 R1 (1): docs/WHAT-IS-TRUSTY-MPM.md
-    assert_eq!(ALL.len(), 58);
+    assert_eq!(ALL.len(), 63);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 58, "artifact paths must be unique");
+    assert_eq!(paths.len(), 63, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

@@ -336,6 +336,32 @@ pub const ALL: &[BundledArtifact] = &[
         contents: TM_DOCTOR,
         install: InstallPolicy::Overwrite,
     },
+    // --- tm-skills-portfolio epic: the /tm- skill catalog (supersedes mpm-*) ---
+    BundledArtifact {
+        rel_path: "skills/tm-circuit-breaker.md",
+        contents: TM_CIRCUIT_BREAKER,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "skills/tm-verification-protocols.md",
+        contents: TM_VERIFICATION_PROTOCOLS,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "skills/tm-tool-usage-guide.md",
+        contents: TM_TOOL_USAGE_GUIDE,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "skills/tm-git-file-tracking.md",
+        contents: TM_GIT_FILE_TRACKING,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "skills/tm-adr.md",
+        contents: TM_ADR,
+        install: InstallPolicy::Overwrite,
+    },
     // --- DOC-28 R1: canonical self-description doc ---
     BundledArtifact {
         rel_path: "docs/WHAT-IS-TRUSTY-MPM.md",

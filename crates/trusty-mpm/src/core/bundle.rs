@@ -171,6 +171,8 @@ pub const MPM_SKILLS_MANAGER_AGENT: &str = include_str!("../assets/agents/mpm-sk
 pub const WHAT_IS_TRUSTY_MPM: &str = include_str!("../../docs/WHAT-IS-TRUSTY-MPM.md");
 
 // --- Phase 1 (#770): mpm-* guidance skills — constants in bundle_skills.rs ---
+// (superseded by the /tm- portfolio in bundle_tm_skills.rs; removed once the
+// migration in the tm-skills-portfolio epic completes.)
 #[path = "bundle_skills.rs"]
 mod skills_inner;
 pub use skills_inner::{
@@ -178,6 +180,14 @@ pub use skills_inner::{
     MPM_GIT_FILE_TRACKING, MPM_PR_WORKFLOW, MPM_SESSION_MANAGEMENT, MPM_SESSION_PAUSE,
     MPM_SESSION_RESUME, MPM_TICKETING_INTEGRATION, MPM_TOOL_USAGE_GUIDE,
     MPM_VERIFICATION_PROTOCOLS, TM_DOCTOR,
+};
+
+// --- tm-skills-portfolio epic: the /tm- skill catalog — bundle_tm_skills.rs ---
+#[path = "bundle_tm_skills.rs"]
+mod tm_skills_inner;
+pub use tm_skills_inner::{
+    TM_ADR, TM_CIRCUIT_BREAKER, TM_GIT_FILE_TRACKING, TM_TOOL_USAGE_GUIDE,
+    TM_VERIFICATION_PROTOCOLS,
 };
 
 /// Default (professional) Claude Code output style deployed to
