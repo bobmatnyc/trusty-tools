@@ -186,8 +186,8 @@ pub use skills_inner::{
 #[path = "bundle_tm_skills.rs"]
 mod tm_skills_inner;
 pub use tm_skills_inner::{
-    TM_ADR, TM_CIRCUIT_BREAKER, TM_GIT_FILE_TRACKING, TM_TOOL_USAGE_GUIDE,
-    TM_VERIFICATION_PROTOCOLS,
+    TM_ADR, TM_AGENT_ARCHITECTURE, TM_CIRCUIT_BREAKER, TM_GIT_FILE_TRACKING, TM_TOOL_USAGE_GUIDE,
+    TM_VERIFICATION_PROTOCOLS, TM_WORKFLOW,
 };
 
 /// Default (professional) Claude Code output style deployed to

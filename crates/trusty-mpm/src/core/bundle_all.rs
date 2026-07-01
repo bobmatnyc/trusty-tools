@@ -362,6 +362,16 @@ pub const ALL: &[BundledArtifact] = &[
         contents: TM_ADR,
         install: InstallPolicy::Overwrite,
     },
+    BundledArtifact {
+        rel_path: "skills/tm-workflow.md",
+        contents: TM_WORKFLOW,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "skills/tm-agent-architecture.md",
+        contents: TM_AGENT_ARCHITECTURE,
+        install: InstallPolicy::Overwrite,
+    },
     // --- DOC-28 R1: canonical self-description doc ---
     BundledArtifact {
         rel_path: "docs/WHAT-IS-TRUSTY-MPM.md",

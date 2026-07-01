@@ -57,3 +57,19 @@ pub const TM_GIT_FILE_TRACKING: &str = include_str!("../assets/skills/tm-git-fil
 /// What: embedded markdown skill file deployed to `skills/tm-adr.md`.
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_ADR: &str = include_str!("../assets/skills/tm-adr.md");
+
+/// PM workflow/phase/gate customization via project-level `.trusty-mpm/` overrides.
+///
+/// Why: maps to the *real* override mechanism in `core/instruction_overrides.rs`
+/// and `core/instruction_pipeline.rs`, not a fixed claude-mpm 5-phase script.
+/// What: embedded markdown skill file deployed to `skills/tm-workflow.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_WORKFLOW: &str = include_str!("../assets/skills/tm-workflow.md");
+
+/// Official (source→rebuild→deploy) vs custom agent update workflow.
+///
+/// Why: prevents agents from editing a deployed `~/.claude/agents/*.md` build
+/// output instead of the composable source under `assets/agents/`.
+/// What: embedded markdown skill file deployed to `skills/tm-agent-architecture.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_AGENT_ARCHITECTURE: &str = include_str!("../assets/skills/tm-agent-architecture.md");
