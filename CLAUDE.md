@@ -294,6 +294,8 @@ convention (i.e. `tga-v<version>`, matching the abbreviation table) works.
 
 ### macOS Full Disk Access must be re-granted after every `cargo install` (issue #873)
 
+🟢 **Scope: `trusty-search` and external-volume daemons only.** `trusty-mpm` / `tm` does NOT require FDA re-granting because the daemon manages tmux sessions and git worktrees under `$HOME` only — it never reads TCC-protected or external (`/Volumes/…`) paths. FDA caveat applies only to daemons that index external volumes (currently `trusty-search`); `trusty-memory` and `trusty-analyze` read `$HOME` locations only and also do NOT require FDA. No `install-trusty-mpm-signed.sh` script exists because it is not needed.
+
 On macOS, every `cargo install` of a binary writes a NEW file at
 `~/.cargo/bin/<binary>` with a new **cdhash** (code-signing hash). macOS TCC
 keys the **Full Disk Access** grant by cdhash, so the previously-granted FDA no
@@ -355,7 +357,7 @@ binary is a deprecated shim that forwards to `serve --stdio`; update your
 launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
 cargo install --path crates/<dir> --locked
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/<label>.plist
-# IMPORTANT on macOS: re-grant Full Disk Access after cargo install (see above)
+# NOTE: re-grant Full Disk Access only for trusty-search (and external-volume daemons), not for trusty-mpm (see FDA section above)
 ```
 
 Prefer restarting between Claude Code sessions. See the cargo-publish skill
