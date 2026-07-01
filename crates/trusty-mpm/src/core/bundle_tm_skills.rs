@@ -98,3 +98,28 @@ pub const TM_BUG_REPORTING: &str = include_str!("../assets/skills/tm-bug-reporti
 /// What: embedded markdown skill file deployed to `skills/tm-teaching-templates.md`.
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_TEACHING_TEMPLATES: &str = include_str!("../assets/skills/tm-teaching-templates.md");
+
+/// Ticket-driven development protocol and ticketing orchestration.
+///
+/// Why: consolidates mpm-ticket-view + mpm-ticketing-integration; verified
+/// against the real bundled `ticketing` agent's mcp-ticketer/aitrackdown
+/// priority (not assumed).
+/// What: embedded markdown skill file deployed to `skills/tm-ticketing.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_TICKETING: &str = include_str!("../assets/skills/tm-ticketing.md");
+
+/// Branch protection, trusty-review gate, squash-merge, worktree discipline.
+///
+/// Why: SLIM per the portfolio design — native Claude Code already knows
+/// basic `gh pr create` mechanics; this keeps only the tm-specific layer.
+/// What: embedded markdown skill file deployed to `skills/tm-pr-workflow.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_PR_WORKFLOW: &str = include_str!("../assets/skills/tm-pr-workflow.md");
+
+/// Delegation matrices and agent-selection decision trees.
+///
+/// Why: SLIM per the portfolio design — drops native Agent/Task-tool basics,
+/// keeps only the tm-specific chains and the verified real agent roster.
+/// What: embedded markdown skill file deployed to `skills/tm-delegation-patterns.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_DELEGATION_PATTERNS: &str = include_str!("../assets/skills/tm-delegation-patterns.md");

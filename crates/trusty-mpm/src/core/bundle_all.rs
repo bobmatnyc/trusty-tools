@@ -387,6 +387,21 @@ pub const ALL: &[BundledArtifact] = &[
         contents: TM_TEACHING_TEMPLATES,
         install: InstallPolicy::Overwrite,
     },
+    BundledArtifact {
+        rel_path: "skills/tm-ticketing.md",
+        contents: TM_TICKETING,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "skills/tm-pr-workflow.md",
+        contents: TM_PR_WORKFLOW,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "skills/tm-delegation-patterns.md",
+        contents: TM_DELEGATION_PATTERNS,
+        install: InstallPolicy::Overwrite,
+    },
     // --- DOC-28 R1: canonical self-description doc ---
     BundledArtifact {
         rel_path: "docs/WHAT-IS-TRUSTY-MPM.md",
