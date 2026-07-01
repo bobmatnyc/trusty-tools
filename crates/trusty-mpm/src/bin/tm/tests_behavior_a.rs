@@ -298,8 +298,8 @@ fn install_then_deploy_deploys_skills() {
     );
     assert_eq!(
         result.deployed.len(),
-        15,
-        "expected 15 skill files deployed (14 /tm- portfolio + tm-doctor); got {:?}",
+        16,
+        "expected 16 skill files deployed (14 /tm- portfolio + tm-doctor + tm overview); got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());

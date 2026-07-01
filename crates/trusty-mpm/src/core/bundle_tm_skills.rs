@@ -143,3 +143,12 @@ pub const TM_DELEGATION_PATTERNS: &str = include_str!("../assets/skills/tm-deleg
 /// What: embedded markdown skill file deployed to `skills/tm-session-management.md`.
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_SESSION_MANAGEMENT: &str = include_str!("../assets/skills/tm-session-management.md");
+
+/// SLIM `/tm` orchestration-model overview (optional 15th portfolio skill).
+///
+/// Why: a quick-reference entry point for the agent roster, skills catalog,
+/// memory system, and health tooling — the tm-native replacement for the
+/// claude-mpm `mpm` overview skill.
+/// What: embedded markdown skill file deployed to `skills/tm.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_OVERVIEW: &str = include_str!("../assets/skills/tm.md");
