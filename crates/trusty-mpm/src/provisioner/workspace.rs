@@ -491,6 +491,39 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
             }
         }
 
+        // DOC-28 §5/§7 Phase 2 (R3, epic #1855): auto-seed the trusty-mpm
+        // identity prompt-fact the first time a workspace is provisioned for a
+        // managed session. Gated on `self.prepare` (not a dedicated config
+        // toggle, per the owner's "don't over-engineer" call) so the
+        // lightweight `without_prepare` test provisioner never performs this
+        // network I/O, exactly like the `prepare_session` step above.
+        // Idempotency is enforced inside the helper via a kg_query guard, and
+        // it is entirely fail-open: any daemon-unreachable/parse error is
+        // logged and swallowed, never propagated here.
+        if self.prepare {
+            let memory_url = std::env::var("TRUSTY_MEMORY_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:7990".to_string());
+            let override_value = trusty_common::palace_override_from_env();
+            match trusty_common::derive_palace_id(
+                &workspace_path,
+                Some(repo_url),
+                override_value.as_deref(),
+            ) {
+                Some(palace_id) => {
+                    super::identity_seed::seed_identity_prompt_fact_blocking(
+                        &memory_url,
+                        &palace_id,
+                    );
+                }
+                None => {
+                    tracing::debug!(
+                        session = %session_id,
+                        "identity-seed: skipping — no palace could be derived for this workspace"
+                    );
+                }
+            }
+        }
+
         Ok(PreparedWorkspace {
             path: workspace_path,
             repo_url: repo_url.to_owned(),
