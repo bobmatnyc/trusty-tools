@@ -359,15 +359,34 @@ pub fn workspace_subpath(config: &TrustyToolsConfig, gh: &GithubPath) -> PathBuf
     workspace_root(config).join(&gh.owner).join(&gh.repo)
 }
 
+/// Process-global lock serialising every test that mutates the workspace-root /
+/// repos-root environment variables.
+///
+/// Why: `cargo test` runs the whole crate's tests in parallel threads sharing one
+/// process env. Both this module's env tests AND
+/// `crate::daemon::managed_routes::inproject`'s `TRUSTY_MPM_REPOS_ROOT` test mutate
+/// `TRUSTY_MPM_WORKSPACE_ROOT` / `TRUSTY_MPM_REPOS_ROOT`; without a SHARED lock a
+/// per-module mutex lets them race (one test's `remove_var` clobbers another's
+/// `set_var`), causing flaky failures. Exposing ONE crate-wide lock guarantees
+/// mutual exclusion across modules.
+/// What: returns a guard over a single `static` mutex; poisoning is recovered so a
+/// panicking test cannot deadlock the rest.
+/// Test: used by the env-precedence tests here and in `inproject`.
+#[cfg(test)]
+pub(crate) fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Serialise env mutation so the env-reading tests cannot race each other
-    /// across the shared test process.
+    /// across the shared test process. Delegates to the crate-wide
+    /// [`super::env_test_lock`] so env tests in OTHER modules are serialised too.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        super::env_test_lock()
     }
 
     /// Why: the built-in default (no env, no config) must be the #1220 path.
