@@ -469,8 +469,10 @@ pub async fn handle_review(
 /// Why: centralises request validation so the handler body stays clean.
 /// What: if `local_diff_text` is present, writes it to a tempfile and returns
 /// `DiffSource::LocalFile`; otherwise validates that owner/repo/pr are all
-/// present and returns `DiffSource::Github` with an empty token (the pipeline
-/// will resolve the token from config).
+/// present and returns `DiffSource::Github` with an empty token placeholder.
+/// `pipeline::runner::run_review` resolves the real token from config via
+/// `resolve_diff_token` before fetching the diff (#1880) — this function never
+/// talks to GitHub itself.
 /// Test: covered indirectly by `review_endpoint_*` handler tests.
 fn resolve_diff_source(req: &ReviewRequest) -> Result<DiffSource, String> {
     if let Some(ref diff_text) = req.local_diff_text {
@@ -504,8 +506,10 @@ fn resolve_diff_source(req: &ReviewRequest) -> Result<DiffSource, String> {
         .pr
         .ok_or_else(|| "pr is required (or provide local_diff_text)".to_string())?;
 
-    // Token is empty here; the pipeline will attempt to resolve it from config.
-    // If no token is available the pipeline fails gracefully (fail-safe APPROVE).
+    // Token is empty here; `run_review` resolves it from config via
+    // `resolve_diff_token` before the diff fetch (#1880). If no token can be
+    // resolved the review fails closed (UNKNOWN, `result.error` set) rather
+    // than sending an empty-token request that surfaces as an opaque 401.
     Ok(DiffSource::Github {
         owner,
         repo,
