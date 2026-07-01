@@ -182,7 +182,18 @@ main() {
 
   # Verify the rewrite actually landed: a silent awk non-match (e.g. an
   # unexpected manifest layout) must abort here instead of printing "Bumped".
-  if ! grep -qF "version = \"${next}\"" "${manifest}"; then
+  #
+  # Why flexible whitespace: write_package_version()/read_package_version()
+  # already tolerate arbitrary spacing around `=` (`[[:space:]]*`) because some
+  # crate manifests use column-aligned fields, e.g. `version     = "0.6.4"` in
+  # crates/trusty-review/Cargo.toml. This check used to be a literal
+  # `grep -qF "version = \"${next}\""` (single space only), which produced a
+  # false-negative "ERROR: version rewrite failed" on trusty-review's aligned
+  # Cargo.toml during the 0.6.4 patch release even though the awk rewrite above
+  # succeeded — see issue #1888. Match with the same [[:space:]]* tolerance the
+  # rest of this script uses so the verification can't diverge from the write.
+  local next_re="${next//./\\.}"
+  if ! grep -qE "^version[[:space:]]*=[[:space:]]*\"${next_re}\"" "${manifest}"; then
     echo "ERROR: version rewrite failed — ${manifest} still contains ${current}" >&2
     exit 1
   fi
