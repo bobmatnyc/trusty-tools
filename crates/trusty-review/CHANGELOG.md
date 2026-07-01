@@ -7,6 +7,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- recalibrate RC gate + verifier + Medium floor ([#1876](https://github.com/bobmatnyc/trusty-tools/pull/1876)) ([`2f0169e`](https://github.com/bobmatnyc/trusty-tools/commit/2f0169ed93924e1e35b06770b20663f4d28ee9c2))
+- correct inner_findings_count metric + fail-open smell ([#1877](https://github.com/bobmatnyc/trusty-tools/pull/1877)) ([`b7c1978`](https://github.com/bobmatnyc/trusty-tools/commit/b7c1978863c7b99748cc9380bc7c3d17006987cb))
+- serve-mode diff-fetch loads auth token correctly ([#1880](https://github.com/bobmatnyc/trusty-tools/pull/1880)) ([`f61ce55`](https://github.com/bobmatnyc/trusty-tools/commit/f61ce55d847588470a8b6e7d975a69388374921d))
+
+### Changed
+
+- bump trusty-review to v0.6.2 ([#1739](https://github.com/bobmatnyc/trusty-tools/pull/1739)) ([#1749](https://github.com/bobmatnyc/trusty-tools/pull/1749)) ([`7ef6107`](https://github.com/bobmatnyc/trusty-tools/commit/7ef6107ce9b28e45a4ee7998e2565d5867bdc5bf))
+## [Unreleased]
+
 ## [0.6.1] — 2026-06-25
 
 ### Fixed
