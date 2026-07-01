@@ -97,8 +97,17 @@ pub fn deploy_skills_filtered(
     let mut stats = DeployStats::default();
 
     // No source directory means nothing to deploy — an empty result, not an
-    // error, so a fresh install with no skills still succeeds.
+    // error, so a fresh install with no skills still succeeds. This is a
+    // legitimate state for a fresh checkout, but it is also indistinguishable
+    // from a misconfigured `skill_source_dir()` (e.g. a submodule that failed
+    // to initialise) unless we log it — silently returning an empty
+    // `DeployStats` previously left operators with no signal that zero
+    // skills were ever considered (A2, tm-skills-portfolio epic).
     if !source.is_dir() {
+        tracing::warn!(
+            source = %source.display(),
+            "skill source directory missing — no skills will be deployed"
+        );
         return Ok(stats);
     }
 
@@ -107,6 +116,7 @@ pub fn deploy_skills_filtered(
 
     // Collect skill filenames deterministically so output and tests are stable.
     let mut names: Vec<String> = Vec::new();
+    let mut source_file_count = 0usize;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let file_name = entry.file_name();
@@ -114,6 +124,7 @@ pub fn deploy_skills_filtered(
             continue;
         };
         if entry.file_type()?.is_file() && is_skill_file(name) {
+            source_file_count += 1;
             // Honour the manifest's skill-set selection (HR-2). The stem is the
             // `.md`-stripped name used as the skill id and target dir name.
             if select(skill_stem(name)) {
@@ -122,6 +133,16 @@ pub fn deploy_skills_filtered(
         }
     }
     names.sort_unstable();
+
+    // An existing but empty source directory is just as silent a failure mode
+    // as a missing one — e.g. a populated `agents/skills/` submodule checked
+    // out shallow, or a source dir pointed at the wrong path (A2).
+    if source_file_count == 0 {
+        tracing::warn!(
+            source = %source.display(),
+            "skill source directory is empty — no skills will be deployed"
+        );
+    }
 
     for filename in names {
         let stem = skill_stem(&filename).to_string();

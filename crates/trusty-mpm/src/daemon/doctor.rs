@@ -45,13 +45,14 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// probes (the output-style probe closes DOC-28 F4 — the "did the
 /// trusty-mpm instructions actually load" gap), then the memory and search
 /// HTTP probes (each bounded by [`PROBE_TIMEOUT`]), and a worktree-orphan
-/// scan (Fix 1b, #1840), and folds the seven [`DoctorCheck`]s into a
-/// [`DoctorReport`] whose `overall` status is the worst of them.
+/// scan (Fix 1b, #1840), and the `skill_source` probe (A2,
+/// tm-skills-portfolio epic) — folding the resulting eight [`DoctorCheck`]s
+/// into a [`DoctorReport`] whose `overall` status is the worst of them.
 /// `project_dir` scopes the instruction and output-style probes; `repos_root`
 /// (when `Some`) gives the managed workspace root for the worktree scan;
 /// `active_workspace_paths` is the full set of workspace paths currently
 /// registered to live sessions.
-/// Test: `run_doctor_produces_seven_checks`.
+/// Test: `run_doctor_produces_eight_checks`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
     repos_root: Option<&Path>,
@@ -64,6 +65,7 @@ pub async fn run_doctor(
         check_instructions(project_dir),
         check_agents(&paths),
         check_skills(&home),
+        check_skill_source(&paths),
         check_output_style(project_dir, &home),
     ];
     checks.push(check_memory(&home).await);
@@ -259,6 +261,51 @@ fn check_skills(home: &Path) -> DoctorCheck {
             CheckStatus::Fail,
             format!("{} does not exist", dir.display()),
         ),
+    }
+}
+
+/// Probe the skill *source* directory (`FrameworkPaths::skill_source_dir()`).
+///
+/// Why: [`check_skills`] only inspects the deploy *target*
+/// (`~/.claude/skills/`), so a missing or empty source directory (e.g. an
+/// uninitialised `agents/skills/` submodule, or a bundled-assets path that
+/// moved) previously deployed zero skills with no operator-visible signal —
+/// `deploy_skills_filtered` silently returned an empty `DeployStats` (A2).
+/// This probe mirrors the [`check_agents`] present-but-empty distinction so
+/// operators see the *cause* (bad source) rather than only the *symptom*
+/// (empty target).
+/// What: `Fail` when the source directory does not exist; `Warn` when it
+/// exists but holds no `.md` skill files; `Ok` when it holds at least one.
+/// Test: `skill_source_missing_dir_is_fail`, `skill_source_empty_dir_is_warn`,
+/// `skill_source_populated_dir_is_ok`.
+fn check_skill_source(paths: &FrameworkPaths) -> DoctorCheck {
+    let dir = paths.skill_source_dir();
+    if !dir.is_dir() {
+        return DoctorCheck::new(
+            "skill_source",
+            CheckStatus::Fail,
+            format!(
+                "skill source directory {} does not exist — skill deploy will no-op",
+                dir.display()
+            ),
+        );
+    }
+    let md_count = count_files_with_extension(&dir, "md");
+    if md_count == 0 {
+        DoctorCheck::new(
+            "skill_source",
+            CheckStatus::Warn,
+            format!(
+                "{} exists but has no skill files — skill deploy will no-op",
+                dir.display()
+            ),
+        )
+    } else {
+        DoctorCheck::new(
+            "skill_source",
+            CheckStatus::Ok,
+            format!("{md_count} skill file(s) available in {}", dir.display()),
+        )
     }
 }
 
@@ -519,6 +566,36 @@ mod tests {
     }
 
     #[test]
+    fn skill_source_missing_dir_is_fail() {
+        // A2: an uninitialised skill source directory must surface as a
+        // doctor Fail, not a silent no-op deploy.
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+        let check = check_skill_source(&paths);
+        assert_eq!(check.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn skill_source_empty_dir_is_warn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+        std::fs::create_dir_all(paths.skill_source_dir()).unwrap();
+        let check = check_skill_source(&paths);
+        assert_eq!(check.status, CheckStatus::Warn);
+    }
+
+    #[test]
+    fn skill_source_populated_dir_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = FrameworkPaths::under(tmp.path());
+        let source = paths.skill_source_dir();
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("tm-doctor.md"), "skill").unwrap();
+        let check = check_skill_source(&paths);
+        assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[test]
     fn index_present_matches_each_shape() {
         // Bare string array.
         let strings = serde_json::json!(["other", "trusty-mpm"]);
@@ -563,11 +640,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_doctor_produces_seven_checks() {
-        // DOC-28 R4(a): adds the `output_style` probe, bringing the total
-        // from six to seven checks.
+    async fn run_doctor_produces_eight_checks() {
+        // A2 (tm-skills-portfolio epic): adds the `skill_source` probe,
+        // bringing the total from seven to eight checks.
         let report = run_doctor(None, None, &[]).await;
-        assert_eq!(report.checks.len(), 7);
+        assert_eq!(report.checks.len(), 8);
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -575,6 +652,7 @@ mod tests {
                 "instructions",
                 "agents",
                 "skills",
+                "skill_source",
                 "output_style",
                 "memory",
                 "search",
