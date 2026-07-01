@@ -5,7 +5,83 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
-## [Unreleased]
+## [0.13.0] — 2026-06-30
+
+### Added
+
+- route tm CLI through console gateway with direct fallback ([#1852](https://github.com/bobmatnyc/trusty-tools/pull/1852)) ([`b1b58bc`](https://github.com/bobmatnyc/trusty-tools/commit/b1b58bc30a423db98d21d5254c3d4d8ac71ab8a5))
+- wire trusty-mpm into console reverse proxy ([#1850](https://github.com/bobmatnyc/trusty-tools/pull/1850)) ([`970d297`](https://github.com/bobmatnyc/trusty-tools/commit/970d297bf9448cf74b3117445401524bd17b20e4))
+- idle auto-suspend + scrollback snapshot + resume restoration (opt-in) ([#1816](https://github.com/bobmatnyc/trusty-tools/pull/1816)) ([#1822](https://github.com/bobmatnyc/trusty-tools/pull/1822)) ([`5e28313`](https://github.com/bobmatnyc/trusty-tools/commit/5e283135fa0ea959aed720573a1302c822c02fb9))
+- runtime-editable splash art + block-robot default banner ([#1825](https://github.com/bobmatnyc/trusty-tools/pull/1825)) ([#1829](https://github.com/bobmatnyc/trusty-tools/pull/1829)) ([`bd4a72a`](https://github.com/bobmatnyc/trusty-tools/commit/bd4a72a9d1dce02d27db14b894dbc725394247d5))
+- auto-register git project alias on tm launch + tm ls shows local paths ([#1819](https://github.com/bobmatnyc/trusty-tools/pull/1819)) ([`436f7c9`](https://github.com/bobmatnyc/trusty-tools/commit/436f7c9194077822fb0d44de9cff4fd1f4862909))
+- kawaii row-of-three pixel-bots replace scary ASCII art ([#1811](https://github.com/bobmatnyc/trusty-tools/pull/1811)) ([#1812](https://github.com/bobmatnyc/trusty-tools/pull/1812)) ([`d8e2111`](https://github.com/bobmatnyc/trusty-tools/commit/d8e2111d882c7237c77214dd122d6337d6d8fde3))
+- unify daily tm banner with tm banner + hide decommissioned tombstones (#1808, #1809) ([#1810](https://github.com/bobmatnyc/trusty-tools/pull/1810)) ([`fba0160`](https://github.com/bobmatnyc/trusty-tools/commit/fba0160a2d12132ef36c2c069502b7acd9be3a5e))
+- unify managed clone on shared base + per-session .worktrees/ ([#1803](https://github.com/bobmatnyc/trusty-tools/pull/1803)) ([#1804](https://github.com/bobmatnyc/trusty-tools/pull/1804)) ([`c32fc0c`](https://github.com/bobmatnyc/trusty-tools/commit/c32fc0c0623a16757c9d0a4d65d8150a29e6c2d0))
+- refine tm robot banner — clip art, dedupe version, owner/repo + managed path ([#1794](https://github.com/bobmatnyc/trusty-tools/pull/1794)) ([`9183e11`](https://github.com/bobmatnyc/trusty-tools/commit/9183e11d52ee8a1076ed09c894c746af1e493ab7))
+- redirect tm launch + spawn_managed_local to managed clone ([#1590](https://github.com/bobmatnyc/trusty-tools/pull/1590)) ([#1796](https://github.com/bobmatnyc/trusty-tools/pull/1796)) ([`6c0af3c`](https://github.com/bobmatnyc/trusty-tools/commit/6c0af3c798686a0eb62cdb734b0febc39d0d265c))
+- detach returns to tm picker + daemon/clone cwd hardening ([#1795](https://github.com/bobmatnyc/trusty-tools/pull/1795)) ([`3b0e723`](https://github.com/bobmatnyc/trusty-tools/commit/3b0e7231e85ca8fbc53dbd55bb4968d4d96e811c))
+- include repo name in managed tmux session names ([#1789](https://github.com/bobmatnyc/trusty-tools/pull/1789)) ([#1791](https://github.com/bobmatnyc/trusty-tools/pull/1791)) ([`c1887de`](https://github.com/bobmatnyc/trusty-tools/commit/c1887defa898e32ee4a424869a810b40567aa979))
+- session-manager daily QoL fixes — ls --source-id, info fallback, honest decommission ([#1787](https://github.com/bobmatnyc/trusty-tools/pull/1787)) ([#1788](https://github.com/bobmatnyc/trusty-tools/pull/1788)) ([`9e9c795`](https://github.com/bobmatnyc/trusty-tools/commit/9e9c795ed07399a6e252e2071d8bc0c161dba1ff))
+- add context compaction efficiency segment ([#1774](https://github.com/bobmatnyc/trusty-tools/pull/1774)) ([`0594d8f`](https://github.com/bobmatnyc/trusty-tools/commit/0594d8f10e68d485ee190f7b76f072709eb18158))
+- tm guided-default auto-start daemon + github-* SSH alias support ([#1775](https://github.com/bobmatnyc/trusty-tools/pull/1775)) ([#1776](https://github.com/bobmatnyc/trusty-tools/pull/1776)) ([`20374a2`](https://github.com/bobmatnyc/trusty-tools/commit/20374a26e1b445f11dfabe6a46ce69325decd5f8))
+- DOC-28 cutover catch-up runtime — watermark + git/palace + auto-inject (PR2/3/4, #1762) ([`e7e23ea`](https://github.com/bobmatnyc/trusty-tools/commit/e7e23ea2ae1a679e285391ea452272ec5bbbfee2))
+- DOC-28 cutover bridge core — tm sessions catchup (PR1, #1762) ([`d66a989`](https://github.com/bobmatnyc/trusty-tools/commit/d66a989a2f6cd4e208fd1d69092d7f644da3e23e))
+
+### Fixed
+
+- session-worktree prune/decommission hardening ([#1845](https://github.com/bobmatnyc/trusty-tools/pull/1845)) ([#1853](https://github.com/bobmatnyc/trusty-tools/pull/1853)) ([`ff970ed`](https://github.com/bobmatnyc/trusty-tools/commit/ff970ed88549f2536f47c00bc232e70dde2561bb))
+- normalise lock-file URL before TCP probe in banner ([#1847](https://github.com/bobmatnyc/trusty-tools/pull/1847)) ([#1848](https://github.com/bobmatnyc/trusty-tools/pull/1848)) ([`df5c330`](https://github.com/bobmatnyc/trusty-tools/commit/df5c330d14fd43bfd0f8174582ef52a74adf0b7c))
+- CLI ergonomics fixes for tm sessions ([#1846](https://github.com/bobmatnyc/trusty-tools/pull/1846)) ([`9e4f4b9`](https://github.com/bobmatnyc/trusty-tools/commit/9e4f4b98f6e236ec6fa106f713258fba5a03ba2a))
+- managed-session lifecycle correctness ([#1840](https://github.com/bobmatnyc/trusty-tools/pull/1840)) ([#1844](https://github.com/bobmatnyc/trusty-tools/pull/1844)) ([`78f2bc2`](https://github.com/bobmatnyc/trusty-tools/commit/78f2bc29a9ddb14a2bd7b9c23e1b36e740ee36f3))
+- banner/health/entry UX fixes ([#1839](https://github.com/bobmatnyc/trusty-tools/pull/1839)) ([#1843](https://github.com/bobmatnyc/trusty-tools/pull/1843)) ([`1863c22`](https://github.com/bobmatnyc/trusty-tools/commit/1863c22692b85621c3e15ef30aa7436b5b0883da))
+- skip worktree checkouts in auto-registration + document TRUSTY_MPM_BANNER_FILE ([#1835](https://github.com/bobmatnyc/trusty-tools/pull/1835)) ([`d2e1ab8`](https://github.com/bobmatnyc/trusty-tools/commit/d2e1ab84a8f0a37dac6e14e7d03cbc02b566b630))
+- orphan-GC log-spam reduction + key-match regression tests (closes #1813) ([#1823](https://github.com/bobmatnyc/trusty-tools/pull/1823)) ([`836f393`](https://github.com/bobmatnyc/trusty-tools/commit/836f3934e005a3436d1f775480b511a23017218e))
+- RAII guard kills leaked tmux sessions after test/error ([#1815](https://github.com/bobmatnyc/trusty-tools/pull/1815)) ([#1821](https://github.com/bobmatnyc/trusty-tools/pull/1821)) ([`af67403`](https://github.com/bobmatnyc/trusty-tools/commit/af67403f3c5fe016cc03c532faafc70d19e3796e))
+- stop session-manager tests leaking real tmux sessions into production store ([#1790](https://github.com/bobmatnyc/trusty-tools/pull/1790)) ([#1793](https://github.com/bobmatnyc/trusty-tools/pull/1793)) ([`b3410e4`](https://github.com/bobmatnyc/trusty-tools/commit/b3410e4fa5373a7df6759a369e3ccc38d99b4a24))
+- session-manager on-ramp blockers — source_id backfill + first-run clone feedback ([#1780](https://github.com/bobmatnyc/trusty-tools/pull/1780)) ([#1781](https://github.com/bobmatnyc/trusty-tools/pull/1781)) ([`313b962`](https://github.com/bobmatnyc/trusty-tools/commit/313b962c00e92b036fec76ad09d8ca72256ce367))
+- non-GitHub remote refusal no longer blames daemon ([#1777](https://github.com/bobmatnyc/trusty-tools/pull/1777)) ([#1778](https://github.com/bobmatnyc/trusty-tools/pull/1778)) ([`cc9d152`](https://github.com/bobmatnyc/trusty-tools/commit/cc9d152b81991bba15c35553ec95fcfd596213a8))
+
+### Changed
+
+- extract DOC-28 catch-up engine behind catchup feature (PR1, #1762) ([`addfdbb`](https://github.com/bobmatnyc/trusty-tools/commit/addfdbb04ed78028887a0e782afe7cfe83c10b46))
+
+---
+
+## [0.12.0] — 2026-06-27
+
+### Added
+
+- two-panel full-width banner (robot left, info right, natural height) ([#1759](https://github.com/bobmatnyc/trusty-tools/pull/1759)) ([`37f3810`](https://github.com/bobmatnyc/trusty-tools/commit/37f3810e3dd238b4b3509c0b65d48393d355e934))
+- full-screen rust robot banner + bypass-permissions launch ([#1755](https://github.com/bobmatnyc/trusty-tools/pull/1755)) ([`0924589`](https://github.com/bobmatnyc/trusty-tools/commit/092458947d3c5487e188ba260744754cfd486f37))
+- ungraceful-exit handling + --resume conversation continuity (closes #1744) ([#1748](https://github.com/bobmatnyc/trusty-tools/pull/1748)) ([`40989bd`](https://github.com/bobmatnyc/trusty-tools/commit/40989bd30f2e35f9b365cdb7a877348505f9e8c1))
+- expanded pre-launch welcome panel — recent commits, service status, TM commands (closes #1743) ([#1747](https://github.com/bobmatnyc/trusty-tools/pull/1747)) ([`689a9be`](https://github.com/bobmatnyc/trusty-tools/commit/689a9bed62b39640f099f038c453617a3d16d73c))
+- tm welcome banner box + rich Claude Code statusline + tmux detach hint ([#1740](https://github.com/bobmatnyc/trusty-tools/pull/1740)) ([`db0a115`](https://github.com/bobmatnyc/trusty-tools/commit/db0a11553da9e81a1ee8f36b4204ee0f768f0a41))
+- guided-default session picker when tm run from a repo ([#1705](https://github.com/bobmatnyc/trusty-tools/pull/1705)) ([#1729](https://github.com/bobmatnyc/trusty-tools/pull/1729)) ([`40ec125`](https://github.com/bobmatnyc/trusty-tools/commit/40ec1252d44cb29c3540b69b70bc052a935851e0))
+- chat session manager MVP — force flag, turn tools, palace_dream, Task drawer (closes #1719 #1720 #1721 #1722) ([#1723](https://github.com/bobmatnyc/trusty-tools/pull/1723)) ([`7b22f28`](https://github.com/bobmatnyc/trusty-tools/commit/7b22f28e2c4f256eda0678a01fac16bd1584685b))
+- in-project protected workspace + claude-mpm parity (epic #1590) ([#1715](https://github.com/bobmatnyc/trusty-tools/pull/1715)) ([`abd9914`](https://github.com/bobmatnyc/trusty-tools/commit/abd991451ba84a771ff91fc06e86e390de30ac32))
+- usability sprint 1 — lock-file URL, startup prompts, TASK.md, offline swagger ([#1697](https://github.com/bobmatnyc/trusty-tools/pull/1697)) ([`d5e7e37`](https://github.com/bobmatnyc/trusty-tools/commit/d5e7e3776852d353b407d04d8623376f98298f56))
+- WI-5 follow-ups — OpenRouter classifier call + auth-timeout auto-stop (closes #1648, closes #1649) ([#1656](https://github.com/bobmatnyc/trusty-tools/pull/1656)) ([`6c71d64`](https://github.com/bobmatnyc/trusty-tools/commit/6c71d646aba04e3e530b081150166518ec827dd3))
+- pin palace slug in standalone MCP injection (closes #1651) ([#1655](https://github.com/bobmatnyc/trusty-tools/pull/1655)) ([`663c9ea`](https://github.com/bobmatnyc/trusty-tools/commit/663c9eab5680830157a864484f01985eaabf0dba))
+- pin trusty-memory palace slug in managed-session MCP injection (closes #1605) ([#1652](https://github.com/bobmatnyc/trusty-tools/pull/1652)) ([`d15c96d`](https://github.com/bobmatnyc/trusty-tools/commit/d15c96dc846e805f2ddf6549d157d2719afd4e9a))
+- SESSCTL WI-5 auth + cost model (closes #1596) ([#1647](https://github.com/bobmatnyc/trusty-tools/pull/1647)) ([`c51a5f6`](https://github.com/bobmatnyc/trusty-tools/commit/c51a5f6ae68cee071d320a92b23b168cb7c4e441))
+
+### Fixed
+
+- absolute-path + project-scope + opt-out for Claude hooks (fail-open hardening) ([#1756](https://github.com/bobmatnyc/trusty-tools/pull/1756)) ([`e382abb`](https://github.com/bobmatnyc/trusty-tools/commit/e382abb5c335d1b2429934dc240651cb0d608235))
+- idempotent catalog sync — update existing checkout instead of failing on re-clone (closes #1751) ([#1752](https://github.com/bobmatnyc/trusty-tools/pull/1752)) ([`8a70a30`](https://github.com/bobmatnyc/trusty-tools/commit/8a70a3048bd9f699261387a213a10ce67f542a19))
+- guided resume restarts a stopped session instead of raw-attaching a dead tmux session (closes #1742) ([#1745](https://github.com/bobmatnyc/trusty-tools/pull/1745)) ([`83f30ba`](https://github.com/bobmatnyc/trusty-tools/commit/83f30ba43e66baefe3715da20281a756997bc7ab))
+- hermetic test isolation for managed-session & prune-idle tests (closes #1734) ([#1736](https://github.com/bobmatnyc/trusty-tools/pull/1736)) ([`d0be201`](https://github.com/bobmatnyc/trusty-tools/commit/d0be201928ab9e7c1b7e80c1d23ecb741d38536f))
+- include source_id in record_to_json to match record_to_summary (closes #1733) ([#1735](https://github.com/bobmatnyc/trusty-tools/pull/1735)) ([`a901a18`](https://github.com/bobmatnyc/trusty-tools/commit/a901a18a420a31eab0a80f9d6a0c6ccaf5355e0d))
+- client source_id field + daemon URL resolution probing for guided tm (closes #1730, closes #1731) ([`2f1eef5`](https://github.com/bobmatnyc/trusty-tools/commit/2f1eef59b04f104bd7444b9fbe1a11837e44cb83))
+- redirect guided-default fallback to managed clone, never live checkout ([#1724](https://github.com/bobmatnyc/trusty-tools/pull/1724)) ([#1728](https://github.com/bobmatnyc/trusty-tools/pull/1728)) ([`5a7d9f1`](https://github.com/bobmatnyc/trusty-tools/commit/5a7d9f18844fee4677d0fadfe50fb0946373bd5f))
+
+### Changed
+
+- publish trusty-agents-common 0.1.3 + trusty-mpm 0.11.0 to crates.io ([#1750](https://github.com/bobmatnyc/trusty-tools/pull/1750)) ([`70194ec`](https://github.com/bobmatnyc/trusty-tools/commit/70194ec1788fed2e71016912dae4e062baade139))
+
+---
+
+## [0.11.0] — 2026-06-24
 
 ### Added
 
