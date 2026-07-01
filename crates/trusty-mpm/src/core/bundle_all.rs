@@ -274,62 +274,6 @@ pub const ALL: &[BundledArtifact] = &[
         contents: MPM_SKILLS_MANAGER_AGENT,
         install: InstallPolicy::Overwrite,
     },
-    // --- Phase 1 (#770): mpm-* guidance skills ---
-    BundledArtifact {
-        rel_path: "skills/mpm-delegation-patterns.md",
-        contents: MPM_DELEGATION_PATTERNS,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/mpm-verification-protocols.md",
-        contents: MPM_VERIFICATION_PROTOCOLS,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/mpm-git-file-tracking.md",
-        contents: MPM_GIT_FILE_TRACKING,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/mpm-pr-workflow.md",
-        contents: MPM_PR_WORKFLOW,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/mpm-ticketing-integration.md",
-        contents: MPM_TICKETING_INTEGRATION,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/mpm-circuit-breaker-enforcement.md",
-        contents: MPM_CIRCUIT_BREAKER_ENFORCEMENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/mpm-bug-reporting.md",
-        contents: MPM_BUG_REPORTING,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/mpm-session-management.md",
-        contents: MPM_SESSION_MANAGEMENT,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/mpm-session-pause.md",
-        contents: MPM_SESSION_PAUSE,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/mpm-session-resume.md",
-        contents: MPM_SESSION_RESUME,
-        install: InstallPolicy::Overwrite,
-    },
-    BundledArtifact {
-        rel_path: "skills/mpm-tool-usage-guide.md",
-        contents: MPM_TOOL_USAGE_GUIDE,
-        install: InstallPolicy::Overwrite,
-    },
     // --- A3 (tm-skills-portfolio epic): previously orphaned tm-doctor.md ---
     BundledArtifact {
         rel_path: "skills/tm-doctor.md",

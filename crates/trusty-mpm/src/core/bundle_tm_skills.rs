@@ -14,6 +14,16 @@
 //! Test: `bundle_tests.rs` — `tm_skills_are_in_bundle`,
 //! `tm_skills_have_frontmatter`, `constants_are_non_empty`.
 
+/// User-invocable `/tm-doctor` slash command — runs `tm doctor`.
+///
+/// Why: `tm-doctor.md` existed as an asset file (A3, tm-skills-portfolio
+/// epic) but was never wired into a const or the `ALL` bundle table, so it
+/// silently never shipped to any user despite being a real, useful skill
+/// that just shells out to the already-documented `tm doctor` diagnostic.
+/// What: embedded markdown skill file deployed to `skills/tm-doctor.md`.
+/// Test: `tm_doctor_skill_is_wired_into_bundle`.
+pub const TM_DOCTOR: &str = include_str!("../assets/skills/tm-doctor.md");
+
 /// Circuit breaker enforcement patterns — the crown jewel of the portfolio.
 ///
 /// Why: the PM's delegation discipline (CB#1-10, CB#14) is the single most

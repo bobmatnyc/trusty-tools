@@ -280,16 +280,15 @@ fn install_then_deploy_deploys_skills() {
         &paths.claude_skills_dir(),
     )
     .unwrap();
-    // All 11 bundled guidance skills plus tm-doctor deploy on first install
-    // (A4, tm-skills-portfolio epic: the `example-skill.md` placeholder no
-    // longer ships; A3: the previously-orphaned tm-doctor.md is now wired
-    // in). Stats report stems (no .md suffix) because each skill lands as
-    // <dest>/<name>/SKILL.md to match Claude Code's native discovery format.
+    // The full /tm- skill portfolio (14 skills + tm-doctor) deploys on first
+    // install (tm-skills-portfolio epic: the `example-skill.md` placeholder
+    // and the 11 mpm-* guidance skills no longer ship; the previously-orphaned
+    // tm-doctor.md is now wired in). Stats report stems (no .md suffix)
+    // because each skill lands as <dest>/<name>/SKILL.md to match Claude
+    // Code's native discovery format.
     assert!(
-        result
-            .deployed
-            .contains(&"mpm-circuit-breaker-enforcement".to_string()),
-        "mpm-circuit-breaker-enforcement must be deployed; got {:?}",
+        result.deployed.contains(&"tm-circuit-breaker".to_string()),
+        "tm-circuit-breaker must be deployed; got {:?}",
         result.deployed
     );
     assert!(
@@ -299,8 +298,8 @@ fn install_then_deploy_deploys_skills() {
     );
     assert_eq!(
         result.deployed.len(),
-        12,
-        "expected 12 skill files deployed (11 guidance + tm-doctor); got {:?}",
+        15,
+        "expected 15 skill files deployed (14 /tm- portfolio + tm-doctor); got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());
@@ -308,7 +307,7 @@ fn install_then_deploy_deploys_skills() {
     // Each skill must be deployed as a directory with SKILL.md inside.
     let deployed = paths
         .claude_skills_dir()
-        .join("mpm-circuit-breaker-enforcement")
+        .join("tm-circuit-breaker")
         .join("SKILL.md");
     assert!(
         deployed.is_file(),
@@ -317,9 +316,7 @@ fn install_then_deploy_deploys_skills() {
     );
     let lines = skill_report_lines(&result);
     assert!(
-        lines
-            .iter()
-            .any(|l| l.contains("mpm-circuit-breaker-enforcement")),
+        lines.iter().any(|l| l.contains("tm-circuit-breaker")),
         "lines = {lines:?}"
     );
 }
