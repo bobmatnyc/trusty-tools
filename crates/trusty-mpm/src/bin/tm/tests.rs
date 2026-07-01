@@ -1739,9 +1739,13 @@ fn cli_parses_login_standalone() {
 
 // ── Image-banner color tests ──────────────────────────────────────────────────
 
-// Serialize all tests that mutate `colored`'s global override so they do not
-// race each other (cargo test runs threads concurrently within the binary).
-static COLOR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// Issue #1858: `shade_image` used to probe the process-global
+// `colored::control` override internally, so these tests had to serialize on
+// COLOR_LOCK and mutate/restore that global to exercise the color-on and
+// color-off paths — and the sibling test in `two_panel.rs` that did the same
+// without the lock was the actual flaky test. `shade_image` now takes
+// `use_color` as an explicit parameter, so every test below passes it
+// directly; no global mutation or lock is needed anywhere in this file.
 
 #[test]
 fn image_clip_has_correct_dimensions() {
@@ -1751,7 +1755,7 @@ fn image_clip_has_correct_dimensions() {
     // consistency.
     // Test: direct call to shade_image with DEFAULT_BANNER_ART.
     use crate::formatters::banner::{shade_image, source::DEFAULT_BANNER_ART};
-    let (lines, cols) = shade_image(DEFAULT_BANNER_ART);
+    let (lines, cols) = shade_image(DEFAULT_BANNER_ART, false);
     let raw_count = DEFAULT_BANNER_ART.lines().count();
     assert_eq!(
         lines.len(),
@@ -1764,42 +1768,35 @@ fn image_clip_has_correct_dimensions() {
 
 #[test]
 fn art_char_shading_emits_truecolor() {
-    // Why: shade_image now respects the colored global state so non-TTY banner
-    // callers can suppress ANSI escapes (#1839 Fix 3). Force color on so the
-    // assertion holds in CI regardless of environment settings.
-    // What: call shade_image with color enabled and verify at least one line
-    // contains a truecolor ANSI escape (`\x1B[38;2;`).
-    // Test: holds COLOR_LOCK to prevent concurrent color-state tests from racing.
-    let _guard = COLOR_LOCK.lock().unwrap();
-    colored::control::set_override(true);
+    // Why: shade_image must emit truecolor escapes when the caller asks for
+    // color (#1839 Fix 3), independent of any process-global state.
+    // What: call shade_image with `use_color = true` and verify at least one
+    // line contains a truecolor ANSI escape (`\x1B[38;2;`).
+    // Test: pure function call, no shared state to race.
     use crate::formatters::banner::{shade_image, source::DEFAULT_BANNER_ART};
-    let (lines, _) = shade_image(DEFAULT_BANNER_ART);
+    let (lines, _) = shade_image(DEFAULT_BANNER_ART, true);
     let any_colored = lines.iter().any(|l| l.contains("\x1B[38;2;"));
     assert!(
         any_colored,
         "shaded art must emit truecolor escapes when color is enabled"
     );
-    colored::control::unset_override();
 }
 
 #[test]
 fn art_shading_no_ansi_when_color_disabled() {
     // Why: shade_image must suppress ANSI escapes when color is disabled so that
     // banner output piped to a file or CI log is clean plain text (#1839 Fix 3).
-    // What: disable color via set_override(false), shade the default art, then
-    // assert no line contains an ANSI escape byte.
-    // Test: holds COLOR_LOCK to prevent concurrent color-state tests from racing.
-    let _guard = COLOR_LOCK.lock().unwrap();
-    colored::control::set_override(false);
+    // What: call shade_image with `use_color = false` and assert no line
+    // contains an ANSI escape byte.
+    // Test: pure function call, no shared state to race.
     use crate::formatters::banner::{shade_image, source::DEFAULT_BANNER_ART};
-    let (lines, _) = shade_image(DEFAULT_BANNER_ART);
+    let (lines, _) = shade_image(DEFAULT_BANNER_ART, false);
     for line in &lines {
         assert!(
             !line.contains('\x1B'),
             "shade_image must not emit ANSI escapes when color is disabled: {line:?}"
         );
     }
-    colored::control::unset_override();
 }
 
 #[test]
@@ -1811,7 +1808,7 @@ fn art_shading_spaces_are_uncolored() {
     use crate::formatters::banner::{
         shade_image, source::DEFAULT_BANNER_ART, two_panel::strip_ansi,
     };
-    let (lines, _) = shade_image(DEFAULT_BANNER_ART);
+    let (lines, _) = shade_image(DEFAULT_BANNER_ART, true);
     let has_space = lines.iter().any(|l| strip_ansi(l).contains(' '));
     assert!(has_space, "shaded art must contain some uncolored spaces");
 }

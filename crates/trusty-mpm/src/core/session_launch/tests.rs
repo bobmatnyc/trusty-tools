@@ -1331,6 +1331,13 @@ fn prepare_session_reports_output_style() {
         .expect("output style deployed when home is resolvable");
     assert!(style.ends_with("trusty-mpm.md"));
     assert!(style.exists());
+    // Issue #1860: the deploy must target the scoped `tmp_home`, never the
+    // real `$HOME` — this is the regression the leaking test exposed.
+    assert!(
+        style.starts_with(tmp_home.path()),
+        "output style must deploy under the injected FrameworkPaths base, got {}",
+        style.display()
+    );
 }
 
 #[test]
