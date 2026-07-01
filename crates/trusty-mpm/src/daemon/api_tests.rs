@@ -1059,12 +1059,12 @@ async fn pair_reset_clears_pairing() {
 
 #[tokio::test]
 async fn doctor_endpoint_returns_report() {
-    // `GET /api/v1/doctor` returns a six-check report (#1840 added the
-    // worktrees check); the per-check statuses carry the diagnosis, not the
-    // HTTP status.
+    // `GET /api/v1/doctor` returns a seven-check report (#1840 added the
+    // worktrees check; DOC-28 R4(a) added the output_style check); the
+    // per-check statuses carry the diagnosis, not the HTTP status.
     let state = DaemonState::shared();
     let Json(report) = doctor(State(state), Query(DoctorQuery::default())).await;
-    assert_eq!(report.checks.len(), 6);
+    assert_eq!(report.checks.len(), 7);
     let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
         names,
@@ -1072,6 +1072,7 @@ async fn doctor_endpoint_returns_report() {
             "instructions",
             "agents",
             "skills",
+            "output_style",
             "memory",
             "search",
             "worktrees"

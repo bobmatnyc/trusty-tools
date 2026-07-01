@@ -335,4 +335,10 @@ pub const ALL: &[BundledArtifact] = &[
         contents: MPM_TOOL_USAGE_GUIDE,
         install: InstallPolicy::Overwrite,
     },
+    // --- DOC-28 R1: canonical self-description doc ---
+    BundledArtifact {
+        rel_path: "docs/WHAT-IS-TRUSTY-MPM.md",
+        contents: WHAT_IS_TRUSTY_MPM,
+        install: InstallPolicy::Overwrite,
+    },
 ];

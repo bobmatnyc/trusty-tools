@@ -299,6 +299,57 @@ mod tests {
     }
 
     #[test]
+    fn assemble_sm_prompt_contains_identity_protocol() {
+        // DOC-28 R2: the Identity & Self-Awareness Protocol section lives in
+        // the BASE_SM floor, so it must survive into the assembled prompt
+        // verbatim, along with the forbidden shell-probe list a reviewer can
+        // grep for regressions.
+        let prompt = assemble_sm_prompt();
+        assert!(prompt.contains("## Identity & Self-Awareness Protocol (Non-Overridable)"));
+        assert!(prompt.contains("pip3 show"));
+        assert!(prompt.contains("which claude-mpm"));
+    }
+
+    #[test]
+    fn identity_protocol_survives_every_override_branch() {
+        // DOC-28 R2 acceptance: the heading must be present in the resolved
+        // prompt regardless of which project-level overrides are applied —
+        // proving it lives in the non-overridable BASE_SM floor, analogous to
+        // `base_sm_floor_is_never_overridable` above.
+        let tmp = TempDir::new().unwrap();
+        write_override(
+            tmp.path(),
+            FILE_SM_INSTRUCTIONS,
+            "# Custom Identity\n\nCUSTOM_BODY\n",
+        );
+        write_override(tmp.path(), FILE_SM_WORKFLOW, "# Custom Loop\n\nBODY\n");
+        write_override(tmp.path(), FILE_SM_TOOLS, "# Custom Verbs\n\nBODY\n");
+        let prompt = resolve_sm_prompt(tmp.path());
+        assert!(
+            prompt.contains("## Identity & Self-Awareness Protocol (Non-Overridable)"),
+            "identity protocol must survive every override branch"
+        );
+        assert!(prompt.contains("<!-- trusty-mpm-instructions-loaded: v1 -->"));
+    }
+
+    #[test]
+    fn base_sm_carries_the_load_marker_as_first_line_of_its_section() {
+        // DOC-28 R4(b) acceptance: the greppable load marker must be the
+        // literal first line preceding the Identity & Self-Awareness Protocol
+        // heading in the bundled BASE_SM floor.
+        const MARKER: &str = "<!-- trusty-mpm-instructions-loaded: v1 -->";
+        const HEADING: &str = "## Identity & Self-Awareness Protocol (Non-Overridable)";
+        let marker_pos = BASE_SM.find(MARKER).expect("marker present in BASE_SM");
+        let heading_pos = BASE_SM.find(HEADING).expect("heading present in BASE_SM");
+        let between = &BASE_SM[marker_pos + MARKER.len()..heading_pos];
+        assert_eq!(
+            between.trim(),
+            "",
+            "marker must immediately precede the heading with no other content between"
+        );
+    }
+
+    #[test]
     fn assemble_sm_prompt_contains_harness_section() {
         let prompt = assemble_sm_prompt();
         // The harness understanding section contains the Claude Code working glyph

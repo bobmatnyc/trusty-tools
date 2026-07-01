@@ -4,8 +4,9 @@
 //! launch with no instructions, agents never deploy, memory recall silently
 //! returns nothing. `tm doctor` collapses every "is this wired correctly?"
 //! question into one command so the operator gets a single, actionable verdict.
-//! What: [`run_doctor`] runs five independent probes — the instruction
-//! pipeline, agent deployment, skill deployment, and the trusty-memory /
+//! What: [`run_doctor`] runs independent probes — the instruction pipeline,
+//! agent deployment, skill deployment, the DOC-28 output-style
+//! configuration check (see `doctor_output_style`), and the trusty-memory /
 //! trusty-search sidecars — and folds their outcomes into a
 //! [`DoctorReport`]. Each network probe is bounded by [`PROBE_TIMEOUT`] so an
 //! unreachable service cannot hang the report.
@@ -22,6 +23,11 @@ use crate::core::paths::FrameworkPaths;
 
 use super::discover::{TRUSTY_MEMORY_DEFAULT_ADDR, TRUSTY_SEARCH_DEFAULT_ADDR, discover_addr};
 
+// Split out to keep this file under the 500-SLOC production cap (DOC-28 R4(a)).
+#[path = "doctor_output_style.rs"]
+mod doctor_output_style;
+use doctor_output_style::check_output_style;
+
 /// Per-probe network timeout.
 ///
 /// Why: a sidecar that is down or wedged must not stall the whole diagnostic;
@@ -35,14 +41,17 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 ///
 /// Why: the single entry point behind `GET /api/v1/doctor` and `tm doctor` —
 /// running all probes here keeps the check set identical across every UI.
-/// What: runs the instruction / agent / skill filesystem probes, then the
-/// memory and search HTTP probes (each bounded by [`PROBE_TIMEOUT`]), and a
-/// worktree-orphan scan (Fix 1b, #1840), and folds the six [`DoctorCheck`]s
-/// into a [`DoctorReport`] whose `overall` status is the worst of them.
-/// `project_dir` scopes the instruction probe; `repos_root` (when `Some`)
-/// gives the managed workspace root for the worktree scan; `active_workspace_paths`
-/// is the full set of workspace paths currently registered to live sessions.
-/// Test: `run_doctor_produces_six_checks`.
+/// What: runs the instruction / agent / skill / output-style filesystem
+/// probes (the output-style probe closes DOC-28 F4 — the "did the
+/// trusty-mpm instructions actually load" gap), then the memory and search
+/// HTTP probes (each bounded by [`PROBE_TIMEOUT`]), and a worktree-orphan
+/// scan (Fix 1b, #1840), and folds the seven [`DoctorCheck`]s into a
+/// [`DoctorReport`] whose `overall` status is the worst of them.
+/// `project_dir` scopes the instruction and output-style probes; `repos_root`
+/// (when `Some`) gives the managed workspace root for the worktree scan;
+/// `active_workspace_paths` is the full set of workspace paths currently
+/// registered to live sessions.
+/// Test: `run_doctor_produces_seven_checks`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
     repos_root: Option<&Path>,
@@ -55,6 +64,7 @@ pub async fn run_doctor(
         check_instructions(project_dir),
         check_agents(&paths),
         check_skills(&home),
+        check_output_style(project_dir, &home),
     ];
     checks.push(check_memory(&home).await);
     checks.push(check_search(&home).await);
@@ -553,9 +563,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_doctor_produces_six_checks() {
+    async fn run_doctor_produces_seven_checks() {
+        // DOC-28 R4(a): adds the `output_style` probe, bringing the total
+        // from six to seven checks.
         let report = run_doctor(None, None, &[]).await;
-        assert_eq!(report.checks.len(), 6);
+        assert_eq!(report.checks.len(), 7);
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -563,6 +575,7 @@ mod tests {
                 "instructions",
                 "agents",
                 "skills",
+                "output_style",
                 "memory",
                 "search",
                 "worktrees"

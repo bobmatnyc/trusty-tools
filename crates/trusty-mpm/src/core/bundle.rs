@@ -161,6 +161,18 @@ pub const MPM_SKILLS_MANAGER_AGENT: &str = include_str!("../assets/agents/mpm-sk
 /// Placeholder skill definition installed to `skills/example-skill.md`.
 pub const EXAMPLE_SKILL: &str = include_str!("../assets/skills/example-skill.md");
 
+/// Canonical self-description doc installed to `docs/WHAT-IS-TRUSTY-MPM.md`
+/// (DOC-28 R1 — `docs/specs/trusty-mpm-self-awareness.md`).
+///
+/// Why: no single, stable, canonically-pointed-at answer to "what is
+/// trusty-mpm" existed anywhere in the bundled assets, which let a launched
+/// session conflate this Rust project with the unrelated Python `claude-mpm`
+/// package (the "self-awareness incident"). Source lives under
+/// `crates/trusty-mpm/docs/` (ordinary, human-reviewable documentation)
+/// rather than `src/assets/` so it reads naturally as a doc while still being
+/// embeddable here, exactly like every other bundled artifact.
+pub const WHAT_IS_TRUSTY_MPM: &str = include_str!("../../docs/WHAT-IS-TRUSTY-MPM.md");
+
 // --- Phase 1 (#770): mpm-* guidance skills — constants in bundle_skills.rs ---
 #[path = "bundle_skills.rs"]
 mod skills_inner;
