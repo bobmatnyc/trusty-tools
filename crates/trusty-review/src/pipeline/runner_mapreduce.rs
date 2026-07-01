@@ -329,6 +329,19 @@ async fn fold_reduced_into_result(
 
     // Inline per-line comments from the RAW diff (#1414 parity).
     attach_inline_comments(result, &run.raw_diff);
+
+    // NOTE (#1877): unlike the unified path (`runner.rs` step 7d-post), this
+    // function does NOT set `result.shallow_clean_review`. The map-reduce path
+    // never aggregates per-chunk `output_tokens`/`input_tokens`/`cost_estimate_usd`
+    // onto `result` (a pre-existing gap, not introduced here — grep confirms no
+    // telemetry-field assignment anywhere in this file), so `result.output_tokens`
+    // stays 0 for every map-reduce review. Wiring `is_shallow_clean_review` in here
+    // today would false-positive on every large map-reduce clean APPROVE (0 tokens
+    // always looks "shallow"). Map-reduce is exactly the path used for the LARGEST
+    // diffs — the population issue #1877's Bug 2 targets — so this is a real
+    // coverage gap, not a deliberate scope exclusion: fix by first threading
+    // aggregate token/cost telemetry from the map/reduce stages onto `result`
+    // (see `mapreduce/reduce.rs`), then wire the same heuristic in here.
 }
 
 #[cfg(test)]

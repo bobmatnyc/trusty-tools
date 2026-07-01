@@ -456,7 +456,10 @@ pub struct ReviewResult {
     /// What: set via `letter_grade::is_shallow_clean_review` in the unified
     /// runner path, using `verdict`, `findings.is_empty()`, the rendered diff
     /// length, and `output_tokens`. `#[serde(default)]` keeps pre-#1877 results
-    /// deserialising to `false`.
+    /// deserialising to `false`. NOT yet wired into the map-reduce path — see
+    /// the NOTE in `runner_mapreduce::fold_reduced_into_result` — because that
+    /// path does not currently aggregate per-chunk token telemetry onto the
+    /// result, so this always stays `false` for map-reduce reviews today.
     /// Test: `shallow_clean_review_flags_large_diff_low_tokens`,
     /// `shallow_clean_review_false_for_small_diff` (letter_grade.rs),
     /// `run_review_flags_shallow_clean_review_on_large_diff` (runner_tests.rs).
