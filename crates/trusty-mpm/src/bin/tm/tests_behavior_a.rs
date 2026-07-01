@@ -280,9 +280,10 @@ fn install_then_deploy_deploys_skills() {
         &paths.claude_skills_dir(),
     )
     .unwrap();
-    // All 11 bundled guidance skills deploy on first install (A4,
-    // tm-skills-portfolio epic: the `example-skill.md` placeholder no longer
-    // ships). Stats report stems (no .md suffix) because each skill lands as
+    // All 11 bundled guidance skills plus tm-doctor deploy on first install
+    // (A4, tm-skills-portfolio epic: the `example-skill.md` placeholder no
+    // longer ships; A3: the previously-orphaned tm-doctor.md is now wired
+    // in). Stats report stems (no .md suffix) because each skill lands as
     // <dest>/<name>/SKILL.md to match Claude Code's native discovery format.
     assert!(
         result
@@ -291,10 +292,15 @@ fn install_then_deploy_deploys_skills() {
         "mpm-circuit-breaker-enforcement must be deployed; got {:?}",
         result.deployed
     );
+    assert!(
+        result.deployed.contains(&"tm-doctor".to_string()),
+        "tm-doctor must be deployed; got {:?}",
+        result.deployed
+    );
     assert_eq!(
         result.deployed.len(),
-        11,
-        "expected 11 guidance skill files deployed; got {:?}",
+        12,
+        "expected 12 skill files deployed (11 guidance + tm-doctor); got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());

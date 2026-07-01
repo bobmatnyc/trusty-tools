@@ -330,6 +330,12 @@ pub const ALL: &[BundledArtifact] = &[
         contents: MPM_TOOL_USAGE_GUIDE,
         install: InstallPolicy::Overwrite,
     },
+    // --- A3 (tm-skills-portfolio epic): previously orphaned tm-doctor.md ---
+    BundledArtifact {
+        rel_path: "skills/tm-doctor.md",
+        contents: TM_DOCTOR,
+        install: InstallPolicy::Overwrite,
+    },
     // --- DOC-28 R1: canonical self-description doc ---
     BundledArtifact {
         rel_path: "docs/WHAT-IS-TRUSTY-MPM.md",

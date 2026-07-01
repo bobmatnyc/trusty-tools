@@ -73,6 +73,7 @@ fn constants_are_non_empty() {
     assert!(!MPM_SESSION_PAUSE.trim().is_empty());
     assert!(!MPM_SESSION_RESUME.trim().is_empty());
     assert!(!MPM_TOOL_USAGE_GUIDE.trim().is_empty());
+    assert!(!TM_DOCTOR.trim().is_empty());
     assert!(!WHAT_IS_TRUSTY_MPM.trim().is_empty());
 }
 
@@ -196,9 +197,11 @@ fn optimizer_toml_is_parseable() {
 #[test]
 fn bundle_table_is_complete() {
     // `ALL` must enumerate every artifact with unique, non-empty paths.
-    // Count: 4 hooks/instructions + 5 base agents + 36 concrete agents + 11 guidance skills = 56
+    // Count: 4 hooks/instructions + 5 base agents + 36 concrete agents + 11
+    // guidance skills + 1 tm-doctor = 57
     // (A4, tm-skills-portfolio epic: the `example-skill.md` placeholder was
-    // removed from ALL — it shipped to every user with no real content.)
+    // removed from ALL — it shipped to every user with no real content.
+    // A3: the previously-orphaned tm-doctor.md is now wired in.)
     // Increment 1 (9): qa, research, ops, security, documentation, data-engineer,
     //   version-control, ticketing, code-analyzer
     // Increment 2 (12): python-engineer, typescript-engineer, golang-engineer,
@@ -214,12 +217,13 @@ fn bundle_table_is_complete() {
     //   mpm-pr-workflow, mpm-ticketing-integration, mpm-circuit-breaker-enforcement,
     //   mpm-bug-reporting, mpm-session-management, mpm-session-pause,
     //   mpm-session-resume, mpm-tool-usage-guide
+    // A3: tm-doctor (1)
     // DOC-28 R1 (1): docs/WHAT-IS-TRUSTY-MPM.md
-    assert_eq!(ALL.len(), 57);
+    assert_eq!(ALL.len(), 58);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 57, "artifact paths must be unique");
+    assert_eq!(paths.len(), 58, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -506,6 +510,20 @@ fn phase1_guidance_skills_have_frontmatter() {
             "skill {name} contains unadapted claude-mpm reference"
         );
     }
+}
+
+#[test]
+fn tm_doctor_skill_is_wired_into_bundle() {
+    // A3 (tm-skills-portfolio epic): tm-doctor.md existed as an asset file
+    // but was never wired into a const or the ALL table, so it silently
+    // never shipped. Assert both are now true, and that it carries valid
+    // frontmatter naming the skill `tm-doctor`.
+    assert!(
+        ALL.iter().any(|a| a.rel_path == "skills/tm-doctor.md"),
+        "tm-doctor.md must be present in the ALL bundle table"
+    );
+    assert!(TM_DOCTOR.starts_with("---\n"));
+    assert!(TM_DOCTOR.contains("name: tm-doctor"));
 }
 
 #[test]

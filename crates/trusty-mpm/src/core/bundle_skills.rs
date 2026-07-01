@@ -104,3 +104,13 @@ pub const MPM_SESSION_RESUME: &str = include_str!("../assets/skills/mpm-session-
 /// What: embedded markdown skill file deployed to `skills/mpm-tool-usage-guide.md`.
 /// Test: `phase1_guidance_skills_are_in_bundle`.
 pub const MPM_TOOL_USAGE_GUIDE: &str = include_str!("../assets/skills/mpm-tool-usage-guide.md");
+
+/// User-invocable `/tm-doctor` slash command — runs `tm doctor`.
+///
+/// Why: `tm-doctor.md` existed as an asset file (A3, tm-skills-portfolio
+/// epic) but was never wired into a const or the `ALL` bundle table, so it
+/// silently never shipped to any user despite being a real, useful skill
+/// that just shells out to the already-documented `tm doctor` diagnostic.
+/// What: embedded markdown skill file deployed to `skills/tm-doctor.md`.
+/// Test: `phase1_guidance_skills_are_in_bundle`.
+pub const TM_DOCTOR: &str = include_str!("../assets/skills/tm-doctor.md");
