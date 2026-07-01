@@ -402,6 +402,11 @@ pub const ALL: &[BundledArtifact] = &[
         contents: TM_DELEGATION_PATTERNS,
         install: InstallPolicy::Overwrite,
     },
+    BundledArtifact {
+        rel_path: "skills/tm-session-management.md",
+        contents: TM_SESSION_MANAGEMENT,
+        install: InstallPolicy::Overwrite,
+    },
     // --- DOC-28 R1: canonical self-description doc ---
     BundledArtifact {
         rel_path: "docs/WHAT-IS-TRUSTY-MPM.md",

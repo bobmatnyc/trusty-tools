@@ -123,3 +123,13 @@ pub const TM_PR_WORKFLOW: &str = include_str!("../assets/skills/tm-pr-workflow.m
 /// What: embedded markdown skill file deployed to `skills/tm-delegation-patterns.md`.
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_DELEGATION_PATTERNS: &str = include_str!("../assets/skills/tm-delegation-patterns.md");
+
+/// PM context-limit pause/resume, project-local sessions, worktree pruning.
+///
+/// Why: consolidates mpm-session-management + mpm-session-pause +
+/// mpm-session-resume into one skill; keeps the 70% auto-pause threshold, the
+/// `.trusty-mpm/sessions/` format, `tm sessions prune-worktrees`, and
+/// trusty-memory task_add/task_list/task_complete integration.
+/// What: embedded markdown skill file deployed to `skills/tm-session-management.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_SESSION_MANAGEMENT: &str = include_str!("../assets/skills/tm-session-management.md");
