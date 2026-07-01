@@ -386,6 +386,8 @@ When publishing a crate to crates.io:
 
 **CRITICAL RULES FOR CONCURRENT SESSIONS:**
 
+🔴 **SOURCE OF TRUTH = `origin/main:HEAD`.** Local `main` may be stale. **Always `git fetch origin main` and branch worktrees off `origin/main`** (not local main). Stale local main has caused lost commits and missed features. This is not optional.
+
 🔴 **The main checkout is inspection-only.** From the repo root
 (`/path/to/trusty-tools/`), the only allowed operations are read-only: `git status`,
 `git log`, `git diff`, `git show`, file reads. **FORBIDDEN**: edits, `git reset --hard`,
@@ -402,6 +404,8 @@ git worktree add -b <feature-or-fix-branch> \
 cd .claude/worktrees/<dirname>
 # … edit, build, test, commit, push from here …
 ```
+
+**End-to-end delivery chain:** spec → issue → worktree branch → PR (linked to issue) → trusty-review gate → squash-merge → worktree cleanup. See `.claude-mpm/INSTRUCTIONS.md` for the full required sequence.
 
 Each ticket, refactor, or experiment gets its own worktree. Worktrees are
 disposable — delete them with `git worktree remove --force <path>` once the
