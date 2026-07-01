@@ -158,9 +158,6 @@ pub const MPM_AGENT_MANAGER_AGENT: &str = include_str!("../assets/agents/mpm-age
 /// Concrete mpm-skills-manager agent — skill lifecycle and recommendations (`extends: base-agent`).
 pub const MPM_SKILLS_MANAGER_AGENT: &str = include_str!("../assets/agents/mpm-skills-manager.md");
 
-/// Placeholder skill definition installed to `skills/example-skill.md`.
-pub const EXAMPLE_SKILL: &str = include_str!("../assets/skills/example-skill.md");
-
 /// Canonical self-description doc installed to `docs/WHAT-IS-TRUSTY-MPM.md`
 /// (DOC-28 R1 — `docs/specs/trusty-mpm-self-awareness.md`).
 ///

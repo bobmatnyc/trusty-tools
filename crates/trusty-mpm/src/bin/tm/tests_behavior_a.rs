@@ -280,18 +280,21 @@ fn install_then_deploy_deploys_skills() {
         &paths.claude_skills_dir(),
     )
     .unwrap();
-    // All 12 bundled skills (1 placeholder + 11 guidance) deploy on first install.
-    // Stats now report stems (no .md suffix) because each skill lands as
+    // All 11 bundled guidance skills deploy on first install (A4,
+    // tm-skills-portfolio epic: the `example-skill.md` placeholder no longer
+    // ships). Stats report stems (no .md suffix) because each skill lands as
     // <dest>/<name>/SKILL.md to match Claude Code's native discovery format.
     assert!(
-        result.deployed.contains(&"example-skill".to_string()),
-        "example-skill must be deployed; got {:?}",
+        result
+            .deployed
+            .contains(&"mpm-circuit-breaker-enforcement".to_string()),
+        "mpm-circuit-breaker-enforcement must be deployed; got {:?}",
         result.deployed
     );
     assert_eq!(
         result.deployed.len(),
-        12,
-        "expected 12 skill files deployed (1 placeholder + 11 guidance); got {:?}",
+        11,
+        "expected 11 guidance skill files deployed; got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());
@@ -299,7 +302,7 @@ fn install_then_deploy_deploys_skills() {
     // Each skill must be deployed as a directory with SKILL.md inside.
     let deployed = paths
         .claude_skills_dir()
-        .join("example-skill")
+        .join("mpm-circuit-breaker-enforcement")
         .join("SKILL.md");
     assert!(
         deployed.is_file(),
@@ -308,7 +311,9 @@ fn install_then_deploy_deploys_skills() {
     );
     let lines = skill_report_lines(&result);
     assert!(
-        lines.iter().any(|l| l.contains("example-skill")),
+        lines
+            .iter()
+            .any(|l| l.contains("mpm-circuit-breaker-enforcement")),
         "lines = {lines:?}"
     );
 }

@@ -58,7 +58,6 @@ fn constants_are_non_empty() {
     assert!(!MEMORY_MANAGER_AGENT.trim().is_empty());
     assert!(!MPM_AGENT_MANAGER_AGENT.trim().is_empty());
     assert!(!MPM_SKILLS_MANAGER_AGENT.trim().is_empty());
-    assert!(!EXAMPLE_SKILL.trim().is_empty());
     assert!(!OUTPUT_STYLE.trim().is_empty());
     assert!(!OUTPUT_STYLE_TEACHER.trim().is_empty());
     assert!(!OUTPUT_STYLE_RESEARCH.trim().is_empty());
@@ -197,7 +196,9 @@ fn optimizer_toml_is_parseable() {
 #[test]
 fn bundle_table_is_complete() {
     // `ALL` must enumerate every artifact with unique, non-empty paths.
-    // Count: 4 hooks/instructions + 5 base agents + 36 concrete agents + 1 skill + 11 guidance skills = 57
+    // Count: 4 hooks/instructions + 5 base agents + 36 concrete agents + 11 guidance skills = 56
+    // (A4, tm-skills-portfolio epic: the `example-skill.md` placeholder was
+    // removed from ALL — it shipped to every user with no real content.)
     // Increment 1 (9): qa, research, ops, security, documentation, data-engineer,
     //   version-control, ticketing, code-analyzer
     // Increment 2 (12): python-engineer, typescript-engineer, golang-engineer,
@@ -214,11 +215,11 @@ fn bundle_table_is_complete() {
     //   mpm-bug-reporting, mpm-session-management, mpm-session-pause,
     //   mpm-session-resume, mpm-tool-usage-guide
     // DOC-28 R1 (1): docs/WHAT-IS-TRUSTY-MPM.md
-    assert_eq!(ALL.len(), 58);
+    assert_eq!(ALL.len(), 57);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 58, "artifact paths must be unique");
+    assert_eq!(paths.len(), 57, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

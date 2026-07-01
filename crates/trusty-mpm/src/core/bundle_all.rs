@@ -203,11 +203,6 @@ pub const ALL: &[BundledArtifact] = &[
         contents: API_QA_AGENT,
         install: InstallPolicy::Overwrite,
     },
-    BundledArtifact {
-        rel_path: "skills/example-skill.md",
-        contents: EXAMPLE_SKILL,
-        install: InstallPolicy::Overwrite,
-    },
     // --- Increment 3: remaining 14 agents ---
     BundledArtifact {
         rel_path: "agents/javascript-engineer.md",
