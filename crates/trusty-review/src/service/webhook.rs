@@ -278,7 +278,7 @@ pub async fn handle_github_webhook(
                 owner: owner.clone(),
                 repo: repo.clone(),
                 pr: pr_number,
-                token: String::new(), // resolved from config by the pipeline
+                token: String::new(), // resolved by `run_review` via `resolve_diff_token` (#1880)
             },
             reviewer_model,
             write_log: true, // background webhook tasks write the log

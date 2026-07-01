@@ -18,7 +18,7 @@ use tracing::{debug, info, warn};
 use super::runner_coverage::load_coverage_contrib;
 use super::runner_helpers::{
     abort_dry, apply_grade_and_floor, attach_inline_comments, build_author_rationale,
-    fetch_github_pr_meta, finalize_run,
+    fetch_github_pr_meta, finalize_run, resolve_diff_token,
 };
 use crate::{
     config::{DiffStats, MapReduceConfig, ReviewConfig, ReviewPath, select_review_mode},
@@ -237,9 +237,23 @@ pub async fn run_review(
         }
     }
 
+    // ── Step 2c: resolve the GitHub token for the diff fetch (#1880) ──────
+    // `DiffSource::Github` may carry an empty placeholder token (service-path
+    // callers defer resolution here); resolve it now via the run-mode's
+    // `AuthStrategy` rather than letting `load_diff` send an empty bearer
+    // token and surface an opaque 401 from GitHub.
+    let diff_source = match resolve_diff_token(&input.diff_source, config, input.run_mode).await {
+        Ok(source) => source,
+        Err(e) => {
+            warn!("failed to resolve GitHub token for diff fetch: {e}");
+            result.error = Some(format!("GitHub token resolution failed: {e}"));
+            return abort_dry(result, config, &input, &deps);
+        }
+    };
+
     // ── Step 3: load, filter (DiffAnalyzer Stages A+B), and truncate diff ─
     // truncate_diff is the final safety net after noise filtering (REV-209).
-    let raw_diff = match load_diff(&input.diff_source).await {
+    let raw_diff = match load_diff(&diff_source).await {
         Ok(d) => d,
         Err(e) => {
             warn!("failed to load diff: {e}");

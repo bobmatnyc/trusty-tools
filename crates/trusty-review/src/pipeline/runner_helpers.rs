@@ -20,6 +20,7 @@ use crate::{
     config::ReviewConfig,
     models::{InlineCommentOut, ReviewResult, Verdict},
     pipeline::{
+        diff::DiffSource,
         grade::derive_verdict_with_grade,
         letter_grade::default_grade_for_verdict,
         output::{print_review_result, write_review_log},
@@ -157,6 +158,62 @@ pub(super) async fn fetch_github_pr_meta(
     ))
 }
 
+/// Resolve the GitHub token for a diff-fetch, replacing an empty placeholder.
+///
+/// Why: service-path callers (`resolve_diff_source` in `service/handlers.rs`,
+/// and the webhook dispatcher in `service/webhook.rs`) intentionally build
+/// `DiffSource::Github` with an empty `token` field, commenting that "the
+/// pipeline will resolve it from config" — but nothing ever did that
+/// resolution, so serve-mode diff fetches sent an empty bearer token straight
+/// to GitHub and got back an opaque `401 Bad credentials` (#1880). This is the
+/// single funnel that closes that gap, mirroring the token resolution already
+/// performed independently for PR-metadata fetch (`fetch_github_pr_meta`
+/// above) and for posting (`pipeline::post::finalize_review`).
+/// What: `LocalFile` sources need no GitHub credentials and pass through
+/// unchanged. `Github` sources with an already-resolved (non-empty) token —
+/// the CLI `run`/`compare`/`calibrate` paths, which resolve up front — also
+/// pass through unchanged so this never triggers a redundant token exchange.
+/// Only a `Github` source with an *empty* token triggers resolution via
+/// `AuthStrategy::select(run_mode, None).resolve_token(...)`, returning a new
+/// `DiffSource::Github` with the resolved token. If no token can be resolved
+/// (no PAT, no `gh` login, no App credentials, or no installation for the
+/// owner) this returns the underlying `GithubError` — whose `Display` already
+/// names the missing env var / config key — so the caller fails CLOSED with an
+/// actionable message instead of silently sending an empty-token request.
+/// Test: `resolve_diff_token_passes_through_local_file`,
+/// `resolve_diff_token_passes_through_already_resolved_token`,
+/// `resolve_diff_token_serve_mode_without_app_creds_errors`,
+/// `resolve_diff_token_cli_mode_resolves_from_config_token`.
+pub(super) async fn resolve_diff_token(
+    source: &DiffSource,
+    config: &ReviewConfig,
+    run_mode: RunMode,
+) -> Result<DiffSource, GithubError> {
+    let DiffSource::Github {
+        owner,
+        repo,
+        pr,
+        token,
+    } = source
+    else {
+        return Ok(source.clone());
+    };
+    if !token.is_empty() {
+        return Ok(source.clone());
+    }
+
+    let client = GithubClient::new()?;
+    let resolved = AuthStrategy::select(run_mode, None)
+        .resolve_token(&client, config, owner)
+        .await?;
+    Ok(DiffSource::Github {
+        owner: owner.clone(),
+        repo: repo.clone(),
+        pr: *pr,
+        token: resolved,
+    })
+}
+
 /// Finalise an *aborted* review as dry-run only, releasing the dedup claim.
 ///
 /// Why: a review that aborts before producing a real verdict (diff-load failure
@@ -266,3 +323,10 @@ pub(super) async fn finalize_run(
     )
     .await
 }
+
+// ─── Unit tests ───────────────────────────────────────────────────────────────
+// Split into a sibling file to keep this file under the 500-line cap.
+
+#[cfg(test)]
+#[path = "runner_helpers_tests.rs"]
+mod tests;

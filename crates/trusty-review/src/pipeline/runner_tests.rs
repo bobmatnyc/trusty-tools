@@ -893,6 +893,56 @@ async fn run_review_missing_diff_file_sets_error() {
 }
 
 #[tokio::test]
+async fn run_review_serve_mode_empty_token_fails_closed_with_actionable_error() {
+    // Regression for #1880: serve-mode callers (POST /review, the webhook
+    // dispatcher) build `DiffSource::Github` with an empty placeholder token,
+    // relying on `run_review` to resolve the real one via `resolve_diff_token`
+    // before the diff fetch. With no GitHub App credentials configured, this
+    // must fail CLOSED with an actionable error field — never proceed to
+    // `load_diff` with an empty bearer token (which previously surfaced as an
+    // opaque `401 Bad credentials` from GitHub instead of a clear diagnostic).
+    let mut config = default_config();
+    config.github_app_id = None;
+    config.github_app_private_key = None;
+    config.github_installations = Vec::new();
+
+    let input = ReviewInput {
+        diff_source: DiffSource::Github {
+            owner: "acme".to_string(),
+            repo: "widgets".to_string(),
+            pr: 7,
+            token: String::new(),
+        },
+        reviewer_model: "openai/gpt-5.4-nano-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Serve,
+        allow_posting: true,
+        caller_context: CallerContext::default(),
+    };
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+
+    let result = run_review(&config, input, deps).await;
+
+    assert!(
+        result.error.is_some(),
+        "empty-token diff fetch without App credentials must set an error"
+    );
+    let error = result.error.expect("checked above");
+    assert!(
+        error.contains("GITHUB_APP_ID") || error.contains("GITHUB_APP_PRIVATE_KEY"),
+        "error must name the missing config so an operator can fix it: {error}"
+    );
+    assert_eq!(
+        result.verdict,
+        Verdict::Unknown,
+        "fail-closed path must never fabricate a verdict"
+    );
+    assert!(!result.posted, "a failed token resolution must never post");
+}
+
+#[tokio::test]
 async fn run_review_local_diff_is_dry_run_and_not_posted() {
     // A local diff can never be posted (no GitHub source); even with the
     // trigger forcing live and posting allowed, the result stays dry-run.
