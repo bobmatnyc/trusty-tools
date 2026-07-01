@@ -87,12 +87,25 @@ exact wording):
 4. **State the disambiguation explicitly when relevant** — this is
    `trusty-mpm` (binary `tm`), NOT `claude-mpm`.
 
-## Memory seeding (R3 — manual step)
+## Memory seeding (R3)
 
 `get_prompt_context()` surfaces `is_fact` triples from every registered
 trusty-memory palace (see `crates/trusty-memory/src/prompt_facts.rs`), but no
-identity fact exists until one is seeded. Run this once per trusty-memory
-install/upgrade (any palace — the fact is visible cross-palace):
+identity fact exists until one is seeded.
+
+**Automatic (DOC-28 §7 Phase 2, epic #1855):** every time `tm` provisions a
+brand-new managed-session workspace (`WorkspaceProvisioner::provision_in`,
+`crates/trusty-mpm/src/provisioner/workspace.rs`), it attempts this seed once
+against the session's derived palace. The attempt is guarded by a `kg_query`
+idempotency check (skips the assert if the triple already exists) and is
+fail-open: an unreachable trusty-memory daemon, a non-2xx response, or a parse
+error is logged and swallowed, never blocking or failing provisioning. This
+only fires at provision time (a new workspace being created), not on every
+`tm session start`/`connect`/resume of an existing project directory.
+
+**Manual (fallback / any palace):** run this once per trusty-memory
+install/upgrade if you are not going through the managed-session provisioner
+(any palace — the fact is visible cross-palace):
 
 ```
 kg_assert(
@@ -106,9 +119,8 @@ kg_assert(
 
 Via the MCP tool surface this is `mcp__trusty-memory__kg_assert` with the same
 arguments. Re-running it is safe (idempotent in effect — it re-asserts the
-same triple). An automatic, idempotent seed call from `prepare_session` is
-deferred future work (DOC-28 §7 Phase 2) — until it lands, this manual step is
-what makes the fact appear in `get_prompt_context()`'s "### Facts" section.
+same triple), and it uses the identical subject/predicate/object as the
+automatic path, so the two are interchangeable.
 
 ## Verifying the instructions actually loaded
 

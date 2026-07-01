@@ -10,6 +10,7 @@
 //! Test: unit tests in workspace.rs use FakeGitBackend; integration test
 //! test_provision_real_repo uses a temp bare repo (marked #[ignore]).
 
+mod identity_seed;
 pub mod workspace;
 
 pub use workspace::{
