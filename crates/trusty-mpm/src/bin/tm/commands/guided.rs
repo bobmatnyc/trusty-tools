@@ -621,21 +621,19 @@ async fn resume_guided_session(
     tmux_attach(&session.name)
 }
 
-/// Invoke `tmux attach-session -t <name>` and await exit.
+/// Attach (or switch) the current terminal into tmux session `name`.
 ///
-/// Why: resuming a session means handing the terminal over to tmux.
-/// What: shells out to `tmux attach-session -t <name>` and waits; returns
-/// `Err` if tmux exits with a non-zero status.
-/// Test: exercised indirectly by the picker flow; mocked in unit tests via
-/// process stubs.
+/// Why: resuming a session means handing the terminal over to tmux; when the
+/// operator is already inside a tmux client, a plain `attach-session` is
+/// refused by tmux (nesting guard), so the actual argv choice is delegated to
+/// the shared [`crate::commands::tmux_attach::tmux_attach`] helper (#1873).
+/// What: thin re-export so existing call sites in this file don't need to
+/// change their import path.
+/// Test: `attach_argv_inside_tmux_uses_switch_client`,
+/// `attach_argv_outside_tmux_uses_attach_session` in `tmux_attach.rs` cover
+/// the argv decision; exercised indirectly here by the picker flow.
 fn tmux_attach(name: &str) -> anyhow::Result<()> {
-    eprintln!("tm: attaching to session '{name}'");
-    let status = std::process::Command::new("tmux")
-        .args(["attach-session", "-t", name])
-        .status()
-        .context("failed to invoke tmux")?;
-    anyhow::ensure!(status.success(), "tmux attach-session exited with failure");
-    Ok(())
+    crate::commands::tmux_attach::tmux_attach(name)
 }
 
 /// POST a new managed session to the daemon and attach to it.
