@@ -19,6 +19,7 @@ fn map_outcome_file_accessor() {
         file: "src/a.rs".to_string(),
         verdict: Verdict::Approve,
         findings: vec![finding("src/a.rs", "x")],
+        tokens: TokenUsage::default(),
     };
     assert_eq!(reviewed.file(), "src/a.rs");
 
@@ -58,4 +59,47 @@ fn stats_partial_on_oversized_hunk() {
         ..Default::default()
     };
     assert!(s.is_partial(), "an over-cap hunk marks coverage partial");
+}
+
+#[test]
+fn token_usage_add_sums_fields() {
+    let a = TokenUsage {
+        input_tokens: 10,
+        output_tokens: 3,
+        cost_usd: 0.01,
+    };
+    let b = TokenUsage {
+        input_tokens: 5,
+        output_tokens: 7,
+        cost_usd: 0.02,
+    };
+    let sum = a.merged(b);
+    assert_eq!(sum.input_tokens, 15);
+    assert_eq!(sum.output_tokens, 10);
+    assert!((sum.cost_usd - 0.03).abs() < 1e-9);
+}
+
+#[test]
+fn token_usage_add_saturates() {
+    let a = TokenUsage {
+        input_tokens: u32::MAX,
+        output_tokens: u32::MAX,
+        cost_usd: 0.0,
+    };
+    let b = TokenUsage {
+        input_tokens: 100,
+        output_tokens: 100,
+        cost_usd: 0.0,
+    };
+    let sum = a.merged(b);
+    assert_eq!(
+        sum.input_tokens,
+        u32::MAX,
+        "must saturate, not overflow-panic"
+    );
+    assert_eq!(
+        sum.output_tokens,
+        u32::MAX,
+        "must saturate, not overflow-panic"
+    );
 }

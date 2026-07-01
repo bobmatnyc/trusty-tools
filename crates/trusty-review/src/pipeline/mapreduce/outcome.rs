@@ -14,6 +14,52 @@
 
 use crate::models::{Finding, Verdict};
 
+// ─── TokenUsage ────────────────────────────────────────────────────────────────
+
+/// Aggregate LLM token / cost telemetry for one or more map-reduce LLM calls.
+///
+/// Why: the shallow-review heuristic (#1877) flags a suspiciously cheap clean
+/// APPROVE by comparing `output_tokens` against a floor proportional to the diff
+/// size.  The unified path reads these fields straight off its single
+/// `LlmResponse`, but the map-reduce path makes MANY calls (one per file, plus an
+/// optional synthesis call).  Without a running total the heuristic sees
+/// `output_tokens == 0` on exactly the largest diffs and never fires (#1885).
+/// This struct is the accumulator that lets each stage add its call's usage so
+/// the runner can apply the SAME heuristic to the aggregate.
+/// What: sums of input/output tokens and USD cost across the calls it covers.
+/// `merged` folds another usage in with saturating integer arithmetic so a
+/// pathological chunk count can never overflow-panic.
+/// Test: `token_usage_add_sums_fields`, `token_usage_add_saturates` (outcome_tests.rs);
+/// aggregation wired end-to-end by `reduce_sums_output_tokens` (reduce_tests.rs).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TokenUsage {
+    /// Sum of prompt (input) tokens across the covered calls.
+    pub input_tokens: u32,
+    /// Sum of completion (output) tokens across the covered calls.
+    pub output_tokens: u32,
+    /// Sum of estimated USD cost across the covered calls.
+    pub cost_usd: f64,
+}
+
+impl TokenUsage {
+    /// Fold another `TokenUsage` into this one, returning the running total.
+    ///
+    /// Why: the reduce stage accumulates one usage per reviewed chunk and the
+    /// synthesis stage adds its own call; a single associative combinator keeps
+    /// that summation in one tested place.
+    /// What: returns a new `TokenUsage` whose integer fields are saturating sums
+    /// (never overflow-panic) and whose cost is the `f64` sum.
+    /// Test: `token_usage_add_sums_fields`, `token_usage_add_saturates`.
+    #[must_use]
+    pub fn merged(self, other: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+            cost_usd: self.cost_usd + other.cost_usd,
+        }
+    }
+}
+
 // ─── MapOutcome ────────────────────────────────────────────────────────────────
 
 /// The result of processing a single `MapUnit` in the map stage.
@@ -37,6 +83,9 @@ pub enum MapOutcome {
         verdict: Verdict,
         /// Findings parsed from this chunk's review.
         findings: Vec<Finding>,
+        /// Token / cost telemetry for this chunk's LLM call, summed by the reduce
+        /// stage into the aggregate the shallow-review heuristic reads (#1885).
+        tokens: TokenUsage,
     },
     /// The unit was metadata-only — no LLM call was made (deleted / binary /
     /// rename-only / summary-only / budget-exhausted).
@@ -163,6 +212,17 @@ pub struct ReducedReview {
     /// Synthesis prose summary from the calibration LLM pass, or empty string
     /// when synthesis is disabled or failed.
     pub summary: String,
+    /// Aggregate token / cost telemetry summed across EVERY LLM call this review
+    /// made — all map-stage per-file calls plus the optional synthesis call.
+    ///
+    /// Why: the runner needs a running total to feed the shallow-review heuristic
+    /// (#1877/#1885); without it `output_tokens` stays 0 on map-reduce reviews and
+    /// the heuristic silently never fires on the largest (highest-risk) diffs.
+    /// What: `map-stage sum` set by `reduce`, then `+= synthesis call` by
+    /// `synthesize_review`.  Zero only when no chunk was reviewed.
+    /// Test: `reduce_sums_output_tokens` (reduce_tests.rs); end-to-end coverage in
+    /// `run_review_mapreduce_shallow_clean_flags_low_tokens` (runner_mapreduce_tests.rs).
+    pub tokens: TokenUsage,
 }
 
 #[cfg(test)]

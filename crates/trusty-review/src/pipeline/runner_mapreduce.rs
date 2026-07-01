@@ -145,8 +145,16 @@ pub(super) async fn run_mapreduce_branch(
         fail_safe_reason: None,
     };
 
-    // Telemetry: surface the map-reduce model.
+    // Telemetry: surface the map-reduce model and the AGGREGATE token/cost usage
+    // summed across every map-stage call plus the synthesis call (#1885). The
+    // unified path reads these straight off its single LlmResponse; on this path
+    // they were never populated, which left `result.output_tokens == 0` and made
+    // the shallow-review heuristic (wired below in `fold_reduced_into_result`)
+    // silently inoperative on exactly the largest, highest-risk diffs.
     result.model = input.reviewer_model.clone();
+    result.input_tokens = reduced.tokens.input_tokens;
+    result.output_tokens = reduced.tokens.output_tokens;
+    result.cost_estimate_usd = reduced.tokens.cost_usd;
 
     // Narrative body: use the synthesis prose summary when available (#1663);
     // fall back to the deterministic stats string when synthesis is disabled.
@@ -341,18 +349,61 @@ async fn fold_reduced_into_result(
     // Inline per-line comments from the RAW diff (#1414 parity).
     attach_inline_comments(result, &run.raw_diff);
 
-    // NOTE (#1877): unlike the unified path (`runner.rs` step 7d-post), this
-    // function does NOT set `result.shallow_clean_review`. The map-reduce path
-    // never aggregates per-chunk `output_tokens`/`input_tokens`/`cost_estimate_usd`
-    // onto `result` (a pre-existing gap, not introduced here — grep confirms no
-    // telemetry-field assignment anywhere in this file), so `result.output_tokens`
-    // stays 0 for every map-reduce review. Wiring `is_shallow_clean_review` in here
-    // today would false-positive on every large map-reduce clean APPROVE (0 tokens
-    // always looks "shallow"). Map-reduce is exactly the path used for the LARGEST
-    // diffs — the population issue #1877's Bug 2 targets — so this is a real
-    // coverage gap, not a deliberate scope exclusion: fix by first threading
-    // aggregate token/cost telemetry from the map/reduce stages onto `result`
-    // (see `mapreduce/reduce.rs`), then wire the same heuristic in here.
+    // Shallow-review flag (#1877 / #1885) — now wired on the map-reduce path.
+    //
+    // Historically this path never populated `result.output_tokens` (it stayed 0),
+    // so the heuristic could not run here without false-positiving on every large
+    // clean review. Issue #1885 closes that gap: the aggregate token total is now
+    // summed across all map + synthesis calls (`reduced.tokens`) and set on
+    // `result` by `run_mapreduce_branch` BEFORE this fold. We therefore apply the
+    // SAME `is_shallow_clean_review` / `cap_shallow_review_grade` logic the unified
+    // path uses (`runner.rs` step 7d-post), so a suspiciously cheap clean APPROVE
+    // on a huge diff is flagged and grade-capped regardless of which path produced
+    // it. `filtered.filtered_byte_size` is the map-reduce analog of the unified
+    // path's rendered `diff.len()` — the char count actually sent to the reviewers,
+    // which the aggregate token spend is proportional to.
+    apply_shallow_review_flag(result, run.filtered.filtered_byte_size);
+}
+
+/// Flag and grade-cap a suspiciously shallow clean review on the map-reduce path.
+///
+/// Why: map-reduce handles the LARGEST diffs, exactly the population the #1877
+/// heuristic targets; leaving it unwired (the #1885 gap) meant a fast/cheap
+/// rubber-stamp APPROVE on a huge diff kept an unearned top grade. Extracting the
+/// wiring into a helper keeps `fold_reduced_into_result` readable and gives the
+/// behaviour a direct unit-test seam.
+/// What: runs `is_shallow_clean_review` against the post-verification verdict,
+/// empty-findings check, the filtered diff length, and the aggregate
+/// `result.output_tokens`; when it fires, sets `result.shallow_clean_review` and
+/// caps `result.grade` at B- via `cap_shallow_review_grade` (leaving the APPROVE
+/// verdict untouched — this is a confidence signal, not a severity judgement).
+/// Test: `run_review_mapreduce_shallow_clean_flags_low_tokens`,
+/// `run_review_mapreduce_substantive_review_not_flagged` (runner_mapreduce_tests.rs).
+fn apply_shallow_review_flag(result: &mut ReviewResult, filtered_byte_size: usize) {
+    result.shallow_clean_review = crate::pipeline::letter_grade::is_shallow_clean_review(
+        &result.verdict,
+        result.findings.is_empty(),
+        filtered_byte_size,
+        result.output_tokens,
+    );
+    if !result.shallow_clean_review {
+        return;
+    }
+    warn!(
+        verdict = %result.verdict,
+        diff_len = filtered_byte_size,
+        output_tokens = result.output_tokens,
+        cost_usd = result.cost_estimate_usd,
+        "flagged shallow clean review on map-reduce path — zero findings with \
+         implausibly low aggregate token spend for this diff size (#1885); grade capped at B-"
+    );
+    if let Some(g) = result
+        .grade
+        .as_deref()
+        .and_then(|s| s.parse::<Grade>().ok())
+    {
+        result.grade = Some(crate::pipeline::letter_grade::cap_shallow_review_grade(g).to_string());
+    }
 }
 
 #[cfg(test)]
