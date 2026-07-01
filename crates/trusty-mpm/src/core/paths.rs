@@ -268,6 +268,29 @@ impl FrameworkPaths {
     pub fn claude_skills_dir(&self) -> PathBuf {
         self.claude_skills.clone()
     }
+
+    /// The base directory `.claude/{agents,skills}` nest under — the real home
+    /// for [`default`](Self::default), the temp dir for [`under`](Self::under).
+    ///
+    /// Why (issue #1860): settings-file operations that need `~/.claude`
+    /// directly (e.g. deploying the bundled output-style definition) must
+    /// honor the same base this `FrameworkPaths` was resolved against. Calling
+    /// `dirs::home_dir()` directly at those call sites ignores test isolation:
+    /// `FrameworkPaths::under(tempdir)` is supposed to confine ALL filesystem
+    /// writes to the temp dir, but a stray `dirs::home_dir()` call re-escapes
+    /// to the real `$HOME` and leaks state between test runs.
+    /// What: derives the base by walking up two levels from `claude_agents`
+    /// (`<base>/.claude/agents` -> `<base>/.claude` -> `<base>`). Falls back to
+    /// `claude_agents` itself in the practically-unreachable case where it has
+    /// no grandparent (e.g. a root-relative path).
+    /// Test: `claude_home_dir_matches_under_base`, `claude_home_dir_matches_default_home`.
+    pub fn claude_home_dir(&self) -> PathBuf {
+        self.claude_agents
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.claude_agents.clone())
+    }
 }
 
 #[cfg(test)]
@@ -398,6 +421,25 @@ mod tests {
             paths.claude_skills_dir(),
             PathBuf::from("/base/.claude/skills")
         );
+    }
+
+    #[test]
+    fn claude_home_dir_matches_under_base() {
+        // Issue #1860: `claude_home_dir()` must recover the exact `base` passed
+        // to `under()`, not some hardcoded or re-resolved home directory — this
+        // is what lets output-style deploy honor test isolation.
+        let paths = FrameworkPaths::under("/base");
+        assert_eq!(paths.claude_home_dir(), PathBuf::from("/base"));
+    }
+
+    #[test]
+    fn claude_home_dir_matches_default_home() {
+        // The home-relative resolver's `claude_home_dir()` must equal the real
+        // home directory `dirs::home_dir()` reports (falling back to "." like
+        // `default()` does), keeping the two resolution paths consistent.
+        let paths = FrameworkPaths::default();
+        let expected = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        assert_eq!(paths.claude_home_dir(), expected);
     }
 
     #[test]
