@@ -19,7 +19,12 @@ This is a unified Cargo workspace. Key rules:
 Internal-only crates (never published) resolve via workspace path deps — no `[patch.crates-io]` entry needed. Published sidecar lib crates (e.g. `trusty-embedderd`, `trusty-bm25-daemon`) DO need `[patch.crates-io]` entries in the workspace root `Cargo.toml` so local builds use the in-tree source. See the Single-Install Convention section below.
 
 ### Required Workflow Sequence
-(prompt → ticket) OR (check tickets) → read ticket → implement → test → build → version bump → publish → update consumers → verify CI
+
+**Full delivery chain (spec → issue → worktree branch → PR → trusty-review → squash-merge → release):**
+
+(prompt → ticket) OR (check tickets) → read ticket → **git fetch origin main** → **create worktree off origin/main** → implement → test → build → **commit & push → create PR** → **trusty-review gate** → **squash-merge to main** → version bump → publish → update consumers → verify CI
+
+**Source of truth = `origin/main:HEAD`** — the main checkout is inspection-only. Always `git fetch origin main` and branch worktrees off `origin/main` because local main may be stale. Never commit directly to main; only through PR + trusty-review + squash-merge.
 
 ### Phase 0: Ticket
 No work begins without a ticket reference.
