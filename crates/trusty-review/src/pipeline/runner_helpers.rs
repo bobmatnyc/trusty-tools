@@ -163,10 +163,12 @@ pub(super) async fn fetch_github_pr_meta(
 /// or LLM transport error) must never be posted live — it carries only a
 /// fail-safe APPROVE/UNKNOWN.  It must also *release* its dedup claim so a later
 /// retry (e.g. once the LLM recovers) can re-run instead of being suppressed.
-/// What: releases the in-progress dedup claim (fail-safe on error), writes the
-/// dry-run log so the failure is inspectable, prints when requested, and returns
-/// the result flagged `dry_run = true`.
-/// Test: `run_review_fail_safe_on_llm_error`, `run_review_missing_diff_file_sets_error`.
+/// What: syncs `findings_count` to `findings.len()` (#1877), releases the
+/// in-progress dedup claim (fail-safe on error), writes the dry-run log so the
+/// failure is inspectable, prints when requested, and returns the result
+/// flagged `dry_run = true`.
+/// Test: `run_review_fail_safe_on_llm_error`, `run_review_missing_diff_file_sets_error`,
+/// `findings_count_matches_len_on_abort`.
 pub(super) fn abort_dry(
     mut result: ReviewResult,
     config: &ReviewConfig,
@@ -174,6 +176,9 @@ pub(super) fn abort_dry(
     deps: &ReviewDeps,
 ) -> ReviewResult {
     result.dry_run = true;
+    // #1877: keep the authoritative findings_count in sync at this canonical
+    // early-abort exit point, regardless of which guard triggered the abort.
+    result.findings_count = result.findings.len();
     // Release the in-progress claim so a retry can re-run this head SHA.
     if !result.head_sha.is_empty()
         && let Some(store) = deps.dedup.as_ref()

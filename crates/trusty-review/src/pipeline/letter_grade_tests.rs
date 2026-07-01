@@ -220,3 +220,94 @@ fn clamp_grade_to_verdict_stricter_grade_kept() {
     let clamped = clamp_grade_to_verdict(Grade::DMinus, &Verdict::RequestChanges);
     assert_eq!(clamped, Grade::DMinus);
 }
+
+// ── is_shallow_clean_review (#1877) ───────────────────────────────────────────
+
+/// A large diff (well above the min-diff-len floor) approved with zero
+/// findings and very few output tokens must be flagged shallow.
+#[test]
+fn shallow_clean_review_flags_large_diff_low_tokens() {
+    // ~12,000-char diff (roughly a 300+-line PR) reviewed with only 20 output
+    // tokens — far below any plausible thorough-review token spend.
+    assert!(is_shallow_clean_review(&Verdict::Approve, true, 12_000, 20));
+}
+
+/// A small diff is never flagged, even with very few output tokens — small
+/// changes legitimately review fast and cheap.
+#[test]
+fn shallow_clean_review_false_for_small_diff() {
+    assert!(!is_shallow_clean_review(&Verdict::Approve, true, 200, 5));
+}
+
+/// A large diff with non-empty findings is never flagged — findings are
+/// direct evidence a real review happened.
+#[test]
+fn shallow_clean_review_false_when_findings_present() {
+    assert!(!is_shallow_clean_review(
+        &Verdict::Approve,
+        false,
+        12_000,
+        20
+    ));
+}
+
+/// Non-APPROVE verdicts are never flagged — the heuristic only targets clean
+/// (zero-finding APPROVE) reviews.
+#[test]
+fn shallow_clean_review_false_for_non_approve_verdict() {
+    assert!(!is_shallow_clean_review(
+        &Verdict::RequestChanges,
+        true,
+        12_000,
+        20
+    ));
+    assert!(!is_shallow_clean_review(&Verdict::Block, true, 12_000, 20));
+    assert!(!is_shallow_clean_review(
+        &Verdict::Unknown,
+        true,
+        12_000,
+        20
+    ));
+}
+
+/// A large diff reviewed with a plausible (sufficiently large) output-token
+/// spend is not flagged, even though findings are empty.
+#[test]
+fn shallow_clean_review_false_when_tokens_sufficient() {
+    // 12,000 chars / 200 = 60 tokens floor; 5,000 output tokens is comfortably
+    // above that — a genuinely thorough pass, not a short-circuit.
+    assert!(!is_shallow_clean_review(
+        &Verdict::Approve,
+        true,
+        12_000,
+        5_000
+    ));
+}
+
+/// The proportional floor never drops below the absolute minimum, even for a
+/// diff just over the min-diff-len threshold.
+#[test]
+fn shallow_clean_review_respects_absolute_token_floor() {
+    // diff_len = 4_000 → proportional floor = 20, but the absolute floor (50)
+    // takes over — 30 tokens is still below 50, so this must be flagged.
+    assert!(is_shallow_clean_review(&Verdict::Approve, true, 4_000, 30));
+    // 60 tokens clears the absolute floor — not flagged.
+    assert!(!is_shallow_clean_review(&Verdict::Approve, true, 4_000, 60));
+}
+
+// ── cap_shallow_review_grade (#1877) ──────────────────────────────────────────
+
+/// A+ (and any grade above B-) is downgraded to B- when capped.
+#[test]
+fn cap_shallow_review_grade_downgrades_a_plus() {
+    assert_eq!(cap_shallow_review_grade(Grade::APlus), Grade::BMinus);
+    assert_eq!(cap_shallow_review_grade(Grade::B), Grade::BMinus);
+}
+
+/// A grade already at or below B- is left unchanged.
+#[test]
+fn cap_shallow_review_grade_noop_below_b_minus() {
+    assert_eq!(cap_shallow_review_grade(Grade::BMinus), Grade::BMinus);
+    assert_eq!(cap_shallow_review_grade(Grade::CPlus), Grade::CPlus);
+    assert_eq!(cap_shallow_review_grade(Grade::F), Grade::F);
+}

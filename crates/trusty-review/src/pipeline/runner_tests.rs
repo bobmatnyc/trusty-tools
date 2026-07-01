@@ -44,6 +44,17 @@ impl FakeLlm {
         }
     }
 
+    /// Same zero-findings APPROVE as `approves()`, but with an explicit
+    /// output-token count — used to drive the shallow-clean-review heuristic
+    /// (#1877) with a token spend far below what the diff size would plausibly
+    /// require.
+    fn approves_with_output_tokens(output_tokens: u32) -> Self {
+        Self {
+            output_tokens: Some(output_tokens),
+            ..Self::approves()
+        }
+    }
+
     /// A response that parses to APPROVE but reports an output-token count at the
     /// ceiling — simulating a truncated completion (#1241).  The runner's
     /// truncation guard must convert this to UNKNOWN BEFORE trusting the parse.
@@ -335,6 +346,118 @@ async fn run_review_request_changes_parsed_correctly() {
     assert_eq!(result.verdict, Verdict::RequestChanges);
     assert_eq!(result.findings.len(), 1);
     assert_eq!(result.findings[0].kind, "SQL injection");
+    assert_eq!(
+        result.findings_count, 1,
+        "findings_count must equal findings.len() on the completed path (#1877)"
+    );
+}
+
+/// #1877: a REAL LLM-error abort still explicitly syncs `findings_count` (to
+/// 0, since no findings were ever parsed) rather than leaving it stale.
+#[tokio::test]
+async fn findings_count_matches_len_on_abort() {
+    let (source, _tmp) = local_diff_source("+fn hello() {}\n");
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+        caller_context: CallerContext::default(),
+    };
+    let deps = ready_deps(Arc::new(FakeLlm::errors("boom")), None);
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(result.verdict, Verdict::Unknown);
+    assert_eq!(result.findings_count, result.findings.len());
+    assert_eq!(result.findings_count, 0);
+}
+
+/// #1877: a large diff approved with zero findings but an implausibly small
+/// output-token spend must be flagged `shallow_clean_review` and have its
+/// grade capped at B- rather than defaulting to A+.
+#[tokio::test]
+async fn run_review_flags_shallow_clean_review_on_large_diff() {
+    // Build a diff long enough (~12K chars) to exceed the shallow-review
+    // min-diff-len floor after filtering/rendering, but well under
+    // MAX_DIFF_CHARS (160K) so it stays on the unified (non-map-reduce) path.
+    let mut diff = String::from("diff --git a/src/big.rs b/src/big.rs\n");
+    diff.push_str("--- a/src/big.rs\n+++ b/src/big.rs\n");
+    diff.push_str("@@ -1,1 +1,300 @@\n");
+    let filler_line = "+    let _padding = compute_value(some_argument_here);\n";
+    while diff.len() < 12_000 {
+        diff.push_str(filler_line);
+    }
+
+    let (source, _tmp) = local_diff_source(&diff);
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+        caller_context: CallerContext::default(),
+    };
+    // Zero-findings APPROVE with only 10 output tokens — implausibly cheap for
+    // a diff this size (mirrors the reported `pricerator#637` regression).
+    let deps = ready_deps(Arc::new(FakeLlm::approves_with_output_tokens(10)), None);
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(result.verdict, Verdict::Approve);
+    assert_eq!(result.findings.len(), 0);
+    assert!(
+        result.shallow_clean_review,
+        "large diff + near-zero output tokens + zero findings must be flagged shallow (#1877)"
+    );
+    assert_eq!(
+        result.grade.as_deref(),
+        Some("B-"),
+        "a flagged shallow review must have its grade capped at B- (#1877)"
+    );
+}
+
+/// #1877: the same large diff, but with a token spend at/above the
+/// proportional floor, must NOT be flagged — a genuinely thorough pass stays
+/// A+.
+#[tokio::test]
+async fn run_review_large_diff_with_sufficient_tokens_not_flagged_shallow() {
+    // ~5K chars → proportional floor is max(5000/200, 50) = 50; the default
+    // FakeLlm::approves() output_tokens is 50, which is NOT below the floor.
+    let mut diff = String::from("diff --git a/src/big.rs b/src/big.rs\n");
+    diff.push_str("--- a/src/big.rs\n+++ b/src/big.rs\n");
+    diff.push_str("@@ -1,1 +1,120 @@\n");
+    let filler_line = "+    let _padding = compute_value(some_argument_here);\n";
+    while diff.len() < 5_000 {
+        diff.push_str(filler_line);
+    }
+
+    let (source, _tmp) = local_diff_source(&diff);
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+        caller_context: CallerContext::default(),
+    };
+    let deps = ready_deps(Arc::new(FakeLlm::approves()), None);
+
+    let result = run_review(&config, input, deps).await;
+    assert_eq!(result.verdict, Verdict::Approve);
+    assert!(
+        !result.shallow_clean_review,
+        "sufficient token spend for the diff size must not be flagged shallow (#1877)"
+    );
+    assert_eq!(result.grade.as_deref(), Some("A+"));
 }
 
 #[tokio::test]

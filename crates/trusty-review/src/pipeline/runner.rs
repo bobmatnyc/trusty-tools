@@ -226,6 +226,10 @@ pub async fn run_review(
                 result.verdict = Verdict::Approve;
                 result.error = Some("skipped: duplicate of a completed review".to_string());
                 result.dry_run = true;
+                // #1877: `result.findings` is empty here (no LLM call happened
+                // yet) but keep the sync explicit rather than relying on the
+                // `ReviewResult::new()` default staying 0 forever.
+                result.findings_count = result.findings.len();
                 return result;
             }
             Ok(ClaimOutcome::Claimed) => {
@@ -570,6 +574,41 @@ pub async fn run_review(
     result.grade = original_llm_grade.map(|g| {
         crate::pipeline::letter_grade::clamp_grade_to_verdict(g, &result.verdict).to_string()
     });
+
+    // 7d-post: flag a suspiciously "shallow" clean review (#1877) — a
+    // zero-findings APPROVE on a large diff whose output-token spend looks too
+    // small for a substantive pass (e.g. `pricerator#637`: A+/0-findings in
+    // 2.6s/$0.011 on a 300+-line PR) — and cap its grade so it never reads as
+    // top-quality on trust alone.  Uses the RENDERED, possibly-truncated `diff`
+    // actually sent to the reviewer (not `raw_diff`) since that is what the
+    // model's token spend is proportional to.  This does not touch the
+    // fail-CLOSED paths above (LLM/transport error, truncated output, oversized
+    // diff) — those already correctly resolve to UNKNOWN, not APPROVE.
+    result.shallow_clean_review = crate::pipeline::letter_grade::is_shallow_clean_review(
+        &result.verdict,
+        result.findings.is_empty(),
+        diff.len(),
+        result.output_tokens,
+    );
+    if result.shallow_clean_review {
+        warn!(
+            verdict = %result.verdict,
+            diff_len = diff.len(),
+            output_tokens = result.output_tokens,
+            cost_usd = result.cost_estimate_usd,
+            latency_ms = result.latency_ms,
+            "flagged shallow clean review — zero findings with implausibly low \
+             token spend for this diff size (#1877); grade capped at B-"
+        );
+        if let Some(g) = result
+            .grade
+            .as_deref()
+            .and_then(|s| s.parse::<crate::pipeline::letter_grade::Grade>().ok())
+        {
+            result.grade =
+                Some(crate::pipeline::letter_grade::cap_shallow_review_grade(g).to_string());
+        }
+    }
 
     // 7e: build inline per-line comments from the RAW diff (#1414).  Using the
     // pre-filter `raw_diff` (not the noise-filtered `diff` sent to the LLM) means
