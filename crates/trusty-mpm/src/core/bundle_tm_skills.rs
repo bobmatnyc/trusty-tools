@@ -73,3 +73,19 @@ pub const TM_WORKFLOW: &str = include_str!("../assets/skills/tm-workflow.md");
 /// What: embedded markdown skill file deployed to `skills/tm-agent-architecture.md`.
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_AGENT_ARCHITECTURE: &str = include_str!("../assets/skills/tm-agent-architecture.md");
+
+/// Session-error postmortem orchestration over the MCP bug-reporting pipeline.
+///
+/// Why: routes through the real `list_recent_errors` / `preview_bug_report` /
+/// `report_bug` MCP tools instead of ad-hoc log parsing.
+/// What: embedded markdown skill file deployed to `skills/tm-postmortem.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_POSTMORTEM: &str = include_str!("../assets/skills/tm-postmortem.md");
+
+/// Bug reporting protocol — MCP-native filing pipeline, single-repo routing.
+///
+/// Why: trusty-tools is one monorepo (no claude-mpm/-agents/-skills split),
+/// and filing is MCP-native (`report_bug`) rather than manual `gh issue create`.
+/// What: embedded markdown skill file deployed to `skills/tm-bug-reporting.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_BUG_REPORTING: &str = include_str!("../assets/skills/tm-bug-reporting.md");

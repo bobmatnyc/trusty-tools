@@ -82,6 +82,8 @@ fn constants_are_non_empty() {
     assert!(!TM_ADR.trim().is_empty());
     assert!(!TM_WORKFLOW.trim().is_empty());
     assert!(!TM_AGENT_ARCHITECTURE.trim().is_empty());
+    assert!(!TM_POSTMORTEM.trim().is_empty());
+    assert!(!TM_BUG_REPORTING.trim().is_empty());
     assert!(!WHAT_IS_TRUSTY_MPM.trim().is_empty());
 }
 
@@ -104,6 +106,8 @@ fn tm_skills_are_in_bundle() {
         "skills/tm-adr.md",
         "skills/tm-workflow.md",
         "skills/tm-agent-architecture.md",
+        "skills/tm-postmortem.md",
+        "skills/tm-bug-reporting.md",
     ] {
         assert!(
             skill_paths.contains(expected),
@@ -124,6 +128,8 @@ fn tm_skills_have_frontmatter() {
         ("tm-adr", TM_ADR),
         ("tm-workflow", TM_WORKFLOW),
         ("tm-agent-architecture", TM_AGENT_ARCHITECTURE),
+        ("tm-postmortem", TM_POSTMORTEM),
+        ("tm-bug-reporting", TM_BUG_REPORTING),
     ];
     for (name, content) in skills {
         assert!(
@@ -288,14 +294,14 @@ fn bundle_table_is_complete() {
     // A3: tm-doctor (1)
     // /tm- portfolio in progress (tm-skills-portfolio epic): tm-circuit-breaker,
     //   tm-verification-protocols, tm-tool-usage-guide, tm-git-file-tracking,
-    //   tm-adr, tm-workflow, tm-agent-architecture (7 so far; more land
-    //   incrementally, mpm-* removed at the end)
+    //   tm-adr, tm-workflow, tm-agent-architecture, tm-postmortem,
+    //   tm-bug-reporting (9 so far; more land incrementally, mpm-* removed at the end)
     // DOC-28 R1 (1): docs/WHAT-IS-TRUSTY-MPM.md
-    assert_eq!(ALL.len(), 65);
+    assert_eq!(ALL.len(), 67);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 65, "artifact paths must be unique");
+    assert_eq!(paths.len(), 67, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
