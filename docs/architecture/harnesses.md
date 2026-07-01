@@ -25,6 +25,12 @@ and delegation edges. **Out of scope:** internal implementation details of any
 single harness, tool lists, model routing specifics, and per-crate release
 procedures (those live in the crate-level README and `docs/<crate>/`).
 
+> **Conformance tracking:** For testable conformance verification of the primary
+> trusty-mpm harness behaviors enumerated herein, refer to
+> [DOC-29 — Primary trusty-mpm Harness Behaviors — Conformance Matrix](../specs/mpm-behavior-conformance.md).
+> DOC-29 is the canonical source for per-behavior test citations and current
+> implementation status.
+
 ---
 
 ## Table of Contents
