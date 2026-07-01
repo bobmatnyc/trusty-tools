@@ -5,6 +5,35 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [0.14.0] — 2026-07-01
+
+### Added
+
+DOC-28 self-awareness (R1-R4 of `docs/specs/trusty-mpm-self-awareness.md`), closing the
+gaps behind the "self-awareness incident" where a session conflated this Rust
+`trusty-mpm` with the unrelated Python `claude-mpm`, and no mechanism detected
+that its instructions never loaded ([#1855](https://github.com/bobmatnyc/trusty-tools/pull/1855)) ([#1859](https://github.com/bobmatnyc/trusty-tools/pull/1859)) ([`5708d95`](https://github.com/bobmatnyc/trusty-tools/commit/5708d95310dd02c903502d812990c8c6d9d743e8)):
+
+- **R1 — canonical self-description doc**: new bundled
+  `crates/trusty-mpm/docs/WHAT-IS-TRUSTY-MPM.md`, deployed via
+  `bundle_all.rs::ALL` with `InstallPolicy::Overwrite` so `tm install` installs
+  it to `~/.trusty-mpm/framework/docs/`.
+- **R2 — identity protocol in instructions**: "Identity & Self-Awareness
+  Protocol (Non-Overridable)" section added verbatim to `BASE_SM.md`'s
+  non-overridable floor and to all three bundled output styles
+  (`trusty-mpm.md`, `trusty-mpm-teacher.md`, `trusty-mpm-research.md`),
+  routing identity questions through memory + the R1 doc and forbidding
+  shell-probing (`pip3 show`, `which claude-mpm`).
+- **R3 — manual identity-fact seeding**: documents the `kg_assert` identity-fact
+  seed step in the R1 doc (automatic seeding from `prepare_session` is deferred
+  future work per spec §7 Phase 2/§10).
+- **R4 — `tm doctor` output-style check + load marker**: new
+  `daemon/doctor_output_style.rs` probe validates that the effective
+  `outputStyle` setting resolves to a real bundled style file (Ok/Warn/Fail per
+  spec, reproducing the exact incident condition as a Fail), plus the
+  greppable `<!-- trusty-mpm-instructions-loaded: v1 -->` load marker at the
+  top of each floor section.
+
 ## [0.13.0] — 2026-06-30
 
 ### Added
