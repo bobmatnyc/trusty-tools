@@ -31,6 +31,7 @@ pub mod optimizer;
 pub mod orphan_gc;
 pub mod overseer_compose;
 pub mod pairing_store;
+pub mod runtime_reap;
 pub mod services;
 pub mod sm_stdio;
 pub mod state;
@@ -404,6 +405,24 @@ async fn reap_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cancellati
                     }
                     // #1744: also reap managed sessions whose tmux session has gone.
                     state.reap_dead_managed_sessions(&driver).await;
+                    // #1814: transition managed sessions to Stopped when their tmux
+                    // pane is still alive but the inner `claude` process has exited
+                    // (the pane fell back to a bare shell). The #1744 reap above only
+                    // covers a vanished tmux *session*; the orphan-GC deliberately
+                    // KEEPS tracked sessions — so without this a runtime-exited
+                    // managed session would stay `Active` forever.
+                    let mgr = state.session_manager().await;
+                    let stopped = runtime_reap::reap_runtime_exited_managed(
+                        &mgr,
+                        &driver,
+                        &orphan_gc::ProcessTreeProbe,
+                    )
+                    .await;
+                    if stopped > 0 {
+                        info!(
+                            "marked {stopped} managed session(s) stopped (runtime process exited, #1814)"
+                        );
+                    }
                 }
             }
         }
