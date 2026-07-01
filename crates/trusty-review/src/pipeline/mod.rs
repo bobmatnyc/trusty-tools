@@ -28,6 +28,9 @@ pub mod context_gate;
 pub mod diff;
 pub mod diff_analyzer;
 pub mod grade;
+// Why: reconciles the grade embedded in the raw `review_body` JSON with the
+// authoritative top-level grade so the two can never disagree (issue #1886).
+pub mod grade_reconcile;
 pub mod letter_grade;
 pub mod mapreduce;
 pub mod output;

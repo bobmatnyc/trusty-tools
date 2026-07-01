@@ -55,6 +55,21 @@ impl FakeLlm {
         }
     }
 
+    /// A zero-findings APPROVE whose JSON block embeds an explicit self-grade and
+    /// an explicit output-token count (#1886).  Used to prove the top-level grade
+    /// and the grade embedded in `review_body` agree AFTER a late-stage adjustment
+    /// (the #1877 shallow-review cap) lowers the top-level grade below the model's
+    /// self-assessed grade.
+    fn approves_with_embedded_grade(grade: &str, output_tokens: u32) -> Self {
+        Self {
+            response: format!(
+                "Looks good.\n\n```json\n{{\"verdict\":\"APPROVE\",\"grade\":\"{grade}\",\"summary\":\"LGTM\",\"findings\":[]}}\n```"
+            ),
+            error: None,
+            output_tokens: Some(output_tokens),
+        }
+    }
+
     /// A response that parses to APPROVE but reports an output-token count at the
     /// ceiling — simulating a truncated completion (#1241).  The runner's
     /// truncation guard must convert this to UNKNOWN BEFORE trusting the parse.
@@ -419,6 +434,77 @@ async fn run_review_flags_shallow_clean_review_on_large_diff() {
         result.grade.as_deref(),
         Some("B-"),
         "a flagged shallow review must have its grade capped at B- (#1877)"
+    );
+}
+
+/// #1886: the top-level `grade` and the grade embedded in `review_body` must be
+/// EQUAL even when a late-stage adjustment (the #1877 shallow-review cap) lowers
+/// the top-level grade below the model's self-assessed grade.
+///
+/// Why: a divergence here misleads any caller that reads only one of the two
+/// fields (e.g. a PM merge gate reading `grade` while the review comment shows the
+/// embedded grade) — the exact regression #1886 reported (outer "C+" vs embedded
+/// "B+" across PRs #1879/#1883/#1884).
+/// What: runs a large-diff zero-findings APPROVE whose JSON self-grades "A+" with
+/// an implausibly small token spend, so the shallow cap lowers the top-level grade
+/// to "B-"; then re-parses the embedded grade out of the returned `review_body`
+/// and asserts it equals the top-level grade (and is no longer the stale "A+").
+/// Test: this test itself (no network).
+#[tokio::test]
+async fn run_review_outer_and_embedded_grade_agree_after_shallow_cap() {
+    let mut diff = String::from("diff --git a/src/big.rs b/src/big.rs\n");
+    diff.push_str("--- a/src/big.rs\n+++ b/src/big.rs\n");
+    diff.push_str("@@ -1,1 +1,300 @@\n");
+    let filler_line = "+    let _padding = compute_value(some_argument_here);\n";
+    while diff.len() < 12_000 {
+        diff.push_str(filler_line);
+    }
+
+    let (source, _tmp) = local_diff_source(&diff);
+    let config = default_config();
+    let input = ReviewInput {
+        diff_source: source,
+        reviewer_model: "openai/gpt-5.4-mini-20260317".to_string(),
+        write_log: false,
+        print_result: false,
+        trigger: TriggerDecision::None,
+        run_mode: RunMode::Cli,
+        allow_posting: false,
+        caller_context: CallerContext::default(),
+    };
+    // Model self-grades A+, but the shallow-review cap lowers the top-level grade.
+    let deps = ready_deps(
+        Arc::new(FakeLlm::approves_with_embedded_grade("A+", 10)),
+        None,
+    );
+
+    let result = run_review(&config, input, deps).await;
+
+    assert!(
+        result.shallow_clean_review,
+        "large diff + near-zero tokens + zero findings must be flagged shallow (#1877)"
+    );
+    let top_level = result
+        .grade
+        .clone()
+        .expect("a completed APPROVE review must carry a grade");
+    assert_eq!(
+        top_level, "B-",
+        "shallow cap must lower the top-level grade (#1877)"
+    );
+
+    // Re-parse the grade embedded in the returned review_body: it must now mirror
+    // the authoritative top-level grade, NOT the model's original "A+" (#1886).
+    let embedded = crate::pipeline::parser::parse_review_response(&result.review_body)
+        .grade
+        .expect("review_body must still embed a parseable grade");
+    assert_eq!(
+        embedded, top_level,
+        "embedded review_body grade must equal the top-level grade (#1886)"
+    );
+    assert_ne!(
+        embedded, "A+",
+        "the stale model self-grade must have been reconciled away (#1886)"
     );
 }
 
