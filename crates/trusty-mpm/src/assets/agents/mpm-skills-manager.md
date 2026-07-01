@@ -21,7 +21,11 @@ Skills are Markdown documents that provide reusable, invokable knowledge to agen
 ### Where Skills Live
 - Bundled: `crates/trusty-mpm/src/assets/skills/`
 - Installed to: `~/.trusty-mpm/framework/skills/` via `trusty-mpm install`
-- Currently one bundled skill: `example-skill.md` (the seed template)
+- Currently the bundled `/tm-*` skill portfolio (circuit breaker enforcement,
+  verification protocols, tool usage, git file tracking, ADR discipline,
+  workflow customization, agent architecture, postmortems, teaching
+  templates, ticketing, PR workflow, delegation patterns, session
+  management, bug reporting, and `tm-doctor`)
 
 ### Skill Structure
 A valid skill file must have:

@@ -203,11 +203,6 @@ pub const ALL: &[BundledArtifact] = &[
         contents: API_QA_AGENT,
         install: InstallPolicy::Overwrite,
     },
-    BundledArtifact {
-        rel_path: "skills/example-skill.md",
-        contents: EXAMPLE_SKILL,
-        install: InstallPolicy::Overwrite,
-    },
     // --- Increment 3: remaining 14 agents ---
     BundledArtifact {
         rel_path: "agents/javascript-engineer.md",
@@ -279,60 +274,86 @@ pub const ALL: &[BundledArtifact] = &[
         contents: MPM_SKILLS_MANAGER_AGENT,
         install: InstallPolicy::Overwrite,
     },
-    // --- Phase 1 (#770): mpm-* guidance skills ---
+    // --- A3 (tm-skills-portfolio epic): previously orphaned tm-doctor.md ---
     BundledArtifact {
-        rel_path: "skills/mpm-delegation-patterns.md",
-        contents: MPM_DELEGATION_PATTERNS,
+        rel_path: "skills/tm-doctor.md",
+        contents: TM_DOCTOR,
+        install: InstallPolicy::Overwrite,
+    },
+    // --- tm-skills-portfolio epic: the /tm- skill catalog (supersedes mpm-*) ---
+    BundledArtifact {
+        rel_path: "skills/tm-circuit-breaker.md",
+        contents: TM_CIRCUIT_BREAKER,
         install: InstallPolicy::Overwrite,
     },
     BundledArtifact {
-        rel_path: "skills/mpm-verification-protocols.md",
-        contents: MPM_VERIFICATION_PROTOCOLS,
+        rel_path: "skills/tm-verification-protocols.md",
+        contents: TM_VERIFICATION_PROTOCOLS,
         install: InstallPolicy::Overwrite,
     },
     BundledArtifact {
-        rel_path: "skills/mpm-git-file-tracking.md",
-        contents: MPM_GIT_FILE_TRACKING,
+        rel_path: "skills/tm-tool-usage-guide.md",
+        contents: TM_TOOL_USAGE_GUIDE,
         install: InstallPolicy::Overwrite,
     },
     BundledArtifact {
-        rel_path: "skills/mpm-pr-workflow.md",
-        contents: MPM_PR_WORKFLOW,
+        rel_path: "skills/tm-git-file-tracking.md",
+        contents: TM_GIT_FILE_TRACKING,
         install: InstallPolicy::Overwrite,
     },
     BundledArtifact {
-        rel_path: "skills/mpm-ticketing-integration.md",
-        contents: MPM_TICKETING_INTEGRATION,
+        rel_path: "skills/tm-adr.md",
+        contents: TM_ADR,
         install: InstallPolicy::Overwrite,
     },
     BundledArtifact {
-        rel_path: "skills/mpm-circuit-breaker-enforcement.md",
-        contents: MPM_CIRCUIT_BREAKER_ENFORCEMENT,
+        rel_path: "skills/tm-workflow.md",
+        contents: TM_WORKFLOW,
         install: InstallPolicy::Overwrite,
     },
     BundledArtifact {
-        rel_path: "skills/mpm-bug-reporting.md",
-        contents: MPM_BUG_REPORTING,
+        rel_path: "skills/tm-agent-architecture.md",
+        contents: TM_AGENT_ARCHITECTURE,
         install: InstallPolicy::Overwrite,
     },
     BundledArtifact {
-        rel_path: "skills/mpm-session-management.md",
-        contents: MPM_SESSION_MANAGEMENT,
+        rel_path: "skills/tm-postmortem.md",
+        contents: TM_POSTMORTEM,
         install: InstallPolicy::Overwrite,
     },
     BundledArtifact {
-        rel_path: "skills/mpm-session-pause.md",
-        contents: MPM_SESSION_PAUSE,
+        rel_path: "skills/tm-bug-reporting.md",
+        contents: TM_BUG_REPORTING,
         install: InstallPolicy::Overwrite,
     },
     BundledArtifact {
-        rel_path: "skills/mpm-session-resume.md",
-        contents: MPM_SESSION_RESUME,
+        rel_path: "skills/tm-teaching-templates.md",
+        contents: TM_TEACHING_TEMPLATES,
         install: InstallPolicy::Overwrite,
     },
     BundledArtifact {
-        rel_path: "skills/mpm-tool-usage-guide.md",
-        contents: MPM_TOOL_USAGE_GUIDE,
+        rel_path: "skills/tm-ticketing.md",
+        contents: TM_TICKETING,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "skills/tm-pr-workflow.md",
+        contents: TM_PR_WORKFLOW,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "skills/tm-delegation-patterns.md",
+        contents: TM_DELEGATION_PATTERNS,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "skills/tm-session-management.md",
+        contents: TM_SESSION_MANAGEMENT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "skills/tm.md",
+        contents: TM_OVERVIEW,
         install: InstallPolicy::Overwrite,
     },
     // --- DOC-28 R1: canonical self-description doc ---

@@ -179,7 +179,7 @@ Forbidden anti-patterns: nanny coding (checking in per step), permission seeking
 
 ## QA Verification Gate (BLOCKING)
 
-**[SKILL: mpm-verification-protocols]**
+**[SKILL: tm-verification-protocols]**
 
 PM MUST delegate to QA BEFORE claiming work complete.
 
@@ -210,7 +210,7 @@ PM MUST delegate to QA BEFORE claiming work complete.
 
 **CB#10 detail:** Track failures per agent per task. At 3 failures: stop, present options (impl directly / simplify scope / different agent). No circular delegation (A->B->A->B) without progress.
 
-**[SKILL: mpm-circuit-breaker-enforcement]** for full patterns and remediation.
+**[SKILL: tm-circuit-breaker]** for full patterns and remediation.
 
 ### Quick Violation Detection
 
@@ -229,7 +229,7 @@ Correct PM: git ops only via Bash, read <=3 small files, everything else -> "I'l
 
 ## Git File Tracking Protocol
 
-**[SKILL: mpm-git-file-tracking]**
+**[SKILL: tm-git-file-tracking]**
 
 BLOCKING: Cannot mark todo complete until files tracked.
 Sequence: `git status` -> `git add` -> `git commit` after every agent creates files.
@@ -238,7 +238,7 @@ Final `git status` before session end.
 
 ## PR Workflow
 
-**[SKILL: mpm-pr-workflow]**
+**[SKILL: tm-pr-workflow]**
 
 All pushes to main/master require feature branch + PR. Delegate to Version Control agent.
 
@@ -264,7 +264,7 @@ Use `run_in_background: true` for fire-and-forget parallel work.
 
 PM skills loaded from `.claude/skills/` when relevant context detected:
 
-`mpm-git-file-tracking` | `mpm-pr-workflow` | `mpm-delegation-patterns` | `mpm-verification-protocols` | `mpm-bug-reporting` | `mpm-teaching-mode` | `mpm-agent-update-workflow` | `mpm-tool-usage-guide` | `mpm-session-management` | `mpm-circuit-breaker-enforcement`
+`tm-git-file-tracking` | `tm-pr-workflow` | `tm-delegation-patterns` | `tm-verification-protocols` | `tm-bug-reporting` | `tm-teaching-templates` | `tm-agent-architecture` | `tm-tool-usage-guide` | `tm-session-management` | `tm-circuit-breaker` | `tm-workflow` | `tm-adr` | `tm-postmortem` | `tm-ticketing` | `tm-doctor`
 
 ## Agent Deployment
 
@@ -282,7 +282,7 @@ When agents report opportunities: max 1-2 per session, specific not vague, ask b
 
 ## Session Management
 
-**[SKILL: mpm-session-management]**
+**[SKILL: tm-session-management]**
 
 Loaded on-demand at 70%+ context usage, existing pause state, or user requests resume.
 

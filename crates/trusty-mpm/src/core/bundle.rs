@@ -158,9 +158,6 @@ pub const MPM_AGENT_MANAGER_AGENT: &str = include_str!("../assets/agents/mpm-age
 /// Concrete mpm-skills-manager agent — skill lifecycle and recommendations (`extends: base-agent`).
 pub const MPM_SKILLS_MANAGER_AGENT: &str = include_str!("../assets/agents/mpm-skills-manager.md");
 
-/// Placeholder skill definition installed to `skills/example-skill.md`.
-pub const EXAMPLE_SKILL: &str = include_str!("../assets/skills/example-skill.md");
-
 /// Canonical self-description doc installed to `docs/WHAT-IS-TRUSTY-MPM.md`
 /// (DOC-28 R1 — `docs/specs/trusty-mpm-self-awareness.md`).
 ///
@@ -173,14 +170,17 @@ pub const EXAMPLE_SKILL: &str = include_str!("../assets/skills/example-skill.md"
 /// embeddable here, exactly like every other bundled artifact.
 pub const WHAT_IS_TRUSTY_MPM: &str = include_str!("../../docs/WHAT-IS-TRUSTY-MPM.md");
 
-// --- Phase 1 (#770): mpm-* guidance skills — constants in bundle_skills.rs ---
-#[path = "bundle_skills.rs"]
-mod skills_inner;
-pub use skills_inner::{
-    MPM_BUG_REPORTING, MPM_CIRCUIT_BREAKER_ENFORCEMENT, MPM_DELEGATION_PATTERNS,
-    MPM_GIT_FILE_TRACKING, MPM_PR_WORKFLOW, MPM_SESSION_MANAGEMENT, MPM_SESSION_PAUSE,
-    MPM_SESSION_RESUME, MPM_TICKETING_INTEGRATION, MPM_TOOL_USAGE_GUIDE,
-    MPM_VERIFICATION_PROTOCOLS,
+// --- tm-skills-portfolio epic: the /tm- skill catalog — bundle_tm_skills.rs ---
+// Supersedes the Phase 1 (#770) mpm-* guidance skills (formerly
+// bundle_skills.rs), which were a mechanical port of claude-mpm's Python
+// skill catalog with unadapted tool/path references. Removed entirely.
+#[path = "bundle_tm_skills.rs"]
+mod tm_skills_inner;
+pub use tm_skills_inner::{
+    TM_ADR, TM_AGENT_ARCHITECTURE, TM_BUG_REPORTING, TM_CIRCUIT_BREAKER, TM_DELEGATION_PATTERNS,
+    TM_DOCTOR, TM_GIT_FILE_TRACKING, TM_OVERVIEW, TM_POSTMORTEM, TM_PR_WORKFLOW,
+    TM_SESSION_MANAGEMENT, TM_TEACHING_TEMPLATES, TM_TICKETING, TM_TOOL_USAGE_GUIDE,
+    TM_VERIFICATION_PROTOCOLS, TM_WORKFLOW,
 };
 
 /// Default (professional) Claude Code output style deployed to

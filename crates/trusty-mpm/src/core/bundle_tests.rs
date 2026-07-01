@@ -58,23 +58,108 @@ fn constants_are_non_empty() {
     assert!(!MEMORY_MANAGER_AGENT.trim().is_empty());
     assert!(!MPM_AGENT_MANAGER_AGENT.trim().is_empty());
     assert!(!MPM_SKILLS_MANAGER_AGENT.trim().is_empty());
-    assert!(!EXAMPLE_SKILL.trim().is_empty());
     assert!(!OUTPUT_STYLE.trim().is_empty());
     assert!(!OUTPUT_STYLE_TEACHER.trim().is_empty());
     assert!(!OUTPUT_STYLE_RESEARCH.trim().is_empty());
-    // Phase 1 (#770) guidance skills
-    assert!(!MPM_DELEGATION_PATTERNS.trim().is_empty());
-    assert!(!MPM_VERIFICATION_PROTOCOLS.trim().is_empty());
-    assert!(!MPM_GIT_FILE_TRACKING.trim().is_empty());
-    assert!(!MPM_PR_WORKFLOW.trim().is_empty());
-    assert!(!MPM_TICKETING_INTEGRATION.trim().is_empty());
-    assert!(!MPM_CIRCUIT_BREAKER_ENFORCEMENT.trim().is_empty());
-    assert!(!MPM_BUG_REPORTING.trim().is_empty());
-    assert!(!MPM_SESSION_MANAGEMENT.trim().is_empty());
-    assert!(!MPM_SESSION_PAUSE.trim().is_empty());
-    assert!(!MPM_SESSION_RESUME.trim().is_empty());
-    assert!(!MPM_TOOL_USAGE_GUIDE.trim().is_empty());
+    assert!(!TM_DOCTOR.trim().is_empty());
+    // /tm- portfolio (tm-skills-portfolio epic)
+    assert!(!TM_CIRCUIT_BREAKER.trim().is_empty());
+    assert!(!TM_VERIFICATION_PROTOCOLS.trim().is_empty());
+    assert!(!TM_TOOL_USAGE_GUIDE.trim().is_empty());
+    assert!(!TM_GIT_FILE_TRACKING.trim().is_empty());
+    assert!(!TM_ADR.trim().is_empty());
+    assert!(!TM_WORKFLOW.trim().is_empty());
+    assert!(!TM_AGENT_ARCHITECTURE.trim().is_empty());
+    assert!(!TM_POSTMORTEM.trim().is_empty());
+    assert!(!TM_BUG_REPORTING.trim().is_empty());
+    assert!(!TM_TEACHING_TEMPLATES.trim().is_empty());
+    assert!(!TM_TICKETING.trim().is_empty());
+    assert!(!TM_PR_WORKFLOW.trim().is_empty());
+    assert!(!TM_DELEGATION_PATTERNS.trim().is_empty());
+    assert!(!TM_SESSION_MANAGEMENT.trim().is_empty());
+    assert!(!TM_OVERVIEW.trim().is_empty());
     assert!(!WHAT_IS_TRUSTY_MPM.trim().is_empty());
+}
+
+#[test]
+fn tm_skills_are_in_bundle() {
+    // The /tm- portfolio (tm-skills-portfolio epic) must be present in ALL so
+    // `trusty-mpm install` deploys every skill offline.
+    let skill_paths: Vec<&str> = ALL
+        .iter()
+        .filter(|a| a.rel_path.starts_with("skills/tm-") || a.rel_path == "skills/tm.md")
+        .map(|a| a.rel_path)
+        .collect();
+
+    for expected in &[
+        "skills/tm-doctor.md",
+        "skills/tm-circuit-breaker.md",
+        "skills/tm-verification-protocols.md",
+        "skills/tm-tool-usage-guide.md",
+        "skills/tm-git-file-tracking.md",
+        "skills/tm-adr.md",
+        "skills/tm-workflow.md",
+        "skills/tm-agent-architecture.md",
+        "skills/tm-postmortem.md",
+        "skills/tm-bug-reporting.md",
+        "skills/tm-teaching-templates.md",
+        "skills/tm-ticketing.md",
+        "skills/tm-pr-workflow.md",
+        "skills/tm-delegation-patterns.md",
+        "skills/tm-session-management.md",
+        "skills/tm.md",
+    ] {
+        assert!(
+            skill_paths.contains(expected),
+            "missing bundled /tm- skill: {expected}"
+        );
+    }
+}
+
+#[test]
+fn tm_skills_have_frontmatter() {
+    // Every /tm- skill must carry YAML frontmatter with a tm-native `name:`
+    // and must not leak unadapted claude-mpm references.
+    let skills = [
+        ("tm-circuit-breaker", TM_CIRCUIT_BREAKER),
+        ("tm-verification-protocols", TM_VERIFICATION_PROTOCOLS),
+        ("tm-tool-usage-guide", TM_TOOL_USAGE_GUIDE),
+        ("tm-git-file-tracking", TM_GIT_FILE_TRACKING),
+        ("tm-adr", TM_ADR),
+        ("tm-workflow", TM_WORKFLOW),
+        ("tm-agent-architecture", TM_AGENT_ARCHITECTURE),
+        ("tm-postmortem", TM_POSTMORTEM),
+        ("tm-bug-reporting", TM_BUG_REPORTING),
+        ("tm-teaching-templates", TM_TEACHING_TEMPLATES),
+        ("tm-ticketing", TM_TICKETING),
+        ("tm-pr-workflow", TM_PR_WORKFLOW),
+        ("tm-delegation-patterns", TM_DELEGATION_PATTERNS),
+        ("tm-session-management", TM_SESSION_MANAGEMENT),
+        ("tm", TM_OVERVIEW),
+    ];
+    for (name, content) in skills {
+        assert!(
+            content.starts_with("---\n"),
+            "skill {name} is missing YAML frontmatter"
+        );
+        assert!(
+            content.contains(&format!("name: {name}")),
+            "skill {name} frontmatter name must match its file stem"
+        );
+        assert!(
+            !content.contains("claude-mpm") || content.contains("trusty-mpm"),
+            "skill {name} contains an unadapted claude-mpm reference"
+        );
+        // tm-session-management is the one deliberate exception: it documents
+        // `tm sessions catchup`'s real dual-format cutover bridge (#1762),
+        // which genuinely reads the legacy `.claude-mpm/sessions/` path
+        // alongside the native one — this is accurate, not an unadapted
+        // leftover, and the skill explicitly calls it "legacy".
+        assert!(
+            !content.contains(".claude-mpm/") || name == "tm-session-management",
+            "skill {name} references the legacy .claude-mpm/ path"
+        );
+    }
 }
 
 #[test]
@@ -197,7 +282,13 @@ fn optimizer_toml_is_parseable() {
 #[test]
 fn bundle_table_is_complete() {
     // `ALL` must enumerate every artifact with unique, non-empty paths.
-    // Count: 4 hooks/instructions + 5 base agents + 36 concrete agents + 1 skill + 11 guidance skills = 57
+    // Count: 4 hooks/instructions + 5 base agents + 36 concrete agents +
+    // 16 /tm- skills + 1 DOC-28 self-description doc = 62
+    // (A4, tm-skills-portfolio epic: the `example-skill.md` placeholder was
+    // removed — it shipped to every user with no real content. A3: the
+    // previously-orphaned tm-doctor.md is now wired in. The 11 Phase 1 (#770)
+    // mpm-* guidance skills were removed entirely, superseded by the /tm-
+    // portfolio below.)
     // Increment 1 (9): qa, research, ops, security, documentation, data-engineer,
     //   version-control, ticketing, code-analyzer
     // Increment 2 (12): python-engineer, typescript-engineer, golang-engineer,
@@ -208,17 +299,17 @@ fn bundle_table_is_complete() {
     //   tauri-engineer, web-ui-engineer, refactoring-engineer, prompt-engineer,
     //   code-critic, gcp-ops, vercel-ops, local-ops,
     //   memory-manager, mpm-agent-manager, mpm-skills-manager
-    // Phase 1 (#770) guidance skills (11):
-    //   mpm-delegation-patterns, mpm-verification-protocols, mpm-git-file-tracking,
-    //   mpm-pr-workflow, mpm-ticketing-integration, mpm-circuit-breaker-enforcement,
-    //   mpm-bug-reporting, mpm-session-management, mpm-session-pause,
-    //   mpm-session-resume, mpm-tool-usage-guide
+    // /tm- portfolio (tm-skills-portfolio epic) (16): tm-doctor,
+    //   tm-circuit-breaker, tm-verification-protocols, tm-tool-usage-guide,
+    //   tm-git-file-tracking, tm-adr, tm-workflow, tm-agent-architecture,
+    //   tm-postmortem, tm-bug-reporting, tm-teaching-templates, tm-ticketing,
+    //   tm-pr-workflow, tm-delegation-patterns, tm-session-management, tm (overview)
     // DOC-28 R1 (1): docs/WHAT-IS-TRUSTY-MPM.md
-    assert_eq!(ALL.len(), 58);
+    assert_eq!(ALL.len(), 62);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 58, "artifact paths must be unique");
+    assert_eq!(paths.len(), 62, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -441,70 +532,42 @@ fn new_concrete_agents_deploy_via_real_asset_files() {
 }
 
 #[test]
-fn phase1_guidance_skills_are_in_bundle() {
-    // Every Phase 1 (#770) guidance skill must be present in ALL so
-    // `trusty-mpm install` deploys them offline.
-    let skill_paths: Vec<&str> = ALL
+fn no_mpm_guidance_skills_remain_in_bundle() {
+    // The tm-skills-portfolio epic removed the 11 Phase 1 (#770) mpm-*
+    // guidance skills in favor of the /tm- portfolio; assert none linger.
+    let mpm_skill_paths: Vec<&str> = ALL
         .iter()
         .filter(|a| a.rel_path.starts_with("skills/mpm-"))
         .map(|a| a.rel_path)
         .collect();
-
-    for expected in &[
-        "skills/mpm-delegation-patterns.md",
-        "skills/mpm-verification-protocols.md",
-        "skills/mpm-git-file-tracking.md",
-        "skills/mpm-pr-workflow.md",
-        "skills/mpm-ticketing-integration.md",
-        "skills/mpm-circuit-breaker-enforcement.md",
-        "skills/mpm-bug-reporting.md",
-        "skills/mpm-session-management.md",
-        "skills/mpm-session-pause.md",
-        "skills/mpm-session-resume.md",
-        "skills/mpm-tool-usage-guide.md",
-    ] {
-        assert!(
-            skill_paths.contains(expected),
-            "missing bundled guidance skill: {expected}"
-        );
-    }
+    assert!(
+        mpm_skill_paths.is_empty(),
+        "mpm-* guidance skills must be fully removed, found: {mpm_skill_paths:?}"
+    );
 }
 
 #[test]
-fn phase1_guidance_skills_have_frontmatter() {
-    // Every ported guidance skill must have a YAML frontmatter block with
-    // a `name:` field so the skill system can identify it.
-    let skills = [
-        ("mpm-delegation-patterns", MPM_DELEGATION_PATTERNS),
-        ("mpm-verification-protocols", MPM_VERIFICATION_PROTOCOLS),
-        ("mpm-git-file-tracking", MPM_GIT_FILE_TRACKING),
-        ("mpm-pr-workflow", MPM_PR_WORKFLOW),
-        ("mpm-ticketing-integration", MPM_TICKETING_INTEGRATION),
-        (
-            "mpm-circuit-breaker-enforcement",
-            MPM_CIRCUIT_BREAKER_ENFORCEMENT,
-        ),
-        ("mpm-bug-reporting", MPM_BUG_REPORTING),
-        ("mpm-session-management", MPM_SESSION_MANAGEMENT),
-        ("mpm-session-pause", MPM_SESSION_PAUSE),
-        ("mpm-session-resume", MPM_SESSION_RESUME),
-        ("mpm-tool-usage-guide", MPM_TOOL_USAGE_GUIDE),
-    ];
-    for (name, content) in skills {
-        assert!(
-            content.starts_with("---\n"),
-            "skill {name} is missing YAML frontmatter"
-        );
-        assert!(
-            content.contains("name:"),
-            "skill {name} frontmatter is missing `name:` field"
-        );
-        // Must not contain claude-mpm or ~/.claude-mpm references (trusty-mpm adaptation).
-        assert!(
-            !content.contains("claude-mpm") || content.contains("trusty-mpm"),
-            "skill {name} contains unadapted claude-mpm reference"
-        );
-    }
+fn no_example_skill_remains_in_bundle() {
+    // A4 (tm-skills-portfolio epic): the example-skill.md placeholder must
+    // never reappear in ALL.
+    assert!(
+        !ALL.iter().any(|a| a.rel_path == "skills/example-skill.md"),
+        "example-skill.md must not be present in ALL"
+    );
+}
+
+#[test]
+fn tm_doctor_skill_is_wired_into_bundle() {
+    // A3 (tm-skills-portfolio epic): tm-doctor.md existed as an asset file
+    // but was never wired into a const or the ALL table, so it silently
+    // never shipped. Assert both are now true, and that it carries valid
+    // frontmatter naming the skill `tm-doctor`.
+    assert!(
+        ALL.iter().any(|a| a.rel_path == "skills/tm-doctor.md"),
+        "tm-doctor.md must be present in the ALL bundle table"
+    );
+    assert!(TM_DOCTOR.starts_with("---\n"));
+    assert!(TM_DOCTOR.contains("name: tm-doctor"));
 }
 
 #[test]
