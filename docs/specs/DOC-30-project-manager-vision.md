@@ -79,11 +79,7 @@ Session Manager is **harness-agnostic**: it works with Claude Code, trusty-code,
 
 ### 2.3 Relationship to multi-repo routing (DOC-22)
 
-DOC-22 specifies the **project registry** and **NL-to-repo resolver** (mapping `"my-app"` or a ticket ID to a repo). The routing layer is **dual-owned**:
-- **Session Manager perspective:** the routing layer is a seam that maps NL intent to `(project_name, repo_url, ref)` inputs for session creation.
-- **Project Manager perspective:** the routing layer is *one* way a user surfaces intent; Project Manager provides the *explicit* project definition interface above routing.
-
-In a future implementation, Project Manager would likely **consume** the routing layer's resolver to support both implicit (NL) and explicit (project-selected) session spawning.
+**DECIDED (Decision #11):** DOC-22's NL-to-repo resolver becomes an INTERNAL INPUT MECHANISM for Project Manager, not a separate competing entry point. A user's natural-language task is resolved to a Project (existing or new) **via DOC-22's resolver**, making Project Manager the primary surface and DOC-22 a subordinate routing layer. This is hierarchical: Project Manager is the main user proxy, Session Manager owns session mechanics, and DOC-22's resolver feeds Project Manager, not the other way around.
 
 ---
 
@@ -111,9 +107,7 @@ Project {
 }
 ```
 
-**Open questions:**
-- Should a Project be 1:1 with a git repo, or can one Project span multiple repos (e.g., a monorepo with sub-projects)?
-- Who can create a Project — just the owner, or any team member? Should there be a "project template" for recurring patterns (bug fix, feature, refactor)?
+**DECIDED (Decision #1):** Each Project is **1:1 with a git repository**. A monorepo (like trusty-tools itself) is ONE Project; finer granularity is expressed via Deliverables, not separate Projects.
 
 ### 3.2 Deliverable
 
@@ -129,18 +123,16 @@ Deliverable {
   ticket_ref: Option<String> (e.g., "GH-1234", "JIRA-567"),
   spec_ref: Option<SpecRef> (which docs/specs/*.md is this implementing?),
   status: DeliverableStatus (proposed | in-progress | blocked | complete | delivered),
-  estimated_effort_hours: Option<f64>,
-  actual_effort_hours: Option<f64>,
+  estimated_effort: EstimationTier (S | M | L | XL),  // Tier-based, not hours/ranges
   created_at: DateTime,
   target_date: Option<DateTime>,
   assigned_to: Option<String> (which harness/agent is working on this?),
 }
 ```
 
-**Open questions:**
-- Is estimated_effort_hours a point estimate, range, or tier (S/M/L/XL)? Should it integrate with historical velocity data?
-- Should Deliverables be sub-breakdownable (a Feature has sub-tasks)?
-- How is the user prompted to create Deliverables — manually, auto-imported from GitHub issues, or inferred from specs?
+**DECIDED (Decision #2):** Estimation uses **tiers (S/M/L/XL)**, not point-hours or ranges. This is coarse-grained and avoids false precision.
+
+**DECIDED (Decision #3):** Deliverables are **flat — no recursive sub-tasks**. Hierarchy can be added later if flat proves insufficient; the MVP keeps it simple.
 
 ### 3.3 Milestone
 
@@ -174,7 +166,7 @@ SessionBinding {
 }
 ```
 
-**Open question:** Should a single session work on multiple Deliverables, or is it 1:1? Should a Deliverable be worked on by multiple concurrent sessions?
+**DECIDED (Decision #7):** Binding is **1 Deliverable ↔ many Sessions** (not strict 1:1, not full N:M). Each session works on exactly ONE deliverable at a time, but a Deliverable can accumulate multiple sessions over its life (first attempt, review-fix follow-up, etc.).
 
 ### 3.5 Spec Reference
 
@@ -195,33 +187,24 @@ SpecRef {
 
 ### 4.1 The primary user interface
 
-**Option A: CLI (`tm project` namespace)**
+**DECIDED (Decision #4):** **CLI first** (`tm project` namespace), matching how `tm` already works. TUI (epic #1272) and Telegram/web come later.
+
 ```
 tm project list                         # List all projects
 tm project create --name "feature-x" --repo <url> --due-date <date>
 tm project show <project-id>            # Show project + deliverables + milestones + sessions
-tm project add-deliverable <project-id> --name "..." --type feature --estimate 8h
+tm project add-deliverable <project-id> --name "..." --type feature --estimate S|M|L|XL
 tm project add-milestone <project-id> --name "v1.0" --target-date <date>
-tm project update <project-id> --status in-progress  # or delivered, shipped, etc.
+tm project update <project-id> --status in-progress  # or blocked, delivered, shipped, etc.
 tm project spawn-session <project-id> --deliverable <id> --task "..."
 tm project status <project-id>          # Show overall status + burn-down
 ```
 
-**Option B: TUI dashboard (ties to epic #1272)**
-- Left sidebar: list of Projects (grouped by status)
-- Center: selected Project detail (Deliverables, Milestones, Sessions, Notes)
-- Right pane: active Session pane output (if a session is running)
-- Key actions: Create Project/Deliverable/Milestone, spawn Session, update status
+**DECIDED (Decision #5):** **BOTH HTTP API (on the existing tm daemon) AND MCP tools** (`mcp__trusty-mpm__project_*`) for agentic driving — same dual-surface pattern other trusty-* daemons already use.
 
-**Option C: Telegram / Web surface**
-- Align with DOC-19 (TELUI) patterns
-- `/project` commands mirror CLI surface
-- Web dashboard for long-form project view (burn-down charts, timeline, handoff tracking)
+**DECIDED (Decision #6):** Spec linking is **manual for MVP** — users explicitly set `spec_ref` when creating/updating a Deliverable. Auto-scan/heuristic matching deferred.
 
-**Open questions:**
-- Which surface is primary for MVP? (CLI alone, TUI, both?)
-- Should Project Manager expose an HTTP API (extending `daemon/api.rs`), an MCP interface, or both?
-- How do users link Projects to Specs? Manually via UI, auto-scanned from directory, or both?
+TUI (epic #1272) and Telegram surfaces will build on this foundation later.
 
 ### 4.2 Handoff from Project Manager to Session Manager
 
@@ -239,11 +222,42 @@ When a user invokes `tm project spawn-session <project-id>`:
 When a session completes (or is abandoned):
 
 1. **Session Manager** marks the session as `dead` or `complete`.
-2. **Project Manager** observes the state change and prompts: "Was this session for Deliverable X? Mark it as complete?"
-3. **User** confirms (via CLI, TUI, or Telegram).
-4. **Project Manager** updates the Deliverable status and re-computes Project status.
+2. **Project Manager** observes the state change and checks objective gates: tests green + trusty-review APPROVE/CI passing.
+3. **If gates pass,** Project Manager auto-marks Deliverable complete; **if gates fail or unclear,** Project Manager prompts user to confirm completion status.
+4. **User** confirms or rejects (via CLI, TUI, or Telegram if prompted).
+5. **Project Manager** updates the Deliverable status and re-computes Project status.
 
-**Open question:** Should this be automatic (session completion → auto-mark deliverable), manual (user confirms), or tiered (automatic for low-risk changes, manual for high-risk)?
+**DECIDED (Decision #8):** Completion is **tiered by risk/gate outcome**. Auto-mark when session's work passed objective gates (tests green + trusty-review APPROVE/CI passing); otherwise prompt user to confirm. Matches the harness's existing "80% autonomous, escalate the ambiguous 20%" operating model.
+
+**DECIDED (Decision #12):** Delivery verification gates on **same objective signals used to merge PRs** (tests green, trusty-review APPROVE/CI passing), surfaced to user for lightweight confirm — not blind trust in session self-report, not pure manual judgment either.
+
+### 4.4 Project & Deliverable status transitions
+
+**DECIDED (Decision #9):** Status transitions follow a **simple linear model with a blocked branch**:
+
+```
+Project/Deliverable lifecycle:
+  proposed
+    ↓
+  in-progress
+    ↙        ↘
+  blocked  (active work)
+    ↖        ↙
+  in-progress
+    ↓
+  complete
+    ↓
+  delivered/shipped
+```
+
+**Transition rules:**
+- `proposed → in-progress` — user starts work (spawn session)
+- `in-progress → blocked` — user encounters blocker (manual trigger)
+- `blocked → in-progress` — blocker resolved (manual trigger)
+- `in-progress → complete` — auto-triggered by gate pass OR manual confirmation
+- `complete → delivered/shipped` — user marks finished (ready for production/release)
+- **No skipping:** cannot jump from `proposed` directly to `complete` or `delivered`
+- **Milestone status:** mirrors rollup of contained Deliverables (proposed if all proposed, in-progress if any in-progress, etc.)
 
 ---
 
@@ -266,39 +280,56 @@ When a session completes (or is abandoned):
 DOC-17 describes the north-star for autonomous session execution. Project Manager **consumes** that autonomy: it orchestrates sessions that, once spawned, run autonomously per DOC-17 principles.
 
 ### DOC-22 (Multi-Repo Routing)
-DOC-22 specifies NL-to-repo resolution and project registry. Project Manager **provides an explicit alternative** to NL routing: a user can explicitly select or create a Project, whereas DOC-22's routing is more implicit/fuzzy. Both are valid entry points; the implementations should coexist.
+
+**DECIDED (Decision #11, hierarchical model):** DOC-22's NL-to-repo resolver is an INTERNAL INPUT MECHANISM, not a competing entry point. Project Manager is the primary user proxy; DOC-22's resolver feeds it. A user says "build feature X" → DOC-22 resolves to Project → Project Manager orchestrates. This supersedes the current framing of DOC-22 and PM as "complementary"; they are now hierarchical.
 
 ### DOC-23 (Learned Autonomy)
 DOC-23 describes learned decision auto-answering. Project Manager observes but does not drive this; Session Manager + AUTONOMY_POLICY own the gate. Project Manager may *expose* learned patterns (e.g., "Historical data: you approve 95% of style fixes") but does not implement the learning.
+
+### Autonomy Tier Binding
+
+**DECIDED (Decision #10):** Project Manager **inherits from Session Manager's existing AUTONOMY_POLICY.md T1-T4 tiers** — do NOT build a second parallel autonomy system. Project Manager can reference/display the tier but Session Manager remains the single source of truth. A Project may label which tier it operates under, but the actual gate logic is elsewhere.
 
 ### DOC-29 (Behavior Conformance)
 DOC-29 enumerates testable harness behaviors (instruction assembly, self-awareness, memory integration, etc.). Project Manager, once implemented, will gain its own set of conformance rows (SPEC-PM-01 through SPEC-PM-XX) in a future update to DOC-29.
 
 ---
 
-## 7. Open Questions for Next Phase
+## 7. Resolved Design Decisions
 
-These are **design decisions Bob and the team must make**:
+These **12 design decisions** have been resolved by the owner and are now LOCKED for the MVP phase:
 
-### Data model
-1. **Project ↔ Repo mapping:** Is each Project 1:1 with a git repo, or can Projects span multiple repos (e.g., monorepo with sub-projects)?
-2. **Estimation units:** Should `estimated_effort_hours` be a point estimate, a range (min/max), or a tier (S/M/L/XL)? Should it integrate with historical velocity?
-3. **Deliverable breakdown:** Can Deliverables be recursively sub-divided (Feature → Sub-tasks), or are they flat?
+### Data model decisions
 
-### User interaction
-4. **Primary surface for MVP:** CLI (`tm project`), TUI (dashboard), or both?
-5. **HTTP/MCP API:** Should Project Manager expose an HTTP API (extending `daemon/api.rs`), MCP tools, or both? Does Telegram routing (DOC-19 / DOC-22) drive the surface choice?
-6. **Spec linking:** Should users manually link Specs, auto-scan from `docs/specs/` + heuristics, or both?
+1. **Project ↔ Repo mapping (DECIDED):** Each Project is **1:1 with a git repo**. A monorepo is ONE Project; finer granularity is via Deliverables, not Projects.
 
-### Semantics
-7. **Session ↔ Deliverable binding:** 1:1 (each session works on one Deliverable) or N:M (multiple sessions on one Deliverable)?
-8. **Deliverable completion:** Automatic on session completion, manual confirmation, or tiered by risk level?
-9. **Status transitions:** What state machine governs Project/Deliverable/Milestone transitions? Are some transitions forbidden?
+2. **Estimation units (DECIDED):** Use **tiers (S/M/L/XL)**, not point-hours or ranges. Coarse-grained, consistent, avoids false precision.
 
-### Integration
-10. **Autonomy policy binding:** Does Project Manager get a project-level autonomy tier (e.g., "this Project runs at T2 auto-accept"), or does it inherit from Session Manager's existing tier model?
-11. **Multi-repo coordination:** How do Projects interact with DOC-22's multi-repo routing? Are they redundant, complementary, or hierarchical?
-12. **Handoff protocol:** When a session completes, who decides if a Deliverable is done — the user (manual), the session's own completion signal, or heuristics?
+3. **Deliverable breakdown (DECIDED):** Keep Deliverables **flat — no recursive sub-tasks**. Add hierarchy later if needed; MVP stays simple.
+
+### User interaction decisions
+
+4. **Primary surface for MVP (DECIDED):** **CLI first** (`tm project`), matching existing `tm` CLI patterns. TUI and Telegram come later.
+
+5. **HTTP/MCP API exposure (DECIDED):** **BOTH HTTP (on existing tm daemon) AND MCP tools** (`mcp__trusty-mpm__project_*`) for agentic driving — same dual-surface pattern other trusty-* daemons use.
+
+6. **Spec linking (DECIDED):** **Manual for MVP** — users explicitly set `spec_ref` when creating/updating Deliverables. Auto-scan/heuristics deferred.
+
+### Semantics decisions
+
+7. **Session ↔ Deliverable binding (DECIDED):** **1 Deliverable ↔ many Sessions** (not strict 1:1, not full N:M). Each session works on ONE deliverable at a time; a Deliverable accumulates multiple sessions over its life.
+
+8. **Deliverable completion trigger (DECIDED):** **Tiered by risk/gate outcome**. Auto-mark when session's work passed objective gates (tests green + trusty-review APPROVE/CI passing); otherwise prompt user to confirm.
+
+9. **Status transition model (DECIDED):** Simple linear + blocked branch: `proposed → in-progress → [blocked ↔ in-progress] → complete → delivered/shipped`. No skipping straight to complete/delivered from proposed.
+
+### Integration decisions
+
+10. **Autonomy tier binding (DECIDED):** **Inherit from Session Manager's AUTONOMY_POLICY.md T1-T4 tiers** — do NOT build a second autonomy system. PM references/displays the tier; SM remains single source of truth.
+
+11. **Multi-repo coordination (DECIDED):** **Hierarchical — PM is primary surface**. DOC-22's NL→repo resolver is an INTERNAL INPUT MECHANISM: user intent (NL) → DOC-22 resolves to Project → PM orchestrates. SUPERSEDES prior "both are complementary entry points" framing.
+
+12. **Delivery verification (DECIDED):** Gate on **same objective signals used to merge PRs** (tests green, trusty-review APPROVE/CI passing), surfaced to user for lightweight confirm — not blind self-report, not pure manual either. Matches the harness's "80% autonomous, escalate the ambiguous 20%" model.
 
 ---
 
@@ -364,6 +395,16 @@ This placeholder reminds future implementers that Project Manager behaviors must
 ---
 
 ## 11. Changelog
+
+**v2 (2026-07-01, all 12 design questions resolved)**
+- Resolved all 12 open design questions from v1 per owner decisions.
+- Section 7 rewritten: "Open Questions" → "Resolved Design Decisions" with 1-line rationales for each.
+- Updated Section 2.3: DOC-22 relationship is now HIERARCHICAL (PM is primary, DOC-22 resolver is internal input).
+- Updated Section 3: Deliverable model uses tier-based estimation (S/M/L/XL), flat (no recursion).
+- Updated Section 4: CLI-first for MVP, dual HTTP+MCP API, manual spec linking, tiered completion gates.
+- Added Section 4.4: Status transition state machine (linear + blocked branch, no skipping).
+- Updated Section 6: Autonomy tier binding inherits from Session Manager; DOC-22 is hierarchical subordinate.
+- Status remains DRAFT/Vision (0% implemented); no implementation phase changes, just design locked.
 
 **v1 (2026-07-01, initial draft)**
 - Established Project Manager as a NEW layer above Session Manager, not a rename/replacement.
