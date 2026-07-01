@@ -74,6 +74,7 @@ fn constants_are_non_empty() {
     assert!(!MPM_SESSION_PAUSE.trim().is_empty());
     assert!(!MPM_SESSION_RESUME.trim().is_empty());
     assert!(!MPM_TOOL_USAGE_GUIDE.trim().is_empty());
+    assert!(!WHAT_IS_TRUSTY_MPM.trim().is_empty());
 }
 
 #[test]
@@ -110,6 +111,39 @@ fn output_style_registry_ids_match_frontmatter() {
             "{} frontmatter name must match registry id",
             style.id
         );
+    }
+}
+
+#[test]
+fn output_styles_carry_identity_protocol_and_load_marker() {
+    // DOC-28 R2/R4(b): every bundled output style must carry the non-overridable
+    // Identity & Self-Awareness Protocol section, and the marker line
+    // `<!-- trusty-mpm-instructions-loaded: v1 -->` must be the literal first
+    // line of that section (so a stale/degraded style is greppably distinct
+    // from one carrying the current floor).
+    const MARKER: &str = "<!-- trusty-mpm-instructions-loaded: v1 -->";
+    const HEADING: &str = "## Identity & Self-Awareness Protocol (Non-Overridable)";
+    for style in OUTPUT_STYLES {
+        assert!(
+            style.content.contains(HEADING),
+            "{} is missing the Identity & Self-Awareness Protocol section",
+            style.id
+        );
+        let marker_pos = style
+            .content
+            .find(MARKER)
+            .unwrap_or_else(|| panic!("{} is missing the load marker", style.id));
+        let heading_pos = style.content.find(HEADING).expect("heading present");
+        let between = &style.content[marker_pos + MARKER.len()..heading_pos];
+        assert_eq!(
+            between.trim(),
+            "",
+            "{}: marker must be the first line immediately preceding the heading",
+            style.id
+        );
+        // Forbidden shell-probe list must be greppable for regressions.
+        assert!(style.content.contains("pip3 show"));
+        assert!(style.content.contains("which claude-mpm"));
     }
 }
 
@@ -179,11 +213,12 @@ fn bundle_table_is_complete() {
     //   mpm-pr-workflow, mpm-ticketing-integration, mpm-circuit-breaker-enforcement,
     //   mpm-bug-reporting, mpm-session-management, mpm-session-pause,
     //   mpm-session-resume, mpm-tool-usage-guide
-    assert_eq!(ALL.len(), 57);
+    // DOC-28 R1 (1): docs/WHAT-IS-TRUSTY-MPM.md
+    assert_eq!(ALL.len(), 58);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 57, "artifact paths must be unique");
+    assert_eq!(paths.len(), 58, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
@@ -470,4 +505,38 @@ fn phase1_guidance_skills_have_frontmatter() {
             "skill {name} contains unadapted claude-mpm reference"
         );
     }
+}
+
+#[test]
+fn what_is_trusty_mpm_is_in_bundle() {
+    // DOC-28 R1 acceptance: the canonical self-description doc must be a
+    // bundled artifact so `tm install` deploys it to every framework root,
+    // not just the trusty-tools repo's own source tree.
+    let artifact = ALL
+        .iter()
+        .find(|a| a.rel_path == "docs/WHAT-IS-TRUSTY-MPM.md")
+        .expect("WHAT-IS-TRUSTY-MPM.md must be a bundled artifact");
+    assert_eq!(
+        artifact.install,
+        InstallPolicy::Overwrite,
+        "the doc is framework-owned and must track upgrades"
+    );
+    assert_eq!(artifact.contents, WHAT_IS_TRUSTY_MPM);
+}
+
+#[test]
+fn what_is_trusty_mpm_disambiguates_claude_mpm() {
+    // DOC-28 R1 acceptance: the doc must contain the literal substrings that
+    // prove it identifies the project (Rust, tm, tcode) and explicitly
+    // disambiguates it from the unrelated Python claude-mpm package.
+    assert!(WHAT_IS_TRUSTY_MPM.contains("Rust"));
+    assert!(WHAT_IS_TRUSTY_MPM.contains("tm"));
+    assert!(WHAT_IS_TRUSTY_MPM.contains("tcode"));
+    assert!(WHAT_IS_TRUSTY_MPM.contains("claude-mpm"));
+    // The claude-mpm substring must appear inside an explicit disambiguation
+    // sentence, not incidentally — assert it co-occurs with "NOT" nearby.
+    assert!(
+        WHAT_IS_TRUSTY_MPM.contains("NOT") && WHAT_IS_TRUSTY_MPM.contains("claude-mpm"),
+        "doc must explicitly disambiguate from claude-mpm, not mention it incidentally"
+    );
 }

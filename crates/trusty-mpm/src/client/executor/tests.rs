@@ -190,13 +190,14 @@ async fn register_project_succeeds() {
 
 #[tokio::test]
 async fn execute_doctor_against_test_daemon() {
-    // `/doctor` returns a five-check report against a live daemon.
+    // `/doctor` returns a seven-check report against a live daemon.
     let (_state, url) = spawn_test_daemon().await;
     let executor = CommandExecutor::new(url);
     match executor.execute(TrustyCommand::Doctor).await {
         CommandResult::Doctor(report) => {
-            // #1840 added the worktrees check, bringing the total to 6.
-            assert_eq!(report.checks.len(), 6);
+            // #1840 added the worktrees check (6); DOC-28 R4(a) added the
+            // output_style check, bringing the total to 7.
+            assert_eq!(report.checks.len(), 7);
         }
         other => panic!("expected Doctor, got {other:?}"),
     }
