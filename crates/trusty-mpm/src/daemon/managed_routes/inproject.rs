@@ -120,16 +120,112 @@ pub fn base_clone_path(owner: &str, repo: &str) -> PathBuf {
     repos_root().join(owner).join(repo)
 }
 
+/// Filename-suffix stem used when migrating a pre-#1803 old-layout dir aside.
+///
+/// Why: naming the backup suffix once keeps [`migrate_old_layout_aside`] and any
+/// operator-facing docs/tests in agreement, and makes the moved directory
+/// self-describing (`<repo>.old-layout-backup-<unix_ts>`).
+/// What: `".old-layout-backup-"` — the timestamp is appended by the migrator.
+/// Test: `ensure_base_clone_migrates_old_layout_dir_aside` asserts a sibling
+/// directory whose name contains this stem is created.
+pub const OLD_LAYOUT_BACKUP_SUFFIX: &str = ".old-layout-backup-";
+
+/// Detect and migrate a pre-#1803 OLD-LAYOUT base directory out of the way (#1805).
+///
+/// Why: before #1803 the managed base directory `<repos_root>/<owner>/<repo>/` was
+/// a plain container of per-session UUID full-clone subdirectories with NO
+/// top-level `.git`. The new shared-base design wants to `git clone` INTO that same
+/// path, but git refuses to clone into a non-empty directory — so the clone failed
+/// and the daemon silently fell back to the legacy full-clone-per-session behaviour,
+/// meaning migrated repos never got the `.worktrees/` layout. Moving the stale dir
+/// aside (rather than erroring) upholds the project's "operator does nothing"
+/// north-star: the fresh clone proceeds automatically and the old data is preserved
+/// under a clearly-named backup the operator can inspect or delete at leisure.
+/// What: acts ONLY when `base_path` exists, is a directory, is non-empty, and has
+/// NO top-level `.git` (the precise old-layout signature). In that case it renames
+/// `base_path` to a sibling `<repo><OLD_LAYOUT_BACKUP_SUFFIX><unix_nanos>` and
+/// returns `Ok(Some(backup))`. Empty dirs, already-`.git` dirs, and absent paths
+/// are left untouched (`Ok(None)`) — git clone handles an empty/absent dir fine and
+/// the caller handles the `.git` case before ever calling this. Loudly `warn!`s so
+/// the migration is never silent.
+/// Test: `ensure_base_clone_migrates_old_layout_dir_aside`,
+/// `migrate_old_layout_aside_ignores_empty_and_git_dirs`.
+fn migrate_old_layout_aside(base_path: &Path) -> Result<Option<PathBuf>, String> {
+    // Absent path or an existing `.git` dir are both non-old-layout: nothing to do.
+    if !base_path.exists() || base_path.join(".git").exists() {
+        return Ok(None);
+    }
+
+    // A non-directory sitting at the base path is not an old-layout container;
+    // leave it for `git clone` to fail loudly rather than silently deleting a file.
+    if !base_path.is_dir() {
+        return Ok(None);
+    }
+
+    // Empty directory → `git clone` succeeds into it; no migration needed.
+    let is_empty = std::fs::read_dir(base_path)
+        .map_err(|e| {
+            format!(
+                "inproject: could not inspect base dir {} for old-layout migration: {e}",
+                base_path.display()
+            )
+        })?
+        .next()
+        .is_none();
+    if is_empty {
+        return Ok(None);
+    }
+
+    // Non-empty, no top-level `.git` → this is the pre-#1803 old layout. Move it
+    // aside so the fresh shared-base clone can be established at `base_path`.
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let leaf = base_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "repo".to_string());
+    let backup = base_path.with_file_name(format!("{leaf}{OLD_LAYOUT_BACKUP_SUFFIX}{ts}"));
+
+    warn!(
+        base = %base_path.display(),
+        backup = %backup.display(),
+        "inproject: detected pre-#1803 old-layout base dir (non-empty, no top-level \
+         .git); migrating it aside so the new shared-base clone + .worktrees/ layout \
+         can engage. The old per-session clones are preserved at the backup path — \
+         inspect and delete them once you have confirmed nothing is needed."
+    );
+
+    std::fs::rename(base_path, &backup).map_err(|e| {
+        format!(
+            "inproject: failed to migrate old-layout dir {} aside to {}: {e}",
+            base_path.display(),
+            backup.display()
+        )
+    })?;
+
+    warn!(
+        backup = %backup.display(),
+        "inproject: old-layout base dir migrated aside successfully"
+    );
+    Ok(Some(backup))
+}
+
 /// Ensure a base clone exists at `base_path`, cloning from `origin_url` if not.
 ///
 /// Why: the first session against a repo triggers a one-time clone; subsequent
 /// sessions reuse the same base directory and only add worktrees.
 /// What: if `base_path/.git` exists, calls `ensure_worktrees_gitignored` and
-/// returns `Ok(())` (idempotent). Otherwise runs
-/// `git clone --no-local <origin_url> <base_path>` then calls
+/// returns `Ok(())` (idempotent). Otherwise it first migrates any pre-#1803
+/// old-layout dir aside via [`migrate_old_layout_aside`] (#1805 — so a non-empty,
+/// non-git directory no longer makes the clone fail and silently fall back to the
+/// legacy full-clone-per-session path), then runs
+/// `git clone --no-local <origin_url> <base_path>` and calls
 /// `ensure_worktrees_gitignored`. A clone failure returns `Err` with the
 /// command's stderr.
-/// Test: idempotent path covered by unit tests; clone path by integration tests.
+/// Test: idempotent path covered by unit tests; migration path by
+/// `ensure_base_clone_migrates_old_layout_dir_aside`; clone path by integration tests.
 pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), String> {
     if base_path.join(".git").exists() {
         info!(
@@ -139,6 +235,11 @@ pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), Strin
         ensure_worktrees_gitignored(base_path)?;
         return Ok(());
     }
+
+    // #1805: a pre-existing old-layout dir (non-empty, no top-level `.git`) would
+    // otherwise make `git clone` fail; migrate it aside first so the fresh clone
+    // succeeds instead of silently falling back to full-clone-per-session.
+    migrate_old_layout_aside(base_path)?;
 
     info!(
         url = %origin_url,
@@ -365,6 +466,196 @@ pub fn try_inproject_spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1807: `tm launch` and the daemon in-project path must resolve the managed
+    /// repo root through the SAME function so a lone `TRUSTY_MPM_REPOS_ROOT` cannot
+    /// send them to different roots.
+    ///
+    /// Why: before the fix, the daemon path used `base_clone_path` (which honours
+    /// `TRUSTY_MPM_REPOS_ROOT`) while `tm launch` used `workspace_subpath` (which
+    /// does NOT), so setting only `TRUSTY_MPM_REPOS_ROOT` re-diverged the roots.
+    /// This locks in that BOTH entry points now call `base_clone_path`, and proves
+    /// the old `workspace_subpath` path really did diverge (guarding against a
+    /// regression that reverts `tm launch` to it).
+    /// Test: this function IS the test.
+    #[test]
+    fn launch_and_daemon_agree_on_repos_root_env() {
+        let _g = crate::core::trusty_tools_config::env_test_lock();
+
+        // The #1807 scenario: ONLY TRUSTY_MPM_REPOS_ROOT is set (no WORKSPACE_ROOT).
+        // SAFETY: guarded by the crate-wide env_test_lock; both vars restored below.
+        unsafe {
+            std::env::set_var(REPOS_ROOT_ENV, "/explicit/repos/root");
+            std::env::remove_var(crate::core::trusty_tools_config::WORKSPACE_ROOT_ENV);
+        }
+
+        // Daemon in-project path AND (post-fix) `tm launch` both resolve via this.
+        let unified = base_clone_path("owner", "repo");
+
+        // The PRE-fix `tm launch` path resolved via workspace_subpath → workspace_root,
+        // which ignores TRUSTY_MPM_REPOS_ROOT.
+        let cfg = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+        let gh = trusty_common::github_path::GithubPath {
+            owner: "owner".into(),
+            repo: "repo".into(),
+        };
+        let pre_fix_launch = crate::core::trusty_tools_config::workspace_subpath(&cfg, &gh);
+
+        // SAFETY: guarded by env_test_lock.
+        unsafe { std::env::remove_var(REPOS_ROOT_ENV) };
+
+        assert_eq!(
+            unified,
+            PathBuf::from("/explicit/repos/root/owner/repo"),
+            "the unified resolver (used by BOTH entry points) must honour \
+             TRUSTY_MPM_REPOS_ROOT"
+        );
+        assert_ne!(
+            unified, pre_fix_launch,
+            "the pre-#1807 tm launch path (workspace_subpath) diverged from the \
+             daemon root; tm launch must now use base_clone_path instead"
+        );
+    }
+
+    /// #1805: `ensure_base_clone` must migrate a pre-existing old-layout dir aside
+    /// (non-empty, no top-level `.git`) and then successfully clone the fresh base,
+    /// instead of failing and silently falling back to full-clone-per-session.
+    ///
+    /// Why: this is the exact scenario observed on `bobmatnyc/trusty-tools` — 37
+    /// stale UUID full-clone subdirs with no top-level `.git`. Cloning into that
+    /// non-empty dir fails, so the new `.worktrees/` layout never engaged.
+    /// Non-tautology proof: the backup-path prefix is derived from the PUBLIC
+    /// constant `OLD_LAYOUT_BACKUP_SUFFIX`, and the assertions check both that the
+    /// OLD marker survived in the backup AND that a NEW `.git` now exists at the
+    /// base — a silent-fallback (no migration) would leave the marker at the base
+    /// and no `.git`, failing both.
+    /// Test: this function IS the test.
+    #[test]
+    fn ensure_base_clone_migrates_old_layout_dir_aside() {
+        // 1. Build a real source repo to clone from.
+        let src = tempfile::TempDir::new().expect("src tmp dir");
+        let src_path = src.path();
+        let init = std::process::Command::new("git")
+            .args(["init", src_path.to_str().expect("src utf8")])
+            .output()
+            .expect("git init src");
+        assert!(init.status.success(), "git init src failed");
+        for (k, v) in [("user.email", "t@example.com"), ("user.name", "T")] {
+            let ok = std::process::Command::new("git")
+                .args(["-C", src_path.to_str().expect("utf8"), "config", k, v])
+                .status()
+                .expect("git config");
+            assert!(ok.success(), "git config {k} failed");
+        }
+        std::fs::write(src_path.join("README"), b"src").expect("write README");
+        let add = std::process::Command::new("git")
+            .args(["-C", src_path.to_str().expect("utf8"), "add", "."])
+            .status()
+            .expect("git add");
+        assert!(add.success(), "git add failed");
+        let commit = std::process::Command::new("git")
+            .args([
+                "-C",
+                src_path.to_str().expect("utf8"),
+                "commit",
+                "-m",
+                "init",
+            ])
+            .status()
+            .expect("git commit");
+        assert!(commit.success(), "git commit failed");
+
+        // 2. Build an OLD-LAYOUT base dir: <parent>/owner/repo/ containing a fake
+        //    per-session UUID full-clone subdir and NO top-level `.git`.
+        let parent = tempfile::TempDir::new().expect("parent tmp dir");
+        let base = parent.path().join("owner").join("repo");
+        let old_session = base.join("00000000-old-session-uuid");
+        std::fs::create_dir_all(&old_session).expect("create old-layout subdir");
+        std::fs::write(old_session.join("MARKER"), b"legacy").expect("write marker");
+        assert!(
+            !base.join(".git").exists(),
+            "precondition: no top-level .git"
+        );
+
+        // 3. ensure_base_clone must migrate the old dir aside and clone fresh.
+        let url = src_path.to_str().expect("src url utf8");
+        ensure_base_clone(url, &base).expect("ensure_base_clone must migrate + clone");
+
+        // 4. The base now holds a FRESH clone (top-level `.git` present).
+        assert!(
+            base.join(".git").exists(),
+            "fresh shared-base clone must exist at the base path after migration"
+        );
+
+        // 5. A sibling backup dir carrying the documented suffix must exist and
+        //    still contain the OLD marker (data preserved, not deleted).
+        let repo_parent = base.parent().expect("base has parent");
+        let backup = std::fs::read_dir(repo_parent)
+            .expect("read owner dir")
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.contains(OLD_LAYOUT_BACKUP_SUFFIX))
+                    .unwrap_or(false)
+            })
+            .expect("a migrated backup dir must exist");
+        assert!(
+            backup
+                .join("00000000-old-session-uuid")
+                .join("MARKER")
+                .exists(),
+            "the old per-session data must be preserved under the backup dir"
+        );
+    }
+
+    /// #1805: the migrator must be a no-op for the cases that are NOT old-layout —
+    /// an empty base dir and a dir that already contains `.git`.
+    ///
+    /// Why: git clone succeeds into an empty/absent dir, and an existing `.git` is
+    /// the reuse path handled by the caller; migrating either would be destructive
+    /// and wrong. This guards the precise old-layout signature.
+    /// Test: this function IS the test.
+    #[test]
+    fn migrate_old_layout_aside_ignores_empty_and_git_dirs() {
+        // Empty dir → Ok(None), dir untouched.
+        let empty = tempfile::TempDir::new().expect("empty tmp");
+        let empty_base = empty.path().join("owner").join("repo");
+        std::fs::create_dir_all(&empty_base).expect("create empty base");
+        assert!(
+            migrate_old_layout_aside(&empty_base)
+                .expect("empty dir must not error")
+                .is_none(),
+            "an empty base dir must not be migrated"
+        );
+        assert!(empty_base.is_dir(), "empty base dir must remain in place");
+
+        // Dir with a top-level `.git` → Ok(None), dir untouched.
+        let git = tempfile::TempDir::new().expect("git tmp");
+        let git_base = git.path().join("owner").join("repo");
+        std::fs::create_dir_all(git_base.join(".git")).expect("create .git");
+        std::fs::write(git_base.join("file"), b"x").expect("write file");
+        assert!(
+            migrate_old_layout_aside(&git_base)
+                .expect("git dir must not error")
+                .is_none(),
+            "a dir with a top-level .git must not be migrated"
+        );
+        assert!(
+            git_base.join(".git").is_dir(),
+            ".git dir must remain in place"
+        );
+
+        // Absent path → Ok(None).
+        let absent = git.path().join("does").join("not").join("exist");
+        assert!(
+            migrate_old_layout_aside(&absent)
+                .expect("absent path must not error")
+                .is_none(),
+            "an absent path must not be migrated"
+        );
+    }
 
     #[test]
     fn try_inproject_spawn_returns_none_for_non_git_path() {
