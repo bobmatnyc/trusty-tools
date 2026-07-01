@@ -9,6 +9,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- unify grade computation so outer and embedded grade never diverge (closes #1886) ([#1891](https://github.com/bobmatnyc/trusty-tools/pull/1891)) ([`8f6eab1`](https://github.com/bobmatnyc/trusty-tools/commit/8f6eab15718c9446579b87166bbfd763d72c48da))
+- aggregate token counts across map-reduce for shallow-review heuristic (closes #1885) ([#1890](https://github.com/bobmatnyc/trusty-tools/pull/1890)) ([`7b53d3f`](https://github.com/bobmatnyc/trusty-tools/commit/7b53d3fa2e4baf4578308babccdfc8caa11c86eb))
+## [Unreleased]
+
+### Fixed
+
 - recalibrate RC gate + verifier + Medium floor ([#1876](https://github.com/bobmatnyc/trusty-tools/pull/1876)) ([`2f0169e`](https://github.com/bobmatnyc/trusty-tools/commit/2f0169ed93924e1e35b06770b20663f4d28ee9c2))
 - correct inner_findings_count metric + fail-open smell ([#1877](https://github.com/bobmatnyc/trusty-tools/pull/1877)) ([`b7c1978`](https://github.com/bobmatnyc/trusty-tools/commit/b7c1978863c7b99748cc9380bc7c3d17006987cb))
 - serve-mode diff-fetch loads auth token correctly ([#1880](https://github.com/bobmatnyc/trusty-tools/pull/1880)) ([`f61ce55`](https://github.com/bobmatnyc/trusty-tools/commit/f61ce55d847588470a8b6e7d975a69388374921d))
