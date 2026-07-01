@@ -36,7 +36,7 @@ use crate::{
     pipeline::{letter_grade::Grade, mapreduce::map::MapContext},
 };
 
-use super::outcome::ReducedReview;
+use super::outcome::{ReducedReview, TokenUsage};
 
 // ─── Synthesis LLM request constants ─────────────────────────────────────────
 
@@ -103,7 +103,8 @@ struct SynthesisResponse {
 ///      The count-based Medium floor is deliberately omitted (it is the
 ///      over-strictness source the synthesis pass is calibrating away).
 ///   7. Returns a new `ReducedReview` with synthesis verdict/grade/summary plus
-///      `grade_pre_floor` for observable telemetry (#1665 item 3).
+///      `grade_pre_floor` for observable telemetry (#1665 item 3) and the
+///      map-stage token total plus this synthesis call's usage (#1885).
 ///
 /// Test: `synthesis_tests.rs` — covers `synthesis_softens_minor_nits`,
 /// `synthesis_high_severity_still_floors`, `synthesis_false_returns_unchanged`,
@@ -153,6 +154,17 @@ pub async fn synthesize_review(
             );
             return reduced;
         }
+    };
+
+    // Capture the synthesis call's token/cost usage so it is folded into the
+    // aggregate the shallow-review heuristic reads (#1885). Done unconditionally
+    // here: even if the response fails to parse below we return `reduced`
+    // unchanged (its map-stage total already stands), so we only add this on the
+    // success path where the new `ReducedReview` is built.
+    let synth_tokens = TokenUsage {
+        input_tokens: resp.input_tokens,
+        output_tokens: resp.output_tokens,
+        cost_usd: resp.cost_usd,
     };
 
     // Parse the synthesis response.
@@ -216,6 +228,9 @@ pub async fn synthesize_review(
         "synthesis pass complete"
     );
 
+    // Fold the synthesis call's usage into the map-stage total (#1885).
+    let tokens = reduced.tokens.merged(synth_tokens);
+
     ReducedReview {
         verdict: floored_verdict,
         findings: reduced.findings,
@@ -223,6 +238,7 @@ pub async fn synthesize_review(
         grade: Some(grade_str),
         grade_pre_floor: Some(pre_floor_grade_str),
         summary,
+        tokens,
     }
 }
 
