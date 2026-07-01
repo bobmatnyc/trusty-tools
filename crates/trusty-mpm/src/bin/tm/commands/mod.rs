@@ -36,4 +36,5 @@ pub(crate) mod statusline;
 pub(crate) mod supervisor;
 pub(crate) mod telegram;
 pub(crate) mod ticket;
+pub(crate) mod tmux_attach;
 pub(crate) mod watch;

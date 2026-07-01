@@ -139,12 +139,7 @@ pub(crate) async fn launch(
         && !existing.is_empty()
     {
         print_launch_banner_reconnecting(&live_workdir, &existing);
-        let status = std::process::Command::new("tmux")
-            .args(["attach-session", "-t", &existing])
-            .status()?;
-        if !status.success() {
-            anyhow::bail!("tmux attach-session exited with failure");
-        }
+        crate::commands::tmux_attach::tmux_attach(&existing)?;
         return Ok(());
     }
 
@@ -353,12 +348,7 @@ pub(crate) async fn launch(
     }
 
     // 14. Attach to the session — blocks until the user detaches or exits claude.
-    let status = std::process::Command::new("tmux")
-        .args(["attach-session", "-t", &tmux_name])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("tmux attach-session exited with failure");
-    }
+    crate::commands::tmux_attach::tmux_attach(&tmux_name)?;
     // Attach succeeded: the user detached normally. Disarm the guard so the
     // session persists and can be resumed with `tmux attach -t <name>`.
     session_guard.disarm();
@@ -400,12 +390,7 @@ pub(crate) async fn connect(
     {
         // Full-screen robot splash + rich info panel (reconnect mode).
         print_launch_banner_reconnecting(&workdir, &existing);
-        let status = std::process::Command::new("tmux")
-            .args(["attach-session", "-t", &existing])
-            .status()?;
-        if !status.success() {
-            anyhow::bail!("tmux attach-session exited with failure");
-        }
+        crate::commands::tmux_attach::tmux_attach(&existing)?;
         return Ok(());
     }
 
@@ -483,12 +468,7 @@ pub(crate) async fn connect(
     }
 
     // 6. Attach — takes over the current terminal until the user detaches.
-    let status = std::process::Command::new("tmux")
-        .args(["attach-session", "-t", &tmux_name])
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("tmux attach-session exited with failure");
-    }
+    crate::commands::tmux_attach::tmux_attach(&tmux_name)?;
     // Attach succeeded: disarm the guard so the session persists for re-attachment.
     if let Some(ref mut g) = session_guard {
         g.disarm();

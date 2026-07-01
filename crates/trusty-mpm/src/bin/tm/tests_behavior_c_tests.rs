@@ -664,6 +664,13 @@ async fn guided_fallback_does_not_refuse_github_ssh_alias_remote() {
     // `fallback_protected`. Asserts the result is NOT the GitHub-remote
     // refusal error. (It may still be an Err from the clone attempt failing
     // due to the daemon being unreachable — that is expected and acceptable.)
+    // Deliberately uses a fixture-only host/owner/repo (NOT the real
+    // `github-duetto` alias from the regression report above) — a developer
+    // machine may have a real, reachable SSH config entry with that exact
+    // name (as this repo's own maintainer's machine does), which would let
+    // `ensure_base_clone` actually succeed and make this test flaky/order-
+    // dependent on local SSH config instead of hermetic (discovered while
+    // fixing the nested-tmux attach bug, #1873).
     // Test: this is the test; annotated `serial` because it may set REPOS_ROOT.
     let dir = tempdir_with_name("trusty_test_github_alias_fallback_1705");
     let ok = std::process::Command::new("git")
@@ -683,7 +690,7 @@ async fn guided_fallback_does_not_refuse_github_ssh_alias_remote() {
             "remote",
             "add",
             "origin",
-            "git@github-duetto:duettoresearch/aria.git",
+            "git@github-test-fixture-alias-nonexistent:acmetest/repo-fixture.git",
         ])
         .current_dir(&dir)
         .status();
