@@ -69,7 +69,11 @@ pub(crate) fn tmux_attach(name: &str) -> anyhow::Result<()> {
     let inside = inside_tmux();
     let argv = attach_argv(name, inside);
     let verb = argv[0].clone();
-    eprintln!("tm: attaching to session '{name}'");
+    if inside {
+        eprintln!("tm: switching client to session '{name}'");
+    } else {
+        eprintln!("tm: attaching to session '{name}'");
+    }
     let status = std::process::Command::new("tmux")
         .args(&argv)
         .status()
