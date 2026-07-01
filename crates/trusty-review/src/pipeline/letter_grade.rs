@@ -277,6 +277,77 @@ pub fn clamp_grade_to_verdict(grade: Grade, actual_verdict: &Verdict) -> Grade {
     }
 }
 
+// ─── Shallow-clean-review detection (#1877) ──────────────────────────────────
+
+/// Heuristic output-token floor per character of diff sent to the reviewer,
+/// below which a zero-findings APPROVE looks more like a short-circuited
+/// glance than a genuinely thorough pass.
+///
+/// Derived loosely from the reported regression (`pricerator#637`: a 300+-line
+/// PR — roughly 10-15k diff chars — approved in 2.6s for $0.011, i.e. a few
+/// hundred output tokens at most). `1 token per 200 diff chars` is
+/// deliberately generous (a real thorough review typically uses far more) so
+/// the heuristic only fires on genuinely implausible cases, not merely terse
+/// ones.
+const SHALLOW_REVIEW_TOKENS_PER_DIFF_CHAR: f64 = 1.0 / 200.0;
+
+/// Diffs smaller than this are never flagged: a legitimately small/simple
+/// change can be reviewed fast and cheaply without being suspicious. The
+/// concern is specifically a LARGE diff reviewed implausibly quickly.
+const SHALLOW_REVIEW_MIN_DIFF_LEN: usize = 4_000;
+
+/// Absolute minimum output-token floor regardless of diff size, so the
+/// proportional floor never rounds down to an unreachably tiny number.
+const SHALLOW_REVIEW_MIN_TOKEN_FLOOR: u32 = 50;
+
+/// Detect a suspiciously "shallow" clean review (#1877).
+///
+/// Why: `pricerator#637` returned A+/0-findings in 2.6s for $0.011 on a
+/// 300+-line PR — a REAL LLM call (not the dedup instant-approve short-circuit,
+/// and not one of the fail-CLOSED paths for LLM/transport error or truncated
+/// output, which are correct as-is) that nonetheless looks too cheap/fast to
+/// have substantively reviewed a diff that size. Silently treating it as a
+/// full, high-confidence pass (and crowning it A+) hides that signal from
+/// downstream consumers. This heuristic surfaces the uncertainty instead of
+/// changing the underlying fail-open/fail-closed policy.
+/// What: returns `true` iff `verdict` is `Approve`, `findings` is empty, the
+/// diff sent to the reviewer is at least `SHALLOW_REVIEW_MIN_DIFF_LEN` chars,
+/// and `output_tokens` falls below a floor proportional to `diff_len` (never
+/// below `SHALLOW_REVIEW_MIN_TOKEN_FLOOR`).
+/// Test: `shallow_clean_review_flags_large_diff_low_tokens`,
+/// `shallow_clean_review_false_for_small_diff`,
+/// `shallow_clean_review_false_when_findings_present`,
+/// `shallow_clean_review_false_for_non_approve_verdict`,
+/// `shallow_clean_review_false_when_tokens_sufficient`.
+pub fn is_shallow_clean_review(
+    verdict: &Verdict,
+    findings_is_empty: bool,
+    diff_len: usize,
+    output_tokens: u32,
+) -> bool {
+    if *verdict != Verdict::Approve || !findings_is_empty || diff_len < SHALLOW_REVIEW_MIN_DIFF_LEN
+    {
+        return false;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let proportional_floor = (diff_len as f64 * SHALLOW_REVIEW_TOKENS_PER_DIFF_CHAR) as u32;
+    output_tokens < proportional_floor.max(SHALLOW_REVIEW_MIN_TOKEN_FLOOR)
+}
+
+/// Cap a grade at `Grade::BMinus` — the lowest still-APPROVE-band grade — used
+/// when a clean review is flagged shallow/suspect (#1877).
+///
+/// Why: a flagged review keeps its APPROVE verdict (the findings really are
+/// empty; this is not a severity judgement) but must not read as the
+/// top-quality signal A+/A implies. B- is the mildest downgrade that still
+/// communicates "reviewed, nothing found, but treat with reduced confidence."
+/// What: returns `min(grade, Grade::BMinus)` using `Grade`'s ordinal `Ord`.
+/// Test: `cap_shallow_review_grade_downgrades_a_plus`,
+/// `cap_shallow_review_grade_noop_below_b_minus`.
+pub fn cap_shallow_review_grade(grade: Grade) -> Grade {
+    grade.min(Grade::BMinus)
+}
+
 /// Return true if `a` implies a verdict at least as strict as `b`.
 ///
 /// Why: needed by `clamp_grade_to_verdict` to avoid clamping when the grade

@@ -360,6 +360,11 @@ async fn run_review_mapreduce_chunk_request_changes_propagates() {
         !result.findings.is_empty(),
         "the REQUEST_CHANGES chunk's finding must survive into the merged result"
     );
+    assert_eq!(
+        result.findings_count,
+        result.findings.len(),
+        "findings_count must equal findings.len() on the map-reduce completed path (#1877)"
+    );
 }
 
 /// Build a multi-file diff that reliably routes to map-reduce and exposes partial

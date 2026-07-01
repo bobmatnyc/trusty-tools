@@ -199,8 +199,11 @@ pub struct PostContext<'a> {
 /// `posted=true`, `dry_run=false` and marking the dedup claim complete on
 /// success); on `LogOnly` (or any post failure) writes the dry-run log.  Prints
 /// the result to STDOUT when `print_result` is set.  Never returns an error —
-/// failures degrade to a logged dry-run.
-/// Test: `decide_action_*` cover the branch; the live post is `#[ignore]`.
+/// failures degrade to a logged dry-run.  Also syncs `findings_count` to
+/// `findings.len()` (#1877) so every completed review (unified or map-reduce)
+/// carries the authoritative count regardless of exit path.
+/// Test: `decide_action_*` cover the branch; the live post is `#[ignore]`;
+/// `findings_count_matches_len_on_completed_review`.
 pub async fn finalize_review(
     mut result: ReviewResult,
     config: &ReviewConfig,
@@ -210,6 +213,11 @@ pub async fn finalize_review(
     print_result: bool,
     post_ctx: PostContext<'_>,
 ) -> ReviewResult {
+    // #1877: keep the authoritative findings_count in sync at this canonical
+    // completed-review exit point (covers both the unified and map-reduce
+    // paths, which both funnel through `finalize_run` → here).
+    result.findings_count = result.findings.len();
+
     // Append the metadata footer to review_body BEFORE the post/log branch so
     // the footer is identical in the live GitHub comment (which reads
     // result.review_body via build_review_comment_body) and in the returned
