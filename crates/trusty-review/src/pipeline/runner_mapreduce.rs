@@ -327,6 +327,17 @@ async fn fold_reduced_into_result(
     result.grade =
         original_llm_grade.map(|g| clamp_grade_to_verdict(g, &result.verdict).to_string());
 
+    // Grade reconciliation (#1886 parity with the unified path): mirror the final
+    // top-level grade into any JSON `"grade"` embedded in `review_body` so the two
+    // observable copies can never disagree.  In this path `review_body` is the
+    // synthesis PROSE summary (no embedded JSON grade), so this is normally a no-op;
+    // it is applied unconditionally as defence-in-depth against a future summary
+    // format that embeds a grade.
+    result.review_body = crate::pipeline::grade_reconcile::reconcile_review_body_grade(
+        &result.review_body,
+        result.grade.as_deref(),
+    );
+
     // Inline per-line comments from the RAW diff (#1414 parity).
     attach_inline_comments(result, &run.raw_diff);
 

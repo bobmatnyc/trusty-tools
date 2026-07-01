@@ -624,6 +624,17 @@ pub async fn run_review(
         }
     }
 
+    // 7d-reconcile: mirror the final top-level grade into the raw `review_body`
+    // JSON so the embedded self-grade the model reported can never disagree with
+    // the authoritative post-floor/post-cap grade (issue #1886).  This runs AFTER
+    // every grade adjustment above (severity floor, #1486 clamp, #1877 shallow cap)
+    // and BEFORE the footer is appended in `finalize_review`, so both observable
+    // copies of the grade are settled to the single source of truth.
+    result.review_body = crate::pipeline::grade_reconcile::reconcile_review_body_grade(
+        &result.review_body,
+        result.grade.as_deref(),
+    );
+
     // 7e: build inline per-line comments from the RAW diff (#1414).  Using the
     // pre-filter `raw_diff` (not the noise-filtered `diff` sent to the LLM) means
     // anchors map to the actual PR diff lines GitHub will accept; findings that do
