@@ -49,9 +49,8 @@ pub struct PrepReport {
     pub stash: PathBuf,
     /// Path the `trusty-mpm` output style was deployed to, if it succeeded.
     ///
-    /// `None` when deployment was skipped (no home directory) or failed; the
-    /// session still launches in that case, just with the operator's default
-    /// style.
+    /// `None` when the deploy write failed; the session still launches in
+    /// that case, just with the operator's default style.
     pub output_style: Option<PathBuf>,
     /// Whether the `trusty-memory` hook block was written to the project's
     /// `.claude/settings.json`.
@@ -408,17 +407,14 @@ fn prepare_session_inner(
 
     // Deploy the bundled output-style definition so Claude Code can resolve the
     // `trusty-mpm` name written into `.claude/settings.json` above. Non-fatal:
-    // a missing style file just falls back to the operator's default.
-    let output_style = match dirs::home_dir() {
-        Some(home) => match deploy_output_style(&home) {
-            Ok(path) => Some(path),
-            Err(err) => {
-                tracing::warn!("failed to deploy trusty-mpm output style file: {err}");
-                None
-            }
-        },
-        None => {
-            tracing::warn!("skipping output style deploy: home directory unresolved");
+    // a missing style file just falls back to the operator's default. Uses
+    // `fw.claude_home_dir()` (issue #1860) rather than `dirs::home_dir()`
+    // directly so isolated `FrameworkPaths::under(tempdir)` callers (tests)
+    // stay confined to the temp dir instead of leaking into the real `$HOME`.
+    let output_style = match deploy_output_style(&fw.claude_home_dir()) {
+        Ok(path) => Some(path),
+        Err(err) => {
+            tracing::warn!("failed to deploy trusty-mpm output style file: {err}");
             None
         }
     };
