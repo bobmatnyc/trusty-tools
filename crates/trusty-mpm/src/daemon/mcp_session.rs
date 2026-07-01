@@ -75,6 +75,9 @@ pub async fn session_new(
         name_hint: name_hint.map(str::to_string),
         runtime: runtime.map(str::to_string),
         ephemeral,
+        // This IS the MCP tool surface (#1836/#1837): every call here is
+        // subject to the off-by-default gate + registry allowlist.
+        mcp_initiated: true,
     };
     let record = spawn_managed(state, params).await?;
     Ok(record_to_json(&record))

@@ -55,6 +55,17 @@ pub struct SpawnParams {
     /// the session up automatically. `None`/`Some(false)` → a normal, durable
     /// session that the automatic paths never touch.
     pub ephemeral: Option<bool>,
+    /// Whether this spawn originates from the MCP tool surface (#1836, #1837).
+    ///
+    /// Why: an MCP-triggered `session_new` call can mint real infrastructure
+    /// for any repo an LLM caller names, with zero operator confirmation (the
+    /// ARIA incident). `true` subjects the spawn to the two-layer MCP spawn
+    /// gate (off-by-default + registry allowlist,
+    /// [`super::mcp_spawn_gate::ensure_mcp_spawn_allowed`]) BEFORE any
+    /// provisioning begins. `false` — set by the HTTP route (`tm launch`/`tm
+    /// ticket` clients) and the SM-STDIO adapter (`sm.sessions.launch`) — never
+    /// gates; those are trusted, explicitly-operator-driven paths.
+    pub mcp_initiated: bool,
 }
 
 /// Spawn a managed session, shared by the HTTP handler and the MCP tool.
@@ -75,6 +86,11 @@ pub async fn spawn_managed(
     state: &Arc<DaemonState>,
     params: SpawnParams,
 ) -> Result<SessionRecord, String> {
+    // Config is loaded ONCE here and reused below for both the MCP spawn gate
+    // and the workspace-root resolution, so the two cannot read divergent
+    // snapshots of `config.yaml` within a single spawn.
+    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+
     // Step 0: resolve the runtime backend (default claude-code). Reject unknown
     // selectors BEFORE any provisioning so a typo never leaves an orphan
     // workspace.
@@ -82,6 +98,17 @@ pub async fn spawn_managed(
         None => RuntimeKind::default(),
         Some(raw) => raw.parse::<RuntimeKind>().map_err(|e| e.to_string())?,
     };
+
+    // Step 0.4 — MCP SPAWN GATE (#1836, #1837): an MCP-triggered spawn (never a
+    // `tm launch`/`tm ticket`/SM-STDIO call — see `SpawnParams::mcp_initiated`)
+    // must be refused BEFORE any side effect when MCP spawning is disabled
+    // (the default) or the target repo is not an already-known project. This
+    // runs before `ManagedSessionId::new()` so a refusal mints nothing.
+    if params.mcp_initiated {
+        let registry = state.project_registry().await;
+        super::mcp_spawn_gate::ensure_mcp_spawn_allowed(&registry, &config, &params.repo_url)
+            .await?;
+    }
 
     let session_id = ManagedSessionId::new();
 
@@ -138,8 +165,8 @@ pub async fn spawn_managed(
     // session nests under the target repo's GitHub `<owner>/<repo>` identity:
     // `<root>/<owner>/<repo>/<session-id>/`. When the repo URL has no parseable
     // GitHub identity we fall back to the legacy single-slug `provision` path so a
-    // bare/non-GitHub URL still provisions cleanly.
-    let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
+    // bare/non-GitHub URL still provisions cleanly. `config` was already loaded
+    // above (before the MCP spawn gate); reused here for the workspace root.
     let prepared = match trusty_common::github_path::parse_github_path(&params.repo_url) {
         Some(gh) => {
             let project_dir = crate::core::trusty_tools_config::workspace_subpath(&config, &gh);

@@ -112,6 +112,40 @@ pub struct TrustyToolsConfig {
     /// in config rather than registering them via MCP on every restart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub projects: Vec<ProjectConfig>,
+
+    /// Daemon-level safety toggles (the `daemon:` YAML section, #1836).
+    ///
+    /// `None` → every toggle defaults to its safe value (MCP-initiated spawning
+    /// stays disabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon: Option<DaemonConfig>,
+}
+
+/// The `daemon:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#1836).
+///
+/// Why: the ARIA incident showed that an MCP-triggered `session_new` call can
+/// silently provision real infrastructure (clone + worktree + tmux + harness)
+/// for any repo an LLM caller names, with no operator confirmation. The fix is
+/// an explicit, declarative opt-in an operator sets once — rather than a
+/// per-call flag a careless/compromised caller could always supply.
+/// What: currently one toggle, `allow_mcp_spawn`; resolution precedence (env >
+/// config > safe default) lives in
+/// [`crate::daemon::managed_routes::mcp_spawn_gate::mcp_spawn_enabled`], not
+/// here — this is purely the on-disk shape.
+/// Test: `daemon_config_yaml_round_trip`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonConfig {
+    /// Whether MCP-initiated session spawns (`session_new` and friends) are
+    /// permitted to provision new infrastructure.
+    ///
+    /// `None`/`Some(false)` → disabled (the safe default, #1836): an MCP
+    /// caller's `session_new` is refused before any workspace is touched.
+    /// `Some(true)` → opts in to MCP-initiated spawning (still subject to the
+    /// #1837 registry allowlist gate). The `tm` CLI's own spawn path (`tm
+    /// launch`/`tm connect`/`tm ticket`) is NEVER gated by this flag — it
+    /// always spawns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_mcp_spawn: Option<bool>,
 }
 
 /// The `github:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#1265).
@@ -437,6 +471,29 @@ mod tests {
             !yaml.contains("token:"),
             "must not have a bare token field: {yaml}"
         );
+    }
+
+    /// Why: the `daemon:` section (#1836) must round-trip through YAML, and an
+    /// absent section must not serialise at all (matching every other optional
+    /// top-level section).
+    /// Test: itself.
+    #[test]
+    fn daemon_config_yaml_round_trip() {
+        let cfg = TrustyToolsConfig {
+            daemon: Some(DaemonConfig {
+                allow_mcp_spawn: Some(true),
+            }),
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&cfg).expect("serialise");
+        let back: TrustyToolsConfig = serde_yaml::from_str(&yaml).expect("deserialise");
+        assert_eq!(cfg, back);
+        assert!(yaml.contains("allow_mcp_spawn"), "yaml: {yaml}");
+
+        // Absent daemon section must not serialise.
+        let empty = TrustyToolsConfig::default();
+        let yaml_empty = serde_yaml::to_string(&empty).expect("serialise");
+        assert!(!yaml_empty.contains("daemon"), "yaml: {yaml_empty}");
     }
 
     /// Why: the project subpath must nest `<owner>/<repo>` under the root in that
