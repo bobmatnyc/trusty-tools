@@ -596,3 +596,142 @@ async fn run_review_mapreduce_medium_rc_propagates_through_synthesis() {
         "the per-chunk Medium finding must survive into the merged result"
     );
 }
+
+// ── Shallow-review heuristic on the map-reduce path (#1885) ──────────────────
+
+/// A reviewer that APPROVEs every prompt (per-file AND synthesis) with ZERO
+/// findings, reporting a configurable per-call `output_tokens`. The single JSON
+/// body satisfies both the per-file parser (uses verdict/findings) and the
+/// synthesis parser (uses verdict/grade/summary), so one fake drives the whole
+/// pipeline. Used to simulate an implausibly cheap clean review of a huge diff.
+struct LowTokenApprover {
+    output_tokens: u32,
+}
+
+#[async_trait]
+impl LlmProvider for LowTokenApprover {
+    fn name(&self) -> &str {
+        "low-token-approver"
+    }
+    async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+        Ok(LlmResponse {
+            // Grade A+ so the pre-cap envelope grade is unambiguously top-band;
+            // the shallow flag must then cap it down to B-.
+            text: r#"{"verdict":"APPROVE","grade":"A+","summary":"ok","findings":[]}"#.to_string(),
+            model: req.model.clone(),
+            input_tokens: 10,
+            output_tokens: self.output_tokens,
+            latency_ms: 1,
+            cost_usd: 0.0,
+            finish_reason: Some("stop".to_string()),
+        })
+    }
+}
+
+/// Build an over-cap multi-file diff whose lines are ALL DISTINCT, so the diff
+/// analyzer's noise/dedup filtering keeps the filtered byte size large (the
+/// shallow heuristic's `diff_len` input). Routes to map-reduce via the size cap.
+fn shallow_oversized_distinct_diff() -> String {
+    use crate::config::constants::MAX_DIFF_CHARS;
+
+    let mut diff = String::new();
+    let mut file_idx = 0;
+    while diff.len() < MAX_DIFF_CHARS + (MAX_DIFF_CHARS / 4) {
+        diff.push_str(&format!(
+            "diff --git a/src/mod{file_idx}.rs b/src/mod{file_idx}.rs\n"
+        ));
+        diff.push_str(&format!(
+            "--- a/src/mod{file_idx}.rs\n+++ b/src/mod{file_idx}.rs\n"
+        ));
+        diff.push_str("@@ -1,1 +1,400 @@\n");
+        for line in 0..400 {
+            // Distinct on both indices so nothing is deduped/collapsed.
+            diff.push_str(&format!(
+                "+    let value_{file_idx}_{line} = compute_{file_idx}({line}, {line} + 1);\n"
+            ));
+        }
+        file_idx += 1;
+    }
+    diff
+}
+
+/// THE #1885 regression test: a huge diff reviewed via MAP-REDUCE that returns a
+/// clean APPROVE (0 findings) with an implausibly low AGGREGATE output-token spend
+/// must be flagged `shallow_clean_review` and have its grade capped at B- — the
+/// SAME treatment the unified path already applies. Before the fix the map-reduce
+/// path never aggregated tokens, so `output_tokens` stayed 0 and the heuristic was
+/// silently inoperative on exactly the largest, highest-risk diffs.
+#[tokio::test]
+async fn run_review_mapreduce_shallow_clean_flags_low_tokens() {
+    let diff = shallow_oversized_distinct_diff();
+    let (source, _tmp) = local_source(&diff);
+
+    // One output token per call → aggregate stays far below the diff-proportional
+    // floor no matter how many chunks the splitter produces.
+    let reviewer = Arc::new(LowTokenApprover { output_tokens: 1 });
+    let llm: Arc<dyn LlmProvider> = reviewer.clone();
+    let config = ReviewConfig::load(None);
+
+    let result = run_review(&config, input(source), deps(llm)).await;
+
+    // Sanity: this really went through the clean-APPROVE map-reduce path.
+    assert_eq!(
+        result.verdict,
+        Verdict::Approve,
+        "all chunks APPROVE with no findings → overall APPROVE"
+    );
+    assert!(
+        result.findings.is_empty(),
+        "the clean review must have zero findings"
+    );
+
+    // Aggregate telemetry must now be populated (was always 0 before the fix).
+    assert!(
+        result.output_tokens > 0,
+        "map-reduce must aggregate output tokens onto the result (was 0 pre-#1885)"
+    );
+
+    // The heuristic must FIRE on the aggregate.
+    assert!(
+        result.shallow_clean_review,
+        "a cheap clean APPROVE on a huge map-reduce diff must be flagged shallow (#1885)"
+    );
+
+    // And the grade must be capped at B- (or lower) — never left at A+.
+    let grade: crate::pipeline::letter_grade::Grade = result
+        .grade
+        .as_deref()
+        .expect("APPROVE verdict must carry a grade")
+        .parse()
+        .expect("grade must parse");
+    assert!(
+        grade >= crate::pipeline::letter_grade::Grade::BMinus,
+        "flagged shallow review grade must be capped at B- or milder, got {:?}",
+        grade
+    );
+}
+
+/// The negative control: the SAME huge map-reduce diff reviewed with a plausible
+/// (high) aggregate output-token spend must NOT be flagged shallow, proving the
+/// heuristic keys on the aggregate token telemetry (not merely on diff size).
+#[tokio::test]
+async fn run_review_mapreduce_substantive_review_not_flagged() {
+    let diff = shallow_oversized_distinct_diff();
+    let (source, _tmp) = local_source(&diff);
+
+    // A high per-call output-token count → aggregate comfortably exceeds the
+    // diff-proportional floor, so the review looks substantive.
+    let reviewer = Arc::new(LowTokenApprover {
+        output_tokens: 100_000,
+    });
+    let llm: Arc<dyn LlmProvider> = reviewer.clone();
+    let config = ReviewConfig::load(None);
+
+    let result = run_review(&config, input(source), deps(llm)).await;
+
+    assert_eq!(result.verdict, Verdict::Approve);
+    assert!(
+        !result.shallow_clean_review,
+        "a review with plausible aggregate token spend must NOT be flagged shallow"
+    );
+}

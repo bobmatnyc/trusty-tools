@@ -10,7 +10,7 @@
 use super::reduce;
 use crate::config::mapreduce::MapReduceConfig;
 use crate::models::{Effort, Finding, Verdict};
-use crate::pipeline::mapreduce::outcome::MapOutcome;
+use crate::pipeline::mapreduce::outcome::{MapOutcome, TokenUsage};
 
 fn cfg() -> MapReduceConfig {
     MapReduceConfig::default()
@@ -21,10 +21,20 @@ fn finding(file: &str, kind: &str, desc: &str, conf: f32, effort: Effort) -> Fin
 }
 
 fn reviewed(file: &str, verdict: Verdict, findings: Vec<Finding>) -> MapOutcome {
+    reviewed_with_tokens(file, verdict, findings, TokenUsage::default())
+}
+
+fn reviewed_with_tokens(
+    file: &str,
+    verdict: Verdict,
+    findings: Vec<Finding>,
+    tokens: TokenUsage,
+) -> MapOutcome {
     MapOutcome::Reviewed {
         file: file.to_string(),
         verdict,
         findings,
+        tokens,
     }
 }
 
@@ -322,4 +332,47 @@ fn reduce_stats_partial_flag() {
     assert_eq!(reduced.stats.files_failed, 1);
     // The clean chunk still yields a usable APPROVE.
     assert_eq!(reduced.verdict, Verdict::Approve);
+}
+
+/// The reduce stage must SUM token/cost telemetry across every reviewed chunk so
+/// the runner can feed the aggregate to the shallow-review heuristic (#1885).
+/// Skipped/failed chunks made no LLM call and must contribute nothing.
+#[test]
+fn reduce_sums_output_tokens() {
+    let outcomes = vec![
+        reviewed_with_tokens(
+            "src/a.rs",
+            Verdict::Approve,
+            vec![],
+            TokenUsage {
+                input_tokens: 100,
+                output_tokens: 7,
+                cost_usd: 0.001,
+            },
+        ),
+        reviewed_with_tokens(
+            "src/b.rs",
+            Verdict::Approve,
+            vec![],
+            TokenUsage {
+                input_tokens: 200,
+                output_tokens: 11,
+                cost_usd: 0.002,
+            },
+        ),
+        // A failed chunk (no LLM usage recorded) must not perturb the totals.
+        MapOutcome::Failed {
+            file: "src/c.rs".to_string(),
+            error: "LLM error".to_string(),
+            hunk_oversized: false,
+        },
+    ];
+    let reduced = reduce(outcomes, &cfg());
+    assert_eq!(reduced.tokens.input_tokens, 300, "input tokens must sum");
+    assert_eq!(reduced.tokens.output_tokens, 18, "output tokens must sum");
+    assert!(
+        (reduced.tokens.cost_usd - 0.003).abs() < 1e-9,
+        "cost must sum, got {}",
+        reduced.tokens.cost_usd
+    );
 }

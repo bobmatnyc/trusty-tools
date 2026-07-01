@@ -32,7 +32,7 @@ use crate::{
     voice::VoiceConfig,
 };
 
-use super::outcome::MapOutcome;
+use super::outcome::{MapOutcome, TokenUsage};
 use super::unit::{MapUnit, MapUnitKind};
 
 /// Borrowed inputs shared across every map-stage LLM call.
@@ -221,6 +221,14 @@ async fn run_task(task: MapTask, llm: &Arc<dyn LlmProvider>) -> MapOutcome {
                 file,
                 verdict: parsed.verdict,
                 findings,
+                // Capture this chunk's token/cost telemetry so the reduce stage
+                // can sum it into the aggregate the shallow-review heuristic
+                // reads (#1885) — the unified path gets these off its single call.
+                tokens: TokenUsage {
+                    input_tokens: resp.input_tokens,
+                    output_tokens: resp.output_tokens,
+                    cost_usd: resp.cost_usd,
+                },
             }
         }
         Err(e) => {

@@ -28,7 +28,7 @@ use crate::{
     profile::synthesizer::jaccard_similarity,
 };
 
-use super::outcome::{MapOutcome, MapReduceStats, ReducedReview};
+use super::outcome::{MapOutcome, MapReduceStats, ReducedReview, TokenUsage};
 
 /// Reduce a vec of per-chunk `MapOutcome`s into a single `ReducedReview`.
 ///
@@ -39,10 +39,11 @@ use super::outcome::{MapOutcome, MapReduceStats, ReducedReview};
 /// blocking finding.
 /// What: builds `MapReduceStats`, unions + dedups + caps the findings, derives
 /// the verdict from the stricter-of all per-chunk verdicts + the severity floor,
-/// and returns the merged `ReducedReview`.
+/// sums each reviewed chunk's `TokenUsage` into the aggregate the shallow-review
+/// heuristic reads (#1885), and returns the merged `ReducedReview`.
 /// Test: `reduce_unions_findings`, `reduce_chunk_request_changes_propagates`,
 /// `reduce_dedups_identical_findings`, `reduce_all_unknown_collapses`,
-/// `reduce_caps_findings`, `reduce_stats_partial_flag`.
+/// `reduce_caps_findings`, `reduce_stats_partial_flag`, `reduce_sums_output_tokens`.
 pub fn reduce(outcomes: Vec<MapOutcome>, config: &MapReduceConfig) -> ReducedReview {
     let mut stats = MapReduceStats {
         units_total: outcomes.len(),
@@ -52,15 +53,23 @@ pub fn reduce(outcomes: Vec<MapOutcome>, config: &MapReduceConfig) -> ReducedRev
     // Collect the per-chunk verdicts (Reviewed only) and the finding union.
     let mut chunk_verdicts: Vec<Verdict> = Vec::new();
     let mut all_findings: Vec<Finding> = Vec::new();
+    // Running total of token/cost telemetry across every reviewed chunk — this is
+    // the aggregate the shallow-review heuristic reads on the map-reduce path
+    // (#1885). Skipped/failed chunks made no LLM call, so they contribute nothing.
+    let mut tokens = TokenUsage::default();
 
     for outcome in outcomes {
         match outcome {
             MapOutcome::Reviewed {
-                verdict, findings, ..
+                verdict,
+                findings,
+                tokens: chunk_tokens,
+                ..
             } => {
                 stats.files_reviewed += 1;
                 chunk_verdicts.push(verdict);
                 all_findings.extend(findings);
+                tokens = tokens.merged(chunk_tokens);
             }
             MapOutcome::Skipped { .. } => {
                 stats.files_skipped += 1;
@@ -109,6 +118,8 @@ pub fn reduce(outcomes: Vec<MapOutcome>, config: &MapReduceConfig) -> ReducedRev
         grade: None,
         grade_pre_floor: None,
         summary: String::new(),
+        // Map-stage token total; the synthesis pass adds its own call on top.
+        tokens,
     }
 }
 

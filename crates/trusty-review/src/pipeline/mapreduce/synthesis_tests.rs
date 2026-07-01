@@ -19,7 +19,7 @@ use crate::{
     pipeline::{
         mapreduce::{
             MapContext,
-            outcome::{MapReduceStats, ReducedReview},
+            outcome::{MapReduceStats, ReducedReview, TokenUsage},
             synthesis::{apply_high_severity_floor_only, synthesize_review},
         },
         prompt::{ReviewContext, ReviewPrMeta},
@@ -100,6 +100,14 @@ fn finding(kind: &str, desc: &str, effort: Effort, conf: f32) -> Finding {
     Finding::new("src/a.rs", kind, desc, "", conf, effort)
 }
 
+/// Map-stage token total the helper seeds so the synthesis-fold tests can assert
+/// the synthesis call's usage (#1885) is ADDED to it, not replacing it.
+const BASE_MAP_TOKENS: TokenUsage = TokenUsage {
+    input_tokens: 500,
+    output_tokens: 100,
+    cost_usd: 0.0,
+};
+
 fn reduced_with_findings(verdict: Verdict, findings: Vec<Finding>) -> ReducedReview {
     ReducedReview {
         verdict,
@@ -108,6 +116,7 @@ fn reduced_with_findings(verdict: Verdict, findings: Vec<Finding>) -> ReducedRev
         grade: None,
         grade_pre_floor: None,
         summary: String::new(),
+        tokens: BASE_MAP_TOKENS,
     }
 }
 
@@ -635,5 +644,74 @@ async fn synthesis_embedded_json_ignores_trailing_stray_brace() {
     assert_eq!(
         result.summary, "ok",
         "summary must be extracted from the embedded JSON"
+    );
+}
+
+/// On the synthesis SUCCESS path the new `ReducedReview` must carry the map-stage
+/// token total PLUS the synthesis call's own usage (#1885) — never replace it.
+#[tokio::test]
+async fn synthesis_adds_call_tokens_to_aggregate() {
+    let reduced = reduced_with_findings(Verdict::Approve, vec![]);
+
+    // FixedLlm reports input_tokens: 50, output_tokens: 20 per call.
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm::new(
+        r#"{"verdict":"APPROVE","grade":"A","summary":"ok"}"#,
+    ));
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+
+    let result = synthesize_review(reduced, &llm, &c, &cfg()).await;
+
+    assert_eq!(
+        result.tokens.output_tokens,
+        BASE_MAP_TOKENS.output_tokens + 20,
+        "synthesis output tokens must be ADDED to the map-stage total"
+    );
+    assert_eq!(
+        result.tokens.input_tokens,
+        BASE_MAP_TOKENS.input_tokens + 50,
+        "synthesis input tokens must be ADDED to the map-stage total"
+    );
+}
+
+/// When synthesis is disabled the map-stage token total must pass through
+/// unchanged (no synthesis call was made, so nothing is added).
+#[tokio::test]
+async fn synthesis_disabled_preserves_map_tokens() {
+    let reduced = reduced_with_findings(Verdict::Approve, vec![]);
+    let llm: Arc<dyn LlmProvider> = Arc::new(FixedLlm::new(
+        r#"{"verdict":"APPROVE","grade":"A","summary":"ok"}"#,
+    ));
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+
+    let result = synthesize_review(reduced, &llm, &c, &cfg_synthesis_off()).await;
+
+    assert_eq!(
+        result.tokens, BASE_MAP_TOKENS,
+        "synthesis-off must not alter the map-stage token total"
+    );
+}
+
+/// When the synthesis LLM call fails, the graceful fall-back must preserve the
+/// map-stage token total (the failed call's usage is unknown / not counted).
+#[tokio::test]
+async fn synthesis_llm_error_preserves_map_tokens() {
+    let reduced = reduced_with_findings(Verdict::Approve, vec![]);
+    let llm: Arc<dyn LlmProvider> = Arc::new(FailingLlm);
+    let pm = pr_meta();
+    let context = ReviewContext::default();
+    let voice = VoiceConfig::default();
+    let c = ctx(&pm, &context, &voice);
+
+    let result = synthesize_review(reduced, &llm, &c, &cfg()).await;
+
+    assert_eq!(
+        result.tokens, BASE_MAP_TOKENS,
+        "synthesis fail-safe fall-back must preserve the map-stage token total"
     );
 }
