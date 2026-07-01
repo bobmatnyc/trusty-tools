@@ -988,15 +988,18 @@ async fn run_review_verification_refutes_and_relaxes_verdict() {
     );
 }
 
-/// The verification round, when wired in, CONFIRMS the Medium finding; after #1015
-/// a lone confirmed Medium anchors at APPROVE* (path a2), not REQUEST_CHANGES.
+/// The verification round, when wired in, CONFIRMS the Medium finding; #1876
+/// (superseding #1015) re-escalates a lone confirmed high-confidence Medium
+/// back to REQUEST_CHANGES.
 ///
-/// Why: before #1015 path (a) preserved primary_verdict (REQUEST_CHANGES) on any
-/// confirmed finding.  After #1015, only confirmed High-effort triggers path (a);
-/// confirmed Medium triggers path (a2) which caps the baseline at APPROVE*.
-/// The APPROVE* result is correct — the model judged REQUEST_CHANGES holistically
-/// but the only confirmed evidence is a single Medium finding, which justifies
-/// at most APPROVE*.
+/// Why: path (a2)'s baseline is still capped at APPROVE* for a confirmed
+/// Medium-only finding (#1015 mechanics unchanged) — but `derive_verdict`'s own
+/// severity floor, computed independently from the surviving findings, now
+/// (#1876) floors a SINGLE confidence > 0.80 Medium to REQUEST_CHANGES on its
+/// own merits (see `grade::correctness_floor`). `stricter_of(baseline=APPROVE*,
+/// floor=REQUEST_CHANGES)` therefore lands back on REQUEST_CHANGES — matching
+/// what the model itself originally said, which is the intended #1876 outcome
+/// (a confirmed, well-evidenced finding must not be silently softened).
 #[tokio::test]
 async fn run_review_verification_confirms_and_preserves_verdict() {
     let (source, _tmp) = local_diff_source("+fn bad() {}\n");
@@ -1019,11 +1022,14 @@ async fn run_review_verification_confirms_and_preserves_verdict() {
     );
 
     let result = run_review(&config, input, deps).await;
-    // After #1015: confirmed Medium → path (a2) → APPROVE* (not REQUEST_CHANGES).
+    // #1876: a confirmed high-confidence Medium re-escalates to REQUEST_CHANGES
+    // via derive_verdict's floor, even though the a2 baseline is capped at
+    // APPROVE* (supersedes the #1015-era APPROVE* result).
     assert_eq!(
         result.verdict,
-        Verdict::ApproveWithReservations,
-        "confirmed Medium → APPROVE* (path a2 — #1015); not REQUEST_CHANGES"
+        Verdict::RequestChanges,
+        "confirmed high-confidence Medium → REQUEST_CHANGES (#1876 floor \
+         re-escalation; path a2 baseline cap alone is no longer the last word)"
     );
 }
 

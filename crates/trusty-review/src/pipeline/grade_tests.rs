@@ -69,7 +69,7 @@ fn grade_high_effort_beats_request_changes() {
     assert_eq!(verdict, Verdict::Block);
 }
 
-// ── Tier 2: ≥2 Medium ────────────────────────────────────────────────────────
+// ── Tier 2: ≥1 confident Medium (#1876: count gate replaced by confidence gate) ─
 
 /// Two high-confidence Medium findings (confidence > 0.80) must floor to REQUEST_CHANGES.
 ///
@@ -87,8 +87,8 @@ fn grade_two_medium_yields_request_changes() {
 /// → REQUEST_CHANGES.
 ///
 /// Why: when the model's own verdict is APPROVE* (not a clean APPROVE), the
-/// count-based floor is free to escalate to REQUEST_CHANGES — the model already
-/// flagged reservations, so the floor is not contradicting an APPROVE review_body.
+/// floor is free to escalate to REQUEST_CHANGES — the model already flagged
+/// reservations, so the floor is not contradicting an APPROVE review_body.
 /// What: model APPROVE* + three Medium@0.85 → floor REQUEST_CHANGES (stricter wins).
 #[test]
 fn grade_three_medium_yields_request_changes() {
@@ -101,17 +101,20 @@ fn grade_three_medium_yields_request_changes() {
     assert_eq!(verdict, Verdict::RequestChanges);
 }
 
-/// #1343: a clean model APPROVE must NOT be count-overridden to REQUEST_CHANGES by
-/// the Medium-count floor — it caps at APPROVE*.
+/// #1876 (supersedes #1343): a clean model APPROVE is NO LONGER capped down to
+/// APPROVE* when a confidence-grounded Medium floor fires — the reconciliation
+/// cap was removed because every REQUEST_CHANGES floor is now confidence-gated,
+/// not count-gated (see the module doc for the shadow-eval rationale).
 ///
-/// Why: this is the core calibration bug.  The model holistically judged the change
-/// APPROVE; a count-based REQUEST_CHANGES floor (≥2 high-confidence Mediums) must
-/// not contradict the model's own verdict.  The floor still surfaces the concern as
-/// an advisory APPROVE* (not silent APPROVE), but never hardens an APPROVE
-/// review_body to REQUEST_CHANGES.
-/// What: model APPROVE + three Medium@0.85 → APPROVE* (capped, not REQUEST_CHANGES).
+/// Why: #1343 introduced the cap to protect against a *count-based* (≥2 Medium)
+/// heuristic overriding the model's own holistic APPROVE. #1876's shadow-eval
+/// (n=473) showed this made the reviewer too lenient — 89% of reference
+/// REQUEST_CHANGES cases were silently downgraded to APPROVE. Since Tier 2 no
+/// longer needs a *count* (a single confidence > 0.80 finding suffices), there
+/// is no remaining "weak heuristic" for the cap to protect, so it was removed.
+/// What: model APPROVE + three Medium@0.85 → REQUEST_CHANGES (no longer capped).
 #[test]
-fn grade_model_approve_caps_medium_count_floor_at_approve_star() {
+fn grade_model_approve_confident_medium_still_escalates_to_request_changes() {
     let findings = vec![
         finding(Effort::Medium, 0.85),
         finding(Effort::Medium, 0.85),
@@ -120,26 +123,35 @@ fn grade_model_approve_caps_medium_count_floor_at_approve_star() {
     let verdict = derive_verdict(Verdict::Approve, &findings);
     assert_eq!(
         verdict,
-        Verdict::ApproveWithReservations,
-        "model APPROVE must cap the Medium-count floor at APPROVE* (#1343)"
+        Verdict::RequestChanges,
+        "model APPROVE must NOT cap a confidence-grounded Medium floor at \
+         APPROVE* (#1876 removes the #1343 count-based reconciliation cap)"
     );
 }
 
-// ── Tier 3: Exactly 1 Medium ─────────────────────────────────────────────────
-
-/// One high-confidence Medium finding (confidence > 0.80) must floor to APPROVE*.
+/// A SINGLE high-confidence Medium finding (confidence > 0.80) must floor to
+/// REQUEST_CHANGES (#1876 — supersedes the pre-#1876 APPROVE* result).
 ///
-/// Why: a single well-grounded concern should not block the PR but warrants
-/// noting.  Only findings with confidence > FLOOR_MIN_CONFIDENCE (0.80) count
-/// toward the floor (#1015).
+/// Why: the #1876 shadow-eval (n=473) showed requiring a SECOND corroborating
+/// Medium before escalating (the old Tier 2/3 split) was the single largest
+/// source of the reviewer under-firing REQUEST_CHANGES (only 3 emissions
+/// against 119 reference-reviewer REQUEST_CHANGES cases). A finding that clears
+/// FLOOR_MIN_CONFIDENCE (0.80) is, by definition, well-evidenced — it now gets
+/// the same hard-floor treatment as a High-effort finding (Tier 1), matching
+/// the precedent set by `mapreduce::synthesis::apply_synthesis_floor`'s
+/// High-effort hard floor (PR #1674/#1675).
 #[test]
-fn grade_one_medium_yields_approve_star() {
+fn grade_one_medium_yields_request_changes() {
     let findings = vec![finding(Effort::Medium, 0.85)];
     let verdict = derive_verdict(Verdict::Approve, &findings);
-    assert_eq!(verdict, Verdict::ApproveWithReservations);
+    assert_eq!(
+        verdict,
+        Verdict::RequestChanges,
+        "a single high-confidence Medium finding must floor to REQUEST_CHANGES (#1876)"
+    );
 }
 
-// ── Tier 4: Only Low or no findings ─────────────────────────────────────────
+// ── Tier 3: Only Low or no findings ─────────────────────────────────────────
 
 /// No findings → APPROVE.
 #[test]
@@ -260,15 +272,16 @@ fn grade_high_confidence_medium_beats_low_confidence_check() {
 /// Mixed-confidence Medium findings: one above FLOOR_MIN_CONFIDENCE, one below.
 ///
 /// Why: only the finding with confidence > 0.80 counts toward the floor (#1015).
-/// One floor-counting Medium → APPROVE* (not REQUEST_CHANGES).  The old test
-/// (confidence 0.8, 0.5 → REQUEST_CHANGES) encoded the over-aggressive behavior
-/// that caused #1015; confidence 0.8 is NOT > 0.80.
+/// One floor-counting Medium is now (#1876) sufficient on its own →
+/// REQUEST_CHANGES.  The sub-0.80 finding contributes nothing either way;
+/// confidence 0.5 is well below the gate.
 #[test]
 fn grade_mixed_confidence_two_medium_only_one_counts() {
     let findings = vec![finding(Effort::Medium, 0.85), finding(Effort::Medium, 0.5)];
     let verdict = derive_verdict(Verdict::Approve, &findings);
-    // Only the 0.85 finding counts (> 0.80); one floor-counting Medium → APPROVE*.
-    assert_eq!(verdict, Verdict::ApproveWithReservations);
+    // Only the 0.85 finding counts (> 0.80); one floor-counting Medium is
+    // sufficient on its own → REQUEST_CHANGES (#1876).
+    assert_eq!(verdict, Verdict::RequestChanges);
 }
 
 // ── Compile-break BLOCK rule ─────────────────────────────────────────────────
@@ -574,28 +587,32 @@ fn approve_b_plus_survives_refuted_and_low_confidence_findings() {
     );
 }
 
-/// #1343: even high-confidence, non-refuted Medium findings cannot count-override a
-/// clean APPROVE/B+ review_body to REQUEST_CHANGES — they cap at APPROVE* / C+.
+/// #1876 (supersedes #1343): high-confidence, non-refuted Medium findings DO
+/// escalate a clean APPROVE/B+ review_body to REQUEST_CHANGES / D+ — the
+/// #1343 count-based reconciliation cap was removed.
 ///
-/// Why: the source-of-truth reconciliation: a count-based REQUEST_CHANGES floor
-/// must never contradict the model's own APPROVE verdict.  The concern is surfaced
-/// as an advisory APPROVE* (grade clamped to C+, the APPROVE* ceiling), never as a
-/// REQUEST_CHANGES that loops the PM merge workflow forever.
-/// What: model APPROVE, grade B+, two Medium@0.85 → (APPROVE*, C+).
+/// Why: #1343's reconciliation existed to stop a *count-based* (≥2 Medium)
+/// heuristic from contradicting the model's own APPROVE verdict. #1876's
+/// shadow-eval (n=473) found that cap made the reviewer too lenient — a
+/// confidence-grounded concern (confidence > FLOOR_MIN_CONFIDENCE) is no
+/// longer a "weak heuristic"; it now gets the same hard-floor treatment as a
+/// High-effort finding and is never capped back down.
+/// What: model APPROVE, grade B+, two Medium@0.85 → (REQUEST_CHANGES, D+).
 /// Test: this test itself.
 #[test]
-fn approve_b_plus_two_high_conf_medium_caps_at_approve_star() {
+fn grade_model_approve_b_plus_confident_medium_escalates_to_request_changes() {
     let findings = vec![finding(Effort::Medium, 0.85), finding(Effort::Medium, 0.85)];
     let (v, g) = derive_verdict_with_grade(Verdict::Approve, Grade::BPlus, &findings);
     assert_eq!(
         v,
-        Verdict::ApproveWithReservations,
-        "clean APPROVE must cap the Medium-count floor at APPROVE* (#1343)"
+        Verdict::RequestChanges,
+        "clean APPROVE must NOT cap a confidence-grounded Medium floor at \
+         APPROVE* (#1876 removes the #1343 count-based reconciliation cap)"
     );
     assert_eq!(
         g,
-        Some(Grade::CPlus),
-        "grade clamps to C+ (APPROVE* ceiling), never D+ (#1343)"
+        Some(Grade::DPlus),
+        "grade clamps to D+ (REQUEST_CHANGES ceiling) — #1876"
     );
 }
 
