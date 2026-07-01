@@ -89,3 +89,12 @@ pub const TM_POSTMORTEM: &str = include_str!("../assets/skills/tm-postmortem.md"
 /// What: embedded markdown skill file deployed to `skills/tm-bug-reporting.md`.
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_BUG_REPORTING: &str = include_str!("../assets/skills/tm-bug-reporting.md");
+
+/// Progressive-disclosure onboarding/teaching templates.
+///
+/// Why: condensed from claude-mpm's 658-line teaching-mode skill, stripping
+/// generic (non-framework) examples and pointing at the concrete tm-* skills
+/// instead of duplicating their content.
+/// What: embedded markdown skill file deployed to `skills/tm-teaching-templates.md`.
+/// Test: `tm_skills_are_in_bundle`.
+pub const TM_TEACHING_TEMPLATES: &str = include_str!("../assets/skills/tm-teaching-templates.md");

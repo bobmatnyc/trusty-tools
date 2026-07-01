@@ -382,6 +382,11 @@ pub const ALL: &[BundledArtifact] = &[
         contents: TM_BUG_REPORTING,
         install: InstallPolicy::Overwrite,
     },
+    BundledArtifact {
+        rel_path: "skills/tm-teaching-templates.md",
+        contents: TM_TEACHING_TEMPLATES,
+        install: InstallPolicy::Overwrite,
+    },
     // --- DOC-28 R1: canonical self-description doc ---
     BundledArtifact {
         rel_path: "docs/WHAT-IS-TRUSTY-MPM.md",
