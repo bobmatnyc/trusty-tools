@@ -93,7 +93,7 @@ pub async fn run_doctor(
 /// that were decommissioned before this fix—or where `git worktree remove`
 /// failed—may leave stale `.worktrees/<session-id>/` directories on disk. This
 /// probe surfaces orphaned dirs so operators know to run
-/// `tm sessions prune --worktrees`. The filesystem walk is delegated to
+/// `tm session prune --worktrees`. The filesystem walk is delegated to
 /// [`crate::session_manager::prune::find_orphaned_worktrees`] inside
 /// `spawn_blocking` so the async executor is not blocked by synchronous I/O.
 /// What: builds a canonicalized active-path set, then spawns a blocking task
@@ -147,7 +147,7 @@ async fn check_worktrees(
             "worktrees",
             CheckStatus::Warn,
             format!(
-                "{} orphaned worktree dir(s) found — run `tm sessions prune --worktrees` to remove",
+                "{} orphaned worktree dir(s) found — run `tm session prune --worktrees` to remove",
                 orphans.len()
             ),
         )
@@ -428,6 +428,6 @@ mod tests {
         let check = check_worktrees(Some(root), &active).await;
         assert_eq!(check.status, CheckStatus::Warn);
         assert!(check.message.contains("1 orphaned"));
-        assert!(check.message.contains("tm sessions prune --worktrees"));
+        assert!(check.message.contains("tm session prune --worktrees"));
     }
 }

@@ -262,7 +262,7 @@ fn cli_parses_services_restart() {
 
 #[test]
 fn compose_session_instructions_display_matches_stash() {
-    // Why: the #382 bug was that `tm sessions instructions` printed
+    // Why: the #382 bug was that `tm session instructions` printed
     // `output.merged` (old pipeline text) while the stash held the
     // override-resolved PM prompt — a visible divergence. After the fix
     // both come from `resolve_pm_prompt`, so they must be identical.
@@ -282,13 +282,13 @@ fn compose_session_instructions_display_matches_stash() {
 
     assert_eq!(
         display, on_disk,
-        "tm sessions instructions display must equal the stash file (issue #382)"
+        "tm session instructions display must equal the stash file (issue #382)"
     );
 }
 
 #[test]
 fn compose_session_instructions_display_matches_live_prompt() {
-    // Why: `tm sessions instructions` must show exactly what `claude` receives
+    // Why: `tm session instructions` must show exactly what `claude` receives
     // via `--append-system-prompt-file`; the live prompt is produced by
     // `build_system_prompt_for`, which calls `resolve_pm_prompt`. If
     // `compose_session_instructions` ever returns something different from
@@ -308,7 +308,7 @@ fn compose_session_instructions_display_matches_live_prompt() {
 
     assert_eq!(
         display, live_prompt,
-        "tm sessions instructions output must match the live launch prompt (issue #382)"
+        "tm session instructions output must match the live launch prompt (issue #382)"
     );
 }
 

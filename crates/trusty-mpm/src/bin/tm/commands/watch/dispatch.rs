@@ -128,7 +128,7 @@ pub(crate) async fn dispatch_issue(
 /// POST the managed-session spawn request that drives the issue implementation.
 ///
 /// Why: reuses the exact session-manager spawn path (`POST
-/// /api/v1/sessions/managed`) that `tm ticket` / `tm sessions new` use, so
+/// /api/v1/sessions/managed`) that `tm ticket` / `tm session new` use, so
 /// `tm watch` plugs into the existing isolated-workspace + runtime-adapter
 /// machinery (the P4 workspace root `~/trusty-mpm-projects/<owner>/<repo>/…`)
 /// rather than re-implementing it. The provisioner clones the repo and the driver

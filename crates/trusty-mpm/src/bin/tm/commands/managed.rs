@@ -47,7 +47,7 @@ pub(crate) fn deprecation_notice(old: &str, new: &str) {
 /// Return true when a session state should be shown in the default picker/list view.
 ///
 /// Why: decommissioned tombstones accumulate without bound (#1809); operators
-/// don't want 230+ dead records cluttering the picker and `tm sessions ls`. This
+/// don't want 230+ dead records cluttering the picker and `tm session ls`. This
 /// predicate is the single source of truth for which states are "live" so the
 /// picker and the `sessions list` table use identical logic.
 /// What: returns `false` for `"decommissioned"` (the sole dead/tombstone state);
@@ -61,7 +61,7 @@ pub(crate) fn is_live_session_state(state: &str) -> bool {
 /// Filter a session list to only live sessions for display in the picker (#1809).
 ///
 /// Why: the picker must never show decommissioned tombstones by default; the
-/// `--all` opt-in re-enables them for `tm sessions ls` via this module's path.
+/// `--all` opt-in re-enables them for `tm session ls` via this module's path.
 /// What: retains only sessions whose `state` passes `is_live_session_state`.
 /// Test: `picker_filter_excludes_decommissioned_keeps_active` in
 /// `tests_behavior_c_tests.rs`.
@@ -74,7 +74,7 @@ pub(crate) fn filter_live_sessions(
         .collect()
 }
 
-/// `tm sessions ls` — list managed sessions.
+/// `tm session ls` — list managed sessions.
 ///
 /// Why: operators need a quick view of every managed session and its pending
 /// decision, optionally scoped to a single project so the firehose is tamed.
@@ -202,7 +202,7 @@ fn short_timestamp(s: &str) -> String {
     }
 }
 
-/// `tm sessions activity <id>` — inspect a managed session's activity state.
+/// `tm session activity <id>` — inspect a managed session's activity state.
 ///
 /// Why: inspect what a session is doing without attaching; the raw pane is
 /// always returned for the calling agentic process to reason over. The LLM
@@ -271,7 +271,7 @@ pub(crate) async fn session_activity(
     Ok(())
 }
 
-/// `tm sessions stop <id>` — stop the runtime of a managed session, keep the workspace.
+/// `tm session stop <id>` — stop the runtime of a managed session, keep the workspace.
 ///
 /// Why: a session ENDURES beyond its runtime; `stop` kills only the tmux session
 /// and claude process, preserving the workspace for later `resume`. Renamed from
@@ -297,7 +297,7 @@ pub(crate) async fn session_stop(
     Ok(())
 }
 
-/// `tm sessions resume <id>` — resume a stopped managed session in its existing workspace.
+/// `tm session resume <id>` — resume a stopped managed session in its existing workspace.
 ///
 /// Why: after `stop`, the workspace is still on disk; `resume` re-spawns the
 /// runtime there without re-cloning. Renamed from the verbose `managed-resume`
@@ -328,7 +328,7 @@ pub(crate) async fn session_resume(
     Ok(())
 }
 
-/// `tm sessions decommission <id>` — full teardown (may or may not remove workspace).
+/// `tm session decommission <id>` — full teardown (may or may not remove workspace).
 ///
 /// Why: adopted/local-path sessions were NEVER owned by tm, so the workspace is
 /// NOT removed on their decommission. Previously the CLI printed an incorrect
@@ -387,7 +387,7 @@ pub(crate) async fn session_decommission(
     Ok(())
 }
 
-/// `tm sessions decommission-ephemeral` — bulk-tear-down every ephemeral session (#1508).
+/// `tm session decommission-ephemeral` — bulk-tear-down every ephemeral session (#1508).
 ///
 /// Why: e2e harnesses and operators need a one-shot "clean up all my throwaway
 /// test sessions" verb. REAL sessions default `ephemeral=false` and are
@@ -415,7 +415,7 @@ pub(crate) async fn session_decommission_ephemeral(
     Ok(())
 }
 
-/// `tm sessions prune --state <filter> [--dry-run] [--include-active]` — by-state prune (#1508).
+/// `tm session prune --state <filter> [--dry-run] [--include-active]` — by-state prune (#1508).
 ///
 /// Why: ONE tool to tear down ephemeral/stopped sessions AND compact the store by
 /// dropping decommissioned tombstones, so legacy stale records can be purged with
@@ -482,7 +482,7 @@ pub(crate) async fn session_prune(
     Ok(())
 }
 
-/// `tm sessions prune --worktrees [--dry-run]` — remove orphaned per-session worktrees (#1840).
+/// `tm session prune --worktrees [--dry-run]` — remove orphaned per-session worktrees (#1840).
 ///
 /// Why: sessions decommissioned before Fix 1a (#1840), or where
 /// `git worktree remove` failed, leave stale `.worktrees/<session-id>/`

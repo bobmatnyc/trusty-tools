@@ -156,7 +156,7 @@ async fn sessctl_connect(
 
 /// POST /api/v1/control/sessions/{id}/stop — send a stop command to a session.
 ///
-/// Why: mirrors `tm sessions stop` for the SESSCTL surface.
+/// Why: mirrors `tm session stop` for the SESSCTL surface.
 /// What: POSTs with `?force=<bool>` and prints a confirmation.
 /// Test: `cli_parses_sessctl_stop`; live test requires daemon.
 async fn sessctl_stop(

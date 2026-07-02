@@ -5,7 +5,7 @@
 //! process. AppleScript is the most reliable mechanism — no extra deps, works
 //! on every macOS iTerm2 install.
 //! What: `is_iterm2()` checks env vars at startup; `open_session_tab` runs
-//! an `osascript` one-liner that creates a new tab running `tm sessions attach
+//! an `osascript` one-liner that creates a new tab running `tm session attach
 //! <id>`.
 //! Test: Detection logic is pure and unit-tested below; AppleScript calls are
 //! integration-only (no test without a live iTerm2).
@@ -27,7 +27,7 @@ pub fn is_iterm2() -> bool {
     std::path::Path::new("/Applications/iTerm.app").exists()
 }
 
-/// Open a new iTerm2 tab in the current window running `tm sessions attach <session_id>`.
+/// Open a new iTerm2 tab in the current window running `tm session attach <session_id>`.
 ///
 /// Why: The operator can monitor the session list in the TUI while the new tab
 /// runs the actual Claude Code session — no window-switching required.
@@ -39,7 +39,7 @@ pub fn open_session_tab(session_id: &str) -> Result<(), String> {
     let script = format!(
         r#"tell application "iTerm2"
   tell current window
-    create tab with default profile command "tm sessions attach {session_id}"
+    create tab with default profile command "tm session attach {session_id}"
   end tell
 end tell"#
     );

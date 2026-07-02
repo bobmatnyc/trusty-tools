@@ -74,14 +74,14 @@ Procedure: `git status` + `git log --oneline -10` for context → `mkdir -p
 .trusty-mpm/sessions` → write `session-{timestamp}.md` → update
 `LATEST-SESSION.txt` → report the path to the user.
 
-## Resuming: `tm sessions catchup`
+## Resuming: `tm session catchup`
 
 Resume delegates to the real CLI command rather than manually parsing
 session files:
 
 ```bash
-tm sessions catchup                  # current project only
-tm sessions catchup --all-projects   # also scan machine-wide claude-mpm/trusty-mpm projects
+tm session catchup                  # current project only
+tm session catchup --all-projects   # also scan machine-wide claude-mpm/trusty-mpm projects
 ```
 
 This renders a unified, newest-first digest across both the native
@@ -106,8 +106,8 @@ decommissioned SM sessions. `tm doctor`'s `worktrees` probe flags these; the
 cleanup command is:
 
 ```bash
-tm sessions prune-worktrees          # dry-run by default
-tm sessions prune-worktrees --force  # actually remove
+tm session prune-worktrees          # dry-run by default
+tm session prune-worktrees --force  # actually remove
 ```
 
 Run this as part of session wrap-up when `tm doctor` reports orphaned

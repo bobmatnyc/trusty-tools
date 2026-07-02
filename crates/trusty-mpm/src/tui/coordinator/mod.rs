@@ -11,7 +11,7 @@
 //! immediate-re-poll-after-mutation hook (see [`nav`] and
 //! [`state::CoordinatorState::request_repoll`]).
 //! What: thin façade re-exporting the submodules and exposing [`run`], the
-//! `tm sessions tui` entry point. [`run`] polls the daemon's
+//! `tm session tui` entry point. [`run`] polls the daemon's
 //! coordinator-context endpoint on the `--interval-ms` cadence and maps each
 //! session into the live list (see [`poll`]). The daemon-backed `last_summary`
 //! column and slash-command dispatch are deferred to later children; the summary
@@ -90,7 +90,7 @@ const KEY_POLL: Duration = Duration::from_millis(50);
 
 /// Launch the coordinator TUI against `url`, polling every `interval_ms`.
 ///
-/// Why: the `tm sessions tui` subcommand needs one entry point that owns the
+/// Why: the `tm session tui` subcommand needs one entry point that owns the
 /// terminal lifecycle. Now async (Child #2 added live daemon IO) so it runs on
 /// the same tokio runtime as `tui::run`.
 /// What: builds a [`DaemonClient`] for `url`, enters raw mode + the alternate

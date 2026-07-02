@@ -591,7 +591,7 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // clone otherwise grows without bound (94 dirs observed for one
                 // project) because decommission-time cleanup (#1806/#1840) only
                 // covers sessions torn down AFTER that fix landed and the manual
-                // `tm sessions prune-worktrees` sweep is rarely run. Only leaf
+                // `tm session prune-worktrees` sweep is rarely run. Only leaf
                 // worktree dirs with NO live record are removed — active worktrees
                 // and the base clone are never touched. Inherits the orphan-GC env
                 // gate (`TRUSTY_MPM_ORPHAN_GC`) since it runs inside this loop.

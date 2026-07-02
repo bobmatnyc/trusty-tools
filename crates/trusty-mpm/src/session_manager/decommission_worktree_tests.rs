@@ -23,7 +23,7 @@ use super::tests::FakeTmuxDriver;
 /// disk AND prunes the git worktree metadata + branch ref from the base clone
 /// (#1806).
 ///
-/// Why: #1806 reported that `tm sessions decommission` tombstones the record
+/// Why: #1806 reported that `tm session decommission` tombstones the record
 /// but leaves the on-disk worktree directory behind, requiring a manual
 /// `git worktree remove`. The `workspace_owned = false` + `.worktrees/`
 /// exception (added for #1840/#1845) is unit-tested for the free function

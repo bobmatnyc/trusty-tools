@@ -214,7 +214,7 @@ pub async fn generate_catchup_context(opts: &CatchupOptions) -> String {
 
 /// Generate the catch-up digest and optionally advance the watermark.
 ///
-/// Why: the CLI `tm sessions catchup` command needs to produce the digest
+/// Why: the CLI `tm session catchup` command needs to produce the digest
 /// without advancing the watermark (manual peek), while the auto-inject on
 /// session start should advance it.
 /// What: calls [`generate_catchup_context`] to produce the context string,

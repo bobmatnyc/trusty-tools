@@ -65,7 +65,7 @@ Never guess what the PM is actually running under. Two equivalent ways to
 check:
 
 ```bash
-tm sessions instructions        # prints the resolved prompt
+tm session instructions        # prints the resolved prompt
 cat .trusty-mpm/last-instructions.md   # the exact stash resolve_pm_prompt wrote
 ```
 

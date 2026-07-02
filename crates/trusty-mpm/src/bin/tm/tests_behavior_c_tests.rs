@@ -445,7 +445,7 @@ fn guided_resume_no_restart_decommissioned() {
 // A zombie is a session whose daemon state is NOT stopped/errored (i.e., active
 // or provisioning) but whose tmux session has disappeared. The daemon's /resume
 // endpoint would return 409 for these — leading to a permanent dead end. The
-// correct recovery is: `tm sessions stop <id>` then `tm` again.
+// correct recovery is: `tm session stop <id>` then `tm` again.
 
 #[test]
 fn guided_resume_is_zombie_active_no_tmux() {

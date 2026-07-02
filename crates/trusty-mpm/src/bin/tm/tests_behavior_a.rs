@@ -351,7 +351,7 @@ fn cli_parses_optimizer_set() {
 
 #[test]
 fn cli_parses_session_events() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "events", "abc-123"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "events", "abc-123"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
             action: SessionAction::Events { id_or_name },
@@ -362,7 +362,7 @@ fn cli_parses_session_events() {
 
 #[test]
 fn cli_parses_session_breakers() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "breakers"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "breakers"]).unwrap();
     assert!(matches!(
         cli.command.unwrap(),
         Command::Session {
@@ -373,8 +373,7 @@ fn cli_parses_session_breakers() {
 
 #[test]
 fn cli_parses_session_pause() {
-    let cli =
-        Cli::try_parse_from(["trusty-mpm", "sessions", "pause", "tmpm-quiet-falcon"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "pause", "tmpm-quiet-falcon"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
             action: SessionAction::Pause { id_or_name, note },
@@ -390,7 +389,7 @@ fn cli_parses_session_pause() {
 fn cli_parses_session_pause_with_note() {
     let cli = Cli::try_parse_from([
         "trusty-mpm",
-        "sessions",
+        "session",
         "pause",
         "abc-123",
         "--note",
@@ -410,7 +409,7 @@ fn cli_parses_session_pause_with_note() {
 
 #[test]
 fn cli_parses_session_resume() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "resume", "abc-123"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "resume", "abc-123"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
             action: SessionAction::Resume { id_or_name },
@@ -421,7 +420,7 @@ fn cli_parses_session_resume() {
 
 #[test]
 fn cli_parses_session_run() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "run", "abc-123", "help me"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "run", "abc-123", "help me"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
             action:
@@ -443,7 +442,7 @@ fn cli_parses_session_run() {
 fn cli_parses_session_run_with_summarize() {
     let cli = Cli::try_parse_from([
         "trusty-mpm",
-        "sessions",
+        "session",
         "run",
         "tmpm-abc",
         "help",
@@ -460,7 +459,7 @@ fn cli_parses_session_run_with_summarize() {
 
 #[test]
 fn cli_parses_session_output_defaults() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "sessions", "output", "abc-123"]).unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "output", "abc-123"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
             action:
@@ -482,7 +481,7 @@ fn cli_parses_session_output_defaults() {
 fn cli_parses_session_output_with_lines() {
     let cli = Cli::try_parse_from([
         "trusty-mpm",
-        "sessions",
+        "session",
         "output",
         "abc-123",
         "--lines",
@@ -499,14 +498,8 @@ fn cli_parses_session_output_with_lines() {
 
 #[test]
 fn cli_parses_session_output_with_summarize() {
-    let cli = Cli::try_parse_from([
-        "trusty-mpm",
-        "sessions",
-        "output",
-        "tmpm-abc",
-        "--summarize",
-    ])
-    .unwrap();
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "output", "tmpm-abc", "--summarize"])
+        .unwrap();
     match cli.command.unwrap() {
         Command::Session {
             action: SessionAction::Output { summarize, .. },
@@ -550,12 +543,12 @@ fn compression_stats_line_printed_when_compressed() {
 
 #[test]
 fn cli_session_pause_requires_arg() {
-    assert!(Cli::try_parse_from(["trusty-mpm", "sessions", "pause"]).is_err());
+    assert!(Cli::try_parse_from(["trusty-mpm", "session", "pause"]).is_err());
 }
 
 #[test]
 fn cli_session_run_requires_command() {
-    assert!(Cli::try_parse_from(["trusty-mpm", "sessions", "run", "abc-123"]).is_err());
+    assert!(Cli::try_parse_from(["trusty-mpm", "session", "run", "abc-123"]).is_err());
 }
 
 #[test]

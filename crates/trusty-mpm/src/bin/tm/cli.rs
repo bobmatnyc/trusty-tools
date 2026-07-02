@@ -101,16 +101,16 @@ pub(crate) enum Command {
     ///   Managed fleet sessions (provisioned in isolated worktrees):
     ///     new, ls, activity, send, answer, decommission, prune-idle, …
     ///
-    /// Why (#1394, #1841): the invoked name is the plural `sessions` to match the
-    /// `/api/v1/sessions/*` HTTP API surface. The singular `session` spelling is
-    /// accepted as a visible alias (#1841) so both forms work ergonomically. The
-    /// Rust variant stays `Session` (with an explicit `#[command(name = "sessions")]`)
-    /// to keep the `SessionAction` group and every match arm coherent without renaming
-    /// ~80 internal references.
-    /// What: the `tm sessions <action>` command group (`tui`, `ls`, `new`, …).
-    /// Test: `cli_parses_sessions_plural` / `cli_session_alias_accepts_singular` in
-    /// `tests.rs`.
-    #[command(name = "sessions", visible_alias = "session")]
+    /// Why (#1916): the invoked name is the singular `session` — renamed from the
+    /// plural `sessions` (#1394/#1841) now that `tm` has no external users to keep
+    /// a compatibility alias for. `tm session start`/`tm session new` reads more
+    /// naturally as a singular verb group. The Rust variant stays `Session`
+    /// (matching the clap-derived kebab-case default, so no rename of the
+    /// `SessionAction` group or its ~80 internal references was needed).
+    /// What: the `tm session <action>` command group (`tui`, `ls`, `new`, …).
+    /// Test: `cli_parses_session_singular` / `cli_sessions_plural_no_longer_parses`
+    /// in `tests.rs`.
+    #[command(name = "session")]
     Session {
         /// Session action to perform.
         #[command(subcommand)]
@@ -739,7 +739,7 @@ pub(crate) enum SessctlAction {
     },
     /// Stop a session (graceful by default, --force for immediate).
     ///
-    /// Why: mirrors `tm sessions stop` for the SESSCTL surface.
+    /// Why: mirrors `tm session stop` for the SESSCTL surface.
     /// What: POSTs to `POST /api/v1/control/sessions/{id}/stop?force=<bool>`.
     /// Test: `cli_parses_sessctl_stop`.
     Stop {
@@ -1059,7 +1059,7 @@ pub(crate) enum CatalogAction {
 pub(crate) enum RepairAction {
     /// Repair the agent/skill deploy state in `~/.claude/`.
     ///
-    /// Why: a crash during `tm install` or `tm sessions start` may leave stale
+    /// Why: a crash during `tm install` or `tm session start` may leave stale
     /// `.tmp` staging files in `~/.claude/agents/` or `~/.claude/skills/`, or
     /// leave either manifest corrupt. This command removes the orphans and
     /// validates both manifests.
@@ -1204,7 +1204,7 @@ pub(crate) enum SessionAction {
     /// session list (controller bullet + one row per managed session, the active
     /// row in two columns `[id] │ [summary]`). This is a NEW screen, distinct
     /// from the existing `tm tui` dashboard. It lives under the `session` group
-    /// as `tm sessions tui` (#1392): it operates on the same managed-session list
+    /// as `tm session tui` (#1392): it operates on the same managed-session list
     /// the other `session` verbs do, so grouping it there keeps the surface
     /// discoverable without colliding with the `coordinator` SM chat command.
     /// What: polls the daemon's coordinator-context endpoint live on the
@@ -1288,7 +1288,7 @@ pub(crate) enum SessionAction {
     /// Spawn a new managed session from a repo + ref (session-manager MVP).
     ///
     /// Why: the session-manager MVP provisions an isolated workspace from a git
-    /// repo and starts a harness in it; `tm sessions new` is the operator-facing
+    /// repo and starts a harness in it; `tm session new` is the operator-facing
     /// entry point that posts to `POST /api/v1/sessions/managed`.
     /// What: posts repo, ref, task, and an optional name hint to the daemon.
     /// Test: `cli_parses_session_new`.

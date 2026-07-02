@@ -52,7 +52,7 @@ pub enum ManagedError {
     Io(#[from] std::io::Error),
 
     /// A name derived from the cwd hint collided with an existing session.
-    #[error("name already in use: {0} — use `tm sessions ls` to find it")]
+    #[error("name already in use: {0} — use `tm session ls` to find it")]
     NameCollision(String),
 
     /// The operation is not valid for the current session state.
@@ -914,7 +914,7 @@ impl SessionManager {
     /// Mark a session as errored with a message.
     ///
     /// Why: when provisioning or spawning fails the session must not remain in
-    /// `Provisioning`; marking it errored surfaces the failure to `tm sessions ls`.
+    /// `Provisioning`; marking it errored surfaces the failure to `tm session ls`.
     /// What: transitions the record to `ManagedSessionState::Errored` and appends
     /// the error message to the task field for observability, then persists.
     /// Test: covered by handler_spawn_wires_provision_and_spawn error path.
@@ -933,7 +933,7 @@ impl SessionManager {
     /// Update a session's workspace path and transition to a new state.
     ///
     /// Why: after `WorkspaceProvisioner::provision` returns the workspace path
-    /// must be persisted so `tm sessions ls` shows it and `activity` can infer
+    /// must be persisted so `tm session ls` shows it and `activity` can infer
     /// context.
     /// What: looks up the record, sets `workspace_path` and `state`, and persists.
     /// Test: covered by handler_spawn_wires_provision_and_spawn.
