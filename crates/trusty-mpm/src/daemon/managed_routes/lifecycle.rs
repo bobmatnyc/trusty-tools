@@ -112,12 +112,56 @@ pub async fn spawn_managed(
 
     let session_id = ManagedSessionId::new();
 
-    // Step 0.5 — LOCAL-PATH FAST PATH (#1433): if `repo_url` is an existing local
-    // absolute directory, treat it AS the session workspace and SKIP the git
-    // clone entirely. This lets `sessions.launch` (which maps `workdir → repo_url`)
-    // drive a session against a directory the operator already has on disk — e.g.
-    // `workdir=/Users/masa/Projects/trusty-tools` — without cloning a remote.
-    //
+    // Wrap the ENTIRE spawn dispatch — in-project, local-path, AND clone-based
+    // — in a `provisioning_stage` scope (issue #1904 stretch goal; #1919 fix).
+    // Before #1919 only the clone-based tail (`spawn_managed_cloned`) was
+    // wrapped here, so the `is_local_workdir` branch below — covering BOTH
+    // `spawn_managed_inproject` and `spawn_managed_local` — returned before
+    // this scope was ever installed. Since #1916 unified `tm session start`
+    // onto `spawn_managed_inproject`, that branch is now the dominant path,
+    // so every `emit(...)` call anywhere in ITS call tree (including
+    // `try_inproject_spawn`'s `ensure_base_clone` first-run clone, several
+    // layers deep in `inproject.rs`) now also broadcasts on the daemon's
+    // existing SSE channel — no signature changes needed anywhere in that
+    // call tree, per `core::provisioning_stage`'s module doc. The client
+    // correlates by `repo_url` (it cannot know `session_id` until this whole
+    // call returns).
+    let emitter = crate::core::provisioning_stage::StageEmitter::new(
+        session_id.to_string(),
+        params.repo_url.clone(),
+        state.event_tx.clone(),
+    );
+    crate::core::provisioning_stage::scoped(
+        emitter,
+        spawn_managed_routed(state, session_id, params, runtime, config),
+    )
+    .await
+}
+
+/// Route a spawn to the in-project, local-path, or clone-based branch (#1919).
+///
+/// Why: extracted from [`spawn_managed`] so the `provisioning_stage::scoped`
+/// wrapper installed there covers ALL THREE spawn branches uniformly — this
+/// function is exactly the routing logic `spawn_managed` used to run inline
+/// after `is_local_workdir` detection, before #1919 moved the scope to cover it.
+/// What: local-path fast path (#1433) — if `repo_url` is an existing local
+/// absolute directory, tries in-project detection (#1706, via
+/// `try_inproject_spawn`) first and dispatches to `spawn_managed_inproject` on
+/// a match, else falls through to `spawn_managed_local`. A remote repo URL
+/// (the common case) falls straight through to `spawn_managed_cloned`.
+/// Test: exercised transitively by the same tests that covered the inline
+/// version before extraction (HTTP spawn tests, MCP session tests); the
+/// stage-emission behaviour added by #1919 is covered by
+/// `prepare_inproject_session_emits_stage_events_in_order` in this module's
+/// `tests` submodule and `ensure_base_clone_emits_cloning_repo_only_on_fresh_clone`
+/// in `inproject::tests`.
+async fn spawn_managed_routed(
+    state: &Arc<DaemonState>,
+    session_id: ManagedSessionId,
+    params: SpawnParams,
+    runtime: RuntimeKind,
+    config: crate::core::trusty_tools_config::TrustyToolsConfig,
+) -> Result<SessionRecord, String> {
     // Detection heuristic (documented): the string is an ABSOLUTE path that EXISTS
     // and is a DIRECTORY on the daemon host. Anything else (a `https://…` /
     // `git@…` URL, a relative path, a non-existent path) falls through to the
@@ -155,30 +199,16 @@ pub async fn spawn_managed(
         return spawn_managed_local(state, &session_id, &params, runtime).await;
     }
 
-    // From here on the flow is the clone-based path — wrap it in a
-    // `provisioning_stage` scope (issue #1904 stretch goal) so every
-    // `emit(...)` call inside `provision`/`provision_in`/`prepare_session_inner`
-    // (all several layers deep, all synchronous, no signature changes needed —
-    // see `core::provisioning_stage`'s module doc) broadcasts a stage-transition
-    // event on the daemon's existing SSE channel. The client correlates by
-    // `repo_url` (it cannot know `session_id` until this whole call returns).
-    let emitter = crate::core::provisioning_stage::StageEmitter::new(
-        session_id.to_string(),
-        params.repo_url.clone(),
-        state.event_tx.clone(),
-    );
-    crate::core::provisioning_stage::scoped(
-        emitter,
-        spawn_managed_cloned(state, session_id, params, runtime, config),
-    )
-    .await
+    spawn_managed_cloned(state, session_id, params, runtime, config).await
 }
 
-/// The clone-based provisioning tail of [`spawn_managed`] (issue #1904).
+/// The clone-based provisioning tail of [`spawn_managed_routed`] (issue #1904).
 ///
-/// Why: split out so the stage-observer scope in `spawn_managed` wraps
-/// exactly this portion — the local-path/in-project fast paths return before
-/// reaching here and do not need per-stage progress (no clone to wait on).
+/// Why: split out so the (now-shared, #1919) stage-observer scope installed
+/// in `spawn_managed` has a clean per-branch extraction to call — mirroring
+/// `spawn_managed_inproject`/`spawn_managed_local`, which get the identical
+/// scope for free since #1919 moved the `scoped(...)` wrapper up to cover all
+/// three branches uniformly (before #1919 this was the ONLY branch it wrapped).
 /// What: provisions the workspace (emits `CloningRepo`/`DeployingAgents`/
 /// `DeployingSkills`/`BuildingInstructions`/`ConfiguringMcp` from deep inside
 /// `provision`/`provision_in`/`prepare_session_inner`), creates the tmux
@@ -407,6 +437,7 @@ async fn spawn_managed_inproject(
     owner: String,
     repo: String,
 ) -> Result<crate::session_manager::SessionRecord, String> {
+    use crate::core::provisioning_stage::{ProvisioningStage, emit};
     use crate::session_manager::ManagedSessionState;
 
     // Pre-flight reconnect check (#1707): if an Active managed session with the
@@ -460,6 +491,9 @@ async fn spawn_managed_inproject(
     let fw = crate::core::paths::FrameworkPaths::default();
     prepare_inproject_session(&fw, session_id, &worktree, &synthetic_repo_url);
 
+    // #1919: mirrors `spawn_managed_cloned`'s placement — announce the tmux
+    // stage right before the record (and its tmux session name) is created.
+    emit(ProvisioningStage::CreatingTmuxSession);
     let mgr = state.session_manager().await;
     let record = mgr
         .create_with_id(
@@ -500,6 +534,7 @@ async fn spawn_managed_inproject(
         warn!(id = %session_id, "spawn_managed (inproject): set_workspace failed: {e}");
     }
 
+    emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
     let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc);
     if let Err(e) = adapter.spawn(&record.tmux_name, &worktree, &params.task) {
@@ -520,6 +555,7 @@ async fn spawn_managed_inproject(
         );
     }
 
+    emit(ProvisioningStage::Complete);
     Ok(mgr.get(&record.id).await.unwrap_or(record))
 }
 
@@ -597,6 +633,8 @@ async fn spawn_managed_local(
     params: &SpawnParams,
     runtime: RuntimeKind,
 ) -> Result<SessionRecord, String> {
+    use crate::core::provisioning_stage::{ProvisioningStage, emit};
+
     let local_dir = std::path::PathBuf::from(&params.repo_url);
 
     // Step 0 (#1590): managed-path redirect.
@@ -653,6 +691,10 @@ async fn spawn_managed_local(
         "spawn_managed: local-path redirected to managed clone (#1590)"
     );
 
+    // #1919: mirrors `spawn_managed_cloned`'s placement — the clone/prepare
+    // stages above already fired inside `provision_in`; announce the tmux
+    // stage right before the record (and its tmux session name) is created.
+    emit(ProvisioningStage::CreatingTmuxSession);
     let mgr = state.session_manager().await;
     let record = mgr
         .create_with_id(
@@ -694,6 +736,7 @@ async fn spawn_managed_local(
         warn!(id = %record.id, "spawn_managed (local→managed): set_workspace failed: {e}");
     }
 
+    emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
     let adapter = build_adapter(record.runtime, tmux_arc);
     if let Err(e) = adapter.spawn(&record.tmux_name, &workspace, &params.task) {
@@ -715,6 +758,7 @@ async fn spawn_managed_local(
         );
     }
 
+    emit(ProvisioningStage::Complete);
     Ok(mgr.get(&record.id).await.unwrap_or(record))
 }
 
@@ -1032,6 +1076,76 @@ mod tests {
             content.contains("statusLine"),
             "prepared worktree settings.json must carry the statusLine key \
              (the #1913 symptom); got: {content}"
+        );
+    }
+
+    /// #1919 regression guard: [`spawn_managed_inproject`]'s call tree —
+    /// specifically [`prepare_inproject_session`] → `prepare_session_with_repo_url`
+    /// → `prepare_session_inner` — must emit its `DeployingAgents`/
+    /// `DeployingSkills`/`BuildingInstructions`/`ConfiguringMcp` stage events
+    /// when a [`crate::core::provisioning_stage::StageEmitter`] scope is
+    /// active. Before #1919, `spawn_managed`'s `is_local_workdir` branch
+    /// (which routes to `spawn_managed_inproject`) returned BEFORE the scope
+    /// was ever installed, so these `emit(...)` calls fired into the void for
+    /// every in-project spawn — the dominant path since #1916.
+    ///
+    /// Why hermetic: same rationale as
+    /// `prepare_inproject_session_writes_statusline` above —
+    /// `spawn_managed_inproject` needs a live `DaemonState`/tmux/git worktree
+    /// the crate's test suite deliberately avoids driving end-to-end, but
+    /// `prepare_inproject_session` is the one new call #1913 added to that
+    /// function's call tree, and it is independently testable against a
+    /// hermetic `FrameworkPaths::under` tempdir plus a plain temp directory
+    /// standing in for the worktree — mirroring
+    /// `session_launch::tests::prepare_session_emits_stage_events_in_order`,
+    /// which proves the identical emit sites fire correctly on the
+    /// clone-based path.
+    /// What: wraps `prepare_inproject_session` in a `scoped(...)` backed by a
+    /// fresh broadcast channel, drains every event it emitted, and asserts
+    /// the four `session_launch`-owned stages appear, IN ORDER. This is the
+    /// same call path `spawn_managed_inproject` now exercises for real once
+    /// #1919 moved the `StageEmitter` scope up to cover the in-project branch.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn prepare_inproject_session_emits_stage_events_in_order() {
+        use crate::core::provisioning_stage::{ProvisioningStage, StageEmitter, scoped};
+
+        let tmp_home = tempfile::TempDir::new().expect("tmp home");
+        let worktree = tempfile::TempDir::new().expect("tmp worktree");
+        let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+        let session_id = ManagedSessionId::new();
+
+        let (tx, mut rx) = tokio::sync::broadcast::channel(32);
+        let emitter =
+            StageEmitter::new(session_id.to_string(), "https://github.com/owner/repo", tx);
+
+        scoped(emitter, async {
+            prepare_inproject_session(
+                &fw,
+                &session_id,
+                worktree.path(),
+                "https://github.com/owner/repo",
+            );
+        })
+        .await;
+
+        let mut stages = Vec::new();
+        while let Ok(value) = rx.try_recv() {
+            assert_eq!(value["kind"], "provisioning_stage");
+            assert_eq!(value["repo_url"], "https://github.com/owner/repo");
+            stages.push(value["stage"].as_str().unwrap().to_string());
+        }
+
+        assert_eq!(
+            stages,
+            vec![
+                ProvisioningStage::DeployingAgents.wire_name(),
+                ProvisioningStage::DeployingSkills.wire_name(),
+                ProvisioningStage::BuildingInstructions.wire_name(),
+                ProvisioningStage::ConfiguringMcp.wire_name(),
+            ],
+            "prepare_inproject_session's call tree must emit exactly these \
+             four stages, in order, when a StageEmitter scope is active"
         );
     }
 }

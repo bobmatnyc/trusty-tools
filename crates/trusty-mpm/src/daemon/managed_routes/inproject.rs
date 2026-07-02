@@ -241,6 +241,19 @@ pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), Strin
     // succeeds instead of silently falling back to full-clone-per-session.
     migrate_old_layout_aside(base_path)?;
 
+    // Announce the clone stage (issue #1904, #1919). Placed here — after the
+    // idempotent `.git`-exists reuse check above returns early — so the event
+    // fires ONLY on an actual first-run clone, mirroring
+    // `WorkspaceProvisioner::provision_in`'s placement (which always clones,
+    // so it emits unconditionally). This is the exact "tm: first run for X —
+    // cloning into ..., this may take a few minutes…" scenario #1904 set out
+    // to make observable, and #1919 found it was never wired up here. No-op
+    // unless the daemon's `spawn_managed` wrapped this call tree in
+    // `provisioning_stage::scoped` (see that module's doc).
+    crate::core::provisioning_stage::emit(
+        crate::core::provisioning_stage::ProvisioningStage::CloningRepo,
+    );
+
     info!(
         url = %origin_url,
         dest = %base_path.display(),

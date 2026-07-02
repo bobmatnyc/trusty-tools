@@ -373,3 +373,103 @@ fn ensure_worktrees_gitignored_idempotent() {
         "second call must not add a duplicate .worktrees/ entry"
     );
 }
+
+/// #1919 regression guard: [`ensure_base_clone`] must emit a `CloningRepo`
+/// stage event on the actual first-run clone — the exact "tm: first run for
+/// X — cloning into ..." scenario #1904 set out to make observable — and must
+/// NOT re-emit it on a subsequent idempotent call against an already-present
+/// base clone (the reuse path takes the early `Ok(())` return above the emit
+/// site and never runs `git clone` again).
+///
+/// Why: this is the single most important observable gap #1919 identified —
+/// `try_inproject_spawn` (and therefore `ensure_base_clone`) runs from inside
+/// `spawn_managed`'s `is_local_workdir` branch, several layers below any
+/// `emit(...)` call `provision_in` already had; before this fix nothing in
+/// the in-project path announced the clone stage at all.
+/// What: builds a real local source repo (same fixture pattern as
+/// `ensure_base_clone_migrates_old_layout_dir_aside`), calls `ensure_base_clone`
+/// once inside a fresh `provisioning_stage::scoped` (asserting exactly one
+/// `CloningRepo` event, since the base dir does not yet exist), then calls it
+/// again inside a SECOND fresh scope against the now-existing base clone
+/// (asserting ZERO events, proving the reuse path is silent).
+/// Test: this function IS the test.
+#[tokio::test]
+async fn ensure_base_clone_emits_cloning_repo_only_on_fresh_clone() {
+    use crate::core::provisioning_stage::{ProvisioningStage, StageEmitter, scoped};
+
+    // 1. Build a real source repo to clone from (mirrors the fixture used by
+    //    `ensure_base_clone_migrates_old_layout_dir_aside` above).
+    let src = tempfile::TempDir::new().expect("src tmp dir");
+    let src_path = src.path();
+    let init = std::process::Command::new("git")
+        .args(["init", src_path.to_str().expect("src utf8")])
+        .output()
+        .expect("git init src");
+    assert!(init.status.success(), "git init src failed");
+    for (k, v) in [("user.email", "t@example.com"), ("user.name", "T")] {
+        let ok = std::process::Command::new("git")
+            .args(["-C", src_path.to_str().expect("utf8"), "config", k, v])
+            .status()
+            .expect("git config");
+        assert!(ok.success(), "git config {k} failed");
+    }
+    std::fs::write(src_path.join("README"), b"src").expect("write README");
+    let add = std::process::Command::new("git")
+        .args(["-C", src_path.to_str().expect("utf8"), "add", "."])
+        .status()
+        .expect("git add");
+    assert!(add.success(), "git add failed");
+    let commit = std::process::Command::new("git")
+        .args([
+            "-C",
+            src_path.to_str().expect("utf8"),
+            "commit",
+            "-m",
+            "init",
+        ])
+        .status()
+        .expect("git commit");
+    assert!(commit.success(), "git commit failed");
+
+    let parent = tempfile::TempDir::new().expect("parent tmp dir");
+    let base = parent.path().join("owner").join("repo");
+    let url = src_path.to_str().expect("src url utf8").to_string();
+
+    // 2. Fresh clone: exactly one CloningRepo event.
+    let (tx1, mut rx1) = tokio::sync::broadcast::channel(8);
+    let emitter1 = StageEmitter::new("s-1", "https://example.com/owner/repo", tx1);
+    let base_for_clone = base.clone();
+    let url_for_clone = url.clone();
+    scoped(emitter1, async move {
+        ensure_base_clone(&url_for_clone, &base_for_clone)
+            .expect("first ensure_base_clone must succeed (fresh clone)");
+    })
+    .await;
+
+    let mut stages1 = Vec::new();
+    while let Ok(value) = rx1.try_recv() {
+        stages1.push(value["stage"].as_str().unwrap().to_string());
+    }
+    assert_eq!(
+        stages1,
+        vec![ProvisioningStage::CloningRepo.wire_name()],
+        "a fresh base clone must emit exactly one CloningRepo stage event"
+    );
+
+    // 3. Idempotent reuse: zero events (the base clone already exists).
+    let (tx2, mut rx2) = tokio::sync::broadcast::channel(8);
+    let emitter2 = StageEmitter::new("s-2", "https://example.com/owner/repo", tx2);
+    scoped(emitter2, async move {
+        ensure_base_clone(&url, &base).expect("second ensure_base_clone must succeed (reuse)");
+    })
+    .await;
+
+    let mut stages2 = Vec::new();
+    while let Ok(value) = rx2.try_recv() {
+        stages2.push(value["stage"].as_str().unwrap().to_string());
+    }
+    assert!(
+        stages2.is_empty(),
+        "reusing an existing base clone must NOT re-emit CloningRepo, got: {stages2:?}"
+    );
+}
