@@ -380,11 +380,24 @@ pub fn write_task_md(workspace: &std::path::Path, task: &str, session_id: &Manag
 /// sessions for the same project, and sets `workspace_owned = false` (the
 /// worktree is inside the base clone dir, which the operator should manage; the
 /// session does NOT own it for decommission purposes).
-/// What: in order — (1) creates the tmux session rooted at the worktree via
-/// `create_with_id`; (2) writes `TASK.md` into the worktree; (3) sets `source_id`
-/// via `set_source_id`; (4) runs the FRONT gate (fail-open); (5) marks `Active`;
-/// (6) spawns the runtime. A spawn failure marks the record errored (non-fatal).
-/// Test: covered transitively by the in-project spawn integration tests.
+///
+/// #1913: unlike `spawn_managed`'s clone path and `spawn_managed_local`, this
+/// path does not go through `WorkspaceProvisioner::provision_in` (there is no
+/// clone step — the worktree already exists via `try_inproject_spawn`), so it
+/// must call [`crate::core::session_launch::prepare_session_with_repo_url`]
+/// itself. Before this fix it never did, so every in-project session silently
+/// got no statusline, no deployed agents/skills, no injected trusty-memory/
+/// trusty-search MCP config, and no merged CLAUDE.md.
+/// What: in order — (1) writes `TASK.md` into the worktree; (2) runs
+/// [`prepare_inproject_session`] (best-effort, mirrors `provision_in`'s
+/// non-fatal error handling); (3) creates the tmux session rooted at the
+/// worktree via `create_with_id`; (4) sets `source_id` via `set_source_id`;
+/// (5) runs the FRONT gate (fail-open); (6) marks `Active`; (7) spawns the
+/// runtime. A spawn failure marks the record errored (non-fatal).
+/// Test: covered transitively by the in-project spawn integration tests;
+/// `prepare_inproject_session_writes_statusline` in this module's `tests`
+/// submodule exercises the new prep-call in isolation (hermetic — no daemon,
+/// tmux, or git required).
 async fn spawn_managed_inproject(
     state: &std::sync::Arc<crate::daemon::state::DaemonState>,
     session_id: &crate::session_manager::ManagedSessionId,
@@ -429,7 +442,6 @@ async fn spawn_managed_inproject(
 
     write_task_md(&worktree, &params.task, session_id);
 
-    let mgr = state.session_manager().await;
     // Pass a canonical GitHub HTTPS URL as repo_url so the session-manager can
     // derive the project name (`tmpm-<repo>-<8hex>`) for the tmux session name
     // (issue #1789). Using a synthetic HTTPS URL is safe: `parse_github_path`
@@ -437,8 +449,18 @@ async fn spawn_managed_inproject(
     // this URL is the real origin of the base clone (it was derived from the
     // operator's local `remote.origin.url`). The record stores it as `repo_url`
     // which gives `tm sessions ls` useful project context even for in-project
-    // sessions that did not clone a fresh workspace.
+    // sessions that did not clone a fresh workspace. It also doubles as the
+    // `repo_url` threaded into `prepare_inproject_session` below, for the same
+    // trusty-memory palace-pinning reason `provision_in` threads its `repo_url`.
     let synthetic_repo_url = format!("https://github.com/{owner}/{repo}");
+
+    // Prepare the session BEFORE spawning the runtime (#1913). See the
+    // function-level doc for why this call is required here specifically (no
+    // clone step wraps it, unlike the other two spawn paths).
+    let fw = crate::core::paths::FrameworkPaths::default();
+    prepare_inproject_session(&fw, session_id, &worktree, &synthetic_repo_url);
+
+    let mgr = state.session_manager().await;
     let record = mgr
         .create_with_id(
             *session_id,
@@ -499,6 +521,48 @@ async fn spawn_managed_inproject(
     }
 
     Ok(mgr.get(&record.id).await.unwrap_or(record))
+}
+
+/// Run the session-preparation pipeline for an in-project worktree, logging
+/// (never propagating) any failure.
+///
+/// Why (#1913): [`spawn_managed_inproject`] has no clone step to wrap this call
+/// in — unlike `spawn_managed`'s clone branch and `spawn_managed_local`, which
+/// both get preparation "for free" as part of `WorkspaceProvisioner::provision_in`
+/// — so it must invoke [`crate::core::session_launch::prepare_session_with_repo_url`]
+/// directly. Extracted to a named, `fw`-parameterised function (rather than
+/// inlined) so it is unit-testable against a hermetic [`crate::core::paths::FrameworkPaths::under`]
+/// tempdir without touching the operator's real `~/.trusty-mpm`/`~/.claude`.
+/// What: calls `prepare_session_with_repo_url(fw, worktree, Some(repo_url))`.
+/// On success, logs the deployed-agent count. On failure, logs a `tracing::warn!`
+/// and returns — mirroring `WorkspaceProvisioner::provision_in`'s non-fatal
+/// handling of the identical call, so a prep failure never blocks the session
+/// from spawning.
+/// Test: `prepare_inproject_session_writes_statusline` in this module's `tests`
+/// submodule.
+fn prepare_inproject_session(
+    fw: &crate::core::paths::FrameworkPaths,
+    session_id: &ManagedSessionId,
+    worktree: &std::path::Path,
+    repo_url: &str,
+) {
+    match crate::core::session_launch::prepare_session_with_repo_url(fw, worktree, Some(repo_url)) {
+        Ok(report) => {
+            info!(
+                id = %session_id,
+                deployed = report.deploy.deployed.len(),
+                worktree = %worktree.display(),
+                "spawn_managed (inproject): session prepared"
+            );
+        }
+        Err(e) => {
+            warn!(
+                id = %session_id,
+                worktree = %worktree.display(),
+                "spawn_managed (inproject): session prep failed (non-fatal): {e}"
+            );
+        }
+    }
 }
 
 /// Spawn a managed session rooted at a local directory, redirecting to a managed
@@ -845,8 +909,21 @@ impl From<ManagedError> for ResumeManagedError {
 /// [`ResumeManagedError`] (`NotFound`/`InvalidState`/`Other`). It then re-spawns
 /// the SAME runtime backend in the fresh tmux session (no re-clone) and returns
 /// the final record.
+///
+/// #1913 self-heal: sessions spawned via the (now-fixed) in-project worktree
+/// path before this fix landed never ran `prepare_session` at all, so their
+/// workspace may be permanently missing the `statusLine` config key. Every
+/// resume defensively re-applies [`crate::core::session_launch::ensure_status_line`]
+/// — the ONE prep step confirmed idempotent/non-clobbering by its own doc
+/// comment — so such a session self-heals the next time it is resumed. The
+/// broader prep pipeline (agent/skill redeploy, CLAUDE.md merge, MCP injection)
+/// is intentionally NOT re-run here: those steps are not all confirmed safe to
+/// repeat against an already-running workspace, so re-running them on every
+/// resume risks a different class of bug for a narrower payoff.
 /// Test: covered by the HTTP `resume_managed_session` tests and the MCP
-/// `session_resume_unknown_id_errors` test.
+/// `session_resume_unknown_id_errors` test;
+/// `resume_managed_backfills_missing_status_line` in
+/// `tests/session_manager_mvp.rs` covers the self-heal call added here.
 pub async fn resume_managed(
     state: &Arc<DaemonState>,
     id: &ManagedSessionId,
@@ -858,6 +935,15 @@ pub async fn resume_managed(
         .workspace_path
         .clone()
         .unwrap_or_else(|| record.cwd.clone());
+
+    // Defensive self-heal (#1913): best-effort, never blocks the resume.
+    if let Err(e) = crate::core::session_launch::ensure_status_line(&workspace) {
+        warn!(
+            id = %record.id,
+            "resume_managed: statusline self-heal failed (non-fatal): {e}"
+        );
+    }
+
     let tmux_arc = mgr.tmux_driver();
     let adapter = build_adapter(record.runtime, tmux_arc);
     // #1744: prefer --resume <id> when a claude_session_id was captured at
@@ -889,4 +975,60 @@ pub async fn resume_managed(
     }
 
     Ok(mgr.get(id).await.unwrap_or(record))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #1913 regression guard: [`prepare_inproject_session`] — the call this fix
+    /// adds to [`spawn_managed_inproject`] BEFORE `adapter.spawn` — must actually
+    /// run the preparation pipeline and land its most visible symptom (the
+    /// reported bug): the `statusLine` key in `<worktree>/.claude/settings.json`.
+    ///
+    /// Why hermetic: `spawn_managed_inproject` itself needs a live `DaemonState`
+    /// (tmux driver, session store) plus a real git worktree from
+    /// `try_inproject_spawn`, which the crate's existing test suite deliberately
+    /// avoids driving end-to-end (see `handler_spawn_wires_provision_and_spawn`'s
+    /// comment in `tests/session_manager_mvp.rs` — replicating handler steps
+    /// rather than calling the private handler). `prepare_inproject_session` was
+    /// extracted specifically so the ONE new call this fix adds is independently
+    /// testable: point `FrameworkPaths::under` at a tempdir (never the operator's
+    /// real `~/.trusty-mpm`/`~/.claude`) and call it directly against a plain
+    /// temp directory standing in for the worktree — no daemon, tmux, or git
+    /// required, matching how `session_launch::tests` already exercises
+    /// `prepare_session*` hermetically.
+    /// What: calls `prepare_inproject_session` with a hermetic `fw` and a fresh
+    /// temp "worktree" dir, then asserts `<worktree>/.claude/settings.json`
+    /// exists and contains `"statusLine"` — proving the prep pipeline actually
+    /// ran (before this fix, nothing in `spawn_managed_inproject` ever wrote
+    /// this file).
+    /// Test: this function IS the test.
+    #[test]
+    fn prepare_inproject_session_writes_statusline() {
+        let tmp_home = tempfile::TempDir::new().expect("tmp home");
+        let worktree = tempfile::TempDir::new().expect("tmp worktree");
+        let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+        let session_id = ManagedSessionId::new();
+
+        prepare_inproject_session(
+            &fw,
+            &session_id,
+            worktree.path(),
+            "https://github.com/owner/repo",
+        );
+
+        let settings_path = worktree.path().join(".claude").join("settings.json");
+        let content = std::fs::read_to_string(&settings_path).unwrap_or_else(|e| {
+            panic!(
+                "prepare_inproject_session must write {}: {e}",
+                settings_path.display()
+            )
+        });
+        assert!(
+            content.contains("statusLine"),
+            "prepared worktree settings.json must carry the statusLine key \
+             (the #1913 symptom); got: {content}"
+        );
+    }
 }
