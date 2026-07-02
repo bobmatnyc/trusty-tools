@@ -38,6 +38,17 @@ can resolve a changed file back to the section that governs it.
 | DOC-27 | `SPEC-MCPSVC-01~draft` … `-07~draft` | [trusty-mcp-service — Unified Native Sidecar Services via MCP-A](./SPEC-MCPSVC-01-trusty-mcp-service.md) | trusty-mcp-service (new) — gworkspace / slack / telegram domains / MCP-A gateway |
 | DOC-28 | `SPEC-SELFAWARE-01~draft` … `-04~draft` | [trusty-mpm Self-Awareness and Instruction-Load Verification](./trusty-mpm-self-awareness.md) | trusty-mpm — identity / instruction pipeline; trusty-memory — prompt-facts |
 | DOC-29 | `SPEC-MPM-BEHAVIOR-01~draft` … `-06~draft` | [Primary trusty-mpm Harness Behaviors — Conformance Matrix](./mpm-behavior-conformance.md) | trusty-mpm — behavior conformance / cross-spec verification |
+| DOC-30 | `SPEC-PM-01~draft` | [Project Manager: Vision & Lifecycle Orchestrator](./DOC-30-project-manager-vision.md) | trusty-mpm — project-level orchestration / user-facing surface |
+| DOC-31 | `SPEC-PROVISION-01~draft` … `-08~draft` | [SYSTEM vs PROJECT Agents & Skills — Provisioning, In-Project Migration, Requirement-Driven Pulls](./system-project-agents-skills.md) | trusty-mpm — content provisioning / agent + skill deploy pipeline |
+
+> **Catalog note — `DOC-28` self-label collision (uncataloged spec).** The file
+> [`mpm-cutover-resume-native-optimization.md`](./mpm-cutover-resume-native-optimization.md)
+> self-labels its header as **`DOC-28`**, which collides with the canonical DOC-28
+> ([trusty-mpm Self-Awareness](./trusty-mpm-self-awareness.md), the entry above). That
+> file is **not** in this catalog. The collision is flagged here rather than resolved by
+> renumbering the file in-place (its self-label and any inbound references are left
+> untouched); a follow-up should assign it the next free `DOC-N` (currently **DOC-32**)
+> and add a catalog row.
 
 ## Status lifecycle
 
