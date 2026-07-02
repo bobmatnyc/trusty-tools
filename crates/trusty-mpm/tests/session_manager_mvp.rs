@@ -886,6 +886,84 @@ async fn resume_managed_backfills_missing_status_line() {
     );
 }
 
+/// #1914 self-heal: `resume_managed` must also upgrade a STALE bare
+/// `tm statusline` command already on disk to an absolute path, not just
+/// backfill a missing key.
+///
+/// Why: a workspace prepared by a pre-#1914 build wrote the literal bare
+/// string `"tm statusline"`, which silently fails to render under a minimal
+/// `PATH` (e.g. launchd, Claude Code's own spawn environment). This extends
+/// the SAME resume self-heal entry point `resume_managed_backfills_missing_status_line`
+/// exercises (`ensure_status_line` → `write_status_line`) rather than adding a
+/// second hook, so both self-heal concerns land through one code path.
+/// What: seeds a workspace whose `.claude/settings.json` already has the exact
+/// pre-#1914 bare `statusLine.command`, resumes it, and asserts the on-disk
+/// command is no longer the bare literal (it now carries a `/`, i.e. an
+/// absolute path).
+/// Test: this function IS the test.
+#[tokio::test]
+async fn resume_managed_heals_stale_bare_status_line_command() {
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+
+    let id = ResumeSessionId::new();
+    let ws = root.path().join(format!("{id}-stale-heal-ws"));
+    let claude_dir = ws.join(".claude");
+    std::fs::create_dir_all(&claude_dir).expect("create .claude dir");
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        serde_json::json!({
+            "statusLine": {"type": "command", "command": "tm statusline", "padding": 0}
+        })
+        .to_string(),
+    )
+    .expect("seed pre-#1914 bare statusLine");
+
+    let _seeded = mgr
+        .create_with_id(
+            id,
+            "regression: stale bare statusline self-heal on resume".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws.clone()),
+            Some("https://github.com/owner/repo".to_string()),
+            Some("main".to_string()),
+            ResumeRuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session");
+
+    mgr.stop(&id).await.expect("stop");
+    let _ = resume_managed(&state, &id).await;
+
+    let settings_path = claude_dir.join("settings.json");
+    let content = std::fs::read_to_string(&settings_path).unwrap_or_else(|e| {
+        panic!(
+            "resume_managed must rewrite {}: {e}",
+            settings_path.display()
+        )
+    });
+    let value: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+    let command = value["statusLine"]["command"]
+        .as_str()
+        .expect("statusLine.command is a string");
+    assert_ne!(
+        command, "tm statusline",
+        "the stale bare command must be upgraded, not left as-is; got: {content}"
+    );
+    assert!(
+        command.contains('/'),
+        "the healed command must resolve to an absolute path; got: {command}"
+    );
+    assert!(
+        command.ends_with(" statusline"),
+        "the healed command must still invoke the statusline subcommand; got: {command}"
+    );
+}
+
 /// FRONT gate (#1360, AC-15): the withheld spawn launches after human approval.
 ///
 /// Why: a session escalated by the FRONT gate sits in `Provisioning` with no
