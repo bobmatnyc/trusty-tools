@@ -140,6 +140,33 @@ pub fn prepare_session_with_repo_url(
     prepare_session_inner(fw, project_dir, None, native, repo_url)
 }
 
+/// Defensively (re)write the `tm statusline` config for an EXISTING session
+/// workspace, without re-running the full preparation pipeline.
+///
+/// Why (issue #1913): sessions spawned via the pre-fix in-project worktree path
+/// never ran [`prepare_session_with_repo_url`] at all, so their on-disk
+/// `.claude/settings.json` may be permanently missing the `statusLine` key, and
+/// nothing else in the launch path ever backfills it. Re-running the FULL prep
+/// pipeline (agent/skill redeploy, CLAUDE.md merge, MCP injection) on every
+/// resume is riskier than necessary here — those steps are not all confirmed
+/// idempotent under a resumed (not freshly-provisioned) workspace — so this
+/// exposes ONLY the one step `write_status_line` itself documents as safe to
+/// call unconditionally (it never clobbers an existing key). The resume path
+/// calls this defensively so a session stuck in the pre-#1913 broken state
+/// self-heals the next time it is resumed, without the broader blast radius of
+/// a full re-prep.
+/// What: thin `pub` wrapper over `settings::write_status_line` (`pub(super)`,
+/// so not directly reachable from `crate::daemon::managed_routes`). Delegates
+/// verbatim — no additional logic.
+/// Test: the underlying idempotency guarantee is covered by
+/// `write_status_line_injects_when_absent` / `write_status_line_skips_when_already_set`
+/// / `write_status_line_preserves_user_config` in this module's test file;
+/// `resume_managed_backfills_missing_status_line` in
+/// `tests/session_manager_mvp.rs` covers the `resume_managed` call site.
+pub fn ensure_status_line(project_dir: &Path) -> Result<(), PrepError> {
+    settings::write_status_line(project_dir)
+}
+
 /// Prepare a session, selecting an explicit output style (HR-4).
 ///
 /// Why: `tm launch --style <id>` lets the operator override the configured

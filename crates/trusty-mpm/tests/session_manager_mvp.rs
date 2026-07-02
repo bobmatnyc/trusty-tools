@@ -809,6 +809,83 @@ async fn resume_managed_typed_invalid_state_is_conflict() {
     );
 }
 
+/// #1913 self-heal: `resume_managed` must backfill a missing `statusLine` key
+/// in a resumed session's workspace, even though the workspace was never
+/// prepared by `prepare_session*` in the first place.
+///
+/// Why: sessions spawned via the (pre-#1913) broken in-project worktree path
+/// never ran the prep pipeline at all, so their `.claude/settings.json` is
+/// permanently missing `statusLine` — and nothing else in the launch path
+/// would ever add it. `resume_managed` now defensively calls
+/// `ensure_status_line` on every resume so such a session self-heals the next
+/// time an operator resumes it, without re-running the (heavier, not fully
+/// idempotent) full prep pipeline.
+/// What: seeds a session whose `workspace_path` is a real temp directory with
+/// NO `.claude/settings.json` (simulating the pre-fix broken state), stops it
+/// (`Stopped` is resumable), calls `resume_managed`, and asserts
+/// `<workspace>/.claude/settings.json` now exists and contains `"statusLine"`.
+/// The runtime adapter spawn itself is allowed to fail in CI (no real
+/// `tmux`/`claude` binary) — `resume_managed` never propagates that failure —
+/// so this test only asserts on the self-heal side effect, not the spawn
+/// outcome.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn resume_managed_backfills_missing_status_line() {
+    // Hermetic framework root with FakeNoopTmuxDriver — no real tmux sessions
+    // are created, so nothing can escape into the production store (#1790).
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+
+    let id = ResumeSessionId::new();
+    let ws = root.path().join(format!("{id}-selfheal-ws"));
+    std::fs::create_dir_all(&ws).expect("create workspace dir");
+
+    // Precondition: no `.claude/settings.json` at all — the exact pre-#1913
+    // broken state (never prepared).
+    let settings_path = ws.join(".claude").join("settings.json");
+    assert!(
+        !settings_path.exists(),
+        "precondition: workspace must start with no settings.json"
+    );
+
+    let _seeded = mgr
+        .create_with_id(
+            id,
+            "regression: statusline self-heal on resume".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws.clone()),
+            Some("https://github.com/owner/repo".to_string()),
+            Some("main".to_string()),
+            ResumeRuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session");
+
+    // Stop first — resume is only valid from Stopped/Errored.
+    mgr.stop(&id).await.expect("stop");
+
+    // `resume_managed` never propagates a runtime-adapter spawn failure (CI has
+    // no real tmux/claude binary), so we don't assert on its Ok/Err — only on
+    // the self-heal side effect, which must land regardless of spawn outcome.
+    let _ = resume_managed(&state, &id).await;
+
+    let content = std::fs::read_to_string(&settings_path).unwrap_or_else(|e| {
+        panic!(
+            "resume_managed must backfill {}: {e}",
+            settings_path.display()
+        )
+    });
+    assert!(
+        content.contains("statusLine"),
+        "resumed workspace settings.json must carry the statusLine key \
+         (the #1913 self-heal); got: {content}"
+    );
+}
+
 /// FRONT gate (#1360, AC-15): the withheld spawn launches after human approval.
 ///
 /// Why: a session escalated by the FRONT gate sits in `Provisioning` with no
