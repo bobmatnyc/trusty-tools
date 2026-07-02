@@ -198,6 +198,37 @@ impl FrameworkPaths {
         paths
     }
 
+    /// Resolve the framework layout for a DAEMON-provisioned managed session
+    /// workspace (clone-based or in-project worktree), targeting the
+    /// project-local `.claude/` deploy destination.
+    ///
+    /// Why (issue #1931, follow-up to #1927/#1930): #1930 fixed the
+    /// **standalone** `tm register/load/run` driver (`core::standalone::load`)
+    /// to deploy project-locally via [`for_managed_project`](Self::for_managed_project),
+    /// but the **daemon**'s own managed-spawn code paths — the ones bare `tm`,
+    /// `tm launch`, and `tm session new` actually exercise — were never
+    /// updated and kept calling [`default`](Self::default), which resolves
+    /// `claude_agents`/`claude_skills` under the REAL `$HOME/.claude`. Since
+    /// the harness cwd for a managed session is the provisioned workspace or
+    /// worktree (never the real home), every managed spawn silently deployed
+    /// agents/skills somewhere Claude Code's project-skill discovery would
+    /// never look, so `/tm-*` slash commands were invisible in the spawned
+    /// session. The daemon always resolves its framework root the same way —
+    /// home-relative, with no `--root`/`TRUSTY_MPM_ROOT` override support
+    /// (unlike the standalone driver) — so this constructor hard-codes
+    /// [`default`](Self::default)`().root` as the `managed_root` input to
+    /// [`for_managed_project`](Self::for_managed_project) rather than
+    /// requiring every daemon call site to compute and pass it.
+    /// What: `Self::for_managed_project(Self::default().root, workspace_dir)`
+    /// — framework SOURCE paths still resolve from the shared `~/.trusty-mpm`
+    /// install; only the deploy destination moves to
+    /// `<workspace_dir>/.claude/{agents,skills}`.
+    /// Test: `for_managed_workspace_targets_workspace_local_claude_dirs`,
+    /// `for_managed_workspace_keeps_framework_source_at_default_root`.
+    pub fn for_managed_workspace(workspace_dir: impl AsRef<Path>) -> Self {
+        Self::for_managed_project(Self::default().root, workspace_dir)
+    }
+
     /// Path of the token-optimizer policy file (`hooks/optimizer.toml`).
     ///
     /// Why: the daemon reads this at startup and on file-change to build its
@@ -507,6 +538,52 @@ mod tests {
         // Only the deploy destinations diverge.
         assert_ne!(managed_project.claude_agents, from_root.claude_agents);
         assert_ne!(managed_project.claude_skills, from_root.claude_skills);
+    }
+
+    // Issue #1931: the daemon's managed-spawn deploy destination must be the
+    // provisioned workspace/worktree directory, never the real home — mirrors
+    // `for_managed_project_targets_project_local_claude_dirs` but exercises
+    // the daemon-facing convenience constructor instead of the standalone one.
+    #[test]
+    fn for_managed_workspace_targets_workspace_local_claude_dirs() {
+        let paths = FrameworkPaths::for_managed_workspace("/some/workspace/or/worktree");
+        assert_eq!(
+            paths.claude_agents_dir(),
+            PathBuf::from("/some/workspace/or/worktree/.claude/agents"),
+            "agents must deploy under the workspace dir, not the real home"
+        );
+        assert_eq!(
+            paths.claude_skills_dir(),
+            PathBuf::from("/some/workspace/or/worktree/.claude/skills"),
+            "skills must deploy under the workspace dir, not the real home"
+        );
+        assert_eq!(
+            paths.claude_home_dir(),
+            PathBuf::from("/some/workspace/or/worktree"),
+            "claude_home_dir() must follow the overridden claude_agents base"
+        );
+    }
+
+    // Issue #1931: only the deploy DESTINATION moves workspace-local — the
+    // framework SOURCE paths must keep resolving from `FrameworkPaths::default()`'s
+    // root (the daemon's single home-relative framework install), matching
+    // `for_managed_project_keeps_framework_source_at_managed_root`'s guarantee
+    // for the sibling standalone constructor.
+    #[test]
+    fn for_managed_workspace_keeps_framework_source_at_default_root() {
+        let default_paths = FrameworkPaths::default();
+        let workspace_paths = FrameworkPaths::for_managed_workspace("/some/workspace");
+
+        assert_eq!(workspace_paths.root, default_paths.root);
+        assert_eq!(workspace_paths.agents, default_paths.agents);
+        assert_eq!(workspace_paths.skills, default_paths.skills);
+        assert_eq!(workspace_paths.hooks, default_paths.hooks);
+        assert_eq!(workspace_paths.instructions, default_paths.instructions);
+        assert_eq!(workspace_paths.registry, default_paths.registry);
+
+        // Only the deploy destinations diverge from the real-home default.
+        assert_ne!(workspace_paths.claude_agents, default_paths.claude_agents);
+        assert_ne!(workspace_paths.claude_skills, default_paths.claude_skills);
     }
 
     #[test]
