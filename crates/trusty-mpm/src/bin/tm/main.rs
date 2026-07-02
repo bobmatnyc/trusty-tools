@@ -189,6 +189,20 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // #1905: one-time migration removing stale pre-rename `mpm-*` skill
+    // directories left over from the mpm-*→tm-* skill rename. Gated on a
+    // marker file (`~/.trusty-mpm/migrations.json`) so it does real work at
+    // most once per machine, then becomes a single cheap file read on every
+    // later `tm` invocation — this is deliberately NOT a permanent
+    // `tm doctor` check (see `core::doctor::run_doctor`'s doc comment).
+    {
+        let paths = trusty_mpm::core::paths::FrameworkPaths::default();
+        trusty_mpm::core::stale_skills::run_stale_mpm_skills_migration_once(
+            &paths.root,
+            &paths.claude_skills_dir(),
+        );
+    }
+
     let client = reqwest::Client::new();
     // Resolve the daemon URL once with gateway-first probing:
     //   1. Explicit --url/TRUSTY_MPM_URL that is non-empty AND not equal to

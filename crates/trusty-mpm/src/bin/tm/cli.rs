@@ -120,19 +120,24 @@ pub(crate) enum Command {
     Events,
     /// Run a full system diagnostic of the trusty-mpm stack.
     Doctor {
-        /// Remove stale pre-rename `~/.claude/skills/mpm-*` directories.
+        /// Hidden manual escape hatch: force-remove stale pre-rename
+        /// `~/.claude/skills/mpm-*` directories.
         ///
         /// Why: the mpm-*→tm-* skill rename (#1905) left orphaned `mpm-*`
         /// skill directories deployed before the rename in place —
         /// `skill_deployer::deploy_skills` never deletes a skill's old
-        /// directory when it is renamed. The default `tm doctor` run only
-        /// reports these via the `stale_skills` check; this flag is the
-        /// explicit opt-in to actually remove them.
+        /// directory when it is renamed. Normally this is cleaned up
+        /// automatically and silently by the one-time
+        /// [`trusty_mpm::core::stale_skills::run_stale_mpm_skills_migration_once`]
+        /// migration on `tm` startup, so this flag exists only as a manual
+        /// troubleshooting hatch (e.g. re-running after the migration marker
+        /// was somehow cleared) — hidden from `--help` because it is not
+        /// part of normal operation.
         /// What: after printing the diagnostic report, scans
         /// `~/.claude/skills/` for trusty-mpm's own frozen pre-rename skill
         /// names (never an unrelated `mpm-*` skill from another tool) and
         /// deletes each one found, printing what was removed.
-        #[arg(long)]
+        #[arg(long, hide = true)]
         prune_stale_skills: bool,
     },
     /// Report daemon health: reachability, catalog freshness, and a fleet summary.

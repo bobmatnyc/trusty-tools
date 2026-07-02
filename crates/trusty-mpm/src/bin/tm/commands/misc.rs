@@ -115,10 +115,12 @@ pub(crate) async fn events(client: &reqwest::Client, url: &str) -> anyhow::Resul
 /// What: runs [`TrustyCommand::Doctor`] through the shared [`CommandExecutor`]
 /// (which calls `GET /api/v1/doctor`), then prints one status-tagged line per
 /// check plus an overall verdict. An unreachable daemon prints an error line.
-/// When `prune_stale_skills` is set, also runs
-/// [`prune_stale_skills_locally`] to remove pre-rename `mpm-*` skill
-/// directories the `stale_skills` check reported (#1905) — this step is
-/// local-filesystem only and independent of the daemon report above.
+/// When `prune_stale_skills` is set (hidden `--prune-stale-skills` flag),
+/// also runs [`prune_stale_skills_locally`] as a manual troubleshooting
+/// escape hatch — normal operation cleans up pre-rename `mpm-*` skill
+/// directories automatically and silently via the one-time
+/// `core::stale_skills::run_stale_mpm_skills_migration_once` migration at
+/// `tm` startup (#1905), so this flag should rarely be needed.
 /// Test: `cli_parses_doctor` / `cli_parses_doctor_prune_stale_skills` cover
 /// parsing; the report path is covered by the executor's
 /// `execute_doctor_against_test_daemon` test; the prune path is covered by
@@ -160,15 +162,19 @@ pub(crate) async fn doctor(url: &str, prune_stale_skills: bool) -> anyhow::Resul
     Ok(())
 }
 
-/// `--prune-stale-skills` action — remove pre-rename `~/.claude/skills/mpm-*`
-/// directories.
+/// Hidden `--prune-stale-skills` action — force-remove pre-rename
+/// `~/.claude/skills/mpm-*` directories.
 ///
 /// Why: the mpm-*→tm-* skill rename (#1905) never deletes a skill's old
 /// directory when it is renamed (`skill_deployer::deploy_skills` only writes,
-/// never removes), so those directories linger forever unless an operator
-/// explicitly opts in to clean them up. This runs entirely against the local
-/// filesystem — like `tm install` and `tm repair` — independent of where the
-/// daemon (whose report is printed above) happens to be reachable.
+/// never removes). In normal operation this is handled automatically and
+/// silently by the one-time startup migration
+/// (`core::stale_skills::run_stale_mpm_skills_migration_once`); this hidden
+/// flag exists only as a manual escape hatch for troubleshooting (e.g. the
+/// migration marker file was lost or hand-edited). This runs entirely
+/// against the local filesystem — like `tm install` and `tm repair` —
+/// independent of where the daemon (whose report is printed above) happens
+/// to be reachable.
 /// What: resolves `~/.claude/skills/` via [`FrameworkPaths::default`], calls
 /// [`find_stale_mpm_skills`] to list only trusty-mpm's own frozen pre-rename
 /// skill names (never an unrelated `mpm-*` skill from another tool), prints

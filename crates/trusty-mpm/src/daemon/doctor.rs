@@ -31,9 +31,7 @@ use doctor_output_style::check_output_style;
 // tm-skills-portfolio epic — adding check_skill_source pushed it over).
 #[path = "doctor_fs_checks.rs"]
 mod doctor_fs_checks;
-use doctor_fs_checks::{
-    check_agents, check_instructions, check_skill_source, check_skills, check_stale_skills,
-};
+use doctor_fs_checks::{check_agents, check_instructions, check_skill_source, check_skills};
 
 /// Per-probe network timeout.
 ///
@@ -52,15 +50,21 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// probes (the output-style probe closes DOC-28 F4 — the "did the
 /// trusty-mpm instructions actually load" gap), then the memory and search
 /// HTTP probes (each bounded by [`PROBE_TIMEOUT`]), a worktree-orphan scan
-/// (Fix 1b, #1840), the `skill_source` probe (A2, tm-skills-portfolio
-/// epic), and the `stale_skills` probe for leftover pre-rename `mpm-*`
-/// skill directories (#1905) — folding the resulting nine [`DoctorCheck`]s
-/// into a [`DoctorReport`] whose `overall` status is the worst of them.
+/// (Fix 1b, #1840), and the `skill_source` probe (A2, tm-skills-portfolio
+/// epic) — folding the resulting eight [`DoctorCheck`]s into a
+/// [`DoctorReport`] whose `overall` status is the worst of them.
+///
+/// Note (#1905): the mpm-*→tm-* stale-skill cleanup is intentionally NOT a
+/// permanent probe here — it is a one-time migration
+/// ([`crate::core::stale_skills::run_stale_mpm_skills_migration_once`]) run
+/// from `tm`'s startup path instead, so it does real work at most once per
+/// machine rather than nagging on every `tm doctor` invocation forever.
+///
 /// `project_dir` scopes the instruction and output-style probes; `repos_root`
 /// (when `Some`) gives the managed workspace root for the worktree scan;
 /// `active_workspace_paths` is the full set of workspace paths currently
 /// registered to live sessions.
-/// Test: `run_doctor_produces_nine_checks`.
+/// Test: `run_doctor_produces_eight_checks`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
     repos_root: Option<&Path>,
@@ -74,7 +78,6 @@ pub async fn run_doctor(
         check_agents(&paths),
         check_skills(&home),
         check_skill_source(&paths),
-        check_stale_skills(&home),
         check_output_style(project_dir, &home),
     ];
     checks.push(check_memory(&home).await);
@@ -348,11 +351,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_doctor_produces_nine_checks() {
-        // #1905: adds the `stale_skills` probe, bringing the total from
-        // eight to nine checks.
+    async fn run_doctor_produces_eight_checks() {
+        // A2 (tm-skills-portfolio epic): adds the `skill_source` probe,
+        // bringing the total from seven to eight checks. #1905's stale-skill
+        // cleanup is deliberately NOT a `run_doctor` probe — see the
+        // `run_doctor` doc comment — so this count stays at eight.
         let report = run_doctor(None, None, &[]).await;
-        assert_eq!(report.checks.len(), 9);
+        assert_eq!(report.checks.len(), 8);
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -361,7 +366,6 @@ mod tests {
                 "agents",
                 "skills",
                 "skill_source",
-                "stale_skills",
                 "output_style",
                 "memory",
                 "search",
