@@ -525,6 +525,10 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
         "orphan-GC enabled; running startup sweep then periodic reconciliation"
     );
     let mut gc = orphan_gc::OrphanGc::new();
+    // Cross-restart debounce for the PID-file sweep (#1918): owned here (not
+    // reconstructed per-tick) so its two-pass candidate history persists across
+    // sweeps, exactly like `gc` above.
+    let mut pid_gc = crate::core::pid_registry::PidOrphanGc::new();
     let probe = orphan_gc::ProcessTreeProbe;
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
     loop {
@@ -565,15 +569,27 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // tmux-name sweep above. Live session-ids come from BOTH registries;
                 // any recorded PID whose session-id is absent is a candidate, and
                 // the registry SIGTERMs it only after verifying it is still a live
-                // `claude` process (the §13.5 PID-reuse mitigation).
+                // `claude` process (the §13.5 PID-reuse mitigation) AND the
+                // candidate has survived the #1918 restart-safety debounce (`pid_gc`)
+                // — a session-id must be an untracked-alive-claude candidate on TWO
+                // consecutive sweeps before it is actually signalled, so a legacy
+                // session that is alive across a daemon restart (when `self.sessions`
+                // is always empty) gets one full GC interval to be re-learned before
+                // any SIGTERM is sent.
                 let live_ids = state.gather_live_session_ids().await;
-                let pid_outcome = state
-                    .pid_registry()
-                    .sweep_orphans(&live_ids, &crate::core::pid_registry::OsProcessProbe);
-                if pid_outcome.terminated > 0 || pid_outcome.removed_stale > 0 {
+                let pid_outcome = state.pid_registry().sweep_orphans(
+                    &live_ids,
+                    &crate::core::pid_registry::OsProcessProbe,
+                    &mut pid_gc,
+                );
+                if pid_outcome.terminated > 0
+                    || pid_outcome.removed_stale > 0
+                    || pid_outcome.deferred > 0
+                {
                     info!(
                         terminated = pid_outcome.terminated,
                         removed_stale = pid_outcome.removed_stale,
+                        deferred = pid_outcome.deferred,
                         "orphan-GC PID-file sweep cleaned up orphaned claude process(es)"
                     );
                 }
