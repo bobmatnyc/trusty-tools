@@ -1745,8 +1745,16 @@ fn prepare_session_config_style_overrides_manifest() {
 /// Assert `cmd` is `"<absolute-path> statusline"` where the path is exactly
 /// the current test binary's `current_exe()` (#1914: `write_status_line`
 /// prefers `current_exe()` over a bare command).
+///
+/// Why the `canonicalize()` call: `resolve_statusline_binary` canonicalizes
+/// `current_exe()` best-effort (symlink resolution, #1914 review finding 1)
+/// before returning it, so the expected value here must apply the identical
+/// transform — otherwise this assertion would be flaky on any platform where
+/// the test binary's path traverses a symlink (e.g. macOS `/tmp` ->
+/// `/private/tmp`).
 fn assert_resolved_statusline_command(cmd: &str) {
     let exe = std::env::current_exe().expect("current_exe resolvable in test process");
+    let exe = exe.canonicalize().unwrap_or(exe);
     let expected = format!("{} statusline", exe.to_str().expect("utf8 test exe path"));
     assert_eq!(
         cmd, expected,
@@ -1792,11 +1800,20 @@ fn write_status_line_skips_when_already_set() {
 
 #[test]
 fn write_status_line_preserves_user_config() {
-    // Existing keys in settings.json must survive the write_status_line call.
+    // #1914 review finding 3: this test must seed a GENUINELY custom
+    // statusLine.command (not one of the bare defaults write_status_line
+    // itself would have written) so it actually exercises "leave user
+    // customizations alone", rather than the absent-key injection path
+    // covered separately by `write_status_line_injects_when_absent` or the
+    // stale-default heal path covered by `write_status_line_heals_stale_*`.
     let tmp = tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
     std::fs::create_dir_all(&claude_dir).unwrap();
-    let existing = serde_json::json!({"outputStyle": "trusty-mpm-research", "someKey": true});
+    let existing = serde_json::json!({
+        "outputStyle": "trusty-mpm-research",
+        "someKey": true,
+        "statusLine": {"type": "command", "command": "my-custom-statusline", "padding": 2}
+    });
     std::fs::write(
         claude_dir.join("settings.json"),
         serde_json::to_string_pretty(&existing).unwrap(),
@@ -1810,7 +1827,14 @@ fn write_status_line_preserves_user_config() {
         "outputStyle must be preserved"
     );
     assert_eq!(v["someKey"], true, "arbitrary keys must be preserved");
-    assert_resolved_statusline_command(v["statusLine"]["command"].as_str().unwrap());
+    assert_eq!(
+        v["statusLine"]["command"], "my-custom-statusline",
+        "a genuinely custom statusLine.command must never be overwritten"
+    );
+    assert_eq!(
+        v["statusLine"]["padding"], 2,
+        "the rest of a custom statusLine entry must also survive untouched"
+    );
 }
 
 #[test]
@@ -1914,6 +1938,23 @@ fn resolve_statusline_binary_with_falls_back_to_path_lookup() {
         },
     );
     assert_eq!(resolved, "/opt/homebrew/bin/tm");
+}
+
+#[test]
+fn resolve_statusline_binary_with_falls_back_to_trusty_mpm_name() {
+    // #1914 review finding 1: a machine with ONLY `trusty-mpm` on PATH (not
+    // the `tm` alias) must still resolve when current_exe() is unavailable —
+    // a bare single-name "tm" PATH lookup would silently degrade to the bare
+    // literal here, reproducing the exact bug this module fixes.
+    let resolved = resolve_statusline_binary_with(
+        || Err(std::io::Error::other("current_exe unavailable")),
+        |name| match name {
+            "tm" => None,
+            "trusty-mpm" => Some(PathBuf::from("/opt/homebrew/bin/trusty-mpm")),
+            other => panic!("unexpected binary name looked up: {other}"),
+        },
+    );
+    assert_eq!(resolved, "/opt/homebrew/bin/trusty-mpm");
 }
 
 #[test]

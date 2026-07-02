@@ -741,12 +741,32 @@ pub(super) fn write_status_line(project_dir: &Path) -> Result<(), PrepError> {
         }
         Some(existing) if is_stale_bare_statusline_command(existing) => {
             let resolved = resolve_statusline_command();
-            obj.get_mut("statusLine")
+            match obj
+                .get_mut("statusLine")
                 .and_then(serde_json::Value::as_object_mut)
-                .is_some_and(|entry| {
+            {
+                Some(entry) => {
                     entry.insert("command".to_string(), serde_json::json!(resolved));
-                    true
-                })
+                }
+                // Defensive (#1914 review finding 2): `is_stale_bare_statusline_command`
+                // only returns `true` for a `serde_json::Value::Object` with matching
+                // `type`/`command` fields, so `as_object_mut` succeeding here is
+                // expected on every real call. If that invariant is ever violated
+                // (e.g. a future refactor of the match guard), replace the entry
+                // wholesale instead of silently leaving the stale/broken value in
+                // place — a silent no-op would defeat the whole point of the heal.
+                None => {
+                    obj.insert(
+                        "statusLine".to_string(),
+                        serde_json::json!({
+                            "type": "command",
+                            "command": resolved,
+                            "padding": 0
+                        }),
+                    );
+                }
+            }
+            true
         }
         // A genuinely user-customized statusLine — never clobber it.
         Some(_) => false,
@@ -812,24 +832,40 @@ fn resolve_statusline_command() -> String {
     format!("{} statusline", resolve_statusline_binary())
 }
 
+/// The `[[bin]]` names this crate's `Cargo.toml` produces, in fallback order.
+///
+/// Why (#1914 review, trusty-review PR #1925 finding 1): a machine that only
+/// has `trusty-mpm` on `PATH` (not the `tm` alias) must still resolve when
+/// `current_exe()` is unavailable — falling back to a single hardcoded "tm"
+/// PATH lookup reproduced the exact bug this module fixes for that installed
+/// name. Both entries are tried, in order, before degrading to the bare
+/// literal.
+const STATUSLINE_BIN_NAMES: &[&str] = &["tm", "trusty-mpm"];
+
 /// Resolve the absolute path to the running `tm`/`trusty-mpm` binary.
 ///
 /// Why (#1914): [`write_status_line`] always runs INSIDE the `tm`/`trusty-mpm`
 /// process itself — the CLI launch path (`tm session start`) and the daemon
 /// resume path (`ensure_status_line`) are both compiled into that same binary
 /// — so `std::env::current_exe()` is the single most reliable source of truth:
-/// no PATH search needed, the running binary IS the answer. That mirrors, but
-/// is even more direct than, the `bin_resolve::resolve_binary("claude")`
-/// pattern `claude_code.rs` uses for a DIFFERENT binary it does not control.
+/// no PATH search needed, the running binary IS the answer. `current_exe()`
+/// does not guarantee a canonical (symlink-free) path, so the result is
+/// canonicalized best-effort — falling back to the raw path when
+/// canonicalization fails (e.g. the exe was deleted/moved since spawn) rather
+/// than losing the resolution entirely. This mirrors, but is even more direct
+/// than, the `bin_resolve::resolve_binary("claude")` pattern `claude_code.rs`
+/// uses for a DIFFERENT binary it does not control.
 /// What: thin wrapper over [`resolve_statusline_binary_with`] using the real
-/// `std::env::current_exe` and [`trusty_common::bin_resolve::resolve_binary`].
+/// `std::env::current_exe` (canonicalized best-effort) and
+/// [`trusty_common::bin_resolve::resolve_binary`].
 /// Test: exercised indirectly by `write_status_line_injects_when_absent`; the
 /// resolution priority itself is covered by the `resolve_statusline_binary_with_*`
 /// unit tests, which inject fake sources.
 fn resolve_statusline_binary() -> String {
-    resolve_statusline_binary_with(std::env::current_exe, |name| {
-        trusty_common::bin_resolve::resolve_binary(name)
-    })
+    resolve_statusline_binary_with(
+        || std::env::current_exe().map(|exe| exe.canonicalize().unwrap_or(exe)),
+        trusty_common::bin_resolve::resolve_binary,
+    )
 }
 
 /// Testable core of [`resolve_statusline_binary`] with its I/O sources injected.
@@ -840,11 +876,14 @@ fn resolve_statusline_binary() -> String {
 /// `has_prior_conversation_in` injected-I/O-root pattern used elsewhere in
 /// this crate (`crate::runtime::claude_code`).
 /// What: returns `current_exe()`'s path as a `String` when it resolves to
-/// valid UTF-8; else the first hit of `path_lookup("tm")`; else the literal
-/// `"tm"` so the statusline segment degrades to pre-#1914 behaviour rather
-/// than disappearing outright.
+/// valid UTF-8; else the first hit of `path_lookup` over [`STATUSLINE_BIN_NAMES`]
+/// (`"tm"` then `"trusty-mpm"` — #1914 review finding 1: a bare single-name
+/// PATH lookup reproduces the original bug on a `trusty-mpm`-only install);
+/// else the literal `"tm"` so the statusline segment degrades to pre-#1914
+/// behaviour rather than disappearing outright.
 /// Test: `resolve_statusline_binary_with_prefers_current_exe`,
 /// `resolve_statusline_binary_with_falls_back_to_path_lookup`,
+/// `resolve_statusline_binary_with_falls_back_to_trusty_mpm_name`,
 /// `resolve_statusline_binary_with_falls_back_to_bare_name`.
 pub(super) fn resolve_statusline_binary_with(
     current_exe: impl Fn() -> std::io::Result<PathBuf>,
@@ -855,7 +894,9 @@ pub(super) fn resolve_statusline_binary_with(
     {
         return s.to_string();
     }
-    if let Some(p) = path_lookup("tm")
+    if let Some(p) = STATUSLINE_BIN_NAMES
+        .iter()
+        .find_map(|name| path_lookup(name))
         && let Some(s) = p.to_str()
     {
         return s.to_string();
