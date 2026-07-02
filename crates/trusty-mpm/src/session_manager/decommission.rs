@@ -37,6 +37,21 @@ use super::workspace_guard::is_safe_to_remove;
 /// Test: `sentinel_gates_worktree_removal` in `decommission::tests`.
 pub(crate) const WORKTREE_SENTINEL_FILE: &str = ".trusty-mpm-worktree";
 
+/// Directory name (relative to a base git checkout) holding all SM-created
+/// per-session git worktrees.
+///
+/// Why: both the in-project spawn path (`daemon::managed_routes::inproject`)
+/// and the clone-based shared-base-checkout path (#1935,
+/// `provisioner::workspace`) nest per-session worktrees one level under a
+/// shared base checkout; naming the segment once here (rather than repeating
+/// the `".worktrees"` string literal at each call site) keeps the convention
+/// singular and greppable.
+/// What: `".worktrees"`.
+/// Test: exercised transitively by every test that builds a `.worktrees/<id>`
+/// path — `is_session_worktree_detects_dot_worktrees_component` pins the
+/// literal value via [`is_session_worktree`].
+pub(crate) const WORKTREES_DIRNAME: &str = ".worktrees";
+
 /// Timeout for the blocking `git worktree remove` subprocess (#1845 item 4).
 ///
 /// Why: `std::process::Command` is synchronous and has no built-in timeout. A git
@@ -67,7 +82,7 @@ pub(crate) const GIT_WORKTREE_REMOVE_TIMEOUT: std::time::Duration =
 fn is_session_worktree(path: &Path) -> bool {
     path.parent()
         .and_then(|p| p.file_name())
-        .map(|n| n == ".worktrees")
+        .map(|n| n == WORKTREES_DIRNAME)
         .unwrap_or(false)
 }
 

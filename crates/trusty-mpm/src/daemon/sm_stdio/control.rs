@@ -109,9 +109,10 @@ impl SessionControl for DaemonSessionControl {
     /// supplied — WI-A #1585 — in which case that takes precedence), `prompt →
     /// task` (defaulting to a generic description when absent), `model →
     /// runtime`, and `ref_ → git_ref` (WI-A #1585; empty string when absent).
-    /// A blank `git_ref` is explicitly handled by `RealGitBackend::clone_repo`
-    /// which omits `--branch` entirely so git uses the remote's default branch
-    /// (HEAD) — see `provisioner::workspace::blank_git_ref_omits_branch_flag`
+    /// A blank `git_ref` is explicitly handled by `RealGitBackend::worktree_add`
+    /// which falls back to fetching `HEAD` (the remote's default branch
+    /// pointer) instead of an empty, invalid ref name — see
+    /// `provisioner::workspace::blank_git_ref_omits_branch_flag`
     /// for the contract test. Returns `{ session_id }`. The `goal_id` link is
     /// recorded by the caller via the goal store (§9.3), not here, so this
     /// stays purely session-control.

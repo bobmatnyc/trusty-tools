@@ -276,10 +276,15 @@ async fn spawn_managed_cloned(
     })?;
 
     // Step 2: create the tmux session rooted at the provisioned workspace.
-    // `owned=true` is set ATOMICALLY at record creation (#1511): the SM
-    // provisioned this directory via git clone, so decommission may remove it.
-    // Local-path spawn and adopt_existing pass `owned=false`; they are never
-    // eligible for automatic disk deletion.
+    // #1935: `owned=false` — the workspace is now a `git worktree` slice of a
+    // shared, persistent base checkout (`<project_dir>/.base/`), not an
+    // independently-owned full clone. Bulk `remove_dir_all` would leave the
+    // base checkout's git worktree metadata and session branch ref dangling;
+    // `session_manager::decommission` instead detects the `.worktrees/<id>`
+    // shape (`is_session_worktree`) and runs `git worktree remove --force` +
+    // branch cleanup via `remove_session_worktree`, mirroring exactly how the
+    // in-project spawn path (`spawn_managed_inproject`, below) already handles
+    // its own per-session worktrees.
     emit(ProvisioningStage::CreatingTmuxSession);
     let mgr = state.session_manager().await;
     let record = mgr
@@ -293,7 +298,7 @@ async fn spawn_managed_cloned(
             Some(params.git_ref.clone()),
             runtime,
             params.ephemeral.unwrap_or(false),
-            true, // owned: SM provisioned via git clone
+            false, // owned: false — worktree of a shared base checkout, not a full clone
         )
         .await
         .map_err(|e| {
