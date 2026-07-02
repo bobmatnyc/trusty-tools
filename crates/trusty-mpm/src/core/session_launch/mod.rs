@@ -152,17 +152,22 @@ pub fn prepare_session_with_repo_url(
 /// resume is riskier than necessary here — those steps are not all confirmed
 /// idempotent under a resumed (not freshly-provisioned) workspace — so this
 /// exposes ONLY the one step `write_status_line` itself documents as safe to
-/// call unconditionally (it never clobbers an existing key). The resume path
-/// calls this defensively so a session stuck in the pre-#1913 broken state
-/// self-heals the next time it is resumed, without the broader blast radius of
-/// a full re-prep.
+/// call unconditionally (it never clobbers a genuine user customization). The
+/// resume path calls this defensively so a session stuck in the pre-#1913
+/// broken state self-heals the next time it is resumed, without the broader
+/// blast radius of a full re-prep. As of #1914, the same call ALSO upgrades a
+/// stale bare `tm`/`trusty-mpm statusline` command (the pre-#1914 default,
+/// which silently fails to render under a minimal `PATH`) to the resolved
+/// absolute path — the two self-heal concerns share this one entry point
+/// rather than growing a second, duplicate resume hook.
 /// What: thin `pub` wrapper over `settings::write_status_line` (`pub(super)`,
 /// so not directly reachable from `crate::daemon::managed_routes`). Delegates
 /// verbatim — no additional logic.
-/// Test: the underlying idempotency guarantee is covered by
-/// `write_status_line_injects_when_absent` / `write_status_line_skips_when_already_set`
-/// / `write_status_line_preserves_user_config` in this module's test file;
-/// `resume_managed_backfills_missing_status_line` in
+/// Test: the underlying idempotency and path-resolution guarantees are covered
+/// by `write_status_line_injects_when_absent` / `write_status_line_skips_when_already_set`
+/// / `write_status_line_preserves_user_config` / `write_status_line_heals_stale_tm_default`
+/// / `write_status_line_heals_stale_trusty_mpm_default` in this module's test
+/// file; `resume_managed_backfills_missing_status_line` in
 /// `tests/session_manager_mvp.rs` covers the `resume_managed` call site.
 pub fn ensure_status_line(project_dir: &Path) -> Result<(), PrepError> {
     settings::write_status_line(project_dir)

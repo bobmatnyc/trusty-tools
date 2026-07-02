@@ -682,18 +682,34 @@ pub(super) fn clean_global_trusty_memory_hooks(settings_path: &Path) -> Result<(
     Ok(())
 }
 
-/// Inject `"statusLine": {"type":"command","command":"tm statusline","padding":0}`
-/// into `<project>/.claude/settings.json` when the key is absent.
+/// Inject `"statusLine": {"type":"command","command":"<abs-path> statusline","padding":0}`
+/// into `<project>/.claude/settings.json` when the key is absent, or upgrade a
+/// stale bare `tm`/`trusty-mpm statusline` default already on disk to the
+/// resolved absolute path.
 ///
-/// Why: the `tm statusline` handler renders a compact status bar segment for
-/// every Claude Code render cycle; injecting it at session prep time wires it up
-/// automatically so operators do not have to configure it manually.
-/// What: reads the existing `.claude/settings.json` (or `{}` when absent/invalid),
-/// inserts the `statusLine` key ONLY when it is not already present (never
-/// overwrites the user's existing value), and writes the file back pretty-printed.
+/// Why (#1914, same risk class as #1298's `claude_code.rs::resolve_claude`): a
+/// bare `tm statusline` command relies on the spawning shell's `PATH`
+/// containing wherever `tm` is installed (e.g. `~/.cargo/bin`); under launchd
+/// or Claude Code's minimal environment that PATH omission silently drops the
+/// statusline segment with no error surfaced anywhere. Resolving an absolute
+/// path via [`resolve_statusline_command`] closes that gap the same way
+/// `crate::runtime::claude_code::ClaudeCodeAdapter::resolve_claude` already
+/// does for the `claude` runtime binary. Because every prior version
+/// of this function wrote the exact literal bare string, [`ensure_status_line`]'s
+/// resume self-heal (#1913) can recognise that EXACT fingerprint via
+/// [`is_stale_bare_statusline_command`] and safely upgrade it in place —
+/// without ever touching a genuinely user-customized `statusLine.command`.
+/// What: reads the existing `.claude/settings.json` (or `{}` when absent/invalid).
+/// When `statusLine` is absent, inserts it with the resolved absolute command.
+/// When present and it matches [`is_stale_bare_statusline_command`], rewrites
+/// ONLY its `command` field in place. Any other existing `statusLine` value —
+/// a genuine user customization — is left completely untouched. The file is
+/// written back pretty-printed only when a change was actually made.
 /// Test: `write_status_line_injects_when_absent`,
 /// `write_status_line_skips_when_already_set`,
-/// `write_status_line_preserves_user_config`.
+/// `write_status_line_preserves_user_config`,
+/// `write_status_line_heals_stale_tm_default`,
+/// `write_status_line_heals_stale_trusty_mpm_default`.
 pub(super) fn write_status_line(project_dir: &Path) -> Result<(), PrepError> {
     let claude_dir = project_dir.join(".claude");
     std::fs::create_dir_all(&claude_dir).map_err(|source| PrepError::Io {
@@ -710,14 +726,36 @@ pub(super) fn write_status_line(project_dir: &Path) -> Result<(), PrepError> {
         Some(o) => o,
         None => return Ok(()),
     };
-    // Only inject when absent — never clobber the user's existing statusLine.
-    if obj.contains_key("statusLine") {
+
+    let changed = match obj.get("statusLine") {
+        None => {
+            obj.insert(
+                "statusLine".to_string(),
+                serde_json::json!({
+                    "type": "command",
+                    "command": resolve_statusline_command(),
+                    "padding": 0
+                }),
+            );
+            true
+        }
+        Some(existing) if is_stale_bare_statusline_command(existing) => {
+            let resolved = resolve_statusline_command();
+            obj.get_mut("statusLine")
+                .and_then(serde_json::Value::as_object_mut)
+                .is_some_and(|entry| {
+                    entry.insert("command".to_string(), serde_json::json!(resolved));
+                    true
+                })
+        }
+        // A genuinely user-customized statusLine — never clobber it.
+        Some(_) => false,
+    };
+
+    if !changed {
         return Ok(());
     }
-    obj.insert(
-        "statusLine".to_string(),
-        serde_json::json!({"type": "command", "command": "tm statusline", "padding": 0}),
-    );
+
     let serialized = serde_json::to_string_pretty(&settings)
         .map_err(|err| PrepError::Deploy(err.to_string()))?;
     std::fs::write(&settings_path, serialized).map_err(|source| PrepError::Io {
@@ -725,6 +763,104 @@ pub(super) fn write_status_line(project_dir: &Path) -> Result<(), PrepError> {
         source,
     })?;
     Ok(())
+}
+
+/// The literal `statusLine.command` strings this module has ever auto-injected.
+///
+/// Why: a single source of truth for [`is_stale_bare_statusline_command`] and
+/// its tests keeps the "what counts as our own stale default" fingerprint from
+/// drifting between the two call sites.
+/// What: the bare (no absolute path) commands written before #1914 introduced
+/// path resolution — one per `[[bin]]` name the `trusty-mpm` crate produces.
+pub(super) const KNOWN_BARE_STATUSLINE_COMMANDS: &[&str] =
+    &["tm statusline", "trusty-mpm statusline"];
+
+/// Whether an existing `statusLine` entry is our own previously-injected bare
+/// default, safe for [`write_status_line`] to upgrade in place.
+///
+/// Why (#1914): [`write_status_line`] must never clobber a genuinely
+/// user-customized `statusLine.command`, but a bare `tm statusline` /
+/// `trusty-mpm statusline` written by a pre-#1914 build of this module is not
+/// a user customization — it is stale output of this exact function that
+/// silently breaks under a minimal PATH. Matching the EXACT literal fingerprint
+/// (rather than e.g. "starts with tm") keeps the heuristic conservative: any
+/// command with extra flags, an already-absolute path, or a different binary
+/// name is left alone.
+/// What: returns `true` when `entry.type == "command"` and `entry.command` is
+/// exactly one of [`KNOWN_BARE_STATUSLINE_COMMANDS`] (case-sensitive, no extra
+/// arguments).
+/// Test: `is_stale_bare_statusline_command_matches_known_defaults`,
+/// `is_stale_bare_statusline_command_ignores_custom_command`,
+/// `is_stale_bare_statusline_command_ignores_non_command_type`.
+pub(super) fn is_stale_bare_statusline_command(entry: &serde_json::Value) -> bool {
+    entry.get("type").and_then(serde_json::Value::as_str) == Some("command")
+        && entry
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|cmd| KNOWN_BARE_STATUSLINE_COMMANDS.contains(&cmd))
+}
+
+/// Resolve the absolute `<binary> statusline` command to write into
+/// `statusLine.command`.
+///
+/// Why (#1914): see [`write_status_line`]'s doc comment for the full
+/// PATH-resolution motivation.
+/// What: appends the `statusline` subcommand to [`resolve_statusline_binary`].
+/// Test: exercised indirectly by `write_status_line_injects_when_absent`
+/// (asserts the written command is an absolute path ending in ` statusline`).
+fn resolve_statusline_command() -> String {
+    format!("{} statusline", resolve_statusline_binary())
+}
+
+/// Resolve the absolute path to the running `tm`/`trusty-mpm` binary.
+///
+/// Why (#1914): [`write_status_line`] always runs INSIDE the `tm`/`trusty-mpm`
+/// process itself — the CLI launch path (`tm session start`) and the daemon
+/// resume path (`ensure_status_line`) are both compiled into that same binary
+/// — so `std::env::current_exe()` is the single most reliable source of truth:
+/// no PATH search needed, the running binary IS the answer. That mirrors, but
+/// is even more direct than, the `bin_resolve::resolve_binary("claude")`
+/// pattern `claude_code.rs` uses for a DIFFERENT binary it does not control.
+/// What: thin wrapper over [`resolve_statusline_binary_with`] using the real
+/// `std::env::current_exe` and [`trusty_common::bin_resolve::resolve_binary`].
+/// Test: exercised indirectly by `write_status_line_injects_when_absent`; the
+/// resolution priority itself is covered by the `resolve_statusline_binary_with_*`
+/// unit tests, which inject fake sources.
+fn resolve_statusline_binary() -> String {
+    resolve_statusline_binary_with(std::env::current_exe, |name| {
+        trusty_common::bin_resolve::resolve_binary(name)
+    })
+}
+
+/// Testable core of [`resolve_statusline_binary`] with its I/O sources injected.
+///
+/// Why: separating the resolution PRIORITY from the actual `current_exe()` /
+/// PATH syscalls lets each branch (current-exe hit, PATH-lookup fallback, bare
+/// last resort) be exercised deterministically, mirroring the
+/// `has_prior_conversation_in` injected-I/O-root pattern used elsewhere in
+/// this crate (`crate::runtime::claude_code`).
+/// What: returns `current_exe()`'s path as a `String` when it resolves to
+/// valid UTF-8; else the first hit of `path_lookup("tm")`; else the literal
+/// `"tm"` so the statusline segment degrades to pre-#1914 behaviour rather
+/// than disappearing outright.
+/// Test: `resolve_statusline_binary_with_prefers_current_exe`,
+/// `resolve_statusline_binary_with_falls_back_to_path_lookup`,
+/// `resolve_statusline_binary_with_falls_back_to_bare_name`.
+pub(super) fn resolve_statusline_binary_with(
+    current_exe: impl Fn() -> std::io::Result<PathBuf>,
+    path_lookup: impl Fn(&str) -> Option<PathBuf>,
+) -> String {
+    if let Ok(exe) = current_exe()
+        && let Some(s) = exe.to_str()
+    {
+        return s.to_string();
+    }
+    if let Some(p) = path_lookup("tm")
+        && let Some(s) = p.to_str()
+    {
+        return s.to_string();
+    }
+    "tm".to_string()
 }
 
 /// Whether a hook handler group is a `trusty-memory` entry.
