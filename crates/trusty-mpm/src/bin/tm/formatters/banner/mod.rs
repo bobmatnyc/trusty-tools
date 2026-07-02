@@ -97,7 +97,11 @@ pub(crate) fn shade_bucket(c: char) -> (u8, u8, u8) {
         | '^' | '●' | '⢀' | '✲' | '⡀' | '◻'
         // Legacy dense glyphs from previous art
         | 'I' | '∏' | '♦' | '∇' | '√' | '≥' | '≤' | '@' | '#'
-        // Guillemets flanking the dot-matrix wordmark (current + legacy #1907 text wordmark)
+        // '«'/'»' flank the current dot-matrix wordmark; 'T','r','u','s','t','y'
+        // are needed only while a pre-refresh legacy #1907 `«Trusty»` text
+        // wordmark may still be on disk (see `source::refresh_if_legacy`) —
+        // kept so that art renders correctly until it is transparently
+        // refreshed to the current dot-matrix default.
         | 'T' | 'r' | 'u' | 's' | 't' | 'y' | '«' | '»' => {
             (224, 140, 60) // bright amber
         }

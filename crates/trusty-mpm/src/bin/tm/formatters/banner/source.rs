@@ -95,12 +95,20 @@ pub(crate) fn write_default_if_absent() {
 /// art update since is invisible to them. Comparing the on-disk content
 /// against every *previous* embedded default (`legacy::KNOWN_LEGACY_DEFAULTS`)
 /// distinguishes "still exactly what we shipped, unmodified" from "the user
-/// changed this" — only the former is safe to overwrite.
+/// changed this" — only the former is safe to overwrite. The comparison is
+/// deliberately whitespace-trimmed (not raw-byte): a file that differs from a
+/// legacy default only by incidental leading/trailing blank lines was never
+/// meaningfully customised — refreshing it to the current art is the correct
+/// outcome, not a regression, and matches the trimming `load_banner_art`
+/// already applies when deciding whether a file counts as "empty".
 /// What: trims `trimmed_content` (already trimmed by the caller) and compares
 /// it against each trimmed entry in `legacy::KNOWN_LEGACY_DEFAULTS`. On a
 /// match, overwrites `path` with `DEFAULT_BANNER_ART` and returns `true`. On
-/// no match (including when the file already holds the current default) or
-/// on a write failure, returns `false` and leaves `path` untouched.
+/// no match (including when the file already holds the current default),
+/// returns `false` and leaves `path` untouched. On a write failure the file
+/// is likewise left untouched (best-effort, non-fatal), a debug line is
+/// logged, and `false` is returned so the caller falls back to serving the
+/// stale-but-still-legacy `content` it already read.
 /// Test: `banner_source_refresh_on_legacy_match`,
 /// `banner_source_refresh_does_not_touch_custom_content`,
 /// `banner_source_refresh_is_noop_on_current_default`.
@@ -111,7 +119,16 @@ fn refresh_if_legacy(path: &std::path::Path, trimmed_content: &str) -> bool {
     if !is_known_legacy {
         return false;
     }
-    std::fs::write(path, DEFAULT_BANNER_ART).is_ok()
+    match std::fs::write(path, DEFAULT_BANNER_ART) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::debug!(
+                "failed to refresh legacy banner seed {}: {e}",
+                path.display()
+            );
+            false
+        }
+    }
 }
 
 /// Load the banner art text, preferring the user-editable override file.
