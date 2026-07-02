@@ -227,6 +227,57 @@ fn prepare_session_writes_claude_md_and_stash() {
     );
 }
 
+/// Why (issue #1904 stretch goal): `prepare_session_inner` emits discrete
+/// `provisioning_stage` events (DeployingAgents/DeployingSkills/
+/// BuildingInstructions/ConfiguringMcp) so the daemon's SSE stream can drive
+/// real step-by-step progress in the `tm` CLI, instead of one opaque wait.
+/// This is testable without a live daemon/tmux/git-clone: `emit()` reads a
+/// `tokio::task_local` that `provisioning_stage::scoped` installs, and
+/// `prepare_session` is a plain sync function we can call from inside that
+/// scope in a `#[tokio::test]`.
+/// What: wraps `prepare_session` in a scope backed by a fresh broadcast
+/// channel, drains every event the call emitted, and asserts the four
+/// session_launch-owned stages appear, IN ORDER (other stages —
+/// CloningRepo/CreatingTmuxSession/LaunchingRuntime/Complete — are emitted
+/// elsewhere in the call chain, not by `prepare_session_inner`, so they are
+/// correctly absent here).
+/// Test: this is the test.
+#[tokio::test]
+async fn prepare_session_emits_stage_events_in_order() {
+    use crate::core::provisioning_stage::{ProvisioningStage, StageEmitter, scoped};
+
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    let (tx, mut rx) = tokio::sync::broadcast::channel(32);
+    let emitter = StageEmitter::new("test-session", "https://github.com/acme/widgets", tx);
+
+    scoped(emitter, async {
+        prepare_session(&fw, project).expect("prep succeeds");
+    })
+    .await;
+
+    let mut stages = Vec::new();
+    while let Ok(value) = rx.try_recv() {
+        assert_eq!(value["kind"], "provisioning_stage");
+        assert_eq!(value["repo_url"], "https://github.com/acme/widgets");
+        stages.push(value["stage"].as_str().unwrap().to_string());
+    }
+
+    assert_eq!(
+        stages,
+        vec![
+            ProvisioningStage::DeployingAgents.wire_name(),
+            ProvisioningStage::DeployingSkills.wire_name(),
+            ProvisioningStage::BuildingInstructions.wire_name(),
+            ProvisioningStage::ConfiguringMcp.wire_name(),
+        ],
+        "prepare_session must emit exactly these four stages, in order"
+    );
+}
+
 #[test]
 fn prepare_session_sets_output_style() {
     // Why: a launched session must show `style:trusty-mpm`, which Claude

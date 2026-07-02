@@ -7,7 +7,13 @@
 //! What: [`launch_new_session_and_attach`] POSTs a new managed session and
 //! attaches to it, showing a [`trusty_progress::ProgressHandle`] spinner for
 //! the full duration of the blocking call. [`spawn_progress_message`] is the
-//! pure helper that formats the spinner's initial message.
+//! pure helper that formats the spinner's initial (fallback) message. A
+//! background task from [`super::guided_launch_sse::watch_provisioning_stages`]
+//! upgrades that static spinner into real step-by-step progress when the
+//! daemon streams `provisioning_stage` SSE events; when it cannot (older
+//! daemon, connection failure), the spinner simply keeps its initial message —
+//! the exact minimum-bar behaviour this module shipped before the #1904
+//! stretch goal, so that path is never regressed.
 //! Test: `spawn_progress_message_first_run`, `spawn_progress_message_reuse` in
 //! `tests_behavior_c_tests.rs`; `launch_new_session_and_attach` is covered by
 //! the `POST /api/v1/sessions/managed` integration tests in
@@ -17,6 +23,7 @@ use anyhow::Context as _;
 use serde::Deserialize;
 
 use super::first_run::needs_first_run_clone;
+use super::guided_launch_sse::watch_provisioning_stages;
 
 /// Response shape for `POST /api/v1/sessions/managed` (subset we need).
 ///
@@ -77,9 +84,20 @@ pub(crate) fn spawn_progress_message(first_run: Option<&(String, std::path::Path
 /// is printed. The daemon provisions a per-session worktree in the base clone
 /// and returns the session name. Then attaches via
 /// `crate::commands::tmux_attach::tmux_attach`.
+///
+/// Issue #1904 stretch goal: alongside the spinner, a background task
+/// subscribes to the daemon's `GET /events` SSE stream and upgrades the
+/// spinner's message to the real in-flight stage (cloning → deploying agents
+/// → deploying skills → building instructions → configuring MCP → creating
+/// session → launching runtime) as `provisioning_stage` events arrive,
+/// correlated by `repo_url` (see
+/// `guided_launch_sse::watch_provisioning_stages` for why session-id
+/// correlation is not possible here). The task is aborted as soon as the POST
+/// returns — success or failure — so it never outlives this call.
 /// Test: covered by the `POST /api/v1/sessions/managed` integration tests in
 /// `tests/session_manager_mvp.rs`; the spinner-message formatting is covered
-/// by `spawn_progress_message_*` above.
+/// by `spawn_progress_message_*` above; the SSE frame parsing is covered by
+/// `guided_launch_sse`'s unit tests.
 pub(crate) async fn launch_new_session_and_attach(
     client: &reqwest::Client,
     url: &str,
@@ -92,6 +110,17 @@ pub(crate) async fn launch_new_session_and_attach(
         spawn_progress_message(first_run.as_ref()),
     );
 
+    // Best-effort real-time stage progress (issue #1904 stretch goal). This
+    // can never turn a working spawn into a failing one: on any SSE failure
+    // the watcher just returns without touching the spinner again, leaving it
+    // at its initial fallback message.
+    let stage_watcher = tokio::spawn(watch_provisioning_stages(
+        client.clone(),
+        format!("{url}/events"),
+        repo_url.to_string(),
+        spinner.clone(),
+    ));
+
     let send_result = client
         .post(format!("{url}/api/v1/sessions/managed"))
         .json(&serde_json::json!({
@@ -101,6 +130,9 @@ pub(crate) async fn launch_new_session_and_attach(
         }))
         .send()
         .await;
+    // The POST has returned — the watcher's job is done either way; stop it
+    // so it doesn't keep the SSE connection open past this function.
+    stage_watcher.abort();
     let resp = match send_result {
         Ok(resp) => resp,
         Err(err) => {

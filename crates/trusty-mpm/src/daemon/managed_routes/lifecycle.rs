@@ -155,9 +155,54 @@ pub async fn spawn_managed(
         return spawn_managed_local(state, &session_id, &params, runtime).await;
     }
 
+    // From here on the flow is the clone-based path — wrap it in a
+    // `provisioning_stage` scope (issue #1904 stretch goal) so every
+    // `emit(...)` call inside `provision`/`provision_in`/`prepare_session_inner`
+    // (all several layers deep, all synchronous, no signature changes needed —
+    // see `core::provisioning_stage`'s module doc) broadcasts a stage-transition
+    // event on the daemon's existing SSE channel. The client correlates by
+    // `repo_url` (it cannot know `session_id` until this whole call returns).
+    let emitter = crate::core::provisioning_stage::StageEmitter::new(
+        session_id.to_string(),
+        params.repo_url.clone(),
+        state.event_tx.clone(),
+    );
+    crate::core::provisioning_stage::scoped(
+        emitter,
+        spawn_managed_cloned(state, session_id, params, runtime, config),
+    )
+    .await
+}
+
+/// The clone-based provisioning tail of [`spawn_managed`] (issue #1904).
+///
+/// Why: split out so the stage-observer scope in `spawn_managed` wraps
+/// exactly this portion — the local-path/in-project fast paths return before
+/// reaching here and do not need per-stage progress (no clone to wait on).
+/// What: provisions the workspace (emits `CloningRepo`/`DeployingAgents`/
+/// `DeployingSkills`/`BuildingInstructions`/`ConfiguringMcp` from deep inside
+/// `provision`/`provision_in`/`prepare_session_inner`), creates the tmux
+/// session (`CreatingTmuxSession`), runs the FRONT gate, spawns the runtime
+/// (`LaunchingRuntime`), and emits `Complete`. Identical behaviour to the
+/// pre-#1904 inline tail of `spawn_managed` — this is a pure extraction plus
+/// `emit(...)` calls.
+/// Test: `handler_spawn_wires_provision_and_spawn` /
+/// `handler_spawn_creates_tmux_at_workspace_cwd` in tests/session_manager_mvp.rs
+/// cover the behaviour; the stage-emission itself is unit-tested in
+/// `core::provisioning_stage` and `provisioner::workspace`/`session_launch`
+/// (no live daemon needed for the emission tests).
+async fn spawn_managed_cloned(
+    state: &Arc<DaemonState>,
+    session_id: ManagedSessionId,
+    params: SpawnParams,
+    runtime: RuntimeKind,
+    config: crate::core::trusty_tools_config::TrustyToolsConfig,
+) -> Result<SessionRecord, String> {
+    use crate::core::provisioning_stage::{ProvisioningStage, emit};
+
     // Provision an isolated workspace under the pre-generated `session_id` (the id
-    // is generated ONCE above, before the local-path/clone branch split, so both
-    // branches register the same id).
+    // is generated ONCE in `spawn_managed`, before the local-path/clone branch
+    // split, so both branches register the same id).
     //
     // #1220: the workspace root defaults to `~/trusty-mpm-projects/` (overridable
     // via the `TRUSTY_MPM_WORKSPACE_ROOT` env var or the
@@ -166,7 +211,11 @@ pub async fn spawn_managed(
     // `<root>/<owner>/<repo>/<session-id>/`. When the repo URL has no parseable
     // GitHub identity we fall back to the legacy single-slug `provision` path so a
     // bare/non-GitHub URL still provisions cleanly. `config` was already loaded
-    // above (before the MCP spawn gate); reused here for the workspace root.
+    // in `spawn_managed` (before the MCP spawn gate); reused here for the
+    // workspace root. `CloningRepo`/`DeployingAgents`/`DeployingSkills`/
+    // `BuildingInstructions`/`ConfiguringMcp` are emitted from inside `provision`/
+    // `provision_in`/`prepare_session_inner` — not here — since those are the
+    // functions that actually perform each step.
     let prepared = match trusty_common::github_path::parse_github_path(&params.repo_url) {
         Some(gh) => {
             let project_dir = crate::core::trusty_tools_config::workspace_subpath(&config, &gh);
@@ -201,6 +250,7 @@ pub async fn spawn_managed(
     // provisioned this directory via git clone, so decommission may remove it.
     // Local-path spawn and adopt_existing pass `owned=false`; they are never
     // eligible for automatic disk deletion.
+    emit(ProvisioningStage::CreatingTmuxSession);
     let mgr = state.session_manager().await;
     let record = mgr
         .create_with_id(
@@ -250,6 +300,7 @@ pub async fn spawn_managed(
     // Step 3: spawn the selected runtime in the pane. A spawn failure is recorded
     // (the record is marked errored) but is not fatal — the record exists and the
     // caller still gets it back.
+    emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
     let adapter = build_adapter(record.runtime, tmux_arc);
     if let Err(e) = adapter.spawn(&record.tmux_name, &prepared.path, &params.task) {
@@ -271,6 +322,7 @@ pub async fn spawn_managed(
         );
     }
 
+    emit(ProvisioningStage::Complete);
     Ok(mgr.get(&record.id).await.unwrap_or(record))
 }
 

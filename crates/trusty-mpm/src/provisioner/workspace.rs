@@ -424,6 +424,13 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
             "provisioning workspace"
         );
 
+        // Announce the clone stage (issue #1904). No-op unless a
+        // `daemon::managed_routes::lifecycle::spawn_managed` caller wrapped
+        // this call in `provisioning_stage::scoped` — see that module's doc
+        // for why this seam does not take a `DaemonState` parameter.
+        crate::core::provisioning_stage::emit(
+            crate::core::provisioning_stage::ProvisioningStage::CloningRepo,
+        );
         self.git.clone_repo(repo_url, git_ref, &workspace_path)?;
 
         // Write the task description into TASK.md at the workspace root so the
