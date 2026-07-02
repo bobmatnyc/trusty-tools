@@ -197,7 +197,8 @@ async fn execute_doctor_against_test_daemon() {
         CommandResult::Doctor(report) => {
             // #1840 added the worktrees check (6); DOC-28 R4(a) added the
             // output_style check (7); A2 (tm-skills-portfolio epic) added the
-            // skill_source check, bringing the total to 8.
+            // skill_source check, bringing the total to 8. #1905's
+            // stale-skill cleanup is a one-time migration, not a probe here.
             assert_eq!(report.checks.len(), 8);
         }
         other => panic!("expected Doctor, got {other:?}"),

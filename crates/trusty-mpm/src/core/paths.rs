@@ -78,8 +78,19 @@ impl FrameworkPaths {
     /// the home directory itself.
     /// What: locates the home directory via the `dirs` crate, falling back to
     /// the current directory if it cannot be determined (e.g. a stripped CI
-    /// environment) so the type is always constructible.
-    /// Test: `default_resolves_under_trusty_mpm`.
+    /// environment) so the type is always constructible. This function takes
+    /// NO path argument and never consults `std::env::current_dir()`, so it
+    /// resolves to exactly one global path per machine/user regardless of
+    /// which project workspace the caller happens to be running inside
+    /// (owner-confirmed requirement for the #1905 one-time skill-cleanup
+    /// migration, which must run once per framework install, never once per
+    /// project). Do NOT confuse this with the unrelated, genuinely
+    /// project-relative `<project_dir>/.trusty-mpm/` stash directory that
+    /// `session_launch::mod.rs` writes `last-instructions.md` into — that is
+    /// a bare `project_dir.join(".trusty-mpm")`, not a `FrameworkPaths` value
+    /// at all.
+    /// Test: `default_resolves_under_trusty_mpm`,
+    /// `default_is_a_single_global_path_never_project_relative`.
     #[allow(clippy::should_implement_trait)] // Intentional: no meaningful Default without I/O.
     pub fn default() -> Self {
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
@@ -308,6 +319,48 @@ mod tests {
             paths.root.display()
         );
         assert!(paths.framework.starts_with(&paths.root));
+    }
+
+    #[test]
+    fn default_is_a_single_global_path_never_project_relative() {
+        // Regression guard (owner feedback on #1905): the #1905 stale-skill
+        // migration resolves its marker file and `~/.claude/skills/` target
+        // via `FrameworkPaths::default()`. That function takes NO path
+        // argument — it resolves purely from `dirs::home_dir()` — so it is
+        // structurally incapable of varying between invocations from
+        // different project workspaces (e.g. `duettoresearch/apex` vs
+        // `trusty-tools`): there is no "which project am I in" input for it
+        // to consult in the first place. Calling it twice must yield the
+        // identical root, proving it is a pure, argument-free resolution.
+        let a = FrameworkPaths::default();
+        let b = FrameworkPaths::default();
+        assert_eq!(
+            a.root, b.root,
+            "FrameworkPaths::default() must resolve to one identical global \
+             root regardless of invocation context — it takes no project or \
+             cwd argument to vary by"
+        );
+        assert_eq!(a.claude_skills, b.claude_skills);
+
+        // Contrast with the genuinely project-relative resolver used for
+        // per-workspace state (e.g. session_launch::mod.rs's
+        // `<project>/.trusty-mpm/last-instructions.md` stash, which is NOT
+        // FrameworkPaths at all but a bare `project_dir.join(".trusty-mpm")`).
+        // `FrameworkPaths::under(base)` IS project-relative when a caller
+        // explicitly passes a project directory as `base` — proving the two
+        // resolvers are genuinely different, not the same function called
+        // two different ways. The #1905 migration must only ever call
+        // `default()`, never `under(project_dir)`.
+        let project_a = FrameworkPaths::under("/tmp/fake-project-a");
+        let project_b = FrameworkPaths::under("/tmp/fake-project-b");
+        assert_ne!(
+            project_a.root, project_b.root,
+            "under(base) IS expected to vary by base — this is the contrast case"
+        );
+        assert_ne!(
+            a.root, project_a.root,
+            "the global default() root must never coincide with a per-project under() root"
+        );
     }
 
     #[test]

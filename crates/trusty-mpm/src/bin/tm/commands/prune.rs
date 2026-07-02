@@ -6,8 +6,8 @@
 //! and applies the locked teardown policy (idle → stop/resumable, done →
 //! decommission, everything else → skip) by REUSING the existing managed
 //! `runtime-stop` / `decommission` operations. It must no-op gracefully when the
-//! Session Manager is disabled or the daemon is unreachable so the claude-mpm
-//! `/mpm-session-pause` flow never breaks when SM is off.
+//! Session Manager is disabled or the daemon is unreachable so the trusty-mpm
+//! `/tm-session-management` flow never breaks when SM is off.
 //! What: [`prune_idle`] is the async entry point (list → verdict → plan →
 //! render → act); [`build_plan`] is the pure, synchronous core that turns a
 //! fetched `Vec<SessionVerdict>` into a `Vec<PlannedAction>` via the

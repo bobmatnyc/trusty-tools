@@ -1061,8 +1061,10 @@ async fn pair_reset_clears_pairing() {
 async fn doctor_endpoint_returns_report() {
     // `GET /api/v1/doctor` returns an eight-check report (#1840 added the
     // worktrees check; DOC-28 R4(a) added the output_style check; A2
-    // (tm-skills-portfolio epic) added the skill_source check); the
-    // per-check statuses carry the diagnosis, not the HTTP status.
+    // (tm-skills-portfolio epic) added the skill_source check). #1905's
+    // stale-skill cleanup is a one-time migration, not a `run_doctor` probe,
+    // so it does not appear here; the per-check statuses carry the
+    // diagnosis, not the HTTP status.
     let state = DaemonState::shared();
     let Json(report) = doctor(State(state), Query(DoctorQuery::default())).await;
     assert_eq!(report.checks.len(), 8);

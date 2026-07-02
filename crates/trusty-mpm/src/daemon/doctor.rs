@@ -49,10 +49,17 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// What: runs the instruction / agent / skill / output-style filesystem
 /// probes (the output-style probe closes DOC-28 F4 — the "did the
 /// trusty-mpm instructions actually load" gap), then the memory and search
-/// HTTP probes (each bounded by [`PROBE_TIMEOUT`]), and a worktree-orphan
-/// scan (Fix 1b, #1840), and the `skill_source` probe (A2,
-/// tm-skills-portfolio epic) — folding the resulting eight [`DoctorCheck`]s
-/// into a [`DoctorReport`] whose `overall` status is the worst of them.
+/// HTTP probes (each bounded by [`PROBE_TIMEOUT`]), a worktree-orphan scan
+/// (Fix 1b, #1840), and the `skill_source` probe (A2, tm-skills-portfolio
+/// epic) — folding the resulting eight [`DoctorCheck`]s into a
+/// [`DoctorReport`] whose `overall` status is the worst of them.
+///
+/// Note (#1905): the mpm-*→tm-* stale-skill cleanup is intentionally NOT a
+/// permanent probe here — it is a one-time migration
+/// ([`crate::core::stale_skills::run_stale_mpm_skills_migration_once`]) run
+/// from `tm`'s startup path instead, so it does real work at most once per
+/// machine rather than nagging on every `tm doctor` invocation forever.
+///
 /// `project_dir` scopes the instruction and output-style probes; `repos_root`
 /// (when `Some`) gives the managed workspace root for the worktree scan;
 /// `active_workspace_paths` is the full set of workspace paths currently
@@ -346,7 +353,9 @@ mod tests {
     #[tokio::test]
     async fn run_doctor_produces_eight_checks() {
         // A2 (tm-skills-portfolio epic): adds the `skill_source` probe,
-        // bringing the total from seven to eight checks.
+        // bringing the total from seven to eight checks. #1905's stale-skill
+        // cleanup is deliberately NOT a `run_doctor` probe — see the
+        // `run_doctor` doc comment — so this count stays at eight.
         let report = run_doctor(None, None, &[]).await;
         assert_eq!(report.checks.len(), 8);
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
