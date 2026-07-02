@@ -7,7 +7,7 @@
 **Spec ID:** `SPEC-PROVISION-01~draft` … `SPEC-PROVISION-08~draft` (DOC-31)
 **Linked issues:** [#1928](https://github.com/bobmatnyc/trusty-tools/issues/1928) (this spec); [#1927](https://github.com/bobmatnyc/trusty-tools/issues/1927) (**dependency** — the DOC-24 §SPEC-STANDALONE-MPM-04 drift bug this spec's isolation contract depends on; must be fixed first).
 **Builds on:** DOC-24 — Standalone Managed `trusty-mpm` Driver (`docs/specs/standalone-managed-trusty-mpm.md`, the project-local `repo/.claude/` model and the isolation invariant that tm never writes the user's real `~/.claude*`); DOC-17 — Autonomous Multi-Session Managed Harness Runner (`docs/specs/harness-runner-vision.md`, HR-2 manifest-driven provisioning precedence + catalog sync); DOC-29 — Primary trusty-mpm Harness Behaviors (`docs/specs/mpm-behavior-conformance.md`, BHV-04 agent/skill bundling + BHV-06 catalog sync, the conformance-row house style §2 adopts).
-**Cross-ref:** the converged deploy hot path (`crates/trusty-mpm/src/core/session_launch/mod.rs`, `prepare_session_inner` @ line 238; `deploy_agents_filtered` → `fw.claude_agents_dir()` @ line 279; `deploy_skills_filtered` → `fw.claude_skills_dir()` @ line 307); the agent/skill deployers + ownership ledgers (`crates/trusty-mpm/src/core/agent_deployer.rs`, `deploy_agents_filtered` @ lines 92–192; `crates/trusty-mpm/src/core/agent_manifest.rs`, `MANIFEST_FILE` @ line 22, `Origin` @ lines 87–94; `crates/trusty-mpm/src/core/skill_deployer.rs`, `deploy_skills_filtered` @ line 92; `crates/trusty-mpm/src/core/skill_manifest.rs`); manifest layering (`crates/trusty-mpm/src/core/manifest/schema.rs`, `ContentSource` @ lines 126–134; `crates/trusty-mpm/src/core/manifest/resolve.rs`, `resolve_manifest` @ lines 95–116); the catalog sync machinery (`crates/trusty-mpm/src/content/catalog_sync.rs`, `catalog_root_for` @ line 39, `DEFAULT_CATALOG_REPO` @ line 43); the spawn flows (`crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs`, `spawn_managed_cloned` @ line 224; `crates/trusty-mpm/src/daemon/managed_routes/inproject.rs`, base clone + `.worktrees/`; `crates/trusty-mpm/src/core/standalone/load.rs`, `run_prepare_session` @ line 175 — the #1927 drift site); project scaffold (`crates/trusty-mpm/src/bin/tm/commands/project.rs`, `scaffold_project_dir` @ line 105); framework-path derivation (`crates/trusty-mpm/src/core/paths.rs`, `agent_source_dir` / `skill_source_dir` @ lines 231–258); the provisioning-stage emitter (`crate::core::provisioning_stage`).
+**Cross-ref:** the converged deploy hot path (`crates/trusty-mpm/src/core/session_launch/mod.rs`, `prepare_session_inner` @ line 238; `deploy_agents_filtered` → `fw.claude_agents_dir()` @ line 279; `deploy_skills_filtered` → `fw.claude_skills_dir()` @ line 307); the agent/skill deployers + ownership ledgers (`crates/trusty-mpm/src/core/agent_deployer.rs`, `deploy_agents_filtered` @ lines 92–192; `crates/trusty-mpm/src/core/agent_manifest.rs`, `MANIFEST_FILE` @ line 22, `Origin` @ lines 87–94; `crates/trusty-mpm/src/core/skill_deployer.rs`, `deploy_skills_filtered` @ line 92; `crates/trusty-mpm/src/core/skill_manifest.rs`); manifest layering (`crates/trusty-mpm/src/core/manifest/schema.rs`, `ContentSource` @ lines 126–134; `crates/trusty-mpm/src/core/manifest/resolve.rs`, `resolve_manifest` @ lines 95–116); the catalog sync machinery (`crates/trusty-mpm/src/content/catalog_sync.rs`, `catalog_root_for` @ line 39, `DEFAULT_CATALOG_REPO` @ line 43); the spawn flows (`crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs`, `spawn_managed_cloned` @ line 224; `crates/trusty-mpm/src/daemon/managed_routes/inproject.rs`, base clone + `.worktrees/`; `crates/trusty-mpm/src/core/standalone/load.rs`, `run_prepare_session` @ line 176 — the #1927 drift site); project scaffold (`crates/trusty-mpm/src/bin/tm/commands/project.rs`, `scaffold_project_dir` @ line 105); framework-path derivation (`crates/trusty-mpm/src/core/paths.rs`, `agent_source_dir` / `skill_source_dir` @ lines 231–258); the provisioning-stage emitter (`crate::core::provisioning_stage`).
 
 > **Scope note.** This is a **behavior contract** for how trusty-mpm classifies, sources,
 > deploys, and migrates **agents and skills** across two ownership tiers — **SYSTEM** (framework-
@@ -101,7 +101,7 @@ observable** (§SPEC-PROVISION-07), never silent.
 
 Every spawn path — managed clone (`spawn_managed_cloned`, `lifecycle.rs:224`), in-project
 (`inproject.rs`), local-path fallback (redirects to the clone flow), and the standalone driver
-(`standalone/load.rs:175`) — converges on `prepare_session_inner` (`session_launch/mod.rs:238`). There
+(`standalone/load.rs:176`) — converges on `prepare_session_inner` (`session_launch/mod.rs:238`). There
 it deploys the manifest-selected SYSTEM catalog:
 
 | # | Step | Target (today) | Call site |
@@ -440,7 +440,7 @@ segregation, and ledger rules are specified once and reused.
      `.claude/`, not its source, not its git state.
   2. **Never write the real `~/.claude` / `~/.claude.json`.** All PROJECT (and, under DOC-24, SYSTEM)
      writes land in a tm-owned workspace or the tm-global config dir. This inherits and depends on DOC-24
-     §SPEC-STANDALONE-MPM-04; the #1927 fix restores that invariant at the `standalone/load.rs:175`
+     §SPEC-STANDALONE-MPM-04; the #1927 fix restores that invariant at the `standalone/load.rs:176`
      drift site.
   3. **All writes inside a tm-owned tree.** Every PROJECT write targets `<workspace>/.claude/…` in a
      base clone, worktree, or managed clone tm provisioned.
@@ -548,7 +548,7 @@ These four decisions are settled defaults with rationale; the spec is built on t
 | **D1** | **Project-level content home = `<workspace>/.claude/{agents,skills}` inside tm-OWNED workspaces** (base clone / worktree / managed clone). tm **NEVER** writes the user's live/primary checkout; F1 migration is **read-only** from the live checkout, writes go only to tm-owned trees. | Native Claude Code discovery (no flags, IDE-honored), matching DOC-24 §03/§06. Enforces the 2026-07-02 **segregation directive** issued after a confirmed cross-tool pollution incident via shared global `~/.claude/agents`. §SPEC-PROVISION-02 / -06. |
 | **D2** | **Collision precedence = PROJECT shadows SYSTEM** (project > user > system), matching Claude Code's own layering. Shadows must be **logged/observable**. | Predictable to anyone who knows Claude Code; makes project content authoritative without deleting the SYSTEM fallback. Observable shadows keep "why did my agent change?" answerable. §SPEC-PROVISION-01 / -07. |
 | **D3** | **F2 source = extend the existing `catalog_sync` machinery** (`content/catalog_sync.rs`, `~/.trusty-mpm/catalog`, repo `bobmatnyc/claude-mpm`, 24h TTL) with requirement-driven selection on top — do **NOT** invent a second cache concept. | One catalog, one TTL, one protected-skills rule (`/mpm-*`). F2 adds only a *selection* filter over the checkout that already exists (`catalog_sync.rs:39,43`). §SPEC-PROVISION-05. |
-| **D4** | **The DOC-24 drift bug is out of scope** (filed as **#1927**, fixed first): `standalone/load.rs:175` uses `FrameworkPaths::default()` and deploys to the real `~/.claude`, violating SPEC-STANDALONE-MPM-04. This spec **DEPENDS** on that invariant holding. | Segregation (§06) cannot be guaranteed while a converged spawn path still writes the real `~/.claude`. Stating the dependency explicitly makes the ordering a gate, not an assumption. §Out-of-scope. |
+| **D4** | **The DOC-24 drift bug is out of scope** (filed as **#1927**, fixed first): `standalone/load.rs:176` uses `FrameworkPaths::default()` and deploys to the real `~/.claude`, violating SPEC-STANDALONE-MPM-04. This spec **DEPENDS** on that invariant holding. | Segregation (§06) cannot be guaranteed while a converged spawn path still writes the real `~/.claude`. Stating the dependency explicitly makes the ordering a gate, not an assumption. §Out-of-scope. |
 
 ---
 
@@ -627,7 +627,7 @@ WI-2; WI-5 follows WI-4; WI-6 (tests/observability) closes out after the feature
 - `crates/trusty-mpm/src/core/manifest/schema.rs` — `ContentSource` (126–134). `resolve.rs` — `resolve_manifest` precedence (95–116).
 - `crates/trusty-mpm/src/content/catalog_sync.rs` — `catalog_root_for` (39); `DEFAULT_CATALOG_REPO = bobmatnyc/claude-mpm` (43).
 - `crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs` — `spawn_managed_cloned` (224). `inproject.rs` — base clone + `.worktrees/`; `DEFAULT_REPOS_DIR` (41).
-- `crates/trusty-mpm/src/core/standalone/load.rs` — `run_prepare_session` (175) — the #1927 drift site.
+- `crates/trusty-mpm/src/core/standalone/load.rs` — `run_prepare_session` (176) — the #1927 drift site.
 - `crates/trusty-mpm/src/bin/tm/commands/project.rs` — `scaffold_project_dir` (105).
 - `crates/trusty-mpm/src/core/paths.rs` — `agent_source_dir` / `skill_source_dir` (231–258).
 
