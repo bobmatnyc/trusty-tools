@@ -7,7 +7,12 @@
 //! What: `load_banner_art` checks `TRUSTY_MPM_BANNER_FILE` (env override), then
 //! `~/.trusty-mpm/banner.txt` (user-editable), then falls back to the embedded
 //! compile-time default. On first run (file absent) the default is written to
-//! `~/.trusty-mpm/banner.txt` so the user can discover and edit it.
+//! `~/.trusty-mpm/banner.txt` so the user can discover and edit it. On every
+//! run where the home-dir file exists, `refresh_if_legacy` (below) checks
+//! whether its content is still byte-identical (modulo whitespace trimming)
+//! to a *previous* embedded default recorded in `legacy`; if so the file is
+//! transparently rewritten to the current `DEFAULT_BANNER_ART` so shipped art
+//! updates actually reach users who never customised the seed file.
 //! Test: `banner_source_*` in the inline `tests` module below.
 
 /// Embedded compile-time default banner art.
@@ -79,22 +84,63 @@ pub(crate) fn write_default_if_absent() {
     }
 }
 
+/// Rewrite `path` to the current default when its content is a known-legacy,
+/// never-customised seed.
+///
+/// Why: `write_default_if_absent` seeds the home-dir file once, on first run,
+/// and never touches it again — by design, so per-machine customisation is
+/// preserved. That design has a gap: an operator who installed `tm` months
+/// ago and never opened `~/.trusty-mpm/banner.txt` has a seed file frozen at
+/// whatever `DEFAULT_BANNER_ART` was on their install date, and every shipped
+/// art update since is invisible to them. Comparing the on-disk content
+/// against every *previous* embedded default (`legacy::KNOWN_LEGACY_DEFAULTS`)
+/// distinguishes "still exactly what we shipped, unmodified" from "the user
+/// changed this" — only the former is safe to overwrite.
+/// What: trims `trimmed_content` (already trimmed by the caller) and compares
+/// it against each trimmed entry in `legacy::KNOWN_LEGACY_DEFAULTS`. On a
+/// match, overwrites `path` with `DEFAULT_BANNER_ART` and returns `true`. On
+/// no match (including when the file already holds the current default) or
+/// on a write failure, returns `false` and leaves `path` untouched.
+/// Test: `banner_source_refresh_on_legacy_match`,
+/// `banner_source_refresh_does_not_touch_custom_content`,
+/// `banner_source_refresh_is_noop_on_current_default`.
+fn refresh_if_legacy(path: &std::path::Path, trimmed_content: &str) -> bool {
+    let is_known_legacy = super::legacy::KNOWN_LEGACY_DEFAULTS
+        .iter()
+        .any(|legacy| legacy.trim() == trimmed_content);
+    if !is_known_legacy {
+        return false;
+    }
+    std::fs::write(path, DEFAULT_BANNER_ART).is_ok()
+}
+
 /// Load the banner art text, preferring the user-editable override file.
 ///
 /// Why: allows operators to customise the splash art without rebuilding.
 /// What: checks `TRUSTY_MPM_BANNER_FILE` env var first, then
 /// `~/.trusty-mpm/banner.txt`. When neither exists, seeds the home-dir file
-/// (best-effort) and returns the embedded default. Read/parse errors are
-/// non-fatal: they fall back to the embedded default with a debug log.
+/// (best-effort) and returns the embedded default. When the file exists and
+/// its trimmed content exactly matches a known legacy default, it is
+/// transparently refreshed to the current default (see `refresh_if_legacy`)
+/// before being returned. Read/parse errors are non-fatal: they fall back to
+/// the embedded default with a debug log.
 /// Test: `banner_source_override_file_used`, `banner_source_missing_falls_back`,
-/// `banner_source_empty_falls_back`, `banner_source_env_override_takes_precedence`.
+/// `banner_source_empty_falls_back`, `banner_source_env_override_takes_precedence`,
+/// `banner_source_refresh_on_legacy_match`,
+/// `banner_source_refresh_does_not_touch_custom_content`.
 pub(crate) fn load_banner_art() -> String {
     let Some(path) = banner_file_path() else {
         return DEFAULT_BANNER_ART.to_string();
     };
 
     match std::fs::read_to_string(&path) {
-        Ok(content) if !content.trim().is_empty() => content,
+        Ok(content) if !content.trim().is_empty() => {
+            if refresh_if_legacy(&path, content.trim()) {
+                DEFAULT_BANNER_ART.to_string()
+            } else {
+                content
+            }
+        }
         Ok(_) => {
             tracing::debug!(
                 "banner file is empty, using embedded default: {}",
@@ -331,5 +377,98 @@ mod tests {
         std::fs::remove_dir_all(fake_home.parent().unwrap()).ok();
 
         assert_eq!(content, "KEEP ME\n");
+    }
+
+    /// A banner file holding a known-legacy default (never customised by the
+    /// user) is transparently refreshed to the current `DEFAULT_BANNER_ART`
+    /// on load — this is the fix for the stale-seed shadowing bug: a user
+    /// who installed months ago and never edited their seed file must still
+    /// see shipped art updates.
+    #[test]
+    fn banner_source_refresh_on_legacy_match() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir();
+        let file = dir.join("banner.txt");
+        std::fs::write(&file, super::super::legacy::LEGACY_PRE_1907).unwrap();
+
+        let old = std::env::var_os("TRUSTY_MPM_BANNER_FILE");
+        // SAFETY: serialised by ENV_LOCK; env mutation restored before unlock.
+        unsafe { std::env::set_var("TRUSTY_MPM_BANNER_FILE", &file) };
+        let art = load_banner_art();
+        let on_disk_after = std::fs::read_to_string(&file).unwrap();
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("TRUSTY_MPM_BANNER_FILE", v),
+                None => std::env::remove_var("TRUSTY_MPM_BANNER_FILE"),
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            art, DEFAULT_BANNER_ART,
+            "load_banner_art must return the refreshed current default"
+        );
+        assert_eq!(
+            on_disk_after, DEFAULT_BANNER_ART,
+            "the on-disk legacy seed file must be rewritten to the current default"
+        );
+    }
+
+    /// A banner file whose content does not match any known legacy default
+    /// (i.e. the user customised it) must never be touched.
+    #[test]
+    fn banner_source_refresh_does_not_touch_custom_content() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir();
+        let file = dir.join("banner.txt");
+        std::fs::write(&file, "MY CUSTOM ROBOT ART\n").unwrap();
+
+        let old = std::env::var_os("TRUSTY_MPM_BANNER_FILE");
+        // SAFETY: serialised by ENV_LOCK; env mutation restored before unlock.
+        unsafe { std::env::set_var("TRUSTY_MPM_BANNER_FILE", &file) };
+        let art = load_banner_art();
+        let on_disk_after = std::fs::read_to_string(&file).unwrap();
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("TRUSTY_MPM_BANNER_FILE", v),
+                None => std::env::remove_var("TRUSTY_MPM_BANNER_FILE"),
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(
+            art.trim(),
+            "MY CUSTOM ROBOT ART",
+            "custom content must be returned unchanged"
+        );
+        assert_eq!(
+            on_disk_after, "MY CUSTOM ROBOT ART\n",
+            "custom content on disk must never be rewritten"
+        );
+    }
+
+    /// A banner file already holding the current default is a no-op refresh
+    /// (not a known *previous* legacy default, so no rewrite happens — and
+    /// none is needed since it already matches).
+    #[test]
+    fn banner_source_refresh_is_noop_on_current_default() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_dir();
+        let file = dir.join("banner.txt");
+        std::fs::write(&file, DEFAULT_BANNER_ART).unwrap();
+
+        let old = std::env::var_os("TRUSTY_MPM_BANNER_FILE");
+        // SAFETY: serialised by ENV_LOCK; env mutation restored before unlock.
+        unsafe { std::env::set_var("TRUSTY_MPM_BANNER_FILE", &file) };
+        let art = load_banner_art();
+        unsafe {
+            match old {
+                Some(v) => std::env::set_var("TRUSTY_MPM_BANNER_FILE", v),
+                None => std::env::remove_var("TRUSTY_MPM_BANNER_FILE"),
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(art, DEFAULT_BANNER_ART);
     }
 }

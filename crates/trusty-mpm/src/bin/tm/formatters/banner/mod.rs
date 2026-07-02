@@ -7,12 +7,15 @@
 //! `print_banner_preview`, `terminal_width`, `detect_memory`, `detect_tool`,
 //! `dirs_config_dir`, `binary_on_path`, `fallback_session_name`,
 //! `normalize_workdir`, `tmux_has_session`. The single-box compositor lives in
-//! the `two_panel` submodule. Banner loading lives in `source`. Auto-sized
-//! shading lives in `shade_image` / `load_and_shade_banner`.
+//! the `two_panel` submodule. Banner loading (including stale-seed refresh)
+//! lives in `source`; previously-shipped default art used for that refresh
+//! check lives in `legacy`. Auto-sized shading lives in `shade_image` /
+//! `load_and_shade_banner`.
 //! Test: `launch_banner_*`, `terminal_width_is_positive`,
 //! `normalize_workdir_strips_trailing_slash` in `tests.rs`;
 //! `two_panel_*` in `two_panel::tests`; `banner_source_*` in `source::tests`.
 
+pub(crate) mod legacy;
 pub(crate) mod source;
 pub(crate) mod two_panel;
 
@@ -63,18 +66,20 @@ impl Drop for NoColorGuard {
 
 /// Map a glyph to its rust-palette RGB triple.
 ///
-/// Why: bot outline chars should appear bright amber so the block robots read
+/// Why: bot outline chars should appear bright amber so the giant robots read
 /// clearly against a dark terminal background; accent glyphs use mid-rust to
-/// add depth without competing with the main structure. The v0.12.0 splash
-/// (issue #1907) renders everything — robots and the `«Trusty»` wordmark — in
-/// a single amber/orange tone against black, so the wordmark's letters and
-/// guillemets join the same bright-amber bucket as the robot glyphs rather
-/// than falling through to the darker "unclassified" default.
+/// add depth without competing with the main structure. The giant-robot splash
+/// renders everything — robot heads and the dot-matrix `«TRUSTY»` wordmark —
+/// in a single amber/orange tone against black, so the wordmark's dot-matrix
+/// pixels and guillemets join the same bright-amber bucket as the robot
+/// glyphs rather than falling through to the darker "unclassified" default.
 /// What: five buckets —
 ///   • amber `(224,140,60)`: block, half-block, and face glyphs used in the
-///     block-robot art (`▄ ▀ █ ▓ ▌ ▐ ▟ ▙`), box-drawing chars, face glyphs
+///     giant-robot art (`▄ ▀ █ ▓ ▌ ▐ ▟ ▙`), the dot-matrix wordmark pixel
+///     (`▪`), box-drawing chars used for the rectangular head outline and
+///     neck notch (`┌ ─ ┐ │ └ ┘ ┬ ┴ ├ ┤ ╷ ╵ ╶ ╴`), face glyphs
 ///     (`◉ ◔ ◕ • ◡ ▿ ⌣ ● ◻ ^ ⢀ ✲ ⡀`) from current and legacy art, and the
-///     `«Trusty»` wordmark glyphs (`T r u s t y « »`);
+///     `«…»` guillemets flanking the wordmark;
 ///   • mid-rust `(205,100,30)`: medium-ink marks;
 ///   • dark rust `(120,50,10)`: fine punctuation marks;
 ///   • base rust `(183,65,14)`: everything else.
@@ -83,14 +88,16 @@ pub(crate) fn shade_bucket(c: char) -> (u8, u8, u8) {
     match c {
         // Amber — block structure: half-block, full-block, shade chars
         '▄' | '▀' | '█' | '▓' | '▌' | '▐' | '▟' | '▙'
-        // Box-drawing chars (legacy kawaii bots)
+        // Dot-matrix wordmark pixel (giant-robot redesign)
+        | '▪'
+        // Box-drawing chars (rectangular robot heads + legacy kawaii bots)
         | '┌' | '─' | '┐' | '│' | '└' | '┘' | '┬' | '┴' | '├' | '┤' | '╷' | '╵' | '╶' | '╴'
         // Face glyphs — block robots and legacy
         | '◉' | '◔' | '◕' | '•' | '◡' | '▿' | '⌣'
         | '^' | '●' | '⢀' | '✲' | '⡀' | '◻'
         // Legacy dense glyphs from previous art
         | 'I' | '∏' | '♦' | '∇' | '√' | '≥' | '≤' | '@' | '#'
-        // «Trusty» wordmark (#1907): letters + guillemets
+        // Guillemets flanking the dot-matrix wordmark (current + legacy #1907 text wordmark)
         | 'T' | 'r' | 'u' | 's' | 't' | 'y' | '«' | '»' => {
             (224, 140, 60) // bright amber
         }
