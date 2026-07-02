@@ -226,8 +226,8 @@ pub struct CatchupConfig {
     /// Whether to automatically inject the catch-up digest on session start.
     ///
     /// `true` → catch-up is generated and appended as seed context when a new
-    /// `tm sessions start` is executed. `false` → only the manual
-    /// `tm sessions catchup` command triggers a digest.
+    /// `tm session start` is executed. `false` → only the manual
+    /// `tm session catchup` command triggers a digest.
     pub auto: bool,
     /// Whether to include git commit history in the digest.
     pub include_git: bool,
@@ -464,7 +464,7 @@ impl MpmConfig {
 /// What: evaluates four sources in descending priority order:
 ///
 /// 1. `explicit` — a model string explicitly specified by the caller (e.g.,
-///    from the `tm sessions start --model` flag). If `Some`, wins immediately.
+///    from the `tm session start --model` flag). If `Some`, wins immediately.
 /// 2. `config.models.agents.<agent_name>` — the per-agent override in
 ///    `~/.trusty-mpm/config.toml`.
 /// 3. `frontmatter_model` — the `model:` field from the agent's frontmatter

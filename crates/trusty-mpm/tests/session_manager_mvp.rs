@@ -1022,7 +1022,7 @@ fn cli_prune_idle_unreachable_exit_code() {
         .args([
             "--url",
             "http://127.0.0.1:1",
-            "sessions",
+            "session",
             "prune-idle",
             "--json",
         ])

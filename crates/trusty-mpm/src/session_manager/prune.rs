@@ -312,7 +312,7 @@ impl SessionManager {
     /// Why: ONE tool must (a) tear down all ephemeral/stopped sessions and (b)
     /// compact the store by dropping decommissioned tombstones, so the legacy 239
     /// stale records can be purged with the SAME verb that cleans up test sessions.
-    /// It is the engine behind `decommission_all_ephemeral`, the `tm sessions prune`
+    /// It is the engine behind `decommission_all_ephemeral`, the `tm session prune`
     /// CLI verb, the prune HTTP route, and the prune MCP tool.
     ///
     /// SAFETY (the #1508 invariant): a RUNNING record (`Active`/`Provisioning`) is
@@ -570,7 +570,7 @@ impl SessionManager {
     /// record set (#1838).
     ///
     /// Why: [`prune_orphaned_worktrees`](Self::prune_orphaned_worktrees) is only
-    /// invoked manually (the `tm sessions prune-worktrees` CLI / HTTP route), so
+    /// invoked manually (the `tm session prune-worktrees` CLI / HTTP route), so
     /// the managed-clone `.worktrees/<id>` tree still grows without bound — one
     /// project accumulated 94 dead worktree dirs because nothing ran the sweep
     /// automatically. This thin convenience wrapper lets the daemon's orphan-GC

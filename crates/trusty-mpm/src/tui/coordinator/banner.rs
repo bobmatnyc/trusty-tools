@@ -1,6 +1,6 @@
 //! Claude-Code-style startup banner + backplane probes (STUI-0, DOC-16 §3.1).
 //!
-//! Why: operators launching `tm sessions tui` want the same confidence-building
+//! Why: operators launching `tm session tui` want the same confidence-building
 //! startup Claude Code gives — the tool names itself + its version and confirms
 //! the trusty backplane (memory + search) is live before the interactive view
 //! takes over the terminal. DOC-16 §3.1 (STUI-0) pins that contract: a banner

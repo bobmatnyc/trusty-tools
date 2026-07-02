@@ -44,6 +44,10 @@ mod tests_behavior_b;
 #[path = "tests_behavior_c_tests.rs"]
 mod tests_behavior_c;
 
+#[cfg(test)]
+#[path = "tests_behavior_d_tests.rs"]
+mod tests_behavior_d;
+
 /// Lazy-loaded help configuration for "did you mean?" suggestions (issue #216).
 ///
 /// Why: the YAML help bundle is checked in as a string literal; loading it
@@ -367,7 +371,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Top-level exit-code translation: a `tm sessions prune-idle` that found the
+    // Top-level exit-code translation: a `tm session prune-idle` that found the
     // Session Manager unavailable returns `PruneError::SmUnavailable`. That is a
     // graceful no-op, not a failure, so exit with the distinct code 75 (the
     // pause skill branches on it) instead of anyhow's default 1. Any other error

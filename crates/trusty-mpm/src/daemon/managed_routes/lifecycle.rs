@@ -448,7 +448,7 @@ async fn spawn_managed_inproject(
     // normalises both SSH and HTTPS forms to the same `{ owner, repo }` pair, and
     // this URL is the real origin of the base clone (it was derived from the
     // operator's local `remote.origin.url`). The record stores it as `repo_url`
-    // which gives `tm sessions ls` useful project context even for in-project
+    // which gives `tm session ls` useful project context even for in-project
     // sessions that did not clone a fresh workspace. It also doubles as the
     // `repo_url` threaded into `prepare_inproject_session` below, for the same
     // trusty-memory palace-pinning reason `provision_in` threads its `repo_url`.

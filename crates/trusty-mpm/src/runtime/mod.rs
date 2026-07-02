@@ -107,7 +107,7 @@ pub trait RuntimeAdapter: Send + Sync {
 
 /// Selector for which runtime backend a managed session uses.
 ///
-/// Why: the spawn endpoint and `tm sessions new` let the operator pick a backend
+/// Why: the spawn endpoint and `tm session new` let the operator pick a backend
 /// (`runtime=tcode` / `--runtime tcode`); the choice must survive on the
 /// persisted [`crate::session_manager::SessionRecord`] so `resume` re-spawns the
 /// SAME backend rather than silently reverting to the default.

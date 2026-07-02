@@ -1,4 +1,4 @@
-//! Handler for `tm sessions catchup` (DOC-28 cutover bridge, #1762).
+//! Handler for `tm session catchup` (DOC-28 cutover bridge, #1762).
 //!
 //! Why: during migration from claude-mpm to trusty-mpm, paused sessions may
 //! exist in both the legacy JSON format (`.claude-mpm/sessions/`) and the
@@ -27,9 +27,9 @@ use trusty_mpm::core::{
 
 use crate::commands::project::resolve_dir;
 
-/// Handle `tm sessions catchup [--all-projects] [--full]`.
+/// Handle `tm session catchup [--all-projects] [--full]`.
 ///
-/// Why: provides the catch-up entry-point for `tm sessions catchup`.
+/// Why: provides the catch-up entry-point for `tm session catchup`.
 /// What: collects project directories to scan (cwd always included; registry
 /// projects appended when `all_projects` is set), runs the catch-up runtime
 /// (watermark-aware when `full=false`, full history when `full=true`), and

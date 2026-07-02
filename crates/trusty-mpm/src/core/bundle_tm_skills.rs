@@ -138,7 +138,7 @@ pub const TM_DELEGATION_PATTERNS: &str = include_str!("../assets/skills/tm-deleg
 ///
 /// Why: consolidates mpm-session-management + mpm-session-pause +
 /// mpm-session-resume into one skill; keeps the 70% auto-pause threshold, the
-/// `.trusty-mpm/sessions/` format, `tm sessions prune-worktrees`, and
+/// `.trusty-mpm/sessions/` format, `tm session prune-worktrees`, and
 /// trusty-memory task_add/task_list/task_complete integration.
 /// What: embedded markdown skill file deployed to `skills/tm-session-management.md`.
 /// Test: `tm_skills_are_in_bundle`.

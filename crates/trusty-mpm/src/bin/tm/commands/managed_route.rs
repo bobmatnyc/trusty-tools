@@ -1,4 +1,4 @@
-//! Route the `tm sessions` managed verbs through the shared chat-core layer.
+//! Route the `tm session` managed verbs through the shared chat-core layer.
 //!
 //! Why: the managed session-manager verbs (`new`/`ls`/`send`/`answer`/`attach`/
 //! `stop`/`resume`/`decommission`) historically built `reqwest` requests by hand
@@ -152,7 +152,7 @@ pub(crate) fn render_cli(result: &CommandResult) -> String {
 /// Resolve a fuzzy id/name against the managed session list (managed-vs-project
 /// routing decision for `stop`/`resume`).
 ///
-/// Why (#1218): the canonical `tm sessions stop`/`resume` verbs are managed-aware
+/// Why (#1218): the canonical `tm session stop`/`resume` verbs are managed-aware
 /// — a managed id/name routes to the managed runtime; anything else falls back to
 /// the project-session path. The matching now goes through the ONE canonical
 /// [`resolve_target`] resolver (Phase 1B collapsed the bespoke
@@ -180,7 +180,7 @@ pub(crate) async fn resolve_managed_match(
 /// Resolve a PROJECT-session id/name to its canonical UUID via the shared
 /// resolver.
 ///
-/// Why: `tm sessions events` needs a UUID for `GET /sessions/{id}/events`, but
+/// Why: `tm session events` needs a UUID for `GET /sessions/{id}/events`, but
 /// operators may pass a friendly `tmpm-*` name. Phase 1B collapsed the bespoke
 /// `resolve_session_id` here so the project-session lookup uses the SAME
 /// [`resolve_target`] precedence (id-exact → name-exact → unambiguous prefix) as

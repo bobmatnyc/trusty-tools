@@ -64,7 +64,7 @@ pub mod prompt;
 pub mod providers;
 /// Idle-session prune policy (issue #1313).
 ///
-/// Why: the `tm sessions prune-idle` command needs a pure, testable mapping from
+/// Why: the `tm session prune-idle` command needs a pure, testable mapping from
 /// a session's latest activity-monitor verdict to a durability-respecting
 /// teardown action (stop idle, decommission done, skip everything else). Keeping
 /// it in core (not the binary) lets it be unit-tested without a live daemon and

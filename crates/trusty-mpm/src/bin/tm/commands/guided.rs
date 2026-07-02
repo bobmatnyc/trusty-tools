@@ -56,7 +56,7 @@ pub(crate) enum PickerDecision {
 /// Bare `tm` guided default — detect project, list sessions, and offer a picker.
 ///
 /// Why: operators who type `tm` from inside a project directory should not
-/// have to remember `tm sessions new`, `tm connect`, or `tm attach <name>` —
+/// have to remember `tm session new`, `tm connect`, or `tm attach <name>` —
 /// the guided default derives the project identity, shows existing sessions,
 /// and lets them resume or launch in one step. The live checkout is NEVER
 /// written to; all managed sessions run in the protected base-clone workspace.
@@ -450,7 +450,7 @@ pub(crate) fn needs_restart(state: &str) -> bool {
 /// provisioning) but its tmux session has disappeared (e.g. after a machine
 /// reboot before the daemon reconcile runs), the daemon's `resume` endpoint
 /// would return 409 (can only resume Stopped/Errored) — leading to a dead end.
-/// The correct recovery is operator-driven: `tm sessions stop <id>` to reset
+/// The correct recovery is operator-driven: `tm session stop <id>` to reset
 /// the daemon state, then `tm` again to restart.
 /// What: returns `true` when `!needs_restart(state)` AND `!tmux_live`.
 /// Test: `guided_resume_is_zombie_*` in `tests_behavior_c_tests.rs`.
@@ -471,7 +471,7 @@ pub(crate) fn is_zombie(state: &str, tmux_live: bool) -> bool {
 /// live, then POSTs `/api/v1/sessions/managed/{id}/resume` with a 30-second
 /// timeout; (4) 404/409/5xx/network errors each print a distinct actionable
 /// message; (5) on HTTP 200, the response body is checked — if `state=errored`
-/// the runtime spawn failed and the operator is directed to `tm sessions info`;
+/// the runtime spawn failed and the operator is directed to `tm session info`;
 /// (6) falls through to `tmux_attach` only when everything is confirmed ready.
 /// Test: `needs_restart` and `is_zombie` are the testable pure seams; the I/O
 /// path is exercised by the e2e suite and manual smoke tests.
@@ -491,7 +491,7 @@ async fn resume_guided_session(
             session.name, session.state
         );
         eprintln!(
-            "tm: run `tm sessions stop {}` then `tm` again to restart it.",
+            "tm: run `tm session stop {}` then `tm` again to restart it.",
             session.id
         );
         anyhow::bail!(
@@ -547,7 +547,7 @@ async fn resume_guided_session(
                     session.name
                 );
                 eprintln!(
-                    "tm: run `tm sessions ls` to see current sessions, \
+                    "tm: run `tm session ls` to see current sessions, \
                      or press [Enter] to launch a new one."
                 );
                 anyhow::bail!("session '{}' not found on daemon", session.name);
@@ -555,7 +555,7 @@ async fn resume_guided_session(
             reqwest::StatusCode::CONFLICT => {
                 let msg = resp.text().await.unwrap_or_default();
                 eprintln!("tm: cannot restart session '{}': {}", session.name, msg);
-                eprintln!("tm: run `tm sessions ls` to see the current state.");
+                eprintln!("tm: run `tm session ls` to see the current state.");
                 anyhow::bail!("cannot restart session '{}': {msg}", session.name);
             }
             // (5) 5xx means the daemon IS running but had an internal error —
@@ -563,7 +563,7 @@ async fn resume_guided_session(
             s if s.is_server_error() => {
                 eprintln!(
                     "tm: daemon returned an internal error ({s}) restarting '{}' — \
-                     try `tm sessions ls`.",
+                     try `tm session ls`.",
                     session.name
                 );
                 anyhow::bail!(
@@ -573,7 +573,7 @@ async fn resume_guided_session(
             }
             s if !s.is_success() => {
                 eprintln!(
-                    "tm: daemon returned {s} restarting '{}' — try `tm sessions ls`.",
+                    "tm: daemon returned {s} restarting '{}' — try `tm session ls`.",
                     session.name
                 );
                 anyhow::bail!("daemon error {s} restarting session '{}'", session.name);
@@ -592,7 +592,7 @@ async fn resume_guided_session(
                         "tm: session '{}' restarted but the runtime failed to start.",
                         session.name
                     );
-                    eprintln!("tm: check `tm sessions info {}` for details.", session.id);
+                    eprintln!("tm: check `tm session info {}` for details.", session.id);
                     anyhow::bail!(
                         "session '{}' restarted but runtime failed to start (state=errored)",
                         session.name

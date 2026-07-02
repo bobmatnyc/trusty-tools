@@ -151,7 +151,7 @@ fn tm_skills_have_frontmatter() {
             "skill {name} contains an unadapted claude-mpm reference"
         );
         // tm-session-management is the one deliberate exception: it documents
-        // `tm sessions catchup`'s real dual-format cutover bridge (#1762),
+        // `tm session catchup`'s real dual-format cutover bridge (#1762),
         // which genuinely reads the legacy `.claude-mpm/sessions/` path
         // alongside the native one — this is accurate, not an unadapted
         // leftover, and the skill explicitly calls it "legacy".

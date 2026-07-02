@@ -61,7 +61,7 @@ pub(crate) fn install(force: bool) -> anyhow::Result<()> {
     // so the source dir is populated before this copy runs — mirroring the
     // agent ordering. Without this step a fresh `tm install` left the skills
     // directory empty and `tm doctor` reported `skills: Fail` (#386); skills
-    // only deployed lazily on `tm sessions start` (see `prepare_session`).
+    // only deployed lazily on `tm session start` (see `prepare_session`).
     println!(
         "Deploying skills into {}",
         paths.claude_skills_dir().display()
