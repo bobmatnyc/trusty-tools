@@ -7,17 +7,30 @@
 //! does not remove a previously deployed copy"). Left alone, a
 //! `~/.claude/skills/` populated before the rename accumulates permanently
 //! orphaned `mpm-*/SKILL.md` directories alongside their `tm-*` replacements.
-//! `~/.claude/skills/` is also shared with the unrelated Python `claude-mpm`
-//! framework, which ships its own `mpm-*`-prefixed skills (e.g. `mpm-doctor`,
-//! `mpm-workflow`, `mpm-config`) purely by naming coincidence — deleting one
-//! of those would destroy something the operator installed on purpose, so
-//! this module never does a wildcard `mpm-*` sweep.
+//!
+//! CRITICAL fork-model constraint (owner clarification): `/mpm-*` is NOT a
+//! deprecated namespace trusty-mpm owns outright. `/tm-*` is a trusty-specific
+//! FORK of a handful of `/mpm-*` skills; the general, harness-agnostic
+//! `/mpm-*` skill (and agent) family is meant to keep existing indefinitely,
+//! sourced from the separate claude-mpm project via the catalog-sync
+//! mechanism (`~/.trusty-mpm/catalog/repo`, `tm catalog sync`). That means a
+//! deployed `~/.claude/skills/mpm-<name>/` directory whose name happens to
+//! match one of trusty-mpm's OLD bundled skill names is not automatically
+//! trusty-mpm's own leftover — it could be a legitimate, current claude-mpm
+//! catalog skill that only coincidentally shares that name. Name matching
+//! alone can never safely decide "was this trusty-mpm's own deploy?", so this
+//! module never deletes on name alone: [`is_confirmed_trusty_mpm_origin`]
+//! is the mandatory gate between "name matches" and "actually safe to
+//! remove", verified through [`crate::core::skill_manifest::SkillManifest`]
+//! (primary) or a frozen content checksum (fallback) — see that function's
+//! doc comment for the exact precedence.
 //! What: [`FORMER_TRUSTY_MPM_SKILLS`] is the exhaustive, frozen allowlist of
 //! trusty-mpm's own pre-rename skill stems (PR #1872's deletion list).
 //! [`find_stale_mpm_skills`] scans a `~/.claude/skills/`-shaped directory for
-//! entries in that allowlist, reporting them only once the tm-* rename has
-//! actually landed there (at least one `tm-` prefixed skill is deployed) so a
-//! pre-rename install isn't mistakenly flagged as already-stale.
+//! entries in that allowlist whose origin [`is_confirmed_trusty_mpm_origin`]
+//! can verify, reporting them only once the tm-* rename has actually landed
+//! there (at least one `tm-` prefixed skill is deployed) so a pre-rename
+//! install isn't mistakenly flagged as already-stale.
 //! [`remove_stale_mpm_skills`] deletes the directories a caller has decided to
 //! remove. [`run_stale_mpm_skills_migration_once`] wraps both behind a
 //! marker-file check so the cleanup runs at most once per machine — this is a
@@ -29,12 +42,17 @@
 //! `find_stale_mpm_skills_missing_dir_is_empty`,
 //! `find_stale_mpm_skills_only_matches_allowlisted_stems`,
 //! `find_stale_mpm_skills_never_touches_catalog_sync_directory`,
+//! `find_stale_mpm_skills_ignores_differently_authored_same_name_skill`,
+//! `find_stale_mpm_skills_confirms_origin_via_frozen_checksum_fallback`,
 //! `remove_stale_mpm_skills_deletes_directories`,
 //! `migration_runs_once_then_marks_complete`,
 //! `migration_is_noop_on_second_run`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+
+use crate::core::agent_manifest::checksum;
+use crate::core::skill_manifest::SkillManifest;
 
 /// trusty-mpm's own bundled skill stems before the mpm-*→tm-* rename
 /// (PR #1872, closes #1905's rename portion).
@@ -60,6 +78,125 @@ pub const FORMER_TRUSTY_MPM_SKILLS: &[&str] = &[
     "mpm-verification-protocols",
 ];
 
+/// Sha256 checksums of the exact content trusty-mpm bundled for each
+/// [`FORMER_TRUSTY_MPM_SKILLS`] stem, frozen at the last commit before PR
+/// #1872 deleted these files (commit `bbd2faf8`, the parent of the deletion
+/// commit `2a245e87`). Computed via
+/// `git show bbd2faf8:crates/trusty-mpm/src/assets/skills/<name>.md | shasum -a 256`.
+///
+/// Why: the manifest-based origin check ([`is_confirmed_trusty_mpm_origin`])
+/// cannot help when a deployed skill predates trusty-mpm's skill-deployment
+/// manifest (or the manifest was lost/reset) — in that case the ONLY
+/// remaining safe signal is byte-for-byte content identity with what
+/// trusty-mpm itself used to ship. Falling back to name alone would violate
+/// the fork-model constraint (a claude-mpm catalog skill may legitimately
+/// share one of these names); this frozen table lets the fallback stay
+/// exact instead.
+/// What: `(stem, sha256_hex)` pairs for all eleven former skill names.
+/// Test: `find_stale_mpm_skills_confirms_origin_via_frozen_checksum_fallback`.
+// Each string below is a public sha256 content checksum (verifiable via the
+// `git show` command in the doc comment above), not a credential — the
+// `pragma` comments silence detect-secrets' high-entropy-hex false positive.
+const FORMER_TRUSTY_MPM_SKILL_CONTENT_SHA256: &[(&str, &str)] = &[
+    (
+        "mpm-bug-reporting",
+        "ae4217996f43b7d32c109675bb2e87a7f03a017b1d5d080e404f69d1130693da", // pragma: allowlist secret
+    ),
+    (
+        "mpm-circuit-breaker-enforcement",
+        "9201be68031dac92209ef262d07a87b295040c540b130f706b495db77fb0bab5", // pragma: allowlist secret
+    ),
+    (
+        "mpm-delegation-patterns",
+        "a0206ac2bc81264b8b14e854260179e1f1050fad9c2949813c6c8c447759cb4f", // pragma: allowlist secret
+    ),
+    (
+        "mpm-git-file-tracking",
+        "8450fa909f729bd8095db3a3705bcb44c91c48f069fcd23f212e144b90612aaf", // pragma: allowlist secret
+    ),
+    (
+        "mpm-pr-workflow",
+        "9dd922ecd082cc37525c618bf01ecc8ce6b94e80386672459f92aa9d872c895d", // pragma: allowlist secret
+    ),
+    (
+        "mpm-session-management",
+        "ce576c484f307967bccf3f01fbff6c143f0c2cd88ae220e73522b7024312bbcf", // pragma: allowlist secret
+    ),
+    (
+        "mpm-session-pause",
+        "3222569435343d98f757099e1cb628a961ff7a192e14e09cfcabcf9a7dedc5e4", // pragma: allowlist secret
+    ),
+    (
+        "mpm-session-resume",
+        "8b12545b4db016b0da7b860d613792e86e4888ec21afd74c0a2e3bb9c9ca5495", // pragma: allowlist secret
+    ),
+    (
+        "mpm-ticketing-integration",
+        "0b3347fdfaed66616541bf1c6d8e049df693fa7581a41a269bc9e53f384565d7", // pragma: allowlist secret
+    ),
+    (
+        "mpm-tool-usage-guide",
+        "23ea465fea861077adbcf6429ee733a231009eed4b5fbb1df21dfa7196efca8b", // pragma: allowlist secret
+    ),
+    (
+        "mpm-verification-protocols",
+        "35faabef27f1bc21f4b509dd60d5c229cfc4f0f12517064025c722a1a9d28f5d", // pragma: allowlist secret
+    ),
+];
+
+/// Look up the frozen pre-rename content checksum for a former skill name.
+///
+/// Why: small helper so [`is_confirmed_trusty_mpm_origin`] reads as a linear
+/// primary-then-fallback check rather than an inline linear scan.
+/// What: returns the sha256 hex digest recorded in
+/// [`FORMER_TRUSTY_MPM_SKILL_CONTENT_SHA256`] for `name`, or `None` when
+/// `name` is not one of the eleven frozen entries.
+fn frozen_content_checksum(name: &str) -> Option<&'static str> {
+    FORMER_TRUSTY_MPM_SKILL_CONTENT_SHA256
+        .iter()
+        .find(|(stem, _)| *stem == name)
+        .map(|(_, sha)| *sha)
+}
+
+/// Confirm a name-matched candidate was actually deployed by trusty-mpm's own
+/// deployer, not some other origin sharing the same name.
+///
+/// Why: under the fork model (owner clarification on #1905), `/mpm-*` is the
+/// harness-agnostic original namespace, sourced from the separate claude-mpm
+/// catalog and meant to coexist with trusty-mpm's `/tm-*` fork indefinitely.
+/// A `~/.claude/skills/mpm-<name>/` directory whose name is in
+/// [`FORMER_TRUSTY_MPM_SKILLS`] is therefore NOT automatically trusty-mpm's
+/// own stale leftover — a `tm catalog sync` could have legitimately deployed
+/// a current claude-mpm skill under that exact same name. This function is
+/// the mandatory safety gate between "name matches" and "confirmed safe to
+/// delete".
+/// What: reads `<skill_dir>/SKILL.md`; unreadable content never confirms
+/// (fails closed). Primary check: [`SkillManifest`] (written exclusively by
+/// [`crate::core::skill_deployer::deploy_skills`]) has a managed entry for
+/// `name` AND its recorded checksum matches the file's current content —
+/// this proves trusty-mpm's own deployer wrote it and nothing has replaced
+/// the content since. A managed entry whose checksum does NOT match is a
+/// confirmed non-match (someone/something else has since overwritten trusty-
+/// mpm's deploy) and does not fall through to the checksum fallback.
+/// Fallback (only when the manifest has no entry for `name` at all — e.g. a
+/// deploy that predates the manifest): the content's sha256 must exactly
+/// equal [`frozen_content_checksum`] for `name`. Any candidate failing both
+/// checks returns `false`.
+/// Test: `find_stale_mpm_skills_reports_known_former_skill`,
+/// `find_stale_mpm_skills_ignores_differently_authored_same_name_skill`,
+/// `find_stale_mpm_skills_confirms_origin_via_frozen_checksum_fallback`.
+fn is_confirmed_trusty_mpm_origin(name: &str, skill_dir: &Path, manifest: &SkillManifest) -> bool {
+    let Ok(content) = std::fs::read_to_string(skill_dir.join("SKILL.md")) else {
+        return false;
+    };
+
+    if manifest.is_managed(name) {
+        return manifest.checksum_matches(name, &content);
+    }
+
+    frozen_content_checksum(name).is_some_and(|expected| expected == checksum(&content))
+}
+
 /// One stale pre-rename skill directory found on disk.
 ///
 /// Why: callers (the one-time [`run_stale_mpm_skills_migration_once`]
@@ -80,16 +217,23 @@ pub struct StaleSkill {
 ///
 /// Why: surfaces exactly the directories left behind by the mpm-*→tm-*
 /// rename so [`run_stale_mpm_skills_migration_once`] can remove them, without
-/// ever touching an unrelated `mpm-*` skill or acting before the tm-*
-/// replacements actually exist.
+/// ever touching an unrelated `mpm-*` skill (whether a differently-authored
+/// claude-mpm catalog skill sharing an old trusty-mpm name, per the fork
+/// model, or a skill from an entirely different tool) or acting before the
+/// tm-* replacements actually exist.
 /// What: returns every [`FORMER_TRUSTY_MPM_SKILLS`] entry present as a
-/// directory directly under `claude_skills_dir`, but only when at least one
-/// `tm-`-prefixed entry is also present there (the rename has landed on this
-/// machine). Returns an empty vec when `claude_skills_dir` does not exist.
+/// directory directly under `claude_skills_dir` whose origin
+/// [`is_confirmed_trusty_mpm_origin`] can positively verify, but only when at
+/// least one `tm-`-prefixed entry is also present there (the rename has
+/// landed on this machine). Returns an empty vec when `claude_skills_dir`
+/// does not exist. A name match alone is never sufficient — see
+/// [`is_confirmed_trusty_mpm_origin`] for the verification precedence.
 /// Test: `find_stale_mpm_skills_reports_known_former_skill`,
 /// `find_stale_mpm_skills_ignores_unrelated_mpm_prefixed_dir`,
 /// `find_stale_mpm_skills_ignores_before_tm_rename_lands`,
-/// `find_stale_mpm_skills_missing_dir_is_empty`.
+/// `find_stale_mpm_skills_missing_dir_is_empty`,
+/// `find_stale_mpm_skills_ignores_differently_authored_same_name_skill`,
+/// `find_stale_mpm_skills_confirms_origin_via_frozen_checksum_fallback`.
 pub fn find_stale_mpm_skills(claude_skills_dir: &Path) -> Vec<StaleSkill> {
     let Ok(entries) = std::fs::read_dir(claude_skills_dir) else {
         return Vec::new();
@@ -106,11 +250,16 @@ pub fn find_stale_mpm_skills(claude_skills_dir: &Path) -> Vec<StaleSkill> {
         return Vec::new();
     }
 
+    let manifest = SkillManifest::load(claude_skills_dir);
+
     FORMER_TRUSTY_MPM_SKILLS
         .iter()
         .filter_map(|&name| {
             let path = claude_skills_dir.join(name);
-            path.is_dir().then(|| StaleSkill {
+            if !path.is_dir() || !is_confirmed_trusty_mpm_origin(name, &path, &manifest) {
+                return None;
+            }
+            Some(StaleSkill {
                 name: name.to_string(),
                 path,
             })
@@ -241,22 +390,57 @@ pub fn run_stale_mpm_skills_migration_once(root: &Path, claude_skills_dir: &Path
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::skill_manifest::SkillManifestEntry;
     use tempfile::TempDir;
 
-    fn write_skill(dir: &Path, name: &str) {
+    /// The exact pre-rename content trusty-mpm bundled for
+    /// `mpm-git-file-tracking` (see `test_fixtures/README.md`), whose sha256
+    /// is a real entry in `FORMER_TRUSTY_MPM_SKILL_CONTENT_SHA256`. Used to
+    /// prove the checksum fallback matches genuine historical content, not a
+    /// fabricated string engineered to satisfy the test.
+    const FORMER_GIT_FILE_TRACKING_CONTENT: &str =
+        include_str!("test_fixtures/former-mpm-git-file-tracking.md");
+
+    /// Write a skill directory with arbitrary content but NO manifest entry —
+    /// simulates a directory of unknown/unconfirmed origin (e.g. a legitimate
+    /// claude-mpm catalog skill, or any file a test doesn't care to attribute).
+    fn write_skill_with_content(dir: &Path, name: &str, content: &str) {
         let skill_dir = dir.join(name);
         std::fs::create_dir_all(&skill_dir).unwrap();
-        std::fs::write(
-            skill_dir.join("SKILL.md"),
-            format!("---\nname: {name}\n---\n\n# {name}\n"),
-        )
-        .unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+    }
+
+    fn write_skill(dir: &Path, name: &str) {
+        write_skill_with_content(dir, name, &format!("---\nname: {name}\n---\n\n# {name}\n"));
+    }
+
+    /// Simulate a skill trusty-mpm's OWN deployer actually wrote: the
+    /// directory content plus a matching [`SkillManifest`] entry, exactly as
+    /// [`crate::core::skill_deployer::deploy_skills`] leaves behind. This is
+    /// the "confirmed origin" fixture the origin-verification tests need —
+    /// `write_skill`/`write_skill_with_content` alone are NOT enough to pass
+    /// [`is_confirmed_trusty_mpm_origin`] since #1905's fork-model fix.
+    fn write_confirmed_trusty_mpm_skill(claude_skills_dir: &Path, name: &str, content: &str) {
+        write_skill_with_content(claude_skills_dir, name, content);
+        let mut manifest = SkillManifest::load(claude_skills_dir);
+        manifest.managed.insert(
+            name.to_string(),
+            SkillManifestEntry {
+                checksum: checksum(content),
+                deployed_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+        );
+        manifest.save(claude_skills_dir).unwrap();
     }
 
     #[test]
     fn find_stale_mpm_skills_reports_known_former_skill() {
         let tmp = TempDir::new().unwrap();
-        write_skill(tmp.path(), "mpm-bug-reporting");
+        write_confirmed_trusty_mpm_skill(
+            tmp.path(),
+            "mpm-bug-reporting",
+            "trusty-mpm's own old bundled content\n",
+        );
         write_skill(tmp.path(), "tm-bug-reporting");
 
         let stale = find_stale_mpm_skills(tmp.path());
@@ -283,7 +467,7 @@ mod tests {
         // A pre-rename install with only mpm-* skills deployed (no tm-* yet)
         // must not be flagged — the rename has not actually happened there.
         let tmp = TempDir::new().unwrap();
-        write_skill(tmp.path(), "mpm-bug-reporting");
+        write_confirmed_trusty_mpm_skill(tmp.path(), "mpm-bug-reporting", "old content\n");
 
         let stale = find_stale_mpm_skills(tmp.path());
         assert!(stale.is_empty());
@@ -299,8 +483,8 @@ mod tests {
     #[test]
     fn remove_stale_mpm_skills_deletes_directories() {
         let tmp = TempDir::new().unwrap();
-        write_skill(tmp.path(), "mpm-bug-reporting");
-        write_skill(tmp.path(), "mpm-pr-workflow");
+        write_confirmed_trusty_mpm_skill(tmp.path(), "mpm-bug-reporting", "old content a\n");
+        write_confirmed_trusty_mpm_skill(tmp.path(), "mpm-pr-workflow", "old content b\n");
         write_skill(tmp.path(), "tm-bug-reporting");
 
         let stale = find_stale_mpm_skills(tmp.path());
@@ -323,7 +507,11 @@ mod tests {
         // skills belonging to the separate Python claude-mpm framework.
         let tmp = TempDir::new().unwrap();
         for name in FORMER_TRUSTY_MPM_SKILLS {
-            write_skill(tmp.path(), name);
+            write_confirmed_trusty_mpm_skill(
+                tmp.path(),
+                name,
+                &format!("old content for {name}\n"),
+            );
         }
         // Plant several mpm-*-prefixed names that are NOT in the allowlist —
         // standing in for the unrelated claude-mpm framework's own skills,
@@ -342,6 +530,80 @@ mod tests {
                 skill.name
             );
         }
+    }
+
+    #[test]
+    fn find_stale_mpm_skills_ignores_differently_authored_same_name_skill() {
+        // Regression guard (owner clarification on the fork model, #1905):
+        // `/mpm-*` is claude-mpm's own harness-agnostic namespace, not
+        // something trusty-mpm owns outright — `/tm-*` is a FORK of a subset
+        // of it, and general skills keep being sourced from the separate
+        // claude-mpm catalog indefinitely. A `~/.claude/skills/mpm-<name>/`
+        // directory whose name is allowlisted but whose content trusty-mpm
+        // never deployed (no manifest entry, AND content that doesn't match
+        // the frozen pre-rename checksum) must survive the migration
+        // untouched — it is presumably a legitimate claude-mpm-sourced skill
+        // that only coincidentally shares one of trusty-mpm's old names.
+        let tmp = TempDir::new().unwrap();
+        write_skill_with_content(
+            tmp.path(),
+            "mpm-session-management",
+            "# mpm-session-management\n\nThis is claude-mpm's own harness-agnostic \
+             skill content — trusty-mpm's deployer never wrote this file.\n",
+        );
+        write_skill(tmp.path(), "tm-session-management"); // the rename has landed
+
+        let stale = find_stale_mpm_skills(tmp.path());
+        assert!(
+            stale.is_empty(),
+            "a same-named but differently-authored skill must never be flagged as stale: {stale:?}"
+        );
+        assert!(tmp.path().join("mpm-session-management").is_dir());
+    }
+
+    #[test]
+    fn find_stale_mpm_skills_ignores_manifest_entry_with_mismatched_checksum() {
+        // A managed entry whose checksum does NOT match the current content
+        // means something has overwritten trusty-mpm's own deploy since —
+        // this must be treated as unconfirmed, not fall through to the
+        // frozen-checksum fallback (which wouldn't match this fabricated
+        // content anyway, but the manifest branch must not short-circuit
+        // that check incorrectly).
+        let tmp = TempDir::new().unwrap();
+        write_confirmed_trusty_mpm_skill(tmp.path(), "mpm-bug-reporting", "original content\n");
+        // Overwrite the on-disk content without updating the manifest —
+        // simulates a claude-mpm catalog sync (or manual edit) replacing it.
+        std::fs::write(
+            tmp.path().join("mpm-bug-reporting").join("SKILL.md"),
+            "replaced content from elsewhere\n",
+        )
+        .unwrap();
+        write_skill(tmp.path(), "tm-bug-reporting");
+
+        let stale = find_stale_mpm_skills(tmp.path());
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn find_stale_mpm_skills_confirms_origin_via_frozen_checksum_fallback() {
+        // Proves the fallback path: a candidate with NO manifest entry (a
+        // deploy predating the manifest system) is still confirmed as
+        // trusty-mpm's own when its content is byte-identical to the frozen
+        // pre-rename checksum table. Uses real historical content (see
+        // `test_fixtures/README.md`), not a fabricated string, so this test
+        // would fail if the frozen checksum table ever drifted from what
+        // trusty-mpm actually shipped.
+        let tmp = TempDir::new().unwrap();
+        write_skill_with_content(
+            tmp.path(),
+            "mpm-git-file-tracking",
+            FORMER_GIT_FILE_TRACKING_CONTENT,
+        );
+        write_skill(tmp.path(), "tm-git-file-tracking"); // the rename has landed
+
+        let stale = find_stale_mpm_skills(tmp.path());
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].name, "mpm-git-file-tracking");
     }
 
     #[test]
@@ -378,7 +640,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join(".trusty-mpm");
         let skills = tmp.path().join(".claude").join("skills");
-        write_skill(&skills, "mpm-bug-reporting");
+        write_confirmed_trusty_mpm_skill(&skills, "mpm-bug-reporting", "old content\n");
         write_skill(&skills, "tm-bug-reporting");
 
         run_stale_mpm_skills_migration_once(&root, &skills);
@@ -405,8 +667,10 @@ mod tests {
         run_stale_mpm_skills_migration_once(&root, &skills);
         assert!(completed_migrations(&root).contains(STALE_MPM_SKILLS_MIGRATION_ID));
 
-        // Simulate a stale directory reappearing after the migration ran.
-        write_skill(&skills, "mpm-bug-reporting");
+        // Simulate a stale directory reappearing after the migration ran
+        // (with a confirmed-origin fixture, so this test isolates the
+        // marker's short-circuit behavior from the origin check).
+        write_confirmed_trusty_mpm_skill(&skills, "mpm-bug-reporting", "old content\n");
         run_stale_mpm_skills_migration_once(&root, &skills);
 
         // The second run must be a no-op: the marker short-circuits it.
