@@ -84,10 +84,23 @@
     </div>
 
     <!-- Aggregate stats -->
+    <!--
+      Why (issue #1924): totals below reflect only palaces already resident in
+      trusty-memory's LRU open-handle cache — the daemon deliberately stopped
+      force-opening every palace on every poll (that was the root cause of the
+      cache-thrashing bug), so on hosts with more palaces than fit in the cache
+      the "Palaces" card and the per-row counts will legitimately undercount
+      until those palaces are touched by other traffic. Surfacing
+      cached_palace_count alongside palace_count, and flagging uncached rows,
+      keeps that distinction visible instead of silently showing misleading
+      zeros.
+    -->
     <div class="stat-grid">
       <div class="stat-card">
-        <span class="stat-value">{report.metrics?.palace_count ?? 0}</span>
-        <span class="stat-label">Palaces</span>
+        <span class="stat-value">
+          {report.metrics?.cached_palace_count ?? report.metrics?.palace_count ?? 0}<span class="stat-value-of">/{report.metrics?.palace_count ?? 0}</span>
+        </span>
+        <span class="stat-label">Palaces (cached/total)</span>
       </div>
       <div class="stat-card">
         <span class="stat-value">{report.metrics?.total_drawers ?? 0}</span>
@@ -119,12 +132,17 @@
           </thead>
           <tbody>
             {#each report.metrics.palaces as p (p.id)}
-              <tr>
+              <tr class:row-uncached={p.cached === false}>
                 <td><code>{p.id}</code></td>
-                <td>{p.name}</td>
-                <td class="num">{p.drawer_count}</td>
-                <td class="num">{p.vector_count}</td>
-                <td class="num">{p.kg_triple_count}</td>
+                <td>
+                  {p.name}
+                  {#if p.cached === false}
+                    <span class="uncached-badge" title="Not currently open in the LRU cache — counts unavailable without a forced disk read.">not loaded</span>
+                  {/if}
+                </td>
+                <td class="num">{p.cached === false ? '—' : p.drawer_count}</td>
+                <td class="num">{p.cached === false ? '—' : p.vector_count}</td>
+                <td class="num">{p.cached === false ? '—' : p.kg_triple_count}</td>
               </tr>
             {/each}
           </tbody>
@@ -171,6 +189,7 @@
     padding: 1rem; display: flex; flex-direction: column; align-items: center; gap: 0.25rem;
   }
   .stat-value { font-size: 1.6rem; font-weight: 700; color: var(--color-text-primary); }
+  .stat-value-of { font-size: 1rem; font-weight: 500; color: var(--color-text-secondary); }
   .stat-label { font-size: 0.75rem; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.05em; }
 
   .sub-title { font-size: 1rem; font-weight: 600; color: var(--color-text-secondary); margin: 0 0 0.75rem; }
@@ -190,4 +209,15 @@
     background: var(--color-surface-code); padding: 0.1rem 0.35rem; border-radius: 0.25rem;
   }
   .empty-hint { color: var(--color-text-secondary); font-size: 0.85rem; }
+
+  /* Issue #1924: distinguish "not currently cached" rows from genuinely
+     empty palaces so the undercounted totals aren't mistaken for real data. */
+  tr.row-uncached td { color: var(--color-text-secondary); font-style: italic; }
+  .uncached-badge {
+    margin-left: 0.4rem; font-size: 0.68rem; font-style: normal; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    color: var(--color-text-secondary);
+    background: var(--color-surface-code);
+    border-radius: 9999px; padding: 0.1rem 0.45rem;
+  }
 </style>
