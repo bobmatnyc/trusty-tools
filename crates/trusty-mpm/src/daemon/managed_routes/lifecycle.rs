@@ -400,6 +400,38 @@ pub fn write_task_md(workspace: &std::path::Path, task: &str, session_id: &Manag
     }
 }
 
+/// Find an existing Active managed session for `source_id` whose tmux session
+/// is still live, so [`spawn_managed_inproject`] can reconnect instead of
+/// provisioning a duplicate worktree (#1707).
+///
+/// Why (issue #1931): extracted out of `spawn_managed_inproject` so the
+/// reconnect PREDICATE — the exact rule the operator relies on to avoid
+/// duplicate clones/worktrees for the same project — is unit-testable without
+/// a live `DaemonState`, tmux, or git worktree. `find` (not the async
+/// `SessionManager`/tmux calls themselves) is the only logic that can drift
+/// and cause the "existing clone not detected" symptom, so this is the seam
+/// worth pinning down with a hermetic regression test.
+/// What: returns the first record in `records` whose `source_id` matches
+/// `source_id` exactly, whose `state` is [`ManagedSessionState::Active`], and
+/// whose `tmux_name` reports alive via `tmux.session_exists(...)`. `None` when
+/// no record satisfies all three.
+/// Test: `find_reusable_inproject_session_matches_active_live_session`,
+/// `find_reusable_inproject_session_ignores_stopped_or_dead_or_other_project`.
+fn find_reusable_inproject_session(
+    records: &[SessionRecord],
+    source_id: &str,
+    tmux: &dyn crate::session_manager::ManagedTmuxDriver,
+) -> Option<SessionRecord> {
+    records
+        .iter()
+        .find(|r| {
+            r.source_id.as_deref() == Some(source_id)
+                && r.state == ManagedSessionState::Active
+                && tmux.session_exists(&r.tmux_name)
+        })
+        .cloned()
+}
+
 /// Spawn a managed session rooted at a per-session git worktree (#1706).
 ///
 /// Why: the in-project spawn path gives every managed session its own isolated
@@ -449,17 +481,15 @@ async fn spawn_managed_inproject(
     {
         let mgr = state.session_manager().await;
         let existing = mgr.list().await;
-        if let Some(live) = existing.iter().find(|r| {
-            r.source_id.as_deref() == Some(&candidate_source_id)
-                && r.state == ManagedSessionState::Active
-                && mgr.tmux_driver().session_exists(&r.tmux_name)
-        }) {
+        if let Some(live) =
+            find_reusable_inproject_session(&existing, &candidate_source_id, &*mgr.tmux_driver())
+        {
             info!(
                 id = %live.id,
                 source_id = %candidate_source_id,
                 "spawn_managed (inproject): reconnecting to existing live session"
             );
-            return Ok(live.clone());
+            return Ok(live);
         }
     }
 
@@ -488,7 +518,12 @@ async fn spawn_managed_inproject(
     // Prepare the session BEFORE spawning the runtime (#1913). See the
     // function-level doc for why this call is required here specifically (no
     // clone step wraps it, unlike the other two spawn paths).
-    let fw = crate::core::paths::FrameworkPaths::default();
+    //
+    // #1931: use `for_managed_workspace(&worktree)`, NOT `default()` — the
+    // harness cwd for this session IS `worktree`, so deployed agents/skills
+    // must land in `<worktree>/.claude/{agents,skills}` (where Claude Code's
+    // project-skill discovery looks), not the real `$HOME/.claude`.
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&worktree);
     prepare_inproject_session(&fw, session_id, &worktree, &synthetic_repo_url);
 
     // #1919: mirrors `spawn_managed_cloned`'s placement — announce the tmux
@@ -1027,6 +1062,135 @@ pub async fn resume_managed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal `ManagedTmuxDriver` test double scoped to this module.
+    ///
+    /// Why (issue #1931): [`find_reusable_inproject_session`] only needs
+    /// `session_exists`, so this fake needs no real tmux process — just a
+    /// settable list of session names considered "alive". The crate's other
+    /// `FakeTmuxDriver` (`session_manager::tests`) is not reachable from here
+    /// (it lives in a private sibling module), so a tiny local double is
+    /// simpler than threading visibility through the module tree.
+    /// What: `session_exists` returns `true` iff `name` is in `alive`; every
+    /// other trait method is unused by this module's tests and panics if
+    /// called, so a wiring mistake fails loudly instead of silently passing.
+    /// Test: used by the `find_reusable_inproject_session_*` tests below.
+    struct StubTmux {
+        alive: Vec<String>,
+    }
+
+    impl crate::session_manager::ManagedTmuxDriver for StubTmux {
+        fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
+            unimplemented!("not exercised by find_reusable_inproject_session tests")
+        }
+        fn kill_session(&self, _name: &str) -> Result<(), ManagedError> {
+            unimplemented!("not exercised by find_reusable_inproject_session tests")
+        }
+        fn send_line(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+            unimplemented!("not exercised by find_reusable_inproject_session tests")
+        }
+        fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+            unimplemented!("not exercised by find_reusable_inproject_session tests")
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(self.alive.clone())
+        }
+    }
+
+    /// Builds a minimal [`SessionRecord`] for [`find_reusable_inproject_session`]
+    /// tests — only `source_id`, `state`, and `tmux_name` affect the predicate;
+    /// every other field is an arbitrary placeholder.
+    fn stub_record(
+        source_id: Option<&str>,
+        state: ManagedSessionState,
+        tmux_name: &str,
+    ) -> SessionRecord {
+        SessionRecord {
+            id: ManagedSessionId::new(),
+            tmux_name: tmux_name.to_owned(),
+            cwd: std::path::PathBuf::from("/tmp/project"),
+            task: "task".into(),
+            state,
+            created_at: chrono::Utc::now(),
+            last_activity_at: None,
+            workspace_path: None,
+            repo_url: None,
+            branch: None,
+            pending_decision: None,
+            proposed_default: None,
+            correlation: Default::default(),
+            runtime: Default::default(),
+            ephemeral: false,
+            workspace_owned: false,
+            source_id: source_id.map(str::to_owned),
+            claude_session_id: None,
+            scrollback_path: None,
+            last_cwd: None,
+        }
+    }
+
+    /// Issue #1931 regression guard (symptom 1 investigation): proves the
+    /// exact predicate `tm` relies on to reconnect to an already-provisioned
+    /// managed project instead of spawning a duplicate clone/worktree — an
+    /// Active record with a matching `source_id` AND a still-live tmux
+    /// session must be returned.
+    #[test]
+    fn find_reusable_inproject_session_matches_active_live_session() {
+        let records = vec![stub_record(
+            Some("bobmatnyc/trusty-tools"),
+            ManagedSessionState::Active,
+            "tmpm-trusty-tools-abc123",
+        )];
+        let tmux = StubTmux {
+            alive: vec!["tmpm-trusty-tools-abc123".to_owned()],
+        };
+
+        let found = find_reusable_inproject_session(&records, "bobmatnyc/trusty-tools", &tmux);
+
+        assert!(
+            found.is_some(),
+            "an Active record with a live tmux session for the same source_id must be reused"
+        );
+        assert_eq!(found.unwrap().tmux_name, "tmpm-trusty-tools-abc123");
+    }
+
+    /// Issue #1931: three ways the predicate must correctly say "no reusable
+    /// session" — a different project's source_id, a non-Active state (e.g.
+    /// `Stopped`, matching the real symptom-1 investigation where prior
+    /// sessions were `state=stopped`), and a record whose tmux session has
+    /// died. Any of these incorrectly matching would either miss a reconnect
+    /// opportunity or, worse, hand back a dead session record.
+    #[test]
+    fn find_reusable_inproject_session_ignores_stopped_or_dead_or_other_project() {
+        let records = vec![
+            stub_record(
+                Some("bobmatnyc/xflux"),
+                ManagedSessionState::Active,
+                "tmpm-xflux-live",
+            ),
+            stub_record(
+                Some("bobmatnyc/trusty-tools"),
+                ManagedSessionState::Stopped,
+                "tmpm-trusty-tools-stopped",
+            ),
+            stub_record(
+                Some("bobmatnyc/trusty-tools"),
+                ManagedSessionState::Active,
+                "tmpm-trusty-tools-dead-tmux",
+            ),
+        ];
+        let tmux = StubTmux {
+            alive: vec!["tmpm-xflux-live".to_owned()],
+        };
+
+        let found = find_reusable_inproject_session(&records, "bobmatnyc/trusty-tools", &tmux);
+
+        assert!(
+            found.is_none(),
+            "must not reuse a different project's session, a Stopped record, \
+             or an Active record whose tmux session is no longer alive; got: {found:?}"
+        );
+    }
 
     /// #1913 regression guard: [`prepare_inproject_session`] — the call this fix
     /// adds to [`spawn_managed_inproject`] BEFORE `adapter.spawn` — must actually

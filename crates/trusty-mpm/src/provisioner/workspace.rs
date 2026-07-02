@@ -334,10 +334,11 @@ pub struct WorkspaceProvisioner<G: GitBackend> {
     workspace_root: PathBuf,
     /// When false, `provision` skips the `prepare_session` deploy step.
     ///
-    /// Why: `prepare_session` deploys agents/skills to the shared `~/.claude/`
-    /// tree; unit tests that only verify path isolation must not perform that
-    /// global side-effect (it races with other tests). Production always sets
-    /// this to true via [`Self::new`].
+    /// Why: `prepare_session` deploys agents/skills into the provisioned
+    /// workspace's `.claude/` tree (issue #1931 — never the shared real
+    /// `~/.claude/`); unit tests that only verify path isolation must not
+    /// perform that filesystem side-effect (it races with other tests).
+    /// Production always sets this to true via [`Self::new`].
     prepare: bool,
 }
 
@@ -470,7 +471,14 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         // ISOLATED CHECKOUT. If the framework is not installed (or deploy fails
         // for any reason) we log and continue so a session can still start — the
         // operator can run `tm install` / `tm catalog sync` to populate agents.
-        let fw = crate::core::paths::FrameworkPaths::default();
+        //
+        // #1931: use `for_managed_workspace(&workspace_path)`, NOT `default()` —
+        // this workspace IS the harness cwd for the spawned session, so deployed
+        // agents/skills must land in `<workspace_path>/.claude/{agents,skills}`
+        // (where Claude Code's project-skill discovery looks), not the real
+        // `$HOME/.claude`. Mirrors the sibling fix in
+        // `daemon::managed_routes::lifecycle::spawn_managed_inproject`.
+        let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace_path);
         // Thread the cloned-from `repo_url` so the trusty-memory MCP injection
         // pins `env.TRUSTY_MEMORY_PALACE` to the project's `owner-repo` slug
         // (issue #1605). Without it the injector would fall back to deriving the
