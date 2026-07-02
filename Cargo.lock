@@ -11013,6 +11013,7 @@ dependencies = [
  "tracing-subscriber",
  "trusty-agents-common",
  "trusty-common",
+ "trusty-progress",
  "trusty-review",
  "unicode-width 0.2.0",
  "utoipa",

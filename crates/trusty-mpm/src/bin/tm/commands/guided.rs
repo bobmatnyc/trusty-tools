@@ -21,28 +21,12 @@
 //! the managed-spawn integration path is exercised by `tests/session_manager_mvp.rs`.
 
 use anyhow::Context as _;
-use serde::Deserialize;
 use std::io::IsTerminal as _;
 
-use super::first_run::needs_first_run_clone;
 pub(crate) use super::guided_autostart::github_host;
+use super::guided_launch::launch_new_session_and_attach;
 use super::managed::filter_live_sessions;
 use crate::formatters::{banner::tmux_has_session, info_box::DaemonInfo};
-
-/// Response shape for `POST /api/v1/sessions/managed` (subset we need).
-///
-/// Why: a local type avoids depending on the daemon's internal DTO from the
-/// CLI binary crate; the fields we care about are `name` and `state`.
-/// What: mirrors `daemon::managed_routes::SpawnResponse` for the two fields
-/// the guided default uses.
-/// Test: covered indirectly by `launch_new_session_and_attach`.
-#[derive(Debug, Deserialize)]
-struct SpawnManagedResponse {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    state: String,
-}
 
 /// Decision returned by [`parse_picker_choice`].
 ///
@@ -634,60 +618,6 @@ async fn resume_guided_session(
 /// the argv decision; exercised indirectly here by the picker flow.
 fn tmux_attach(name: &str) -> anyhow::Result<()> {
     crate::commands::tmux_attach::tmux_attach(name)
-}
-
-/// POST a new managed session to the daemon and attach to it.
-///
-/// Why: "launch new" in the picker must use the daemon's protected managed-clone
-/// spawn path — NEVER write framework files into the live checkout (#1724).
-/// What: POSTs `{"repo_url": repo_url, "ref": "HEAD", "task": ""}` to
-/// `/api/v1/sessions/managed`. `repo_url` MUST be the git working-tree root
-/// (not a subdirectory), so the daemon finds `.git` and sets `source_id`
-/// correctly — enabling future `list_project_sessions` to show this session.
-/// The daemon provisions a per-session worktree in the base clone and returns
-/// the session name. Then attaches via [`tmux_attach`].
-/// Test: covered by the `POST /api/v1/sessions/managed` integration tests in
-/// `tests/session_manager_mvp.rs`.
-async fn launch_new_session_and_attach(
-    client: &reqwest::Client,
-    url: &str,
-    repo_url: &str,
-) -> anyhow::Result<()> {
-    let first_run = needs_first_run_clone(repo_url);
-    if let Some((ref proj, ref path)) = first_run {
-        eprintln!(
-            "tm: first run for {proj} — cloning into {}, this may take a few minutes…",
-            path.display()
-        );
-    }
-    eprintln!("tm: launching new session…");
-    let resp = client
-        .post(format!("{url}/api/v1/sessions/managed"))
-        .json(&serde_json::json!({
-            "repo_url": repo_url,
-            "ref": "HEAD",
-            "task": "",
-        }))
-        .send()
-        .await
-        .context("managed spawn POST failed")?;
-
-    if !resp.status().is_success() {
-        anyhow::bail!("daemon returned {} for managed spawn", resp.status());
-    }
-    let body: SpawnManagedResponse = resp
-        .json()
-        .await
-        .context("failed to parse managed spawn response")?;
-    anyhow::ensure!(
-        !body.name.is_empty(),
-        "daemon returned empty session name from managed spawn"
-    );
-    if first_run.is_some() {
-        eprintln!("tm: clone complete — workspace ready");
-    }
-    eprintln!("tm: session '{}' created ({})", body.name, body.state);
-    tmux_attach(&body.name)
 }
 
 // ── Fallback (daemon-unreachable / non-GitHub) path ─────────────────────────

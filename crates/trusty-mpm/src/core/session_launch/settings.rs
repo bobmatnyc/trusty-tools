@@ -124,39 +124,6 @@ pub(super) fn trusty_memory_mcp_value(palace_slug: Option<&str>) -> serde_json::
     server
 }
 
-/// Build the `trusty-search` MCP server definition injected into a project's
-/// `.mcp.json`, optionally pinned to a project index (issue #1373).
-///
-/// Why (issue #1270 / step 4): trusty-mpm-spawned sessions need the code-search
-/// tools (`search`, `grep`, `get_call_chain`, …). Issue #1373: without pinning,
-/// the contextless `trusty-search serve` stub left index selection to the LLM,
-/// which routinely queried the WRONG index (usually the persistent `claude-mpm`
-/// one) instead of the session's own project. Passing `--index <derived-id>`
-/// pins the session to its project index so a bare `search` always resolves
-/// correctly and fan-out never sweeps every index. The canonical stdio MCP
-/// invocation is bare `serve` (stdio is the default transport; HTTP is off
-/// unless `--with-http`).
-/// What: returns the JSON `Value` for a stdio MCP server running
-/// `trusty-search serve` — with `["serve", "--index", "<id>"]` when `index_id`
-/// is `Some` (non-empty), else the unpinned `["serve"]`. Index *creation* is
-/// handled separately by [`register_project_index`].
-/// Test: `trusty_search_mcp_value_pins_index`, `trusty_search_mcp_value_unpinned`.
-pub(super) fn trusty_search_mcp_value(index_id: Option<&str>) -> serde_json::Value {
-    let args: Vec<serde_json::Value> = match index_id {
-        Some(id) if !id.trim().is_empty() => vec![
-            serde_json::Value::String("serve".to_string()),
-            serde_json::Value::String("--index".to_string()),
-            serde_json::Value::String(id.to_string()),
-        ],
-        _ => vec![serde_json::Value::String("serve".to_string())],
-    };
-    serde_json::json!({
-        "type": "stdio",
-        "command": "trusty-search",
-        "args": args,
-    })
-}
-
 /// Hook event types the global `trusty-memory` entries may have been registered
 /// under (across current and legacy trusty-mpm builds).
 ///
@@ -328,7 +295,11 @@ pub(super) fn write_project_hooks(project_dir: &Path) -> Result<(), PrepError> {
 /// built by the caller (a const for `trusty-memory`, a dynamically-pinned value
 /// for `trusty-search`, #1373).
 /// Test: exercised via `inject_trusty_memory_mcp_*` and `inject_trusty_search_mcp_*`.
-fn inject_mcp_server(
+///
+/// Visibility: `pub(super)` (rather than private) because the sibling
+/// `search_index` module's `inject_trusty_search_mcp` also calls this shared
+/// read-merge-write helper (issue #610 split).
+pub(super) fn inject_mcp_server(
     project_path: &Path,
     name: &str,
     server: serde_json::Value,
@@ -469,146 +440,6 @@ fn git_remote_origin(start: &Path) -> Option<String> {
     }
     let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if url.is_empty() { None } else { Some(url) }
-}
-
-/// Inject the `trusty-search` MCP server into the project's `.mcp.json`,
-/// pinned to the project's index when one is known (issue #1373).
-///
-/// Why (issue #1270 / step 4): spawned sessions must reach the code-search
-/// tools, but `trusty-search` was never registered alongside `trusty-memory`.
-/// Issue #1373: the stub must additionally PIN the session to the project's own
-/// index (`--index <id>`) so queries never resolve to the wrong index. When
-/// `index_id` is `None` (derivation failed) the unpinned stub is written so the
-/// session still gets the tools — backward-compatible with the pre-#1373 stub.
-/// What: builds the (optionally pinned) server value via
-/// [`trusty_search_mcp_value`] and registers it under the key `trusty-search`.
-/// Test: `inject_trusty_search_mcp_adds_server`,
-/// `inject_trusty_search_mcp_preserves_existing`,
-/// `inject_trusty_search_mcp_is_idempotent`,
-/// `inject_trusty_search_mcp_pins_index`,
-/// `inject_both_mcp_servers_coexist`.
-pub(super) fn inject_trusty_search_mcp(
-    project_path: &Path,
-    index_id: Option<&str>,
-) -> Result<(), PrepError> {
-    inject_mcp_server(
-        project_path,
-        "trusty-search",
-        trusty_search_mcp_value(index_id),
-    )
-}
-
-/// Find-or-create the trusty-search index for `project_root` and return its id
-/// (issue #1373).
-///
-/// Why: pinning the serve stub to an index id is only useful if that index
-/// actually exists in the daemon — otherwise a query against it returns nothing
-/// and the LLM falls back to guessing (the very bug #1373 fixes). At session
-/// launch we therefore derive the project's canonical index id (the same rule
-/// trusty-search's `detect_project` uses, via the shared
-/// `trusty_common::derive_index_id`) and best-effort register it with the
-/// running daemon. The daemon's `POST /indexes` is idempotent (returns
-/// `created: false` for an existing id), so a re-register is safe and cheap.
-/// What: resolves the git-root for `project_root`, derives the index id, and —
-/// when the id is non-empty AND the trusty-search daemon address is discoverable
-/// — POSTs `{id, root_path}` to `/indexes`. ALWAYS returns the derived id
-/// (`None` only when derivation yields an empty string) so the caller can pin
-/// the stub even if the daemon is unreachable; a failed/skipped registration is
-/// logged at warn/debug and never propagates (the session must still launch).
-/// Test: `register_project_index_returns_derived_id` (derivation + daemon-down
-/// graceful path) in `tests.rs`.
-pub(super) fn register_project_index(project_root: &Path) -> Option<String> {
-    let root = trusty_common::resolve_project_root(project_root);
-    let index_id = trusty_common::derive_index_id(&root);
-    if index_id.trim().is_empty() {
-        tracing::warn!(
-            "skipping trusty-search index registration: empty index id for {}",
-            root.display()
-        );
-        return None;
-    }
-
-    // Discover the running daemon's address. Absent / unreadable file ⇒ daemon
-    // not started: skip registration (best-effort) but still return the id so
-    // the stub is pinned — the daemon will create the index on first reindex.
-    match trusty_common::read_daemon_addr("trusty-search") {
-        Ok(Some(addr)) if !addr.trim().is_empty() => {
-            let base = if addr.starts_with("http://") || addr.starts_with("https://") {
-                addr
-            } else {
-                format!("http://{addr}")
-            };
-            best_effort_create_index(&base, &index_id, &root);
-        }
-        _ => {
-            tracing::warn!(
-                "trusty-search daemon address not found; pinning index '{index_id}' \
-                 without pre-registering it (it will be created on first reindex)"
-            );
-        }
-    }
-
-    Some(index_id)
-}
-
-/// POST `/indexes` to find-or-create `index_id`; failures are logged, never
-/// propagated (issue #1373).
-///
-/// Why: registration is best-effort — a daemon that is briefly unreachable, or
-/// an HTTP hiccup, must NOT abort session launch. Isolating the blocking HTTP
-/// call here keeps [`register_project_index`] readable and the error handling
-/// in one place.
-/// What: issues a short-timeout blocking `POST {base}/indexes` with body
-/// `{id, root_path}` ON A DEDICATED OS THREAD. `prepare_session` is synchronous
-/// but is frequently invoked from inside a tokio runtime (the daemon/TUI launch
-/// paths); creating `reqwest::blocking`'s internal runtime directly there panics
-/// with "Cannot drop a runtime in a context where blocking is not allowed".
-/// Running the blocking client on a freshly-spawned `std::thread` (joined here)
-/// keeps that nested runtime entirely off the async worker, so the call is safe
-/// from both sync and async callers. A non-2xx response or transport error is
-/// logged at warn/debug and swallowed; the daemon endpoint is idempotent so
-/// re-creates are harmless. The client uses a tight ~1s overall timeout
-/// (750 ms connect) so the joined thread returns quickly: this call sits on the
-/// `prepare_session` hot path and must NOT stall a session launch when the
-/// daemon is slow or unreachable. Registration is purely best-effort — the
-/// index is also created on the first reindex — so a short cap is acceptable.
-/// Test: exercised via `register_project_index_returns_derived_id` (daemon-down
-/// path) and `launch_session_errors_when_daemon_unreachable` (async-context
-/// safety); the live HTTP path is covered by integration use.
-fn best_effort_create_index(base: &str, index_id: &str, root: &Path) {
-    let url = format!("{base}/indexes");
-    let body = serde_json::json!({ "id": index_id, "root_path": root.to_string_lossy() });
-    let index_id = index_id.to_string();
-    let root_display = root.display().to_string();
-
-    let result = std::thread::spawn(move || {
-        // 1s overall / 750ms connect cap: this runs synchronously on the
-        // session-launch hot path, so the worst-case stall must stay small.
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(1))
-            .connect_timeout(std::time::Duration::from_millis(750))
-            .build()?;
-        let resp = client.post(&url).json(&body).send()?;
-        Ok::<reqwest::StatusCode, reqwest::Error>(resp.status())
-    })
-    .join();
-
-    match result {
-        Ok(Ok(status)) if status.is_success() => {
-            tracing::debug!("registered trusty-search index '{index_id}' (root={root_display})");
-        }
-        Ok(Ok(status)) => {
-            tracing::warn!(
-                "trusty-search index registration for '{index_id}' returned HTTP {status}"
-            );
-        }
-        Ok(Err(e)) => {
-            tracing::warn!("trusty-search index registration for '{index_id}' failed: {e}");
-        }
-        Err(_) => {
-            tracing::warn!("trusty-search index registration thread for '{index_id}' panicked");
-        }
-    }
 }
 
 /// Collect the MCP server names declared in a workspace's `.mcp.json`.

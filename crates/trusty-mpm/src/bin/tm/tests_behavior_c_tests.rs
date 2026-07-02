@@ -30,6 +30,7 @@ use crate::commands::guided::{
     needs_restart, non_github_refusal_message, parse_picker_choice, print_non_tty_hint,
     print_project_context, tty_gate,
 };
+use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::managed::{filter_live_sessions, is_live_session_state};
 
 // ── parse_picker_choice ───────────────────────────────────────────────────────
@@ -854,6 +855,30 @@ fn needs_first_run_clone_returns_some_when_no_clone() {
     };
     let (proj, _path) = result.expect("must return Some for a first-run scenario");
     assert_eq!(proj, "myorg/my-new-project");
+}
+
+// ── spawn_progress_message (#1904) ────────────────────────────────────────────
+// The blocking managed-spawn POST previously left the operator with zero
+// feedback for the whole (potentially multi-minute) first-run clone; a spinner
+// now wraps the call, and this is the pure message-formatting helper behind it.
+
+#[test]
+fn spawn_progress_message_first_run() {
+    // Why: the first-run case must name the project and the destination path so
+    // the operator understands why the wait is long.
+    let path = PathBuf::from("/home/user/trusty-mpm-projects/owner/repo");
+    let msg = spawn_progress_message(Some(&("owner/repo".to_string(), path.clone())));
+    assert!(msg.contains("owner/repo"));
+    assert!(msg.contains(&path.display().to_string()));
+    assert!(msg.contains("first run"));
+}
+
+#[test]
+fn spawn_progress_message_reuse() {
+    // Why: a non-first-run launch (worktree already cloned) should show the
+    // generic launching message, not the cloning-specific one.
+    let msg = spawn_progress_message(None);
+    assert_eq!(msg, "tm: launching new session…");
 }
 
 // ── non_github_refusal_message (#1777) ───────────────────────────────────────

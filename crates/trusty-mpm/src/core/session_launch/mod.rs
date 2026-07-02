@@ -14,6 +14,7 @@
 //! Test: `prepare_session_writes_claude_md_and_stash` and
 //! `prepare_session_is_idempotent` in this module's tests.
 
+mod search_index;
 mod settings;
 #[cfg(test)]
 mod tests;
@@ -24,10 +25,10 @@ use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered};
 use crate::core::instruction_pipeline::{PipelineInput, PipelineOutput, build_instructions};
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::{DeployStats, deploy_skills_filtered};
+use search_index::{inject_trusty_search_mcp, register_project_index};
 use settings::{
-    deploy_output_style, inject_trusty_memory_mcp, inject_trusty_search_mcp,
-    preseed_workspace_trust_home, register_project_index, remove_global_trusty_memory_hooks,
-    write_output_style, write_project_hooks, write_status_line,
+    deploy_output_style, inject_trusty_memory_mcp, preseed_workspace_trust_home,
+    remove_global_trusty_memory_hooks, write_output_style, write_project_hooks, write_status_line,
 };
 
 /// Outcome of the pre-launch preparation for one session.
