@@ -190,6 +190,10 @@ unicode-width.workspace = true
 # Portable executable lookup on PATH (replaces the non-portable `which` shell-out
 # in the tcode runtime adapter's availability probe — see #1213).
 which.workspace = true
+# Shared rustup/cargo-style spinner used around the blocking managed-spawn POST
+# in the guided `tm` on-ramp so first-run clone/provisioning is no longer a
+# silent multi-minute hang (issue #1904).
+trusty-progress = { workspace = true }
 # rusqlite: formerly a direct dep for the claude-mpm session-registry reader
 # (DOC-28 cutover bridge, #1762). Now consumed transitively via
 # trusty-common/catchup feature — removed from direct deps (PR1, refs #1762).

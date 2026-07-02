@@ -14,6 +14,7 @@
 //! Test: `prepare_session_writes_claude_md_and_stash` and
 //! `prepare_session_is_idempotent` in this module's tests.
 
+mod search_index;
 mod settings;
 #[cfg(test)]
 mod tests;
@@ -24,10 +25,10 @@ use crate::core::agent_deployer::{DeployResult, deploy_agents_filtered};
 use crate::core::instruction_pipeline::{PipelineInput, PipelineOutput, build_instructions};
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_deployer::{DeployStats, deploy_skills_filtered};
+use search_index::{inject_trusty_search_mcp, register_project_index};
 use settings::{
-    deploy_output_style, inject_trusty_memory_mcp, inject_trusty_search_mcp,
-    preseed_workspace_trust_home, register_project_index, remove_global_trusty_memory_hooks,
-    write_output_style, write_project_hooks, write_status_line,
+    deploy_output_style, inject_trusty_memory_mcp, preseed_workspace_trust_home,
+    remove_global_trusty_memory_hooks, write_output_style, write_project_hooks, write_status_line,
 };
 
 /// Outcome of the pre-launch preparation for one session.
@@ -236,7 +237,13 @@ fn prepare_session_inner(
 
     // Deploy composed agents — Claude Code reads `~/.claude/agents/` at startup.
     // The manifest's agent-set selection (include/exclude) restricts WHICH source
-    // agents deploy; the default manifest selects all of them.
+    // agents deploy; the default manifest selects all of them. Announce the
+    // stage BEFORE the step so a slow deploy is visibly "in flight" rather than
+    // only surfacing after the fact (issue #1904); a no-op outside a daemon
+    // `spawn_managed` scope (see `provisioning_stage`).
+    crate::core::provisioning_stage::emit(
+        crate::core::provisioning_stage::ProvisioningStage::DeployingAgents,
+    );
     let deploy = deploy_agents_filtered(&plan.agent_source, &fw.claude_agents_dir(), |name| {
         plan.agent_selected(name)
     })
@@ -245,6 +252,9 @@ fn prepare_session_inner(
     // Deploy skill files — Claude Code reads `~/.claude/skills/` at startup.
     // Skills carry no inheritance, so this is a manifest-tracked content copy;
     // the manifest's skill-set selection restricts WHICH source skills deploy.
+    crate::core::provisioning_stage::emit(
+        crate::core::provisioning_stage::ProvisioningStage::DeployingSkills,
+    );
     let skill_deploy =
         deploy_skills_filtered(&plan.skill_source, &fw.claude_skills_dir(), |name| {
             plan.skill_selected(name)
@@ -254,6 +264,9 @@ fn prepare_session_inner(
     // Compose the effective launch instructions (framework + delegation
     // authority + project CLAUDE.md); this loads or creates the project
     // CLAUDE.md so Claude Code picks it up automatically.
+    crate::core::provisioning_stage::emit(
+        crate::core::provisioning_stage::ProvisioningStage::BuildingInstructions,
+    );
     let input = PipelineInput {
         framework_instructions_path: fw.framework_instructions_path(),
         agents_dir: fw.claude_agents_dir(),
@@ -356,6 +369,9 @@ fn prepare_session_inner(
     // `memory_store`, …). Gated by the manifest's `[mcp] trusty_memory` toggle
     // (default on). Non-fatal: the session still launches, it just lacks the
     // memory tools.
+    crate::core::provisioning_stage::emit(
+        crate::core::provisioning_stage::ProvisioningStage::ConfiguringMcp,
+    );
     if plan.inject_trusty_memory {
         // Pin the project's palace via `env.TRUSTY_MEMORY_PALACE` (issue #1605).
         // `repo_url` (the cloned-from URL, threaded from LaunchParams) is the

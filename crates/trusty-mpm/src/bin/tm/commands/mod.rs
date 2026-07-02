@@ -14,6 +14,8 @@ pub(crate) mod daemon;
 pub(crate) mod first_run;
 pub(crate) mod guided;
 pub(crate) mod guided_autostart;
+pub(crate) mod guided_launch;
+pub(crate) mod guided_launch_sse;
 pub(crate) mod install;
 pub(crate) mod issue;
 pub(crate) mod launch;
