@@ -89,7 +89,23 @@ fn cli_parses_stop() {
 #[test]
 fn cli_parses_doctor() {
     let cli = Cli::try_parse_from(["trusty-mpm", "doctor"]).unwrap();
-    assert!(matches!(cli.command.unwrap(), Command::Doctor));
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            prune_stale_skills: false
+        }
+    ));
+}
+
+#[test]
+fn cli_parses_doctor_prune_stale_skills() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "doctor", "--prune-stale-skills"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Doctor {
+            prune_stale_skills: true
+        }
+    ));
 }
 
 #[test]

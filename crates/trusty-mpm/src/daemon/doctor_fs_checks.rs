@@ -17,6 +17,7 @@ use std::path::Path;
 use crate::core::agent_manifest::MANIFEST_FILE;
 use crate::core::doctor::{CheckStatus, DoctorCheck};
 use crate::core::paths::FrameworkPaths;
+use crate::core::stale_skills::find_stale_mpm_skills;
 
 /// Probe the instruction pipeline by looking for `last-instructions.md`.
 ///
@@ -226,6 +227,42 @@ pub(super) fn check_skill_source(paths: &FrameworkPaths) -> DoctorCheck {
     }
 }
 
+/// Probe `~/.claude/skills/` for stale pre-rename `mpm-*` skill directories.
+///
+/// Why: [`crate::core::skill_deployer::deploy_skills`] never removes a
+/// skill's old directory when it is renamed, so the mpm-*→tm-* skill rename
+/// (#1905, PR #1872) leaves orphaned `mpm-*/SKILL.md` directories behind
+/// indefinitely unless an operator notices and removes them by hand. This
+/// probe gives that a visible, actionable signal instead of silence.
+/// What: `Ok` when no stale skills are found; `Warn` naming each one and
+/// pointing at `tm doctor --prune-stale-skills` when
+/// [`find_stale_mpm_skills`] reports at least one. Never reports skills
+/// outside the frozen `FORMER_TRUSTY_MPM_SKILLS` allowlist, so unrelated
+/// `mpm-*` skills from the Python claude-mpm framework are never flagged.
+/// Test: `stale_skills_none_found_is_ok`, `stale_skills_found_is_warn`.
+pub(super) fn check_stale_skills(home: &Path) -> DoctorCheck {
+    let dir = home.join(".claude").join("skills");
+    let stale = find_stale_mpm_skills(&dir);
+    if stale.is_empty() {
+        DoctorCheck::new(
+            "stale_skills",
+            CheckStatus::Ok,
+            "no stale pre-rename mpm-* skills found",
+        )
+    } else {
+        let names: Vec<&str> = stale.iter().map(|s| s.name.as_str()).collect();
+        DoctorCheck::new(
+            "stale_skills",
+            CheckStatus::Warn,
+            format!(
+                "{} stale pre-rename skill(s) found ({}) — run `tm doctor --prune-stale-skills` to remove",
+                stale.len(),
+                names.join(", ")
+            ),
+        )
+    }
+}
+
 /// Count files with the given extension directly under `dir`.
 ///
 /// Why: the agent and skill-source probes need the number of deployed `.md`
@@ -396,6 +433,30 @@ mod tests {
         std::fs::create_dir_all(paths.skill_source_dir()).unwrap();
         let check = check_skill_source(&paths);
         assert_eq!(check.status, CheckStatus::Warn);
+    }
+
+    #[test]
+    fn stale_skills_none_found_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = tmp.path().join(".claude").join("skills");
+        std::fs::create_dir_all(skills.join("tm-doctor")).unwrap();
+        std::fs::write(skills.join("tm-doctor").join("SKILL.md"), "skill").unwrap();
+        let check = check_stale_skills(tmp.path());
+        assert_eq!(check.status, CheckStatus::Ok);
+    }
+
+    #[test]
+    fn stale_skills_found_is_warn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skills = tmp.path().join(".claude").join("skills");
+        std::fs::create_dir_all(skills.join("mpm-bug-reporting")).unwrap();
+        std::fs::write(skills.join("mpm-bug-reporting").join("SKILL.md"), "skill").unwrap();
+        std::fs::create_dir_all(skills.join("tm-bug-reporting")).unwrap();
+        std::fs::write(skills.join("tm-bug-reporting").join("SKILL.md"), "skill").unwrap();
+        let check = check_stale_skills(tmp.path());
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("mpm-bug-reporting"));
+        assert!(check.message.contains("--prune-stale-skills"));
     }
 
     #[test]

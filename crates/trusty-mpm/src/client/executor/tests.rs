@@ -190,15 +190,16 @@ async fn register_project_succeeds() {
 
 #[tokio::test]
 async fn execute_doctor_against_test_daemon() {
-    // `/doctor` returns an eight-check report against a live daemon.
+    // `/doctor` returns a nine-check report against a live daemon.
     let (_state, url) = spawn_test_daemon().await;
     let executor = CommandExecutor::new(url);
     match executor.execute(TrustyCommand::Doctor).await {
         CommandResult::Doctor(report) => {
             // #1840 added the worktrees check (6); DOC-28 R4(a) added the
             // output_style check (7); A2 (tm-skills-portfolio epic) added the
-            // skill_source check, bringing the total to 8.
-            assert_eq!(report.checks.len(), 8);
+            // skill_source check (8); #1905 added the stale_skills check,
+            // bringing the total to 9.
+            assert_eq!(report.checks.len(), 9);
         }
         other => panic!("expected Doctor, got {other:?}"),
     }

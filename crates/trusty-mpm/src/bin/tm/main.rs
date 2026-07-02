@@ -226,7 +226,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Project { action }) => project(&client, &url, action).await,
         Some(Command::Session { action }) => session(&client, &url, action).await,
         Some(Command::Events) => commands::misc::events(&client, &url).await,
-        Some(Command::Doctor) => doctor(&url).await,
+        Some(Command::Doctor { prune_stale_skills }) => doctor(&url, prune_stale_skills).await,
         Some(Command::Health) => health(&url).await,
         Some(Command::Tui {
             url: tui_url,

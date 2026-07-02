@@ -205,8 +205,8 @@ At the end of orchestration, provide a structured summary, including an
 
 ## Detailed Workflows (See PM Skills)
 
-- **mpm-delegation-patterns** - Common workflows mapped onto trusty-mpm agents
-- **mpm-git-file-tracking** - File tracking protocol after an agent creates files
-- **mpm-pr-workflow** - Branch protection and PR creation
-- **mpm-verification-protocols** - QA verification gate and evidence requirements
-- **mpm-bug-reporting** - Bug reporting and tracking via GitHub issues
+- **tm-delegation-patterns** - Common workflows mapped onto trusty-mpm agents
+- **tm-git-file-tracking** - File tracking protocol after an agent creates files
+- **tm-pr-workflow** - Branch protection and PR creation
+- **tm-verification-protocols** - QA verification gate and evidence requirements
+- **tm-bug-reporting** - Bug reporting and tracking via GitHub issues

@@ -119,7 +119,22 @@ pub(crate) enum Command {
     /// Show the recent hook-event feed.
     Events,
     /// Run a full system diagnostic of the trusty-mpm stack.
-    Doctor,
+    Doctor {
+        /// Remove stale pre-rename `~/.claude/skills/mpm-*` directories.
+        ///
+        /// Why: the mpm-*→tm-* skill rename (#1905) left orphaned `mpm-*`
+        /// skill directories deployed before the rename in place —
+        /// `skill_deployer::deploy_skills` never deletes a skill's old
+        /// directory when it is renamed. The default `tm doctor` run only
+        /// reports these via the `stale_skills` check; this flag is the
+        /// explicit opt-in to actually remove them.
+        /// What: after printing the diagnostic report, scans
+        /// `~/.claude/skills/` for trusty-mpm's own frozen pre-rename skill
+        /// names (never an unrelated `mpm-*` skill from another tool) and
+        /// deletes each one found, printing what was removed.
+        #[arg(long)]
+        prune_stale_skills: bool,
+    },
     /// Report daemon health: reachability, catalog freshness, and a fleet summary.
     Health,
     /// Launch the ratatui multi-session TUI dashboard.
