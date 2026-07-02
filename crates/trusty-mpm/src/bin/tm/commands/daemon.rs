@@ -362,6 +362,10 @@ pub(crate) async fn stop_daemon() -> anyhow::Result<()> {
 pub(crate) fn cleanup_lock_file() {
     let path = trusty_mpm::core::lock_file_path();
     let _ = std::fs::remove_file(&path);
+    // Also drop the guided-autostart pidfile so a stale PID from a prior raw
+    // fallback spawn does not mislead `tm`'s tooling after the daemon stops (#1900).
+    let root = trusty_mpm::core::paths::FrameworkPaths::default().root;
+    super::guided_autostart::remove_autostart_pidfile(&root);
 }
 
 /// Walk the process table and return every trusty-mpm daemon PID.

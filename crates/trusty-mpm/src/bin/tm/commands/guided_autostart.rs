@@ -3,40 +3,107 @@
 //! Why: bare `tm` should bring the trusty-mpm daemon up automatically when
 //! it is unreachable, so the operator gets the full picker UX without having
 //! to run `tm start` first.
-//! What: [`ensure_daemon_started`] checks for a launchd supervisor plist on
-//! macOS (preferred: reboot-durable) and falls back to a detached direct spawn.
-//! Both paths poll `/health` via lock-file URL resolution for up to 5 s and
-//! return the resolved daemon URL on success.
-//! Test: [`supervisor_plist_path_has_expected_components`] verifies the path
-//! derivation; integration coverage lives in the guided-default e2e suite.
+//! What: [`ensure_daemon_started`] checks whether the MAIN session-manager
+//! daemon is managed by launchd on macOS (via its `com.trusty.mpm` plist) and,
+//! if so, nudges it with `launchctl bootstrap` (reboot-durable); otherwise it
+//! falls back to a detached direct spawn, recording the child PID in a
+//! discoverable pidfile. Both paths poll `/health` via lock-file URL resolution
+//! for up to 5 s and return the resolved daemon URL on success.
+//! Test: `main_daemon_plist_path_uses_main_label`,
+//! `main_daemon_managed_by_launchd`,
+//! `main_daemon_managed_ignores_supervisor_only_home`, and
+//! `autostart_pidfile_roundtrip` cover the pure decision/path helpers;
+//! integration coverage lives in the guided-default e2e suite.
 
 use anyhow::Context as _;
 
-/// The launchd label for the trusty-mpm supervisor plist (macOS only).
+/// The launchd label for the MAIN trusty-mpm session-manager daemon (macOS).
 ///
-/// Why: the identical string appears as `PLIST_LABEL` in `trusty-installer`;
-/// defining it here avoids importing that crate (which would create a circular
-/// dependency). It MUST match the installer's constant exactly so that
-/// `try_launchctl_start` and the installer target the same plist.
-/// What: `"com.trusty.mpm.supervisor"`.
-/// Test: `supervisor_plist_path_has_expected_components` derives the filename
-/// from this constant and asserts it matches the expected plist basename.
+/// Why: `ensure_daemon_started` must decide whether the *main* daemon — the one
+/// bare `tm` talks to — is managed by launchd, so it can nudge it via
+/// `launchctl bootstrap` instead of raw-spawning a competing copy. The main
+/// daemon registers under `com.trusty.mpm` (its plist runs
+/// `trusty-mpm daemon --addr 127.0.0.1:7880`). This is a DIFFERENT launchd job
+/// from the optional unattended supervisor (`com.trusty.mpm.supervisor`, which
+/// runs `tm supervisor` for auto-resume/observation, see
+/// `deploy/supervisor/`). The previous code checked the *supervisor* label
+/// here, so the lookup always missed the real daemon and every autostart fell
+/// through to a detached raw spawn — orphaning a stray daemon on a random port
+/// (#1900).
+/// What: `"com.trusty.mpm"` — matches the installed main-daemon plist's
+/// `<key>Label</key>` entry.
+/// Test: `main_daemon_plist_path_uses_main_label`,
+/// `main_daemon_managed_ignores_supervisor_only_home`.
 #[cfg(target_os = "macos")]
-pub(crate) const SUPERVISOR_PLIST_LABEL: &str = "com.trusty.mpm.supervisor";
+pub(crate) const MAIN_DAEMON_PLIST_LABEL: &str = "com.trusty.mpm";
 
-/// Resolve the expected macOS LaunchAgents path for the supervisor plist.
+/// Resolve the LaunchAgents plist path for `label` under an explicit home dir.
 ///
-/// Why: factored out so `ensure_daemon_started` can check whether a supervisor
-/// plist is installed before deciding between launchd-start and detached-spawn.
-/// What: returns `~/Library/LaunchAgents/com.trusty.mpm.supervisor.plist`.
-/// Test: `supervisor_plist_path_has_expected_components`.
+/// Why: taking `home` as a parameter keeps the derivation pure so tests can
+/// point it at a temp dir instead of touching the real
+/// `~/Library/LaunchAgents/`.
+/// What: returns `<home>/Library/LaunchAgents/<label>.plist`.
+/// Test: `main_daemon_plist_path_uses_main_label`.
 #[cfg(target_os = "macos")]
-pub(crate) fn supervisor_plist_path() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("Library")
+fn plist_path_in(home: &std::path::Path, label: &str) -> std::path::PathBuf {
+    home.join("Library")
         .join("LaunchAgents")
-        .join(format!("{SUPERVISOR_PLIST_LABEL}.plist"))
+        .join(format!("{label}.plist"))
+}
+
+/// Decide whether the MAIN daemon is managed by launchd, given a home dir.
+///
+/// Why: this is the exact decision that gates the launchd-nudge vs. raw-spawn
+/// branch in `ensure_daemon_started`. Extracting it as a pure function (home
+/// dir injected) lets tests verify — with temp dirs — that a
+/// `com.trusty.mpm.plist` triggers launchd management while a home containing
+/// ONLY the supervisor plist does not (the #1900 regression guard).
+/// What: returns `true` iff `<home>/Library/LaunchAgents/com.trusty.mpm.plist`
+/// exists.
+/// Test: `main_daemon_managed_by_launchd`,
+/// `main_daemon_managed_ignores_supervisor_only_home`.
+#[cfg(target_os = "macos")]
+fn main_daemon_managed_by_launchd_in(home: &std::path::Path) -> bool {
+    plist_path_in(home, MAIN_DAEMON_PLIST_LABEL).exists()
+}
+
+/// Resolve the discoverable pidfile path for an autostart-spawned daemon.
+///
+/// Why: the raw detached-spawn fallback (used when launchd cannot help) would
+/// otherwise leave a fully-invisible child — if it races the real daemon and
+/// gets orphaned it is hard for `tm`'s own tooling to find and kill (#1900).
+/// Recording its PID under the framework root makes the stray trackable.
+/// What: returns `<root>/autostart-daemon.pid`.
+/// Test: `autostart_pidfile_roundtrip`.
+fn autostart_pidfile_path(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("autostart-daemon.pid")
+}
+
+/// Record the PID of an autostart-spawned daemon to a discoverable pidfile.
+///
+/// Why: makes a raw fallback spawn trackable/killable rather than invisible, so
+/// a raced/orphaned autostart daemon can be found by `tm`'s own tooling (#1900).
+/// What: writes `pid` (decimal) to `autostart_pidfile_path(root)` and returns
+/// the path on success. Callers treat failure as non-fatal.
+/// Test: `autostart_pidfile_roundtrip`.
+fn write_autostart_pidfile(
+    root: &std::path::Path,
+    pid: u32,
+) -> std::io::Result<std::path::PathBuf> {
+    let path = autostart_pidfile_path(root);
+    std::fs::write(&path, pid.to_string())?;
+    Ok(path)
+}
+
+/// Remove the autostart pidfile, if present.
+///
+/// Why: once the daemon is stopped the recorded PID is stale; leaving it would
+/// mislead tooling into probing a dead PID. Mirrors `daemon::cleanup_lock_file`,
+/// which is where this is wired into the stop path.
+/// What: best-effort `remove_file` of `autostart_pidfile_path(root)`.
+/// Test: `autostart_pidfile_roundtrip`.
+pub(crate) fn remove_autostart_pidfile(root: &std::path::Path) {
+    let _ = std::fs::remove_file(autostart_pidfile_path(root));
 }
 
 /// Outcome of a `launchctl bootstrap` attempt (macOS only).
@@ -65,31 +132,41 @@ enum LaunchctlOutcome {
 /// Why: bare `tm` in the guided-default flow should not require the operator
 /// to run `tm start` manually first. This helper transparently starts the
 /// daemon so the picker UX appears on every invocation.
-/// What: (1) on macOS, if the supervisor plist exists, issues
-/// `launchctl bootstrap gui/<uid> <plist>` for reboot-durable startup and
-/// skips the spawn step when the service is already loaded (EALREADY);
-/// (2) when launchd is unavailable, the plist is absent, or on non-macOS,
-/// removes any stale lock file and spawns the current executable with the
-/// `daemon` subcommand in a detached process; (3) polls `/health` every 500 ms
-/// for up to 5 s via lock-file URL resolution; (4) returns the resolved daemon
-/// URL on success or `Err` on timeout. The `_url` parameter is intentionally
-/// unused: after auto-start the lock file records the actual bound address.
-/// Test: launchd path requires a macOS launchd environment; detached-spawn and
-/// polling paths are covered by the guided-default e2e smoke test.
+/// What: (1) on macOS, if the MAIN daemon plist (`com.trusty.mpm`) is installed,
+/// issues `launchctl bootstrap gui/<uid> <plist>` for reboot-durable startup and
+/// skips the spawn step when the service is already loaded (EALREADY) — the
+/// check targets the main daemon, NOT the optional supervisor (#1900);
+/// (2) when launchd is unavailable, the main-daemon plist is absent, or on
+/// non-macOS, removes any stale lock file and spawns the current executable with
+/// the `daemon` subcommand in a detached process (recording the child PID in a
+/// discoverable pidfile); (3) polls `/health` every 500 ms for up to 5 s via
+/// lock-file URL resolution; (4) returns the resolved daemon URL on success or
+/// `Err` on timeout. The `_url` parameter is intentionally unused: after
+/// auto-start the lock file records the actual bound address.
+/// Test: launchd path requires a macOS launchd environment; the pure gate
+/// (`main_daemon_managed_by_launchd_in`) and pidfile helpers are unit-tested;
+/// detached-spawn and polling paths are covered by the guided-default e2e suite.
 pub(crate) async fn ensure_daemon_started(
     client: &reqwest::Client,
     _url: &str,
 ) -> anyhow::Result<String> {
     // Determine whether we need to spawn a new daemon process.
-    // On macOS: prefer launchctl; spawn only when launchd cannot help.
+    // On macOS: if the MAIN daemon plist is installed, let launchd own it and
+    // nudge it via bootstrap; spawn only when launchctl truly cannot help.
     // On all other platforms: always spawn directly.
     #[cfg(target_os = "macos")]
     let needs_spawn = {
-        let plist_path = supervisor_plist_path();
-        matches!(
-            try_launchctl_start(&plist_path),
-            LaunchctlOutcome::Unavailable
-        )
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        if main_daemon_managed_by_launchd_in(&home) {
+            let plist_path = plist_path_in(&home, MAIN_DAEMON_PLIST_LABEL);
+            matches!(
+                try_launchctl_start(&plist_path),
+                LaunchctlOutcome::Unavailable
+            )
+        } else {
+            // No main-daemon plist installed → launchd cannot help; spawn.
+            true
+        }
     };
     #[cfg(not(target_os = "macos"))]
     let needs_spawn = true;
@@ -109,13 +186,18 @@ pub(crate) async fn ensure_daemon_started(
             .context("open daemon log file")?;
         let log_copy = log_file.try_clone().context("clone log file handle")?;
         let exe = std::env::current_exe().context("resolve current executable path")?;
-        std::process::Command::new(&exe)
+        let child = std::process::Command::new(&exe)
             .arg("daemon")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::from(log_file))
             .stderr(std::process::Stdio::from(log_copy))
             .spawn()
             .context("spawn daemon process")?;
+        // Record the child's PID so a raced/orphaned autostart daemon stays
+        // discoverable to `tm`'s own tooling (#1900 hardening). Non-fatal.
+        if let Err(e) = write_autostart_pidfile(&root, child.id()) {
+            eprintln!("tm: warning: could not write autostart pidfile: {e}");
+        }
     }
 
     // Poll until healthy or timeout (5 s). Re-resolve from the lock file each
@@ -228,22 +310,23 @@ pub(crate) fn github_host(lower_url: &str) -> &str {
 mod tests {
     use super::*;
 
-    /// Verify the supervisor plist path is derived correctly from the label constant.
+    /// Verify the MAIN daemon plist path is derived from the main-daemon label.
     ///
-    /// Why: the path must match what `launchctl bootstrap` and the installer
-    /// both expect so they all refer to the same file.
-    /// What: asserts the filename is `<LABEL>.plist` and the parent dir is
-    /// `LaunchAgents`.
+    /// Why: `ensure_daemon_started` must look up the main daemon
+    /// (`com.trusty.mpm`), not the supervisor — the #1900 mismatch made every
+    /// autostart miss the real launchd job. Pin the derived filename and dir.
+    /// What: asserts the path is `<home>/Library/LaunchAgents/com.trusty.mpm.plist`.
     /// Test: this test.
     #[cfg(target_os = "macos")]
     #[test]
-    fn supervisor_plist_path_has_expected_components() {
-        let path = supervisor_plist_path();
+    fn main_daemon_plist_path_uses_main_label() {
+        let home = std::path::Path::new("/tmp/fake-home");
+        let path = plist_path_in(home, MAIN_DAEMON_PLIST_LABEL);
+        assert_eq!(MAIN_DAEMON_PLIST_LABEL, "com.trusty.mpm");
         let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         assert_eq!(
-            filename,
-            format!("{SUPERVISOR_PLIST_LABEL}.plist"),
-            "plist filename must be <LABEL>.plist"
+            filename, "com.trusty.mpm.plist",
+            "must target the main daemon plist, not the supervisor"
         );
         let parent = path
             .parent()
@@ -252,7 +335,81 @@ mod tests {
             .unwrap_or("");
         assert_eq!(
             parent, "LaunchAgents",
-            "plist must live in ~/Library/LaunchAgents/"
+            "plist must live under Library/LaunchAgents/"
+        );
+    }
+
+    /// Verify a present main-daemon plist makes the launchd gate return true.
+    ///
+    /// Why: when the real `com.trusty.mpm.plist` is installed, autostart must
+    /// route through `launchctl bootstrap` rather than a raw spawn (#1900).
+    /// What: creates `com.trusty.mpm.plist` under a temp home and asserts the
+    /// pure decision function returns true; asserts false when it is absent.
+    /// Test: this test.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn main_daemon_managed_by_launchd() {
+        let tmp = tempfile::tempdir().expect("create temp home");
+        let home = tmp.path();
+        // Absent plist → not launchd-managed → spawn path.
+        assert!(
+            !main_daemon_managed_by_launchd_in(home),
+            "empty home must not report launchd management"
+        );
+        // Install the main-daemon plist.
+        let agents = plist_path_in(home, MAIN_DAEMON_PLIST_LABEL);
+        std::fs::create_dir_all(agents.parent().expect("agents dir"))
+            .expect("create LaunchAgents dir");
+        std::fs::write(&agents, "<plist/>").expect("write main plist");
+        assert!(
+            main_daemon_managed_by_launchd_in(home),
+            "installed main-daemon plist must report launchd management"
+        );
+    }
+
+    /// Verify a supervisor-only home does NOT report the main daemon as managed.
+    ///
+    /// Why: this is the direct #1900 regression guard — the supervisor plist
+    /// (`com.trusty.mpm.supervisor`) is a distinct optional service; its presence
+    /// must never be mistaken for the main daemon being launchd-managed.
+    /// What: writes only `com.trusty.mpm.supervisor.plist` and asserts the gate
+    /// returns false so autostart correctly falls through to the spawn path.
+    /// Test: this test.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn main_daemon_managed_ignores_supervisor_only_home() {
+        let tmp = tempfile::tempdir().expect("create temp home");
+        let home = tmp.path();
+        let supervisor = plist_path_in(home, "com.trusty.mpm.supervisor");
+        std::fs::create_dir_all(supervisor.parent().expect("agents dir"))
+            .expect("create LaunchAgents dir");
+        std::fs::write(&supervisor, "<plist/>").expect("write supervisor plist");
+        assert!(
+            !main_daemon_managed_by_launchd_in(home),
+            "a supervisor-only home must not report the main daemon as managed (#1900)"
+        );
+    }
+
+    /// Verify the autostart pidfile is written, read back, and removed.
+    ///
+    /// Why: the fallback-spawn hardening records the child PID so a raced/
+    /// orphaned autostart daemon is discoverable and killable (#1900). Round-trip
+    /// the write and the cleanup that `daemon::cleanup_lock_file` invokes on stop.
+    /// What: writes a PID under a temp root, asserts the file contains that PID,
+    /// then removes it and asserts it is gone.
+    /// Test: this test.
+    #[test]
+    fn autostart_pidfile_roundtrip() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let root = tmp.path();
+        let path = write_autostart_pidfile(root, 424242).expect("write pidfile");
+        assert_eq!(path, autostart_pidfile_path(root));
+        let contents = std::fs::read_to_string(&path).expect("read pidfile");
+        assert_eq!(contents, "424242", "pidfile must contain the child PID");
+        remove_autostart_pidfile(root);
+        assert!(
+            !path.exists(),
+            "remove_autostart_pidfile must delete the pidfile"
         );
     }
 
