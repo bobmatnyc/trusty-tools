@@ -63,6 +63,7 @@ pub mod session_launch;
 pub mod session_store;
 pub mod skill_deployer;
 pub mod skill_manifest;
+pub mod skill_source;
 pub mod sm;
 pub mod stale_skills;
 pub mod standalone;

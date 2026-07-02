@@ -227,6 +227,56 @@ fn prepare_session_writes_claude_md_and_stash() {
     );
 }
 
+#[test]
+fn prepare_session_self_heals_missing_skill_source() {
+    // #1917: `fw.skills` (the framework skill *source* dir `skill_source_dir()`
+    // falls back to) starts out completely absent here — simulating a machine
+    // that never ran `tm install` under the current binary. Before the fix,
+    // `deploy_skills_filtered` would silently deploy zero skills from an
+    // absent source with no error surfaced anywhere; session prep must now
+    // self-heal it first.
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    assert!(!fw.skills.exists(), "precondition: no prior tm install ran");
+
+    let report = prepare_session(&fw, project).expect("prep succeeds");
+
+    assert!(
+        !report.skill_deploy.deployed.is_empty(),
+        "session prep must self-heal the missing skill source and deploy at \
+         least one skill; got {:?}",
+        report.skill_deploy
+    );
+    assert!(fw.skills.join("tm-doctor.md").exists());
+}
+
+#[test]
+fn prepare_session_self_heals_renamed_skill_source() {
+    // #1917: a pre-rename `~/.trusty-mpm/framework/skills/` (stale content
+    // left by an old binary, no matching bundle stamp) must be pruned and
+    // refreshed automatically during session prep — not left for a manual
+    // `tm install --force` to notice and fix.
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+    std::fs::create_dir_all(&fw.skills).unwrap();
+    std::fs::write(fw.skills.join("mpm-old-skill.md"), "stale\n").unwrap();
+
+    let report = prepare_session(&fw, project).expect("prep succeeds");
+
+    assert!(
+        !fw.skills.join("mpm-old-skill.md").exists(),
+        "the stale pre-rename file must be pruned during self-heal"
+    );
+    assert!(
+        !report.skill_deploy.deployed.is_empty(),
+        "renamed/stale skill source must self-heal and deploy current skills"
+    );
+}
+
 /// Why (issue #1904 stretch goal): `prepare_session_inner` emits discrete
 /// `provisioning_stage` events (DeployingAgents/DeployingSkills/
 /// BuildingInstructions/ConfiguringMcp) so the daemon's SSE stream can drive
