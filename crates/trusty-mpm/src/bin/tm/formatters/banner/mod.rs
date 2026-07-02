@@ -65,11 +65,16 @@ impl Drop for NoColorGuard {
 ///
 /// Why: bot outline chars should appear bright amber so the block robots read
 /// clearly against a dark terminal background; accent glyphs use mid-rust to
-/// add depth without competing with the main structure.
+/// add depth without competing with the main structure. The v0.12.0 splash
+/// (issue #1907) renders everything — robots and the `«Trusty»` wordmark — in
+/// a single amber/orange tone against black, so the wordmark's letters and
+/// guillemets join the same bright-amber bucket as the robot glyphs rather
+/// than falling through to the darker "unclassified" default.
 /// What: five buckets —
 ///   • amber `(224,140,60)`: block, half-block, and face glyphs used in the
-///     block-robot art (`▄ ▀ █ ▓ ▌ ▐ ▟ ▙`), box-drawing chars, and face glyphs
-///     (`◉ ◔ ◕ • ◡ ▿ ⌣ ● ◻ ^ ⢀ ✲ ⡀`) from current and legacy art;
+///     block-robot art (`▄ ▀ █ ▓ ▌ ▐ ▟ ▙`), box-drawing chars, face glyphs
+///     (`◉ ◔ ◕ • ◡ ▿ ⌣ ● ◻ ^ ⢀ ✲ ⡀`) from current and legacy art, and the
+///     `«Trusty»` wordmark glyphs (`T r u s t y « »`);
 ///   • mid-rust `(205,100,30)`: medium-ink marks;
 ///   • dark rust `(120,50,10)`: fine punctuation marks;
 ///   • base rust `(183,65,14)`: everything else.
@@ -84,7 +89,9 @@ pub(crate) fn shade_bucket(c: char) -> (u8, u8, u8) {
         | '◉' | '◔' | '◕' | '•' | '◡' | '▿' | '⌣'
         | '^' | '●' | '⢀' | '✲' | '⡀' | '◻'
         // Legacy dense glyphs from previous art
-        | 'I' | '∏' | '♦' | '∇' | '√' | '≥' | '≤' | '@' | '#' => {
+        | 'I' | '∏' | '♦' | '∇' | '√' | '≥' | '≤' | '@' | '#'
+        // «Trusty» wordmark (#1907): letters + guillemets
+        | 'T' | 'r' | 'u' | 's' | 't' | 'y' | '«' | '»' => {
             (224, 140, 60) // bright amber
         }
         // Medium — moderate ink
