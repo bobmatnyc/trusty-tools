@@ -30,9 +30,23 @@
 //! probe's answer, so the full matrix is unit-testable with a fake probe and a
 //! `tempfile` directory; no real process is ever signalled in tests.
 //!
-//! Test: the `tests` submodule exercises register/unregister/entries round-trips
-//! and the full [`classify_pidfile`] decision matrix against a fake probe and a
-//! temp directory.
+//! Cross-restart safety (#1918): `DaemonState`'s in-memory session registry
+//! (`crate::daemon::state::DaemonState`) is never persisted, so it is always empty
+//! immediately after a daemon restart — every legacy session's `.pid` file looks
+//! exactly like a genuine orphan on the very first post-restart sweep, even when
+//! its `claude` process is alive and in active use. [`PidOrphanGc`] closes that
+//! gap with the same two-pass debounce the tmux-name orphan-GC
+//! (`crate::daemon::orphan_gc::OrphanGc`) already uses for the identical
+//! mid-spawn race: a PID is only actually SIGTERMed once it has been an
+//! untracked-but-alive `Terminate` candidate on TWO consecutive sweeps, giving a
+//! freshly-restarted daemon one full GC interval (60s by default) to re-learn the
+//! session before any signal is sent. Dead-PID and PID-reused removals are NOT
+//! debounced — deleting a stale file can never harm a live process.
+//!
+//! Test: the `tests` submodule exercises register/unregister/entries round-trips,
+//! the full [`classify_pidfile`] decision matrix against a fake probe and a temp
+//! directory, and the [`PidOrphanGc`] debounce (including the daemon-restart
+//! scenario in `tests/pid_registry_sweep.rs`).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -171,17 +185,62 @@ pub fn classify_pidfile(
 /// Why: the daemon's GC loop logs a per-pass summary and `GET /health` may
 /// surface orphan-GC activity (§10.3); returning structured counts keeps the
 /// caller free of any file-system detail.
-/// What: how many PID files were scanned, terminated (SIGTERM sent), and removed
-/// as stale (no signal).
+/// What: how many PID files were scanned, terminated (SIGTERM sent), removed
+/// as stale (no signal), and newly deferred by the restart-safety debounce
+/// (§#1918 — a first-sighting `Terminate` candidate that was NOT signalled this
+/// pass and must be seen again next sweep before it can be).
 /// Test: asserted by `sweep_terminates_only_untracked_claude` and siblings.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct SweepOutcome {
     /// Total `.pid` files examined this pass.
     pub scanned: usize,
-    /// PIDs that were SIGTERMed (untracked, alive, still `claude`).
+    /// PIDs that were SIGTERMed (untracked, alive, still `claude`, and confirmed
+    /// on a second consecutive sweep).
     pub terminated: usize,
     /// Stale PID files removed without signalling (dead PID or reused PID).
     pub removed_stale: usize,
+    /// Untracked-alive-`claude` candidates seen for the FIRST time this pass —
+    /// spared by the debounce, pending confirmation on the next sweep.
+    pub deferred: usize,
+}
+
+/// Cross-pass debounce for the PID-file orphan sweep (#1918).
+///
+/// Why: on a fresh daemon restart `self.sessions` is always empty — the legacy
+/// in-memory session registry is never persisted to disk — so every legacy
+/// session's still-live `claude` process looks exactly like a genuine orphan on
+/// the very first sweep. Reaping on first sight would SIGTERM a perfectly
+/// legitimate, actively-used session on every routine daemon restart (e.g. after
+/// `cargo install`). This mirrors the tmux-name orphan-GC's identical two-pass
+/// debounce (`crate::daemon::orphan_gc::OrphanGc`), which solved the same
+/// mid-spawn race for managed sessions: a candidate must be observed as a
+/// [`PidDecision::Terminate`] on TWO consecutive sweeps before it is actually
+/// signalled, giving a freshly-restarted daemon one full GC interval to
+/// re-register the session (or for the process to genuinely exit) before any
+/// signal is sent.
+/// What: holds `prev_candidates`, the session-ids classified as `Terminate` on
+/// the *previous* sweep. [`PidRegistry::sweep_orphans`] only signals a candidate
+/// present in both this pass's and the previous pass's candidate set.
+/// Test: `pid_debounce_spares_first_sighting`, `pid_debounce_terminates_second_sighting`,
+/// `pid_debounce_resets_when_session_becomes_tracked`, and the daemon-restart
+/// scenario in `tests/pid_registry_sweep.rs`.
+#[derive(Debug, Default)]
+pub struct PidOrphanGc {
+    /// Session-ids that were `Terminate` candidates on the previous sweep.
+    prev_candidates: HashSet<String>,
+}
+
+impl PidOrphanGc {
+    /// Construct a fresh debounce with an empty sighting history.
+    ///
+    /// Why: the daemon owns one long-lived `PidOrphanGc` across the process
+    /// lifetime (mirroring `OrphanGc::new()`) so the debounce persists between
+    /// sweeps rather than resetting every tick.
+    /// What: returns a default-initialised instance.
+    /// Test: used by every `pid_debounce_*` test and the daemon's `orphan_gc_loop`.
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 /// A handle over the `~/.trusty-mpm/pids/` PID-file directory.
@@ -337,19 +396,29 @@ impl PidRegistry {
     /// orphan. The name-verification gate (§13.5) means we SIGTERM only a PID
     /// that is still alive AND still a `claude` process — a recycled PID that now
     /// belongs to an unrelated process is spared (its stale file is removed
-    /// silently). Every gate fails toward NOT signalling.
+    /// silently). Every gate fails toward NOT signalling. The restart-safety
+    /// debounce (#1918, `gc`) adds a further gate on TOP of that: a `Terminate`
+    /// verdict is only acted on once the same session-id has been a candidate on
+    /// two consecutive sweeps — see [`PidOrphanGc`].
     /// What: lists [`entries`](Self::entries), classifies each via
-    /// [`classify_pidfile`] against `live_session_ids` and `probe`, then for each
-    /// non-`Keep` decision performs the action (terminate → SIGTERM then remove;
-    /// remove-stale → remove only) and removes the PID file. A removal failure is
-    /// logged and does not abort the pass. Returns a [`SweepOutcome`] summary.
+    /// [`classify_pidfile`] against `live_session_ids` and `probe`. `RemoveStale`
+    /// verdicts act immediately (deleting a stale file can never harm a live
+    /// process). A `Terminate` verdict only fires SIGTERM + removes the file when
+    /// `gc` shows the session-id was ALSO a candidate on the previous sweep;
+    /// otherwise the file is left untouched and counted in
+    /// [`SweepOutcome::deferred`]. `gc`'s candidate history is updated to this
+    /// pass's set before returning, so the next sweep's debounce reflects THIS
+    /// pass. A removal failure is logged and does not abort the pass. Returns a
+    /// [`SweepOutcome`] summary.
     /// Test: `sweep_terminates_only_untracked_claude`,
     /// `sweep_removes_dead_without_signal`, `sweep_spares_reused_pid`,
-    /// `sweep_keeps_tracked`.
+    /// `sweep_keeps_tracked`, `pid_debounce_spares_first_sighting`,
+    /// `pid_debounce_terminates_second_sighting`.
     pub fn sweep_orphans(
         &self,
         live_session_ids: &HashSet<String>,
         probe: &dyn ProcessProbe,
+        gc: &mut PidOrphanGc,
     ) -> SweepOutcome {
         let entries = match self.entries() {
             Ok(e) => e,
@@ -362,19 +431,31 @@ impl PidRegistry {
             scanned: entries.len(),
             ..SweepOutcome::default()
         };
+        let mut this_pass_candidates: HashSet<String> = HashSet::new();
         for entry in &entries {
             match classify_pidfile(entry, live_session_ids, probe) {
                 PidDecision::Keep => {}
                 PidDecision::Terminate => {
-                    let delivered = probe.terminate(entry.pid);
-                    info!(
-                        session_id = %entry.session_id,
-                        pid = entry.pid,
-                        delivered,
-                        "pid-registry: SIGTERM orphaned claude process"
-                    );
-                    outcome.terminated += 1;
-                    self.remove_pidfile_logged(&entry.session_id);
+                    this_pass_candidates.insert(entry.session_id.clone());
+                    if gc.prev_candidates.contains(&entry.session_id) {
+                        let delivered = probe.terminate(entry.pid);
+                        info!(
+                            session_id = %entry.session_id,
+                            pid = entry.pid,
+                            delivered,
+                            "pid-registry: SIGTERM orphaned claude process (confirmed on 2nd sweep)"
+                        );
+                        outcome.terminated += 1;
+                        self.remove_pidfile_logged(&entry.session_id);
+                    } else {
+                        debug!(
+                            session_id = %entry.session_id,
+                            pid = entry.pid,
+                            "pid-registry: new terminate-candidate; deferring to next sweep \
+                             (restart-safety debounce, #1918)"
+                        );
+                        outcome.deferred += 1;
+                    }
                 }
                 PidDecision::RemoveStale(reason) => {
                     debug!(
@@ -388,10 +469,12 @@ impl PidRegistry {
                 }
             }
         }
+        gc.prev_candidates = this_pass_candidates;
         debug!(
             scanned = outcome.scanned,
             terminated = outcome.terminated,
             removed_stale = outcome.removed_stale,
+            deferred = outcome.deferred,
             "pid-registry: orphan sweep complete"
         );
         outcome
@@ -603,25 +686,48 @@ mod tests {
 
     #[test]
     fn sweep_terminates_only_untracked_claude() {
-        // Full matrix in one sweep: only the untracked-alive-claude PID is
-        // SIGTERMed; its file (and the stale ones) are removed; the tracked
-        // session's file survives.
+        // Full matrix over two sweeps (the #1918 debounce requires a `Terminate`
+        // candidate to be confirmed on a second consecutive sweep before it is
+        // actually signalled): the untracked-alive-claude PID is deferred on the
+        // first pass, then SIGTERMed on the second; the dead and reused files are
+        // removed immediately (no debounce for stale removals); the tracked
+        // session's file survives both passes.
         let tmp = tempfile::TempDir::new().unwrap();
         let reg = PidRegistry::new(tmp.path());
         reg.register("tracked", 100).unwrap(); // live + claude, but tracked → KEEP
-        reg.register("orphan", 200).unwrap(); // untracked + live + claude → KILL
+        reg.register("orphan", 200).unwrap(); // untracked + live + claude → KILL (2nd sweep)
         reg.register("dead", 300).unwrap(); // untracked + dead → remove stale
         reg.register("reused", 400).unwrap(); // untracked + live, not claude → remove stale
 
         let probe = FakeProbe::new(&[100, 200, 400], &[100, 200]);
-        let outcome = reg.sweep_orphans(&live(&["tracked"]), &probe);
+        let mut gc = PidOrphanGc::new();
 
-        assert_eq!(outcome.scanned, 4);
-        assert_eq!(outcome.terminated, 1);
-        assert_eq!(outcome.removed_stale, 2);
+        // First sweep: the dead/reused files are removed immediately, but the
+        // genuine orphan is only a first sighting — deferred, not signalled.
+        let outcome1 = reg.sweep_orphans(&live(&["tracked"]), &probe, &mut gc);
+        assert_eq!(outcome1.scanned, 4);
+        assert_eq!(outcome1.terminated, 0);
+        assert_eq!(outcome1.deferred, 1);
+        assert_eq!(outcome1.removed_stale, 2);
+        assert!(probe.terminated.borrow().is_empty());
+        // The orphan's PID file is still on disk, spared by the debounce.
+        let mut remaining: Vec<String> = reg
+            .entries()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.session_id)
+            .collect();
+        remaining.sort();
+        assert_eq!(remaining, vec!["orphan".to_string(), "tracked".to_string()]);
+
+        // Second sweep: the orphan is confirmed (seen again as a candidate) →
+        // SIGTERMed and removed; the tracked session's file still survives.
+        let outcome2 = reg.sweep_orphans(&live(&["tracked"]), &probe, &mut gc);
+        assert_eq!(outcome2.scanned, 2);
+        assert_eq!(outcome2.terminated, 1);
+        assert_eq!(outcome2.deferred, 0);
+        assert_eq!(outcome2.removed_stale, 0);
         assert_eq!(*probe.terminated.borrow(), vec![200]);
-
-        // Only the tracked session's PID file remains.
         assert_eq!(reg.entries().unwrap(), vec![entry("tracked", 100)]);
     }
 
@@ -631,9 +737,10 @@ mod tests {
         let reg = PidRegistry::new(tmp.path());
         reg.register("dead", 7).unwrap();
         let probe = FakeProbe::new(&[], &[]);
-        let outcome = reg.sweep_orphans(&live(&[]), &probe);
+        let outcome = reg.sweep_orphans(&live(&[]), &probe, &mut PidOrphanGc::new());
         assert_eq!(outcome.removed_stale, 1);
         assert_eq!(outcome.terminated, 0);
+        assert_eq!(outcome.deferred, 0);
         assert!(probe.terminated.borrow().is_empty());
         assert!(reg.entries().unwrap().is_empty());
     }
@@ -645,7 +752,7 @@ mod tests {
         let reg = PidRegistry::new(tmp.path());
         reg.register("reused", 8).unwrap();
         let probe = FakeProbe::new(&[8], &[]); // alive, not claude
-        let outcome = reg.sweep_orphans(&live(&[]), &probe);
+        let outcome = reg.sweep_orphans(&live(&[]), &probe, &mut PidOrphanGc::new());
         assert_eq!(outcome.terminated, 0);
         assert_eq!(outcome.removed_stale, 1);
         assert!(
@@ -660,15 +767,82 @@ mod tests {
         let reg = PidRegistry::new(tmp.path());
         reg.register("tracked", 9).unwrap();
         let probe = FakeProbe::new(&[9], &[9]);
-        let outcome = reg.sweep_orphans(&live(&["tracked"]), &probe);
+        let outcome = reg.sweep_orphans(&live(&["tracked"]), &probe, &mut PidOrphanGc::new());
         assert_eq!(
             outcome,
             SweepOutcome {
                 scanned: 1,
                 terminated: 0,
-                removed_stale: 0
+                removed_stale: 0,
+                deferred: 0,
             }
         );
         assert_eq!(reg.entries().unwrap(), vec![entry("tracked", 9)]);
+    }
+
+    #[test]
+    fn pid_debounce_spares_first_sighting() {
+        // The core #1918 guarantee at the debounce level: a session-id seen as a
+        // `Terminate` candidate for the FIRST time is never signalled, regardless
+        // of how confidently `classify_pidfile` would otherwise reap it.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let reg = PidRegistry::new(tmp.path());
+        reg.register("fresh-orphan", 55).unwrap();
+        let probe = FakeProbe::new(&[55], &[55]);
+        let mut gc = PidOrphanGc::new();
+
+        let outcome = reg.sweep_orphans(&live(&[]), &probe, &mut gc);
+        assert_eq!(outcome.terminated, 0);
+        assert_eq!(outcome.deferred, 1);
+        assert!(probe.terminated.borrow().is_empty());
+        assert_eq!(reg.entries().unwrap(), vec![entry("fresh-orphan", 55)]);
+    }
+
+    #[test]
+    fn pid_debounce_terminates_second_sighting() {
+        // Observed as a `Terminate` candidate on two consecutive sweeps → the
+        // second sweep actually signals and removes the file.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let reg = PidRegistry::new(tmp.path());
+        reg.register("persistent-orphan", 66).unwrap();
+        let probe = FakeProbe::new(&[66], &[66]);
+        let mut gc = PidOrphanGc::new();
+
+        let _ = reg.sweep_orphans(&live(&[]), &probe, &mut gc);
+        let outcome = reg.sweep_orphans(&live(&[]), &probe, &mut gc);
+        assert_eq!(outcome.terminated, 1);
+        assert_eq!(outcome.deferred, 0);
+        assert_eq!(*probe.terminated.borrow(), vec![66]);
+        assert!(reg.entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pid_debounce_resets_when_session_becomes_tracked() {
+        // If a first-sighting candidate becomes tracked before the next sweep
+        // (the session re-registers), the debounce history for it is dropped —
+        // it is never reaped, and if it later becomes untracked again it must be
+        // treated as a fresh first sighting, not an immediate kill.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let reg = PidRegistry::new(tmp.path());
+        reg.register("flaky", 77).unwrap();
+        let probe = FakeProbe::new(&[77], &[77]);
+        let mut gc = PidOrphanGc::new();
+
+        // Pass 1: untracked → first sighting, deferred.
+        let p1 = reg.sweep_orphans(&live(&[]), &probe, &mut gc);
+        assert_eq!(p1.deferred, 1);
+
+        // Pass 2: now tracked (re-registered) → Keep, no candidate recorded.
+        let p2 = reg.sweep_orphans(&live(&["flaky"]), &probe, &mut gc);
+        assert_eq!(p2.terminated, 0);
+        assert_eq!(p2.deferred, 0);
+
+        // Pass 3: untracked again → this is a FRESH first sighting (the debounce
+        // history was cleared by the tracked pass), so it is deferred again, not
+        // immediately killed.
+        let p3 = reg.sweep_orphans(&live(&[]), &probe, &mut gc);
+        assert_eq!(p3.terminated, 0);
+        assert_eq!(p3.deferred, 1);
+        assert!(probe.terminated.borrow().is_empty());
     }
 }
