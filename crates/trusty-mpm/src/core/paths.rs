@@ -153,6 +153,51 @@ impl FrameworkPaths {
         Self::under(root)
     }
 
+    /// Resolve the framework layout for a standalone/managed-driver project
+    /// session, targeting the project-local `.claude/` deploy destination.
+    ///
+    /// Why (issue #1927, DOC-24 SPEC-STANDALONE-MPM-04): the standalone `tm
+    /// register/load/run` driver must never deploy content into the user's
+    /// REAL global `~/.claude/agents` or `~/.claude/skills` — but
+    /// [`FrameworkPaths::default`] always resolves `claude_agents`/
+    /// `claude_skills` under the real home directory, which is correct for the
+    /// ordinary (non-managed) `tm session start` launch path but violates the
+    /// standalone isolation invariant when reused there. The managed driver
+    /// already exposes two isolated destinations for deployed content: the
+    /// tm-global `CLAUDE_CONFIG_DIR` (`<managed_root>/claude-config/{agents,skills}`,
+    /// populated separately by
+    /// `core::standalone::global_config::ensure_global_config_dir` before
+    /// `load_alias` runs) and the per-alias **project-local**
+    /// `repo/.claude/{agents,skills}` (SPEC-STANDALONE-MPM-03 project-local half
+    /// / SPEC-STANDALONE-MPM-04 item 1: "`deploy_agents_filtered` target →
+    /// `repo/.claude/agents/` (project-local, standard discovery)"). This
+    /// constructor targets the latter so `core::standalone::load::load_alias`'s
+    /// call into `prepare_session_with_repo_url` writes the project-local half
+    /// only, leaving the tm-global half to `ensure_global_config_dir` (no
+    /// redundant re-deploy of the SAME content into the SAME destination — the
+    /// two calls target two distinct, intentionally-separate trees per the
+    /// "effective config = tm-global ⊕ project-local" merge model).
+    /// What: starts from [`Self::from_root`]`(managed_root)` so every framework
+    /// SOURCE path (`agents`, `skills`, `hooks`, `instructions`, `registry`,
+    /// `trusty_mpm_root`, and therefore `agent_source_dir()`/`skill_source_dir()`)
+    /// still resolves from the shared framework install — `managed_root`, i.e.
+    /// `~/.trusty-mpm` by default or the operator's `--root`/`TRUSTY_MPM_ROOT`
+    /// override — exactly as before. Only `claude_agents` and `claude_skills`
+    /// (the DEPLOY destinations, and therefore `claude_home_dir()` too) are
+    /// overridden to `<project_dir>/.claude/{agents,skills}`.
+    /// Test: `for_managed_project_targets_project_local_claude_dirs`,
+    /// `for_managed_project_keeps_framework_source_at_managed_root`.
+    pub fn for_managed_project(
+        managed_root: impl AsRef<Path>,
+        project_dir: impl AsRef<Path>,
+    ) -> Self {
+        let project_dir = project_dir.as_ref();
+        let mut paths = Self::from_root(managed_root);
+        paths.claude_agents = project_dir.join(".claude").join("agents");
+        paths.claude_skills = project_dir.join(".claude").join("skills");
+        paths
+    }
+
     /// Path of the token-optimizer policy file (`hooks/optimizer.toml`).
     ///
     /// Why: the daemon reads this at startup and on file-change to build its
@@ -409,6 +454,59 @@ mod tests {
         // under `<root>/.trusty-mpm` — the type is always constructible.
         let from_root = FrameworkPaths::from_root("/tmp/testroot");
         assert_eq!(from_root.root, PathBuf::from("/tmp/testroot/.trusty-mpm"));
+    }
+
+    // Issue #1927: the standalone driver's project-local deploy destination
+    // must be `<project_dir>/.claude/{agents,skills}`, never the real home.
+    #[test]
+    fn for_managed_project_targets_project_local_claude_dirs() {
+        let paths = FrameworkPaths::for_managed_project("/managed-root", "/some/project/repo");
+        assert_eq!(
+            paths.claude_agents_dir(),
+            PathBuf::from("/some/project/repo/.claude/agents"),
+            "agents must deploy under the project dir, not the framework base"
+        );
+        assert_eq!(
+            paths.claude_skills_dir(),
+            PathBuf::from("/some/project/repo/.claude/skills"),
+            "skills must deploy under the project dir, not the framework base"
+        );
+        assert_eq!(
+            paths.claude_home_dir(),
+            PathBuf::from("/some/project/repo"),
+            "claude_home_dir() must follow the overridden claude_agents base"
+        );
+    }
+
+    // Issue #1927: only the deploy DESTINATION moves project-local — the
+    // framework SOURCE paths (agent/skill templates, hooks, instructions,
+    // registry) must keep resolving from the shared managed_root exactly as
+    // `from_root` would produce, so the same framework install is reused
+    // across every alias.
+    #[test]
+    fn for_managed_project_keeps_framework_source_at_managed_root() {
+        let managed_root = "/managed-root/.trusty-mpm";
+        let from_root = FrameworkPaths::from_root(managed_root);
+        let managed_project = FrameworkPaths::for_managed_project(managed_root, "/proj/repo");
+
+        assert_eq!(managed_project.root, from_root.root);
+        assert_eq!(managed_project.agents, from_root.agents);
+        assert_eq!(managed_project.skills, from_root.skills);
+        assert_eq!(managed_project.hooks, from_root.hooks);
+        assert_eq!(managed_project.instructions, from_root.instructions);
+        assert_eq!(managed_project.registry, from_root.registry);
+        assert_eq!(
+            managed_project.agent_source_dir(),
+            from_root.agent_source_dir()
+        );
+        assert_eq!(
+            managed_project.skill_source_dir(),
+            from_root.skill_source_dir()
+        );
+
+        // Only the deploy destinations diverge.
+        assert_ne!(managed_project.claude_agents, from_root.claude_agents);
+        assert_ne!(managed_project.claude_skills, from_root.claude_skills);
     }
 
     #[test]

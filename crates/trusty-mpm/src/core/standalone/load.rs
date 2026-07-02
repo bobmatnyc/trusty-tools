@@ -92,7 +92,7 @@ pub fn load_alias(
     // shallow / renamed / origin-less clone might lack); the operator
     // `TRUSTY_MEMORY_PALACE` override still wins over it per `derive_palace_id`
     // precedence.
-    run_prepare_session(&repo_dir, Some(&url))?;
+    run_prepare_session(&repo_dir, Some(&url), managed_root)?;
     write_marker(&repo_dir, alias, &url, &git_ref, claude_config_dir)?;
 
     // WI-3 sub-parts 2+3: pre-seed project trust + MCP-server approval into
@@ -166,14 +166,36 @@ fn pull_ff_only(repo_dir: &Path) {
 /// override), so the managed session lands in the SAME palace a non-tm Claude
 /// session in that repo would use. `None` falls back to probing the checkout's
 /// own `git remote get-url origin`, then to the directory-basename slug.
-/// What: resolves `FrameworkPaths` from the home directory and calls
-/// `crate::core::session_launch::prepare_session_with_repo_url`, forwarding
-/// `repo_url` to the trusty-memory MCP palace-slug derivation.
+///
+/// Issue #1927 (DOC-24 SPEC-STANDALONE-MPM-04): this previously resolved
+/// `FrameworkPaths::default()`, which always deploys composed agents/skills
+/// under the REAL `$HOME/.claude/{agents,skills}` — a direct isolation-invariant
+/// violation for the "fully isolated" standalone driver. `load_alias` already
+/// carries `managed_root` (the shared framework install, e.g. `~/.trusty-mpm` or
+/// an operator override), so it is threaded here and combined with `repo_dir`
+/// via `FrameworkPaths::for_managed_project`, which keeps every framework SOURCE
+/// path (agent/skill templates, hooks, instructions, catalog root) resolving
+/// from `managed_root` exactly as before, while re-targeting ONLY the deploy
+/// destination to the project-local `repo_dir/.claude/{agents,skills}` tree
+/// (SPEC-STANDALONE-MPM-04 item 1). This is intentionally distinct from — and
+/// not a redundant re-deploy of — the tm-global `<managed_root>/claude-config/`
+/// deploy that `core::standalone::global_config::ensure_global_config_dir`
+/// performs separately (and earlier) in every CLI command handler that calls
+/// `load_alias`: the two writes target two different trees that Claude Code
+/// merges (tm-global ⊕ project-local), matching the DOC-24 layering model.
+/// What: resolves `FrameworkPaths::for_managed_project(managed_root, repo_dir)`
+/// and calls `crate::core::session_launch::prepare_session_with_repo_url`,
+/// forwarding `repo_url` to the trusty-memory MCP palace-slug derivation.
 /// Test: `run_prepare_session_pins_palace_from_clone_url`,
-/// `run_prepare_session_bare_stub_when_no_identity`; `prepare_session` itself is
-/// covered in session_launch/tests.rs.
-fn run_prepare_session(repo_dir: &Path, repo_url: Option<&str>) -> anyhow::Result<()> {
-    let fw = crate::core::paths::FrameworkPaths::default();
+/// `run_prepare_session_bare_stub_when_no_identity`,
+/// `run_prepare_session_never_writes_real_home_claude_dirs`; `prepare_session`
+/// itself is covered in session_launch/tests.rs.
+fn run_prepare_session(
+    repo_dir: &Path,
+    repo_url: Option<&str>,
+    managed_root: &Path,
+) -> anyhow::Result<()> {
+    let fw = crate::core::paths::FrameworkPaths::for_managed_project(managed_root, repo_dir);
     crate::core::session_launch::prepare_session_with_repo_url(&fw, repo_dir, repo_url)
         .map(|_| ())
         .map_err(|e| anyhow::anyhow!("prepare_session failed: {e}"))
@@ -270,9 +292,14 @@ mod tests {
         // clone URL, NOT this directory name.
         let repo = tmp.path().join("0c8f1a2b3c4d");
         std::fs::create_dir_all(&repo).unwrap();
+        let managed_root = tmp.path().join("managed-root");
 
-        run_prepare_session(&repo, Some("git@github.com:bobmatnyc/trusty-tools.git"))
-            .expect("run_prepare_session succeeds");
+        run_prepare_session(
+            &repo,
+            Some("git@github.com:bobmatnyc/trusty-tools.git"),
+            &managed_root,
+        )
+        .expect("run_prepare_session succeeds");
 
         let mcp_path = repo.join(".mcp.json");
         assert!(
@@ -308,8 +335,9 @@ mod tests {
         // parent-dir slug, so with no URL/remote/override the stub stays bare.
         let repo = tmp.path().join("---");
         std::fs::create_dir_all(&repo).unwrap();
+        let managed_root = tmp.path().join("managed-root");
 
-        run_prepare_session(&repo, None).expect("run_prepare_session succeeds");
+        run_prepare_session(&repo, None, &managed_root).expect("run_prepare_session succeeds");
 
         let value: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(repo.join(".mcp.json")).unwrap())
@@ -323,6 +351,113 @@ mod tests {
         assert!(
             memory.get("env").is_none(),
             "with no derivable identity the stub must be bare (no TRUSTY_MEMORY_PALACE env); got {memory}"
+        );
+    }
+
+    /// RAII guard restoring `$HOME` on drop (including panic) — mirrors the
+    /// identical pattern in `standalone::global_config::tests::test_mcp_config_review_no_home_write`.
+    ///
+    /// Why: the isolation regression test below must point the process at a
+    /// throwaway `$HOME` so a bug (`FrameworkPaths::default()`) would write to
+    /// that FAKE home, not the developer's real `~/.claude`; the guard makes
+    /// this safe under panics and keeps `$HOME` correct for tests that run
+    /// after this one.
+    /// What: snapshots the prior `$HOME` value and restores it on drop.
+    /// Test: used by `run_prepare_session_never_writes_real_home_claude_dirs`.
+    struct HomeGuard(Option<String>);
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            // SAFETY: paired with `#[serial_test::serial]` below — no other
+            // thread reads/writes the environment concurrently.
+            match self.0 {
+                Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
+    /// Why (issue #1927, DOC-24 SPEC-STANDALONE-MPM-04): before this fix,
+    /// `run_prepare_session` built `FrameworkPaths::default()`, which resolves
+    /// `claude_agents`/`claude_skills` under the REAL `$HOME/.claude` — so the
+    /// "fully isolated" standalone driver silently deployed agents and skills
+    /// into the user's real global `~/.claude/agents` and `~/.claude/skills`,
+    /// directly violating the isolation invariant. This test points `$HOME` at
+    /// a throwaway tempdir (so a regression would be caught, not accidentally
+    /// masked by writing to the real developer home) and asserts the fake
+    /// home's `.claude/agents`/`.claude/skills` stay completely absent, while
+    /// the project-local `repo/.claude/agents`/`repo/.claude/skills` receive
+    /// the deploy instead.
+    /// What: seeds a minimal agent source file under
+    /// `<fake_home>/.trusty-mpm/framework/agents/` (the SAME tree
+    /// `managed_root` resolves to in production, since `~/.trusty-mpm` is the
+    /// default managed root — no skill source is seeded because
+    /// `core::skill_source::ensure_skill_source_fresh`, part of the
+    /// `prepare_session` pipeline, self-heals `framework/skills/` from the
+    /// compiled-in bundle unconditionally, overwriting any hand-seeded file),
+    /// runs `run_prepare_session` against a `repo/` under a SEPARATE temp dir,
+    /// then asserts (a) `$HOME/.claude/agents` and `$HOME/.claude/skills` do
+    /// not exist and (b) `repo/.claude/agents/regression-agent.md` exists and
+    /// `repo/.claude/skills/` was populated with at least one deployed skill.
+    /// Test: itself.
+    #[test]
+    #[serial_test::serial]
+    fn run_prepare_session_never_writes_real_home_claude_dirs() {
+        let _palace_guard = EnvClearGuard::clear("TRUSTY_MEMORY_PALACE");
+
+        let fake_home = TempDir::new().unwrap();
+        let _home_guard = {
+            let prior = std::env::var("HOME").ok();
+            // SAFETY: serialized via `#[serial_test::serial]`.
+            unsafe { std::env::set_var("HOME", fake_home.path()) };
+            HomeGuard(prior)
+        };
+
+        // managed_root mirrors the real default (`~/.trusty-mpm`) under the
+        // fake home, so this test exercises the exact production shape.
+        let managed_root = fake_home.path().join(".trusty-mpm");
+        let agents_src = managed_root.join("framework").join("agents");
+        std::fs::create_dir_all(&agents_src).unwrap();
+        std::fs::write(
+            agents_src.join("regression-agent.md"),
+            "---\nname: regression-agent\nrole: engineer\n---\n\n\
+             # Regression Agent\n\nAgent content.\n",
+        )
+        .unwrap();
+
+        // repo/ lives under a SEPARATE temp dir so it can never coincidentally
+        // land inside the fake home tree.
+        let project_root = TempDir::new().unwrap();
+        let repo = project_root.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        run_prepare_session(&repo, None, &managed_root).expect("run_prepare_session succeeds");
+
+        assert!(
+            !fake_home.path().join(".claude").join("agents").exists(),
+            "run_prepare_session must NOT write to the real $HOME/.claude/agents (issue #1927)"
+        );
+        assert!(
+            !fake_home.path().join(".claude").join("skills").exists(),
+            "run_prepare_session must NOT write to the real $HOME/.claude/skills (issue #1927)"
+        );
+
+        assert!(
+            repo.join(".claude")
+                .join("agents")
+                .join("regression-agent.md")
+                .exists(),
+            "run_prepare_session must deploy agents to repo/.claude/agents (project-local, DOC-24)"
+        );
+        let deployed_skills_dir = repo.join(".claude").join("skills");
+        let has_deployed_skill = deployed_skills_dir
+            .read_dir()
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false);
+        assert!(
+            has_deployed_skill,
+            "run_prepare_session must deploy the compiled-in skill bundle to \
+             repo/.claude/skills (project-local, DOC-24); dir: {}",
+            deployed_skills_dir.display()
         );
     }
 
