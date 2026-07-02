@@ -140,9 +140,11 @@ enum LaunchctlOutcome {
 /// non-macOS, removes any stale lock file and spawns the current executable with
 /// the `daemon` subcommand in a detached process (recording the child PID in a
 /// discoverable pidfile); (3) polls `/health` every 500 ms for up to 5 s via
-/// lock-file URL resolution; (4) returns the resolved daemon URL on success or
-/// `Err` on timeout. The `_url` parameter is intentionally unused: after
-/// auto-start the lock file records the actual bound address.
+/// lock-file URL resolution; (4) returns the resolved daemon URL on success or,
+/// on timeout, removes any pidfile written by this call's fallback spawn (so a
+/// failed autostart leaves no stale PID) and returns `Err`. The `_url` parameter
+/// is intentionally unused: after auto-start the lock file records the actual
+/// bound address.
 /// Test: launchd path requires a macOS launchd environment; the pure gate
 /// (`main_daemon_managed_by_launchd_in`) and pidfile helpers are unit-tested;
 /// detached-spawn and polling paths are covered by the guided-default e2e suite.
@@ -171,6 +173,11 @@ pub(crate) async fn ensure_daemon_started(
     #[cfg(not(target_os = "macos"))]
     let needs_spawn = true;
 
+    // When we take the fallback-spawn path we record the framework root so the
+    // health-poll timeout branch below can clean up the pidfile we wrote. On the
+    // launchd path (or when no spawn happened) this stays `None` and no pidfile
+    // is touched — we only ever remove a pidfile this call actually created.
+    let mut spawned_root: Option<std::path::PathBuf> = None;
     if needs_spawn {
         // launchd not available or plist absent — fall back to detached spawn,
         // the same approach used by `commands::daemon::start`.
@@ -198,6 +205,11 @@ pub(crate) async fn ensure_daemon_started(
         if let Err(e) = write_autostart_pidfile(&root, child.id()) {
             eprintln!("tm: warning: could not write autostart pidfile: {e}");
         }
+        spawned_root = Some(root);
+        // `child` is intentionally dropped here: the daemon is meant to outlive
+        // this process (on Unix it re-parents to init on our exit), so we do not
+        // wait on or kill it — dropping the handle just detaches from it.
+        drop(child);
     }
 
     // Poll until healthy or timeout (5 s). Re-resolve from the lock file each
@@ -209,6 +221,17 @@ pub(crate) async fn ensure_daemon_started(
             eprintln!("tm: daemon ready");
             return Ok(resolved);
         }
+    }
+    // Health poll timed out. If we spawned a fallback daemon, the pidfile we
+    // wrote now points at a PID that never became reachable — the spawned child
+    // may have died immediately or bound an unreachable address. The single-file
+    // pidfile is overwritten per spawn, so this does not *accumulate* entries,
+    // but leaving it behind hands `tm`'s tooling a stale PID that no longer
+    // corresponds to a healthy daemon. Remove it here (mirrors the stop-path
+    // cleanup in `daemon::cleanup_lock_file`) so a failed autostart leaves no
+    // misleading pidfile. Best-effort; ignore removal errors.
+    if let Some(root) = spawned_root.as_deref() {
+        remove_autostart_pidfile(root);
     }
     anyhow::bail!("daemon did not become healthy within 5 s after auto-start")
 }
