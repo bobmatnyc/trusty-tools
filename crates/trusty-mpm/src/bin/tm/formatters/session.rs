@@ -3,9 +3,11 @@
 //! Why: session list and event display share compact-output helpers that should
 //! live outside the handler file to keep it below the 500-line cap.
 //! What: `short_id` for UUID truncation, `event_summary` for payload one-liners,
-//! `print_compression_stats` for optimizer feedback.
+//! `print_compression_stats` for optimizer feedback, `deploy_summary_line` for
+//! the agent/skill deploy-count summaries `session start` prints.
 //! Test: `short_id_*` and `event_summary_*` unit tests in `tests.rs`; the
-//! compression stats helper is exercised by `compression_stats_line_*` tests.
+//! compression stats helper is exercised by `compression_stats_line_*` tests;
+//! `deploy_summary_line` by `deploy_summary_line_formats_counts`.
 
 /// Render a `SessionId` newtype JSON value into a short, human id.
 ///
@@ -69,4 +71,22 @@ pub(crate) fn print_compression_stats(body: &serde_json::Value) {
         .checked_div(original)
         .unwrap_or(0);
     println!("\n[summarized: {original} \u{2192} {compressed} bytes ({reduction}% reduction)]");
+}
+
+/// Render a "`<Label>: N deployed, M skipped, K unchanged`" summary line.
+///
+/// Why (#1917): `session start` prints matching three-way deploy summaries
+/// for both agents and skills; a shared formatter keeps the two counts in
+/// lockstep instead of two near-identical `println!` calls drifting apart —
+/// before this fix, only the agent line existed, and `report.skill_deploy`
+/// was silently never surfaced anywhere.
+/// What: formats `"{label}: {deployed} deployed, {skipped} skipped, {unchanged} unchanged"`.
+/// Test: `deploy_summary_line_formats_counts`.
+pub(crate) fn deploy_summary_line(
+    label: &str,
+    deployed: usize,
+    skipped: usize,
+    unchanged: usize,
+) -> String {
+    format!("{label}: {deployed} deployed, {skipped} skipped, {unchanged} unchanged")
 }

@@ -15,6 +15,7 @@ use serde::Deserialize;
 
 use crate::cli::SessionAction;
 use crate::commands::project::resolve_dir;
+use crate::formatters::session::deploy_summary_line;
 
 /// `session start` — launch a session, routed through protected-path segregation
 /// for a recognized GitHub-backed git repo (#1916).
@@ -92,7 +93,8 @@ pub(crate) async fn start_session(
 /// into the developer's/CI's real `~/.claude`/`~/.trusty-mpm` — the real CLI
 /// call site in [`start_session`] still passes `FrameworkPaths::default()`, so
 /// production behavior is unchanged.
-/// What: runs `prepare_session` (deploys agents, merges CLAUDE.md, prints the
+/// What: runs `prepare_session` (deploys agents AND skills — printing both
+/// `deploy_summary_line` counts, #1917 — merges CLAUDE.md, prints the
 /// catch-up digest), registers via `POST /sessions`, then creates a detached
 /// tmux session rooted at `path` and starts `claude` in it.
 /// Test: `session_start_in_place_writes_stash_and_hard_fails_on_daemon_unreachable`
@@ -112,10 +114,22 @@ async fn start_session_in_place(
     match trusty_mpm::core::session_launch::prepare_session(fw, path) {
         Ok(report) => {
             println!(
-                "Agents: {} deployed, {} skipped, {} unchanged",
-                report.deploy.deployed.len(),
-                report.deploy.skipped.len(),
-                report.deploy.unchanged.len(),
+                "{}",
+                deploy_summary_line(
+                    "Agents",
+                    report.deploy.deployed.len(),
+                    report.deploy.skipped.len(),
+                    report.deploy.unchanged.len(),
+                )
+            );
+            println!(
+                "{}",
+                deploy_summary_line(
+                    "Skills",
+                    report.skill_deploy.deployed.len(),
+                    report.skill_deploy.skipped.len(),
+                    report.skill_deploy.unchanged.len(),
+                )
             );
             if report.instructions.claude_md_created {
                 println!("  Created CLAUDE.md stub in {}", path.display());

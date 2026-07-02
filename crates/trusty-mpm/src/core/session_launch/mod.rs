@@ -276,6 +276,22 @@ fn prepare_session_inner(
     })
     .map_err(|err| PrepError::Deploy(err.to_string()))?;
 
+    // Self-heal the skill *source* directory before deploying from it
+    // (#1917): `plan.skill_source` falls back to `fw.skill_source_dir()`,
+    // which was previously populated ONLY by a separate, explicit
+    // `tm install` run — a stale or missing directory (e.g. after the
+    // mpm-*→tm-* rename, #1905, or on a machine that never ran `tm install`
+    // under the current binary) made `deploy_skills_filtered` below silently
+    // deploy zero skills, with no error surfaced anywhere. Refreshing here
+    // removes that dependency on a prior manual install; it is a no-op when
+    // the `agents/skills` git submodule is in play (see
+    // `skill_source::ensure_skill_source_fresh`). Non-fatal: a refresh
+    // failure falls back to whatever is already on disk, matching pre-#1917
+    // behaviour rather than blocking the session.
+    if let Err(err) = crate::core::skill_source::ensure_skill_source_fresh(fw) {
+        tracing::warn!("failed to refresh skill source directory: {err}");
+    }
+
     // Deploy skill files — Claude Code reads `~/.claude/skills/` at startup.
     // Skills carry no inheritance, so this is a manifest-tracked content copy;
     // the manifest's skill-set selection restricts WHICH source skills deploy.

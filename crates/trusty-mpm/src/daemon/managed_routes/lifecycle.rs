@@ -534,10 +534,12 @@ async fn spawn_managed_inproject(
 /// inlined) so it is unit-testable against a hermetic [`crate::core::paths::FrameworkPaths::under`]
 /// tempdir without touching the operator's real `~/.trusty-mpm`/`~/.claude`.
 /// What: calls `prepare_session_with_repo_url(fw, worktree, Some(repo_url))`.
-/// On success, logs the deployed-agent count. On failure, logs a `tracing::warn!`
-/// and returns — mirroring `WorkspaceProvisioner::provision_in`'s non-fatal
-/// handling of the identical call, so a prep failure never blocks the session
-/// from spawning.
+/// On success, logs the deployed-agent count AND the deployed-skill count
+/// (`report.skill_deploy.deployed.len()` — #1917; previously only the agent
+/// count was logged, so a skill-deploy no-op was invisible here too). On
+/// failure, logs a `tracing::warn!` and returns — mirroring
+/// `WorkspaceProvisioner::provision_in`'s non-fatal handling of the identical
+/// call, so a prep failure never blocks the session from spawning.
 /// Test: `prepare_inproject_session_writes_statusline` in this module's `tests`
 /// submodule.
 fn prepare_inproject_session(
@@ -551,6 +553,7 @@ fn prepare_inproject_session(
             info!(
                 id = %session_id,
                 deployed = report.deploy.deployed.len(),
+                skills_deployed = report.skill_deploy.deployed.len(),
                 worktree = %worktree.display(),
                 "spawn_managed (inproject): session prepared"
             );

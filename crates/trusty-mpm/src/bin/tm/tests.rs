@@ -22,7 +22,21 @@ use crate::formatters::banner::{
     fallback_session_name, normalize_workdir, print_launch_banner,
     print_launch_banner_reconnecting, terminal_width,
 };
-use crate::formatters::session::short_id;
+use crate::formatters::session::{deploy_summary_line, short_id};
+
+#[test]
+fn deploy_summary_line_formats_counts() {
+    // #1917: `session start` prints this exact shape for both the Agents and
+    // the (previously missing) Skills deploy summary lines.
+    assert_eq!(
+        deploy_summary_line("Skills", 3, 1, 2),
+        "Skills: 3 deployed, 1 skipped, 2 unchanged"
+    );
+    assert_eq!(
+        deploy_summary_line("Agents", 0, 0, 0),
+        "Agents: 0 deployed, 0 skipped, 0 unchanged"
+    );
+}
 
 #[test]
 fn short_id_extracts_uuid_prefix() {
