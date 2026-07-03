@@ -48,7 +48,7 @@ trusty-common = { workspace = true, features = ["mcp", "symgraph-parser", "memor
 #      `default-features = false` drops the `axum-server` feature so we don't
 #      compile the trusty-memory HTTP daemon code paths just to pick up a
 #      zero-sized service descriptor.
-trusty-memory = { path = "../trusty-memory", version = "0.18.0", default-features = false }
+trusty-memory = { path = "../trusty-memory", version = "0.18.1", default-features = false }
 trusty-search = { path = "../trusty-search", version = "0.29.0" }
 tokio = { version = "1", features = ["full"] }
 async-openai = "0.30"
@@ -132,7 +132,7 @@ lru = "0.12"
 #      `trusty-agents-local` depend on both `trusty-agents` and the agent crate, and
 #      wire them at startup via `trusty_agents::install_plugins(...)` before
 #      calling `trusty_agents::run()`.
-trusty-agents-common = { path = "../trusty-agents-common", version = "0.1.3" }
+trusty-agents-common = { path = "../trusty-agents-common", version = "0.2.0" }
 
 # [patch.crates-io] moved to workspace root Cargo.toml (Cargo requires
 # [patch] tables to live in the workspace root; see #460 for context).

@@ -1,6 +1,6 @@
 [package]
 name = "trusty-memory"
-version = "0.18.0"
+version = "0.18.1"
 edition = "2021"
 description = "MCP server (stdio + HTTP/SSE) for trusty-memory"
 license.workspace = true
@@ -80,7 +80,7 @@ path = "src/bin/mcp_bridge.rs"
 #      build for the binary path keeps `axum-server` on (see [features]
 #      below), so existing `cargo install` / `cargo build` flows are
 #      unaffected.
-trusty-common = { path = "../trusty-common", version = "0.18.0", default-features = false, features = ["mcp", "memory-core", "monitor-tui", "bm25-client", "cli-help", "update-check", "bug-capture", "console-metrics"] }
+trusty-common = { path = "../trusty-common", version = "0.19.0", default-features = false, features = ["mcp", "memory-core", "monitor-tui", "bm25-client", "cli-help", "update-check", "bug-capture", "console-metrics"] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # Why: declaring trusty-bm25-daemon as a Cargo dependency causes `cargo install
 #      trusty-memory` to also build and install the daemon binary alongside
@@ -163,7 +163,7 @@ serial_test = { workspace = true }
 # which is gated behind `embedder-test-support`. Re-declaring trusty-common here
 # with the feature activates it for all integration tests without enabling it in
 # the production library (mirrors the trusty-mpm and trusty-search pattern).
-trusty-common = { path = "../trusty-common", version = "0.18.0", default-features = false, features = ["memory-core", "embedder-test-support"] }
+trusty-common = { path = "../trusty-common", version = "0.19.0", default-features = false, features = ["memory-core", "embedder-test-support"] }
 chrono = { workspace = true }
 
 [features]

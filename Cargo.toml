@@ -27,8 +27,8 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 # trusty-code: per-project Claude-Code-compatible MPM orchestration harness (#587).
 # publish=false; version 0.0.0 intentionally — pre-release scaffold.
 trusty-code = { path = "crates/trusty-code" }
-trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.1.3" }
-trusty-common = { path = "crates/trusty-common", version = "0.18.1" }
+trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.2.0" }
+trusty-common = { path = "crates/trusty-common", version = "0.19.0" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.4" }
@@ -42,7 +42,7 @@ tga = { path = "crates/trusty-git-analytics", version = "2.8.2" }
 # trusty-mpm: unified crate (replaces the former trusty-mpm-{core,mcp,client,
 # daemon,cli,tui,telegram} sub-crates). The gui sub-crate is kept separate
 # because it owns Tauri's build.rs and tauri.conf.json.
-trusty-mpm = { path = "crates/trusty-mpm", version = "0.12.0" }
+trusty-mpm = { path = "crates/trusty-mpm", version = "0.15.0" }
 # trusty-review: LLM-backed PR-review service. Referenced by trusty-analyze
 # (behind the optional `review` feature) so the analyze MCP server can expose
 # the trusty-review pipeline as `tr_review_*` tools (#630).

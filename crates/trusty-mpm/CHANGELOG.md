@@ -5,6 +5,51 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Added
+
+- compact splash art update, supersede giant-robot banner ([#1973](https://github.com/bobmatnyc/trusty-tools/pull/1973)) ([`9dd65fb`](https://github.com/bobmatnyc/trusty-tools/commit/9dd65fb875585cb41aa6a6affe7aae9a01df578a))
+- switch session naming to tm-<leaf>-NN pattern ([#1966](https://github.com/bobmatnyc/trusty-tools/pull/1966)) ([`5c20a3d`](https://github.com/bobmatnyc/trusty-tools/commit/5c20a3dc3a0be4ea93ec298d7ee04ecabff0fb46))
+- giant-robot «TRUSTY» banner art + stale banner.txt seed refresh ([#1933](https://github.com/bobmatnyc/trusty-tools/pull/1933)) ([`25cd224`](https://github.com/bobmatnyc/trusty-tools/commit/25cd22434d2bce527c6b0b4d7cb123c73d167928))
+- extend per-stage provisioning progress to in-project and local-path spawns (closes #1919) ([#1923](https://github.com/bobmatnyc/trusty-tools/pull/1923)) ([`211b7ba`](https://github.com/bobmatnyc/trusty-tools/commit/211b7ba211873b9505090b8ee84ad521ebf97f19))
+- unify session start with protected-path routing, rename sessions->session, bare tm shortcut (closes #1916) ([#1920](https://github.com/bobmatnyc/trusty-tools/pull/1920)) ([`0f40c01`](https://github.com/bobmatnyc/trusty-tools/commit/0f40c01085d15d6ec5f7f2424593640ad11da23e))
+- add Trusty MPM v0.12.0 wordmark to splash banner (closes #1907) ([#1912](https://github.com/bobmatnyc/trusty-tools/pull/1912)) ([`d02d75c`](https://github.com/bobmatnyc/trusty-tools/commit/d02d75c26fd7d134c29a4f90d7434a2c094039ef))
+- add tm meta-harness self-awareness text to BASE_PM identity (closes #1906) ([#1911](https://github.com/bobmatnyc/trusty-tools/pull/1911)) ([`076dfd3`](https://github.com/bobmatnyc/trusty-tools/commit/076dfd318740404a650cae4d52d613995a4c4459))
+- complete mpm-* to tm-* skill fork, fork-safe one-time cleanup migration ([#1910](https://github.com/bobmatnyc/trusty-tools/pull/1910)) ([`0d3d93b`](https://github.com/bobmatnyc/trusty-tools/commit/0d3d93b68939ab672088affb0744070e945032da))
+- stream real per-stage provisioning progress + trigger index reindex on session launch ([#1909](https://github.com/bobmatnyc/trusty-tools/pull/1909)) ([`287a49e`](https://github.com/bobmatnyc/trusty-tools/commit/287a49eeb896d56e51334fdabc02ecfc6b885e10))
+- add report-only dry-run gate to idle auto-teardown (closes #1783) ([#1899](https://github.com/bobmatnyc/trusty-tools/pull/1899)) ([`3a7adf3`](https://github.com/bobmatnyc/trusty-tools/commit/3a7adf33c9512893881b8ba4c7e5ca54e6661f2a))
+- rebuild PM skills as /tm- portfolio + fix skill-deploy bugs ([#1872](https://github.com/bobmatnyc/trusty-tools/pull/1872)) ([`2a245e8`](https://github.com/bobmatnyc/trusty-tools/commit/2a245e8724959ef7f38cb95e59c0367e36932cf8))
+- auto-seed R3 identity prompt-fact at provision (DOC-28 Phase 2, epic #1855) ([`1b553c1`](https://github.com/bobmatnyc/trusty-tools/commit/1b553c17d5a51fcd324dd538ce5ed42cda3bdb97))
+
+### Fixed
+
+- clarify tool-output compression scope, ZTK/RTK status (closes #1944) ([#1952](https://github.com/bobmatnyc/trusty-tools/pull/1952)) ([`7b0a5bd`](https://github.com/bobmatnyc/trusty-tools/commit/7b0a5bd1f839ac531ce01e45db0bef9166aa5739))
+- correct stale PM instruction template content (closes #1943) ([#1951](https://github.com/bobmatnyc/trusty-tools/pull/1951)) ([`c735452`](https://github.com/bobmatnyc/trusty-tools/commit/c735452c6b21df7ff24ee8a5925d131da8feb8cc))
+- register provisioned native sessions so session_list finds them (closes #1946) ([#1949](https://github.com/bobmatnyc/trusty-tools/pull/1949)) ([`b8ff3cc`](https://github.com/bobmatnyc/trusty-tools/commit/b8ff3cc5d280378f0853ac3634b358291e613124))
+- reconcile manifest drift, scope roster by project language, fix catalog sync (closes #1940, closes #1941, closes #1947) ([#1950](https://github.com/bobmatnyc/trusty-tools/pull/1950)) ([`e136d6c`](https://github.com/bobmatnyc/trusty-tools/commit/e136d6cd0b141071200b89b244a38ca6549b2cf9))
+- clarify agent_delegate is a tracking gate, not the delegation path (closes #1942) ([#1948](https://github.com/bobmatnyc/trusty-tools/pull/1948)) ([`d38359f`](https://github.com/bobmatnyc/trusty-tools/commit/d38359fe29c40302c1482c8a1e3949c42e705154))
+- palace-level alias resolution for claude-mpm parity (owner-repo -> bare palace) ([#1945](https://github.com/bobmatnyc/trusty-tools/pull/1945)) ([`af7f904`](https://github.com/bobmatnyc/trusty-tools/commit/af7f90499402971ac65aed5b104cde251e182599))
+- address review follow-ups from #1936 (closes #1937) ([#1938](https://github.com/bobmatnyc/trusty-tools/pull/1938)) ([`1c0afa3`](https://github.com/bobmatnyc/trusty-tools/commit/1c0afa3c985680f671919811991c7eb5ef51d21c))
+- use shared base checkout + git worktree per session (closes #1935) ([#1936](https://github.com/bobmatnyc/trusty-tools/pull/1936)) ([`40b9e3e`](https://github.com/bobmatnyc/trusty-tools/commit/40b9e3e2bfdef0d31ae432b6dbe43e885422a13a))
+- daemon managed-spawn deploys agents/skills to worktree, not real ~/.claude (closes #1931) ([#1934](https://github.com/bobmatnyc/trusty-tools/pull/1934)) ([`d0c655d`](https://github.com/bobmatnyc/trusty-tools/commit/d0c655d142c8f2e043d09546c5905e7d165c4399))
+- standalone load_alias deploys to isolated config, not real ~/.claude (closes #1927) ([#1930](https://github.com/bobmatnyc/trusty-tools/pull/1930)) ([`81e1924`](https://github.com/bobmatnyc/trusty-tools/commit/81e1924f662f1cee5b013d2db3c3840ee480bb98))
+- resolve tm statusline to absolute path, heal stale bare entries (closes #1914) ([#1925](https://github.com/bobmatnyc/trusty-tools/pull/1925)) ([`104b4bf`](https://github.com/bobmatnyc/trusty-tools/commit/104b4bfb649315594cbad7a36931bf136b6a08e3))
+- auto-refresh stale skill source dir, log skill deployment counts (closes #1917) ([#1922](https://github.com/bobmatnyc/trusty-tools/pull/1922)) ([`a124a2e`](https://github.com/bobmatnyc/trusty-tools/commit/a124a2e659a1eb620b2bdaeba36d492c099dc5cf))
+- prevent orphan-GC from killing legitimate sessions across daemon restart (closes #1918) ([#1921](https://github.com/bobmatnyc/trusty-tools/pull/1921)) ([`1c90c11`](https://github.com/bobmatnyc/trusty-tools/commit/1c90c11aff433c1bdfc0ccc0bf94a14050858cdc))
+- call prepare_session in spawn_managed_inproject, add statusline self-heal on resume (closes #1913) ([#1915](https://github.com/bobmatnyc/trusty-tools/pull/1915)) ([`7c3b052`](https://github.com/bobmatnyc/trusty-tools/commit/7c3b05222deaa06146b16b8ca7b0d0a9fab1c3f9))
+- correct launchd plist detection in guided autostart ([#1901](https://github.com/bobmatnyc/trusty-tools/pull/1901)) ([`aa5da12`](https://github.com/bobmatnyc/trusty-tools/commit/aa5da12ce413b8a186d6afeb251ca48b758fd70e))
+- auto-transition sessions to stopped when runtime process exits (closes #1814) ([#1894](https://github.com/bobmatnyc/trusty-tools/pull/1894)) ([`b4bee16`](https://github.com/bobmatnyc/trusty-tools/commit/b4bee163541f444b58de396f3637faae36db65e1))
+- clean up managed-clone worktree dirs on decommission + reap orphans (closes #1838) ([#1895](https://github.com/bobmatnyc/trusty-tools/pull/1895)) ([`8843f9c`](https://github.com/bobmatnyc/trusty-tools/commit/8843f9c1ef2e2421cc06b32cb6c233ea9e37988b))
+- unify workspace-root resolution + handle pre-existing old-layout dirs (closes #1805, closes #1807) ([#1896](https://github.com/bobmatnyc/trusty-tools/pull/1896)) ([`875d8e3`](https://github.com/bobmatnyc/trusty-tools/commit/875d8e310a2c0f0487b1bc0cd9e2e33b8e1ddc00))
+- require opt-in before MCP-triggered session spawn for unregistered repos (#1836, #1837) ([`2a6252f`](https://github.com/bobmatnyc/trusty-tools/commit/2a6252fc06552e08976cf813f0b2de1af64a1e56))
+- session attach uses switch-client inside tmux (nested-tmux fix) ([#1875](https://github.com/bobmatnyc/trusty-tools/pull/1875)) ([`93324c2`](https://github.com/bobmatnyc/trusty-tools/commit/93324c201ce9c18d6aa5a634da9361580c787e91))
+- output-style resolution + test-isolation hygiene (#1860, #1863, #1858) ([`8a9a4f9`](https://github.com/bobmatnyc/trusty-tools/commit/8a9a4f9db79025d59fc1263e023984492d0af3e1))
+
+### Changed
+
+- hoist compress::tool_output from trusty-agents ([#1959](https://github.com/bobmatnyc/trusty-tools/pull/1959)) ([#1968](https://github.com/bobmatnyc/trusty-tools/pull/1968)) ([`7cf93b9`](https://github.com/bobmatnyc/trusty-tools/commit/7cf93b9ab3918aff316238bdfe540a4053aa971d))
+- split inproject.rs to satisfy 500-SLOC production cap ([#1898](https://github.com/bobmatnyc/trusty-tools/pull/1898)) ([`43066c2`](https://github.com/bobmatnyc/trusty-tools/commit/43066c2a30cd9bdc6513554caff9ad2da54defd2))
 ## [0.14.0] — 2026-07-01
 
 ### Added
