@@ -173,3 +173,58 @@ fn pm_guard_sub_agent_env_allows_all() {
     );
     assert_eq!(stdout.trim(), "", "sub-agents must not be blocked");
 }
+
+#[test]
+fn pm_guard_disable_hooks_env_allows_all() {
+    // TRUSTY_MPM_DISABLE_HOOKS is the universal opt-out for CI / build shells —
+    // even a direct Edit must pass when it is set.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#,
+        &[("TRUSTY_MPM_DISABLE_HOOKS", "1")],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "the disable-hooks bypass must allow everything"
+    );
+}
+
+#[test]
+fn pm_guard_denies_composition_hidden_verb() {
+    // Shell composition must not let a benign leading verb hide a forbidden one
+    // in a later segment (the composition bypass fixed with PR #1985).
+    let sed = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cd repo && sed -i s/a/b/ f"}}"#,
+        &[],
+    );
+    assert_denied(&sed);
+
+    let make = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"true; make build"}}"#,
+        &[],
+    );
+    assert_denied(&make);
+
+    let redirect = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi > out.txt"}}"#,
+        &[],
+    );
+    assert_denied(&redirect);
+}
+
+#[test]
+fn pm_guard_allows_benign_pipes_and_dev_null() {
+    // Composition with no forbidden segment must still allow.
+    let piped = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"git log | head"}}"#,
+        &[],
+    );
+    assert_eq!(piped.trim(), "", "benign pipe must be allowed");
+
+    // Discarding output to /dev/null is not a file write.
+    let dev_null = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"which cargo 2>/dev/null"}}"#,
+        &[],
+    );
+    assert_eq!(dev_null.trim(), "", "2>/dev/null discard must be allowed");
+}

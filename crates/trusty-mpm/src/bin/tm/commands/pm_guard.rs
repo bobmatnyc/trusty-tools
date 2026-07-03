@@ -171,19 +171,87 @@ pub(crate) fn evaluate_tool(
 /// Why: Bash is the escape hatch a prompt-only prohibition can't close — a PM
 /// can edit a file with `sed -i`, write one with `echo … > f.rs`, apply a
 /// diff with `git apply`, or run the suite with `pytest` — all of which
-/// side-step the P1–P5 prohibitions. This denies exactly those high-confidence
-/// forms and allows everything else (git status/add/commit, ls, grep, …), so
-/// the PM's normal shell usage is unaffected.
-/// What: resolves the effective program via [`first_command_token`] (strips
-/// env/`sudo`/path noise) and denies `sed`/`awk`/`patch` (shell edit),
-/// `curl`/`wget` (network), and `make`/`pytest` (build/test). It then matches
-/// the two-token forms `git apply` / `npm test` via [`effective_tool_name`],
-/// and finally denies any file-write redirection (`>`/`>>` to a file, but not
-/// fd-duplication like `2>&1`) via [`has_file_write_redirection`]. Empty
-/// commands allow.
-/// Test: `evaluate_bash_command_denies_*`, `evaluate_bash_command_allows_*`.
+/// side-step the P1–P5 prohibitions. Crucially, shell *composition* is itself a
+/// bypass: classifying only the first token of the whole line let
+/// `cd repo && sed -i …`, `true; make build`, and `x || pytest` slip through
+/// because their leading verb (`cd`/`true`/`x`) is benign. So the classifier
+/// must look at every composed command, not just the first.
+/// What: splits the command on the shell composition operators `&&`, `||`, `;`,
+/// and `|` (see [`split_shell_segments`]) and runs [`classify_bash_segment`] on
+/// each segment — denying if ANY segment names a forbidden verb — then applies
+/// the whole-command file-write redirection check ([`has_file_write_redirection`],
+/// which ignores `2>&1` fd-dups and `/dev/null` discards). Benign pipes whose
+/// segments are all allowed (`git log | head`, `ls | wc -l`) still pass. Empty
+/// commands allow. The split is deliberately quote-unaware: a forbidden verb
+/// hidden inside a quoted string may over-deny, which is the safe direction here
+/// (a missed deny is the dangerous one).
+/// Test: `evaluate_bash_command_denies_*`, `evaluate_bash_command_allows_*`,
+/// `evaluate_bash_command_denies_composition_*`.
 pub(crate) fn evaluate_bash_command(command: &str) -> Option<&'static str> {
     let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    for segment in split_shell_segments(trimmed) {
+        if let Some(reason) = classify_bash_segment(segment) {
+            return Some(reason);
+        }
+    }
+    if has_file_write_redirection(trimmed) {
+        return Some(SHELL_EDIT_REASON);
+    }
+    None
+}
+
+/// Split a command into the sub-commands joined by `&&`/`||`/`;`/`|`.
+///
+/// Why: a forbidden verb can hide in any composed segment, not just the first;
+/// splitting lets [`evaluate_bash_command`] classify each independently.
+/// What: a byte scan that cuts at each composition operator (preferring the
+/// two-byte `&&`/`||` over a bare `|`) and returns the raw (untrimmed) segments;
+/// `classify_bash_segment` trims. Deliberately quote-unaware — see
+/// [`evaluate_bash_command`]. A lone `&` (backgrounding) is NOT a split point,
+/// so `foo &` stays one segment.
+/// Test: `split_shell_segments_splits_operators`,
+/// `split_shell_segments_single_command`.
+fn split_shell_segments(command: &str) -> Vec<&str> {
+    let bytes = command.as_bytes();
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let two = command.get(i..i + 2);
+        if two == Some("&&") || two == Some("||") {
+            segments.push(&command[start..i]);
+            i += 2;
+            start = i;
+            continue;
+        }
+        if bytes[i] == b';' || bytes[i] == b'|' {
+            segments.push(&command[start..i]);
+            i += 1;
+            start = i;
+            continue;
+        }
+        i += 1;
+    }
+    segments.push(&command[start..]);
+    segments
+}
+
+/// Classify a single composition segment: `Some(reason)` denies, `None` allows.
+///
+/// Why: factored out of [`evaluate_bash_command`] so the same first-token /
+/// two-token / substitution deny logic runs uniformly on every segment.
+/// What: resolves the effective program via [`first_command_token`] (strips
+/// env/`sudo`/path noise) and denies `sed`/`awk`/`patch` (shell edit),
+/// `curl`/`wget` (network), `make`/`pytest` (build/test); matches the two-token
+/// forms `git apply` / `npm test` via [`effective_tool_name`]; and finally
+/// inspects any command substitution / subshell in the segment via
+/// [`classify_command_substitutions`]. Empty/whitespace segments allow.
+/// Test: covered via `evaluate_bash_command_*` (this is its per-segment core).
+fn classify_bash_segment(segment: &str) -> Option<&'static str> {
+    let trimmed = segment.trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -200,8 +268,70 @@ pub(crate) fn evaluate_bash_command(command: &str) -> Option<&'static str> {
         "npm test" => return Some(BUILD_TEST_REASON),
         _ => {}
     }
-    if has_file_write_redirection(trimmed) {
-        return Some(SHELL_EDIT_REASON);
+    classify_command_substitutions(trimmed)
+}
+
+/// Inspect `$(…)` / backtick command substitutions for hidden forbidden verbs.
+///
+/// Why: first-token classification sees the *outer* command only, so
+/// `echo "$(sed -i s/a/b/ f)"` would pass on `echo` while the substitution
+/// silently runs `sed`. Since the dangerous direction here is a MISSED deny,
+/// this scans substitutions too. Design choice: rather than blanket-deny every
+/// substitution (which would break trivial, ubiquitous forms like
+/// `echo "$(date)"` or `cd "$(git rev-parse --show-toplevel)"`), it recursively
+/// classifies the *body* of each substitution with [`evaluate_bash_command`] —
+/// so a benign body allows and a forbidden one denies. Only when a substitution
+/// is *unbalanced* (an opening `$(` / backtick with no matching close — a form
+/// we cannot confidently decompose, e.g. one broken across a composition split)
+/// do we deny conservatively.
+/// What: byte-scans for `$(` (matching `)` with paren-depth tracking) and
+/// backtick pairs; recursively evaluates each balanced body and propagates a
+/// deny; returns [`SHELL_EDIT_REASON`] for any unbalanced substitution. Bounded
+/// recursion — each body is strictly shorter than its enclosing string.
+/// Test: `evaluate_bash_command_denies_hidden_substitution_verb`,
+/// `evaluate_bash_command_allows_benign_substitution`,
+/// `evaluate_bash_command_denies_unbalanced_substitution`.
+fn classify_command_substitutions(segment: &str) -> Option<&'static str> {
+    let bytes = segment.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
+            let mut depth = 1usize;
+            let mut j = i + 2;
+            while j < bytes.len() && depth > 0 {
+                match bytes[j] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            if depth != 0 {
+                // Unbalanced `$(` — cannot decompose; deny conservatively.
+                return Some(SHELL_EDIT_REASON);
+            }
+            if let Some(reason) = evaluate_bash_command(&segment[i + 2..j - 1]) {
+                return Some(reason);
+            }
+            i = j;
+            continue;
+        }
+        if bytes[i] == b'`' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j] != b'`' {
+                j += 1;
+            }
+            if j >= bytes.len() {
+                // Unbalanced backtick — cannot decompose; deny conservatively.
+                return Some(SHELL_EDIT_REASON);
+            }
+            if let Some(reason) = evaluate_bash_command(&segment[i + 1..j]) {
+                return Some(reason);
+            }
+            i = j + 1;
+            continue;
+        }
+        i += 1;
     }
     None
 }
@@ -216,13 +346,17 @@ pub(crate) fn evaluate_bash_command(command: &str) -> Option<&'static str> {
 /// must be distinguished.
 /// What: scans for `>`; for each, skips a second `>` (append) and any spaces,
 /// then treats it as an fd-duplication (allow, keep scanning) only when the
-/// next non-space byte is `&`. Any other `>` is a file-write redirect → `true`.
+/// next non-space byte is `&`. It then reads the redirect *target* token and
+/// treats `/dev/null` as benign (output discard, e.g. `2>/dev/null` /
+/// `>/dev/null` / `&>/dev/null`) — allow, keep scanning. Any other `>` is a
+/// file-write redirect → `true`.
 /// A pragmatic byte scan (a `>` inside a quoted string can false-positive) that
 /// errs toward blocking, matching the conservative posture of the sibling
 /// `hook_rewrite::has_unsafe_pipe_composition`.
 /// Test: `has_file_write_redirection_detects_write`,
 /// `has_file_write_redirection_detects_append`,
 /// `has_file_write_redirection_ignores_fd_dup`,
+/// `has_file_write_redirection_ignores_dev_null`,
 /// `has_file_write_redirection_false_for_plain_command`.
 pub(crate) fn has_file_write_redirection(command: &str) -> bool {
     let bytes = command.as_bytes();
@@ -240,6 +374,17 @@ pub(crate) fn has_file_write_redirection(command: &str) -> bool {
             // `>&fd` / `2>&1` duplicate a descriptor — not a file write.
             if j < bytes.len() && bytes[j] == b'&' {
                 i = j + 1;
+                continue;
+            }
+            // Read the redirect target token. `/dev/null` is an output-discard
+            // sink, not a file write (`which cargo 2>/dev/null`,
+            // `command -v foo >/dev/null`) — allow it and keep scanning.
+            let start = j;
+            while j < bytes.len() && !matches!(bytes[j], b' ' | b'>' | b'<' | b'|' | b';' | b'&') {
+                j += 1;
+            }
+            if &command[start..j] == "/dev/null" {
+                i = j;
                 continue;
             }
             return true;
@@ -445,6 +590,117 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_bash_command_denies_composition_hidden_verbs() {
+        // A benign leading verb must NOT hide a forbidden verb in a later
+        // composed segment (the shell-composition bypass, issue: PR #1985).
+        assert_eq!(
+            evaluate_bash_command("cd repo && sed -i s/a/b/ f"),
+            Some(SHELL_EDIT_REASON)
+        );
+        assert_eq!(
+            evaluate_bash_command("true; make build"),
+            Some(BUILD_TEST_REASON)
+        );
+        assert_eq!(
+            evaluate_bash_command("x || pytest"),
+            Some(BUILD_TEST_REASON)
+        );
+        assert_eq!(
+            evaluate_bash_command("ls && git apply p.diff"),
+            Some(SHELL_EDIT_REASON)
+        );
+        // Redirection hidden after a benign first segment still denies.
+        assert_eq!(
+            evaluate_bash_command("cd repo && echo x > out.txt"),
+            Some(SHELL_EDIT_REASON)
+        );
+    }
+
+    #[test]
+    fn evaluate_bash_command_allows_benign_pipes() {
+        // Composition where NO segment is a forbidden verb must still allow —
+        // we do not blanket-deny all composition.
+        for cmd in [
+            "git log | head",
+            "cat f | grep x",
+            "ls | wc -l",
+            "git diff && git status",
+            "cd repo; ls -la",
+        ] {
+            assert_eq!(
+                evaluate_bash_command(cmd),
+                None,
+                "expected allow for benign composition: {cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_bash_command_allows_dev_null_redirect() {
+        // `/dev/null` is an output-discard sink, not a file write.
+        for cmd in ["which cargo 2>/dev/null", "command -v foo >/dev/null"] {
+            assert_eq!(
+                evaluate_bash_command(cmd),
+                None,
+                "expected allow for /dev/null discard: {cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_bash_command_denies_hidden_substitution_verb() {
+        // A forbidden verb inside a command substitution must be caught.
+        assert_eq!(
+            evaluate_bash_command("echo \"$(sed -i s/a/b/ f)\""),
+            Some(SHELL_EDIT_REASON)
+        );
+        assert_eq!(
+            evaluate_bash_command("x=`make build`"),
+            Some(BUILD_TEST_REASON)
+        );
+    }
+
+    #[test]
+    fn evaluate_bash_command_allows_benign_substitution() {
+        // Trivial substitutions with benign bodies must not be over-blocked.
+        for cmd in [
+            "echo \"$(date)\"",
+            "cd \"$(git rev-parse --show-toplevel)\"",
+        ] {
+            assert_eq!(
+                evaluate_bash_command(cmd),
+                None,
+                "expected allow for benign substitution: {cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_bash_command_denies_unbalanced_substitution() {
+        // An unbalanced substitution we cannot decompose denies conservatively.
+        assert_eq!(
+            evaluate_bash_command("echo $(sed -i"),
+            Some(SHELL_EDIT_REASON)
+        );
+        assert_eq!(evaluate_bash_command("echo `foo"), Some(SHELL_EDIT_REASON));
+    }
+
+    #[test]
+    fn split_shell_segments_splits_operators() {
+        assert_eq!(
+            split_shell_segments("a && b || c ; d | e"),
+            vec!["a ", " b ", " c ", " d ", " e"]
+        );
+    }
+
+    #[test]
+    fn split_shell_segments_single_command() {
+        assert_eq!(split_shell_segments("git status"), vec!["git status"]);
+        // Backgrounding `&` is not a split point.
+        assert_eq!(split_shell_segments("foo &"), vec!["foo &"]);
+    }
+
+    #[test]
     fn has_file_write_redirection_detects_write() {
         assert!(has_file_write_redirection("echo x > f"));
         assert!(has_file_write_redirection("echo x >f.rs"));
@@ -459,6 +715,17 @@ mod tests {
     fn has_file_write_redirection_ignores_fd_dup() {
         assert!(!has_file_write_redirection("cargo test 2>&1"));
         assert!(!has_file_write_redirection("foo >&2"));
+    }
+
+    #[test]
+    fn has_file_write_redirection_ignores_dev_null() {
+        // Discarding output to /dev/null is not a file write.
+        assert!(!has_file_write_redirection("which cargo 2>/dev/null"));
+        assert!(!has_file_write_redirection("command -v foo >/dev/null"));
+        assert!(!has_file_write_redirection("foo &>/dev/null"));
+        // A real file write with the same shape still denies.
+        assert!(has_file_write_redirection("echo x > /dev/null.txt"));
+        assert!(has_file_write_redirection("echo x > out.txt"));
     }
 
     #[test]
