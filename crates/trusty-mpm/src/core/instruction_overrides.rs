@@ -209,7 +209,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let prompt = resolve_pm_prompt(tmp.path());
 
-        assert!(prompt.contains("# PM Agent -- Claude MPM"));
+        assert!(prompt.contains("# PM Agent -- Trusty MPM"));
         assert!(prompt.contains("# PM Workflow Configuration"));
         assert!(prompt.contains("# Agent Delegation Routing"));
         assert!(prompt.contains("# BASE_PM Framework Floor"));
@@ -232,7 +232,7 @@ mod tests {
         let prompt = resolve_pm_prompt(tmp.path());
 
         assert!(prompt.contains("ALWAYS_RUN_MAKE_CHECK"));
-        assert!(prompt.contains("# PM Agent -- Claude MPM"));
+        assert!(prompt.contains("# PM Agent -- Trusty MPM"));
         assert!(prompt.contains("# Agent Delegation Routing"));
 
         let extra = prompt.find("ALWAYS_RUN_MAKE_CHECK").expect("extra");
@@ -258,7 +258,7 @@ mod tests {
             "bundled workflow heading must be replaced"
         );
         // Other sections intact.
-        assert!(prompt.contains("# PM Agent -- Claude MPM"));
+        assert!(prompt.contains("# PM Agent -- Trusty MPM"));
         assert!(prompt.contains("# Agent Delegation Routing"));
         assert!(prompt.contains("# BASE_PM Framework Floor"));
     }
@@ -280,7 +280,7 @@ mod tests {
             !prompt.contains("# Agent Delegation Routing"),
             "bundled delegation heading must be replaced"
         );
-        assert!(prompt.contains("# PM Agent -- Claude MPM"));
+        assert!(prompt.contains("# PM Agent -- Trusty MPM"));
         assert!(prompt.contains("# PM Workflow Configuration"));
         assert!(prompt.contains("# BASE_PM Framework Floor"));
     }
@@ -300,7 +300,7 @@ mod tests {
         assert!(prompt.contains(MEMORY_OVERRIDE_HEADING));
         assert!(prompt.contains("Recall from the `team` palace"));
 
-        let pm = prompt.find("# PM Agent -- Claude MPM").expect("pm");
+        let pm = prompt.find("# PM Agent -- Trusty MPM").expect("pm");
         let mem = prompt.find(MEMORY_OVERRIDE_HEADING).expect("mem");
         let wf = prompt.find("# PM Workflow Configuration").expect("wf");
         assert!(pm < mem, "memory block follows PM_INSTRUCTIONS");
@@ -331,7 +331,7 @@ mod tests {
         );
         assert!(prompt.contains("## Trusty Tool Priority (Non-Overridable)"));
         // Bundled body sections are replaced.
-        assert!(!prompt.contains("# PM Agent -- Claude MPM"));
+        assert!(!prompt.contains("# PM Agent -- Trusty MPM"));
         assert!(!prompt.contains("# PM Workflow Configuration"));
         assert!(!prompt.contains("# Agent Delegation Routing"));
 
@@ -364,7 +364,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         assert!(!tmp.path().join(OVERRIDE_DIR_NAME).exists());
         let prompt = resolve_pm_prompt(tmp.path());
-        assert!(prompt.contains("# PM Agent -- Claude MPM"));
+        assert!(prompt.contains("# PM Agent -- Trusty MPM"));
         assert!(prompt.contains("# BASE_PM Framework Floor"));
     }
 
