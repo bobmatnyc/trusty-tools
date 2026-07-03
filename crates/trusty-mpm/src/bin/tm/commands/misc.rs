@@ -8,6 +8,9 @@
 
 use crate::cli::{CliCompressionLevel, OptimizerAction, OverseerAction};
 use crate::commands::daemon::{daemon_healthy, print_status};
+use crate::commands::hook_rewrite::{
+    build_pretooluse_rewrite_response, rewrite_bash_command_for_compression,
+};
 use crate::formatters::session::short_id;
 use crate::types::EventRow;
 
@@ -275,6 +278,42 @@ fn status_icon(status: trusty_mpm::core::doctor::CheckStatus) -> &'static str {
     }
 }
 
+/// Best-effort read of Claude Code's hook stdin JSON payload.
+///
+/// Why (issue #1956): Claude Code delivers the full hook payload — including
+/// `tool_name`/`tool_input`/`tool_response` — on the hook process's stdin,
+/// but `hook()` historically never read it (see
+/// `docs/specs/tool-output-interception-seam.md` §Problem). Reading it is a
+/// prerequisite for both the `PreToolUse` Bash rewrite (Option 0) and richer
+/// daemon observability. Bounded by a short timeout rather than reading to
+/// EOF unconditionally: Claude Code always closes stdin promptly after
+/// writing the payload, but a hook must never risk blocking the user's
+/// prompt if some future caller leaves stdin open.
+/// What: Reads up to `HOOK_STDIN_TIMEOUT` worth of stdin, then attempts a
+/// JSON parse. Returns `None` on timeout, empty input, or a parse failure —
+/// every case degrades to "no stdin payload" rather than erroring.
+/// Test: `hook_guard_short_circuits`/`hook_disable_env_short_circuits`
+/// exercise the guard branches that skip this entirely; this helper's
+/// behavior with real Claude Code stdin needs live validation (see
+/// `commands::hook_rewrite` module docs for the broader unverified-schema
+/// caveat).
+async fn read_stdin_hook_payload() -> Option<serde_json::Value> {
+    use tokio::io::AsyncReadExt;
+
+    const HOOK_STDIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+
+    let mut buf = String::new();
+    let read = tokio::time::timeout(
+        HOOK_STDIN_TIMEOUT,
+        tokio::io::stdin().read_to_string(&mut buf),
+    )
+    .await;
+    match read {
+        Ok(Ok(_)) if !buf.trim().is_empty() => serde_json::from_str(&buf).ok(),
+        _ => None,
+    }
+}
+
 /// `hook` subcommand — handle a Claude Code lifecycle hook event.
 ///
 /// Why: Claude Code invokes the configured hook command on every PreToolUse /
@@ -286,6 +325,19 @@ fn status_icon(status: trusty_mpm::core::doctor::CheckStatus) -> &'static str {
 /// the daemon. `TRUSTY_MPM_DISABLE_HOOKS` provides an additional escape hatch
 /// for any environment (SAM deploys, CI, stripped-PATH build shells) where
 /// the hook must not fire at all.
+///
+/// Issue #1956 (Option 0 spike) widens this beyond the original env-var-only
+/// relay: it now also reads Claude Code's stdin JSON payload (see
+/// [`read_stdin_hook_payload`]) so `tool_name`/`tool_input` can be forwarded
+/// to the daemon for observability, AND — for `PreToolUse` events where
+/// `tool_name == "Bash"` — attempts to rewrite the command to pipe through
+/// `tm compress --tool "<effective tool name>"` (see `commands::hook_rewrite`,
+/// which derives a dispatch-relevant tool name from the command rather than
+/// a hardcoded `"bash"`), printing the resulting
+/// `hookSpecificOutput.updatedInput` JSON to stdout when a safe rewrite is
+/// constructed. When no rewrite applies (excluded command, unsafe
+/// composition, or no stdin payload at all) nothing is printed — a silent
+/// no-op, matching this handler's existing fail-open posture.
 /// What: reads the event name from `CLAUDE_HOOK_EVENT` and the session id
 /// from `CLAUDE_SESSION_ID` (both populated by Claude Code; missing values
 /// degrade to placeholders so the daemon still gets a record). POSTs to
@@ -294,7 +346,10 @@ fn status_icon(status: trusty_mpm::core::doctor::CheckStatus) -> &'static str {
 /// user's prompt.
 /// Test: `cli_parses_hook` covers parse routing; the guard branches are
 /// exercised via `hook_guard_short_circuits` and
-/// `hook_disable_env_short_circuits` in `tests_behavior_a.rs`.
+/// `hook_disable_env_short_circuits` in `tests_behavior_a.rs`. The rewrite
+/// decision logic itself is covered by `commands::hook_rewrite`'s unit tests
+/// (this function is a thin caller with no independent branching to test
+/// beyond "print when `Some`, stay silent when `None`").
 pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     // Guard 1: suppress inside MPM-spawned sub-agents.
     if std::env::var_os(SUB_AGENT_ENV).is_some() {
@@ -312,16 +367,53 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
     let event = std::env::var("CLAUDE_HOOK_EVENT").unwrap_or_else(|_| "Unknown".to_string());
     let session_id = std::env::var("CLAUDE_SESSION_ID").unwrap_or_default();
 
+    // #1956: read the stdin JSON payload Claude Code delivers alongside the
+    // env vars above. `tool_name`/`tool_input` are used both for the
+    // PreToolUse Bash rewrite below and for daemon observability.
+    let stdin_payload = read_stdin_hook_payload().await;
+    let tool_name = stdin_payload
+        .as_ref()
+        .and_then(|v| v.get("tool_name"))
+        .and_then(|v| v.as_str());
+    let tool_input = stdin_payload.as_ref().and_then(|v| v.get("tool_input"));
+    let bash_command = tool_input
+        .and_then(|v| v.get("command"))
+        .and_then(|v| v.as_str());
+
+    // #1956 Option 0: PreToolUse Bash command-rewrite spike. Printed to
+    // stdout BEFORE the daemon POST below (which is best-effort
+    // observability only) so Claude Code sees the rewrite regardless of
+    // daemon reachability. No output at all when no safe rewrite applies —
+    // a silent no-op, not an error.
+    if event == "PreToolUse"
+        && tool_name == Some("Bash")
+        && let Some(cmd) = bash_command
+        && let Some(rewritten) = rewrite_bash_command_for_compression(cmd)
+    {
+        let response = build_pretooluse_rewrite_response(&rewritten);
+        println!("{response}");
+    }
+
     // Include the caller's cwd so the daemon can correlate this SessionStart
     // event to the right managed session by workspace_path (issue #1744).
     let cwd = std::env::current_dir()
         .ok()
         .and_then(|p| p.to_str().map(str::to_owned))
         .unwrap_or_default();
+    let mut payload = serde_json::json!({ "cwd": cwd });
+    // #1956: enrich the observability payload with tool/input when present —
+    // the daemon's hook_service already reads `payload["tool"]`/`["input"]`
+    // (see `daemon::services::hook_service::OverseerContext` construction).
+    if let Some(name) = tool_name {
+        payload["tool"] = serde_json::Value::String(name.to_string());
+    }
+    if let Some(input) = tool_input {
+        payload["input"] = input.clone();
+    }
     let body = serde_json::json!({
         "session_id": session_id,
         "event": event,
-        "payload": { "cwd": cwd }
+        "payload": payload
     });
 
     // Build a hook-specific client with a tight connect timeout so a
