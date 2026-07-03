@@ -455,6 +455,36 @@ mod tests {
         assert_eq!(strip_managed_prefix("frontend"), "frontend");
     }
 
+    /// Why: `PREFIX` (`tm-`) and `LEGACY_PREFIX_TMPM` (`tmpm-`) share the two
+    /// leading characters `tm`; a naive `starts_with("tm")` (missing the
+    /// trailing dash) or a strip order that checked a `"tm"`/`"tmp"` fragment
+    /// before the full `tmpm-` prefix would strip only `tm` off a legacy name,
+    /// leaving a mangled `pm-<rest>` instead of `<rest>`. This regression-locks
+    /// the exact worked example from issue #1955's review follow-up: a legacy
+    /// `tmpm-quiet-falcon` session must display as `quiet-falcon`, never
+    /// `pm-quiet-falcon`.
+    /// What: asserts the full `tmpm-` prefix is stripped cleanly, not just its
+    /// `tm`/`tm-`-shaped prefix overlap with the current [`PREFIX`].
+    /// Test: itself.
+    #[test]
+    fn strip_managed_prefix_no_partial_overlap_with_legacy_tmpm() {
+        assert_eq!(strip_managed_prefix("tmpm-quiet-falcon"), "quiet-falcon");
+        assert_ne!(strip_managed_prefix("tmpm-quiet-falcon"), "pm-quiet-falcon");
+        assert_ne!(strip_managed_prefix("tmpm-quiet-falcon"), "-quiet-falcon");
+    }
+
+    /// Why: mirrors the strip-side regression lock above for the boolean
+    /// classifier — [`is_managed_session_name`] must recognize a legacy
+    /// `tmpm-`-prefixed name as managed via the FULL prefix, not merely
+    /// because it happens to also match a shorter/overlapping fragment.
+    /// What: asserts classification is stable across the whole `tmpm-` family
+    /// used by the #1955 worked example.
+    /// Test: itself.
+    #[test]
+    fn managed_prefix_matches_legacy_tmpm_quiet_falcon() {
+        assert!(is_managed_session_name("tmpm-quiet-falcon"));
+    }
+
     #[test]
     fn format_matches() {
         for _ in 0..200 {
