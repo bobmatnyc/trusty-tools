@@ -307,12 +307,13 @@ fn install_then_deploy_deploys_skills() {
         &paths.claude_skills_dir(),
     )
     .unwrap();
-    // The full /tm- skill portfolio deploys on first install: 16 skills total
-    // — 14 /tm- portfolio skills (tm-circuit-breaker, tm-verification-protocols,
+    // The full /tm- skill portfolio deploys on first install: 18 skills total
+    // — 16 /tm- portfolio skills (tm-circuit-breaker, tm-verification-protocols,
     // tm-tool-usage-guide, tm-git-file-tracking, tm-adr, tm-workflow,
     // tm-agent-architecture, tm-postmortem, tm-bug-reporting,
     // tm-teaching-templates, tm-ticketing, tm-pr-workflow,
-    // tm-delegation-patterns, tm-session-management) + tm-doctor + the tm
+    // tm-delegation-patterns, tm-session-management, tm-session-pause,
+    // tm-session-resume) + tm-doctor + the tm
     // overview skill (tm-skills-portfolio epic: the `example-skill.md`
     // placeholder and the 11 mpm-* guidance skills no longer ship; the
     // previously-orphaned tm-doctor.md is now wired in). See
@@ -331,8 +332,8 @@ fn install_then_deploy_deploys_skills() {
     );
     assert_eq!(
         result.deployed.len(),
-        16,
-        "expected 16 skill files deployed (14 /tm- portfolio + tm-doctor + tm overview); got {:?}",
+        18,
+        "expected 18 skill files deployed (16 /tm- portfolio + tm-doctor + tm overview); got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());

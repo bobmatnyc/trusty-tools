@@ -352,6 +352,16 @@ pub const ALL: &[BundledArtifact] = &[
         install: InstallPolicy::Overwrite,
     },
     BundledArtifact {
+        rel_path: "skills/tm-session-pause.md",
+        contents: TM_SESSION_PAUSE,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
+        rel_path: "skills/tm-session-resume.md",
+        contents: TM_SESSION_RESUME,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
         rel_path: "skills/tm.md",
         contents: TM_OVERVIEW,
         install: InstallPolicy::Overwrite,

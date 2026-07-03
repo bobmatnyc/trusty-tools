@@ -144,6 +144,28 @@ pub const TM_DELEGATION_PATTERNS: &str = include_str!("../assets/skills/tm-deleg
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_SESSION_MANAGEMENT: &str = include_str!("../assets/skills/tm-session-management.md");
 
+/// Focused `/tm-session-pause` action — snapshot + prune, split from the
+/// consolidated session-management overview.
+///
+/// Why: restores the per-action UX of claude-mpm's `/mpm-session-pause`; users
+/// want a single-purpose "pause and save my work" entry point rather than
+/// reading the full policy skill. Adapted to tm-native `.trusty-mpm/sessions/`
+/// paths and `tm session prune-worktrees` (no `.claude-mpm/` references).
+/// What: embedded markdown skill file deployed to `skills/tm-session-pause.md`.
+/// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
+pub const TM_SESSION_PAUSE: &str = include_str!("../assets/skills/tm-session-pause.md");
+
+/// Focused `/tm-session-resume` action — load + restore, split from the
+/// consolidated session-management overview.
+///
+/// Why: restores the per-action UX of claude-mpm's `/mpm-session-resume`; a
+/// single-purpose "resume my paused session" entry point over `tm session
+/// catchup`, with project-path validation. Adapted to tm-native
+/// `.trusty-mpm/sessions/` paths (no `.claude-mpm/` references).
+/// What: embedded markdown skill file deployed to `skills/tm-session-resume.md`.
+/// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
+pub const TM_SESSION_RESUME: &str = include_str!("../assets/skills/tm-session-resume.md");
+
 /// SLIM `/tm` orchestration-model overview (optional 15th portfolio skill).
 ///
 /// Why: a quick-reference entry point for the agent roster, skills catalog,
