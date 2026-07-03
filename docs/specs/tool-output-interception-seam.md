@@ -14,25 +14,42 @@
 Issue #1944 (closed, PR #1952) established that trusty-mpm's `optimize_tool_output`
 compression only ever touches the *observability* copy of a tool result (dashboard,
 ring buffer, compacted history) — never the copy the model actually reads. This doc
-is the follow-up investigation (#1953) requested to evaluate the two viable seams for
+is the follow-up investigation (#1953) requested to evaluate the viable seams for
 reducing a **native Claude Code session's live tool-output tokens**, quantify realistic
 savings with a real spike, and decide whether `SPEC-MPM-CUTOVER-03` should retarget to
 one of them.
 
+> **⚠️ Revision (2026-07-03, same investigation).** The original version of this doc
+> claimed no pre-context-insertion interception seam exists in the Claude Code harness,
+> and framed a "future tool-output-transform hook" (old Option 2) as purely
+> speculative — "As of this writing no such hook exists." **That claim was incomplete.**
+> The sibling `claude-mpm` Python project already ships a working, production-hardened
+> seam of exactly this shape, for Bash specifically — see [§ Problem](#problem) and the
+> new [§ Option 0](#option-0-pretooluse-bash-command-rewrite-in-tms-own-hook-relay-spec-toolproxy-00draft)
+> below. The correction is scoped precisely: the seam is real and shipped **for Bash
+> only**; it still does not exist for structured/native tools (Read/Grep/Glob), which
+> have no subprocess to rewrite.
+
 **Recommendation (see [§ Decision](#decision)):** do not retarget `SPEC-MPM-CUTOVER-03`
-yet. The MCP-proxy seam (Option 1) is architecturally viable and reuses shipped code
-(`compress_tool_output_async`), but the spike shows the *existing* native filter chain
-only compresses 2 of 4 realistic fixture types (cargo/git — not grep/ls), so the
-opt-in, steering-only UX described below caps realistic savings well short of the
-rtk/ztk README numbers until filter coverage is extended. Recommend a scoped follow-up
-spike (see [§ Follow-ups](#follow-up-implementation-issues)) before committing engineering
-time to the full MCP proxy.
+to the full MCP proxy (Option 1) yet. Instead, prototype the cheaper **Option 0** —
+`tm hook`'s own `PreToolUse` Bash command-rewrite — first. It has real prior art
+(claude-mpm's ztk integration proves the seam works in production), reuses
+already-shipped pieces (`tm hook` relay, `compress_tool_output_async`), and needs no
+new MCP tools, steering, or tool-provenance change, since Bash still executes as Bash.
+Option 1 (the MCP-proxy seam) remains architecturally viable and reuses shipped code,
+but the spike shows the *existing* native filter chain only compresses 2 of 4 realistic
+fixture types (cargo/git — not grep/ls), so its opt-in, steering-only UX caps realistic
+savings well short of the rtk/ztk README numbers until filter coverage is extended, and
+it stays the more expensive path (new tool provenance, new consent UX, new MCP surface).
+Option 1 remains the right eventual path for Read/Grep/Glob coverage, which Option 0
+cannot reach (no subprocess to wrap or pipe for native/structured tools).
 
 ## Contents
 
 - [Problem](#problem)
+- [Option 0: PreToolUse Bash Command-Rewrite in tm's Own Hook Relay](#option-0-pretooluse-bash-command-rewrite-in-tms-own-hook-relay-spec-toolproxy-00draft)
 - [Option 1: tm-Provided MCP Tool-Output Proxy](#option-1-tm-provided-mcp-tool-output-proxy-spec-toolproxy-01draft)
-- [Option 2: Future Upstream Claude Code Hook](#option-2-future-upstream-claude-code-tool-output-transform-hook)
+- [Option 2: Future Upstream Claude Code Hook for Structured Tools](#option-2-future-upstream-claude-code-post-execution-transform-hook-readgrepglob)
 - [Spike: Real Compression Numbers](#spike-real-compression-numbers)
 - [Decision](#decision)
 - [Not Recommended](#not-recommended)
@@ -69,19 +86,168 @@ This rules out every post-hoc interception point:
   (`llm/tool_loop/mod.rs:424`), which mediates its own tool calls and can rewrite a
   result before it goes back to the model. Native `tm` sessions don't run that loop;
   they run Claude Code's.
-- **ZTK doesn't exist in this workspace.** No `ztk` symbol appears anywhere under
-  `crates/`. Treat every "native ztk" reference in `SPEC-MPM-CUTOVER-03` as aspirational
-  naming for an in-tree Rust filter tier, not a delivered dependency.
+- **ZTK doesn't exist in this workspace** — but a working equivalent exists in a
+  sibling project, and it proves the seam is real. No `ztk` symbol appears anywhere
+  under `crates/`; the `codejunkie99/ztk` Zig binary itself is not vendored, shelled
+  out to, or ported into `trusty-tools`. Treat every "native ztk" reference in
+  `SPEC-MPM-CUTOVER-03` as aspirational naming for an in-tree Rust filter tier, not a
+  delivered dependency **in this workspace**. However, the sibling Python project
+  `claude-mpm` (installed locally at
+  `~/.local/share/uv/tools/claude-mpm/lib/python3.13/site-packages/claude_mpm/`) already
+  ships a production-hardened `PreToolUse` hook (`hooks/ztk_hook.py`) that, on every
+  `Bash` tool call, rewrites `tool_input["command"]` from `<cmd>` to
+  `<ztk_path> run <cmd>` and returns the rewrite via
+  `hookSpecificOutput.updatedInput` (`_build_ztk_response_impl`, `hooks/ztk_hook.py`
+  ~lines 742-813). Claude Code then **executes the rewritten command** — the external
+  `ztk` binary wraps the subprocess and filters stdout in-flight, so only the
+  already-compressed output is ever captured as the Bash tool's result. This *is* a
+  genuine pre-context-insertion seam: compression happens as a side effect of *what
+  gets executed*, not post-hoc filtering of output that's already in context. A comment
+  in the sibling `hooks/llmlingua_hook.py` (~lines 3-7) makes the same distinction
+  explicitly, contrasting itself with ztk: "Unlike ztk — which rewrites Bash *commands*
+  via PreToolUse to strip noise before output is generated — LLMLingua operates on
+  already-generated *text*." Routing is wired via `hooks/pretooluse_dispatcher.py`
+  (~lines 160-179), which dispatches `Bash` events to `ztk_hook.build_ztk_response`; a
+  `--no-ztk` CLI flag / `CLAUDE_MPM_DISABLE_ZTK` env var gates it
+  (`cli/parsers/run_parser.py` ~263-268, `ztk_hook.py` ~45, ~610-611, ~745-747). **This
+  corrects the earlier framing of this doc's old Option 2** ("no pre-context-insertion
+  hook exists") — it exists today, for Bash, outside this workspace, with real prior
+  art. See [§ Option 0](#option-0-pretooluse-bash-command-rewrite-in-tms-own-hook-relay-spec-toolproxy-00draft)
+  for what an equivalent inside `tm hook` would look like, and
+  [§ Option 2](#option-2-future-upstream-claude-code-post-execution-transform-hook-readgrepglob)
+  for the narrower gap that remains (structured/native tools with no subprocess to
+  rewrite).
 
 **The only way to reduce live tokens is to rewrite the tool result *before* the model
-consumes it.** That means either the tool call itself must go through something other
-than Claude Code's built-in tool implementation (Option 1), or Claude Code's harness
-must ship a transform hook that runs before context insertion (Option 2, speculative).
+consumes it.** For Bash, that seam already exists (see above) and claude-mpm's ztk
+integration proves it works in production; [§ Option 0](#option-0-pretooluse-bash-command-rewrite-in-tms-own-hook-relay-spec-toolproxy-00draft)
+sketches `tm`'s own equivalent. For everything else, the tool call itself must go
+through something other than Claude Code's built-in tool implementation (Option 1), or
+Claude Code's harness must ship a post-execution transform hook that runs before
+context insertion for those tool types (Option 2, still speculative for structured
+tools — see that section for the precise scope).
+
+## Option 0: PreToolUse Bash Command-Rewrite in tm's Own Hook Relay {#SPEC-TOOLPROXY-00~draft}
+
+**ID:** SPEC-TOOLPROXY-00~draft
+**Status:** Draft — recommended next prototype (see [§ Decision](#decision))
+
+### Precedent
+
+claude-mpm's ztk integration (cited in full in [§ Problem](#problem)) proves this seam
+works in production: rewrite the Bash *command* at `PreToolUse` time so that whatever
+subprocess Claude Code spawns already produces filtered output. `tm hook` could do the
+same thing without depending on the external ztk Zig binary at all, by piping through a
+`tm`-owned compression subcommand instead.
+
+### Behavior Contract (WHAT)
+
+- **Inputs:** A `PreToolUse` hook event for `tool_name == "Bash"`, delivered by Claude
+  Code on the hook process's **stdin** as JSON (`tool_name`, `tool_input.command`,
+  session/context fields). `tm hook` does not read this today (see Architecture Sketch).
+- **Outputs:** `tm hook` responds with `hookSpecificOutput.updatedInput` containing a
+  rewritten `command` field. Claude Code substitutes the rewritten command for the
+  original before executing it — the model still sees a `Bash` tool call, just with a
+  different, tm-mediated command string.
+- **Preconditions:** The project has `tm hook` wired in as a `PreToolUse` hook (already
+  standard for `tm`-managed sessions). No new opt-in surface beyond what's already
+  required to use `tm hook` at all — a meaningful UX simplification versus Option 1.
+- **Postconditions:** The Bash subprocess Claude Code actually runs already has its
+  output filtered in-flight; the tool result the model reads reflects the compressed
+  size, matching Option 1's postcondition but without a new tool name in the
+  transcript — the call still shows up as `Bash`.
+- **Error conditions:** Same fail-open requirement as everywhere else in this doc and
+  as already locked in `SPEC-MPM-CUTOVER-03`'s Locked-Decisions #4 (infallible,
+  bounded, in-process where possible). If the rewrite cannot be constructed safely
+  (e.g., the command matches an exclusion — see Tradeoffs below), `tm hook` must return
+  no `updatedInput` and let the original command run unmodified — a silent no-op, not a
+  failure.
+
+### Architecture Sketch
+
+`tm hook`'s relay (`crates/trusty-mpm/src/bin/tm/commands/misc.rs`, `hook()` function,
+~lines 298-359) currently **discards stdin entirely** — it reads only the
+`CLAUDE_HOOK_EVENT` and `CLAUDE_SESSION_ID` environment variables and POSTs
+`{session_id, event, payload: {cwd}}` to the daemon. It never touches stdin, which is
+where Claude Code actually delivers `tool_name`/`tool_input` for `PreToolUse` events.
+Implementing Option 0 requires:
+
+1. **Read stdin JSON on `PreToolUse` events.** Parse `tool_name` and, when it's
+   `"Bash"`, `tool_input.command`.
+2. **Decide how to filter.** Two sub-approaches, evaluated for cost/complexity:
+   - **(i) Shell out to an external strategy, mirroring ztk's own architecture.**
+     Wrap the command with an external compressing proxy binary (analogous to
+     `ztk run <cmd>`). Rejected: this re-introduces exactly the external-binary
+     dependency `SPEC-MPM-CUTOVER-03`'s Locked-Decision #1 already forbids ("Do not
+     shell out to or bundle the external `codejunkie99/ztk` Zig binary... Keep it
+     pure-Rust, single-install clean"), and reintroduces the same global-wrap failure
+     class that caused the SAM-build incident cited below.
+   - **(ii) Ship tm's own output-filtering subcommand and pipe through it.** Since
+     RTK/native compression here is Rust-native and can't "wrap" a subprocess the way
+     ztk's Zig binary does, have `tm hook` return
+     `hookSpecificOutput.updatedInput` with `command` rewritten to
+     `<original cmd> | tm compress --tool bash` — i.e., `tm` ships its own filtering
+     binary/subcommand, and the pipe is the interception point, achieving the same
+     seam as ztk without depending on any external binary. This subcommand would
+     reuse `compress_tool_output_async`
+     (`crates/trusty-agents/src/compress/tool_output/rtk.rs:84`) as the actual filter
+     — already proven reusable and free of `tool_loop` internals (see
+     [§ Option 1 Architecture Sketch](#option-1-tm-provided-mcp-tool-output-proxy-spec-toolproxy-01draft)).
+     **Recommended sub-approach** — pure-Rust, in-tree, consistent with
+     `SPEC-MPM-CUTOVER-03`'s locked decisions, and requires no new external dependency.
+
+Sketch (sub-approach ii):
+
+```rust
+// crates/trusty-mpm/src/bin/tm/commands/misc.rs (extend hook())
+// On PreToolUse with tool_name == "Bash":
+let rewritten = format!("{original_command} | tm compress --tool bash");
+Ok(json!({
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "updatedInput": { "command": rewritten }
+    }
+}))
+```
+
+### Tradeoffs
+
+- **Shell-pipe composition risk.** Appending `| tm compress --tool bash`
+  unconditionally can break commands that use `|` in ways sensitive to pipeline
+  structure, subshells, or that rely on a specific exit code from the *last* command
+  in a pipeline (`set -o pipefail` interactions), or long-PATH/argv-size edge cases.
+  This is the **same class of problem** ztk itself hit and had to defend against: its
+  `_ORCHESTRATOR_EXCLUSIONS` set (`hooks/ztk_hook.py` ~lines 49-69) skips wrapping for
+  `make`, `sam`, `rake`, `gradle`, `gradlew`, `mvn`, `ant`, `cdk`, `terraform` — build
+  orchestrators that spawn long subprocess chains where a global wrap once broke a SAM
+  build (exit-2 on E2BIG / long-PATH, looked like success because the orchestrator
+  printed partial success before a later stage silently never ran). This exact
+  incident is **already cited in this repo** as prior art:
+  `docs/specs/mpm-cutover-resume-native-optimization.md:178` and
+  `docs/specs/SPEC-INSTALLER-01.md:150` both point to it as the reason trusty-mpm's own
+  compression must stay fail-open/in-process/no-shell-out. Option 0 must ship an
+  exclusion list **from day one**, not add one reactively after a similar incident —
+  there is no excuse for repeating a documented failure mode.
+- **Scope limited to Bash only**, same as ztk itself. Read/Grep/Glob remain uncovered —
+  there's no subprocess to wrap or pipe for native/structured tools. See
+  [§ Option 2](#option-2-future-upstream-claude-code-post-execution-transform-hook-readgrepglob).
+- **No new MCP tools, no steering, no provenance change.** The tool name in the
+  transcript stays `Bash` — cheaper UX than Option 1, which requires opt-in MCP tool
+  registration, CLAUDE.md/skill steering, and a new consent surface.
+- **Reuses existing infrastructure rather than standing up a new server.** Extends
+  `tm hook`'s existing relay (already wired as a `PreToolUse` hook for every
+  `tm`-managed session) instead of a new MCP server process.
+- **Requires widening the relay to read stdin JSON** — currently discarded (see
+  Architecture Sketch). This is the same widening flagged in
+  [§ Not Recommended](#not-recommended) as "worth doing for observability"; Option 0
+  reframes it as also being a **prerequisite for live-token reduction**, not merely an
+  observability nice-to-have (see that section's revision note).
 
 ## Option 1: tm-Provided MCP Tool-Output Proxy {#SPEC-TOOLPROXY-01~draft}
 
 **ID:** SPEC-TOOLPROXY-01~draft
-**Status:** Draft
+**Status:** Draft — remains the right eventual path for Read/Grep/Glob coverage, which
+Option 0 cannot reach (see [§ Decision](#decision) for sequencing).
 
 ### Behavior Contract (WHAT)
 
@@ -189,15 +355,33 @@ step wrapped around an unchanged execution step.
   MCP tool permission the same way it does for built-in tools; no new consent UX is
   needed beyond what MCP tool registration already provides.
 
-## Option 2: Future Upstream Claude Code "Tool-Output Transform" Hook
+## Option 2: Future Upstream Claude Code Post-Execution Transform Hook (Read/Grep/Glob)
 
-Speculative. If Anthropic ships a hook that runs *before* a tool result is inserted
-into the model's context (as opposed to today's `PostToolUse`, which runs after), that
-hook could call `compress_tool_output_async` directly with zero provenance/permission
-tradeoffs — no new tool names, no steering needed, no proxy execution surface. This
-would be strictly better than Option 1 wherever it applies. As of this writing no such
-hook exists in the Claude Code harness. This is not actionable now; track the upstream
-Claude Code changelog and revisit if/when a pre-context-insertion hook ships.
+**Scope corrected by this revision.** The original version of this section claimed no
+pre-context-insertion hook exists at all — that was incomplete. `PreToolUse` +
+`hookSpecificOutput.updatedInput` already exists and already provides a real
+pre-context-insertion seam **for Bash**, proven in production by claude-mpm's ztk
+integration (see [§ Problem](#problem) and [§ Option 0](#option-0-pretooluse-bash-command-rewrite-in-tms-own-hook-relay-spec-toolproxy-00draft)).
+That mechanism works by rewriting the *input* (the command) before execution, which
+only helps because Bash's "result" is the stdout/stderr of a subprocess that hasn't run
+yet at hook time.
+
+That trick does not generalize to structured/native tools. Read, Grep, and Glob are not
+shell invocations — there is no command string to rewrite that would cause their result
+to come back pre-filtered; their result is produced directly by Claude Code's own
+built-in implementation, not a subprocess `tm hook` could interpose on. For those
+tools, what would actually be needed is a hook that runs *after* the tool executes but
+*before* the result is inserted into the model's context (as opposed to today's
+`PostToolUse`, which runs strictly after context insertion) — a genuine
+"transform-the-output" hook, not a "rewrite-the-input" hook. **As of this writing, no
+such hook exists in the Claude Code harness for any tool type**, and no comparable
+prior art (in claude-mpm or elsewhere) was found during this investigation. If Anthropic
+ships one, it could call `compress_tool_output_async` directly with zero
+provenance/permission tradeoffs — no new tool names, no steering needed, no proxy
+execution surface — and would be strictly better than Option 1 wherever it applies.
+This remains genuinely speculative and not actionable now; track the upstream Claude
+Code changelog and revisit if/when a post-execution, pre-context-insertion hook ships
+for built-in tools generally.
 
 ## Spike: Real Compression Numbers
 
@@ -287,45 +471,66 @@ of a new tool-provenance surface for those specific tools.
 
 ## Decision
 
-**Do not retarget `SPEC-MPM-CUTOVER-03` to the MCP-proxy seam yet.** Conditions under
-which retargeting becomes correct:
+**Prototype Option 0 before committing to Option 1.** Option 0 (`tm hook`'s own
+`PreToolUse` Bash command-rewrite) is now the recommended next step: it is cheaper (no
+new MCP tools, no steering, no tool-provenance change — Bash still executes as Bash,
+just with output piped through a filter), reuses proven pieces (`tm hook` relay +
+`compress_tool_output_async`), and has real prior art (claude-mpm's ztk) proving the
+seam works in practice. **Do not retarget `SPEC-MPM-CUTOVER-03` to the full MCP-proxy
+seam (Option 1) yet.** Conditions under which committing to Option 1 becomes correct:
 
-1. `compress_tool_output`'s dispatch table gains real filters for `grep` and `ls`
+1. The Option 0 prototype spike (see [§ Follow-ups](#follow-up-implementation-issues))
+   lands and quantifies real savings/tradeoffs for the Bash-only case, establishing
+   whether the pipe-composition risk (see [§ Option 0 Tradeoffs](#tradeoffs)) is
+   manageable with a day-one exclusion list.
+2. `compress_tool_output`'s dispatch table gains real filters for `grep` and `ls`
    (currently 0% reduction — see Spike), so the "v1 filter granularity" originally
    promised by `SPEC-MPM-CUTOVER-03` §Locked-Decisions actually exists in code before a
-   proxy tool advertises those command names.
-2. A follow-up spike re-runs with those filters in place and shows aggregate reduction
+   proxy tool advertises those command names. This condition applies to Option 1
+   regardless of Option 0's outcome, since Option 0 cannot cover Read/Grep/Glob at all.
+3. A follow-up spike re-runs with those filters in place and shows aggregate reduction
    materially above the current 9.1%/8.4% (cargo-test/git-diff-only) baseline — a
    reasonable target given rtk/ztk's own README claims (70–90% on structured command
    output) would be 40–60% aggregate across a realistic 4-fixture mix once grep/ls
    filters exist.
-3. The security/provenance review in [§ Option 1](#provenance-permission-and-security-tradeoffs)
+4. The security/provenance review in [§ Option 1](#provenance-permission-and-security-tradeoffs)
    is formalized (a short security-review pass, reusing the `security-review` skill
    convention already used elsewhere in this repo for MCP server installs) before any
    proxy tool ships to a real project, even opt-in.
 
 Until then, `SPEC-MPM-CUTOVER-03` remains correctly scoped to the observability-only
 `optimize_tool_output` seam it already targets (per the #1944/PR #1952 scope caveat
-already in that section) — that work is still valid and shippable; it just doesn't
-solve the live-token problem, and both docs must continue to say so explicitly.
+already in that section) — that work is still valid and shippable, and the Option 0
+prototype (if it lands) would be tracked as a new, separate seam rather than folded
+into `SPEC-MPM-CUTOVER-03`'s existing scope. Both docs must continue to be explicit
+about which seam(s) are actually wired up at any given time.
 
 ## Not Recommended
 
-- **Widening the `tm hook` relay to forward stdin JSON** (`tool_name`/`tool_input`/
-  `tool_response`) is still worth doing **for observability** — `HookService::process`
-  and `mcp_backend.rs` are already written expecting a richer payload the relay never
-  sends, so this is a real, currently-missing capability. **But it does not solve the
-  live-token problem described in this doc.** By the time any hook fires — widened
-  relay or not — the tool result is already in the model's context. Do not conflate
-  "richer hook payload" work with "live token reduction" work in future tickets; file
-  them separately so scope stays honest.
+- **~~Widening the `tm hook` relay to forward stdin JSON does not solve the live-token
+  problem~~ — corrected by this revision.** The original text here claimed the relay
+  widening (`tool_name`/`tool_input`/`tool_response` on stdin) was "worth doing for
+  observability" but "does not solve the live-token problem... by the time any hook
+  fires... the tool result is already in the model's context." That was true of
+  `PostToolUse` but **incomplete as a blanket statement about hooks in general**:
+  `PreToolUse` fires *before* execution, so reading its stdin payload and returning
+  `hookSpecificOutput.updatedInput` (Option 0) *does* affect the live copy for Bash.
+  The relay widening is still needed for richer `PostToolUse` observability *and* is
+  now also a **direct prerequisite for Option 0** — don't read this bullet as license to
+  skip stdin-reading work; read [§ Option 0](#option-0-pretooluse-bash-command-rewrite-in-tms-own-hook-relay-spec-toolproxy-00draft)
+  instead.
 - **Shipping `tm_grep`/`tm_ls` proxy tools before filters exist for those command
   domains.** Confirmed 0% reduction in the spike above — pure provenance/permission
-  cost with no offsetting benefit.
-- **Claiming transparent built-in tool interception.** No known upstream Claude Code
-  mechanism lets an MCP server transparently replace/proxy the built-in Bash/Read/Grep
-  tools' results before context insertion. Any future doc or ticket that assumes this
-  is possible should be corrected to the steering-based UX described in this doc, or
+  cost with no offsetting benefit. Applies to Option 1; also applies to any future
+  Option 0 extension that tried to cover grep/ls via a Bash-invoked `grep`/`ls` command
+  (the underlying dispatch-table gap is the same).
+- **Claiming transparent built-in tool interception for Read/Grep/Glob.** No known
+  upstream Claude Code mechanism lets an MCP server, or a `PreToolUse` command-rewrite,
+  transparently replace/proxy those built-in tools' results before context insertion —
+  Option 0's command-rewrite trick is Bash-specific because Bash is the only built-in
+  tool whose "result" is generated by a subprocess with a rewritable invocation. Any
+  future doc or ticket that assumes transparent interception is possible for
+  Read/Grep/Glob should be corrected to the steering-based UX described in Option 1, or
   wait for Option 2.
 
 ## Follow-up Implementation Issues
@@ -333,31 +538,59 @@ solve the live-token problem, and both docs must continue to say so explicitly.
 If the conditions in [§ Decision](#decision) are later met, file these (not filed by
 this investigation):
 
+0. **Prototype `tm hook` `PreToolUse` Bash command-rewrite (Option 0) as a spike.**
+   Widen the relay to read stdin JSON on `PreToolUse` events (see
+   [§ Option 0 Architecture Sketch](#architecture-sketch)), implement a `tm compress
+   --tool bash` subcommand wrapping `compress_tool_output_async`, rewrite the command
+   to pipe through it, and ship a day-one exclusion list for orchestrator commands
+   (`make`/`sam`/`rake`/`gradle`/`gradlew`/`mvn`/`ant`/`cdk`/`terraform` — mirroring
+   ztk's `_ORCHESTRATOR_EXCLUSIONS`). Measure real savings and pipe-composition
+   breakage rate before deciding whether to productionize. **This is the recommended
+   near-term follow-up, ahead of the Option 1 items below.**
 1. **Add `grep`/`ls` (and ideally `find`/`rg`) filter branches to
    `compress_tool_output`** in `crates/trusty-agents/src/compress/tool_output/mod.rs`,
    matching the domain-aware filtering pattern already used for `git diff`/`cargo
-   test`. Prerequisite for any proxy tool covering those commands to be worth shipping.
+   test`. Prerequisite for any proxy tool (Option 1) — or any Option 0 extension
+   covering these commands — to be worth shipping.
 2. **Re-run the spike** (`tool_output_compression_spike.rs`, or a successor) after (1)
    lands, and update this doc's numbers.
 3. **Hoist `compress::tool_output` into `trusty-agents-common`**, mirroring the
    `OutputStyle` hoist already locked in `SPEC-MPM-CUTOVER-02`, so trusty-mpm can call
-   `compress_tool_output_async` without a full `trusty-agents` path dependency.
-4. **Implement `tm_bash`/`tm_read`/`tm_grep` MCP tools** in a new
+   `compress_tool_output_async` without a full `trusty-agents` path dependency. Needed
+   by both Option 0 (the `tm compress` subcommand) and Option 1.
+4. **(Deprioritized — was next, now sequenced after the Option 0 spike.) Implement
+   `tm_bash`/`tm_read`/`tm_grep` MCP tools** in a new
    `crates/trusty-mpm/src/mcp/tools/tool_proxy.rs` module, following the
    `OrchestratorBackend` + `tool()` descriptor pattern in `crates/trusty-mpm/src/mcp/mod.rs`
    and `tools/core.rs`. Reuse the exact execution primitives the built-in tools use —
-   no new sandboxing surface.
-5. **Add a CLAUDE.md/skill steering snippet** to tm project templates, instructing the
-   model to prefer the proxy tools for high-volume-output operations, with the same
-   drafting rigor already applied to other steering snippets in this repo.
-6. **Security review** of the tool-proxy MCP server before it ships to any real
-   project, even opt-in — reuse the `security-review` skill's MCP-install checklist
+   no new sandboxing surface. Only worth filing once (0) shows Option 0 alone isn't
+   sufficient for Bash coverage, and this is still required for Read/Grep/Glob
+   regardless.
+5. **(Deprioritized, same reason as (4).) Add a CLAUDE.md/skill steering snippet** to
+   tm project templates, instructing the model to prefer the proxy tools for
+   high-volume-output operations, with the same drafting rigor already applied to
+   other steering snippets in this repo. Only needed for Option 1 — Option 0 needs no
+   steering.
+6. **Security review** of whichever seam ships first — the tool-proxy MCP server
+   (Option 1) or the `PreToolUse` Bash rewrite (Option 0) — before it reaches any real
+   project, even opt-in. Reuse the `security-review` skill's MCP-install checklist
    (provenance, permission classification, credential exposure) as the starting
-   checklist, extended to cover the provenance/audit-trail double-counting concern
-   noted in [§ Option 1](#provenance-permission-and-security-tradeoffs).
-7. **De-duplicate observability entries** for proxied calls (the same logical tool
-   call would otherwise appear twice — once as the MCP tool invocation, once via
-   `PostToolUse` — in the dashboard/ring buffer) as part of (4).
+   checklist; for Option 1, extend it to cover the provenance/audit-trail
+   double-counting concern noted in [§ Option 1](#provenance-permission-and-security-tradeoffs).
+   For Option 0, extend it to cover the shell-pipe composition risk noted in
+   [§ Option 0 Tradeoffs](#tradeoffs).
+7. **De-duplicate observability entries** for proxied calls under Option 1 (the same
+   logical tool call would otherwise appear twice — once as the MCP tool invocation,
+   once via `PostToolUse` — in the dashboard/ring buffer) as part of (4). Not
+   applicable to Option 0, since the tool name stays `Bash` and there's no second
+   invocation to de-duplicate.
+8. **Update `docs/trusty-agents/research/token-compression-rtk-ztk.md`** to mention
+   ztk's `PreToolUse` invocation mechanism (see [§ References](#references)) — that doc
+   currently covers only ztk's internal Zig-side filtering techniques (comptime filter
+   dispatch, TTL session cache, stderr routing, etc.), not *how ztk gets invoked* in the
+   harness that runs it. This doc's [§ Problem](#problem) and
+   [§ Option 0](#option-0-pretooluse-bash-command-rewrite-in-tms-own-hook-relay-spec-toolproxy-00draft)
+   sections are the authoritative source for that mechanism until this follow-up lands.
 
 ## References
 
@@ -372,3 +605,22 @@ this investigation):
 - `crates/trusty-mpm/src/mcp/mod.rs`, `crates/trusty-mpm/src/mcp/tools/core.rs` — MCP server + tool-descriptor pattern reference.
 - Issue #1944 (closed), PR #1952 — the prior investigation this doc follows up on.
 - Issue #1953 — this investigation.
+- **claude-mpm (sibling project, external to this repo)** — local install path
+  `~/.local/share/uv/tools/claude-mpm/lib/python3.13/site-packages/claude_mpm/`. Cited
+  as prior art for [§ Option 0](#option-0-pretooluse-bash-command-rewrite-in-tms-own-hook-relay-spec-toolproxy-00draft),
+  not as a `trusty-tools` dependency:
+  - `hooks/ztk_hook.py` — `build_ztk_response` / `_build_ztk_response_impl`
+    (~lines 717-813) — the `PreToolUse` Bash command-rewrite; `_ORCHESTRATOR_EXCLUSIONS`
+    (~lines 49-69); `verify_ztk_binary` self-test sentinel round-trip (~lines 188-239).
+  - `hooks/llmlingua_hook.py` (~lines 3-7) — comment contrasting ztk's PreToolUse
+    command-rewrite with LLMLingua's PostToolUse text-transform.
+  - `hooks/pretooluse_dispatcher.py` (~lines 160-179) — routes `Bash` events to
+    `ztk_hook.build_ztk_response`.
+  - `cli/parsers/run_parser.py` (~lines 260-268) — `--no-ztk` / `--ztk` CLI flags.
+- `docs/trusty-agents/research/token-compression-rtk-ztk.md` — background survey; per
+  [§ Follow-ups](#follow-up-implementation-issues) item 8, still needs its own update to
+  cover ztk's *invocation* mechanism (this doc's Option 0/Problem sections), not just
+  its internal Zig-side filtering techniques (which is all that doc currently covers).
+- `docs/specs/mpm-cutover-resume-native-optimization.md:178` and
+  `docs/specs/SPEC-INSTALLER-01.md:150` — existing internal citations of the ztk
+  SAM-build incident, used as prior art in [§ Option 0 Tradeoffs](#tradeoffs).
