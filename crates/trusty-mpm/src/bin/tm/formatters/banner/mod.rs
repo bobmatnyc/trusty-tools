@@ -66,20 +66,21 @@ impl Drop for NoColorGuard {
 
 /// Map a glyph to its rust-palette RGB triple.
 ///
-/// Why: bot outline chars should appear bright amber so the giant robots read
-/// clearly against a dark terminal background; accent glyphs use mid-rust to
-/// add depth without competing with the main structure. The giant-robot splash
-/// renders everything — robot heads and the dot-matrix `«TRUSTY»` wordmark —
-/// in a single amber/orange tone against black, so the wordmark's dot-matrix
-/// pixels and guillemets join the same bright-amber bucket as the robot
-/// glyphs rather than falling through to the darker "unclassified" default.
+/// Why: bot outline chars should appear bright amber so the compact robot
+/// faces read clearly against a dark terminal background; accent glyphs use
+/// mid-rust to add depth without competing with the main structure. The
+/// splash renders everything — robot faces and the block-letter `TRUSTY`
+/// wordmark — in a single amber/orange tone against black, so the wordmark
+/// strokes join the same bright-amber bucket as the robot glyphs rather than
+/// falling through to the darker "unclassified" default.
 /// What: five buckets —
 ///   • amber `(224,140,60)`: block, half-block, and face glyphs used in the
-///     giant-robot art (`▄ ▀ █ ▓ ▌ ▐ ▟ ▙`), the dot-matrix wordmark pixel
-///     (`▪`), box-drawing chars used for the rectangular head outline and
-///     neck notch (`┌ ─ ┐ │ └ ┘ ┬ ┴ ├ ┤ ╷ ╵ ╶ ╴`), face glyphs
-///     (`◉ ◔ ◕ • ◡ ▿ ⌣ ● ◻ ^ ⢀ ✲ ⡀`) from current and legacy art, and the
-///     `«…»` guillemets flanking the wordmark;
+///     current compact-splash art (`▄ ▀ █ ▓ ▌ ▐ ▟ ▙`), face glyphs
+///     (`◉ ◔ ◕ • ◡ ▿ ⌣ ● ◻ ^ ⢀ ✲ ⡀`) from current and legacy art, plus the
+///     dot-matrix wordmark pixel (`▪`), box-drawing head-outline chars
+///     (`┌ ─ ┐ │ └ ┘ ┬ ┴ ├ ┤ ╷ ╵ ╶ ╴`), and `«…»` guillemets retained from the
+///     superseded #1933 giant-robot generation (see `legacy` doc comment) so
+///     a not-yet-refreshed stale seed still renders correctly;
 ///   • mid-rust `(205,100,30)`: medium-ink marks;
 ///   • dark rust `(120,50,10)`: fine punctuation marks;
 ///   • base rust `(183,65,14)`: everything else.
@@ -88,20 +89,20 @@ pub(crate) fn shade_bucket(c: char) -> (u8, u8, u8) {
     match c {
         // Amber — block structure: half-block, full-block, shade chars
         '▄' | '▀' | '█' | '▓' | '▌' | '▐' | '▟' | '▙'
-        // Dot-matrix wordmark pixel (giant-robot redesign)
+        // Dot-matrix wordmark pixel (superseded #1933 giant-robot generation)
         | '▪'
-        // Box-drawing chars (rectangular robot heads + legacy kawaii bots)
+        // Box-drawing chars (superseded #1933 rectangular robot heads + legacy kawaii bots)
         | '┌' | '─' | '┐' | '│' | '└' | '┘' | '┬' | '┴' | '├' | '┤' | '╷' | '╵' | '╶' | '╴'
-        // Face glyphs — block robots and legacy
+        // Face glyphs — block robots (current + all legacy generations)
         | '◉' | '◔' | '◕' | '•' | '◡' | '▿' | '⌣'
         | '^' | '●' | '⢀' | '✲' | '⡀' | '◻'
         // Legacy dense glyphs from previous art
         | 'I' | '∏' | '♦' | '∇' | '√' | '≥' | '≤' | '@' | '#'
-        // '«'/'»' flank the current dot-matrix wordmark; 'T','r','u','s','t','y'
-        // are needed only while a pre-refresh legacy #1907 `«Trusty»` text
-        // wordmark may still be on disk (see `source::refresh_if_legacy`) —
-        // kept so that art renders correctly until it is transparently
-        // refreshed to the current dot-matrix default.
+        // '«'/'»' and 'T','r','u','s','t','y' are needed only while a
+        // pre-refresh legacy #1907 `«Trusty»` text wordmark, or the #1933
+        // dot-matrix wordmark's guillemets, may still be on disk (see
+        // `source::refresh_if_legacy`) — kept so that art renders correctly
+        // until it is transparently refreshed to the current default.
         | 'T' | 'r' | 'u' | 's' | 't' | 'y' | '«' | '»' => {
             (224, 140, 60) // bright amber
         }
