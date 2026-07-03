@@ -558,6 +558,17 @@ pub(crate) async fn catalog(action: CatalogAction) -> anyhow::Result<()> {
                     result.agent_count, result.skill_count
                 );
             }
+            // #1947: be honest when the synced catalog has no composable agents.
+            // The upstream claude-mpm layout moved agents to JSON templates under
+            // `src/claude_mpm/agents/`, so `.claude/agents/` is empty; trusty-mpm
+            // provisions from its BUNDLED agents, which are the source of truth.
+            if result.agents_empty() {
+                println!(
+                    "warning: the synced catalog contains 0 composable agents \
+                     (upstream layout moved); trusty-mpm deploys its bundled agents \
+                     — the catalog agent source is not currently used."
+                );
+            }
         }
         CatalogAction::Ls { json } => {
             let agents = sync.list_agents();
