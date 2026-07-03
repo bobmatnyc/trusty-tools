@@ -17,6 +17,7 @@ use crate::memory_core::palace::{Palace, PalaceId};
 use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::store::concurrent_open::OpenIntent;
 use crate::memory_core::store::palace_store::PalaceStore;
+use crate::palace_alias::PalaceAliasStore;
 use anyhow::{Context, Result};
 use dashmap::DashMap;
 use lru::LruCache;
@@ -303,12 +304,24 @@ impl PalaceRegistry {
     /// `PalaceHandle::open`, and inserts the handle (may evict LRU).
     /// Test: `registry_create_and_open` round-trips create -> drop -> reopen;
     /// `lru_evicted_handle_reopens` verifies evicted handles are transparently
-    /// reopened.
+    /// reopened; `open_palace_follows_alias` covers the alias redirect.
     pub fn open_palace(&self, data_root: &Path, palace_id: &PalaceId) -> Result<Arc<PalaceHandle>> {
+        // Fast path: an already-open handle under the requested id.
         if let Some(h) = self.get(palace_id) {
             return Ok(h);
         }
-        let palace_dir = data_root.join(palace_id.as_str());
+        // Issue #1939: when the requested palace has no on-disk metadata but a
+        // persisted palace-level alias redirects it to an existing palace, open
+        // (and cache under) the alias target so the alias and the canonical name
+        // share ONE handle — never two writers over the same redb files.
+        // `resolve_palace_alias` returns the original id unchanged when there is
+        // no redirect; re-checking the cache under the (possibly redirected) id
+        // shares an already-open canonical handle (a redundant miss otherwise).
+        let effective_id = Self::resolve_palace_alias(data_root, palace_id);
+        if let Some(h) = self.get(&effective_id) {
+            return Ok(h);
+        }
+        let palace_dir = data_root.join(effective_id.as_str());
         let palace = PalaceStore::load_palace(&palace_dir)
             .with_context(|| format!("load palace metadata for {palace_id}"))?;
         // Issue #1487: honour the registry's open intent. On the HTTP daemon
@@ -317,6 +330,36 @@ impl PalaceRegistry {
         let handle = PalaceHandle::open_with_intent(&palace, self.open_intent)?;
         self.register_arc(handle.clone());
         Ok(handle)
+    }
+
+    /// Resolve a palace-level alias, but ONLY when the requested palace is
+    /// missing on disk (issue #1939).
+    ///
+    /// Why: an alias must never shadow a real palace of the same name — a lookup
+    /// for an existing palace always resolves to itself. The redirect fires only
+    /// in the split-brain case: the requested `owner-repo` palace was never
+    /// created, yet an alias points it at an existing bare-repo palace. Requiring
+    /// the target to also exist on disk stops a stale alias from redirecting to a
+    /// deleted palace (which would just fail load anyway, but this keeps the
+    /// error message about the ORIGINAL id).
+    /// What: returns `palace_id` unchanged when `<data_root>/<palace_id>/palace.json`
+    /// exists. Otherwise consults [`PalaceAliasStore::resolve_alias`]; if it maps
+    /// to a `target` whose `<data_root>/<target>/palace.json` exists, returns that
+    /// target id. In every other case returns `palace_id` unchanged so the caller
+    /// surfaces the normal "metadata missing" error. Alias-map read errors are
+    /// swallowed (best-effort redirect) — a broken alias file must not break
+    /// resolution of palaces that DO exist.
+    /// Test: `open_palace_follows_alias`, `open_palace_ignores_alias_when_target_missing`,
+    /// `open_palace_prefers_real_palace_over_alias`.
+    fn resolve_palace_alias(data_root: &Path, palace_id: &PalaceId) -> PalaceId {
+        let exists = |id: &str| data_root.join(id).join("palace.json").exists();
+        if exists(palace_id.as_str()) {
+            return palace_id.clone();
+        }
+        match PalaceAliasStore::resolve_alias(data_root, palace_id.as_str()) {
+            Ok(Some(target)) if exists(&target) => PalaceId::new(target),
+            _ => palace_id.clone(),
+        }
     }
 
     /// Create and persist a new palace, then open it.
@@ -647,6 +690,119 @@ mod tests {
         assert!(
             reg.peek(&PalaceId::new("c")).is_some(),
             "newly inserted 'c' must be present"
+        );
+    }
+
+    /// Issue #1939 — a palace requested by an aliased name resolves to the
+    /// alias target's on-disk store.
+    ///
+    /// Why: trusty-mpm pins a session to the derived `owner-repo` palace, but the
+    /// real data lives under the bare repo name. Registering the alias must make
+    /// an `open_palace` for the (non-existent) `owner-repo` name transparently
+    /// return the handle for the existing bare palace — the split-brain fix.
+    /// What: creates palace `trusty-tools`, registers alias
+    /// `bobmatnyc-trusty-tools -> trusty-tools`, then opens the alias name and
+    /// asserts the returned handle's canonical id is `trusty-tools` (not the
+    /// alias), proving both names share the one store.
+    /// Test: this test itself (issue #1939 regression guard).
+    #[test]
+    fn open_palace_follows_alias() {
+        use crate::memory_core::palace::Palace;
+        use crate::palace_alias::PalaceAliasStore;
+        use chrono::Utc;
+
+        let dir = tempdir().unwrap();
+        let data_root = dir.path();
+        let reg = PalaceRegistry::new();
+
+        // The real (bare-repo) palace on disk.
+        let bare = Palace {
+            id: PalaceId::new("trusty-tools"),
+            name: "trusty-tools".to_string(),
+            description: None,
+            created_at: Utc::now(),
+            data_dir: data_root.join("trusty-tools"),
+        };
+        reg.create_palace(data_root, bare)
+            .expect("create bare palace");
+
+        // Register the palace-level alias (owner-repo -> bare).
+        PalaceAliasStore::register_alias(data_root, "bobmatnyc-trusty-tools", "trusty-tools")
+            .expect("register alias");
+
+        // Opening the aliased (non-existent) name must resolve to the bare store.
+        let handle = reg
+            .open_palace(data_root, &PalaceId::new("bobmatnyc-trusty-tools"))
+            .expect("alias must resolve to the existing palace");
+        assert_eq!(
+            handle.id,
+            PalaceId::new("trusty-tools"),
+            "aliased open must return the canonical target handle, not the alias id"
+        );
+    }
+
+    /// Issue #1939 — a stale alias whose target does not exist must NOT redirect;
+    /// the original "metadata missing" error stands.
+    ///
+    /// Why: if an alias points at a deleted palace we must fail on the ORIGINAL
+    /// requested id rather than masking it, so operators see the name they asked
+    /// for. Requiring the target to exist on disk enforces this.
+    /// What: registers an alias to a non-existent target, opens the alias name,
+    /// and asserts the open errors (no redirect happened).
+    /// Test: this test itself.
+    #[test]
+    fn open_palace_ignores_alias_when_target_missing() {
+        use crate::palace_alias::PalaceAliasStore;
+
+        let dir = tempdir().unwrap();
+        let data_root = dir.path();
+        let reg = PalaceRegistry::new();
+
+        PalaceAliasStore::register_alias(data_root, "ghost", "does-not-exist")
+            .expect("register alias");
+
+        assert!(
+            reg.open_palace(data_root, &PalaceId::new("ghost")).is_err(),
+            "alias to a missing target must not redirect"
+        );
+    }
+
+    /// Issue #1939 — an alias must never shadow a real palace of the same name.
+    ///
+    /// Why: if both an alias entry AND a real palace exist under the same name,
+    /// the real palace wins (aliases only fill the "missing palace" gap).
+    /// What: creates palace `dup`, registers a (mischievous) alias
+    /// `dup -> other`, and asserts `open_palace("dup")` returns `dup` itself.
+    /// Test: this test itself.
+    #[test]
+    fn open_palace_prefers_real_palace_over_alias() {
+        use crate::memory_core::palace::Palace;
+        use crate::palace_alias::PalaceAliasStore;
+        use chrono::Utc;
+
+        let dir = tempdir().unwrap();
+        let data_root = dir.path();
+        let reg = PalaceRegistry::new();
+
+        for id in ["dup", "other"] {
+            let p = Palace {
+                id: PalaceId::new(id),
+                name: id.to_string(),
+                description: None,
+                created_at: Utc::now(),
+                data_dir: data_root.join(id),
+            };
+            reg.create_palace(data_root, p).expect("create palace");
+        }
+        PalaceAliasStore::register_alias(data_root, "dup", "other").expect("register alias");
+
+        let handle = reg
+            .open_palace(data_root, &PalaceId::new("dup"))
+            .expect("real palace opens");
+        assert_eq!(
+            handle.id,
+            PalaceId::new("dup"),
+            "a real palace must win over an alias of the same name"
         );
     }
 

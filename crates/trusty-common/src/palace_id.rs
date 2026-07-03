@@ -91,6 +91,45 @@ pub fn palace_override_from_env() -> Option<String> {
 /// `git_non_github_host`, `git_trailing_slash`, `git_repo_only`,
 /// `git_empty_returns_none`, `git_self_hosted_with_port`.
 pub fn owner_repo_from_git_remote(url: &str) -> Option<String> {
+    let (owner_slug, repo_slug) = parse_owner_repo_slugs(url)?;
+    match owner_slug {
+        Some(owner) => Some(format!("{owner}-{repo_slug}")),
+        None => Some(repo_slug),
+    }
+}
+
+/// Parse a git remote URL into just the slugified `repo` segment (no owner).
+///
+/// Why: the claude-mpm-era palaces are named by the BARE repo name (e.g.
+/// `trusty-tools`), NOT the `owner-repo` slug that [`owner_repo_from_git_remote`]
+/// produces (`bobmatnyc-trusty-tools`). trusty-mpm's session-launch alias
+/// registration (issue #1939) needs the bare-repo candidate to decide whether a
+/// pre-existing bare palace should be aliased to the derived owner-repo palace.
+/// Deriving it from the same remote (rather than string-splitting the owner-repo
+/// slug on `-`, which is ambiguous because a repo name may itself contain `-`)
+/// keeps the two identities consistent and unambiguous.
+/// What: reuses the same host/path parsing as [`owner_repo_from_git_remote`] but
+/// returns only the slugified final `repo` segment. Returns `None` when nothing
+/// usable can be extracted (empty input, host-only URL).
+/// Test: `repo_slug_ssh_github`, `repo_slug_https_with_owner`,
+/// `repo_slug_repo_only`, `repo_slug_empty_returns_none`.
+pub fn repo_slug_from_git_remote(url: &str) -> Option<String> {
+    parse_owner_repo_slugs(url).map(|(_, repo)| repo)
+}
+
+/// Shared parse: extract the slugified `(owner, repo)` pair from a git remote.
+///
+/// Why: both [`owner_repo_from_git_remote`] (which joins owner+repo) and
+/// [`repo_slug_from_git_remote`] (which keeps only repo) need identical host/path
+/// isolation and slugification; factoring it here guarantees they can never
+/// diverge on how a URL is parsed.
+/// What: strips the scheme and host, trims a trailing `.git`/slashes, takes the
+/// last two path segments as `(owner, repo)`, and slugifies each. Returns
+/// `(Some(owner_slug), repo_slug)` for `owner/repo` URLs, `(None, repo_slug)`
+/// when only a repo segment is present (or the owner slugifies to empty), and
+/// `None` when no non-empty repo slug can be extracted.
+/// Test: covered transitively by the `owner_repo_*` and `repo_slug_*` tests.
+fn parse_owner_repo_slugs(url: &str) -> Option<(Option<String>, String)> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
         return None;
@@ -127,17 +166,8 @@ pub fn owner_repo_from_git_remote(url: &str) -> Option<String> {
         return None;
     }
 
-    match owner {
-        Some(owner) => {
-            let owner_slug = slugify_string(owner);
-            if owner_slug.is_empty() {
-                Some(repo_slug)
-            } else {
-                Some(format!("{owner_slug}-{repo_slug}"))
-            }
-        }
-        None => Some(repo_slug),
-    }
+    let owner_slug = owner.map(slugify_string).filter(|s| !s.is_empty());
+    Some((owner_slug, repo_slug))
 }
 
 /// Strip a leading URL scheme (`https://`, `ssh://`, `git://`, …) if present.
@@ -406,6 +436,58 @@ mod tests {
         assert_eq!(owner_repo_from_git_remote("   "), None);
         // Host-only (no path segments).
         assert_eq!(owner_repo_from_git_remote("https://github.com/"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // repo_slug_from_git_remote — bare repo name (no owner)
+    // -----------------------------------------------------------------------
+
+    /// Why: the bare-repo alias candidate must drop the owner entirely so
+    /// `git@github.com:bobmatnyc/trusty-tools.git` yields `trusty-tools`, the
+    /// claude-mpm-era palace name (issue #1939).
+    /// Test: itself.
+    #[test]
+    fn repo_slug_ssh_github() {
+        assert_eq!(
+            repo_slug_from_git_remote("git@github.com:bobmatnyc/trusty-tools.git").as_deref(),
+            Some("trusty-tools")
+        );
+    }
+
+    /// Why: an HTTPS remote with an owner must still reduce to just the repo
+    /// segment, and a repo name containing `-` must survive intact (proving we
+    /// do not string-split the owner-repo slug on `-`).
+    /// Test: itself.
+    #[test]
+    fn repo_slug_https_with_owner() {
+        assert_eq!(
+            repo_slug_from_git_remote("https://github.com/bobmatnyc/trusty-tools").as_deref(),
+            Some("trusty-tools")
+        );
+        assert_eq!(
+            repo_slug_from_git_remote("https://gitlab.com/acme/team/cool-widget.git").as_deref(),
+            Some("cool-widget")
+        );
+    }
+
+    /// Why: an owner-less remote must yield the repo slug (parity with
+    /// `owner_repo_from_git_remote`'s repo-only branch).
+    /// Test: itself.
+    #[test]
+    fn repo_slug_repo_only() {
+        assert_eq!(
+            repo_slug_from_git_remote("git@host:repo.git").as_deref(),
+            Some("repo")
+        );
+    }
+
+    /// Why: unparseable input must return `None` so the caller skips alias
+    /// registration entirely.
+    /// Test: itself.
+    #[test]
+    fn repo_slug_empty_returns_none() {
+        assert_eq!(repo_slug_from_git_remote(""), None);
+        assert_eq!(repo_slug_from_git_remote("https://github.com/"), None);
     }
 
     // -----------------------------------------------------------------------

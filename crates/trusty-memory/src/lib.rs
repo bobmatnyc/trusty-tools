@@ -206,12 +206,11 @@ pub use tools::MemoryMcpServer;
 /// Test: `tests::resolve_palace_registry_dir_prefers_palaces_subdir` and
 /// `resolve_palace_registry_dir_falls_back_to_data_dir`.
 pub fn resolve_palace_registry_dir(data_dir: PathBuf) -> PathBuf {
-    let nested = data_dir.join("palaces");
-    if nested.is_dir() {
-        nested
-    } else {
-        data_dir
-    }
+    // Issue #1939: the subdir-choice logic is hoisted into trusty-common
+    // (`palace_alias::palace_registry_dir_from`) so trusty-mpm's alias-registration
+    // path and this daemon path can never disagree on WHERE the registry (and the
+    // alias file beside it) lives. This delegates to keep a single implementation.
+    trusty_common::palace_alias::palace_registry_dir_from(data_dir)
 }
 
 /// Hook type — labels the Claude Code hook that triggered a submission.

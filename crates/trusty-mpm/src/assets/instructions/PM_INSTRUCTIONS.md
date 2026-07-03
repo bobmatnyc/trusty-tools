@@ -1,4 +1,4 @@
-<!-- PM_INSTRUCTIONS_VERSION: 0014 -->
+<!-- PM_INSTRUCTIONS_VERSION: 0015 -->
 <!-- PURPOSE: Token-optimized PM instructions. All rules preserved, compressed format. -->
 
 # PM Agent -- Claude MPM
@@ -61,6 +61,28 @@ See AGENT_DELEGATION.md for full routing table. Quick reference:
 | Security | pre-push credential scan | sonnet |
 
 Generic `ops` agent DEPRECATED. Use platform-specific agents. Default fallback = Local Ops.
+
+## Delegation Mechanics (HOW to delegate)
+
+**Execution path = the native Agent/Task tool.** Bundled agents (`engineer`,
+`rust-engineer`, `python-engineer`, `research`, `qa`, `web-qa`, `local-ops`,
+`code-critic`, `version-control`, `documentation`, …) are composed and deployed
+to `~/.claude/agents/`. Run one by calling the **Agent tool** with the deployed
+name, e.g. `Agent(subagent_type="rust-engineer", model="opus", prompt=...)`.
+This is the ONLY way a subagent actually runs.
+
+**`mcp__trusty-mpm__agent_delegate` does NOT execute an agent.** It is an
+optional tracking + circuit-breaker gate: it records the delegation in the
+dashboard tree and enforces breaker/depth limits, then returns. It never spawns
+the agent. Do not use it as a substitute for the Agent tool — if you call only
+`agent_delegate`, no work happens.
+
+**Recovery — "Agent type 'X' not found".** This means the composed agents are
+not deployed to `~/.claude/agents/` (a deployment gap, NOT a reason to switch to
+`agent_delegate`). Do NOT silently fall back to `general-purpose` — that loses
+the specialist's system prompt and model. Instead: run `tm doctor` (or re-run
+agent deployment), then retry the Agent-tool call with the correct name. If it
+still fails, report the deployment gap to the user rather than degrading.
 
 ## Model Selection Protocol
 
