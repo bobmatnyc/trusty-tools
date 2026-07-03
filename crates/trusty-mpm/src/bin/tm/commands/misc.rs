@@ -290,8 +290,20 @@ fn status_icon(status: trusty_mpm::core::doctor::CheckStatus) -> &'static str {
 /// writing the payload, but a hook must never risk blocking the user's
 /// prompt if some future caller leaves stdin open.
 /// What: Reads up to `HOOK_STDIN_TIMEOUT` worth of stdin, then attempts a
-/// JSON parse. Returns `None` on timeout, empty input, or a parse failure —
-/// every case degrades to "no stdin payload" rather than erroring.
+/// JSON parse. Returns `None` on timeout, an I/O error, empty input, or a
+/// parse failure — every case degrades to "no stdin payload" rather than
+/// erroring the hook — but unlike the original implementation, the timeout/
+/// I/O-error/parse-failure branches are no longer collapsed into a single
+/// unlabelled `_ => None` arm: each now emits a `tracing::debug!` line
+/// distinguishing *which* case fired (trusty-review finding, PR #1968 —
+/// silently identical handling made a broken pipe indistinguishable from a
+/// legitimate empty payload when debugging a hook that unexpectedly never
+/// rewrites). These are `debug`-level and best-effort only: `hook()` has no
+/// registered tracing subscriber by default (see `commands::compress`'s doc
+/// comment for why `main()` only initializes one for `Daemon`/`Supervisor`),
+/// so in normal operation these are no-ops; they become visible when a
+/// subscriber is present (e.g. `RUST_LOG=debug` in a context that installs
+/// one) without adding any latency or behavior change to the hot path.
 /// Test: `hook_guard_short_circuits`/`hook_disable_env_short_circuits`
 /// exercise the guard branches that skip this entirely.
 /// `hook_rewrites_plain_bash_command_on_pretooluse` (in the
@@ -313,8 +325,18 @@ async fn read_stdin_hook_payload() -> Option<serde_json::Value> {
     )
     .await;
     match read {
-        Ok(Ok(_)) if !buf.trim().is_empty() => serde_json::from_str(&buf).ok(),
-        _ => None,
+        Ok(Ok(_)) if !buf.trim().is_empty() => serde_json::from_str(&buf)
+            .inspect_err(|e| tracing::debug!("hook stdin payload was not valid JSON: {e}"))
+            .ok(),
+        Ok(Ok(_)) => None, // empty stdin — a legitimate no-payload case, not a failure.
+        Ok(Err(e)) => {
+            tracing::debug!("hook stdin read error: {e}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!("hook stdin read timed out after {HOOK_STDIN_TIMEOUT:?}");
+            None
+        }
     }
 }
 

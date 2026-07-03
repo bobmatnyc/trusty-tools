@@ -20,9 +20,13 @@
 //! shell pipeline), and writes the compressed text to stdout.
 //! Test: `run_compress_shrinks_repetitive_cargo_test_output`,
 //! `log_compression_stats_pct_reduction_is_zero_for_empty_input`,
-//! `run_compress_passes_through_short_output_unchanged` below.
+//! `log_compression_stats_pct_reduction_can_be_negative_when_output_expands`,
+//! `run_compress_passes_through_short_output_unchanged` below; the full
+//! stdin→stdout process contract (including this function's now-async
+//! write) is exercised end to end through the real binary by the
+//! `tm_compress_pipe` integration test.
 
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use trusty_agents_common::compress::compress_tool_output_async_with_path;
 
 /// Run `tm compress --tool <tool>`: read stdin, compress, log stats, print.
@@ -41,7 +45,14 @@ use trusty_agents_common::compress::compress_tool_output_async_with_path;
 /// to compress) is the slow case (trusty-review finding, PR #1968).
 /// Compresses via [`compress_tool_output_async_with_path`], logs
 /// `tool_name`/`bytes_before`/`bytes_after`/`pct_reduction`/
-/// `compression_path` at `info` level, then prints the compressed text.
+/// `compression_path` at `info` level, then writes the compressed text via
+/// [`tokio::io::AsyncWriteExt::write_all`] (rather than a synchronous
+/// `print!`) so the write side of this filter is exactly as
+/// async-runtime-friendly as the read side, and the write's `Result` is
+/// propagated through `?` instead of silently assuming the OS always
+/// accepts the full buffer (a trusty-review-flagged robustness gap, PR
+/// #1968 — `print!`'s panic-on-write-failure behavior is unrecoverable in a
+/// pipe filter, whereas `?` degrades to a clean non-zero exit).
 /// Test: See module tests; `tm compress` has no daemon-only tracing
 /// subscriber from `main()` (that only inits for `Daemon`/`Supervisor`), so
 /// this function installs its own stderr-writing subscriber via
@@ -56,7 +67,7 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
     let (compressed, path) = compress_tool_output_async_with_path(tool, &input).await;
     log_compression_stats(tool, input.len(), compressed.len(), path.as_str());
 
-    print!("{compressed}");
+    tokio::io::stdout().write_all(compressed.as_bytes()).await?;
     Ok(())
 }
 
@@ -94,8 +105,16 @@ fn init_stats_log_subscriber() {
 /// `bytes_after`, `pct_reduction` (0.0 when `bytes_before` is 0), and
 /// `compression_path` (`"rtk_binary"` / `"native_fallback"`, see
 /// [`trusty_agents_common::compress::CompressionPath`]) as structured
-/// fields, machine-parseable from `RUST_LOG=info` output.
+/// fields, machine-parseable from `RUST_LOG=info` output. `pct_reduction`
+/// is deliberately **not** clamped to `>= 0.0`: if a compression path ever
+/// expands the input (e.g. added framing/summary text pushes `bytes_after`
+/// above `bytes_before`), the field goes negative rather than being
+/// silently floored to `0.0` — a trusty-review-flagged naming concern (PR
+/// #1968) that we resolve by documentation rather than by clamping, since
+/// clamping would hide the one signal ("compression made this worse") a
+/// downstream meta-harness aggregation effort would most want to see.
 /// Test: `log_compression_stats_pct_reduction_is_zero_for_empty_input`,
+/// `log_compression_stats_pct_reduction_can_be_negative_when_output_expands`,
 /// exercised end-to-end via `run_compress_*` tests below.
 fn log_compression_stats(tool_name: &str, bytes_before: usize, bytes_after: usize, path: &str) {
     let pct_reduction = if bytes_before > 0 {
@@ -122,6 +141,17 @@ mod tests {
         // Guards the division-by-zero edge case: an empty tool output must
         // report 0.0% reduction, not NaN/panic.
         log_compression_stats("bash", 0, 0, "native_fallback");
+    }
+
+    #[test]
+    fn log_compression_stats_pct_reduction_can_be_negative_when_output_expands() {
+        // If a compression path ever expands the input, the stats log must
+        // still emit — a negative `pct_reduction` is the honest signal that
+        // compression made things worse, not a bug in this function to
+        // clamp away (trusty-review finding, PR #1968; see this function's
+        // doc comment for why we don't clamp). This test only proves no
+        // panic/NaN occurs for `bytes_after > bytes_before`.
+        log_compression_stats("bash", 10, 20, "native_fallback");
     }
 
     #[tokio::test]
