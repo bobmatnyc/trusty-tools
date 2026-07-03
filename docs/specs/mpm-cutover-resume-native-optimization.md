@@ -134,6 +134,30 @@ Implement command-domain-aware compression of tool-call output (git, cargo, ls, 
 > a prerequisite for this spec to deliver its claimed token savings on native sessions and is not
 > yet designed. Until then, "native ztk" here means richer observability-history compression only.
 
+> **📎 Follow-up decision record (issue #1953, 2026-07-03, revised same day).** The live-interception
+> seam called out as "not yet designed" above was investigated in
+> [`docs/specs/tool-output-interception-seam.md`](./tool-output-interception-seam.md), which is now
+> the **authoritative decision record** for whether this spec should retarget to that seam.
+> **Outcome: not retargeted (yet) — and the "not yet designed" framing above needs a Bash-scoped
+> correction.** The investigation found that a pre-context-insertion seam of this shape is not
+> purely aspirational: the sibling `claude-mpm` project already ships one in production for Bash
+> (its `PreToolUse` ztk hook rewrites the Bash command so the external `ztk` binary filters output
+> in-flight, before Claude Code ever sees the raw result). That precedent is scoped to Bash only —
+> it still does not reach Read/Grep/Glob, which have no subprocess to rewrite. The recommended next
+> step is therefore **Option 0** (`SPEC-TOOLPROXY-00~draft`) — prototyping a `tm hook` `PreToolUse`
+> Bash command-rewrite that pipes through a `tm`-owned compression subcommand — evaluated *before*
+> the full MCP tool-output-proxy (Option 1, `SPEC-TOOLPROXY-01~draft`). Option 1 remains
+> architecturally sound and reuses shipped code (`compress_tool_output_async`), but a spike found
+> the reusable filter chain compresses cargo/git output well (54–83% byte reduction) while
+> `grep`/`ls` compress **0%** — no filter branch exists for those tool names today — so shipping
+> proxy tools for `ls`/`grep` now would add provenance/permission cost with no offsetting savings,
+> and Option 1 also carries a new-tool-provenance/consent-UX cost Option 0 does not. See that doc's
+> Decision section for the full conditions under which retargeting to Option 1 becomes correct, and
+> its Follow-ups section for the concrete tickets (Option 0 prototype spike first, then filter
+> coverage, then re-spike, then the MCP proxy itself) that would need to land before this spec
+> retargets. This spec (`SPEC-MPM-CUTOVER-03`) remains correctly scoped to the observability-only
+> seam described above until then.
+
 ### Behavior & Scope
 
 Add command-domain-aware filters as a new tier/mode in the existing `crates/trusty-mpm/src/core/compress.rs` (`CompressionLevel` today: Off/Trim/Summarise/Caveman). Wire at the single existing seam: `daemon/optimizer.rs` `optimize_tool_output`, called from `daemon/mcp_backend.rs:183-192` (PostToolUse hook, before ring buffer).

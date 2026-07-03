@@ -11,11 +11,25 @@ Rust-applicable, rule-based approaches. Includes analysis of rtk-ai/rtk and code
 This document is a **survey of external techniques**, not a description of shipped behavior. The
 current implementation status in `trusty-tools` is:
 
-- **ZTK — NOT implemented.** `ztk` exists only in this survey. There is no `ztk` symbol anywhere
-  under `crates/`. The `codejunkie99/ztk` Zig binary is **not** vendored, shelled out to, or ported.
-  Treat every "native ztk" reference as *aspirational roadmap* (see the draft
+- **ZTK — NOT implemented in this workspace.** `ztk` exists only in this survey as far as
+  `trusty-tools` is concerned. There is no `ztk` symbol anywhere under `crates/`. The
+  `codejunkie99/ztk` Zig binary is **not** vendored, shelled out to, or ported. Treat every
+  "native ztk" reference as *aspirational roadmap* (see the draft
   `docs/specs/mpm-cutover-resume-native-optimization.md` §C `SPEC-MPM-CUTOVER-03`), not as a
   delivered feature.
+
+  **Invocation mechanism (added 2026-07-03, issue #1953)** — this survey covers ztk's *internal*
+  Zig-side filtering techniques below (comptime filter dispatch, TTL session cache, stderr
+  routing, etc.) but not *how ztk gets invoked*. For that: the sibling `claude-mpm` Python
+  project ships a `PreToolUse` hook (`hooks/ztk_hook.py`) that, on every `Bash` tool call,
+  rewrites `tool_input["command"]` to `<ztk_path> run <cmd>` and returns the rewrite via
+  `hookSpecificOutput.updatedInput` — Claude Code then executes the rewritten command, so ztk's
+  filtering happens as a side effect of what gets executed, before the result ever reaches the
+  model's context. This is a genuine pre-context-insertion interception seam, proven in
+  production, scoped to Bash only. Full citation and analysis of what a `trusty-mpm`-native
+  equivalent would look like (without depending on the external ztk binary) lives in
+  [`docs/specs/tool-output-interception-seam.md`](../../specs/tool-output-interception-seam.md)
+  (`SPEC-TOOLPROXY-00~draft`, "Option 0").
 
 - **RTK-*pattern* — shipped, but only in the `tagent` runtime.** The rtk command-domain filtering
   pattern is implemented in `crates/trusty-agents/src/compress/tool_output/rtk.rs` and wired into
