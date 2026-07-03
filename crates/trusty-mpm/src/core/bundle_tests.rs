@@ -77,6 +77,8 @@ fn constants_are_non_empty() {
     assert!(!TM_PR_WORKFLOW.trim().is_empty());
     assert!(!TM_DELEGATION_PATTERNS.trim().is_empty());
     assert!(!TM_SESSION_MANAGEMENT.trim().is_empty());
+    assert!(!TM_SESSION_PAUSE.trim().is_empty());
+    assert!(!TM_SESSION_RESUME.trim().is_empty());
     assert!(!TM_OVERVIEW.trim().is_empty());
     assert!(!WHAT_IS_TRUSTY_MPM.trim().is_empty());
 }
@@ -107,6 +109,8 @@ fn tm_skills_are_in_bundle() {
         "skills/tm-pr-workflow.md",
         "skills/tm-delegation-patterns.md",
         "skills/tm-session-management.md",
+        "skills/tm-session-pause.md",
+        "skills/tm-session-resume.md",
         "skills/tm.md",
     ] {
         assert!(
@@ -135,6 +139,8 @@ fn tm_skills_have_frontmatter() {
         ("tm-pr-workflow", TM_PR_WORKFLOW),
         ("tm-delegation-patterns", TM_DELEGATION_PATTERNS),
         ("tm-session-management", TM_SESSION_MANAGEMENT),
+        ("tm-session-pause", TM_SESSION_PAUSE),
+        ("tm-session-resume", TM_SESSION_RESUME),
         ("tm", TM_OVERVIEW),
     ];
     for (name, content) in skills {
@@ -283,7 +289,7 @@ fn optimizer_toml_is_parseable() {
 fn bundle_table_is_complete() {
     // `ALL` must enumerate every artifact with unique, non-empty paths.
     // Count: 4 hooks/instructions + 5 base agents + 36 concrete agents +
-    // 16 /tm- skills + 1 DOC-28 self-description doc = 62
+    // 18 /tm- skills + 1 DOC-28 self-description doc = 64
     // (A4, tm-skills-portfolio epic: the `example-skill.md` placeholder was
     // removed — it shipped to every user with no real content. A3: the
     // previously-orphaned tm-doctor.md is now wired in. The 11 Phase 1 (#770)
@@ -299,17 +305,18 @@ fn bundle_table_is_complete() {
     //   tauri-engineer, web-ui-engineer, refactoring-engineer, prompt-engineer,
     //   code-critic, gcp-ops, vercel-ops, local-ops,
     //   memory-manager, mpm-agent-manager, mpm-skills-manager
-    // /tm- portfolio (tm-skills-portfolio epic) (16): tm-doctor,
+    // /tm- portfolio (tm-skills-portfolio epic) (18): tm-doctor,
     //   tm-circuit-breaker, tm-verification-protocols, tm-tool-usage-guide,
     //   tm-git-file-tracking, tm-adr, tm-workflow, tm-agent-architecture,
     //   tm-postmortem, tm-bug-reporting, tm-teaching-templates, tm-ticketing,
-    //   tm-pr-workflow, tm-delegation-patterns, tm-session-management, tm (overview)
+    //   tm-pr-workflow, tm-delegation-patterns, tm-session-management,
+    //   tm-session-pause, tm-session-resume, tm (overview)
     // DOC-28 R1 (1): docs/WHAT-IS-TRUSTY-MPM.md
-    assert_eq!(ALL.len(), 62);
+    assert_eq!(ALL.len(), 64);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 62, "artifact paths must be unique");
+    assert_eq!(paths.len(), 64, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

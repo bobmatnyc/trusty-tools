@@ -10,8 +10,12 @@ effort: medium
 
 # /tm-session — Session Management
 
-Consolidates PM session pause/resume (previously three separate
-claude-mpm-ported skills) into one. This is a PM self-monitoring convention,
+Overview and policy reference for PM session pause/resume. For the focused
+per-action entry points, use `/tm-session-pause` (snapshot + prune) and
+`/tm-session-resume` (load + restore) — this skill stays as the thresholds,
+format, and integration reference they build on.
+
+This is a PM self-monitoring convention,
 not a hard-coded token counter — the PM must judge its own context usage and
 act on the thresholds below; native Claude Code has no equivalent
 conversation-level auto-pause, so this behavior is tm-specific, not a
@@ -135,6 +139,10 @@ Direct the user to pause first if they expected one.
 
 ## Related Skills
 
+- `/tm-session-pause` — focused action: snapshot todos/git/context, prune stale
+  worktrees, print the resume path
+- `/tm-session-resume` — focused action: load the latest (or selected) snapshot
+  via `tm session catchup` and restore todos/context
 - `tm-git-file-tracking` — git state reconciliation during resume
 - `tm-verification-protocols` — evidence state carried across a pause
 - `tm-delegation-patterns` — resuming mid-workflow delegations
