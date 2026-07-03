@@ -36,20 +36,24 @@ use trusty_common::ChatProvider;
 #[cfg(feature = "axum-server")]
 use tracing::info;
 
-/// Two-phase daemon readiness state (issues #910/#911).
+/// Two-phase daemon readiness state (issues #910/#911, revised by #1970).
 ///
-/// Why: The embedder cold-init (CoreML compile, 30-120 s) blocks the first
-/// real `memory_remember`/`memory_recall` call if it arrives before warm-up
-/// completes.  Advertising the state lets handlers return an explicit, fast
-/// error ("daemon is warming up, retry shortly") instead of blocking for
-/// minutes.
+/// Why: The embedder cold-init (CoreML compile, 30-120 s) must never block
+/// the fast text/KG/BM25 paths that don't need it. Originally (#910/#911)
+/// this state gated a hard-error preflight that rejected every
+/// `memory_remember`/`memory_recall` call outright while `Warming` — mirrored
+/// from trusty-search's staged pipeline, #1970 replaced that with graceful
+/// degradation: writes persist immediately and defer embedding to a
+/// background task, reads return BM25 + L0/L1 results and simply omit the
+/// vector lane, all keyed off this same state.
 /// What: Two stable values stored atomically.  `Warming` (0) is the initial
 /// state; `Ready` (1) is set once the embedder has been successfully
 /// initialised by `spawn_startup_tasks`.  The transition is one-way and
 /// lock-free: a single `AtomicU8` compare-and-swap.
 /// Test: `daemon_readiness_transitions_warming_to_ready` in this module;
-///       end-to-end warming-error path covered by
-///       `tools::tests::remember_returns_warming_error_while_state_is_warming`.
+///       degraded-path coverage in `tools::tests`
+///       (`remember_succeeds_and_defers_embedding_while_state_is_warming`,
+///       `recall_falls_back_to_bm25_and_l0_l1_while_warming`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonReadiness {
     /// Embedder cold-init (and/or pin scan) still in progress.
@@ -1321,25 +1325,6 @@ impl AppState {
             .store(DaemonReadiness::Ready as u8, Ordering::Release);
     }
 
-    /// Return `Ok(())` when `Ready`, or an explicit `Err` with the warming
-    /// message when still `Warming`.
-    ///
-    /// Why: the preflight in every bounded handler calls this and returns the
-    /// error immediately so no embedding / redb I/O is attempted while the
-    /// daemon is still initialising (tracks #911 internally).
-    /// What: cheaply reads `daemon_readiness`; returns the fast error string
-    /// on `Warming`.  Zero allocation on the happy path.
-    /// Test: covered by `tools::tests::remember_returns_warming_error_while_state_is_warming`.
-    pub fn readiness_check(&self) -> Result<()> {
-        if self.readiness() == DaemonReadiness::Warming {
-            return Err(anyhow::anyhow!(
-                "trusty-memory is warming up (embedder initialising); \
-                 please retry in a few seconds"
-            ));
-        }
-        Ok(())
-    }
-
     /// Obtain the shared `FastEmbedder` instance, initialising it on first call.
     ///
     /// Why: centralises lazy embedder access so every tool handler goes through
@@ -1348,30 +1333,23 @@ impl AppState {
     /// CoreML/CUDA first-compile cannot block a handler indefinitely.  On
     /// timeout the `OnceCell` is left unresolved and the next caller retries.
     ///
-    /// **Callers on the request path MUST call `readiness_check()` before
-    /// this method.**  The four guarded handlers (`memory_remember`,
-    /// `memory_recall`, `memory_recall_deep`, `memory_note`) do so; any new
-    /// handler that calls `embedder()` must follow the same pattern.
-    /// Reaching this method while still `Warming` is not a bug — the warm-up
-    /// task itself calls `embedder()` while in `Warming` state — but request
-    /// handlers should have short-circuited before here via `readiness_check()`.
+    /// **Callers on the request path SHOULD check `readiness()` before this
+    /// method** (issue #1970) — every recall handler now checks
+    /// `readiness() == Ready` first and only calls `embedder()` on that
+    /// branch, falling back to a BM25/L0/L1-only path while `Warming` instead
+    /// of paying this method's cold-init cost. Reaching this method while
+    /// still `Warming` is not a bug (the warm-up task itself calls
+    /// `embedder()` while in `Warming` state), just unusual on the request
+    /// path.
     ///
-    /// The `readiness_check()` preflight is the PRIMARY guard (fast rejection
-    /// with no I/O).  This timeout is the last-resort backstop in case a
-    /// handler bypasses the preflight or the warm-up task itself hits a
-    /// pathological init delay.  If this timeout fires the `OnceCell` is left
-    /// in the unresolved state and the next call retries from scratch.
+    /// This timeout is a backstop against a pathological init delay (e.g. the
+    /// warm-up task's own call, or a handler that skips the `readiness()`
+    /// check). If this timeout fires the `OnceCell` is left in the unresolved
+    /// state and the next call retries from scratch.
     pub async fn embedder(&self) -> Result<Arc<FastEmbedder>> {
         use trusty_common::memory_core::timeouts;
         let cell = self.embedder.clone();
         let timeout = timeouts::embedder_init_timeout();
-        // `readiness_check()` is the PRIMARY guard — handlers return a fast
-        // warming error before reaching here.  This timeout is the last-resort
-        // backstop: if the embedder init races past the preflight (e.g. in the
-        // warm-up task itself, which calls embedder() while still Warming) or
-        // the CoreML/CUDA compile stalls, we fail fast rather than blocking
-        // indefinitely.  On timeout the OnceCell stays unresolved; the next
-        // caller will retry the init from scratch.
         let embedder = tokio::time::timeout(
             timeout,
             cell.get_or_try_init(|| async {

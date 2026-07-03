@@ -33,8 +33,7 @@ fn test_state() -> (AppState, tempfile::TempDir) {
 
 /// Why: DaemonReadiness tests need a state that starts in Warming; this
 /// variant skips `set_ready()` so the transition can be tested explicitly.
-/// Test: `daemon_readiness_transitions_warming_to_ready`,
-///       `readiness_check_ok_when_ready_err_when_warming`.
+/// Test: `daemon_readiness_transitions_warming_to_ready`.
 fn test_state_warming() -> (AppState, tempfile::TempDir) {
     // Use OnceLock so the env var is written exactly once across all
     // parallel test threads — avoids the unsynchronised set_var race while
@@ -1072,30 +1071,6 @@ async fn daemon_readiness_transitions_warming_to_ready() {
         DaemonReadiness::Ready,
         "daemon must be Ready after set_ready()"
     );
-}
-
-/// Why (issue #911): `readiness_check` must return `Ok(())` when Ready and
-/// an explicit `Err` when Warming, so tool handlers can use `?` to short-
-/// circuit without blocking.
-/// What: verify both states.
-/// Test: this test.
-#[tokio::test]
-async fn readiness_check_ok_when_ready_err_when_warming() {
-    let (state, _tmp) = test_state_warming();
-    // Warming → should error.
-    let err = state
-        .readiness_check()
-        .expect_err("readiness_check must fail when Warming");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("warming up"),
-        "error must mention 'warming up'; got: {msg}"
-    );
-    // Ready → should succeed.
-    state.set_ready();
-    state
-        .readiness_check()
-        .expect("readiness_check must succeed when Ready");
 }
 
 /// Why (issue #911): `DaemonReadiness::from_u8` must map 0 → Warming and

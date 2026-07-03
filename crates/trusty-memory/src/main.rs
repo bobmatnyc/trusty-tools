@@ -834,13 +834,17 @@ fn spawn_startup_tasks(state: &AppState) {
     // is likely ready by the time the first `memory_remember` / `memory_recall`
     // arrives.
     //
-    // On SUCCESS flip `daemon_readiness` to `Ready` so the preflight guards in
-    // `tools.rs` (issue #911) allow requests through.  Until then they return
-    // a fast "warming up" error instead of blocking behind the OnceCell init.
+    // On SUCCESS flip `daemon_readiness` to `Ready` so the recall handlers in
+    // `tools/memory_ops.rs` switch from the BM25/L0/L1-only fallback to full
+    // vector-backed recall (issue #1970; formerly issue #911's hard-error
+    // preflight, which blocked writes/reads outright while Warming — replaced
+    // by graceful degradation that mirrors trusty-search's staged pipeline).
     //
     // On FAILURE: log at ERROR, leave state as `Warming`.  The lazy-init path
     // in `shared_embedder()` will retry on the first real request (and the
-    // bounded timeout there means it will fail fast, not hang).
+    // bounded timeout there means it will fail fast, not hang). Writes still
+    // succeed while Warming — they defer embedding to a background task
+    // (see `PalaceHandle::remember_with_options` / `defer_embedding`).
     let warmup_state = state.clone();
     tokio::spawn(async move {
         let ws = std::time::Instant::now();

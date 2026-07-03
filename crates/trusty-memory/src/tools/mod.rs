@@ -39,7 +39,7 @@ pub(crate) use helpers::{auto_extract_and_assert, room_label};
 
 // Re-exports used only by the in-crate test module (`super::*`).
 #[cfg(test)]
-pub(crate) use bm25::bm25_index_enqueue;
+pub(crate) use bm25::{bm25_hits_to_recall_results, bm25_index_enqueue};
 #[cfg(test)]
 pub(crate) use helpers::{blocklist_gate, content_gate, dedup_gate, open_palace_handle};
 

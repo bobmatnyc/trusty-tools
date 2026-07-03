@@ -8,7 +8,7 @@
 //! create/query/complete Task drawers via the standard palace storage pipeline.
 //! Test: `crates/trusty-memory/tests/task_mcp.rs`.
 
-use crate::AppState;
+use crate::{AppState, DaemonReadiness};
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -36,7 +36,10 @@ use super::helpers::{
 /// Returns `{ drawer_id, palace, status: "stored", drawer_type: "Task" }`.
 /// Test: `task_add_and_list_via_mcp` in `tests/task_mcp.rs`.
 pub(crate) async fn handle_task_add(state: &AppState, args: Value) -> Result<Value> {
-    state.readiness_check()?;
+    // Issue #1970: same non-blocking write posture as memory_remember — the
+    // KG/redb write below never touches the embedder, so a warming daemon
+    // defers vector embedding to a background task instead of erroring.
+    let defer_embedding = state.readiness() == DaemonReadiness::Warming;
     let palace = resolve_palace(state, &args, "task_add")?;
     let palace = palace.as_str();
     let content = args
@@ -69,6 +72,7 @@ pub(crate) async fn handle_task_add(state: &AppState, args: Value) -> Result<Val
                 force: true, // bypass token/noise filters
                 enforce_min_tokens: false,
                 classify_as: Some(DrawerType::Task),
+                defer_embedding,
                 ..RememberOptions::default()
             },
             room_label_for_kg,

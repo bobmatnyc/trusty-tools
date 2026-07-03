@@ -214,9 +214,14 @@ pub(crate) fn dedup_gate(handle: &trusty_common::memory_core::PalaceHandle, cont
 /// Why: Issue #61 — the MCP boundary is where auto-capture hooks deposit
 /// raw tool/commit/prompt data; we want the 8-token threshold there even
 /// though the library default is more permissive for direct callers.
+/// Issue #1970: `defer_embedding` is threaded through separately so callers
+/// can key it off the live `AppState::readiness()` at dispatch time rather
+/// than baking a stale snapshot into this helper.
 /// What: Clones the default filter and bumps `min_tokens` to `MCP_MIN_TOKENS`.
-/// Test: `dispatch_remember_rejects_short_content`.
-pub(crate) fn mcp_remember_opts(force: bool) -> RememberOptions {
+/// Test: `dispatch_remember_rejects_short_content`;
+/// `remember_succeeds_and_defers_embedding_while_state_is_warming` covers
+/// `defer_embedding`.
+pub(crate) fn mcp_remember_opts(force: bool, defer_embedding: bool) -> RememberOptions {
     let filter = FilterConfig {
         min_tokens: MCP_MIN_TOKENS,
         ..FilterConfig::default()
@@ -224,6 +229,7 @@ pub(crate) fn mcp_remember_opts(force: bool) -> RememberOptions {
     RememberOptions {
         filter,
         force,
+        defer_embedding,
         ..RememberOptions::default()
     }
 }
