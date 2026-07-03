@@ -389,3 +389,32 @@ async fn compress_tool_output_async_falls_back_when_rtk_absent() {
     // Whether rtk ran or native fallback ran, the summary must be retained.
     assert!(out.contains("test result"));
 }
+
+// ── CompressionPath (issue #1956 stats-logging signal) ──────────────────
+
+#[test]
+fn compression_path_as_str_is_stable() {
+    // `tm compress`'s structured stats log (issue #1956) keys on these exact
+    // strings; a Debug-format change to the enum must not silently change them.
+    assert_eq!(CompressionPath::RtkBinary.as_str(), "rtk_binary");
+    assert_eq!(CompressionPath::NativeFallback.as_str(), "native_fallback");
+}
+
+#[tokio::test]
+async fn compress_tool_output_async_with_path_matches_plain_wrapper() {
+    let mut input = String::new();
+    for i in 0..10 {
+        input.push_str(&format!("test t{i} ... ok\n"));
+    }
+    input.push_str("test result: ok. 10 passed; 0 failed\n");
+
+    let (text, path) = compress_tool_output_async_with_path("cargo_test", &input).await;
+    assert!(text.contains("test result"));
+    // Path-reporting variant must produce the exact same text as the plain
+    // wrapper — the latter is defined as discarding this variant's path.
+    let via_wrapper = compress_tool_output_async("cargo_test", &input).await;
+    assert_eq!(text, via_wrapper);
+    // Whichever route actually ran in this environment, the reported path
+    // must round-trip through a valid, stable string.
+    assert!(matches!(path.as_str(), "rtk_binary" | "native_fallback"));
+}

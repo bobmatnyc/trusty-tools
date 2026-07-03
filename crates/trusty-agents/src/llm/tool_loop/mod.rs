@@ -419,9 +419,14 @@ pub async fn chat_with_tools_gated(
             // falls back to native filter chain) so per-tool filters (test runner,
             // git diff, file read, etc.) strip noise that would otherwise bloat
             // the next request's prompt. Errors and unknown tools pass through.
+            // #1959: calls the hoisted `trusty-agents-common` implementation
+            // directly (rather than via the `crate::compress` re-export) now
+            // that `trusty-mpm`'s `tm compress` subcommand shares the same
+            // dependency for its own PreToolUse Bash rewrite spike (#1956).
             let content_str = match &result {
                 ToolResult::Success(_) => {
-                    crate::compress::compress_tool_output_async(&name, &raw_str).await
+                    trusty_agents_common::compress::compress_tool_output_async(&name, &raw_str)
+                        .await
                 }
                 ToolResult::Error { .. } => raw_str,
             };

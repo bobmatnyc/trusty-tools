@@ -194,6 +194,28 @@ pub(crate) enum Command {
     /// a daemon restart never blocks the user's prompt.
     /// Test: `cli_parses_hook` plus the inline `hook_guard_short_circuits`.
     Hook,
+    /// Compress a piped command's stdout — the `tm hook` PreToolUse Bash
+    /// command-rewrite spike's filter stage (issue #1956, Option 0).
+    ///
+    /// Why: `tm hook` rewrites a Bash tool call's command to
+    /// `<original> | tm compress --tool "<effective tool name>"` (the tool
+    /// name is derived from the wrapped command — e.g. `"cargo test"`,
+    /// `"git diff"` — not a hardcoded `"bash"`, see
+    /// `commands::hook_rewrite::effective_tool_name`) so Claude Code's own
+    /// subprocess execution produces already-compressed output before the
+    /// model ever sees the raw payload — see
+    /// `docs/specs/tool-output-interception-seam.md` §Option 0.
+    /// What: reads all of stdin, compresses it via
+    /// `trusty_agents_common::compress::compress_tool_output_async_with_path`
+    /// (hoisted from `trusty-agents` in issue #1959), logs a structured
+    /// stats line, and writes the compressed text to stdout.
+    /// Test: `cli_parses_compress` plus `commands::compress`'s unit tests
+    /// and the `tm_compress_pipe` integration test.
+    Compress {
+        /// Tool name used to select the compression filter (e.g. "cargo test").
+        #[arg(long)]
+        tool: String,
+    },
     /// Run the trusty-mpm daemon.
     Daemon {
         /// Address the daemon HTTP API binds to.
