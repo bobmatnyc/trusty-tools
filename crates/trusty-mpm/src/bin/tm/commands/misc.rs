@@ -428,8 +428,9 @@ pub(crate) async fn overseer(
 /// daemon's live view via `GET /optimizer`, while `Set` rewrites the policy
 /// file itself (`~/.trusty-mpm/framework/hooks/optimizer.toml`) — the daemon's
 /// watcher then reloads it.
-/// What: `Status` prints the current config; `Set` writes a new `[default]`
-/// level into the policy file, creating the `hooks/` directory if needed.
+/// What: `Status` prints the current config plus an honest scope note (which
+/// sessions the level actually affects — issue #1944); `Set` writes a new
+/// `[default]` level into the policy file, creating the `hooks/` dir if needed.
 /// Test: `cli_parses_optimizer_status`, `cli_parses_optimizer_set`.
 pub(crate) async fn optimizer(
     client: &reqwest::Client,
@@ -445,6 +446,11 @@ pub(crate) async fn optimizer(
                 .json()
                 .await?;
             println!("{}", serde_json::to_string_pretty(&body["optimizer"])?);
+            // Print the scope note so operators are not misled into thinking a
+            // non-Off level compresses their live native session (issue #1944).
+            if let Some(scope) = body["scope"].as_str() {
+                println!("\nscope: {scope}");
+            }
         }
         OptimizerAction::Set { level } => {
             let level_name = match level {

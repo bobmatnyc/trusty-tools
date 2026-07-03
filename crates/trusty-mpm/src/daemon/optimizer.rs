@@ -10,6 +10,28 @@
 use crate::core::compress::{CompressionLevel, compress_output};
 use serde_json::Value;
 
+/// Honest description of what the token-use optimizer actually compresses.
+///
+/// Why: `tm optimizer status` and the dashboard would otherwise imply that a
+/// `trim`/`caveman` level reduces the live token usage of every session. It
+/// does not. Compression runs only on the copy of tool output that enters
+/// trusty-mpm's observability history (see [`optimize_tool_output`], invoked
+/// from the hook-ingestion path *before* the ring buffer) and on
+/// tm-mediated / MCP-proxied tool calls. A *native* Claude Code session — the
+/// common case, where tm provisions the session but Claude Code runs its own
+/// tool loop — returns built-in tool results (Bash, Read, …) directly to the
+/// model before any `PostToolUse` hook can rewrite them, so its live context
+/// tokens are unaffected. Surfacing this scope keeps `optimizer status`
+/// truthful (issue #1944).
+/// What: a one-line human-readable scope string embedded in the `/optimizer`
+/// response and printed by the CLI status command.
+/// Test: `scope_note_names_native_limitation`; e2e `optimizer_default_config`.
+pub const OPTIMIZER_SCOPE_NOTE: &str = "compression applies only to tool output copied into \
+     trusty-mpm's observability history (dashboard, event feed, compacted session log) and to \
+     tm-mediated / MCP-proxied tool calls; it does NOT reduce live token usage for native Claude \
+     Code sessions, whose built-in tools return results directly to the model before any \
+     PostToolUse hook can rewrite them (see issue #1944)";
+
 /// Per-tool compression override. Keyed by tool name (e.g. "Bash", "Read").
 pub type ToolOverrides = std::collections::HashMap<String, CompressionLevel>;
 
@@ -283,6 +305,16 @@ mod tests {
         assert_eq!(cfg.default_level, CompressionLevel::Caveman);
         assert_eq!(cfg.level_for("Read"), CompressionLevel::Off);
         assert_eq!(cfg.level_for("Bash"), CompressionLevel::Caveman);
+    }
+
+    #[test]
+    fn scope_note_names_native_limitation() {
+        // The scope note must make the native-session limitation explicit so
+        // `optimizer status` cannot be read as "compression on for everything".
+        let note = OPTIMIZER_SCOPE_NOTE.to_ascii_lowercase();
+        assert!(note.contains("native"));
+        assert!(note.contains("does not") || note.contains("not reduce"));
+        assert!(note.contains("#1944"));
     }
 
     #[test]

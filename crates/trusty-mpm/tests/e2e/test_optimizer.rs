@@ -19,6 +19,14 @@ async fn optimizer_default_config() {
         .expect("optimizer body");
     assert_eq!(body["optimizer"]["default_level"], "trim");
     assert_eq!(body["optimizer"]["suppress_redundant_reads"], true);
+    // The response carries an honest scope note so `optimizer status` cannot be
+    // misread as "compression on for native sessions" (issue #1944).
+    let scope = body["scope"].as_str().expect("scope note present");
+    assert!(scope.contains("native"), "scope must name native sessions");
+    assert!(
+        scope.contains("#1944"),
+        "scope must cite the tracking issue"
+    );
 }
 
 /// A custom `optimizer.toml` planted in the framework dir before boot is

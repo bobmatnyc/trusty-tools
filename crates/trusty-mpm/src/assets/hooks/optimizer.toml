@@ -1,6 +1,11 @@
 # trusty-mpm token optimizer — framework hook configuration
 # Deployed by: trusty-mpm install
-# Purpose: controls PostToolUse output compression for Claude Code sessions
+# Purpose: compression level for tool output that enters trusty-mpm's
+#   observability history (dashboard, event feed, compacted session log) and
+#   tm-mediated / MCP-proxied tool calls. It does NOT reduce live token usage
+#   for native Claude Code sessions — their built-in tools return results
+#   directly to the model before any PostToolUse hook can rewrite them.
+#   See issue #1944 and `tm optimizer status` for the authoritative scope note.
 
 [default]
 level = "Trim"          # Off | Trim | Summarise | Caveman
