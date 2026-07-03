@@ -242,11 +242,13 @@ pub(super) fn write_output_style(
 /// `~/.claude/settings.json`) means they no longer run for unrelated Claude
 /// Code sessions such as claude-mpm.
 /// What: reads an existing `<project>/.claude/settings.json` (preserving all
-/// other keys), *replaces* the entire `hooks` key with [`TRUSTY_MEMORY_HOOKS`],
-/// and writes it back pretty-printed. Replacing — rather than merging — the
-/// `hooks` key avoids double-firing if this runs twice. Creates the file and
-/// `.claude/` directory when absent.
+/// other keys), *replaces* the entire `hooks` key with [`TRUSTY_MEMORY_HOOKS`]
+/// **plus** a `PreToolUse` PM-enforcement guard entry (see
+/// [`pm_guard_hook_value`], issue #1977), and writes it back pretty-printed.
+/// Replacing — rather than merging — the `hooks` key avoids double-firing if
+/// this runs twice. Creates the file and `.claude/` directory when absent.
 /// Test: `write_project_hooks_writes_all_event_types`,
+/// `write_project_hooks_registers_pm_guard`,
 /// `write_project_hooks_replaces_existing`.
 pub(super) fn write_project_hooks(project_dir: &Path) -> Result<(), PrepError> {
     let claude_dir = project_dir.join(".claude");
@@ -268,8 +270,15 @@ pub(super) fn write_project_hooks(project_dir: &Path) -> Result<(), PrepError> {
 
     // Replace the entire `hooks` key. The bundled block is a constant and is
     // guaranteed to parse.
-    let hooks: serde_json::Value =
+    let mut hooks: serde_json::Value =
         serde_json::from_str(TRUSTY_MEMORY_HOOKS).expect("bundled hook block is valid JSON");
+    // Register the PM-enforcement PreToolUse guard (issue #1977) alongside the
+    // trusty-memory hooks so the PM is blocked from editing code directly and
+    // steered to delegate. The bundled block is an object, so this insert
+    // always succeeds; guarded defensively regardless.
+    if let Some(obj) = hooks.as_object_mut() {
+        obj.insert("PreToolUse".to_string(), pm_guard_hook_value());
+    }
     settings["hooks"] = hooks;
 
     let serialized = serde_json::to_string_pretty(&settings)
@@ -279,6 +288,37 @@ pub(super) fn write_project_hooks(project_dir: &Path) -> Result<(), PrepError> {
         source,
     })?;
     Ok(())
+}
+
+/// Build the `PreToolUse` PM-enforcement guard hook entry (issue #1977).
+///
+/// Why: the deployed PM instructions' P1–P11 prohibitions ("delegate all file
+/// edits", "never run builds/tests yourself") are prompt-only and unenforced.
+/// Claude Code's `PreToolUse` hook is the one seam that can *block* a tool call
+/// before it runs, so managed PM sessions register `tm hook --pm-guard` there
+/// (see `crate::bin::tm::commands::pm_guard`) to turn those prohibitions into
+/// enforcement. The command is resolved to an ABSOLUTE binary path via
+/// [`resolve_statusline_binary`] — the same PATH-robustness fix #1914 applied to
+/// the statusLine command — because a bare `tm hook --pm-guard` would silently
+/// no-op under Claude Code's minimal `PATH`, leaving the guard un-fired.
+/// What: returns the `PreToolUse` handler-group array with `matcher: ""` (fires
+/// for every tool) invoking `<abs-path> hook --pm-guard` with a short timeout.
+/// The guard itself fails open (ALLOW) on any error, so a slow/absent binary
+/// never blocks the PM.
+/// Test: `write_project_hooks_registers_pm_guard`.
+pub(super) fn pm_guard_hook_value() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": format!("{} hook --pm-guard", resolve_statusline_binary()),
+                    "timeout": 10
+                }
+            ]
+        }
+    ])
 }
 
 /// Inject (or update) a named stdio MCP server into the project's `.mcp.json`.

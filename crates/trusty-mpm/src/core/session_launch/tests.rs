@@ -575,6 +575,9 @@ fn write_project_hooks_omits_post_tool_use_and_stop() {
     // Why (#1270): trusty-memory has no PostToolUse/Stop CLI hook surface, so
     // those events must not be registered (they previously invoked `hooks fire`,
     // which fails). Memory writes during a session flow through MCP tools.
+    // NOTE (#1977): PreToolUse IS now registered — it carries the PM-enforcement
+    // guard, not a trusty-memory hook — so it is intentionally excluded from
+    // the absent list here (see `write_project_hooks_registers_pm_guard`).
     let tmp = tempdir().unwrap();
     let project = tmp.path();
 
@@ -584,12 +587,45 @@ fn write_project_hooks_omits_post_tool_use_and_stop() {
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
     )
     .unwrap();
-    for absent in ["PreToolUse", "PostToolUse", "Stop"] {
+    for absent in ["PostToolUse", "Stop"] {
         assert!(
             value["hooks"].get(absent).is_none(),
             "{absent} hook must not be registered"
         );
     }
+}
+
+#[test]
+fn write_project_hooks_registers_pm_guard() {
+    // Why (#1977): managed PM sessions must register the PreToolUse enforcement
+    // guard so the PM is blocked from editing code directly. The command must be
+    // an absolute path (PATH-robust, per #1914) ending in `hook --pm-guard`.
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+
+    write_project_hooks(project).expect("write succeeds");
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    let groups = value["hooks"]["PreToolUse"]
+        .as_array()
+        .expect("PreToolUse must be an array");
+    assert_eq!(groups.len(), 1, "exactly one PreToolUse handler group");
+    // Matcher `""` means the guard fires for every tool call.
+    assert_eq!(groups[0]["matcher"], serde_json::json!(""));
+    let cmd = groups[0]["hooks"][0]["command"]
+        .as_str()
+        .expect("command must be a string");
+    assert!(
+        cmd.ends_with(" hook --pm-guard"),
+        "guard command must end with ' hook --pm-guard', got: {cmd}"
+    );
+    assert!(
+        !cmd.starts_with("trusty-memory"),
+        "PreToolUse must be the tm guard, not a trusty-memory hook: {cmd}"
+    );
 }
 
 #[test]

@@ -130,7 +130,7 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
 /// `effective_tool_name_single_token_command`,
 /// `effective_tool_name_strips_env_and_sudo_noise`,
 /// `effective_tool_name_strips_env_command_prefix`.
-fn effective_tool_name(command: &str) -> String {
+pub(crate) fn effective_tool_name(command: &str) -> String {
     let mut tokens = command.split_whitespace();
     let Some(mut first) = tokens.next() else {
         return String::new();
@@ -252,7 +252,7 @@ fn is_orchestrator_command(command: &str) -> bool {
 /// `first_command_token_plain_command`,
 /// `first_command_token_strips_env_command_prefix`,
 /// `first_command_token_none_for_sudo_followed_by_flag`.
-fn first_command_token(command: &str) -> Option<&str> {
+pub(crate) fn first_command_token(command: &str) -> Option<&str> {
     let mut tokens = command.split_whitespace();
     let mut tok = tokens.next()?;
     loop {

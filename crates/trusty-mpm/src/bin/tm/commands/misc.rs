@@ -319,7 +319,7 @@ fn status_icon(status: trusty_mpm::core::doctor::CheckStatus) -> &'static str {
 /// (<https://code.claude.com/docs/en/hooks>, confirmed 2026-07-03) — see
 /// `commands::hook_rewrite` module docs for the citation on the response
 /// shape.
-async fn read_stdin_hook_payload() -> Option<serde_json::Value> {
+pub(crate) async fn read_stdin_hook_payload() -> Option<serde_json::Value> {
     use tokio::io::AsyncReadExt;
 
     const HOOK_STDIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
