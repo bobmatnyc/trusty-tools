@@ -66,6 +66,14 @@ async fn manager_naming_convention() {
         "serial suffix is numeric: {}",
         record.tmux_name
     );
+    // `01`-`99`, never `00` (#1966 review follow-up: a bare length+digit-ness
+    // check would also accept "00", which `allocate_serial` never hands out).
+    let serial: u8 = suffix.parse().expect("suffix is numeric (checked above)");
+    assert!(
+        (1..=99).contains(&serial),
+        "serial is in 01-99: {}",
+        record.tmux_name
+    );
 }
 
 /// Serial reuse end-to-end (issue #1955 worked example): sessions `-01`,

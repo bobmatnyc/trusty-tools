@@ -109,11 +109,17 @@ pub struct EventSummary {
 
 /// Derive a short routing prefix from a tmux session name.
 ///
-/// Why: operators address a session by a short word (`aipowerranking`), not
-/// its full `tm-aipowerranking-01` tmux name; the prefix is that name with the
-/// managed prefix dropped. Delegates to
-/// [`crate::core::names::strip_managed_prefix`] so both the current `tm-`
-/// scheme (#1955) and legacy `tmpm-`/`trusty-mpm-` names strip correctly.
+/// Why: operators address a session by a short word (e.g. `aipowerranking-01`
+/// under the current `tm-<leaf>-NN` scheme, #1955), not its full
+/// `tm-aipowerranking-01` tmux name; the prefix is that name with ONLY the
+/// managed prefix dropped — the `-NN` serial is intentionally KEPT (not
+/// stripped further) because it is what disambiguates multiple concurrent
+/// sessions for the same project (`aipowerranking-01` vs `aipowerranking-02`);
+/// dropping it would make [`parse_session_prefix`] unable to route between
+/// them. A legacy `tmpm-<leaf>` name (no serial) still yields the bare leaf.
+/// Delegates to [`crate::core::names::strip_managed_prefix`] so both the
+/// current `tm-` scheme and legacy `tmpm-`/`trusty-mpm-` names strip
+/// correctly.
 /// What: strips whichever managed prefix `name` carries; otherwise returns the
 /// name unchanged.
 /// Test: `prefix_strips_managed_prefixes`.

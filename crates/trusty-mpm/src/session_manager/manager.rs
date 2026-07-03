@@ -275,6 +275,21 @@ impl SessionManager {
         // failure. `NameCollision` is still returned if every attempt in the
         // bounded window collides (e.g. sustained, pathological contention),
         // so this can never loop forever.
+        //
+        // Residual race window (KNOWN, not closed by this loop): there is
+        // still a gap between THIS `session_exists` check and the
+        // `create_session` call a few lines below. Note this does NOT
+        // surface as a `TmuxUnavailable` error the way a naive analysis might
+        // suggest — `create_session` shells out to `tmux new-session -A -d`
+        // (see `crate::core::tmux::tmux_argv`), and `-A` makes tmux ATTACH to
+        // an existing session of the same name instead of failing. So if two
+        // concurrent creates lose this exact race, both succeed, but the
+        // second one silently attaches to the first one's pane — an aliasing
+        // risk (two `SessionRecord`s could end up pointing at one tmux
+        // session), not a crash. Closing this fully would require a
+        // distributed lock across the external `tmux` process (e.g. a
+        // per-name lock file) — out of scope for this naming-scheme ticket;
+        // tracked as a follow-up if it proves to matter in practice.
         const MAX_NAME_ALLOCATION_ATTEMPTS: u8 = 5;
         let mut tmux_name = None;
         for _ in 0..MAX_NAME_ALLOCATION_ATTEMPTS {

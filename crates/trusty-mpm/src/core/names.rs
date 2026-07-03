@@ -383,10 +383,16 @@ pub fn build_managed_session_name(
         project.is_none_or(|p| !p.contains('/')),
         "build_managed_session_name: pass the repo segment only, not owner/repo — got {project:?}"
     );
-    // Slug once and reuse the result (#1966 review follow-up): computing
-    // `slug_project(p)` here and letting `build_session_name` re-derive it
-    // internally was harmless (idempotent) but wasteful and easy to misread
-    // as two different values.
+    // Slug the `project` branch once and reuse the result (#1966 review
+    // follow-up): computing `slug_project(p)` here and letting
+    // `build_session_name` re-derive it internally was harmless (idempotent)
+    // but wasteful and easy to misread as two different values. The
+    // `leaf_slug_from_dir(cwd)` fallback branch still gets slugified a second
+    // time inside `build_session_name` (it calls `slug_project` on whatever
+    // leaf it is handed, by design, so every caller — not just this one — gets
+    // a guaranteed-sanitized name); that second pass is a no-op here too,
+    // since `leaf_slug_from_dir`'s own cap ([`MAX_FOLDER_LEN`] = 20) is
+    // already tighter than `slug_project`'s ([`MAX_REPO_SLUG_LEN`] = 24).
     let leaf = match project.map(slug_project) {
         Some(slug) if !slug.is_empty() => slug,
         _ => leaf_slug_from_dir(cwd),
