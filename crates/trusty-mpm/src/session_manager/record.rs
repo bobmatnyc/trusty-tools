@@ -136,7 +136,7 @@ impl fmt::Display for ManagedSessionState {
 pub struct SessionRecord {
     /// Unique managed session identifier.
     pub id: ManagedSessionId,
-    /// tmux session name (e.g. `tmpm-quiet-falcon`).
+    /// tmux session name (e.g. `tm-quiet-falcon` or `tm-trusty-tools-01`).
     pub tmux_name: String,
     /// Working directory the session was started in.
     pub cwd: PathBuf,
