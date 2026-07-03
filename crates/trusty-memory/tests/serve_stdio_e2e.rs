@@ -308,9 +308,12 @@ async fn stdio_serve_tools_list_bounded() {
 /// Why: proves that `memory_remember` and `memory_recall` work end-to-end
 /// through the bridge server and that both complete within the deadline.
 /// The daemon starts in `Warming` state (no background embedder warm-up
-/// completes before the test sends requests), so these calls may return the
-/// fast "warming up" error OR succeed if the embedder completes quickly.
-/// Either response counts as a pass — the invariant is "never hang".
+/// completes before the test sends requests). Since issue #1970, both calls
+/// are expected to *succeed* even while Warming (writes defer embedding to a
+/// background task; reads fall back to BM25/L0/L1) rather than error — the
+/// assertions below accept either shape defensively (a bounded explicit
+/// error would also be an acceptable non-hang outcome), but the invariant
+/// under test is "never hang".
 /// Test: `cargo test -p trusty-memory --test serve_stdio_e2e -- stdio_serve_remember_and_recall_bounded`.
 #[tokio::test]
 async fn stdio_serve_remember_and_recall_bounded() {
@@ -348,7 +351,8 @@ async fn stdio_serve_remember_and_recall_bounded() {
     // either is fine.  We only assert the response arrived within the deadline.
     assert_eq!(create_resp["id"], 2, "palace_create response id must match");
 
-    // memory_remember — may return success or warming error; must not hang.
+    // memory_remember — expected to succeed even while Warming (issue #1970);
+    // must not hang regardless.
     child
         .send(&json!({
             "jsonrpc": "2.0",
@@ -368,14 +372,16 @@ async fn stdio_serve_remember_and_recall_bounded() {
         remember_resp["id"], 3,
         "memory_remember response id must match"
     );
-    // Either success or an explicit error (e.g., warming up) — never absent.
+    // Accept either shape defensively — the hard invariant is "responded at
+    // all" (never absent / never a hang); success is now the expected shape.
     let is_ok_or_error = !remember_resp["result"].is_null() || !remember_resp["error"].is_null();
     assert!(
         is_ok_or_error,
         "memory_remember must return a result or error; got: {remember_resp}"
     );
 
-    // memory_recall — may return success or warming error; must not hang.
+    // memory_recall — expected to succeed even while Warming (BM25/L0/L1
+    // fallback, issue #1970); must not hang regardless.
     child
         .send(&json!({
             "jsonrpc": "2.0",
@@ -401,10 +407,11 @@ async fn stdio_serve_remember_and_recall_bounded() {
     child.close().await;
 }
 
-/// Why: `memory_recall_all` was the specific handler that lacked the
-/// readiness preflight (issue #914 Part A fix).  This test proves that even
-/// before the embedder is warm, `memory_recall_all` returns a bounded explicit
-/// response — not a hang.
+/// Why: `memory_recall_all` was originally the one handler that lacked the
+/// readiness preflight (issue #914 Part A fix); since #1970 the preflight
+/// itself is gone (graceful BM25/L0/L1 degradation replaced the hard error).
+/// This test proves that even before the embedder is warm, `memory_recall_all`
+/// returns a bounded response — not a hang.
 /// What: provisions daemon + bridge, sends `memory_recall_all` immediately
 /// after `initialize` (before any embedder warm-up could complete) and asserts
 /// the response arrives within `RESPONSE_DEADLINE`.
@@ -429,8 +436,9 @@ async fn stdio_serve_recall_all_bounded() {
     );
 
     // memory_recall_all — send immediately, before any warm-up can complete.
-    // Must return the fast "warming up" error (or succeed on very fast machines)
-    // within the deadline.
+    // Expected to succeed (BM25/L0/L1 fallback, issue #1970) within the
+    // deadline; a bounded error would also satisfy "never hangs" if it ever
+    // occurred (e.g. no palaces registered yet).
     child
         .send(&json!({
             "jsonrpc": "2.0",

@@ -1458,90 +1458,123 @@ async fn bm25_index_queue_drops_when_full() {
 }
 
 // -------------------------------------------------------------------------
-// Issues #910 / #911 — readiness preflight in remember / recall handlers
+// Issue #1970 — graceful degradation while the embedder is Warming
+// (supersedes the former issues #910/#911/#914 hard-error preflight, which
+// blocked writes AND reads outright until the embedder finished cold-init;
+// trusty-memory now mirrors trusty-search's staged-pipeline degradation:
+// BM25/KG/text paths never wait on the embedder).
 // -------------------------------------------------------------------------
 
-/// Why (issue #911): while the daemon is still `Warming`, `memory_remember`
-/// must return an explicit error immediately — never block or queue behind
-/// the embedder init.
-/// What: construct a state that remains in Warming state (no `set_ready`),
-/// dispatch `memory_remember`, assert the error message mentions "warming".
+/// Why (issue #1970): `memory_remember` must succeed immediately while the
+/// daemon is still `Warming` — the KG/redb write never depends on the
+/// embedder, and vector embedding is deferred to a background task rather
+/// than blocking the caller behind a 30-120s cold compile.
+/// What: dispatch `memory_remember` against a state that stays `Warming`,
+/// assert the call succeeds (`status: "stored"`), assert the drawer is
+/// immediately visible via `memory_list` (proves the synchronous KG/redb
+/// portion completed), then poll (bounded, condition-based — no blind
+/// sleep) until the real shared embedder backfills the vector so
+/// `handle.vector_store` returns a hit for the drawer id. This proves the
+/// deferred embed job is not just fired but actually completes.
+///
+/// Deliberately does NOT seed a mock embedder: this unit-test binary also
+/// runs `dispatch_remember_then_recall` against the real, process-wide
+/// `shared_embedder()` singleton, and seeding a mock here would race with
+/// (and potentially poison) that test depending on execution order.
 /// Test: this test.
 #[tokio::test]
-async fn remember_returns_warming_error_while_state_is_warming() {
-    // Use test_state_warming() so the daemon stays in Warming state.
-    // The readiness preflight fires BEFORE the embedder is accessed, so
-    // no mock embedder is needed.
+async fn remember_succeeds_and_defers_embedding_while_state_is_warming() {
+    use trusty_common::memory_core::store::VectorStore;
+
     let (state, _tmp) = test_state_warming();
-    // Create the palace so the handler doesn't fail on "palace not found".
     let _ = dispatch_tool(
         &state,
         "palace_create",
         serde_json::json!({"name": "warmtest"}),
     )
-    .await;
+    .await
+    .expect("palace_create");
 
-    let result = dispatch_tool(
+    let content = "Quokkas are famously photogenic marsupials found in Western Australia";
+    let remembered = dispatch_tool(
         &state,
         "memory_remember",
         serde_json::json!({
             "palace": "warmtest",
-            "text": "test memory that should be rejected while warming up"
+            "text": content,
         }),
     )
-    .await;
-    let err = result.expect_err("memory_remember must fail while Warming");
-    let msg = err.to_string();
+    .await
+    .expect("memory_remember must succeed while Warming (issue #1970)");
+    assert_eq!(remembered["status"], "stored");
+    let drawer_id_str = remembered["drawer_id"]
+        .as_str()
+        .expect("drawer_id present")
+        .to_string();
+    let drawer_id = Uuid::parse_str(&drawer_id_str).expect("valid uuid");
+
+    // The text/KG portion is synchronous — no need to wait for it.
+    let listed = dispatch_tool(
+        &state,
+        "memory_list",
+        serde_json::json!({"palace": "warmtest"}),
+    )
+    .await
+    .expect("memory_list");
+    let drawers = listed["drawers"].as_array().expect("drawers array");
     assert!(
-        msg.contains("warming up"),
-        "error must mention 'warming up'; got: {msg}"
+        drawers.iter().any(|d| d["drawer_id"] == drawer_id_str),
+        "drawer must be listed immediately even though the embedder is warming"
+    );
+
+    // Poll (bounded) until the background embed task backfills the vector.
+    let handle = open_palace_handle(&state, "warmtest").expect("open palace");
+    let embedder = trusty_common::memory_core::retrieval::shared_embedder()
+        .await
+        .expect("shared embedder must initialise");
+    // Generous bound: a cold ONNX/CoreML compile can take up to ~120s per
+    // CLAUDE.md; a warm model cache (the common case once any other test in
+    // this binary has touched the embedder) resolves in well under a second.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut backfilled = false;
+    while std::time::Instant::now() < deadline {
+        let vecs = embedder
+            .embed_batch(&[content.to_string()])
+            .await
+            .expect("embed query");
+        let hits = handle
+            .vector_store
+            .search(&vecs[0], 5)
+            .await
+            .expect("vector search");
+        if hits
+            .iter()
+            .any(|h| h.drawer_id.as_bytes()[..8] == drawer_id.as_bytes()[..8])
+        {
+            backfilled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(
+        backfilled,
+        "background embed task must backfill the vector index once the embedder is ready"
     );
 }
 
-/// Why (issue #911): while the daemon is still `Warming`, `memory_recall`
-/// must return an explicit error immediately.
-/// What: construct a Warming state, dispatch `memory_recall`, assert the
-/// error message mentions "warming".
+/// Why (issue #1970): `memory_note` shares `write_drawer`'s deferred-embed
+/// posture; confirm it also succeeds (rather than erroring) while Warming.
 /// Test: this test.
 #[tokio::test]
-async fn recall_returns_warming_error_while_state_is_warming() {
-    let (state, _tmp) = test_state_warming();
-    let _ = dispatch_tool(
-        &state,
-        "palace_create",
-        serde_json::json!({"name": "warmtest-recall"}),
-    )
-    .await;
-
-    let result = dispatch_tool(
-        &state,
-        "memory_recall",
-        serde_json::json!({
-            "palace": "warmtest-recall",
-            "query": "test query"
-        }),
-    )
-    .await;
-    let err = result.expect_err("memory_recall must fail while Warming");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("warming up"),
-        "error must mention 'warming up'; got: {msg}"
-    );
-}
-
-/// Why (issue #911): `memory_note` must also return the warming error while
-/// the daemon is `Warming` (it shares the same preflight guard).
-/// Test: this test.
-#[tokio::test]
-async fn note_returns_warming_error_while_state_is_warming() {
+async fn note_succeeds_while_state_is_warming() {
     let (state, _tmp) = test_state_warming();
     let _ = dispatch_tool(
         &state,
         "palace_create",
         serde_json::json!({"name": "warmtest-note"}),
     )
-    .await;
+    .await
+    .expect("palace_create");
 
     let result = dispatch_tool(
         &state,
@@ -1551,38 +1584,144 @@ async fn note_returns_warming_error_while_state_is_warming() {
             "content": "short note content here"
         }),
     )
-    .await;
-    let err = result.expect_err("memory_note must fail while Warming");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("warming up"),
-        "error must mention 'warming up'; got: {msg}"
-    );
+    .await
+    .expect("memory_note must succeed while Warming (issue #1970)");
+    assert_eq!(result["status"], "stored");
 }
 
-/// Why (issue #914 Part A): `memory_recall_all` was the only
-/// embedder-touching handler without the readiness preflight from #912.
-/// It must return the fast "warming up" error immediately — not block
-/// behind an open-ended OnceCell init — while the daemon is `Warming`.
-/// What: construct a state that stays `Warming` (no `set_ready`), dispatch
-/// `memory_recall_all`, assert the error message mentions "warming".
-/// Test: this test (regression guard for the gap fixed in #914 Part A).
+/// Why (issue #1970): `memory_recall` must never block/error on embedder
+/// state — it should degrade to the BM25/L0/L1 fallback and return
+/// normally while the daemon is `Warming`.
+/// What: dispatch `memory_recall` against a Warming state and assert the
+/// call succeeds with a well-formed (possibly empty, since BM25 isn't
+/// wired up in this unit test and L1 isn't live-refreshed mid-process)
+/// results array — the key assertion is the absence of a "warming up"
+/// error, not the result content (see
+/// `bm25_hits_hydrate_from_handle_during_warmup` for content-level
+/// coverage of the fallback's BM25 hydration path).
+/// Test: this test.
 #[tokio::test]
-async fn recall_all_returns_warming_error_while_state_is_warming() {
+async fn recall_does_not_error_while_state_is_warming() {
+    let (state, _tmp) = test_state_warming();
+    let _ = dispatch_tool(
+        &state,
+        "palace_create",
+        serde_json::json!({"name": "warmtest-recall"}),
+    )
+    .await
+    .expect("palace_create");
+
+    let result = dispatch_tool(
+        &state,
+        "memory_recall",
+        serde_json::json!({
+            "palace": "warmtest-recall",
+            "query": "test query"
+        }),
+    )
+    .await
+    .expect("memory_recall must not error while Warming (issue #1970)");
+    assert!(result["results"].is_array());
+}
+
+/// Why (issue #1970): `memory_recall_deep` mirrors `memory_recall`'s
+/// warming-fallback posture.
+/// Test: this test.
+#[tokio::test]
+async fn recall_deep_does_not_error_while_state_is_warming() {
+    let (state, _tmp) = test_state_warming();
+    let _ = dispatch_tool(
+        &state,
+        "palace_create",
+        serde_json::json!({"name": "warmtest-recall-deep"}),
+    )
+    .await
+    .expect("palace_create");
+
+    let result = dispatch_tool(
+        &state,
+        "memory_recall_deep",
+        serde_json::json!({
+            "palace": "warmtest-recall-deep",
+            "query": "test query"
+        }),
+    )
+    .await
+    .expect("memory_recall_deep must not error while Warming (issue #1970)");
+    assert!(result["results"].is_array());
+}
+
+/// Why (issue #1970, was #914 Part A): `memory_recall_all` must not error
+/// while `Warming` either — it fans the same BM25/L0/L1 fallback out across
+/// every palace.
+/// Test: this test (regression guard for the gap originally fixed in #914
+/// Part A, now re-targeted at graceful degradation instead of a hard error).
+#[tokio::test]
+async fn recall_all_does_not_error_while_state_is_warming() {
     let (state, _tmp) = test_state_warming();
 
     let result = dispatch_tool(
         &state,
         "memory_recall_all",
         serde_json::json!({
-            "q": "test query that should be rejected while warming up"
+            "q": "test query issued while warming up"
         }),
     )
-    .await;
-    let err = result.expect_err("memory_recall_all must fail while Warming");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("warming up"),
-        "error must mention 'warming up'; got: {msg}"
+    .await
+    .expect("memory_recall_all must not error while Warming (issue #1970)");
+    assert!(result["results"].is_array());
+}
+
+/// Why (issue #1970): `bm25_hits_to_recall_results` is the piece that makes
+/// the warming-fallback recall path actually useful — without it, BM25
+/// hits would be silently dropped whenever there's no vector lane to boost
+/// (exactly the situation while the embedder is cold). This test exercises
+/// it directly against a handle's in-memory drawer table, with no BM25
+/// daemon or embedder involved.
+/// What: adds two drawers to a fresh handle, fabricates `BM25Hit`s
+/// referencing one real drawer id and one unknown id, calls
+/// `bm25_hits_to_recall_results`, and asserts the known drawer is hydrated
+/// with the BM25 score and `layer: 4` while the unknown hit is skipped.
+/// Test: this test.
+#[test]
+fn bm25_hits_hydrate_from_handle_during_warmup() {
+    use trusty_common::bm25_client::BM25Hit;
+    use trusty_common::memory_core::palace::Drawer;
+    use trusty_common::memory_core::store::kg::KnowledgeGraph;
+    use trusty_common::memory_core::store::vector::UsearchStore;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let vs = UsearchStore::new(dir.path().join("idx.usearch"), 384).expect("vector store");
+    let kg = KnowledgeGraph::open(&dir.path().join("kg.db")).expect("kg");
+    let handle = trusty_common::memory_core::retrieval::PalaceHandle::new(
+        PalaceId::new("bm25hydrate"),
+        String::new(),
+        vs,
+        kg,
     );
+
+    let drawer = Drawer::new(Uuid::new_v4(), "Rustc is a compiler for the Rust language");
+    let known_id = drawer.id;
+    handle.add_drawer(drawer);
+
+    let hits = vec![
+        BM25Hit {
+            doc_id: known_id.to_string(),
+            score: 4.2,
+        },
+        BM25Hit {
+            doc_id: Uuid::new_v4().to_string(),
+            score: 1.0,
+        },
+    ];
+
+    let results = bm25_hits_to_recall_results(&handle, &hits);
+    assert_eq!(
+        results.len(),
+        1,
+        "unknown drawer id must be skipped, not fabricated"
+    );
+    assert_eq!(results[0].drawer.id, known_id);
+    assert_eq!(results[0].score, 4.2);
+    assert_eq!(results[0].layer, 4, "BM25-hydrated hits use layer 4");
 }

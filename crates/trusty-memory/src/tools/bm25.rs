@@ -298,6 +298,42 @@ pub(crate) fn fuse_bm25_into_recall(
     results.truncate(top_k);
 }
 
+/// Hydrate BM25 hits directly into `RecallResult`s from a palace's
+/// in-memory drawer table (issue #1970 embedder-warming fallback).
+///
+/// Why: `fuse_bm25_into_recall` only *boosts* vector hits already present in
+/// `results` — it never appends BM25-only matches because (per its own
+/// comment) it has no drawer payload to hydrate them with. During embedder
+/// warm-up there are no vector hits at all, so that boost-only behaviour
+/// would silently drop every BM25 match. `PalaceHandle::drawers` already
+/// holds every drawer's metadata in memory (no disk I/O needed), so each
+/// BM25 `doc_id` (a stringified drawer UUID) can be resolved into a full
+/// `RecallResult` directly.
+/// What: parses each hit's `doc_id` as a `Uuid`, looks it up in
+/// `handle.drawers`, and emits a `RecallResult` carrying the BM25 score and
+/// `layer: 4` (the same lexical-lane marker `fuse_bm25_into_recall` uses).
+/// Hits whose `doc_id` doesn't parse or no longer resolves to a drawer
+/// (e.g. forgotten since the BM25 snapshot was built) are skipped.
+/// Test: `bm25_hits_hydrate_from_handle_during_warmup`.
+pub(crate) fn bm25_hits_to_recall_results(
+    handle: &trusty_common::memory_core::retrieval::PalaceHandle,
+    bm25_hits: &[trusty_common::bm25_client::BM25Hit],
+) -> Vec<trusty_common::memory_core::retrieval::RecallResult> {
+    let drawers = handle.drawers.read();
+    bm25_hits
+        .iter()
+        .filter_map(|hit| {
+            let drawer_id = uuid::Uuid::parse_str(&hit.doc_id).ok()?;
+            let drawer = drawers.iter().find(|d| d.id == drawer_id)?.clone();
+            Some(trusty_common::memory_core::retrieval::RecallResult {
+                drawer,
+                score: hit.score,
+                layer: 4,
+            })
+        })
+        .collect()
+}
+
 /// Serialize `recall` results into a JSON shape the MCP client can render.
 pub(crate) fn serialize_recall(
     palace: &str,

@@ -51,14 +51,21 @@ pub(super) const L1_CAP: usize = 15;
 /// What: `filter` defaults to `FilterConfig::default()`; `force` skips the
 /// gate entirely; `enforce_min_tokens` lets `memory_note` keep noise rejects
 /// while accepting short content; `classify_as` pins the resulting
-/// `DrawerType` (used by `memory_note` to force `UserFact`).
-/// Test: See `remember_force_bypasses_filter` and friends in this file.
+/// `DrawerType` (used by `memory_note` to force `UserFact`);
+/// `defer_embedding` (issue #1970) tells `remember_with_options` to skip the
+/// synchronous embed + vector-store upsert and instead background it, so a
+/// caller whose embedder is still cold-initialising is not blocked behind a
+/// 30-120s ONNX/CoreML compile just to persist a drawer.
+/// Test: See `remember_force_bypasses_filter` and friends in this file;
+/// `deferred_embed_backfills_vector_once_embedder_ready` covers
+/// `defer_embedding`.
 #[derive(Debug, Clone)]
 pub struct RememberOptions {
     pub filter: FilterConfig,
     pub force: bool,
     pub enforce_min_tokens: bool,
     pub classify_as: Option<DrawerType>,
+    pub defer_embedding: bool,
 }
 
 impl Default for RememberOptions {
@@ -68,6 +75,7 @@ impl Default for RememberOptions {
             force: false,
             enforce_min_tokens: true,
             classify_as: None,
+            defer_embedding: false,
         }
     }
 }
@@ -89,6 +97,7 @@ impl RememberOptions {
             force: false,
             enforce_min_tokens: false,
             classify_as: Some(DrawerType::UserFact),
+            defer_embedding: false,
         }
     }
 

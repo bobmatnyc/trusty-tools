@@ -512,30 +512,42 @@ impl PalaceHandle {
         // spin up a fresh ONNX session per call (issue #57). The
         // OnceCell-backed `shared_embedder` guarantees at most one model load
         // for the lifetime of the process.
-        // Issue #906: both `shared_embedder()` (cold init path) and
-        // `embed_batch` carry their own bounded timeouts — if the embedder
-        // hangs mid-batch the remember call returns an error instead of
-        // blocking the write-lock indefinitely.
-        let embedder = shared_embedder()
-            .await
-            .context("acquire shared embedder for remember")?;
-        let embed_timeout = timeouts::embed_batch_timeout();
-        let vecs = tokio::time::timeout(embed_timeout, embedder.embed_batch(&[content]))
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "embed_batch timed out after {:?} on remember path (issue #906); \
-                     increase TRUSTY_EMBED_BATCH_TIMEOUT_SECS if batches legitimately \
-                     take longer on this host",
-                    embed_timeout
-                )
-            })?
-            .context("embed drawer content")?;
-        if let Some(v) = vecs.into_iter().next() {
-            self.vector_store
-                .upsert(id, v)
+        //
+        // Issue #1970: a caller whose daemon is still warming up (embedder
+        // cold-init in progress) sets `opts.defer_embedding` so this write
+        // returns as soon as the KG/redb portion below completes instead of
+        // blocking behind a 30-120s ONNX/CoreML compile — the vector is
+        // backfilled by a background task once the embedder resolves. Text
+        // and KG indexing never depend on the embedder either way; this
+        // branch only changes *when* the drawer becomes vector-searchable.
+        if opts.defer_embedding {
+            self.spawn_deferred_embed(id, content.clone());
+        } else {
+            // Issue #906: both `shared_embedder()` (cold init path) and
+            // `embed_batch` carry their own bounded timeouts — if the embedder
+            // hangs mid-batch the remember call returns an error instead of
+            // blocking the write-lock indefinitely.
+            let embedder = shared_embedder()
                 .await
-                .context("upsert drawer vector")?;
+                .context("acquire shared embedder for remember")?;
+            let embed_timeout = timeouts::embed_batch_timeout();
+            let vecs = tokio::time::timeout(embed_timeout, embedder.embed_batch(&[content]))
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "embed_batch timed out after {:?} on remember path (issue #906); \
+                         increase TRUSTY_EMBED_BATCH_TIMEOUT_SECS if batches legitimately \
+                         take longer on this host",
+                        embed_timeout
+                    )
+                })?
+                .context("embed drawer content")?;
+            if let Some(v) = vecs.into_iter().next() {
+                self.vector_store
+                    .upsert(id, v)
+                    .await
+                    .context("upsert drawer vector")?;
+            }
         }
 
         // Persist drawer metadata BEFORE the in-memory push so a crash mid-op
@@ -561,6 +573,85 @@ impl PalaceHandle {
         self.rebuild_closets();
 
         Ok(id)
+    }
+
+    /// Fire-and-forget background embed + vector-store backfill for a
+    /// drawer written while the shared embedder was cold (issue #1970).
+    ///
+    /// Why: `memory_remember` / `memory_note` / `task_add` must not block
+    /// the caller behind a 30-120s CoreML/CUDA cold compile just to persist
+    /// a memory — the KG/redb write already completed synchronously by the
+    /// time this is called. This task's only job is to make the drawer's
+    /// vector show up in `retrieve_l2` / `retrieve_l3` once the shared
+    /// embedder resolves.
+    /// What: clones the `Arc<UsearchStore>` handle and spawns a detached
+    /// task that awaits `shared_embedder()` (retrying the cold init if
+    /// necessary), embeds `content` under the same bounded timeout the
+    /// synchronous path uses, and upserts the resulting vector under `id`.
+    /// Every failure mode (embedder init failure, embed timeout, upsert
+    /// error) is logged at `warn!` and dropped — the drawer is already
+    /// durable via KG/redb regardless of whether the vector backfill
+    /// succeeds.
+    /// Known limitation: if the drawer is forgotten before this task
+    /// completes, the backfilled vector becomes an orphaned entry in the
+    /// vector store. Acceptable for a best-effort background lane (mirrors
+    /// the existing best-effort tone of BM25 indexing and auto-KG
+    /// extraction elsewhere in this pipeline); tighten with an
+    /// existence check against `self.drawers` if this proves to matter in
+    /// practice.
+    /// Test: `deferred_embed_backfills_vector_once_embedder_ready` in
+    /// `retrieval::tests`.
+    fn spawn_deferred_embed(&self, id: Uuid, content: String) {
+        let vector_store = self.vector_store.clone();
+        let palace_id = self.id.clone();
+        tokio::spawn(async move {
+            let embedder = match shared_embedder().await {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(
+                        palace = %palace_id,
+                        drawer = %id,
+                        "deferred embed: shared embedder init failed (vector left unindexed): {e:#}"
+                    );
+                    return;
+                }
+            };
+            let embed_timeout = timeouts::embed_batch_timeout();
+            let vecs =
+                match tokio::time::timeout(embed_timeout, embedder.embed_batch(&[content])).await {
+                    Ok(Ok(v)) => v,
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            palace = %palace_id,
+                            drawer = %id,
+                            "deferred embed: embed_batch failed: {e:#}"
+                        );
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            palace = %palace_id,
+                            drawer = %id,
+                            "deferred embed: embed_batch timed out after {embed_timeout:?}"
+                        );
+                        return;
+                    }
+                };
+            if let Some(v) = vecs.into_iter().next() {
+                match vector_store.upsert(id, v).await {
+                    Ok(()) => tracing::info!(
+                        palace = %palace_id,
+                        drawer = %id,
+                        "deferred embed: vector backfill complete"
+                    ),
+                    Err(e) => tracing::warn!(
+                        palace = %palace_id,
+                        drawer = %id,
+                        "deferred embed: vector upsert failed: {e:#}"
+                    ),
+                }
+            }
+        });
     }
 
     /// Rebuild the closet keyword index from the current in-memory drawer table.

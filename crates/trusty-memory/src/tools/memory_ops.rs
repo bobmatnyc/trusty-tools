@@ -10,7 +10,7 @@
 //! `dispatch_memory_list_*`, `dispatch_memory_recall_all_*` in `tools::tests`.
 
 use crate::attribution::{CreatorInfo, CreatorSource, MCP_CLIENT_NAME};
-use crate::{ActivitySource, AppState, DaemonEvent};
+use crate::{ActivitySource, AppState, DaemonEvent, DaemonReadiness};
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use trusty_common::memory_core::palace::RoomType;
@@ -20,7 +20,9 @@ use trusty_common::memory_core::retrieval::{
 use trusty_common::memory_core::timeouts;
 use uuid::Uuid;
 
-use super::bm25::{bm25_search_optional, fuse_bm25_into_recall, serialize_recall};
+use super::bm25::{
+    bm25_hits_to_recall_results, bm25_search_optional, fuse_bm25_into_recall, serialize_recall,
+};
 use super::helpers::{
     attach_mcp_attribution, blocklist_gate, content_gate, dedup_gate, mcp_remember_opts,
     open_palace_handle, parse_room, parse_tags, resolve_palace, room_label, skipped_envelope,
@@ -28,10 +30,13 @@ use super::helpers::{
 };
 
 pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Result<Value> {
-    // Issue #911: fast readiness preflight — return an explicit bounded error
-    // immediately if the daemon is still warming up (embedder not yet
-    // initialised) so the caller is never parked behind an open-ended init.
-    state.readiness_check()?;
+    // Issue #1970: writes no longer hard-block on embedder readiness. The
+    // text/KG/BM25 path below never touches the embedder; when the daemon
+    // is still `Warming`, `defer_embedding` tells `write_drawer` to
+    // background the embed + vector-store upsert instead of blocking this
+    // call behind a 30-120s ONNX/CoreML cold compile (mirrors trusty-search's
+    // lexical-first, vector-later staged pipeline).
+    let defer_embedding = state.readiness() == DaemonReadiness::Warming;
     let palace = resolve_palace(state, &args, "memory_remember")?;
     let palace = palace.as_str();
     let raw_text = args
@@ -119,7 +124,7 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
             tags,
             room,
             importance: 0.5,
-            opts: mcp_remember_opts(force),
+            opts: mcp_remember_opts(force, defer_embedding),
             room_label_for_kg,
         },
     )
@@ -132,8 +137,9 @@ pub(crate) async fn handle_memory_remember(state: &AppState, args: Value) -> Res
 }
 
 pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<Value> {
-    // Issue #911: fast readiness preflight — same guard as memory_remember.
-    state.readiness_check()?;
+    // Issue #1970: same non-blocking write posture as memory_remember — see
+    // that handler's comment for the rationale.
+    let defer_embedding = state.readiness() == DaemonReadiness::Warming;
     // Issue #61: curated short-fact shortcut. Bypasses the token
     // threshold (so "User prefers snake_case" is accepted) but still
     // applies noise-pattern rejects so the tool can't be used to
@@ -216,7 +222,10 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
             tags,
             room: RoomType::General,
             importance: 1.0,
-            opts: RememberOptions::note(),
+            opts: RememberOptions {
+                defer_embedding,
+                ..RememberOptions::note()
+            },
             // memory_note is pinned to the General room; mirror that for
             // the KG extractor so the auto-extracted triples carry the
             // same room label as the drawer.
@@ -233,9 +242,45 @@ pub(crate) async fn handle_memory_note(state: &AppState, args: Value) -> Result<
     }))
 }
 
+/// Degraded-embedder recall fallback (issue #1970): L0/L1 + BM25 only.
+///
+/// Why: mirrors trusty-search's staged-pipeline degradation — rather than
+/// blocking/erroring while the shared embedder cold-inits, every recall
+/// variant should return identity + essential drawers plus whatever the
+/// BM25 lexical lane can resolve, with the semantic (vector) layer simply
+/// omitted until the embedder warms up.
+/// What: seeds the result set with `retrieve_l0_l1`, joins the optional BM25
+/// lane (query runs regardless of embedder state — BM25 has no embedder
+/// dependency), hydrates any BM25-only hits via `bm25_hits_to_recall_results`,
+/// merges without duplicating drawers already present, re-sorts by score
+/// descending, and truncates to `top_k`.
+/// Test: `recall_falls_back_to_bm25_and_l0_l1_while_warming`,
+/// `recall_deep_falls_back_to_bm25_and_l0_l1_while_warming`.
+async fn recall_without_embedder(
+    state: &AppState,
+    handle: &trusty_common::memory_core::retrieval::PalaceHandle,
+    palace: &str,
+    query: &str,
+    top_k: usize,
+) -> Vec<trusty_common::memory_core::retrieval::RecallResult> {
+    let mut results = trusty_common::memory_core::retrieval::retrieve_l0_l1(handle);
+    if let Some(bm25_hits) = bm25_search_optional(state, palace, query, top_k).await {
+        for hydrated in bm25_hits_to_recall_results(handle, &bm25_hits) {
+            if !results.iter().any(|r| r.drawer.id == hydrated.drawer.id) {
+                results.push(hydrated);
+            }
+        }
+    }
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    results.truncate(top_k);
+    results
+}
+
 pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Result<Value> {
-    // Issue #911: fast readiness preflight.
-    state.readiness_check()?;
     let palace = resolve_palace(state, &args, "memory_recall")?;
     let query = args
         .get("query")
@@ -244,6 +289,15 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     let handle = open_palace_handle(state, &palace)?;
+
+    // Issue #1970: while the embedder is still warming up, return BM25 +
+    // L0/L1 results immediately instead of blocking/erroring on embedder
+    // state.
+    if state.readiness() == DaemonReadiness::Warming {
+        let results = recall_without_embedder(state, &handle, &palace, query, top_k).await;
+        return Ok(serialize_recall(&palace, query, results));
+    }
+
     let embedder = state.embedder().await?;
     // Issue #156: when the BM25 lane is enabled, run it in parallel
     // with the vector recall and RRF-fuse the two ranked lists.
@@ -261,8 +315,6 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
 }
 
 pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> Result<Value> {
-    // Issue #911: fast readiness preflight.
-    state.readiness_check()?;
     let palace = resolve_palace(state, &args, "memory_recall_deep")?;
     let query = args
         .get("query")
@@ -271,6 +323,13 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     let top_k = args.get("top_k").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     let handle = open_palace_handle(state, &palace)?;
+
+    // Issue #1970: same warming-fallback posture as memory_recall.
+    if state.readiness() == DaemonReadiness::Warming {
+        let results = recall_without_embedder(state, &handle, &palace, query, top_k).await;
+        return Ok(serialize_recall(&palace, query, results));
+    }
+
     let embedder = state.embedder().await?;
     let results = recall_deep(&handle, embedder.as_ref(), query, top_k)
         .await
@@ -330,12 +389,43 @@ pub(crate) async fn handle_memory_forget(state: &AppState, args: Value) -> Resul
     Ok(json!({ "status": "deleted", "drawer_id": drawer_id_str, "palace": palace }))
 }
 
+/// Cross-palace counterpart of `recall_without_embedder` (issue #1970).
+///
+/// Why: `memory_recall_all` must degrade the same way the single-palace
+/// recall handlers do — BM25 + L0/L1 per palace, no vector lane — while the
+/// embedder is warming up.
+/// What: runs `recall_without_embedder` against every handle, tags each hit
+/// with its source palace id, then merges/re-sorts/truncates exactly like
+/// `recall_across_palaces` does for the vector-backed path.
+/// Test: `recall_all_falls_back_to_bm25_and_l0_l1_while_warming`.
+async fn recall_all_without_embedder(
+    state: &AppState,
+    handles: &[std::sync::Arc<trusty_common::memory_core::retrieval::PalaceHandle>],
+    query: &str,
+    top_k: usize,
+) -> Vec<trusty_common::memory_core::retrieval::CrossPalaceResult> {
+    let mut merged = Vec::new();
+    for handle in handles {
+        let palace_id = handle.id.as_str().to_string();
+        let hits = recall_without_embedder(state, handle, &palace_id, query, top_k).await;
+        merged.extend(hits.into_iter().map(|result| {
+            trusty_common::memory_core::retrieval::CrossPalaceResult {
+                palace_id: palace_id.clone(),
+                result,
+            }
+        }));
+    }
+    merged.sort_by(|a, b| {
+        b.result
+            .score
+            .partial_cmp(&a.result.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    merged.truncate(top_k);
+    merged
+}
+
 pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> Result<Value> {
-    // Issue #914 (Part A): fast readiness preflight — mirror the guard on
-    // every other embedder-touching handler. Without this, a `memory_recall_all`
-    // call while the daemon is still Warming blocks behind the OnceCell init
-    // (up to 180 s) instead of returning the fast bounded error.
-    state.readiness_check()?;
     let query = args
         .get("q")
         .and_then(|v| v.as_str())
@@ -363,12 +453,17 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
         }
     }
 
-    let embedder = state.embedder().await?;
-    let erased: std::sync::Arc<dyn trusty_common::memory_core::embed::Embedder + Send + Sync> =
-        embedder;
-    let results = recall_across_palaces(&handles, &erased, query, top_k, deep)
-        .await
-        .context("recall_across_palaces")?;
+    // Issue #1970: BM25 + L0/L1 fallback across every palace while warming.
+    let results = if state.readiness() == DaemonReadiness::Warming {
+        recall_all_without_embedder(state, &handles, query, top_k).await
+    } else {
+        let embedder = state.embedder().await?;
+        let erased: std::sync::Arc<dyn trusty_common::memory_core::embed::Embedder + Send + Sync> =
+            embedder;
+        recall_across_palaces(&handles, &erased, query, top_k, deep)
+            .await
+            .context("recall_across_palaces")?
+    };
 
     let payload: Vec<Value> = results
         .iter()
