@@ -5,6 +5,13 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Fixed
+
+- decouple recall/remember from embedder warm-up (closes #1970) ([#1972](https://github.com/bobmatnyc/trusty-tools/pull/1972)) ([`bb322d4`](https://github.com/bobmatnyc/trusty-tools/commit/bb322d4678f8e167691688e77190b44d9c08627a))
+- palace-level alias resolution for claude-mpm parity (owner-repo -> bare palace) ([#1945](https://github.com/bobmatnyc/trusty-tools/pull/1945)) ([`af7f904`](https://github.com/bobmatnyc/trusty-tools/commit/af7f90499402971ac65aed5b104cde251e182599))
+- stop console_metrics force-opening every palace on poll (closes #1924) ([#1926](https://github.com/bobmatnyc/trusty-tools/pull/1926)) ([`74e9e54`](https://github.com/bobmatnyc/trusty-tools/commit/74e9e54243efc6de3778d7c43d938add2ab7b676))
 ## [0.17.0] — 2026-06-25
 
 ### Added
