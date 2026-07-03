@@ -146,23 +146,79 @@ fn md_stems(dir: &Path) -> Vec<String> {
     stems
 }
 
-/// Compare a catalog agent source tree against the deployed agent manifest.
+/// Classify one artifact's drift against what the next `apply` would actually do.
+///
+/// Why (#1940): the old rule keyed drift on the checksum MANIFEST alone — an
+/// artifact absent from the manifest was reported `new`, even when the file was
+/// already deployed on disk. Real deployments landed files via paths that never
+/// recorded a manifest entry (or another tool wrote an identical file), so those
+/// on-disk-but-unmanifested files surfaced as permanent false "new" drift. This
+/// classifier reconciles the manifest against the file ACTUALLY on disk, so the
+/// report matches what `apply` would change rather than what the manifest happens
+/// to record. `apply` only writes a selected artifact when it is absent or is a
+/// managed, unmodified refresh; it skips user-owned and user-modified files.
+/// What: given the catalog content hash, the manifest's recorded checksum (if
+/// any), and the on-disk deployed content (if any), returns:
+/// - `None` when the artifact is already deployed & current (manifest OR on-disk
+///   content matches the catalog hash) — including the reconcile case where the
+///   file is present and correct but was never manifested;
+/// - `None` when the file exists but is user-owned (not managed) or user-modified
+///   (managed but on-disk differs from the recorded checksum) — `apply` skips it,
+///   so it is not actionable drift;
+/// - `Some(Changed)` when the artifact is managed, its catalog content changed,
+///   and the on-disk copy is still what tm wrote (or cannot be read to prove
+///   otherwise) — `apply` would refresh it;
+/// - `Some(New)` when nothing is deployed on disk and the manifest has no entry —
+///   `apply` would deploy it.
+///
+/// Test: `classify_drift_reconciles_on_disk`, `classify_drift_new_when_absent`,
+/// and `detect_reconciles_deployed_but_unmanifested`.
+fn classify_drift(
+    catalog_hash: &str,
+    manifest_checksum: Option<&str>,
+    on_disk: Option<&str>,
+) -> Option<ChangeKind> {
+    let on_disk_hash = on_disk.map(checksum);
+    // Deployed & current — the manifest records this exact content, or the file
+    // already on disk holds it (reconcile: deployed-but-unmanifested). Not drift.
+    if manifest_checksum == Some(catalog_hash) || on_disk_hash.as_deref() == Some(catalog_hash) {
+        return None;
+    }
+    match (manifest_checksum, on_disk_hash.as_deref()) {
+        // Managed, catalog changed since deploy. `apply` refreshes it only if the
+        // on-disk copy is still what tm wrote (unmodified); a user-edited copy is
+        // skipped, so it is not actionable drift.
+        (Some(recorded), Some(disk_hash)) => (disk_hash == recorded).then_some(ChangeKind::Changed),
+        // Managed, catalog changed, on-disk unreadable/absent: cannot prove the
+        // user edited it, so report Changed (apply would attempt a refresh).
+        (Some(_), None) => Some(ChangeKind::Changed),
+        // Not managed and the on-disk content differs from the catalog: a
+        // user-owned file `apply` never touches → not actionable drift.
+        (None, Some(_)) => None,
+        // Not managed and nothing on disk → genuinely new; `apply` deploys it.
+        (None, None) => Some(ChangeKind::New),
+    }
+}
+
+/// Compare a catalog agent source tree against the deployed agents (manifest +
+/// on-disk files), reconciling the two so unmanifested-but-deployed files are not
+/// false "new" drift.
 ///
 /// Why: the agent half of staleness — for each selected catalog agent, the
 /// content the next deploy WOULD write (the composed agent) is hashed and
-/// compared to the checksum the manifest recorded for the deployed file. A
-/// missing manifest entry means the agent is new; a differing hash means it
-/// changed upstream since deploy.
-/// What: pushes a [`CatalogChange`] for every selected catalog agent whose
-/// composed-hash is absent-from or differs-from the deployed manifest. Agents the
-/// predicate rejects are skipped (they are not part of this harness's set). An
-/// agent that fails to compose is skipped rather than reported (it cannot be
-/// deployed either, so it is not actionable drift).
+/// classified via [`classify_drift`] against BOTH the checksum manifest and the
+/// file actually on disk under `deployed_dir`. Keying only on the manifest caused
+/// #1940's false positives; reconciling against the on-disk file fixes them.
+/// What: pushes a [`CatalogChange`] only when [`classify_drift`] reports the agent
+/// as `new`/`changed`. Agents the predicate rejects are skipped (not part of this
+/// harness's set). An agent that fails to compose is skipped rather than reported
+/// (it cannot be deployed either, so it is not actionable drift).
 /// Test: `detect_flags_changed_agent`, `detect_not_stale_when_identical`,
-/// `detect_respects_selection`.
+/// `detect_respects_selection`, `detect_reconciles_deployed_but_unmanifested`.
 fn agent_changes(
     catalog_agents: &Path,
     deployed: &AgentManifest,
+    deployed_dir: &Path,
     select: &impl Fn(&str) -> bool,
     out: &mut Vec<CatalogChange>,
 ) {
@@ -175,18 +231,17 @@ fn agent_changes(
         };
         let filename = format!("{stem}.md");
         let catalog_hash = checksum(&composed);
-        match deployed.managed.get(&filename) {
-            None => out.push(CatalogChange {
+        let on_disk = std::fs::read_to_string(deployed_dir.join(&filename)).ok();
+        if let Some(kind) = classify_drift(
+            &catalog_hash,
+            deployed.managed.get(&filename).map(|e| e.checksum.as_str()),
+            on_disk.as_deref(),
+        ) {
+            out.push(CatalogChange {
                 artifact: "agent",
                 name: stem,
-                kind: ChangeKind::New,
-            }),
-            Some(entry) if entry.checksum != catalog_hash => out.push(CatalogChange {
-                artifact: "agent",
-                name: stem,
-                kind: ChangeKind::Changed,
-            }),
-            Some(_) => {}
+                kind,
+            });
         }
     }
 }
@@ -196,15 +251,18 @@ fn agent_changes(
 /// Why: the skill half of staleness. Skills carry no inheritance, so the catalog
 /// content the next deploy would write is the raw file body; its hash is compared
 /// to the deployed skill manifest's checksum.
-/// What: pushes a [`CatalogChange`] for every selected catalog skill whose raw
-/// content hash is absent-from or differs-from the deployed skill manifest.
-/// Unreadable files are skipped (not actionable). The skill source the deployer
+/// What: pushes a [`CatalogChange`] only when [`classify_drift`] reports the skill
+/// as `new`/`changed`, reconciling the skill manifest against the file actually on
+/// disk (deployed skills live at `<deployed_dir>/<stem>/SKILL.md`). Unreadable
+/// catalog files are skipped (not actionable). The skill source the deployer
 /// consumes is a flat `<stem>.md` layout, and the [`SkillManifest`] is keyed by
 /// the bare STEM (no `.md`) — so the lookup uses `stem`, matching the deployer.
-/// Test: `detect_flags_new_skill`, `detect_not_stale_when_identical`.
+/// Test: `detect_flags_new_skill`, `detect_not_stale_when_identical`,
+/// `detect_reconciles_deployed_but_unmanifested`.
 fn skill_changes(
     catalog_skills: &Path,
     deployed: &SkillManifest,
+    deployed_dir: &Path,
     select: &impl Fn(&str) -> bool,
     out: &mut Vec<CatalogChange>,
 ) {
@@ -216,20 +274,19 @@ fn skill_changes(
         let Ok(body) = std::fs::read_to_string(catalog_skills.join(&filename)) else {
             continue;
         };
-        // The SkillManifest is keyed by stem (no `.md`), per the skill deployer.
-        if deployed.is_managed(&stem) {
-            if !deployed.checksum_matches(&stem, &body) {
-                out.push(CatalogChange {
-                    artifact: "skill",
-                    name: stem,
-                    kind: ChangeKind::Changed,
-                });
-            }
-        } else {
+        let catalog_hash = checksum(&body);
+        // Deployed skills land as `<deployed_dir>/<stem>/SKILL.md` (per the
+        // skill deployer); the SkillManifest is keyed by stem (no `.md`).
+        let on_disk = std::fs::read_to_string(deployed_dir.join(&stem).join("SKILL.md")).ok();
+        if let Some(kind) = classify_drift(
+            &catalog_hash,
+            deployed.managed.get(&stem).map(|e| e.checksum.as_str()),
+            on_disk.as_deref(),
+        ) {
             out.push(CatalogChange {
                 artifact: "skill",
                 name: stem,
-                kind: ChangeKind::New,
+                kind,
             });
         }
     }
@@ -244,18 +301,25 @@ fn skill_changes(
 /// What: when neither catalog source tree exists (the catalog was never synced)
 /// returns `unknown` (and NOT stale) so the surface can prompt a sync rather than
 /// imply currency — DOC-17's "catalog unreachable → treat as not-stale, never
-/// block". Otherwise it compares the selected catalog agents (composed-hash vs
-/// the deployed [`AgentManifest`]) and skills (raw-hash vs the deployed
-/// [`SkillManifest`]); `stale` is true iff any selected artifact is new or
-/// changed. The change list is capped at [`MAX_CHANGES`].
+/// block". Otherwise it compares the selected catalog agents (composed-hash) and
+/// skills (raw-hash) against BOTH the deployed checksum manifests
+/// ([`AgentManifest`]/[`SkillManifest`]) AND the files actually on disk under
+/// `deployed_agents_dir`/`deployed_skills_dir` (via [`classify_drift`]), so a
+/// deployed-but-unmanifested file is reconciled rather than reported as a false
+/// `new` (#1940). `stale` is true iff any selected artifact would be
+/// deployed/refreshed by `apply`. The change list is capped at [`MAX_CHANGES`].
 /// Test: `detect_unknown_when_never_synced`, `detect_flags_changed_agent`,
 /// `detect_flags_new_skill`, `detect_not_stale_when_identical`,
-/// `detect_respects_selection`, `detect_caps_change_list`.
+/// `detect_respects_selection`, `detect_caps_change_list`,
+/// `detect_reconciles_deployed_but_unmanifested`.
+#[allow(clippy::too_many_arguments)]
 pub fn detect_staleness(
     catalog_agents: &Path,
     catalog_skills: &Path,
     deployed_agents: &AgentManifest,
     deployed_skills: &SkillManifest,
+    deployed_agents_dir: &Path,
+    deployed_skills_dir: &Path,
     agent_select: impl Fn(&str) -> bool,
     skill_select: impl Fn(&str) -> bool,
 ) -> StalenessReport {
@@ -270,8 +334,20 @@ pub fn detect_staleness(
     }
 
     let mut changes = Vec::new();
-    agent_changes(catalog_agents, deployed_agents, &agent_select, &mut changes);
-    skill_changes(catalog_skills, deployed_skills, &skill_select, &mut changes);
+    agent_changes(
+        catalog_agents,
+        deployed_agents,
+        deployed_agents_dir,
+        &agent_select,
+        &mut changes,
+    );
+    skill_changes(
+        catalog_skills,
+        deployed_skills,
+        deployed_skills_dir,
+        &skill_select,
+        &mut changes,
+    );
 
     let stale = !changes.is_empty();
     changes.truncate(MAX_CHANGES);
@@ -312,14 +388,18 @@ pub fn detect_for_framework(
     let manifest = crate::core::manifest::resolve_manifest(&sources);
     let plan = crate::core::manifest::HarnessPlan::from_manifest(&manifest, fw, &catalog_root);
 
-    let deployed_agents = AgentManifest::load(&fw.claude_agents_dir());
-    let deployed_skills = SkillManifest::load(&fw.claude_skills_dir());
+    let agents_dir = fw.claude_agents_dir();
+    let skills_dir = fw.claude_skills_dir();
+    let deployed_agents = AgentManifest::load(&agents_dir);
+    let deployed_skills = SkillManifest::load(&skills_dir);
 
     detect_staleness(
         &plan.agent_source,
         &plan.skill_source,
         &deployed_agents,
         &deployed_skills,
+        &agents_dir,
+        &skills_dir,
         |name| plan.agent_selected(name),
         |name| plan.skill_selected(name),
     )

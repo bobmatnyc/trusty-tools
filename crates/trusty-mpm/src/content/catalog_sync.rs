@@ -16,6 +16,7 @@ use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+use super::catalog_url::urls_match;
 use crate::provisioner::GitBackend;
 
 /// Default TTL for the catalog cache: 24 hours.
@@ -78,6 +79,22 @@ pub struct CatalogSyncResult {
     pub agent_count: usize,
     /// Number of skill files found in the catalog after sync.
     pub skill_count: usize,
+}
+
+impl CatalogSyncResult {
+    /// Whether the synced catalog yielded no agents at all.
+    ///
+    /// Why (#1947): the upstream claude-mpm repo moved its agents out of
+    /// `.claude/agents/` (they now live under `src/claude_mpm/agents/` as JSON
+    /// templates, an incompatible format), so the sync legitimately finds zero
+    /// composable agents. Callers must be able to detect that emptiness and warn
+    /// clearly rather than presenting "0 agents" as a bland success — the harness
+    /// still provisions from the BUNDLED assets, which are the source of truth.
+    /// What: returns `true` when `agent_count == 0`.
+    /// Test: `catalog_sync_reports_empty_agents`.
+    pub fn agents_empty(&self) -> bool {
+        self.agent_count == 0
+    }
 }
 
 /// Synchronizes the claude-mpm agent/skill catalog from a git remote.
@@ -231,6 +248,23 @@ impl<G: GitBackend> CatalogSync<G> {
             skills = skill_count,
             "catalog sync complete"
         );
+
+        // #1947: a fetch that produces zero agents is almost never what the
+        // operator expects — it means the upstream layout moved (claude-mpm now
+        // ships agents as JSON templates under `src/claude_mpm/agents/`, not the
+        // composable `.md` files trusty-mpm consumes from `.claude/agents/`). Warn
+        // loudly rather than let `catalog sync`/`status` silently no-op; the
+        // harness still provisions from the BUNDLED assets, the source of truth.
+        if agent_count == 0 {
+            warn!(
+                repo = %self.repo_url,
+                git_ref = %self.git_ref,
+                dir = %self.catalog_dir.display(),
+                "catalog sync found 0 agents — the synced repo has no composable \
+                 agents at repo/.claude/agents (upstream layout may have moved); \
+                 provisioning falls back to the bundled agent assets"
+            );
+        }
 
         Ok(CatalogSyncResult {
             fetched: true,
@@ -474,42 +508,6 @@ fn guard_remove(target: &Path, catalog_dir: &Path) -> Result<(), CatalogError> {
     std::fs::remove_dir_all(target).map_err(CatalogError::Io)
 }
 
-/// Return true if two git remote URLs refer to the same repository.
-///
-/// Why: `git remote get-url` and the configured URL may differ by trailing
-/// slash or `.git` suffix; normalising before comparison avoids spurious
-/// re-clones when the URL forms are equivalent.
-/// What: lower-cases both URLs and strips trailing `/` and `.git`.
-/// Test: urls_match_normalises_variants.
-fn urls_match(a: &str, b: &str) -> bool {
-    normalize_repo_url(a) == normalize_repo_url(b)
-}
-
-/// Normalise a git remote URL to a canonical form for comparison.
-///
-/// Why: two URLs for the same repository can differ in protocol (ssh vs https),
-/// `.git` suffix, trailing slash, and case — without normalization they falsely
-/// mismatch and trigger a spurious destructive re-clone.
-/// What: converts `git@host:owner/repo` to `https://host/owner/repo`, strips
-/// trailing `/` and `.git`, then lowercases the result.
-/// Test: urls_match_normalises_variants.
-fn normalize_repo_url(url: &str) -> String {
-    // Convert SSH git@ form to HTTPS before further normalization.
-    let https_form = if let Some(rest) = url.strip_prefix("git@") {
-        if let Some((host, path)) = rest.split_once(':') {
-            format!("https://{host}/{path}")
-        } else {
-            url.to_owned()
-        }
-    } else {
-        url.to_owned()
-    };
-    https_form
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .to_lowercase()
-}
-
 /// Return the file stems in a directory (for flat-file layouts like agents).
 ///
 /// Why: catalog listing needs clean names without extensions.
@@ -604,6 +602,41 @@ mod tests {
 
         let result = sync.sync(false).unwrap();
         assert!(result.fetched, "first sync must fetch");
+    }
+
+    #[test]
+    fn catalog_sync_reports_empty_agents() {
+        // #1947: a fetch whose checkout has no composable agents at
+        // repo/.claude/agents must report `agents_empty()` so the CLI/daemon can
+        // warn honestly instead of presenting "0 agents" as a silent success. The
+        // FakeGitBackend clone does not populate an agents dir, so the count is 0.
+        let root = TempDir::new().unwrap();
+        let sync = make_sync(&root);
+
+        let result = sync.sync(false).unwrap();
+        assert!(result.fetched, "first sync must fetch");
+        assert_eq!(result.agent_count, 0, "no agents present in the fake clone");
+        assert!(
+            result.agents_empty(),
+            "an agent-less catalog must be flagged empty"
+        );
+    }
+
+    #[test]
+    fn catalog_sync_not_empty_when_agents_present() {
+        // The inverse: once composable agents exist at repo/.claude/agents, the
+        // result must NOT be flagged empty.
+        let root = TempDir::new().unwrap();
+        let sync = make_sync(&root);
+        sync.sync(false).unwrap();
+
+        let agents_dir = root.path().join("repo").join(".claude").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("rust-engineer.md"), "# rust").unwrap();
+
+        let result = sync.sync(true).unwrap();
+        assert_eq!(result.agent_count, 1);
+        assert!(!result.agents_empty());
     }
 
     #[test]
@@ -782,50 +815,6 @@ mod tests {
         assert!(
             guard_remove(&catalog_dir, &catalog_dir).is_err(),
             "catalog root itself must be rejected"
-        );
-    }
-
-    #[test]
-    fn urls_match_normalises_variants() {
-        // SSH and HTTPS forms of the same repo must match.
-        assert!(
-            urls_match(
-                "git@github.com:owner/repo.git",
-                "https://github.com/owner/repo"
-            ),
-            "ssh↔https must match"
-        );
-        // Trailing slash must not prevent a match.
-        assert!(
-            urls_match(
-                "https://github.com/owner/repo/",
-                "https://github.com/owner/repo"
-            ),
-            "trailing slash must be ignored"
-        );
-        // .git suffix must not prevent a match.
-        assert!(
-            urls_match(
-                "https://github.com/owner/repo.git",
-                "https://github.com/owner/repo"
-            ),
-            ".git suffix must be stripped"
-        );
-        // Case insensitivity.
-        assert!(
-            urls_match(
-                "HTTPS://GitHub.com/Owner/Repo",
-                "https://github.com/owner/repo"
-            ),
-            "comparison must be case-insensitive"
-        );
-        // Different repos must NOT match.
-        assert!(
-            !urls_match(
-                "https://github.com/owner/repo-a",
-                "https://github.com/owner/repo-b"
-            ),
-            "distinct repos must not match"
         );
     }
 }

@@ -8,5 +8,6 @@
 //! Test: catalog_sync.rs carries unit tests with a FakeGitBackend.
 
 pub mod catalog_sync;
+mod catalog_url;
 
 pub use catalog_sync::{CatalogError, CatalogSync, CatalogSyncResult, catalog_root_for};

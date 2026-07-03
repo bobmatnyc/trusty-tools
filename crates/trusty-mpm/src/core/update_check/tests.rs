@@ -80,6 +80,8 @@ fn detect_unknown_when_never_synced() {
         &skills,
         &AgentManifest::default(),
         &SkillManifest::default(),
+        &root.path().join("dep-agents"),
+        &root.path().join("dep-skills"),
         |_| true,
         |_| true,
     );
@@ -106,6 +108,8 @@ fn detect_not_stale_when_identical() {
         &skills,
         &dep_agents,
         &dep_skills,
+        &root.path().join("dep-agents"),
+        &root.path().join("dep-skills"),
         |_| true,
         |_| true,
     );
@@ -134,6 +138,8 @@ fn detect_flags_changed_agent() {
         &skills,
         &dep_agents,
         &SkillManifest::default(),
+        &root.path().join("dep-agents"),
+        &root.path().join("dep-skills"),
         |_| true,
         |_| true,
     );
@@ -157,6 +163,8 @@ fn detect_flags_new_agent() {
         &root.path().join("skills"),
         &AgentManifest::default(),
         &SkillManifest::default(),
+        &root.path().join("dep-agents"),
+        &root.path().join("dep-skills"),
         |_| true,
         |_| true,
     );
@@ -177,6 +185,8 @@ fn detect_flags_new_skill() {
         &skills,
         &AgentManifest::default(),
         &SkillManifest::default(),
+        &root.path().join("dep-agents"),
+        &root.path().join("dep-skills"),
         |_| true,
         |_| true,
     );
@@ -201,6 +211,8 @@ fn detect_flags_changed_skill() {
         &skills,
         &AgentManifest::default(),
         &dep_skills,
+        &root.path().join("dep-agents"),
+        &root.path().join("dep-skills"),
         |_| true,
         |_| true,
     );
@@ -226,6 +238,8 @@ fn detect_respects_selection() {
         &root.path().join("skills"),
         &dep_agents,
         &SkillManifest::default(),
+        &root.path().join("dep-agents"),
+        &root.path().join("dep-skills"),
         |name| name == "rust-engineer", // exclude php-engineer
         |_| true,
     );
@@ -250,6 +264,8 @@ fn detect_caps_change_list() {
         &root.path().join("skills"),
         &AgentManifest::default(),
         &SkillManifest::default(),
+        &root.path().join("dep-agents"),
+        &root.path().join("dep-skills"),
         |_| true,
         |_| true,
     );
@@ -313,6 +329,8 @@ fn detect_unknown_when_only_one_tree_missing_is_not_unknown() {
         &root.path().join("skills"), // does not exist
         &AgentManifest::default(),
         &SkillManifest::default(),
+        &root.path().join("dep-agents"),
+        &root.path().join("dep-skills"),
         |_| true,
         |_| true,
     );
@@ -321,4 +339,155 @@ fn detect_unknown_when_only_one_tree_missing_is_not_unknown() {
         "one present tree means synced, not unknown"
     );
     assert!(report.stale, "the present agent is new → stale");
+}
+
+/// Write the COMPOSED catalog agent to a deployment dir, simulating a file tm
+/// deployed WITHOUT recording a manifest entry (the #1940 root-cause scenario).
+fn deploy_agent_on_disk(catalog_agents: &Path, deployed_dir: &Path, stem: &str) {
+    let composed = compose_agent(stem, catalog_agents).unwrap();
+    fs::create_dir_all(deployed_dir).unwrap();
+    fs::write(deployed_dir.join(format!("{stem}.md")), composed).unwrap();
+}
+
+/// Write the RAW catalog skill to `<deployed_dir>/<stem>/SKILL.md`, matching the
+/// skill deployer's on-disk layout, again WITHOUT a manifest entry.
+fn deploy_skill_on_disk(catalog_skills: &Path, deployed_dir: &Path, stem: &str) {
+    let body = fs::read_to_string(catalog_skills.join(format!("{stem}.md"))).unwrap();
+    let skill_dir = deployed_dir.join(stem);
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(skill_dir.join("SKILL.md"), body).unwrap();
+}
+
+#[test]
+fn detect_reconciles_deployed_but_unmanifested() {
+    // #1940: an agent/skill already deployed on disk with the current catalog
+    // content but ABSENT from the checksum manifest must NOT be reported as `new`.
+    // A fully-deployed roster reports 0 changes even with an empty manifest.
+    let root = TempDir::new().unwrap();
+    let agents = root.path().join("agents");
+    let skills = root.path().join("skills");
+    write_agent(&agents, "rust-engineer", "ENGINEER BODY");
+    write_skill(&skills, "tm-doctor", "DOCTOR BODY");
+
+    let dep_agents_dir = root.path().join("dep-agents");
+    let dep_skills_dir = root.path().join("dep-skills");
+    deploy_agent_on_disk(&agents, &dep_agents_dir, "rust-engineer");
+    deploy_skill_on_disk(&skills, &dep_skills_dir, "tm-doctor");
+
+    // Manifests are EMPTY — the deploy path never recorded them (the live bug).
+    let report = detect_staleness(
+        &agents,
+        &skills,
+        &AgentManifest::default(),
+        &SkillManifest::default(),
+        &dep_agents_dir,
+        &dep_skills_dir,
+        |_| true,
+        |_| true,
+    );
+    assert!(!report.unknown);
+    assert!(
+        !report.stale,
+        "deployed-but-unmanifested roster must reconcile to 0 changes: {report:?}"
+    );
+    assert!(report.changes.is_empty());
+}
+
+#[test]
+fn detect_user_owned_on_disk_not_reported() {
+    // A file on disk that differs from the catalog content and is NOT managed is
+    // user-owned; `apply` skips it, so it must not be reported as drift.
+    let root = TempDir::new().unwrap();
+    let agents = root.path().join("agents");
+    write_agent(&agents, "rust-engineer", "CATALOG BODY");
+
+    let dep_agents_dir = root.path().join("dep-agents");
+    fs::create_dir_all(&dep_agents_dir).unwrap();
+    fs::write(
+        dep_agents_dir.join("rust-engineer.md"),
+        "USER-OWNED DIFFERENT CONTENT",
+    )
+    .unwrap();
+
+    let report = detect_staleness(
+        &agents,
+        &root.path().join("skills"),
+        &AgentManifest::default(),
+        &SkillManifest::default(),
+        &dep_agents_dir,
+        &root.path().join("dep-skills"),
+        |_| true,
+        |_| true,
+    );
+    assert!(
+        !report.stale,
+        "a user-owned on-disk file `apply` never touches must not be drift: {report:?}"
+    );
+}
+
+#[test]
+fn detect_user_modified_managed_not_reported() {
+    // A MANAGED agent whose catalog content changed, but whose on-disk copy the
+    // user has since edited (differs from the recorded checksum), must NOT be
+    // reported — `apply` preserves the user's edit rather than refreshing it.
+    let root = TempDir::new().unwrap();
+    let agents = root.path().join("agents");
+    write_agent(&agents, "rust-engineer", "ORIGINAL");
+    let dep_agents = deployed_agent_matching(&agents, "rust-engineer");
+    // Upstream edit: catalog content changes.
+    write_agent(&agents, "rust-engineer", "UPSTREAM CHANGED");
+    // On disk the user has hand-edited it (matches neither recorded nor catalog).
+    let dep_agents_dir = root.path().join("dep-agents");
+    fs::create_dir_all(&dep_agents_dir).unwrap();
+    fs::write(dep_agents_dir.join("rust-engineer.md"), "USER HAND-EDIT").unwrap();
+
+    let report = detect_staleness(
+        &agents,
+        &root.path().join("skills"),
+        &dep_agents,
+        &SkillManifest::default(),
+        &dep_agents_dir,
+        &root.path().join("dep-skills"),
+        |_| true,
+        |_| true,
+    );
+    assert!(
+        !report.stale,
+        "a user-modified managed file `apply` skips must not be drift: {report:?}"
+    );
+}
+
+#[test]
+fn classify_drift_reconciles_on_disk() {
+    // Unit-level: on-disk content matching the catalog hash is never drift, even
+    // with no manifest entry; a managed+unmodified changed file is Changed.
+    let cat = checksum("catalog content");
+    // Deployed-but-unmanifested and current → None (reconcile).
+    assert_eq!(
+        super::classify_drift(&cat, None, Some("catalog content")),
+        None
+    );
+    // Managed, unmodified on disk, catalog changed → Changed.
+    let recorded = checksum("old content");
+    assert_eq!(
+        super::classify_drift(&cat, Some(&recorded), Some("old content")),
+        Some(ChangeKind::Changed)
+    );
+    // Managed, user-modified on disk, catalog changed → None (apply skips).
+    assert_eq!(
+        super::classify_drift(&cat, Some(&recorded), Some("user edit")),
+        None
+    );
+}
+
+#[test]
+fn classify_drift_new_when_absent() {
+    // Nothing on disk and no manifest entry → genuinely new (apply deploys it).
+    let cat = checksum("catalog content");
+    assert_eq!(
+        super::classify_drift(&cat, None, None),
+        Some(ChangeKind::New)
+    );
+    // Manifest already records the catalog content → not drift regardless of disk.
+    assert_eq!(super::classify_drift(&cat, Some(&cat), None), None);
 }

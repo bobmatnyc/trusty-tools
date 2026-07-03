@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use super::default::default_manifest;
-use super::schema::HarnessManifest;
+use super::schema::{AgentSet, HarnessManifest};
 
 /// File name of a harness manifest in every layer location.
 ///
@@ -45,6 +45,15 @@ pub struct ManifestSources {
     pub user: Option<PathBuf>,
     /// `~/.trusty-mpm/catalog/repo/.claude/manifest.toml` — synced catalog.
     pub catalog: Option<PathBuf>,
+    /// Auto-detected per-project language agent scoping (#1941).
+    ///
+    /// Why: a Rust-only workspace should not receive the full polyglot roster.
+    /// [`ManifestSources::resolve`] fills this from
+    /// [`super::project_lang::language_agent_scope`]; [`resolve_manifest`] applies
+    /// it as the lowest override layer (above the compiled default, below the
+    /// catalog/user/project manifests) so an explicit `[agents]` override always
+    /// wins. `None` means "no recognized language" → deploy everything (unchanged).
+    pub language_scope: Option<AgentSet>,
 }
 
 impl ManifestSources {
@@ -75,6 +84,7 @@ impl ManifestSources {
                     .join(".claude")
                     .join(MANIFEST_FILE),
             ),
+            language_scope: super::project_lang::language_agent_scope(project_dir),
         }
     }
 }
@@ -94,6 +104,17 @@ impl ManifestSources {
 /// `resolve_user_over_catalog`, `resolve_malformed_layer_is_skipped`.
 pub fn resolve_manifest(sources: &ManifestSources) -> HarnessManifest {
     let mut manifest = default_manifest();
+
+    // Per-project language scoping (#1941): the lowest override layer, applied on
+    // top of the compiled default but below the catalog/user/project manifests so
+    // an explicit `[agents]` override always wins. Absent (unknown project type)
+    // → no scoping, deploy everything (zero-regression).
+    if let Some(scope) = &sources.language_scope {
+        manifest = manifest.merge(HarnessManifest {
+            agents: Some(scope.clone()),
+            ..HarnessManifest::default()
+        });
+    }
 
     // Lowest-to-highest precedence: catalog → user → project.
     if let Some(path) = &sources.catalog
@@ -192,6 +213,7 @@ mod tests {
             project: Some(tmp.path().join("p").join("manifest.toml")),
             user: Some(tmp.path().join("u").join("manifest.toml")),
             catalog: Some(tmp.path().join("c").join("manifest.toml")),
+            language_scope: None,
         };
         assert_eq!(resolve_manifest(&sources), default_manifest());
     }
@@ -220,6 +242,7 @@ mod tests {
             project: Some(project),
             user: Some(user),
             catalog: Some(catalog),
+            language_scope: None,
         };
         let m = resolve_manifest(&sources);
         assert_eq!(
@@ -248,6 +271,7 @@ mod tests {
             project: Some(tmp.path().join("p").join("manifest.toml")), // absent
             user: Some(user),
             catalog: Some(catalog),
+            language_scope: None,
         };
         let m = resolve_manifest(&sources);
         assert_eq!(
@@ -270,6 +294,7 @@ mod tests {
             project: None,
             user: None,
             catalog: Some(catalog),
+            language_scope: None,
         };
         let m = resolve_manifest(&sources);
         // The catalog disables search. Because `[mcp]` now merges FIELD-BY-FIELD
@@ -299,6 +324,7 @@ mod tests {
             project: Some(project),
             user: None,
             catalog: None,
+            language_scope: None,
         };
         let mcp = resolve_manifest(&sources).mcp.expect("mcp present");
         assert_eq!(mcp.trusty_search, Some(false));
@@ -323,8 +349,57 @@ mod tests {
             project: None,
             user: Some(user),
             catalog: None,
+            language_scope: None,
         };
         // Malformed user layer skipped → result equals the default.
         assert_eq!(resolve_manifest(&sources), default_manifest());
+    }
+
+    #[test]
+    fn resolve_scopes_agents_for_rust_project() {
+        // #1941: a project whose root has a Cargo.toml (and no manifest overrides)
+        // must resolve to an agent set that excludes the foreign-language engineers
+        // while keeping rust-engineer — driven purely by auto-detection.
+        let proj = TempDir::new().unwrap();
+        std::fs::write(proj.path().join("Cargo.toml"), "[package]\n").unwrap();
+        let fw = TempDir::new().unwrap();
+        let catalog = TempDir::new().unwrap();
+
+        let sources = ManifestSources::resolve(proj.path(), fw.path(), catalog.path());
+        assert!(
+            sources.language_scope.is_some(),
+            "a Cargo project must be language-scoped"
+        );
+
+        let m = resolve_manifest(&sources);
+        let agents = m.agents.expect("agents section present");
+        assert!(
+            !agents.exclude.contains(&"rust-engineer".to_string()),
+            "rust-engineer must survive scoping"
+        );
+        assert!(
+            agents.exclude.contains(&"python-engineer".to_string()),
+            "python-engineer must be excluded from a Rust-only project: {:?}",
+            agents.exclude
+        );
+    }
+
+    #[test]
+    fn resolve_unknown_project_deploys_everything() {
+        // A project with no recognized language marker must NOT be scoped — the
+        // resolved manifest keeps the default's empty include/exclude (deploy all).
+        let proj = TempDir::new().unwrap();
+        std::fs::write(proj.path().join("README.md"), "# hi\n").unwrap();
+        let fw = TempDir::new().unwrap();
+        let catalog = TempDir::new().unwrap();
+
+        let sources = ManifestSources::resolve(proj.path(), fw.path(), catalog.path());
+        assert!(sources.language_scope.is_none());
+        let agents = resolve_manifest(&sources).agents.expect("agents present");
+        assert!(
+            agents.exclude.is_empty(),
+            "unknown project excludes nothing"
+        );
+        assert!(agents.include.is_empty(), "unknown project includes all");
     }
 }
