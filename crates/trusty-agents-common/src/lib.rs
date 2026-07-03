@@ -99,6 +99,20 @@ pub mod events;
 /// Test: `harness_doc::tests` exercises every accessor and the full-doc combinator.
 pub mod harness_doc;
 
+/// Portable tool-output compression: `compress_tool_output(_async)` + filters.
+///
+/// Why: Hoisted from `trusty-agents::compress::tool_output` in issue #1959 so
+///      `trusty-mpm` (and any future consumer) can compress tool output
+///      without a full `trusty-agents` path dependency — needed by the `tm
+///      hook` `PreToolUse` Bash rewrite spike (issue #1956).
+/// What: Dispatch (`compress_tool_output`), the async RTK-then-native wrapper
+///       (`compress_tool_output_async`), and the path-reporting variant
+///       (`compress_tool_output_async_with_path`) used for stats logging.
+/// Test: `cargo test -p trusty-agents-common` exercises `compress::tool_output::tests`
+///       in place; `trusty-agents`'s `llm::tool_loop` tests cover the
+///       re-exported call site.
+pub mod compress;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

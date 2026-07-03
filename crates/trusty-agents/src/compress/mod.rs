@@ -14,7 +14,20 @@ pub mod history;
 pub mod output_prompt;
 mod pipeline;
 pub mod session;
-pub mod tool_output;
+
+/// Per-tool output compression — hoisted into `trusty-agents-common` (#1959).
+///
+/// Why: `trusty-mpm`'s `tm compress` subcommand (issue #1956) needs
+/// `compress_tool_output_async` without a full `trusty-agents` path
+/// dependency. Re-exporting here (rather than re-declaring the module)
+/// keeps every existing `trusty_agents::compress::tool_output::*` /
+/// `trusty_agents::compress::compress_tool_output*` call site — including
+/// the `llm::tool_loop` hot path and the
+/// `examples/tool_output_compression_spike.rs` spike — source-compatible.
+/// What: Re-exports `trusty_agents_common::compress::tool_output`.
+/// Test: `cargo test -p trusty-agents-common` covers the implementation in
+/// place; `cargo test -p trusty-agents` compile-tests the re-export.
+pub use trusty_agents_common::compress::tool_output;
 
 pub use context::{TokenBudget, truncate_history};
 pub use dedup::dedup_sections;
