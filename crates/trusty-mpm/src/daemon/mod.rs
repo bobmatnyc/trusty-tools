@@ -503,7 +503,7 @@ fn parse_orphan_gc_interval(raw: Option<&str>) -> u64 {
 
 /// Periodically reconcile live tmux against the registries and reap orphans.
 ///
-/// Why: leaked `tmpm-*` tmux sessions (from crashes or pre-RAII builds) must be
+/// Why: leaked managed (`tm-*`/`tmpm-*`) tmux sessions (from crashes or pre-RAII builds) must be
 /// cleaned up self-healingly. One sweep runs immediately at boot to clear
 /// accumulated orphans, then the loop runs on the configured interval.
 /// What: owns a single [`orphan_gc::OrphanGc`] so the two-pass debounce persists

@@ -433,7 +433,7 @@ pub struct RegisterSession {
     pub project_path: Option<PathBuf>,
     /// Optional caller-supplied tmux session name.
     ///
-    /// Why: the CLI computes a `tmpm-<folder>` name from the project directory
+    /// Why: the CLI computes a `tm-<folder>` name from the project directory
     /// and creates the tmux session under that name; passing it here keeps the
     /// daemon registry's `tmux_name` consistent with the live tmux session.
     /// What: when present and non-empty it is used as the session's
@@ -493,7 +493,7 @@ pub async fn register_session(
     State(state): State<Arc<DaemonState>>,
     Json(body): Json<RegisterSession>,
 ) -> Result<Json<RegisterSessionResponse>, DaemonError> {
-    // Derive the tmux name from the project directory (`tmpm-<folder>`) so the
+    // Derive the tmux name from the project directory (`tm-<folder>`) so the
     // registry name matches the folder-based session the CLI creates. A
     // caller-supplied `name` always wins; otherwise fall back to the UUID name.
     let project_dir = body.project_path.as_deref();
@@ -602,7 +602,7 @@ pub async fn get_session(
 /// `DELETE /sessions/:id` — deregister a session AND kill its tmux host.
 ///
 /// Why: a DELETE must actually tear the session down — dropping only the
-/// registry entry leaks a live `tmpm-*` tmux session on every call (the
+/// registry entry leaks a live managed (`tm-*`/`tmpm-*`) tmux session on every call (the
 /// `full_user_cycle` leak this closes, epic #1452, #1454). Every session is
 /// owned by exactly one Session object; deleting it kills the tmux host too.
 /// What: parses the UUID, removes the legacy registry entry (404 if absent),

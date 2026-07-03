@@ -21,13 +21,13 @@ use crate::formatters::banner::{
 /// creation fails (e.g. `send-keys` error, or `attach-session` failing because
 /// there is no TTY available — which is always the case in integration tests),
 /// the session would otherwise be permanently orphaned, filling the host tmux
-/// with leaked `tmpm-*` sessions (#1815).
+/// with leaked managed (`tm-*`/`tmpm-*`) sessions (#1815).
 /// What: on `drop` while armed, runs `tmux kill-session -t <name>` best-effort
 /// (ignores errors, since the session may already be gone). [`disarm`] turns
 /// `drop` into a no-op; call it before returning `Ok(())` so a session that
 /// the user successfully attached to persists for future re-attachment.
 /// Test: verified by `cargo test -p trusty-mpm --bin tm`; the before/after
-/// `tmpm-*` session count must be equal after the test run (issue #1815).
+/// managed (`tm-*`/`tmpm-*`) session count must be equal after the test run (issue #1815).
 struct LaunchSessionGuard {
     name: String,
     armed: bool,

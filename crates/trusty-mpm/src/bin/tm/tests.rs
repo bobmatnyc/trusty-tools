@@ -305,16 +305,16 @@ fn cli_parses_launch_with_style() {
 }
 
 #[test]
-fn fallback_session_name_has_tmpm_prefix() {
+fn fallback_session_name_has_tm_prefix() {
     let name = fallback_session_name(std::path::Path::new("/work/p"));
-    assert!(name.starts_with("tmpm-"), "got {name}");
+    assert!(name.starts_with("tm-"), "got {name}");
 }
 
 #[test]
 fn fallback_session_name_uses_folder() {
     // The offline fallback name reflects the project folder, not a UUID.
     let name = fallback_session_name(std::path::Path::new("/Users/x/trusty-mpm"));
-    assert_eq!(name, "tmpm-trusty-mpm");
+    assert_eq!(name, "tm-trusty-mpm");
 }
 
 #[test]

@@ -20,7 +20,7 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use crate::core::names::{build_managed_session_name, name_from_dir};
+use crate::core::names::{SessionNameError, build_managed_session_name, leaf_slug_from_dir};
 use crate::core::sm::control::Submit;
 
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
@@ -74,137 +74,32 @@ pub enum ManagedError {
     /// record instead.
     #[error("tmux session already adopted/registered: {0}")]
     AlreadyAdopted(String),
+
+    /// A session-name derivation failure (currently: all 99 `tm-<leaf>-NN`
+    /// serials for a project are in use).
+    ///
+    /// Why (#1955, renamed in the #1966 review follow-up): the serial-numbered
+    /// naming scheme caps at two digits per project; this surfaces
+    /// [`SessionNameError`] through the same typed-error seam as every other
+    /// create-path failure instead of stringly-typed-wrapping it into
+    /// [`TmuxUnavailable`](Self::TmuxUnavailable). Named `SessionName` (not
+    /// `NameSerialExhausted`, its original name) and given a generic message
+    /// ("session name error", not "serial exhausted") because of the `#[from]`
+    /// below: [`SessionNameError`] currently has exactly one variant
+    /// ([`SessionNameError::SerialExhausted`]), but `#[from]` auto-converts
+    /// ANY future variant into this one — a name/message naming one specific
+    /// variant would silently mislabel a later, unrelated `SessionNameError`
+    /// variant.
+    #[error("session name error: {0}")]
+    SessionName(#[from] SessionNameError),
 }
 
-/// Trait seam over tmux operations used by the session manager.
-///
-/// Why: the manager must be fully unit-testable without a live tmux binary;
-/// a trait lets tests inject a [`FakeTmuxDriver`] instead of the real
-/// [`crate::daemon::tmux::TmuxDriver`].
-/// What: minimal surface — create session, kill session, send a line, capture
-/// pane output, list session names, and probe existence.
-/// Test: [`FakeTmuxDriver`] in this module's test section.
-pub trait ManagedTmuxDriver: Send + Sync {
-    /// Create a detached tmux session named `name`, rooted at `workdir`.
-    fn create_session(&self, name: &str, workdir: &str) -> Result<(), ManagedError>;
-
-    /// Kill the tmux session named `name`.
-    fn kill_session(&self, name: &str) -> Result<(), ManagedError>;
-
-    /// Send literal text followed by Enter to the session named `name`.
-    fn send_line(&self, name: &str, text: &str) -> Result<(), ManagedError>;
-
-    /// Send literal text to `name` WITHOUT a trailing Enter (#1461).
-    ///
-    /// Why: the harness-agnostic [`Submit::NoSubmit`](crate::core::sm::control::Submit::NoSubmit)
-    /// intent must type into the pane without committing the line (e.g. staging a
-    /// partial command a human will edit). Splitting this out keeps `send_line`
-    /// (literal + Enter) and this (literal only) as distinct, testable primitives.
-    /// What: sends `text` literally. The default returns an explicit
-    /// `TmuxUnavailable` error rather than silently falling back to `send_line`:
-    /// delegating to `send_line` would append an Enter and SUBMIT a line the
-    /// caller asked NOT to submit (`Submit::NoSubmit`) — a silent-wrong-behavior
-    /// trap. Any driver actually used with `inject(.., NoSubmit)` MUST override
-    /// this (the real `RealTmuxDriver` does); an un-overriding driver fails loudly.
-    /// Test: `RealTmuxDriver` override is asserted via `core::tmux` argv tests;
-    /// the no-submit dispatch is asserted by `inject_dispatch_nosubmit_sends_literal_only`.
-    fn send_keys_literal(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
-        Err(ManagedError::TmuxUnavailable(
-            "send_keys_literal not implemented for this driver".into(),
-        ))
-    }
-
-    /// Send an interrupt (Ctrl-C) to the session named `name` (#1461).
-    ///
-    /// Why: the [`Submit::Interrupt`](crate::core::sm::control::Submit::Interrupt)
-    /// intent stops a running task in place (the clean precursor to relaunching a
-    /// runtime). Exposing it on the trait keeps the interrupt path runtime-neutral.
-    /// What: sends the runtime's interrupt. The default returns an explicit
-    /// `TmuxUnavailable` error rather than a silent no-op `Ok(())`: Interrupt is
-    /// the verb used to STOP a running task, so a silent no-op would leave the
-    /// task running while the caller believes it was interrupted — a dangerous
-    /// silent-wrong-behavior trap. Any driver actually used with
-    /// `inject(.., Interrupt)` MUST override this (the real `RealTmuxDriver` sends
-    /// `C-c`); an un-overriding driver fails loudly.
-    /// Test: `RealTmuxDriver` override via `core::tmux::send_keys_keyname_argv`;
-    /// dispatch asserted by `inject_dispatch_interrupt_sends_ctrl_c`.
-    fn send_interrupt(&self, _name: &str) -> Result<(), ManagedError> {
-        Err(ManagedError::TmuxUnavailable(
-            "send_interrupt not implemented for this driver".into(),
-        ))
-    }
-
-    /// Capture the last `lines` of pane output for the session named `name`.
-    ///
-    /// `lines` is `usize` to match the harness-agnostic
-    /// [`SessionControl::observe`](crate::core::sm::control::SessionControl::observe)
-    /// contract end-to-end; the single `usize → u32` narrowing the underlying
-    /// tmux `-S` argv requires is confined to the real-tmux driver edge, so no
-    /// caller in the observe path needs a `try_from`.
-    fn capture(&self, name: &str, lines: usize) -> Result<String, ManagedError>;
-
-    /// Return the pane's current working directory for snapshot-before-stop (#1816).
-    ///
-    /// Why: the idle auto-stop path captures cwd just before killing tmux so
-    /// `resume()` can restore the operator's working directory instead of always
-    /// starting at the workspace root. Returning `None` (the default) is safe —
-    /// resume falls back to `workspace_path`/`cwd` as before.
-    /// What: returns the `pane_current_path` tmux format string value, or `None`
-    /// if the driver does not support it or the call fails.
-    /// Test: `RealTmuxDriver` runs `tmux display-message`; fake drivers return `None`.
-    fn get_pane_cwd(&self, _name: &str) -> Option<std::path::PathBuf> {
-        None
-    }
-
-    /// Return all live tmux session names on the host.
-    fn list_sessions(&self) -> Result<Vec<String>, ManagedError>;
-
-    /// True if a tmux session with this name currently exists.
-    fn session_exists(&self, name: &str) -> bool {
-        self.list_sessions()
-            .map(|names| names.iter().any(|n| n == name))
-            .unwrap_or(false)
-    }
-
-    /// Signal a session's process to stop, then kill the tmux session.
-    ///
-    /// Why: abruptly killing a session (`kill_session`) discards any in-flight
-    /// work the claude process was persisting. Sending a termination signal first
-    /// gives the process a chance to flush state — the async caller is responsible
-    /// for inserting the ~2 s grace window before calling this (see
-    /// `SessionManager::shutdown` in `restart_ops.rs`). This method is
-    /// intentionally synchronous so it can live on the non-async trait; the delay
-    /// is owned by the async shutdown path to avoid blocking a Tokio worker thread.
-    /// What: if `claude_pid` is known, sends SIGTERM via `nix::signal::kill`;
-    /// then unconditionally calls `kill_session`. If `claude_pid` is `None`,
-    /// falls back to `send_interrupt` (Ctrl-C) before the kill. Signal errors are
-    /// logged as warnings (the process may have already exited); only
-    /// `kill_session` failure is returned as `Err`. Does NOT sleep — callers
-    /// must insert an async delay (`tokio::time::sleep`) between the signal phase
-    /// and calling this if a grace window is desired.
-    /// Test: `fake_driver_graceful_stop_with_pid` (pid known, records kill),
-    /// `fake_driver_graceful_stop_without_pid` (no pid, falls back to C-c).
-    fn graceful_stop(&self, name: &str, claude_pid: Option<u32>) -> Result<(), ManagedError> {
-        if let Some(pid) = claude_pid {
-            #[cfg(unix)]
-            {
-                use nix::sys::signal::{Signal, kill};
-                use nix::unistd::Pid;
-                if let Err(e) = kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
-                    tracing::warn!(pid, name, "graceful_stop: SIGTERM failed: {e}");
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = pid; // SIGTERM not applicable on non-unix; fall through to kill
-            }
-        } else {
-            // No pid — best effort interrupt via tmux send-keys.
-            let _ = self.send_interrupt(name);
-        }
-        self.kill_session(name)
-    }
-}
+// [`ManagedTmuxDriver`] lives in `driver.rs` (issue #1955 SLOC split — the
+// trait's default-impl doc comments alone were ~130 lines, which pushed this
+// file over the 500-SLOC production cap once the serial-numbered naming
+// rework added a new error variant and helper method). Re-exported here so
+// existing `super::manager::ManagedTmuxDriver` import paths keep resolving.
+pub use super::driver::ManagedTmuxDriver;
 
 /// Summary of what a reconciliation pass found and changed.
 ///
@@ -219,7 +114,7 @@ pub struct ReconcileReport {
     pub adopted: Vec<String>,
     /// Session ids whose tmux session was gone; marked Stopped (resumable).
     pub stopped: Vec<String>,
-    /// tmux sessions with the `tmpm-` prefix that the store did not know about.
+    /// Managed tmux sessions (`tm-`/`tmpm-`/`trusty-mpm-`) that the store did not know about.
     pub external_adopted: Vec<String>,
 }
 
@@ -277,10 +172,9 @@ impl SessionManager {
     ///
     /// Why: `POST /api/v1/sessions/managed` needs the full create-name-record-spawn
     /// flow in one operation so the HTTP handler stays thin.
-    /// What: derives the tmux name from `name_hint` (→ `name_from_dir`) or from
-    /// the `repo_url` GitHub identity (→ `build_managed_session_name`, #1789),
-    /// creates the tmux session via the driver, persists a [`SessionRecord`] in
-    /// state `Provisioning`, and returns it.
+    /// What: derives the tmux name via [`build_managed_session_name`]
+    /// (`tm-<project-leaf>-NN`, #1955), creates the tmux session via the driver,
+    /// persists a [`SessionRecord`] in state `Provisioning`, and returns it.
     /// The runtime backend defaults to [`crate::runtime::RuntimeKind::ClaudeCode`]
     /// so callers that do not care about the backend keep the pre-#1203 behavior.
     /// Test: `manager_create_record`.
@@ -343,35 +237,88 @@ impl SessionManager {
         owned: bool,
     ) -> Result<SessionRecord, ManagedError> {
         let cwd = cwd.unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")));
-        // Name selection priority (issue #1789):
-        //   1. Explicit `name_hint` from the user → honor unchanged (→ `tmpm-<hint-slug>`).
-        //   2. GitHub-parseable `repo_url`         → `tmpm-<repo>-<8hex>` (project-identifiable).
-        //   3. No project determined                → `tmpm-local-<8hex>` (fallback).
-        //
-        // The cwd-basename scheme is intentionally removed: for the clone path the
-        // cwd is `<workspace-root>/<owner>/<repo>/<session-id>/` whose BASENAME is
-        // the UUID — not useful. For the in-project path the basename is also the
-        // UUID. For the local-path spawn (no `repo_url`) the new `tmpm-local-<8hex>`
-        // fallback is explicit and avoids the misleading appearance of being a
-        // project-linked session.
-        let tmux_name = if let Some(hint) = name_hint {
-            // Explicit name hint from the user — treat the hint as a path basename
-            // to match pre-#1789 behaviour (callers may pass a bare "ticket-1234"
-            // or a directory path like "/repos/project").
-            name_from_dir(Path::new(&hint))
-        } else {
-            // Derive project from repo_url if it carries a parseable GitHub identity.
-            let project = repo_url
-                .as_deref()
-                .and_then(trusty_common::github_path::parse_github_path)
-                .map(|gh| gh.repo);
-            build_managed_session_name(project.as_deref(), id.as_uuid())
-        };
+        // Name selection priority (issue #1955, supersedes the #1789/#1791
+        // `tmpm-<repo-slug>-<8hex>` scheme):
+        //   1. Explicit `name_hint` from the user → leaf = sanitized hint
+        //      (treated as a directory-like basename, matching pre-#1955
+        //      behaviour for the hint itself) → `tm-<hint-slug>-NN`.
+        //   2. GitHub-parseable `repo_url`         → leaf = repo name →
+        //      `tm-<repo>-NN` (project-identifiable; preferred over the cwd
+        //      basename because for the clone path `cwd` is
+        //      `<workspace-root>/<owner>/<repo>/<session-id>/`, whose BASENAME
+        //      is the session UUID — not useful).
+        //   3. Otherwise                            → leaf = basename(cwd), or
+        //      the literal `"local"` if that sanitizes to empty (e.g. cwd is
+        //      `/` or unset and fell back to `$HOME`'s unusable basename).
+        // Every branch now allocates a per-project serial (issue #1955) so
+        // concurrent sessions for the SAME leaf get distinguishable `-01`,
+        // `-02`, `-03` names instead of relying solely on the raw tmux
+        // `NameCollision` error — the hint path previously had NO uniqueness
+        // suffix at all.
+        let mut existing_names = self.names_for_serial_allocation().await?;
+        let leaf_hint = name_hint
+            .as_deref()
+            .map(|h| leaf_slug_from_dir(Path::new(h)));
+        let github_project = repo_url
+            .as_deref()
+            .and_then(trusty_common::github_path::parse_github_path)
+            .map(|gh| gh.repo);
 
-        // Detect collision before creating tmux session.
-        if self.tmux.session_exists(&tmux_name) {
-            return Err(ManagedError::NameCollision(tmux_name));
+        // Allocate a name, then check for a live tmux collision (belt-and-
+        // suspenders: the serial allocation above should already guarantee
+        // freedom from collision, but a concurrent create for the same leaf
+        // between the allocation read and this check is possible under load).
+        // Why a bounded retry loop (#1966 review follow-up) rather than a
+        // single check-and-fail: a lost race is recoverable — feeding the
+        // just-collided name back into `existing_names` makes the next
+        // allocation pick the following free serial, so a concurrent create
+        // only costs an extra loop iteration instead of a hard user-visible
+        // failure. `NameCollision` is still returned if every attempt in the
+        // bounded window collides (e.g. sustained, pathological contention),
+        // so this can never loop forever.
+        //
+        // Residual race window (KNOWN, not closed by this loop): there is
+        // still a gap between THIS `session_exists` check and the
+        // `create_session` call a few lines below. Note this does NOT
+        // surface as a `TmuxUnavailable` error the way a naive analysis might
+        // suggest — `create_session` shells out to `tmux new-session -A -d`
+        // (see `crate::core::tmux::tmux_argv`), and `-A` makes tmux ATTACH to
+        // an existing session of the same name instead of failing. So if two
+        // concurrent creates lose this exact race, both succeed, but the
+        // second one silently attaches to the first one's pane — an aliasing
+        // risk (two `SessionRecord`s could end up pointing at one tmux
+        // session), not a crash. Closing this fully would require a
+        // distributed lock across the external `tmux` process (e.g. a
+        // per-name lock file) — out of scope for this naming-scheme ticket;
+        // tracked as a follow-up if it proves to matter in practice.
+        const MAX_NAME_ALLOCATION_ATTEMPTS: u8 = 5;
+        let mut tmux_name = None;
+        for _ in 0..MAX_NAME_ALLOCATION_ATTEMPTS {
+            let candidate = if let Some(ref leaf) = leaf_hint {
+                // Explicit name hint from the user — treat the hint as a path
+                // basename (callers may pass a bare "ticket-1234" or a
+                // directory path like "/repos/project"), then allocate a
+                // serial for it same as every other leaf.
+                crate::core::names::build_session_name(leaf, &existing_names)?
+            } else {
+                // Derive project from repo_url if it carries a parseable
+                // GitHub identity; otherwise `build_managed_session_name`
+                // falls back to the basename of `cwd`, then to `"local"`.
+                build_managed_session_name(github_project.as_deref(), &cwd, &existing_names)?
+            };
+            if self.tmux.session_exists(&candidate) {
+                existing_names.push(candidate);
+                continue;
+            }
+            tmux_name = Some(candidate);
+            break;
         }
+        let Some(tmux_name) = tmux_name else {
+            return Err(ManagedError::NameCollision(format!(
+                "no free `tm-<leaf>-NN` name after {MAX_NAME_ALLOCATION_ATTEMPTS} attempts \
+                 (sustained concurrent creates for the same project)"
+            )));
+        };
 
         let workdir = cwd.to_string_lossy().to_string();
         self.tmux
@@ -720,12 +667,15 @@ impl SessionManager {
     /// running. A persisted record whose tmux session is GONE (e.g. after reboot)
     /// must become `Stopped` (resumable), NOT a "lost" or "orphaned" session —
     /// a stopped runtime does NOT mean the session itself is lost.
-    /// What: lists all tmux sessions, filters to `tmpm-` prefix, cross-references
+    /// What: lists all tmux sessions, filters to managed names (current `tm-`
+    /// or legacy `tmpm-`/`trusty-mpm-`, issue #1955) via
+    /// [`crate::core::names::is_managed_session_name`], cross-references
     /// against the store: live → `Active`; gone → `Stopped` (unless already
-    /// `Decommissioned`). External `tmpm-` sessions unknown to the store are
+    /// `Decommissioned`). External managed sessions unknown to the store are
     /// adopted as `Active`.
     /// When `auto_resume` is true, all `Stopped` sessions are immediately resumed.
-    /// Test: `manager_reconcile_gone_tmux_yields_stopped`.
+    /// Test: `manager_reconcile_gone_tmux_yields_stopped`,
+    /// `manager_reconcile_adopts_new_prefix_session`.
     pub async fn reconcile_on_boot(
         &self,
         auto_resume: bool,
@@ -738,7 +688,7 @@ impl SessionManager {
                 Vec::new()
             })
             .into_iter()
-            .filter(|n| n.starts_with("tmpm-"))
+            .filter(|n| crate::core::names::is_managed_session_name(n))
             .collect();
 
         let mut report = ReconcileReport::default();
@@ -816,7 +766,7 @@ impl SessionManager {
                 };
                 guard.upsert(external).await?;
                 report.external_adopted.push(name.clone());
-                info!(name = %name, "reconcile: adopted external tmpm- session");
+                info!(name = %name, "reconcile: adopted external managed session");
             }
         }
 
@@ -882,6 +832,42 @@ impl SessionManager {
     ) -> Result<std::collections::HashSet<String>, ManagedError> {
         let records = self.store.write().await.all().await?;
         Ok(records.into_iter().map(|r| r.tmux_name).collect())
+    }
+
+    /// Gather the session names currently "in use" for per-project serial
+    /// allocation (issue #1955).
+    ///
+    /// Why: [`crate::core::names::build_session_name`] must know which
+    /// `tm-<leaf>-NN` serials are taken so it can pick the lowest free one. A
+    /// DECOMMISSIONED record's serial must be free for immediate reuse (the
+    /// ticket's gap-reuse requirement — "sessions 01,02,03 exist, 02 gets
+    /// decommissioned, next new session reuses 02"), so this deliberately
+    /// excludes them. This is DIFFERENT from [`Self::known_tmux_names`], which
+    /// protects ALL records — including decommissioned tombstones — from the
+    /// orphan-GC, a stricter safety purpose where "was this ever ours" matters
+    /// more than "is this serial still occupied".
+    /// What: unions the live tmux session list (covers adopted/foreign
+    /// sessions not yet reflected in the store) with every NON-decommissioned
+    /// store record's `tmux_name`. Takes the store's WRITE lock rather than a
+    /// read lock for the same reason as [`Self::known_tmux_names`]:
+    /// [`SessionStore::all`] requires `&mut self` (it calls
+    /// `reload_if_changed()` first to pick up records another process wrote),
+    /// so a read-only guard would not compile and the read-only
+    /// `cached_all()` alternative would risk a stale serial set.
+    /// Test: `manager_serial_reuses_decommissioned_gap` in tests.rs.
+    async fn names_for_serial_allocation(&self) -> Result<Vec<String>, ManagedError> {
+        let mut names: Vec<String> = self
+            .tmux
+            .list_sessions()
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+        let records = self.store.write().await.all().await?;
+        names.extend(
+            records
+                .into_iter()
+                .filter(|r| r.state != ManagedSessionState::Decommissioned)
+                .map(|r| r.tmux_name),
+        );
+        Ok(names)
     }
 
     /// Return a clone of the shared tmux driver Arc.

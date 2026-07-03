@@ -4,9 +4,10 @@
 //! *new* leaks — a session the daemon spawns is killed when its owning guard
 //! drops. But it cannot clean up orphans that already exist: sessions leaked by
 //! older daemon builds, by crashes before the guard landed, or by a `kill -9`
-//! of the daemon. Those `tmpm-*` tmux sessions accumulate forever, drowning the
-//! dashboard and eventually the host. This module is the self-healing other
-//! half: a conservative reaper that reconciles the live `tmux ls` against BOTH
+//! of the daemon. Those managed (`tm-*`/`tmpm-*`) tmux sessions accumulate
+//! forever, drowning the dashboard and eventually the host. This module is the
+//! self-healing other half: a conservative reaper that reconciles the live
+//! `tmux ls` against BOTH
 //! session registries and reaps only sessions that are provably untracked,
 //! managed, and idle.
 //!
@@ -75,7 +76,7 @@ pub fn is_idle_shell(pane_command: &str) -> bool {
 /// Test: constructed throughout the `tests` submodule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneInfo {
-    /// tmux session name (e.g. `tmpm-brave-otter`).
+    /// tmux session name (e.g. `tm-brave-otter`).
     pub session_name: String,
     /// The pane's foreground command (`claude`, `zsh`, `node`, …).
     pub pane_current_command: String,

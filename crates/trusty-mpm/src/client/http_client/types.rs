@@ -27,7 +27,7 @@ pub struct SessionRow {
     /// Number of active delegations.
     #[serde(default)]
     pub active_delegations: u32,
-    /// Friendly tmux session name (`tmpm-<adjective>-<noun>`).
+    /// Friendly tmux session name (`tm-<adjective>-<noun>`).
     ///
     /// Why: session action endpoints resolve their `{id}` path segment against
     /// this friendly name; the UIs use it as the action target rather than the
@@ -266,7 +266,7 @@ pub struct LlmChatOutcome {
 pub struct CoordinatorSession {
     /// Session id (UUID string).
     pub id: String,
-    /// tmux session name, e.g. `tmpm-aipowerranking`.
+    /// tmux session name, e.g. `tm-aipowerranking-01`.
     pub name: String,
     /// Short routing prefix, e.g. `aipowerranking`.
     pub prefix: String,
@@ -498,7 +498,7 @@ pub struct ManagedSpawnResponse {
 /// Test: `managed_adopt_request_serializes` in `tests.rs`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedAdoptRequest {
-    /// The live tmux session name to adopt (any name; need not be `tmpm-`).
+    /// The live tmux session name to adopt (any name; need not be `tm-`/`tmpm-`).
     pub tmux_name: String,
     /// Working directory the adopted session runs in (required).
     pub cwd: String,

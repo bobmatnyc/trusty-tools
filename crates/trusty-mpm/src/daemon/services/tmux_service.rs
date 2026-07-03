@@ -87,7 +87,7 @@ impl TmuxService {
     /// Kill the tmux session named `tmux_name`, best-effort.
     ///
     /// Why: `DELETE /sessions/{id}` must KILL the owning tmux session, not merely
-    /// drop the registry entry — otherwise every delete leaks a live `tmpm-*`
+    /// drop the registry entry — otherwise every delete leaks a live managed (`tm-*`/`tmpm-*`)
     /// session (epic #1452, #1454). The kill is best-effort because the session
     /// may already be gone (the operator killed it by hand, the reaper got it
     /// first, or it never had a tmux host on this box). Failing the HTTP response
@@ -202,7 +202,7 @@ impl TmuxService {
         // not the request's fault — the tmux host was created — so we surface
         // it as an internal error rather than 422. But first ROLL BACK: the
         // tmux session was already created above, so a `send_line` failure here
-        // would orphan a live `tmpm-*` host with no record and no owner (the
+        // would orphan a live managed (`tm-*`/`tmpm-*`) host with no record and no owner (the
         // exact leak epic #1452 is closing — #1456). Reap the just-created
         // session best-effort BEFORE propagating the original error, so the
         // orphan never accumulates. The kill is best-effort/logged (the session
@@ -402,7 +402,7 @@ mod tests {
     }
 
     /// RAII guard that force-kills a tmux session on drop so a failed assertion
-    /// in a real-tmux test never leaks a `tmpm-*` host.
+    /// in a real-tmux test never leaks a managed (`tm-*`/`tmpm-*`) host.
     ///
     /// Why: the rollback test below creates a real tmux session; if an
     /// assertion panics before the test reaps it, the session would leak —
@@ -444,7 +444,7 @@ mod tests {
     ///
     /// Why: the bug was that `spawn_claude` created the tmux session, then a
     /// `send_line` failure returned 500 without reaping the session — leaking a
-    /// live `tmpm-*` host (the exact leak class epic #1452 closes). This test
+    /// live managed (`tm-*`/`tmpm-*`) host (the exact leak class epic #1452 closes). This test
     /// reproduces the post-create rollback the fix performs against REAL tmux
     /// and asserts the session is gone afterward.
     /// What: forces the `claude` lookup positive (so spawn passes its

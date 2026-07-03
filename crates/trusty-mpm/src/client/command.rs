@@ -244,7 +244,7 @@ pub enum TrustyCommand {
     /// unknown so the operator supplies it), an optional `task`, and an optional
     /// `runtime` selector (`claude-code` | `tcode`).
     ManagedAdopt {
-        /// The live tmux session name to adopt (any name; need not be `tmpm-`).
+        /// The live tmux session name to adopt (any name; need not be `tm-`/`tmpm-`).
         tmux_name: String,
         /// Working directory the adopted session runs in (required).
         cwd: String,

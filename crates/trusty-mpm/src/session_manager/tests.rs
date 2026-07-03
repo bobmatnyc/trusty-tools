@@ -149,7 +149,7 @@ async fn manager_create_record() {
         .expect("create");
 
     assert!(
-        record.tmux_name.starts_with("tmpm-"),
+        record.tmux_name.starts_with("tm-"),
         "tmux_name has prefix: {}",
         record.tmux_name
     );
@@ -298,32 +298,15 @@ async fn manager_create_store_failure_reaps_orphan() {
         "exactly one orphaned tmux session must be reaped; kills: {kills:?}"
     );
     assert!(
-        kills[0].starts_with("tmpm-"),
-        "the reaped session is the one just created (tmpm- prefix): {}",
+        kills[0].starts_with("tm-"),
+        "the reaped session is the one just created (tm- prefix): {}",
         kills[0]
     );
 }
 
-#[tokio::test]
-async fn manager_naming_convention() {
-    let dir = TempDir::new().unwrap();
-    let (mgr, _fake) = make_manager(&dir).await;
-
-    let record = mgr
-        .create(
-            "task".into(),
-            Some(PathBuf::from("/tmp/wt1")),
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect("create");
-
-    // tmux name must match tmpm-<slug> convention.
-    assert!(record.tmux_name.starts_with("tmpm-"), "has tmpm- prefix");
-}
+// `manager_naming_convention` (full `tm-<leaf>-NN` format assertion) lives in
+// `naming_tests.rs` alongside the rest of the #1955 naming-scheme coverage —
+// this file is at the 1500-SLOC test cap (see naming_tests.rs's module doc).
 
 #[tokio::test]
 async fn manager_name_hint_overrides() {
@@ -342,7 +325,7 @@ async fn manager_name_hint_overrides() {
         .await
         .expect("create");
 
-    assert_eq!(record.tmux_name, "tmpm-ticket-1234");
+    assert_eq!(record.tmux_name, "tm-ticket-1234-01");
 }
 
 /// `stop` must kill the runtime but KEEP the workspace directory and record,

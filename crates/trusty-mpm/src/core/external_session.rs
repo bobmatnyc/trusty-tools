@@ -2,8 +2,9 @@
 //!
 //! Why: trusty-mpm should observe and manage *every* tmux session on the host,
 //! not just the ones it spawned. The dashboard needs to tell apart sessions
-//! the daemon created (`tmpm-*` / `trusty-mpm-*`) from pre-existing ones so it
-//! can offer to "adopt" the latter for oversight without touching them.
+//! the daemon created (`tm-*` / `tmpm-*` / `trusty-mpm-*`) from pre-existing
+//! ones so it can offer to "adopt" the latter for oversight without touching
+//! them.
 //! What: [`SessionOrigin`] classifies a session by name prefix, and
 //! [`ExternalSession`] is the structured, origin-tagged view of one tmux
 //! session row used by the `GET /tmux/sessions` endpoint.
@@ -17,16 +18,16 @@ use serde::{Deserialize, Serialize};
 /// Why: the daemon treats its own sessions and externally-created ones
 /// differently — only external sessions need an explicit "adopt" step before
 /// oversight applies.
-/// What: [`TrustyMpm`](SessionOrigin::TrustyMpm) for `tmpm-*` / `trusty-mpm-*`
-/// names (this covers the random `tmpm-<adjective>-<noun>` form, the
-/// folder-derived `tmpm-<folder>` form, and the project-identifiable
-/// `tmpm-<repo>-<8hex>` form added in #1789), [`External`](SessionOrigin::External)
-/// for everything else.
+/// What: [`TrustyMpm`](SessionOrigin::TrustyMpm) for `tm-*` / `tmpm-*` /
+/// `trusty-mpm-*` names (the current `tm-<leaf>-NN` scheme from #1955, the
+/// #1789-era `tmpm-<repo>-<8hex>`/`tmpm-<folder>`/`tmpm-<adjective>-<noun>`
+/// forms, and the pre-#1789 `trusty-mpm-<uuid>` form), else
+/// [`External`](SessionOrigin::External).
 /// Test: `classifies_trusty_mpm_prefixes`, `classifies_external`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionOrigin {
-    /// A session created by trusty-mpm (name starts with `tmpm-`/`trusty-mpm-`).
+    /// A session created by trusty-mpm (name starts with `tm-`/`tmpm-`/`trusty-mpm-`).
     TrustyMpm,
     /// A session that pre-existed or was created outside trusty-mpm.
     External,
@@ -36,12 +37,16 @@ impl SessionOrigin {
     /// Classify a tmux session by its name.
     ///
     /// Why: the daemon's session driver only has the tmux name to work from;
-    /// a single classifier keeps the prefix convention in one place.
-    /// What: returns [`TrustyMpm`](SessionOrigin::TrustyMpm) when `name` starts
-    /// with `tmpm-` or `trusty-mpm-`, else [`External`](SessionOrigin::External).
+    /// a single classifier keeps the prefix convention in one place — it
+    /// delegates to [`crate::core::names::is_managed_session_name`] rather
+    /// than duplicating the prefix list, so a future naming-scheme change
+    /// (like #1955) only needs to update one function.
+    /// What: returns [`TrustyMpm`](SessionOrigin::TrustyMpm) when `name` is
+    /// managed per [`crate::core::names::is_managed_session_name`], else
+    /// [`External`](SessionOrigin::External).
     /// Test: `classifies_trusty_mpm_prefixes`, `classifies_external`.
     pub fn classify(name: &str) -> Self {
-        if name.starts_with("tmpm-") || name.starts_with("trusty-mpm-") {
+        if crate::core::names::is_managed_session_name(name) {
             Self::TrustyMpm
         } else {
             Self::External
@@ -101,6 +106,12 @@ mod tests {
 
     #[test]
     fn classifies_trusty_mpm_prefixes() {
+        assert_eq!(
+            SessionOrigin::classify("tm-trusty-tools-01"),
+            SessionOrigin::TrustyMpm
+        );
+        // Legacy prefixes (issue #1955): a live session created before the
+        // daemon upgraded to `tm-` must still classify as ours.
         assert_eq!(
             SessionOrigin::classify("tmpm-brave-otter"),
             SessionOrigin::TrustyMpm

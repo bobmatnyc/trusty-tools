@@ -128,8 +128,9 @@ impl SessionManager {
     ///   have it stubbed to `/unknown` (as auto-boot adoption does). `task` may be
     ///   empty. `runtime` is caller-supplied; call sites that do not care pass
     ///   [`crate::runtime::RuntimeKind::default`].
-    /// - **Non-`tmpm-` names are ALLOWED.** Unlike `reconcile_on_boot` (which filters
-    ///   to the `tmpm-` prefix for SAFE automatic adoption), this explicit path
+    /// - **Non-managed names are ALLOWED.** Unlike `reconcile_on_boot` (which filters
+    ///   to [`crate::core::names::is_managed_session_name`] — `tm-`/`tmpm-`/
+    ///   `trusty-mpm-` — for SAFE automatic adoption), this explicit path
     ///   adopts ANY name the operator names. The reconcile filter is left untouched.
     ///
     /// What: verifies the pane exists, rejects an already-tracked name, then upserts

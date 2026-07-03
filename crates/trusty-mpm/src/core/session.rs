@@ -90,7 +90,7 @@ pub struct Session {
     pub control: ControlModel,
     /// Number of active agent delegations within the session.
     pub active_delegations: u32,
-    /// Friendly tmux session name (`tmpm-<adjective>-<noun>`).
+    /// Friendly tmux session name (`tm-<adjective>-<noun>`).
     ///
     /// Why: the daemon's reaper compares this against the live tmux session
     /// list, and the dashboard shows it instead of the raw UUID.
@@ -152,7 +152,7 @@ impl Session {
     /// centralizing it prevents drift. A session belongs to a project, so the
     /// tmux name should identify that project rather than be random.
     /// What: when `project_dir` is `Some`, derives `tmux_name` from the folder
-    /// basename via [`crate::core::names::name_from_dir`] (`tmpm-<folder>`); when
+    /// basename via [`crate::core::names::name_from_dir`] (`tm-<folder>`); when
     /// `None`, falls back to the UUID-derived [`crate::core::names::name_from_uuid`].
     /// Both timestamps are stamped to the current time.
     /// Test: `new_derives_tmux_name`, `new_derives_tmux_name_from_dir`.
@@ -216,7 +216,7 @@ mod tests {
         let id = SessionId::new();
         let session = Session::new(id, "/tmp/p", ControlModel::Tmux, None);
         assert_eq!(session.tmux_name, crate::core::names::name_from_uuid(&id.0));
-        assert!(session.tmux_name.starts_with("tmpm-"));
+        assert!(session.tmux_name.starts_with("tm-"));
         assert_eq!(session.status, SessionStatus::Starting);
     }
 
@@ -230,7 +230,7 @@ mod tests {
             ControlModel::Tmux,
             Some(dir),
         );
-        assert_eq!(session.tmux_name, "tmpm-trusty-mpm");
+        assert_eq!(session.tmux_name, "tm-trusty-mpm");
     }
 
     #[test]

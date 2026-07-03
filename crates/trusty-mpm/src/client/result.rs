@@ -46,7 +46,7 @@ pub struct DecisionCounts {
 /// Why: the `/tmux` result lists tmux session names; the `/tmux` keyboard also
 /// offers an "Adopt" button for sessions trusty-mpm does not yet manage.
 /// What: the session name and whether trusty-mpm already manages it (internal
-/// `tmpm-*` / `trusty-mpm-*` sessions) versus an external one.
+/// `tm-*` / `tmpm-*` / `trusty-mpm-*` sessions) versus an external one.
 /// Test: covered by the executor's tmux test.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TmuxSessionSummary {

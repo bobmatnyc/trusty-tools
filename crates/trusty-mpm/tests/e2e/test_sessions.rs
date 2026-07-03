@@ -9,7 +9,7 @@ use crate::harness::TestDaemon;
 use serde_json::{Value, json};
 
 /// Register a session, then confirm it appears in the listing with an id and
-/// a friendly `tmpm-` name.
+/// a friendly `tm-` name.
 #[tokio::test]
 async fn create_and_list_session() {
     let daemon = TestDaemon::spawn().await;
@@ -28,7 +28,7 @@ async fn create_and_list_session() {
     let id = created["id"].as_str().expect("id present");
     let name = created["name"].as_str().expect("name present");
     assert!(!id.is_empty());
-    assert!(name.starts_with("tmpm-"), "friendly name: {name}");
+    assert!(name.starts_with("tm-"), "friendly name: {name}");
 
     let listed: Value = client
         .get(daemon.url("/sessions"))
@@ -43,7 +43,7 @@ async fn create_and_list_session() {
     assert_eq!(sessions[0]["id"], id);
 }
 
-/// The friendly session name follows the `tmpm-<adj>-<noun>` pattern.
+/// The friendly session name follows the `tm-<adj>-<noun>` pattern.
 #[tokio::test]
 async fn session_has_friendly_name() {
     let daemon = TestDaemon::spawn().await;
@@ -59,10 +59,10 @@ async fn session_has_friendly_name() {
         .expect("create body");
 
     let name = created["name"].as_str().expect("name present");
-    // Shape: `tmpm-` then two lowercase-letter words separated by a dash.
-    let rest = name.strip_prefix("tmpm-").expect("tmpm- prefix");
+    // Shape: `tm-` then two lowercase-letter words separated by a dash.
+    let rest = name.strip_prefix("tm-").expect("tm- prefix");
     let parts: Vec<&str> = rest.split('-').collect();
-    assert_eq!(parts.len(), 2, "expected tmpm-<adj>-<noun>, got {name}");
+    assert_eq!(parts.len(), 2, "expected tm-<adj>-<noun>, got {name}");
     for part in parts {
         assert!(!part.is_empty(), "empty word in {name}");
         assert!(
@@ -265,7 +265,7 @@ async fn spawn_session_without_claude_returns_422() {
 /// `DELETE /sessions/dead` returns a well-formed `{ "removed": N }` body.
 ///
 /// The exact count depends on whether tmux is installed on the host: with tmux
-/// the lone registered session (no live `tmpm-*` tmux session) is reaped;
+/// the lone registered session (no live managed `tm-*`/`tmpm-*` tmux session) is reaped;
 /// without tmux nothing is reaped. Either way the response shape is fixed and
 /// the registry must not afterwards contain a session tmux does not host.
 #[tokio::test]

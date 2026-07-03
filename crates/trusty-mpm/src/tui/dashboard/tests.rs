@@ -195,7 +195,13 @@ fn status_indicator_maps_each_status() {
 }
 
 #[test]
-fn session_prefix_strips_tmpm() {
+fn session_prefix_strips_managed_prefixes() {
+    assert_eq!(session_prefix("tm-aipowerranking-01"), "aipowerranking-01");
+    // A `tm-<leaf>` name with no numeric suffix (e.g. the non-serial
+    // `name_from_dir`/`name_from_uuid` fallbacks) must strip just as cleanly
+    // (#1966 review follow-up).
+    assert_eq!(session_prefix("tm-frontend"), "frontend");
+    // Legacy prefix (issue #1955) must still strip correctly.
     assert_eq!(session_prefix("tmpm-aipowerranking"), "aipowerranking");
     assert_eq!(session_prefix("frontend"), "frontend");
 }
