@@ -1,14 +1,27 @@
 //! Workspace provisioner implementation.
 //!
-//! Why: each managed session needs an isolated clone of the target repository
-//! so that agents, skills, and configuration deployed there do not collide with
-//! the operator's live checkout or with other concurrent sessions on the same repo.
+//! Why: each managed session needs an isolated workspace so that agents, skills,
+//! and configuration deployed there do not collide with the operator's live
+//! checkout or with other concurrent sessions on the same repo. Before #1935
+//! every session did a full, independent `git clone` of the target repo —
+//! wasteful (duplicates the whole object database per session) and at odds
+//! with this repo's own worktree-discipline convention (see root `CLAUDE.md`
+//! §"Parallel Worktree Discipline": fetch `origin`, then `git worktree add` off
+//! it). #1935 replaces the per-session clone with ONE persistent, shared base
+//! checkout per project plus a per-session `git worktree add`, mirroring the
+//! same shared-base-plus-worktrees pattern already proven by the in-project
+//! spawn path (`daemon::managed_routes::inproject`).
 //! What: [`WorkspaceProvisioner`] accepts (repo_url, ref, task, session_id),
-//! clones via a [`GitBackend`] into ~/.trusty-mpm/workspaces/<project>/<id>/,
-//! calls prepare_session to deploy agents/skills, and returns a
-//! [`PreparedWorkspace`] with the workspace path, repo_url, and branch.
+//! ensures a persistent bare base checkout exists at
+//! `<project_dir>/.base/` (cloning once via [`GitBackend::ensure_base_checkout`]),
+//! then fetches `git_ref` fresh from `origin` and adds an isolated per-session
+//! `git worktree` at `<project_dir>/.base/.worktrees/<session-id>/` via
+//! [`GitBackend::worktree_add`]. It then calls `prepare_session` to deploy
+//! agents/skills into that worktree, and returns a [`PreparedWorkspace`] with
+//! the worktree path, repo_url, and the REQUESTED branch/ref (not the internal
+//! per-session branch name backing the worktree).
 //! Test: `provisioner_isolation_path`, `provisioner_path_not_in_existing_project`,
-//! `provisioner_uses_session_id_subdir`.
+//! `provisioner_uses_session_id_subdir`, `provision_reuses_base_checkout_across_sessions`.
 
 use std::path::{Path, PathBuf};
 
@@ -37,6 +50,20 @@ pub enum ProvisionError {
     #[error("session preparation failed: {0}")]
     PrepareSession(String),
 }
+
+/// Directory name (relative to a project directory) holding the persistent,
+/// shared base git checkout that every session's worktree branches off of (#1935).
+///
+/// Why: naming this segment `.base` (rather than reusing the project
+/// directory itself as the checkout root) guarantees it is EMPTY the first
+/// time a project is provisioned under the new scheme — even on an existing
+/// installation whose project directory already holds pre-#1935 per-session
+/// full-clone subdirectories — so establishing the base checkout never needs
+/// an old-layout migration step.
+/// What: `".base"`.
+/// Test: `provision_in_uses_explicit_project_dir`,
+/// `provision_reuses_base_checkout_across_sessions`.
+const BASE_CHECKOUT_DIRNAME: &str = ".base";
 
 /// Describes an isolated workspace after provisioning.
 ///
@@ -102,6 +129,47 @@ pub trait GitBackend: Send + Sync {
     /// `git -C dir reset --hard FETCH_HEAD` — works for branches, tags, and SHAs.
     /// Test: FakeGitBackend returns Ok(()) without performing real git operations.
     fn fetch_and_reset(&self, dir: &Path, git_ref: &str) -> Result<(), ProvisionError>;
+
+    /// Ensure a persistent, shared base checkout exists at `base_dir` (#1935).
+    ///
+    /// Why: every managed session used to pay for a full, independent clone.
+    /// A single shared base checkout per project lets every session's git
+    /// worktree share one object database, cloned only once.
+    /// What: no-op (idempotent) when `base_dir` already looks like an
+    /// established git directory; otherwise clones `repo_url` into `base_dir`.
+    /// `RealGitBackend` clones `--bare` (see its impl doc for why); callers
+    /// must not assume a working tree exists at `base_dir` itself — only
+    /// [`worktree_add`](Self::worktree_add) produces checked-out working trees.
+    /// Test: `FakeGitBackend` records the call and creates a `HEAD` marker so
+    /// a second call is recognised as already-established (no re-clone).
+    fn ensure_base_checkout(&self, repo_url: &str, base_dir: &Path) -> Result<(), ProvisionError>;
+
+    /// Fetch `git_ref` fresh from `origin` and add an isolated worktree for it.
+    ///
+    /// Why: sessions must branch off the LATEST `git_ref`, not whatever commit
+    /// the base happened to be at when it was first cloned — mirroring this
+    /// repo's own worktree-discipline convention ("always fetch origin, branch
+    /// off origin/<ref>"). Fetching directly into a session-unique local branch
+    /// (rather than mutating the shared `FETCH_HEAD`) also means concurrent
+    /// session creation against the same base never races on a shared ref.
+    /// What: runs `git -C base_dir fetch origin "+<src>:refs/heads/<branch_name>"`
+    /// (where `<src>` is `git_ref`, or `HEAD` when `git_ref` is blank — mirroring
+    /// `RealGitBackend::clone_repo`'s blank-ref handling) followed by
+    /// `git -C base_dir worktree add <worktree_path> <branch_name>`. Works for
+    /// branches, tags, and commit SHAs alike (each becomes its own dedicated
+    /// local branch, so this never conflicts with a branch checked out
+    /// elsewhere). `branch_name` is caller-chosen so it can double as the
+    /// worktree-removal branch cleanup key (see
+    /// `session_manager::decommission::remove_session_worktree`).
+    /// Test: `FakeGitBackend` records the call and creates `worktree_path` on
+    /// disk so callers that write into it (e.g. `TASK.md`) succeed.
+    fn worktree_add(
+        &self,
+        base_dir: &Path,
+        git_ref: &str,
+        worktree_path: &Path,
+        branch_name: &str,
+    ) -> Result<(), ProvisionError>;
 }
 
 /// Real git backend that shells out to the `git` binary.
@@ -115,6 +183,14 @@ pub trait GitBackend: Send + Sync {
 /// `FakeGitBackend`. The empty-ref contract is locked in by
 /// `blank_git_ref_omits_branch_flag` in `workspace.rs` tests.
 pub struct RealGitBackend;
+
+// #1935 review findings (PR #1936): bare-checkout detection + the advisory
+// provisioning lock live in the `base_lock` submodule to keep this file under
+// the 500-SLOC production cap — see that module's doc comment for the full
+// rationale behind each item.
+use base_lock::{
+    acquire_base_checkout_lock, base_checkout_lock_path, is_established_bare_checkout,
+};
 
 impl GitBackend for RealGitBackend {
     fn clone_repo(
@@ -201,6 +277,158 @@ impl GitBackend for RealGitBackend {
         } else {
             let stderr = String::from_utf8_lossy(&reset.stderr);
             Err(ProvisionError::Git(format!("git reset failed: {stderr}")))
+        }
+    }
+
+    /// Why: this method used to treat `base_dir.join("HEAD").is_file()` as
+    /// proof of an established bare checkout (trusty-review finding #2 on
+    /// PR #1936 / #1935). A non-bare git repo ALSO has a root-level `HEAD`
+    /// file, so a stale non-bare directory (e.g. left over from a pre-#1935
+    /// full-clone install sharing this path) would be silently accepted as a
+    /// valid base, and a later `git worktree add` against it would then fail
+    /// with `'<branch>' is already checked out`. It also unconditionally
+    /// attempted `git clone --bare` on a cache miss with no protection
+    /// against two sessions provisioning the SAME project for the first time
+    /// concurrently (finding #1): both observe "no base yet" and both start
+    /// cloning into the identical target directory. Note that "recover by
+    /// re-checking after the clone fails" is NOT sufficient here — real `git
+    /// clone --bare` is not safe against a concurrent writer into the exact
+    /// same directory; two interleaved clones can corrupt each other's
+    /// partial checkout (observed empirically: colliding on copying
+    /// `hooks/commit-msg.sample`) rather than cleanly failing with "already
+    /// exists". Only mutual exclusion around the whole check-and-clone window
+    /// avoids that.
+    /// What: replaces the fragile file-existence probe with
+    /// [`is_established_bare_checkout`], which asks git itself via
+    /// `rev-parse --is-bare-repository` (returns `false`, never panics, for a
+    /// non-bare repo or a non-repo directory) — this alone fixes finding #2.
+    /// For finding #1, wraps the clone in [`acquire_base_checkout_lock`]: a
+    /// dependency-free `OpenOptions::create_new` marker-file mutex (no
+    /// file-locking crate such as `fs2`/`fs4` is currently a workspace
+    /// dependency) that serializes concurrent callers for the SAME
+    /// `base_dir`, with stale-lock recovery so a crashed process can never
+    /// permanently deadlock future provisioning. After acquiring the lock,
+    /// re-checks `is_established_bare_checkout` once more (another caller may
+    /// have finished cloning while this one was waiting) before cloning.
+    /// Test: `ensure_base_checkout_recovers_from_concurrent_race` (spawns
+    /// real threads racing on the same `base_dir`, asserts every one returns
+    /// `Ok` and exactly one valid bare checkout results),
+    /// `ensure_base_checkout_rejects_stale_non_bare_directory` (pre-seeds a
+    /// non-bare repo at `base_dir` and asserts a loud error, not silent
+    /// reuse), both in `provisioner/workspace/tests.rs`.
+    fn ensure_base_checkout(&self, repo_url: &str, base_dir: &Path) -> Result<(), ProvisionError> {
+        use std::process::Command;
+        // A bare clone has no working tree of its own, so it can never conflict
+        // with a session worktree checking out the same branch (a non-bare
+        // clone's own checked-out branch would collide with a worktree trying
+        // to check out that same branch elsewhere). Bare-plus-worktrees is the
+        // standard git pattern for exactly this "one shared base, many
+        // isolated worktrees" shape (verified empirically before landing this:
+        // `git clone --bare`, then repeated `git fetch origin +<ref>:refs/heads/<x>`
+        // + `git worktree add` against it, works cleanly for branches, tags,
+        // and SHAs alike).
+        if is_established_bare_checkout(base_dir) {
+            debug!(path = %base_dir.display(), "base checkout already present, reusing");
+            return Ok(());
+        }
+        if let Some(parent) = base_dir.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Serialize the check-and-clone window across concurrent callers
+        // racing to provision the SAME project for the first time (finding
+        // #1). The guard's `Drop` impl removes the marker file when this
+        // function returns via any path (success, error, or early return).
+        let lock_path = base_checkout_lock_path(base_dir);
+        let _lock = acquire_base_checkout_lock(&lock_path)?;
+
+        // Re-check now that the lock is held: another caller may have
+        // completed the clone while this one was waiting for the lock.
+        if is_established_bare_checkout(base_dir) {
+            debug!(
+                path = %base_dir.display(),
+                "base checkout completed by a concurrent caller while waiting for the lock; reusing"
+            );
+            return Ok(());
+        }
+
+        // Use the destination's parent as cwd so a deleted inherited cwd cannot
+        // cause git to fail with "fatal: Unable to read current working directory".
+        let cwd = base_dir.parent().unwrap_or(std::path::Path::new("/"));
+        let out = Command::new("git")
+            .args(["clone", "--bare", repo_url])
+            .arg(base_dir)
+            .current_dir(cwd)
+            .output()
+            .map_err(|e| ProvisionError::Git(format!("git clone --bare exec failed: {e}")))?;
+        if out.status.success() {
+            info!(url = %repo_url, dest = %base_dir.display(), "base checkout cloned");
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            Err(ProvisionError::Git(format!(
+                "git clone --bare failed (exit {}): {stderr}",
+                out.status
+            )))
+        }
+    }
+
+    fn worktree_add(
+        &self,
+        base_dir: &Path,
+        git_ref: &str,
+        worktree_path: &Path,
+        branch_name: &str,
+    ) -> Result<(), ProvisionError> {
+        use std::process::Command;
+        let base_s = base_dir.to_string_lossy();
+        // Blank git_ref means "the remote's default branch" — mirror clone_repo's
+        // blank-ref handling by fetching `HEAD` (the remote's default branch
+        // pointer) rather than an empty (invalid) ref name.
+        let src_ref = if git_ref.trim().is_empty() {
+            "HEAD"
+        } else {
+            git_ref
+        };
+        // Fetch directly into a session-unique local branch ref rather than the
+        // shared FETCH_HEAD: two sessions provisioning against the SAME base
+        // concurrently would otherwise race on which fetch's FETCH_HEAD the
+        // other session's `worktree add` observes. The leading `+` allows a
+        // non-fast-forward overwrite in case a retry reuses `branch_name`.
+        let refspec = format!("+{src_ref}:refs/heads/{branch_name}");
+        let fetch = Command::new("git")
+            .args(["-C", &base_s, "fetch", "origin", &refspec])
+            .output()
+            .map_err(|e| ProvisionError::Git(format!("git fetch exec failed: {e}")))?;
+        if !fetch.status.success() {
+            let stderr = String::from_utf8_lossy(&fetch.stderr);
+            return Err(ProvisionError::Git(format!("git fetch failed: {stderr}")));
+        }
+
+        if let Some(parent) = worktree_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let out = Command::new("git")
+            .args(["-C", &base_s, "worktree", "add"])
+            .arg(worktree_path)
+            .arg(branch_name)
+            .output()
+            .map_err(|e| ProvisionError::Git(format!("git worktree add exec failed: {e}")))?;
+        if out.status.success() {
+            info!(
+                base = %base_dir.display(),
+                worktree = %worktree_path.display(),
+                branch = %branch_name,
+                "per-session worktree created"
+            );
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            Err(ProvisionError::Git(format!(
+                "git worktree add failed (exit {}): {stderr}",
+                out.status
+            )))
         }
     }
 }
@@ -317,6 +545,49 @@ impl GitBackend for FakeGitBackend {
         // Fake: always succeeds — no network or filesystem operation needed.
         Ok(())
     }
+
+    fn ensure_base_checkout(&self, repo_url: &str, base_dir: &Path) -> Result<(), ProvisionError> {
+        self.calls.lock().unwrap().push((
+            repo_url.to_owned(),
+            "ensure_base_checkout".to_owned(),
+            base_dir.to_owned(),
+        ));
+        // Idempotent: a `HEAD` marker simulates an already-established base so
+        // a second call (e.g. a second session for the same project) does not
+        // re-clone — this is the observable contract
+        // `provision_reuses_base_checkout_across_sessions` pins down.
+        if base_dir.join("HEAD").is_file() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(base_dir)?;
+        std::fs::write(base_dir.join("HEAD"), "ref: refs/heads/main\n")?;
+        Ok(())
+    }
+
+    fn worktree_add(
+        &self,
+        base_dir: &Path,
+        git_ref: &str,
+        worktree_path: &Path,
+        branch_name: &str,
+    ) -> Result<(), ProvisionError> {
+        self.calls.lock().unwrap().push((
+            git_ref.to_owned(),
+            branch_name.to_owned(),
+            worktree_path.to_owned(),
+        ));
+        // Simulate a checked-out worktree: create the directory and a `.git`
+        // file pointing back at the (fake) base, mirroring what a real
+        // `git worktree add` produces, so downstream code that only checks
+        // for directory existence (TASK.md write, prepare_session, etc.)
+        // behaves the same as it would against a real worktree.
+        std::fs::create_dir_all(worktree_path)?;
+        std::fs::write(
+            worktree_path.join(".git"),
+            format!("gitdir: {}/worktrees/{branch_name}\n", base_dir.display()),
+        )?;
+        Ok(())
+    }
 }
 
 /// Provisions isolated workspaces for managed agent sessions.
@@ -374,12 +645,14 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
 
     /// Provision an isolated workspace for the given session.
     ///
-    /// Why: each session needs a fresh, isolated checkout so agents and config
-    /// never collide across sessions or with the operator's live project.
-    /// What: derives the workspace path
-    /// (workspace_root/<project-slug>/<session-id>/), clones repo_url@git_ref into
-    /// it via the GitBackend, runs prepare_session inside the workspace, and
-    /// returns a PreparedWorkspace with path, repo_url, and branch.
+    /// Why: each session needs a fresh, isolated git worktree so agents and
+    /// config never collide across sessions or with the operator's live
+    /// project, without paying for a full independent clone per session (#1935).
+    /// What: derives the project directory
+    /// (workspace_root/<project-slug>/), delegates to [`Self::provision_in`]
+    /// which ensures a shared base checkout and adds a per-session worktree at
+    /// `<project-slug>/.base/.worktrees/<session-id>/`, runs prepare_session
+    /// inside it, and returns a PreparedWorkspace with path, repo_url, and branch.
     /// Test: provisioner_isolation_path, provisioner_uses_session_id_subdir.
     pub fn provision(
         &self,
@@ -395,18 +668,37 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
 
     /// Provision an isolated workspace under an explicit project directory.
     ///
-    /// Why: #1220 nests session workspaces as
-    /// `~/trusty-mpm-projects/<owner>/<repo>/<session-id>/`, where the
-    /// `<owner>/<repo>` project home is resolved by the caller from the target
-    /// repo's GitHub remote (see [`crate::core::trusty_tools_config`]). The legacy
-    /// [`Self::provision`] derives a single-segment slug from the URL; this variant
-    /// lets the caller supply the pre-resolved two-segment project directory so the
-    /// session id is the only segment appended here. Both share the clone + prepare
-    /// flow below.
-    /// What: joins `session_id` onto `project_dir`, clones `repo_url`@`git_ref` into
-    /// it via the [`GitBackend`], runs `prepare_session` (unless `prepare` is false),
-    /// and returns the [`PreparedWorkspace`].
-    /// Test: `provision_in_uses_explicit_project_dir`.
+    /// Why: #1220 nests session workspaces under
+    /// `~/trusty-mpm-projects/<owner>/<repo>/`, where the `<owner>/<repo>`
+    /// project home is resolved by the caller from the target repo's GitHub
+    /// remote (see [`crate::core::trusty_tools_config`]). The legacy
+    /// [`Self::provision`] derives a single-segment slug from the URL; this
+    /// variant lets the caller supply the pre-resolved two-segment project
+    /// directory. #1935: rather than a full clone per session, both variants
+    /// now share ONE persistent base checkout per project
+    /// (`<project_dir>/.base/`, established once via
+    /// [`GitBackend::ensure_base_checkout`]) plus a per-session `git worktree`
+    /// (`<project_dir>/.base/.worktrees/<session-id>/`, added fresh every call
+    /// via [`GitBackend::worktree_add`]) — see the module doc for the full
+    /// rationale. Nesting worktrees under the NEW `.base/` directory (rather
+    /// than reusing `project_dir` as the checkout root directly) means an
+    /// existing installation's pre-#1935 per-session full clones sitting
+    /// directly under `project_dir` can never collide with the fresh base
+    /// checkout: `.base/` is guaranteed empty on first use, so no migration
+    /// step is required.
+    /// What: computes `base_dir = project_dir/.base` and
+    /// `workspace_path = base_dir/.worktrees/<session_id>`; ensures the base
+    /// checkout exists, fetches `git_ref` fresh from `origin` into an isolated
+    /// worktree at `workspace_path`, writes the session-manager worktree
+    /// ownership sentinel (so `session_manager::decommission` can safely
+    /// `git worktree remove --force` it later), runs `prepare_session` (unless
+    /// `prepare` is false), and returns the [`PreparedWorkspace`] — `branch` is
+    /// the REQUESTED `git_ref`, not the internal per-session branch name
+    /// backing the worktree (that internal name is `session_id` itself, chosen
+    /// so `decommission`'s existing branch cleanup — which deletes a branch
+    /// named after the worktree's leaf directory — finds and removes it).
+    /// Test: `provision_in_uses_explicit_project_dir`,
+    /// `provision_reuses_base_checkout_across_sessions`.
     pub fn provision_in(
         &self,
         project_dir: &Path,
@@ -415,24 +707,52 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         git_ref: &str,
         task: &str,
     ) -> Result<PreparedWorkspace, ProvisionError> {
-        let workspace_path = project_dir.join(session_id.to_string());
+        let base_dir = project_dir.join(BASE_CHECKOUT_DIRNAME);
+        let workspace_path = base_dir
+            .join(crate::session_manager::decommission::WORKTREES_DIRNAME)
+            .join(session_id.to_string());
+        // The branch backing this worktree is named after the session id
+        // itself (not e.g. "session/<id>") so that
+        // `session_manager::decommission::remove_session_worktree`'s branch
+        // cleanup step — which deletes a branch named after the worktree's
+        // leaf directory name — targets the right ref.
+        let branch_name = session_id.to_string();
 
         debug!(
             session = %session_id,
+            base = %base_dir.display(),
             path = %workspace_path.display(),
             repo = %repo_url,
             git_ref = %git_ref,
             "provisioning workspace"
         );
 
-        // Announce the clone stage (issue #1904). No-op unless a
+        // Announce the clone/checkout stage (issue #1904). No-op unless a
         // `daemon::managed_routes::lifecycle::spawn_managed` caller wrapped
         // this call in `provisioning_stage::scoped` — see that module's doc
         // for why this seam does not take a `DaemonState` parameter.
         crate::core::provisioning_stage::emit(
             crate::core::provisioning_stage::ProvisioningStage::CloningRepo,
         );
-        self.git.clone_repo(repo_url, git_ref, &workspace_path)?;
+        self.git.ensure_base_checkout(repo_url, &base_dir)?;
+        self.git
+            .worktree_add(&base_dir, git_ref, &workspace_path, &branch_name)?;
+
+        // Item 5 mirror (#1845 / #1935): write the SM ownership sentinel so
+        // `remove_session_worktree` can confirm this worktree was TM-created
+        // before ever running `git worktree remove --force` against it.
+        // Best-effort: a failure here is a non-fatal warning — the worktree
+        // was created successfully and decommission's naming-convention
+        // fallback still recognises `.worktrees/<id>` paths.
+        let sentinel =
+            workspace_path.join(crate::session_manager::decommission::WORKTREE_SENTINEL_FILE);
+        if let Err(e) = std::fs::write(&sentinel, b"") {
+            tracing::warn!(
+                session = %session_id,
+                path = %workspace_path.display(),
+                "failed to write worktree ownership sentinel (non-fatal): {e}"
+            );
+        }
 
         // Write the task description into TASK.md at the workspace root so the
         // agent can read it as its initial brief (closes #1693).
@@ -563,210 +883,7 @@ fn repo_slug(repo_url: &str) -> String {
     name.trim_end_matches(".git").to_lowercase()
 }
 
+mod base_lock;
+
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    fn make_provisioner(root: &TempDir) -> WorkspaceProvisioner<FakeGitBackend> {
-        // Skip the global `prepare_session` deploy: these tests verify path
-        // isolation only and must not touch the shared `~/.claude/` tree.
-        WorkspaceProvisioner::without_prepare(FakeGitBackend::new(), root.path().to_owned())
-    }
-
-    #[test]
-    fn repo_slug_extraction() {
-        assert_eq!(
-            repo_slug("https://github.com/owner/trusty-tools"),
-            "trusty-tools"
-        );
-        assert_eq!(
-            repo_slug("https://github.com/owner/trusty-tools.git"),
-            "trusty-tools"
-        );
-        assert_eq!(repo_slug("git@github.com:owner/my-repo.git"), "my-repo");
-    }
-
-    #[test]
-    fn provisioner_isolation_path() {
-        let root = TempDir::new().unwrap();
-        let prov = make_provisioner(&root);
-        let id = ManagedSessionId::new();
-
-        let ws = prov
-            .provision(&id, "https://github.com/owner/trusty-tools", "main", "task")
-            .unwrap();
-
-        // Path must be inside workspace_root, not the operator's project directory.
-        assert!(ws.path.starts_with(root.path()));
-        assert!(ws.path.to_string_lossy().contains("trusty-tools"));
-        assert!(ws.path.to_string_lossy().contains(&id.to_string()));
-    }
-
-    #[test]
-    fn provisioner_path_not_in_existing_project() {
-        // The workspace must NOT be inside any real project dir.
-        // We simulate this by checking the path is inside workspace_root (a tempdir).
-        let root = TempDir::new().unwrap();
-        let prov = make_provisioner(&root);
-        let id = ManagedSessionId::new();
-
-        let ws = prov
-            .provision(&id, "https://github.com/owner/myrepo.git", "feat/x", "task")
-            .unwrap();
-
-        // Must start with the mpm-owned workspace root, not any other path.
-        assert!(ws.path.starts_with(root.path()));
-        // Must not be equal to the workspace root itself.
-        assert_ne!(&ws.path, root.path());
-    }
-
-    #[test]
-    fn provisioner_uses_session_id_subdir() {
-        let root = TempDir::new().unwrap();
-        let prov = make_provisioner(&root);
-        let id = ManagedSessionId::new();
-
-        let ws = prov
-            .provision(&id, "https://github.com/owner/repo", "main", "task")
-            .unwrap();
-
-        // The leaf directory must be the session id.
-        let leaf = ws.path.file_name().unwrap().to_string_lossy();
-        assert_eq!(leaf.as_ref(), id.to_string());
-    }
-
-    #[test]
-    fn provision_in_uses_explicit_project_dir() {
-        // The #1220 path: caller supplies a pre-resolved `<owner>/<repo>` project
-        // dir; only the session id is appended.
-        let root = TempDir::new().unwrap();
-        let prov = make_provisioner(&root);
-        let id = ManagedSessionId::new();
-        let project_dir = root.path().join("bobmatnyc").join("trusty-tools");
-
-        let ws = prov
-            .provision_in(
-                &project_dir,
-                &id,
-                "https://github.com/bobmatnyc/trusty-tools",
-                "main",
-                "task",
-            )
-            .unwrap();
-
-        // Path must be exactly <project_dir>/<session-id> — no extra slug nesting.
-        assert_eq!(ws.path, project_dir.join(id.to_string()));
-        assert!(ws.path.starts_with(&project_dir));
-    }
-
-    #[test]
-    fn provisioner_records_repo_url_and_branch() {
-        let root = TempDir::new().unwrap();
-        let prov = make_provisioner(&root);
-        let id = ManagedSessionId::new();
-
-        let ws = prov
-            .provision(
-                &id,
-                "https://github.com/owner/repo",
-                "feat/my-branch",
-                "task",
-            )
-            .unwrap();
-
-        assert_eq!(ws.repo_url, "https://github.com/owner/repo");
-        assert_eq!(ws.branch, "feat/my-branch");
-    }
-
-    /// Why: WI-A #1585 — when `LaunchParams::ref_` is absent the spawn path
-    /// forwards `git_ref = ""` to `spawn_managed`/`SpawnParams`. This test
-    /// locks in the contract that a blank `git_ref` is passed through to the
-    /// git backend as `""` AND that provision still succeeds (no early error).
-    /// The production fix lives in `RealGitBackend::clone_repo`: when
-    /// `git_ref.trim().is_empty()` the `--branch` flag is omitted entirely so
-    /// git uses the remote's default branch (HEAD) — passing `--branch ""`
-    /// would cause `fatal: '' is not a valid branch name`.
-    /// What: provisions with `git_ref = ""` and asserts (1) provision
-    /// succeeds, (2) the returned `branch` field is `""` (the provisioner does
-    /// not substitute a default), and (3) `FakeGitBackend` recorded the call
-    /// with a blank ref — confirming `RealGitBackend` is the single fix point.
-    /// Test: this is the test.
-    #[test]
-    fn blank_git_ref_omits_branch_flag() {
-        let root = TempDir::new().unwrap();
-        // Use FakeGitBackend via make_provisioner so we can read its call log.
-        // make_provisioner returns a provisioner whose backend is a FakeGitBackend
-        // but we cannot access it post-move. We build explicitly here so we can
-        // inspect calls.
-        let fake = FakeGitBackend::new();
-        // SAFETY: the calls Mutex is shared across the borrow boundary through
-        // raw pointers; instead, use a shared Arc<FakeGitBackend> — but since the
-        // type does not impl Clone we verify the contract via ws.branch instead.
-        let prov =
-            WorkspaceProvisioner::without_prepare(FakeGitBackend::new(), root.path().to_owned());
-        let id = ManagedSessionId::new();
-
-        let ws = prov
-            .provision(&id, "https://github.com/owner/repo", "", "task")
-            .unwrap();
-
-        // Provision must succeed: the provisioner does not reject a blank ref.
-        assert!(ws.path.starts_with(root.path()), "workspace inside root");
-        // The branch field records what was passed — blank — not a substituted default.
-        // This pins the single-fix-point invariant: the provisioner passes "" through
-        // to the backend, and only RealGitBackend translates "" to no --branch flag.
-        assert_eq!(
-            ws.branch, "",
-            "blank ref must be stored as-is, not substituted"
-        );
-        drop(fake); // explicitly drop to silence unused-variable lint
-    }
-
-    /// Why: closes #1693 — the task description must be written to TASK.md in
-    /// the workspace root so the agent can read its brief without requiring
-    /// interactive input. This test locks in the write behaviour.
-    /// What: provisions with a non-empty task and asserts TASK.md exists and
-    /// contains exactly the task string.
-    /// Test: this is the test.
-    #[test]
-    fn provision_writes_task_md() {
-        let root = TempDir::new().unwrap();
-        let prov = make_provisioner(&root);
-        let id = ManagedSessionId::new();
-        let task = "Fix the authentication bug in the login flow";
-
-        let ws = prov
-            .provision(&id, "https://github.com/owner/repo", "main", task)
-            .unwrap();
-
-        let task_file = ws.path.join("TASK.md");
-        assert!(
-            task_file.exists(),
-            "TASK.md must be written when task is non-empty"
-        );
-        let content = std::fs::read_to_string(&task_file).unwrap();
-        assert_eq!(content, task, "TASK.md must contain the exact task text");
-    }
-
-    /// Why: closes #1693 — when no task is provided the workspace must NOT
-    /// receive an empty TASK.md (an empty file is misleading and wastes I/O).
-    /// What: provisions with an empty task string and asserts TASK.md is absent.
-    /// Test: this is the test.
-    #[test]
-    fn provision_skips_task_md_when_empty() {
-        let root = TempDir::new().unwrap();
-        let prov = make_provisioner(&root);
-        let id = ManagedSessionId::new();
-
-        let ws = prov
-            .provision(&id, "https://github.com/owner/repo", "main", "")
-            .unwrap();
-
-        let task_file = ws.path.join("TASK.md");
-        assert!(
-            !task_file.exists(),
-            "TASK.md must NOT be created when task is empty"
-        );
-    }
-}
+mod tests;

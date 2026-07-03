@@ -365,10 +365,17 @@ fn spawn_managed_local_redirects_to_managed_clone() {
         .expect("provision_in must succeed with FakeGitBackend");
 
     // KEY ASSERTIONS: the workspace is the MANAGED clone path, NOT the live checkout.
-    let expected = project_dir.join(session_id.to_string());
+    // #1935: the managed path now nests each session's git worktree under a
+    // shared, persistent base checkout (`<project_dir>/.base/.worktrees/<id>`)
+    // rather than a full clone directly at `<project_dir>/<id>`.
+    let expected = project_dir
+        .join(".base")
+        .join(".worktrees")
+        .join(session_id.to_string());
     assert_eq!(
         prepared.path, expected,
-        "spawn_managed_local must route to <project_dir>/<session_id>, not the live checkout"
+        "spawn_managed_local must route to <project_dir>/.base/.worktrees/<session_id>, \
+         not the live checkout"
     );
     assert!(
         !prepared.path.starts_with(live_dir),
