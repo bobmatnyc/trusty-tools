@@ -16,8 +16,8 @@
 //! unmodified) for empty commands, day-one orchestrator exclusions
 //! (`make`/`sam`/`rake`/`gradle`/`gradlew`/`mvn`/`ant`/`cdk`/`terraform`,
 //! mirroring claude-mpm's `_ORCHESTRATOR_EXCLUSIONS`), any command that
-//! already contains pipe/chain/redirection composition (`|`, `&&`, `;`,
-//! `>`, `<`) since appending another pipe to those is the same class of
+//! already contains pipe/chain/redirection/background composition (`|`,
+//! `&`, `;`, `>`, `<`) since appending another pipe to those is the same class of
 //! risk (redirection in particular: piping `tm compress` after an
 //! already-redirected stdout gets it empty input for no benefit — a
 //! trusty-review finding, PR #1968), and any command whose derived tool
@@ -291,7 +291,8 @@ fn is_env_assignment(token: &str) -> bool {
         && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Whether `command` already contains pipe/chain/redirection composition.
+/// Whether `command` already contains pipe/chain/redirection/background
+/// composition.
 ///
 /// Why: Appending a second pipe to a command that already pipes/chains
 /// (`|`, `&&`, `;`) is the same class of risk the orchestrator exclusion
@@ -303,19 +304,26 @@ fn is_env_assignment(token: &str) -> bool {
 /// `cargo test > out.log | tm compress --tool "cargo test"`, pipes
 /// `tm compress` an *empty* stdin (stdout was already redirected to the
 /// file) — the rewrite would silently do nothing useful while altering the
-/// command's pipeline/exit-code shape for no benefit.
+/// command's pipeline/exit-code shape for no benefit. Backgrounding (`&`) is
+/// a third variant of the same risk (a further trusty-review finding, PR
+/// #1968): `cargo test &` rewritten to `cargo test & | tm compress ...`
+/// is invalid shell syntax in most shells, not merely a no-op.
 /// What: Simple substring checks — deliberately conservative (a command
-/// with `|`/`&&`/`;`/`>`/`<` inside a quoted string literal will also be
-/// skipped; under-rewriting is the safe failure mode here).
+/// with `|`/`&`/`;`/`>`/`<` inside a quoted string literal will also be
+/// skipped; under-rewriting is the safe failure mode here). A single
+/// `contains('&')` check subsumes both the `&&` chain operator and the
+/// standalone backgrounding `&` — there's no case where `&` is safe to
+/// leave unguarded in this position.
 /// Test: `has_unsafe_pipe_composition_detects_pipe`,
 /// `has_unsafe_pipe_composition_detects_and_chain`,
 /// `has_unsafe_pipe_composition_detects_semicolon`,
 /// `has_unsafe_pipe_composition_detects_output_redirection`,
 /// `has_unsafe_pipe_composition_detects_input_redirection`,
+/// `has_unsafe_pipe_composition_detects_background_operator`,
 /// `has_unsafe_pipe_composition_false_for_plain_command`.
 fn has_unsafe_pipe_composition(command: &str) -> bool {
     command.contains('|')
-        || command.contains("&&")
+        || command.contains('&') // catches both `&&` chaining and background `&`
         || command.contains(';')
         || command.contains('>')
         || command.contains('<')
@@ -600,6 +608,14 @@ mod tests {
     #[test]
     fn has_unsafe_pipe_composition_detects_input_redirection() {
         assert!(has_unsafe_pipe_composition("cat < input.txt"));
+    }
+
+    #[test]
+    fn has_unsafe_pipe_composition_detects_background_operator() {
+        // Regression test (trusty-review finding, PR #1968): `cargo test &`
+        // rewritten to `cargo test & | tm compress ...` is invalid shell
+        // syntax in most shells — must never be rewritten.
+        assert!(has_unsafe_pipe_composition("cargo test &"));
     }
 
     #[test]
