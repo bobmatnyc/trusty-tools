@@ -11,9 +11,16 @@
 //! (backed by [`BaseCheckoutLock`], a dependency-free marker-file mutex) plus
 //! [`lock_is_stale`] serialize the check-and-clone window across concurrent
 //! callers to fix the TOCTOU provisioning race (review finding #1).
+//! [`stale_base_dir_error`] turns the "the base path is occupied by a broken,
+//! non-bare directory" state into an actionable operator error (issue #1937
+//! item 1), and is shared by BOTH backends; [`fake_is_established_bare_checkout`]
+//! / [`write_fake_bare_checkout`] let `FakeGitBackend` mirror the real backend's
+//! `rev-parse`-based validity semantics rather than a superficial file-exists
+//! probe (issue #1937 item 3).
 //! Test: `ensure_base_checkout_recovers_from_concurrent_race`,
 //! `ensure_base_checkout_rejects_stale_non_bare_directory`,
-//! `base_checkout_lock_recovers_stale_lock_marker`, all in
+//! `base_checkout_lock_recovers_stale_lock_marker`,
+//! `fake_ensure_base_checkout_rejects_stale_non_bare_directory`, all in
 //! `provisioner/workspace/tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -54,6 +61,91 @@ pub(super) fn is_established_bare_checkout(dir: &Path) -> bool {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim() == "true",
         _ => false,
     }
+}
+
+/// Build an actionable error for a base-checkout path occupied by a broken,
+/// non-bare directory — or return `None` when the path is safe to clone into.
+///
+/// Why: `ensure_base_checkout` correctly refuses to reuse a `<project_dir>/.base`
+/// that is not a valid bare checkout (a leftover from a crashed mid-clone, or a
+/// stale non-bare directory), but the resulting failure used to be an opaque
+/// `git clone --bare` "destination path already exists" message that gives the
+/// operator no recovery path (issue #1937 item 1). We deliberately do NOT
+/// auto-remediate (delete + re-clone): silently `rm -rf`-ing a directory the
+/// daemon did not create is too destructive for an advisory recovery path.
+/// Instead we surface the exact path and the exact command to clear it, and let
+/// the human decide.
+/// What: returns `None` when `base_dir` is absent or empty (either is safe —
+/// `git clone --bare` accepts a missing or empty target); otherwise returns
+/// `Some(ProvisionError::Git(..))` whose message names the exact path and the
+/// literal `rm -rf <path>` command to run before retrying. Callers MUST invoke
+/// this only AFTER confirming the path is not already a valid bare checkout
+/// (via [`is_established_bare_checkout`]) so a healthy base is never flagged.
+/// Test: `ensure_base_checkout_rejects_stale_non_bare_directory` and
+/// `fake_ensure_base_checkout_rejects_stale_non_bare_directory` (both assert
+/// the returned message contains the path and the `rm -rf` hint).
+pub(super) fn stale_base_dir_error(base_dir: &Path) -> Option<ProvisionError> {
+    // A missing dir (read_dir errors) or an empty dir (no entries) is fine:
+    // `git clone --bare` clones cleanly into either. Only a NON-empty dir that
+    // is not a valid bare checkout is the stale/broken state worth reporting.
+    let non_empty = std::fs::read_dir(base_dir)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false);
+    if !non_empty {
+        return None;
+    }
+    Some(ProvisionError::Git(format!(
+        "base checkout path {path} exists but is not a valid bare git checkout \
+         (likely a leftover from a crashed clone, or a stale non-bare directory). \
+         trusty-mpm will not delete it automatically. To allow re-provisioning, \
+         remove it manually and retry:\n    rm -rf {path}",
+        path = base_dir.display()
+    )))
+}
+
+/// Determine whether `dir` is an already-established (fake) BARE checkout,
+/// mirroring [`is_established_bare_checkout`]'s intent for `FakeGitBackend`.
+///
+/// Why: `FakeGitBackend::ensure_base_checkout` used to treat a lone
+/// `dir.join("HEAD").is_file()` as proof of an established base — the exact
+/// superficial file-existence probe the real backend abandoned in favour of
+/// `git rev-parse --is-bare-repository` (issue #1937 item 3). A future test
+/// author using the fake to simulate a stale `.base` (a stray `HEAD` file with
+/// no repository structure) would have gotten a false-positive "already
+/// established" pass, hiding the very stale-directory bug a real-backend test
+/// would catch. This check restores that fidelity in the filesystem-light fake.
+/// What: returns `true` only when BOTH a root-level `HEAD` file exists AND a
+/// root-level `config` file marked `bare = true` exists — the structural
+/// markers [`write_fake_bare_checkout`] writes to simulate a real bare clone. A
+/// directory containing only a stray `HEAD` (the stale-mid-clone shape) fails
+/// the `config` check and reads as NOT established, matching the real backend.
+/// Test: `fake_ensure_base_checkout_rejects_stale_non_bare_directory`,
+/// `provision_reuses_base_checkout_across_sessions`.
+pub(super) fn fake_is_established_bare_checkout(dir: &Path) -> bool {
+    dir.join("HEAD").is_file()
+        && std::fs::read_to_string(dir.join("config"))
+            .map(|c| c.contains("bare = true"))
+            .unwrap_or(false)
+}
+
+/// Write the minimal structural markers that make a directory read as an
+/// established (fake) bare checkout.
+///
+/// Why: `FakeGitBackend::ensure_base_checkout` must leave behind enough state
+/// that [`fake_is_established_bare_checkout`] recognises it on the next call
+/// (idempotent reuse across sessions) while still being distinguishable from a
+/// stale directory that merely holds a stray `HEAD` file (issue #1937 item 3).
+/// What: creates `dir` (and parents) and writes a `HEAD` ref pointer plus a
+/// `config` file carrying the `bare = true` marker — the two files
+/// [`fake_is_established_bare_checkout`] requires. Returns any I/O error as
+/// [`ProvisionError::Io`].
+/// Test: `provision_reuses_base_checkout_across_sessions` (second provision is a
+/// no-op reuse), `fake_ensure_base_checkout_rejects_stale_non_bare_directory`.
+pub(super) fn write_fake_bare_checkout(dir: &Path) -> Result<(), ProvisionError> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join("HEAD"), "ref: refs/heads/main\n")?;
+    std::fs::write(dir.join("config"), "[core]\n\tbare = true\n")?;
+    Ok(())
 }
 
 /// Maximum time a caller will wait to acquire the base-checkout lock before
@@ -164,6 +256,25 @@ pub(super) fn acquire_base_checkout_lock(
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // KNOWN, ACCEPTED RACE (issue #1937 item 2): staleness is judged
+                // purely by the marker file's mtime crossing `LOCK_STALE_AFTER`.
+                // On a filesystem with low-resolution timestamps, or under
+                // significant wall-clock skew (e.g. NTP step, VM clock drift),
+                // it is theoretically possible for this caller to compute a
+                // still-live holder's marker as "stale" and force-remove it,
+                // after which BOTH callers could hold the lock at once. We
+                // accept this window deliberately: this is an ADVISORY lock, not
+                // a correctness-critical mutex — the only thing it guards is a
+                // rare first-provision `git clone --bare` collision (finding #1),
+                // and `LOCK_STALE_AFTER` (5 min) is set comfortably longer than
+                // `LOCK_ACQUIRE_TIMEOUT` (60 s) precisely so a live,
+                // slow-but-progressing clone is never mistaken for an abandoned
+                // one under normal conditions. A dependency-free, kernel-tracked
+                // alternative (e.g. `flock`) or a PID-liveness check would close
+                // the window, but the added complexity is not justified for this
+                // low-probability, non-destructive edge case (worst outcome: the
+                // git-clone collision this lock exists to prevent, which was
+                // already tolerable before the lock landed).
                 if lock_is_stale(lock_path) {
                     // Best-effort: if the remove races with the true holder's
                     // own release, the next loop iteration's create_new simply
