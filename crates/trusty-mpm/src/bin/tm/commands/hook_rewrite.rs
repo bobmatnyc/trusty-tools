@@ -145,11 +145,21 @@ fn effective_tool_name(command: &str) -> String {
         }
         if first == "sudo" || first == "env" {
             match tokens.next() {
-                Some(next) => {
+                Some(next) if !next.starts_with('-') => {
                     first = next;
                     continue;
                 }
-                None => break,
+                // Either nothing follows `sudo`/`env`, or the next token is
+                // itself a flag (e.g. `sudo -u root make`, `env -i cmd`).
+                // Resolving the real program name in that case needs
+                // argument-aware parsing this function doesn't do; rather
+                // than guess and derive a bogus tool name (trusty-review
+                // finding, PR #1968: `sudo -u root make build` previously
+                // resolved to `"-u root"` instead of recognising `make`),
+                // degrade to "unknown" — `is_safe_tool_name` already
+                // rejects an empty string, so the caller safely skips the
+                // rewrite.
+                _ => return String::new(),
             }
         }
         break;
@@ -198,13 +208,22 @@ fn is_safe_tool_name(tool_name: &str) -> bool {
 /// unit testing of the matching rule independent of the rewrite string
 /// format.
 /// What: Delegates token extraction to [`first_command_token`], then does a
-/// case-sensitive exact match against [`ORCHESTRATOR_EXCLUSIONS`].
+/// case-sensitive exact match against [`ORCHESTRATOR_EXCLUSIONS`]. When
+/// [`first_command_token`] can't confidently resolve the real program name
+/// (returns `None` — e.g. `sudo -u root make`, where the token after `sudo`
+/// is itself a flag, not a program), this conservatively returns `true`
+/// (treat as orchestrator-like, i.e. don't rewrite) rather than `false`: a
+/// trusty-review-flagged fail-open gap (PR #1968) where "can't tell" used
+/// to mean "assume it's safe to rewrite" — backwards for a safety check
+/// whose entire purpose is avoiding exactly this kind of unrecognised
+/// build-orchestrator invocation.
 /// Test: `is_orchestrator_command_matches_known_exclusions`,
-/// `is_orchestrator_command_ignores_unrelated_commands`.
+/// `is_orchestrator_command_ignores_unrelated_commands`,
+/// `is_orchestrator_command_conservatively_true_for_sudo_with_flags`.
 fn is_orchestrator_command(command: &str) -> bool {
     match first_command_token(command) {
         Some(token) => ORCHESTRATOR_EXCLUSIONS.contains(&token),
-        None => false,
+        None => true,
     }
 }
 
@@ -221,10 +240,18 @@ fn is_orchestrator_command(command: &str) -> bool {
 /// [`effective_tool_name`]'s doc comment for the same `env`-handling gap
 /// this mirrors), then returns the basename (post-`/`) of whatever token
 /// remains.
+/// Returns `None` — "can't confidently resolve" — when the token
+/// immediately after `sudo`/`env` is itself flag-shaped (starts with `-`,
+/// e.g. `sudo -u root make`, `env -i cmd`): the real program name in that
+/// case needs argument-aware parsing this function doesn't do, and
+/// [`is_orchestrator_command`] treats `None` as "conservatively assume
+/// orchestrator" rather than risk missing a real exclusion (trusty-review
+/// finding, PR #1968).
 /// Test: `first_command_token_strips_env_assignment`,
 /// `first_command_token_strips_sudo`, `first_command_token_strips_path`,
 /// `first_command_token_plain_command`,
-/// `first_command_token_strips_env_command_prefix`.
+/// `first_command_token_strips_env_command_prefix`,
+/// `first_command_token_none_for_sudo_followed_by_flag`.
 fn first_command_token(command: &str) -> Option<&str> {
     let mut tokens = command.split_whitespace();
     let mut tok = tokens.next()?;
@@ -234,7 +261,11 @@ fn first_command_token(command: &str) -> Option<&str> {
             continue;
         }
         if tok == "sudo" || tok == "env" {
-            tok = tokens.next()?;
+            let next = tokens.next()?;
+            if next.starts_with('-') {
+                return None;
+            }
+            tok = next;
             continue;
         }
         break;
@@ -408,6 +439,21 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_skips_sudo_with_user_flag() {
+        // Regression test (trusty-review finding, PR #1968): `sudo -u root
+        // make build` must never be rewritten — before the fix, the token
+        // after `sudo` (`-u`) was blindly treated as the program name,
+        // producing the bogus tool name `"-u root"` and — critically —
+        // causing `is_orchestrator_command` to miss that this is a `make`
+        // invocation, defeating the orchestrator-exclusion safety net this
+        // whole module exists to provide.
+        assert_eq!(
+            rewrite_bash_command_for_compression("sudo -u root make build"),
+            None
+        );
+    }
+
+    #[test]
     fn is_orchestrator_command_matches_known_exclusions() {
         assert!(is_orchestrator_command("make"));
         assert!(is_orchestrator_command("sudo make install"));
@@ -419,6 +465,16 @@ mod tests {
     fn is_orchestrator_command_ignores_unrelated_commands() {
         assert!(!is_orchestrator_command("cargo test"));
         assert!(!is_orchestrator_command("git diff"));
+    }
+
+    #[test]
+    fn is_orchestrator_command_conservatively_true_for_sudo_with_flags() {
+        // Fail-safe: when the real program name can't be confidently
+        // resolved (`sudo`/`env` followed by a flag rather than a program),
+        // treat the command as orchestrator-like rather than risk rewriting
+        // an unrecognised `make`/`sam`/etc. invocation.
+        assert!(is_orchestrator_command("sudo -u root make build"));
+        assert!(is_orchestrator_command("env -i make build"));
     }
 
     #[test]
@@ -451,6 +507,17 @@ mod tests {
     }
 
     #[test]
+    fn first_command_token_none_for_sudo_followed_by_flag() {
+        // `sudo -u root make` — the token after `sudo` is itself a flag,
+        // not a program name; resolving it correctly needs argument-aware
+        // parsing this function doesn't do, so it must degrade to `None`
+        // (trusty-review finding, PR #1968) rather than returning the
+        // bogus token `"-u"`.
+        assert_eq!(first_command_token("sudo -u root make build"), None);
+        assert_eq!(first_command_token("env -i make build"), None);
+    }
+
+    #[test]
     fn effective_tool_name_joins_program_and_subcommand() {
         assert_eq!(effective_tool_name("cargo test --workspace"), "cargo test");
         assert_eq!(effective_tool_name("git diff HEAD~1"), "git diff");
@@ -476,6 +543,16 @@ mod tests {
         // the previously-buggy `"env FOO=bar"` — trusty-review finding,
         // PR #1968.
         assert_eq!(effective_tool_name("env FOO=bar cargo test"), "cargo test");
+    }
+
+    #[test]
+    fn effective_tool_name_returns_empty_for_sudo_followed_by_flag() {
+        // `sudo -u root make build` must NOT resolve to a bogus tool name
+        // like `"-u root"` — trusty-review finding, PR #1968. An empty
+        // string fails `is_safe_tool_name`, so the caller safely skips the
+        // rewrite instead of guessing.
+        assert_eq!(effective_tool_name("sudo -u root make build"), "");
+        assert_eq!(effective_tool_name("env -i cargo test"), "");
     }
 
     #[test]
