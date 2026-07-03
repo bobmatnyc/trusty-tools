@@ -281,12 +281,14 @@ pub enum SessionNameError {
 /// already taken FOR THIS PROJECT specifically — a `tm-other-project-01`
 /// session must never block `tm-trusty-tools-01` from being assigned.
 /// What: strips the [`PREFIX`] and the `<leaf>-` segment; if what remains is
-/// exactly two ASCII digits, parses and returns them. Any other shape (wrong
-/// leaf, wrong/legacy prefix, non-numeric or non-2-digit suffix — e.g. a
+/// exactly two ASCII digits in `01`-`99` (`00` is rejected — [`allocate_serial`]
+/// never hands one out, so a `tm-<leaf>-00` name is foreign/hand-crafted, not
+/// one of ours), parses and returns them. Any other shape (wrong leaf,
+/// wrong/legacy prefix, non-numeric, non-2-digit, or `00` suffix — e.g. a
 /// legacy `tmpm-<repo>-<8hex>` name) returns `None`, so legacy/foreign names
 /// never collide with the new serial space.
 /// Test: `parse_serial_matches_own_leaf`, `parse_serial_rejects_other_leaf`,
-/// `parse_serial_rejects_legacy_hex_suffix`.
+/// `parse_serial_rejects_legacy_hex_suffix`, `parse_serial_rejects_serial_00`.
 fn parse_serial_for_leaf(name: &str, leaf: &str) -> Option<u8> {
     let rest = name.strip_prefix(PREFIX)?;
     let rest = rest.strip_prefix(leaf)?;
@@ -294,7 +296,8 @@ fn parse_serial_for_leaf(name: &str, leaf: &str) -> Option<u8> {
     if digits.len() != 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    digits.parse::<u8>().ok()
+    let serial = digits.parse::<u8>().ok()?;
+    if serial == 0 { None } else { Some(serial) }
 }
 
 /// Find the lowest unused two-digit serial (01-99) for `leaf`.
@@ -380,8 +383,12 @@ pub fn build_managed_session_name(
         project.is_none_or(|p| !p.contains('/')),
         "build_managed_session_name: pass the repo segment only, not owner/repo — got {project:?}"
     );
-    let leaf = match project {
-        Some(p) if !slug_project(p).is_empty() => p.to_string(),
+    // Slug once and reuse the result (#1966 review follow-up): computing
+    // `slug_project(p)` here and letting `build_session_name` re-derive it
+    // internally was harmless (idempotent) but wasteful and easy to misread
+    // as two different values.
+    let leaf = match project.map(slug_project) {
+        Some(slug) if !slug.is_empty() => slug,
         _ => leaf_slug_from_dir(cwd),
     };
     build_session_name(&leaf, existing_names)
@@ -667,6 +674,32 @@ mod tests {
         assert_eq!(allocate_serial("trusty-tools", &existing).unwrap(), 1);
     }
 
+    /// Why (#1966 review follow-up): `parse_serial_for_leaf`'s doc comment names
+    /// this test directly; it was previously covered only indirectly through
+    /// `allocate_serial_*`. Pins the happy path in isolation: a `tm-<leaf>-NN`
+    /// name for exactly this leaf must parse to its serial.
+    /// Test: itself.
+    #[test]
+    fn parse_serial_matches_own_leaf() {
+        assert_eq!(
+            parse_serial_for_leaf("tm-trusty-tools-07", "trusty-tools"),
+            Some(7)
+        );
+    }
+
+    /// Why (#1966 review follow-up): mirrors `allocate_serial_ignores_other_leaf`
+    /// but exercises `parse_serial_for_leaf` directly, as its doc comment names.
+    /// A name belonging to a different leaf must never parse as a serial for
+    /// this one, even when the other leaf is a prefix/suffix-adjacent string.
+    /// Test: itself.
+    #[test]
+    fn parse_serial_rejects_other_leaf() {
+        assert_eq!(
+            parse_serial_for_leaf("tm-other-project-01", "trusty-tools"),
+            None
+        );
+    }
+
     /// Why: legacy `tmpm-<repo>-<8hex>` names must never be mistaken for a
     /// `tm-<leaf>-NN` serial (the suffix is 8 hex chars, not 2 digits).
     /// Test: itself.
@@ -674,6 +707,20 @@ mod tests {
     fn parse_serial_rejects_legacy_hex_suffix() {
         assert_eq!(
             parse_serial_for_leaf("tmpm-trusty-tools-abc12345", "trusty-tools"),
+            None
+        );
+    }
+
+    /// Why (#1966 review follow-up): [`allocate_serial`] scans `1..=MAX_SERIAL`
+    /// and never hands out `00`, so a `tm-<leaf>-00` name is foreign or
+    /// hand-crafted, not one this scheme ever produced. Without an explicit
+    /// reject, such a name would silently parse as serial `0` and could be
+    /// mistaken for a managed session with that serial.
+    /// Test: itself.
+    #[test]
+    fn parse_serial_rejects_serial_00() {
+        assert_eq!(
+            parse_serial_for_leaf("tm-trusty-tools-00", "trusty-tools"),
             None
         );
     }

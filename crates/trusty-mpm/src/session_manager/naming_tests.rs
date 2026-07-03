@@ -21,6 +21,53 @@ use super::manager::{ManagedTmuxDriver, SessionManager};
 use super::record::ManagedSessionState;
 use super::tests::FakeTmuxDriver;
 
+/// The full `tm-<leaf>-NN` naming convention (issue #1955): a `tm-` prefix
+/// AND a trailing two-digit numeric serial.
+///
+/// Why (#1966 review follow-up, moved from `tests.rs` to keep that file under
+/// its 1500-SLOC test cap): checking only the `tm-` prefix would not catch a
+/// regression that dropped the `-NN` suffix entirely (e.g. a future change
+/// that regressed to the pre-#1955 `tm-<leaf>` form with no serial).
+/// What: creates one session and asserts its `tmux_name` has the `tm-` prefix
+/// AND that the segment after the last dash is exactly two ASCII digits.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn manager_naming_convention() {
+    let dir = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt1")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+
+    assert!(record.tmux_name.starts_with("tm-"), "has tm- prefix");
+    let suffix = record
+        .tmux_name
+        .rsplit('-')
+        .next()
+        .expect("name has at least one dash-delimited segment");
+    assert_eq!(
+        suffix.len(),
+        2,
+        "serial suffix is exactly 2 digits: {}",
+        record.tmux_name
+    );
+    assert!(
+        suffix.bytes().all(|b| b.is_ascii_digit()),
+        "serial suffix is numeric: {}",
+        record.tmux_name
+    );
+}
+
 /// Serial reuse end-to-end (issue #1955 worked example): sessions `-01`,
 /// `-02`, `-03` exist for a project; `-02` is decommissioned; the NEXT session
 /// created for that project must reuse `-02`, not jump to `-04`.

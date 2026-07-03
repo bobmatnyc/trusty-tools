@@ -75,13 +75,21 @@ pub enum ManagedError {
     #[error("tmux session already adopted/registered: {0}")]
     AlreadyAdopted(String),
 
-    /// All 99 `tm-<leaf>-NN` serials for a project are currently in use.
+    /// A session-name derivation failure (currently: all 99 `tm-<leaf>-NN`
+    /// serials for a project are in use).
     ///
-    /// Why (#1955): the serial-numbered naming scheme caps at two digits per
-    /// project; this surfaces [`SessionNameError::SerialExhausted`] through the
-    /// same typed-error seam as every other create-path failure instead of
-    /// stringly-typed-wrapping it into [`TmuxUnavailable`](Self::TmuxUnavailable).
-    #[error("session name serial exhausted: {0}")]
+    /// Why (#1955, hardened in the #1966 review follow-up): the serial-numbered
+    /// naming scheme caps at two digits per project; this surfaces
+    /// [`SessionNameError`] through the same typed-error seam as every other
+    /// create-path failure instead of stringly-typed-wrapping it into
+    /// [`TmuxUnavailable`](Self::TmuxUnavailable). The message is deliberately
+    /// generic ("session name error", not "serial exhausted") via `#[from]`:
+    /// [`SessionNameError`] currently has exactly one variant
+    /// ([`SessionNameError::SerialExhausted`]), but `#[from]` auto-converts
+    /// ANY future variant into this one — a hardcoded "serial exhausted"
+    /// message would silently mislabel a later, unrelated `SessionNameError`
+    /// variant.
+    #[error("session name error: {0}")]
     NameSerialExhausted(#[from] SessionNameError),
 }
 
@@ -246,32 +254,55 @@ impl SessionManager {
         // `-02`, `-03` names instead of relying solely on the raw tmux
         // `NameCollision` error — the hint path previously had NO uniqueness
         // suffix at all.
-        let existing_names = self.names_for_serial_allocation().await?;
-        let tmux_name = if let Some(hint) = name_hint {
-            // Explicit name hint from the user — treat the hint as a path
-            // basename (callers may pass a bare "ticket-1234" or a directory
-            // path like "/repos/project"), then allocate a serial for it same
-            // as every other leaf.
-            let leaf = leaf_slug_from_dir(Path::new(&hint));
-            crate::core::names::build_session_name(&leaf, &existing_names)?
-        } else {
-            // Derive project from repo_url if it carries a parseable GitHub
-            // identity; otherwise `build_managed_session_name` falls back to
-            // the basename of `cwd`, then to `"local"`.
-            let project = repo_url
-                .as_deref()
-                .and_then(trusty_common::github_path::parse_github_path)
-                .map(|gh| gh.repo);
-            build_managed_session_name(project.as_deref(), &cwd, &existing_names)?
-        };
+        let mut existing_names = self.names_for_serial_allocation().await?;
+        let leaf_hint = name_hint
+            .as_deref()
+            .map(|h| leaf_slug_from_dir(Path::new(h)));
+        let github_project = repo_url
+            .as_deref()
+            .and_then(trusty_common::github_path::parse_github_path)
+            .map(|gh| gh.repo);
 
-        // Detect collision before creating tmux session (belt-and-suspenders:
-        // the serial allocation above should already guarantee freedom from
-        // collision, but a concurrent create for the same leaf between the
-        // allocation read and this check is possible under load).
-        if self.tmux.session_exists(&tmux_name) {
-            return Err(ManagedError::NameCollision(tmux_name));
+        // Allocate a name, then check for a live tmux collision (belt-and-
+        // suspenders: the serial allocation above should already guarantee
+        // freedom from collision, but a concurrent create for the same leaf
+        // between the allocation read and this check is possible under load).
+        // Why a bounded retry loop (#1966 review follow-up) rather than a
+        // single check-and-fail: a lost race is recoverable — feeding the
+        // just-collided name back into `existing_names` makes the next
+        // allocation pick the following free serial, so a concurrent create
+        // only costs an extra loop iteration instead of a hard user-visible
+        // failure. `NameCollision` is still returned if every attempt in the
+        // bounded window collides (e.g. sustained, pathological contention),
+        // so this can never loop forever.
+        const MAX_NAME_ALLOCATION_ATTEMPTS: u8 = 5;
+        let mut tmux_name = None;
+        for _ in 0..MAX_NAME_ALLOCATION_ATTEMPTS {
+            let candidate = if let Some(ref leaf) = leaf_hint {
+                // Explicit name hint from the user — treat the hint as a path
+                // basename (callers may pass a bare "ticket-1234" or a
+                // directory path like "/repos/project"), then allocate a
+                // serial for it same as every other leaf.
+                crate::core::names::build_session_name(leaf, &existing_names)?
+            } else {
+                // Derive project from repo_url if it carries a parseable
+                // GitHub identity; otherwise `build_managed_session_name`
+                // falls back to the basename of `cwd`, then to `"local"`.
+                build_managed_session_name(github_project.as_deref(), &cwd, &existing_names)?
+            };
+            if self.tmux.session_exists(&candidate) {
+                existing_names.push(candidate);
+                continue;
+            }
+            tmux_name = Some(candidate);
+            break;
         }
+        let Some(tmux_name) = tmux_name else {
+            return Err(ManagedError::NameCollision(format!(
+                "no free `tm-<leaf>-NN` name after {MAX_NAME_ALLOCATION_ATTEMPTS} attempts \
+                 (sustained concurrent creates for the same project)"
+            )));
+        };
 
         let workdir = cwd.to_string_lossy().to_string();
         self.tmux
@@ -801,7 +832,12 @@ impl SessionManager {
     /// more than "is this serial still occupied".
     /// What: unions the live tmux session list (covers adopted/foreign
     /// sessions not yet reflected in the store) with every NON-decommissioned
-    /// store record's `tmux_name`.
+    /// store record's `tmux_name`. Takes the store's WRITE lock rather than a
+    /// read lock for the same reason as [`Self::known_tmux_names`]:
+    /// [`SessionStore::all`] requires `&mut self` (it calls
+    /// `reload_if_changed()` first to pick up records another process wrote),
+    /// so a read-only guard would not compile and the read-only
+    /// `cached_all()` alternative would risk a stale serial set.
     /// Test: `manager_serial_reuses_decommissioned_gap` in tests.rs.
     async fn names_for_serial_allocation(&self) -> Result<Vec<String>, ManagedError> {
         let mut names: Vec<String> = self
