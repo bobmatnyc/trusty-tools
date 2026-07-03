@@ -15,17 +15,22 @@
 //! it returns `None` (meaning: do not rewrite, forward the command
 //! unmodified) for empty commands, day-one orchestrator exclusions
 //! (`make`/`sam`/`rake`/`gradle`/`gradlew`/`mvn`/`ant`/`cdk`/`terraform`,
-//! mirroring claude-mpm's `_ORCHESTRATOR_EXCLUSIONS`), and any command that
+//! mirroring claude-mpm's `_ORCHESTRATOR_EXCLUSIONS`), any command that
 //! already contains pipe/chain composition (`|`, `&&`, `;`) since appending
-//! another pipe to those is the same class of risk. Otherwise it returns
-//! `Some(rewritten)` with `| tm compress --tool "<effective tool name>"`
-//! appended — see [`effective_tool_name`] for why the tool value is derived
-//! from the command rather than a hardcoded `"bash"`.
+//! another pipe to those is the same class of risk, and any command whose
+//! derived tool name would embed shell metacharacters (see
+//! [`is_safe_tool_name`]). Otherwise it returns `Some(rewritten)` with
+//! `| tm compress --tool "<effective tool name>"` appended — see
+//! [`effective_tool_name`] for why the tool value is derived from the
+//! command rather than a hardcoded `"bash"`.
 //! [`build_pretooluse_rewrite_response`] builds the
 //! `hookSpecificOutput.updatedInput` JSON body `tm hook` prints to stdout so
-//! Claude Code substitutes the rewritten command before executing it.
+//! Claude Code substitutes the rewritten command before executing it — this
+//! exact shape is confirmed against the live Claude Code hooks reference
+//! (<https://code.claude.com/docs/en/hooks>, confirmed 2026-07-03; see that
+//! function's doc comment for the citation).
 //! Test: `rewrite_*`, `is_orchestrator_command_*`, `first_command_token_*`,
-//! `build_pretooluse_rewrite_response_*` below.
+//! `is_safe_tool_name_*`, `build_pretooluse_rewrite_response_*` below.
 
 /// Day-one orchestrator-command exclusion list.
 ///
@@ -37,8 +42,8 @@
 /// ~lines 49-69) so this spike inherits the same day-one safety margin
 /// rather than rediscovering the failure mode.
 /// What: Matched against the command's first whitespace-delimited token
-/// (after stripping env-var-assignment prefixes, `sudo`, and any leading
-/// path) by [`is_orchestrator_command`].
+/// (after stripping env-var-assignment prefixes, `sudo`/`env`, and any
+/// leading path) by [`is_orchestrator_command`].
 /// Test: `is_orchestrator_command_matches_known_exclusions`.
 const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
     "make",
@@ -60,8 +65,12 @@ const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
 /// tradeoff framing.
 /// What: Returns `None` (no-op — forward the original command unmodified)
 /// when `command` is empty/whitespace-only, matches
-/// [`is_orchestrator_command`], or already contains pipe/chain composition
-/// (see [`has_unsafe_pipe_composition`]). Otherwise returns
+/// [`is_orchestrator_command`], already contains pipe/chain composition
+/// (see [`has_unsafe_pipe_composition`]), or derives a tool name containing
+/// shell metacharacters (see [`is_safe_tool_name`] — a
+/// trusty-review-flagged injection risk, PR #1968: the derived name is
+/// embedded verbatim inside a double-quoted shell argument below, and
+/// double quotes do not stop POSIX command substitution). Otherwise returns
 /// `Some("<command> | tm compress --tool \"<effective tool name>\"")` —
 /// the `--tool` value comes from [`effective_tool_name`], **not** a
 /// hardcoded `"bash"`: `compress_tool_output`'s dispatch table
@@ -74,7 +83,8 @@ const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
 /// Test: `rewrite_appends_compress_pipe_for_plain_command`,
 /// `rewrite_appends_compress_pipe_with_subcommand_tool_name`,
 /// `rewrite_skips_orchestrator_commands`, `rewrite_skips_piped_commands`,
-/// `rewrite_skips_chained_commands`, `rewrite_skips_empty_command`.
+/// `rewrite_skips_chained_commands`, `rewrite_skips_empty_command`,
+/// `rewrite_skips_command_substitution_in_tool_name`.
 pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<String> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
@@ -87,6 +97,9 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
         return None;
     }
     let tool = effective_tool_name(trimmed);
+    if !is_safe_tool_name(&tool) {
+        return None;
+    }
     Some(format!("{trimmed} | tm compress --tool \"{tool}\""))
 }
 
@@ -102,31 +115,78 @@ pub(crate) fn rewrite_bash_command_for_compression(command: &str) -> Option<Stri
 /// still pass through unchanged, which matches this repo's own documented
 /// filter-coverage gap (`docs/specs/tool-output-interception-seam.md`
 /// §Spike) rather than a new regression.
-/// What: Strips the same env-assignment/`sudo`/path noise
-/// [`first_command_token`] strips, then returns `"<program> <subcommand>"`
-/// when a second whitespace-delimited token follows, else just `<program>`.
+/// What: Strips the same env-assignment/`sudo`/`env`/path noise
+/// [`first_command_token`] strips (looping so `env FOO=bar cargo test` and
+/// similar multi-prefix combinations resolve correctly — a trusty-review
+/// finding, PR #1968: a one-shot `if first == "sudo"` check left the literal
+/// `env` command unhandled, e.g. `env FOO=bar cargo test` previously
+/// resolved to the wrong tool name `"env FOO=bar"` instead of `"cargo
+/// test"`), then returns `"<program> <subcommand>"` when a second
+/// whitespace-delimited token follows, else just `<program>`.
 /// Test: `effective_tool_name_joins_program_and_subcommand`,
 /// `effective_tool_name_single_token_command`,
-/// `effective_tool_name_strips_env_and_sudo_noise`.
+/// `effective_tool_name_strips_env_and_sudo_noise`,
+/// `effective_tool_name_strips_env_command_prefix`.
 fn effective_tool_name(command: &str) -> String {
     let mut tokens = command.split_whitespace();
     let Some(mut first) = tokens.next() else {
         return String::new();
     };
-    while is_env_assignment(first) {
-        let Some(next) = tokens.next() else {
-            return String::new();
-        };
-        first = next;
-    }
-    if first == "sudo" {
-        first = tokens.next().unwrap_or(first);
+    loop {
+        if is_env_assignment(first) {
+            let Some(next) = tokens.next() else {
+                return String::new();
+            };
+            first = next;
+            continue;
+        }
+        if first == "sudo" || first == "env" {
+            match tokens.next() {
+                Some(next) => {
+                    first = next;
+                    continue;
+                }
+                None => break,
+            }
+        }
+        break;
     }
     let program = first.rsplit('/').next().unwrap_or(first);
     match tokens.next() {
         Some(subcommand) => format!("{program} {subcommand}"),
         None => program.to_string(),
     }
+}
+
+/// Whether `tool_name` is safe to embed verbatim inside the double-quoted
+/// `--tool "<tool_name>"` argument of the rewritten command.
+///
+/// Why: [`effective_tool_name`] derives its value from whitespace-delimited
+/// tokens of the *user-supplied* Bash command with no further sanitisation.
+/// Wrapping the value in double quotes only defeats word-splitting — POSIX
+/// shells still perform command substitution (`$(...)`, backticks) and
+/// variable expansion (`$VAR`) *inside* double-quoted strings, and an
+/// embedded `"` would terminate the quoted argument early and let whatever
+/// follows be interpreted as new shell syntax. A command whose first two
+/// tokens happen to contain any of those characters — e.g.
+/// `echo $(touch /tmp/pwned)` — would therefore have that substitution
+/// re-evaluated a second time, in a new shell position, as part of building
+/// the `--tool` argument (trusty-review-flagged shell-injection risk, PR
+/// #1968; confirmed by an independent `review_diff` pass).
+/// What: `true` only when every character is ASCII alphanumeric or one of
+/// the small set that legitimately appears in tool names/subcommands/paths
+/// (space, `-`, `_`, `.`, `/`, `:`) — exactly what `"cargo test"`,
+/// `"git diff"`, or `"./scripts/foo.sh"` need. Anything else (`$`,
+/// backticks, `"`, `\`, parens, newlines, …) is rejected, and
+/// [`rewrite_bash_command_for_compression`] falls back to its safe
+/// no-rewrite default rather than risk embedding it.
+/// Test: `is_safe_tool_name_allows_typical_tool_names`,
+/// `is_safe_tool_name_rejects_shell_metacharacters`.
+fn is_safe_tool_name(tool_name: &str) -> bool {
+    !tool_name.is_empty()
+        && tool_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.' | '/' | ':'))
 }
 
 /// Whether `command`'s first token matches a known orchestrator exclusion.
@@ -152,20 +212,29 @@ fn is_orchestrator_command(command: &str) -> bool {
 /// `/usr/bin/make` (absolute path) — all of which should still match
 /// `make` for exclusion purposes. Being permissive here trades a little
 /// precision for staying on the safe (under-rewrite) side.
-/// What: Skips any number of leading `KEY=value`-shaped tokens, then a
-/// single leading `sudo`, then returns the basename (post-`/`) of whatever
-/// token remains.
+/// What: Loops skipping any number of leading `KEY=value`-shaped tokens
+/// interleaved with `sudo`/`env` prefixes (so `env FOO=bar make build`
+/// resolves to `make` just like `sudo make build` does — see
+/// [`effective_tool_name`]'s doc comment for the same `env`-handling gap
+/// this mirrors), then returns the basename (post-`/`) of whatever token
+/// remains.
 /// Test: `first_command_token_strips_env_assignment`,
 /// `first_command_token_strips_sudo`, `first_command_token_strips_path`,
-/// `first_command_token_plain_command`.
+/// `first_command_token_plain_command`,
+/// `first_command_token_strips_env_command_prefix`.
 fn first_command_token(command: &str) -> Option<&str> {
     let mut tokens = command.split_whitespace();
     let mut tok = tokens.next()?;
-    while is_env_assignment(tok) {
-        tok = tokens.next()?;
-    }
-    if tok == "sudo" {
-        tok = tokens.next()?;
+    loop {
+        if is_env_assignment(tok) {
+            tok = tokens.next()?;
+            continue;
+        }
+        if tok == "sudo" || tok == "env" {
+            tok = tokens.next()?;
+            continue;
+        }
+        break;
     }
     Some(tok.rsplit('/').next().unwrap_or(tok))
 }
@@ -211,12 +280,25 @@ fn has_unsafe_pipe_composition(command: &str) -> bool {
 ///
 /// Why: This is the JSON shape `tm hook` prints to stdout so Claude Code
 /// substitutes `rewritten_command` for the original before executing it.
-/// **Unverified against a live Claude Code instance** — implemented per the
-/// shape sketched in `docs/specs/tool-output-interception-seam.md` §Option 0
-/// (itself derived from claude-mpm's `ztk_hook.py::_build_ztk_response_impl`
-/// convention), since no reference to `hookSpecificOutput`/`updatedInput`
-/// exists elsewhere in this repo's docs. Needs live validation before this
-/// spike is considered production-ready.
+/// Originally implemented per the shape sketched in
+/// `docs/specs/tool-output-interception-seam.md` §Option 0 (itself derived
+/// from claude-mpm's `ztk_hook.py::_build_ztk_response_impl` convention) with
+/// no in-repo reference to confirm it. **Confirmed against the live Claude
+/// Code hooks reference** (<https://code.claude.com/docs/en/hooks>,
+/// confirmed 2026-07-03 while addressing a trusty-review finding on PR
+/// #1968): "PreToolUse: `updatedInput` directly under `hookSpecificOutput`
+/// replaces a tool's arguments before it runs," with the documented example
+/// matching this shape exactly. That same reference also confirms (a) the
+/// hook's response is only parsed on `exit 0`, and stdout "must contain only
+/// the JSON object" for that parse to succeed — see `misc::hook`'s doc
+/// comment for why the caller now returns immediately after printing this
+/// — and (b) the stdin payload field names this module's caller
+/// (`misc::hook`) reads (`hook_event_name`, `tool_name`,
+/// `tool_input.command`) match the live protocol. This function itself has
+/// no failure path: parsing failures upstream (in `misc::read_stdin_hook_payload`)
+/// already degrade to "no stdin payload" before this is ever called, so an
+/// invalid/unrecognised hook payload shape fails safe as a silent no-op, not
+/// a malformed response.
 /// What: `{"hookSpecificOutput": {"hookEventName": "PreToolUse",
 /// "updatedInput": {"command": rewritten_command}}}`.
 /// Test: `build_pretooluse_rewrite_response_has_expected_shape`.
@@ -295,6 +377,22 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_skips_command_substitution_in_tool_name() {
+        // `$(...)`, backticks, and embedded quotes in the derived tool name
+        // must never reach the `--tool "<name>"` shell argument verbatim —
+        // see `is_safe_tool_name`'s doc comment for the injection risk.
+        assert_eq!(
+            rewrite_bash_command_for_compression("echo $(touch /tmp/pwned)"),
+            None
+        );
+        assert_eq!(rewrite_bash_command_for_compression("echo `whoami`"), None);
+        assert_eq!(
+            rewrite_bash_command_for_compression("echo \"quoted\" arg"),
+            None
+        );
+    }
+
+    #[test]
     fn is_orchestrator_command_matches_known_exclusions() {
         assert!(is_orchestrator_command("make"));
         assert!(is_orchestrator_command("sudo make install"));
@@ -329,6 +427,15 @@ mod tests {
     }
 
     #[test]
+    fn first_command_token_strips_env_command_prefix() {
+        // `env FOO=bar make build` (the common `env`-prefixed invocation
+        // form) must still resolve to `make` for orchestrator-exclusion
+        // matching purposes — a trusty-review-flagged gap where only
+        // `sudo` was handled, not the literal `env` command.
+        assert_eq!(first_command_token("env FOO=bar make build"), Some("make"));
+    }
+
+    #[test]
     fn effective_tool_name_joins_program_and_subcommand() {
         assert_eq!(effective_tool_name("cargo test --workspace"), "cargo test");
         assert_eq!(effective_tool_name("git diff HEAD~1"), "git diff");
@@ -345,6 +452,32 @@ mod tests {
         assert_eq!(effective_tool_name("FOO=bar cargo test"), "cargo test");
         assert_eq!(effective_tool_name("sudo cargo test"), "cargo test");
         assert_eq!(effective_tool_name("/usr/bin/cargo test"), "cargo test");
+    }
+
+    #[test]
+    fn effective_tool_name_strips_env_command_prefix() {
+        // `env FOO=bar cargo test` (the literal `env` command, not just a
+        // `KEY=value` assignment) must still resolve to `"cargo test"`, not
+        // the previously-buggy `"env FOO=bar"` — trusty-review finding,
+        // PR #1968.
+        assert_eq!(effective_tool_name("env FOO=bar cargo test"), "cargo test");
+    }
+
+    #[test]
+    fn is_safe_tool_name_allows_typical_tool_names() {
+        assert!(is_safe_tool_name("cargo test"));
+        assert!(is_safe_tool_name("git diff"));
+        assert!(is_safe_tool_name("./scripts/foo.sh"));
+        assert!(is_safe_tool_name("ls-la_v2"));
+    }
+
+    #[test]
+    fn is_safe_tool_name_rejects_shell_metacharacters() {
+        assert!(!is_safe_tool_name("echo $(touch /tmp/pwned)"));
+        assert!(!is_safe_tool_name("echo `whoami`"));
+        assert!(!is_safe_tool_name("echo \"quoted\""));
+        assert!(!is_safe_tool_name("a;b"));
+        assert!(!is_safe_tool_name(""));
     }
 
     #[test]

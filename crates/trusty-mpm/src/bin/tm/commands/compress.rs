@@ -22,8 +22,7 @@
 //! `log_compression_stats_pct_reduction_is_zero_for_empty_input`,
 //! `run_compress_passes_through_short_output_unchanged` below.
 
-use std::io::Read;
-
+use tokio::io::AsyncReadExt;
 use trusty_agents_common::compress::compress_tool_output_async_with_path;
 
 /// Run `tm compress --tool <tool>`: read stdin, compress, log stats, print.
@@ -34,8 +33,13 @@ use trusty_agents_common::compress::compress_tool_output_async_with_path;
 /// unchanged) result to stdout, exit 0 — so it never breaks the exit-code
 /// semantics of whatever pipeline it's the tail of.
 /// What: Blocks until stdin reaches EOF (this is intentional — the whole
-/// point is to wait for the wrapped command to finish producing output),
-/// compresses via [`compress_tool_output_async_with_path`], logs
+/// point is to wait for the wrapped command to finish producing output), via
+/// [`tokio::io::AsyncReadExt::read_to_string`] rather than a synchronous
+/// `std::io::stdin().read_to_string` — the latter would block this async
+/// fn's Tokio worker thread for the entire read, which is exactly the wrong
+/// tradeoff here since large piped output (the case this subcommand exists
+/// to compress) is the slow case (trusty-review finding, PR #1968).
+/// Compresses via [`compress_tool_output_async_with_path`], logs
 /// `tool_name`/`bytes_before`/`bytes_after`/`pct_reduction`/
 /// `compression_path` at `info` level, then prints the compressed text.
 /// Test: See module tests; `tm compress` has no daemon-only tracing
@@ -47,7 +51,7 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
     init_stats_log_subscriber();
 
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input)?;
+    tokio::io::stdin().read_to_string(&mut input).await?;
 
     let (compressed, path) = compress_tool_output_async_with_path(tool, &input).await;
     log_compression_stats(tool, input.len(), compressed.len(), path.as_str());
