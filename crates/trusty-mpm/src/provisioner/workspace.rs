@@ -140,8 +140,10 @@ pub trait GitBackend: Send + Sync {
     /// `RealGitBackend` clones `--bare` (see its impl doc for why); callers
     /// must not assume a working tree exists at `base_dir` itself — only
     /// [`worktree_add`](Self::worktree_add) produces checked-out working trees.
-    /// Test: `FakeGitBackend` records the call and creates a `HEAD` marker so
-    /// a second call is recognised as already-established (no re-clone).
+    /// Test: `FakeGitBackend` records the call and writes fake bare-checkout
+    /// markers (`HEAD` + a `bare = true` `config`) so a second call is
+    /// recognised as already-established (no re-clone), while a stale directory
+    /// carrying only a stray `HEAD` is rejected — matching the real backend.
     fn ensure_base_checkout(&self, repo_url: &str, base_dir: &Path) -> Result<(), ProvisionError>;
 
     /// Fetch `git_ref` fresh from `origin` and add an isolated worktree for it.
@@ -189,7 +191,8 @@ pub struct RealGitBackend;
 // the 500-SLOC production cap — see that module's doc comment for the full
 // rationale behind each item.
 use base_lock::{
-    acquire_base_checkout_lock, base_checkout_lock_path, is_established_bare_checkout,
+    acquire_base_checkout_lock, base_checkout_lock_path, fake_is_established_bare_checkout,
+    is_established_bare_checkout, stale_base_dir_error, write_fake_bare_checkout,
 };
 
 impl GitBackend for RealGitBackend {
@@ -309,7 +312,11 @@ impl GitBackend for RealGitBackend {
     /// `base_dir`, with stale-lock recovery so a crashed process can never
     /// permanently deadlock future provisioning. After acquiring the lock,
     /// re-checks `is_established_bare_checkout` once more (another caller may
-    /// have finished cloning while this one was waiting) before cloning.
+    /// have finished cloning while this one was waiting) before cloning. If the
+    /// path is then found occupied by a non-empty stale/broken (non-bare)
+    /// directory, returns an actionable [`stale_base_dir_error`] naming the
+    /// exact path and the `rm -rf` command to clear it — rather than a cryptic
+    /// clone failure or a destructive auto-delete (issue #1937 item 1).
     /// Test: `ensure_base_checkout_recovers_from_concurrent_race` (spawns
     /// real threads racing on the same `base_dir`, asserts every one returns
     /// `Ok` and exactly one valid bare checkout results),
@@ -350,6 +357,17 @@ impl GitBackend for RealGitBackend {
                 "base checkout completed by a concurrent caller while waiting for the lock; reusing"
             );
             return Ok(());
+        }
+
+        // The path is confirmed NOT a valid bare checkout. If it is a non-empty
+        // stale/broken directory (crashed mid-clone leftover, or a pre-#1935
+        // non-bare clone) a `git clone --bare` here would fail with an opaque
+        // "destination path already exists" message. Surface an actionable
+        // error naming the exact path + the `rm -rf` command instead (issue
+        // #1937 item 1). We do NOT auto-delete: removing operator data is too
+        // destructive for an advisory recovery path.
+        if let Some(err) = stale_base_dir_error(base_dir) {
+            return Err(err);
         }
 
         // Use the destination's parent as cwd so a deleted inherited cwd cannot
@@ -552,15 +570,25 @@ impl GitBackend for FakeGitBackend {
             "ensure_base_checkout".to_owned(),
             base_dir.to_owned(),
         ));
-        // Idempotent: a `HEAD` marker simulates an already-established base so
-        // a second call (e.g. a second session for the same project) does not
-        // re-clone — this is the observable contract
+        // Idempotent reuse, mirroring `RealGitBackend`'s
+        // `rev-parse --is-bare-repository` semantics (issue #1937 item 3):
+        // recognise an already-established base ONLY when it looks like a valid
+        // (fake) bare checkout, not merely when a stray `HEAD` file exists.
+        // This is the observable contract
         // `provision_reuses_base_checkout_across_sessions` pins down.
-        if base_dir.join("HEAD").is_file() {
+        if fake_is_established_bare_checkout(base_dir) {
             return Ok(());
         }
-        std::fs::create_dir_all(base_dir)?;
-        std::fs::write(base_dir.join("HEAD"), "ref: refs/heads/main\n")?;
+        // Mirror `RealGitBackend`: a non-empty directory that is NOT a valid
+        // bare checkout is a stale/broken artifact — reject it loudly (with the
+        // same actionable message) rather than silently reuse or clobber it, so
+        // a fake-backend stale-directory test catches what a real one would.
+        if let Some(err) = stale_base_dir_error(base_dir) {
+            return Err(err);
+        }
+        // Simulate `git clone --bare`: write the structural markers that make
+        // `fake_is_established_bare_checkout` recognise this as a valid base.
+        write_fake_bare_checkout(base_dir)?;
         Ok(())
     }
 

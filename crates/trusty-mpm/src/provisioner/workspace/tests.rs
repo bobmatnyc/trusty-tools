@@ -457,6 +457,87 @@ fn ensure_base_checkout_rejects_stale_non_bare_directory() {
         result.is_err(),
         "a stale non-repo directory must be rejected loudly, not silently reused: {result:?}"
     );
+    // #1937 item 1: the error must be ACTIONABLE — name the exact path and the
+    // `rm -rf` command the operator should run to allow re-provisioning.
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains(&base_dir.display().to_string()),
+        "error must name the exact stale base path, got: {msg}"
+    );
+    assert!(
+        msg.contains("rm -rf"),
+        "error must include the `rm -rf` recovery command, got: {msg}"
+    );
+}
+
+/// #1937 item 3: `FakeGitBackend`'s idempotency/stale-detection must match
+/// `RealGitBackend`'s so a fake-backend test catches the same stale-directory
+/// condition a real-backend test would — the fidelity gap flagged in the
+/// PR #1936 review.
+///
+/// Why: before this fix `FakeGitBackend::ensure_base_checkout` reused any
+/// directory containing a stray `HEAD` file (the same superficial probe the
+/// real backend abandoned), so a future author simulating a stale `.base` with
+/// the fake would get a false-positive "already established" pass instead of
+/// the loud rejection the real backend now produces. This test mirrors
+/// `ensure_base_checkout_rejects_stale_non_bare_directory` against the fake.
+/// What: pre-seeds `base_dir` with ONLY a stray `HEAD` file (no `config`
+/// `bare = true` marker — the fake's stand-in for "not a valid bare checkout")
+/// and asserts `FakeGitBackend::ensure_base_checkout` returns an actionable
+/// `Err` naming the path and the `rm -rf` recovery command, exactly like the
+/// real backend — not a silent `Ok` reuse.
+/// Test: this function IS the test.
+#[test]
+fn fake_ensure_base_checkout_rejects_stale_non_bare_directory() {
+    let root = TempDir::new().unwrap();
+    let base_dir = root.path().join("project").join(".base");
+    std::fs::create_dir_all(&base_dir).unwrap();
+    // A lone HEAD file with no `config bare = true` marker is the fake's
+    // stand-in for a stale, non-bare, mid-crash directory.
+    std::fs::write(base_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    let fake = FakeGitBackend::new();
+    let result = fake.ensure_base_checkout("https://github.com/owner/repo", &base_dir);
+    assert!(
+        result.is_err(),
+        "fake must reject a stale non-bare directory loudly, not silently reuse it: {result:?}"
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains(&base_dir.display().to_string()) && msg.contains("rm -rf"),
+        "fake error must be actionable (path + `rm -rf`), got: {msg}"
+    );
+}
+
+/// #1937 item 3 (positive path): a FRESH `FakeGitBackend::ensure_base_checkout`
+/// establishes a valid fake bare checkout, and a SECOND call reuses it
+/// idempotently (no error, no clobber).
+///
+/// Why: locks in that the tightened validity check does not regress the
+/// happy-path reuse contract — the fake must still recognise the base it just
+/// wrote as established on the next call.
+/// What: calls `ensure_base_checkout` twice against an empty base path; asserts
+/// both return `Ok`, the second is recognised via `fake_is_established_bare_checkout`,
+/// and the written markers (`HEAD` + `bare = true` `config`) are present.
+/// Test: this function IS the test.
+#[test]
+fn fake_ensure_base_checkout_is_idempotent_on_valid_base() {
+    let root = TempDir::new().unwrap();
+    let base_dir = root.path().join("project").join(".base");
+    let fake = FakeGitBackend::new();
+
+    fake.ensure_base_checkout("https://github.com/owner/repo", &base_dir)
+        .expect("first ensure must establish the fake base");
+    assert!(
+        super::base_lock::fake_is_established_bare_checkout(&base_dir),
+        "a freshly-established fake base must read as a valid bare checkout"
+    );
+
+    // Second call must be an idempotent no-op reuse, not a stale rejection.
+    fake.ensure_base_checkout("https://github.com/owner/repo", &base_dir)
+        .expect("second ensure must reuse the established fake base");
+    assert!(base_dir.join("HEAD").is_file());
+    assert!(base_dir.join("config").is_file());
 }
 
 /// A lock marker abandoned by a crashed holder must not permanently deadlock
