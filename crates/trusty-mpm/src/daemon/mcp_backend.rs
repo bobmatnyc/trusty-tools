@@ -50,10 +50,43 @@ fn parse_session_id(raw: &str) -> Result<SessionId, String> {
 
 #[async_trait]
 impl OrchestratorBackend for StateBackend {
-    /// Return every managed session as a JSON array.
+    /// Return every session — legacy AND managed — as a JSON array.
+    ///
+    /// Why: a session provisioned via the managed path (`session_new` /
+    /// `spawn_managed` / the in-project worktree spawn — the tm day-to-day path)
+    /// lives in the [`crate::session_manager::SessionManager`] store, NOT the
+    /// legacy `DaemonState` registry. The sibling `session_stop` / `session_resume`
+    /// tools already target that store by id, so listing only the legacy registry
+    /// left provisioned sessions invisible: the operator could never discover the
+    /// id needed to stop the session they are in (#1946).
+    /// What: unions the legacy `DaemonState.sessions` (native-process discovery,
+    /// hook auto-register, `POST /sessions` bookkeeping — tagged `kind: "legacy"`)
+    /// with every `SessionManager` record (tagged `kind: "managed"`, serialized via
+    /// the shared [`crate::daemon::managed_routes::record_to_json`] so callers get
+    /// the managed id + `workspace_path`/`cwd` used to target `session_stop`).
+    /// Test: `session_list_returns_registered_sessions` (legacy path) and
+    /// `session_list_includes_managed_sessions` (#1946 regression) in `tests`.
     async fn session_list(&self) -> Result<Value, String> {
-        let sessions = self.state.list_sessions();
-        serde_json::to_value(&sessions).map_err(|e| e.to_string())
+        let mut items: Vec<Value> = Vec::new();
+        // Legacy in-memory registry: native-process discovery, hook
+        // auto-registration, and `POST /sessions` bookkeeping.
+        for session in &self.state.list_sessions() {
+            let mut value = serde_json::to_value(session).map_err(|e| e.to_string())?;
+            if let Value::Object(map) = &mut value {
+                map.insert("kind".into(), Value::String("legacy".into()));
+            }
+            items.push(value);
+        }
+        // Managed store: the sessions `session_stop`/`session_resume` can target.
+        let manager = self.state.session_manager().await;
+        for record in manager.list().await {
+            let mut value = crate::daemon::managed_routes::record_to_json(&record);
+            if let Value::Object(map) = &mut value {
+                map.insert("kind".into(), Value::String("managed".into()));
+            }
+            items.push(value);
+        }
+        Ok(Value::Array(items))
     }
 
     /// Return one session plus its memory snapshot and delegation count.
@@ -512,10 +545,64 @@ mod tests {
 
     #[tokio::test]
     async fn session_list_returns_registered_sessions() {
-        let (state, _) = state_with_session();
+        // session_list now also reads the SessionManager store, so this test
+        // must bind to an ISOLATED managed store (#1790) rather than the
+        // production `~/.trusty-mpm` root that `DaemonState::shared` uses.
+        let root = tempfile::TempDir::new().expect("root tempdir");
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+        let id = SessionId::new();
+        let mut session = Session::new(id, "/tmp/p", ControlModel::Tmux, None);
+        session.status = SessionStatus::Active;
+        state.register_session(session);
+
         let backend = StateBackend::new(state);
         let list = backend.session_list().await.unwrap();
+        // One legacy session registered; the isolated managed store is empty.
         assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["kind"], "legacy");
+    }
+
+    #[tokio::test]
+    async fn session_list_includes_managed_sessions() {
+        // Regression for #1946: a session provisioned via the managed path
+        // (`session_new` / `spawn_managed` / in-project worktree spawn) lives in
+        // the SessionManager store, NOT the legacy `DaemonState` registry. The
+        // sibling `session_stop` tool targets that store by id, so `session_list`
+        // MUST surface managed sessions — otherwise the operator can never
+        // discover the id needed to stop the session they are in.
+        let root = tempfile::TempDir::new().expect("root tempdir");
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+
+        // Seed one managed session directly in the store (fake tmux driver, so no
+        // real tmux pane is created).
+        let mgr = state.session_manager().await;
+        let record = mgr
+            .create(
+                "fix the bug".to_string(),
+                Some(root.path().to_path_buf()),
+                Some("regression".to_string()),
+                Some(root.path().to_path_buf()),
+                None,
+                None,
+            )
+            .await
+            .expect("managed session create must succeed with the fake tmux driver");
+
+        let backend = StateBackend::new(state);
+        let list = backend.session_list().await.unwrap();
+        let arr = list.as_array().expect("session_list returns an array");
+
+        let found = arr.iter().any(|v| {
+            v.get("id").and_then(|i| i.as_str()) == Some(record.id.to_string().as_str())
+                && v.get("kind").and_then(|k| k.as_str()) == Some("managed")
+        });
+        assert!(
+            found,
+            "provisioned managed session {} must appear in session_list (got {list})",
+            record.id
+        );
     }
 
     #[tokio::test]
