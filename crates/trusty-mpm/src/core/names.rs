@@ -98,14 +98,24 @@ pub fn is_managed_session_name(name: &str) -> bool {
 /// would have shown its prefix un-stripped. Centralising the strip here keeps
 /// both display sites — and any future one — correct for all three
 /// generations without duplicating the prefix list.
-/// What: returns `name` with [`PREFIX`], [`LEGACY_PREFIX_TMPM`], or
+/// What: returns `name` with [`LEGACY_PREFIX_TMPM`], [`PREFIX`], or
 /// [`LEGACY_PREFIX_FULL`] removed (whichever matches first); returns `name`
-/// unchanged if none match.
+/// unchanged if none match. Deliberately checks [`LEGACY_PREFIX_TMPM`]
+/// (`tmpm-`) BEFORE [`PREFIX`] (`tm-`) — longest/most-specific prefix first —
+/// even though `tm-` requires a literal trailing dash as its 3rd byte and so
+/// can never actually match a `tmpm-` name (`tmpm-`'s 3rd byte is `p`, not
+/// `-`; verified by `strip_managed_prefix_no_partial_overlap_with_legacy_tmpm`
+/// and a standalone `strip_prefix` check — see the #1966 review thread).
+/// Ordering longest-first anyway is defense-in-depth against a FUTURE prefix
+/// choice that really does overlap (e.g. if `PREFIX` were ever shortened to
+/// bare `"tm"` without the dash), and removes any ambiguity for readers who
+/// reasonably expect prefix-matching code to be ordered longest-first.
 /// Test: `strip_managed_prefix_strips_current`,
-/// `strip_managed_prefix_strips_legacy`, `strip_managed_prefix_passthrough`.
+/// `strip_managed_prefix_strips_legacy`, `strip_managed_prefix_passthrough`,
+/// `strip_managed_prefix_no_partial_overlap_with_legacy_tmpm`.
 pub fn strip_managed_prefix(name: &str) -> &str {
-    name.strip_prefix(PREFIX)
-        .or_else(|| name.strip_prefix(LEGACY_PREFIX_TMPM))
+    name.strip_prefix(LEGACY_PREFIX_TMPM)
+        .or_else(|| name.strip_prefix(PREFIX))
         .or_else(|| name.strip_prefix(LEGACY_PREFIX_FULL))
         .unwrap_or(name)
 }

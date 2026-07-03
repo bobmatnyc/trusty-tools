@@ -78,19 +78,20 @@ pub enum ManagedError {
     /// A session-name derivation failure (currently: all 99 `tm-<leaf>-NN`
     /// serials for a project are in use).
     ///
-    /// Why (#1955, hardened in the #1966 review follow-up): the serial-numbered
+    /// Why (#1955, renamed in the #1966 review follow-up): the serial-numbered
     /// naming scheme caps at two digits per project; this surfaces
     /// [`SessionNameError`] through the same typed-error seam as every other
     /// create-path failure instead of stringly-typed-wrapping it into
-    /// [`TmuxUnavailable`](Self::TmuxUnavailable). The message is deliberately
-    /// generic ("session name error", not "serial exhausted") via `#[from]`:
-    /// [`SessionNameError`] currently has exactly one variant
+    /// [`TmuxUnavailable`](Self::TmuxUnavailable). Named `SessionName` (not
+    /// `NameSerialExhausted`, its original name) and given a generic message
+    /// ("session name error", not "serial exhausted") because of the `#[from]`
+    /// below: [`SessionNameError`] currently has exactly one variant
     /// ([`SessionNameError::SerialExhausted`]), but `#[from]` auto-converts
-    /// ANY future variant into this one — a hardcoded "serial exhausted"
-    /// message would silently mislabel a later, unrelated `SessionNameError`
+    /// ANY future variant into this one — a name/message naming one specific
+    /// variant would silently mislabel a later, unrelated `SessionNameError`
     /// variant.
     #[error("session name error: {0}")]
-    NameSerialExhausted(#[from] SessionNameError),
+    SessionName(#[from] SessionNameError),
 }
 
 // [`ManagedTmuxDriver`] lives in `driver.rs` (issue #1955 SLOC split — the
