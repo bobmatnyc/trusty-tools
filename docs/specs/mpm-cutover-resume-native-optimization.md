@@ -120,6 +120,20 @@ Trusty-mpm has **no** equivalent today.
 
 Implement command-domain-aware compression of tool-call output (git, cargo, ls, grep, etc.) natively in Rust, reaching parity with claude-mpm's external `ztk` Zig binary. Keep the implementation pure-Rust, in-tree, with no external binary dependencies.
 
+> **⚠️ Scope caveat (issue #1944, 2026-07-03) — read before implementing.** The single seam this
+> spec targets (`optimize_tool_output`, called from `mcp_backend.rs` / `hook_service.rs` on
+> `PostToolUse` ingestion) compresses tool output **only as it enters trusty-mpm's observability
+> history** (dashboard, event feed, compacted session log) — *before* the ring buffer, as the code
+> comments state. It runs **after** the native Claude Code model has already consumed the raw tool
+> result, so extending it with ztk-style filters will **not** reduce a native session's live token
+> usage. The `tm hook` relay that native sessions invoke forwards only `{event, cwd}`, never tool
+> output, so `optimize_tool_output` is effectively a no-op for native sessions today. Reducing
+> *live* native-session tokens requires a fundamentally different interception point — one that
+> rewrites the tool result *before* it reaches the model (e.g., routing built-in tools through an
+> MCP proxy, or a future Claude Code "tool-output transform" hook). That live-interception seam is
+> a prerequisite for this spec to deliver its claimed token savings on native sessions and is not
+> yet designed. Until then, "native ztk" here means richer observability-history compression only.
+
 ### Behavior & Scope
 
 Add command-domain-aware filters as a new tier/mode in the existing `crates/trusty-mpm/src/core/compress.rs` (`CompressionLevel` today: Off/Trim/Summarise/Caveman). Wire at the single existing seam: `daemon/optimizer.rs` `optimize_tool_output`, called from `daemon/mcp_backend.rs:183-192` (PostToolUse hook, before ring buffer).

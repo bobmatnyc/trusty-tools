@@ -248,6 +248,13 @@ pub struct OverseerResponse {
 pub struct OptimizerResponse {
     /// The current token-use optimizer configuration.
     pub optimizer: OptimizerConfig,
+    /// Human-readable note clarifying which sessions the configured level
+    /// actually affects (observability history + proxied calls only — NOT
+    /// native Claude Code sessions). Prevents `optimizer status` from reading
+    /// as "compression on everywhere" (issue #1944). Defaulted on the wire so
+    /// older clients deserialize without it.
+    #[serde(default)]
+    pub scope: String,
 }
 
 /// Response of `GET /tmux/sessions`.

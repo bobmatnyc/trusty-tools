@@ -1385,8 +1385,10 @@ pub async fn llm_chat(
 /// Why: the CLI and dashboard surface the active compression tuning. The
 /// config is now framework-managed on disk (`optimizer.toml`); this endpoint
 /// is read-only introspection of the daemon's in-memory copy of it.
-/// What: returns `{ "optimizer": <OptimizerConfig> }`.
-/// Test: `get_optimizer_returns_default`.
+/// What: returns `{ "optimizer": <OptimizerConfig>, "scope": <note> }`. The
+/// `scope` note states that the level only affects observability history and
+/// proxied calls, never native Claude Code sessions (issue #1944).
+/// Test: e2e `optimizer_default_config`.
 #[utoipa::path(
     get,
     path = "/optimizer",
@@ -1396,6 +1398,7 @@ pub async fn llm_chat(
 pub async fn get_optimizer(State(state): State<Arc<DaemonState>>) -> Json<OptimizerResponse> {
     Json(OptimizerResponse {
         optimizer: state.optimizer_config(),
+        scope: crate::daemon::optimizer::OPTIMIZER_SCOPE_NOTE.to_string(),
     })
 }
 

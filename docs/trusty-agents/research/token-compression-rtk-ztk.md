@@ -6,6 +6,40 @@ Rust-applicable, rule-based approaches. Includes analysis of rtk-ai/rtk and code
 
 ---
 
+## Implementation status (updated 2026-07-03, issue #1944)
+
+This document is a **survey of external techniques**, not a description of shipped behavior. The
+current implementation status in `trusty-tools` is:
+
+- **ZTK — NOT implemented.** `ztk` exists only in this survey. There is no `ztk` symbol anywhere
+  under `crates/`. The `codejunkie99/ztk` Zig binary is **not** vendored, shelled out to, or ported.
+  Treat every "native ztk" reference as *aspirational roadmap* (see the draft
+  `docs/specs/mpm-cutover-resume-native-optimization.md` §C `SPEC-MPM-CUTOVER-03`), not as a
+  delivered feature.
+
+- **RTK-*pattern* — shipped, but only in the `tagent` runtime.** The rtk command-domain filtering
+  pattern is implemented in `crates/trusty-agents/src/compress/tool_output/rtk.rs` and wired into
+  the agent tool loop at `crates/trusty-agents/src/llm/tool_loop/mod.rs`
+  (`compress::compress_tool_output_async`). This runs inside the **trusty-agents (`tagent`) harness**,
+  which mediates its own LLM tool loop — so it *does* reduce that harness's live tool-output tokens.
+  It has nothing to do with tm-provisioned **native Claude Code** sessions.
+
+- **tm's `core/compress.rs` optimizer — a separate, simpler mechanism, observability-scoped.**
+  trusty-mpm has its own `CompressionLevel` (Off/Trim/Summarise/Caveman) invoked by
+  `daemon/optimizer.rs::optimize_tool_output`. It only rewrites the copy of tool output that enters
+  tm's observability history (dashboard / event feed / compacted session log) and tm-mediated /
+  MCP-proxied tool calls. **It does not reduce live token usage for native Claude Code sessions**:
+  those sessions run Claude Code's own tool loop, and built-in tools (Bash, Read, …) return results
+  directly to the model before any `PostToolUse` hook can rewrite them. `tm optimizer status` now
+  prints this scope explicitly.
+
+**Roadmap decision:** RTK (via trusty-agents) is the shipped answer for the `tagent` runtime. ZTK is
+**not** on the near-term roadmap as a distinct tool — the draft `SPEC-MPM-CUTOVER-03` reuses the
+*name* "native ztk" for an in-tree Rust filter tier, but that spec is unimplemented and, per #1944,
+would still only affect tm's observability copy unless a live-interception seam is added first.
+
+---
+
 ## 1. Repository Analysis
 
 ### rtk-ai/rtk — "Rust Token Killer"
