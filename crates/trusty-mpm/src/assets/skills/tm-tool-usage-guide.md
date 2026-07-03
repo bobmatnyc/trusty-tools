@@ -64,7 +64,7 @@ mcp__trusty-search__search(query="skill deploy no-op", index_id="trusty-mpm", li
 
 | Tool | Use |
 |---|---|
-| `agent_delegate` | Programmatic delegation surface (mirrors the Agent tool for MCP-driven flows) |
+| `agent_delegate` | Tracking + circuit-breaker **gate** for a delegation — records it in the dashboard tree and enforces breaker/depth limits. **NOT an execution path**: it does not spawn the agent. Actually run the agent with the native **Agent/Task tool** (`subagent_type="<deployed-agent>"`); this call is an optional companion, never a substitute. |
 | `circuit_breaker_status` | Check live per-agent runtime breaker state before a retry (CB#10) |
 | `session_new` / `session_list` / `session_status` / `session_send` / `session_stop` / `session_resume` | Drive durable tmux-backed sessions (see `session-manager-driver` for the full loop) |
 | `session_decommission` / `session_decommission_ephemeral` / `session_prune` | Teardown of managed sessions |
