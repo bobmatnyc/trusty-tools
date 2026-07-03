@@ -1336,7 +1336,7 @@ fn image_clip_has_correct_dimensions() {
         "shade_image row count must match art line count"
     );
     assert!(cols > 0, "auto-sized cols must be > 0");
-    assert!(cols >= 28, "block-robot art is at least 28 columns wide");
+    assert!(cols >= 20, "compact-splash art is at least 20 columns wide");
 }
 
 #[test]
