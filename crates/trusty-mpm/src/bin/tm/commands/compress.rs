@@ -67,7 +67,15 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
     let (compressed, path) = compress_tool_output_async_with_path(tool, &input).await;
     log_compression_stats(tool, input.len(), compressed.len(), path.as_str());
 
-    tokio::io::stdout().write_all(compressed.as_bytes()).await?;
+    // Explicit `.flush()` (trusty-review finding, PR #1968): `write_all`
+    // hands the bytes to Tokio's stdout writer but does not itself guarantee
+    // the OS has accepted them before this function returns and the process
+    // exits — flushing closes that gap so the compressed payload can never
+    // be silently truncated in the shell pipeline this binary is the tail
+    // of.
+    let mut stdout = tokio::io::stdout();
+    stdout.write_all(compressed.as_bytes()).await?;
+    stdout.flush().await?;
     Ok(())
 }
 

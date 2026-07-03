@@ -304,6 +304,12 @@ fn status_icon(status: trusty_mpm::core::doctor::CheckStatus) -> &'static str {
 /// so in normal operation these are no-ops; they become visible when a
 /// subscriber is present (e.g. `RUST_LOG=debug` in a context that installs
 /// one) without adding any latency or behavior change to the hot path.
+/// `HOOK_STDIN_TIMEOUT` is 500 ms (widened from an initial 200 ms per a
+/// trusty-review finding, PR #1968, that flagged 200 ms as tight on a
+/// heavily loaded host) — still a small fraction of the 2-second total
+/// budget the caller's daemon POST uses, so the "never block the user's
+/// prompt" guarantee is unaffected while giving a slower `stdin` write from
+/// Claude Code more room before this degrades to a silent no-rewrite.
 /// Test: `hook_guard_short_circuits`/`hook_disable_env_short_circuits`
 /// exercise the guard branches that skip this entirely.
 /// `hook_rewrites_plain_bash_command_on_pretooluse` (in the
@@ -316,7 +322,7 @@ fn status_icon(status: trusty_mpm::core::doctor::CheckStatus) -> &'static str {
 async fn read_stdin_hook_payload() -> Option<serde_json::Value> {
     use tokio::io::AsyncReadExt;
 
-    const HOOK_STDIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+    const HOOK_STDIN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
     let mut buf = String::new();
     let read = tokio::time::timeout(

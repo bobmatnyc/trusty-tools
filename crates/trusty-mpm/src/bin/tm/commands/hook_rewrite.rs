@@ -16,9 +16,12 @@
 //! unmodified) for empty commands, day-one orchestrator exclusions
 //! (`make`/`sam`/`rake`/`gradle`/`gradlew`/`mvn`/`ant`/`cdk`/`terraform`,
 //! mirroring claude-mpm's `_ORCHESTRATOR_EXCLUSIONS`), any command that
-//! already contains pipe/chain composition (`|`, `&&`, `;`) since appending
-//! another pipe to those is the same class of risk, and any command whose
-//! derived tool name would embed shell metacharacters (see
+//! already contains pipe/chain/redirection composition (`|`, `&&`, `;`,
+//! `>`, `<`) since appending another pipe to those is the same class of
+//! risk (redirection in particular: piping `tm compress` after an
+//! already-redirected stdout gets it empty input for no benefit — a
+//! trusty-review finding, PR #1968), and any command whose derived tool
+//! name would embed shell metacharacters (see
 //! [`is_safe_tool_name`]). Otherwise it returns `Some(rewritten)` with
 //! `| tm compress --tool "<effective tool name>"` appended — see
 //! [`effective_tool_name`] for why the tool value is derived from the
@@ -257,22 +260,34 @@ fn is_env_assignment(token: &str) -> bool {
         && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Whether `command` already contains pipe/chain composition.
+/// Whether `command` already contains pipe/chain/redirection composition.
 ///
 /// Why: Appending a second pipe to a command that already pipes/chains
 /// (`|`, `&&`, `;`) is the same class of risk the orchestrator exclusion
 /// guards against — the design doc explicitly calls out "don't rewrite
 /// something that already contains a `|` or `&&`/`;` chain that could break
-/// under an additional pipe".
+/// under an additional pipe". Output/input redirection (`>`, `>>`, `<`) is
+/// the same class of risk from the opposite direction: a trusty-review
+/// finding (PR #1968) noted that `cargo test > out.log`, rewritten to
+/// `cargo test > out.log | tm compress --tool "cargo test"`, pipes
+/// `tm compress` an *empty* stdin (stdout was already redirected to the
+/// file) — the rewrite would silently do nothing useful while altering the
+/// command's pipeline/exit-code shape for no benefit.
 /// What: Simple substring checks — deliberately conservative (a command
-/// with `|`/`&&`/`;` inside a quoted string literal will also be skipped;
-/// under-rewriting is the safe failure mode here).
+/// with `|`/`&&`/`;`/`>`/`<` inside a quoted string literal will also be
+/// skipped; under-rewriting is the safe failure mode here).
 /// Test: `has_unsafe_pipe_composition_detects_pipe`,
 /// `has_unsafe_pipe_composition_detects_and_chain`,
 /// `has_unsafe_pipe_composition_detects_semicolon`,
+/// `has_unsafe_pipe_composition_detects_output_redirection`,
+/// `has_unsafe_pipe_composition_detects_input_redirection`,
 /// `has_unsafe_pipe_composition_false_for_plain_command`.
 fn has_unsafe_pipe_composition(command: &str) -> bool {
-    command.contains('|') || command.contains("&&") || command.contains(';')
+    command.contains('|')
+        || command.contains("&&")
+        || command.contains(';')
+        || command.contains('>')
+        || command.contains('<')
 }
 
 /// Build the `hookSpecificOutput.updatedInput` JSON body for a `PreToolUse`
@@ -493,6 +508,21 @@ mod tests {
     #[test]
     fn has_unsafe_pipe_composition_detects_semicolon() {
         assert!(has_unsafe_pipe_composition("cd /tmp; ls"));
+    }
+
+    #[test]
+    fn has_unsafe_pipe_composition_detects_output_redirection() {
+        // Regression test (trusty-review finding, PR #1968): a command that
+        // already redirects stdout to a file must not be rewritten — piping
+        // `tm compress` after the redirect would receive empty stdin and do
+        // nothing useful.
+        assert!(has_unsafe_pipe_composition("cargo test > out.log"));
+        assert!(has_unsafe_pipe_composition("cargo test >> out.log"));
+    }
+
+    #[test]
+    fn has_unsafe_pipe_composition_detects_input_redirection() {
+        assert!(has_unsafe_pipe_composition("cat < input.txt"));
     }
 
     #[test]
