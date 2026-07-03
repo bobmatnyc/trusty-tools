@@ -14,6 +14,7 @@
 //! Test: `prepare_session_writes_claude_md_and_stash` and
 //! `prepare_session_is_idempotent` in this module's tests.
 
+mod palace_alias;
 mod search_index;
 mod settings;
 #[cfg(test)]

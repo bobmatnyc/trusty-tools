@@ -375,6 +375,12 @@ pub(super) fn inject_trusty_memory_mcp(
     git_remote: Option<&str>,
 ) -> Result<(), PrepError> {
     let slug = resolve_palace_slug(project_path, git_remote);
+    // Issue #1939: before pinning, heal the claude-mpm split-brain — if the
+    // derived `owner-repo` palace does not exist but the BARE repo-name palace
+    // does, register a palace-level alias so the pinned `owner-repo` name resolves
+    // to the existing bare store. Best-effort and side-effect-only; never fails
+    // the launch.
+    super::palace_alias::maybe_register_palace_alias(project_path, git_remote);
     inject_mcp_server(
         project_path,
         "trusty-memory",
@@ -426,7 +432,7 @@ fn resolve_palace_slug(project_path: &Path, git_remote: Option<&str>) -> Option<
 /// absent, or `start` is not in a repo. No network.
 /// Test: exercised indirectly via `resolve_palace_slug_falls_back_to_git_remote`
 /// (a temp git repo) and the daemon-less paths in `inject_trusty_memory_mcp_*`.
-fn git_remote_origin(start: &Path) -> Option<String> {
+pub(super) fn git_remote_origin(start: &Path) -> Option<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(start)

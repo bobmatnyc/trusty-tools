@@ -401,8 +401,23 @@ pub use index_id::{derive_index_id, resolve_project_root};
 pub mod palace_id;
 pub use palace_id::{
     PALACE_OVERRIDE_ENV, derive_palace_id, owner_repo_from_git_remote, palace_override_from_env,
-    parent_dir_slug,
+    parent_dir_slug, repo_slug_from_git_remote,
 };
+
+/// Palace-level alias map: redirect one palace name to another (issue #1939).
+///
+/// Why: trusty-mpm pins a managed session to the `owner-repo` palace slug, but
+/// the pre-existing claude-mpm-era palace is the BARE repo name — so the pinned
+/// palace does not exist and memory splits in two. A persisted alias map lets the
+/// non-existent `owner-repo` name resolve to the existing bare palace. This is a
+/// PALACE-level redirect, distinct from the in-palace term/KG entity aliases.
+/// What: exposes [`palace_alias::PalaceAliasStore`] (load/register/resolve) plus
+/// [`palace_alias::default_palace_registry_dir`] and
+/// [`palace_alias::palace_registry_dir_from`] for locating the registry dir. This
+/// module is always compiled (no `memory-core` gate) so trusty-mpm's always-on
+/// session-launch path can register aliases without pulling the storage engine.
+/// Test: `cargo test -p trusty-common -- palace_alias::tests`.
+pub mod palace_alias;
 
 /// Shared GitHub `owner/repo` path derivation (issue #1220).
 ///
