@@ -183,4 +183,30 @@ mod tests {
             assert!(names.contains(&expected), "missing {expected}: {names:?}");
         }
     }
+
+    #[test]
+    fn agent_delegate_description_clarifies_it_does_not_execute() {
+        // Why (#1942): the old wording ("...before spawning") wrongly implied
+        // agent_delegate executes the agent. It only gates + tracks; the real
+        // execution path is the native Agent/Task tool reading ~/.claude/agents/.
+        // Guard the corrected wording so a future edit can't silently regress it.
+        let catalog = tool_catalog();
+        let desc = catalog
+            .iter()
+            .find(|t| t["name"] == "agent_delegate")
+            .and_then(|t| t["description"].as_str())
+            .expect("agent_delegate tool present with a description");
+        assert!(
+            desc.contains("does not spawn"),
+            "agent_delegate description must state it does not spawn: {desc}"
+        );
+        assert!(
+            desc.contains("Agent/Task tool"),
+            "agent_delegate description must point to the native Agent/Task tool: {desc}"
+        );
+        assert!(
+            !desc.contains("before spawning"),
+            "agent_delegate description must not claim it spawns: {desc}"
+        );
+    }
 }

@@ -52,8 +52,12 @@ pub(super) fn core_tools() -> Vec<Value> {
         ),
         tool(
             "agent_delegate",
-            "Request that the daemon delegate a task to a named agent. The \
-             daemon applies circuit-breaker and depth limits before spawning.",
+            "Record and gate a delegation to a named agent: applies the \
+             circuit-breaker and depth limits and adds the delegation to the \
+             session's dashboard tree. This is a TRACKING/GATING companion, NOT \
+             an execution path — it does not spawn the agent. Execution happens \
+             via the native Agent/Task tool using the deployed agent name (from \
+             ~/.claude/agents/), e.g. Agent(subagent_type=\"rust-engineer\").",
             json!({
                 "type": "object",
                 "properties": {
