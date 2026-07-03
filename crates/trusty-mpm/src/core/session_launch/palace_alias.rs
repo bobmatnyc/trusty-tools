@@ -186,7 +186,9 @@ mod tests {
         maybe_register_palace_alias(Path::new("/unused"), Some(REMOTE));
 
         assert_eq!(
-            PalaceAliasStore::resolve_alias(&reg, OWNER_REPO).unwrap().as_deref(),
+            PalaceAliasStore::resolve_alias(&reg, OWNER_REPO)
+                .unwrap()
+                .as_deref(),
             Some(BARE),
             "split-brain must register {OWNER_REPO} -> {BARE}"
         );

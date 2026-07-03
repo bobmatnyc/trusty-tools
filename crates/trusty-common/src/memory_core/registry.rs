@@ -723,7 +723,8 @@ mod tests {
             created_at: Utc::now(),
             data_dir: data_root.join("trusty-tools"),
         };
-        reg.create_palace(data_root, bare).expect("create bare palace");
+        reg.create_palace(data_root, bare)
+            .expect("create bare palace");
 
         // Register the palace-level alias (owner-repo -> bare).
         PalaceAliasStore::register_alias(data_root, "bobmatnyc-trusty-tools", "trusty-tools")

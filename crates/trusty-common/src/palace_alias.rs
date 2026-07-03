@@ -88,7 +88,8 @@ impl PalaceAliasStore {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
             Err(e) => {
-                return Err(e).with_context(|| format!("read palace aliases at {}", path.display()));
+                return Err(e)
+                    .with_context(|| format!("read palace aliases at {}", path.display()));
             }
         };
         if bytes.iter().all(u8::is_ascii_whitespace) {
@@ -127,10 +128,14 @@ impl PalaceAliasStore {
         let alias = alias.trim();
         let target = target.trim();
         if alias.is_empty() || target.is_empty() {
-            anyhow::bail!("palace alias and target must both be non-empty (alias={alias:?}, target={target:?})");
+            anyhow::bail!(
+                "palace alias and target must both be non-empty (alias={alias:?}, target={target:?})"
+            );
         }
         if alias == target {
-            anyhow::bail!("refusing to register a self-referential palace alias {alias:?} -> {target:?}");
+            anyhow::bail!(
+                "refusing to register a self-referential palace alias {alias:?} -> {target:?}"
+            );
         }
 
         std::fs::create_dir_all(registry_dir)
@@ -236,7 +241,10 @@ mod tests {
         );
         // Full-map load reflects it too.
         let all = PalaceAliasStore::load_aliases(tmp.path()).expect("load");
-        assert_eq!(all.get("bobmatnyc-trusty-tools").map(String::as_str), Some("trusty-tools"));
+        assert_eq!(
+            all.get("bobmatnyc-trusty-tools").map(String::as_str),
+            Some("trusty-tools")
+        );
         // File actually exists on disk.
         assert!(tmp.path().join(PALACE_ALIASES_JSON).exists());
     }
@@ -288,7 +296,10 @@ mod tests {
     fn resolve_unknown_is_none() {
         let tmp = tempdir().unwrap();
         PalaceAliasStore::register_alias(tmp.path(), "a", "b").unwrap();
-        assert_eq!(PalaceAliasStore::resolve_alias(tmp.path(), "zzz").unwrap(), None);
+        assert_eq!(
+            PalaceAliasStore::resolve_alias(tmp.path(), "zzz").unwrap(),
+            None
+        );
     }
 
     /// Why: a corrupt alias file must degrade to "no aliases", never panic or
@@ -298,7 +309,8 @@ mod tests {
     fn corrupt_file_degrades_to_empty() {
         let tmp = tempdir().unwrap();
         std::fs::write(tmp.path().join(PALACE_ALIASES_JSON), b"{ not json ]").unwrap();
-        let all = PalaceAliasStore::load_aliases(tmp.path()).expect("load never errors on corruption");
+        let all =
+            PalaceAliasStore::load_aliases(tmp.path()).expect("load never errors on corruption");
         assert!(all.is_empty());
     }
 

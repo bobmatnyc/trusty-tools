@@ -166,9 +166,7 @@ fn parse_owner_repo_slugs(url: &str) -> Option<(Option<String>, String)> {
         return None;
     }
 
-    let owner_slug = owner
-        .map(slugify_string)
-        .filter(|s| !s.is_empty());
+    let owner_slug = owner.map(slugify_string).filter(|s| !s.is_empty());
     Some((owner_slug, repo_slug))
 }
 
