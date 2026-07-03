@@ -307,11 +307,12 @@ impl SessionManager {
     ) -> Result<(SessionRecord, bool), ManagedError> {
         let mut record = self.get(id).await?;
 
-        // Kill the runtime (best-effort).
-        if self.tmux.session_exists(&record.tmux_name)
-            && let Err(e) = self.tmux.kill_session(&record.tmux_name)
-        {
-            warn!(name = %record.tmux_name, "decommission: kill_session failed: {e}");
+        // Gracefully terminate the runtime before removing the workspace (#1975):
+        // SIGTERM the claude process and give it a grace window to flush state,
+        // then reclaim the pane — instead of an abrupt `kill_session`. Best-effort:
+        // a session whose runtime is already gone still decommissions cleanly.
+        if self.tmux.session_exists(&record.tmux_name) {
+            self.graceful_terminate_runtime(&record.tmux_name).await;
         }
 
         // Guard: only remove the workspace directory if the SM provisioned it.

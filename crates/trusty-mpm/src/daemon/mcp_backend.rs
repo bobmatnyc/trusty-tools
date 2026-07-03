@@ -17,6 +17,7 @@ use crate::core::hook::{HookEvent, HookEventRecord};
 use crate::core::memory::MemoryUsage;
 use crate::core::session::SessionId;
 use crate::mcp::OrchestratorBackend;
+use crate::session_manager::record::ManagedSessionId;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -90,20 +91,43 @@ impl OrchestratorBackend for StateBackend {
     }
 
     /// Return one session plus its memory snapshot and delegation count.
+    ///
+    /// Resolves BOTH session families (#1976): the legacy in-process
+    /// `DaemonState` registry first, then — on a miss — the managed
+    /// `SessionManager` store. Without the managed fallback, `session_status`
+    /// reported "no such session" for the `tmpm-` sessions trusty-mpm itself
+    /// spawns, even though `session_list` surfaces them. Managed records are
+    /// serialized via the shared `record_to_json` (matching `session_list`) and
+    /// carry no memory snapshot; delegations are keyed by UUID so they resolve
+    /// for either family.
     async fn session_status(&self, session_id: &str) -> Result<Value, String> {
         let id = parse_session_id(session_id)?;
-        let session = self
-            .state
-            .session(id)
-            .ok_or_else(|| format!("no such session: {session_id}"))?;
-        let memory = self.state.memory_for(id);
-        let delegations = self.state.delegations_for(id);
-        Ok(json!({
-            "session": session,
-            "memory": memory,
-            "delegation_count": delegations.len(),
-            "delegations": delegations,
-        }))
+        // Legacy in-process registry first.
+        if let Some(session) = self.state.session(id) {
+            let memory = self.state.memory_for(id);
+            let delegations = self.state.delegations_for(id);
+            return Ok(json!({
+                "session": session,
+                "kind": "legacy",
+                "memory": memory,
+                "delegation_count": delegations.len(),
+                "delegations": delegations,
+            }));
+        }
+        // Managed store fallback (#1976): the `tmpm-` sessions `session_list`
+        // surfaces and `session_stop`/`session_resume` already target by id.
+        let manager = self.state.session_manager().await;
+        if let Ok(record) = manager.get(&ManagedSessionId(id.0)).await {
+            let delegations = self.state.delegations_for(id);
+            return Ok(json!({
+                "session": crate::daemon::managed_routes::record_to_json(&record),
+                "kind": "managed",
+                "memory": Value::Null,
+                "delegation_count": delegations.len(),
+                "delegations": delegations,
+            }));
+        }
+        Err(format!("no such session: {session_id}"))
     }
 
     /// Gate and record a new agent delegation.
@@ -118,7 +142,20 @@ impl OrchestratorBackend for StateBackend {
         tier: Option<&str>,
     ) -> Result<Value, String> {
         let id = parse_session_id(session_id)?;
-        if self.state.session(id).is_none() {
+        // Accept BOTH session families (#1976): the gating registry historically
+        // only knew the legacy in-process registry, so delegations from the
+        // managed (`tmpm-`) sessions trusty-mpm itself spawns were rejected
+        // outright. Fall back to the managed store on a legacy miss. The
+        // delegation is keyed by UUID, so tracking works for either family.
+        let known = self.state.session(id).is_some()
+            || self
+                .state
+                .session_manager()
+                .await
+                .get(&ManagedSessionId(id.0))
+                .await
+                .is_ok();
+        if !known {
             return Err(format!("no such session: {session_id}"));
         }
         let breaker = self.state.breaker(agent);
@@ -614,6 +651,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_status_resolves_managed_session() {
+        // Regression for #1976: session_status previously only consulted the
+        // legacy registry, so a managed (`tmpm-`) session — the primary type
+        // trusty-mpm spawns — reported "no such session". It must now resolve via
+        // the managed store fallback and report `kind: "managed"`.
+        let root = tempfile::TempDir::new().expect("root tempdir");
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+        let record = state
+            .session_manager()
+            .await
+            .create(
+                "fix the bug".to_string(),
+                Some(root.path().to_path_buf()),
+                None,
+                Some(root.path().to_path_buf()),
+                None,
+                None,
+            )
+            .await
+            .expect("managed create");
+
+        let backend = StateBackend::new(state);
+        let status = backend
+            .session_status(&record.id.to_string())
+            .await
+            .expect("managed session must resolve via the #1976 fallback");
+        assert_eq!(status["kind"], "managed");
+        assert_eq!(status["session"]["id"], record.id.to_string());
+    }
+
+    #[tokio::test]
     async fn agent_delegate_records_a_delegation() {
         let (state, id) = state_with_session();
         let backend = StateBackend::new(state.clone());
@@ -638,6 +707,44 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("circuit breaker"));
+    }
+
+    #[tokio::test]
+    async fn agent_delegate_accepts_managed_session() {
+        // Regression for #1976: delegation gating rejected managed (`tmpm-`)
+        // sessions with "no such session" because it only checked the legacy
+        // registry. A delegation from a managed session must now be accepted and
+        // recorded (keyed by UUID).
+        let root = tempfile::TempDir::new().expect("root tempdir");
+        let state =
+            Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+        let record = state
+            .session_manager()
+            .await
+            .create(
+                "implement the fix".to_string(),
+                Some(root.path().to_path_buf()),
+                None,
+                Some(root.path().to_path_buf()),
+                None,
+                None,
+            )
+            .await
+            .expect("managed create");
+
+        let backend = StateBackend::new(state.clone());
+        let result = backend
+            .agent_delegate(
+                &record.id.to_string(),
+                "rust-engineer",
+                "wire it up",
+                Some("sonnet"),
+            )
+            .await
+            .expect("delegation from a managed session must be accepted (#1976)");
+        assert_eq!(result["agent"], "rust-engineer");
+        // The delegation is keyed by the session UUID, shared across both families.
+        assert_eq!(state.delegations_for(SessionId(record.id.0)).len(), 1);
     }
 
     #[tokio::test]

@@ -113,4 +113,38 @@ impl SessionManager {
         }
         info!("shutdown: gracefully stopped {stopped} live managed session(s)");
     }
+
+    /// Gracefully terminate ONE session's runtime: signal → grace → kill.
+    ///
+    /// Why: CLI-initiated `stop`/`decommission` tear down a single session at a
+    /// time (unlike [`Self::shutdown`], which batches one grace window across the
+    /// whole fleet) and were previously abrupt — a bare `kill_session` gave the
+    /// inner `claude` process no chance to flush state (memory snapshot, git
+    /// index, session record) before its pane was reclaimed. This drains one
+    /// session the same way `shutdown` drains the fleet, honouring the repo's
+    /// graceful-shutdown convention (SIGTERM drain, not an abrupt kill).
+    /// What: resolves the live `claude` PID via a single
+    /// [`crate::core::process::find_claude_pid_in_tmux`] probe (no retry), calls
+    /// `signal_terminate` (SIGTERM when the PID is known, else one Ctrl-C), awaits
+    /// a [`SIGTERM_GRACE_SECS`] async grace window (0 s in tests) so the process
+    /// can checkpoint, then `kill_session` to reclaim the pane. Every step is
+    /// best-effort: a `kill_session` failure is logged, not returned, because the
+    /// caller still needs to mark the record `Stopped` / decommissioned even when
+    /// the runtime was already gone. Uses `tokio::time::sleep` — never a blocking
+    /// `std::thread::sleep` — so it does not starve the Tokio thread pool.
+    /// Test: `graceful_terminate_runtime_signals_then_kills` in tests.rs (fake
+    /// driver records a Ctrl-C then a kill); exercised end-to-end by
+    /// `manager_stop_keeps_workspace` and `manager_decommission_removes_workspace`.
+    pub(crate) async fn graceful_terminate_runtime(&self, tmux_name: &str) {
+        let pid =
+            crate::core::process::find_claude_pid_in_tmux(tmux_name, 1, Duration::from_millis(0));
+        self.tmux.signal_terminate(tmux_name, pid);
+        tokio::time::sleep(Duration::from_secs(SIGTERM_GRACE_SECS)).await;
+        if let Err(e) = self.tmux.kill_session(tmux_name) {
+            warn!(
+                name = %tmux_name,
+                "graceful_terminate_runtime: kill_session failed (may already be gone): {e}"
+            );
+        }
+    }
 }

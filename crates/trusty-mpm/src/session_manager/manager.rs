@@ -579,17 +579,20 @@ impl SessionManager {
     /// tmux session and the `claude` process inside it, but PRESERVES the
     /// workspace directory on disk and the session record so the session can
     /// be resumed later via `resume`.
-    /// What: kills the tmux session (best-effort; logs a warning on failure
-    /// since the session may already be gone), marks the record `Stopped`
-    /// (workspace path untouched), and persists.
+    /// What: captures a pane snapshot, then GRACEFULLY terminates the runtime via
+    /// [`Self::graceful_terminate_runtime`] (SIGTERM the `claude` process, grace
+    /// window, then reclaim the pane — #1975) so the process can flush state
+    /// before it dies, marks the record `Stopped` (workspace path untouched), and
+    /// persists.
     /// Test: `manager_stop_keeps_workspace` — asserts state is `Stopped` and
     /// workspace dir still exists on disk.
     pub async fn stop(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
         let mut record = self.get(id).await?;
         super::snapshot::capture_into(&mut record, &*self.tmux).await;
-        if let Err(e) = self.tmux.kill_session(&record.tmux_name) {
-            warn!(name = %record.tmux_name, "kill_session failed (may already be gone): {e}");
-        }
+        // Graceful teardown (#1975): give the claude process a SIGTERM + grace
+        // window to checkpoint before its tmux pane is reclaimed, instead of an
+        // abrupt `kill_session`. The snapshot above already preserved the pane.
+        self.graceful_terminate_runtime(&record.tmux_name).await;
         record.state = ManagedSessionState::Stopped;
         self.store.write().await.upsert(record.clone()).await?;
         info!(id = %id, name = %record.tmux_name, "managed session stopped (workspace intact)");

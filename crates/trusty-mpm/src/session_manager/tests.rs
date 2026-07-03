@@ -45,6 +45,13 @@ pub struct FakeTmuxDriver {
     pub create_cwd_calls: Mutex<Vec<(String, String)>>,
     /// Records `(session_name, claude_pid)` for every `graceful_stop` call.
     pub graceful_stop_calls: Mutex<Vec<(String, Option<u32>)>>,
+    /// Records the session name for every `send_interrupt` (Ctrl-C) call.
+    ///
+    /// Why: the CLI graceful-drain path (#1975) signals the runtime via
+    /// `signal_terminate`, which — with no PID known in unit tests — falls back to
+    /// `send_interrupt`. Recording it lets `graceful_terminate_runtime_signals_then_kills`
+    /// assert the signal fired before the pane was reclaimed.
+    pub interrupt_calls: Mutex<Vec<String>>,
 }
 
 impl FakeTmuxDriver {
@@ -57,6 +64,7 @@ impl FakeTmuxDriver {
             seeded_names: Mutex::new(Vec::new()),
             create_cwd_calls: Mutex::new(Vec::new()),
             graceful_stop_calls: Mutex::new(Vec::new()),
+            interrupt_calls: Mutex::new(Vec::new()),
         })
     }
 }
@@ -120,6 +128,17 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
             .unwrap()
             .push((name.to_owned(), claude_pid));
         self.kill_session(name)
+    }
+
+    /// Record Ctrl-C interrupts so the graceful-drain path (#1975) is observable.
+    ///
+    /// Why: the default `send_interrupt` fails loudly (`TmuxUnavailable`) to catch
+    /// drivers that silently drop interrupts; the fake instead records the call and
+    /// succeeds so `graceful_terminate_runtime`'s signal phase can be asserted.
+    /// What: records `name` and returns `Ok`.
+    fn send_interrupt(&self, name: &str) -> Result<(), ManagedError> {
+        self.interrupt_calls.lock().unwrap().push(name.to_owned());
+        Ok(())
     }
 }
 
@@ -326,6 +345,34 @@ async fn manager_name_hint_overrides() {
         .expect("create");
 
     assert_eq!(record.tmux_name, "tm-ticket-1234-01");
+}
+
+/// `graceful_terminate_runtime` signals the runtime BEFORE reclaiming the pane (#1975).
+///
+/// Why: CLI stop/decommission must give the `claude` process a termination signal
+/// (and a grace window) to flush state, not an abrupt `kill_session`. With no real
+/// tmux the PID probe returns `None`, so `signal_terminate` falls back to a Ctrl-C
+/// interrupt; the grace window is 0 s under `#[cfg(test)]`.
+/// What: drives the helper directly and asserts BOTH the interrupt fired and the
+/// pane was subsequently killed — the two-phase drain.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn graceful_terminate_runtime_signals_then_kills() {
+    let dir = TempDir::new().unwrap();
+    let (mgr, fake) = make_manager(&dir).await;
+
+    mgr.graceful_terminate_runtime("tm-drain-1").await;
+
+    assert_eq!(
+        *fake.interrupt_calls.lock().unwrap(),
+        vec!["tm-drain-1".to_string()],
+        "expected a Ctrl-C interrupt (SIGTERM fallback) before the pane is reclaimed"
+    );
+    assert_eq!(
+        *fake.kill_calls.lock().unwrap(),
+        vec!["tm-drain-1".to_string()],
+        "expected the pane to be reclaimed after the grace window"
+    );
 }
 
 /// `stop` must kill the runtime but KEEP the workspace directory and record,

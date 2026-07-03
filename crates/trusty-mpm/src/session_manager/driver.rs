@@ -122,23 +122,44 @@ pub trait ManagedTmuxDriver: Send + Sync {
     /// Test: `fake_driver_graceful_stop_with_pid` (pid known, records kill),
     /// `fake_driver_graceful_stop_without_pid` (no pid, falls back to C-c).
     fn graceful_stop(&self, name: &str, claude_pid: Option<u32>) -> Result<(), ManagedError> {
+        self.signal_terminate(name, claude_pid);
+        self.kill_session(name)
+    }
+
+    /// Signal a session's `claude` process to stop WITHOUT killing the pane.
+    ///
+    /// Why: a truly graceful teardown sends the termination signal, waits a grace
+    /// window so `claude` can flush state, and only THEN reclaims the pane. That
+    /// ordering requires the signal and the kill to be separate steps — so this is
+    /// the signal-only half, letting an async caller insert a `tokio::time::sleep`
+    /// grace window between it and `kill_session` (see
+    /// [`SessionManager::graceful_terminate_runtime`] for the CLI stop/decommission
+    /// path). `graceful_stop` composes this with an immediate kill for the
+    /// batched, one-grace-window-for-all shutdown path.
+    /// What: SIGTERMs the known `claude_pid` via `nix::signal::kill` (unix only);
+    /// when the pid is unknown, falls back to a single `send_interrupt` (Ctrl-C).
+    /// Signal errors are logged and swallowed — the process may already be gone —
+    /// so this method is infallible (the fallible reclaim lives in `kill_session`).
+    /// Test: `fake_driver_graceful_stop_with_pid` / `_without_pid` cover the
+    /// composed `graceful_stop`; the CLI drain is covered by
+    /// `graceful_terminate_runtime_signals_then_kills` in `restart_ops`.
+    fn signal_terminate(&self, name: &str, claude_pid: Option<u32>) {
         if let Some(pid) = claude_pid {
             #[cfg(unix)]
             {
                 use nix::sys::signal::{Signal, kill};
                 use nix::unistd::Pid;
                 if let Err(e) = kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
-                    tracing::warn!(pid, name, "graceful_stop: SIGTERM failed: {e}");
+                    tracing::warn!(pid, name, "signal_terminate: SIGTERM failed: {e}");
                 }
             }
             #[cfg(not(unix))]
             {
-                let _ = pid; // SIGTERM not applicable on non-unix; fall through to kill
+                let _ = pid; // SIGTERM not applicable on non-unix
             }
         } else {
             // No pid — best effort interrupt via tmux send-keys.
             let _ = self.send_interrupt(name);
         }
-        self.kill_session(name)
     }
 }
