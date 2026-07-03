@@ -11,8 +11,15 @@
 //! - `mod.rs` — dispatch + the native per-tool filters
 //! - `structured.rs` — JSON/YAML/TOML/CSV passthrough detection
 //! - `strategy.rs` — generic `FilterLevel`/`Language`/`FilterStrategy`
-//! - `rtk.rs` — RTK subprocess delegation + async wrapper
+//! - `rtk.rs` — RTK subprocess delegation + async wrapper, plus
+//!   `CompressionPath` (issue #1956 stats-logging signal)
 //! - `tests.rs` — unit tests
+//!
+//! Hoisted from `trusty-agents::compress::tool_output` into
+//! `trusty-agents-common` in issue #1959 so `trusty-mpm` can reach
+//! `compress_tool_output_async` without a full `trusty-agents` path
+//! dependency; `trusty-agents` re-exports this module's public surface from
+//! `trusty_agents::compress` for source-level compatibility.
 //!
 //! Test: See `tests` — covers each filter and the dispatch table.
 
@@ -25,7 +32,10 @@ mod tests;
 
 // Re-export the full public surface so callers can keep using
 // `compress::tool_output::{...}` (and `compress::{compress_tool_output, ...}`).
-pub use rtk::{compress_tool_output_async, compress_via_rtk};
+pub use rtk::{
+    CompressionPath, compress_tool_output_async, compress_tool_output_async_with_path,
+    compress_via_rtk,
+};
 pub use strategy::{
     AggressiveFilter, FilterLevel, FilterStrategy, Language, MinimalFilter, NoFilter, get_filter,
 };
