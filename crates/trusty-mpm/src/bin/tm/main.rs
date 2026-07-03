@@ -258,7 +258,13 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
         Some(Command::Slack { cmd }) => slack(cmd).await,
         Some(Command::Install { force }) => install(force),
-        Some(Command::Hook) => hook(&client, &url).await,
+        Some(Command::Hook { pm_guard }) => {
+            if pm_guard {
+                commands::pm_guard::pm_guard(&url).await
+            } else {
+                hook(&client, &url).await
+            }
+        }
         Some(Command::Compress { tool }) => run_compress(&tool).await,
         Some(Command::Daemon {
             addr,

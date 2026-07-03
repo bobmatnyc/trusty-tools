@@ -26,6 +26,8 @@ pub(crate) mod managed_root;
 pub(crate) mod managed_route;
 pub(crate) mod meta;
 pub(crate) mod misc;
+pub(crate) mod pm_guard;
+pub(crate) mod pm_guard_bash;
 pub(crate) mod project;
 pub(crate) mod prune;
 pub(crate) mod repair;

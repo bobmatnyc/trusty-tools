@@ -192,8 +192,20 @@ pub(crate) enum Command {
     /// posts a `hook_event` to the running daemon, and exits 0. Daemon
     /// failures and missing env vars degrade silently so a hook firing during
     /// a daemon restart never blocks the user's prompt.
-    /// Test: `cli_parses_hook` plus the inline `hook_guard_short_circuits`.
-    Hook,
+    ///
+    /// `--pm-guard` (issue #1977) switches this invocation into PM-enforcement
+    /// mode instead of the observability relay: it reads the `PreToolUse` stdin
+    /// payload, classifies the tool locally (no daemon round-trip), and emits a
+    /// `permissionDecision: "deny"` response for direct file edits / forbidden
+    /// Bash verbs the PM must delegate — see `commands::pm_guard`. The managed
+    /// launcher registers exactly this form as the session's `PreToolUse` hook.
+    /// Test: `cli_parses_hook` / `cli_parses_hook_pm_guard` plus the inline
+    /// `hook_guard_short_circuits`.
+    Hook {
+        /// Run in PM-enforcement mode (blocks direct edits; steers to delegate).
+        #[arg(long)]
+        pm_guard: bool,
+    },
     /// Compress a piped command's stdout — the `tm hook` PreToolUse Bash
     /// command-rewrite spike's filter stage (issue #1956, Option 0).
     ///

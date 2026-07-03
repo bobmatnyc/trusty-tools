@@ -81,7 +81,22 @@ fn cli_parses_install_with_force() {
 #[test]
 fn cli_parses_hook() {
     let cli = Cli::try_parse_from(["trusty-mpm", "hook"]).unwrap();
-    assert!(matches!(cli.command.unwrap(), Command::Hook));
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Hook { pm_guard: false }
+    ));
+}
+
+/// Why (#1977): the managed launcher registers `tm hook --pm-guard` as the
+/// PreToolUse enforcement hook; parsing must round-trip the flag so the
+/// dispatcher routes to the PM guard instead of the observability relay.
+#[test]
+fn cli_parses_hook_pm_guard() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "hook", "--pm-guard"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Hook { pm_guard: true }
+    ));
 }
 
 /// Why (#1956): `tm compress --tool bash` is the pipe-filter stage the
