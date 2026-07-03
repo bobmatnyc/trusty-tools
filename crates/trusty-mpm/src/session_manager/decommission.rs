@@ -310,10 +310,9 @@ impl SessionManager {
         // Gracefully terminate the runtime before removing the workspace (#1975):
         // SIGTERM the claude process and give it a grace window to flush state,
         // then reclaim the pane — instead of an abrupt `kill_session`. Best-effort:
-        // a session whose runtime is already gone still decommissions cleanly.
-        if self.tmux.session_exists(&record.tmux_name) {
-            self.graceful_terminate_runtime(&record.tmux_name).await;
-        }
+        // a session whose runtime is already gone still decommissions cleanly —
+        // the helper self-guards and is a no-op when the pane is already gone.
+        self.graceful_terminate_runtime(&record.tmux_name).await;
 
         // Guard: only remove the workspace directory if the SM provisioned it.
         // Track whether remove_dir_all ACTUALLY RAN (not inferred from filesystem).

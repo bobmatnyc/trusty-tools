@@ -123,9 +123,10 @@ impl SessionManager {
     /// index, session record) before its pane was reclaimed. This drains one
     /// session the same way `shutdown` drains the fleet, honouring the repo's
     /// graceful-shutdown convention (SIGTERM drain, not an abrupt kill).
-    /// What: resolves the live `claude` PID via a single
-    /// [`crate::core::process::find_claude_pid_in_tmux`] probe (no retry), calls
-    /// `signal_terminate` (SIGTERM when the PID is known, else one Ctrl-C), awaits
+    /// What: returns early (no signal, no grace sleep, no kill) when the tmux
+    /// session no longer exists; otherwise resolves the live `claude` PID via a
+    /// single [`crate::core::process::find_claude_pid_in_tmux`] probe (no retry),
+    /// calls `signal_terminate` (SIGTERM when the PID is known, else one Ctrl-C), awaits
     /// a [`SIGTERM_GRACE_SECS`] async grace window (0 s in tests) so the process
     /// can checkpoint, then `kill_session` to reclaim the pane. Every step is
     /// best-effort: a `kill_session` failure is logged, not returned, because the
@@ -136,6 +137,12 @@ impl SessionManager {
     /// driver records a Ctrl-C then a kill); exercised end-to-end by
     /// `manager_stop_keeps_workspace` and `manager_decommission_removes_workspace`.
     pub(crate) async fn graceful_terminate_runtime(&self, tmux_name: &str) {
+        // Fast-path: nothing to drain if the pane is already gone. Skips the grace
+        // sleep entirely so callers looping over dead sessions (e.g. prune-idle) do
+        // not pay SIGTERM_GRACE_SECS per already-terminated session.
+        if !self.tmux.session_exists(tmux_name) {
+            return;
+        }
         let pid =
             crate::core::process::find_claude_pid_in_tmux(tmux_name, 1, Duration::from_millis(0));
         self.tmux.signal_terminate(tmux_name, pid);

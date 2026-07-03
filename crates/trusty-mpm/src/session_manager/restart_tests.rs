@@ -11,7 +11,75 @@
 
 use std::sync::Mutex;
 
-use super::manager::{ManagedError, ManagedTmuxDriver};
+use tempfile::TempDir;
+
+use super::manager::{ManagedError, ManagedTmuxDriver, SessionManager};
+use super::tests::FakeTmuxDriver;
+
+/// `graceful_terminate_runtime` signals the runtime BEFORE reclaiming the pane (#1975).
+///
+/// Why: CLI stop/decommission must give the `claude` process a termination signal
+/// (and a grace window) to flush state, not an abrupt `kill_session`. With no real
+/// tmux the PID probe returns `None`, so `signal_terminate` falls back to a Ctrl-C
+/// interrupt; the grace window is 0 s under `#[cfg(test)]`. Lives here (not in the
+/// at-cap `tests.rs`) alongside the other `restart_ops` graceful-shutdown coverage.
+/// What: seeds the session so the helper's self-guard sees it as live, drives the
+/// helper directly, and asserts BOTH the interrupt fired and the pane was
+/// subsequently killed — the two-phase drain.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn graceful_terminate_runtime_signals_then_kills() {
+    let dir = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    // Seed the session so the helper's self-guard (`session_exists`, which reads
+    // `list_sessions()`) reports it as live; otherwise the helper no-ops.
+    fake.seeded_names
+        .lock()
+        .unwrap()
+        .push("tm-drain-1".to_string());
+
+    mgr.graceful_terminate_runtime("tm-drain-1").await;
+
+    assert_eq!(
+        *fake.interrupt_calls.lock().unwrap(),
+        vec!["tm-drain-1".to_string()],
+        "expected a Ctrl-C interrupt (SIGTERM fallback) before the pane is reclaimed"
+    );
+    assert_eq!(
+        *fake.kill_calls.lock().unwrap(),
+        vec!["tm-drain-1".to_string()],
+        "expected the pane to be reclaimed after the grace window"
+    );
+}
+
+/// `graceful_terminate_runtime` is a no-op when the tmux session no longer exists.
+///
+/// Why: the drain helper now self-guards (fast-path) so callers looping over dead
+/// sessions (e.g. prune-idle) do not pay the SIGTERM grace window per already-gone
+/// session, and a decommission of an already-terminated runtime does no signalling.
+/// What: drives the helper against a name that was never seeded (so `session_exists`
+/// reports false) and asserts neither an interrupt nor a kill was issued.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn graceful_terminate_runtime_noop_when_session_gone() {
+    let dir = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+
+    // Do NOT seed "tm-already-gone" — the session_exists guard must short-circuit.
+    mgr.graceful_terminate_runtime("tm-already-gone").await;
+
+    assert!(
+        fake.interrupt_calls.lock().unwrap().is_empty(),
+        "must not signal a session that no longer exists"
+    );
+    assert!(
+        fake.kill_calls.lock().unwrap().is_empty(),
+        "must not kill a session that no longer exists"
+    );
+}
 
 /// A minimal driver that does NOT override `graceful_stop`, so the DEFAULT trait
 /// impl runs — exercising its real SIGTERM-with-known-PID branch.

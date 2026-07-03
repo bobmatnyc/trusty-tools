@@ -347,34 +347,6 @@ async fn manager_name_hint_overrides() {
     assert_eq!(record.tmux_name, "tm-ticket-1234-01");
 }
 
-/// `graceful_terminate_runtime` signals the runtime BEFORE reclaiming the pane (#1975).
-///
-/// Why: CLI stop/decommission must give the `claude` process a termination signal
-/// (and a grace window) to flush state, not an abrupt `kill_session`. With no real
-/// tmux the PID probe returns `None`, so `signal_terminate` falls back to a Ctrl-C
-/// interrupt; the grace window is 0 s under `#[cfg(test)]`.
-/// What: drives the helper directly and asserts BOTH the interrupt fired and the
-/// pane was subsequently killed — the two-phase drain.
-/// Test: this function IS the test.
-#[tokio::test]
-async fn graceful_terminate_runtime_signals_then_kills() {
-    let dir = TempDir::new().unwrap();
-    let (mgr, fake) = make_manager(&dir).await;
-
-    mgr.graceful_terminate_runtime("tm-drain-1").await;
-
-    assert_eq!(
-        *fake.interrupt_calls.lock().unwrap(),
-        vec!["tm-drain-1".to_string()],
-        "expected a Ctrl-C interrupt (SIGTERM fallback) before the pane is reclaimed"
-    );
-    assert_eq!(
-        *fake.kill_calls.lock().unwrap(),
-        vec!["tm-drain-1".to_string()],
-        "expected the pane to be reclaimed after the grace window"
-    );
-}
-
 /// `stop` must kill the runtime but KEEP the workspace directory and record,
 /// setting state to `Stopped` (not `Dead` or any terminal state).
 ///
