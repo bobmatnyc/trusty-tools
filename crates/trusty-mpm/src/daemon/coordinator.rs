@@ -56,9 +56,9 @@ pub struct CoordinatorContext {
 pub struct SessionSummary {
     /// Session id (UUID string).
     pub id: String,
-    /// tmux session name, e.g. `tmpm-aipowerranking`.
+    /// tmux session name, e.g. `tm-aipowerranking-01`.
     pub name: String,
-    /// Short routing prefix, e.g. `aipowerranking` (the `tmpm-` prefix dropped).
+    /// Short routing prefix, e.g. `aipowerranking-01` (the managed prefix dropped).
     pub prefix: String,
     /// Working directory the session runs in.
     pub workdir: String,
@@ -109,14 +109,16 @@ pub struct EventSummary {
 
 /// Derive a short routing prefix from a tmux session name.
 ///
-/// Why: operators address a session by a short word (`aipowerranking`), not its
-/// full `tmpm-aipowerranking` tmux name; the prefix is that name with the
-/// `tmpm-` prefix dropped.
-/// What: strips a leading `tmpm-` when present; otherwise returns the name
-/// unchanged.
-/// Test: `prefix_strips_tmpm`.
+/// Why: operators address a session by a short word (`aipowerranking`), not
+/// its full `tm-aipowerranking-01` tmux name; the prefix is that name with the
+/// managed prefix dropped. Delegates to
+/// [`crate::core::names::strip_managed_prefix`] so both the current `tm-`
+/// scheme (#1955) and legacy `tmpm-`/`trusty-mpm-` names strip correctly.
+/// What: strips whichever managed prefix `name` carries; otherwise returns the
+/// name unchanged.
+/// Test: `prefix_strips_managed_prefixes`.
 fn derive_prefix(name: &str) -> String {
-    name.strip_prefix("tmpm-").unwrap_or(name).to_string()
+    crate::core::names::strip_managed_prefix(name).to_string()
 }
 
 /// Render a [`SessionStatus`] as a capitalised display word.
@@ -316,7 +318,9 @@ mod tests {
     }
 
     #[test]
-    fn prefix_strips_tmpm() {
+    fn prefix_strips_managed_prefixes() {
+        assert_eq!(derive_prefix("tm-aipowerranking-01"), "aipowerranking-01");
+        // Legacy prefix (issue #1955) must still strip correctly.
         assert_eq!(derive_prefix("tmpm-aipowerranking"), "aipowerranking");
         assert_eq!(derive_prefix("frontend"), "frontend");
     }

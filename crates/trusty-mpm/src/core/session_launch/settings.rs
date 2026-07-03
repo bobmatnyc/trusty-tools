@@ -34,7 +34,7 @@ pub(super) const SPINNER_TIPS: &[&str] = &[
     "API → CLI → TUI: implement at the lowest layer first",
     "Delegate Rust code to rust-engineer — PM never edits .rs files",
     "gh issue create to track work; commits include Closes #N",
-    "tmux ls shows all active tmpm-<folder> sessions",
+    "tmux ls shows all active tm-<project>-NN sessions",
     "tm session list shows daemon-managed sessions",
     "/compact at ~50% context to stay focused",
     "Layer new features behind the HTTP API before wiring CLI or TUI",

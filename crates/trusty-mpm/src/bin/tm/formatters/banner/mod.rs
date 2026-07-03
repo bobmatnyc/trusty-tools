@@ -404,13 +404,13 @@ pub(crate) fn binary_on_path(name: &str) -> bool {
     std::env::split_paths(&paths).any(|dir| dir.join(name).is_file())
 }
 
-/// Compute the fallback `tmpm-<folder>` session name for a project directory.
+/// Compute the fallback `tm-<folder>` session name for a project directory.
 ///
 /// Why: when the daemon is unreachable `tm launch` still needs a tmux session
 /// name; deriving it from the project folder keeps the offline name identical
 /// to the one the daemon would assign for the same directory.
-/// What: returns `name_from_dir(path)` (`tmpm-<sanitized-folder>`).
-/// Test: `fallback_session_name_has_tmpm_prefix`,
+/// What: returns `name_from_dir(path)` (`tm-<sanitized-folder>`).
+/// Test: `fallback_session_name_has_tm_prefix`,
 /// `fallback_session_name_uses_folder`.
 pub(crate) fn fallback_session_name(path: &std::path::Path) -> String {
     trusty_mpm::core::names::name_from_dir(path)

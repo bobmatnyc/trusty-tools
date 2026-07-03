@@ -129,16 +129,18 @@ impl TestDaemon {
 }
 
 impl Drop for TestDaemon {
-    /// Why: aborting only the HTTP task left any `tmpm-` tmux session this daemon
-    /// spawned running forever — those orphans once saturated the host fork
-    /// limit (epic #1452, #1459). This `Drop` now also reaps the tmux hosts THIS
-    /// harness created.
+    /// Why: aborting only the HTTP task left any managed (`tm-`/`tmpm-`) tmux
+    /// session this daemon spawned running forever — those orphans once
+    /// saturated the host fork limit (epic #1452, #1459). This `Drop` now also
+    /// reaps the tmux hosts THIS harness created.
     /// What: aborts the server task, then best-effort kills the tmux session
     /// named by every record in this daemon's OWN registry (each `TestDaemon`
     /// owns an isolated `DaemonState`, so the registry contains only sessions
-    /// this harness created — the reap never touches unrelated `tmpm-` sessions).
-    /// A `tmpm-` prefix check is an extra belt-and-braces guard. tmux being
-    /// absent (CI) is fine: discovery fails and the loop is a no-op.
+    /// this harness created — the reap never touches unrelated managed
+    /// sessions). A [`trusty_mpm::core::names::is_managed_session_name`] check
+    /// is an extra belt-and-braces guard (covers both the current `tm-` scheme,
+    /// #1955, and the legacy `tmpm-`/`trusty-mpm-` ones). tmux being absent
+    /// (CI) is fine: discovery fails and the loop is a no-op.
     /// Test: covered indirectly by every e2e session scenario; the reaping
     /// primitive itself is unit-tested in `session_manager::session_guard`.
     fn drop(&mut self) {
@@ -151,7 +153,7 @@ impl Drop for TestDaemon {
             .list_sessions()
             .into_iter()
             .map(|s| s.tmux_name)
-            .filter(|name| name.starts_with("tmpm-"))
+            .filter(|name| trusty_mpm::core::names::is_managed_session_name(name))
             .collect();
 
         if created.is_empty() {

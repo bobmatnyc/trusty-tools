@@ -90,7 +90,7 @@ impl OverseerDecision {
 pub struct OverseerContext {
     /// Session the event originated from.
     pub session_id: SessionId,
-    /// Friendly tmux session name (`tmpm-<adjective>-<noun>`).
+    /// Friendly tmux session name (`tm-<adjective>-<noun>`).
     pub tmux_name: String,
     /// Tool name for `PreToolUse` / `PostToolUse` events, if any.
     pub tool_name: Option<String>,

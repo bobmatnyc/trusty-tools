@@ -346,11 +346,14 @@ pub fn status_indicator(status: crate::core::session::SessionStatus) -> (char, C
 /// Derive a session's short routing prefix from its tmux name.
 ///
 /// Why: the sidebar and the Enter-to-prefill flow address a session by its
-/// short prefix (`aipowerranking`), not its full `tmpm-aipowerranking` name.
-/// What: strips a leading `tmpm-` when present.
-/// Test: `session_prefix_strips_tmpm`.
+/// short prefix (`aipowerranking-01`), not its full `tm-aipowerranking-01`
+/// name. Delegates to [`crate::core::names::strip_managed_prefix`] so both the
+/// current `tm-` scheme (#1955) and legacy `tmpm-`/`trusty-mpm-` names strip
+/// correctly.
+/// What: strips whichever managed prefix `name` carries.
+/// Test: `session_prefix_strips_managed_prefixes`.
 pub fn session_prefix(name: &str) -> &str {
-    name.strip_prefix("tmpm-").unwrap_or(name)
+    crate::core::names::strip_managed_prefix(name)
 }
 
 /// Build the list items for the session sidebar.

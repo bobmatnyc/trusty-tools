@@ -149,7 +149,7 @@ async fn manager_create_record() {
         .expect("create");
 
     assert!(
-        record.tmux_name.starts_with("tmpm-"),
+        record.tmux_name.starts_with("tm-"),
         "tmux_name has prefix: {}",
         record.tmux_name
     );
@@ -298,8 +298,8 @@ async fn manager_create_store_failure_reaps_orphan() {
         "exactly one orphaned tmux session must be reaped; kills: {kills:?}"
     );
     assert!(
-        kills[0].starts_with("tmpm-"),
-        "the reaped session is the one just created (tmpm- prefix): {}",
+        kills[0].starts_with("tm-"),
+        "the reaped session is the one just created (tm- prefix): {}",
         kills[0]
     );
 }
@@ -321,8 +321,8 @@ async fn manager_naming_convention() {
         .await
         .expect("create");
 
-    // tmux name must match tmpm-<slug> convention.
-    assert!(record.tmux_name.starts_with("tmpm-"), "has tmpm- prefix");
+    // tmux name must match tm-<slug>-NN convention (issue #1955).
+    assert!(record.tmux_name.starts_with("tm-"), "has tm- prefix");
 }
 
 #[tokio::test]
@@ -342,7 +342,7 @@ async fn manager_name_hint_overrides() {
         .await
         .expect("create");
 
-    assert_eq!(record.tmux_name, "tmpm-ticket-1234");
+    assert_eq!(record.tmux_name, "tm-ticket-1234-01");
 }
 
 /// `stop` must kill the runtime but KEEP the workspace directory and record,

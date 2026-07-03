@@ -39,7 +39,7 @@ use super::manager::ManagedTmuxDriver;
 /// blocks the manager from using the same driver concurrently.
 /// Test: see the module test section.
 pub struct TmuxSessionGuard {
-    /// The tmux session name this guard owns (e.g. `tmpm-<slug>`).
+    /// The tmux session name this guard owns (e.g. `tm-<leaf>-NN`).
     name: String,
     /// Shared handle to the tmux driver used to reap the session on drop.
     driver: Arc<dyn ManagedTmuxDriver>,

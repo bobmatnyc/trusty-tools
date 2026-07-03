@@ -122,7 +122,7 @@ pub struct SpawnResponse {
 /// Test: `adopt_existing_*` handler tests in tests/session_manager_mvp.rs.
 #[derive(Debug, Deserialize)]
 pub struct AdoptExistingRequest {
-    /// The live tmux session name to adopt (any name; need not be `tmpm-`).
+    /// The live tmux session name to adopt (any name; need not be `tm-`/`tmpm-`).
     pub tmux_name: String,
     /// Working directory the adopted session runs in (REQUIRED — provenance is
     /// unknown to the daemon, so the operator supplies it).

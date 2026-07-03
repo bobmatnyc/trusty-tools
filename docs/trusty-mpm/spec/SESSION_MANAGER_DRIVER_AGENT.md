@@ -5,6 +5,12 @@
 > **Scope:** claude-mpm catalog content (agent definition + skill playbook)
 > **Companion:** [SESSION_MANAGER_MVP.md](./SESSION_MANAGER_MVP.md)
 > **Parent epic:** #380
+>
+> **Naming note (issue #1955):** example session names below (`tmpm-ticket-1234`,
+> `tmpm-<slug>`) reflect the naming scheme in effect when this doc was written.
+> Sessions are now named `tm-<project-leaf>-NN` (e.g. `tm-ticket-1234-01`); the
+> daemon still recognizes the historical `tmpm-`/`trusty-mpm-` prefixes for
+> already-running sessions. See `src/core/names.rs` for current behavior.
 
 ---
 

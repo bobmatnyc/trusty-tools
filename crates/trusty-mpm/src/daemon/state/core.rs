@@ -539,10 +539,10 @@ impl DaemonState {
     /// (#1734, #1790).
     ///
     /// Why: tests that exercise the managed-session API surface must NEVER touch
-    /// the production `~/.trusty-mpm` store nor spawn real `tmpm-*` tmux sessions.
+    /// the production `~/.trusty-mpm` store nor spawn real managed (`tm-*`/`tmpm-*`) tmux sessions.
     ///
     /// The lazy `session_manager()` initialiser calls `RealTmuxDriver::discover()`
-    /// followed by `reconcile_on_boot`, which (a) adopts any `tmpm-*` sessions from
+    /// followed by `reconcile_on_boot`, which (a) adopts any managed (`tm-*`/`tmpm-*`) sessions from
     /// the host into the test-owned store and (b) creates real tmux sessions through
     /// `create_with_id`. Those real sessions escape into the host and get adopted by
     /// the production daemon's next `reconcile_on_boot`, polluting

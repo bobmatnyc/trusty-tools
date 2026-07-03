@@ -181,7 +181,7 @@ pub(crate) async fn resolve_managed_match(
 /// resolver.
 ///
 /// Why: `tm session events` needs a UUID for `GET /sessions/{id}/events`, but
-/// operators may pass a friendly `tmpm-*` name. Phase 1B collapsed the bespoke
+/// operators may pass a friendly `tm-*`/`tmpm-*` name. Phase 1B collapsed the bespoke
 /// `resolve_session_id` here so the project-session lookup uses the SAME
 /// [`resolve_target`] precedence (id-exact → name-exact → unambiguous prefix) as
 /// every managed path.

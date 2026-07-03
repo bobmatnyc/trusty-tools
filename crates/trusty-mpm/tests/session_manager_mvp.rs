@@ -1493,13 +1493,13 @@ async fn session_manager_github_repo_url_produces_project_name() {
         .expect("create");
 
     assert!(
-        record.tmux_name.starts_with("tmpm-trusty-tools-"),
-        "a GitHub repo_url must produce tmpm-<repo>-<8hex>, got: {}",
+        record.tmux_name.starts_with("tm-trusty-tools-"),
+        "a GitHub repo_url must produce tm-<repo>-NN, got: {}",
         record.tmux_name
     );
     assert!(
-        !record.tmux_name.starts_with("tmpm-local-"),
-        "must not fall through to tmpm-local-<8hex> when repo_url is a GitHub URL: {}",
+        !record.tmux_name.starts_with("tm-local-"),
+        "must not fall through to tm-local-NN when repo_url is a GitHub URL: {}",
         record.tmux_name
     );
 }
@@ -1553,8 +1553,8 @@ async fn isolated_managed_state_uses_fake_driver_never_creates_real_tmux_session
     let retrieved = mgr.get(&id).await.expect("session must be retrievable");
     assert_eq!(retrieved.id, record.id);
     assert!(
-        retrieved.tmux_name.starts_with("tmpm-"),
-        "session name must follow tmpm- convention"
+        retrieved.tmux_name.starts_with("tm-"),
+        "session name must follow tm- convention"
     );
 
     // The driver must report zero live sessions — confirming no real tmux

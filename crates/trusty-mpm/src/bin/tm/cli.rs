@@ -1189,7 +1189,7 @@ pub(crate) enum SessionAction {
     /// runtime (workspace preserved, resumable); otherwise it stops the local
     /// project session.
     Stop {
-        /// Session id or friendly name (e.g. `tmpm-quiet-falcon`).
+        /// Session id or friendly name (e.g. `tm-quiet-falcon`).
         id_or_name: String,
     },
     /// List sessions for the current project.

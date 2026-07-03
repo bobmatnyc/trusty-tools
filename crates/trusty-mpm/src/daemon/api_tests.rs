@@ -300,7 +300,7 @@ async fn registered_session_has_friendly_tmux_name() {
         .find(|s| s.id.0.to_string() == id)
         .expect("session registered");
     assert!(
-        session.tmux_name.starts_with("tmpm-"),
+        session.tmux_name.starts_with("tm-"),
         "friendly name: {}",
         session.tmux_name
     );

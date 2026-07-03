@@ -216,7 +216,7 @@ impl DaemonState {
     /// Look up one session by id or by friendly tmux name.
     ///
     /// Why: the `session stop` / `session info` subcommands accept either a
-    /// UUID or the friendly `tmpm-<adj>-<noun>` name the daemon prints on
+    /// UUID or the friendly `tm-<adj>-<noun>` name the daemon prints on
     /// start; resolving both keeps the CLI ergonomic.
     /// What: tries to parse `key` as a UUID first; on failure scans the
     /// registry for a session whose `tmux_name` matches.

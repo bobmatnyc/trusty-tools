@@ -195,7 +195,9 @@ fn status_indicator_maps_each_status() {
 }
 
 #[test]
-fn session_prefix_strips_tmpm() {
+fn session_prefix_strips_managed_prefixes() {
+    assert_eq!(session_prefix("tm-aipowerranking-01"), "aipowerranking-01");
+    // Legacy prefix (issue #1955) must still strip correctly.
     assert_eq!(session_prefix("tmpm-aipowerranking"), "aipowerranking");
     assert_eq!(session_prefix("frontend"), "frontend");
 }
