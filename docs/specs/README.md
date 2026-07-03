@@ -40,6 +40,7 @@ can resolve a changed file back to the section that governs it.
 | DOC-29 | `SPEC-MPM-BEHAVIOR-01~draft` … `-06~draft` | [Primary trusty-mpm Harness Behaviors — Conformance Matrix](./mpm-behavior-conformance.md) | trusty-mpm — behavior conformance / cross-spec verification |
 | DOC-30 | `SPEC-PM-01~draft` | [Project Manager: Vision & Lifecycle Orchestrator](./DOC-30-project-manager-vision.md) | trusty-mpm — project-level orchestration / user-facing surface |
 | DOC-31 | `SPEC-PROVISION-01~draft` … `-08~draft` | [SYSTEM vs PROJECT Agents & Skills — Provisioning, In-Project Migration, Requirement-Driven Pulls](./system-project-agents-skills.md) | trusty-mpm — content provisioning / agent + skill deploy pipeline |
+| DOC-32 | `SPEC-TOOLPROXY-01~draft` | [Live Tool-Output Interception Seam for Native `tm` Sessions](./tool-output-interception-seam.md) | trusty-mpm / trusty-agents — MCP tool-output proxy / live token compression |
 
 > **Catalog note — `DOC-28` self-label collision (uncataloged spec).** The file
 > [`mpm-cutover-resume-native-optimization.md`](./mpm-cutover-resume-native-optimization.md)
@@ -47,7 +48,8 @@ can resolve a changed file back to the section that governs it.
 > ([trusty-mpm Self-Awareness](./trusty-mpm-self-awareness.md), the entry above). That
 > file is **not** in this catalog. The collision is flagged here rather than resolved by
 > renumbering the file in-place (its self-label and any inbound references are left
-> untouched); a follow-up should assign it the next free `DOC-N` (currently **DOC-32**)
+> untouched); a follow-up should assign it the next free `DOC-N` (currently **DOC-33**
+> — DOC-32 was claimed by [`tool-output-interception-seam.md`](./tool-output-interception-seam.md), issue #1953)
 > and add a catalog row.
 
 ## Status lifecycle

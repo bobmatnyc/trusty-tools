@@ -134,6 +134,21 @@ Implement command-domain-aware compression of tool-call output (git, cargo, ls, 
 > a prerequisite for this spec to deliver its claimed token savings on native sessions and is not
 > yet designed. Until then, "native ztk" here means richer observability-history compression only.
 
+> **📎 Follow-up decision record (issue #1953, 2026-07-03).** The live-interception seam called
+> out as "not yet designed" above was investigated in
+> [`docs/specs/tool-output-interception-seam.md`](./tool-output-interception-seam.md)
+> (`SPEC-TOOLPROXY-01~draft`), which is now the **authoritative decision record** for whether this
+> spec should retarget to that seam. **Outcome: not retargeted (yet).** The MCP tool-output-proxy
+> architecture (Option 1 in that doc) is sound and reuses shipped code
+> (`compress_tool_output_async`), but a spike found the reusable filter chain compresses cargo/git
+> output well (54–83% byte reduction) while `grep`/`ls` compress **0%** — no filter branch exists
+> for those tool names today — so shipping proxy tools for `ls`/`grep` now would add
+> provenance/permission cost with no offsetting savings. See that doc's Decision section for the
+> conditions under which retargeting becomes correct, and its Follow-ups section for the concrete
+> tickets (filter coverage, then re-spike, then the MCP proxy itself) that would need to land first.
+> This spec (`SPEC-MPM-CUTOVER-03`) remains correctly scoped to the observability-only seam
+> described above until then.
+
 ### Behavior & Scope
 
 Add command-domain-aware filters as a new tier/mode in the existing `crates/trusty-mpm/src/core/compress.rs` (`CompressionLevel` today: Off/Trim/Summarise/Caveman). Wire at the single existing seam: `daemon/optimizer.rs` `optimize_tool_output`, called from `daemon/mcp_backend.rs:183-192` (PostToolUse hook, before ring buffer).
