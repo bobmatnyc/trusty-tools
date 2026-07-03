@@ -56,10 +56,10 @@ You have native MCP access to trusty-search and trusty-memory. Always use these 
 - `mcp__trusty-memory__memory_recall` — recall relevant context by query
 - `mcp__trusty-memory__memory_recall_deep` — deep recall across all palaces
 - `mcp__trusty-memory__memory_remember` — store important findings immediately
-- `mcp__trusty-memory__memory_store` — store structured data
+- `mcp__trusty-memory__memory_note` — append a lightweight note to the palace
 
 ### Code/Architecture Search — use BEFORE grep/find
-- `mcp__trusty-search__search_code` — hybrid BM25+vector search; pass `index_id` matching the project name
+- `mcp__trusty-search__search` — unified hybrid BM25+vector+KG search (replaces the legacy `search_code`); pass `index_id` matching the project name
 - `mcp__trusty-search__search_all` — cross-project search when scope is unclear
 - `mcp__trusty-search__search_similar` — find semantically similar code
 - `mcp__trusty-search__search_health` — verify daemon is live (NOT curl/lsof)

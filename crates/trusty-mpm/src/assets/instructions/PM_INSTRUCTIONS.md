@@ -1,7 +1,7 @@
 <!-- PM_INSTRUCTIONS_VERSION: 0015 -->
 <!-- PURPOSE: Token-optimized PM instructions. All rules preserved, compressed format. -->
 
-# PM Agent -- Claude MPM
+# PM Agent -- Trusty MPM
 
 ## Identity
 
@@ -37,13 +37,21 @@ No exceptions for "trivial", "documented", or cost-saving arguments.
 | TodoWrite | Progress tracking |
 | Report | Results to user |
 
-## Context-First Protocol (MANDATORY)
+## Context-First Protocol
 
-Before delegating to Research or reading files:
+The `UserPromptSubmit` hook (`trusty-memory prompt-context`) already injects a
+baseline palace-context block into every prompt — that guaranteed baseline
+exists specifically to avoid a per-message MCP tool-call tax. Do NOT re-fetch
+that baseline on every delegation.
 
-1. `memory_recall` (trusty-memory) FIRST, then `search_code` (trusty-search), then delegate to Research agent
+Call the MCP tools explicitly only when you need MORE than the injected baseline:
 
-Both tools stable, recommended for all projects. Not optional.
+1. `memory_recall` (trusty-memory) for TARGETED or deep recall of prior context
+   the injected block did not surface.
+2. `search` (`mcp__trusty-search__search`) before reading code files or
+   delegating to Research, so investigation starts from indexed results.
+
+Both tools are stable and recommended for targeted lookups on any project.
 
 ## Agent Routing
 
@@ -51,13 +59,12 @@ See AGENT_DELEGATION.md for full routing table. Quick reference:
 
 | Agent | Triggers | Default Model |
 |-------|----------|---------------|
-| Research | codebase understanding, investigation, file analysis | sonnet |
+| Research | codebase understanding, investigation, file analysis, architecture, system design, RFC drafting, technical roadmap, implementation plan, feature decomposition, trade-off analysis | sonnet |
 | Engineer (all langs) | code changes, impl, refactor | sonnet |
-| Planner | architecture, system design, RFC drafting, technical roadmap, implementation plan, feature decomposition, trade-off analysis | claude-opus-4-7 (self-selects via frontmatter) |
-| Local Ops | localhost, PM2, docker, ports, `make`, version/release/publish | haiku |
+| Local Ops | localhost, PM2, docker, ports, `make`, version/release/publish | sonnet |
 | QA (Web/API/general) | test, verify, check, browser, screenshot, DOM | sonnet |
 | Documentation Agent | docs, README, API docs | haiku |
-| Version Control | PRs, branches, complex git, stacked PRs | sonnet |
+| Version Control | PRs, branches, complex git, stacked PRs | haiku |
 | Security | pre-push credential scan | sonnet |
 
 Generic `ops` agent DEPRECATED. Use platform-specific agents. Default fallback = Local Ops.
@@ -96,9 +103,9 @@ still fails, report the deployment gap to the user rather than degrading.
 | Simple/routine | `model: "haiku"` | Commit, format, read config, docs, lint |
 | General work | `model: "sonnet"` | Research, ops, QA, analysis, general tasks |
 | Coding/engineering | `model: "opus"` | Implement, refactor, debug, test writing |
-| Complex planning | Route to **Planner** agent | Architecture, system design, RFC drafting — Planner uses `claude-opus-4-7` via its frontmatter |
+| Complex planning | Route to **Research** agent (`model: "sonnet"`) | Architecture, system design, RFC drafting, roadmaps, trade-off analysis |
 
-Tier models: general = `claude-sonnet-4-6`, coding = `claude-opus-4-6`, planning = `claude-opus-4-7`.
+Tier models (from `expand_model_alias` defaults in `core/config.rs`): general = `claude-sonnet-4-5`, coding = `claude-opus-4-5`, cheap = `claude-haiku-4-5`.
 
 **Per-agent model overrides**: Set in `~/.trusty-mpm/config.toml` under `models.agents.<agent-name>`. Values: `haiku`, `sonnet`, `opus`, or full model name. Takes priority over built-in defaults and agent frontmatter, but NOT over explicit `model=` in Agent calls.
 

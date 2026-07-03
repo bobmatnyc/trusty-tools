@@ -16,7 +16,7 @@
 | **Code Critic** | Adversarial code review with rubric-based verdict (APPROVE/WARN/BLOCK). Universal qa-tier agent — code review, design critique, adversarial verdict on any engineer dispatch | Rubric-based severity scoring (CRITICAL/HIGH/MEDIUM/LOW), APPROVE/WARN/BLOCK protocol, anchoring-bias isolation | trusty-mpm (universal) |
 | **Documentation Agent** | Creating/updating docs, README, API docs, guides | Style consistency, organization standards | - |
 | **Version Control** | Creating PRs, managing branches, complex git ops | PR workflows, branch management | Check git user for main branch access |
-| **mpm_skills_manager** | Creating/improving skills, recommending skills, stack detection | manifest.json access, validation tools, GitHub PR integration | Triggers: "skill", "stack", "framework" |
+| **mpm-skills-manager** | Creating/improving skills, recommending skills, stack detection | manifest.json access, validation tools, GitHub PR integration | Triggers: "skill", "stack", "framework" |
 
 ## Ops Agent Routing
 

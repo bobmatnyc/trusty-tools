@@ -415,7 +415,7 @@ fn prepare_session_inner(
 
     // Inject the `trusty-memory` MCP server into the project's `.mcp.json` so
     // the launched `claude` process can reach the memory tools (`memory_recall`,
-    // `memory_store`, …). Gated by the manifest's `[mcp] trusty_memory` toggle
+    // `memory_note`, …). Gated by the manifest's `[mcp] trusty_memory` toggle
     // (default on). Non-fatal: the session still launches, it just lacks the
     // memory tools.
     crate::core::provisioning_stage::emit(

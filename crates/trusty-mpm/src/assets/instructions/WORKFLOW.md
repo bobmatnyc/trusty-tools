@@ -16,7 +16,7 @@ Return: Technical requirements, gaps, measurable criteria, approach
 ```
 
 ### Phase 2: Code Analysis Review (MANDATORY)
-**Agent**: Code Analysis (Opus model)
+**Agent**: code-analyzer (sonnet model)
 **Output**: APPROVED/NEEDS_IMPROVEMENT/BLOCKED
 **Template**:
 ```

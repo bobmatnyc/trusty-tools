@@ -83,13 +83,13 @@ fn build_system_prompt_includes_trusty_block() {
     // Why: `build_system_prompt` must always yield a prompt — generating
     // `INSTRUCTIONS.md` from the bundled assets on first run — and that
     // prompt must include the trusty tool-priority block so a launched
-    // session knows to prefer `memory_recall` and `search_code`.
+    // session knows to prefer `memory_recall` and `search`.
     let prompt = build_system_prompt().expect("trusty block is always present");
     assert!(prompt.contains("## Trusty Tool Priority (Non-Overridable)"));
     assert!(prompt.contains("mcp__trusty-memory__memory_recall"));
-    assert!(prompt.contains("mcp__trusty-search__search_code"));
+    assert!(prompt.contains("mcp__trusty-search__search"));
     // The bundled PM instructions are also part of the assembled prompt.
-    assert!(prompt.contains("# PM Agent -- Claude MPM"));
+    assert!(prompt.contains("# PM Agent -- Trusty MPM"));
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn build_system_prompt_for_applies_project_override() {
     assert!(prompt.contains("PROJECT_OVERRIDE_MARKER"));
     assert!(prompt.contains("# BASE_PM Framework Floor"));
     // Bundled PM body is still present (INSTRUCTIONS.md is additive).
-    assert!(prompt.contains("# PM Agent -- Claude MPM"));
+    assert!(prompt.contains("# PM Agent -- Trusty MPM"));
 }
 
 #[test]
@@ -120,7 +120,7 @@ fn build_system_prompt_for_no_override_matches_bundled_sections() {
     // bundled sections and the BASE_PM floor last.
     let tmp = tempdir().unwrap();
     let prompt = build_system_prompt_for(tmp.path());
-    assert!(prompt.contains("# PM Agent -- Claude MPM"));
+    assert!(prompt.contains("# PM Agent -- Trusty MPM"));
     assert!(prompt.contains("# Agent Delegation Routing"));
     let base = prompt.find("# BASE_PM Framework Floor").expect("base");
     let deleg = prompt.find("# Agent Delegation Routing").expect("deleg");

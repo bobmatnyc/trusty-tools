@@ -413,7 +413,7 @@ mod tests {
         // Why: the assembled prompt is the contract `claude` receives; every
         // bundled section must be present and joined with the `---` rule.
         let prompt = assemble_system_prompt();
-        assert!(prompt.contains("# PM Agent -- Claude MPM"));
+        assert!(prompt.contains("# PM Agent -- Trusty MPM"));
         assert!(prompt.contains("# BASE_PM Framework Floor"));
         assert!(prompt.contains("# PM Workflow Configuration"));
         assert!(prompt.contains("# Agent Delegation Routing"));
@@ -472,7 +472,7 @@ mod tests {
         );
         // Real PM sections must be present.
         assert!(
-            on_disk.contains("# PM Agent -- Claude MPM"),
+            on_disk.contains("# PM Agent -- Trusty MPM"),
             "PM_INSTRUCTIONS section must be present"
         );
         assert!(
