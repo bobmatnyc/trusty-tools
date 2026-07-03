@@ -85,12 +85,18 @@ pub(super) fn is_established_bare_checkout(dir: &Path) -> bool {
 /// `fake_ensure_base_checkout_rejects_stale_non_bare_directory` (both assert
 /// the returned message contains the path and the `rm -rf` hint).
 pub(super) fn stale_base_dir_error(base_dir: &Path) -> Option<ProvisionError> {
-    // A missing dir (read_dir errors) or an empty dir (no entries) is fine:
-    // `git clone --bare` clones cleanly into either. Only a NON-empty dir that
-    // is not a valid bare checkout is the stale/broken state worth reporting.
-    let non_empty = std::fs::read_dir(base_dir)
-        .map(|mut entries| entries.next().is_some())
-        .unwrap_or(false);
+    // A missing dir (NotFound) or an empty dir (no entries) is fine: `git clone
+    // --bare` clones cleanly into either. Only a NON-empty dir that is not a
+    // valid bare checkout is the stale/broken state worth reporting. Any OTHER
+    // read_dir error (e.g. permission-denied) must NOT be swallowed as "absent":
+    // treating an unreadable directory as non-empty forces an actionable error
+    // here instead of letting `git clone --bare` fail later with an opaque
+    // message — exactly the failure mode this helper exists to prevent.
+    let non_empty = match std::fs::read_dir(base_dir) {
+        Ok(mut entries) => entries.next().is_some(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    };
     if !non_empty {
         return None;
     }
