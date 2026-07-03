@@ -45,6 +45,13 @@ pub struct FakeTmuxDriver {
     pub create_cwd_calls: Mutex<Vec<(String, String)>>,
     /// Records `(session_name, claude_pid)` for every `graceful_stop` call.
     pub graceful_stop_calls: Mutex<Vec<(String, Option<u32>)>>,
+    /// Records the session name for every `send_interrupt` (Ctrl-C) call.
+    ///
+    /// Why: the CLI graceful-drain path (#1975) signals the runtime via
+    /// `signal_terminate`, which — with no PID known in unit tests — falls back to
+    /// `send_interrupt`. Recording it lets `graceful_terminate_runtime_signals_then_kills`
+    /// assert the signal fired before the pane was reclaimed.
+    pub interrupt_calls: Mutex<Vec<String>>,
 }
 
 impl FakeTmuxDriver {
@@ -57,6 +64,7 @@ impl FakeTmuxDriver {
             seeded_names: Mutex::new(Vec::new()),
             create_cwd_calls: Mutex::new(Vec::new()),
             graceful_stop_calls: Mutex::new(Vec::new()),
+            interrupt_calls: Mutex::new(Vec::new()),
         })
     }
 }
@@ -120,6 +128,17 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
             .unwrap()
             .push((name.to_owned(), claude_pid));
         self.kill_session(name)
+    }
+
+    /// Record Ctrl-C interrupts so the graceful-drain path (#1975) is observable.
+    ///
+    /// Why: the default `send_interrupt` fails loudly (`TmuxUnavailable`) to catch
+    /// drivers that silently drop interrupts; the fake instead records the call and
+    /// succeeds so `graceful_terminate_runtime`'s signal phase can be asserted.
+    /// What: records `name` and returns `Ok`.
+    fn send_interrupt(&self, name: &str) -> Result<(), ManagedError> {
+        self.interrupt_calls.lock().unwrap().push(name.to_owned());
+        Ok(())
     }
 }
 
