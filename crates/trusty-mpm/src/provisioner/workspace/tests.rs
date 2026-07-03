@@ -13,6 +13,7 @@
 //! sessions, blank-ref handling, and TASK.md write/skip behaviour.
 //! Test: this file IS the test module; run with `cargo test -p trusty-mpm`.
 
+use super::base_lock::{LOCK_STALE_AFTER, lock_is_stale};
 use super::*;
 use tempfile::TempDir;
 
@@ -278,5 +279,233 @@ fn provision_skips_task_md_when_empty() {
     assert!(
         !task_file.exists(),
         "TASK.md must NOT be created when task is empty"
+    );
+}
+
+// ── trusty-review PR #1936 (#1935) findings: RealGitBackend::ensure_base_checkout ──
+//
+// Both tests below exercise `RealGitBackend` against real local git
+// repositories (no network required — `file://` remotes and local `git init`
+// only), mirroring the graceful-skip-if-git-unavailable pattern already used
+// by `decommission_worktree_tests.rs`.
+
+/// Create a local bare "origin" repo with a single commit and return its path.
+///
+/// Why: shared fixture for the two `ensure_base_checkout` regression tests
+/// below — both need a real, clonable bare repo to point `RealGitBackend` at.
+/// What: `git init --bare`, then clones it to a scratch work dir, commits a
+/// README, and pushes back to the bare repo. Returns `None` (callers must
+/// skip, not fail) if the local `git` binary is unavailable, matching the
+/// established pattern in `decommission_worktree_tests.rs`.
+/// Test: exercised transitively by every test that calls it.
+fn make_local_bare_origin(scratch: &TempDir) -> Option<PathBuf> {
+    use std::process::Command;
+    let bare = scratch.path().join("origin.git");
+    let work = scratch.path().join("seed");
+    if !Command::new("git")
+        .args(["init", "--bare", "-b", "main"])
+        .arg(&bare)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    if !Command::new("git")
+        .args(["clone"])
+        .arg(&bare)
+        .arg(&work)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    std::fs::write(work.join("README.md"), "seed").unwrap();
+    let work_s = work.to_str().unwrap();
+    for args in [
+        vec!["-C", work_s, "add", "."],
+        vec![
+            "-C",
+            work_s,
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-m",
+            "seed",
+        ],
+        vec!["-C", work_s, "push", "origin", "main"],
+    ] {
+        if !Command::new("git")
+            .args(&args)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return None;
+        }
+    }
+    Some(bare)
+}
+
+/// trusty-review finding #1 (TOCTOU race, PR #1936): two sessions
+/// provisioning the SAME project for the first time must not fail when they
+/// race on `ensure_base_checkout`.
+///
+/// Why: before the fix, both racing callers observed `base_dir.join("HEAD")`
+/// absent, both attempted `git clone --bare`, and the loser hit git's
+/// "destination path ... already exists and is not an empty directory"
+/// error, surfacing as a hard `ProvisionError::Git` and failing that
+/// session's provisioning outright.
+/// What: spawns several real OS threads that all call
+/// `RealGitBackend.ensure_base_checkout(repo_url, &base_dir)` concurrently
+/// against the exact same, not-yet-existing `base_dir`, then asserts (1)
+/// every thread returned `Ok(())` — no race loser propagates the "already
+/// exists" error — and (2) exactly one genuinely established bare checkout
+/// exists at `base_dir` afterward (`git rev-parse --is-bare-repository`
+/// reports `true`). Skips gracefully if the local `git` binary is
+/// unavailable.
+/// Test: this function IS the test.
+#[test]
+fn ensure_base_checkout_recovers_from_concurrent_race() {
+    let scratch = TempDir::new().unwrap();
+    let Some(bare_origin) = make_local_bare_origin(&scratch) else {
+        eprintln!("ensure_base_checkout_recovers_from_concurrent_race: git unavailable, skipping");
+        return;
+    };
+    let repo_url = format!("file://{}", bare_origin.display());
+
+    let root = TempDir::new().unwrap();
+    let base_dir = root.path().join("project").join(".base");
+
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let repo_url = repo_url.clone();
+            let base_dir = base_dir.clone();
+            std::thread::spawn(move || RealGitBackend.ensure_base_checkout(&repo_url, &base_dir))
+        })
+        .collect();
+
+    for handle in handles {
+        let result = handle.join().expect("thread must not panic");
+        assert!(
+            result.is_ok(),
+            "every racing ensure_base_checkout call must recover and return Ok, got {result:?}"
+        );
+    }
+
+    assert!(
+        is_established_bare_checkout(&base_dir),
+        "base_dir must be a genuinely established bare checkout after the race settles"
+    );
+}
+
+/// trusty-review finding #2 (fragile bare-clone detection, PR #1936): a
+/// stale NON-bare directory sitting at the base-checkout path must not be
+/// silently accepted as a valid shared base.
+///
+/// Why: the previous idempotency guard (`base_dir.join("HEAD").is_file()`)
+/// only checks for a file NAMED `HEAD` at the root of `base_dir` — it never
+/// confirms that directory is actually a valid, complete git repository.
+/// Verified empirically (see this test): a plain non-bare `git init`/`clone`
+/// does NOT put a `HEAD` file at its OWN root (that lives at `.git/HEAD`
+/// instead), but a directory that merely CONTAINS a stray file literally
+/// named `HEAD` — e.g. left over from a `git clone --bare` that crashed
+/// mid-clone (git writes `HEAD` early, before the rest of the object
+/// database/refs), or any other stale/corrupt artifact occupying
+/// `<project_dir>/.base/` — passes the old check and would be silently
+/// treated as an established base, so cloning is skipped and a corrupt
+/// directory is left as the "base"; later `git worktree add` /
+/// `git fetch` calls against it then fail confusingly.
+/// What: pre-creates `base_dir` containing ONLY a `HEAD` file (no `.git`,
+/// no object database, no refs — the minimum needed to fool the OLD
+/// file-existence check) and calls `RealGitBackend.ensure_base_checkout`
+/// pointed at a real, unrelated bare origin. Asserts the call returns `Err`
+/// (loud failure) rather than `Ok` (which would mean the corrupt directory
+/// was silently treated as valid). Skips gracefully if the local `git`
+/// binary is unavailable.
+/// Test: this function IS the test.
+#[test]
+fn ensure_base_checkout_rejects_stale_non_bare_directory() {
+    let scratch = TempDir::new().unwrap();
+    let Some(bare_origin) = make_local_bare_origin(&scratch) else {
+        eprintln!(
+            "ensure_base_checkout_rejects_stale_non_bare_directory: git unavailable, skipping"
+        );
+        return;
+    };
+    let repo_url = format!("file://{}", bare_origin.display());
+
+    let root = TempDir::new().unwrap();
+    let base_dir = root.path().join("project").join(".base");
+    std::fs::create_dir_all(&base_dir).unwrap();
+    std::fs::write(base_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    assert!(
+        base_dir.join("HEAD").is_file(),
+        "sanity check: the stale directory has a file literally named HEAD"
+    );
+    assert!(
+        !is_established_bare_checkout(&base_dir),
+        "sanity check: a lone HEAD file with no repo structure must NOT read as bare"
+    );
+
+    let result = RealGitBackend.ensure_base_checkout(&repo_url, &base_dir);
+    assert!(
+        result.is_err(),
+        "a stale non-repo directory must be rejected loudly, not silently reused: {result:?}"
+    );
+}
+
+/// A lock marker abandoned by a crashed holder must not permanently deadlock
+/// future base-checkout provisioning attempts.
+///
+/// Why: the base-checkout lock (added to fix trusty-review finding #1) is a
+/// plain marker file, not a kernel-tracked `flock` — if the process holding
+/// it is killed mid-clone, nothing ever runs its `Drop` impl to remove the
+/// marker. Without stale-lock recovery, every future `ensure_base_checkout`
+/// call for that project would wait out `LOCK_ACQUIRE_TIMEOUT` and then fail
+/// forever, which is worse than the race it was meant to fix.
+/// What: writes a lock marker file and backdates its modified time past
+/// `LOCK_STALE_AFTER` via `File::set_modified` (no `filetime` dependency
+/// needed — this has been in `std` since Rust 1.75, well under this
+/// workspace's 1.91 MSRV). Asserts `lock_is_stale` reports it as stale, then
+/// asserts `acquire_base_checkout_lock` recovers PROMPTLY (well under
+/// `LOCK_ACQUIRE_TIMEOUT`) rather than blocking out the full timeout, and
+/// that dropping the returned guard removes the marker file.
+/// Test: this function IS the test.
+#[test]
+fn base_checkout_lock_recovers_stale_lock_marker() {
+    let root = TempDir::new().unwrap();
+    let lock_path = root.path().join(".base.lock");
+    std::fs::write(&lock_path, b"").unwrap();
+
+    let stale_time =
+        std::time::SystemTime::now() - (LOCK_STALE_AFTER + std::time::Duration::from_secs(10));
+    std::fs::File::options()
+        .write(true)
+        .open(&lock_path)
+        .unwrap()
+        .set_modified(stale_time)
+        .unwrap();
+
+    assert!(
+        lock_is_stale(&lock_path),
+        "a lock marker older than LOCK_STALE_AFTER must be considered stale"
+    );
+
+    let start = std::time::Instant::now();
+    let guard = acquire_base_checkout_lock(&lock_path).expect("must recover from a stale lock");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "stale-lock recovery must not wait out the full acquire timeout"
+    );
+
+    drop(guard);
+    assert!(
+        !lock_path.exists(),
+        "dropping the lock guard must remove the marker file"
     );
 }

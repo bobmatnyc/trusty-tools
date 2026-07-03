@@ -184,6 +184,14 @@ pub trait GitBackend: Send + Sync {
 /// `blank_git_ref_omits_branch_flag` in `workspace.rs` tests.
 pub struct RealGitBackend;
 
+// #1935 review findings (PR #1936): bare-checkout detection + the advisory
+// provisioning lock live in the `base_lock` submodule to keep this file under
+// the 500-SLOC production cap — see that module's doc comment for the full
+// rationale behind each item.
+use base_lock::{
+    acquire_base_checkout_lock, base_checkout_lock_path, is_established_bare_checkout,
+};
+
 impl GitBackend for RealGitBackend {
     fn clone_repo(
         &self,
@@ -272,6 +280,42 @@ impl GitBackend for RealGitBackend {
         }
     }
 
+    /// Why: this method used to treat `base_dir.join("HEAD").is_file()` as
+    /// proof of an established bare checkout (trusty-review finding #2 on
+    /// PR #1936 / #1935). A non-bare git repo ALSO has a root-level `HEAD`
+    /// file, so a stale non-bare directory (e.g. left over from a pre-#1935
+    /// full-clone install sharing this path) would be silently accepted as a
+    /// valid base, and a later `git worktree add` against it would then fail
+    /// with `'<branch>' is already checked out`. It also unconditionally
+    /// attempted `git clone --bare` on a cache miss with no protection
+    /// against two sessions provisioning the SAME project for the first time
+    /// concurrently (finding #1): both observe "no base yet" and both start
+    /// cloning into the identical target directory. Note that "recover by
+    /// re-checking after the clone fails" is NOT sufficient here — real `git
+    /// clone --bare` is not safe against a concurrent writer into the exact
+    /// same directory; two interleaved clones can corrupt each other's
+    /// partial checkout (observed empirically: colliding on copying
+    /// `hooks/commit-msg.sample`) rather than cleanly failing with "already
+    /// exists". Only mutual exclusion around the whole check-and-clone window
+    /// avoids that.
+    /// What: replaces the fragile file-existence probe with
+    /// [`is_established_bare_checkout`], which asks git itself via
+    /// `rev-parse --is-bare-repository` (returns `false`, never panics, for a
+    /// non-bare repo or a non-repo directory) — this alone fixes finding #2.
+    /// For finding #1, wraps the clone in [`acquire_base_checkout_lock`]: a
+    /// dependency-free `OpenOptions::create_new` marker-file mutex (no
+    /// file-locking crate such as `fs2`/`fs4` is currently a workspace
+    /// dependency) that serializes concurrent callers for the SAME
+    /// `base_dir`, with stale-lock recovery so a crashed process can never
+    /// permanently deadlock future provisioning. After acquiring the lock,
+    /// re-checks `is_established_bare_checkout` once more (another caller may
+    /// have finished cloning while this one was waiting) before cloning.
+    /// Test: `ensure_base_checkout_recovers_from_concurrent_race` (spawns
+    /// real threads racing on the same `base_dir`, asserts every one returns
+    /// `Ok` and exactly one valid bare checkout results),
+    /// `ensure_base_checkout_rejects_stale_non_bare_directory` (pre-seeds a
+    /// non-bare repo at `base_dir` and asserts a loud error, not silent
+    /// reuse), both in `provisioner/workspace/tests.rs`.
     fn ensure_base_checkout(&self, repo_url: &str, base_dir: &Path) -> Result<(), ProvisionError> {
         use std::process::Command;
         // A bare clone has no working tree of its own, so it can never conflict
@@ -283,13 +327,31 @@ impl GitBackend for RealGitBackend {
         // `git clone --bare`, then repeated `git fetch origin +<ref>:refs/heads/<x>`
         // + `git worktree add` against it, works cleanly for branches, tags,
         // and SHAs alike).
-        if base_dir.join("HEAD").is_file() {
+        if is_established_bare_checkout(base_dir) {
             debug!(path = %base_dir.display(), "base checkout already present, reusing");
             return Ok(());
         }
         if let Some(parent) = base_dir.parent() {
             std::fs::create_dir_all(parent)?;
         }
+
+        // Serialize the check-and-clone window across concurrent callers
+        // racing to provision the SAME project for the first time (finding
+        // #1). The guard's `Drop` impl removes the marker file when this
+        // function returns via any path (success, error, or early return).
+        let lock_path = base_checkout_lock_path(base_dir);
+        let _lock = acquire_base_checkout_lock(&lock_path)?;
+
+        // Re-check now that the lock is held: another caller may have
+        // completed the clone while this one was waiting for the lock.
+        if is_established_bare_checkout(base_dir) {
+            debug!(
+                path = %base_dir.display(),
+                "base checkout completed by a concurrent caller while waiting for the lock; reusing"
+            );
+            return Ok(());
+        }
+
         // Use the destination's parent as cwd so a deleted inherited cwd cannot
         // cause git to fail with "fatal: Unable to read current working directory".
         let cwd = base_dir.parent().unwrap_or(std::path::Path::new("/"));
@@ -820,6 +882,8 @@ fn repo_slug(repo_url: &str) -> String {
         .unwrap_or("unknown");
     name.trim_end_matches(".git").to_lowercase()
 }
+
+mod base_lock;
 
 #[cfg(test)]
 mod tests;
