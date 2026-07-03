@@ -84,6 +84,18 @@ fn cli_parses_hook() {
     assert!(matches!(cli.command.unwrap(), Command::Hook));
 }
 
+/// Why (#1956): `tm compress --tool bash` is the pipe-filter stage the
+/// `tm hook` PreToolUse Bash rewrite targets; parsing must round-trip the
+/// required `--tool` flag.
+#[test]
+fn cli_parses_compress() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "compress", "--tool", "bash"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Compress { tool } => assert_eq!(tool, "bash"),
+        other => panic!("expected Compress, got {other:?}"),
+    }
+}
+
 /// Why: when `CLAUDE_MPM_SUB_AGENT` is present in the env, the hook
 /// handler must return Ok(()) without performing any I/O — that is the
 /// whole point of the sub-agent guard.

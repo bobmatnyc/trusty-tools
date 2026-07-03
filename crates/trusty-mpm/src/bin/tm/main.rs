@@ -16,6 +16,7 @@ mod types;
 use clap::Parser;
 use cli::{Cli, Command};
 use commands::{
+    compress::run_compress,
     daemon::{restart, run_daemon, start, stop_daemon},
     install::install,
     launch::{connect, launch},
@@ -258,6 +259,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Slack { cmd }) => slack(cmd).await,
         Some(Command::Install { force }) => install(force),
         Some(Command::Hook) => hook(&client, &url).await,
+        Some(Command::Compress { tool }) => run_compress(&tool).await,
         Some(Command::Daemon {
             addr,
             tailscale,
