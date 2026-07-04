@@ -153,6 +153,60 @@ fn error_response(status: StatusCode, body: &'static str) -> Response {
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
+/// Backoff between the initial proxied request and its single connect-retry.
+///
+/// Why: An upstream daemon restart (`launchctl bootout`/`bootstrap`) leaves the
+/// port unbound for a short window (empirically ~1 s to re-listen).  A 300 ms
+/// pause before the retry lets that window start to clear without noticeably
+/// delaying the (overwhelmingly common) success path.
+/// What: 300 ms constant consumed by `proxy_handler`.
+/// Test: `test_connect_retry_recovers` uses a shorter test-local delay.
+const CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Send the proxied upstream request, retrying exactly once on a connect error.
+///
+/// Why: When the upstream daemon restarts (#1984), its port is momentarily not
+/// accepting connections; a proxied request landing in that window fails to
+/// connect and would surface as a 502 to the caller (the first `tm session new`
+/// after an mpm restart).  Because the proxy client no longer pools idle
+/// keep-alive connections (see `AppState::new`), a *connect* error is proof the
+/// request was never transmitted — so retrying it once is safe even for a
+/// non-idempotent POST (there is no risk of a duplicate spawn).
+/// What: Sends the request; if the error is a connect failure (`is_connect()`),
+/// waits `retry_delay` and rebuilds+resends the request once from the cloned
+/// method/url/headers/body.  Any other transport error is returned as-is, and an
+/// HTTP error *status* (which reqwest reports as `Ok`) is never retried.
+/// Test: `test_connect_retry_recovers` and `test_connect_retry_gives_up` below.
+async fn send_with_connect_retry(
+    client: &reqwest::Client,
+    method: Method,
+    url: &str,
+    headers: HeaderMap,
+    body: Bytes,
+    retry_delay: std::time::Duration,
+) -> Result<reqwest::Response, reqwest::Error> {
+    match client
+        .request(method.clone(), url)
+        .headers(headers.clone())
+        .body(body.clone())
+        .send()
+        .await
+    {
+        Ok(resp) => Ok(resp),
+        Err(e) if e.is_connect() => {
+            debug!("proxy: upstream connect failed, retrying once after {retry_delay:?}: {e}");
+            tokio::time::sleep(retry_delay).await;
+            client
+                .request(method, url)
+                .headers(headers)
+                .body(body)
+                .send()
+                .await
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// `ANY /api/{service}/{*path}` — reverse-proxy to the service's live URL.
 ///
 /// Why: Lets operators and the console SPA reach every daemon API through the
@@ -250,15 +304,23 @@ pub async fn proxy_handler(
         }
     };
 
-    // Build the upstream request with safe headers and body.
+    // Build & execute the upstream request with a single connect-retry. The
+    // proxy client does not pool idle keep-alive connections (see
+    // `AppState::new`), so a connect error means nothing was transmitted; retry
+    // once to absorb the brief window in which a restarted upstream daemon is not
+    // yet accepting connections (#1984) rather than failing the caller's first
+    // request outright.
     let client = state.http_client();
-    let upstream_req = client
-        .request(method, &upstream_url)
-        .headers(safe_headers)
-        .body(body_bytes);
-
-    // Execute.
-    let upstream_resp = match upstream_req.send().await {
+    let upstream_resp = match send_with_connect_retry(
+        &client,
+        method,
+        &upstream_url,
+        safe_headers,
+        body_bytes,
+        CONNECT_RETRY_DELAY,
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             warn!("proxy: upstream request failed for '{service_key}': {e}");
@@ -497,5 +559,106 @@ mod tests {
         let filtered = filter_headers(&h);
         assert!(!filtered.contains_key("connection"));
         assert!(filtered.contains_key("x-custom"));
+    }
+
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Reserve a loopback port, then release it so nothing is listening.
+    ///
+    /// Why: The restart tests need a port that is *initially* refusing
+    /// connections (mimicking a daemon that is down) but that a test server can
+    /// later bind.  Binding then dropping a listener yields such a port.
+    /// What: Binds `127.0.0.1:0`, reads the assigned port, drops the listener,
+    /// and returns the port.
+    /// Test: Used by the two connect-retry tests below.
+    async fn reserve_free_port() -> u16 {
+        let l = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let port = l.local_addr().expect("local_addr").port();
+        drop(l);
+        port
+    }
+
+    /// Accept exactly one connection on `port`, drain the request, and reply 200.
+    ///
+    /// Why: A minimal HTTP/1.1 responder is enough to prove the proxy client can
+    /// reach a freshly-(re)bound upstream; pulling in a full server would add
+    /// noise.  `connection: close` lets reqwest read the body to EOF.
+    /// What: Binds `port`, accepts one socket, reads one buffer of the request
+    /// (headers + tiny body), then writes a fixed `200 OK` response and closes.
+    /// Test: Used by `test_connect_retry_recovers`.
+    async fn serve_one_ok(port: u16) {
+        let l = TcpListener::bind(("127.0.0.1", port))
+            .await
+            .expect("rebind test server");
+        let (mut sock, _) = l.accept().await.expect("accept");
+        let mut buf = [0u8; 4096];
+        let _ = sock.read(&mut buf).await;
+        let resp = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok";
+        let _ = sock.write_all(resp).await;
+        let _ = sock.shutdown().await;
+    }
+
+    /// Why: A proxied POST that lands while the upstream is mid-restart (port not
+    /// yet listening) must succeed via the single connect-retry once the daemon
+    /// comes back — the #1984 root-cause regression guard.
+    /// What: Points the client at a port that is refused for ~120 ms, then bound
+    /// by a one-shot 200 server; with a 300 ms retry delay the retry connects and
+    /// returns 200.  A no-idle-pool client mirrors production (`AppState::new`).
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_connect_retry_recovers() {
+        let port = reserve_free_port().await;
+        let url = format!("http://127.0.0.1:{port}/api/v1/sessions/managed");
+
+        // Bring the upstream up shortly after the first attempt will have failed.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            serve_one_ok(port).await;
+        });
+
+        let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .expect("client");
+        let resp = send_with_connect_retry(
+            &client,
+            Method::POST,
+            &url,
+            HeaderMap::new(),
+            Bytes::from_static(b"{}"),
+            Duration::from_millis(300),
+        )
+        .await
+        .expect("retry should recover once upstream is back");
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    /// Why: If the upstream never returns, the retry must give up after exactly
+    /// one extra attempt and surface a connect error (not hang, not loop) so the
+    /// handler can map it to a 502.
+    /// What: Targets a permanently-unbound port; asserts the result is an error
+    /// that `is_connect()`.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_connect_retry_gives_up() {
+        let port = reserve_free_port().await;
+        let url = format!("http://127.0.0.1:{port}/health");
+        let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .expect("client");
+        let err = send_with_connect_retry(
+            &client,
+            Method::POST,
+            &url,
+            HeaderMap::new(),
+            Bytes::from_static(b"{}"),
+            Duration::from_millis(20),
+        )
+        .await
+        .expect_err("no upstream should yield an error");
+        assert!(err.is_connect(), "expected a connect error, got: {err}");
     }
 }

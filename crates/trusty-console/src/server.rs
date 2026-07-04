@@ -106,14 +106,28 @@ impl AppState {
     /// Why: Lets tests inject a custom connector list and fresh caches.
     /// What: Wraps `connectors` in `Arc`; initialises empty `PollerCache`,
     /// three `MetricsCache` instances (analyze / memory / search), and a
-    /// default `reqwest::Client`. Creates the analyze stdio MCP handle that is
+    /// `reqwest::Client` with idle-connection pooling disabled (#1984 — see the
+    /// builder comment below). Creates the analyze stdio MCP handle that is
     /// shared between the background metrics poller and on-demand routes.
     /// Populates `mcp_handles` with all three per-service handles so the
     /// services route can read their degraded state.
     /// Test: Used in `build_router` and directly in `tests`.
     pub fn new(connectors: Vec<Box<dyn ServiceConnector>>) -> Self {
+        // Why pool_max_idle_per_host(0): the proxy client must survive an upstream
+        // daemon restart (#1984). With the default keep-alive pool, the FIRST
+        // proxied request after an upstream restart reuses a stale idle connection
+        // to the now-dead process and fails — an instant RST → 502, a half-open
+        // hang → 30s-timeout → 502, or a partial write the restarted daemon
+        // rejects → 500 — even though a direct curl (which never pools across
+        // invocations) always opens a fresh connection and succeeds. reqwest does
+        // NOT retry a non-idempotent POST on a broken pooled connection, so the
+        // failure is surfaced to the caller (e.g. `tm session new`). Disabling
+        // idle-connection reuse forces every proxied request to open a fresh
+        // connection to whatever process currently owns the port, eliminating the
+        // stale-reuse failure at the root. Loopback connect cost is negligible.
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
+            .pool_max_idle_per_host(0)
             .build()
             .expect("reqwest client init");
         let analyze_handle = Arc::new(McpServiceHandle::new(
