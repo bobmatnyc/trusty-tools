@@ -26,7 +26,7 @@ use std::io::IsTerminal as _;
 pub(crate) use super::guided_autostart::github_host;
 use super::guided_launch::launch_new_session_and_attach;
 use super::managed::filter_live_sessions;
-use crate::formatters::{banner::tmux_has_session, info_box::DaemonInfo};
+use crate::formatters::info_box::DaemonInfo;
 
 /// Decision returned by [`parse_picker_choice`].
 ///
@@ -412,7 +412,9 @@ async fn run_tty_picker(
             }
             // #1742: route through daemon resume when the session is stopped or its
             // tmux session is absent — never raw-attach a non-live session.
-            PickerDecision::Resume(i) => resume_guided_session(client, url, &sessions[i]).await?,
+            PickerDecision::Resume(i) => {
+                super::guided_resume::resume_guided_session(client, url, &sessions[i]).await?
+            }
             PickerDecision::LaunchNew => {
                 launch_new_session_and_attach(client, url, repo_url).await?
             }
@@ -430,195 +432,14 @@ async fn run_tty_picker(
     Ok(())
 }
 
-/// Decide whether a guided resume must restart the session through the daemon.
-///
-/// Why: a stopped/errored managed session has no live tmux session; calling
-/// `tmux attach-session` against it fails with "can't find session" (#1742).
-/// The check is state-only: the daemon's `resume` endpoint only accepts
-/// Stopped/Errored, so tmux liveness is NOT used here — see [`is_zombie`] for
-/// the active-but-tmux-absent case.
-/// What: returns `true` when `state` is `"stopped"` or `"errored"`. Returns
-/// `false` for all other states (active, provisioning, decommissioned, …).
-/// Test: `guided_resume_needs_restart_*` in `tests_behavior_c_tests.rs`.
-pub(crate) fn needs_restart(state: &str) -> bool {
-    matches!(state, "stopped" | "errored")
-}
-
-/// Detect a zombie session: daemon thinks it is active but the tmux session is gone.
-///
-/// Why: when a session's daemon state is NOT stopped/errored (i.e. active or
-/// provisioning) but its tmux session has disappeared (e.g. after a machine
-/// reboot before the daemon reconcile runs), the daemon's `resume` endpoint
-/// would return 409 (can only resume Stopped/Errored) — leading to a dead end.
-/// The correct recovery is operator-driven: `tm session stop <id>` to reset
-/// the daemon state, then `tm` again to restart.
-/// What: returns `true` when `!needs_restart(state)` AND `!tmux_live`.
-/// Test: `guided_resume_is_zombie_*` in `tests_behavior_c_tests.rs`.
-pub(crate) fn is_zombie(state: &str, tmux_live: bool) -> bool {
-    !tmux_live && !needs_restart(state)
-}
-
-/// Restart (if needed) then attach to a managed session from the guided picker.
-///
-/// Why: the guided picker must handle stopped sessions gracefully (#1742). A
-/// direct `tmux attach-session` against a stopped session exits with failure
-/// ("can't find session"). This function routes the request correctly based on
-/// session state and tmux liveness, surfaces clear actionable messages for all
-/// failure modes, and never exposes a raw tmux failure to the operator.
-/// What: (1) `tmux_has_session` checks liveness; (2) zombie guard bails with an
-/// actionable hint when the session is active but tmux is gone; (3) for
-/// stopped/errored sessions, warns about pane kill if the tmux pane is still
-/// live, then POSTs `/api/v1/sessions/managed/{id}/resume` with a 30-second
-/// timeout; (4) 404/409/5xx/network errors each print a distinct actionable
-/// message; (5) on HTTP 200, the response body is checked — if `state=errored`
-/// the runtime spawn failed and the operator is directed to `tm session info`;
-/// (6) falls through to `tmux_attach` only when everything is confirmed ready.
-/// Test: `needs_restart` and `is_zombie` are the testable pure seams; the I/O
-/// path is exercised by the e2e suite and manual smoke tests.
-async fn resume_guided_session(
-    client: &reqwest::Client,
-    url: &str,
-    session: &trusty_mpm::client::ManagedSessionSummary,
-) -> anyhow::Result<()> {
-    let tmux_live = tmux_has_session(&session.name);
-
-    // (1) Zombie guard — active/provisioning state but tmux is gone. The daemon
-    // cannot restart these via /resume (only accepts Stopped/Errored → 409).
-    // Give the operator a concrete fix rather than a confusing 409 or tmux error.
-    if is_zombie(&session.state, tmux_live) {
-        eprintln!(
-            "tm: session '{}' is still marked {} but its tmux session is gone.",
-            session.name, session.state
-        );
-        eprintln!(
-            "tm: run `tm session stop {}` then `tm` again to restart it.",
-            session.id
-        );
-        anyhow::bail!(
-            "session '{}' is {} but tmux is absent — stop it first, then resume",
-            session.name,
-            session.state
-        );
-    }
-
-    if needs_restart(&session.state) {
-        // (3) Pane-kill disclosure: when the state is stopped/errored but a stale
-        // tmux pane is still alive, the daemon kills it before starting fresh.
-        // Disclose this explicitly so the operator knows in-progress pane state is lost.
-        if tmux_live {
-            eprintln!(
-                "tm: session '{}' is {} but its tmux pane is still alive — \
-                 the daemon will KILL that pane and start a fresh runtime \
-                 (in-progress pane state will be lost).",
-                session.name, session.state
-            );
-        } else {
-            eprintln!(
-                "tm: session '{}' is {} (tmux absent); restarting via daemon…",
-                session.name, session.state
-            );
-        }
-
-        // (2) POST with a 30-second timeout — a hung daemon must not freeze the CLI.
-        let resp = match client
-            .post(format!(
-                "{url}/api/v1/sessions/managed/{}/resume",
-                session.id
-            ))
-            .timeout(std::time::Duration::from_secs(30))
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!(
-                    "tm: daemon unreachable — cannot restart session '{}': {e}",
-                    session.name
-                );
-                eprintln!("tm: start the daemon with `tm start`, then run `tm` again.");
-                anyhow::bail!("daemon unreachable; cannot restart stopped session: {e}");
-            }
-        };
-
-        match resp.status() {
-            reqwest::StatusCode::NOT_FOUND => {
-                eprintln!(
-                    "tm: session '{}' not found on daemon; it may have been decommissioned.",
-                    session.name
-                );
-                eprintln!(
-                    "tm: run `tm session ls` to see current sessions, \
-                     or press [Enter] to launch a new one."
-                );
-                anyhow::bail!("session '{}' not found on daemon", session.name);
-            }
-            reqwest::StatusCode::CONFLICT => {
-                let msg = resp.text().await.unwrap_or_default();
-                eprintln!("tm: cannot restart session '{}': {}", session.name, msg);
-                eprintln!("tm: run `tm session ls` to see the current state.");
-                anyhow::bail!("cannot restart session '{}': {msg}", session.name);
-            }
-            // (5) 5xx means the daemon IS running but had an internal error —
-            // "start the daemon" is wrong advice; direct the operator to inspect state.
-            s if s.is_server_error() => {
-                eprintln!(
-                    "tm: daemon returned an internal error ({s}) restarting '{}' — \
-                     try `tm session ls`.",
-                    session.name
-                );
-                anyhow::bail!(
-                    "daemon internal error {s} restarting session '{}'",
-                    session.name
-                );
-            }
-            s if !s.is_success() => {
-                eprintln!(
-                    "tm: daemon returned {s} restarting '{}' — try `tm session ls`.",
-                    session.name
-                );
-                anyhow::bail!("daemon error {s} restarting session '{}'", session.name);
-            }
-            _ => {
-                // (4) The daemon returned 200 but the runtime spawn may still have
-                // failed: it creates the tmux session synchronously, then spawns
-                // claude/tcode asynchronously and marks the session errored if that
-                // fails. Deserialize the body and check the final state.
-                let body: trusty_mpm::client::ManagedSessionSummary = resp
-                    .json()
-                    .await
-                    .context("failed to parse daemon resume response")?;
-                if body.state == "errored" {
-                    eprintln!(
-                        "tm: session '{}' restarted but the runtime failed to start.",
-                        session.name
-                    );
-                    eprintln!("tm: check `tm session info {}` for details.", session.id);
-                    anyhow::bail!(
-                        "session '{}' restarted but runtime failed to start (state=errored)",
-                        session.name
-                    );
-                }
-                eprintln!("tm: session restarted — attaching…");
-            }
-        }
-    }
-    tmux_attach(&session.name)
-}
-
-/// Attach (or switch) the current terminal into tmux session `name`.
-///
-/// Why: resuming a session means handing the terminal over to tmux; when the
-/// operator is already inside a tmux client, a plain `attach-session` is
-/// refused by tmux (nesting guard), so the actual argv choice is delegated to
-/// the shared [`crate::commands::tmux_attach::tmux_attach`] helper (#1873).
-/// What: thin re-export so existing call sites in this file don't need to
-/// change their import path.
-/// Test: `attach_argv_inside_tmux_uses_switch_client`,
-/// `attach_argv_outside_tmux_uses_attach_session` in `tmux_attach.rs` cover
-/// the argv decision; exercised indirectly here by the picker flow.
-fn tmux_attach(name: &str) -> anyhow::Result<()> {
-    crate::commands::tmux_attach::tmux_attach(name)
-}
+// ── Guided resume/restart ────────────────────────────────────────────────────
+//
+// The resume/restart flow (zombie auto-reconcile, daemon /resume, attach) lives
+// in the sibling `guided_resume` module (#2001) to keep both files under the
+// 500-SLOC production cap. The picker calls
+// `super::guided_resume::resume_guided_session`; the pure seams
+// (`needs_restart`, `is_zombie`, `plan_resume`, `ResumeAction`) are unit-tested
+// there directly.
 
 // ── Fallback (daemon-unreachable / non-GitHub) path ─────────────────────────
 
