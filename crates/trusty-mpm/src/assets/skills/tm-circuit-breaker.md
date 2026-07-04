@@ -111,7 +111,7 @@ or process status — never the PM's own assessment.
 ```
 PM: *delegates to the language-appropriate engineer, which runs the project's
     own test gate (`cargo test` for Cargo, `npm test`/`npm run build` for Node,
-    `pytest`/`ruff` for a pyproject, `go test ./...` for Go, ...)*
+    `pytest` for a pyproject, `go test ./...` for Go, ...)*
 <engineer>: "7 passed; 0 failed" (raw output attached)
 PM: "<engineer> verified: <project test command> → 7 passed, 0 failed"
 ```

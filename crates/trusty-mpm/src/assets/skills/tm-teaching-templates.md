@@ -91,7 +91,7 @@ at the concrete skill.
 
 Stop teaching-mode elaboration once the user demonstrates fluency: they
 reference agent names unprompted, they ask for a specific agent by name
-("have the typescript-engineer do this"), or they explicitly say "just do it, I know
+("have the <engineer> do this"), or they explicitly say "just do it, I know
 how this works." At that point, Level 1 responses only — re-explaining after
 fluency is signaled reads as condescending, not helpful.
 
