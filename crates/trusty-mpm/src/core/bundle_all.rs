@@ -362,6 +362,11 @@ pub const ALL: &[BundledArtifact] = &[
         install: InstallPolicy::Overwrite,
     },
     BundledArtifact {
+        rel_path: "skills/tm-init.md",
+        contents: TM_INIT,
+        install: InstallPolicy::Overwrite,
+    },
+    BundledArtifact {
         rel_path: "skills/tm.md",
         contents: TM_OVERVIEW,
         install: InstallPolicy::Overwrite,

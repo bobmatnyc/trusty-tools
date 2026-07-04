@@ -166,6 +166,20 @@ pub const TM_SESSION_PAUSE: &str = include_str!("../assets/skills/tm-session-pau
 /// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
 pub const TM_SESSION_RESUME: &str = include_str!("../assets/skills/tm-session-resume.md");
 
+/// User-invocable `/tm-init` — project initialization / CLAUDE.md refresh.
+///
+/// Why: restores the per-command UX of claude-mpm's `/mpm-init`, adapted to
+/// tm's reality — the trusty *config* (agents/skills/INSTRUCTIONS/settings/
+/// output-style/`.mcp.json`) deploys automatically on managed-session launch
+/// (or via `tm install`), so this skill deliberately does NOT deploy config.
+/// It focuses on *project* init/refresh: analyze the repo, scaffold or update
+/// `CLAUDE.md`, register the project (`tm project init`), and offer
+/// update/context/catchup modes (catchup → `tm session catchup`). Uses only
+/// tm-native `.trusty-mpm/` paths (no `.claude-mpm/` references).
+/// What: embedded markdown skill file deployed to `skills/tm-init.md`.
+/// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
+pub const TM_INIT: &str = include_str!("../assets/skills/tm-init.md");
+
 /// SLIM `/tm` orchestration-model overview (optional 15th portfolio skill).
 ///
 /// Why: a quick-reference entry point for the agent roster, skills catalog,
