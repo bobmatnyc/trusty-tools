@@ -210,20 +210,25 @@ impl TmManager {
             .capture_output(&session.tmux_session_name, None, Some(lines))?)
     }
 
-    /// Spawn a new session using the canonical `<project>-<harness>-<serial>`
-    /// naming convention from the refined `/connect` spec.
+    /// Spawn a new session using the canonical lifecycle-managed
+    /// `tm-<project>-<harness>-NN` naming convention (SPEC-ONESM-01).
     ///
     /// Why: The REPL's `/connect <path> <adapter> [name]` command and the
     /// HTTP API need an identical naming policy so a session created on the
-    /// CLI can be addressed by the WebUI (and vice versa). The serial
-    /// auto-increments per `(project, harness)` pair, computed from the live
-    /// registry so deletes/renames don't desync the counter.
+    /// CLI can be addressed by the WebUI (and vice versa). Since SPEC-ONESM-01
+    /// the name is derived through the SHARED
+    /// [`trusty_common::session_naming`] helper (via `next_session_name`) so it
+    /// carries the managed prefix and is recognised by trusty-mpm's
+    /// reconcile/prune/adopt rather than being orphaned. The serial
+    /// auto-increments (and reuses gaps) per `(project, harness)` pair,
+    /// computed from the live registry so deletes/renames don't desync it.
     /// What:
     ///   1. `project_name` defaults to `basename(project_path)` when None
     ///      (matches the spec's `name` default).
-    ///   2. Scans existing session names to compute the next serial.
+    ///   2. Scans existing session names to compute the next managed name.
     ///   3. Delegates to `new_session` with the generated name.
-    /// Test: integration only — requires tmux.
+    /// Test: integration only — requires tmux; naming covered by
+    /// `test_next_session_name`.
     pub async fn connect_session(
         &self,
         project_path: &Path,
@@ -244,7 +249,7 @@ impl TmManager {
             .into_iter()
             .map(|s| s.name)
             .collect();
-        let name = crate::tm::project_config::next_session_name(&project, harness, &existing);
+        let name = crate::tm::project_config::next_session_name(&project, harness, &existing)?;
         self.new_session(&name, project_path, Some(adapter_type))
             .await
     }

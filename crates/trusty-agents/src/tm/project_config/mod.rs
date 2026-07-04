@@ -36,8 +36,9 @@ use serde::{Deserialize, Serialize};
 /// Why: A project can be driven by multiple harnesses (`repl`, `bash`,
 /// `claude-code` review pane, etc.); each gets its own startup command and
 /// adapter so `tell <project>:<harness>` can find the right session.
-/// What: `name` is the harness label used in `<project>-<harness>-<serial>`
-/// and `tell <project>:<harness>`; `adapter` maps to `AdapterType::from_id`.
+/// What: `name` is the harness label folded into the managed session name
+/// (`tm-<project>-<harness>-NN`, see `next_session_name`) and used by
+/// `tell <project>:<harness>`; `adapter` maps to `AdapterType::from_id`.
 /// Test: `test_roundtrip_with_harnesses`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HarnessConfig {
@@ -326,29 +327,38 @@ pub fn default_startup_command_for(adapter_id: &str) -> &'static str {
     }
 }
 
-/// Compute the next session name for `<project>-<harness>` using the live
-/// session list as the source of truth for the serial counter.
+/// Compute the next lifecycle-managed tmux session name for a
+/// `(project, harness)` pair, using the live session list as the source of
+/// truth for the serial counter.
 ///
-/// Why: Per the refined `/connect` spec, sessions are named
-/// `<project>-<harness>-<serial>` and serials auto-increment per
-/// `(project, harness)` pair. Computing from `existing_names` (rather than
-/// storing a counter) means renames/deletes can't desync the serial.
-/// What: Scans `existing_names` for entries matching `<project>-<harness>-<N>`,
-/// finds the highest `N`, and returns `<project>-<harness>-(max+1)` (or
-/// `<project>-<harness>-1` if none exist).
+/// Why (SPEC-ONESM-01 / DOC-33): sessions used to be named
+/// `<project>-<harness>-<serial>`, which carried NO managed prefix — so
+/// trusty-mpm's reconcile/prune/adopt/orphan-GC (which recognise a session as
+/// "ours" only via [`trusty_common::session_naming::is_managed_session_name`])
+/// orphaned every session `TmManager` created. Deriving the tmux session name
+/// through the SHARED [`trusty_common::session_naming::build_session_name`]
+/// helper — the same one trusty-mpm's `SessionManager` uses — makes the name
+/// carry the canonical managed prefix so both managers recognise each other's
+/// sessions (ONE session manager). `build_session_name` was chosen over
+/// `name_from_dir` / `name_from_uuid` because it preserves the existing
+/// project+harness+serial identity operators rely on (the leaf is
+/// `<project>-<harness>`) while adopting the managed prefix and the canonical
+/// gap-reusing per-leaf serial allocation.
+/// What: builds the leaf `<project>-<harness>`, then delegates to
+/// [`trusty_common::session_naming::build_session_name`], which sanitises the
+/// leaf, allocates the lowest free two-digit serial (`01`-`99`, reusing gaps
+/// left by decommissioned sessions) by scanning `existing_names`, and returns
+/// `tm-<project>-<harness>-NN`. Errors with
+/// [`trusty_common::session_naming::SessionNameError::SerialExhausted`] if all
+/// 99 serials for this `(project, harness)` are in use.
 /// Test: `test_next_session_name`.
-pub fn next_session_name(project: &str, harness: &str, existing_names: &[String]) -> String {
-    let prefix = format!("{}-{}-", project, harness);
-    let mut max_serial: u32 = 0;
-    for name in existing_names {
-        if let Some(rest) = name.strip_prefix(&prefix)
-            && let Ok(n) = rest.parse::<u32>()
-            && n > max_serial
-        {
-            max_serial = n;
-        }
-    }
-    format!("{}{}", prefix, max_serial + 1)
+pub fn next_session_name(
+    project: &str,
+    harness: &str,
+    existing_names: &[String],
+) -> Result<String, trusty_common::session_naming::SessionNameError> {
+    let leaf = format!("{}-{}", project, harness);
+    trusty_common::session_naming::build_session_name(&leaf, existing_names)
 }
 
 #[cfg(test)]

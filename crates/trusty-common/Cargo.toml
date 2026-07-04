@@ -198,6 +198,14 @@ axum-server = ["dep:axum", "dep:tower-http"]
 # `trusty-mcp-core` crate). Pulls in no extra deps beyond `serde` / `tokio`
 # which are already required.
 mcp = []
+# Enables the `session_naming` module: the ONE canonical tmux-session naming
+# rule (managed prefix, adjective+noun / dir-slug / serial derivation, and the
+# `is_managed_session_name` classifier) shared by trusty-mpm's SessionManager
+# and trusty-agents' TmManager so lifecycle passes (reconcile/prune/adopt) never
+# orphan a session created by the other manager (SPEC-ONESM-01 / DOC-33). Pulls
+# in `uuid` (UUID→name derivation) and `thiserror` (`SessionNameError`), both
+# already optional workspace deps in this crate.
+session-naming = ["dep:uuid", "dep:thiserror"]
 # Enables the `rpc` module: general-purpose JSON-RPC client + stdio/HTTP
 # transports + pretty-print helpers (formerly the library half of the
 # `trusty-rpc` crate). Requires `uuid` for request id generation and reuses

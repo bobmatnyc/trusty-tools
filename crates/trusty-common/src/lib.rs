@@ -384,6 +384,22 @@ pub use slug::slugify_string;
 pub mod index_id;
 pub use index_id::{derive_index_id, resolve_project_root};
 
+/// Canonical tmux-session naming shared by both session managers (SPEC-ONESM-01).
+///
+/// Why: trusty-mpm's `SessionManager` and trusty-agents' `TmManager` both create
+/// tmux sessions, but only names carrying a managed prefix are recognised by
+/// trusty-mpm's reconcile/prune/adopt/orphan-GC. Keeping the ONE naming rule here
+/// — the crate both already depend on — lets trusty-agents emit managed names
+/// without a `trusty-mpm` dependency edge, so its sessions stop being orphaned.
+/// trusty-mpm's `core::names` re-exports this module verbatim for compatibility.
+/// What: exposes the managed [`session_naming::PREFIX`] and legacy prefixes,
+/// [`session_naming::is_managed_session_name`], [`session_naming::name_from_uuid`],
+/// [`session_naming::name_from_dir`], [`session_naming::build_managed_session_name`]
+/// / [`session_naming::build_session_name`] and the serial helpers.
+/// Test: `cargo test -p trusty-common -- session_naming`.
+#[cfg(feature = "session-naming")]
+pub mod session_naming;
+
 /// Canonical trusty-memory palace-ID derivation from project identity (#1217/#1605).
 ///
 /// Why: trusty-memory (default-palace derivation at the CLI/hook/MCP edges) and
