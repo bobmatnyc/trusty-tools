@@ -19,30 +19,53 @@ use crate::session_manager::ManagedTmuxDriver;
 use super::RuntimeAdapter;
 use super::RuntimeError;
 
+/// Single-quote a string for safe interpolation into the pane shell command.
+///
+/// Why: [`env_bin_prefix`] interpolates the resolved `CLAUDE_CONFIG_DIR` path into
+/// a command string that `send_line` types into the tmux pane's live shell. An
+/// UNQUOTED path containing a space — e.g. a macOS home `/Users/John Doe/…` —
+/// word-splits, so `env` sees `CLAUDE_CONFIG_DIR=/Users/John` plus a stray
+/// `Doe/…` argv entry; `claude` never execs and the pane silently dies with no
+/// error surfaced anywhere. POSIX single-quoting disables ALL word-splitting,
+/// globbing, and expansion, so any path survives intact.
+/// What: wraps `s` in single quotes, escaping any embedded single quote with the
+/// canonical close-reopen sequence `'\''` (a macOS home never contains a `'`, but
+/// the escape keeps the quoting correct for arbitrary paths and is cheap).
+/// Test: `env_bin_prefix_quotes_config_dir_with_space`,
+/// `shell_single_quote_escapes_embedded_quote`.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 /// Compose the `env …` prefix + resolved binary that starts every managed
 /// `claude`, wiring in the tm-owned `CLAUDE_CONFIG_DIR` when available (DOC-34).
 ///
 /// Why: two invariants must hold on the pane command. (1) `-u ANTHROPIC_API_KEY`
 /// strips the API key so Claude Code falls back to OAuth, preventing key leakage
 /// through pane history. (2) When a managed `CLAUDE_CONFIG_DIR` is resolved,
-/// `env CLAUDE_CONFIG_DIR=<dir>` points the session at the tm-owned config home
-/// (`~/.trusty-tools/trusty-mpm/claude-config/`) so its framework agent roster,
-/// skills, hooks, and MCP servers come from there — NOT from the target
-/// project's committed `.claude/`, which for trusty-tools shadows the roster and
-/// forced the general-purpose fallback (#1996). Both are applied via a single
-/// `env` prefix, consistent with the pre-existing scrub-only prefix.
-/// What: `env CLAUDE_CONFIG_DIR=<dir> -u ANTHROPIC_API_KEY <claude_bin>` when
-/// `config_dir` is `Some`; the legacy `env -u ANTHROPIC_API_KEY <claude_bin>`
-/// when `None` (home unresolved — no config dir to point at).
+/// `env CLAUDE_CONFIG_DIR='<dir>'` points the session at the tm-owned config home
+/// (`~/.trusty-tools/trusty-mpm/claude-config/`). Under the retained
+/// `--setting-sources project,local` flag (see [`spawn_command`]) this config
+/// home does NOT supply the agent roster/skills/hooks — those load from the
+/// project layer — but it DOES isolate the session's auth: with the API key
+/// scrubbed, `claude` authenticates via the keychain/`.credentials.json` keyed to
+/// this config-dir path (the tm-managed login), never touching the operator's
+/// `~/.claude`. The path is SINGLE-QUOTED via [`shell_single_quote`] so a home
+/// dir with a space does not word-split and break the pane. Both settings are
+/// applied via a single `env` prefix, consistent with the scrub-only prefix.
+/// What: `env CLAUDE_CONFIG_DIR='<dir>' -u ANTHROPIC_API_KEY <claude_bin>` (path
+/// single-quoted) when `config_dir` is `Some`; the legacy
+/// `env -u ANTHROPIC_API_KEY <claude_bin>` when `None` (home unresolved — no
+/// config dir to point at).
 /// Test: `spawn_command_contains_env_scrub`, `spawn_command_sets_claude_config_dir`,
-/// `spawn_command_without_config_dir_omits_it`.
+/// `spawn_command_without_config_dir_omits_it`,
+/// `env_bin_prefix_quotes_config_dir_with_space`.
 fn env_bin_prefix(claude_bin: &str, config_dir: Option<&Path>) -> String {
     match config_dir {
-        Some(dir) => format!(
-            "env CLAUDE_CONFIG_DIR={} -u ANTHROPIC_API_KEY {}",
-            dir.display(),
-            claude_bin
-        ),
+        Some(dir) => {
+            let quoted = shell_single_quote(&dir.display().to_string());
+            format!("env CLAUDE_CONFIG_DIR={quoted} -u ANTHROPIC_API_KEY {claude_bin}")
+        }
         None => format!("env -u ANTHROPIC_API_KEY {claude_bin}"),
     }
 }
@@ -50,17 +73,23 @@ fn env_bin_prefix(claude_bin: &str, config_dir: Option<&Path>) -> String {
 /// The shell command sent to the tmux pane to start Claude Code.
 ///
 /// Why: the env prefix (see [`env_bin_prefix`]) strips `ANTHROPIC_API_KEY` and,
-/// when available, injects the tm-owned `CLAUDE_CONFIG_DIR` so the framework
-/// roster comes from tm's config home rather than the project's committed
-/// `.claude/` (#1996). `--setting-sources project,local` is RETAINED: it gates
-/// only the settings.json layering (loading the project/local hooks + statusline
-/// the daemon deploys, excluding the operator's global `~/.claude/settings.json`,
-/// #1269) — agent/skill discovery from `CLAUDE_CONFIG_DIR` is independent of it,
-/// so the roster fix is delivered by the config dir, not by changing this flag.
-/// `--dangerously-skip-permissions` keeps the unattended orchestration session
-/// from blocking on per-tool prompts (#1269). Both flags reuse the shared
-/// [`crate::core::model_inject::SETTING_SOURCES_FLAG`] /
-/// [`crate::core::model_inject::PERMISSION_MODE_FLAG`] constants so this spawn
+/// when available, injects the tm-owned `CLAUDE_CONFIG_DIR` for AUTH isolation.
+/// `--setting-sources project,local` is RETAINED and is LOAD-BEARING for where
+/// the roster comes from: it restricts every setting source Claude Code loads —
+/// settings.json, subagents (`agents/*.md`), and skills (`skills/`) — to the
+/// `project` + `local` tiers, EXCLUDING the `user` tier. Because
+/// `CLAUDE_CONFIG_DIR` relocates the `user` tier, the agents/skills/hooks the
+/// daemon provisions INTO that config home are NOT read while this flag is in
+/// force (empirically verified against `claude` 2.1.201, DOC-34 review). The
+/// full framework roster, skills, project hooks (trusty-memory + PM-guard) and
+/// MCP servers are instead delivered by the PROJECT layer — `<workspace>/.claude/
+/// {agents,skills,settings.json,.mcp.json}` — which `session_launch::
+/// prepare_session` (run on every daemon spawn path) deploys and which
+/// `project,local` DOES load. The flag also excludes the operator's global
+/// `~/.claude/settings.json` (#1269). `--dangerously-skip-permissions` keeps the
+/// unattended orchestration session from blocking on per-tool prompts (#1269).
+/// Both flags reuse the shared [`crate::core::model_inject::SETTING_SOURCES_FLAG`]
+/// / [`crate::core::model_inject::PERMISSION_MODE_FLAG`] constants so this spawn
 /// path and the CLI launch path can never drift.
 /// What: built from [`env_bin_prefix`] plus the two shared flag constants; piped
 /// to `tmux send-keys … Enter`. `claude_bin` is the resolved binary — an
@@ -160,12 +189,21 @@ fn has_prior_conversation_in(cwd: &Path, projects_dir: &Path) -> bool {
 
 /// Resolve, provision, and trust-seed the managed `CLAUDE_CONFIG_DIR` for a spawn.
 ///
-/// Why (DOC-34 / #1996): every managed spawn must point `claude` at the tm-owned
-/// config home so the framework agent roster/skills/hooks come from there rather
-/// than the target project's committed `.claude/`. This centralises the three
-/// coupled steps — resolve the path, provision it (full roster), and seed
-/// workspace trust into `<config_dir>/.claude.json` (NEVER `~/.claude.json`) —
-/// so `spawn` and `spawn_resume` stay identical and cannot drift.
+/// Why (DOC-34): every managed spawn points `claude` at the tm-owned config home
+/// primarily for AUTH + TRUST isolation — with the API key scrubbed the session
+/// authenticates via the keychain/`.credentials.json` keyed to this config-dir
+/// path, and its per-workspace trust is seeded into `<config_dir>/.claude.json`
+/// (NEVER `~/.claude.json`), so a managed session never reads or writes the
+/// operator's `~/.claude`. NOTE (DOC-34 review): under the retained
+/// `--setting-sources project,local` flag the config home's provisioned
+/// agents/skills/settings.json are NOT loaded (that flag excludes the `user`
+/// tier this dir relocates); the framework roster/skills/hooks are delivered by
+/// the PROJECT layer via `session_launch::prepare_session`. The full-roster
+/// provisioning here is therefore belt-and-suspenders (it would load only if the
+/// flag were ever dropped) — the load-bearing effect of the config dir is auth +
+/// trust isolation. This centralises the three coupled steps — resolve the path,
+/// provision it, and seed workspace trust — so `spawn` and `spawn_resume` stay
+/// identical and cannot drift.
 /// What: resolves [`crate::core::trusty_tools_config::managed_claude_config_dir`].
 /// When `Some`: provisions it via
 /// [`crate::core::managed_config::ensure_managed_config_dir`] and seeds managed
@@ -287,9 +325,11 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             claude = %claude_bin,
             "spawning claude-code in tmux pane"
         );
-        // Provision + point the session at the tm-owned CLAUDE_CONFIG_DIR (full
-        // framework roster) and seed trust there — never at the project's
-        // committed `.claude/` (#1996). Non-fatal throughout (closes #1696).
+        // Point the session at the tm-owned CLAUDE_CONFIG_DIR for auth + trust
+        // isolation and seed trust there — never at `~/.claude.json` (DOC-34).
+        // The framework roster/skills/hooks load from the PROJECT layer under
+        // `--setting-sources project,local`, not from this config dir (see
+        // `prepare_managed_config`). Non-fatal throughout (closes #1696).
         let config_dir = prepare_managed_config(tmux_name, cwd);
         self.tmux
             .send_line(
@@ -442,10 +482,10 @@ mod tests {
         let cmd = spawn_command("claude", Some(dir));
         assert!(
             cmd.contains(
-                "env CLAUDE_CONFIG_DIR=/home/bob/.trusty-tools/trusty-mpm/claude-config \
+                "env CLAUDE_CONFIG_DIR='/home/bob/.trusty-tools/trusty-mpm/claude-config' \
                  -u ANTHROPIC_API_KEY claude"
             ),
-            "spawn command must set CLAUDE_CONFIG_DIR before scrubbing the key: {cmd}"
+            "spawn command must set (single-quoted) CLAUDE_CONFIG_DIR before scrubbing the key: {cmd}"
         );
         assert!(
             cmd.contains("--setting-sources project,local"),
@@ -462,6 +502,47 @@ mod tests {
         assert!(
             !cmd.contains("CLAUDE_CONFIG_DIR"),
             "no config dir → must not reference CLAUDE_CONFIG_DIR: {cmd}"
+        );
+    }
+
+    #[test]
+    fn env_bin_prefix_quotes_config_dir_with_space() {
+        // CRITICAL (DOC-34 review): a home dir with a space must NOT word-split
+        // the pane command. The path must appear single-quoted and INTACT so
+        // `env` receives one CLAUDE_CONFIG_DIR value, not two argv tokens.
+        let dir = Path::new("/Users/John Doe/.trusty-tools/trusty-mpm/claude-config");
+        let cmd = spawn_command("claude", Some(dir));
+        assert!(
+            cmd.contains(
+                "env CLAUDE_CONFIG_DIR='/Users/John Doe/.trusty-tools/trusty-mpm/claude-config' \
+                 -u ANTHROPIC_API_KEY claude"
+            ),
+            "config dir with a space must be single-quoted and intact: {cmd}"
+        );
+        // The bare unquoted form (which would word-split) must NOT appear.
+        assert!(
+            !cmd.contains("CLAUDE_CONFIG_DIR=/Users/John Doe"),
+            "config dir must never be interpolated unquoted: {cmd}"
+        );
+        // Resume path shares env_bin_prefix, so it must quote identically.
+        let resume = resume_command("claude", Some(dir), None, false);
+        assert!(
+            resume.contains(
+                "CLAUDE_CONFIG_DIR='/Users/John Doe/.trusty-tools/trusty-mpm/claude-config'"
+            ),
+            "resume command must also single-quote a spaced config dir: {resume}"
+        );
+    }
+
+    #[test]
+    fn shell_single_quote_escapes_embedded_quote() {
+        // A literal single quote in the path must be escaped via the POSIX
+        // close-reopen sequence '\'' so the quoting stays balanced. (A macOS
+        // home never contains one, but the escape must be correct regardless.)
+        assert_eq!(shell_single_quote("/a/b"), "'/a/b'");
+        assert_eq!(
+            shell_single_quote("/Users/o'brien/cfg"),
+            r"'/Users/o'\''brien/cfg'"
         );
     }
 
@@ -565,10 +646,10 @@ mod tests {
         let cmd = resume_command("claude", Some(dir), Some("abc-123"), false);
         assert!(
             cmd.contains(
-                "env CLAUDE_CONFIG_DIR=/home/bob/.trusty-tools/trusty-mpm/claude-config \
+                "env CLAUDE_CONFIG_DIR='/home/bob/.trusty-tools/trusty-mpm/claude-config' \
                  -u ANTHROPIC_API_KEY claude"
             ),
-            "resume command must export CLAUDE_CONFIG_DIR: {cmd}"
+            "resume command must export (single-quoted) CLAUDE_CONFIG_DIR: {cmd}"
         );
         assert!(
             cmd.contains("--resume abc-123"),

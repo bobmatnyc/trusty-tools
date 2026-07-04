@@ -22,6 +22,21 @@
 //! whether the binary is a dev checkout (git submodule source) or an installed
 //! binary (`~/.trusty-mpm/framework/*`).
 //!
+//! WHICH LAYER ACTUALLY LOADS THE ROSTER (DOC-34 review, empirically verified
+//! against `claude` 2.1.201): the DAEMON managed-spawn path launches `claude`
+//! with `--setting-sources project,local` (see `runtime::claude_code`), which
+//! restricts subagent/skill/settings discovery to the `project` + `local` tiers
+//! and EXCLUDES the `user` tier that `CLAUDE_CONFIG_DIR` relocates. So under the
+//! daemon path the agents/skills deployed HERE are NOT read — the roster is
+//! delivered by the PROJECT layer (`<workspace>/.claude/{agents,skills}`, which
+//! `prepare_session` deploys) and the config-dir roster is belt-and-suspenders
+//! (it would load only if that flag were dropped). The config dir's load-bearing
+//! role on the daemon path is instead AUTH + TRUST isolation (keychain /
+//! `.credentials.json` / `.claude.json` keyed to this path). The **standalone**
+//! `tm run` driver, by contrast, passes NO `--setting-sources` flag, so THERE
+//! the full roster/skills/hooks this module deploys DO load from the config dir —
+//! which is why provisioning the complete set here remains mandatory.
+//!
 //! What: [`ensure_managed_config_dir`] (1) runs the canonical standalone
 //! scaffolding ([`ensure_global_config_dir`] — settings.json + the MPM hook
 //! triad + `.mcp.json` + output-styles, plus a best-effort deploy from the
@@ -42,11 +57,16 @@ use crate::core::standalone::global_config::ensure_global_config_dir;
 /// Provision (idempotently) the tm-owned managed `CLAUDE_CONFIG_DIR`.
 ///
 /// Why: called from the daemon managed-spawn path immediately before the
-/// launched `claude` is pointed at `config_dir` via `CLAUDE_CONFIG_DIR`, so the
-/// session always finds the full framework agent roster, skills, hooks, and MCP
-/// servers there rather than falling back to the project's committed `.claude/`
-/// (#1996). Runs on every spawn because it is cheap and idempotent, matching the
-/// standalone `tm run` contract.
+/// launched `claude` is pointed at `config_dir` via `CLAUDE_CONFIG_DIR`, giving
+/// the session an isolated, fully-scaffolded config home (auth, trust, MCP
+/// stubs, output-styles) plus the full framework roster/skills. NOTE (DOC-34
+/// review): under the daemon path's `--setting-sources project,local` flag the
+/// roster/skills deployed here are NOT read (that flag excludes the `user` tier
+/// this dir relocates) — the roster loads from the PROJECT layer via
+/// `prepare_session`; the config-dir provisioning is belt-and-suspenders for the
+/// daemon and load-bearing for the flag-less standalone `tm run` path (see the
+/// module doc). Runs on every spawn because it is cheap and idempotent, matching
+/// the standalone `tm run` contract.
 /// What: resolves the framework layout from the daemon's fixed home-relative
 /// root ([`FrameworkPaths::default`]), then:
 /// 1. calls [`ensure_global_config_dir`]`(&fw.root, config_dir)` for the shared
