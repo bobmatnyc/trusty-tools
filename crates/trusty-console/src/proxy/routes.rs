@@ -153,29 +153,44 @@ fn error_response(status: StatusCode, body: &'static str) -> Response {
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-/// Backoff between the initial proxied request and its single connect-retry.
+/// Bounded backoff schedule for connect-retries after a proxied request fails
+/// to reach the upstream.
 ///
 /// Why: An upstream daemon restart (`launchctl bootout`/`bootstrap`) leaves the
-/// port unbound for a short window (empirically ~1 s to re-listen).  A 300 ms
-/// pause before the retry lets that window start to clear without noticeably
-/// delaying the (overwhelmingly common) success path.
-/// What: 300 ms constant consumed by `proxy_handler`.
-/// Test: `test_connect_retry_recovers` uses a shorter test-local delay.
-const CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+/// port unbound for a short window (empirically up to ~1 s to re-listen).  A
+/// single short pause does not reliably cover that window — a request landing
+/// early in a restart would retry while the port is still dead and surface the
+/// exact 502 this fix targets (#1984).  So we retry with a bounded escalating
+/// backoff whose cumulative wait (~1 s) spans a typical restart.  The delays are
+/// only ever paid when a connect actually fails, so the overwhelmingly common
+/// success path is never slowed.
+/// What: Two entries — 300 ms then 700 ms — i.e. at most two extra attempts
+/// (three total), consumed by `proxy_handler`.
+/// Test: `test_connect_retry_recovers` / `test_connect_retry_gives_up` pass
+/// shorter test-local schedules.
+const CONNECT_RETRY_DELAYS: &[std::time::Duration] = &[
+    std::time::Duration::from_millis(300),
+    std::time::Duration::from_millis(700),
+];
 
-/// Send the proxied upstream request, retrying exactly once on a connect error.
+/// Send the proxied upstream request, retrying on connect errors per a bounded
+/// backoff schedule.
 ///
 /// Why: When the upstream daemon restarts (#1984), its port is momentarily not
 /// accepting connections; a proxied request landing in that window fails to
 /// connect and would surface as a 502 to the caller (the first `tm session new`
 /// after an mpm restart).  Because the proxy client no longer pools idle
 /// keep-alive connections (see `AppState::new`), a *connect* error is proof the
-/// request was never transmitted — so retrying it once is safe even for a
-/// non-idempotent POST (there is no risk of a duplicate spawn).
-/// What: Sends the request; if the error is a connect failure (`is_connect()`),
-/// waits `retry_delay` and rebuilds+resends the request once from the cloned
-/// method/url/headers/body.  Any other transport error is returned as-is, and an
-/// HTTP error *status* (which reqwest reports as `Ok`) is never retried.
+/// request was never transmitted — so retrying it is safe even for a
+/// non-idempotent POST (no risk of a duplicate spawn), for any bounded number of
+/// attempts.
+/// What: Sends the request; while it fails with a connect error (`is_connect()`)
+/// and the schedule is not exhausted, waits the next `retry_delays` entry and
+/// rebuilds+resends from the cloned method/url/headers/body.  Any other transport
+/// error is returned as-is, an HTTP error *status* (which reqwest reports as
+/// `Ok`) is never retried, and the last connect error is returned once the
+/// schedule is exhausted.  Attempts are strictly bounded to `retry_delays.len()`
+/// retries (no loop past the schedule).
 /// Test: `test_connect_retry_recovers` and `test_connect_retry_gives_up` below.
 async fn send_with_connect_retry(
     client: &reqwest::Client,
@@ -183,27 +198,29 @@ async fn send_with_connect_retry(
     url: &str,
     headers: HeaderMap,
     body: Bytes,
-    retry_delay: std::time::Duration,
+    retry_delays: &[std::time::Duration],
 ) -> Result<reqwest::Response, reqwest::Error> {
-    match client
-        .request(method.clone(), url)
-        .headers(headers.clone())
-        .body(body.clone())
-        .send()
-        .await
-    {
-        Ok(resp) => Ok(resp),
-        Err(e) if e.is_connect() => {
-            debug!("proxy: upstream connect failed, retrying once after {retry_delay:?}: {e}");
-            tokio::time::sleep(retry_delay).await;
-            client
-                .request(method, url)
-                .headers(headers)
-                .body(body)
-                .send()
-                .await
+    let mut attempt = 0usize;
+    loop {
+        match client
+            .request(method.clone(), url)
+            .headers(headers.clone())
+            .body(body.clone())
+            .send()
+            .await
+        {
+            Ok(resp) => return Ok(resp),
+            Err(e) if e.is_connect() && attempt < retry_delays.len() => {
+                let delay = retry_delays[attempt];
+                debug!(
+                    "proxy: upstream connect failed (attempt {}), retrying after {delay:?}: {e}",
+                    attempt + 1
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) => Err(e),
     }
 }
 
@@ -304,11 +321,11 @@ pub async fn proxy_handler(
         }
     };
 
-    // Build & execute the upstream request with a single connect-retry. The
-    // proxy client does not pool idle keep-alive connections (see
+    // Build & execute the upstream request with a bounded connect-retry backoff.
+    // The proxy client does not pool idle keep-alive connections (see
     // `AppState::new`), so a connect error means nothing was transmitted; retry
-    // once to absorb the brief window in which a restarted upstream daemon is not
-    // yet accepting connections (#1984) rather than failing the caller's first
+    // across the ~1 s window in which a restarted upstream daemon is not yet
+    // accepting connections (#1984) rather than failing the caller's first
     // request outright.
     let client = state.http_client();
     let upstream_resp = match send_with_connect_retry(
@@ -317,7 +334,7 @@ pub async fn proxy_handler(
         &upstream_url,
         safe_headers,
         body_bytes,
-        CONNECT_RETRY_DELAY,
+        CONNECT_RETRY_DELAYS,
     )
     .await
     {
@@ -601,8 +618,8 @@ mod tests {
     }
 
     /// Why: A proxied POST that lands while the upstream is mid-restart (port not
-    /// yet listening) must succeed via the single connect-retry once the daemon
-    /// comes back — the #1984 root-cause regression guard.
+    /// yet listening) must succeed via a connect-retry once the daemon comes
+    /// back — the #1984 root-cause regression guard.
     /// What: Points the client at a port that is refused for ~120 ms, then bound
     /// by a one-shot 200 server; with a 300 ms retry delay the retry connects and
     /// returns 200.  A no-idle-pool client mirrors production (`AppState::new`).
@@ -628,18 +645,55 @@ mod tests {
             &url,
             HeaderMap::new(),
             Bytes::from_static(b"{}"),
-            Duration::from_millis(300),
+            &[Duration::from_millis(300), Duration::from_millis(700)],
         )
         .await
         .expect("retry should recover once upstream is back");
         assert_eq!(resp.status().as_u16(), 200);
     }
 
+    /// Why: A restart whose port stays dead past the first retry must still
+    /// recover on a *later* scheduled retry — this guards the bounded-backoff
+    /// widening (300 ms + 700 ms) added so the schedule spans the ~1 s restart
+    /// window, not just its tail (#1984 review follow-up).
+    /// What: Refuses the port for ~400 ms (past the first 100 ms retry, before the
+    /// second 300 ms one), then binds a one-shot 200 server; asserts the second
+    /// scheduled retry connects and returns 200.
+    /// Test: this test itself.
+    #[tokio::test]
+    async fn test_connect_retry_recovers_on_second_attempt() {
+        let port = reserve_free_port().await;
+        let url = format!("http://127.0.0.1:{port}/api/v1/sessions/managed");
+
+        // Up only after the first retry would already have failed.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            serve_one_ok(port).await;
+        });
+
+        let client = reqwest::Client::builder()
+            .pool_max_idle_per_host(0)
+            .build()
+            .expect("client");
+        let resp = send_with_connect_retry(
+            &client,
+            Method::POST,
+            &url,
+            HeaderMap::new(),
+            Bytes::from_static(b"{}"),
+            &[Duration::from_millis(100), Duration::from_millis(300)],
+        )
+        .await
+        .expect("second scheduled retry should recover once upstream is back");
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
     /// Why: If the upstream never returns, the retry must give up after exactly
-    /// one extra attempt and surface a connect error (not hang, not loop) so the
-    /// handler can map it to a 502.
-    /// What: Targets a permanently-unbound port; asserts the result is an error
-    /// that `is_connect()`.
+    /// the scheduled number of extra attempts and surface a connect error (not
+    /// hang, not loop) so the handler can map it to a 502.
+    /// What: Targets a permanently-unbound port with a two-entry schedule; asserts
+    /// the result is an error that `is_connect()` (proving the loop exits after
+    /// exhausting the schedule rather than spinning).
     /// Test: this test itself.
     #[tokio::test]
     async fn test_connect_retry_gives_up() {
@@ -655,7 +709,7 @@ mod tests {
             &url,
             HeaderMap::new(),
             Bytes::from_static(b"{}"),
-            Duration::from_millis(20),
+            &[Duration::from_millis(20), Duration::from_millis(20)],
         )
         .await
         .expect_err("no upstream should yield an error");
