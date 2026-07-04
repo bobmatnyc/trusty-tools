@@ -81,14 +81,18 @@ pub(crate) fn run_statusline() -> anyhow::Result<()> {
 ///
 /// Why: keeping rendering pure (no mandatory I/O) makes it unit-testable
 /// independently of the stdin protocol.
-/// What: builds up to seven segments — project+branch, model, daemon, session
-/// count, context%, compaction efficiency, cost — joined with ` │ `, emitting
-/// only non-empty segments.
+/// What: builds up to eight segments — project+branch, active gh account
+/// (`@<login>`, marked `⚠` when multiple accounts are logged in), model, daemon,
+/// session count, context%, compaction efficiency, cost — joined with ` │ `,
+/// emitting only non-empty segments.
 /// Test: `render_statusline_minimal_input`, `render_statusline_full_payload`.
 pub(crate) fn render_statusline(input: &StatusInput) -> String {
     let mut parts: Vec<String> = Vec::new();
 
     if let Some(seg) = project_segment(&input.cwd) {
+        parts.push(seg);
+    }
+    if let Some(seg) = gh_account_segment_probe() {
         parts.push(seg);
     }
     if let Some(seg) = model_segment(&input.model) {
@@ -326,6 +330,58 @@ fn git_owner_repo(cwd: &str) -> Option<String> {
     rx.recv_timeout(Duration::from_millis(100)).ok().flatten()
 }
 
+/// Probe the active `gh` github.com account for the statusline, cheaply and
+/// fail-soft, with a 100 ms wall-clock bound.
+///
+/// Why (#gh-account-awareness): `tm` shells to `gh` constantly (PR merge, issue
+/// edits) but the operator had no visibility into WHICH github.com identity was
+/// active. A non-admin active account silently broke `gh pr merge --admin`.
+/// Surfacing `@<login>` in the status bar — and flagging the multi-account
+/// ambiguity that hides the bug — makes the active identity impossible to miss.
+/// The bounded-thread pattern (matching [`git_branch`]/[`git_owner_repo`]) keeps
+/// a slow config read from ever blocking Claude Code's hot render path.
+/// What: spawns a detached thread that reads `gh`'s `hosts.yml` via the cheap,
+/// subprocess-free [`trusty_mpm::core::gh_account::gh_account_status_local`],
+/// waits ≤100 ms, and renders the segment via [`render_gh_account_segment`].
+/// Returns `None` (segment omitted) when `gh` is unconfigured, the read times
+/// out, or no active account is set — never errors or blocks.
+/// Test: the render is unit-tested via [`render_gh_account_segment`]; the probe
+/// itself is thin bounded glue over the tested local reader.
+fn gh_account_segment_probe() -> Option<String> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(trusty_mpm::core::gh_account::gh_account_status_local());
+    });
+    let status = rx.recv_timeout(Duration::from_millis(100)).ok().flatten()?;
+    render_gh_account_segment(status.active.as_deref(), status.logged_in.len())
+}
+
+/// Assemble the `@<login>` gh-account segment from a resolved active login.
+///
+/// Why: keeping the render pure (no file/subprocess I/O) makes the
+/// present/absent/multi-account cases unit-testable without touching real `gh`
+/// state, and centralises the ambiguity marker.
+/// What: returns `None` for an absent/blank active login (segment omitted);
+/// `"@<login>"` for a single logged-in account; and `"@<login>⚠"` when more than
+/// one account is logged in (`logged_in_count > 1`) so the operator notices they
+/// may be on the wrong identity.
+/// Test: `render_gh_account_segment_single`, `render_gh_account_segment_multi`,
+/// `render_gh_account_segment_absent`.
+fn render_gh_account_segment(active: Option<&str>, logged_in_count: usize) -> Option<String> {
+    let active = active?.trim();
+    if active.is_empty() {
+        return None;
+    }
+    Some(if logged_in_count > 1 {
+        format!("@{active}\u{26a0}")
+    } else {
+        format!("@{active}")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +545,41 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let cwd = tmp.path().to_string_lossy().to_string();
         assert_eq!(git_owner_repo(&cwd), None);
+    }
+
+    /// Why: a single logged-in account renders `@<login>` with no warning mark.
+    /// Test: itself.
+    #[test]
+    fn render_gh_account_segment_single() {
+        assert_eq!(
+            render_gh_account_segment(Some("bobmatnyc"), 1).as_deref(),
+            Some("@bobmatnyc")
+        );
+        // Zero count is treated the same as one (unambiguous single identity).
+        assert_eq!(
+            render_gh_account_segment(Some("bobmatnyc"), 0).as_deref(),
+            Some("@bobmatnyc")
+        );
+    }
+
+    /// Why: multiple logged-in accounts must append the `⚠` ambiguity marker so
+    /// the operator notices they may be merging as the wrong identity (the bug).
+    /// Test: itself.
+    #[test]
+    fn render_gh_account_segment_multi() {
+        let seg = render_gh_account_segment(Some("bob-duetto"), 2).expect("segment");
+        assert_eq!(seg, "@bob-duetto\u{26a0}");
+        assert!(seg.contains('\u{26a0}'), "multi-account marker must appear");
+    }
+
+    /// Why: an absent/blank active login must omit the segment entirely rather
+    /// than emit a stray `@`.
+    /// Test: itself.
+    #[test]
+    fn render_gh_account_segment_absent() {
+        assert_eq!(render_gh_account_segment(None, 0), None);
+        assert_eq!(render_gh_account_segment(Some("   "), 3), None);
+        assert_eq!(render_gh_account_segment(Some(""), 1), None);
     }
 
     #[test]

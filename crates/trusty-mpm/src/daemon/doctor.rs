@@ -50,9 +50,11 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// probes (the output-style probe closes DOC-28 F4 — the "did the
 /// trusty-mpm instructions actually load" gap), then the memory and search
 /// HTTP probes (each bounded by [`PROBE_TIMEOUT`]), a worktree-orphan scan
-/// (Fix 1b, #1840), and the `skill_source` probe (A2, tm-skills-portfolio
-/// epic) — folding the resulting eight [`DoctorCheck`]s into a
-/// [`DoctorReport`] whose `overall` status is the worst of them.
+/// (Fix 1b, #1840), the `skill_source` probe (A2, tm-skills-portfolio epic), and
+/// the `gh_account` probe (#gh-account-awareness — surfaces the active
+/// github.com identity and warns on the multi-account ambiguity) — folding the
+/// resulting nine [`DoctorCheck`]s into a [`DoctorReport`] whose `overall` status
+/// is the worst of them.
 ///
 /// Note (#1905): the mpm-*→tm-* stale-skill cleanup is intentionally NOT a
 /// permanent probe here — it is a one-time migration
@@ -64,7 +66,7 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// (when `Some`) gives the managed workspace root for the worktree scan;
 /// `active_workspace_paths` is the full set of workspace paths currently
 /// registered to live sessions.
-/// Test: `run_doctor_produces_eight_checks`.
+/// Test: `run_doctor_produces_nine_checks`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
     repos_root: Option<&Path>,
@@ -83,8 +85,86 @@ pub async fn run_doctor(
     checks.push(check_memory(&home).await);
     checks.push(check_search(&home).await);
     checks.push(check_worktrees(repos_root, active_workspace_paths).await);
+    checks.push(check_gh_account().await);
 
     DoctorReport::from_checks(checks)
+}
+
+/// Probe the active `gh` github.com account and warn on ambiguity.
+///
+/// Why (#gh-account-awareness): `tm` shells to `gh` for PR merges, issue edits,
+/// and managed spawn, but had no awareness of WHICH github.com identity was
+/// active. When several accounts are logged in, `gh` uses whichever is active —
+/// and a non-admin active account silently broke `gh pr merge --admin` with
+/// "1 approving review required". This probe makes the active account visible in
+/// `tm doctor` and warns when the dangerous multi-account ambiguity exists.
+/// What: off-loads the two bounded `gh`/`hosts.yml` reads to `spawn_blocking`
+/// (so the async executor is not stalled), then folds the result via
+/// [`build_gh_account_check`]. Advisory only: `Warn` when multiple accounts are
+/// logged in or `gh` is unauthenticated, `Ok` for a single clear account — never
+/// a hard `Fail`, since a missing/other `gh` identity is not a broken stack.
+/// Test: `build_gh_account_check` covers every branch;
+/// `gh_account_check_is_advisory_only` asserts it never returns `Fail`.
+async fn check_gh_account() -> DoctorCheck {
+    let (active, accounts) = tokio::task::spawn_blocking(|| {
+        let active = crate::core::gh_account::active_gh_account();
+        let accounts = crate::core::gh_account::logged_in_gh_accounts();
+        (active, accounts)
+    })
+    .await
+    .unwrap_or((None, Vec::new()));
+    build_gh_account_check(active, accounts)
+}
+
+/// Fold the resolved gh-account state into a [`DoctorCheck`] (pure).
+///
+/// Why: keeping the verdict logic pure makes every branch — single account,
+/// multi-account ambiguity, active-unknown, and unauthenticated — unit-testable
+/// without a live `gh`.
+/// What: returns `Warn` when `accounts` holds more than one login (naming them
+/// and pointing at `gh auth switch`), `Warn` when no account is detected, `Warn`
+/// when accounts exist but none is marked active, and `Ok` for a single clear
+/// active account. Never `Fail` — this is advisory.
+/// Test: `build_gh_account_check_single_ok`, `build_gh_account_check_multi_warn`,
+/// `build_gh_account_check_unauthenticated_warn`,
+/// `gh_account_check_is_advisory_only`.
+fn build_gh_account_check(active: Option<String>, accounts: Vec<String>) -> DoctorCheck {
+    if accounts.len() > 1 {
+        let list = accounts.join(", ");
+        let active_str = active.as_deref().unwrap_or("unknown");
+        return DoctorCheck::new(
+            "gh_account",
+            CheckStatus::Warn,
+            format!(
+                "{} github.com accounts logged in ({list}); active is `{active_str}`. \
+                 `gh` (and `gh pr merge --admin`) uses the ACTIVE account — if merges \
+                 fail on permissions, run `gh auth switch` to the repo owner.",
+                accounts.len()
+            ),
+        );
+    }
+    match active {
+        Some(login) => DoctorCheck::new(
+            "gh_account",
+            CheckStatus::Ok,
+            format!("active gh account: `{login}`"),
+        ),
+        None if accounts.is_empty() => DoctorCheck::new(
+            "gh_account",
+            CheckStatus::Warn,
+            "gh is not authenticated (no github.com account) — `gh` calls will fail; \
+             run `gh auth login`"
+                .to_string(),
+        ),
+        None => DoctorCheck::new(
+            "gh_account",
+            CheckStatus::Warn,
+            format!(
+                "gh authenticated ({}) but no active account is set — run `gh auth switch`",
+                accounts.join(", ")
+            ),
+        ),
+    }
 }
 
 /// Probe for orphaned per-session git worktrees under the managed workspace root.
@@ -351,13 +431,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_doctor_produces_eight_checks() {
-        // A2 (tm-skills-portfolio epic): adds the `skill_source` probe,
-        // bringing the total from seven to eight checks. #1905's stale-skill
-        // cleanup is deliberately NOT a `run_doctor` probe — see the
-        // `run_doctor` doc comment — so this count stays at eight.
+    async fn run_doctor_produces_nine_checks() {
+        // #gh-account-awareness: adds the `gh_account` probe, bringing the total
+        // from eight to nine checks. #1905's stale-skill cleanup is deliberately
+        // NOT a `run_doctor` probe — see the `run_doctor` doc comment.
         let report = run_doctor(None, None, &[]).await;
-        assert_eq!(report.checks.len(), 8);
+        assert_eq!(report.checks.len(), 9);
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -369,9 +448,63 @@ mod tests {
                 "output_style",
                 "memory",
                 "search",
-                "worktrees"
+                "worktrees",
+                "gh_account"
             ]
         );
+    }
+
+    #[test]
+    fn build_gh_account_check_single_ok() {
+        // A single clear active account is healthy (Ok), naming the login.
+        let check =
+            build_gh_account_check(Some("bobmatnyc".to_string()), vec!["bobmatnyc".to_string()]);
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert_eq!(check.name, "gh_account");
+        assert!(check.message.contains("bobmatnyc"));
+    }
+
+    #[test]
+    fn build_gh_account_check_multi_warn() {
+        // Multiple logged-in accounts is the ambiguity that hid the admin-merge
+        // bug: Warn, name both accounts, and point at `gh auth switch`.
+        let check = build_gh_account_check(
+            Some("bob-duetto".to_string()),
+            vec!["bob-duetto".to_string(), "bobmatnyc".to_string()],
+        );
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("bob-duetto"));
+        assert!(check.message.contains("bobmatnyc"));
+        assert!(check.message.contains("gh auth switch"));
+    }
+
+    #[test]
+    fn build_gh_account_check_unauthenticated_warn() {
+        // No account at all: Warn (advisory), not Fail, pointing at `gh auth login`.
+        let check = build_gh_account_check(None, Vec::new());
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("not authenticated"));
+        assert!(check.message.contains("gh auth login"));
+    }
+
+    #[test]
+    fn gh_account_check_is_advisory_only() {
+        // Every branch must be advisory — never a hard Fail.
+        for check in [
+            build_gh_account_check(Some("a".to_string()), vec!["a".to_string()]),
+            build_gh_account_check(
+                Some("a".to_string()),
+                vec!["a".to_string(), "b".to_string()],
+            ),
+            build_gh_account_check(None, Vec::new()),
+            build_gh_account_check(None, vec!["a".to_string()]),
+        ] {
+            assert_ne!(
+                check.status,
+                CheckStatus::Fail,
+                "gh_account must never Fail"
+            );
+        }
     }
 
     #[tokio::test]
