@@ -19,30 +19,61 @@ use crate::session_manager::ManagedTmuxDriver;
 use super::RuntimeAdapter;
 use super::RuntimeError;
 
+/// Compose the `env …` prefix + resolved binary that starts every managed
+/// `claude`, wiring in the tm-owned `CLAUDE_CONFIG_DIR` when available (DOC-34).
+///
+/// Why: two invariants must hold on the pane command. (1) `-u ANTHROPIC_API_KEY`
+/// strips the API key so Claude Code falls back to OAuth, preventing key leakage
+/// through pane history. (2) When a managed `CLAUDE_CONFIG_DIR` is resolved,
+/// `env CLAUDE_CONFIG_DIR=<dir>` points the session at the tm-owned config home
+/// (`~/.trusty-tools/trusty-mpm/claude-config/`) so its framework agent roster,
+/// skills, hooks, and MCP servers come from there — NOT from the target
+/// project's committed `.claude/`, which for trusty-tools shadows the roster and
+/// forced the general-purpose fallback (#1996). Both are applied via a single
+/// `env` prefix, consistent with the pre-existing scrub-only prefix.
+/// What: `env CLAUDE_CONFIG_DIR=<dir> -u ANTHROPIC_API_KEY <claude_bin>` when
+/// `config_dir` is `Some`; the legacy `env -u ANTHROPIC_API_KEY <claude_bin>`
+/// when `None` (home unresolved — no config dir to point at).
+/// Test: `spawn_command_contains_env_scrub`, `spawn_command_sets_claude_config_dir`,
+/// `spawn_command_without_config_dir_omits_it`.
+fn env_bin_prefix(claude_bin: &str, config_dir: Option<&Path>) -> String {
+    match config_dir {
+        Some(dir) => format!(
+            "env CLAUDE_CONFIG_DIR={} -u ANTHROPIC_API_KEY {}",
+            dir.display(),
+            claude_bin
+        ),
+        None => format!("env -u ANTHROPIC_API_KEY {claude_bin}"),
+    }
+}
+
 /// The shell command sent to the tmux pane to start Claude Code.
 ///
-/// Why: the `env -u ANTHROPIC_API_KEY` prefix strips the API key from the
-/// child environment so Claude Code falls back to its OAuth login in
-/// `~/.claude.json`, preventing accidental key leakage through pane history.
-/// The `--setting-sources project,local` flag isolates the session from the
-/// operator's interfering global `~/.claude/settings.json` hooks (issue #1269 /
-/// step 4) without touching `~/.claude.json` (so OAuth is preserved), and
+/// Why: the env prefix (see [`env_bin_prefix`]) strips `ANTHROPIC_API_KEY` and,
+/// when available, injects the tm-owned `CLAUDE_CONFIG_DIR` so the framework
+/// roster comes from tm's config home rather than the project's committed
+/// `.claude/` (#1996). `--setting-sources project,local` is RETAINED: it gates
+/// only the settings.json layering (loading the project/local hooks + statusline
+/// the daemon deploys, excluding the operator's global `~/.claude/settings.json`,
+/// #1269) — agent/skill discovery from `CLAUDE_CONFIG_DIR` is independent of it,
+/// so the roster fix is delivered by the config dir, not by changing this flag.
 /// `--dangerously-skip-permissions` keeps the unattended orchestration session
-/// from blocking on per-tool permission prompts (issue #1269). The isolation flags reuse the
-/// shared [`crate::core::model_inject::SETTING_SOURCES_FLAG`] /
+/// from blocking on per-tool prompts (#1269). Both flags reuse the shared
+/// [`crate::core::model_inject::SETTING_SOURCES_FLAG`] /
 /// [`crate::core::model_inject::PERMISSION_MODE_FLAG`] constants so this spawn
 /// path and the CLI launch path can never drift.
-/// What: built from `env -u ANTHROPIC_API_KEY <claude_bin>` plus the two shared
-/// flag constants; piped to `tmux send-keys … Enter`. `claude_bin` is the
-/// resolved binary — an absolute path under launchd so the pane (which inherits
-/// the daemon's minimal `PATH`) does not need `claude` on its own `PATH` (#1298).
+/// What: built from [`env_bin_prefix`] plus the two shared flag constants; piped
+/// to `tmux send-keys … Enter`. `claude_bin` is the resolved binary — an
+/// absolute path under launchd so the pane (which inherits the daemon's minimal
+/// `PATH`) does not need `claude` on its own `PATH` (#1298).
 /// Test: `spawn_command_contains_env_scrub`,
 /// `spawn_command_contains_isolation_flags`,
-/// `spawn_command_uses_resolved_binary`.
-fn spawn_command(claude_bin: &str) -> String {
+/// `spawn_command_uses_resolved_binary`,
+/// `spawn_command_sets_claude_config_dir`.
+fn spawn_command(claude_bin: &str, config_dir: Option<&Path>) -> String {
     format!(
-        "env -u ANTHROPIC_API_KEY {} {} {}",
-        claude_bin,
+        "{} {} {}",
+        env_bin_prefix(claude_bin, config_dir),
         crate::core::model_inject::SETTING_SOURCES_FLAG,
         crate::core::model_inject::PERMISSION_MODE_FLAG,
     )
@@ -60,18 +91,21 @@ fn spawn_command(claude_bin: &str) -> String {
 /// What: `Some(id)` → `--resume <id>`. `None, has_prior_conv=true` → `--continue`.
 /// `None, has_prior_conv=false` → plain spawn (no resume flag), so the session
 /// starts a fresh conversation instead of erroring. All three share the same
-/// env-scrub and isolation flags as [`spawn_command`].
+/// env prefix (scrub + `CLAUDE_CONFIG_DIR`) and isolation flags as
+/// [`spawn_command`].
 /// Test: `resume_command_with_id_uses_resume_flag`,
 /// `resume_command_without_id_with_prior_conv_uses_continue`,
-/// `resume_command_without_id_no_prior_conv_uses_plain_spawn`.
+/// `resume_command_without_id_no_prior_conv_uses_plain_spawn`,
+/// `resume_command_sets_claude_config_dir`.
 fn resume_command(
     claude_bin: &str,
+    config_dir: Option<&Path>,
     claude_session_id: Option<&str>,
     has_prior_conv: bool,
 ) -> String {
     let base = format!(
-        "env -u ANTHROPIC_API_KEY {} {} {}",
-        claude_bin,
+        "{} {} {}",
+        env_bin_prefix(claude_bin, config_dir),
         crate::core::model_inject::SETTING_SOURCES_FLAG,
         crate::core::model_inject::PERMISSION_MODE_FLAG,
     );
@@ -124,6 +158,65 @@ fn has_prior_conversation_in(cwd: &Path, projects_dir: &Path) -> bool {
             .unwrap_or(false)
 }
 
+/// Resolve, provision, and trust-seed the managed `CLAUDE_CONFIG_DIR` for a spawn.
+///
+/// Why (DOC-34 / #1996): every managed spawn must point `claude` at the tm-owned
+/// config home so the framework agent roster/skills/hooks come from there rather
+/// than the target project's committed `.claude/`. This centralises the three
+/// coupled steps — resolve the path, provision it (full roster), and seed
+/// workspace trust into `<config_dir>/.claude.json` (NEVER `~/.claude.json`) —
+/// so `spawn` and `spawn_resume` stay identical and cannot drift.
+/// What: resolves [`crate::core::trusty_tools_config::managed_claude_config_dir`].
+/// When `Some`: provisions it via
+/// [`crate::core::managed_config::ensure_managed_config_dir`] and seeds managed
+/// trust via [`crate::core::standalone::preseed_managed_trust`] (both non-fatal —
+/// a failure logs a warning but the dir is still returned so the session never
+/// silently falls back to the project's `.claude/`), returning `Some(dir)`. When
+/// `None` (home unresolved): falls back to the legacy
+/// [`crate::core::home_trust_seed::preseed_home_trust`] and returns `None`
+/// (no `CLAUDE_CONFIG_DIR` to inject).
+/// Test: exercised via `spawn_sends_env_scrub_when_binary_available` and the
+/// `spawn_command`/`resume_command` config-dir tests (the command-string layer);
+/// the provisioning itself is covered in `core::managed_config`.
+fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::PathBuf> {
+    let Some(config_dir) = crate::core::trusty_tools_config::managed_claude_config_dir() else {
+        // Home unresolved (stripped env): no config dir to point at. Fall back
+        // to the legacy home-trust seed so startup prompts are still dismissed.
+        if let Err(e) = crate::core::home_trust_seed::preseed_home_trust(cwd) {
+            tracing::warn!(
+                session = %tmux_name,
+                cwd = %cwd.display(),
+                "home trust pre-seed failed (non-fatal): {e}"
+            );
+        }
+        return None;
+    };
+
+    // Provision the tm-owned config dir with the full framework roster. Non-fatal:
+    // even on a partial provisioning error we still point CLAUDE_CONFIG_DIR at it,
+    // because that is strictly safer than falling back to the project's committed
+    // `.claude/` (the #1996 regression this whole change exists to prevent).
+    if let Err(e) = crate::core::managed_config::ensure_managed_config_dir(&config_dir) {
+        tracing::warn!(
+            session = %tmux_name,
+            config_dir = %config_dir.display(),
+            "managed config dir provisioning failed (non-fatal): {e}"
+        );
+    }
+
+    // Seed workspace trust into <config_dir>/.claude.json (isolation invariant:
+    // NEVER ~/.claude.json) so the session starts without the trust/MCP dialogs.
+    if let Err(e) = crate::core::standalone::preseed_managed_trust(&config_dir, cwd) {
+        tracing::warn!(
+            session = %tmux_name,
+            cwd = %cwd.display(),
+            "managed trust pre-seed failed (non-fatal): {e}"
+        );
+    }
+
+    Some(config_dir)
+}
+
 /// Runtime adapter that launches Claude Code CLI inside a tmux session.
 ///
 /// Why: Claude Code is the primary agent runtime for MPM sessions; coupling the
@@ -171,8 +264,10 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// Why: the session manager calls this after creating the tmux pane so the
     /// actual agent process starts inside it.
     /// What: resolves `claude` to an absolute path (returns `BinaryNotFound`
-    /// if it cannot be found on `PATH` or in the well-known daemon dirs), then
-    /// sends [`spawn_command`] (`env -u ANTHROPIC_API_KEY <abs-claude>` plus the
+    /// if it cannot be found on `PATH` or in the well-known daemon dirs),
+    /// provisions + trust-seeds the tm-owned `CLAUDE_CONFIG_DIR` via
+    /// [`prepare_managed_config`], then sends [`spawn_command`]
+    /// (`env CLAUDE_CONFIG_DIR=<dir> -u ANTHROPIC_API_KEY <abs-claude>` plus the
     /// isolation/permission flags) to the pane; the task is logged for
     /// observability but not passed to the command (Claude Code reads
     /// instructions from CLAUDE.md or an interactive prompt).
@@ -192,18 +287,15 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             claude = %claude_bin,
             "spawning claude-code in tmux pane"
         );
-        // Best-effort: pre-seed workspace trust + renderer-upsell dismissal into
-        // ~/.claude.json so the session starts without blocking startup prompts.
-        // Non-fatal: a seed failure must never abort the spawn (closes #1696).
-        if let Err(e) = crate::core::home_trust_seed::preseed_home_trust(cwd) {
-            tracing::warn!(
-                session = %tmux_name,
-                cwd = %cwd.display(),
-                "home trust pre-seed failed (non-fatal): {e}"
-            );
-        }
+        // Provision + point the session at the tm-owned CLAUDE_CONFIG_DIR (full
+        // framework roster) and seed trust there — never at the project's
+        // committed `.claude/` (#1996). Non-fatal throughout (closes #1696).
+        let config_dir = prepare_managed_config(tmux_name, cwd);
         self.tmux
-            .send_line(tmux_name, &spawn_command(&claude_bin))
+            .send_line(
+                tmux_name,
+                &spawn_command(&claude_bin, config_dir.as_deref()),
+            )
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
     }
 
@@ -216,7 +308,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// `--continue` resumes the most-recent conversation; when neither applies,
     /// a plain spawn is used to avoid the "No conversation found to continue"
     /// error that otherwise drops the session to a bare shell (#1840).
-    /// What: resolves the claude binary, pre-seeds home trust, checks for prior
+    /// What: resolves the claude binary, provisions + trust-seeds the tm-owned
+    /// `CLAUDE_CONFIG_DIR` via [`prepare_managed_config`], checks for prior
     /// conversation when `claude_session_id` is `None`, then sends the
     /// appropriate [`resume_command`] to the tmux pane.
     /// Test: `spawn_resume_with_id_uses_resume_flag`,
@@ -261,17 +354,11 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             has_prior_conv = file_history, // reflects actual .jsonl file check, not the combined value
             "resuming claude-code in tmux pane"
         );
-        if let Err(e) = crate::core::home_trust_seed::preseed_home_trust(cwd) {
-            tracing::warn!(
-                session = %tmux_name,
-                cwd = %cwd.display(),
-                "home trust pre-seed failed (non-fatal): {e}"
-            );
-        }
+        let config_dir = prepare_managed_config(tmux_name, cwd);
         self.tmux
             .send_line(
                 tmux_name,
-                &resume_command(&claude_bin, claude_session_id, prior),
+                &resume_command(&claude_bin, config_dir.as_deref(), claude_session_id, prior),
             )
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
     }
@@ -292,6 +379,37 @@ mod tests {
     use super::super::test_helpers::FakeTmux;
     use super::*;
 
+    /// RAII guard that redirects `$HOME` to a temp dir and restores it on drop
+    /// (including panic).
+    ///
+    /// Why: the adapter's `spawn`/`spawn_resume` now provision the real managed
+    /// `CLAUDE_CONFIG_DIR` (resolved under `$HOME`). Tests that drive them must
+    /// redirect `$HOME` so the provisioning/trust-seed side effects land in a
+    /// throwaway dir instead of the developer's real `~/.trusty-tools`. Pair with
+    /// `#[serial_test::serial]` since it mutates process-global env.
+    struct HomeGuard {
+        prev: Option<String>,
+        _tmp: tempfile::TempDir,
+    }
+    impl HomeGuard {
+        fn set() -> Self {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let prev = std::env::var("HOME").ok();
+            // SAFETY: callers are #[serial], so no other test thread reads HOME
+            // concurrently; Drop restores the prior value even on panic.
+            unsafe { std::env::set_var("HOME", tmp.path()) };
+            Self { prev, _tmp: tmp }
+        }
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.prev {
+                Some(ref p) => unsafe { std::env::set_var("HOME", p) },
+                None => unsafe { std::env::remove_var("HOME") },
+            }
+        }
+    }
+
     #[test]
     fn claude_code_adapter_identifies() {
         let fake = FakeTmux::new();
@@ -302,8 +420,8 @@ mod tests {
     #[test]
     fn spawn_command_contains_env_scrub() {
         // The spawn command must always strip the API key from the environment
-        // so the session falls back to OAuth in ~/.claude.json.
-        let cmd = spawn_command("claude");
+        // so the session falls back to OAuth (keyed by CLAUDE_CONFIG_DIR).
+        let cmd = spawn_command("claude", None);
         assert!(
             cmd.contains("env -u ANTHROPIC_API_KEY"),
             "spawn command must contain env scrub: {cmd}"
@@ -315,11 +433,44 @@ mod tests {
     }
 
     #[test]
+    fn spawn_command_sets_claude_config_dir() {
+        // DOC-34 / #1996: when a managed config dir is available the spawn
+        // command MUST export it so the framework roster comes from tm's config
+        // home, not the project's committed `.claude/`. It must co-exist with the
+        // API-key scrub.
+        let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
+        let cmd = spawn_command("claude", Some(dir));
+        assert!(
+            cmd.contains(
+                "env CLAUDE_CONFIG_DIR=/home/bob/.trusty-tools/trusty-mpm/claude-config \
+                 -u ANTHROPIC_API_KEY claude"
+            ),
+            "spawn command must set CLAUDE_CONFIG_DIR before scrubbing the key: {cmd}"
+        );
+        assert!(
+            cmd.contains("--setting-sources project,local"),
+            "isolation flag must still be present with a config dir: {cmd}"
+        );
+    }
+
+    #[test]
+    fn spawn_command_without_config_dir_omits_it() {
+        // When home is unresolvable there is no config dir to point at; the
+        // command must fall back to the legacy scrub-only prefix (no bare
+        // `CLAUDE_CONFIG_DIR=` token).
+        let cmd = spawn_command("claude", None);
+        assert!(
+            !cmd.contains("CLAUDE_CONFIG_DIR"),
+            "no config dir → must not reference CLAUDE_CONFIG_DIR: {cmd}"
+        );
+    }
+
+    #[test]
     fn spawn_command_contains_isolation_flags() {
         // Why: the session_manager spawn path must isolate from the user's global
         // settings and run fully unattended (bypass all permission prompts) so
         // multi-agent orchestration never stalls on interactive approval dialogs.
-        let cmd = spawn_command("claude");
+        let cmd = spawn_command("claude", None);
         assert!(
             cmd.contains("--setting-sources project,local"),
             "spawn command must isolate settings: {cmd}"
@@ -340,7 +491,7 @@ mod tests {
         // Why (#1298): under launchd the pane inherits a minimal PATH, so the
         // spawn command must invoke claude by the resolved (absolute) path
         // rather than a bare `claude` that the pane's PATH cannot find.
-        let cmd = spawn_command("/Users/me/.local/bin/claude");
+        let cmd = spawn_command("/Users/me/.local/bin/claude", None);
         assert!(
             cmd.contains("env -u ANTHROPIC_API_KEY /Users/me/.local/bin/claude "),
             "spawn command must invoke the resolved absolute claude path: {cmd}"
@@ -356,10 +507,14 @@ mod tests {
         }
     }
 
+    #[serial_test::serial]
     #[test]
     fn spawn_sends_env_scrub_when_binary_available() {
         // Patch: if claude is not available this test is a no-op (we cannot
         // install it in CI). We only assert the send when the binary exists.
+        // HOME is redirected so the spawn's config-dir provisioning + trust seed
+        // land in a throwaway dir, not the developer's real ~/.trusty-tools.
+        let _home = HomeGuard::set();
         let Some(claude_bin) = ClaudeCodeAdapter::resolve_claude() else {
             return;
         };
@@ -371,14 +526,23 @@ mod tests {
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1);
         assert_eq!(sends[0].0, "tmpm-test");
-        assert_eq!(sends[0].1, spawn_command(&claude_bin));
+        // The sent command must equal the builder output for whatever config dir
+        // resolves under the redirected HOME (Some in a normal env).
+        let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir();
+        assert_eq!(
+            sends[0].1,
+            spawn_command(&claude_bin, config_dir.as_deref())
+        );
+        // And it must carry the env scrub regardless (an intervening
+        // `CLAUDE_CONFIG_DIR=` may sit between `env` and `-u`).
+        assert!(sends[0].1.contains("-u ANTHROPIC_API_KEY"));
     }
 
     #[test]
     fn resume_command_with_id_uses_resume_flag() {
         // Why (#1744): --resume <id> restores the exact prior conversation;
         // the test pins the contract so accidental regressions are caught early.
-        let cmd = resume_command("claude", Some("abc-123"), false);
+        let cmd = resume_command("claude", None, Some("abc-123"), false);
         assert!(
             cmd.contains("--resume abc-123"),
             "resume command must include --resume <id>: {cmd}"
@@ -394,11 +558,30 @@ mod tests {
     }
 
     #[test]
+    fn resume_command_sets_claude_config_dir() {
+        // DOC-34: the resume path must also carry CLAUDE_CONFIG_DIR so resumed
+        // sessions read the same tm-owned roster as fresh spawns.
+        let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
+        let cmd = resume_command("claude", Some(dir), Some("abc-123"), false);
+        assert!(
+            cmd.contains(
+                "env CLAUDE_CONFIG_DIR=/home/bob/.trusty-tools/trusty-mpm/claude-config \
+                 -u ANTHROPIC_API_KEY claude"
+            ),
+            "resume command must export CLAUDE_CONFIG_DIR: {cmd}"
+        );
+        assert!(
+            cmd.contains("--resume abc-123"),
+            "resume command must still include --resume <id>: {cmd}"
+        );
+    }
+
+    #[test]
     fn resume_command_without_id_with_prior_conv_uses_continue() {
         // Why (#1744 / #1840): when no claude_session_id is stored but prior
         // conversation history exists, --continue resumes the most-recent
         // conversation in the workspace rather than starting fresh.
-        let cmd = resume_command("claude", None, true);
+        let cmd = resume_command("claude", None, None, true);
         assert!(
             cmd.contains("--continue"),
             "resume command without id + prior conv must use --continue: {cmd}"
@@ -414,7 +597,7 @@ mod tests {
         // Why (#1840): when no claude_session_id is stored AND no prior
         // conversation exists, --continue would error with "No conversation
         // found to continue". The plain spawn starts a fresh session instead.
-        let cmd = resume_command("claude", None, false);
+        let cmd = resume_command("claude", None, None, false);
         assert!(
             !cmd.contains("--continue"),
             "resume command without id + no prior conv must NOT use --continue: {cmd}"
@@ -469,10 +652,13 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn spawn_resume_with_id_uses_resume_flag() {
         // Why (#1744): ClaudeCodeAdapter::spawn_resume must send --resume <id>
         // to the pane when the claude_session_id is known.
+        // HOME is redirected so the config-dir provisioning is hermetic.
+        let _home = HomeGuard::set();
         if ClaudeCodeAdapter::resolve_claude().is_none() {
             return;
         };
@@ -495,6 +681,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial]
     #[test]
     fn spawn_resume_without_id_no_prior_conv_sends_plain_spawn() {
         // Why (#1840, #1845 item 3): when no claude_session_id is available AND the
@@ -505,7 +692,7 @@ mod tests {
         // binary so assertions ALWAYS run even when the `claude` binary is absent in CI.
         // The adapter merely calls resume_command() with the same arguments; testing the
         // function directly proves the selection logic without CI depending on claude.
-        let cmd = resume_command("__fake_claude__", None, false);
+        let cmd = resume_command("__fake_claude__", None, None, false);
         assert!(
             !cmd.contains("--continue"),
             "plain-spawn path must NOT use --continue: {cmd}"
@@ -520,6 +707,8 @@ mod tests {
         );
 
         // Additionally verify the adapter-level plumbing when the binary is present.
+        // HOME is redirected so the config-dir provisioning is hermetic.
+        let _home = HomeGuard::set();
         let Some(_claude_bin) = ClaudeCodeAdapter::resolve_claude() else {
             return; // core assertions above already ran; adapter path requires binary
         };

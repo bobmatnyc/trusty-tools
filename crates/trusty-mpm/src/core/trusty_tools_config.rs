@@ -36,6 +36,20 @@ use trusty_common::github_path::GithubPath;
 /// Test: `config_dir_is_trusty_mpm` indirectly via `crate_config` path tests.
 pub const CRATE_NAME: &str = "trusty-mpm";
 
+/// Sub-directory of `~/.trusty-tools/trusty-mpm/` that holds the shared,
+/// tm-owned `CLAUDE_CONFIG_DIR` for every DAEMON-managed session (DOC-34).
+///
+/// Why: managed sessions must NOT read the target project's committed `.claude/`
+/// (which ships a partial/broken agent roster and shadows the framework set,
+/// #1996). Pointing the launched `claude` at a tm-owned config home under the
+/// shared `~/.trusty-tools` base — the same base the #1220 crate-config
+/// convention already uses — segregates the framework agents/skills/hooks/mcp
+/// from whatever the project happens to commit. Naming the segment once keeps
+/// the accessor and any future migration in agreement.
+/// What: `"claude-config"`, joined onto `~/.trusty-tools/trusty-mpm/`.
+/// Test: `managed_claude_config_dir_nests_under_trusty_tools`.
+pub const MANAGED_CLAUDE_CONFIG_SUBDIR: &str = "claude-config";
+
 /// Built-in default workspace-root directory name under `$HOME` (#1220).
 ///
 /// Why: #1220 fixes the new default at `~/trusty-mpm-projects/`. Naming it once
@@ -286,6 +300,36 @@ impl TrustyToolsConfig {
     }
 }
 
+/// Resolve the shared tm-owned `CLAUDE_CONFIG_DIR` for daemon-managed sessions.
+///
+/// Why: the daemon managed-spawn path must launch `claude` with a
+/// `CLAUDE_CONFIG_DIR` that supplies the framework agent roster, skills, hooks,
+/// and MCP servers from a tm-controlled location — NOT from the target
+/// project's committed `.claude/` and NOT from the operator's `~/.claude`
+/// (DOC-34 / #1996). This accessor is the single source of truth for that path
+/// so the provisioner and the spawn-command builder can never disagree.
+/// What: `~/.trusty-tools/trusty-mpm/claude-config/`, delegating to
+/// [`trusty_common::crate_config::crate_config_dir`] for the `~/.trusty-tools/<crate>`
+/// base and joining [`MANAGED_CLAUDE_CONFIG_SUBDIR`]. Returns `None` only when
+/// the home directory cannot be resolved (a stripped CI environment).
+/// Test: `managed_claude_config_dir_nests_under_trusty_tools`.
+pub fn managed_claude_config_dir() -> Option<PathBuf> {
+    trusty_common::crate_config::crate_config_dir(CRATE_NAME)
+        .map(|dir| dir.join(MANAGED_CLAUDE_CONFIG_SUBDIR))
+}
+
+/// Resolve the managed `CLAUDE_CONFIG_DIR` under an explicit base (hermetic).
+///
+/// Why: the production accessor calls `dirs::home_dir()`, which unit tests must
+/// not depend on. Pointing `base` at a `tempfile::TempDir` keeps the layout
+/// assertion hermetic and parallel-safe.
+/// What: `<base>/.trusty-tools/trusty-mpm/claude-config/`.
+/// Test: `managed_claude_config_dir_nests_under_trusty_tools`.
+pub fn managed_claude_config_dir_at(base: &Path) -> PathBuf {
+    trusty_common::crate_config::crate_config_dir_at(base, CRATE_NAME)
+        .join(MANAGED_CLAUDE_CONFIG_SUBDIR)
+}
+
 /// Expand a leading `~` in a path template to the home directory.
 ///
 /// Why: config templates and the built-in default are written home-relative
@@ -387,6 +431,34 @@ mod tests {
     /// [`super::env_test_lock`] so env tests in OTHER modules are serialised too.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         super::env_test_lock()
+    }
+
+    /// Why (DOC-34): the managed `CLAUDE_CONFIG_DIR` MUST resolve under the
+    /// shared `~/.trusty-tools/trusty-mpm/` base (never `~/.trusty-mpm` or the
+    /// project). Pinning the exact layout guards the segregation guarantee.
+    /// Test: itself.
+    #[test]
+    fn managed_claude_config_dir_nests_under_trusty_tools() {
+        let base = PathBuf::from("/home/bob");
+        assert_eq!(
+            managed_claude_config_dir_at(&base),
+            PathBuf::from("/home/bob/.trusty-tools/trusty-mpm/claude-config")
+        );
+        // The production accessor, when home resolves, must agree with the
+        // hermetic `_at` variant on the trailing `.trusty-tools/trusty-mpm/...`
+        // segments regardless of the actual home directory.
+        if let Some(dir) = managed_claude_config_dir() {
+            assert!(
+                dir.ends_with("trusty-mpm/claude-config"),
+                "managed config dir must end with trusty-mpm/claude-config, got {}",
+                dir.display()
+            );
+            assert!(
+                dir.to_string_lossy().contains(".trusty-tools"),
+                "managed config dir must live under .trusty-tools, got {}",
+                dir.display()
+            );
+        }
     }
 
     /// Why: the built-in default (no env, no config) must be the #1220 path.
