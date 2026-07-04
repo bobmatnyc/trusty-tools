@@ -9,6 +9,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- MCP review path is now local-first: `review_pr`/`review_diff` authenticate with
+  the developer's `gh`/PAT login (CLI auth) unless a GitHub App is explicitly
+  configured, instead of always requiring `GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY`
+  (closes #1993)
 - unify grade computation so outer and embedded grade never diverge (closes #1886) ([#1891](https://github.com/bobmatnyc/trusty-tools/pull/1891)) ([`8f6eab1`](https://github.com/bobmatnyc/trusty-tools/commit/8f6eab15718c9446579b87166bbfd763d72c48da))
 - aggregate token counts across map-reduce for shallow-review heuristic (closes #1885) ([#1890](https://github.com/bobmatnyc/trusty-tools/pull/1890)) ([`7b53d3f`](https://github.com/bobmatnyc/trusty-tools/commit/7b53d3fa2e4baf4578308babccdfc8caa11c86eb))
 ## [Unreleased]

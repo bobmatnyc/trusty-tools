@@ -27,8 +27,10 @@ use crate::{
 };
 
 use super::{
-    ToolError, call_review_health, require_str, tool_descriptors, wrap_result, wrap_tool_error,
+    ToolError, call_review_health, mcp_run_mode, require_str, tool_descriptors, wrap_result,
+    wrap_tool_error,
 };
+use crate::integrations::github::{AuthStrategy, RunMode};
 use crate::models::ReviewResult;
 
 // ── Stub providers ────────────────────────────────────────────────────────────
@@ -351,5 +353,85 @@ fn wrap_result_no_fallback_omits_field() {
     assert!(
         payload.get("reviewer_model_fallback").is_none(),
         "no fallback → payload must NOT carry the marker"
+    );
+}
+
+// ── mcp_run_mode: local-first auth selection (#1993) ──────────────────────────
+
+/// Both App credentials present → `Serve` (hosted-bot deployment).
+///
+/// Why: deployments that actually configure a GitHub App must keep using App
+/// auth; the local-first default must not regress the hosted path.
+/// What: sets both `github_app_id` and `github_app_private_key`; asserts `Serve`.
+/// Test: this test itself.
+#[test]
+fn mcp_run_mode_serve_with_app_creds() {
+    let mut config = ReviewConfig::load(None);
+    config.github_app_id = Some("123456".to_string());
+    config.github_app_private_key = Some("-----BEGIN RSA PRIVATE KEY-----".to_string());
+    assert_eq!(mcp_run_mode(&config), RunMode::Serve);
+}
+
+/// Neither App credential present → `Cli` (local developer invocation).
+///
+/// Why: the common MCP case has no GitHub App configured; it must fall back to
+/// the developer's `gh` login instead of erroring for missing App creds (#1993).
+/// What: clears both App fields; asserts `Cli`.
+/// Test: this test itself.
+#[test]
+fn mcp_run_mode_cli_without_app_creds() {
+    let mut config = ReviewConfig::load(None);
+    config.github_app_id = None;
+    config.github_app_private_key = None;
+    assert_eq!(mcp_run_mode(&config), RunMode::Cli);
+}
+
+/// Partial or empty App credentials → `Cli`.
+///
+/// Why: an App is only usable when BOTH id and key are present and non-empty;
+/// a half-configured or blank-string App must not select the App strategy.
+/// What: exercises id-only, key-only, and both-empty cases; each yields `Cli`.
+/// Test: this test itself.
+#[test]
+fn mcp_run_mode_cli_with_empty_app_creds() {
+    // id only.
+    let mut config = ReviewConfig::load(None);
+    config.github_app_id = Some("123456".to_string());
+    config.github_app_private_key = None;
+    assert_eq!(mcp_run_mode(&config), RunMode::Cli);
+
+    // key only.
+    let mut config = ReviewConfig::load(None);
+    config.github_app_id = None;
+    config.github_app_private_key = Some("-----BEGIN RSA PRIVATE KEY-----".to_string());
+    assert_eq!(mcp_run_mode(&config), RunMode::Cli);
+
+    // both present but whitespace-only.
+    let mut config = ReviewConfig::load(None);
+    config.github_app_id = Some("   ".to_string());
+    config.github_app_private_key = Some("  ".to_string());
+    assert_eq!(mcp_run_mode(&config), RunMode::Cli);
+}
+
+/// With no App creds, MCP auth resolution selects the CLI strategy.
+///
+/// Why: this is the end-to-end contract of #1993 — the MCP path must resolve to
+/// `AuthStrategy::Cli` (developer `gh`/PAT) when no App is configured, rather
+/// than `App` (which would demand `GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY`).
+/// What: feeds `mcp_run_mode` into `AuthStrategy::select` (no override) and
+/// asserts `Cli`.  Clears `TRUSTY_REVIEW_AUTH_MODE` first so the env override
+/// cannot flip the default; serialised to avoid racing other env-reading tests.
+/// Test: this test itself.
+#[test]
+#[serial_test::serial]
+fn mcp_run_mode_resolves_cli_strategy() {
+    // SAFETY: test-only env mutation, serialised via #[serial].
+    unsafe { std::env::remove_var("TRUSTY_REVIEW_AUTH_MODE") };
+    let mut config = ReviewConfig::load(None);
+    config.github_app_id = None;
+    config.github_app_private_key = None;
+    assert_eq!(
+        AuthStrategy::select(mcp_run_mode(&config), None),
+        AuthStrategy::Cli
     );
 }

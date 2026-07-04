@@ -192,19 +192,30 @@ async fn call_tool_review_diff_returns_non_empty_verdict() {
     );
 }
 
-/// `call_tool("review_pr", ...)` with no `GITHUB_TOKEN` in the environment
-/// returns an error indicating auth / token failure.
+/// `call_tool("review_pr", ...)` with no resolvable token returns an error
+/// indicating auth / token failure.
 ///
 /// Why: exercises the token-resolution failure path in `call_review_pr` —
 /// the tool must not panic and must surface the auth failure clearly
-/// (closes #949).
-/// What: blanks out `github_token` / `github_app_id` in the config so there
+/// (closes #949).  Since #1993 the MCP default is local-first (CLI auth), so a
+/// bare "no App creds" config now falls back to the developer's `gh` login
+/// rather than failing deterministically.  To keep this test network-free and
+/// independent of the host's `gh` state, we force App auth via the
+/// `TRUSTY_REVIEW_AUTH_MODE=app` override (which the local-first default does
+/// NOT bypass) so token resolution fails fast before any HTTP call.
+/// What: sets the auth override to `app` and blanks all App/PAT creds so there
 /// is no token to resolve; calls `call_tool("review_pr", ...)`; asserts the
 /// response is `isError: true` or `ToolError::InvalidParams` mentioning auth.
+/// Serialised (`#[serial]`) because it mutates the `TRUSTY_REVIEW_AUTH_MODE`
+/// env var shared with other auth-selection tests.
 /// Test: this test itself; failure is fast (token resolution fails before
 /// any HTTP call, so no network).
 #[tokio::test]
+#[serial_test::serial]
 async fn call_tool_review_pr_no_token_returns_error() {
+    // SAFETY: test-only env mutation, serialised via #[serial].
+    unsafe { std::env::set_var("TRUSTY_REVIEW_AUTH_MODE", "app") };
+
     let mut config = ReviewConfig::load(None);
     config.github_token = String::new();
     config.github_app_id = None;
@@ -226,6 +237,9 @@ async fn call_tool_review_pr_no_token_returns_error() {
     });
 
     let result = call_tool("review_pr", &args, &state).await;
+
+    // SAFETY: restore env before any assertion can unwind the test.
+    unsafe { std::env::remove_var("TRUSTY_REVIEW_AUTH_MODE") };
 
     match result {
         Ok(envelope) => {
