@@ -215,34 +215,49 @@ fn test_default_startup_command_falls_back_to_bash() {
     assert_eq!(default_startup_command_for(""), "bash");
 }
 
+/// Why (SPEC-ONESM-01): since the naming moved to the shared
+/// `trusty_common::session_naming::build_session_name`, a new session's tmux
+/// name is now the lifecycle-MANAGED `tm-<project>-<harness>-NN` (was the
+/// unprefixed `<project>-<harness>-<serial>`), so trusty-mpm's reconcile/
+/// prune/adopt recognise it. The serial is a zero-padded two-digit field that
+/// REUSES gaps left by decommissioned sessions (matching trusty-mpm's
+/// canonical `SessionManager` behaviour), whereas the old scheme always
+/// counted `max+1`.
+/// What: pins the managed prefix, the `(project, harness)` leaf, per-pair
+/// scoping (a different harness/project never blocks a serial), and gap reuse.
+/// Test: itself.
 #[test]
 fn test_next_session_name() {
-    // No existing → -1.
+    // No existing → managed `tm-` prefix, zero-padded first serial `01`.
     assert_eq!(
-        next_session_name("trusty-agents", "repl", &[]),
-        "trusty-agents-repl-1"
+        next_session_name("trusty-agents", "repl", &[]).unwrap(),
+        "tm-trusty-agents-repl-01"
     );
+    // Every generated name is recognised as lifecycle-managed by trusty-mpm.
+    assert!(trusty_common::session_naming::is_managed_session_name(
+        &next_session_name("trusty-agents", "repl", &[]).unwrap()
+    ));
 
-    // Mix of unrelated names is ignored.
+    // Names for a different harness/project (or malformed) never block a serial.
     let existing = vec![
-        "trusty-agents-repl-1".to_string(),
-        "trusty-agents-repl-2".to_string(),
-        "trusty-agents-bash-1".to_string(), // different harness
-        "other-repl-9".to_string(),         // different project
-        "trusty-agents-repl-broken".to_string(),
+        "tm-trusty-agents-repl-01".to_string(),
+        "tm-trusty-agents-repl-02".to_string(),
+        "tm-trusty-agents-bash-01".to_string(), // different harness
+        "tm-other-repl-09".to_string(),         // different project
+        "tm-trusty-agents-repl-broken".to_string(),
     ];
     assert_eq!(
-        next_session_name("trusty-agents", "repl", &existing),
-        "trusty-agents-repl-3"
+        next_session_name("trusty-agents", "repl", &existing).unwrap(),
+        "tm-trusty-agents-repl-03"
     );
 
-    // Gaps still pick max+1 (we don't reuse holes — predictability wins).
+    // Gaps ARE reused now (canonical shared behaviour): 01 and 03 taken → 02.
     let with_gap = vec![
-        "trusty-agents-repl-1".to_string(),
-        "trusty-agents-repl-5".to_string(),
+        "tm-trusty-agents-repl-01".to_string(),
+        "tm-trusty-agents-repl-03".to_string(),
     ];
     assert_eq!(
-        next_session_name("trusty-agents", "repl", &with_gap),
-        "trusty-agents-repl-6"
+        next_session_name("trusty-agents", "repl", &with_gap).unwrap(),
+        "tm-trusty-agents-repl-02"
     );
 }

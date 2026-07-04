@@ -145,6 +145,9 @@ trusty-common = { workspace = true, features = [
     # DOC-28 catch-up engine (PR1, #1762): moves the catch-up module out of
     # trusty-mpm/src/core/ into trusty-common so trusty-code can share it.
     "catchup",
+    # SPEC-ONESM-01 / DOC-33: canonical tmux-session naming was hoisted into
+    # trusty-common so trusty-agents can reuse it. `core::names` re-exports it.
+    "session-naming",
 ] }
 # `bug-capture` enables Phase 1 ERROR event capture to JSONL + in-memory ring (bug-reporting #478)
 # `console-metrics` enables `trusty_common::console_metrics` (used unconditionally by
