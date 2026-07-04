@@ -26,11 +26,12 @@ use crate::commands::first_run::needs_first_run_clone;
 /// racing `needs_first_run_clone_returns_some_when_no_clone`.
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
-    PickerDecision, derive_project, fallback_protected, github_host, is_github_remote, is_zombie,
-    needs_restart, non_github_refusal_message, parse_picker_choice, print_non_tty_hint,
-    print_project_context, tty_gate,
+    PickerDecision, derive_project, fallback_protected, github_host, is_github_remote,
+    non_github_refusal_message, parse_picker_choice, print_non_tty_hint, print_project_context,
+    tty_gate,
 };
 use crate::commands::guided_launch::spawn_progress_message;
+use crate::commands::guided_resume::{ResumeAction, is_zombie, needs_restart, plan_resume};
 use crate::commands::managed::{filter_live_sessions, is_live_session_state};
 
 // ── parse_picker_choice ───────────────────────────────────────────────────────
@@ -492,6 +493,80 @@ fn guided_resume_not_zombie_active_with_tmux() {
     assert!(
         !is_zombie("active", true),
         "active + live tmux is the normal attach path, not a zombie"
+    );
+}
+
+// ── plan_resume (#2001 zombie auto-reconcile) ─────────────────────────────────
+// `plan_resume` is the pure branch-selection seam that drives resume_guided_session.
+// It composes is_zombie + needs_restart into the three concrete actions the I/O
+// driver takes. The zombie case must now select ReconcileThenRestart (auto-stop
+// then restart) rather than bailing — the operator does nothing.
+
+#[test]
+fn guided_resume_plan_active_live_tmux_attaches() {
+    // Why: active state with a live tmux pane is the happy path — attach directly,
+    // no daemon round-trip, no stop, no resume.
+    assert_eq!(
+        plan_resume("active", true),
+        ResumeAction::Attach,
+        "active + live tmux must attach directly"
+    );
+}
+
+#[test]
+fn guided_resume_plan_stopped_restarts() {
+    // Why: stopped state must go straight to the daemon /resume restart path —
+    // NOT reconcile (there is nothing to stop) and NOT a bare attach.
+    assert_eq!(
+        plan_resume("stopped", false),
+        ResumeAction::Restart,
+        "stopped must select the plain Restart path"
+    );
+}
+
+#[test]
+fn guided_resume_plan_errored_restarts() {
+    // Why: errored is resumable via /resume just like stopped.
+    assert_eq!(
+        plan_resume("errored", false),
+        ResumeAction::Restart,
+        "errored must select the plain Restart path"
+    );
+}
+
+#[test]
+fn guided_resume_plan_active_no_tmux_reconciles_then_restarts() {
+    // Why (#2001): the canonical zombie — daemon says active but tmux is gone. The
+    // fix is to auto-stop (reset the record to Stopped) THEN restart, so the plan
+    // must be ReconcileThenRestart, not a bail and not a plain Restart (a bare
+    // /resume would 409 because the record is still active).
+    assert_eq!(
+        plan_resume("active", false),
+        ResumeAction::ReconcileThenRestart,
+        "active + no tmux must reconcile (auto-stop) then restart"
+    );
+}
+
+#[test]
+fn guided_resume_plan_provisioning_no_tmux_reconciles_then_restarts() {
+    // Why (#2001): provisioning + tmux gone is also a zombie and follows the same
+    // auto-stop-then-restart recovery.
+    assert_eq!(
+        plan_resume("provisioning", false),
+        ResumeAction::ReconcileThenRestart,
+        "provisioning + no tmux must reconcile then restart"
+    );
+}
+
+#[test]
+fn guided_resume_plan_stopped_with_stale_tmux_still_restarts() {
+    // Why: a stopped record whose stale tmux pane is somehow still alive is NOT a
+    // zombie (needs_restart is true) — it takes the plain Restart path (the daemon
+    // kills the stale pane). Guards the branch ordering in plan_resume.
+    assert_eq!(
+        plan_resume("stopped", true),
+        ResumeAction::Restart,
+        "stopped + stale live tmux must still take the Restart path, not reconcile"
     );
 }
 

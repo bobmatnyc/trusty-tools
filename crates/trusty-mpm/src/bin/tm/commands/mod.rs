@@ -17,6 +17,7 @@ pub(crate) mod guided;
 pub(crate) mod guided_autostart;
 pub(crate) mod guided_launch;
 pub(crate) mod guided_launch_sse;
+pub(crate) mod guided_resume;
 pub(crate) mod hook_rewrite;
 pub(crate) mod install;
 pub(crate) mod issue;
