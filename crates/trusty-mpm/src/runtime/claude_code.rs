@@ -43,7 +43,7 @@ fn shell_single_quote(s: &str) -> String {
 /// Why: two invariants must hold on the pane command. (1) `-u ANTHROPIC_API_KEY`
 /// strips the API key so Claude Code falls back to OAuth, preventing key leakage
 /// through pane history. (2) When a managed `CLAUDE_CONFIG_DIR` is resolved,
-/// `env CLAUDE_CONFIG_DIR='<dir>'` points the session at the tm-owned config home
+/// `env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='<dir>'` points the session at the tm-owned config home
 /// (`~/.trusty-tools/trusty-mpm/claude-config/`). Under the retained
 /// `--setting-sources project,local` flag (see [`spawn_command`]) this config
 /// home does NOT supply the agent roster/skills/hooks — those load from the
@@ -53,18 +53,24 @@ fn shell_single_quote(s: &str) -> String {
 /// `~/.claude`. The path is SINGLE-QUOTED via [`shell_single_quote`] so a home
 /// dir with a space does not word-split and break the pane. Both settings are
 /// applied via a single `env` prefix, consistent with the scrub-only prefix.
-/// What: `env CLAUDE_CONFIG_DIR='<dir>' -u ANTHROPIC_API_KEY <claude_bin>` (path
+/// What: `env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR='<dir>' <claude_bin>` (path
 /// single-quoted) when `config_dir` is `Some`; the legacy
 /// `env -u ANTHROPIC_API_KEY <claude_bin>` when `None` (home unresolved — no
-/// config dir to point at).
+/// config dir to point at). The `-u NAME` option MUST precede any `NAME=VALUE`
+/// assignment per POSIX `env` grammar (`env [OPTION]... [NAME=VALUE]...
+/// [COMMAND]...`); putting `CLAUDE_CONFIG_DIR=<dir>` before `-u` makes `env`
+/// stop parsing options at the first `NAME=VALUE` and try to exec `-u` as a
+/// command (`env: -u: No such file or directory`), which fatally kills every
+/// managed session spawn.
 /// Test: `spawn_command_contains_env_scrub`, `spawn_command_sets_claude_config_dir`,
 /// `spawn_command_without_config_dir_omits_it`,
-/// `env_bin_prefix_quotes_config_dir_with_space`.
+/// `env_bin_prefix_quotes_config_dir_with_space`,
+/// `env_bin_prefix_orders_unset_flag_before_config_dir_assignment`.
 fn env_bin_prefix(claude_bin: &str, config_dir: Option<&Path>) -> String {
     match config_dir {
         Some(dir) => {
             let quoted = shell_single_quote(&dir.display().to_string());
-            format!("env CLAUDE_CONFIG_DIR={quoted} -u ANTHROPIC_API_KEY {claude_bin}")
+            format!("env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR={quoted} {claude_bin}")
         }
         None => format!("env -u ANTHROPIC_API_KEY {claude_bin}"),
     }
@@ -305,7 +311,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// if it cannot be found on `PATH` or in the well-known daemon dirs),
     /// provisions + trust-seeds the tm-owned `CLAUDE_CONFIG_DIR` via
     /// [`prepare_managed_config`], then sends [`spawn_command`]
-    /// (`env CLAUDE_CONFIG_DIR=<dir> -u ANTHROPIC_API_KEY <abs-claude>` plus the
+    /// (`env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=<dir> <abs-claude>` plus the
     /// isolation/permission flags) to the pane; the task is logged for
     /// observability but not passed to the command (Claude Code reads
     /// instructions from CLAUDE.md or an interactive prompt).
@@ -482,14 +488,39 @@ mod tests {
         let cmd = spawn_command("claude", Some(dir));
         assert!(
             cmd.contains(
-                "env CLAUDE_CONFIG_DIR='/home/bob/.trusty-tools/trusty-mpm/claude-config' \
-                 -u ANTHROPIC_API_KEY claude"
+                "env -u ANTHROPIC_API_KEY \
+                 CLAUDE_CONFIG_DIR='/home/bob/.trusty-tools/trusty-mpm/claude-config' claude"
             ),
-            "spawn command must set (single-quoted) CLAUDE_CONFIG_DIR before scrubbing the key: {cmd}"
+            "spawn command must scrub the key (via -u, BEFORE the NAME=VALUE assignment per \
+             POSIX env grammar) then set (single-quoted) CLAUDE_CONFIG_DIR: {cmd}"
         );
         assert!(
             cmd.contains("--setting-sources project,local"),
             "isolation flag must still be present with a config dir: {cmd}"
+        );
+    }
+
+    #[test]
+    fn env_bin_prefix_orders_unset_flag_before_config_dir_assignment() {
+        // Regression guard (fatal bug): POSIX `env`'s grammar is
+        // `env [OPTION]... [NAME=VALUE]... [COMMAND]...` — option flags like
+        // `-u NAME` MUST precede any `NAME=VALUE` assignment. Putting
+        // `CLAUDE_CONFIG_DIR=<dir>` before `-u` makes `env` stop parsing options
+        // at the first NAME=VALUE and try to exec `-u` as a command
+        // (`env: -u: No such file or directory`), fatally killing every managed
+        // session spawn.
+        let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
+        let cmd = spawn_command("claude", Some(dir));
+        let u_pos = cmd
+            .find("-u ANTHROPIC_API_KEY")
+            .expect("cmd must contain -u ANTHROPIC_API_KEY");
+        let config_pos = cmd
+            .find("CLAUDE_CONFIG_DIR=")
+            .expect("cmd must contain CLAUDE_CONFIG_DIR=");
+        assert!(
+            u_pos < config_pos,
+            "-u ANTHROPIC_API_KEY must appear BEFORE CLAUDE_CONFIG_DIR= per POSIX env \
+             option-then-assignment grammar: {cmd}"
         );
     }
 
@@ -514,8 +545,8 @@ mod tests {
         let cmd = spawn_command("claude", Some(dir));
         assert!(
             cmd.contains(
-                "env CLAUDE_CONFIG_DIR='/Users/John Doe/.trusty-tools/trusty-mpm/claude-config' \
-                 -u ANTHROPIC_API_KEY claude"
+                "env -u ANTHROPIC_API_KEY \
+                 CLAUDE_CONFIG_DIR='/Users/John Doe/.trusty-tools/trusty-mpm/claude-config' claude"
             ),
             "config dir with a space must be single-quoted and intact: {cmd}"
         );
@@ -614,8 +645,8 @@ mod tests {
             sends[0].1,
             spawn_command(&claude_bin, config_dir.as_deref())
         );
-        // And it must carry the env scrub regardless (an intervening
-        // `CLAUDE_CONFIG_DIR=` may sit between `env` and `-u`).
+        // And it must carry the env scrub regardless (the option must precede
+        // any intervening `CLAUDE_CONFIG_DIR=` assignment per POSIX env grammar).
         assert!(sends[0].1.contains("-u ANTHROPIC_API_KEY"));
     }
 
@@ -646,10 +677,10 @@ mod tests {
         let cmd = resume_command("claude", Some(dir), Some("abc-123"), false);
         assert!(
             cmd.contains(
-                "env CLAUDE_CONFIG_DIR='/home/bob/.trusty-tools/trusty-mpm/claude-config' \
-                 -u ANTHROPIC_API_KEY claude"
+                "env -u ANTHROPIC_API_KEY \
+                 CLAUDE_CONFIG_DIR='/home/bob/.trusty-tools/trusty-mpm/claude-config' claude"
             ),
-            "resume command must export (single-quoted) CLAUDE_CONFIG_DIR: {cmd}"
+            "resume command must export (single-quoted) CLAUDE_CONFIG_DIR after the -u option: {cmd}"
         );
         assert!(
             cmd.contains("--resume abc-123"),
