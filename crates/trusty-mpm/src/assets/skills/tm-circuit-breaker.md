@@ -44,15 +44,18 @@ Edit target the PM may touch directly.
 
 **Violation:**
 ```
-PM: Edit(crates/trusty-mpm/src/core/paths.rs, ...)   # implementation
+PM: Edit(src/<file>, ...)                             # implementation
 PM: Write(docs/README.md, ...)                        # writing docs directly
 ```
 
 **Correct:**
 ```
 PM: Edit(.git/COMMIT_EDITMSG, ...)                    # ALLOWED
-PM: *delegates to rust-engineer*
-rust-engineer: Edit(crates/trusty-mpm/src/core/paths.rs)
+PM: *delegates to the language-appropriate engineer*  # rust-engineer for a Cargo
+                                                       # project, nextjs-/typescript-
+                                                       # engineer for Node, python-
+                                                       # engineer for a pyproject, ...
+<engineer>: Edit(src/<file>)
 PM: runs git tracking after the agent returns
 ```
 
@@ -75,14 +78,14 @@ files, never for "understanding" the codebase.
 
 **Violation:**
 ```
-PM: Read(crates/trusty-mpm/src/core/paths.rs)
-PM: Read(crates/trusty-mpm/src/core/bundle.rs)        # 2nd Read
-PM: Grep("skill_source_dir", path="crates/")           # investigation
+PM: Read(src/<file-a>)
+PM: Read(src/<file-b>)                                 # 2nd Read
+PM: Grep("<symbol>", path="src/")                      # investigation
 ```
 
 **Correct:**
 ```
-PM: mcp__trusty-search__search(query="skill deploy", index_id="trusty-mpm")
+PM: mcp__trusty-search__search(query="<what to find>", index_id="<project>")
 PM: *delegates to Research if results are insufficient*
 Research: reads/greps as needed, returns findings
 PM: uses findings to write a grounded Engineer delegation
@@ -106,9 +109,11 @@ or process status — never the PM's own assessment.
 
 **Correct:**
 ```
-PM: *delegates to rust-engineer, which runs `cargo test -p trusty-mpm skill_deployer`*
-rust-engineer: "7 passed; 0 failed" (raw output attached)
-PM: "rust-engineer verified: cargo test -p trusty-mpm skill_deployer → 7 passed, 0 failed"
+PM: *delegates to the language-appropriate engineer, which runs the project's
+    own test gate (`cargo test` for Cargo, `npm test`/`npm run build` for Node,
+    `pytest` for a pyproject, `go test ./...` for Go, ...)*
+<engineer>: "7 passed; 0 failed" (raw output attached)
+PM: "<engineer> verified: <project test command> → 7 passed, 0 failed"
 ```
 
 ## CB#4: File Tracking
@@ -240,7 +245,7 @@ file target.
 **Action**: BLOCK — delegate to the Engineer agent, or use Edit/Write
 directly ONLY for the CB#1 exception (commit messages).
 
-**Violation:** `PM: Bash(sed -i 's/old/new/' Cargo.toml)`
+**Violation:** `PM: Bash(sed -i 's/old/new/' <any-file>)`
 
 **Allowed Bash uses (never blocked)**: `git status`, `git add`, `git commit`,
 `git log`, `git diff`, `ls`, `pwd`, `cd` — navigation and git tracking only.

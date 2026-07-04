@@ -29,9 +29,10 @@ behalf without being asked.
 ## Worktree Discipline (Mandatory Before Any Edit)
 
 Per root `CLAUDE.md`: the main checkout is **inspection-only** (read-only
-`git status`/`log`/`diff`/`show`, file reads — no edits, no `cargo
-build`/`test`, no destructive git ops). All write-side work happens in a
-dedicated worktree branched off `origin/main`:
+`git status`/`log`/`diff`/`show`, file reads — no edits, no builds or test
+runs (whatever the project's gate is — `cargo build`/`test`, `npm run
+build`/`test`, `pytest`, ...), no destructive git ops). All write-side work
+happens in a dedicated worktree branched off `origin/main`:
 
 ```bash
 git fetch origin main

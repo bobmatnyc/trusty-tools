@@ -79,13 +79,15 @@ the PM tracked them immediately after each agent — not batched at the end.
 ## Example Workflow
 
 ```bash
-# After rust-engineer adds a new doctor probe
+# After the language-appropriate engineer adds a new feature
+# (paths shown are placeholders — substitute the files your engineer actually
+#  touched, e.g. src/handlers/auth.ts, app/services/user.py, src/core/foo.rs)
 git status
-#   modified:   crates/trusty-mpm/src/daemon/doctor.rs
-#   modified:   crates/trusty-mpm/src/core/skill_deployer.rs
+#   modified:   src/<module>/<file-a>
+#   modified:   src/<module>/<file-b>
 
-git add crates/trusty-mpm/src/daemon/doctor.rs crates/trusty-mpm/src/core/skill_deployer.rs
-git commit -m "fix(trusty-mpm): warn instead of silent no-op on empty skill source (A2)
+git add src/<module>/<file-a> src/<module>/<file-b>
+git commit -m "fix(<scope>): warn instead of silent no-op on empty input
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 

@@ -48,8 +48,8 @@ evidence]"`.
 **Good evidence** is specific, measurable, attributed, and reproducible:
 - File paths and line numbers; URLs and endpoints tested; HTTP status codes
 - "12 tests passed, 0 failed"; "HTTP 200 OK"; "no console errors found"
-- "web-qa verified via browser navigation"; "rust-engineer ran `cargo test -p
-  trusty-mpm skill_deployer`"
+- "web-qa verified via browser navigation"; "the engineer ran the project's
+  test gate (e.g. `cargo test`, `npm test`, `pytest`, or `go test ./...`)"
 - Reproducible steps: exact command run, exact URL navigated
 
 **Insufficient evidence (violations)**: "works", "looks good", "should be
@@ -84,15 +84,14 @@ console error check, and relevant network request status.
 ## Example Good Report
 
 ```
-Work complete: skill-source doctor probe (A2)
+Work complete: input-validation guard (A2)
 
-Implementation: rust-engineer added check_skill_source in daemon/doctor.rs
-and the tracing::warn! calls in skill_deployer.rs.
-Files: crates/trusty-mpm/src/daemon/doctor.rs (+45),
-crates/trusty-mpm/src/core/skill_deployer.rs (+12).
+Implementation: the engineer added validate_input in src/<module>/<file-a>
+and the warning-log calls in src/<module>/<file-b>.
+Files: src/<module>/<file-a> (+45), src/<module>/<file-b> (+12).
 Commit: a15150fc
 
-Testing: cargo test -p trusty-mpm --lib doctor
+Testing: <the project's test command, e.g. `cargo test`, `npm test`, `pytest`>
   37 passed; 0 failed; 0 ignored
 
 All acceptance criteria met.
