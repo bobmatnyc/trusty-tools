@@ -24,6 +24,7 @@ use tracing::info;
 use trusty_common::console_metrics::CONSOLE_METRICS_METHOD;
 
 use crate::{
+    config::ReviewConfig,
     integrations::github::{AuthStrategy, GithubClient, RunMode},
     mcp::console_metrics,
     models::ReviewResult,
@@ -199,7 +200,7 @@ async fn call_review_pr(args: &Value, state: &AppState) -> Result<Value, ToolErr
     // Resolve GitHub token.
     let client = GithubClient::new()
         .map_err(|e| ToolError::InvalidParams(format!("failed to build HTTP client: {e}")))?;
-    let token = AuthStrategy::select(RunMode::Serve, None)
+    let token = AuthStrategy::select(mcp_run_mode(&state.config), None)
         .resolve_token(&client, &state.config, owner)
         .await
         .map_err(|e| ToolError::InvalidParams(format!("GitHub auth failed: {e}")))?;
@@ -218,7 +219,7 @@ async fn call_review_pr(args: &Value, state: &AppState) -> Result<Value, ToolErr
         write_log: false,
         print_result: false,
         trigger: TriggerDecision::ForceDryRun,
-        run_mode: RunMode::Serve,
+        run_mode: mcp_run_mode(&state.config),
         allow_posting: false,
         caller_context: crate::pipeline::runner::CallerContext::default(),
     };
@@ -270,7 +271,7 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
         write_log: false,
         print_result: false,
         trigger: TriggerDecision::ForceDryRun,
-        run_mode: RunMode::Serve,
+        run_mode: mcp_run_mode(&state.config),
         allow_posting: false,
         caller_context: crate::pipeline::runner::CallerContext::default(),
     };
@@ -353,6 +354,41 @@ async fn call_review_health(state: &AppState) -> Value {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Choose the `RunMode` the MCP review path should authenticate under.
+///
+/// Why: MCP review is typically invoked by a developer's harness (Claude Code,
+/// MPM) against *their own* PR, so it should authenticate with their local `gh`
+/// login (CLI auth) — not as a GitHub App.  Hardcoding `RunMode::Serve` here
+/// selected `AuthStrategy::App`, which demands `GITHUB_APP_ID` /
+/// `GITHUB_APP_PRIVATE_KEY`; with no App configured the review failed with
+/// "GitHub App credentials … are required in service mode" and returned no
+/// verdict (issue #1993).  Local-first: only route through the App (`Serve`)
+/// when App credentials are actually present, so hosted-bot deployments (which
+/// DO configure the App) are unaffected while local invocations use `gh` auth.
+/// What: returns `RunMode::Serve` iff BOTH `github_app_id` and
+/// `github_app_private_key` are `Some` and non-empty (after trimming); otherwise
+/// `RunMode::Cli`.  The `TRUSTY_REVIEW_AUTH_MODE` override still wins because
+/// this value is passed to `AuthStrategy::select`, which applies the override
+/// first — this only changes the *default*.
+/// Test: `mcp_run_mode_serve_with_app_creds`, `mcp_run_mode_cli_without_app_creds`,
+/// `mcp_run_mode_cli_with_empty_app_creds`, `mcp_run_mode_resolves_cli_strategy`
+/// (in `tools_tests.rs`).
+fn mcp_run_mode(config: &ReviewConfig) -> RunMode {
+    let has_app_id = config
+        .github_app_id
+        .as_deref()
+        .is_some_and(|v| !v.trim().is_empty());
+    let has_app_key = config
+        .github_app_private_key
+        .as_deref()
+        .is_some_and(|v| !v.trim().is_empty());
+    if has_app_id && has_app_key {
+        RunMode::Serve
+    } else {
+        RunMode::Cli
+    }
+}
 
 /// Build `ReviewDeps` from the shared `AppState`, honouring the provider implied
 /// by a `reviewer_model` override (closes #1233).
