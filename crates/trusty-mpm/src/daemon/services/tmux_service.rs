@@ -209,7 +209,8 @@ impl TmuxService {
         // may already be gone); the original `send_line` error still propagates
         // to the caller — the rollback never masks it.
         let target = TmuxTarget::session(tmux_name);
-        if let Err(e) = driver.send_line(&target, crate::daemon::spawn_command::spawn_command()) {
+        if let Err(e) = driver.send_line(&target, crate::daemon::spawn_command::relaunch_command())
+        {
             Self::kill_best_effort(tmux_name);
             return Err(DaemonError::Internal(format!(
                 "failed to launch claude in {tmux_name}: {e}"
