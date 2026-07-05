@@ -151,6 +151,27 @@ fn resume_command(
     }
 }
 
+/// Encode a workspace path the same way Claude Code names its project dir.
+///
+/// Why: both the `--continue`-eligibility check ([`has_prior_conversation_in`])
+/// and the `--resume <id>`-existence check ([`session_id_exists_in`]) must
+/// derive the SAME on-disk project directory name for a given `cwd` — if the
+/// two ever computed the encoding differently (e.g. one gets tweaked and the
+/// other doesn't), `--continue` detection and `--resume` existence detection
+/// would silently disagree about which conversations exist. Sharing one
+/// helper makes that impossible.
+/// What: replaces every `/` in the path with `-` (Claude Code's project-dir
+/// naming scheme). A leading `/` becomes `-`, so `/private/tmp/foo` →
+/// `-private-tmp-foo`.
+/// Test: `encode_project_dir_replaces_slashes`,
+/// `has_prior_conversation_returns_true_when_jsonl_exists`,
+/// `session_id_exists_true_for_real_jsonl_file`,
+/// `session_id_exists_finds_hardcoded_dir_name_for_known_cwd` (non-circular
+/// regression guard against encoding-scheme drift).
+fn encode_project_dir(cwd: &Path) -> String {
+    cwd.to_string_lossy().replace('/', "-")
+}
+
 /// Detect whether Claude Code has prior conversation history for `cwd` (#1840).
 ///
 /// Why: `claude --continue` exits with "No conversation found to continue" when
@@ -173,17 +194,16 @@ fn has_prior_conversation(cwd: &Path) -> bool {
 /// test execution). Separating the I/O root from the detection logic keeps the
 /// detection pure and mockable.
 /// What: returns `true` when `<projects_dir>/<encoded-cwd>/` exists and contains
-/// at least one `.jsonl` file. The encoded path replaces every `/` with `-`.
-/// A leading `/` becomes `-`, so `/private/tmp/foo` → `-private-tmp-foo`.
+/// at least one `.jsonl` file. The encoded path comes from
+/// [`encode_project_dir`] (every `/` replaced with `-`); a leading `/` becomes
+/// `-`, so `/private/tmp/foo` → `-private-tmp-foo`.
 /// Test: `has_prior_conversation_returns_false_for_fresh_workspace`,
 /// `has_prior_conversation_returns_true_when_jsonl_exists`.
 fn has_prior_conversation_in(cwd: &Path, projects_dir: &Path) -> bool {
     if !projects_dir.is_dir() {
         return false;
     }
-    // Claude Code encodes the workspace path by replacing every '/' with '-'.
-    let encoded = cwd.to_string_lossy().replace('/', "-");
-    let project_dir = projects_dir.join(&encoded);
+    let project_dir = projects_dir.join(encode_project_dir(cwd));
     project_dir.is_dir()
         && std::fs::read_dir(&project_dir)
             .map(|d| {
@@ -191,6 +211,73 @@ fn has_prior_conversation_in(cwd: &Path, projects_dir: &Path) -> bool {
                     .any(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
             })
             .unwrap_or(false)
+}
+
+/// Resolve the Claude Code `projects` directory used for session storage.
+///
+/// Why: `CLAUDE_CONFIG_DIR` relocates the ENTIRE config home for a managed
+/// session — not just settings/agents/skills but also the conversation-history
+/// store under `<config_dir>/projects/` (verified empirically: this daemon's
+/// own tool-result artifacts land under
+/// `~/.trusty-tools/trusty-mpm/claude-config/projects/<encoded-cwd>/...`). So
+/// the existence check for a stored `claude_session_id` (#2013) must look under
+/// the SAME `config_dir` the session was/will be launched with, not always
+/// `~/.claude/projects` — otherwise every id would appear "missing" for managed
+/// sessions and resume would never use `--resume`.
+/// What: `<config_dir>/projects` when a managed config dir is resolved; falls
+/// back to `~/.claude/projects` when `config_dir` is `None` (home-unresolved
+/// legacy path, matching [`has_prior_conversation`]'s fallback).
+/// Test: `session_id_exists_prefers_config_dir_projects_when_present`,
+/// `session_id_exists_falls_back_to_home_claude_when_no_config_dir`.
+fn projects_dir_for(config_dir: Option<&Path>) -> Option<std::path::PathBuf> {
+    if let Some(dir) = config_dir {
+        return Some(dir.join("projects"));
+    }
+    dirs::home_dir().map(|h| h.join(".claude").join("projects"))
+}
+
+/// Existence-check a stored `claude_session_id` against Claude Code's local
+/// session store before trusting `--resume <id>` (#2013).
+///
+/// Why: a `claude_session_id` persisted from a prior run can go stale (the
+/// session file was pruned, moved, or never made it to disk after a crash).
+/// `claude --resume <missing-id>` fails hard with no graceful recovery, which
+/// turns `tm` resume into a dead end. Checking first lets the caller fall back
+/// to `--continue` or a plain spawn instead of a hard failure.
+/// What: best-effort filesystem check — `true` only when
+/// `<projects_dir>/<encoded-cwd>/<id>.jsonl` exists as a regular file, where
+/// `projects_dir` is resolved via [`projects_dir_for`] and the cwd is encoded
+/// via the shared [`encode_project_dir`] helper (every `/` becomes `-`) — the
+/// same encoding [`has_prior_conversation_in`] uses, so the two checks can
+/// never silently disagree.
+/// Never panics: an unresolvable projects dir, a missing file, or any I/O
+/// error all conservatively resolve to `false` (safest outcome — it only ever
+/// causes an extra fallback, never a hard failure or a wrong `--resume`).
+/// Test: `session_id_exists_true_for_real_jsonl_file`,
+/// `session_id_exists_false_for_missing_id`,
+/// `session_id_exists_false_when_projects_dir_absent`.
+fn session_id_exists(cwd: &Path, config_dir: Option<&Path>, id: &str) -> bool {
+    match projects_dir_for(config_dir) {
+        Some(projects_dir) => session_id_exists_in(cwd, &projects_dir, id),
+        None => false,
+    }
+}
+
+/// Inner implementation of the session-id existence check, testable with an
+/// injected `projects_dir` (mirrors [`has_prior_conversation_in`]'s pattern).
+///
+/// Why: unit tests need to point at a temp directory rather than mutating
+/// `HOME`/`CLAUDE_CONFIG_DIR` process-globals.
+/// What: encodes `cwd` via [`encode_project_dir`] (every `/` → `-`) and checks
+/// `<projects_dir>/<encoded-cwd>/<id>.jsonl` is a regular file.
+/// Test: `session_id_exists_true_for_real_jsonl_file`,
+/// `session_id_exists_false_for_missing_id`,
+/// `session_id_exists_finds_hardcoded_dir_name_for_known_cwd`.
+fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
+    projects_dir
+        .join(encode_project_dir(cwd))
+        .join(format!("{id}.jsonl"))
+        .is_file()
 }
 
 /// Resolve, provision, and trust-seed the managed `CLAUDE_CONFIG_DIR` for a spawn.
@@ -345,19 +432,24 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
     }
 
-    /// Resume Claude Code with conversation continuity (#1744, #1840).
+    /// Resume Claude Code with conversation continuity (#1744, #1840, #2013).
     ///
     /// Why: `resume_managed` must restore the prior conversation rather than
-    /// starting fresh. If the stored `claude_session_id` is available,
-    /// `--resume <id>` restores the exact conversation; when absent AND prior
-    /// conversation history is detected (via [`has_prior_conversation`]),
-    /// `--continue` resumes the most-recent conversation; when neither applies,
-    /// a plain spawn is used to avoid the "No conversation found to continue"
-    /// error that otherwise drops the session to a bare shell (#1840).
+    /// starting fresh. If the stored `claude_session_id` is available AND
+    /// still resolves to a real session on disk (checked via
+    /// [`session_id_exists`], #2013), `--resume <id>` restores the exact
+    /// conversation. A stale id (the session was pruned, moved, or never
+    /// reached disk) is NOT passed to `--resume` — `claude --resume <missing>`
+    /// fails hard with no recovery — instead it is treated like "no id" and
+    /// falls back to the existing #1840 semantics: `--continue` when prior
+    /// conversation history is detected (via [`has_prior_conversation`]), else
+    /// a plain spawn, avoiding the "No conversation found to continue" error
+    /// that would otherwise drop the session to a bare shell.
     /// What: resolves the claude binary, provisions + trust-seeds the tm-owned
-    /// `CLAUDE_CONFIG_DIR` via [`prepare_managed_config`], checks for prior
-    /// conversation when `claude_session_id` is `None`, then sends the
-    /// appropriate [`resume_command`] to the tmux pane.
+    /// `CLAUDE_CONFIG_DIR` via [`prepare_managed_config`], existence-checks
+    /// `claude_session_id` against the resolved config dir, falls back when it
+    /// is missing, checks for prior conversation when no usable id remains,
+    /// then sends the appropriate [`resume_command`] to the tmux pane.
     /// Test: `spawn_resume_with_id_uses_resume_flag`,
     /// `spawn_resume_without_id_no_prior_conv_sends_plain_spawn`.
     fn spawn_resume(
@@ -374,7 +466,24 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
                     .into(),
             )
         })?;
-        if let Some(id) = claude_session_id {
+        let config_dir = prepare_managed_config(tmux_name, cwd);
+
+        // #2013: a stored id can go stale — existence-check it before trusting
+        // `--resume <id>` so a missing session falls back gracefully instead
+        // of a hard `claude` failure.
+        let effective_id = claude_session_id.filter(|id| {
+            let exists = session_id_exists(cwd, config_dir.as_deref(), id);
+            if !exists {
+                tracing::warn!(
+                    session = %tmux_name,
+                    claude_session_id = %id,
+                    "stored claude_session_id no longer resolves to a session on \
+                     disk; falling back instead of passing --resume (#2013)"
+                );
+            }
+            exists
+        });
+        if let Some(id) = effective_id {
             tracing::warn!(
                 session = %tmux_name,
                 claude_session_id = %id,
@@ -389,22 +498,21 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // or a fresh worktree that was never used).
         // Compute file_history separately so the debug log reflects the actual
         // filesystem check result rather than the combined (id || file) value.
-        let file_history = claude_session_id.is_none() && has_prior_conversation(cwd);
-        let prior = claude_session_id.is_some() || file_history;
+        let file_history = effective_id.is_none() && has_prior_conversation(cwd);
+        let prior = effective_id.is_some() || file_history;
         debug!(
             session = %tmux_name,
             cwd = %cwd.display(),
             task = %task,
             claude = %claude_bin,
-            resume = claude_session_id.is_some(),
+            resume = effective_id.is_some(),
             has_prior_conv = file_history, // reflects actual .jsonl file check, not the combined value
             "resuming claude-code in tmux pane"
         );
-        let config_dir = prepare_managed_config(tmux_name, cwd);
         self.tmux
             .send_line(
                 tmux_name,
-                &resume_command(&claude_bin, config_dir.as_deref(), claude_session_id, prior),
+                &resume_command(&claude_bin, config_dir.as_deref(), effective_id, prior),
             )
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
     }
@@ -767,9 +875,45 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn spawn_resume_with_id_uses_resume_flag() {
-        // Why (#1744): ClaudeCodeAdapter::spawn_resume must send --resume <id>
-        // to the pane when the claude_session_id is known.
-        // HOME is redirected so the config-dir provisioning is hermetic.
+        // Why (#1744, #2013): ClaudeCodeAdapter::spawn_resume must send
+        // --resume <id> to the pane when the claude_session_id is known AND
+        // still resolves to a real session on disk. HOME is redirected so the
+        // config-dir provisioning is hermetic; a matching session jsonl file
+        // is seeded under the resolved CLAUDE_CONFIG_DIR/projects/ so the
+        // #2013 existence check passes.
+        let _home = HomeGuard::set();
+        if ClaudeCodeAdapter::resolve_claude().is_none() {
+            return;
+        };
+        let cwd = Path::new("/tmp");
+        let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir()
+            .expect("config dir resolves under redirected HOME");
+        let encoded = cwd.to_string_lossy().replace('/', "-");
+        let project_dir = config_dir.join("projects").join(&encoded);
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("my-session-id.jsonl"), "{}").unwrap();
+
+        let fake = FakeTmux::new();
+        let adapter = ClaudeCodeAdapter::new(fake.clone());
+        adapter
+            .spawn_resume("tmpm-test", cwd, "task", Some("my-session-id"))
+            .expect("spawn_resume");
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1);
+        assert!(
+            sends[0].1.contains("--resume my-session-id"),
+            "spawn_resume with an existing id must use --resume: {}",
+            sends[0].1
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn spawn_resume_with_missing_id_falls_back_gracefully() {
+        // Why (#2013): a stale/unknown claude_session_id must NOT be passed to
+        // `--resume` (which would fail hard) — it must fall back the same way
+        // a `None` id does. HOME is redirected so the config dir is hermetic
+        // and no session jsonl is seeded, so the id is guaranteed missing.
         let _home = HomeGuard::set();
         if ClaudeCodeAdapter::resolve_claude().is_none() {
             return;
@@ -779,17 +923,131 @@ mod tests {
         adapter
             .spawn_resume(
                 "tmpm-test",
-                Path::new("/tmp"),
+                Path::new("/tmp/does-not-exist-2013"),
                 "task",
-                Some("my-session-id"),
+                Some("stale-session-id"),
             )
-            .expect("spawn_resume");
+            .expect("spawn_resume must not hard-fail on a missing id");
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1);
         assert!(
-            sends[0].1.contains("--resume my-session-id"),
-            "spawn_resume with id must use --resume: {}",
+            !sends[0].1.contains("--resume"),
+            "a missing id must NOT be passed to --resume: {}",
             sends[0].1
+        );
+        assert!(
+            !sends[0].1.contains("--continue"),
+            "a missing id with no prior conversation history must fall back to a \
+             plain spawn, not --continue: {}",
+            sends[0].1
+        );
+        assert!(
+            sends[0].1.contains("env -u ANTHROPIC_API_KEY"),
+            "fallback command must still scrub the API key: {}",
+            sends[0].1
+        );
+    }
+
+    #[test]
+    fn session_id_exists_true_for_real_jsonl_file() {
+        // Why (#2013): the positive path — a session file present under the
+        // encoded project dir must resolve as existing.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("my-workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let projects_dir = tmp.path().join("projects");
+        let encoded = cwd.to_string_lossy().replace('/', "-");
+        let project_dir = projects_dir.join(&encoded);
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("abc-123.jsonl"), "{}").unwrap();
+        assert!(
+            session_id_exists_in(&cwd, &projects_dir, "abc-123"),
+            "existing session file must resolve as present"
+        );
+    }
+
+    #[test]
+    fn session_id_exists_false_for_missing_id() {
+        // Why (#2013): a stale id — no matching .jsonl for this id, even
+        // though the workspace has OTHER conversation history — must resolve
+        // as absent so the caller falls back instead of hard-failing.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("my-workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let projects_dir = tmp.path().join("projects");
+        let encoded = cwd.to_string_lossy().replace('/', "-");
+        let project_dir = projects_dir.join(&encoded);
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("other-session.jsonl"), "{}").unwrap();
+        assert!(
+            !session_id_exists_in(&cwd, &projects_dir, "stale-id-not-present"),
+            "id with no matching file must resolve as absent"
+        );
+    }
+
+    #[test]
+    fn session_id_exists_false_when_projects_dir_absent() {
+        // Why (#2013): a fresh workspace / unresolved config dir must never
+        // panic or hard-fail — best-effort false is the safe default.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing_projects_dir = tmp.path().join("does-not-exist");
+        assert!(
+            !session_id_exists_in(tmp.path(), &missing_projects_dir, "any-id"),
+            "missing projects dir must resolve as absent, not panic"
+        );
+        assert!(
+            !session_id_exists(tmp.path(), None, "any-id"),
+            "session_id_exists with no config dir falls back to home resolution \
+             and must never panic even if HOME is unusual in the test env"
+        );
+    }
+
+    #[test]
+    fn encode_project_dir_replaces_slashes() {
+        // Why (#2013 cleanup): pins the shared encoding helper's contract
+        // directly, independent of either call site.
+        assert_eq!(
+            encode_project_dir(Path::new("/private/tmp/foo")),
+            "-private-tmp-foo"
+        );
+    }
+
+    #[test]
+    fn session_id_exists_finds_hardcoded_dir_name_for_known_cwd() {
+        // Why (#2013 cleanup, MEDIUM): the other session_id_exists tests build
+        // their expected path via the SAME formula the implementation uses
+        // (`cwd.to_string_lossy().replace('/', "-")` / `encode_project_dir`),
+        // so they cannot catch a future drift in the encoding scheme — the
+        // test and the code would drift together. This test instead types the
+        // expected directory name BY HAND as a literal, so if the encoding
+        // scheme ever changes (e.g. Claude Code starts hashing paths instead
+        // of dash-joining them), this assertion breaks independently of the
+        // implementation.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let projects_dir = tmp.path().join("projects");
+        // Hand-typed literal for cwd "/tmp/my-workspace" — NOT derived by
+        // calling encode_project_dir/replace('/', "-") here.
+        let project_dir = projects_dir.join("-tmp-my-workspace");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("known-id.jsonl"), "{}").unwrap();
+        assert!(
+            session_id_exists_in(Path::new("/tmp/my-workspace"), &projects_dir, "known-id"),
+            "session_id_exists_in must find the seeded session under the \
+             hand-typed expected dir name '-tmp-my-workspace'"
+        );
+    }
+
+    #[test]
+    fn projects_dir_for_prefers_config_dir_when_present() {
+        // Why (#2013): CLAUDE_CONFIG_DIR relocates the entire config home,
+        // including session storage — the projects dir must be resolved
+        // UNDER it, not always under ~/.claude, or the existence check would
+        // never find managed sessions.
+        let config_dir = Path::new("/tmp/some-managed-config-dir");
+        assert_eq!(
+            projects_dir_for(Some(config_dir)),
+            Some(config_dir.join("projects")),
+            "projects_dir_for must nest under the given config dir"
         );
     }
 
