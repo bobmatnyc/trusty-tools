@@ -10,6 +10,7 @@
 
 pub mod adopt;
 pub mod decommission;
+pub mod delete;
 pub mod driver;
 pub mod hook_sync;
 pub mod manager;
@@ -32,6 +33,9 @@ mod backfill_tests;
 
 #[cfg(test)]
 mod decommission_worktree_tests;
+
+#[cfg(test)]
+mod delete_tests;
 
 #[cfg(test)]
 mod reap_orphaned_worktrees_tests;

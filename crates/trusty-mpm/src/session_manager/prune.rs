@@ -198,7 +198,7 @@ impl PruneOutcome {
 /// What: returns true for `Active` and `Provisioning`; false for `Stopped`,
 /// `Errored`, and `Decommissioned`.
 /// Test: `prune_by_state_never_touches_active`.
-fn is_running(state: &ManagedSessionState) -> bool {
+pub(super) fn is_running(state: &ManagedSessionState) -> bool {
     matches!(
         state,
         ManagedSessionState::Active | ManagedSessionState::Provisioning

@@ -170,6 +170,24 @@ pub trait OrchestratorBackend: Send + Sync {
     /// Test: `dispatch_session_decommission_tool` (mock).
     async fn session_decommission(&self, session_id: &str) -> Result<Value, String>;
 
+    /// Back `session_delete`: hard-delete the session RECORD (#2012).
+    ///
+    /// Why: distinct from `session_decommission` — that op stops the runtime and
+    ///      may remove the workspace but ALWAYS leaves a `Decommissioned`
+    ///      tombstone; this permanently drops the record itself via the existing
+    ///      tombstone-compaction primitive, for an operator who wants a
+    ///      mis-provisioned or stale record gone outright. Fail-closed: a RUNNING
+    ///      session is refused unless `force` is true.
+    /// What: parses the id, calls
+    ///       [`crate::session_manager::SessionManager::delete_record`], and
+    ///       returns the pre-deletion record as JSON (plus `deleted: true`). A
+    ///       missing id is an error string; a running session refused without
+    ///       `force` is an error string naming the actionable next step. NEVER
+    ///       touches the workspace directory on disk (store-only operation).
+    /// Test: `dispatch_session_delete_tool`,
+    ///       `dispatch_session_delete_refuses_running_without_force` (mock).
+    async fn session_delete(&self, session_id: &str, force: bool) -> Result<Value, String>;
+
     /// Back `session_activity`: capture pane + lifecycle state.
     ///
     /// Why: the driver must reason about whether a session is working / idle /

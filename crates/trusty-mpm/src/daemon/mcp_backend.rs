@@ -476,6 +476,10 @@ impl OrchestratorBackend for StateBackend {
         super::mcp_session::session_decommission(&self.state, session_id).await
     }
 
+    async fn session_delete(&self, session_id: &str, force: bool) -> Result<Value, String> {
+        super::mcp_session::session_delete(&self.state, session_id, force).await
+    }
+
     async fn session_activity(&self, session_id: &str, lines: u32) -> Result<Value, String> {
         super::mcp_session::session_activity(&self.state, session_id, lines).await
     }

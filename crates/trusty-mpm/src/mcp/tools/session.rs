@@ -8,32 +8,36 @@
 //! existing [`crate::session_manager::SessionManager`] lifecycle ops that the
 //! HTTP `…/managed/*` routes already use, so the behaviour is identical across
 //! transports.
-//! What: [`session_tools`] returns the eight `{ name, description, inputSchema }`
+//! What: [`session_tools`] returns the nine `{ name, description, inputSchema }`
 //! descriptors — `session_new`, `session_stop`, `session_resume`,
-//! `session_decommission`, `session_activity`, `session_send`, and the #1508
-//! fleet-wide `session_decommission_ephemeral` + `session_prune`. The shared
-//! [`tool`] builder is re-exported from the parent module.
+//! `session_decommission`, `session_delete` (#2012), `session_activity`,
+//! `session_send`, and the #1508 fleet-wide `session_decommission_ephemeral` +
+//! `session_prune`. The shared [`tool`] builder is re-exported from the parent
+//! module.
 //! Test: `cargo test -p trusty-mpm` (in [`super`]) asserts the full catalog is
-//! well-formed and that each of these six names is present.
+//! well-formed and that each of these names is present.
 
 use serde_json::{Value, json};
 
 use super::tool;
 
-/// Build the eight session-lifecycle tool descriptors.
+/// Build the nine session-lifecycle tool descriptors.
 ///
-/// Why: spawning, stopping, resuming, decommissioning, observing, and driving a
-/// managed session are the operations the driver skill needs; surfacing them as
-/// MCP tools removes the CLI-scraping defect. #1508 adds two fleet-wide teardown
-/// tools so a driver can clean up its throwaway test sessions and purge legacy
-/// tombstones without scraping the CLI. Keeping them in their own builder keeps
-/// `tools/core.rs` and this file each well under the 500-SLOC cap.
-/// What: returns the eight descriptors in catalog order. `session_new` takes the
+/// Why: spawning, stopping, resuming, decommissioning, hard-deleting,
+/// observing, and driving a managed session are the operations the driver
+/// skill needs; surfacing them as MCP tools removes the CLI-scraping defect.
+/// #1508 adds two fleet-wide teardown tools so a driver can clean up its
+/// throwaway test sessions and purge legacy tombstones without scraping the
+/// CLI; #2012 adds `session_delete` — a single-record hard-delete distinct
+/// from `session_decommission` (which stops the runtime and may remove the
+/// workspace but always leaves a tombstone). Keeping them in their own builder
+/// keeps `tools/core.rs` and this file each well under the 500-SLOC cap.
+/// What: returns the nine descriptors in catalog order. `session_new` takes the
 /// repo/ref/task spawn inputs (plus optional `ephemeral`); the per-session tools
-/// take a `session_id`; `session_decommission_ephemeral` takes no args; and
-/// `session_prune` takes a `state` filter plus `dry_run`/`include_active`. Every
-/// schema sets `additionalProperties: false` so the driver gets a clear error on a
-/// typo.
+/// take a `session_id` (`session_delete` also takes optional `force`);
+/// `session_decommission_ephemeral` takes no args; and `session_prune` takes a
+/// `state` filter plus `dry_run`/`include_active`. Every schema sets
+/// `additionalProperties: false` so the driver gets a clear error on a typo.
 /// Test: `super::tests::session_tools_present`,
 /// `super::tests::catalog_names_match_constant`.
 pub(super) fn session_tools() -> Vec<Value> {
@@ -127,6 +131,31 @@ pub(super) fn session_tools() -> Vec<Value> {
                     "session_id": {
                         "type": "string",
                         "description": "Managed session id (UUID)."
+                    }
+                },
+                "required": ["session_id"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            "session_delete",
+            "Hard-delete a managed session's RECORD from the store — distinct \
+             from `session_decommission`, which stops the runtime and may remove \
+             the workspace but always leaves a Decommissioned tombstone behind. \
+             `session_delete` permanently drops the record itself. FAIL-CLOSED: \
+             a RUNNING session (Active/Provisioning) is REFUSED unless `force` is \
+             true. Never touches the workspace directory on disk — this is a \
+             store-only operation.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Managed session id (UUID)."
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Bypass the running-session guard and delete the record anyway. Defaults to false (the fail-closed default)."
                     }
                 },
                 "required": ["session_id"],

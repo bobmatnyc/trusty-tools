@@ -249,6 +249,42 @@ pub struct DecommissionResponse {
     pub workspace_path_was: Option<String>,
 }
 
+/// Query parameters for POST /api/v1/sessions/managed/{id}/delete (#2012).
+///
+/// Why: hard-delete needs exactly one caller-controlled knob — whether to
+/// bypass the running-session safety guard. A query flag (mirroring
+/// `?source_id=` on the list route) keeps the call a plain, bodyless POST for
+/// the common (non-running) case, while still letting `--force` opt in.
+/// What: `force` (default `false`, the fail-closed default) — when absent or
+/// `false`, [`crate::session_manager::SessionManager::delete_record`] refuses
+/// to delete a RUNNING (`Active`/`Provisioning`) session.
+/// Test: `delete_route_*` in managed_routes tests.
+#[derive(Debug, Deserialize)]
+pub struct DeleteQuery {
+    /// Bypass the running-session guard and hard-delete the record anyway.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// Response body for POST /api/v1/sessions/managed/{id}/delete (#2012).
+///
+/// Why: the record is gone from the store after this call succeeds, so a
+/// follow-up GET can never confirm what was deleted — the response carries the
+/// PRE-deletion snapshot (id, name, prior state, …) so the caller/CLI can
+/// render an honest confirmation.
+/// What: the pre-deletion [`SessionSummary`] plus `deleted: true`. Distinct
+/// from [`DecommissionResponse`] — delete never mutates the workspace, so
+/// there is no `workspace_removed` field here.
+/// Test: `delete_route_*` in managed_routes tests.
+#[derive(Debug, Serialize)]
+pub struct DeleteResponse {
+    /// Snapshot of the record as it was immediately BEFORE deletion.
+    #[serde(flatten)]
+    pub summary: SessionSummary,
+    /// Always `true` on success — the record was removed from the store.
+    pub deleted: bool,
+}
+
 /// Request body for POST /api/v1/sessions/managed/{id}/send.
 ///
 /// Why: the calling agentic process or operator injects text into the pane.
@@ -807,6 +843,49 @@ pub async fn decommission_managed_session(
         }
         Err(crate::session_manager::ManagedError::SessionNotFound(_)) => {
             (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// POST /api/v1/sessions/managed/{id}/delete — hard-delete the session RECORD (#2012).
+///
+/// Why: distinct from `decommission` (stop runtime + maybe remove workspace +
+/// tombstone) — this permanently drops the record itself from the store via
+/// the existing tombstone-compaction primitive
+/// ([`crate::session_manager::SessionManager::compact_record`]), for an
+/// operator who wants a mis-provisioned or stale record gone outright rather
+/// than left as a `Decommissioned` tombstone forever. Fail-closed: a RUNNING
+/// session (`Active`/`Provisioning`) is refused unless `?force=true`.
+/// What: parses the id and the `force` query flag, delegates to
+/// [`crate::session_manager::SessionManager::delete_record`], and maps its
+/// result — `Ok` → 200 with the pre-deletion [`DeleteResponse`] snapshot;
+/// `SessionNotFound` → 404; `InvalidState` (the running-guard refusal) → 409
+/// with the manager's actionable message; any other error → 500. NEVER
+/// touches the workspace directory on disk (see `delete_record`'s doc).
+/// Test: `delete_route_removes_record`, `delete_route_refuses_running_without_force`,
+/// `delete_route_force_bypasses_guard` in managed_routes tests.
+pub async fn delete_managed_session(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id_str): AxumPath<String>,
+    axum::extract::Query(q): axum::extract::Query<DeleteQuery>,
+) -> impl IntoResponse {
+    let id = match parse_id(&id_str) {
+        Ok(id) => id,
+        Err((code, msg)) => return (code, msg).into_response(),
+    };
+    let mgr = state.session_manager().await;
+    match mgr.delete_record(&id, q.force).await {
+        Ok(record) => Json(DeleteResponse {
+            summary: record_to_summary(&record),
+            deleted: true,
+        })
+        .into_response(),
+        Err(crate::session_manager::ManagedError::SessionNotFound(_)) => {
+            (StatusCode::NOT_FOUND, format!("session {id_str} not found")).into_response()
+        }
+        Err(crate::session_manager::ManagedError::InvalidState(_, reason)) => {
+            (StatusCode::CONFLICT, reason).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

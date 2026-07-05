@@ -5,8 +5,8 @@
 //! cap) live alongside it. Included via `#[path = "tests.rs"] mod tests;`.
 //! What: a `MockBackend` implementing every `OrchestratorBackend` method plus
 //! dispatch tests for the handshake, the core tools, the bug-reporting tools,
-//! and the eight session-lifecycle tools (six per-session #1221 + the two
-//! fleet-wide #1508 teardown verbs).
+//! and the nine session-lifecycle tools (seven per-session #1221 + #2012 ops +
+//! the two fleet-wide #1508 teardown verbs).
 //! Test: this IS the test module.
 
 use super::*;
@@ -93,6 +93,16 @@ impl OrchestratorBackend for MockBackend {
     }
     async fn session_decommission(&self, session_id: &str) -> Result<Value, String> {
         Ok(json!({ "id": session_id, "state": "decommissioned" }))
+    }
+    async fn session_delete(&self, session_id: &str, force: bool) -> Result<Value, String> {
+        // Mirror the real fail-closed contract: a non-forced delete of the
+        // sentinel "running-id" is refused, exercising the dispatch-level test.
+        if !force && session_id == "running-id" {
+            return Err(format!(
+                "session is active — stop it first, or pass --force ({session_id})"
+            ));
+        }
+        Ok(json!({ "id": session_id, "state": "stopped", "deleted": true }))
     }
     async fn session_activity(&self, session_id: &str, lines: u32) -> Result<Value, String> {
         Ok(json!({ "id": session_id, "lines": lines, "raw_pane": "" }))
@@ -264,9 +274,10 @@ async fn dispatch_initialize_returns_server_info() {
 
 #[tokio::test]
 async fn dispatch_tools_list_returns_full_catalog() {
-    // 9 pre-existing + 8 session-lifecycle + 5 console-facing + 4 project = 26
+    // 9 pre-existing + 9 session-lifecycle + 5 console-facing + 4 project = 27
     // (#1222 + the two #1220 config tools + the two #1508 fleet-teardown tools
-    // + the three #1519 project-registry tools + #1517 WI-5 project_resolve).
+    // + #2012 session_delete + the three #1519 project-registry tools + #1517
+    // WI-5 project_resolve).
     let req = Request {
         jsonrpc: Some("2.0".into()),
         id: Some(json!(1)),
@@ -275,7 +286,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 26);
+    assert_eq!(tools.as_array().unwrap().len(), 27);
 }
 
 /// Why: the console Config tab calls `config_read`; dispatch must route it and
@@ -581,12 +592,17 @@ async fn dispatch_session_new_requires_repo_url() {
     );
 }
 
-/// Why: the four single-id session tools must each parse `session_id` and
-/// forward it; one parameterised test covers stop/resume/decommission.
+/// Why: the single-id session tools must each parse `session_id` and forward
+/// it; one parameterised test covers stop/resume/decommission/delete.
 /// Test: this test.
 #[tokio::test]
 async fn dispatch_single_id_session_tools() {
-    for tool in ["session_stop", "session_resume", "session_decommission"] {
+    for tool in [
+        "session_stop",
+        "session_resume",
+        "session_decommission",
+        "session_delete",
+    ] {
         let resp = dispatch(&MockBackend, call(tool, json!({ "session_id": "s9" }))).await;
         let result = resp.result.unwrap();
         assert_eq!(result["isError"], false, "{tool} should succeed");
@@ -694,6 +710,52 @@ async fn dispatch_session_send_requires_text() {
             .as_str()
             .unwrap()
             .contains("text")
+    );
+}
+
+/// Why (#2012): `session_delete` must default `force` to `false` — a call that
+/// omits it must be refused for the mock's "running" sentinel id, proving the
+/// dispatch layer's fail-closed default reaches the backend (not just an
+/// internal manager-layer default).
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_delete_defaults_force_false() {
+    let resp = dispatch(
+        &MockBackend,
+        call("session_delete", json!({ "session_id": "running-id" })),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], true, "must refuse without --force");
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("running-id")
+    );
+}
+
+/// Why (#2012): `force: true` must reach the backend and bypass the mock's
+/// running-session refusal, proving the dispatch layer threads the optional
+/// `force` argument through to `OrchestratorBackend::session_delete`.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_delete_force_bypasses_guard() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_delete",
+            json!({ "session_id": "running-id", "force": true }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false, "force:true must bypass refusal");
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"deleted\":true")
     );
 }
 

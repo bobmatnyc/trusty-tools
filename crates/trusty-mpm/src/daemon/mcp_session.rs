@@ -1,5 +1,5 @@
-//! Daemon-side implementation of the eight session-lifecycle MCP tools
-//! (#1221 + the two fleet-wide #1508 teardown verbs).
+//! Daemon-side implementation of the nine session-lifecycle MCP tools
+//! (#1221 + the two fleet-wide #1508 teardown verbs + #2012's `session_delete`).
 //!
 //! Why: the MCP `StateBackend` (in `mcp_backend.rs`) must service the new
 //! session-lifecycle tools, but inlining their bodies there would push that file
@@ -9,9 +9,9 @@
 //! reimplementation — so MCP and HTTP behave identically. This module holds the
 //! wrapping logic; `session_new` delegates to the shared
 //! [`crate::daemon::managed_routes::spawn_managed`] used by the HTTP handler too.
-//! What: eight free async functions — the six per-session ops (`session_new`,
-//! `session_stop`, `session_resume`, `session_decommission`, `session_activity`,
-//! `session_send`) plus the two fleet-wide #1508 verbs
+//! What: nine free async functions — the seven per-session ops (`session_new`,
+//! `session_stop`, `session_resume`, `session_decommission`, `session_delete`,
+//! `session_activity`, `session_send`) plus the two fleet-wide #1508 verbs
 //! (`session_decommission_ephemeral`, `session_prune`) — each taking
 //! `&Arc<DaemonState>` plus parsed arguments and returning the same JSON shapes
 //! the HTTP routes return, or a human-readable error string.
@@ -132,6 +132,35 @@ pub async fn session_decommission(
         .await
         .map(|(r, _workspace_removed)| record_to_json(&r))
         .map_err(managed_err)
+}
+
+/// Hard-delete a session's RECORD from the store (`session_delete` tool, #2012).
+///
+/// Why: thin wrapper over
+/// [`crate::session_manager::SessionManager::delete_record`] — distinct from
+/// `session_decommission` (stops the runtime and may remove the workspace, but
+/// always leaves a `Decommissioned` tombstone). This permanently drops the
+/// record itself for an operator who wants a mis-provisioned or stale record
+/// gone outright. Fail-closed: refuses a RUNNING (`Active`/`Provisioning`)
+/// session unless `force` is `true`.
+/// What: parses the id, calls `delete_record(&id, force)`, and returns the
+/// pre-deletion record as JSON with `deleted: true` appended. NEVER touches the
+/// workspace directory on disk (store-only operation).
+/// Test: `session_delete_unknown_id_errors`, `session_delete_refuses_running`,
+/// `session_delete_force_bypasses_guard` in the `tests` module.
+pub async fn session_delete(
+    state: &Arc<DaemonState>,
+    session_id: &str,
+    force: bool,
+) -> Result<Value, String> {
+    let id = parse_managed_id(session_id)?;
+    let mgr = state.session_manager().await;
+    let record = mgr.delete_record(&id, force).await.map_err(managed_err)?;
+    let mut value = record_to_json(&record);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("deleted".to_string(), Value::Bool(true));
+    }
+    Ok(value)
 }
 
 /// Inspect a session's recent activity (`session_activity` tool).
@@ -286,6 +315,12 @@ mod tests {
                 .contains("not found")
         );
         assert!(
+            session_delete(&s, &id, false)
+                .await
+                .unwrap_err()
+                .contains("not found")
+        );
+        assert!(
             session_activity(&s, &id, 60)
                 .await
                 .unwrap_err()
@@ -309,11 +344,69 @@ mod tests {
             session_stop(&s, "xx").await,
             session_resume(&s, "xx").await,
             session_decommission(&s, "xx").await,
+            session_delete(&s, "xx", false).await,
             session_activity(&s, "xx", 60).await,
             session_send(&s, "xx", "t").await,
         ] {
             assert!(r.unwrap_err().contains("valid managed session id"));
         }
+    }
+
+    /// `session_delete` fail-closed guard + `force` bypass, driven end-to-end
+    /// against a real (isolated) [`SessionManager`] record (#2012).
+    ///
+    /// Why: `unknown_id_errors_for_all_single_id_tools` only proves the
+    /// not-found path; the actual running-guard/force behaviour needs a seeded
+    /// record, which requires an isolated store (never the shared production
+    /// one `state()` above points at).
+    /// What: seeds an Active (running) record via `create_with_id`, asserts a
+    /// non-forced `session_delete` call is refused (error mentions the
+    /// session), then asserts `force=true` succeeds, returns `deleted: true`,
+    /// and the record is gone from the store.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn session_delete_refuses_running_then_force_bypasses() {
+        use crate::runtime::RuntimeKind;
+
+        let root = tempfile::TempDir::new().expect("tempdir");
+        let s = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+        let mgr = s.session_manager().await;
+
+        let id = ManagedSessionId::new();
+        let ws = root.path().join(format!("{id}-mcp-delete"));
+        mgr.create_with_id(
+            id,
+            "mcp session_delete test".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws),
+            Some("https://example.com/r.git".to_string()),
+            Some("main".to_string()),
+            RuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session");
+
+        // Non-forced delete of a running (Provisioning) session must be refused.
+        let err = session_delete(&s, &id.to_string(), false)
+            .await
+            .expect_err("must refuse to delete a running session without force");
+        assert!(err.contains(&id.to_string()), "{err}");
+
+        // The record must still be present after the refusal.
+        assert!(mgr.get(&id).await.is_ok(), "record must survive refusal");
+
+        // `force: true` bypasses the guard and hard-deletes the record.
+        let value = session_delete(&s, &id.to_string(), true)
+            .await
+            .expect("force must bypass the running guard");
+        assert_eq!(value["deleted"], serde_json::json!(true));
+        assert!(
+            matches!(mgr.get(&id).await, Err(ManagedError::SessionNotFound(_))),
+            "record must be gone from the store after forced delete"
+        );
     }
 
     /// Why: an unknown `runtime` selector must be rejected up front (before any

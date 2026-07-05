@@ -1468,6 +1468,25 @@ pub(crate) enum SessionAction {
         /// Managed session id.
         id: String,
     },
+    /// Hard-delete a managed session RECORD from the store (#2012).
+    ///
+    /// Why: distinct from `decommission` (stop runtime + maybe remove
+    /// workspace + tombstone) — this permanently drops the record itself via
+    /// the existing tombstone-compaction primitive, for a mis-provisioned or
+    /// stale record an operator wants gone outright rather than left as a
+    /// `Decommissioned` tombstone forever. Fail-closed: refuses a RUNNING
+    /// session unless `--force` is passed.
+    /// What: POSTs `/api/v1/sessions/managed/{id}/delete?force=<bool>`. NEVER
+    /// removes the workspace directory from disk — deleting the record is a
+    /// store-only operation (use `decommission` first to also reclaim disk).
+    /// Test: `cli_parses_session_delete`.
+    Delete {
+        /// Managed session id.
+        id: String,
+        /// Bypass the running-session guard and delete the record anyway.
+        #[arg(long)]
+        force: bool,
+    },
     /// Reclaim idle managed sessions: stop idle, decommission done (#1313).
     ///
     /// Why: paused orchestration sessions leave behind idle SM tmux sessions that

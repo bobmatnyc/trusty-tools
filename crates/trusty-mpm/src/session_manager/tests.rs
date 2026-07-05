@@ -142,7 +142,7 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
     }
 }
 
-async fn make_manager(dir: &TempDir) -> (SessionManager, Arc<FakeTmuxDriver>) {
+pub(super) async fn make_manager(dir: &TempDir) -> (SessionManager, Arc<FakeTmuxDriver>) {
     let fake = FakeTmuxDriver::new();
     let mgr = SessionManager::new(dir.path(), fake.clone())
         .await
@@ -1352,7 +1352,7 @@ async fn manager_get_returns_last_known_on_reload_error() {
 /// workspace path that actually exists on disk (so a real decommission can remove
 /// it), upserts it, and returns the workspace path for assertions.
 /// Test: used by the prune tests below.
-async fn seed_record(
+pub(super) async fn seed_record(
     mgr: &SessionManager,
     root: &TempDir,
     id: ManagedSessionId,
@@ -1768,6 +1768,12 @@ async fn compact_record_removes_from_store() {
         Err(ManagedError::SessionNotFound(_))
     ));
 }
+
+// #2012: `delete_record` coverage (hard-delete via compact_record, the
+// fail-closed running-guard, --force bypass, and the workspace-dir-untouched
+// invariant) lives in the sibling `delete_tests` module — this file is at the
+// 1500-SLOC test cap, mirroring the `decommission_worktree_tests` /
+// `backfill_tests` split pattern documented there.
 
 /// Age-based auto-reap targets ONLY old EPHEMERAL sessions (#1508).
 ///
