@@ -325,16 +325,55 @@ fn test_write_project_hooks_is_idempotent() {
     assert_eq!(content_first, content_second, "file must not change");
 }
 
+/// Why (#2015): the crate ships the SAME binary under two `[[bin]]` names —
+/// `trusty-mpm` and the short `tm` alias used by `tm run`/`tm load`/`tm
+/// login`. `is_mpm_hook_command` must treat both names as the same owner so
+/// [`strip_mpm_hook_entries_for_events`] recognises a stale `tm`-named group
+/// when the next write resolves to `trusty-mpm` (or vice versa).
+/// What: asserts bare `"tm hook"`, absolute `"/opt/bin/tm hook"`, bare
+/// `"trusty-mpm hook"`, and absolute `"/opt/bin/trusty-mpm hook"` are all
+/// recognised, while an unrelated binary that merely shares the `tm` stem
+/// with a *different* trailing subcommand (not literally `hook`) is not.
+#[test]
+fn test_is_mpm_hook_command_recognises_tm_bin_name() {
+    assert!(is_mpm_hook_command("tm hook"), "bare 'tm' must match");
+    assert!(
+        is_mpm_hook_command("/opt/old/bin/tm hook"),
+        "absolute path ending in '/tm' must match"
+    );
+    assert!(
+        is_mpm_hook_command("trusty-mpm hook"),
+        "bare 'trusty-mpm' must still match"
+    );
+    assert!(
+        is_mpm_hook_command("/opt/new/bin/trusty-mpm hook"),
+        "absolute path ending in '/trusty-mpm' must still match"
+    );
+    assert!(
+        !is_mpm_hook_command("tm status"),
+        "must stay scoped to the ' hook' subcommand, not any 'tm' invocation"
+    );
+    assert!(
+        !is_mpm_hook_command("other-tool hook"),
+        "unrelated binaries named neither 'tm' nor 'trusty-mpm' must not match"
+    );
+}
+
 /// Why (#2015): `merge_hook_entries` dedups only by byte-for-byte JSON
-/// equality, so writing with a different resolved exe path (bin rename,
-/// worktree rebuild, reinstall) must REPLACE the stale MPM group rather
-/// than append a second one beside it — otherwise MPM hook groups
-/// accumulate and each fires on every lifecycle event.
-/// What: calls `write_project_hooks` twice with two different
-/// `exe_override` paths against the same settings file, seeding a
-/// pre-existing non-MPM hook group first. Asserts exactly one MPM hook
-/// group per event survives (matching the SECOND call's exe path) and
-/// the non-MPM group is untouched.
+/// equality, so writing with a different resolved exe path (bin rename —
+/// including the `tm` vs `trusty-mpm` [[bin]]-name switch, not just a
+/// directory change — worktree rebuild, reinstall) must REPLACE the stale
+/// MPM group rather than append a second one beside it — otherwise MPM hook
+/// groups accumulate and each fires on every lifecycle event.
+/// What: calls `write_project_hooks` twice — first with the `tm` bin name,
+/// then with the `trusty-mpm` bin name — against the same settings file,
+/// seeding a pre-existing non-MPM hook group first. Deliberately asserts on
+/// the RAW array length and literal command strings (NOT filtered through
+/// `is_mpm_hook_command`, the predicate under test) so a stale group that a
+/// narrow/buggy predicate fails to recognise cannot hide from the
+/// assertion: PreToolUse must have exactly 2 groups (1 preserved non-MPM +
+/// 1 MPM), and no surviving entry anywhere may reference the first (`tm`)
+/// exe path.
 #[test]
 fn test_write_project_hooks_replaces_stale_exe_path_group() {
     let tmp = TempDir::new().unwrap();
@@ -365,48 +404,57 @@ fn test_write_project_hooks_replaces_stale_exe_path_group() {
     let val: serde_json::Value = serde_json::from_str(&text).unwrap();
     let hooks = val["hooks"].as_object().expect("hooks must be present");
 
-    for event in &[
-        "PreToolUse",
-        "PostToolUse",
-        "Stop",
-        "SessionStart",
-        "SessionEnd",
-    ] {
+    // PreToolUse: the preserved non-MPM group + exactly one MPM group.
+    // Raw length, independent of `is_mpm_hook_command` — a stale group the
+    // predicate fails to recognise would otherwise inflate this to 3 while
+    // still passing a predicate-filtered assertion.
+    let pre = hooks["PreToolUse"]
+        .as_array()
+        .expect("PreToolUse must be present");
+    assert_eq!(
+        pre.len(),
+        2,
+        "PreToolUse must have exactly 2 groups (1 non-MPM + 1 MPM), found {}: {pre:?}",
+        pre.len()
+    );
+    let pre_commands: Vec<&str> = pre
+        .iter()
+        .filter_map(|g| g["hooks"][0]["command"].as_str())
+        .collect();
+    assert!(
+        pre_commands.contains(&"trusty-memory inbox-check"),
+        "pre-existing non-MPM hook group must be preserved, got: {pre_commands:?}"
+    );
+    assert!(
+        pre_commands
+            .iter()
+            .any(|c| c.contains("/opt/new/bin/trusty-mpm")),
+        "must contain the SECOND call's exe path, got: {pre_commands:?}"
+    );
+    assert!(
+        !pre_commands.iter().any(|c| c.contains("/opt/old/bin/tm")),
+        "must NOT contain the FIRST call's stale exe path, got: {pre_commands:?}"
+    );
+
+    // Every other event started empty, so exactly one (MPM) group must survive.
+    for event in &["PostToolUse", "Stop", "SessionStart", "SessionEnd"] {
         let arr = hooks[*event]
             .as_array()
             .unwrap_or_else(|| panic!("event {event} must be present after two writes"));
-        let mpm_groups: Vec<&serde_json::Value> = arr
-            .iter()
-            .filter(|g| {
-                g.get("hooks")
-                    .and_then(|h| h.as_array())
-                    .is_some_and(|cmds| {
-                        cmds.iter().all(|c| {
-                            c.get("command")
-                                .and_then(|v| v.as_str())
-                                .is_some_and(is_mpm_hook_command)
-                        })
-                    })
-            })
-            .collect();
         assert_eq!(
-            mpm_groups.len(),
+            arr.len(),
             1,
-            "event {event} must have exactly one MPM hook group, found {}",
-            mpm_groups.len()
+            "event {event} must have exactly 1 group, found {}: {arr:?}",
+            arr.len()
         );
-        let cmd = mpm_groups[0]["hooks"][0]["command"].as_str().unwrap();
-        assert_eq!(
-            cmd, "/opt/new/bin/trusty-mpm hook",
-            "event {event} must carry the SECOND call's exe path"
+        let cmd = arr[0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(
+            cmd.contains("/opt/new/bin/trusty-mpm"),
+            "event {event} must carry the SECOND call's exe path, got: {cmd:?}"
+        );
+        assert!(
+            !cmd.contains("/opt/old/bin/tm"),
+            "event {event} must NOT carry the stale FIRST exe path, got: {cmd:?}"
         );
     }
-
-    // The pre-existing non-MPM group must be preserved untouched.
-    let pre = hooks["PreToolUse"].as_array().unwrap();
-    assert!(
-        pre.iter()
-            .any(|g| g["hooks"][0]["command"] == "trusty-memory inbox-check"),
-        "pre-existing non-MPM hook group must be preserved"
-    );
 }

@@ -18,6 +18,7 @@
 //! `test_hook_command_uses_absolute_path`,
 //! `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`,
 //! `test_write_project_hooks_targets_project_dir`,
+//! `test_is_mpm_hook_command_recognises_tm_bin_name`,
 //! `test_write_project_hooks_replaces_stale_exe_path_group` in `tests`.
 
 #[cfg(test)]
@@ -145,19 +146,40 @@ pub fn mpm_hook_additions() -> serde_json::Value {
     mpm_hook_additions_with_exe(None)
 }
 
+/// Binary names this crate ships as `[[bin]]` targets (`Cargo.toml`): the
+/// full name and the short everyday alias used by `tm run`/`tm load`/`tm login`.
+const MPM_BIN_NAMES: &[&str] = &["trusty-mpm", "tm"];
+
 /// Check if a command string is one of the trusty-mpm hook command variants.
 ///
-/// Why: when stripping global hooks we need to match both bare and absolute-
-/// path variants so we do not leave stale bare-name entries behind.
-/// What: returns `true` when `cmd` ends with ` hook` and its prefix (the
-/// binary path) either is the literal `"trusty-mpm"` or ends with `/trusty-mpm`.
-/// Test: `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`.
+/// Why (#2015): the crate ships TWO `[[bin]]` targets that share one binary —
+/// `trusty-mpm` and the short alias `tm` (the everyday entry point for `tm
+/// run`/`tm load`/`tm login`). `mpm_hook_command` resolves whichever binary is
+/// currently running via `current_exe()`, so a hook group's command can be
+/// `.../tm hook` on one write and `.../trusty-mpm hook` on the next (or vice
+/// versa) purely from which entry point launched the process — not from any
+/// real difference in ownership. The original predicate only recognised the
+/// `trusty-mpm` name, so a stale `tm`-named group was invisible to the
+/// replace-by-identity strip in [`write_project_hooks`] and survived every
+/// merge: exactly the accumulation bug #2015 reports. Both names must be
+/// recognised as the SAME hook owner.
+/// What: returns `true` when `cmd` ends with ` hook` (scoping the match to an
+/// actual MPM hook invocation, not just any binary that happens to share a
+/// name) AND the remaining prefix's file-name component is one of
+/// [`MPM_BIN_NAMES`] — covering both bare names (`"tm hook"`) and absolute
+/// paths (`"/opt/bin/tm hook"`, `"/opt/bin/trusty-mpm hook"`).
+/// Test: `test_remove_global_trusty_mpm_hooks_removes_only_mpm_entries`,
+/// `test_is_mpm_hook_command_recognises_tm_bin_name`,
+/// `test_write_project_hooks_replaces_stale_exe_path_group`.
 fn is_mpm_hook_command(cmd: &str) -> bool {
     // The command must end with " hook" (with exactly one trailing sub-command word).
     let Some(binary) = cmd.strip_suffix(" hook") else {
         return false;
     };
-    binary == "trusty-mpm" || binary.ends_with("/trusty-mpm")
+    Path::new(binary)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .is_some_and(|name| MPM_BIN_NAMES.contains(&name))
 }
 
 /// Strip trusty-mpm hook entries from every global Claude settings file.
