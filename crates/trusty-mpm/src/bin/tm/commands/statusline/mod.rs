@@ -2,10 +2,13 @@
 //!
 //! Why: Claude Code's `statusLine` hook fires on every render cycle and calls this
 //! command; this handler parses the hook JSON from stdin and emits a compact
-//! ` │ `-separated segment string on stdout. All fields degrade gracefully.
-//! What: reads a JSON object from stdin, renders repo+branch/model/daemon/cost
-//! segments, and exits 0. Missing or invalid fields produce empty/omitted segments.
-//! Test: `render_statusline_minimal_input`, `render_statusline_full_payload` in tests.
+//! ` | `-separated segment string on stdout. All fields degrade gracefully.
+//! What: reads a JSON object from stdin and renders the fixed-order layout
+//! `TM <ver> <port> | <project> ⎇ <branch> | @<gh> | <model> | ctx% | <cost>`
+//! (#2011) to stdout. Missing or invalid fields produce empty/omitted segments;
+//! nothing ever panics or blocks the render path.
+//! Test: `render_statusline_minimal_input`, `render_statusline_full_payload`,
+//! `assemble_statusline_pins_segment_order_with_markers` in tests.
 
 pub(crate) mod compaction;
 
@@ -79,55 +82,96 @@ pub(crate) fn run_statusline() -> anyhow::Result<()> {
 
 /// Render the compact statusline string from parsed hook input.
 ///
-/// Why: keeping rendering pure (no mandatory I/O) makes it unit-testable
-/// independently of the stdin protocol.
-/// What: builds up to eight segments — project+branch, active gh account
-/// (`@<login>`, marked `⚠` when multiple accounts are logged in), model, daemon,
-/// session count, context%, compaction efficiency, cost — joined with ` │ `,
-/// emitting only non-empty segments.
-/// Test: `render_statusline_minimal_input`, `render_statusline_full_payload`.
+/// Why: keeping rendering pure aside from bounded, timeout-guarded probes makes
+/// the layout unit-testable and keeps Claude Code's hot render path fast (#2011:
+/// the prior blocking-I/O + path-traversal bug means every probe here must stay
+/// non-blocking and infallible). Probing each segment here and handing the
+/// results to the pure [`assemble_statusline`] lets the fixed segment ORDER be
+/// pinned by a deterministic unit test with hand-supplied strings, independent
+/// of real git/gh/daemon state.
+/// What: probes each of the six segments (version+port, project+branch, gh
+/// account, model, ctx%, cost) in spec order and joins them via
+/// [`assemble_statusline`].
+/// Test: `render_statusline_minimal_input`, `render_statusline_full_payload`,
+/// `render_statusline_full_payload_matches_pipe_format`.
 pub(crate) fn render_statusline(input: &StatusInput) -> String {
-    let mut parts: Vec<String> = Vec::new();
+    // Lock-file read only — cheap and non-blocking; no HTTP session-count probe
+    // is needed since the reformatted layout (#2011) no longer surfaces a count.
+    let daemon = DaemonInfo::from_lock_file();
+    let version_port = version_port_segment(&daemon);
 
-    if let Some(seg) = project_segment(&input.cwd) {
-        parts.push(seg);
-    }
-    if let Some(seg) = gh_account_segment_probe() {
-        parts.push(seg);
-    }
-    if let Some(seg) = model_segment(&input.model) {
-        parts.push(seg);
-    }
+    let project = project_segment(&input.cwd);
+    let gh = gh_account_segment_probe();
+    let model = model_segment(&input.model);
 
-    // Probe daemon info: lock file (cheap) + optional session-count HTTP probe.
-    let daemon = {
-        let d = DaemonInfo::from_lock_file();
-        if d.online {
-            let url = daemon_base_url(&d);
-            d.probe_session_count(&url)
-        } else {
-            d
-        }
-    };
-    parts.push(daemon_segment(&daemon));
-    if let Some(n) = daemon.session_count {
-        parts.push(count_segment(n));
-    }
+    // Compaction efficiency / live context fill; falls back to a bare
+    // `ctx>200k` marker when no context-window payload was sent at all.
+    let ctx = compaction_segment(&input.session_id, input.context_window.as_ref())
+        .or_else(|| input.exceeds_200k_tokens.then(|| "ctx>200k".to_string()));
 
-    if input.exceeds_200k_tokens {
-        parts.push("ctx>200k".to_string());
-    }
+    let cost = (input.cost.total_cost_usd > 0.0).then(|| cost_segment(input.cost.total_cost_usd));
 
-    // Compaction efficiency / live context fill.
-    if let Some(seg) = compaction_segment(&input.session_id, input.context_window.as_ref()) {
-        parts.push(seg);
-    }
+    assemble_statusline(version_port, project, gh, model, ctx, cost)
+}
 
-    if input.cost.total_cost_usd > 0.0 {
-        parts.push(cost_segment(input.cost.total_cost_usd));
-    }
+/// Join the six statusline segments in spec order, omitting absent ones.
+///
+/// Why (#2011 follow-up): separating ORDER + JOIN from the I/O-bound probes
+/// that produce each segment value is what makes the exact layout —
+/// `TM <ver> <port> | <project> ⎇ <branch> | @<gh> | <model> | ctx% | <cost>`
+/// — pinned by a deterministic test using hand-supplied synthetic strings.
+/// Without this split, a future refactor could transpose or silently drop a
+/// middle segment and no test would catch it.
+/// What: takes the six segments in fixed spec order (`version_port` is always
+/// present; the rest are `Option<String>`), filters out `None`s, and joins the
+/// survivors with ` | `. Pure — no I/O, no panics.
+/// Test: `assemble_statusline_full_payload_pins_order_and_format`,
+/// `assemble_statusline_pins_segment_order_with_markers`,
+/// `assemble_statusline_omits_none_segments`.
+fn assemble_statusline(
+    version_port: String,
+    project: Option<String>,
+    gh: Option<String>,
+    model: Option<String>,
+    ctx: Option<String>,
+    cost: Option<String>,
+) -> String {
+    [Some(version_port), project, gh, model, ctx, cost]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
 
-    parts.join(" \u{2502} ")
+/// Build the leading `TM <ver> <port>` segment.
+///
+/// Why (#2011): the statusline reformat replaces the old `tm ●:<port>` /
+/// `tm ○` online-indicator glyphs with a plain-text `TM <ver> <port>` lead-in;
+/// the version always renders (it is a compile-time constant) so the segment
+/// degrades gracefully to just `TM <ver>` when the daemon is offline or its
+/// port cannot be parsed, rather than showing a stale or misleading port.
+/// What: reads `env!("CARGO_PKG_VERSION")` and appends the port parsed from
+/// `daemon.addr` (`host:port` → `port`) only when `daemon.online` is true and
+/// a port is present.
+/// Test: `version_port_segment_online_includes_port`,
+/// `version_port_segment_offline_omits_port`.
+fn version_port_segment(daemon: &DaemonInfo) -> String {
+    let ver = env!("CARGO_PKG_VERSION");
+    match daemon_port(daemon) {
+        Some(port) if daemon.online => format!("TM {ver} {port}"),
+        _ => format!("TM {ver}"),
+    }
+}
+
+/// Extract the bare port substring from a `host:port` daemon address.
+///
+/// Why: centralises the `rfind(':')` parse so `version_port_segment` stays
+/// focused on assembly rather than string surgery.
+/// What: returns everything after the last `:`, or `None` when `addr` has no
+/// colon (e.g. empty/unset).
+/// Test: `version_port_segment_online_includes_port` (via the parsed port).
+fn daemon_port(daemon: &DaemonInfo) -> Option<&str> {
+    daemon.addr.rfind(':').map(|i| &daemon.addr[i + 1..])
 }
 
 // ── Segment builders ──────────────────────────────────────────────────────────
@@ -167,10 +211,10 @@ fn project_segment(cwd: &str) -> Option<String> {
 ///
 /// Why: keeping the label/branch combination pure (no git I/O) makes the
 /// branch-omission logic unit-testable without spawning subprocesses.
-/// What: returns `None` for an empty label; otherwise `"<project>  ⎇ <branch>"`
-/// for a meaningful branch, or just `"<project>"` when the branch is empty,
-/// detached `HEAD`, or a managed `session/<…>` branch (see
-/// [`is_managed_session_branch`]).
+/// What: returns `None` for an empty label; otherwise `"<project> ⎇ <branch>"`
+/// (single space, per the #2011 layout) for a meaningful branch, or just
+/// `"<project>"` when the branch is empty, detached `HEAD`, or a managed
+/// `session/<…>` branch (see [`is_managed_session_branch`]).
 /// Test: `render_project_segment_omits_managed_session_branch`,
 /// `render_project_segment_keeps_real_branch`, `render_project_segment_empty_label`.
 fn render_project_segment(project: String, branch: Option<&str>) -> Option<String> {
@@ -179,7 +223,7 @@ fn render_project_segment(project: String, branch: Option<&str>) -> Option<Strin
     }
     Some(match branch {
         Some(b) if !b.is_empty() && b != "HEAD" && !is_managed_session_branch(b) => {
-            format!("{project}  \u{2387} {b}")
+            format!("{project} \u{2387} {b}")
         }
         _ => project,
     })
@@ -212,34 +256,6 @@ fn model_segment(model: &ModelInfo) -> Option<String> {
     }
 }
 
-/// Build the daemon online/offline segment (`tm ●:<port>` or `tm ○`).
-///
-/// Why: makes the daemon state immediately visible without opening a terminal.
-/// What: extracts the port from `daemon.addr` and returns `"tm ●:<port>"` or
-/// `"tm ○"`.
-/// Test: `render_statusline_minimal_input` (offline daemon → `tm ○`).
-fn daemon_segment(daemon: &DaemonInfo) -> String {
-    if daemon.online {
-        let port = daemon
-            .addr
-            .rfind(':')
-            .map(|i| &daemon.addr[i..])
-            .unwrap_or(daemon.addr.as_str());
-        format!("tm \u{25cf}{port}")
-    } else {
-        "tm \u{25cb}".to_string()
-    }
-}
-
-/// Build the session-count segment (`⛁N`).
-///
-/// Why: shows at a glance how many trusty-mpm sessions are active.
-/// What: returns `"⛁{n}"`.
-/// Test: `render_statusline_full_payload`.
-fn count_segment(n: usize) -> String {
-    format!("\u{26c1}{n}")
-}
-
 /// Build the cost segment (`$X.XX`).
 ///
 /// Why: running cost visibility helps operators monitor API spend.
@@ -249,26 +265,13 @@ fn cost_segment(usd: f64) -> String {
     format!("${usd:.2}")
 }
 
-/// Construct the HTTP base URL for the daemon from `DaemonInfo.addr`.
-///
-/// Why: the lock file stores `addr = "127.0.0.1:7880"` without the `http://`
-/// scheme; the probe needs a full URL.
-/// What: prepends `http://` when the addr does not already start with it.
-/// Test: covered indirectly by `render_statusline_minimal_input`.
-fn daemon_base_url(daemon: &DaemonInfo) -> String {
-    if daemon.addr.starts_with("http") {
-        daemon.addr.clone()
-    } else {
-        format!("http://{}", daemon.addr)
-    }
-}
-
 /// Run `git rev-parse --abbrev-ref HEAD` in `cwd` with a hard 100 ms wall-clock
 /// timeout and return the branch name.
 ///
 /// Why: `statusline` is on Claude Code's hot render path; a stuck credential
 /// helper, network filesystem, or git hook would otherwise block every render
-/// cycle. The bounded thread pattern matches `try_get_session_count`.
+/// cycle. The bounded thread + `recv_timeout` pattern matches
+/// [`compaction::compaction_segment`].
 /// What: spawns a detached thread that calls `git rev-parse`, sends the result
 /// over an mpsc channel; the caller waits ≤100 ms, returns `None` on timeout.
 /// Test: `render_statusline_full_payload` exercises the detected branch path;
@@ -405,9 +408,10 @@ mod tests {
 
     #[test]
     fn render_statusline_minimal_input() {
-        // Empty StatusInput (all defaults) must not panic; daemon segment always present.
+        // Empty StatusInput (all defaults) must not panic; the `TM <ver>` lead-in
+        // segment always appears (#2011).
         let out = render_statusline(&StatusInput::default());
-        assert!(out.contains("tm "), "daemon segment must always appear");
+        assert!(out.starts_with("TM "), "TM <ver> segment must always lead");
         assert!(!out.is_empty(), "output must not be empty");
     }
 
@@ -426,6 +430,128 @@ mod tests {
             out.contains("my-project"),
             "project name from cwd must appear"
         );
+    }
+
+    /// Why (#2011): pins the exact reformatted layout — `TM <ver>` lead-in,
+    /// `|`-joined segments (not the old `│` glyph), and no legacy session-count
+    /// (`⛁N`) segment.
+    /// Test: itself.
+    #[test]
+    fn render_statusline_full_payload_matches_pipe_format() {
+        let input = full_input();
+        let out = render_statusline(&input);
+        let ver = env!("CARGO_PKG_VERSION");
+        assert!(
+            out.starts_with(&format!("TM {ver}")),
+            "must lead with TM <ver>: {out}"
+        );
+        assert!(
+            out.contains(" | "),
+            "segments must be pipe-separated: {out}"
+        );
+        assert!(
+            !out.contains('\u{2502}'),
+            "old │ separator must not appear: {out}"
+        );
+        assert!(
+            !out.contains('\u{26c1}'),
+            "session-count segment must be dropped: {out}"
+        );
+    }
+
+    /// Why (#2011 follow-up): `render_statusline_full_payload_matches_pipe_format`
+    /// only checks a prefix/substring/absence, so a refactor that transposed or
+    /// silently dropped a middle segment (`@gh` / model / ctx% / cost) would
+    /// still pass it. This test drives the pure join layer directly with
+    /// synthetic, realistic segment strings — no git/gh/daemon I/O — and
+    /// asserts the exact joined output, pinning both the format AND the order.
+    /// Test: itself.
+    #[test]
+    fn assemble_statusline_full_payload_pins_order_and_format() {
+        let out = assemble_statusline(
+            "TM 1.2.3 7880".to_string(),
+            Some("bobmatnyc/trusty-tools \u{2387} main".to_string()),
+            Some("@bobmatnyc".to_string()),
+            Some("Claude Sonnet 4.6".to_string()),
+            Some("ctx 41%".to_string()),
+            Some("$1.23".to_string()),
+        );
+        assert_eq!(
+            out,
+            "TM 1.2.3 7880 | bobmatnyc/trusty-tools \u{2387} main | @bobmatnyc | Claude Sonnet 4.6 | ctx 41% | $1.23"
+        );
+    }
+
+    /// Why (#2011 follow-up): guards specifically against segment
+    /// transposition — using distinct single-letter markers instead of
+    /// realistic strings means a swap between any two positions (e.g. gh and
+    /// model) produces a different, easily-diffed string rather than two
+    /// plausible-looking segments that a reviewer might not notice swapped.
+    /// What: asserts both the exact joined string AND the split-on-` | `
+    /// vector equal `[version_port, project, gh, model, ctx, cost]`.
+    /// Test: itself.
+    #[test]
+    fn assemble_statusline_pins_segment_order_with_markers() {
+        let out = assemble_statusline(
+            "VERSION_PORT".to_string(),
+            Some("PROJECT".to_string()),
+            Some("GH".to_string()),
+            Some("MODEL".to_string()),
+            Some("CTX".to_string()),
+            Some("COST".to_string()),
+        );
+        assert_eq!(out, "VERSION_PORT | PROJECT | GH | MODEL | CTX | COST");
+        assert_eq!(
+            out.split(" | ").collect::<Vec<_>>(),
+            vec!["VERSION_PORT", "PROJECT", "GH", "MODEL", "CTX", "COST"],
+            "segment order must exactly match [version_port, project, gh, model, ctx, cost]"
+        );
+    }
+
+    /// Why (#2011 follow-up): every segment except `version_port` must be
+    /// omittable independently without leaving a stray/empty ` | ` pair, and
+    /// omitting all of them must fall back to just the lead-in segment.
+    /// Test: itself.
+    #[test]
+    fn assemble_statusline_omits_none_segments() {
+        // All optional segments absent → only the lead-in segment appears.
+        let out = assemble_statusline("TM 1.2.3".to_string(), None, None, None, None, None);
+        assert_eq!(out, "TM 1.2.3");
+
+        // A gap in the middle (gh absent) must not leave an empty separator pair.
+        let out = assemble_statusline(
+            "TM 1.2.3".to_string(),
+            Some("proj".to_string()),
+            None,
+            Some("model".to_string()),
+            None,
+            Some("$0.50".to_string()),
+        );
+        assert_eq!(out, "TM 1.2.3 | proj | model | $0.50");
+    }
+
+    /// Why (#2011): `version_port_segment` must append the parsed port only
+    /// when the daemon is online, matching the `TM <ver> <port>` spec.
+    /// Test: itself.
+    #[test]
+    fn version_port_segment_online_includes_port() {
+        let daemon = DaemonInfo {
+            addr: "127.0.0.1:7880".to_string(),
+            online: true,
+            session_count: None,
+        };
+        let seg = version_port_segment(&daemon);
+        assert_eq!(seg, format!("TM {} 7880", env!("CARGO_PKG_VERSION")));
+    }
+
+    /// Why (#2011): an offline/absent daemon must degrade to `TM <ver>` alone
+    /// rather than showing a stale or empty port.
+    /// Test: itself.
+    #[test]
+    fn version_port_segment_offline_omits_port() {
+        let daemon = DaemonInfo::default();
+        let seg = version_port_segment(&daemon);
+        assert_eq!(seg, format!("TM {}", env!("CARGO_PKG_VERSION")));
     }
 
     /// Why: a managed tm session runs on a `session/<uuid>` branch that just
@@ -463,10 +589,7 @@ mod tests {
     #[test]
     fn render_project_segment_keeps_real_branch() {
         let seg = render_project_segment("bobmatnyc/trusty-tools".to_string(), Some("main"));
-        assert_eq!(
-            seg.as_deref(),
-            Some("bobmatnyc/trusty-tools  \u{2387} main")
-        );
+        assert_eq!(seg.as_deref(), Some("bobmatnyc/trusty-tools \u{2387} main"));
 
         // Detached HEAD and empty branch collapse to just the label.
         assert_eq!(
@@ -589,7 +712,7 @@ mod tests {
         input.model = ModelInfo::default();
         let out = render_statusline(&input);
         assert!(!out.contains("claude"), "model segment must be omitted");
-        assert!(out.contains("tm "), "daemon segment must still appear");
+        assert!(out.starts_with("TM "), "TM <ver> segment must still appear");
         assert!(out.contains("$1.23"), "cost must still appear");
     }
 
@@ -615,21 +738,21 @@ mod tests {
         // as run_statusline's unwrap_or_default on parse failure.
         let out = render_statusline(&StatusInput::default());
         assert!(
-            out.contains("tm "),
-            "graceful fallback must still emit daemon segment"
+            out.starts_with("TM "),
+            "graceful fallback must still emit the TM <ver> segment"
         );
         assert!(
-            !out.contains("│ │"),
+            !out.contains("| |"),
             "must not produce empty separator pairs"
         );
     }
 
     #[test]
     fn render_statusline_no_empty_separator_pairs() {
-        // With every optional field empty, the only segment is the daemon row.
+        // With every optional field empty, the only segment is the TM <ver> lead-in.
         let out = render_statusline(&StatusInput::default());
-        assert!(!out.contains(" \u{2502}  \u{2502} "), "no empty │ │ pairs");
-        assert!(!out.contains("│ │"), "no adjacent separators");
+        assert!(!out.contains("|  | "), "no empty | | pairs");
+        assert!(!out.contains("| |"), "no adjacent separators");
     }
 
     #[test]

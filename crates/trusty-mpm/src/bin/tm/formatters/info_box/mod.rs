@@ -122,20 +122,6 @@ impl DaemonInfo {
         self.session_count = Some(count);
         self
     }
-
-    /// Probe `/sessions` to attach a session count (best-effort, ≤150 ms).
-    ///
-    /// Why: `tm launch` and `tm connect` do not have a pre-fetched session list,
-    /// so a cheap HTTP probe fills in the count for the panel.
-    /// What: spawns a background thread (blocking reqwest, 150 ms timeout);
-    /// waits up to 200 ms for the result; degrades gracefully on timeout/error.
-    /// Test: `welcome_panel_renders_online` verifies this does not panic.
-    pub(crate) fn probe_session_count(mut self, base_url: &str) -> Self {
-        if self.online {
-            self.session_count = probes::try_get_session_count(base_url);
-        }
-        self
-    }
 }
 
 // ── WelcomeData ───────────────────────────────────────────────────────────────
