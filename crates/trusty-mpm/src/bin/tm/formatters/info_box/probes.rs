@@ -5,8 +5,7 @@
 //! What: `probe_recent_commits` runs `git log` in a background thread and
 //! waits ≤150 ms; `run_git_log` spawns the subprocess and installs a 3-second
 //! watchdog that sends SIGKILL so no git process ever lingers on a slow or
-//! network-mounted filesystem; `try_get_session_count` probes the daemon's
-//! `/sessions` endpoint; `shorten_git_age` compresses git's verbose
+//! network-mounted filesystem; `shorten_git_age` compresses git's verbose
 //! relative-time strings.
 //! Test: `probe_commits_returns_empty_for_non_git_dir`,
 //! `shorten_age_*` in the inline test module below.
@@ -167,39 +166,6 @@ fn unit_suffix(unit: &str) -> &'static str {
         "years" | "year" => "y",
         _ => "?",
     }
-}
-
-// ── Session-count probe ───────────────────────────────────────────────────────
-
-/// Probe `/sessions` with a short timeout and return the session count.
-///
-/// Why: blocking HTTP inside a (possibly async) context requires a detached
-/// thread; the ≤150 ms wall-clock budget keeps panel latency acceptable.
-/// What: spawns a thread that GETs `{base_url}/sessions` with `reqwest::blocking`
-/// (150 ms timeout), sends the count over a channel; the caller waits ≤200 ms.
-/// Test: covered indirectly by info-box render tests (offline degradation path).
-pub(crate) fn try_get_session_count(base_url: &str) -> Option<usize> {
-    let url = format!("{base_url}/sessions");
-    let (tx, rx) = mpsc::channel::<Option<usize>>();
-    std::thread::spawn(move || {
-        let count = (|| -> Option<usize> {
-            let client = reqwest::blocking::Client::builder()
-                .timeout(Duration::from_millis(150))
-                .build()
-                .ok()?;
-            let resp = client.get(&url).send().ok()?;
-            #[derive(serde::Deserialize)]
-            struct Row {
-                #[allow(dead_code)]
-                #[serde(default)]
-                name: String,
-            }
-            let rows: Vec<Row> = resp.json().ok()?;
-            Some(rows.len())
-        })();
-        let _ = tx.send(count);
-    });
-    rx.recv_timeout(Duration::from_millis(200)).ok().flatten()
 }
 
 #[cfg(test)]
