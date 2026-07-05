@@ -1319,6 +1319,180 @@ async fn prune_route_rejects_bad_state() {
     );
 }
 
+// ── #2012: HTTP route tests for the hard-delete-record endpoint ──────────────
+//
+// Same pattern as the #1508 prune-route tests above: call the handler directly
+// with axum's `State`/`Path`/`Query` extractors against a hermetic
+// `DaemonState::with_root_isolated_managed`, using `create_with_id` +
+// `ResumeRuntimeKind`/`ResumeSessionId` (aliased above) so no real tmux session
+// is ever created (#1790).
+
+/// POST …/{id}/delete removes a NON-running record from the store (#2012).
+///
+/// Why: the common case — an operator deleting an already-stopped session's
+/// record — must succeed without `--force` and actually drop it from the store
+/// (not merely tombstone it).
+/// What: seeds a session, stops it (so it is no longer `Active`/`Provisioning`),
+/// calls [`delete_managed_session`] with `force=false`, asserts `200` with
+/// `deleted: true`, and confirms the record is gone (`SessionNotFound`).
+/// Test: this function IS the test.
+#[tokio::test]
+async fn delete_route_removes_record() {
+    use trusty_mpm::daemon::managed_routes::{DeleteQuery, delete_managed_session};
+
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+
+    let id = ResumeSessionId::new();
+    let ws = root.path().join(format!("{id}-delete-ok"));
+    let _ = mgr
+        .create_with_id(
+            id,
+            "delete route test".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws),
+            Some("https://example.com/r.git".to_string()),
+            Some("main".to_string()),
+            ResumeRuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session");
+    // Take the session out of a running state so the fail-closed guard allows
+    // the delete without --force (mirrors an operator's real workflow: stop,
+    // then delete).
+    mgr.stop(&id).await.expect("stop before delete");
+
+    let (status, body) = decode_response(
+        delete_managed_session(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(id.to_string()),
+            axum::extract::Query(DeleteQuery { force: false }),
+        )
+        .await,
+    )
+    .await;
+
+    assert_eq!(status, axum::http::StatusCode::OK, "body={body}");
+    assert_eq!(body["deleted"], serde_json::json!(true));
+    assert!(matches!(
+        mgr.get(&id).await,
+        Err(ManagedError::SessionNotFound(_))
+    ));
+}
+
+/// POST …/{id}/delete REFUSES a RUNNING session without `--force` (#2012).
+///
+/// Why: the #2012 fail-closed safety requirement at the HTTP layer — a running
+/// session's record must survive a non-forced delete attempt.
+/// What: seeds a session (starts `Provisioning`, a running state), calls
+/// [`delete_managed_session`] with `force=false`, asserts `409 Conflict`, and
+/// confirms the record is still present afterward.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn delete_route_refuses_running_without_force() {
+    use trusty_mpm::daemon::managed_routes::{DeleteQuery, delete_managed_session};
+
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+
+    let id = ResumeSessionId::new();
+    let ws = root.path().join(format!("{id}-delete-refuse"));
+    let _ = mgr
+        .create_with_id(
+            id,
+            "delete route refuse test".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws),
+            Some("https://example.com/r.git".to_string()),
+            Some("main".to_string()),
+            ResumeRuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session");
+
+    let (status, body) = decode_response(
+        delete_managed_session(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(id.to_string()),
+            axum::extract::Query(DeleteQuery { force: false }),
+        )
+        .await,
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        axum::http::StatusCode::CONFLICT,
+        "a running session must be refused without --force, body={body}"
+    );
+    // The record must be untouched by the refused delete.
+    let still_there = mgr.get(&id).await.expect("record must still exist");
+    assert_ne!(
+        still_there.state,
+        trusty_mpm::session_manager::ManagedSessionState::Decommissioned
+    );
+}
+
+/// POST …/{id}/delete?force=true bypasses the running-state guard (#2012).
+///
+/// Why: an operator who explicitly opts in via `--force` must be able to
+/// hard-delete a running session's record over HTTP too.
+/// What: seeds a running session, calls [`delete_managed_session`] with
+/// `force=true`, asserts `200` with `deleted: true`, and confirms the record is
+/// gone from the store.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn delete_route_force_bypasses_guard() {
+    use trusty_mpm::daemon::managed_routes::{DeleteQuery, delete_managed_session};
+
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+
+    let id = ResumeSessionId::new();
+    let ws = root.path().join(format!("{id}-delete-force"));
+    let _ = mgr
+        .create_with_id(
+            id,
+            "delete route force test".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws),
+            Some("https://example.com/r.git".to_string()),
+            Some("main".to_string()),
+            ResumeRuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session");
+
+    let (status, body) = decode_response(
+        delete_managed_session(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(id.to_string()),
+            axum::extract::Query(DeleteQuery { force: true }),
+        )
+        .await,
+    )
+    .await;
+
+    assert_eq!(status, axum::http::StatusCode::OK, "body={body}");
+    assert_eq!(body["deleted"], serde_json::json!(true));
+    assert!(matches!(
+        mgr.get(&id).await,
+        Err(ManagedError::SessionNotFound(_))
+    ));
+}
+
 // ── #1730: list_managed_sessions ?source_id= filter + serialization ───────────
 //
 // These tests call `list_managed_sessions` directly (same axum-extractor pattern

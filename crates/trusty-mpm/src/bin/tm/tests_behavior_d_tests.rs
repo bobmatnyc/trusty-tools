@@ -316,6 +316,32 @@ fn cli_parses_session_decommission() {
 }
 
 #[test]
+fn cli_parses_session_delete() {
+    // #2012: `delete` hard-deletes the record; defaults to force=false.
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "delete", "abc"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::Delete { id, force },
+        } => {
+            assert_eq!(id, "abc");
+            assert!(!force, "default must be the fail-closed force=false");
+        }
+        other => panic!("expected session delete, got {other:?}"),
+    }
+    // With --force, bypasses the running-session guard.
+    let cli2 = Cli::try_parse_from(["trusty-mpm", "session", "delete", "abc", "--force"]).unwrap();
+    match cli2.command.unwrap() {
+        Command::Session {
+            action: SessionAction::Delete { id, force },
+        } => {
+            assert_eq!(id, "abc");
+            assert!(force, "--force must set force=true");
+        }
+        other => panic!("expected session delete, got {other:?}"),
+    }
+}
+
+#[test]
 fn cli_parses_session_prune_idle() {
     // `prune-idle` (#1313) accepts both flags; defaults are false.
     let cli = Cli::try_parse_from(["trusty-mpm", "session", "prune-idle", "--dry-run", "--json"])

@@ -118,10 +118,10 @@ pub use rpc::rpc_handler;
 /// wiring.
 use super::managed_routes::{
     adopt_existing_session, answer_session_decision, decommission_ephemeral_route,
-    decommission_managed_session, fleet_by_project_route, get_attach_cmd, get_managed_session,
-    get_session_activity, list_managed_sessions, prune_managed_route, prune_worktrees_route,
-    resume_managed_session, send_to_session, spawn_session, stop_managed_session,
-    stop_managed_session_runtime,
+    decommission_managed_session, delete_managed_session, fleet_by_project_route, get_attach_cmd,
+    get_managed_session, get_session_activity, list_managed_sessions, prune_managed_route,
+    prune_worktrees_route, resume_managed_session, send_to_session, spawn_session,
+    stop_managed_session, stop_managed_session_runtime,
 };
 
 /// Typed HTTP response bodies for every endpoint.
@@ -277,6 +277,12 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route(
             "/api/v1/sessions/managed/{id}/decommission",
             post(decommission_managed_session),
+        )
+        // #2012: hard-delete the session RECORD (distinct from decommission,
+        // which stops/reaps). Fail-closed unless `?force=true`.
+        .route(
+            "/api/v1/sessions/managed/{id}/delete",
+            post(delete_managed_session),
         )
         // #1221: loopback-only JSON-RPC dispatch for the `serve --stdio` bridge.
         // The handler independently enforces the loopback gate via ConnectInfo.

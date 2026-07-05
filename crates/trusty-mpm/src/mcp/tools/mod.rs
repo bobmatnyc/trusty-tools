@@ -9,10 +9,10 @@
 //! #1519 / #1517) — so this is a thin facade that re-exports all and
 //! concatenates their descriptors, keeping each leaf file well under the
 //! 500-SLOC production cap.
-//! What: [`tool_catalog`] builds the twenty-six MCP tool descriptors (nine core +
-//! eight session + five console + four project — #1222 / #1220 / #1508 / #1519 /
-//! #1517 WI-5); [`TOOL_CATALOG`] lists their names for tests and the startup
-//! log; [`tool`] is the shared descriptor builder used by every submodule.
+//! What: [`tool_catalog`] builds the twenty-seven MCP tool descriptors (nine core +
+//! nine session + five console + four project — #1222 / #1220 / #1508 / #1519 /
+//! #1517 WI-5 / #2012); [`TOOL_CATALOG`] lists their names for tests and the
+//! startup log; [`tool`] is the shared descriptor builder used by every submodule.
 //! Test: the `tests` module below asserts the catalog has the expected count,
 //! well-formed entries, and names matching [`TOOL_CATALOG`].
 
@@ -28,11 +28,11 @@ pub mod session;
 /// Why: tests, the daemon's startup log, and the loopback-`/rpc` audit all want
 /// the authoritative list without re-parsing the JSON schema. Keeping it exact
 /// resolves the #1221 review nit about ambiguous existing-vs-new counts.
-/// What: a static slice of the twenty-six tool names — the nine core/bug tools,
-/// the eight session-lifecycle tools, the five console-facing tools, and the
-/// four project-registry + NL-resolver tools (#1519 WI-2, #1517 WI-5).
+/// What: a static slice of the twenty-seven tool names — the nine core/bug
+/// tools, the nine session-lifecycle tools, the five console-facing tools, and
+/// the four project-registry + NL-resolver tools (#1519 WI-2, #1517 WI-5).
 /// Test: `catalog_names_match_constant`.
-pub const TOOL_CATALOG: [&str; 26] = [
+pub const TOOL_CATALOG: [&str; 27] = [
     // ── 9 pre-existing tools (core.rs) ───────────────────────────────────────
     "session_list",
     "session_status",
@@ -43,11 +43,13 @@ pub const TOOL_CATALOG: [&str; 26] = [
     "list_recent_errors",
     "preview_bug_report",
     "report_bug",
-    // ── 8 session-lifecycle tools (#1221 + #1508, session.rs) ────────────────
+    // ── 9 session-lifecycle tools (#1221 + #1508 + #2012, session.rs) ────────
     "session_new",
     "session_stop",
     "session_resume",
     "session_decommission",
+    // #2012: hard-delete the record (distinct from decommission).
+    "session_delete",
     "session_activity",
     "session_send",
     // #1508 bulk teardown + by-state prune.
@@ -73,9 +75,9 @@ pub const TOOL_CATALOG: [&str; 26] = [
 /// keeps the schemas and the dispatch argument-parsing in lockstep across all
 /// tool groups.
 /// What: concatenates [`core::core_tools`] (nine descriptors),
-/// [`session::session_tools`] (eight descriptors), [`console::console_tools`]
+/// [`session::session_tools`] (nine descriptors), [`console::console_tools`]
 /// (five descriptors), and [`project::project_tools`] (four descriptors, WI-5
-/// adds `project_resolve`) in catalog order, returning twenty-six
+/// adds `project_resolve`) in catalog order, returning twenty-seven
 /// `{ name, description, inputSchema }` objects.
 /// Test: `catalog_has_expected_tool_count` and `every_tool_has_input_schema`.
 pub fn tool_catalog() -> Vec<Value> {
@@ -106,10 +108,11 @@ mod tests {
 
     #[test]
     fn catalog_has_expected_tool_count() {
-        // 9 pre-existing + 8 session-lifecycle + 5 console-facing + 4 project = 26.
-        // (WI-5 adds project_resolve to the 3 WI-2 tools → 4 total project tools)
-        assert_eq!(tool_catalog().len(), 26);
-        assert_eq!(TOOL_CATALOG.len(), 26);
+        // 9 pre-existing + 9 session-lifecycle + 5 console-facing + 4 project = 27.
+        // (WI-5 adds project_resolve to the 3 WI-2 tools → 4 total project tools;
+        // #2012 adds session_delete → 9 total session-lifecycle tools)
+        assert_eq!(tool_catalog().len(), 27);
+        assert_eq!(TOOL_CATALOG.len(), 27);
     }
 
     #[test]
@@ -148,6 +151,7 @@ mod tests {
             "session_stop",
             "session_resume",
             "session_decommission",
+            "session_delete",
             "session_activity",
             "session_send",
         ] {

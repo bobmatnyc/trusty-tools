@@ -1,17 +1,17 @@
-//! Argument parsing + routing for the eight session-lifecycle MCP tools
-//! (#1221 + #1508).
+//! Argument parsing + routing for the nine session-lifecycle MCP tools
+//! (#1221 + #1508 + #2012).
 //!
 //! Why: the session-lifecycle tools more than half-again the catalog; routing
 //! them inline in `mcp/mod.rs`'s `dispatch_tool_call` would push that file over
 //! the 500-SLOC production cap. Extracting the parse-and-call arms into a sibling
 //! module keeps `mod.rs` focused on the handshake + core tools and gives the
 //! session tools one auditable home.
-//! What: [`try_dispatch`] matches a tool name against the eight session tools
-//! (six per-session #1221 + the two fleet-wide #1508 teardown verbs); when it
-//! matches it parses arguments (via the shared `required_str` helper), calls the
-//! corresponding [`super::OrchestratorBackend`] method, and returns
-//! `Some(result)`. A non-session tool name returns `None` so the caller can
-//! report "unknown tool".
+//! What: [`try_dispatch`] matches a tool name against the nine session tools
+//! (seven per-session #1221 + #2012 ops + the two fleet-wide #1508 teardown
+//! verbs); when it matches it parses arguments (via the shared `required_str`
+//! helper), calls the corresponding [`super::OrchestratorBackend`] method, and
+//! returns `Some(result)`. A non-session tool name returns `None` so the caller
+//! can report "unknown tool".
 //! Test: the `super::tests` `dispatch_session_*` cases drive this module through
 //! the public `dispatch` entry point with a mock backend.
 
@@ -31,11 +31,12 @@ const DEFAULT_ACTIVITY_LINES: u32 = 60;
 ///
 /// Why: a single entry point lets `dispatch_tool_call` delegate every
 /// session-tool name in one arm, keeping the core dispatch match small.
-/// What: returns `Some(Result)` for the eight session tool names — the six
-/// per-session ops plus the two fleet-wide #1508 verbs (`session_decommission_ephemeral`,
-/// `session_prune`) — parsing args and calling the matching backend method, or
-/// `None` when `name` is not a session tool — signalling the caller to fall
-/// through to its "unknown tool" branch.
+/// What: returns `Some(Result)` for the nine session tool names — the seven
+/// per-session ops (including #2012's `session_delete`) plus the two
+/// fleet-wide #1508 verbs (`session_decommission_ephemeral`, `session_prune`)
+/// — parsing args and calling the matching backend method, or `None` when
+/// `name` is not a session tool — signalling the caller to fall through to its
+/// "unknown tool" branch.
 /// Errors from argument parsing are returned as `Some(Err(_))` so they surface
 /// to the client as a tool-error result, identical to the core tools.
 /// Test: exercised by every `dispatch_session_*` test in `super::tests`.
@@ -56,6 +57,14 @@ pub async fn try_dispatch<B: OrchestratorBackend>(
         },
         "session_decommission" => match required_str(args, "session_id") {
             Ok(id) => backend.session_decommission(&id).await,
+            Err(e) => Err(e),
+        },
+        // #2012: hard-delete the record; `force` defaults to false (fail-closed).
+        "session_delete" => match required_str(args, "session_id") {
+            Ok(id) => {
+                let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+                backend.session_delete(&id, force).await
+            }
             Err(e) => Err(e),
         },
         "session_activity" => match required_str(args, "session_id") {

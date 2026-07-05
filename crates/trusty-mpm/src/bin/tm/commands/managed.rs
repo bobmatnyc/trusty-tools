@@ -387,6 +387,11 @@ pub(crate) async fn session_decommission(
     Ok(())
 }
 
+// #2012: `tm session delete` lives in the sibling `commands::delete` module —
+// this file is at the 500-SLOC production cap, mirroring the pattern used to
+// keep `session_manager`'s files under the same cap (`adopt.rs`/`decommission.rs`/
+// `prune.rs`/`delete.rs`).
+
 /// `tm session decommission-ephemeral` — bulk-tear-down every ephemeral session (#1508).
 ///
 /// Why: e2e harnesses and operators need a one-shot "clean up all my throwaway

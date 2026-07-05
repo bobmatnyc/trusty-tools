@@ -376,6 +376,12 @@ pub(crate) async fn session(
             // `--force` means "actually delete"; absence means dry-run (#1840).
             crate::commands::managed::session_prune_worktrees(client, url, !force).await?
         }
+        // #2012: hard-delete the record; goes through direct HTTP like the
+        // other fleet-teardown verbs above (not chat-core — `delete` is a
+        // distinct terminal store operation, not a `decommission` alias).
+        SessionAction::Delete { id, force } => {
+            crate::commands::delete::session_delete(client, url, id, force).await?
+        }
         // The deprecated verbose aliases emit their deprecation notice, then
         // route through chat-core exactly like their canonical verb (#1205).
         action @ (SessionAction::ManagedStop { .. }
