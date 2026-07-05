@@ -8,7 +8,7 @@
 //! (#2011) to stdout. Missing or invalid fields produce empty/omitted segments;
 //! nothing ever panics or blocks the render path.
 //! Test: `render_statusline_minimal_input`, `render_statusline_full_payload`,
-//! `render_statusline_full_payload_matches_pipe_format` in tests.
+//! `assemble_statusline_pins_segment_order_with_markers` in tests.
 
 pub(crate) mod compaction;
 
@@ -85,44 +85,62 @@ pub(crate) fn run_statusline() -> anyhow::Result<()> {
 /// Why: keeping rendering pure aside from bounded, timeout-guarded probes makes
 /// the layout unit-testable and keeps Claude Code's hot render path fast (#2011:
 /// the prior blocking-I/O + path-traversal bug means every probe here must stay
-/// non-blocking and infallible).
-/// What: builds the fixed-order layout `TM <ver> <port> | <project> ⎇ <branch>
-/// | @<gh> | <model> | ctx% | <cost>`, joined with ` | `. The leading `TM <ver>`
-/// segment is always present; every other segment is omitted (not left blank)
-/// when its data source is unavailable, so the separators never double up.
+/// non-blocking and infallible). Probing each segment here and handing the
+/// results to the pure [`assemble_statusline`] lets the fixed segment ORDER be
+/// pinned by a deterministic unit test with hand-supplied strings, independent
+/// of real git/gh/daemon state.
+/// What: probes each of the six segments (version+port, project+branch, gh
+/// account, model, ctx%, cost) in spec order and joins them via
+/// [`assemble_statusline`].
 /// Test: `render_statusline_minimal_input`, `render_statusline_full_payload`,
 /// `render_statusline_full_payload_matches_pipe_format`.
 pub(crate) fn render_statusline(input: &StatusInput) -> String {
-    let mut parts: Vec<String> = Vec::new();
-
     // Lock-file read only — cheap and non-blocking; no HTTP session-count probe
     // is needed since the reformatted layout (#2011) no longer surfaces a count.
     let daemon = DaemonInfo::from_lock_file();
-    parts.push(version_port_segment(&daemon));
+    let version_port = version_port_segment(&daemon);
 
-    if let Some(seg) = project_segment(&input.cwd) {
-        parts.push(seg);
-    }
-    if let Some(seg) = gh_account_segment_probe() {
-        parts.push(seg);
-    }
-    if let Some(seg) = model_segment(&input.model) {
-        parts.push(seg);
-    }
+    let project = project_segment(&input.cwd);
+    let gh = gh_account_segment_probe();
+    let model = model_segment(&input.model);
 
     // Compaction efficiency / live context fill; falls back to a bare
     // `ctx>200k` marker when no context-window payload was sent at all.
-    if let Some(seg) = compaction_segment(&input.session_id, input.context_window.as_ref()) {
-        parts.push(seg);
-    } else if input.exceeds_200k_tokens {
-        parts.push("ctx>200k".to_string());
-    }
+    let ctx = compaction_segment(&input.session_id, input.context_window.as_ref())
+        .or_else(|| input.exceeds_200k_tokens.then(|| "ctx>200k".to_string()));
 
-    if input.cost.total_cost_usd > 0.0 {
-        parts.push(cost_segment(input.cost.total_cost_usd));
-    }
+    let cost = (input.cost.total_cost_usd > 0.0).then(|| cost_segment(input.cost.total_cost_usd));
 
-    parts.join(" | ")
+    assemble_statusline(version_port, project, gh, model, ctx, cost)
+}
+
+/// Join the six statusline segments in spec order, omitting absent ones.
+///
+/// Why (#2011 follow-up): separating ORDER + JOIN from the I/O-bound probes
+/// that produce each segment value is what makes the exact layout —
+/// `TM <ver> <port> | <project> ⎇ <branch> | @<gh> | <model> | ctx% | <cost>`
+/// — pinned by a deterministic test using hand-supplied synthetic strings.
+/// Without this split, a future refactor could transpose or silently drop a
+/// middle segment and no test would catch it.
+/// What: takes the six segments in fixed spec order (`version_port` is always
+/// present; the rest are `Option<String>`), filters out `None`s, and joins the
+/// survivors with ` | `. Pure — no I/O, no panics.
+/// Test: `assemble_statusline_full_payload_pins_order_and_format`,
+/// `assemble_statusline_pins_segment_order_with_markers`,
+/// `assemble_statusline_omits_none_segments`.
+fn assemble_statusline(
+    version_port: String,
+    project: Option<String>,
+    gh: Option<String>,
+    model: Option<String>,
+    ctx: Option<String>,
+    cost: Option<String>,
+) -> String {
+    [Some(version_port), project, gh, model, ctx, cost]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 /// Build the leading `TM <ver> <port>` segment.
@@ -439,6 +457,77 @@ mod tests {
             !out.contains('\u{26c1}'),
             "session-count segment must be dropped: {out}"
         );
+    }
+
+    /// Why (#2011 follow-up): `render_statusline_full_payload_matches_pipe_format`
+    /// only checks a prefix/substring/absence, so a refactor that transposed or
+    /// silently dropped a middle segment (`@gh` / model / ctx% / cost) would
+    /// still pass it. This test drives the pure join layer directly with
+    /// synthetic, realistic segment strings — no git/gh/daemon I/O — and
+    /// asserts the exact joined output, pinning both the format AND the order.
+    /// Test: itself.
+    #[test]
+    fn assemble_statusline_full_payload_pins_order_and_format() {
+        let out = assemble_statusline(
+            "TM 1.2.3 7880".to_string(),
+            Some("bobmatnyc/trusty-tools \u{2387} main".to_string()),
+            Some("@bobmatnyc".to_string()),
+            Some("Claude Sonnet 4.6".to_string()),
+            Some("ctx 41%".to_string()),
+            Some("$1.23".to_string()),
+        );
+        assert_eq!(
+            out,
+            "TM 1.2.3 7880 | bobmatnyc/trusty-tools \u{2387} main | @bobmatnyc | Claude Sonnet 4.6 | ctx 41% | $1.23"
+        );
+    }
+
+    /// Why (#2011 follow-up): guards specifically against segment
+    /// transposition — using distinct single-letter markers instead of
+    /// realistic strings means a swap between any two positions (e.g. gh and
+    /// model) produces a different, easily-diffed string rather than two
+    /// plausible-looking segments that a reviewer might not notice swapped.
+    /// What: asserts both the exact joined string AND the split-on-` | `
+    /// vector equal `[version_port, project, gh, model, ctx, cost]`.
+    /// Test: itself.
+    #[test]
+    fn assemble_statusline_pins_segment_order_with_markers() {
+        let out = assemble_statusline(
+            "VERSION_PORT".to_string(),
+            Some("PROJECT".to_string()),
+            Some("GH".to_string()),
+            Some("MODEL".to_string()),
+            Some("CTX".to_string()),
+            Some("COST".to_string()),
+        );
+        assert_eq!(out, "VERSION_PORT | PROJECT | GH | MODEL | CTX | COST");
+        assert_eq!(
+            out.split(" | ").collect::<Vec<_>>(),
+            vec!["VERSION_PORT", "PROJECT", "GH", "MODEL", "CTX", "COST"],
+            "segment order must exactly match [version_port, project, gh, model, ctx, cost]"
+        );
+    }
+
+    /// Why (#2011 follow-up): every segment except `version_port` must be
+    /// omittable independently without leaving a stray/empty ` | ` pair, and
+    /// omitting all of them must fall back to just the lead-in segment.
+    /// Test: itself.
+    #[test]
+    fn assemble_statusline_omits_none_segments() {
+        // All optional segments absent → only the lead-in segment appears.
+        let out = assemble_statusline("TM 1.2.3".to_string(), None, None, None, None, None);
+        assert_eq!(out, "TM 1.2.3");
+
+        // A gap in the middle (gh absent) must not leave an empty separator pair.
+        let out = assemble_statusline(
+            "TM 1.2.3".to_string(),
+            Some("proj".to_string()),
+            None,
+            Some("model".to_string()),
+            None,
+            Some("$0.50".to_string()),
+        );
+        assert_eq!(out, "TM 1.2.3 | proj | model | $0.50");
     }
 
     /// Why (#2011): `version_port_segment` must append the parsed port only
