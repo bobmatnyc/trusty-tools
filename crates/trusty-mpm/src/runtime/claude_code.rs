@@ -151,6 +151,27 @@ fn resume_command(
     }
 }
 
+/// Encode a workspace path the same way Claude Code names its project dir.
+///
+/// Why: both the `--continue`-eligibility check ([`has_prior_conversation_in`])
+/// and the `--resume <id>`-existence check ([`session_id_exists_in`]) must
+/// derive the SAME on-disk project directory name for a given `cwd` — if the
+/// two ever computed the encoding differently (e.g. one gets tweaked and the
+/// other doesn't), `--continue` detection and `--resume` existence detection
+/// would silently disagree about which conversations exist. Sharing one
+/// helper makes that impossible.
+/// What: replaces every `/` in the path with `-` (Claude Code's project-dir
+/// naming scheme). A leading `/` becomes `-`, so `/private/tmp/foo` →
+/// `-private-tmp-foo`.
+/// Test: `encode_project_dir_replaces_slashes`,
+/// `has_prior_conversation_returns_true_when_jsonl_exists`,
+/// `session_id_exists_true_for_real_jsonl_file`,
+/// `session_id_exists_finds_hardcoded_dir_name_for_known_cwd` (non-circular
+/// regression guard against encoding-scheme drift).
+fn encode_project_dir(cwd: &Path) -> String {
+    cwd.to_string_lossy().replace('/', "-")
+}
+
 /// Detect whether Claude Code has prior conversation history for `cwd` (#1840).
 ///
 /// Why: `claude --continue` exits with "No conversation found to continue" when
@@ -173,17 +194,16 @@ fn has_prior_conversation(cwd: &Path) -> bool {
 /// test execution). Separating the I/O root from the detection logic keeps the
 /// detection pure and mockable.
 /// What: returns `true` when `<projects_dir>/<encoded-cwd>/` exists and contains
-/// at least one `.jsonl` file. The encoded path replaces every `/` with `-`.
-/// A leading `/` becomes `-`, so `/private/tmp/foo` → `-private-tmp-foo`.
+/// at least one `.jsonl` file. The encoded path comes from
+/// [`encode_project_dir`] (every `/` replaced with `-`); a leading `/` becomes
+/// `-`, so `/private/tmp/foo` → `-private-tmp-foo`.
 /// Test: `has_prior_conversation_returns_false_for_fresh_workspace`,
 /// `has_prior_conversation_returns_true_when_jsonl_exists`.
 fn has_prior_conversation_in(cwd: &Path, projects_dir: &Path) -> bool {
     if !projects_dir.is_dir() {
         return false;
     }
-    // Claude Code encodes the workspace path by replacing every '/' with '-'.
-    let encoded = cwd.to_string_lossy().replace('/', "-");
-    let project_dir = projects_dir.join(&encoded);
+    let project_dir = projects_dir.join(encode_project_dir(cwd));
     project_dir.is_dir()
         && std::fs::read_dir(&project_dir)
             .map(|d| {
@@ -227,7 +247,9 @@ fn projects_dir_for(config_dir: Option<&Path>) -> Option<std::path::PathBuf> {
 /// What: best-effort filesystem check — `true` only when
 /// `<projects_dir>/<encoded-cwd>/<id>.jsonl` exists as a regular file, where
 /// `projects_dir` is resolved via [`projects_dir_for`] and the cwd is encoded
-/// the same way [`has_prior_conversation_in`] does (every `/` becomes `-`).
+/// via the shared [`encode_project_dir`] helper (every `/` becomes `-`) — the
+/// same encoding [`has_prior_conversation_in`] uses, so the two checks can
+/// never silently disagree.
 /// Never panics: an unresolvable projects dir, a missing file, or any I/O
 /// error all conservatively resolve to `false` (safest outcome — it only ever
 /// causes an extra fallback, never a hard failure or a wrong `--resume`).
@@ -246,14 +268,14 @@ fn session_id_exists(cwd: &Path, config_dir: Option<&Path>, id: &str) -> bool {
 ///
 /// Why: unit tests need to point at a temp directory rather than mutating
 /// `HOME`/`CLAUDE_CONFIG_DIR` process-globals.
-/// What: encodes `cwd` (every `/` → `-`) and checks
+/// What: encodes `cwd` via [`encode_project_dir`] (every `/` → `-`) and checks
 /// `<projects_dir>/<encoded-cwd>/<id>.jsonl` is a regular file.
 /// Test: `session_id_exists_true_for_real_jsonl_file`,
-/// `session_id_exists_false_for_missing_id`.
+/// `session_id_exists_false_for_missing_id`,
+/// `session_id_exists_finds_hardcoded_dir_name_for_known_cwd`.
 fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
-    let encoded = cwd.to_string_lossy().replace('/', "-");
     projects_dir
-        .join(&encoded)
+        .join(encode_project_dir(cwd))
         .join(format!("{id}.jsonl"))
         .is_file()
 }
@@ -977,6 +999,41 @@ mod tests {
             !session_id_exists(tmp.path(), None, "any-id"),
             "session_id_exists with no config dir falls back to home resolution \
              and must never panic even if HOME is unusual in the test env"
+        );
+    }
+
+    #[test]
+    fn encode_project_dir_replaces_slashes() {
+        // Why (#2013 cleanup): pins the shared encoding helper's contract
+        // directly, independent of either call site.
+        assert_eq!(
+            encode_project_dir(Path::new("/private/tmp/foo")),
+            "-private-tmp-foo"
+        );
+    }
+
+    #[test]
+    fn session_id_exists_finds_hardcoded_dir_name_for_known_cwd() {
+        // Why (#2013 cleanup, MEDIUM): the other session_id_exists tests build
+        // their expected path via the SAME formula the implementation uses
+        // (`cwd.to_string_lossy().replace('/', "-")` / `encode_project_dir`),
+        // so they cannot catch a future drift in the encoding scheme — the
+        // test and the code would drift together. This test instead types the
+        // expected directory name BY HAND as a literal, so if the encoding
+        // scheme ever changes (e.g. Claude Code starts hashing paths instead
+        // of dash-joining them), this assertion breaks independently of the
+        // implementation.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let projects_dir = tmp.path().join("projects");
+        // Hand-typed literal for cwd "/tmp/my-workspace" — NOT derived by
+        // calling encode_project_dir/replace('/', "-") here.
+        let project_dir = projects_dir.join("-tmp-my-workspace");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("known-id.jsonl"), "{}").unwrap();
+        assert!(
+            session_id_exists_in(Path::new("/tmp/my-workspace"), &projects_dir, "known-id"),
+            "session_id_exists_in must find the seeded session under the \
+             hand-typed expected dir name '-tmp-my-workspace'"
         );
     }
 
