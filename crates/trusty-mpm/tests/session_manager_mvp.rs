@@ -373,7 +373,12 @@ async fn handler_spawn_wires_provision_and_spawn() {
     // `spawn` calls `which claude` — it may fail in CI where `claude` is
     // absent. We tolerate that error here since we're testing the wiring,
     // not the binary availability.
-    let _ = adapter.spawn(&record.tmux_name, &prepared.path, task);
+    let _ = adapter.spawn(
+        &record.tmux_name,
+        &prepared.path,
+        task,
+        &record.id.to_string(),
+    );
 
     // Verify that the workspace directory was actually created on disk by the
     // FakeGitBackend. This is the non-optional anti-stub assertion: a stub
@@ -694,6 +699,7 @@ async fn tcode_session_spawns_and_accepts_commands() {
         &record.tmux_name,
         std::path::Path::new("/tmp/tcode-ws"),
         &record.task,
+        &record.id.to_string(),
     );
 
     // Issue a command into the session's pane (operator interaction).

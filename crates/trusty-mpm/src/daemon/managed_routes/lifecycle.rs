@@ -338,7 +338,12 @@ async fn spawn_managed_cloned(
     emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
     let adapter = build_adapter(record.runtime, tmux_arc);
-    if let Err(e) = adapter.spawn(&record.tmux_name, &prepared.path, &params.task) {
+    if let Err(e) = adapter.spawn(
+        &record.tmux_name,
+        &prepared.path,
+        &params.task,
+        &record.id.to_string(),
+    ) {
         warn!(
             id = %record.id,
             name = %record.tmux_name,
@@ -578,7 +583,12 @@ async fn spawn_managed_inproject(
     emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
     let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc);
-    if let Err(e) = adapter.spawn(&record.tmux_name, &worktree, &params.task) {
+    if let Err(e) = adapter.spawn(
+        &record.tmux_name,
+        &worktree,
+        &params.task,
+        &record.id.to_string(),
+    ) {
         warn!(
             id = %record.id,
             name = %record.tmux_name,
@@ -780,7 +790,12 @@ async fn spawn_managed_local(
     emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
     let adapter = build_adapter(record.runtime, tmux_arc);
-    if let Err(e) = adapter.spawn(&record.tmux_name, &workspace, &params.task) {
+    if let Err(e) = adapter.spawn(
+        &record.tmux_name,
+        &workspace,
+        &params.task,
+        &record.id.to_string(),
+    ) {
         warn!(
             id = %record.id,
             name = %record.tmux_name,
@@ -836,7 +851,12 @@ pub async fn spawn_runtime_for(
 
     let tmux_arc = mgr.tmux_driver();
     let adapter = build_adapter(record.runtime, tmux_arc);
-    if let Err(e) = adapter.spawn(&record.tmux_name, &workspace, &record.task) {
+    if let Err(e) = adapter.spawn(
+        &record.tmux_name,
+        &workspace,
+        &record.task,
+        &record.id.to_string(),
+    ) {
         warn!(
             id = %record.id,
             name = %record.tmux_name,
@@ -1043,6 +1063,7 @@ pub async fn resume_managed(
         &workspace,
         &record.task,
         record.claude_session_id.as_deref(),
+        &record.id.to_string(),
     ) {
         warn!(
             id = %record.id,

@@ -37,6 +37,32 @@ fn shell_single_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// Build the `export TM_MANAGED_SESSION_ID=…;` prefix injected into the pane
+/// shell ahead of every managed launch/resume command (#2023 component B).
+///
+/// Why: `tmux set-environment` only updates the tmux *session* environment —
+/// the pane's login shell was already forked (and its environment snapshotted)
+/// at session creation, BEFORE this command is ever sent, so it never picks up
+/// a `set-environment` change. Exporting the variable as part of the literal
+/// shell line sent via `send_line` is the only way the assignment lands in
+/// THAT shell's live environment, which is what makes it survive `claude`
+/// exiting and dropping back to the pane's shell — the exact case the
+/// in-place-relaunch feature (#2023 component C) depends on: a command run in
+/// the pane after Claude exits needs to identify which managed session it is.
+/// What: `export TM_MANAGED_SESSION_ID='<session_id>'; ` (single-quoted via
+/// [`shell_single_quote`], trailing space so it concatenates cleanly with the
+/// `env …` prefix that follows). `session_id` is a UUID and never contains a
+/// single quote, but the same escaping used for `CLAUDE_CONFIG_DIR` is applied
+/// for defense in depth.
+/// Test: `spawn_command_exports_managed_session_id`,
+/// `resume_command_exports_managed_session_id`.
+fn session_id_export_prefix(session_id: &str) -> String {
+    format!(
+        "export TM_MANAGED_SESSION_ID={}; ",
+        shell_single_quote(session_id)
+    )
+}
+
 /// Compose the `env …` prefix + resolved binary that starts every managed
 /// `claude`, wiring in the tm-owned `CLAUDE_CONFIG_DIR` when available (DOC-34).
 ///
@@ -97,17 +123,22 @@ fn env_bin_prefix(claude_bin: &str, config_dir: Option<&Path>) -> String {
 /// Both flags reuse the shared [`crate::core::model_inject::SETTING_SOURCES_FLAG`]
 /// / [`crate::core::model_inject::PERMISSION_MODE_FLAG`] constants so this spawn
 /// path and the CLI launch path can never drift.
-/// What: built from [`env_bin_prefix`] plus the two shared flag constants; piped
-/// to `tmux send-keys … Enter`. `claude_bin` is the resolved binary — an
-/// absolute path under launchd so the pane (which inherits the daemon's minimal
-/// `PATH`) does not need `claude` on its own `PATH` (#1298).
+/// What: [`session_id_export_prefix`] followed by [`env_bin_prefix`] plus the
+/// two shared flag constants; piped to `tmux send-keys … Enter`. `claude_bin`
+/// is the resolved binary — an absolute path under launchd so the pane (which
+/// inherits the daemon's minimal `PATH`) does not need `claude` on its own
+/// `PATH` (#1298). `session_id` is the managed session's UUID (#2023 component
+/// B), exported so in-pane commands can identify the session after `claude`
+/// exits.
 /// Test: `spawn_command_contains_env_scrub`,
 /// `spawn_command_contains_isolation_flags`,
 /// `spawn_command_uses_resolved_binary`,
-/// `spawn_command_sets_claude_config_dir`.
-fn spawn_command(claude_bin: &str, config_dir: Option<&Path>) -> String {
+/// `spawn_command_sets_claude_config_dir`,
+/// `spawn_command_exports_managed_session_id`.
+fn spawn_command(claude_bin: &str, config_dir: Option<&Path>, session_id: &str) -> String {
     format!(
-        "{} {} {}",
+        "{}{} {} {}",
+        session_id_export_prefix(session_id),
         env_bin_prefix(claude_bin, config_dir),
         crate::core::model_inject::SETTING_SOURCES_FLAG,
         crate::core::model_inject::PERMISSION_MODE_FLAG,
@@ -131,15 +162,18 @@ fn spawn_command(claude_bin: &str, config_dir: Option<&Path>) -> String {
 /// Test: `resume_command_with_id_uses_resume_flag`,
 /// `resume_command_without_id_with_prior_conv_uses_continue`,
 /// `resume_command_without_id_no_prior_conv_uses_plain_spawn`,
-/// `resume_command_sets_claude_config_dir`.
+/// `resume_command_sets_claude_config_dir`,
+/// `resume_command_exports_managed_session_id`.
 fn resume_command(
     claude_bin: &str,
     config_dir: Option<&Path>,
     claude_session_id: Option<&str>,
     has_prior_conv: bool,
+    session_id: &str,
 ) -> String {
     let base = format!(
-        "{} {} {}",
+        "{}{} {} {}",
+        session_id_export_prefix(session_id),
         env_bin_prefix(claude_bin, config_dir),
         crate::core::model_inject::SETTING_SOURCES_FLAG,
         crate::core::model_inject::PERMISSION_MODE_FLAG,
@@ -403,7 +437,13 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// observability but not passed to the command (Claude Code reads
     /// instructions from CLAUDE.md or an interactive prompt).
     /// Test: `spawn_sends_env_scrub_when_binary_available`.
-    fn spawn(&self, tmux_name: &str, cwd: &Path, task: &str) -> Result<(), RuntimeError> {
+    fn spawn(
+        &self,
+        tmux_name: &str,
+        cwd: &Path,
+        task: &str,
+        session_id: &str,
+    ) -> Result<(), RuntimeError> {
         let claude_bin = Self::resolve_claude().ok_or_else(|| {
             RuntimeError::BinaryNotFound(
                 "claude binary not found on PATH or in well-known dirs \
@@ -427,7 +467,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         self.tmux
             .send_line(
                 tmux_name,
-                &spawn_command(&claude_bin, config_dir.as_deref()),
+                &spawn_command(&claude_bin, config_dir.as_deref(), session_id),
             )
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
     }
@@ -458,6 +498,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         cwd: &Path,
         task: &str,
         claude_session_id: Option<&str>,
+        session_id: &str,
     ) -> Result<(), RuntimeError> {
         let claude_bin = Self::resolve_claude().ok_or_else(|| {
             RuntimeError::BinaryNotFound(
@@ -512,7 +553,13 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         self.tmux
             .send_line(
                 tmux_name,
-                &resume_command(&claude_bin, config_dir.as_deref(), effective_id, prior),
+                &resume_command(
+                    &claude_bin,
+                    config_dir.as_deref(),
+                    effective_id,
+                    prior,
+                    session_id,
+                ),
             )
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
     }
@@ -532,6 +579,10 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
 mod tests {
     use super::super::test_helpers::FakeTmux;
     use super::*;
+
+    /// Fixed managed-session UUID string reused across command-builder tests
+    /// (#2023 component B) — a representative id, not a real session.
+    const TEST_SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
 
     /// RAII guard that redirects `$HOME` to a temp dir and restores it on drop
     /// (including panic).
@@ -575,7 +626,7 @@ mod tests {
     fn spawn_command_contains_env_scrub() {
         // The spawn command must always strip the API key from the environment
         // so the session falls back to OAuth (keyed by CLAUDE_CONFIG_DIR).
-        let cmd = spawn_command("claude", None);
+        let cmd = spawn_command("claude", None, TEST_SESSION_ID);
         assert!(
             cmd.contains("env -u ANTHROPIC_API_KEY"),
             "spawn command must contain env scrub: {cmd}"
@@ -587,13 +638,37 @@ mod tests {
     }
 
     #[test]
+    fn spawn_command_exports_managed_session_id() {
+        // #2023 component B: the spawn command sent to the pane must export
+        // TM_MANAGED_SESSION_ID (single-quoted, terminated by `;`) BEFORE the
+        // claude invocation, so a command run in the pane after claude exits
+        // can identify which managed session it belongs to. tmux
+        // set-environment alone would NOT reach the pane's already-running
+        // shell — the export must be part of the literal command line.
+        let cmd = spawn_command("claude", None, TEST_SESSION_ID);
+        let expected_prefix = format!("export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; ");
+        assert!(
+            cmd.starts_with(&expected_prefix),
+            "spawn command must start with the session-id export: {cmd}"
+        );
+        let export_pos = cmd
+            .find("export TM_MANAGED_SESSION_ID")
+            .expect("export present");
+        let claude_pos = cmd.find(" claude ").expect("claude invocation present");
+        assert!(
+            export_pos < claude_pos,
+            "export must precede the claude invocation: {cmd}"
+        );
+    }
+
+    #[test]
     fn spawn_command_sets_claude_config_dir() {
         // DOC-34 / #1996: when a managed config dir is available the spawn
         // command MUST export it so the framework roster comes from tm's config
         // home, not the project's committed `.claude/`. It must co-exist with the
         // API-key scrub.
         let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
-        let cmd = spawn_command("claude", Some(dir));
+        let cmd = spawn_command("claude", Some(dir), TEST_SESSION_ID);
         assert!(
             cmd.contains(
                 "env -u ANTHROPIC_API_KEY \
@@ -618,7 +693,7 @@ mod tests {
         // (`env: -u: No such file or directory`), fatally killing every managed
         // session spawn.
         let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
-        let cmd = spawn_command("claude", Some(dir));
+        let cmd = spawn_command("claude", Some(dir), TEST_SESSION_ID);
         let u_pos = cmd
             .find("-u ANTHROPIC_API_KEY")
             .expect("cmd must contain -u ANTHROPIC_API_KEY");
@@ -637,7 +712,7 @@ mod tests {
         // When home is unresolvable there is no config dir to point at; the
         // command must fall back to the legacy scrub-only prefix (no bare
         // `CLAUDE_CONFIG_DIR=` token).
-        let cmd = spawn_command("claude", None);
+        let cmd = spawn_command("claude", None, TEST_SESSION_ID);
         assert!(
             !cmd.contains("CLAUDE_CONFIG_DIR"),
             "no config dir → must not reference CLAUDE_CONFIG_DIR: {cmd}"
@@ -650,7 +725,7 @@ mod tests {
         // the pane command. The path must appear single-quoted and INTACT so
         // `env` receives one CLAUDE_CONFIG_DIR value, not two argv tokens.
         let dir = Path::new("/Users/John Doe/.trusty-tools/trusty-mpm/claude-config");
-        let cmd = spawn_command("claude", Some(dir));
+        let cmd = spawn_command("claude", Some(dir), TEST_SESSION_ID);
         assert!(
             cmd.contains(
                 "env -u ANTHROPIC_API_KEY \
@@ -664,7 +739,7 @@ mod tests {
             "config dir must never be interpolated unquoted: {cmd}"
         );
         // Resume path shares env_bin_prefix, so it must quote identically.
-        let resume = resume_command("claude", Some(dir), None, false);
+        let resume = resume_command("claude", Some(dir), None, false, TEST_SESSION_ID);
         assert!(
             resume.contains(
                 "CLAUDE_CONFIG_DIR='/Users/John Doe/.trusty-tools/trusty-mpm/claude-config'"
@@ -690,7 +765,7 @@ mod tests {
         // Why: the session_manager spawn path must isolate from the user's global
         // settings and run fully unattended (bypass all permission prompts) so
         // multi-agent orchestration never stalls on interactive approval dialogs.
-        let cmd = spawn_command("claude", None);
+        let cmd = spawn_command("claude", None, TEST_SESSION_ID);
         assert!(
             cmd.contains("--setting-sources project,local"),
             "spawn command must isolate settings: {cmd}"
@@ -711,7 +786,7 @@ mod tests {
         // Why (#1298): under launchd the pane inherits a minimal PATH, so the
         // spawn command must invoke claude by the resolved (absolute) path
         // rather than a bare `claude` that the pane's PATH cannot find.
-        let cmd = spawn_command("/Users/me/.local/bin/claude", None);
+        let cmd = spawn_command("/Users/me/.local/bin/claude", None, TEST_SESSION_ID);
         assert!(
             cmd.contains("env -u ANTHROPIC_API_KEY /Users/me/.local/bin/claude "),
             "spawn command must invoke the resolved absolute claude path: {cmd}"
@@ -741,7 +816,7 @@ mod tests {
         let fake = FakeTmux::new();
         let adapter = ClaudeCodeAdapter::new(fake.clone());
         adapter
-            .spawn("tmpm-test", Path::new("/tmp"), "some task")
+            .spawn("tmpm-test", Path::new("/tmp"), "some task", TEST_SESSION_ID)
             .expect("spawn");
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1);
@@ -751,7 +826,7 @@ mod tests {
         let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir();
         assert_eq!(
             sends[0].1,
-            spawn_command(&claude_bin, config_dir.as_deref())
+            spawn_command(&claude_bin, config_dir.as_deref(), TEST_SESSION_ID)
         );
         // And it must carry the env scrub regardless (the option must precede
         // any intervening `CLAUDE_CONFIG_DIR=` assignment per POSIX env grammar).
@@ -762,7 +837,7 @@ mod tests {
     fn resume_command_with_id_uses_resume_flag() {
         // Why (#1744): --resume <id> restores the exact prior conversation;
         // the test pins the contract so accidental regressions are caught early.
-        let cmd = resume_command("claude", None, Some("abc-123"), false);
+        let cmd = resume_command("claude", None, Some("abc-123"), false, TEST_SESSION_ID);
         assert!(
             cmd.contains("--resume abc-123"),
             "resume command must include --resume <id>: {cmd}"
@@ -778,11 +853,33 @@ mod tests {
     }
 
     #[test]
+    fn resume_command_exports_managed_session_id() {
+        // #2023 component B: the resume command must ALSO export
+        // TM_MANAGED_SESSION_ID before the claude invocation, for the same
+        // reason as the spawn path — the pane's shell must retain the id after
+        // claude exits, whichever launch path (fresh spawn or resume) started it.
+        let cmd = resume_command("claude", None, Some("abc-123"), false, TEST_SESSION_ID);
+        let expected_prefix = format!("export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; ");
+        assert!(
+            cmd.starts_with(&expected_prefix),
+            "resume command must start with the session-id export: {cmd}"
+        );
+        let export_pos = cmd
+            .find("export TM_MANAGED_SESSION_ID")
+            .expect("export present");
+        let resume_pos = cmd.find("--resume").expect("--resume flag present");
+        assert!(
+            export_pos < resume_pos,
+            "export must precede the --resume flag: {cmd}"
+        );
+    }
+
+    #[test]
     fn resume_command_sets_claude_config_dir() {
         // DOC-34: the resume path must also carry CLAUDE_CONFIG_DIR so resumed
         // sessions read the same tm-owned roster as fresh spawns.
         let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
-        let cmd = resume_command("claude", Some(dir), Some("abc-123"), false);
+        let cmd = resume_command("claude", Some(dir), Some("abc-123"), false, TEST_SESSION_ID);
         assert!(
             cmd.contains(
                 "env -u ANTHROPIC_API_KEY \
@@ -801,7 +898,7 @@ mod tests {
         // Why (#1744 / #1840): when no claude_session_id is stored but prior
         // conversation history exists, --continue resumes the most-recent
         // conversation in the workspace rather than starting fresh.
-        let cmd = resume_command("claude", None, None, true);
+        let cmd = resume_command("claude", None, None, true, TEST_SESSION_ID);
         assert!(
             cmd.contains("--continue"),
             "resume command without id + prior conv must use --continue: {cmd}"
@@ -817,7 +914,7 @@ mod tests {
         // Why (#1840): when no claude_session_id is stored AND no prior
         // conversation exists, --continue would error with "No conversation
         // found to continue". The plain spawn starts a fresh session instead.
-        let cmd = resume_command("claude", None, None, false);
+        let cmd = resume_command("claude", None, None, false, TEST_SESSION_ID);
         assert!(
             !cmd.contains("--continue"),
             "resume command without id + no prior conv must NOT use --continue: {cmd}"
@@ -896,7 +993,13 @@ mod tests {
         let fake = FakeTmux::new();
         let adapter = ClaudeCodeAdapter::new(fake.clone());
         adapter
-            .spawn_resume("tmpm-test", cwd, "task", Some("my-session-id"))
+            .spawn_resume(
+                "tmpm-test",
+                cwd,
+                "task",
+                Some("my-session-id"),
+                TEST_SESSION_ID,
+            )
             .expect("spawn_resume");
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1);
@@ -926,6 +1029,7 @@ mod tests {
                 Path::new("/tmp/does-not-exist-2013"),
                 "task",
                 Some("stale-session-id"),
+                TEST_SESSION_ID,
             )
             .expect("spawn_resume must not hard-fail on a missing id");
         let sends = fake.sends.lock().unwrap();
@@ -1062,7 +1166,7 @@ mod tests {
         // binary so assertions ALWAYS run even when the `claude` binary is absent in CI.
         // The adapter merely calls resume_command() with the same arguments; testing the
         // function directly proves the selection logic without CI depending on claude.
-        let cmd = resume_command("__fake_claude__", None, None, false);
+        let cmd = resume_command("__fake_claude__", None, None, false, TEST_SESSION_ID);
         assert!(
             !cmd.contains("--continue"),
             "plain-spawn path must NOT use --continue: {cmd}"
@@ -1086,7 +1190,13 @@ mod tests {
         let fake = FakeTmux::new();
         let adapter = ClaudeCodeAdapter::new(fake.clone());
         adapter
-            .spawn_resume("test-tmux-session", tmp.path(), "task", None)
+            .spawn_resume(
+                "test-tmux-session",
+                tmp.path(),
+                "task",
+                None,
+                TEST_SESSION_ID,
+            )
             .expect("spawn_resume without id");
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1);
