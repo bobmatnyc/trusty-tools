@@ -615,6 +615,28 @@ impl SessionManager {
     /// wanted to glance at, purely because the daemon noticed the runtime was
     /// gone ~60s earlier than the human did. This method gives the reaper its
     /// own non-destructive path: same record transition, no pane teardown.
+    ///
+    /// Scope: this ONLY preserves the pane — it marks `Stopped` and leaves the
+    /// tmux session/pane alive so an operator can still `tmux attach` and look
+    /// at the trailing output, or manually re-launch `claude` in that same
+    /// pane. It does NOT provide in-place runtime reuse by itself: today's
+    /// `tm session resume` / the guided-picker Restart path unconditionally
+    /// kills any surviving tmux session and creates a fresh one
+    /// (`Self::resume`, below — see the `kill_session` + `create_session` pair
+    /// there), so resuming a session marked `Stopped` by this method still
+    /// tears the preserved pane down. True bare-`tm`-in-pane relaunch reusing
+    /// the surviving shell is the scope of #2023 component C, not this method.
+    ///
+    /// NOTE — auto-resume supervisors: `tm supervisor --auto-resume`
+    /// (`supervisor::poller::run_tick`) auto-resumes EVERY `Stopped` record
+    /// once `cfg.auto_resume` is true, and `resume()` kills the preserved pane
+    /// as described above. So the "pane left alive" guarantee this method
+    /// provides only holds for `auto_resume = false` / interactive
+    /// deployments — under an auto-resume supervisor the session is still
+    /// revived (and its idle pane replaced) by that mode's own design.
+    /// Reconciling supervisor-revive vs. preserve-on-exit semantics is tracked
+    /// as a follow-up (#2026).
+    ///
     /// What: loads the record, captures a pane snapshot the same way `stop`
     /// does (best-effort — the pane usually still exists, it is just an idle
     /// shell), sets `state = Stopped`, and persists. Deliberately never calls
