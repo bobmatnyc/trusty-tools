@@ -61,7 +61,7 @@ impl ClaudeCodeRestarter {
         driver.send_interrupt(&target)?;
         std::thread::sleep(std::time::Duration::from_millis(500));
         // Relaunch Claude Code.
-        driver.send_line(&target, "claude")?;
+        driver.send_line(&target, crate::daemon::spawn_command::spawn_command())?;
         Ok(())
     }
 }

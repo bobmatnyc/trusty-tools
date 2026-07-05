@@ -34,6 +34,7 @@ pub mod pairing_store;
 pub mod runtime_reap;
 pub mod services;
 pub mod sm_stdio;
+pub(crate) mod spawn_command;
 pub mod state;
 pub mod tmux;
 pub mod watcher;
