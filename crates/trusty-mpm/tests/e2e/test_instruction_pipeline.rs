@@ -65,7 +65,9 @@ fn pipeline_produces_merged_output() {
     assert!(auth < proj, "delegation authority precedes project notes");
 }
 
-/// An existing project `CLAUDE.md` with custom content is preserved verbatim.
+/// An existing project `CLAUDE.md` with custom content has that content
+/// preserved; the framework additively upserts its own fenced
+/// delegation-directive block alongside it (issue #2125 item 1).
 #[test]
 fn pipeline_preserves_claude_md() {
     let tmp = TempDir::new().unwrap();
@@ -80,7 +82,14 @@ fn pipeline_preserves_claude_md() {
     assert!(!out.claude_md_created, "existing CLAUDE.md not recreated");
 
     let on_disk = std::fs::read_to_string(&input.claude_md_path).unwrap();
-    assert_eq!(on_disk, custom, "custom content untouched");
+    assert!(
+        on_disk.contains("CUSTOM HAND-WRITTEN CONTENT"),
+        "custom content preserved: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("trusty-mpm:delegation-directive:begin"),
+        "delegation-directive block additively inserted: {on_disk}"
+    );
     assert!(out.merged.contains("CUSTOM HAND-WRITTEN CONTENT"));
 }
 
