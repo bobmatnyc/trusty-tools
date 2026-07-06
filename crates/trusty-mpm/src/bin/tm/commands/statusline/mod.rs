@@ -4,20 +4,23 @@
 //! command; this handler parses the hook JSON from stdin and emits a compact
 //! ` | `-separated segment string on stdout. All fields degrade gracefully.
 //! What: reads a JSON object from stdin and renders the fixed-order layout
-//! `TM <ver> <port> | <project> ⎇ <branch> | @<gh> | <model> | ctx% | <cost>`
-//! (#2011) to stdout. Missing or invalid fields produce empty/omitted segments;
+//! `TM <ver> <port> | <project> ⎇ <branch> | @<gh> | <model> | ctx% | <cost> |
+//! <usage>` (#2011, extended #2140 with the trailing account-usage% segment)
+//! to stdout. Missing or invalid fields produce empty/omitted segments;
 //! nothing ever panics or blocks the render path.
 //! Test: `render_statusline_minimal_input`, `render_statusline_full_payload`,
 //! `assemble_statusline_pins_segment_order_with_markers` in tests.
 
 mod branch;
 pub(crate) mod compaction;
+mod usage;
 
 use std::io::Read as _;
 
 use crate::formatters::info_box::DaemonInfo;
 use branch::project_segment;
 use compaction::{ContextWindow, colorize_ctx_segment, compaction_segment};
+use usage::{RateLimits, usage_segment};
 
 /// Claude Code `statusLine` hook input (all fields optional via `#[serde(default)]`).
 ///
@@ -40,6 +43,8 @@ pub(crate) struct StatusInput {
     pub(crate) exceeds_200k_tokens: bool,
     #[serde(default)]
     pub(crate) context_window: Option<ContextWindow>,
+    #[serde(default)]
+    pub(crate) rate_limits: Option<RateLimits>,
 }
 
 /// Model metadata from the Claude Code hook input.
@@ -91,9 +96,9 @@ pub(crate) fn run_statusline() -> anyhow::Result<()> {
 /// results to the pure [`assemble_statusline`] lets the fixed segment ORDER be
 /// pinned by a deterministic unit test with hand-supplied strings, independent
 /// of real git/gh/daemon state.
-/// What: probes each of the six segments (version+port, project+branch, gh
-/// account, model, ctx%, cost) in spec order and joins them via
-/// [`assemble_statusline`].
+/// What: probes each of the seven segments (version+port, project+branch, gh
+/// account, model, ctx%, cost, account-usage%) in spec order and joins them
+/// via [`assemble_statusline`].
 /// Test: `render_statusline_minimal_input`, `render_statusline_full_payload`,
 /// `render_statusline_full_payload_matches_pipe_format`.
 pub(crate) fn render_statusline(input: &StatusInput) -> String {
@@ -118,23 +123,29 @@ pub(crate) fn render_statusline(input: &StatusInput) -> String {
 
     let cost = (input.cost.total_cost_usd > 0.0).then(|| cost_segment(input.cost.total_cost_usd));
 
-    assemble_statusline(version_port, project, gh, model, ctx, cost)
+    // Account-level rate-limit usage (#2140); appended after cost, absent
+    // entirely before the first API response of a session or on non-Pro/Max
+    // accounts (Claude Code simply omits `rate_limits` in those cases).
+    let usage = usage_segment(input.rate_limits.as_ref());
+
+    assemble_statusline(version_port, project, gh, model, ctx, cost, usage)
 }
 
-/// Join the six statusline segments in spec order, omitting absent ones.
+/// Join the seven statusline segments in spec order, omitting absent ones.
 ///
-/// Why (#2011 follow-up): separating ORDER + JOIN from the I/O-bound probes
-/// that produce each segment value is what makes the exact layout —
-/// `TM <ver> <port> | <project> ⎇ <branch> | @<gh> | <model> | ctx% | <cost>`
-/// — pinned by a deterministic test using hand-supplied synthetic strings.
-/// Without this split, a future refactor could transpose or silently drop a
-/// middle segment and no test would catch it.
-/// What: takes the six segments in fixed spec order (`version_port` is always
-/// present; the rest are `Option<String>`), filters out `None`s, and joins the
-/// survivors with ` | `. Pure — no I/O, no panics.
+/// Why (#2011 follow-up, extended #2140): separating ORDER + JOIN from the
+/// I/O-bound probes that produce each segment value is what makes the exact
+/// layout — `TM <ver> <port> | <project> ⎇ <branch> | @<gh> | <model> | ctx% |
+/// <cost> | <usage>` — pinned by a deterministic test using hand-supplied
+/// synthetic strings. Without this split, a future refactor could transpose
+/// or silently drop a middle segment and no test would catch it.
+/// What: takes the seven segments in fixed spec order (`version_port` is
+/// always present; the rest are `Option<String>`), filters out `None`s, and
+/// joins the survivors with ` | `. Pure — no I/O, no panics.
 /// Test: `assemble_statusline_full_payload_pins_order_and_format`,
 /// `assemble_statusline_pins_segment_order_with_markers`,
 /// `assemble_statusline_omits_none_segments`.
+#[allow(clippy::too_many_arguments)]
 fn assemble_statusline(
     version_port: String,
     project: Option<String>,
@@ -142,8 +153,9 @@ fn assemble_statusline(
     model: Option<String>,
     ctx: Option<String>,
     cost: Option<String>,
+    usage: Option<String>,
 ) -> String {
-    [Some(version_port), project, gh, model, ctx, cost]
+    [Some(version_port), project, gh, model, ctx, cost, usage]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
@@ -282,6 +294,7 @@ mod tests {
             },
             exceeds_200k_tokens: false,
             context_window: None,
+            rate_limits: None,
         }
     }
 
@@ -354,10 +367,11 @@ mod tests {
             Some("Claude Sonnet 4.6".to_string()),
             Some("ctx 41%".to_string()),
             Some("$1.23".to_string()),
+            Some("\u{23f3}24% \u{1f4c5}41%".to_string()),
         );
         assert_eq!(
             out,
-            "TM 1.2.3 7880 | bobmatnyc/trusty-tools \u{2387} main | @bobmatnyc | Claude Sonnet 4.6 | ctx 41% | $1.23"
+            "TM 1.2.3 7880 | bobmatnyc/trusty-tools \u{2387} main | @bobmatnyc | Claude Sonnet 4.6 | ctx 41% | $1.23 | \u{23f3}24% \u{1f4c5}41%"
         );
     }
 
@@ -378,12 +392,24 @@ mod tests {
             Some("MODEL".to_string()),
             Some("CTX".to_string()),
             Some("COST".to_string()),
+            Some("USAGE".to_string()),
         );
-        assert_eq!(out, "VERSION_PORT | PROJECT | GH | MODEL | CTX | COST");
+        assert_eq!(
+            out,
+            "VERSION_PORT | PROJECT | GH | MODEL | CTX | COST | USAGE"
+        );
         assert_eq!(
             out.split(" | ").collect::<Vec<_>>(),
-            vec!["VERSION_PORT", "PROJECT", "GH", "MODEL", "CTX", "COST"],
-            "segment order must exactly match [version_port, project, gh, model, ctx, cost]"
+            vec![
+                "VERSION_PORT",
+                "PROJECT",
+                "GH",
+                "MODEL",
+                "CTX",
+                "COST",
+                "USAGE"
+            ],
+            "segment order must exactly match [version_port, project, gh, model, ctx, cost, usage]"
         );
     }
 
@@ -394,7 +420,7 @@ mod tests {
     #[test]
     fn assemble_statusline_omits_none_segments() {
         // All optional segments absent → only the lead-in segment appears.
-        let out = assemble_statusline("TM 1.2.3".to_string(), None, None, None, None, None);
+        let out = assemble_statusline("TM 1.2.3".to_string(), None, None, None, None, None, None);
         assert_eq!(out, "TM 1.2.3");
 
         // A gap in the middle (gh absent) must not leave an empty separator pair.
@@ -405,6 +431,7 @@ mod tests {
             Some("model".to_string()),
             None,
             Some("$0.50".to_string()),
+            None,
         );
         assert_eq!(out, "TM 1.2.3 | proj | model | $0.50");
     }
@@ -547,5 +574,45 @@ mod tests {
         let out = render_statusline(&input);
         // No compaction/ctx segment because session_id is empty
         assert!(!out.contains("ctx "), "no ctx segment without session_id");
+    }
+
+    /// Why (#2140): end-to-end check that `rate_limits` flows from
+    /// `StatusInput` through `render_statusline` into a trailing usage
+    /// segment, appended after cost.
+    /// Test: itself.
+    #[test]
+    fn render_statusline_with_rate_limits_shows_usage_segment() {
+        use usage::{RateLimits, RateWindow};
+
+        let mut input = full_input();
+        input.rate_limits = Some(RateLimits {
+            five_hour: Some(RateWindow {
+                used_percentage: Some(24.0),
+            }),
+            seven_day: Some(RateWindow {
+                used_percentage: Some(41.0),
+            }),
+        });
+        let out = render_statusline(&input);
+        assert!(out.contains("24%"), "5h usage % must appear: {out}");
+        assert!(out.contains("41%"), "7d usage % must appear: {out}");
+        assert!(
+            out.ends_with("41%") || out.contains("41%\u{1b}[0m"),
+            "usage segment must be appended after cost: {out}"
+        );
+    }
+
+    /// Why (#2140): before the first API response (or on non-Pro/Max
+    /// accounts) `rate_limits` is entirely absent from the hook payload; the
+    /// segment must be cleanly omitted, never a false `0%`.
+    /// Test: itself.
+    #[test]
+    fn render_statusline_without_rate_limits_omits_usage_segment() {
+        let input = full_input();
+        let out = render_statusline(&input);
+        assert!(
+            !out.contains('\u{23f3}') && !out.contains('\u{1f4c5}'),
+            "usage segment must be omitted when rate_limits is absent: {out}"
+        );
     }
 }
