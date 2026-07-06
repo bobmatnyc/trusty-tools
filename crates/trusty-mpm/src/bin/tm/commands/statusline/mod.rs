@@ -17,7 +17,7 @@ use std::io::Read as _;
 
 use crate::formatters::info_box::DaemonInfo;
 use branch::project_segment;
-use compaction::{ContextWindow, compaction_segment};
+use compaction::{ContextWindow, colorize_ctx_segment, compaction_segment};
 
 /// Claude Code `statusLine` hook input (all fields optional via `#[serde(default)]`).
 ///
@@ -108,8 +108,13 @@ pub(crate) fn render_statusline(input: &StatusInput) -> String {
 
     // Compaction efficiency / live context fill; falls back to a bare
     // `ctx>200k` marker when no context-window payload was sent at all.
-    let ctx = compaction_segment(&input.session_id, input.context_window.as_ref())
-        .or_else(|| input.exceeds_200k_tokens.then(|| "ctx>200k".to_string()));
+    // `exceeds_200k_tokens` is itself already an over-limit signal (usage
+    // fraction 1.0), so the fallback marker is always colored red (#2098).
+    let ctx = compaction_segment(&input.session_id, input.context_window.as_ref()).or_else(|| {
+        input
+            .exceeds_200k_tokens
+            .then(|| colorize_ctx_segment("ctx>200k", 1.0))
+    });
 
     let cost = (input.cost.total_cost_usd > 0.0).then(|| cost_segment(input.cost.total_cost_usd));
 
