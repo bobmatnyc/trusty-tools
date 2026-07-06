@@ -9,11 +9,13 @@
 //! tested in `manager::tests`.
 
 pub mod adopt;
+pub mod create;
 pub mod decommission;
 pub mod delete;
 pub mod driver;
 pub mod hook_sync;
 pub mod manager;
+pub mod naming;
 pub mod prune;
 pub mod reactivate;
 pub mod record;

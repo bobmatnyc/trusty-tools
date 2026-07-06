@@ -90,7 +90,14 @@ async fn manager_decommission_removes_real_git_worktree() {
     }
 
     // ── Real `git worktree add` under <base>/.worktrees/<session-name> ───────
+    // Branch is `session/<session_name>` (issue #2032 fix) — this MUST mirror
+    // the exact convention `create_session_worktree`/`worktree_branch_for`
+    // use in production, or this fixture would silently re-encode the very
+    // bug #2032 fixed (a pre-#2032 version of this fixture used the bare,
+    // unprefixed name here, which happened to match `decommission.rs`'s
+    // then-buggy `git branch -D <leaf>` and masked the missing-prefix bug).
     let session_name = "test-session-1806";
+    let branch_name = crate::core::worktree_naming::worktree_branch_for(session_name);
     let worktrees_dir = base.join(".worktrees");
     std::fs::create_dir_all(&worktrees_dir).unwrap();
     let worktree_path = worktrees_dir.join(session_name);
@@ -101,7 +108,7 @@ async fn manager_decommission_removes_real_git_worktree() {
             "worktree",
             "add",
             "-b",
-            session_name,
+            &branch_name,
         ])
         .arg(&worktree_path)
         .status()
@@ -158,14 +165,14 @@ async fn manager_decommission_removes_real_git_worktree() {
         "git worktree list must not reference the removed worktree; got: {list_stdout}"
     );
 
-    // The session branch ref must have been deleted.
+    // The session branch ref (`session/<name>`, #2032) must have been deleted.
     let branch_out = std::process::Command::new("git")
         .args([
             "-C",
             base.to_str().unwrap(),
             "branch",
             "--list",
-            session_name,
+            &branch_name,
         ])
         .output()
         .expect("git branch --list");

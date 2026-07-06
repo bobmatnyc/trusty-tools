@@ -642,7 +642,13 @@ async fn redirect_to_managed_clone(
 
     // Create a per-session worktree branched from the base clone.
     let session_id = ManagedSessionId::new();
-    let worktree = match inproject::create_session_worktree(&base, &session_id) {
+    // NOTE (#2032): this daemon-unreachable fallback path is NOT the managed
+    // SessionManager spawn flow — it has no session manager to resolve a
+    // semantic tmux name from, so it deliberately keeps the pre-#2032
+    // UUID-named worktree here. Only the daemon's `spawn_managed_inproject`
+    // path (`daemon::managed_routes::lifecycle`) uses the new semantic-name
+    // worktree layout.
+    let worktree = match inproject::create_session_worktree(&base, &session_id.to_string()) {
         Ok(p) => p,
         Err(e) => {
             eprintln!(
