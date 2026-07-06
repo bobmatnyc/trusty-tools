@@ -24,6 +24,7 @@ pub mod persistence;
 pub mod persistence_loader;
 pub mod persistence_timestamps;
 pub mod query_timeout;
+pub mod reconcile;
 pub mod reindex;
 pub mod roots_registry;
 pub mod server;

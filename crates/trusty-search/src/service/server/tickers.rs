@@ -141,6 +141,73 @@ pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
     });
 }
 
+/// Spawn a background ticker that suspends the FSEvents watcher of any index
+/// that has gone idle, to stop burning CPU / `fseventsd` load on projects
+/// nobody is using.
+///
+/// Why: once `spawn_for_index` fires (warm-boot or `POST /indexes`), an index's
+/// OS watch runs until the index is deleted — so a host tracking hundreds of
+/// registered projects keeps hundreds of live watches even though only a few
+/// are in active use. Releasing an idle index's watch reclaims that cost; the
+/// query path re-establishes it (and reconciles missed edits) on the next
+/// query, so suspension is invisible to an active user. Complements the
+/// idle-chunk-eviction ticker, which reclaims heap but keeps the watcher hot.
+/// What: every 60 s, resolves the idle window via `watch_idle_suspend_secs()`
+/// (env `TRUSTY_WATCH_IDLE_SUSPEND_SECS`, default 900 s; `0` disables and the
+/// ticker idles), then for each *currently-watched* index whose
+/// `CodeIndexer::idle_duration()` meets the threshold, calls
+/// `watcher_manager.stop_for_index`. The per-index idle read takes only the
+/// indexer read lock; unwatched indexes are skipped before any lock.
+/// Test: the idle window helper is covered by
+/// `watch_idle_suspend_secs_default_and_env_override`; `is_watching` transitions
+/// by `is_watching_reflects_spawn_and_stop`; this is a thin scheduling wrapper.
+pub(super) fn spawn_watcher_idle_suspend_ticker(state: Arc<SearchAppState>) {
+    let weak = Arc::downgrade(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        // Skip the immediate first tick so a freshly-started daemon isn't
+        // suspending watchers before it has served anything.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let Some(state) = weak.upgrade() else {
+                break;
+            };
+            let secs = crate::core::indexer::watch_idle_suspend_secs();
+            if secs == 0 {
+                // Suspension disabled by env; keep ticking cheaply so an operator
+                // re-enabling it (next process) is honoured — but do no work.
+                continue;
+            }
+            let threshold = Duration::from_secs(secs);
+            let mut suspended = 0usize;
+            for id in state.registry.list() {
+                // Only watched indexes can be suspended; check before any lock.
+                if !state.watcher_manager.is_watching(&id).await {
+                    continue;
+                }
+                let Some(handle) = state.registry.get(&id) else {
+                    continue;
+                };
+                let idle = handle.indexer.read().await.idle_duration();
+                if idle >= threshold && state.watcher_manager.stop_for_index(&id).await {
+                    suspended += 1;
+                    tracing::info!(
+                        index_id = %id.0,
+                        idle_secs = idle.as_secs(),
+                        "watcher idle-suspended — will resume on next query"
+                    );
+                }
+            }
+            if suspended > 0 {
+                tracing::info!(
+                    "watcher idle-suspend: released {suspended} idle watch(es) this cycle"
+                );
+            }
+        }
+    });
+}
+
 /// Spawn a background ticker that unregisters indexes whose `root_path` was
 /// deleted while the daemon runs (orphan self-heal).
 ///

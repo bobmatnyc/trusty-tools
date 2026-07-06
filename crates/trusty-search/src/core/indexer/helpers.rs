@@ -76,6 +76,42 @@ pub(crate) fn idle_evict_secs() -> u64 {
     }
 }
 
+/// Default idle window (seconds) after which a live index's FSEvents watcher is
+/// suspended to stop burning CPU / `fseventsd` load on a project nobody is using.
+///
+/// Why: 900s (15 min) sits above the 300s chunk-eviction window
+/// ([`DEFAULT_CHUNKS_IDLE_EVICT_SECS`]) so the escalation is gradual — a briefly
+/// idle index keeps its watcher (cheap incremental indexing on the next save),
+/// and only a genuinely-dormant one drops it. The watcher resumes on the next
+/// query, so suspension is invisible to an active user.
+pub(crate) const DEFAULT_WATCH_IDLE_SUSPEND_SECS: u64 = 900;
+
+/// Resolve the watcher idle-suspend window (in seconds) from the environment,
+/// falling back to [`DEFAULT_WATCH_IDLE_SUSPEND_SECS`].
+///
+/// Why: the FSEvents watch is the CPU/`fseventsd` cost of a registered index;
+/// operators watching hundreds of projects want to release idle watches, while
+/// those on a single active repo may want to disable suspension entirely.
+/// What: reads `TRUSTY_WATCH_IDLE_SUSPEND_SECS` as `u64` seconds. A value of `0`
+/// **disables** suspension (watchers stay hot). Unset / unparseable falls back
+/// to the default.
+/// Test: `watch_idle_suspend_secs_default_and_env_override`.
+pub(crate) fn watch_idle_suspend_secs() -> u64 {
+    match std::env::var("TRUSTY_WATCH_IDLE_SUSPEND_SECS") {
+        Ok(v) if !v.is_empty() => match v.parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => {
+                tracing::warn!(
+                    "indexer: TRUSTY_WATCH_IDLE_SUSPEND_SECS={v:?} is not a valid u64; \
+                     using default ({DEFAULT_WATCH_IDLE_SUSPEND_SECS}s)"
+                );
+                DEFAULT_WATCH_IDLE_SUSPEND_SECS
+            }
+        },
+        _ => DEFAULT_WATCH_IDLE_SUSPEND_SECS,
+    }
+}
+
 /// Default hard cap on chunks per index.
 const DEFAULT_MAX_CHUNKS_PER_INDEX: usize = 200_000;
 
@@ -334,5 +370,47 @@ pub(crate) fn compute_match_reason(in_v: bool, in_b: bool, in_kg: bool) -> &'sta
         (false, true, _) => "bm25",
         (false, false, true) => "hybrid+kg",
         (false, false, false) => "fallback:ripgrep",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Watcher idle-suspend: `watch_idle_suspend_secs` honours the default and
+    /// the `TRUSTY_WATCH_IDLE_SUSPEND_SECS` override, including `0` (disabled)
+    /// and an unparseable value (falls back to default).
+    #[test]
+    fn watch_idle_suspend_secs_default_and_env_override() {
+        let prior = std::env::var("TRUSTY_WATCH_IDLE_SUSPEND_SECS").ok();
+
+        // Unset → default.
+        // SAFETY: this test is the only reader/writer of this env var.
+        unsafe { std::env::remove_var("TRUSTY_WATCH_IDLE_SUSPEND_SECS") };
+        assert_eq!(watch_idle_suspend_secs(), DEFAULT_WATCH_IDLE_SUSPEND_SECS);
+
+        // Valid override wins.
+        // SAFETY: see above.
+        unsafe { std::env::set_var("TRUSTY_WATCH_IDLE_SUSPEND_SECS", "120") };
+        assert_eq!(watch_idle_suspend_secs(), 120);
+
+        // Zero disables (returned verbatim; the ticker treats 0 as "off").
+        // SAFETY: see above.
+        unsafe { std::env::set_var("TRUSTY_WATCH_IDLE_SUSPEND_SECS", "0") };
+        assert_eq!(watch_idle_suspend_secs(), 0);
+
+        // Garbage falls back to default (with a warn).
+        // SAFETY: see above.
+        unsafe { std::env::set_var("TRUSTY_WATCH_IDLE_SUSPEND_SECS", "nope") };
+        assert_eq!(watch_idle_suspend_secs(), DEFAULT_WATCH_IDLE_SUSPEND_SECS);
+
+        // Restore.
+        // SAFETY: see above.
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("TRUSTY_WATCH_IDLE_SUSPEND_SECS", v),
+                None => std::env::remove_var("TRUSTY_WATCH_IDLE_SUSPEND_SECS"),
+            }
+        }
     }
 }

@@ -208,6 +208,25 @@ pub(super) async fn search_handler(
             }
         }
     };
+    // Idle-watcher wake: an index served without a live watcher was either
+    // idle-suspended (`server::tickers::spawn_watcher_idle_suspend_ticker`) or
+    // lazily restored from the cold store (which never spawns a watcher). Resume
+    // watching so future saves index incrementally, and — only when we actually
+    // (re)establish a watcher — kick a background reconcile to catch edits made
+    // while it was unwatched. The `is_watching` re-check keeps this a no-op when
+    // `TRUSTY_DISABLE_WATCHER=1` (spawn is a no-op), so we never spin a reconcile
+    // on every query in that mode. The query itself served current in-memory
+    // state; the reconcile converges any missed edits for subsequent queries.
+    if !state.watcher_manager.is_watching(&index_id).await {
+        state.watcher_manager.spawn_for_index(&handle).await;
+        if state.watcher_manager.is_watching(&index_id).await {
+            let woken = Arc::clone(&handle);
+            let summary = Arc::clone(&state.reconcile_summary);
+            tokio::spawn(crate::service::reconcile::reconcile_one_index(
+                woken, summary,
+            ));
+        }
+    }
     // Issue #993: rate-limited write of last_queried_unix (max once per
     // LAST_QUERIED_WRITE_INTERVAL_SECS) so the LRU sort key stays current for
     // future selective warm-boots without hammering indexes.toml on every query.

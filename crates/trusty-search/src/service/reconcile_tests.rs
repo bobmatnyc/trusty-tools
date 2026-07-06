@@ -1,4 +1,4 @@
-//! Tests for `commands::start::reconcile`.
+//! Tests for `service::reconcile`.
 //!
 //! Why: split into a dedicated `*_tests.rs` file so `reconcile.rs` stays
 //! under the 500-SLOC production cap while this file enjoys the 1500-SLOC
@@ -702,7 +702,7 @@ fn mtime_walk_caps_at_threshold_plus_one() {
 
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
-    let n = crate::commands::start::reconcile::FULL_REINDEX_THRESHOLD + 5;
+    let n = crate::service::reconcile::FULL_REINDEX_THRESHOLD + 5;
     for i in 0..n {
         let p = root.join(format!("file_{i}.rs"));
         std::fs::write(&p, "fn f() {}").expect("write");
@@ -712,7 +712,7 @@ fn mtime_walk_caps_at_threshold_plus_one() {
     let stale = collect_stale_files_by_mtime(root, 0);
     assert_eq!(
         stale.len(),
-        crate::commands::start::reconcile::FULL_REINDEX_THRESHOLD + 1,
+        crate::service::reconcile::FULL_REINDEX_THRESHOLD + 1,
         "result must be capped at FULL_REINDEX_THRESHOLD + 1"
     );
 }
