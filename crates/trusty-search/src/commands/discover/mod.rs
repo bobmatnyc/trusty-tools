@@ -127,6 +127,15 @@ pub async fn auto_discover_and_index() {
             if !path.is_dir() {
                 continue;
             }
+            // Skip ephemeral session dirs (`.worktrees/`) so throwaway MPM
+            // worktrees are never auto-registered (orphan self-heal).
+            if path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(crate::service::constants::is_ephemeral_dir_name)
+            {
+                continue;
+            }
             let marker = detect_project_marker(&path);
             if marker == ProjectMarker::None {
                 continue;

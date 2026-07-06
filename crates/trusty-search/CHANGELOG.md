@@ -6,6 +6,43 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.30.0] — 2026-07-06
+
+### Added — self-managed orphan reaping (daemon no longer leaks dead registrations)
+
+- **The daemon now removes orphaned index registrations automatically.**
+  Previously, an ephemeral MPM worktree (`.worktrees/<uuid>/`) that was
+  registered and then deleted left a dead entry in `indexes.toml` forever:
+  warm-boot *detected* the missing `root_path`, logged "run
+  `trusty-search prune-orphans`", and skipped it — but nothing ever removed it.
+  Over a long-lived daemon these accumulated without bound (a real machine
+  reached **485 dead registrations over 26 days**), each holding an idle
+  FSEvents watch that pinned macOS `fseventsd` at ~100% CPU / 8 GB RSS.
+  Three complementary mechanisms now keep the registry self-healing:
+  - **Boot self-heal** — `heal_boot_orphans` runs at warm-boot start and drops
+    legacy (non-colocated) registrations whose `root_path` was deleted, so they
+    stop being re-read on every boot. Colocated entries are still left to the
+    relocation scan.
+  - **Runtime reaper ticker** — an hourly background sweep unregisters live
+    indexes whose root vanished mid-run. Cadence is tunable via
+    `TRUSTY_ORPHAN_REAP_SECS` (`0` disables it).
+  - **Ephemeral-dir ignore** — auto-discovery and the colocated rescan now skip
+    the `.worktrees/` component, so throwaway worktrees are never
+    auto-registered (or FSEvents-watched) in the first place. Explicit
+    `trusty-search index <path>` is unaffected.
+
+### Safety
+
+- Orphan reaping only fires when a `root_path` is missing **and its immediate
+  parent still exists** — a deleted worktree leaves `.worktrees/` behind (reap),
+  while an unmounted external volume takes the whole parent chain with it (spared).
+- The automatic reaper **never deletes on-disk index data**, only the
+  registration, so a false-positive detection is always recoverable by
+  re-registering the path. (The interactive `DELETE /indexes/:id` still removes
+  data as before.)
+
+---
+
 ## [0.29.1] — 2026-06-25
 
 ### Fixed (closes #1711)
