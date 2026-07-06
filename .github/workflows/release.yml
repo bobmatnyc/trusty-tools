@@ -758,6 +758,17 @@ jobs:
       # override cc-rs (the `cc` crate) checks specifically for HOST-targeted
       # compiles (confirmed from the build.rs diagnostic output in that CI
       # run), so this does NOT affect the actual `--target` cross-compile.
+      #
+      # RUSTFLAGS -lstdc++ (issue #2037, ORT-bundling crates): the prebuilt
+      # ONNX Runtime archive `bundled-ort` links against is a C++ library, so
+      # the final binary needs libstdc++. A normal `cc`/`g++` invocation
+      # auto-links libstdc++ for C++ inputs, but zig's `cc` (used here as the
+      # Rust linker driver, which only ever sees Rust object files, not C++
+      # sources) does not infer that a transitively-linked static archive
+      # needs it — this surfaces as `undefined symbol: std::...` at final
+      # link time. Passed unconditionally for the linux-zigbuild variant: an
+      # unused `-lstdc++` is a no-op for crates that don't need it (modern
+      # linkers only pull in symbols actually referenced).
       - name: Build release binary
         shell: bash
         # SKIP_UI_BUILD is a per-step env var set from the matrix field.
@@ -766,6 +777,7 @@ jobs:
         env:
           SKIP_UI_BUILD: ${{ matrix.skip_ui_build && '1' || '' }}
           HOST_CFLAGS: ${{ matrix.variant == 'linux-zigbuild' && '-I/usr/include/x86_64-linux-gnu' || '' }}
+          RUSTFLAGS: ${{ matrix.variant == 'linux-zigbuild' && '-C link-arg=-lstdc++' || '' }}
         run: |
           CARGO_ARGS="-p ${{ matrix.cargo_pkg }} --release"
 
