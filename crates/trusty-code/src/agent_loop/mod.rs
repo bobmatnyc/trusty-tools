@@ -36,6 +36,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, ToolCall, ToolDefinition};
+use crate::mode::HarnessMode;
 use crate::perf::PerfCollector;
 use crate::tools::{AgentOutput, ToolRegistry, ToolResult};
 
@@ -56,6 +57,10 @@ const PERF_WORKFLOW: &str = "agent_loop";
 /// constructor signature stable as more knobs are added later.
 /// What: `max_turns` bounds LLM round-trips; `timeout_secs` bounds total
 /// wall-clock time; `model` is the OpenRouter slug sent on every request.
+/// `mode` (#2059) is the resolved `HarnessMode` for this run — the branch
+/// point `tool_definitions` uses; defaults to `HarnessMode::default()`
+/// (`DailyDriver`) so every pre-#2059 call site that doesn't set it
+/// unchanged.
 /// Test: `agent_loop::tests::config_defaults_are_sane`.
 #[derive(Debug, Clone)]
 pub struct AgentLoopConfig {
@@ -67,6 +72,10 @@ pub struct AgentLoopConfig {
 
     /// OpenRouter model slug sent on every chat request.
     pub model: String,
+
+    /// The resolved harness mode for this run (#2059). See
+    /// `Self::tool_definitions`' docs for the branch point this feeds.
+    pub mode: HarnessMode,
 }
 
 impl Default for AgentLoopConfig {
@@ -74,13 +83,14 @@ impl Default for AgentLoopConfig {
     ///
     /// Why: Most callers want a bounded but generous loop; defaults avoid
     /// boilerplate at every construction site.
-    /// What: 8 turns, 120s timeout, `openai/gpt-4o-mini`.
+    /// What: 8 turns, 120s timeout, `openai/gpt-4o-mini`, `HarnessMode::default()`.
     /// Test: `config_defaults_are_sane`.
     fn default() -> Self {
         Self {
             max_turns: 8,
             timeout_secs: 120,
             model: "openai/gpt-4o-mini".to_string(),
+            mode: HarnessMode::default(),
         }
     }
 }
@@ -304,17 +314,29 @@ impl AgentLoop {
     ///
     /// Why: The registry emits OpenAI-format `serde_json::Value` schemas, but
     /// `ChatRequest.tools` is typed as `Vec<ToolDefinition>`; this bridges the
-    /// two without forcing every tool to know about the request type.
+    /// two without forcing every tool to know about the request type. The
+    /// `self.config.mode` branch (#2059) is the tool-schema CONSUMPTION POINT
+    /// for P1B's token-efficiency work: `HarnessMode::Parity` must forever
+    /// return the registry's full schema set verbatim (parity-spec D2 requires
+    /// byte-identical schemas across models); `HarnessMode::DailyDriver` is
+    /// where a future deferred/metadata-only schema set will be substituted.
+    /// Both arms are identical in M1 — no such set exists yet.
     /// What: Deserialises each schema value; a schema that fails to parse is
     /// dropped (a malformed schema must not abort the run) but logged with
     /// `tracing::warn!` — including the offending tool's name (best-effort from
     /// the raw schema) and the parse error — so a misconfigured tool that is
     /// never advertised to the model is diagnosable rather than silent.
     /// Test: `agent_loop::tests::two_turn_flow_completes` advertises a real tool
-    /// schema through this path.
+    /// schema through this path; `agent_loop::tests::tool_definitions_identical_across_modes_in_m1`
+    /// pins the #2059 "no behavioural difference yet" contract.
     fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.registry
-            .schemas()
+        let schemas = match self.config.mode {
+            HarnessMode::Parity => self.registry.schemas(),
+            // P1B hooks in here: a deferred/metadata-only schema set. Full
+            // schemas until then (#2059 M1 scope).
+            HarnessMode::DailyDriver => self.registry.schemas(),
+        };
+        schemas
             .into_iter()
             .filter_map(
                 |v| match serde_json::from_value::<ToolDefinition>(v.clone()) {

@@ -29,7 +29,8 @@ use async_trait::async_trait;
 use crate::agent_loop::{AgentLoop, AgentLoopConfig, ToolEventSink};
 use crate::agents::AgentConfig;
 use crate::llm::LlmClientTrait;
-use crate::prompt::assemble_system_prompt;
+use crate::mode::HarnessMode;
+use crate::prompt::assemble_system_prompt_for_mode;
 use crate::provider::resolve_model;
 use crate::runner::error::RunnerError;
 use crate::tools::{AgentOutput, AgentRunner, RunContext, ToolRegistry};
@@ -136,6 +137,13 @@ pub struct InProcessAgentRunner {
     /// #2056: propagated to every sub-agent `AgentLoop`, so cancelling the
     /// PM's run also stops any in-flight delegated sub-agent loop.
     cancel: Option<Arc<AtomicBool>>,
+    /// #2059: the resolved `HarnessMode` for the delegating (PM) run,
+    /// propagated to every sub-agent `AgentLoop` this runner drives so a
+    /// delegated sub-agent's prompt/tool-schema assembly uses the SAME mode
+    /// as its delegator. Defaults to `HarnessMode::default()`, matching
+    /// pre-#2059 behaviour exactly (both modes are functionally identical
+    /// in M1 regardless).
+    mode: HarnessMode,
 }
 
 impl InProcessAgentRunner {
@@ -161,6 +169,7 @@ impl InProcessAgentRunner {
             config: InProcessRunnerConfig::default(),
             sink: None,
             cancel: None,
+            mode: HarnessMode::default(),
         }
     }
 
@@ -186,6 +195,19 @@ impl InProcessAgentRunner {
     /// Test: `runner::tests::cancel_flag_reaches_delegated_loop`.
     pub fn with_cancel_flag(mut self, cancel: Arc<AtomicBool>) -> Self {
         self.cancel = Some(cancel);
+        self
+    }
+
+    /// Set the resolved `HarnessMode` every sub-agent `AgentLoop` this runner
+    /// drives will use (#2059).
+    ///
+    /// Why: a delegated sub-agent's prompt/tool-schema assembly must use the
+    /// SAME resolved mode as its delegator — a daily-driver PM run should not
+    /// silently delegate to a parity-mode engineer, or vice versa.
+    /// What: Builder-style setter; returns `self` for chaining.
+    /// Test: `runner::tests::with_mode_completes_a_delegated_run_in_both_modes`.
+    pub fn with_mode(mut self, mode: HarnessMode) -> Self {
+        self.mode = mode;
         self
     }
 
@@ -269,11 +291,18 @@ impl InProcessAgentRunner {
             max_turns,
             timeout_secs: self.config.timeout_secs,
             model,
+            mode: self.mode,
         };
 
-        // Assemble the parity system prompt (BASE + agent prompt + project ctx).
+        // Assemble the mode-branched system prompt (BASE + agent prompt +
+        // project ctx) — see `assemble_system_prompt_for_mode`'s docs (#2059).
         // Fallback guidance (the #1023 per-tier seam) is not wired here yet.
-        let system = assemble_system_prompt(&agent, self.project_context.as_deref(), None);
+        let system = assemble_system_prompt_for_mode(
+            self.mode,
+            &agent,
+            self.project_context.as_deref(),
+            None,
+        );
 
         let mut agent_loop = AgentLoop::new(loop_config, Arc::clone(&self.llm), registry);
         if let Some(sink) = &self.sink {

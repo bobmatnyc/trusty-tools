@@ -153,6 +153,19 @@ pub mod llm;
 /// Test: `agents::tests::*`.
 pub mod agents;
 
+/// Harness mode selection: `daily-driver` (default, token-efficiency
+/// consumption point) vs `parity` (full-schema benchmark mode) — #2059,
+/// vision spec §5.9.
+///
+/// Why: reconciles the parity spec's byte-identical-schema requirement with
+/// the production harness's future token-efficiency work by making the
+/// choice an explicit, resolvable, queryable mode rather than picking one
+/// behaviour permanently.
+/// What: `HarnessMode`, `resolve_mode` (the three-tier precedence: env var >
+/// `task.run` param > `.claude/settings.json` > default).
+/// Test: `mode::tests::*`.
+pub mod mode;
+
 /// Caller identity hierarchy for memory scoping.
 ///
 /// Why: Memory must be scoped according to who is calling — operator, PM, or

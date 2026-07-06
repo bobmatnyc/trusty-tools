@@ -181,6 +181,7 @@ mod tests {
             project: None,
             status,
             created_at: Utc::now(),
+            mode: None,
         }
     }
 
@@ -244,6 +245,7 @@ mod tests {
             }],
             usage: TokenUsage::new(10, 5, 0, 0),
             cost_usd: Some(0.01),
+            mode: Some(crate::mode::HarnessMode::DailyDriver),
         };
         let out = render_transcript_human(&record);
         assert!(out.contains("pm"));
@@ -259,6 +261,7 @@ mod tests {
             turns: vec![],
             usage: TokenUsage::default(),
             cost_usd: None,
+            mode: None,
         };
         let out = render_transcript_human(&record);
         assert!(out.contains("s-1"));

@@ -75,27 +75,41 @@ struct TaskRunRequestParams {
     /// mode.
     #[serde(default)]
     session_id: Option<String>,
+    /// #2059: per-call `HarnessMode` override (vision spec §5.9's tier-2
+    /// precedence source, above `.claude/settings.json` and below
+    /// `TRUSTY_CODE_MODE`). Leniently parsed by
+    /// `crate::mode::resolve_mode` — an unrecognised string here degrades
+    /// to "this source does not contribute", NOT a request error.
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 /// `task.run(task_description, agent_name?, context?, model_override?,
-/// session_id?) -> { session_id, status }`.
+/// session_id?, mode?) -> { session_id, status, mode }`.
 ///
 /// Why: the single entry point that turns a request into a running
 /// background execution.
 /// What: validates `task_description` is non-empty
 /// (`-32003 invalid_argument`); resolves the target session — an existing
 /// one by `session_id` (propagating `session_not_found` if it doesn't
-/// exist) or a freshly `session.create`d one; builds the shared LLM client
-/// (real or the #2056 offline mock, per `TCODE_MOCK_LLM`); and calls
-/// `spawn_task_run`, which reserves the execution slot synchronously
-/// (rejecting a second overlapping run) before handing off to the
-/// background task. Returns immediately — the caller `session.attach`es to
-/// observe progress, per the ticket's "must not block the request thread on
-/// the whole LLM run" requirement.
+/// exist) or a freshly `session.create`d one; resolves the effective
+/// `HarnessMode` via `crate::mode::resolve_mode` (#2059's three-tier
+/// precedence) and persists it onto the session (`SessionRegistry::set_mode`)
+/// so it is queryable afterward via `session.status`/`session.list`
+/// (`Session.mode`) and `session.get_transcript` (`TranscriptRecord.mode`);
+/// builds the shared LLM client (real or the #2056 offline mock, per
+/// `TCODE_MOCK_LLM`); and calls `spawn_task_run`, which reserves the
+/// execution slot synchronously (rejecting a second overlapping run) before
+/// handing off to the background task. Returns immediately — the caller
+/// `session.attach`es to observe progress, per the ticket's "must not block
+/// the request thread on the whole LLM run" requirement. The response's own
+/// `mode` field is the SAME resolved value, surfaced immediately rather than
+/// requiring a follow-up `session.status` call.
 /// Test: `task::protocol::tests::task_run_rejects_empty_task_description`,
 /// `task::protocol::tests::task_run_creates_session_when_none_given`,
 /// `task::protocol::tests::task_run_sessionful_reuses_existing_session`,
-/// `task::protocol::tests::task_run_unknown_session_id_errors`.
+/// `task::protocol::tests::task_run_unknown_session_id_errors`,
+/// `task::protocol::tests::task_run_resolves_and_reports_mode`.
 async fn task_run(
     registry: Arc<SessionRegistry>,
     params: Value,
@@ -126,6 +140,9 @@ async fn task_run(
         }
     };
 
+    let mode = crate::mode::resolve_mode(p.mode.as_deref(), &project);
+    registry.set_mode(&session_id, mode)?;
+
     let llm = build_llm_client()?;
     let task_params = TaskRunParams {
         session_id: session_id.clone(),
@@ -134,10 +151,11 @@ async fn task_run(
         project,
         agents_dir,
         model_override: p.model_override,
+        mode,
     };
     spawn_task_run(registry, llm, task_params)?;
 
-    Ok(json!({ "session_id": session_id, "status": "running" }))
+    Ok(json!({ "session_id": session_id, "status": "running", "mode": mode.as_str() }))
 }
 
 #[cfg(test)]
@@ -253,6 +271,111 @@ mod tests {
             registry.status(session_id).is_ok(),
             "a new session must have been created"
         );
+    }
+
+    /// `task.run` must resolve `HarnessMode` per §5.9's three-tier
+    /// precedence and report it BOTH in its own immediate response AND on
+    /// the session (queryable via `session.status`/`get_transcript`
+    /// afterward) — #2059.
+    ///
+    /// Why: this is the integration point proving the wiring
+    /// `crate::mode::resolve_mode`'s own unit tests cannot: that
+    /// `task::protocol::task_run` actually reads the `mode` request param,
+    /// the project's `.claude/settings.json`, and `TRUSTY_CODE_MODE`, in
+    /// that precedence, and persists the result via
+    /// `SessionRegistry::set_mode` before spawning the run.
+    /// What: covers default (nothing set), settings.json alone,
+    /// task-param-over-settings.json, and env-var-over-everything.
+    /// Test: this test.
+    #[tokio::test]
+    async fn task_run_resolves_and_reports_mode() {
+        let _mock_guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+        let _mode_guard = crate::mode::MODE_ENV_LOCK.lock().await;
+        // SAFETY: test-only env mutation; serialized by both locks above.
+        unsafe {
+            std::env::set_var(
+                super::super::mock_llm::MOCK_LLM_ENV,
+                super::super::mock_llm::MOCK_LLM_ECHO,
+            );
+            std::env::remove_var(crate::mode::MODE_ENV_VAR);
+        }
+        let agents = agents_dir();
+
+        // 1. Nothing set anywhere -> default (daily-driver).
+        let project = tempfile::tempdir().expect("project tempdir");
+        let registry = Arc::new(SessionRegistry::new());
+        let value = task_run(
+            Arc::clone(&registry),
+            json!({"task_description": "say hi"}),
+            project.path().to_path_buf(),
+            agents.path().to_path_buf(),
+        )
+        .await
+        .expect("task.run should succeed");
+        assert_eq!(value["mode"], "daily-driver");
+        let session_id = value["session_id"].as_str().unwrap().to_string();
+        assert_eq!(
+            registry.status(&session_id).unwrap().mode,
+            Some(crate::mode::HarnessMode::DailyDriver)
+        );
+
+        // 2. `.claude/settings.json` alone sets parity.
+        let project2 = tempfile::tempdir().expect("project tempdir");
+        std::fs::create_dir_all(project2.path().join(".claude")).expect("mkdir");
+        std::fs::write(
+            project2.path().join(".claude").join("settings.json"),
+            r#"{"code_harness": {"mode": "parity"}}"#,
+        )
+        .expect("write settings.json");
+        let registry2 = Arc::new(SessionRegistry::new());
+        let value2 = task_run(
+            Arc::clone(&registry2),
+            json!({"task_description": "say hi"}),
+            project2.path().to_path_buf(),
+            agents.path().to_path_buf(),
+        )
+        .await
+        .expect("task.run should succeed");
+        assert_eq!(value2["mode"], "parity");
+
+        // 3. A `mode` request param overrides settings.json (still parity
+        //    from settings.json here, but requesting daily-driver must win).
+        let registry3 = Arc::new(SessionRegistry::new());
+        let value3 = task_run(
+            Arc::clone(&registry3),
+            json!({"task_description": "say hi", "mode": "daily-driver"}),
+            project2.path().to_path_buf(),
+            agents.path().to_path_buf(),
+        )
+        .await
+        .expect("task.run should succeed");
+        assert_eq!(
+            value3["mode"], "daily-driver",
+            "task.run's mode param must override settings.json"
+        );
+
+        // 4. TRUSTY_CODE_MODE overrides EVERYTHING, including a task param.
+        unsafe {
+            std::env::set_var(crate::mode::MODE_ENV_VAR, "parity");
+        }
+        let registry4 = Arc::new(SessionRegistry::new());
+        let value4 = task_run(
+            Arc::clone(&registry4),
+            json!({"task_description": "say hi", "mode": "daily-driver"}),
+            project2.path().to_path_buf(),
+            agents.path().to_path_buf(),
+        )
+        .await
+        .expect("task.run should succeed");
+        assert_eq!(
+            value4["mode"], "parity",
+            "TRUSTY_CODE_MODE must win over a task.run mode param"
+        );
+
+        unsafe {
+            std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
+            std::env::remove_var(crate::mode::MODE_ENV_VAR);
+        }
     }
 
     /// A `session_id` that does not exist must propagate `session_not_found`.

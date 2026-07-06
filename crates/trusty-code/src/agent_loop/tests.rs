@@ -254,6 +254,42 @@ fn schema_tool_name_extracts_or_falls_back() {
     assert_eq!(super::schema_tool_name(&non_string_name), "<unknown>");
 }
 
+/// #2059: `tool_definitions`'s `HarnessMode` branch must produce IDENTICAL
+/// tool schemas for both modes in M1 — the branch exists (a real seam for
+/// P1B to hook into) but has no behavioural difference yet.
+///
+/// Why: pins the documented "byte-identical until P1B" contract at the
+/// tool-schema layer, mirroring `prompt::tests::assemble_system_prompt_for_mode_is_identical_in_m1`
+/// for the prompt-assembly layer.
+/// What: constructs two loops over the SAME registry, differing only in
+/// `AgentLoopConfig.mode`, and asserts `tool_definitions()` returns the
+/// exact same `Vec<ToolDefinition>` for both.
+/// Test: this test.
+#[test]
+fn tool_definitions_identical_across_modes_in_m1() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[]));
+    let registry = registry_with_echo(false);
+
+    let parity = make_loop(
+        llm.clone(),
+        registry.clone(),
+        AgentLoopConfig {
+            mode: crate::mode::HarnessMode::Parity,
+            ..AgentLoopConfig::default()
+        },
+    );
+    let daily_driver = make_loop(
+        llm,
+        registry,
+        AgentLoopConfig {
+            mode: crate::mode::HarnessMode::DailyDriver,
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    assert_eq!(parity.tool_definitions(), daily_driver.tool_definitions());
+}
+
 /// A two-turn flow: assistant calls the tool, then stops with final text.
 ///
 /// Why: This is the canonical happy path the loop exists to support.
@@ -463,6 +499,7 @@ async fn agent_loop_live() {
             max_turns: 4,
             timeout_secs: 60,
             model: "openai/gpt-4o-mini".to_string(),
+            mode: crate::mode::HarnessMode::default(),
         },
         Arc::new(client),
         registry,

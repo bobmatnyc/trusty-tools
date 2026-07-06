@@ -39,8 +39,9 @@ use crate::agent_loop::{AgentLoop, AgentLoopConfig, ToolEventSink};
 use crate::agents::AgentConfig;
 use crate::jsonrpc::RpcError;
 use crate::llm::LlmClientTrait;
+use crate::mode::HarnessMode;
 use crate::project_context::load_project_context;
-use crate::prompt::assemble_system_prompt;
+use crate::prompt::assemble_system_prompt_for_mode;
 use crate::provider::resolve_model;
 use crate::run_task::{RecordingLlmClient, SharedTranscript, TurnRecord};
 use crate::runner::{InProcessAgentRunner, RegistryFactory};
@@ -71,7 +72,10 @@ pub const ENGINEER_AGENT_NAME: &str = "python-engineer";
 /// (PM) agent, `task` is the free-form request text, `project`/`agents_dir`
 /// mirror `run_task::RunTaskParams`, and `model_override` pins the
 /// DELEGATED ENGINEER's model for this run only (mirrors `run_task`'s
-/// `--engineer-model`).
+/// `--engineer-model`). `mode` (#2059) is the ALREADY-RESOLVED `HarnessMode`
+/// (`task::protocol::task_run` resolves it via `crate::mode::resolve_mode`
+/// before constructing this — resolution is a request-parsing concern, not
+/// an execution one).
 #[derive(Debug, Clone)]
 pub struct TaskRunParams {
     pub session_id: String,
@@ -80,6 +84,7 @@ pub struct TaskRunParams {
     pub project: PathBuf,
     pub agents_dir: PathBuf,
     pub model_override: Option<String>,
+    pub mode: HarnessMode,
 }
 
 /// Reserve the session's execution slot and spawn the background run.
@@ -172,7 +177,8 @@ async fn run_and_record(
     ));
 
     let catchup_ctx = crate::catchup::pm_catchup_context(&params.project).await;
-    let pm_system = assemble_system_prompt(
+    let pm_system = assemble_system_prompt_for_mode(
+        params.mode,
         &pm_config,
         project_context.as_deref(),
         catchup_ctx.as_deref(),
@@ -181,6 +187,7 @@ async fn run_and_record(
     let pm_loop = AgentLoop::new(
         AgentLoopConfig {
             model: pm_model.clone(),
+            mode: params.mode,
             ..AgentLoopConfig::default()
         },
         pm_llm,
@@ -208,8 +215,9 @@ async fn run_and_record(
 }
 
 /// Build the in-process engineer runner with project-scoped fs/bash tools,
-/// the #2056 sink, and the shared cancel flag (mirrors
-/// `run_task::build_engineer_runner`, which is private to that module).
+/// the #2056 sink, the shared cancel flag, and (#2059) the SAME resolved
+/// `HarnessMode` as the delegating PM (mirrors `run_task::build_engineer_runner`,
+/// which is private to that module).
 fn build_engineer_runner(
     llm: Arc<dyn LlmClientTrait>,
     params: &TaskRunParams,
@@ -230,7 +238,8 @@ fn build_engineer_runner(
 
     let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
         .with_tool_event_sink(sink)
-        .with_cancel_flag(cancel);
+        .with_cancel_flag(cancel)
+        .with_mode(params.mode);
     if let Some(ctx) = project_context {
         runner = runner.with_project_context(ctx);
     }

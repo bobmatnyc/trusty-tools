@@ -568,6 +568,42 @@ async fn project_context_reaches_prompt() {
     );
 }
 
+/// `with_mode` must be chainable and a delegated run must complete
+/// successfully under EITHER `HarnessMode` (#2059) — both modes are
+/// functionally identical in M1, so this pins "the builder wires through
+/// without breaking the run", not a behavioural difference (there isn't
+/// one yet — see `crate::mode`'s and `agent_loop::tests`'s own docs for
+/// where the real branch point is exercised).
+///
+/// Why: `InProcessAgentRunner` is the seam that propagates the PM's
+/// resolved mode to a delegated sub-agent's own `AgentLoop`; a broken
+/// propagation would most likely surface as the delegated run failing to
+/// construct/complete, which this test would catch.
+/// What: runs the SAME scripted delegation twice, once per mode, asserting
+/// both complete successfully.
+/// Test: this test.
+#[tokio::test]
+async fn with_mode_completes_a_delegated_run_in_both_modes() {
+    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    for mode in [
+        crate::mode::HarnessMode::DailyDriver,
+        crate::mode::HarnessMode::Parity,
+    ] {
+        let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
+        let invoked = Arc::new(Mutex::new(Vec::new()));
+        let factory = Arc::new(recording_factory(vec![], invoked));
+        let runner =
+            InProcessAgentRunner::new(llm, factory, tmp.path().to_path_buf()).with_mode(mode);
+
+        runner
+            .run("python-engineer", "task")
+            .await
+            .unwrap_or_else(|e| panic!("run must complete under mode {mode:?}: {e}"));
+    }
+}
+
 // ── #2056: ToolEventSink / cancel-flag propagation into the delegated loop ──────
 
 /// Minimal `ToolEventSink` recording call order (see

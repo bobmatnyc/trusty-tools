@@ -99,6 +99,42 @@ pub fn assemble_system_prompt(
     sections.join(SECTION_SEPARATOR)
 }
 
+/// Mode-aware prompt assembly — the CONSUMPTION POINT #2059 wires up for
+/// P1B's token-efficiency work, without implementing any of it here.
+///
+/// Why: vision spec §5.9 resolves the parity/daily-driver split at the
+/// prompt-assembly and tool-schema layers. This function is where the
+/// prompt-assembly half of that branch lives — real code, both arms
+/// currently identical, so P1B has an obvious, already-wired seam to change
+/// ONE arm without touching every call site (`task::executor`,
+/// `runner::in_process::InProcessAgentRunner::run_pipeline`) that currently
+/// calls [`assemble_system_prompt`] directly.
+/// What: `HarnessMode::Parity` calls [`assemble_system_prompt`] verbatim —
+/// this is contractually permanent, since parity-spec D2 requires
+/// byte-identical schemas/prompts for benchmark fairness and must never
+/// change. `HarnessMode::DailyDriver` ALSO calls it verbatim today (M1: no
+/// token-efficiency built yet — see the crate-level `mode` module docs);
+/// P1B is expected to replace only this arm (progressive-disclosure skill
+/// loading, compaction, etc.), never the `Parity` arm.
+/// Test: `prompt::tests::assemble_system_prompt_for_mode_is_identical_in_m1`.
+pub fn assemble_system_prompt_for_mode(
+    mode: crate::mode::HarnessMode,
+    config: &AgentConfig,
+    project_context: Option<&str>,
+    fallback_guidance: Option<&str>,
+) -> String {
+    match mode {
+        crate::mode::HarnessMode::Parity => {
+            assemble_system_prompt(config, project_context, fallback_guidance)
+        }
+        // P1B hooks in here: deferred/progressive-disclosure prompt assembly.
+        // Byte-identical to `Parity` until then (#2059 M1 scope).
+        crate::mode::HarnessMode::DailyDriver => {
+            assemble_system_prompt(config, project_context, fallback_guidance)
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;

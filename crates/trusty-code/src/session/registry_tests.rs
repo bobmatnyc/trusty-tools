@@ -570,6 +570,7 @@ async fn get_transcript_on_never_run_session_is_empty() {
     assert!(transcript.turns.is_empty());
     assert_eq!(transcript.usage, crate::perf::TokenUsage::default());
     assert_eq!(transcript.cost_usd, None);
+    assert_eq!(transcript.mode, None);
 }
 
 /// `get_transcript` on an unknown session must error `session_not_found`
@@ -578,6 +579,36 @@ async fn get_transcript_on_never_run_session_is_empty() {
 async fn get_transcript_unknown_session_errors() {
     let registry = SessionRegistry::new();
     let err = registry.get_transcript("nope").unwrap_err();
+    assert_eq!(err.code, -32007);
+}
+
+/// `set_mode` must store the mode on the session, queryable both via
+/// `status`/`list` (`Session.mode`) and `get_transcript`
+/// (`TranscriptRecord.mode`, the SAME field) (#2059).
+#[tokio::test]
+async fn set_mode_stores_on_session() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    assert_eq!(session.mode, None, "a fresh session has no mode yet");
+
+    registry
+        .set_mode(&session.id, crate::mode::HarnessMode::Parity)
+        .unwrap();
+
+    let status = registry.status(&session.id).unwrap();
+    assert_eq!(status.mode, Some(crate::mode::HarnessMode::Parity));
+
+    let transcript = registry.get_transcript(&session.id).unwrap();
+    assert_eq!(transcript.mode, Some(crate::mode::HarnessMode::Parity));
+}
+
+/// `set_mode` on an unknown session must error `session_not_found` (#2059).
+#[tokio::test]
+async fn set_mode_unknown_session_errors() {
+    let registry = SessionRegistry::new();
+    let err = registry
+        .set_mode("nope", crate::mode::HarnessMode::DailyDriver)
+        .unwrap_err();
     assert_eq!(err.code, -32007);
 }
 
