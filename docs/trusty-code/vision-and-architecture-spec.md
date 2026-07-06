@@ -832,6 +832,7 @@ trusty-code is delivered as three **canonical owner-facing capability milestones
 - [ ] **Agent delegation works end-to-end** (PM → sub-agent round-trip, observable via events). Demonstrates: delegation yields correct output; PM receives and processes result.
 - [ ] **Harness instructions are VALID** — the instruction-assembly / parity path (BASE preamble + agent prompt + CLAUDE.md) produces correct, working harness instructions. Includes a conformance check.
 - [ ] **Self-awareness without context pollution** — tcode can answer "what am I / what can I do" from a COMPACT embedded harness summary, with LINKS to fuller docs loaded ON DEMAND (progressive disclosure, see §6 Self-Awareness).
+- [ ] **M1 E2E Suite** — Full end-to-end suite (§9 Requirement 3) driving real `tcode serve` daemon over stdio and HTTP, CLI invocations, and JSON-RPC assertions on responses/events. M1 is not complete until this suite passes.
 
 **Engineering Deliverables (from P1A control plane + P1C integrations + new self-awareness):**
 
@@ -851,6 +852,7 @@ trusty-code is delivered as three **canonical owner-facing capability milestones
 - [ ] Structured `finish_task` tool convention working (validated JSON-schema + repair loop per §5.8). Agent can finish a task and report structured completion.
 - [ ] **Cross-provider tool-calling fallback** (#1023) enables models WITHOUT native function-calling to still use tools (fenced-JSON / tolerant-scan strategies + validate-repair loop).
 - [ ] Per-model edit-format selection (unified-diff default, SEARCH/REPLACE fallback). Different models get appropriate edit formats.
+- [ ] **M2 E2E Suite** — Full end-to-end suite driving real daemon, exercising all tool-calling paths (fs, bash, repo, search), format selection fallbacks, and structured finish_task. M2 is not complete until this suite passes.
 
 **Engineering Deliverables (from P1B + #1023):**
 
@@ -869,6 +871,7 @@ trusty-code is delivered as three **canonical owner-facing capability milestones
 - [ ] Agent edits files through the tool surface; changes actually land in the repo (write_file / edit success).
 - [ ] Diff / transcript / cost captured correctly (depends on #1475 fixes from P1A).
 - [ ] A SIMPLE coding task (e.g., a small function + its unit test) completes and is verifiable (tests pass, diff applies cleanly).
+- [ ] **M3 E2E Suite** — Full end-to-end suite exercising real PM→agent delegation, file edits, repo-map integration, and actual coding task completion with passing tests. M3 is not complete until this suite passes.
 
 **Engineering Deliverables (from P1A + P1B + P1C hardened end-to-end + repo-map + agent definitions):**
 
@@ -1029,7 +1032,55 @@ trusty-code is delivered as three **canonical owner-facing capability milestones
 
 ---
 
-## 9. Resolved Decisions (Owner-Approved 2026-07-06)
+## 9. Testability & E2E Testing
+
+**Standing Owner Directive:** trusty-code must be 100% testable by CLI/API, and each milestone ships full end-to-end testing. This section codifies the testability requirement as a first-class architectural constraint tied to the daemon-first + CLI/API-first design.
+
+### Requirement 1: 100% CLI/API-Testable
+
+Every capability of trusty-code MUST be reachable and exercisable through the CLI or the JSON-RPC API. No functionality may be reachable only via internal code paths or private test harnesses.
+
+**Rationale:** This is the payoff of the daemon-first + CLI/API-first architecture (Axioms 2, 3, 4). The entire tool is black-box testable; operators and testers interact with the SAME surface that development tests use. There is no "internal API" or "private testing backdoor" that differs from the user-facing surface.
+
+### Requirement 2: Per-Issue E2E Coverage
+
+Each implementation issue carries API-driven integration/e2e coverage for its slice. Tests that implement an issue must:
+
+- Spawn the real `tcode serve` daemon over both **stdio** AND **HTTP** transports.
+- Invoke the real CLI (`tcode attach`, `tcode run-task`, etc.) as a subprocess speaking the actual JSON-RPC protocol.
+- Assert on real responses, error codes, events, and transcripts received over the wire.
+
+**Rationale:** Unit tests alone are insufficient. E2E tests drive the real daemon and catch integration failures (framing, protocol, event ordering, session lifecycle) that unit tests miss. Every issue is a slice of the public surface; it must be validated against that surface.
+
+### Requirement 3: Per-Milestone E2E Suite (Merge Gate)
+
+Each milestone ships a full end-to-end suite driving the real CLI/API. The milestone is not "done" until the e2e suite passes against the real CLI/API surface.
+
+**M1 E2E Suite (Concretely):** The §13 Cut Line scenario, black-box:
+1. Start `tcode serve --stdio` (or over HTTP).
+2. Create a session via JSON-RPC (`session.create`).
+3. Run an engineer task via JSON-RPC (`task.run` or `session.send`).
+4. Receive lifecycle/tool/session events in real-time (observable via NDJSON stdout or `/events` SSE endpoint).
+5. Cancel the session via JSON-RPC (`session.cancel`).
+6. Inspect the transcript via JSON-RPC (`session.get_transcript`).
+7. Replay the same task through the thin CLI (`tcode run-task engineer "..."`), which internally calls the API.
+8. Assert on all outputs, event streams, exit codes, and transcript integrity.
+
+This M1 suite lands with issue #2062 (M1 E2E Validation); earlier M1 issues (#587-P1A-1 through #587-P1A-10) each add their own API-level e2e slice so the full suite is built incrementally.
+
+**M2 & M3 suites:** Defined similarly, exercising tool-calling and coding workflows end-to-end.
+
+### Requirement 4: E2E is a Merge Gate
+
+A milestone is not complete until its e2e suite passes. All pull requests contributing to a milestone must either add e2e coverage for their slice or inherit coverage from a prior issue. No feature merges without e2e validation against the real CLI/API surface.
+
+**Tie-ins:**
+- §8 Milestone acceptance criteria: Each milestone's acceptance criteria note that its e2e suite (driving real CLI/API) is required for sign-off.
+- §13 Phase 1 Cut Line: The P1A control-plane foundation is internally validated by §9 Requirement 3 M1 suite.
+
+---
+
+## 10. Resolved Decisions (Owner-Approved 2026-07-06)
 
 **These decisions were resolved by Bob Matsuoka and are now settled policy for Phase 1+ implementation.**
 
@@ -1056,7 +1107,7 @@ trusty-code is delivered as three **canonical owner-facing capability milestones
 
 ---
 
-## 10. Security & Trust Model
+## 11. Security & Trust Model
 
 This section defines the filesystem sandbox, approval thresholds, and trust levels for integrations.
 
@@ -1122,7 +1173,7 @@ This section defines the filesystem sandbox, approval thresholds, and trust leve
 
 ---
 
-## 11. Session Durability Model
+## 12. Session Durability Model
 
 This section defines how sessions persist, recover, and expire.
 
@@ -1178,7 +1229,7 @@ This section defines how sessions persist, recover, and expire.
 
 ---
 
-## 12. API Error Model
+## 13. API Error Model
 
 This section defines standard error handling across JSON-RPC/STDIO and HTTP `/rpc`.
 
@@ -1232,7 +1283,7 @@ All errors are returned in the JSON-RPC 2.0 error envelope:
 
 ---
 
-## 13. Phase 1 Cut Line
+## 14. Phase 1 Cut Line
 
 **Verbatim definition of the minimum shippable daemon (P1A milestone):**
 
@@ -1270,7 +1321,7 @@ All errors are returned in the JSON-RPC 2.0 error envelope:
 
 ---
 
-## 15. References
+## 16. References
 
 ### External References (Tooling Benchmarks)
 
