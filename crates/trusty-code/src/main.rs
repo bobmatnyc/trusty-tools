@@ -1,20 +1,26 @@
 //! tcode — entry point for the trusty-code CLI.
 //!
 //! Why: provides the `tcode` binary that operators, agents, and TUI frontends
-//! use to interact with the per-project MPM orchestration harness. Phase 0
-//! defines the CLI surface (subcommands + flags); the `run-task` path is now a
-//! full PM→engineer execution (epic #1039 / #1034).
+//! use to interact with the per-project MPM orchestration harness. As of
+//! #2060 (M1 cut-line "replay via thin CLI"), `run-task`, `session list`/
+//! `status`, `attach`, `cancel`, and `transcript` are all thin JSON-RPC
+//! clients over a `tcode serve --stdio` child this binary spawns itself
+//! (`trusty_code::cli_client` + `crate::cli`) — no orchestration logic lives
+//! in the CLI. The ORIGINAL in-process `run-task` execution (epic #1039 /
+//! #1034, calling `trusty_code::run_task::execute_run_task` directly) is
+//! kept available behind `--legacy-in-process` (see [`Command::RunTask`]'s
+//! docs for why it was kept rather than deleted) — `trusty_code::run_task`'s
+//! own extensive offline test suite (`run_task::tests`) exercises that
+//! library function directly and is unaffected by this CLI-layer change.
 //!
-//! What: thin clap CLI. `run-task` resolves the agents dir, validates the agent
-//! name + project path, builds the real OpenRouter `LlmClient` from env, and
-//! delegates to `trusty_code::run_task::execute_run_task`, then prints a human or
-//! `--json` report and exits with the report's meaningful exit code. `serve`
-//! (#2053) delegates to `trusty_code::serve::{run_stdio, run_http}` for its
-//! two transports. `run-workflow` remains a stub.
+//! What: thin clap CLI. `serve` (#2053) delegates to
+//! `trusty_code::serve::{run_stdio, run_http}` for its two transports.
+//! `run-workflow` remains a stub.
 //!
 //! Test: `cargo run -p trusty-code -- --version` must exit 0 and print the
-//! crate version. The execution path is covered by `trusty_code::run_task::tests`
-//! (offline, mocked LLM); the binary handler is a thin wrapper over that.
+//! crate version. The thin-client subcommands are covered end-to-end by
+//! `tests/cli_e2e.rs` (spawns the real binary); the legacy in-process path
+//! remains covered by `trusty_code::run_task::tests`.
 
 use std::path::{Path, PathBuf};
 use std::process;
@@ -26,6 +32,8 @@ use tracing::info;
 
 use trusty_code::llm::{LlmClient, LlmClientConfig, LlmClientTrait};
 use trusty_code::run_task::{ExitCode, RunTaskParams, execute_run_task};
+
+mod cli;
 
 /// Environment variable that overrides the engineer model for a single run (#1035).
 const ENGINEER_MODEL_ENV: &str = "TCODE_ENGINEER_MODEL";
@@ -85,12 +93,20 @@ enum Command {
         port: Option<u16>,
     },
 
-    /// Delegate a single task to a named agent and run it end-to-end.
+    /// Create (or target) a session, run a task through it via the daemon's
+    /// `task.run`, stream live events to the terminal as they arrive, and
+    /// exit once the run reaches a terminal state (#2060, the M1 cut-line
+    /// "replay via thin CLI" verb).
     ///
-    /// Loads the agent config from `<project>/.claude/agents/<agent>.toml`,
-    /// assembles its system prompt (with project `CLAUDE.md` context), runs the
-    /// PM through the agent loop, lets it delegate to the python-engineer
-    /// in-process, and prints the resulting diff, transcript, and usage.
+    /// This is a THIN CLIENT by default: it spawns an ephemeral
+    /// `tcode serve --stdio` child (`crate::cli::run_task`) and drives it
+    /// entirely over JSON-RPC — no agent-loop logic runs in this process.
+    /// `--legacy-in-process` restores the pre-#2060 behaviour (this binary
+    /// runs the PM->engineer `AgentLoop` directly, printing a diff/
+    /// transcript/usage report at the end) — kept available rather than
+    /// deleted since it is still exercised by `trusty_code::run_task::tests`
+    /// and some callers may depend on its diff-report output, which the
+    /// daemon-driven path does not (yet) compute.
     RunTask {
         /// Agent name as declared in `.claude/agents/<name>.toml` (e.g. `pm`).
         agent: String,
@@ -112,6 +128,11 @@ enum Command {
         /// config's own model.
         #[arg(long, value_name = "SLUG")]
         engineer_model: Option<String>,
+
+        /// Use the ORIGINAL in-process execution path instead of the #2060
+        /// thin JSON-RPC client. See this variant's docs for why it is kept.
+        #[arg(long)]
+        legacy_in_process: bool,
     },
 
     /// Execute a named MPM workflow end-to-end.
@@ -123,6 +144,72 @@ enum Command {
         name: String,
 
         /// Path to the project root.
+        #[arg(long, short, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+    },
+
+    /// Inspect and manage daemon-owned sessions (#2060).
+    Session {
+        #[command(subcommand)]
+        action: SessionCommand,
+    },
+
+    /// Attach to a live session and stream its events to the terminal until
+    /// it reaches a terminal state or you press Ctrl-C (#2060).
+    ///
+    /// Spawns its OWN ephemeral daemon (see `crate::cli::attach`'s docs) —
+    /// only useful against a session created within THIS same invocation
+    /// today; M1 sessions are in-memory, per daemon process.
+    Attach {
+        /// The session id to attach to.
+        session_id: String,
+
+        /// Path to the project root the daemon should be rooted at.
+        #[arg(long, short, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+    },
+
+    /// Send a cancellation signal to a session (#2060).
+    Cancel {
+        /// The session id to cancel.
+        session_id: String,
+
+        /// Path to the project root the daemon should be rooted at.
+        #[arg(long, short, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+    },
+
+    /// Print a session's stored transcript (turns, tool calls, usage, cost)
+    /// via `session.get_transcript` (#2058, #2060).
+    Transcript {
+        /// The session id to inspect.
+        session_id: String,
+
+        /// Path to the project root the daemon should be rooted at.
+        #[arg(long, short, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+
+        /// Emit the raw JSON result instead of a human-readable rendering.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `tcode session <action>` subcommands (#2060).
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// List every session the daemon currently knows about.
+    List {
+        /// Path to the project root the daemon should be rooted at.
+        #[arg(long, short, value_name = "PATH", default_value = ".")]
+        project: PathBuf,
+    },
+    /// Show one session's current status.
+    Status {
+        /// The session id to look up.
+        session_id: String,
+
+        /// Path to the project root the daemon should be rooted at.
         #[arg(long, short, value_name = "PATH", default_value = ".")]
         project: PathBuf,
     },
@@ -150,7 +237,21 @@ async fn main() -> Result<()> {
             project,
             json,
             engineer_model,
-        } => run_task(&agent, &task, &project, json, engineer_model).await,
+            legacy_in_process,
+        } => {
+            if legacy_in_process {
+                run_task(&agent, &task, &project, json, engineer_model).await
+            } else {
+                let project = canonicalize_project_or_exit(&project, "run-task");
+                match cli::run_task::run(&project, &agent, &task, json, engineer_model).await {
+                    Ok(code) => process::exit(code),
+                    Err(e) => {
+                        eprintln!("tcode run-task: {e:#}");
+                        process::exit(ExitCode::RunFailure.code());
+                    }
+                }
+            }
+        }
 
         Command::RunWorkflow { name, project } => {
             eprintln!(
@@ -159,7 +260,94 @@ async fn main() -> Result<()> {
             );
             process::exit(1);
         }
+
+        Command::Session { action } => match action {
+            SessionCommand::List { project } => {
+                let project = canonicalize_project_or_exit(&project, "session list");
+                run_thin_client(cli::session::list(&project), "session list").await
+            }
+            SessionCommand::Status {
+                session_id,
+                project,
+            } => {
+                let project = canonicalize_project_or_exit(&project, "session status");
+                run_thin_client(
+                    cli::session::status(&project, &session_id),
+                    "session status",
+                )
+                .await
+            }
+        },
+
+        Command::Attach {
+            session_id,
+            project,
+        } => {
+            let project = canonicalize_project_or_exit(&project, "attach");
+            run_thin_client(cli::attach::run(&project, &session_id), "attach").await
+        }
+
+        Command::Cancel {
+            session_id,
+            project,
+        } => {
+            let project = canonicalize_project_or_exit(&project, "cancel");
+            run_thin_client(cli::cancel::run(&project, &session_id), "cancel").await
+        }
+
+        Command::Transcript {
+            session_id,
+            project,
+            json,
+        } => {
+            let project = canonicalize_project_or_exit(&project, "transcript");
+            run_thin_client(
+                cli::transcript::run(&project, &session_id, json),
+                "transcript",
+            )
+            .await
+        }
     }
+}
+
+/// Canonicalize `project`, printing a `tcode <cmd>:`-prefixed error and
+/// exiting with [`ExitCode::ConfigError`] on failure.
+///
+/// Why: every thin-client subcommand needs the SAME "must be a real,
+/// existing directory" validation `run-task`'s legacy path already applies
+/// — centralised so each one-line match arm above doesn't repeat it.
+/// What: `Path::canonicalize`, exiting on `Err` rather than returning one
+/// (matching this binary's existing `process::exit`-on-config-error style).
+fn canonicalize_project_or_exit(project: &Path, cmd: &str) -> PathBuf {
+    project.canonicalize().unwrap_or_else(|e| {
+        eprintln!(
+            "tcode {cmd}: invalid --project path '{}': {e}",
+            project.display()
+        );
+        process::exit(ExitCode::ConfigError.code());
+    })
+}
+
+/// Run a thin-client subcommand's future, printing a `tcode <cmd>:`-prefixed
+/// error and exiting nonzero on failure; exits 0 on success.
+///
+/// Why: every non-`run-task` thin-client subcommand (`session list`/
+/// `status`, `attach`, `cancel`, `transcript`) shares the exact same
+/// "await, print error verbatim (`RpcClientError`'s `Display` already
+/// includes the daemon's JSON-RPC error message/code where applicable),
+/// exit nonzero" shape — centralised here instead of repeated per arm.
+/// What: `ExitCode::RunFailure`'s numeric value on error (mirrors
+/// `run-task`'s exit-code contract); exits 0 (falls through, returning
+/// `Ok(())`) on success.
+async fn run_thin_client(
+    fut: impl std::future::Future<Output = Result<()>>,
+    cmd: &str,
+) -> Result<()> {
+    if let Err(e) = fut.await {
+        eprintln!("tcode {cmd}: {e:#}");
+        process::exit(ExitCode::RunFailure.code());
+    }
+    Ok(())
 }
 
 /// Execute `tcode serve`: dispatches to whichever transport was selected.

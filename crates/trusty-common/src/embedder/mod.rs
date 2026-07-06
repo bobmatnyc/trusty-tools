@@ -531,6 +531,96 @@ mod tests {
         }
     }
 
+    /// Why: issue #2111 — the fallback *decision* must be verifiable without a
+    /// real ORT/CoreML runtime. A successful init must never fall back or
+    /// poison the known-bad cache.
+    /// What: asserts `decide_fallback(Success) == (false, false)`.
+    /// Test: this test.
+    #[test]
+    fn fallback_decision_success_keeps_provider() {
+        use crate::embedder::fast_embedder::{InitOutcome, decide_fallback};
+        assert_eq!(decide_fallback(InitOutcome::Success), (false, false));
+    }
+
+    /// Why: a fast `Err` (pre-existing #763 behaviour) is not proof the
+    /// provider will misbehave again, so it must fall back to CPU for this
+    /// attempt WITHOUT poisoning the process-wide known-bad cache — the next
+    /// full `FastEmbedder::new()` should still retry the accelerated
+    /// provider.
+    /// What: asserts `decide_fallback(FastError) == (true, false)`.
+    /// Test: this test.
+    #[test]
+    fn fallback_decision_fast_error_falls_back_without_poisoning() {
+        use crate::embedder::fast_embedder::{InitOutcome, decide_fallback};
+        assert_eq!(decide_fallback(InitOutcome::FastError), (true, false));
+    }
+
+    /// Why: issue #2111 — a `Hung` outcome means an OS thread is permanently
+    /// stuck inside ORT/CoreML with no cancellation point. Falling back
+    /// without poisoning the cache would leak one more blocked thread on
+    /// every subsequent retry (e.g. each ~5-minute dream cycle), so a hang
+    /// MUST poison `COREML_KNOWN_BAD` so it is never attempted again this
+    /// process.
+    /// What: asserts `decide_fallback(Hung) == (true, true)`.
+    /// Test: this test.
+    #[test]
+    fn fallback_decision_hang_falls_back_and_poisons() {
+        use crate::embedder::fast_embedder::{InitOutcome, decide_fallback};
+        assert_eq!(decide_fallback(InitOutcome::Hung), (true, true));
+    }
+
+    /// Why: issue #2111 — the CoreML hang-detection bound must default to a
+    /// documented, sensible value (60 s) so a hang is caught well before the
+    /// outer `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (default 180 s) gives up.
+    /// What: clears the env override and asserts the default duration.
+    /// Test: this test.
+    #[test]
+    fn coreml_init_timeout_default() {
+        use crate::embedder::fast_embedder::{
+            DEFAULT_COREML_INIT_TIMEOUT_SECS, coreml_init_timeout,
+        };
+        let _g = ENV_LOCK.lock().unwrap();
+        let _t = EnvVarGuard::apply("TRUSTY_COREML_INIT_TIMEOUT_SECS", None);
+        assert_eq!(
+            coreml_init_timeout(),
+            std::time::Duration::from_secs(DEFAULT_COREML_INIT_TIMEOUT_SECS)
+        );
+        assert_eq!(DEFAULT_COREML_INIT_TIMEOUT_SECS, 60);
+    }
+
+    /// Why: operators on a host with a legitimately slow (but working) CoreML
+    /// cold-compile must be able to raise the bound without a code change.
+    /// What: sets an explicit override and asserts it is honoured; also
+    /// checks a malformed value falls back to the default.
+    /// Test: this test.
+    #[test]
+    fn coreml_init_timeout_reads_env() {
+        use crate::embedder::fast_embedder::{
+            DEFAULT_COREML_INIT_TIMEOUT_SECS, coreml_init_timeout,
+        };
+        let _g = ENV_LOCK.lock().unwrap();
+        {
+            let _t = EnvVarGuard::apply("TRUSTY_COREML_INIT_TIMEOUT_SECS", Some("120"));
+            assert_eq!(coreml_init_timeout(), std::time::Duration::from_secs(120));
+        }
+        {
+            let _t = EnvVarGuard::apply("TRUSTY_COREML_INIT_TIMEOUT_SECS", Some("not-a-number"));
+            assert_eq!(
+                coreml_init_timeout(),
+                std::time::Duration::from_secs(DEFAULT_COREML_INIT_TIMEOUT_SECS),
+                "malformed override must fall back to the default"
+            );
+        }
+        {
+            let _t = EnvVarGuard::apply("TRUSTY_COREML_INIT_TIMEOUT_SECS", Some("0"));
+            assert_eq!(
+                coreml_init_timeout(),
+                std::time::Duration::from_secs(DEFAULT_COREML_INIT_TIMEOUT_SECS),
+                "zero override must fall back to the default"
+            );
+        }
+    }
+
     /// Why: zero vectors from a CUDA EP silent fallback would be stored in the
     /// HNSW index and corrupt all similarity searches.
     /// What: asserts `is_zero_vector` fires on an all-zero vector and not on
