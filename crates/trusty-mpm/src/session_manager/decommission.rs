@@ -20,6 +20,7 @@ use crate::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
 
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use super::search_gc;
 use super::workspace_guard::is_safe_to_remove;
 
 /// Sentinel file written by [`create_session_worktree`] into every SM-created
@@ -79,7 +80,12 @@ pub(crate) const GIT_WORKTREE_REMOVE_TIMEOUT: std::time::Duration =
 /// only the immediate parent (not any ancestor) prevents false positives for
 /// paths like `<base>/.worktrees/deep/nested` where `.worktrees` is a grandparent.
 /// Test: `is_session_worktree_detects_dot_worktrees_component`.
-fn is_session_worktree(path: &Path) -> bool {
+///
+/// Visibility (#2033): `pub(super)` — reused by `session_manager::search_gc`
+/// so the "is this path a disposable in-project worktree?" rule lives in
+/// exactly one place and the search-index lifecycle (delete-on-decommission,
+/// orphan sweep) can never diverge from the filesystem-removal safety gate.
+pub(super) fn is_session_worktree(path: &Path) -> bool {
     path.parent()
         .and_then(|p| p.file_name())
         .map(|n| n == WORKTREES_DIRNAME)
@@ -327,6 +333,23 @@ impl SessionManager {
     ) -> Result<(SessionRecord, bool), ManagedError> {
         let mut record = self.get(id).await?;
 
+        // #2033: derive the trusty-search index id for a disposable workspace
+        // (SM-owned clone or in-project worktree — see
+        // `search_gc::disposable_workspace_index_id`) BEFORE any removal
+        // happens below. This must run first because
+        // `trusty_common::resolve_project_root` walks UP from the workspace
+        // path looking for a `.git` marker — if the directory is already gone
+        // by the time we derive the id, the walk would find the wrong (e.g.
+        // shared base clone's) ancestor `.git` and target the WRONG index for
+        // deletion. Local-path/adopted sessions (`workspace_owned == false`
+        // and not an in-project worktree) return `None` here — their real,
+        // long-lived directory keeps its search index, exactly mirroring the
+        // filesystem-removal guard below.
+        let search_index_id = search_gc::disposable_workspace_index_id(
+            record.workspace_path.as_deref(),
+            record.workspace_owned,
+        );
+
         // Gracefully terminate the runtime before removing the workspace (#1975):
         // SIGTERM the claude process and give it a grace window to flush state,
         // then reclaim the pane — instead of an abrupt `kill_session`. Best-effort:
@@ -424,6 +447,15 @@ impl SessionManager {
                     }
                 }
             }
+        }
+
+        // #2033: best-effort remove the trusty-search index for a disposed
+        // workspace, alongside the worktree/clone directory. Fail-soft: an
+        // unreachable/erroring search daemon must never block or fail session
+        // teardown — `delete_search_index_best_effort` logs and swallows every
+        // failure mode itself.
+        if let Some(index_id) = search_index_id {
+            search_gc::delete_search_index_best_effort(&index_id).await;
         }
 
         // Tombstone: clear workspace_path, mark Decommissioned, persist.

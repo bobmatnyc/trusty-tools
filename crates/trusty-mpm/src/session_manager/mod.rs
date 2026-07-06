@@ -20,6 +20,7 @@ pub mod prune;
 pub mod reactivate;
 pub mod record;
 pub mod restart_ops;
+pub mod search_gc;
 pub mod session_guard;
 pub mod snapshot;
 pub mod store;

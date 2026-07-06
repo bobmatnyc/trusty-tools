@@ -118,20 +118,17 @@ pub(super) fn register_project_index(project_root: &Path) -> Option<String> {
         return None;
     }
 
-    // Discover the running daemon's address. Absent / unreadable file ⇒ daemon
-    // not started: skip registration (best-effort) but still return the id so
-    // the stub is pinned — the daemon will create the index on first reindex.
-    match trusty_common::read_daemon_addr("trusty-search") {
-        Ok(Some(addr)) if !addr.trim().is_empty() => {
-            let base = if addr.starts_with("http://") || addr.starts_with("https://") {
-                addr
-            } else {
-                format!("http://{addr}")
-            };
+    // Discover the running daemon's address (issue #2033: via the shared
+    // `trusty_common::resolve_daemon_base_url` helper — never a hardcoded
+    // port). Absent / unreadable file ⇒ daemon not started: skip registration
+    // (best-effort) but still return the id so the stub is pinned — the
+    // daemon will create the index on first reindex.
+    match trusty_common::resolve_daemon_base_url("trusty-search") {
+        Some(base) => {
             best_effort_create_index(&base, &index_id, &root);
             best_effort_trigger_reindex(&base, &index_id);
         }
-        _ => {
+        None => {
             tracing::warn!(
                 "trusty-search daemon address not found; pinning index '{index_id}' \
                  without pre-registering it (it will be created on first reindex)"

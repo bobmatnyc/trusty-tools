@@ -118,6 +118,38 @@ pub async fn check_already_running(addr_file: &Path, health_path: &str) -> Optio
     }
 }
 
+/// Resolve a running daemon's discovered HTTP base URL (issue #2033).
+///
+/// Why: several trusty-mpm call sites (session-launch index registration,
+/// decommission-time index removal, the orphan-index sweep) each need "if the
+/// named daemon recorded a bound address, give me its `http://`-prefixed base
+/// URL, else `None`" — and must NEVER fall back to a hardcoded/guessed port
+/// (the #2030 discovery-first rule: a wrong guessed port produces worse
+/// failures than a clean skip). Centralising the `read_daemon_addr` +
+/// scheme-prefix dance here, instead of repeating it at each call site, keeps
+/// every caller in sync and removes the duplication.
+/// What: reads `{app_name}`'s recorded address via [`read_daemon_addr`]; when
+/// present and non-blank, returns it prefixed with `http://` unless it
+/// already carries a `http://`/`https://` scheme. Returns `None` when the
+/// daemon has never started (no address file), the file is empty, or is
+/// unreadable — callers treat `None` as "skip, daemon not discoverable"
+/// rather than guessing a default port.
+/// Test: `resolve_daemon_base_url_adds_scheme`,
+/// `resolve_daemon_base_url_preserves_existing_scheme`,
+/// `resolve_daemon_base_url_none_when_undiscoverable`.
+pub fn resolve_daemon_base_url(app_name: &str) -> Option<String> {
+    match read_daemon_addr(app_name) {
+        Ok(Some(addr)) if !addr.trim().is_empty() => Some(
+            if addr.starts_with("http://") || addr.starts_with("https://") {
+                addr
+            } else {
+                format!("http://{addr}")
+            },
+        ),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +324,82 @@ mod tests {
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
         assert!(result.is_ok(), "removing non-existent addr must succeed");
+    }
+
+    /// Why (#2033): a bare `host:port` recorded on disk must come back with an
+    /// `http://` scheme prefixed so callers can hand it straight to `reqwest`.
+    /// Test: this test.
+    #[test]
+    fn resolve_daemon_base_url_adds_scheme() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile_like_dir();
+        unsafe {
+            std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp);
+        }
+        let app = format!(
+            "trusty-test-daemon-base-url-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        write_daemon_addr(&app, "127.0.0.1:54321").unwrap();
+        let got = resolve_daemon_base_url(&app);
+        unsafe {
+            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
+        }
+        assert_eq!(got.as_deref(), Some("http://127.0.0.1:54321"));
+    }
+
+    /// Why (#2033): an address that already carries a scheme (rare, but the
+    /// contract must be idempotent) must not be double-prefixed.
+    /// Test: this test.
+    #[test]
+    fn resolve_daemon_base_url_preserves_existing_scheme() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile_like_dir();
+        unsafe {
+            std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp);
+        }
+        let app = format!(
+            "trusty-test-daemon-base-url-scheme-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        write_daemon_addr(&app, "https://127.0.0.1:54321").unwrap();
+        let got = resolve_daemon_base_url(&app);
+        unsafe {
+            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
+        }
+        assert_eq!(got.as_deref(), Some("https://127.0.0.1:54321"));
+    }
+
+    /// Why (#2033): the discovery-first rule — an undiscoverable daemon must
+    /// resolve to `None`, never a guessed default port.
+    /// Test: this test.
+    #[test]
+    fn resolve_daemon_base_url_none_when_undiscoverable() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile_like_dir();
+        unsafe {
+            std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp);
+        }
+        let app = format!(
+            "trusty-test-daemon-base-url-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let got = resolve_daemon_base_url(&app);
+        unsafe {
+            std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
+        }
+        assert!(got.is_none(), "undiscoverable daemon must resolve to None");
     }
 }
