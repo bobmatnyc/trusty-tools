@@ -872,6 +872,7 @@ trusty-code is delivered as three **canonical owner-facing capability milestones
 - [ ] Diff / transcript / cost captured correctly (depends on #1475 fixes from P1A).
 - [ ] A SIMPLE coding task (e.g., a small function + its unit test) completes and is verifiable (tests pass, diff applies cleanly).
 - [ ] **M3 E2E Suite** — Full end-to-end suite exercising real PM→agent delegation, file edits, repo-map integration, and actual coding task completion with passing tests. M3 is not complete until this suite passes.
+- [ ] **Bake-Off Capstone:** trusty-code, run against the `ai-coding-bake-off` L1-L3 challenges (`~/Projects/ai-coding-bake-off`), achieves scores COMPARABLE to the claude-code (4.53) / codex (4.49) band on BOTH automated pytest pass-rate AND peer-review average — WHILE demonstrating LOWER real token/dollar cost (measured from tcode's own perf/usage telemetry, not self-reported). L4-L5 deferred (5–70× more expensive). This validates the token-efficiency thesis: harness quality > model quality.
 
 **Engineering Deliverables (from P1A + P1B + P1C hardened end-to-end + repo-map + agent definitions):**
 
@@ -879,6 +880,7 @@ trusty-code is delivered as three **canonical owner-facing capability milestones
 - P1B: Token-efficiency (edit formats, compaction, etc.).
 - P1C: Repo-map ranking layer + MCP integrations (exercised at scale in M3).
 - New: Hardened coding-agent TOML definitions (engineer, QA, security-reviewer), end-to-end testing scenario.
+- **API-Driven Bake-Off Runner** — A runner (reference template: `scripts/oneshot_bakeoff.py`) that drives tcode via its JSON-RPC API against a bake-off level, writes solution files + REAL cost metadata (from tcode telemetry) to harness output dir, and runs the pytest verifier. Doubles as M3's e2e/testability artifact (ties to §9 Testability).
 
 ---
 
@@ -1068,7 +1070,7 @@ Each milestone ships a full end-to-end suite driving the real CLI/API. The miles
 
 This M1 suite lands with issue #2062 (M1 E2E Validation); earlier M1 issues (#587-P1A-1 through #587-P1A-10) each add their own API-level e2e slice so the full suite is built incrementally.
 
-**M2 & M3 suites:** Defined similarly, exercising tool-calling and coding workflows end-to-end.
+**M2 & M3 suites:** Defined similarly, exercising tool-calling and coding workflows end-to-end. M3's suite includes the API-driven bake-off runner (reference: `scripts/oneshot_bakeoff.py`) that validates trusty-code against the `ai-coding-bake-off` L1-L3 challenges for the bake-off capstone criterion.
 
 ### Requirement 4: E2E is a Merge Gate
 
