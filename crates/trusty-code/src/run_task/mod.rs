@@ -40,10 +40,18 @@ use crate::tools::{
 };
 
 pub use recorder::{RecordingLlmClient, SharedTranscript, TurnRecord};
-pub use report::{ExitCode, RunReport, aggregate_usage};
+pub use report::{ExitCode, RunReport, aggregate_usage_per_role};
 
 /// Default bash timeout for the engineer's tools, in seconds.
 const ENGINEER_BASH_TIMEOUT_SECS: u64 = 120;
+
+/// The delegated engineer's agent name (matches
+/// `task::executor::ENGINEER_AGENT_NAME`, the daemon path's own copy of this
+/// same literal — kept as two constants, not one shared item, since neither
+/// module depends on the other and a shared constant would be a heavier
+/// coupling than the two paths' otherwise-independent module boundaries
+/// warrant).
+const ENGINEER_AGENT_NAME: &str = "python-engineer";
 
 /// Inputs to a single `run-task` invocation, parsed from the CLI.
 ///
@@ -148,7 +156,24 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     let pm_result = pm_loop.run(&pm_system, &params.task).await;
     let after = diff::capture_snapshot(&params.project);
 
-    assemble_report(&params, &transcript, &pm_model, before, after, pm_result)
+    // Resolve the engineer's model independently (#1475 bug 1) so the report
+    // prices its turns at its OWN rate rather than blending everything
+    // under the PM model.
+    let engineer_model = resolve_agent_model_slug(
+        &params.agents_dir,
+        ENGINEER_AGENT_NAME,
+        params.engineer_model.as_deref(),
+    );
+
+    assemble_report(
+        &params,
+        &transcript,
+        &pm_model,
+        &engineer_model,
+        before,
+        after,
+        pm_result,
+    )
 }
 
 /// Build the in-process engineer runner with project-scoped fs/bash tools.
@@ -166,8 +191,11 @@ fn build_engineer_runner(
     project_context: Option<String>,
     transcript: SharedTranscript,
 ) -> Arc<dyn AgentRunner> {
-    let engineer_llm: Arc<dyn LlmClientTrait> =
-        Arc::new(RecordingLlmClient::new(llm, "python-engineer", transcript));
+    let engineer_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
+        llm,
+        ENGINEER_AGENT_NAME,
+        transcript,
+    ));
 
     let factory: Arc<dyn RegistryFactory> = Arc::new(ProjectToolFactory {
         project: params.project.clone(),
@@ -232,6 +260,46 @@ fn apply_engineer_model_override(
             model: model.clone(),
         }),
         None => runner,
+    }
+}
+
+/// Resolve an agent's model slug, honouring an optional per-run override
+/// (#1035, #1475 bug 1 fix's prerequisite).
+///
+/// Why: `InProcessAgentRunner` resolves the engineer's model internally and
+/// does not expose it, so pricing the engineer's turns against its OWN
+/// model (rather than blending everything under the PM model — the #1475
+/// bug) needs this same resolution done independently, here, purely for the
+/// pricing step. Shared with the daemon path (`task::executor`'s own
+/// `resolve_engineer_model`, which now delegates here) so the two paths
+/// can never independently drift on how per-role pricing resolves a model.
+/// What: loads `<agents_dir>/<agent_name>.toml`; on any load failure
+/// (missing/invalid file) falls back to the literal string `"unknown"` —
+/// `crate::perf::cost_usd` degrades gracefully (Sonnet-equivalent pricing)
+/// for an unrecognised model rather than erroring, so a missing agent
+/// config degrades pricing accuracy, not the whole run. When
+/// `model_override` is `Some`, it wins over the config's own model (mirrors
+/// `RunContext`'s override precedence).
+/// Test: `run_task::tests::resolve_agent_model_slug_falls_back_when_config_missing`,
+/// `run_task::tests::resolve_agent_model_slug_honours_override`.
+pub fn resolve_agent_model_slug(
+    agents_dir: &std::path::Path,
+    agent_name: &str,
+    model_override: Option<&str>,
+) -> String {
+    let path = agents_dir.join(format!("{agent_name}.toml"));
+    let Ok(config) = AgentConfig::load(&path) else {
+        return "unknown".to_string();
+    };
+    match model_override {
+        Some(model) => {
+            let ctx = RunContext {
+                model: Some(model.to_string()),
+                ..Default::default()
+            };
+            resolve_model(&config, Some(&ctx))
+        }
+        None => resolve_model(&config, None),
     }
 }
 
@@ -313,13 +381,15 @@ fn config_error_report(
 /// branches never drift.
 /// What: On a PM-loop error → `RunFailure` (with whatever transcript accrued). On
 /// success → compute the diff; empty diff → `NoChanges`, else `Success`. Usage and
-/// cost are aggregated from the PM output (which already rolls up the engineer's
-/// usage via the shared client) and priced against the PM model.
+/// cost are aggregated from the transcript and priced PER ROLE — `pm_model` for
+/// `"pm"` turns, `engineer_model` for the delegated engineer's — per the #1475
+/// bug 1 fix (`aggregate_usage_per_role`), not blended under one model.
 /// Test: `run_task::tests::*` (success, no-change, and failure paths).
 fn assemble_report(
     params: &RunTaskParams,
     transcript: &SharedTranscript,
     pm_model: &str,
+    engineer_model: &str,
     before: diff::Snapshot,
     after: diff::Snapshot,
     pm_result: Result<AgentOutput, crate::agent_loop::AgentLoopError>,
@@ -343,11 +413,11 @@ fn assemble_report(
 
     let rendered_diff = diff::diff_snapshots(&before, &after);
 
-    // Sum usage across every recorded PM + engineer turn and price it against the
-    // PM (dominant) model. The PM's own `AgentOutput.usage` omits the engineer's
-    // tokens (they return as a tool-result string), so the transcript is the
-    // faithful total.
-    let (total_usage, cost) = aggregate_usage(&turns, pm_model);
+    // Sum usage across every recorded PM + engineer turn, pricing each turn
+    // against its OWN role's resolved model (#1475 bug 1 fix). The PM's own
+    // `AgentOutput.usage` omits the engineer's tokens (they return as a
+    // tool-result string), so the transcript is the faithful total.
+    let (total_usage, cost) = aggregate_usage_per_role(&turns, pm_model, engineer_model);
 
     let exit = if rendered_diff.trim().is_empty() {
         ExitCode::NoChanges

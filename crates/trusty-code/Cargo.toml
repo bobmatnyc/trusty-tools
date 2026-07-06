@@ -79,11 +79,17 @@ axum = { workspace = true }
 tokio-stream = { workspace = true }
 futures-util = { workspace = true }
 
+# `run_task::diff`'s git-tree snapshot (#2061, #1475 bug 3): a scratch
+# directory for the THROWAWAY `GIT_INDEX_FILE` git stages into, so the run's
+# before/after capture never touches the project's real `.git/index`.
+# Promoted from dev-dependencies (where it already served every temp-dir
+# test in this crate) since this is now a genuine production code path, not
+# test-only.
+tempfile = { workspace = true }
+
 [dev-dependencies]
 # Async test runtime (events, build_info, perf async tests, tools tests)
 tokio = { workspace = true }
-# Temp directories for build_info, delegate, and agents tests
-tempfile = { workspace = true }
 # HTTP router test-only helper (`tower::util::ServiceExt::oneshot`) for
 # driving the `tcode serve --http` axum router without a real socket (#2053).
 tower = { workspace = true }

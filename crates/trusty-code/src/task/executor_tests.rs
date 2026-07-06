@@ -9,7 +9,6 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::llm::LlmClientTrait;
-use crate::perf::TokenUsage;
 use crate::session::SessionRegistry;
 use crate::task::mock_llm::EchoLlmClient;
 
@@ -81,45 +80,11 @@ async fn spawn_task_run_unknown_session_errors() {
     assert_eq!(err.code, -32007);
 }
 
-/// Per-role pricing must charge the PM's turns at `pm_model` and the
-/// engineer's at `engineer_model`, not blend everything under one slug —
-/// the #1475 concern this function exists to avoid reintroducing.
-#[test]
-fn aggregate_usage_per_role_prices_each_role_separately() {
-    let turns = vec![
-        TurnRecord {
-            role: "pm".to_string(),
-            model: "anthropic/claude-sonnet-4-5".to_string(),
-            text: String::new(),
-            tool_calls: vec![],
-            usage: TokenUsage::new(1000, 500, 0, 0),
-        },
-        TurnRecord {
-            role: "python-engineer".to_string(),
-            model: "anthropic/claude-haiku-4".to_string(),
-            text: String::new(),
-            tool_calls: vec![],
-            usage: TokenUsage::new(1000, 500, 0, 0),
-        },
-    ];
-
-    let (usage, cost) = aggregate_usage_per_role(
-        &turns,
-        "anthropic/claude-sonnet-4-5",
-        "anthropic/claude-haiku-4",
-    );
-    assert_eq!(usage.prompt_tokens, 2000);
-    assert_eq!(usage.completion_tokens, 1000);
-
-    // Pricing the SAME two turns entirely under the PM model must differ
-    // from the per-role split whenever the two models price differently —
-    // the concrete regression the per-role split guards against.
-    let blended_cost = crate::perf::cost_usd("anthropic/claude-sonnet-4-5", 2000, 1000, 0, 0);
-    assert_ne!(
-        cost, blended_cost,
-        "per-role pricing must differ from blending everything under the PM model"
-    );
-}
+// `aggregate_usage_per_role` itself is now `run_task::aggregate_usage_per_role`
+// (#2061, #1475 bug 1) — its per-role pricing behaviour is tested once, at
+// its actual definition site, in `run_task::report::tests`
+// (`aggregate_usage_per_role_prices_each_role_separately`). This module only
+// tests THIS daemon path's own wrapper (`resolve_engineer_model`, below).
 
 /// `resolve_engineer_model` must fall back to `"unknown"` (never panic) when
 /// the engineer config is missing.

@@ -37,7 +37,7 @@ use crate::perf::TokenUsage;
 /// flows back to the PM as a tool-result string). `Deserialize` (#2060) lets
 /// `tcode`'s CLI thin client parse a `session.get_transcript` JSON-RPC result
 /// straight back into `Vec<TurnRecord>`.
-/// Test: `run_task::tests::transcript_has_pm_and_engineer_turns`.
+/// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnRecord {
     /// Agent label that produced this turn (e.g. `"pm"`, `"python-engineer"`).
@@ -69,7 +69,7 @@ pub type SharedTranscript = Arc<Mutex<Vec<TurnRecord>>>;
 /// What: Forwards `chat` to the inner client, then appends a `TurnRecord` tagged
 /// with this wrapper's `role` and the request's model. A poisoned transcript
 /// lock is treated as a no-op record (the run must not panic mid-flight).
-/// Test: `run_task::tests::transcript_has_pm_and_engineer_turns`.
+/// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`.
 pub struct RecordingLlmClient {
     inner: Arc<dyn LlmClientTrait>,
     role: String,
@@ -82,7 +82,7 @@ impl RecordingLlmClient {
     /// Why: Each agent (PM, engineer) needs its own labelled recorder sharing the
     /// same transcript sink so the report can distinguish their turns.
     /// What: Stores the inner client, the role label, and the shared transcript.
-    /// Test: `run_task::tests::transcript_has_pm_and_engineer_turns`.
+    /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`.
     pub fn new(
         inner: Arc<dyn LlmClientTrait>,
         role: impl Into<String>,
@@ -104,9 +104,13 @@ impl LlmClientTrait for RecordingLlmClient {
     /// after the call (on success) keeps the report faithful and never fabricates
     /// turns for failed requests.
     /// What: Calls the inner client; on `Ok`, appends a `TurnRecord` with the
-    /// request model, the response's first text, and its tool-call names; returns
-    /// the response unchanged. Errors propagate untouched (and are not recorded).
-    /// Test: `run_task::tests::transcript_has_pm_and_engineer_turns`.
+    /// RESOLVED model slug (#1475 bug 2 — `resp.resolved_model(&req.model)`,
+    /// which prefers the provider-reported model and falls back to the
+    /// requested slug when the response omits one), the response's first
+    /// text, and its tool-call names; returns the response unchanged. Errors
+    /// propagate untouched (and are not recorded).
+    /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`,
+    /// `run_task::tests::transcript_records_resolved_model_not_requested_slug`.
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         let resp = self.inner.chat(req).await?;
 
@@ -117,7 +121,7 @@ impl LlmClientTrait for RecordingLlmClient {
             .collect();
         let record = TurnRecord {
             role: self.role.clone(),
-            model: req.model.clone(),
+            model: resp.resolved_model(&req.model).to_string(),
             text: resp.first_text().unwrap_or_default(),
             tool_calls,
             usage: resp.clone().token_usage(),

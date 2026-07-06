@@ -135,6 +135,22 @@ fn stop_response(text: &str) -> Value {
     })
 }
 
+/// A response where the assistant emits final text and stops, ALSO
+/// reporting a specific RESOLVED `model` slug — for the #1475 bug 2 test
+/// (`transcript_records_resolved_model_not_requested_slug`), which needs a
+/// response whose resolved model differs from what was requested.
+fn stop_response_with_model(text: &str, model: &str) -> Value {
+    json!({
+        "id": "gen-stop",
+        "model": model,
+        "choices": [{
+            "message": {"role": "assistant", "content": text, "tool_calls": []},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 15, "completion_tokens": 5, "total_tokens": 20}
+    })
+}
+
 /// Build an agents dir with `pm.toml` and `python-engineer.toml`.
 ///
 /// Why: `run-task` loads the PM config from `<agents_dir>/pm.toml` and the
@@ -227,6 +243,45 @@ async fn end_to_end_pm_delegates_to_engineer() {
     assert!(
         roles.contains(&"python-engineer"),
         "transcript must have an engineer turn: {roles:?}"
+    );
+}
+
+/// The transcript must record the RESOLVED model slug a response reports,
+/// not merely the slug that was requested (#1475 bug 2).
+///
+/// Why: `RecordingLlmClient::chat` previously recorded `req.model` (what was
+/// asked for); if the provider remaps/falls back to a different concrete
+/// model, that divergence must be visible in the transcript for the #1035
+/// cross-model comparison to be trustworthy.
+/// What: Script the PM's FINAL (stop) response with a `model` field that
+/// differs from the PM agent config's own model
+/// (`openai/gpt-4o-mini` vs. the response's `openai/gpt-4o-mini-2024-07-18`);
+/// assert the recorded PM turn's `model` is the response's resolved slug.
+/// Test: this test.
+#[tokio::test]
+async fn transcript_records_resolved_model_not_requested_slug() {
+    let agents = agents_dir("deepseek/deepseek-chat");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        delegate_response("create hello.py"),
+        write_file_response("hello.py", "print('hi')"),
+        stop_response("engineer: wrote hello.py"),
+        stop_response_with_model("pm: task complete", "openai/gpt-4o-mini-2024-07-18"),
+    ]));
+
+    let report = execute_run_task(params(&agents, &project, None), llm).await;
+
+    let pm_final_turn = report
+        .transcript
+        .iter()
+        .rev()
+        .find(|t| t.role == "pm")
+        .expect("a pm turn must be recorded");
+    assert_eq!(
+        pm_final_turn.model, "openai/gpt-4o-mini-2024-07-18",
+        "transcript must record the RESOLVED model, not the requested slug \
+         (openai/gpt-4o-mini)"
     );
 }
 

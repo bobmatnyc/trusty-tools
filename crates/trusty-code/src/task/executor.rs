@@ -12,9 +12,9 @@
 //! the engine: it builds the exact same PM-delegates-to-engineer shape
 //! `run_task::execute_run_task` does (see that module's doc comment), reusing
 //! `agent_loop::AgentLoop`, `runner::InProcessAgentRunner`, `tools::*`, and
-//! `run_task`'s own public `RecordingLlmClient`/`TurnRecord`/`aggregate_usage`
-//! machinery — only the orchestration shell (spawn-and-report vs.
-//! run-and-render) differs.
+//! `run_task`'s own public `RecordingLlmClient`/`TurnRecord`/
+//! `aggregate_usage_per_role`/`resolve_agent_model_slug` machinery — only the
+//! orchestration shell (spawn-and-report vs. run-and-render) differs.
 //! What: [`TaskRunParams`] carries one run's inputs; [`spawn_task_run`] is
 //! the single entry point `task::protocol::task_run` calls — it reserves the
 //! session's execution slot synchronously (rejecting a second overlapping
@@ -22,9 +22,11 @@
 //! a `tokio::spawn`'d task that builds both loops (attaching the #2056
 //! `SessionToolEventSink` + a shared cancel flag to BOTH the PM's and the
 //! delegated engineer's `AgentLoop`), drives the PM loop, prices the
-//! transcript PER ROLE against each role's own resolved model (avoiding the
-//! #1475 single-model mispricing this ticket was warned not to reintroduce),
-//! persists the outcome, and transitions the session to its terminal state.
+//! transcript PER ROLE against each role's own resolved model via
+//! `run_task::aggregate_usage_per_role` (#1475 bug 1 — this daemon path and
+//! the legacy CLI path now share the ONE implementation, so they can never
+//! independently drift), persists the outcome, and transitions the session
+//! to its terminal state.
 //! Test: `task::executor::tests::*`; the full flow end-to-end (a real
 //! subprocess) in `tests/task_e2e.rs`.
 
@@ -43,7 +45,9 @@ use crate::mode::HarnessMode;
 use crate::project_context::load_project_context;
 use crate::prompt::assemble_system_prompt_for_mode;
 use crate::provider::resolve_model;
-use crate::run_task::{RecordingLlmClient, SharedTranscript, TurnRecord};
+use crate::run_task::{
+    RecordingLlmClient, SharedTranscript, aggregate_usage_per_role, resolve_agent_model_slug,
+};
 use crate::runner::{InProcessAgentRunner, RegistryFactory};
 use crate::session::{SessionRegistry, SessionStatus};
 use crate::tools::{
@@ -315,74 +319,22 @@ impl AgentRunner for ModelPinningRunner {
 /// Resolve the engineer's model the SAME way `InProcessAgentRunner` does
 /// internally, purely so the cost split below can price the engineer's
 /// turns against its own slug rather than blending everything under the PM
-/// model (the #1475 mispricing pattern this ticket was warned not to
-/// reintroduce).
+/// model.
 ///
 /// Why: `InProcessAgentRunner` resolves the engineer's model internally and
-/// does not expose it; loading the same config file here is cheap and keeps
-/// `run_and_record`'s pricing step independently correct without changing
-/// the runner's public surface.
-/// What: loads `<agents_dir>/python-engineer.toml`; on any load failure
-/// (missing/invalid file) falls back to the literal string `"unknown"` —
-/// `crate::perf::cost_usd` degrades gracefully (Sonnet-equivalent pricing)
-/// for an unrecognised model rather than erroring, so a missing engineer
-/// config degrades pricing accuracy, not the whole run.
+/// does not expose it; `run_task::resolve_agent_model_slug` (#2061's #1475
+/// bug 1 fix) is the ONE shared implementation of "load config, apply
+/// override else resolve from config, degrade to `unknown` on load
+/// failure" this daemon path and `run_task::execute_run_task`'s legacy CLI
+/// path both now call, so they can never independently drift.
+/// What: thin wrapper binding this module's `ENGINEER_AGENT_NAME` constant
+/// and `params.model_override`.
 fn resolve_engineer_model(params: &TaskRunParams) -> String {
-    let path = params
-        .agents_dir
-        .join(format!("{ENGINEER_AGENT_NAME}.toml"));
-    let Ok(engineer_config) = AgentConfig::load(&path) else {
-        return "unknown".to_string();
-    };
-    match &params.model_override {
-        Some(model) => {
-            let ctx = RunContext {
-                model: Some(model.clone()),
-                ..Default::default()
-            };
-            resolve_model(&engineer_config, Some(&ctx))
-        }
-        None => resolve_model(&engineer_config, None),
-    }
-}
-
-/// Aggregate transcript usage, pricing EACH turn against its OWN role's
-/// resolved model rather than blending the whole transcript under one model
-/// (the #1475 concern; a full fix is #2061 — this is a narrow, independently
-/// correct improvement scoped to this new code path only, not a rewrite of
-/// `run_task::aggregate_usage`, which is left untouched for its own callers).
-///
-/// Why: `run_task::aggregate_usage` prices the WHOLE transcript against a
-/// single model (the PM's), which mis-prices every engineer turn whenever
-/// the engineer routes to a different model — exactly what #1475 flags.
-/// Since this is new code, there is no reason to copy that known bug forward.
-/// What: sums `TokenUsage` across every turn (unchanged), but computes cost
-/// per turn using `pm_model` for `role == "pm"` and `engineer_model`
-/// otherwise, then sums the per-turn costs.
-/// Test: `task::executor::tests::aggregate_usage_per_role_prices_each_role_separately`.
-fn aggregate_usage_per_role(
-    turns: &[TurnRecord],
-    pm_model: &str,
-    engineer_model: &str,
-) -> (crate::perf::TokenUsage, f64) {
-    let mut total = crate::perf::TokenUsage::default();
-    let mut cost = 0.0;
-    for turn in turns {
-        total.add(&turn.usage);
-        let model = if turn.role == "pm" {
-            pm_model
-        } else {
-            engineer_model
-        };
-        cost += crate::perf::cost_usd(
-            model,
-            turn.usage.prompt_tokens,
-            turn.usage.completion_tokens,
-            turn.usage.cache_read_tokens,
-            turn.usage.cache_creation_tokens,
-        );
-    }
-    (total, cost)
+    resolve_agent_model_slug(
+        &params.agents_dir,
+        ENGINEER_AGENT_NAME,
+        params.model_override.as_deref(),
+    )
 }
 
 /// Record a diagnostic log line and transition the session to `Failed`.
