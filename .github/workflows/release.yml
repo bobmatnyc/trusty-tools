@@ -742,6 +742,22 @@ jobs:
       # `target/<bare-triple>/release/` directory a plain `cargo build` would
       # use — the "Strip, package, and checksum" step below reads from
       # `target/${{ matrix.target }}/release/` (the bare triple) either way.
+      #
+      # HOST_CFLAGS (issue #2037, discovered via a real CI dry-run — see PR):
+      # cargo-zigbuild exports its `CC_<target>` env var for the WHOLE build
+      # session, so HOST-only build-dependencies (e.g. `ort-sys`'s build.rs
+      # uses `ureq` → `native-tls` → `openssl-sys` to download the prebuilt
+      # ONNX Runtime archive, and build-dependencies always compile for the
+      # HOST, never the `--target`) also get routed through zig's `cc`
+      # wrapper. Zig's `cc` runs with `-nostdinc`, so it does NOT replicate
+      # gcc's built-in Debian/Ubuntu multiarch header search (`/usr/include/
+      # x86_64-linux-gnu`), which is where `openssl/opensslconf.h` actually
+      # lives on the apt-installed `libssl-dev` here — the top-level
+      # `/usr/include/openssl/*.h` shim headers were found, but the
+      # multiarch-only conf header was not. `HOST_CFLAGS` is a distinct
+      # override cc-rs (the `cc` crate) checks specifically for HOST-targeted
+      # compiles (confirmed from the build.rs diagnostic output in that CI
+      # run), so this does NOT affect the actual `--target` cross-compile.
       - name: Build release binary
         shell: bash
         # SKIP_UI_BUILD is a per-step env var set from the matrix field.
@@ -749,6 +765,7 @@ jobs:
         # no shellcheck warnings, and the value is validated at workflow parse time.
         env:
           SKIP_UI_BUILD: ${{ matrix.skip_ui_build && '1' || '' }}
+          HOST_CFLAGS: ${{ matrix.variant == 'linux-zigbuild' && '-I/usr/include/x86_64-linux-gnu' || '' }}
         run: |
           CARGO_ARGS="-p ${{ matrix.cargo_pkg }} --release"
 
