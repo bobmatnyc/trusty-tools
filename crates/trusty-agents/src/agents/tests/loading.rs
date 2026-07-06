@@ -12,10 +12,20 @@ use crate::agents::{
     AgentConfig, FALLBACK_MODEL, ModelSource, agent_config_path, agent_env_suffix, resolve_model,
 };
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 
 // Serialize model-resolution tests because they mutate process-global env.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+//
+// Why `tokio::sync::Mutex` rather than `std::sync::Mutex`: the async loader
+// test (`by_name_async_loads_plan_agent`) must hold this guard across an
+// `.await` point so a concurrent test can't mutate `TAGENT_CONFIG_DIR` (or
+// the `TAGENT_MODEL_*` / `TAGENT_DEFAULT_MODEL` vars) mid-read. A
+// `std::sync::MutexGuard` held across `.await` trips
+// `clippy::await_holding_lock`; `tokio::sync::Mutex` is designed for exactly
+// this and its guard is `Send`. Sync `#[test]` functions use
+// `blocking_lock()`, which is safe here because none of them run inside a
+// tokio runtime.
+static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
 fn clear_model_env(agent_name: &str) {
     let suffix = agent_env_suffix(agent_name);
@@ -39,7 +49,7 @@ fn agent_env_suffix_uppercases_and_replaces_hyphens() {
 
 #[test]
 fn resolve_model_env_var_beats_toml() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("python-engineer");
     // SAFETY: guarded by ENV_LOCK
     unsafe {
@@ -53,7 +63,7 @@ fn resolve_model_env_var_beats_toml() {
 
 #[test]
 fn resolve_model_llm_override_beats_agent_model() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("x-agent");
     let (m, src) = resolve_model("x-agent", "toml/agent", Some("toml/override"));
     assert_eq!(m, "toml/override");
@@ -62,7 +72,7 @@ fn resolve_model_llm_override_beats_agent_model() {
 
 #[test]
 fn resolve_model_uses_agent_model_when_no_override() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("y-agent");
     let (m, src) = resolve_model("y-agent", "toml/agent", None);
     assert_eq!(m, "toml/agent");
@@ -71,7 +81,7 @@ fn resolve_model_uses_agent_model_when_no_override() {
 
 #[test]
 fn resolve_model_uses_default_env_when_nothing_else() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("z-agent");
     // SAFETY: guarded by ENV_LOCK
     unsafe {
@@ -88,7 +98,7 @@ fn resolve_model_uses_default_env_when_nothing_else() {
 
 #[test]
 fn resolve_model_fallback_when_nothing_set() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("q-agent");
     let (m, src) = resolve_model("q-agent", "", None);
     assert_eq!(m, FALLBACK_MODEL);
@@ -97,7 +107,7 @@ fn resolve_model_fallback_when_nothing_set() {
 
 #[test]
 fn resolve_model_empty_llm_override_is_ignored() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("r-agent");
     let (m, src) = resolve_model("r-agent", "toml/agent", Some(""));
     assert_eq!(m, "toml/agent");
@@ -108,15 +118,17 @@ fn resolve_model_empty_llm_override_is_ignored() {
 async fn by_name_async_loads_plan_agent() {
     // #96: Async loader should produce the same adapter + model as the
     // sync path when TAGENT_CONFIG_DIR is unset (fallback path).
-    // Set up env inside a sync scope so the MutexGuard is dropped
-    // before we hit any `.await` (avoids await_holding_lock clippy lint).
-    {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_model_env("plan-agent");
-        // SAFETY: guarded by ENV_LOCK for the duration of this scope.
-        unsafe {
-            std::env::remove_var("TAGENT_CONFIG_DIR");
-        }
+    // Hold the guard across the `.await` below: `by_name_async` reads the
+    // process-global `TAGENT_CONFIG_DIR` env var at poll-time, so dropping
+    // the guard before the call lets a concurrent test (e.g.
+    // `agent_config_path_honors_env_var`) mutate the var mid-read and
+    // redirect the lookup out from under this test.
+    let _guard = ENV_LOCK.lock().await;
+    clear_model_env("plan-agent");
+    // SAFETY: guarded by ENV_LOCK for the duration of this guard's scope,
+    // which spans the `by_name_async` call below.
+    unsafe {
+        std::env::remove_var("TAGENT_CONFIG_DIR");
     }
     let cfg = AgentConfig::by_name_async("plan-agent")
         .await
@@ -130,7 +142,7 @@ fn agent_directory_package_loads_correctly() {
     // #482: The directory-package format (`<name>/agent.toml` +
     // `persona.md` + optional `skills.md`) must load with the system
     // prompt sourced from persona.md and skills.md appended.
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.blocking_lock();
     let tmp = tempfile::tempdir().expect("create temp dir");
     let agents = tmp.path();
     let pkg = agents.join("cto-assistant");
@@ -174,7 +186,7 @@ max_tokens = 4096
 fn agent_config_path_honors_env_var() {
     // MIN-7 (#104): With TAGENT_CONFIG_DIR set, resolution must use it
     // verbatim instead of the CWD-relative fallback.
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.blocking_lock();
     // SAFETY: guarded by ENV_LOCK
     unsafe {
         std::env::set_var("TAGENT_CONFIG_DIR", "/tmp/custom-agents");
@@ -193,7 +205,7 @@ fn agent_config_path_honors_env_var() {
 fn agent_config_load_populates_adapter() {
     // Loading a real agent TOML should set `adapter` to match the model.
     // `plan-agent` is configured with an Anthropic model.
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("plan-agent");
     let cfg = AgentConfig::by_name("plan-agent").expect("plan-agent loads");
     use crate::llm::adapter::Provider;
@@ -204,7 +216,7 @@ fn agent_config_load_populates_adapter() {
 fn agent_config_ctrl_default_loads_with_adapter() {
     // The built-in ctrl default (#240) must parse and populate an adapter
     // so the controller can boot with zero on-disk config.
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("ctrl");
     let cfg = AgentConfig::ctrl_default();
     assert_eq!(cfg.agent.name, "ctrl");
