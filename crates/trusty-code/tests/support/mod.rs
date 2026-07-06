@@ -1,5 +1,6 @@
-//! Process/protocol plumbing shared by `tests/session_e2e.rs` and (#2056)
-//! `tests/task_e2e.rs`.
+//! Process/protocol plumbing shared by `tests/session_e2e.rs`, (#2056)
+//! `tests/task_e2e.rs`, (#2060) `tests/cli_e2e.rs`, and (#2062)
+//! `tests/m1_cutline_e2e.rs`.
 //!
 //! Why: driving the REAL `tcode` binary over its real stdio/HTTP surface
 //! needs a bit of scaffolding (spawn, NDJSON line I/O with timeouts, parse
@@ -7,18 +8,21 @@
 //! reading) that has nothing to do with the session-lifecycle assertions
 //! themselves. Keeping it in `tests/support/mod.rs` (not a top-level
 //! `tests/*.rs` file, so cargo does not treat it as its own test binary)
-//! keeps `session_e2e.rs`/`task_e2e.rs` readable as pure black-box scripts.
+//! keeps every `*_e2e.rs` file readable as a pure black-box script.
 //! What: [`StdioSession`] (spawn + NDJSON request/response/notification
 //! I/O over real pipes — [`StdioSession::spawn_with_mock_llm`] additionally
 //! roots the daemon at a given project dir and sets `TCODE_MOCK_LLM=echo`
 //! for #2056's offline task-execution coverage), [`HttpDaemon`]/
-//! [`spawn_http_daemon`] (spawn + discover the bound HTTP address from
-//! stderr), [`find_response`]/[`find_session_event`] (classify a raw NDJSON
-//! line), [`open_sse`]/[`read_sse_until`] (read one never-terminating SSE
-//! connection in stages), [`parse_sse_frames`] (split an SSE body into its
-//! JSON `data:` frames), and [`assert_envelopes_contiguous`] (#2055: the
-//! shared seq/field-presence check both the STDIO and HTTP/SSE e2e
-//! scenarios run against the SAME `SessionEventEnvelope` shape).
+//! [`spawn_http_daemon`]/[`spawn_http_daemon_with_env`] (#2062: the general
+//! form taking a project root + extra env vars, e.g. the SAME mock-LLM
+//! determinism over HTTP that STDIO already had) (spawn + discover the
+//! bound HTTP address from stderr), [`find_response`]/[`find_session_event`]
+//! (classify a raw NDJSON line), [`open_sse`]/[`read_sse_until`] (read one
+//! never-terminating SSE connection in stages), [`parse_sse_frames`] (split
+//! an SSE body into its JSON `data:` frames), and
+//! [`assert_envelopes_contiguous`] (#2055: the shared seq/field-presence
+//! check both the STDIO and HTTP/SSE e2e scenarios run against the SAME
+//! `SessionEventEnvelope` shape).
 //!
 //! `#![allow(dead_code)]`: each `tests/*.rs` file compiles `mod support;` as
 //! its OWN independent crate (cargo's per-integration-test-binary model), so
@@ -220,13 +224,38 @@ pub struct HttpDaemon {
 /// Why: `--port 0` avoids test-suite port collisions; the daemon logs the
 /// real bound `host:port` to stderr (never stdout) on startup, which this
 /// helper parses.
-/// What: spawns the child, reads stderr lines until one contains
-/// `"listening on http://"`, extracts the address, and spawns a background
-/// task to keep draining stderr for the rest of the daemon's life (so its
-/// stderr pipe never fills and blocks the process).
+/// What: thin wrapper over [`spawn_http_daemon_with_env`] rooted at `.`
+/// with no extra env vars — the shape every pre-#2062 caller
+/// (`tests/session_e2e.rs`) needs.
 pub async fn spawn_http_daemon() -> HttpDaemon {
-    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_tcode"))
-        .args(["serve", "--project", ".", "--http", "--port", "0"])
+    spawn_http_daemon_with_env(std::path::Path::new("."), &[]).await
+}
+
+/// Spawn `tcode serve --http --port 0` rooted at `project`, with `envs` set
+/// in the child's environment, discovering its ephemeral bound address from
+/// stderr.
+///
+/// Why: (#2062) the M1 milestone suite's HTTP scenario needs the SAME
+/// `TCODE_MOCK_LLM=echo` offline determinism the STDIO scenario gets from
+/// `StdioSession::spawn_with_mock_llm` — `spawn_http_daemon`'s original
+/// zero-argument form couldn't express that, so this is the general form
+/// both now share.
+/// What: `--project` argument path and `env(...)`-set every `(key, value)`
+/// pair in `envs`; otherwise identical to `spawn_http_daemon`'s original
+/// stderr address-discovery + drain-for-life behaviour.
+pub async fn spawn_http_daemon_with_env(
+    project: &std::path::Path,
+    envs: &[(&str, &str)],
+) -> HttpDaemon {
+    let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_tcode"));
+    cmd.arg("serve")
+        .arg("--project")
+        .arg(project)
+        .args(["--http", "--port", "0"]);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
