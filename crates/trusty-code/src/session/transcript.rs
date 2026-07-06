@@ -7,7 +7,11 @@
 //! recomputing anything. Kept as its own small file (rather than growing
 //! `registry.rs`) so the wire shape has one obvious home and stays decoupled
 //! from the registry's storage/locking internals.
-//! What: [`TranscriptRecord`] is a plain, `Serialize`-only DTO: `session_id`,
+//! What: [`TranscriptRecord`] is a plain, `Serialize`+`Deserialize` DTO
+//! (#2060: the `Deserialize` half lets `tcode`'s CLI thin client — see
+//! `crate::cli_client` — parse `session.get_transcript`'s JSON-RPC result
+//! straight back into this type rather than picking fields off a raw
+//! `serde_json::Value`): `session_id`,
 //! the ordered `turns` (each already `role`/`model`/`text`/`tool_calls`/
 //! `usage` — see `crate::run_task::TurnRecord`), the aggregate `usage`, and
 //! `cost_usd` exactly as stored (`None` either because pricing was
@@ -18,7 +22,7 @@
 //! valid, empty transcript, not an error.
 //! Test: `session::registry_tests::get_transcript_*`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::perf::TokenUsage;
 use crate::run_task::TurnRecord;
@@ -35,7 +39,7 @@ use crate::run_task::TurnRecord;
 /// the result self-contained for a caller inspecting the JSON alone).
 /// Test: `session::registry_tests::get_transcript_returns_stored_record`,
 /// `session::registry_tests::get_transcript_on_never_run_session_is_empty`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptRecord {
     pub session_id: String,
     pub turns: Vec<TurnRecord>,

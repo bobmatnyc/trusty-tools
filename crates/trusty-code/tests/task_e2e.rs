@@ -38,25 +38,7 @@
 mod support;
 
 use serde_json::json;
-use support::{StdioSession, find_session_event, run_task_to_completion};
-
-/// Provision a throwaway project with `.claude/agents/{pm,python-engineer}.toml`.
-fn project_with_agents() -> tempfile::TempDir {
-    let tmp = tempfile::tempdir().expect("project tempdir");
-    let agents = tmp.path().join(".claude").join("agents");
-    std::fs::create_dir_all(&agents).expect("mkdir agents");
-    std::fs::write(
-        agents.join("pm.toml"),
-        "[agent]\nname = \"pm\"\nmodel = \"openai/gpt-4o-mini\"\n[system_prompt]\ncontent = \"You are the PM. Delegate work to python-engineer.\"\n",
-    )
-    .expect("write pm.toml");
-    std::fs::write(
-        agents.join("python-engineer.toml"),
-        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n[system_prompt]\ncontent = \"You are a Python engineer.\"\n",
-    )
-    .expect("write python-engineer.toml");
-    tmp
-}
+use support::{StdioSession, find_session_event, project_with_agents, run_task_to_completion};
 
 /// `task.run` -> `session.attach` must observe the FULL PM -> engineer tool
 /// dispatch as live (or, in the replay burst, if the mock run already

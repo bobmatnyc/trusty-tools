@@ -18,7 +18,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
 use crate::perf::TokenUsage;
@@ -34,9 +34,11 @@ use crate::perf::TokenUsage;
 /// the invoked tool names in order; `usage` is the token usage the provider
 /// reported for this turn (the per-turn unit the run aggregates over both PM and
 /// engineer turns, since the engineer's usage is otherwise lost when its output
-/// flows back to the PM as a tool-result string).
+/// flows back to the PM as a tool-result string). `Deserialize` (#2060) lets
+/// `tcode`'s CLI thin client parse a `session.get_transcript` JSON-RPC result
+/// straight back into `Vec<TurnRecord>`.
 /// Test: `run_task::tests::transcript_has_pm_and_engineer_turns`.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnRecord {
     /// Agent label that produced this turn (e.g. `"pm"`, `"python-engineer"`).
     pub role: String,

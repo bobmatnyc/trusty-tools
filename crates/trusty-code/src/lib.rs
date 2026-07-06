@@ -317,6 +317,21 @@ pub mod session;
 /// coverage in `tests/task_e2e.rs`.
 pub mod task;
 
+/// Thin JSON-RPC client the `tcode` CLI binary drives against its own
+/// spawned `tcode serve --stdio` child (#2060, vision spec §4.4 "CLI as
+/// Thin Client" / Axiom 3 "API-First").
+///
+/// Why: the CLI must hold no orchestration logic of its own — every
+/// session/task operation goes through the SAME JSON-RPC surface `tcode
+/// serve` exposes, so a human, a script, and a future TUI see identical
+/// behaviour.
+/// What: `cli_client::stdio::StdioRpcClient` (spawn + NDJSON request/
+/// response/notification I/O) and `cli_client::render` (pure formatting for
+/// `session list`/`attach`/`run-task`/`transcript`).
+/// Test: `cli_client::stdio::tests::*`, `cli_client::render::tests::*`;
+/// end-to-end coverage in `tests/cli_e2e.rs`.
+pub mod cli_client;
+
 // ── Package-level re-exports ──
 
 /// Version string, re-exported so integration tests can assert it without
