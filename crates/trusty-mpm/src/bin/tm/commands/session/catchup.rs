@@ -62,8 +62,9 @@ pub(crate) async fn handle_catchup(all_projects: bool, full: bool) -> anyhow::Re
 
     // Load config for the memory URL (fail-open to default).
     let config = trusty_mpm::core::config::MpmConfig::load_default();
-    let memory_url =
-        std::env::var("TRUSTY_MEMORY_URL").unwrap_or_else(|_| "http://127.0.0.1:7990".to_string());
+    // Discovery-first (issue #2030): resolves TRUSTY_MEMORY_URL when set, else
+    // the daemon's actual discovered bound address, never a hardcoded port.
+    let memory_url = trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable();
 
     for dir in &project_dirs {
         let opts = CatchupOptions {

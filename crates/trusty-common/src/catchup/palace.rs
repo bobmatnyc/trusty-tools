@@ -2,26 +2,36 @@
 //!
 //! Why: surfaces recent memory palace activity as one of three catch-up sources
 //! so the operator is reminded of context stored in trusty-memory during the gap.
-//! What: [`fetch_recent_palace_drawers`] calls the trusty-memory HTTP API and
-//! returns parsed [`DrawerSummary`] values. Fail-open: if the daemon is
-//! unreachable or returns non-200, a warning is emitted to stderr and an empty
-//! vec is returned — palace inspection never blocks catch-up.
-//! Test: `drawer_response_parsing`, `drawer_since_filter`, `drawer_empty_array`.
+//! What: [`fetch_recent_palace_drawers`] calls the `memory_list` MCP tool via
+//! [`crate::mcp::memory_rpc::call_memory_tool_at`] (discovery + JSON-RPC,
+//! issue #2030 — `memory_url` is already resolved by the caller, e.g.
+//! `crate::mcp::memory_rpc::resolve_memory_base_url`) and returns parsed
+//! [`DrawerSummary`] values. `memory_list` itself sorts by importance DESC, so
+//! this re-sorts client-side by `created_at` DESC to match the old
+//! `sort=created_desc` REST contract callers depend on. Fail-open: if the
+//! daemon is unreachable or the RPC errors, a warning is emitted to stderr and
+//! `None` is returned so the caller can distinguish "unreachable" from
+//! "reached, but genuinely empty" (`Some(vec![])`) — palace inspection never
+//! blocks catch-up either way.
+//! Test: `drawer_summary_from_raw`, `drawer_since_filter`, `drawer_empty_array`,
+//! `parses_memory_list_result_and_sorts_newest_first`.
 //!
 // CUTOVER BRIDGE — remove post-migration (#1762)
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use serde_json::{Value, json};
 
 /// A single memory palace drawer surfaced by the catch-up system.
 ///
 /// Why: callers render this into the "Recent Memory" section of the catch-up
 /// digest so the operator is reminded of stored context.
-/// What: minimal drawer metadata — title, tags, and creation timestamp.
-/// Test: `drawer_response_parsing`.
+/// What: minimal drawer metadata — title (the drawer's content), tags, and
+/// creation timestamp.
+/// Test: `drawer_summary_from_raw`.
 #[derive(Debug, Clone)]
 pub struct DrawerSummary {
-    /// Human-readable title of the drawer.
+    /// Human-readable title of the drawer (the drawer's stored content).
     pub title: String,
     /// Tags associated with the drawer.
     pub tags: Vec<String>,
@@ -29,93 +39,111 @@ pub struct DrawerSummary {
     pub created_at: Option<DateTime<Utc>>,
 }
 
-/// Raw drawer record as returned by the trusty-memory API.
+/// Raw drawer record as returned by the `memory_list` JSON-RPC result.
 ///
-/// Why: isolates JSON deserialization from the public type.
-/// What: maps to the API response object; unknown fields are ignored.
-/// Test: `drawer_response_parsing`.
+/// Why: isolates JSON deserialization from the public [`DrawerSummary`] type.
+/// What: mirrors the payload built by
+/// `trusty_memory::tools::memory_ops::handle_memory_list`; unknown fields are
+/// ignored.
+/// Test: `drawer_summary_from_raw`.
 #[derive(Debug, Deserialize)]
 struct RawDrawer {
     #[serde(default)]
-    title: String,
+    content: String,
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
     created_at: Option<String>,
 }
 
+/// The `result` payload of a `memory_list` JSON-RPC response.
+#[derive(Debug, Default, Deserialize)]
+struct MemoryListResult {
+    #[serde(default)]
+    drawers: Vec<RawDrawer>,
+}
+
 impl From<RawDrawer> for DrawerSummary {
     fn from(r: RawDrawer) -> Self {
-        let created_at = r
-            .created_at
-            .as_deref()
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok());
+        let created_at = r.created_at.as_deref().and_then(|s| s.parse().ok());
         DrawerSummary {
-            title: r.title,
+            title: r.content,
             tags: r.tags,
             created_at,
         }
     }
 }
 
+/// Parse a `memory_list` JSON-RPC `result` payload into drawers sorted
+/// newest-first.
+///
+/// Why: isolated from the HTTP transport so the sort/parse contract is
+/// unit-testable without a live daemon.
+/// What: deserializes `result` into [`MemoryListResult`], projects into
+/// [`DrawerSummary`], and sorts by `created_at` descending (drawers with no
+/// parseable timestamp sort last).
+/// Test: `parses_memory_list_result_and_sorts_newest_first`.
+fn parse_memory_list_result(result: Value) -> anyhow::Result<Vec<DrawerSummary>> {
+    let parsed: MemoryListResult = serde_json::from_value(result)?;
+    let mut drawers: Vec<DrawerSummary> = parsed
+        .drawers
+        .into_iter()
+        .map(DrawerSummary::from)
+        .collect();
+    // memory_list sorts by importance DESC; re-sort client-side by created_at
+    // DESC to match the old `sort=created_desc` REST contract. Timestamp-less
+    // drawers sort last.
+    drawers.sort_by_key(|d| std::cmp::Reverse(d.created_at));
+    Ok(drawers)
+}
+
 /// Fetch recent drawers from a trusty-memory palace, fail-open.
 ///
 /// Why: palace drawers are one of three catch-up activity sources; failure to
-/// reach the daemon must not abort the entire catch-up.
-/// What: issues `GET {memory_url}/api/v1/palaces/{palace_id}/drawers?sort=created_desc&limit={limit}`;
-/// if `since` is Some, filters client-side to drawers created after that timestamp.
-/// On any HTTP error, connection refused, or non-200, logs a warning to stderr
-/// and returns empty vec.
-/// Test: `drawer_response_parsing`, `drawer_since_filter`, `drawer_empty_array`,
+/// reach the daemon must not abort the entire catch-up. Returning `Option`
+/// (rather than always collapsing to an empty `Vec`) lets [`super::generate_catchup_context`]
+/// render a distinct "unreachable" message instead of conflating it with a
+/// genuinely empty result (issue #2030, item 5).
+/// What: calls `memory_list` via
+/// [`crate::mcp::memory_rpc::call_memory_tool_at`] against `memory_url`
+/// (already resolved by the caller). On success, parses + sorts via
+/// [`parse_memory_list_result`] and — when `since` is `Some` — filters
+/// client-side to drawers created after that timestamp. Returns
+/// `Some(drawers)` on success (possibly empty) or `None` on any
+/// transport/HTTP/RPC/parse error (after logging a warning to stderr).
+/// Test: `drawer_since_filter`, `drawer_empty_array`,
 /// `live_drawer_fetch` (ignored; requires running daemon).
 pub async fn fetch_recent_palace_drawers(
     memory_url: &str,
     palace_id: &str,
     limit: usize,
     since: Option<DateTime<Utc>>,
-) -> Vec<DrawerSummary> {
-    let url = format!(
-        "{}/api/v1/palaces/{}/drawers?sort=created_desc&limit={}",
-        memory_url.trim_end_matches('/'),
-        palace_id,
-        limit
-    );
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
+) -> Option<Vec<DrawerSummary>> {
+    let params = json!({ "palace": palace_id, "limit": limit });
+    let result = match crate::mcp::memory_rpc::call_memory_tool_at(
+        memory_url,
+        "memory_list",
+        params,
+    )
+    .await
     {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("catchup: could not build HTTP client: {e}");
-            return vec![];
-        }
-    };
-    let resp = match client.get(&url).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("catchup: could not reach trusty-memory at {memory_url}: {e}");
-            return vec![];
-        }
-    };
-    if !resp.status().is_success() {
-        eprintln!(
-            "catchup: trusty-memory returned {} for palace drawer query",
-            resp.status()
-        );
-        return vec![];
-    }
-    let raw: Vec<RawDrawer> = match resp.json().await {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("catchup: could not parse palace drawer response: {e}");
-            return vec![];
+            eprintln!("catchup: could not reach trusty-memory at {memory_url}: {e}");
+            return None;
         }
     };
-    let mut drawers: Vec<DrawerSummary> = raw.into_iter().map(DrawerSummary::from).collect();
+    let mut summaries = match parse_memory_list_result(result) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("catchup: could not parse memory_list response: {e}");
+            return None;
+        }
+    };
     if let Some(since_ts) = since {
-        drawers.retain(|d| d.created_at.is_some_and(|ts| ts > since_ts));
+        summaries.retain(|d| d.created_at.is_some_and(|ts| ts > since_ts));
     }
-    drawers
+    Some(summaries)
 }
 
 #[cfg(test)]
@@ -124,14 +152,14 @@ mod tests {
 
     fn make_raw(title: &str, tags: Vec<&str>, created_at: Option<&str>) -> RawDrawer {
         RawDrawer {
-            title: title.to_string(),
+            content: title.to_string(),
             tags: tags.into_iter().map(|s| s.to_string()).collect(),
             created_at: created_at.map(|s| s.to_string()),
         }
     }
 
     #[test]
-    fn drawer_response_parsing() {
+    fn drawer_summary_from_raw() {
         let raw = make_raw(
             "My Drawer",
             vec!["rust", "mpm"],
@@ -173,12 +201,44 @@ mod tests {
         assert!(s.created_at.is_none());
     }
 
+    #[test]
+    fn parses_memory_list_result_and_sorts_newest_first() {
+        let result = json!({
+            "palace": "test-palace",
+            "drawers": [
+                {
+                    "drawer_id": "old",
+                    "content": "Old note",
+                    "importance": 0.9,
+                    "tags": ["a"],
+                    "created_at": "2026-06-25T00:00:00Z",
+                },
+                {
+                    "drawer_id": "new",
+                    "content": "New note",
+                    "importance": 0.1,
+                    "tags": ["b"],
+                    "created_at": "2026-06-27T00:00:00Z",
+                },
+            ],
+        });
+        let drawers = parse_memory_list_result(result).unwrap();
+        assert_eq!(drawers.len(), 2);
+        // Despite "Old note" having higher importance (the tool's native
+        // sort), the newest-first re-sort must put "New note" first.
+        assert_eq!(drawers[0].title, "New note");
+        assert_eq!(drawers[1].title, "Old note");
+    }
+
     /// Live-daemon test: mark #[ignore] so CI doesn't require the daemon running.
+    /// Uses an unreachable port (never bound) rather than any hardcoded daemon
+    /// default — the point of the test is only "does not panic", exercising the
+    /// fail-open `None` path.
     #[tokio::test]
     #[ignore]
     async fn live_drawer_fetch() {
         let drawers =
-            fetch_recent_palace_drawers("http://127.0.0.1:7990", "test-palace", 5, None).await;
+            fetch_recent_palace_drawers("http://127.0.0.1:19999", "test-palace", 5, None).await;
         // Just verify it returns without panicking.
         let _ = drawers;
     }

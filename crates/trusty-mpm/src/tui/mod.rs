@@ -192,7 +192,11 @@ fn coordinator_session_to_row(s: crate::client::CoordinatorSession) -> client::S
 /// Why: the acceptance criteria require each daemon to be polled independently
 /// every 5 seconds without freezing the input loop. Running each poll on its
 /// own detached tokio task keeps a slow or hung daemon from blocking the other
-/// panel or the keyboard.
+/// panel or the keyboard. `memory_url` is resolved once by the caller before
+/// this is invoked (issue #2030: via discovery — `TRUSTY_MEMORY_URL` override,
+/// else the daemon's actual discovered bound address — never a hardcoded
+/// port); each task then reuses one cached [`health::HealthClient`] for its
+/// whole lifetime.
 /// What: spawns one task per daemon; each task polls its [`health::HealthClient`]
 /// on [`health::POLL_INTERVAL`] and sends every result down `tx` as a
 /// [`HealthUpdate`]. A task exits quietly once the receiver is dropped (the TUI

@@ -44,9 +44,8 @@ pub use screen::{
     palace_index_tab_lines, service_name, tab_bar,
 };
 pub use types::{
-    CollectionRow, DEFAULT_MEMORY_URL, DEFAULT_SEARCH_URL, Daemon, HealthClient, HealthScreen,
-    HealthTab, HealthUpdate, LOG_BUFFER_CAP, LogBuffer, POLL_INTERVAL, PalaceActivity, PanelData,
-    PanelState,
+    CollectionRow, DEFAULT_SEARCH_URL, Daemon, HealthClient, HealthScreen, HealthTab, HealthUpdate,
+    LOG_BUFFER_CAP, LogBuffer, POLL_INTERVAL, PalaceActivity, PanelData, PanelState,
 };
 
 #[cfg(test)]

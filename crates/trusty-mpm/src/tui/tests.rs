@@ -107,7 +107,10 @@ fn render_screen_draws_both_screens_without_panic() {
     // Rendering each screen against a TestBackend must not panic.
     use ratatui::{Terminal, backend::TestBackend};
     let chat = DashboardState::default();
-    let hp = HealthScreen::new(health::DEFAULT_SEARCH_URL, health::DEFAULT_MEMORY_URL);
+    // `DEFAULT_MEMORY_URL` was removed (issue #2030) — the real default is
+    // resolved dynamically via discovery; an unreachable placeholder is fine
+    // for a render-only smoke test.
+    let hp = HealthScreen::new(health::DEFAULT_SEARCH_URL, "http://127.0.0.1:19999");
     for screen in [Screen::Chat, Screen::Health] {
         let backend = TestBackend::new(120, 24);
         let mut terminal = Terminal::new(backend).expect("test terminal");

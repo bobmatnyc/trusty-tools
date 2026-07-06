@@ -12,11 +12,17 @@
 //!
 //! Test: `cargo test -p trusty-mcp-core` covers Response construction +
 //! the stdio loop round-trip behaviour with an in-memory dispatcher.
+//!
+//! `memory_rpc` (issue #2030) additionally provides discovery-based JSON-RPC
+//! *client* access to the trusty-memory daemon — the shared "resolve address
+//! + POST /rpc" helper every trusty-mpm / trusty-common call site now uses
+//! instead of a hardcoded port.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub mod daemon_bridge;
+pub mod memory_rpc;
 pub mod openrpc;
 pub mod service;
 

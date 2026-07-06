@@ -58,7 +58,11 @@ impl Default for CatchupOptions {
     fn default() -> Self {
         Self {
             project_dir: PathBuf::from("."),
-            memory_url: "http://127.0.0.1:7990".to_string(),
+            // Discovery-first (issue #2030): resolves TRUSTY_MEMORY_URL when
+            // set, else the daemon's actual discovered bound address, else a
+            // guaranteed-unreachable placeholder that fails fast rather than
+            // guessing a fixed (and likely wrong) port.
+            memory_url: crate::mcp::memory_rpc::resolve_memory_base_url_or_unreachable(),
             include_git: true,
             include_palace: true,
             git_limit: 50,
@@ -191,21 +195,35 @@ pub async fn generate_catchup_context(opts: &CatchupOptions) -> String {
     // ── Section 3: Recent Memory ────────────────────────────────────────────
     if opts.include_palace {
         out.push_str("## Recent Memory\n\n");
-        let drawers =
-            fetch_recent_palace_drawers(&opts.memory_url, &palace_id, opts.drawer_limit, watermark)
-                .await;
-        if drawers.is_empty() {
-            out.push_str("No recent palace activity since last catch-up.\n\n");
-        } else {
-            for d in &drawers {
-                let tags = if d.tags.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{}]", d.tags.join(", "))
-                };
-                out.push_str(&format!("- {}{}\n", d.title, tags));
+        // `None` means trusty-memory was unreachable; `Some(vec![])` means the
+        // daemon answered but had nothing new. Issue #2030 (item 5): these two
+        // outcomes must render distinct messages rather than the same
+        // "No recent palace activity" line.
+        match fetch_recent_palace_drawers(
+            &opts.memory_url,
+            &palace_id,
+            opts.drawer_limit,
+            watermark,
+        )
+        .await
+        {
+            None => {
+                out.push_str("trusty-memory unreachable — catch-up skipped for this section.\n\n");
             }
-            out.push('\n');
+            Some(drawers) if drawers.is_empty() => {
+                out.push_str("No recent palace activity since last catch-up.\n\n");
+            }
+            Some(drawers) => {
+                for d in &drawers {
+                    let tags = if d.tags.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", d.tags.join(", "))
+                    };
+                    out.push_str(&format!("- {}{}\n", d.title, tags));
+                }
+                out.push('\n');
+            }
         }
     }
 
@@ -346,10 +364,12 @@ mod tests {
         );
         // Should contain the commit we made.
         assert!(context.contains("init"), "commit message should appear");
-        // Palace section should gracefully note unavailable (no daemon).
+        // Palace section should gracefully note the daemon is unreachable
+        // (memory_url points at a port nobody listens on) rather than
+        // conflating it with a genuinely empty result (issue #2030, item 5).
         assert!(
-            context.contains("No recent palace activity") || context.contains("## Recent Memory"),
-            "palace section should be present"
+            context.contains("trusty-memory unreachable"),
+            "palace section should distinguish unreachable from empty"
         );
     }
 

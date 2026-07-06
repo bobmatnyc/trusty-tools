@@ -14,14 +14,20 @@ use super::probes::{
 use super::screen::format_count_suffix;
 use super::types::HealthWire;
 use super::{
-    CollectionRow, DEFAULT_MEMORY_URL, DEFAULT_SEARCH_URL, Daemon, HealthScreen, HealthTab,
-    HealthUpdate, LOG_BUFFER_CAP, LogBuffer, PalaceActivity, PanelData, PanelState, activity_color,
-    ascii_bar, client_for, collections_lines, collections_lines_at_tick, format_bytes,
-    format_count, format_relative_time, format_rss, format_uptime, format_with_commas,
-    header_lines, health_tab_lines, index_tab_lines, memory_panel_lines, palace_activity,
-    palace_index_tab_lines, render, search_panel_lines, service_name, spinner_frame, tab_bar,
+    CollectionRow, DEFAULT_SEARCH_URL, Daemon, HealthScreen, HealthTab, HealthUpdate,
+    LOG_BUFFER_CAP, LogBuffer, PalaceActivity, PanelData, PanelState, activity_color, ascii_bar,
+    client_for, collections_lines, collections_lines_at_tick, format_bytes, format_count,
+    format_relative_time, format_rss, format_uptime, format_with_commas, header_lines,
+    health_tab_lines, index_tab_lines, memory_panel_lines, palace_activity, palace_index_tab_lines,
+    render, search_panel_lines, service_name, spinner_frame, tab_bar,
 };
 use ratatui::{Terminal, backend::TestBackend, style::Color};
+
+/// Test-only stand-in for the trusty-memory daemon address: a port nobody
+/// binds, used wherever a test previously relied on the removed
+/// `DEFAULT_MEMORY_URL` constant (issue #2030 — the real default is now
+/// resolved dynamically via discovery, not a fixed literal).
+const TEST_MEMORY_URL: &str = "http://127.0.0.1:19999";
 
 /// A sample online search payload for rendering tests.
 fn sample_search() -> PanelData {
@@ -55,8 +61,10 @@ fn sample_memory() -> PanelData {
 
 #[test]
 fn default_urls_are_local() {
+    // Only the search daemon has a fixed local convention port; the memory
+    // default is resolved dynamically via discovery (issue #2030), so there
+    // is no `DEFAULT_MEMORY_URL` constant left to assert on.
     assert_eq!(DEFAULT_SEARCH_URL, "http://127.0.0.1:7878");
-    assert_eq!(DEFAULT_MEMORY_URL, "http://127.0.0.1:7990");
 }
 
 #[test]
@@ -152,7 +160,7 @@ fn search_panel_lines_format_fields() {
 fn memory_panel_lines_format_fields() {
     let lines = memory_panel_lines(
         &PanelState::Online(sample_memory()),
-        "http://127.0.0.1:7990",
+        "http://127.0.0.1:7071",
     );
     assert!(lines.iter().any(|l| l.contains("MEMORY [●] v0.1.56")));
     assert!(
@@ -179,7 +187,7 @@ fn panel_lines_render_each_state() {
         &PanelState::Offline {
             last_error: "connection refused".into(),
         },
-        "http://127.0.0.1:7990",
+        "http://127.0.0.1:7071",
     );
     assert!(offline.iter().any(|l| l.contains("OFFLINE")));
     assert!(offline.iter().any(|l| l.contains("connection refused")));
@@ -426,7 +434,7 @@ fn service_name_matches_focus() {
 
 #[test]
 fn header_lines_show_focus_summary() {
-    let mut screen = HealthScreen::new(DEFAULT_SEARCH_URL, DEFAULT_MEMORY_URL);
+    let mut screen = HealthScreen::new(DEFAULT_SEARCH_URL, TEST_MEMORY_URL);
     screen.search = PanelState::Online(sample_search());
     let lines = header_lines(&screen);
     assert!(lines[0].contains("trusty-search"));
@@ -620,7 +628,7 @@ fn ascii_bar_fills_proportionally() {
 
 #[test]
 fn health_tab_lines_show_gauges() {
-    let mut screen = HealthScreen::new(DEFAULT_SEARCH_URL, DEFAULT_MEMORY_URL);
+    let mut screen = HealthScreen::new(DEFAULT_SEARCH_URL, TEST_MEMORY_URL);
     screen.search = PanelState::Online(sample_search());
     let lines = health_tab_lines(&screen);
     assert!(lines.iter().any(|l| l.starts_with("Memory ")));
@@ -1057,7 +1065,7 @@ fn index_tab_lines_routes_to_palace_when_focus_memory() {
 
 #[test]
 fn render_health_smoke() {
-    let mut screen = HealthScreen::new(DEFAULT_SEARCH_URL, DEFAULT_MEMORY_URL);
+    let mut screen = HealthScreen::new(DEFAULT_SEARCH_URL, TEST_MEMORY_URL);
     screen.search = PanelState::Online(sample_search());
     screen.memory = PanelState::Offline {
         last_error: "connection refused".into(),
