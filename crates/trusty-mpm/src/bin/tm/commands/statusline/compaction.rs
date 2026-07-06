@@ -72,6 +72,74 @@ pub(crate) struct CompactionRecord {
     pub reclaimed_pct: f64,
 }
 
+// ── Context-usage coloring (#2098) ────────────────────────────────────────────
+
+/// Color tier for the context-usage indicator segment.
+///
+/// Why (#2098): Claude Code's `statusLine` hook has no persistent UI chrome —
+/// the segment text itself is the only way to warn the operator that the
+/// session is approaching auto-compaction / the hard context limit. Usage at
+/// or above 50 % is close enough to that boundary to deserve visual emphasis.
+/// What: a two-tier enum consumed by [`colorize_ctx_segment`]; kept separate
+/// from the ANSI-emitting code so the threshold decision itself is trivially
+/// unit-testable without depending on the `colored` crate's global override
+/// state.
+/// Test: `ctx_usage_color_boundaries`, `ctx_usage_color_clamps_out_of_range`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CtxUsageColor {
+    Normal,
+    Red,
+}
+
+/// Decide the color tier for a context-window usage fraction.
+///
+/// Why (#2098): centralising the 50 % threshold as a pure function (rather
+/// than inlining the comparison at each call site) makes the boundary
+/// independently unit-testable and gives future callers (e.g. a "nearly full"
+/// yellow tier) one place to extend.
+/// What: clamps `used_fraction` to `[0.0, 1.0]` (out-of-range inputs — stale
+/// or malformed hook data — degrade to the nearest valid tier rather than
+/// panicking or silently misclassifying) and returns [`CtxUsageColor::Red`]
+/// when the clamped value is `>= 0.5`, else [`CtxUsageColor::Normal`].
+/// Test: `ctx_usage_color_boundaries`, `ctx_usage_color_clamps_out_of_range`.
+pub(crate) fn ctx_usage_color(used_fraction: f64) -> CtxUsageColor {
+    if used_fraction.clamp(0.0, 1.0) >= 0.5 {
+        CtxUsageColor::Red
+    } else {
+        CtxUsageColor::Normal
+    }
+}
+
+/// Wrap `text` in a red ANSI foreground escape when `used_fraction` indicates
+/// high context-window usage; otherwise return it unchanged.
+///
+/// Why (#2098): both the live-fill `ctx N%` segment (below) and the bare
+/// `ctx>200k` overflow marker (`mod.rs`, used when Claude Code's hook payload
+/// omits the full `context_window` object) need the same red-at-50% treatment,
+/// so it is centralised here. This builds the ANSI escape directly rather than
+/// going through the `colored` crate's `Colorize` trait (as
+/// `formatters/services.rs` / `formatters/banner` do) for two reasons: (1)
+/// `colored`'s calls gate on its process-global `SHOULD_COLORIZE` override,
+/// which `formatters/banner/two_panel.rs`'s `image_shading_emits_truecolor`
+/// test comment (issue #1858) documents as racy under parallel `cargo test`
+/// threads — that module's fix was exactly this: take the color decision as
+/// an explicit, already-resolved input and emit the escape directly; (2) `tm
+/// statusline`'s stdout is always a pipe consumed by Claude Code's status-bar
+/// renderer, never a real user terminal, so `colored`'s TTY/`NO_COLOR`
+/// autodetection is not just irrelevant here but actively wrong — the red
+/// marker must render unconditionally whenever usage crosses the threshold.
+/// What: wraps `text` as `"\x1b[31m{text}\x1b[0m"` (standard SGR red
+/// foreground, matching the color `colored::Colorize::red()` itself emits)
+/// when [`ctx_usage_color`] returns `Red`; returns `text` unchanged otherwise.
+/// Test: `render_ctx_segment_colors_high_usage_red`,
+/// `render_ctx_segment_leaves_low_usage_plain`.
+pub(crate) fn colorize_ctx_segment(text: &str, used_fraction: f64) -> String {
+    match ctx_usage_color(used_fraction) {
+        CtxUsageColor::Red => format!("\u{1b}[31m{text}\u{1b}[0m"),
+        CtxUsageColor::Normal => text.to_string(),
+    }
+}
+
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
 /// Humanize a raw token count to a short display string (e.g. 182 000 → "182k").
@@ -254,9 +322,13 @@ pub(crate) fn compaction_segment(
 /// Why: separating rendering from I/O enables unit tests that verify output
 /// format without a real state file.
 /// What: returns `"⤵ {before}→{after} ({pct}%)"` when a compaction record
-/// exists; otherwise `"ctx {pct}%"` from token counts or `used_percentage`;
-/// `None` when no displayable information is available.
-/// Test: `render_segment_after_compaction`, `render_segment_live_fill_*`.
+/// exists (a past event, not current usage — never colored); otherwise
+/// `"ctx {pct}%"` from token counts or `used_percentage`, colored red via
+/// [`colorize_ctx_segment`] (#2098) when usage is `>= 50%`; `None` when no
+/// displayable information is available.
+/// Test: `render_segment_after_compaction`, `render_segment_live_fill_*`,
+/// `render_ctx_segment_colors_high_usage_red`,
+/// `render_ctx_segment_leaves_low_usage_plain`.
 pub(crate) fn render_compaction_segment(
     state: &CompactionState,
     cw: &ContextWindow,
@@ -269,13 +341,14 @@ pub(crate) fn render_compaction_segment(
     }
 
     if cw.total_input_tokens > 0 && cw.context_window_size > 0 {
-        let pct =
-            (cw.total_input_tokens as f64 / cw.context_window_size as f64 * 100.0).round() as u64;
-        return Some(format!("ctx {pct}%"));
+        let fraction = cw.total_input_tokens as f64 / cw.context_window_size as f64;
+        let pct = (fraction * 100.0).round() as u64;
+        return Some(colorize_ctx_segment(&format!("ctx {pct}%"), fraction));
     }
     if cw.used_percentage > 0.0 {
+        let fraction = cw.used_percentage / 100.0;
         let pct = cw.used_percentage.round() as u64;
-        return Some(format!("ctx {pct}%"));
+        return Some(colorize_ctx_segment(&format!("ctx {pct}%"), fraction));
     }
     None
 }
@@ -533,6 +606,82 @@ mod tests {
         let state = CompactionState::default();
         let cw = ContextWindow::default(); // all zeros
         assert!(render_compaction_segment(&state, &cw).is_none());
+    }
+
+    // ── ctx_usage_color / colorize_ctx_segment (#2098) ───────────────────────
+
+    /// Why (#2098): pins the exact 50% threshold contract that drives the
+    /// red-at-high-usage statusline requirement.
+    /// Test: itself.
+    #[test]
+    fn ctx_usage_color_boundaries() {
+        assert_eq!(ctx_usage_color(0.0), CtxUsageColor::Normal);
+        assert_eq!(ctx_usage_color(0.49), CtxUsageColor::Normal);
+        assert_eq!(ctx_usage_color(0.4999), CtxUsageColor::Normal);
+        // Exactly 50% must already be Red ("≥ 50%").
+        assert_eq!(ctx_usage_color(0.5), CtxUsageColor::Red);
+        assert_eq!(ctx_usage_color(0.51), CtxUsageColor::Red);
+        assert_eq!(ctx_usage_color(1.0), CtxUsageColor::Red);
+    }
+
+    /// Why (#2098): stale/malformed hook data could in principle produce a
+    /// negative or >1.0 fraction; both must clamp to a valid tier rather than
+    /// panicking or silently misclassifying.
+    /// Test: itself.
+    #[test]
+    fn ctx_usage_color_clamps_out_of_range() {
+        assert_eq!(ctx_usage_color(-0.3), CtxUsageColor::Normal);
+        assert_eq!(ctx_usage_color(-100.0), CtxUsageColor::Normal);
+        assert_eq!(ctx_usage_color(1.5), CtxUsageColor::Red);
+        assert_eq!(ctx_usage_color(1_000.0), CtxUsageColor::Red);
+    }
+
+    /// Why (#2098): the actual ANSI red escape must appear in the rendered
+    /// text at/above the 50% threshold. `colorize_ctx_segment` builds the
+    /// escape directly rather than through `colored`'s global override (see
+    /// its doc comment re: issue #1858), so this assertion is deterministic
+    /// under parallel `cargo test` execution — no override setup/teardown
+    /// needed.
+    /// Test: itself.
+    #[test]
+    fn render_ctx_segment_colors_high_usage_red() {
+        let seg = colorize_ctx_segment("ctx 62%", 0.62);
+        assert!(
+            seg.contains('\u{1b}'),
+            "expected an ANSI escape in high-usage segment: {seg:?}"
+        );
+        assert!(
+            seg.contains("ctx 62%"),
+            "original text must survive the ANSI wrapping: {seg:?}"
+        );
+    }
+
+    /// Why (#2098): below the 50% threshold the segment must render as plain
+    /// text — no stray ANSI codes.
+    /// Test: itself.
+    #[test]
+    fn render_ctx_segment_leaves_low_usage_plain() {
+        let seg = colorize_ctx_segment("ctx 30%", 0.30);
+        assert_eq!(seg, "ctx 30%", "low usage must not be colorized");
+        assert!(!seg.contains('\u{1b}'), "must contain no ANSI escape");
+    }
+
+    /// Why (#2098): exercises the same red-at-threshold behaviour through the
+    /// full `render_compaction_segment` entry point (live-fill path, no prior
+    /// compaction record) rather than only the lower-level helper.
+    /// Test: itself.
+    #[test]
+    fn render_compaction_segment_colors_high_live_fill_red() {
+        let state = CompactionState::default();
+        // 164 000 / 200 000 = 82% → well above the 50% threshold.
+        let cw = ContextWindow {
+            total_input_tokens: 164_000,
+            context_window_size: 200_000,
+            used_percentage: 0.0,
+        };
+        let seg = render_compaction_segment(&state, &cw).unwrap();
+        assert!(seg.contains("ctx 82%"), "got: {seg}");
+        assert!(seg.contains('\u{1b}'), "expected ANSI escape: {seg:?}");
     }
 
     // ── graceful degradation ──────────────────────────────────────────────────
