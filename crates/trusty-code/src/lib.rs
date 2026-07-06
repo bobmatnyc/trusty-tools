@@ -301,6 +301,22 @@ pub mod serve;
 /// `tests/session_e2e.rs`.
 pub mod session;
 
+/// Daemon-owned task execution: `task.run` + background agent-loop
+/// orchestration (#2056, M1 control-plane cut line).
+///
+/// Why: wires the session/event layer to the existing engine
+/// (`agent_loop`/`runner`/`tools`/`llm`) so a task actually EXECUTES through
+/// the daemon and streams live tool/lifecycle events to attached clients —
+/// the keystone that closes the M1 control-plane cut line.
+/// What: `task.run` JSON-RPC method, background execution orchestration, the
+/// concrete `SessionToolEventSink`, and the offline "echo" mock LLM
+/// (`TCODE_MOCK_LLM=echo`) that makes the whole flow black-box testable
+/// without a live model.
+/// Test: `task::executor::tests::*`, `task::protocol::tests::*`,
+/// `task::sink::tests::*`, `task::mock_llm::tests::*`; API-driven end-to-end
+/// coverage in `tests/task_e2e.rs`.
+pub mod task;
+
 // ── Package-level re-exports ──
 
 /// Version string, re-exported so integration tests can assert it without

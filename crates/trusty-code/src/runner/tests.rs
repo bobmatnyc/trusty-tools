@@ -14,13 +14,14 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use super::{InProcessAgentRunner, InProcessRunnerConfig};
+use crate::agent_loop::ToolEventSink;
 use crate::agents::AgentConfig;
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
 use crate::tools::{
@@ -564,5 +565,112 @@ async fn project_context_reaches_prompt() {
     assert!(
         system.contains("PROJECT-CONTEXT-MARKER"),
         "assembled prompt must include the injected project context"
+    );
+}
+
+// ── #2056: ToolEventSink / cancel-flag propagation into the delegated loop ──────
+
+/// Minimal `ToolEventSink` recording call order (see
+/// `agent_loop::tests::RecordingSink` for the same pattern exercising the loop
+/// directly; this one proves the runner PROPAGATES a sink to its own
+/// internally-built `AgentLoop`).
+struct RecordingSink {
+    calls: Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl ToolEventSink for RecordingSink {
+    async fn tool_started(&self, call_id: &str, tool: &str, _args_preview: &str) {
+        self.calls
+            .lock()
+            .expect("lock poisoned")
+            .push(format!("started:{tool}:{call_id}"));
+    }
+
+    async fn tool_finished(&self, call_id: &str, tool: &str, success: bool, _result_preview: &str) {
+        self.calls
+            .lock()
+            .expect("lock poisoned")
+            .push(format!("finished:{tool}:{call_id}:{success}"));
+    }
+
+    async fn tool_error(&self, call_id: &str, tool: &str, _error: &str) {
+        self.calls
+            .lock()
+            .expect("lock poisoned")
+            .push(format!("error:{tool}:{call_id}"));
+    }
+}
+
+/// A sink attached via `with_tool_event_sink` must observe the DELEGATED
+/// engineer's own tool dispatch, not just be silently dropped.
+///
+/// Why: #2056 needs a delegated sub-agent's tool activity to be observable to
+/// the same sink the delegating (PM) loop uses; this is the propagation seam
+/// that makes that possible.
+/// What: Script [tool_call("mytool"), stop]; attach a `RecordingSink` to the
+/// runner; assert it saw `started`/`finished` for `mytool`.
+/// Test: this test.
+#[tokio::test]
+async fn sink_reaches_delegated_loop() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("call-1", "mytool"),
+        stop_response("engineer done"),
+    ]));
+    let tmp = agents_dir_with(
+        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n",
+        "python-engineer",
+    );
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec!["mytool"], invoked));
+    let sink = Arc::new(RecordingSink {
+        calls: Mutex::new(Vec::new()),
+    });
+
+    let runner = InProcessAgentRunner::new(llm, factory, tmp.path().to_path_buf())
+        .with_tool_event_sink(sink.clone());
+
+    runner
+        .run("python-engineer", "task")
+        .await
+        .expect("completes");
+
+    assert_eq!(
+        sink.calls.lock().expect("lock poisoned").as_slice(),
+        ["started:mytool:call-1", "finished:mytool:call-1:true"]
+    );
+}
+
+/// A cancel flag attached via `with_cancel_flag` must abort the DELEGATED
+/// engineer's own loop before it makes any chat call, not just the PM's.
+///
+/// Why: `session.cancel` must stop a whole in-flight run, including any
+/// sub-agent currently delegated to — otherwise cancelling a session would
+/// leave an orphaned engineer loop running.
+/// What: Pre-set the flag, attach it via `with_cancel_flag`, and assert the
+/// run errors with zero chat calls made.
+/// Test: this test.
+#[tokio::test]
+async fn cancel_flag_reaches_delegated_loop() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response(
+        "should never be reached",
+    )]));
+    let tmp = agents_dir_with(
+        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n",
+        "python-engineer",
+    );
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec![], invoked));
+    let cancel = Arc::new(AtomicBool::new(true));
+
+    let runner = InProcessAgentRunner::new(llm.clone(), factory, tmp.path().to_path_buf())
+        .with_cancel_flag(cancel);
+
+    let result = runner.run("python-engineer", "task").await;
+    assert!(result.is_err(), "a pre-cancelled run must error");
+    assert_eq!(
+        llm.calls(),
+        0,
+        "cancellation must be observed before any chat call"
     );
 }

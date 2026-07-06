@@ -1,4 +1,5 @@
-//! Process/protocol plumbing shared by `tests/session_e2e.rs`.
+//! Process/protocol plumbing shared by `tests/session_e2e.rs` and (#2056)
+//! `tests/task_e2e.rs`.
 //!
 //! Why: driving the REAL `tcode` binary over its real stdio/HTTP surface
 //! needs a bit of scaffolding (spawn, NDJSON line I/O with timeouts, parse
@@ -6,16 +7,26 @@
 //! reading) that has nothing to do with the session-lifecycle assertions
 //! themselves. Keeping it in `tests/support/mod.rs` (not a top-level
 //! `tests/*.rs` file, so cargo does not treat it as its own test binary)
-//! keeps `session_e2e.rs` readable as a pure black-box script.
+//! keeps `session_e2e.rs`/`task_e2e.rs` readable as pure black-box scripts.
 //! What: [`StdioSession`] (spawn + NDJSON request/response/notification
-//! I/O over real pipes), [`HttpDaemon`]/[`spawn_http_daemon`] (spawn +
-//! discover the bound HTTP address from stderr), [`find_response`]/
-//! [`find_session_event`] (classify a raw NDJSON line), [`open_sse`]/
-//! [`read_sse_until`] (read one never-terminating SSE connection in
-//! stages), [`parse_sse_frames`] (split an SSE body into its JSON `data:`
-//! frames), and [`assert_envelopes_contiguous`] (#2055: the shared
-//! seq/field-presence check both the STDIO and HTTP/SSE e2e scenarios run
-//! against the SAME `SessionEventEnvelope` shape).
+//! I/O over real pipes — [`StdioSession::spawn_with_mock_llm`] additionally
+//! roots the daemon at a given project dir and sets `TCODE_MOCK_LLM=echo`
+//! for #2056's offline task-execution coverage), [`HttpDaemon`]/
+//! [`spawn_http_daemon`] (spawn + discover the bound HTTP address from
+//! stderr), [`find_response`]/[`find_session_event`] (classify a raw NDJSON
+//! line), [`open_sse`]/[`read_sse_until`] (read one never-terminating SSE
+//! connection in stages), [`parse_sse_frames`] (split an SSE body into its
+//! JSON `data:` frames), and [`assert_envelopes_contiguous`] (#2055: the
+//! shared seq/field-presence check both the STDIO and HTTP/SSE e2e
+//! scenarios run against the SAME `SessionEventEnvelope` shape).
+//!
+//! `#![allow(dead_code)]`: each `tests/*.rs` file compiles `mod support;` as
+//! its OWN independent crate (cargo's per-integration-test-binary model), so
+//! any helper one file doesn't use (e.g. `task_e2e.rs` never touches the
+//! HTTP/SSE helpers `session_e2e.rs` needs) is flagged dead in THAT binary —
+//! a false positive from splitting one shared file across two consumers,
+//! not a real unused-code issue.
+#![allow(dead_code)]
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -51,8 +62,31 @@ impl StdioSession {
     /// (logs aren't asserted on here), `kill_on_drop` so a panicking test
     /// still reaps the child instead of leaking a process.
     pub fn spawn() -> Self {
-        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_tcode"))
-            .args(["serve", "--project", ".", "--stdio"])
+        Self::spawn_inner(std::path::Path::new("."), false)
+    }
+
+    /// Spawn `tcode serve --stdio` rooted at `project`, with
+    /// `TCODE_MOCK_LLM=echo` set in the child's environment so `task.run`
+    /// drives #2056's deterministic offline `EchoLlmClient` instead of
+    /// requiring a live `OPENROUTER_API_KEY` — the mandatory offline
+    /// black-box path for `tests/task_e2e.rs`.
+    pub fn spawn_with_mock_llm(project: &std::path::Path) -> Self {
+        Self::spawn_inner(project, true)
+    }
+
+    fn spawn_inner(project: &std::path::Path, mock_llm: bool) -> Self {
+        let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_tcode"));
+        cmd.arg("serve")
+            .arg("--project")
+            .arg(project)
+            .arg("--stdio");
+        if mock_llm {
+            cmd.env(
+                trusty_code::task::mock_llm::MOCK_LLM_ENV,
+                trusty_code::task::mock_llm::MOCK_LLM_ECHO,
+            );
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

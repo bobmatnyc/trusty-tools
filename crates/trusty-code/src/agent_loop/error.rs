@@ -1,15 +1,18 @@
 //! Error type for the multi-turn agent loop.
 //!
-//! Why: The loop has three distinct failure modes that callers handle
+//! Why: The loop has four distinct failure modes that callers handle
 //! differently — an LLM transport/API failure (usually fatal), exhausting the
-//! turn budget (recoverable: a partial transcript is still useful), and the
-//! wall-clock timeout firing (also carries partial work). A structured enum lets
-//! callers branch without string-matching, and the turn-cap variant carries the
+//! turn budget (recoverable: a partial transcript is still useful), the
+//! wall-clock timeout firing (also carries partial work), and (#2056)
+//! cooperative cancellation via `AgentLoop::with_cancel_flag` (a
+//! `session.cancel` on an in-flight daemon-driven run). A structured enum lets
+//! callers branch without string-matching, and every abort variant carries the
 //! partial `AgentOutput` so no work is lost.
-//! What: Defines `AgentLoopError` with `Llm`, `TurnCapExceeded`, and `Timeout`
-//! variants, deriving `thiserror::Error`.
+//! What: Defines `AgentLoopError` with `Llm`, `TurnCapExceeded`, `Timeout`, and
+//! `Cancelled` variants, deriving `thiserror::Error`.
 //! Test: `agent_loop::tests::turn_cap_returns_partial_transcript` asserts the
-//! `TurnCapExceeded` variant carries the accumulated transcript.
+//! `TurnCapExceeded` variant carries the accumulated transcript;
+//! `cancel_flag_aborts_before_next_turn` covers `Cancelled`.
 
 use thiserror::Error;
 
@@ -79,6 +82,26 @@ pub enum AgentLoopError {
         /// Inspection/diagnostics only — see the variant note. May reflect an
         /// incomplete turn (e.g. tool calls without matching results); do NOT
         /// replay or resume from it.
+        partial: Box<AgentOutput>,
+    },
+
+    /// The loop's `with_cancel_flag` cancellation flag was observed set
+    /// (#2056: `session.cancel` on an in-flight daemon-driven run).
+    ///
+    /// Why: `session.cancel` must stop an in-flight task cooperatively rather
+    /// than aborting the process or leaking the background task. The flag is
+    /// checked once per turn boundary (before the next LLM call) — per the
+    /// vision spec §12 (11.6), cancellation is NOT instantaneous: a tool call
+    /// already in flight always completes first.
+    /// What: Carries the partial `AgentOutput` assembled before cancellation
+    /// was observed, for the same inspection-only purpose as the other two
+    /// abort variants.
+    #[error("cancelled; returning partial transcript")]
+    Cancelled {
+        /// Partial output accumulated before cancellation was observed.
+        ///
+        /// Inspection/diagnostics only — see the variant note on the other
+        /// abort arms. Do NOT replay or resume from it.
         partial: Box<AgentOutput>,
     },
 }

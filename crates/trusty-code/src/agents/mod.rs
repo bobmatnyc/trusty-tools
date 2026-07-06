@@ -65,6 +65,31 @@ pub fn load_all_agents(dir: &Path) -> Vec<AgentConfig> {
         .collect()
 }
 
+/// Locate the agents directory for the given project root.
+///
+/// Why: projects may use either `.claude/agents` (Claude Code native) or
+/// `.open-mpm/agents` (open-mpm legacy). Checking both preserves
+/// compatibility. Shared between `main.rs`'s `run-task` CLI path and (#2056)
+/// `serve::build_router`'s `task.run` wiring, so a project's agents resolve
+/// identically whether driven from the CLI or the daemon.
+/// What: returns the first of the two conventional directories that exists;
+/// falls back to `.claude/agents` (which may not exist yet — callers that
+/// need it to exist check separately, e.g. via `AgentConfig::load`'s own
+/// error).
+/// Test: `agents::tests::locate_agents_dir_prefers_claude_then_open_mpm_then_default`.
+pub fn locate_agents_dir(project_root: &Path) -> std::path::PathBuf {
+    let claude_agents = project_root.join(".claude").join("agents");
+    if claude_agents.exists() {
+        return claude_agents;
+    }
+    let open_mpm_agents = project_root.join(".open-mpm").join("agents");
+    if open_mpm_agents.exists() {
+        return open_mpm_agents;
+    }
+    // Default to .claude/agents (may not exist yet).
+    claude_agents
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -125,5 +150,32 @@ mod tests {
         let agents = load_all_agents(tmp.path());
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].agent.name, "engineer");
+    }
+
+    /// `locate_agents_dir` prefers `.claude/agents`, falls back to
+    /// `.open-mpm/agents`, and defaults to `.claude/agents` when neither
+    /// exists.
+    #[test]
+    fn locate_agents_dir_prefers_claude_then_open_mpm_then_default() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            locate_agents_dir(tmp.path()),
+            tmp.path().join(".claude").join("agents"),
+            "default (neither exists) must be .claude/agents"
+        );
+
+        std::fs::create_dir_all(tmp.path().join(".open-mpm").join("agents")).expect("mkdir");
+        assert_eq!(
+            locate_agents_dir(tmp.path()),
+            tmp.path().join(".open-mpm").join("agents"),
+            "must fall back to .open-mpm/agents when only it exists"
+        );
+
+        std::fs::create_dir_all(tmp.path().join(".claude").join("agents")).expect("mkdir");
+        assert_eq!(
+            locate_agents_dir(tmp.path()),
+            tmp.path().join(".claude").join("agents"),
+            "must prefer .claude/agents when both exist"
+        );
     }
 }

@@ -273,7 +273,7 @@ async fn run_task(
         }
     };
 
-    let agents_dir = locate_agents_dir(&project_root);
+    let agents_dir = trusty_code::agents::locate_agents_dir(&project_root);
 
     // Engineer-model override (#1035): CLI flag wins, then the env var; an empty
     // value is treated as "unset" so it falls through to the agent config model.
@@ -345,25 +345,6 @@ fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>> {
     let client = LlmClient::from_config(config)
         .map_err(|e| anyhow::anyhow!("failed to build LLM client: {e}"))?;
     Ok(Arc::new(client))
-}
-
-/// Locate the agents directory for the given project root.
-///
-/// Why: Projects may use either `.claude/agents` (Claude Code native) or
-/// `.open-mpm/agents` (open-mpm legacy). Checking both preserves compatibility.
-/// What: Returns the first directory that exists; falls back to `.claude/agents`.
-/// Test: Indirect via `run_task` integration.
-fn locate_agents_dir(project_root: &std::path::Path) -> PathBuf {
-    let claude_agents = project_root.join(".claude").join("agents");
-    if claude_agents.exists() {
-        return claude_agents;
-    }
-    let open_mpm_agents = project_root.join(".open-mpm").join("agents");
-    if open_mpm_agents.exists() {
-        return open_mpm_agents;
-    }
-    // Default to .claude/agents (may not exist yet).
-    claude_agents
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
