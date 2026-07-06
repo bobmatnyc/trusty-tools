@@ -9,16 +9,23 @@
 //! call, never touching the transport or the dispatch algorithm.
 //!
 //! What: [`MethodHandler`] is an object-safe async-handler trait, blanket
-//! implemented for any `Fn(Value) -> Future<Output = Result<Value, RpcError>>`
-//! (so plain `async fn(Value) -> Result<Value, RpcError>` items and closures
-//! both register directly, no adapter boilerplate). [`Router::dispatch`]
-//! implements the JSON-RPC 2.0 error model end-to-end for methods it knows
-//! about:
+//! implemented for any `Fn(Value, ConnectionContext) -> Future<Output =
+//! Result<Value, RpcError>>` (so plain `async fn(Value, ConnectionContext)
+//! -> Result<Value, RpcError>` items and closures both register directly,
+//! no adapter boilerplate). Every handler receives a
+//! [`ConnectionContext`](super::context::ConnectionContext) — most (`ping`,
+//! `health`, `session.list`, …) ignore it; `session.attach` (#2054) uses it
+//! to push server-initiated notifications back to the calling connection.
+//! Threading it through uniformly keeps one call signature for every
+//! method rather than a second handler trait carved out for streaming
+//! methods. [`Router::dispatch`] implements the JSON-RPC 2.0 error model
+//! end-to-end for methods it knows about:
 //!   - `-32600 Invalid Request` — non-`"2.0"` `jsonrpc` version, or an empty
 //!     method name.
 //!   - `-32601 Method not found` — no handler registered under the name.
-//!   - handler-returned [`RpcError`] (typically `-32602`/`-32603`) is copied
-//!     onto the wire error verbatim, `data` included.
+//!   - handler-returned [`RpcError`] (typically `-32602`/`-32603`, or a
+//!     #2054 domain code like `-32007 session_not_found`) is copied onto
+//!     the wire error verbatim, `data` included.
 //!   - `-32700 Parse error` is produced by [`Router::dispatch_json`], not
 //!     [`Router::dispatch`] — the STDIO transport (`crate::serve::transport`,
 //!     one JSON object per line) and the HTTP transport
@@ -46,6 +53,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use trusty_common::mcp::{Request, Response, error_codes};
 
+use super::context::ConnectionContext;
 use super::error::RpcError;
 
 /// A boxed, pinned future returned by a method handler.
@@ -58,29 +66,31 @@ type HandlerFuture = Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send
 /// Async fns are not directly object-safe, hence the `call` -> boxed-future
 /// indirection.
 /// What: implemented for `Self` by the blanket impl below whenever `Self` is
-/// `Fn(Value) -> Fut` with `Fut: Future<Output = Result<Value, RpcError>>` —
-/// callers never need to implement this trait by hand.
+/// `Fn(Value, ConnectionContext) -> Fut` with `Fut: Future<Output =
+/// Result<Value, RpcError>>` — callers never need to implement this trait
+/// by hand.
 /// Test: exercised indirectly by every `router::tests` case and by
 /// `crate::serve::methods::tests`.
 pub trait MethodHandler: Send + Sync {
     /// Invoke the handler with the request's `params` (defaulted to `Null`
-    /// when the wire request omitted them).
-    fn call(&self, params: Value) -> HandlerFuture;
+    /// when the wire request omitted them) and the calling connection's
+    /// context.
+    fn call(&self, params: Value, ctx: ConnectionContext) -> HandlerFuture;
 }
 
 impl<F, Fut> MethodHandler for F
 where
-    F: Fn(Value) -> Fut + Send + Sync,
+    F: Fn(Value, ConnectionContext) -> Fut + Send + Sync,
     Fut: Future<Output = Result<Value, RpcError>> + Send + 'static,
 {
-    fn call(&self, params: Value) -> HandlerFuture {
-        Box::pin(self(params))
+    fn call(&self, params: Value, ctx: ConnectionContext) -> HandlerFuture {
+        Box::pin(self(params, ctx))
     }
 }
 
 /// Method-name -> handler registry and JSON-RPC 2.0 dispatcher.
 ///
-/// Why: the single seam between the STDIO transport and tcode's business
+/// Why: the single seam between both transports and tcode's business
 /// methods. See the module docs for the extensibility rationale.
 /// What: a thin `HashMap<String, Arc<dyn MethodHandler>>` plus `dispatch`.
 /// Test: `router::tests::*`.
@@ -125,15 +135,15 @@ impl Router {
     /// Dispatch a parsed JSON-RPC request, returning the response to write
     /// back on the wire (or a suppressed response for notifications).
     ///
-    /// Why: the single entry point the transport loop calls per request
-    /// line. See the module docs for the full error-code contract.
-    /// What: validates the envelope, looks up the handler, awaits it, and
-    /// maps the result onto a `Response` — suppressing the reply entirely
-    /// when `req.id` was absent (a notification).
+    /// Why: the single entry point each transport calls per request. See
+    /// the module docs for the full error-code contract.
+    /// What: validates the envelope, looks up the handler, awaits it with
+    /// `ctx` in hand, and maps the result onto a `Response` — suppressing
+    /// the reply entirely when `req.id` was absent (a notification).
     /// Test: `router::tests::*` (one case per code path).
-    pub async fn dispatch(&self, req: Request) -> Response {
+    pub async fn dispatch(&self, req: Request, ctx: &ConnectionContext) -> Response {
         let is_notification = req.id.is_none();
-        let response = self.dispatch_replyable(&req).await;
+        let response = self.dispatch_replyable(&req, ctx).await;
         if is_notification {
             Response::suppressed()
         } else {
@@ -150,7 +160,7 @@ impl Router {
     /// What: envelope validation, method lookup, handler invocation, result
     /// mapping. Never suppresses.
     /// Test: covered transitively via `dispatch`'s tests.
-    async fn dispatch_replyable(&self, req: &Request) -> Response {
+    async fn dispatch_replyable(&self, req: &Request, ctx: &ConnectionContext) -> Response {
         let id = req.id.clone();
 
         if let Some(version) = &req.jsonrpc
@@ -175,7 +185,7 @@ impl Router {
         };
 
         let params = req.params.clone().unwrap_or(Value::Null);
-        match handler.call(params).await {
+        match handler.call(params, ctx.clone()).await {
             Ok(result) => Response::ok(id, result),
             Err(e) => {
                 let mut resp = Response::err(id, e.code, e.message);
@@ -201,9 +211,9 @@ impl Router {
     /// id per the JSON-RPC 2.0 spec.
     /// Test: `dispatch_json_valid_request_dispatches`,
     /// `dispatch_json_malformed_bytes_return_parse_error`.
-    pub async fn dispatch_json(&self, raw: &[u8]) -> Response {
+    pub async fn dispatch_json(&self, raw: &[u8], ctx: &ConnectionContext) -> Response {
         match serde_json::from_slice::<Request>(raw) {
-            Ok(req) => self.dispatch(req).await,
+            Ok(req) => self.dispatch(req, ctx).await,
             Err(e) => Response::err(
                 None,
                 error_codes::PARSE_ERROR,
@@ -218,6 +228,7 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::mpsc;
 
     fn req(id: Option<Value>, method: &str, params: Option<Value>) -> Request {
         Request {
@@ -228,16 +239,24 @@ mod tests {
         }
     }
 
+    /// A throwaway context for tests that don't care about notifications.
+    fn test_ctx() -> ConnectionContext {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        ConnectionContext::new(tx)
+    }
+
     /// A registered method must return its handler's `Ok` result verbatim.
     #[tokio::test]
     async fn dispatch_registered_method_returns_handler_result() {
         let mut router = Router::new();
         router.register(
             "ping",
-            |_params: Value| async move { Ok(json!({"pong": true})) },
+            |_params: Value, _ctx: ConnectionContext| async move { Ok(json!({"pong": true})) },
         );
 
-        let resp = router.dispatch(req(Some(json!(1)), "ping", None)).await;
+        let resp = router
+            .dispatch(req(Some(json!(1)), "ping", None), &test_ctx())
+            .await;
         assert!(resp.error.is_none(), "expected ok, got {:?}", resp.error);
         assert_eq!(resp.result, Some(json!({"pong": true})));
         assert_eq!(resp.id, Some(json!(1)));
@@ -248,10 +267,13 @@ mod tests {
     #[tokio::test]
     async fn dispatch_unknown_method_returns_method_not_found() {
         let mut router = Router::new();
-        router.register("ping", |_params: Value| async move { Ok(json!({})) });
+        router.register(
+            "ping",
+            |_params: Value, _ctx: ConnectionContext| async move { Ok(json!({})) },
+        );
 
         let resp = router
-            .dispatch(req(Some(json!(2)), "definitely_missing", None))
+            .dispatch(req(Some(json!(2)), "definitely_missing", None), &test_ctx())
             .await;
         let err = resp.error.expect("expected an error response");
         assert_eq!(err.code, error_codes::METHOD_NOT_FOUND);
@@ -265,7 +287,7 @@ mod tests {
         let mut r = req(Some(json!(3)), "ping", None);
         r.jsonrpc = Some("1.0".to_string());
 
-        let resp = router.dispatch(r).await;
+        let resp = router.dispatch(r, &test_ctx()).await;
         let err = resp.error.expect("expected an error response");
         assert_eq!(err.code, error_codes::INVALID_REQUEST);
     }
@@ -274,7 +296,9 @@ mod tests {
     #[tokio::test]
     async fn dispatch_empty_method_returns_invalid_request() {
         let router = Router::new();
-        let resp = router.dispatch(req(Some(json!(4)), "", None)).await;
+        let resp = router
+            .dispatch(req(Some(json!(4)), "", None), &test_ctx())
+            .await;
         let err = resp.error.expect("expected an error response");
         assert_eq!(err.code, error_codes::INVALID_REQUEST);
     }
@@ -284,11 +308,16 @@ mod tests {
     #[tokio::test]
     async fn dispatch_handler_error_maps_to_response_error() {
         let mut router = Router::new();
-        router.register("boom", |_params: Value| async move {
-            Err(RpcError::invalid_params("bad field").with_data(json!({"field": "name"})))
-        });
+        router.register(
+            "boom",
+            |_params: Value, _ctx: ConnectionContext| async move {
+                Err(RpcError::invalid_params("bad field").with_data(json!({"field": "name"})))
+            },
+        );
 
-        let resp = router.dispatch(req(Some(json!(5)), "boom", None)).await;
+        let resp = router
+            .dispatch(req(Some(json!(5)), "boom", None), &test_ctx())
+            .await;
         let err = resp.error.expect("expected an error response");
         assert_eq!(err.code, error_codes::INVALID_PARAMS);
         assert_eq!(err.message, "bad field");
@@ -301,12 +330,17 @@ mod tests {
     async fn dispatch_notification_executes_handler_but_suppresses_reply() {
         static RAN: AtomicBool = AtomicBool::new(false);
         let mut router = Router::new();
-        router.register("notify_me", |_params: Value| async move {
-            RAN.store(true, Ordering::SeqCst);
-            Ok(json!({}))
-        });
+        router.register(
+            "notify_me",
+            |_params: Value, _ctx: ConnectionContext| async move {
+                RAN.store(true, Ordering::SeqCst);
+                Ok(json!({}))
+            },
+        );
 
-        let resp = router.dispatch(req(None, "notify_me", None)).await;
+        let resp = router
+            .dispatch(req(None, "notify_me", None), &test_ctx())
+            .await;
         assert!(resp.suppress, "notifications must suppress the reply");
         assert!(
             RAN.load(Ordering::SeqCst),
@@ -318,10 +352,13 @@ mod tests {
     #[tokio::test]
     async fn dispatch_missing_params_defaults_to_null() {
         let mut router = Router::new();
-        router.register("echo_params", |params: Value| async move { Ok(params) });
+        router.register(
+            "echo_params",
+            |params: Value, _ctx: ConnectionContext| async move { Ok(params) },
+        );
 
         let resp = router
-            .dispatch(req(Some(json!(6)), "echo_params", None))
+            .dispatch(req(Some(json!(6)), "echo_params", None), &test_ctx())
             .await;
         assert_eq!(resp.result, Some(Value::Null));
     }
@@ -333,11 +370,11 @@ mod tests {
         let mut router = Router::new();
         router.register(
             "ping",
-            |_params: Value| async move { Ok(json!({"pong": true})) },
+            |_params: Value, _ctx: ConnectionContext| async move { Ok(json!({"pong": true})) },
         );
 
         let raw = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
-        let resp = router.dispatch_json(raw).await;
+        let resp = router.dispatch_json(raw, &test_ctx()).await;
         assert_eq!(resp.result, Some(json!({"pong": true})));
     }
 
@@ -345,8 +382,29 @@ mod tests {
     #[tokio::test]
     async fn dispatch_json_malformed_bytes_return_parse_error() {
         let router = Router::new();
-        let resp = router.dispatch_json(b"not json at all").await;
+        let resp = router.dispatch_json(b"not json at all", &test_ctx()).await;
         let err = resp.error.expect("expected a parse error");
         assert_eq!(err.code, error_codes::PARSE_ERROR);
+    }
+
+    /// The context passed to `dispatch` must be the exact one the handler
+    /// receives (proven by round-tripping a value through its notify sender).
+    #[tokio::test]
+    async fn dispatch_passes_the_given_context_to_the_handler() {
+        let mut router = Router::new();
+        router.register(
+            "push_via_ctx",
+            |_params: Value, ctx: ConnectionContext| async move {
+                let _ = ctx.notify.send(json!({"pushed": true}));
+                Ok(json!({}))
+            },
+        );
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let ctx = ConnectionContext::new(tx);
+        let _ = router
+            .dispatch(req(Some(json!(7)), "push_via_ctx", None), &ctx)
+            .await;
+        assert_eq!(rx.try_recv().unwrap(), json!({"pushed": true}));
     }
 }

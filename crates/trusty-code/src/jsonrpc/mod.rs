@@ -20,11 +20,19 @@
 //! error a handler returns; the router converts it into the JSON-RPC error
 //! envelope.
 //!
-//! Test: see `error::tests` and `router::tests`.
+//! `#2054` adds [`context::ConnectionContext`]: every handler now also
+//! receives the calling connection's context, which is how `session.attach`
+//! pushes server-initiated notifications (session lifecycle events) back to
+//! that connection asynchronously, outside the normal request/response
+//! cycle — see `context`'s module docs for the STDIO-vs-HTTP distinction.
+//!
+//! Test: see `error::tests`, `router::tests`, and `context::tests`.
 
+pub mod context;
 pub mod error;
 pub mod router;
 
+pub use context::{ConnectionContext, NotifySender};
 pub use error::RpcError;
 pub use router::{MethodHandler, Router};
 pub use trusty_common::mcp::{Request, Response, error_codes};

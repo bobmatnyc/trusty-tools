@@ -1,4 +1,4 @@
-//! HTTP JSON-RPC 2.0 transport for `tcode serve --http` (#2053).
+//! HTTP JSON-RPC 2.0 transport for `tcode serve --http` (#2053, #2054).
 //!
 //! Why: matches how `trusty-memory` (`web::router` + `run_http_on`) and
 //! `trusty-search` (`service::server::build_router`) stand up their axum
@@ -10,7 +10,20 @@
 //! /rpc` and `GET /health` dispatch through the SAME [`crate::jsonrpc::Router`]
 //! the STDIO transport (`crate::serve::transport`) uses via
 //! [`Router::dispatch_json`] — there is exactly one implementation of each
-//! method (`ping`, `health`, …), not one per transport.
+//! method (`ping`, `health`, `session.*`, …), not one per transport.
+//!
+//! #2054 adds `GET /sessions/{id}/events`: an SSE route that is HTTP's real
+//! live-streaming mechanism for `session.attach`. HTTP `POST /rpc` is
+//! fundamentally one request/one response, so `session.attach` over HTTP
+//! acknowledges immediately (replay burst + this endpoint's URL in
+//! `stream_url`) rather than holding the connection open — a browser or CLI
+//! client then opens this endpoint to receive the ring-buffer replay
+//! followed by live events, and simply closing that connection IS "detach"
+//! for HTTP (there is nothing further to call). See
+//! `crate::jsonrpc::ConnectionContext`'s docs and `session::protocol::attach`
+//! for the full STDIO-vs-HTTP rationale. Multi-client attach falls out for
+//! free here: every `GET` gets its own `crate::events::subscribe()`
+//! receiver.
 //!
 //! What: [`build_axum_router`] (pure, unit-testable) and [`run_http`] (binds
 //! a `TcpListener` — port `0` yields an OS-assigned ephemeral port — logs
@@ -23,8 +36,10 @@
 //!
 //! Test: `http::tests::*` drive [`build_axum_router`] via
 //! `tower::util::ServiceExt::oneshot` (no real socket): `POST /rpc` ping
-//! success, `POST /rpc` malformed JSON -> `-32700`, `GET /health`.
+//! success, `POST /rpc` malformed JSON -> `-32700`, `GET /health`,
+//! `session.create` + `GET /sessions/{id}/events` SSE replay + live event.
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -32,18 +47,36 @@ use anyhow::{Context, Result};
 use axum::{
     Json, Router as AxumRouter,
     body::Bytes,
-    extract::State,
+    extract::{Path, State},
+    response::sse::{Event as SseEvent, KeepAlive, Sse},
     routing::{get, post},
 };
+use futures_util::{Stream, StreamExt, stream};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::BroadcastStream;
 use tracing::info;
 use trusty_common::mcp::Response;
 
-use crate::jsonrpc::Router;
+use crate::jsonrpc::{ConnectionContext, Router};
 use crate::serve::methods::health_payload;
+use crate::session::SessionRegistry;
 
-/// Build the pure axum router (no listener bound) exposing `POST /rpc` and
-/// `GET /health`.
+/// Shared axum state: the JSON-RPC router (for `POST /rpc`) and the session
+/// registry (for the SSE route, which reads it directly rather than going
+/// through the router).
+///
+/// Why: both fields are `Arc` so cloning per-request (axum requires `State`
+/// to be `Clone`) is cheap and every route sees the same daemon-wide
+/// instances.
+#[derive(Clone)]
+struct HttpState {
+    router: Arc<Router>,
+    sessions: Arc<SessionRegistry>,
+}
+
+/// Build the pure axum router (no listener bound) exposing `POST /rpc`,
+/// `GET /health`, and `GET /sessions/{id}/events`.
 ///
 /// Why: kept separate from [`run_http`] so unit tests exercise routing and
 /// dispatch via `tower::util::ServiceExt::oneshot` without opening a real
@@ -51,16 +84,19 @@ use crate::serve::methods::health_payload;
 /// identically to trusty-memory/trusty-search.
 /// What: `POST /rpc` dispatches the request body through
 /// `Router::dispatch_json` (shared with the STDIO transport); `GET /health`
-/// returns [`health_payload`] — the exact payload the `health` JSON-RPC
-/// method returns, so HTTP and JSON-RPC callers see the same shape.
+/// returns [`health_payload`]; `GET /sessions/{id}/events` streams that
+/// session's ring-buffer replay then live events as SSE.
 /// Test: `http_rpc_ping_returns_pong`,
 /// `http_rpc_malformed_json_returns_parse_error`,
-/// `http_health_matches_jsonrpc_health_payload`.
-pub fn build_axum_router(router: Arc<Router>) -> AxumRouter {
+/// `http_health_matches_jsonrpc_health_payload`,
+/// `http_session_events_sse_streams_replay_then_live_event`.
+pub fn build_axum_router(router: Arc<Router>, sessions: Arc<SessionRegistry>) -> AxumRouter {
+    let state = HttpState { router, sessions };
     let app = AxumRouter::new()
         .route("/rpc", post(rpc_handler))
         .route("/health", get(health_handler))
-        .with_state(router);
+        .route("/sessions/{id}/events", get(session_events_sse))
+        .with_state(state);
     trusty_common::server::with_standard_middleware(app)
 }
 
@@ -69,14 +105,21 @@ pub fn build_axum_router(router: Arc<Router>) -> AxumRouter {
 /// Why: lets browser clients, curl, and any HTTP-only caller reach the same
 /// method surface the STDIO transport exposes, without learning a REST
 /// vocabulary per method.
-/// What: dispatches the raw request body through `Router::dispatch_json`
-/// (single request per call — batch/array bodies are not supported, see
-/// module docs). Always returns HTTP 200; JSON-RPC errors, including
-/// malformed JSON (mapped to `-32700`), are carried in the response
-/// envelope's `error` field rather than the HTTP status.
+/// What: builds a throwaway [`ConnectionContext`] for this one call (its
+/// `notify` receiver is dropped once this function returns, so any handler
+/// that queued a notification via it — e.g. `session.attach`'s forwarder —
+/// simply stops on its next send; the real HTTP live-streaming path is
+/// `GET /sessions/{id}/events`, not this channel), then dispatches the raw
+/// request body through `Router::dispatch_json` (single request per call —
+/// batch/array bodies are not supported, see module docs). Always returns
+/// HTTP 200; JSON-RPC errors, including malformed JSON (mapped to
+/// `-32700`), are carried in the response envelope's `error` field rather
+/// than the HTTP status.
 /// Test: `http_rpc_ping_returns_pong`, `http_rpc_malformed_json_returns_parse_error`.
-async fn rpc_handler(State(router): State<Arc<Router>>, body: Bytes) -> Json<Response> {
-    Json(router.dispatch_json(&body).await)
+async fn rpc_handler(State(state): State<HttpState>, body: Bytes) -> Json<Response> {
+    let (notify_tx, _notify_rx) = mpsc::unbounded_channel();
+    let ctx = ConnectionContext::new(notify_tx);
+    Json(state.router.dispatch_json(&body, &ctx).await)
 }
 
 /// `GET /health` — liveness probe matching the `health` JSON-RPC method.
@@ -92,11 +135,73 @@ async fn health_handler() -> Json<serde_json::Value> {
     Json(health_payload())
 }
 
-/// Bind a `TcpListener` and serve `POST /rpc` + `GET /health` until SIGTERM/
-/// SIGINT (graceful) or an internal axum error.
+/// `GET /sessions/{id}/events` — Server-Sent Events stream of a session's
+/// ring-buffer replay followed by its live events.
+///
+/// Why: HTTP's real live-streaming mechanism for `session.attach` (see
+/// module docs for why `POST /rpc` itself can't hold the stream open).
+/// Multiple concurrent `GET`s against the same session id each get their
+/// own subscription (multi-client attach, vision spec Axiom 4) — no extra
+/// bookkeeping needed because `crate::events::subscribe()` already hands
+/// out an independent `broadcast::Receiver` per call.
+/// What: 404 with a JSON-RPC error envelope if the session id is unknown
+/// (`SessionRegistry::replay` -> `session_not_found`, spec-mapped HTTP
+/// status per §13.2). Otherwise: an SSE stream that first emits the
+/// ring-buffer replay (oldest-first) then chains the live bus, filtered to
+/// this `session_id`, forever (until the client disconnects — which is
+/// "detach" for HTTP).
+/// Test: `http_session_events_sse_streams_replay_then_live_event`,
+/// `http_session_events_sse_unknown_session_returns_404`.
+async fn session_events_sse(
+    State(state): State<HttpState>,
+    Path(session_id): Path<String>,
+) -> Result<
+    Sse<impl Stream<Item = Result<SseEvent, Infallible>>>,
+    (axum::http::StatusCode, Json<Response>),
+> {
+    let replay = state.sessions.replay(&session_id).map_err(|e| {
+        let body = Response::err(None, e.code, e.message);
+        (axum::http::StatusCode::NOT_FOUND, Json(body))
+    })?;
+
+    let replay_stream = stream::iter(replay.into_iter().map(|event| Ok(sse_event_for(&event))));
+
+    let filter_id = session_id.clone();
+    let live_stream = BroadcastStream::new(crate::events::subscribe()).filter_map(move |item| {
+        let filter_id = filter_id.clone();
+        async move {
+            match item {
+                Ok(event) if event.session_id() == Some(filter_id.as_str()) => {
+                    Some(Ok(sse_event_for(&event)))
+                }
+                _ => None,
+            }
+        }
+    });
+
+    Ok(Sse::new(replay_stream.chain(live_stream)).keep_alive(KeepAlive::default()))
+}
+
+/// Serialise one `crate::events::Event` as an SSE `data:` frame.
+///
+/// Why: centralises the (practically infallible — `Event` has no untagged
+/// maps or non-string keys) JSON encoding so `session_events_sse` doesn't
+/// repeat the fallback logic at two call sites.
+/// What: `SseEvent::default().json_data(event)`, falling back to an empty
+/// JSON object on the (unreachable in practice) serialisation error rather
+/// than `unwrap`ing.
+fn sse_event_for(event: &crate::events::Event) -> SseEvent {
+    SseEvent::default()
+        .json_data(event)
+        .unwrap_or_else(|_| SseEvent::default().data("{}"))
+}
+
+/// Bind a `TcpListener` and serve `POST /rpc` + `GET /health` +
+/// `GET /sessions/{id}/events` until SIGTERM/SIGINT (graceful) or an
+/// internal axum error.
 ///
 /// Why: the top-level entry point `crate::serve::run_http` delegates to this
-/// once the router is assembled.
+/// once the router and session registry are assembled.
 /// What: binds `127.0.0.1:port` (`port = 0` lets the OS assign an ephemeral
 /// port), logs the real bound address to stderr — mirroring
 /// `trusty-memory`'s `run_http_on`, and never touching stdout — then serves
@@ -106,7 +211,7 @@ async fn health_handler() -> Json<serde_json::Value> {
 /// Test: not directly unit-tested (would require a real socket + a real
 /// signal); [`build_axum_router`]'s tests cover the routing/dispatch logic
 /// this serves.
-pub async fn run_http(router: Router, port: u16) -> Result<()> {
+pub async fn run_http(router: Router, sessions: Arc<SessionRegistry>, port: u16) -> Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = TcpListener::bind(addr)
         .await
@@ -117,7 +222,7 @@ pub async fn run_http(router: Router, port: u16) -> Result<()> {
     info!("tcode serve --http: listening on http://{bound}");
     eprintln!("tcode serve --http: listening on http://{bound}");
 
-    let app = build_axum_router(Arc::new(router));
+    let app = build_axum_router(Arc::new(router), sessions);
     axum::serve(listener, app)
         .with_graceful_shutdown(trusty_common::shutdown_signal())
         .await
@@ -134,11 +239,14 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use serde_json::{Value, json};
     use tower::util::ServiceExt;
+    use trusty_common::mcp::error_codes;
 
-    fn router_with_methods() -> Arc<Router> {
+    fn router_and_sessions() -> (Arc<Router>, Arc<SessionRegistry>) {
+        let sessions = Arc::new(SessionRegistry::new());
         let mut router = Router::new();
         crate::serve::methods::register(&mut router);
-        Arc::new(router)
+        crate::session::protocol::register(&mut router, sessions.clone());
+        (Arc::new(router), sessions)
     }
 
     async fn body_json(response: axum::response::Response) -> Value {
@@ -150,7 +258,8 @@ mod tests {
     /// `{"pong": true}` result the STDIO transport returns.
     #[tokio::test]
     async fn http_rpc_ping_returns_pong() {
-        let app = build_axum_router(router_with_methods());
+        let (router, sessions) = router_and_sessions();
+        let app = build_axum_router(router, sessions);
         let req_body = json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}).to_string();
 
         let resp = app
@@ -175,7 +284,8 @@ mod tests {
     /// JSON-RPC `-32700 Parse error` envelope, not a bare HTTP 400.
     #[tokio::test]
     async fn http_rpc_malformed_json_returns_parse_error() {
-        let app = build_axum_router(router_with_methods());
+        let (router, sessions) = router_and_sessions();
+        let app = build_axum_router(router, sessions);
 
         let resp = app
             .oneshot(
@@ -191,17 +301,15 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
-        assert_eq!(
-            v["error"]["code"],
-            trusty_common::mcp::error_codes::PARSE_ERROR
-        );
+        assert_eq!(v["error"]["code"], error_codes::PARSE_ERROR);
     }
 
     /// `GET /health` must return the exact payload `health_payload()`
     /// (and thus the `health` JSON-RPC method) returns.
     #[tokio::test]
     async fn http_health_matches_jsonrpc_health_payload() {
-        let app = build_axum_router(router_with_methods());
+        let (router, sessions) = router_and_sessions();
+        let app = build_axum_router(router, sessions);
 
         let resp = app
             .oneshot(
@@ -217,5 +325,78 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v, health_payload());
+    }
+
+    /// `GET /sessions/{id}/events` on an unknown session must 404 with a
+    /// JSON-RPC `session_not_found` envelope.
+    #[tokio::test]
+    async fn http_session_events_sse_unknown_session_returns_404() {
+        let (router, sessions) = router_and_sessions();
+        let app = build_axum_router(router, sessions);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/sessions/does-not-exist/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let v = body_json(resp).await;
+        assert_eq!(v["error"]["code"], -32007);
+    }
+
+    /// `GET /sessions/{id}/events` on a real session must stream the
+    /// ring-buffer replay as SSE `data:` frames.
+    ///
+    /// Why: the response body never terminates (the live half subscribes to
+    /// the bus forever), so this reads a bounded prefix of the body as a
+    /// `Stream` (rather than `axum::body::to_bytes`, which would hang or
+    /// error waiting for a completion that never comes) until the expected
+    /// content shows up or a timeout fires.
+    #[tokio::test]
+    async fn http_session_events_sse_streams_replay() {
+        let (router, sessions) = router_and_sessions();
+        let session = sessions.create("t".to_string(), None, None);
+        let app = build_axum_router(router, sessions);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/sessions/{}/events", session.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut stream = resp.into_body().into_data_stream();
+        let mut collected = Vec::new();
+        let read_replay = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !String::from_utf8_lossy(&collected).contains("session_status_changed") {
+                match stream.next().await {
+                    Some(Ok(chunk)) => collected.extend_from_slice(&chunk),
+                    _ => break,
+                }
+            }
+        })
+        .await;
+
+        assert!(
+            read_replay.is_ok(),
+            "timed out waiting for the SSE replay burst"
+        );
+        let text = String::from_utf8(collected).unwrap();
+        assert!(text.contains("session_started"), "body so far: {text}");
+        assert!(
+            text.contains("session_status_changed"),
+            "body so far: {text}"
+        );
     }
 }

@@ -4,15 +4,19 @@
 //! error code (invalid params, internal error, …) without the router having
 //! to string-sniff an `anyhow::Error`. Centralising the constructors here
 //! means every handler produces spec-correct codes by construction.
-//! What: `RpcError { code, message, data }` plus constructors for the two
-//! codes a handler is expected to return itself. `-32601 Method not found`
-//! and `-32600 Invalid Request` are produced by [`super::router::Router`]
-//! before a handler is ever invoked, so they are intentionally not exposed
-//! as constructors here — a handler has no legitimate reason to fabricate
-//! either.
+//! What: `RpcError { code, message, data }` plus constructors for the
+//! standard JSON-RPC 2.0 codes a handler is expected to return itself, and
+//! (#2054) the vision spec's domain error taxonomy (§13.2) — an
+//! *additive* layer of application-specific codes carried in the same
+//! envelope, each tagged with `data.error_type` so clients can match on a
+//! stable string rather than a numeric code alone. `-32601 Method not
+//! found` and `-32600 Invalid Request` are produced by
+//! [`super::router::Router`] before a handler is ever invoked, so they are
+//! intentionally not exposed as constructors here — a handler has no
+//! legitimate reason to fabricate either.
 //! Test: this module's unit tests.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use trusty_common::mcp::error_codes;
 
 /// A JSON-RPC 2.0 error, as returned by a method handler.
@@ -77,6 +81,49 @@ impl RpcError {
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(error_codes::INTERNAL_ERROR, message)
     }
+
+    /// Build a domain-taxonomy error (vision spec §13.2): a code from the
+    /// spec's table plus a stable `error_type` string tagged onto `data`.
+    ///
+    /// Why: the spec's domain errors (`session_not_found`, `invalid_argument`,
+    /// `cancelled`, …) live in a numeric range distinct from the standard
+    /// JSON-RPC `-326xx` codes, and every one of them carries
+    /// `data.error_type` so a client can match on the string rather than
+    /// memorising numbers. Centralising the shape here means every domain
+    /// error is built the same way.
+    /// What: sets `code`, `message`, and `data = {"error_type": error_type}`.
+    /// Test: `rpc_error_domain_sets_error_type_in_data`.
+    fn domain(code: i32, error_type: &'static str, message: impl Into<String>) -> Self {
+        Self::new(code, message).with_data(json!({"error_type": error_type}))
+    }
+
+    /// Build a `-32007 session_not_found` error (vision spec §13.2).
+    ///
+    /// Why: the specific, spec-named code for "the session id in `params`
+    /// does not exist in the registry" — used by every `session.*` method
+    /// that takes a `session_id`.
+    /// What: `message` embeds `session_id` for operator-visible logs;
+    /// `data.error_type = "session_not_found"`.
+    /// Test: `rpc_error_session_not_found_sets_code_and_type`.
+    pub fn session_not_found(session_id: &str) -> Self {
+        Self::domain(
+            -32007,
+            "session_not_found",
+            format!("session not found: {session_id}"),
+        )
+    }
+
+    /// Build a `-32003 invalid_argument` error (vision spec §13.2).
+    ///
+    /// Why: the spec's domain-level "malformed request" code, distinct from
+    /// the JSON-RPC protocol-level `-32602 Invalid params` — used when a
+    /// method's arguments parse as JSON but fail a semantic check (e.g. an
+    /// empty task description).
+    /// What: `data.error_type = "invalid_argument"`.
+    /// Test: `rpc_error_invalid_argument_sets_code_and_type`.
+    pub fn invalid_argument(message: impl Into<String>) -> Self {
+        Self::domain(-32003, "invalid_argument", message)
+    }
 }
 
 impl std::fmt::Display for RpcError {
@@ -131,5 +178,24 @@ mod tests {
         let s = e.to_string();
         assert!(s.contains("-32603"));
         assert!(s.contains("db unreachable"));
+    }
+
+    /// `session_not_found` must use the spec's `-32007` code, embed the id
+    /// in the message, and tag `error_type` in `data`.
+    #[test]
+    fn rpc_error_session_not_found_sets_code_and_type() {
+        let e = RpcError::session_not_found("s-123");
+        assert_eq!(e.code, -32007);
+        assert!(e.message.contains("s-123"));
+        assert_eq!(e.data, Some(json!({"error_type": "session_not_found"})));
+    }
+
+    /// `invalid_argument` must use the spec's `-32003` code and tag
+    /// `error_type` in `data`.
+    #[test]
+    fn rpc_error_invalid_argument_sets_code_and_type() {
+        let e = RpcError::invalid_argument("task must not be empty");
+        assert_eq!(e.code, -32003);
+        assert_eq!(e.data, Some(json!({"error_type": "invalid_argument"})));
     }
 }

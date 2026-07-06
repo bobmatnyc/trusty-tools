@@ -72,6 +72,13 @@ trusty-common = { workspace = true, features = ["catchup", "mcp", "axum-server"]
 # how `trusty-search`/`trusty-memory` depend on it.
 axum = { workspace = true }
 
+# `GET /sessions/{id}/events` SSE route (#2054): wraps the existing
+# `tokio::sync::broadcast`-backed event bus (`crate::events`) as a `Stream`
+# axum's SSE response type can consume, chained after a ring-buffer replay
+# burst built with plain `futures_util::stream::iter`.
+tokio-stream = { workspace = true }
+futures-util = { workspace = true }
+
 [dev-dependencies]
 # Async test runtime (events, build_info, perf async tests, tools tests)
 tokio = { workspace = true }
