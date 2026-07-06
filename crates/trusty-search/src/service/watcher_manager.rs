@@ -209,6 +209,17 @@ impl WatcherManager {
     pub async fn watched_count(&self) -> usize {
         self.inner.lock().await.len()
     }
+
+    /// Whether a specific index currently has a live watcher.
+    ///
+    /// Why: the query path uses this to detect an index being served without a
+    /// watcher — either idle-suspended (`server::tickers`) or lazily restored
+    /// from the cold store — so it can resume watching and reconcile on wake.
+    /// What: `contains_key` under the lock.
+    /// Test: `is_watching_reflects_spawn_and_stop`.
+    pub async fn is_watching(&self, id: &IndexId) -> bool {
+        self.inner.lock().await.contains_key(id)
+    }
 }
 
 #[cfg(test)]
@@ -271,6 +282,23 @@ mod tests {
             "second spawn for the same index must not add a second watcher"
         );
         mgr.stop_all().await;
+    }
+
+    /// Why: the idle-suspend / wake path keys off `is_watching`, so it must
+    /// track spawn and stop transitions exactly (false → true → false).
+    /// Test: this test.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn is_watching_reflects_spawn_and_stop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mgr = WatcherManager::new();
+        let handle = handle_for("idx", dir.path());
+        let id = IndexId::new("idx");
+
+        assert!(!mgr.is_watching(&id).await, "not watching before spawn");
+        mgr.spawn_for_index(&handle).await;
+        assert!(mgr.is_watching(&id).await, "watching after spawn");
+        assert!(mgr.stop_for_index(&id).await);
+        assert!(!mgr.is_watching(&id).await, "not watching after stop");
     }
 
     /// Why: `stop_for_index` must remove exactly the targeted watcher and

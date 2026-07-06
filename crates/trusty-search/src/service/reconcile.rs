@@ -240,7 +240,7 @@ impl Drop for InProgressGuard {
 /// throughout.
 /// Test: `reconcile_disabled_gate`, `reconcile_in_progress_clears_after_tasks_complete`
 /// in reconcile_tests.rs.
-pub(super) async fn reconcile_stale_indexes(state: &SearchAppState) {
+pub async fn reconcile_stale_indexes(state: &SearchAppState) {
     let raw = std::env::var(NO_BOOT_RECONCILE_ENV).ok();
     if reconcile_disabled_for_value(raw.as_deref()) {
         tracing::info!("boot reconcile: disabled via {NO_BOOT_RECONCILE_ENV}=1 — skipping");
@@ -297,12 +297,15 @@ pub(super) async fn reconcile_stale_indexes(state: &SearchAppState) {
 ///
 /// Why: each index is independent; background tasks let the daemon serve
 /// queries while reconciliation proceeds and avoid one slow index blocking others.
+/// Also called on the query-wake path (`server::search`) when an idle-suspended
+/// or lazily-restored index is served without a watcher, to catch edits missed
+/// while the watcher was off — hence `pub(crate)`.
 /// What: reads the stored + current HEAD SHAs (git path), or falls back to the
 /// mtime path for non-git / missing-SHA indexes. Updates `summary` with the
-/// outcome so `GET /health` reports boot-reconcile progress.
+/// outcome so `GET /health` reports reconcile progress.
 /// Test: `reconcile_up_to_date_index_is_noop`, `reconcile_stale_index_stamps_new_sha`
 /// in reconcile_tests.rs.
-async fn reconcile_one_index(
+pub(crate) async fn reconcile_one_index(
     handle: Arc<IndexHandle>,
     summary: Arc<std::sync::Mutex<ReconcileSummary>>,
 ) {

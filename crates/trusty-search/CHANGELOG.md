@@ -6,6 +6,37 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.31.0] — 2026-07-06
+
+### Added — idle watcher suspension (stop watching projects nobody is using)
+
+- **A live index's FSEvents watcher is now suspended after it goes idle, and
+  resumes on the next query.** Previously, once an index was warm-booted or
+  registered, its OS filesystem watch ran until the index was *deleted* — so a
+  host tracking hundreds of registered projects kept hundreds of live watches
+  regardless of use, a standing CPU / `fseventsd` cost. Now:
+  - A background ticker releases the watcher of any index whose in-memory
+    `idle_duration()` exceeds `TRUSTY_WATCH_IDLE_SUSPEND_SECS` (default 900 s;
+    `0` disables). This sits above the 300 s chunk-eviction window, so an idle
+    index first sheds memory, then — if still dormant — sheds its watcher.
+  - The query path re-establishes the watcher on the next query to a suspended
+    (or lazily cold-restored) index, then runs a background reconcile
+    (git-diff / mtime catch-up, the same logic used at boot) so any edits made
+    while the watcher was off are picked up. The query itself is served
+    immediately from current in-memory state; suspension is invisible to an
+    active user.
+- **Side fix:** lazily cold-restored indexes (issue #993) previously never
+  started a watcher at all; the wake path now gives them one too.
+
+### Notes
+
+- Memory for idle indexes was already reclaimed by the chunk-eviction ticker
+  (`TRUSTY_CHUNKS_IDLE_EVICT_SECS`); this change adds the CPU/watch half.
+- No behaviour change when `TRUSTY_DISABLE_WATCHER=1` (watchers never spawn) or
+  `TRUSTY_WATCH_IDLE_SUSPEND_SECS=0` (watchers stay hot).
+
+---
+
 ## [0.30.0] — 2026-07-06
 
 ### Added — self-managed orphan reaping (daemon no longer leaks dead registrations)

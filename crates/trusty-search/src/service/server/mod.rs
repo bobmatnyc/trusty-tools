@@ -90,7 +90,7 @@ use search::{delete_index_handler, global_search_handler, search_handler};
 use status::{graph_handler, graph_stats_handler, index_status_handler};
 use tickers::{
     spawn_disk_size_ticker, spawn_idle_chunk_eviction_ticker, spawn_orphan_reaper_ticker,
-    spawn_status_ticker,
+    spawn_status_ticker, spawn_watcher_idle_suspend_ticker,
 };
 
 use files::{call_chain_handler, global_grep_handler, grep_handler};
@@ -136,6 +136,7 @@ pub fn build_router(state: SearchAppState) -> Router {
     spawn_status_ticker(Arc::clone(&state_arc));
     spawn_disk_size_ticker(Arc::clone(&state_arc));
     spawn_idle_chunk_eviction_ticker(Arc::clone(&state_arc));
+    spawn_watcher_idle_suspend_ticker(Arc::clone(&state_arc));
     spawn_orphan_reaper_ticker(Arc::clone(&state_arc));
 
     let limiter = crate::service::concurrency::ConcurrencyLimiter::from_env();

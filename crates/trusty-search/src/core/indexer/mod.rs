@@ -60,7 +60,7 @@ pub(crate) use helpers::{
     build_compact_snippet, definition_boost_query_tokens, embed_batch_size, embedding_cache_cap,
     file_type_score_multiplier, hash_query, idle_evict_secs, is_function_definition_chunk_type,
     is_struct_definition_chunk_type, max_chunks_per_index, populate_virtual_terms,
-    raw_to_code_chunk, STRUCT_DEFINITION_BOOST,
+    raw_to_code_chunk, watch_idle_suspend_secs, STRUCT_DEFINITION_BOOST,
 };
 // Exposed for unit tests in `tests.rs`.
 #[cfg(test)]
@@ -245,10 +245,13 @@ impl CodeIndexer {
     /// Milliseconds since the last recorded activity (query/ingest).
     ///
     /// Why: lets the eviction logic compare elapsed idle time against the
-    /// configured window without exposing the raw atomic.
+    /// configured window without exposing the raw atomic. Also read by the
+    /// watcher idle-suspend ticker (`server::tickers`) to decide when to release
+    /// an idle index's FSEvents watch, hence `pub(crate)`.
     /// What: `created_at.elapsed() - last_activity_ms`, floored at 0.
-    /// Test: covered via `evict_chunks_if_idle`'s behaviour tests.
-    fn idle_duration(&self) -> std::time::Duration {
+    /// Test: covered via `evict_chunks_if_idle`'s behaviour tests and the
+    /// watcher idle-suspend ticker.
+    pub(crate) fn idle_duration(&self) -> std::time::Duration {
         let now_ms = self.created_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
         let last = self.last_activity_ms.load(Ordering::Relaxed);
         std::time::Duration::from_millis(now_ms.saturating_sub(last))
