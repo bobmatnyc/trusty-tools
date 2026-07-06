@@ -164,15 +164,19 @@ async fn session_events_sse(
         (axum::http::StatusCode::NOT_FOUND, Json(body))
     })?;
 
-    let replay_stream = stream::iter(replay.into_iter().map(|event| Ok(sse_event_for(&event))));
+    let replay_stream = stream::iter(
+        replay
+            .into_iter()
+            .map(|envelope| Ok(sse_event_for(&envelope))),
+    );
 
     let filter_id = session_id.clone();
     let live_stream = BroadcastStream::new(crate::events::subscribe()).filter_map(move |item| {
         let filter_id = filter_id.clone();
         async move {
             match item {
-                Ok(event) if event.session_id() == Some(filter_id.as_str()) => {
-                    Some(Ok(sse_event_for(&event)))
+                Ok(envelope) if envelope.session_id == filter_id => {
+                    Some(Ok(sse_event_for(&envelope)))
                 }
                 _ => None,
             }
@@ -182,17 +186,22 @@ async fn session_events_sse(
     Ok(Sse::new(replay_stream.chain(live_stream)).keep_alive(KeepAlive::default()))
 }
 
-/// Serialise one `crate::events::Event` as an SSE `data:` frame.
+/// Serialise one `crate::events::SessionEventEnvelope` as an SSE `data:`
+/// frame.
 ///
-/// Why: centralises the (practically infallible — `Event` has no untagged
-/// maps or non-string keys) JSON encoding so `session_events_sse` doesn't
-/// repeat the fallback logic at two call sites.
-/// What: `SseEvent::default().json_data(event)`, falling back to an empty
+/// Why: centralises the (practically infallible — the envelope has no
+/// untagged maps or non-string keys) JSON encoding so `session_events_sse`
+/// doesn't repeat the fallback logic at two call sites. Sending the full
+/// envelope (not just the bare `event`) means the HTTP SSE transport carries
+/// exactly the same `session_id`/`seq`/`at`/`kind`/`event` shape the STDIO
+/// `session.event` notification does (#2055 requirement: both transports
+/// carry the full taxonomy with the envelope).
+/// What: `SseEvent::default().json_data(envelope)`, falling back to an empty
 /// JSON object on the (unreachable in practice) serialisation error rather
 /// than `unwrap`ing.
-fn sse_event_for(event: &crate::events::Event) -> SseEvent {
+fn sse_event_for(envelope: &crate::events::SessionEventEnvelope) -> SseEvent {
     SseEvent::default()
-        .json_data(event)
+        .json_data(envelope)
         .unwrap_or_else(|_| SseEvent::default().data("{}"))
 }
 
@@ -396,6 +405,13 @@ mod tests {
         assert!(text.contains("session_started"), "body so far: {text}");
         assert!(
             text.contains("session_status_changed"),
+            "body so far: {text}"
+        );
+        // #2055: the SSE frames must carry the full envelope, not a bare
+        // event — `seq` and the top-level `kind` field must both appear.
+        assert!(text.contains("\"seq\":1"), "body so far: {text}");
+        assert!(
+            text.contains("\"kind\":\"session_started\""),
             "body so far: {text}"
         );
     }

@@ -1,4 +1,5 @@
-//! Process-wide event bus for real-time UI streaming (#192 Phase B).
+//! Process-wide event bus for real-time UI streaming (#192 Phase B; #2055
+//! formalises the session-attach envelope on top of it).
 //!
 //! Why: The 2-second stderr polling model from #149 is slow, lossy, and only
 //! handles workflow phase transitions. The UI needs immediate feedback on
@@ -7,16 +8,34 @@
 //! A `tokio::sync::broadcast` channel exposed via a process-global `OnceLock`
 //! lets any code path emit events without threading the bus through dozens of
 //! function signatures, while SSE subscribers fan out to all browsers.
-//! What: Defines the `Event` enum (the wire format), a process-global
-//! `EVENT_BUS` initialised lazily from any thread, helpers to publish and
-//! subscribe, and a `__OMPM_EVENT__ <json>\n` stderr-relay protocol so events
-//! emitted by `--workflow` subprocesses can be re-broadcast by the parent
-//! API server.
+//!
+//! #2055 adds [`SessionEventEnvelope`]: every event the `session.attach`
+//! protocol (#2054) cares about is session-scoped, so the bus now carries the
+//! ENVELOPE (`session_id`, a per-session monotonic `seq`, a UTC timestamp,
+//! and the tagged [`Event`] payload) rather than a bare `Event`. This is the
+//! same "envelope wraps a domain-tagged payload" shape as
+//! `trusty-agents-common`'s `HarnessEvent`/`HarnessPayload` convention, with
+//! two deliberate divergences (documented on the struct itself): `seq` is
+//! PER-SESSION here (not process-global) because the session-attach
+//! replay->live continuity this ticket requires is scoped to one session's
+//! stream, and the payload stays a flat `#[serde(tag = "type")]` enum (not a
+//! nested `{domain, event}` wrapper) because #2054 already shipped that wire
+//! shape and rewriting it would break the shipped `session.attach` contract.
+//! `session::registry::SessionRegistry` is the sole assigner of `seq`
+//! (see its `record` method) since it already owns the per-session ring
+//! buffer this must stay consistent with.
+//!
+//! What: Defines the `Event` enum (the tagged payload), `SessionEventEnvelope`
+//! (the wire envelope), a process-global `EVENT_BUS` initialised lazily from
+//! any thread carrying envelopes, helpers to publish and subscribe, and a
+//! `__OMPM_EVENT__ <json>\n` stderr-relay protocol so events emitted by
+//! `--workflow` subprocesses can be re-broadcast by the parent API server.
 //! Test: `events::publish` round-trips through `subscribe()`. The relay
 //! prefix is stable so the parent stderr reader can detect and re-publish.
 
 use std::sync::OnceLock;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -96,6 +115,67 @@ pub enum Event {
     SessionInput {
         session_id: String,
         input: String,
+    },
+
+    // -- Tool lifecycle (#2055 taxonomy; emitted by #2056's agent loop) --
+    /// A tool invocation began. Distinct from the older `ToolCalled` (which
+    /// has no started/finished/error distinction or call-correlation id, and
+    /// predates the session-attach protocol) — this is the tcode
+    /// session.attach taxonomy's tool-lifecycle kind.
+    ///
+    /// Why: `call_id` correlates this with the matching `ToolFinished`/
+    /// `ToolError` when a session runs multiple tool calls in sequence or
+    /// concurrently.
+    /// What: `args_preview` is truncated via `preview()` before emission.
+    /// Test: `session::registry::registry_tests::record_tool_started_publishes_event`.
+    ToolStarted {
+        session_id: String,
+        tool: String,
+        call_id: String,
+        args_preview: String,
+    },
+    /// A tool invocation completed (success or failure signalled by `success`,
+    /// not a separate error variant — use `ToolError` for exceptional
+    /// failures the caller wants to narrate distinctly, e.g. a timeout).
+    ToolFinished {
+        session_id: String,
+        tool: String,
+        call_id: String,
+        success: bool,
+        result_preview: String,
+    },
+    /// A tool invocation raised an exceptional error (as opposed to
+    /// completing with `success: false`) — e.g. the tool process crashed or
+    /// timed out rather than returning a normal failure result.
+    ToolError {
+        session_id: String,
+        tool: String,
+        call_id: String,
+        error: String,
+    },
+
+    // -- Diagnostics / progress / generic message (#2055 taxonomy) --
+    /// A structured log line scoped to a session, for operators/UIs that
+    /// want daemon-side diagnostics without parsing stderr.
+    Log {
+        session_id: String,
+        /// `"debug"` | `"info"` | `"warn"` | `"error"`.
+        level: String,
+        message: String,
+    },
+    /// A coarse progress update for a long-running session operation.
+    /// `percent` is `None` when progress isn't quantifiable (e.g. "still
+    /// searching") — the UI falls back to an indeterminate spinner.
+    Progress {
+        session_id: String,
+        message: String,
+        percent: Option<f32>,
+    },
+    /// A generic, freeform session-scoped message that doesn't fit any more
+    /// specific kind — the taxonomy's catch-all, used sparingly.
+    Message {
+        session_id: String,
+        text: String,
     },
 
     // -- PM activity --
@@ -279,6 +359,12 @@ impl Event {
             | Event::SessionCancelled { session_id }
             | Event::SessionStatusChanged { session_id, .. }
             | Event::SessionInput { session_id, .. }
+            | Event::ToolStarted { session_id, .. }
+            | Event::ToolFinished { session_id, .. }
+            | Event::ToolError { session_id, .. }
+            | Event::Log { session_id, .. }
+            | Event::Progress { session_id, .. }
+            | Event::Message { session_id, .. }
             | Event::PmThinking { session_id, .. }
             | Event::PmDelegating { session_id, .. }
             | Event::AgentSpawned { session_id, .. }
@@ -300,19 +386,116 @@ impl Event {
             Event::Ping => None,
         }
     }
+
+    /// The stable `kind` string for this event — identical to the serde
+    /// `"type"` tag `#[serde(tag = "type", rename_all = "snake_case")]`
+    /// produces on the wire.
+    ///
+    /// Why (#2055): `SessionEventEnvelope` carries `kind` as a top-level
+    /// field (vision spec's envelope requirement) so a client can filter/
+    /// route on it without parsing into the nested `event` payload. Hand-
+    /// written rather than derived from serde reflection (no such API exists
+    /// without an extra dependency) — `kind_matches_serde_tag_for_every_variant`
+    /// guards the two from drifting apart.
+    /// What: Returns the exact snake_case tag string for every variant.
+    /// Test: `kind_matches_serde_tag_for_every_variant`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Event::SessionStarted { .. } => "session_started",
+            Event::SessionDone { .. } => "session_done",
+            Event::SessionCancelled { .. } => "session_cancelled",
+            Event::SessionStatusChanged { .. } => "session_status_changed",
+            Event::SessionInput { .. } => "session_input",
+            Event::ToolStarted { .. } => "tool_started",
+            Event::ToolFinished { .. } => "tool_finished",
+            Event::ToolError { .. } => "tool_error",
+            Event::Log { .. } => "log",
+            Event::Progress { .. } => "progress",
+            Event::Message { .. } => "message",
+            Event::PmThinking { .. } => "pm_thinking",
+            Event::PmDelegating { .. } => "pm_delegating",
+            Event::AgentSpawned { .. } => "agent_spawned",
+            Event::AgentMessage { .. } => "agent_message",
+            Event::AgentDone { .. } => "agent_done",
+            Event::AgentFailed { .. } => "agent_failed",
+            Event::ToolCalled { .. } => "tool_called",
+            Event::ToolResult { .. } => "tool_result",
+            Event::AstOperation { .. } => "ast_operation",
+            Event::PhaseStarted { .. } => "phase_started",
+            Event::PhaseDone { .. } => "phase_done",
+            Event::PhaseSkipped { .. } => "phase_skipped",
+            Event::PersonaDetected { .. } => "persona_detected",
+            Event::LlmRequested { .. } => "llm_requested",
+            Event::LlmResponded { .. } => "llm_responded",
+            Event::AgentStarted { .. } => "agent_started",
+            Event::ReportGenerated { .. } => "report_generated",
+            Event::RecapGenerated { .. } => "recap_generated",
+            Event::Ping => "ping",
+        }
+    }
+}
+
+/// The stable, sequenced wire envelope for one session's event (#2055).
+///
+/// Why: `session.attach`'s ring-buffer replay and every live notification
+/// thereafter (both STDIO `session.event` notifications and the HTTP
+/// `GET /sessions/{id}/events` SSE stream) need the SAME shape so a client
+/// can detect gaps and stitch replay -> live into one ordered stream. See
+/// the module docs for how this aligns with / diverges from
+/// `trusty-agents-common`'s `HarnessEvent` convention.
+/// What: `session_id` (always present — every event this daemon emits is
+/// session-scoped), `seq` (per-session monotonic, assigned by
+/// `session::registry::SessionRegistry::record`, starting at 1), `at` (UTC
+/// emit timestamp), `kind` (== `event.kind()`, duplicated at the top level
+/// for cheap client-side filtering), and `event` (the full tagged payload).
+/// Test: `session_event_envelope_round_trips_through_json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionEventEnvelope {
+    pub session_id: String,
+    pub seq: u64,
+    pub at: DateTime<Utc>,
+    pub kind: String,
+    pub event: Event,
+}
+
+impl SessionEventEnvelope {
+    /// Build an envelope for `event`, computing `kind` from
+    /// [`Event::kind`].
+    ///
+    /// Why: the one place `kind` is derived from `event`, so the two can
+    /// never be constructed out of sync.
+    /// What: `session_id`/`seq`/`at` are supplied by the caller (the
+    /// registry, which owns the per-session sequence counter); `kind` is
+    /// computed here.
+    /// Test: `session_event_envelope_round_trips_through_json`.
+    pub fn new(session_id: String, seq: u64, at: DateTime<Utc>, event: Event) -> Self {
+        let kind = event.kind().to_string();
+        Self {
+            session_id,
+            seq,
+            at,
+            kind,
+            event,
+        }
+    }
 }
 
 /// Process-global event bus, initialised on first access.
 ///
-/// Why: Threading a `broadcast::Sender<Event>` through every code path that
-/// might want to emit telemetry (workflow engine, agent runners, ctrl) would
-/// touch hundreds of function signatures. A `OnceLock` mirrors how `tracing`
-/// solves the same problem — emit-from-anywhere with zero overhead when no
-/// one is listening.
+/// Why: Threading a `broadcast::Sender<SessionEventEnvelope>` through every
+/// code path that might want to emit telemetry (workflow engine, agent
+/// runners, ctrl) would touch hundreds of function signatures. A `OnceLock`
+/// mirrors how `tracing` solves the same problem — emit-from-anywhere with
+/// zero overhead when no one is listening. Carries the full envelope
+/// (#2055), not a bare `Event`, since every current producer
+/// (`session::registry::SessionRegistry`) and every current consumer (the
+/// STDIO forwarder, the HTTP SSE route) is session-scoped and needs `seq`/
+/// `at`/`kind` alongside the payload — see the module docs for the
+/// `HarnessEvent` alignment/divergence rationale.
 /// What: `Sender::send` is non-blocking; when there are no subscribers it
 /// returns an error which we silently drop (events without listeners are
 /// the expected baseline).
-static EVENT_BUS: OnceLock<broadcast::Sender<Event>> = OnceLock::new();
+static EVENT_BUS: OnceLock<broadcast::Sender<SessionEventEnvelope>> = OnceLock::new();
 
 /// Get (or initialise) the process-global event bus sender.
 ///
@@ -322,7 +505,7 @@ static EVENT_BUS: OnceLock<broadcast::Sender<Event>> = OnceLock::new();
 /// What: Returns a clone of the global sender. The receiver half is created
 /// per subscriber via `subscribe()`.
 /// Test: `bus_is_singleton` confirms repeated calls return the same channel.
-pub fn bus() -> broadcast::Sender<Event> {
+pub fn bus() -> broadcast::Sender<SessionEventEnvelope> {
     EVENT_BUS
         .get_or_init(|| broadcast::channel(CHANNEL_CAPACITY).0)
         .clone()
@@ -335,21 +518,24 @@ pub fn bus() -> broadcast::Sender<Event> {
 /// What: Returns a new `Receiver` that begins receiving events emitted after
 /// the call returns. Lagged subscribers receive `RecvError::Lagged(n)` and
 /// can resume.
-pub fn subscribe() -> broadcast::Receiver<Event> {
+pub fn subscribe() -> broadcast::Receiver<SessionEventEnvelope> {
     bus().subscribe()
 }
 
-/// Publish one event to the bus (best-effort, never panics).
+/// Publish one envelope to the bus (best-effort, never panics).
 ///
 /// Why: Most callers don't care whether anyone is listening — events are
-/// telemetry, not control flow. Failures (no subscribers) are normal.
-/// What: Sends the event on the broadcast channel, ignoring `SendError`.
+/// telemetry, not control flow. Failures (no subscribers) are normal. The
+/// envelope (not a bare `Event`) is the unit of publication so `seq`/`at`
+/// travel with the payload to every subscriber, including a client that
+/// only just attached.
+/// What: Sends the envelope on the broadcast channel, ignoring `SendError`.
 /// Test: `publish_round_trips_through_subscribe`.
-pub fn publish(event: Event) {
-    let _ = bus().send(event);
+pub fn publish(envelope: SessionEventEnvelope) {
+    let _ = bus().send(envelope);
 }
 
-/// Publish an event AND emit it on stderr with the `__OMPM_EVENT__` prefix
+/// Publish an envelope AND emit it on stderr with the `__OMPM_EVENT__` prefix
 /// so a parent process can re-broadcast on its own bus.
 ///
 /// Why: Workflow runs spawn as `open-mpm --workflow ...` subprocesses of the
@@ -357,14 +543,14 @@ pub fn publish(event: Event) {
 /// reach the parent's bus only via the existing stderr stream. This helper
 /// does both in one call so emit sites don't have to know whether they're
 /// running as a child.
-/// What: Calls `publish(event.clone())` for in-process subscribers, then
+/// What: Calls `publish(envelope.clone())` for in-process subscribers, then
 /// writes one NDJSON line to stderr prefixed with `__OMPM_EVENT__ `. The
 /// parent's stderr reader (in `api::server::run_task`) detects the prefix
 /// and re-publishes on its own bus.
 /// Test: Indirect — exercised by the workflow integration path.
-pub fn emit(event: Event) {
-    publish(event.clone());
-    if let Ok(line) = serde_json::to_string(&event) {
+pub fn emit(envelope: SessionEventEnvelope) {
+    publish(envelope.clone());
+    if let Ok(line) = serde_json::to_string(&envelope) {
         eprintln!("{EVENT_LINE_PREFIX}{line}");
     }
 }
@@ -427,21 +613,31 @@ mod tests {
         // Two senders to the same channel: a message sent on `a` should be
         // visible to a receiver from `b`.
         let mut rx = b.subscribe();
-        let _ = a.send(Event::Ping);
+        let envelope = SessionEventEnvelope::new("s-bus".into(), 1, Utc::now(), Event::Ping);
+        let _ = a.send(envelope);
         // Drain via try_recv to avoid an async runtime in this sync test.
-        let got = rx.try_recv().expect("expected ping");
-        assert!(matches!(got, Event::Ping));
+        let got = rx.try_recv().expect("expected an envelope");
+        assert!(matches!(got.event, Event::Ping));
     }
 
     #[tokio::test]
     async fn publish_round_trips_through_subscribe() {
         let mut rx = subscribe();
-        publish(Event::SessionStarted {
-            session_id: "t1".into(),
-            project: "demo".into(),
-        });
+        let envelope = SessionEventEnvelope::new(
+            "t1".into(),
+            1,
+            Utc::now(),
+            Event::SessionStarted {
+                session_id: "t1".into(),
+                project: "demo".into(),
+            },
+        );
+        publish(envelope);
         let got = rx.recv().await.unwrap();
-        match got {
+        assert_eq!(got.session_id, "t1");
+        assert_eq!(got.seq, 1);
+        assert_eq!(got.kind, "session_started");
+        match got.event {
             Event::SessionStarted {
                 session_id,
                 project,
@@ -451,6 +647,98 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    /// `kind()` must match the serde `"type"` tag for every variant — the
+    /// guard `SessionEventEnvelope::new`'s doc comment references.
+    #[test]
+    fn kind_matches_serde_tag_for_every_variant() {
+        let samples: Vec<Event> = vec![
+            Event::SessionStarted {
+                session_id: "s".into(),
+                project: "p".into(),
+            },
+            Event::SessionDone {
+                session_id: "s".into(),
+                status: "done".into(),
+            },
+            Event::SessionCancelled {
+                session_id: "s".into(),
+            },
+            Event::SessionStatusChanged {
+                session_id: "s".into(),
+                status: "running".into(),
+            },
+            Event::SessionInput {
+                session_id: "s".into(),
+                input: "hi".into(),
+            },
+            Event::ToolStarted {
+                session_id: "s".into(),
+                tool: "bash".into(),
+                call_id: "c1".into(),
+                args_preview: "ls".into(),
+            },
+            Event::ToolFinished {
+                session_id: "s".into(),
+                tool: "bash".into(),
+                call_id: "c1".into(),
+                success: true,
+                result_preview: "ok".into(),
+            },
+            Event::ToolError {
+                session_id: "s".into(),
+                tool: "bash".into(),
+                call_id: "c1".into(),
+                error: "boom".into(),
+            },
+            Event::Log {
+                session_id: "s".into(),
+                level: "info".into(),
+                message: "m".into(),
+            },
+            Event::Progress {
+                session_id: "s".into(),
+                message: "m".into(),
+                percent: None,
+            },
+            Event::Message {
+                session_id: "s".into(),
+                text: "hi".into(),
+            },
+            Event::Ping,
+        ];
+        for ev in samples {
+            let value = serde_json::to_value(&ev).unwrap();
+            let wire_type = value["type"].as_str().unwrap_or("ping");
+            assert_eq!(
+                ev.kind(),
+                wire_type,
+                "kind() drifted from the serde tag for {ev:?}"
+            );
+        }
+    }
+
+    /// `SessionEventEnvelope` must round-trip through JSON with every field
+    /// present, and `kind` must be derived from `event.kind()`.
+    #[test]
+    fn session_event_envelope_round_trips_through_json() {
+        let event = Event::SessionInput {
+            session_id: "s1".into(),
+            input: "hello".into(),
+        };
+        let envelope = SessionEventEnvelope::new("s1".into(), 7, Utc::now(), event);
+
+        let value = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(value["session_id"], "s1");
+        assert_eq!(value["seq"], 7);
+        assert_eq!(value["kind"], "session_input");
+        assert_eq!(value["event"]["type"], "session_input");
+        assert!(value["at"].is_string());
+
+        let back: SessionEventEnvelope = serde_json::from_value(value).unwrap();
+        assert_eq!(back.session_id, "s1");
+        assert_eq!(back.seq, 7);
     }
 
     #[test]

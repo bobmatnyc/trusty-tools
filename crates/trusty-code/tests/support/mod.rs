@@ -10,9 +10,12 @@
 //! What: [`StdioSession`] (spawn + NDJSON request/response/notification
 //! I/O over real pipes), [`HttpDaemon`]/[`spawn_http_daemon`] (spawn +
 //! discover the bound HTTP address from stderr), [`find_response`]/
-//! [`find_session_event`] (classify a raw NDJSON line), and
-//! [`http_get_prefix`] (read a bounded prefix of a never-terminating SSE
-//! body).
+//! [`find_session_event`] (classify a raw NDJSON line), [`open_sse`]/
+//! [`read_sse_until`] (read one never-terminating SSE connection in
+//! stages), [`parse_sse_frames`] (split an SSE body into its JSON `data:`
+//! frames), and [`assert_envelopes_contiguous`] (#2055: the shared
+//! seq/field-presence check both the STDIO and HTTP/SSE e2e scenarios run
+//! against the SAME `SessionEventEnvelope` shape).
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -256,34 +259,48 @@ pub fn find_session_event(line: &str, session_id: &str) -> Option<Value> {
     }
 }
 
-/// Read a bounded prefix of a streaming HTTP GET response body until it
-/// contains `until_substr` or `total_timeout` elapses.
+/// Open `url` as a Server-Sent Events GET, asserting a successful status.
 ///
-/// Why: `GET /sessions/{id}/events` never terminates (the live half
-/// subscribes to the event bus forever), so a normal "read the whole body"
-/// helper would hang; this reads chunks via the response's byte stream
-/// until the expected content shows up.
-pub async fn http_get_prefix(
-    client: &reqwest::Client,
-    url: &str,
-    until_substr: &str,
-    total_timeout: Duration,
-) -> String {
-    use futures_util::StreamExt;
-
+/// Why: the #2055 replay->live continuity check needs to read ONE SSE
+/// connection in two stages (first the replay burst, then a live event
+/// published while still connected) — unlike [`http_get_prefix`], which
+/// opens a fresh connection per call and only proves replay content, not
+/// continuity within a single stream.
+/// What: returns the live `reqwest::Response`; pair with
+/// [`read_sse_until`] to pull further chunks from the SAME connection.
+pub async fn open_sse(client: &reqwest::Client, url: &str) -> reqwest::Response {
     let resp = client.get(url).send().await.expect("GET request");
     assert!(
         resp.status().is_success(),
         "GET {url} returned {}",
         resp.status()
     );
+    resp
+}
 
-    let mut stream = resp.bytes_stream();
-    let mut collected = Vec::new();
+/// Read more chunks from `resp` into `buffer` until it contains
+/// `until_substr` or `total_timeout` elapses.
+///
+/// Why: paired with [`open_sse`] so a test can read a SINGLE SSE connection
+/// in stages (replay, then a later live event) instead of opening a fresh
+/// GET per stage — which is what actually proves replay -> live continuity
+/// on one stream, per the #2055 requirement.
+/// What: appends to `buffer` in place (so a second call continues from
+/// where the first left off) via `Response::chunk()` — no `Stream`/`Bytes`
+/// naming needed at the call site.
+pub async fn read_sse_until(
+    resp: &mut reqwest::Response,
+    buffer: &mut Vec<u8>,
+    until_substr: &str,
+    total_timeout: Duration,
+) {
+    if String::from_utf8_lossy(buffer).contains(until_substr) {
+        return;
+    }
     let read = timeout(total_timeout, async {
-        while !String::from_utf8_lossy(&collected).contains(until_substr) {
-            match stream.next().await {
-                Some(Ok(chunk)) => collected.extend_from_slice(&chunk),
+        while !String::from_utf8_lossy(buffer).contains(until_substr) {
+            match resp.chunk().await {
+                Ok(Some(chunk)) => buffer.extend_from_slice(&chunk),
                 _ => break,
             }
         }
@@ -291,8 +308,63 @@ pub async fn http_get_prefix(
     .await;
     assert!(
         read.is_ok(),
-        "timed out waiting for {until_substr:?} in the SSE stream from {url}"
+        "timed out waiting for {until_substr:?} in the SSE stream"
     );
+}
 
-    String::from_utf8(collected).expect("SSE body must be valid UTF-8")
+/// Parse an SSE body (one or more `data: {...}` lines, possibly interleaved
+/// with blank lines or `:`-comment keep-alives) into the JSON objects it
+/// carries.
+///
+/// Why: the #2055 envelope assertions need to inspect individual event
+/// objects (`seq`, `kind`, `session_id`, ...), not just substring-match the
+/// raw SSE text the way [`http_get_prefix`]'s callers otherwise would.
+/// What: for each line starting with `data:`, strips the prefix and parses
+/// the remainder as JSON; lines that aren't `data:` or don't parse are
+/// skipped (SSE comment lines, a partially-read trailing frame at the
+/// prefix's read boundary).
+pub fn parse_sse_frames(text: &str) -> Vec<Value> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("data:"))
+        .filter_map(|rest| serde_json::from_str::<Value>(rest.trim()).ok())
+        .collect()
+}
+
+/// Assert that `envelopes` (in receipt order) each carry every
+/// `SessionEventEnvelope` field and form ONE gap-free, strictly increasing
+/// `seq` sequence; returns `(first_seq, last_seq)`.
+///
+/// Why: the #2055 correctness property this whole e2e suite exists to
+/// prove — factored out so the STDIO and HTTP/SSE scenarios run the exact
+/// same check against their respective wire representations of the same
+/// envelope shape.
+/// What: panics with the offending envelope on the first missing field or
+/// any `seq` that isn't exactly `previous + 1`. Panics on empty input too —
+/// every call site here always has at least the replay burst to check.
+pub fn assert_envelopes_contiguous(envelopes: &[Value]) -> (u64, u64) {
+    assert!(
+        !envelopes.is_empty(),
+        "expected at least one envelope to check"
+    );
+    let mut previous: Option<u64> = None;
+    for envelope in envelopes {
+        for field in ["session_id", "seq", "at", "kind", "event"] {
+            assert!(
+                envelope.get(field).is_some(),
+                "envelope missing required field {field:?}: {envelope}"
+            );
+        }
+        let seq = envelope["seq"].as_u64().expect("seq must be a u64");
+        if let Some(prev) = previous {
+            assert_eq!(
+                seq,
+                prev + 1,
+                "seq must increase by exactly 1 with no gaps or duplicates: {envelope}"
+            );
+        }
+        previous = Some(seq);
+    }
+    let first = envelopes[0]["seq"].as_u64().unwrap();
+    let last = envelopes[envelopes.len() - 1]["seq"].as_u64().unwrap();
+    (first, last)
 }

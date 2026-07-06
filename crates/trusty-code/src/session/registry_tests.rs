@@ -1,6 +1,7 @@
-//! Unit tests for `SessionRegistry` (#2054). Split out of `registry.rs` per
-//! the crate's `_tests.rs` sibling-file convention (see `intent::classifier_tests`
-//! for precedent) to keep the production file under the 500-SLOC cap.
+//! Unit tests for `SessionRegistry` (#2054, #2055). Split out of
+//! `registry.rs` per the crate's `_tests.rs` sibling-file convention (see
+//! `intent::classifier_tests` for precedent) to keep the production file
+//! under the 500-SLOC cap.
 
 use super::*;
 use tokio::sync::broadcast;
@@ -12,23 +13,26 @@ fn notify_channel() -> (NotifySender, mpsc::UnboundedReceiver<serde_json::Value>
     mpsc::unbounded_channel()
 }
 
-/// Read from the process-global event bus until an event matching
+/// Read from the process-global event bus until an envelope matching
 /// `session_id` arrives, ignoring anything else.
 ///
 /// Why: `crate::events::bus()` is a single process-wide singleton shared by
 /// every test in this binary; cargo runs tests concurrently, so a raw
-/// `events.recv().await` can observe another test's unrelated event
+/// `events.recv().await` can observe another test's unrelated envelope
 /// interleaved on the same subscription. Filtering by `session_id` (unique
 /// per test via a fresh UUID) makes these tests robust to that interleaving
-/// instead of assuming "the very next event is mine". Bounded by a 2s
+/// instead of assuming "the very next envelope is mine". Bounded by a 2s
 /// timeout so a genuine bug (event never published) still fails fast
 /// instead of hanging.
-async fn next_event_for(rx: &mut broadcast::Receiver<Event>, session_id: &str) -> Event {
+async fn next_event_for(
+    rx: &mut broadcast::Receiver<SessionEventEnvelope>,
+    session_id: &str,
+) -> SessionEventEnvelope {
     timeout(Duration::from_secs(2), async {
         loop {
-            let ev = rx.recv().await.expect("event bus closed unexpectedly");
-            if ev.session_id() == Some(session_id) {
-                return ev;
+            let envelope = rx.recv().await.expect("event bus closed unexpectedly");
+            if envelope.session_id == session_id {
+                return envelope;
             }
         }
     })
@@ -36,8 +40,9 @@ async fn next_event_for(rx: &mut broadcast::Receiver<Event>, session_id: &str) -
     .expect("timed out waiting for an event on this session")
 }
 
-/// `create` must publish `SessionStarted` then `SessionStatusChanged` (to
-/// `"running"`), and the returned snapshot must already be `Running`.
+/// `create` must publish `SessionStarted` (seq 1) then `SessionStatusChanged`
+/// (seq 2, `status: "running"`), and the returned snapshot must already be
+/// `Running`.
 #[tokio::test]
 async fn create_publishes_started_and_status_events() {
     let registry = SessionRegistry::new();
@@ -47,10 +52,15 @@ async fn create_publishes_started_and_status_events() {
     assert_eq!(session.status, SessionStatus::Running);
 
     let first = next_event_for(&mut events, &session.id).await;
-    assert!(matches!(first, Event::SessionStarted { project, .. } if project == "proj"));
+    assert_eq!(first.seq, 1);
+    assert_eq!(first.kind, "session_started");
+    assert!(matches!(first.event, Event::SessionStarted { project, .. } if project == "proj"));
 
     let second = next_event_for(&mut events, &session.id).await;
-    assert!(matches!(second, Event::SessionStatusChanged { status, .. } if status == "running"));
+    assert_eq!(second.seq, 2);
+    assert!(
+        matches!(second.event, Event::SessionStatusChanged { status, .. } if status == "running")
+    );
 }
 
 /// `list` must return every created session.
@@ -79,8 +89,9 @@ async fn send_publishes_input_event() {
 
     registry.send(&session.id, "hello").unwrap();
 
-    let ev = next_event_for(&mut events, &session.id).await;
-    assert!(matches!(ev, Event::SessionInput { input, .. } if input == "hello"));
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.seq, 3); // after SessionStarted(1), StatusChanged(2)
+    assert!(matches!(envelope.event, Event::SessionInput { input, .. } if input == "hello"));
 }
 
 /// `send` on an unknown session must error, not panic.
@@ -91,7 +102,9 @@ async fn send_unknown_session_errors() {
     assert_eq!(err.code, -32007);
 }
 
-/// `cancel` must transition to `Cancelled` and publish the terminal events.
+/// `cancel` must transition to `Cancelled` and publish the terminal events
+/// (`status_changed` -> `session_cancelled` -> `session_done`), each with a
+/// strictly increasing `seq`.
 #[tokio::test]
 async fn cancel_transitions_to_cancelled_and_publishes() {
     let registry = SessionRegistry::new();
@@ -103,10 +116,19 @@ async fn cancel_transitions_to_cancelled_and_publishes() {
 
     let status_changed = next_event_for(&mut events, &session.id).await;
     assert!(
-        matches!(status_changed, Event::SessionStatusChanged { status, .. } if status == "cancelled")
+        matches!(status_changed.event, Event::SessionStatusChanged { status, .. } if status == "cancelled")
     );
+
+    let cancelled_event = next_event_for(&mut events, &session.id).await;
+    assert!(matches!(
+        cancelled_event.event,
+        Event::SessionCancelled { .. }
+    ));
+    assert!(cancelled_event.seq > status_changed.seq);
+
     let done = next_event_for(&mut events, &session.id).await;
-    assert!(matches!(done, Event::SessionDone { status, .. } if status == "cancelled"));
+    assert!(matches!(done.event, Event::SessionDone { status, .. } if status == "cancelled"));
+    assert!(done.seq > cancelled_event.seq);
 
     // Idempotent: cancelling again returns the same terminal snapshot,
     // no error, no further events required.
@@ -122,7 +144,8 @@ async fn cancel_unknown_session_errors() {
     assert_eq!(err.code, -32007);
 }
 
-/// `attach` must replay the ring buffer accumulated so far.
+/// `attach` must replay the ring buffer accumulated so far, in order, with
+/// `seq` starting at 1 and increasing by 1 per entry.
 #[tokio::test]
 async fn attach_returns_ring_buffer_replay() {
     let registry = SessionRegistry::new();
@@ -132,13 +155,18 @@ async fn attach_returns_ring_buffer_replay() {
     let (tx, _rx) = notify_channel();
     let replay = registry.attach(&session.id, Uuid::new_v4(), tx).unwrap();
 
-    // SessionStarted, SessionStatusChanged(running), SessionInput(one).
+    // SessionStarted(1), SessionStatusChanged(2, running), SessionInput(3).
     assert_eq!(replay.len(), 3);
-    assert!(matches!(replay.last().unwrap(), Event::SessionInput { input, .. } if input == "one"));
+    let seqs: Vec<u64> = replay.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, vec![1, 2, 3]);
+    assert!(
+        matches!(&replay.last().unwrap().event, Event::SessionInput { input, .. } if input == "one")
+    );
 }
 
 /// After `attach`, a live event published on the session must be forwarded
-/// to the connection's notify channel as a JSON-RPC notification.
+/// to the connection's notify channel as a JSON-RPC notification whose
+/// `params` is the full envelope.
 #[tokio::test]
 async fn attach_forwards_live_events_until_detach() {
     let registry = SessionRegistry::new();
@@ -156,8 +184,11 @@ async fn attach_forwards_live_events_until_detach() {
         .expect("channel must still be open");
     assert_eq!(notification["method"], "session.event");
     assert_eq!(notification["params"]["session_id"], session.id);
+    assert_eq!(notification["params"]["seq"], 3);
+    assert_eq!(notification["params"]["kind"], "session_input");
     assert_eq!(notification["params"]["event"]["type"], "session_input");
     assert_eq!(notification["params"]["event"]["input"], "live");
+    assert!(notification["params"]["at"].is_string());
 
     registry.detach(&session.id, connection_id).unwrap();
     // The forwarder task is cancelled by waking its `select!` on a
@@ -178,6 +209,37 @@ async fn attach_forwards_live_events_until_detach() {
         Err(_) => {}   // timed out waiting: nothing arrived, good.
         Ok(None) => {} // channel closed: nothing arrived, good.
         Ok(Some(v)) => panic!("no event should arrive after detach, got {v:?}"),
+    }
+}
+
+/// Replay and live events must share ONE gap-free, strictly increasing
+/// `seq` — the correctness property the whole envelope design exists for.
+#[tokio::test]
+async fn attach_replay_then_live_seq_is_contiguous() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    registry.send(&session.id, "before-attach").unwrap();
+
+    let (tx, mut rx) = notify_channel();
+    let replay = registry.attach(&session.id, Uuid::new_v4(), tx).unwrap();
+    let last_replay_seq = replay.last().unwrap().seq;
+
+    registry.send(&session.id, "after-attach").unwrap();
+    let notification = timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("forwarder must deliver the live event")
+        .expect("channel must still be open");
+    let live_seq = notification["params"]["seq"].as_u64().unwrap();
+
+    assert_eq!(
+        live_seq,
+        last_replay_seq + 1,
+        "no gap and no duplicate between replay and live"
+    );
+
+    // The whole replay sequence itself must be gap-free from 1.
+    for (i, envelope) in replay.iter().enumerate() {
+        assert_eq!(envelope.seq, (i as u64) + 1);
     }
 }
 
@@ -229,10 +291,162 @@ async fn ring_buffer_drops_oldest_when_full() {
     let replay = registry.replay(&session.id).unwrap();
     assert_eq!(replay.len(), 2);
     assert!(matches!(
-        replay.first().unwrap(),
+        replay.first().unwrap().event,
         Event::SessionStatusChanged { .. }
     ));
     assert!(
-        matches!(replay.last().unwrap(), Event::SessionInput { input, .. } if input == "evicts-started")
+        matches!(&replay.last().unwrap().event, Event::SessionInput { input, .. } if input == "evicts-started")
+    );
+    // Eviction must not reset the seq counter — the surviving entries keep
+    // their original sequence numbers (2, 3), not renumbered to (1, 2).
+    let seqs: Vec<u64> = replay.iter().map(|e| e.seq).collect();
+    assert_eq!(seqs, vec![2, 3]);
+}
+
+/// `record_tool_started` must publish a `ToolStarted` event with a
+/// truncated `args_preview`.
+#[tokio::test]
+async fn record_tool_started_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_tool_started(&session.id, "bash", "call-1", "ls -la")
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "tool_started");
+    assert!(matches!(
+        envelope.event,
+        Event::ToolStarted { tool, call_id, args_preview, .. }
+            if tool == "bash" && call_id == "call-1" && args_preview == "ls -la"
+    ));
+}
+
+/// `record_tool_finished` must publish a `ToolFinished` event carrying
+/// `success` and a truncated `result_preview`.
+#[tokio::test]
+async fn record_tool_finished_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_tool_finished(&session.id, "bash", "call-1", true, "done")
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "tool_finished");
+    assert!(matches!(
+        envelope.event,
+        Event::ToolFinished { success, result_preview, .. } if success && result_preview == "done"
+    ));
+}
+
+/// `record_tool_error` must publish a `ToolError` event.
+#[tokio::test]
+async fn record_tool_error_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_tool_error(&session.id, "bash", "call-1", "timed out")
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "tool_error");
+    assert!(matches!(envelope.event, Event::ToolError { error, .. } if error == "timed out"));
+}
+
+/// `record_log` must publish a `Log` event.
+#[tokio::test]
+async fn record_log_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_log(&session.id, "warn", "disk almost full")
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "log");
+    assert!(
+        matches!(envelope.event, Event::Log { level, message, .. } if level == "warn" && message == "disk almost full")
+    );
+}
+
+/// `record_progress` must publish a `Progress` event.
+#[tokio::test]
+async fn record_progress_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    let mut events = crate::events::subscribe();
+
+    registry
+        .record_progress(&session.id, "indexing", Some(0.5))
+        .unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "progress");
+    assert!(matches!(envelope.event, Event::Progress { percent: Some(p), .. } if p == 0.5));
+}
+
+/// `record_message` must publish a `Message` event.
+#[tokio::test]
+async fn record_message_publishes_event() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    let mut events = crate::events::subscribe();
+
+    registry.record_message(&session.id, "hello world").unwrap();
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert_eq!(envelope.kind, "message");
+    assert!(matches!(envelope.event, Event::Message { text, .. } if text == "hello world"));
+}
+
+/// Every `record_*` emission-plumbing method must reject an unknown
+/// session id with `session_not_found` rather than panicking.
+#[tokio::test]
+async fn record_plumbing_methods_reject_unknown_session() {
+    let registry = SessionRegistry::new();
+    assert_eq!(
+        registry
+            .record_tool_started("nope", "t", "c", "a")
+            .unwrap_err()
+            .code,
+        -32007
+    );
+    assert_eq!(
+        registry
+            .record_tool_finished("nope", "t", "c", true, "r")
+            .unwrap_err()
+            .code,
+        -32007
+    );
+    assert_eq!(
+        registry
+            .record_tool_error("nope", "t", "c", "e")
+            .unwrap_err()
+            .code,
+        -32007
+    );
+    assert_eq!(
+        registry.record_log("nope", "info", "m").unwrap_err().code,
+        -32007
+    );
+    assert_eq!(
+        registry
+            .record_progress("nope", "m", None)
+            .unwrap_err()
+            .code,
+        -32007
+    );
+    assert_eq!(
+        registry.record_message("nope", "m").unwrap_err().code,
+        -32007
     );
 }
