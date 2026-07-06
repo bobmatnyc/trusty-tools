@@ -2,13 +2,16 @@
 //!
 //! # Why
 //!
-//! open-mpm is the general-purpose MPM orchestration platform, but each project
-//! needs a harness that is *already* wired to its own `.claude` configuration:
-//! agents, skills, MCP connections, CLAUDE.md, and permissions. `trusty-code`
-//! fills that role. It is the Claude-Code-native orchestration entry point —
+//! Each Claude-Code project needs a harness that is *already* wired to its
+//! own `.claude` configuration: agents, skills, MCP connections, CLAUDE.md,
+//! and permissions. `trusty-code` fills that role as an original, purpose-built
+//! coding harness. It is the Claude-Code-native orchestration entry point —
 //! driven by API, CLI, or TUI — that runs the PM main-loop, enforces the
 //! mandatory workflow, and delegates authority to typed sub-agents according to
-//! MPM protocols. Extraction from open-mpm is tracked in epic #587.
+//! MPM protocols. Its non-coding sibling, trusty-agents, is a
+//! separately-installable general-purpose orchestration platform for
+//! personal-productivity workflows; the two share architectural DNA but
+//! trusty-code is not extracted from it. Tracked under epic #2052.
 //!
 //! # Design constraints
 //!
@@ -26,8 +29,7 @@
 //!
 //! # What
 //!
-//! Phase 1 public surface (leaf/protocol modules extracted from open-mpm per
-//! #640):
+//! Phase 1 public surface (leaf/protocol modules, per #640):
 //!
 //! * [`events`] — process-global broadcast event bus.
 //! * [`ipc`] — NDJSON IPC protocol for PM ↔ sub-agent communication.
@@ -52,7 +54,7 @@
 //!
 //! `cargo test -p trusty-code` — all modules carry their own unit tests.
 
-// ── Phase 1 leaf/protocol modules (extracted from open-mpm per #640) ──
+// ── Phase 1 leaf/protocol modules (per #640) ──
 
 /// Process-wide broadcast event bus for real-time UI streaming.
 ///

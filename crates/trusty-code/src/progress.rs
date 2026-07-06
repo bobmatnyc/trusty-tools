@@ -88,7 +88,7 @@ impl ProgressReporter {
         let arrow = wrap(self.use_color, COLOR_CYAN, "▶");
         let arrow = wrap(self.use_color, COLOR_DIM, &arrow);
         let name = wrap(self.use_color, COLOR_BOLD, &format!("{phase:<10}"));
-        format!("[open-mpm] {arrow} {name} starting…")
+        format!("[tcode] {arrow} {name} starting…")
     }
 
     /// Print "phase starting" to stderr.
@@ -110,9 +110,9 @@ impl ProgressReporter {
         let stats = wrap(self.use_color, COLOR_DIM, &stats);
         match note {
             Some(n) if !n.is_empty() => {
-                format!("[open-mpm] {check} {name} done  {stats} — {n}")
+                format!("[tcode] {check} {name} done  {stats} — {n}")
             }
-            _ => format!("[open-mpm] {check} {name} done  {stats}"),
+            _ => format!("[tcode] {check} {name} done  {stats}"),
         }
     }
 
@@ -133,7 +133,7 @@ impl ProgressReporter {
         // Truncate long errors to keep the line readable.
         let short = error.lines().next().unwrap_or(error);
         let short: String = short.chars().take(120).collect();
-        eprintln!("\r[open-mpm] {cross} {name} failed {stats} — {short}");
+        eprintln!("\r[tcode] {cross} {name} failed {stats} — {short}");
     }
 
     /// Print a "code wave starting" line for the wave-loop branch of the code
@@ -143,7 +143,7 @@ impl ProgressReporter {
         let arrow = wrap(self.use_color, COLOR_DIM, "▶");
         let name = wrap(self.use_color, COLOR_BOLD, "code      ");
         eprintln!(
-            "\r[open-mpm] {arrow} {name} wave {wave_index}/{wave_total}  ({file_count} file{plural})",
+            "\r[tcode] {arrow} {name} wave {wave_index}/{wave_total}  ({file_count} file{plural})",
             plural = if file_count == 1 { "" } else { "s" },
         );
     }
@@ -157,7 +157,7 @@ impl ProgressReporter {
             COLOR_DIM,
             &format!("({})", format_duration(elapsed)),
         );
-        eprintln!("\r[open-mpm] {check} {name} wave {wave_index}/{wave_total} done {stats}");
+        eprintln!("\r[tcode] {check} {name} wave {wave_index}/{wave_total} done {stats}");
     }
 
     /// Print the final workflow-complete summary line.
@@ -173,7 +173,7 @@ impl ProgressReporter {
                 total_cost
             ),
         );
-        eprintln!("\r[open-mpm] {check} {name} complete  {stats}");
+        eprintln!("\r[tcode] {check} {name} complete  {stats}");
     }
 
     /// Workflow-level start time accessor (used by callers that want to show
@@ -215,7 +215,7 @@ mod tests {
         let s = r.format_phase_start("research");
         assert!(s.contains("research"), "got: {s}");
         assert!(s.contains("starting"), "got: {s}");
-        assert!(s.starts_with("[open-mpm]"), "got: {s}");
+        assert!(s.starts_with("[tcode]"), "got: {s}");
         // No ANSI when color disabled.
         assert!(!s.contains("\x1b["), "expected no ANSI in: {s}");
     }

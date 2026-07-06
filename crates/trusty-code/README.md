@@ -14,7 +14,7 @@ according to MPM protocols.
 
 What: Per-project coding orchestration harness. One `tcode serve` process per
 `.claude/` project root. Accepts task requests from CLI clients, TUI frontends,
-and MCP callers. Full extraction from `open-mpm` is tracked in epic #587.
+and MCP callers. An original coding harness, tracked under epic #2052.
 
 ## Installation
 

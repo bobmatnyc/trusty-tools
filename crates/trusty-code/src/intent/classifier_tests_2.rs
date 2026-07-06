@@ -199,7 +199,7 @@ fn underscores_preserved_prevent_false_action_match() {
 #[test]
 fn hyphens_preserved_in_identifiers() {
     assert_eq!(
-        classify_intent("what is open-mpm"),
+        classify_intent("what is trusty-code"),
         IntentClass::Conversational
     );
 }
@@ -255,7 +255,7 @@ fn single_ambiguous_word_is_conversational() {
 fn normalize_strips_punctuation_preserves_apostrophe() {
     assert_eq!(normalize("Hello!!!"), "hello");
     assert_eq!(normalize("what's up?"), "what's up");
-    assert_eq!(normalize("open-mpm"), "open-mpm");
+    assert_eq!(normalize("trusty-code"), "trusty-code");
     assert_eq!(normalize("run_pm_task"), "run_pm_task");
 }
 

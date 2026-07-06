@@ -8,7 +8,7 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Per-project Claude-Code-compatible MPM orchestration harness (bin: tcode). Phase 1-3/6 modules extracted from open-mpm. Full extraction tracked in #587."
+description = "Per-project Claude-Code-compatible MPM orchestration harness (bin: tcode) — an original coding harness, tracked under epic #2052."
 publish = false
 
 [[bin]]

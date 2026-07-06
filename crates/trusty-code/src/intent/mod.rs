@@ -151,8 +151,8 @@ const SELF_QUESTIONS: &[&str] = &[
     "what are you",
     "who are you",
     "what can you do",
-    "what is open-mpm",
-    "what is open mpm",
+    "what is trusty-code",
+    "what is trusty code",
     "what do you do",
     "what's your name",
     "whats your name",
@@ -164,7 +164,7 @@ const SELF_QUESTIONS: &[&str] = &[
 ///
 /// Why: Users write "Hello!" / "hi." / "hey," — comparing to plain "hello"
 /// requires normalization. We keep apostrophes (so "what's" stays whole)
-/// and internal hyphens (so "open-mpm" stays whole).
+/// and internal hyphens (so "trusty-code" stays whole).
 /// What: Lowercases and replaces ASCII punctuation (except `'`, `-`, `_`)
 /// with spaces, then collapses runs of whitespace. Underscores are preserved
 /// so identifiers like `run_pm_task_with_session` remain a single token
