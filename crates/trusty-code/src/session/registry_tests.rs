@@ -549,10 +549,36 @@ async fn set_run_outcome_stores_transcript_and_usage() {
         Some(0.01),
     );
 
-    // No public getter exists yet (session.get_transcript is #2058); this
-    // test proves the call is infallible and side-effect-free on a missing
-    // session, which is the only externally-observable contract for now.
+    let stored = registry.get_transcript(&session.id).unwrap();
+    assert_eq!(stored.turns, turns);
+    assert_eq!(stored.usage, crate::perf::TokenUsage::new(10, 5, 0, 0));
+    assert_eq!(stored.cost_usd, Some(0.01));
+
+    // A no-op on a missing session, not a panic.
     registry.set_run_outcome("nope", turns, crate::perf::TokenUsage::default(), None);
+}
+
+/// `get_transcript` on a session that has never run a task must return an
+/// empty, valid `TranscriptRecord` — not an error (#2058).
+#[tokio::test]
+async fn get_transcript_on_never_run_session_is_empty() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+
+    let transcript = registry.get_transcript(&session.id).unwrap();
+    assert_eq!(transcript.session_id, session.id);
+    assert!(transcript.turns.is_empty());
+    assert_eq!(transcript.usage, crate::perf::TokenUsage::default());
+    assert_eq!(transcript.cost_usd, None);
+}
+
+/// `get_transcript` on an unknown session must error `session_not_found`
+/// (#2058).
+#[tokio::test]
+async fn get_transcript_unknown_session_errors() {
+    let registry = SessionRegistry::new();
+    let err = registry.get_transcript("nope").unwrap_err();
+    assert_eq!(err.code, -32007);
 }
 
 /// `shutdown_executions` must flip every tracked execution's cancel flag and

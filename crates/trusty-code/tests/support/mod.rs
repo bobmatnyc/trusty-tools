@@ -293,6 +293,79 @@ pub fn find_session_event(line: &str, session_id: &str) -> Option<Value> {
     }
 }
 
+/// Drive `task.run` -> `session.attach` -> read-until-`session_done` over an
+/// already-spawned [`StdioSession`], returning the session id once the run
+/// has reached a terminal state.
+///
+/// Why: (#2058) both `tests/task_e2e.rs`'s live-tool-event assertions and its
+/// `session.get_transcript` assertions need "run a task to completion" as a
+/// precondition — `get_transcript` in particular must not be called before
+/// `task::executor::run_and_record` has stored the outcome via
+/// `SessionRegistry::set_run_outcome`, or the transcript would still be
+/// empty. Factored out so both call sites share the exact same
+/// read-until-terminal logic rather than copy-pasting the polling loop.
+/// What: calls `task.run` (id 1) and `session.attach` (id 2) — these two ids
+/// are reserved by this helper, so callers must start their OWN subsequent
+/// request ids at 3 — then reads NDJSON lines, classifying each as a
+/// `session.event` for this session, until `session_done` is observed (or
+/// panics after 20 read rounds, mirroring the bounded wait every other e2e
+/// polling loop in this crate uses). Returns the session id.
+pub async fn run_task_to_completion(daemon: &mut StdioSession, task_description: &str) -> String {
+    let run_resp = daemon
+        .call(1, "task.run", json!({"task_description": task_description}))
+        .await;
+    assert!(run_resp["error"].is_null(), "task.run failed: {run_resp}");
+    let session_id = run_resp["result"]["session_id"]
+        .as_str()
+        .expect("task.run must return a session_id")
+        .to_string();
+
+    let attach_resp = daemon
+        .call(2, "session.attach", json!({"session_id": session_id}))
+        .await;
+    assert!(
+        attach_resp["error"].is_null(),
+        "attach failed: {attach_resp}"
+    );
+    let mut kinds: Vec<String> = attach_resp["result"]["events"]
+        .as_array()
+        .expect("attach must return a replay events array")
+        .iter()
+        .map(|e| {
+            e["kind"]
+                .as_str()
+                .expect("kind must be a string")
+                .to_string()
+        })
+        .collect();
+
+    let mut iterations = 0;
+    while !kinds.iter().any(|k| k == "session_done") {
+        iterations += 1;
+        assert!(
+            iterations < 20,
+            "gave up waiting for session_done after {iterations} read rounds; kinds so far: {kinds:?}"
+        );
+        let lines = daemon.read_lines(20).await;
+        assert!(
+            !lines.is_empty(),
+            "timed out waiting for more events; kinds so far: {kinds:?}"
+        );
+        for line in &lines {
+            if let Some(envelope) = find_session_event(line, &session_id) {
+                kinds.push(
+                    envelope["kind"]
+                        .as_str()
+                        .expect("kind must be a string")
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    session_id
+}
+
 /// Open `url` as a Server-Sent Events GET, asserting a successful status.
 ///
 /// Why: the #2055 replay->live continuity check needs to read ONE SSE
