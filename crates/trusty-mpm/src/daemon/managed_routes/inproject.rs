@@ -1,27 +1,35 @@
-//! In-project spawn path: shared base clone + per-session worktrees (#1706, #1803).
+//! In-project spawn path: shared base clone + per-session worktrees (#1706, #1803, #2032).
 //!
 //! Why: operators who run `tm` from inside a git repository should get a managed
 //! session against a git-worktree slice of that repo rather than a full clone.
 //! This module implements the "in-project" path: (a) a durable PROTECTED base
 //! clone under `~/trusty-mpm-projects/<owner>/<repo>/` that is always on the
 //! default branch and owned by the daemon, and (b) a per-session git worktree
-//! at `<base>/.worktrees/<session_id>` branched off that clone so each session
-//! works in isolation.
+//! at `<base>/.worktrees/<worktree_name>` branched off that clone so each
+//! session works in isolation. Since #2032 `worktree_name` is the SEMANTIC
+//! tmux session name (e.g. `tm-trusty-tools-01`), not the raw session UUID —
+//! resolving that name requires the async `SessionManager`, which this module
+//! deliberately does not depend on, so worktree CREATION is split from
+//! DETECTION (see [`try_inproject_spawn`] vs [`create_session_worktree`]).
+//! Existing UUID-named worktrees are left as-is; only NEW sessions get the
+//! semantic name.
 //! What: [`repos_root`] resolves the configurable root; [`base_clone_path`]
 //! computes the per-project clone directory; [`ensure_base_clone`] clones if
-//! absent; [`create_session_worktree`] adds a per-session worktree at
-//! `<base>/.worktrees/<session_id>`; [`ensure_worktrees_gitignored`] keeps
-//! the worktree directory out of `git status`; [`try_inproject_spawn`] is the
-//! main entry point called from the lifecycle layer;
-//! [`get_origin_url`] reads the remote.origin.url from a git directory.
+//! absent; [`try_inproject_spawn`] is the main entry point called from the
+//! lifecycle layer — it detects the GitHub identity and ensures the base
+//! clone, returning `(base_path, owner, repo)`; [`create_session_worktree`]
+//! adds a per-session worktree at `<base>/.worktrees/<worktree_name>` given a
+//! CALLER-RESOLVED name; [`worktree_name_collides`] lets the caller steer name
+//! resolution away from an existing worktree dir/branch;
+//! [`ensure_worktrees_gitignored`] keeps the worktree directory out of
+//! `git status`; [`get_origin_url`] reads the remote.origin.url from a git
+//! directory.
 //! Test: `try_inproject_spawn_returns_none_for_non_git_path` unit test covers the
 //! non-git early exit; integration coverage via `tests/local_spawn.rs`.
 
 use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
-
-use crate::session_manager::ManagedSessionId;
 
 /// Environment variable that overrides the managed repos root.
 ///
@@ -292,19 +300,101 @@ pub fn ensure_base_clone(origin_url: &str, base_path: &Path) -> Result<(), Strin
     Ok(())
 }
 
+/// Compute the per-session worktree directory for `worktree_name` under `base_path`.
+///
+/// Why: both [`create_session_worktree`] and the caller-side collision check
+/// ([`worktree_name_collides`], used by the in-project spawn routing layer to
+/// steer `SessionManager::resolve_session_name` away from a name whose
+/// worktree already exists on disk, #2032) must agree on exactly where a
+/// worktree for a given name would live.
+/// What: `<base_path>/.worktrees/<worktree_name>` (dot-prefixed so
+/// `ensure_worktrees_gitignored` hides it from `git status`).
+/// Test: `session_worktree_path_uses_dot_prefix`.
+pub fn worktree_path_for(base_path: &Path, worktree_name: &str) -> PathBuf {
+    base_path.join(".worktrees").join(worktree_name)
+}
+
+/// Compute the per-session branch name for `worktree_name`.
+///
+/// Why: re-exported here (rather than defined here) so existing callers in
+/// this module keep the short `worktree_branch_for(...)` spelling. The single
+/// source of truth lives in [`crate::core::worktree_naming`] — an
+/// unconditionally-compiled module — specifically so
+/// `session_manager::decommission` (which is NOT gated behind the `daemon`
+/// feature) can depend on the SAME convention without pulling in this
+/// feature-gated `daemon` module (#2032; see that module's doc for why the
+/// dependency direction matters).
+/// What: `format!("session/{worktree_name}")`.
+/// Test: `crate::core::worktree_naming::tests::worktree_branch_for_adds_session_prefix`.
+pub use crate::core::worktree_naming::worktree_branch_for;
+
+/// Check whether a worktree directory or branch already exists for `worktree_name`.
+///
+/// Why (#2032): `tmux_name` collisions were already guarded by
+/// `SessionManager::resolve_session_name`'s live-tmux-session check, but that
+/// check knows nothing about git worktrees or branches — a DIFFERENT
+/// collision surface. Without this, two names could theoretically differ in
+/// tmux-liveness (one dead, one live) yet share the same worktree directory
+/// once #2032 makes the worktree leaf equal to the tmux name, silently
+/// clobbering (or failing to clobber, but confusingly erroring on) a stale
+/// worktree left behind by a hand-deleted-but-not-decommissioned session.
+/// This predicate is threaded into `resolve_session_name` as its
+/// `extra_collision` callback so a colliding candidate is retried with the
+/// next free serial BEFORE `create_session_worktree` ever runs, rather than
+/// discovered as a raw `git worktree add`/`git branch` failure.
+/// What: `true` if `<base_path>/.worktrees/<worktree_name>` exists on disk OR
+/// `refs/heads/session/<worktree_name>` already exists in `base_path`'s repo.
+/// Test: `worktree_name_collides_detects_existing_dir_and_branch`.
+pub fn worktree_name_collides(base_path: &Path, worktree_name: &str) -> bool {
+    if worktree_path_for(base_path, worktree_name).exists() {
+        return true;
+    }
+    let branch_ref = format!("refs/heads/{}", worktree_branch_for(worktree_name));
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(base_path)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(&branch_ref)
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
 /// Create a per-session git worktree branched off the base clone.
 ///
 /// Why: each managed session must work in an isolated branch; git worktrees
-/// achieve this without duplicating the object store of the base clone.
-/// What: runs `git -C <base_path> worktree add -b session/<session_id>
-/// <base_path>/.worktrees/<session_id>`. Returns the worktree path on success.
-/// Test: covered by integration tests against a real temp repo.
-pub fn create_session_worktree(
-    base_path: &Path,
-    session_id: &ManagedSessionId,
-) -> Result<PathBuf, String> {
-    let worktree_path = base_path.join(".worktrees").join(session_id.to_string());
-    let branch = format!("session/{session_id}");
+/// achieve this without duplicating the object store of the base clone. Since
+/// #2032 the caller supplies the ALREADY-RESOLVED semantic tmux name (e.g.
+/// `tm-trusty-tools-01`) rather than the raw session UUID, so the worktree
+/// directory and branch are human-readable and match the tmux session the
+/// operator actually sees in `tm session ls`.
+///
+/// NOTE for #2033 (trusty-search index-id derivation): the worktree LEAF NAME
+/// computed here (`worktree_name`) is significant beyond this function — the
+/// trusty-search index id for a managed session is derived from the worktree
+/// path, so #2033 must read the ACTUAL path this function returns (or the
+/// record's `workspace_path`, which `spawn_managed_inproject` sets to this
+/// same path) rather than re-deriving a path from the session id.
+/// What: runs `git -C <base_path> worktree add -b session/<worktree_name>
+/// <base_path>/.worktrees/<worktree_name>`. Returns the worktree path on
+/// success. Fails loudly (rather than silently clobbering) if the target
+/// worktree directory already exists — callers are expected to have already
+/// steered `SessionManager::resolve_session_name` away from a colliding name
+/// via [`worktree_name_collides`], so hitting this guard indicates a TOCTOU
+/// race or a caller that skipped the collision check.
+/// Test: covered by integration tests against a real temp repo;
+/// `create_session_worktree_rejects_existing_worktree_dir`.
+pub fn create_session_worktree(base_path: &Path, worktree_name: &str) -> Result<PathBuf, String> {
+    let worktree_path = worktree_path_for(base_path, worktree_name);
+    let branch = worktree_branch_for(worktree_name);
+
+    if worktree_path.exists() {
+        return Err(format!(
+            "inproject: worktree path already exists: {} — refusing to clobber \
+             (this should have been caught by the pre-reservation collision check)",
+            worktree_path.display()
+        ));
+    }
 
     info!(
         base = %base_path.display(),
@@ -425,22 +515,26 @@ pub fn get_origin_url(path: &Path) -> Option<String> {
     if url.is_empty() { None } else { Some(url) }
 }
 
-/// Main entry point for the in-project spawn path (#1706).
+/// Main entry point for the in-project spawn path's DETECTION phase (#1706, #2032).
 ///
 /// Why: the lifecycle layer needs a single call that encapsulates in-project
-/// detection and setup: is the given path inside a git repo with a GitHub remote?
-/// If so, ensure the base clone exists and create a per-session worktree.
+/// detection: is the given path inside a git repo with a GitHub remote? If so,
+/// ensure the base clone exists. Since #2032 this function STOPS SHORT of
+/// creating the per-session worktree: the worktree directory/branch must be
+/// named after the semantic tmux name (resolved via
+/// `SessionManager::resolve_session_name`), which requires the session
+/// manager's async store/tmux state that this synchronous, decoupled module
+/// deliberately has no access to. The caller
+/// (`daemon::managed_routes::lifecycle::spawn_managed_routed`) resolves the
+/// name and calls [`create_session_worktree`] itself.
 /// What: (1) checks that `path` is an existing directory with a `.git` entry;
 /// (2) reads the `remote.origin.url` — returns `Ok(None)` if absent;
 /// (3) parses the URL via `trusty_common::github_path::parse_github_path` —
-/// returns `Ok(None)` if unparseable; (4) calls [`ensure_base_clone`] and
-/// [`create_session_worktree`]; (5) returns `Ok(Some((worktree_path, owner, repo)))`.
-/// Steps 4–5 errors propagate as `Err`.
+/// returns `Ok(None)` if unparseable; (4) calls [`ensure_base_clone`];
+/// (5) returns `Ok(Some((base_clone_path, owner, repo)))` — NOT a worktree
+/// path (that was the pre-#2032 contract). Step 4 errors propagate as `Err`.
 /// Test: `try_inproject_spawn_returns_none_for_non_git_path` (unit).
-pub fn try_inproject_spawn(
-    path: &Path,
-    session_id: &ManagedSessionId,
-) -> Result<Option<(PathBuf, String, String)>, String> {
+pub fn try_inproject_spawn(path: &Path) -> Result<Option<(PathBuf, String, String)>, String> {
     if !path.is_dir() || !path.join(".git").exists() {
         return Ok(None);
     }
@@ -463,17 +557,15 @@ pub fn try_inproject_spawn(
 
     let base = base_clone_path(&gh.owner, &gh.repo);
     ensure_base_clone(&origin_url, &base)?;
-    let worktree = create_session_worktree(&base, session_id)?;
 
     info!(
         owner = %gh.owner,
         repo = %gh.repo,
-        worktree = %worktree.display(),
-        session = %session_id,
-        "inproject: per-session worktree ready"
+        base = %base.display(),
+        "inproject: base clone ready for per-session worktree"
     );
 
-    Ok(Some((worktree, gh.owner, gh.repo)))
+    Ok(Some((base, gh.owner, gh.repo)))
 }
 
 #[cfg(test)]

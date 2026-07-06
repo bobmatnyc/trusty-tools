@@ -95,11 +95,18 @@ fn is_session_worktree(path: &Path) -> bool {
 /// What: runs `git -C <repo-root> worktree remove --force <path>` where
 /// `<repo-root>` is the grandparent of the worktree directory
 /// (`path` → `.worktrees` → `<repo-root>`). Also runs
-/// `git -C <repo-root> worktree prune` and `git -C <repo-root> branch -D <session>`
-/// on success to clear stale git refs and the session branch. `<session>` is
-/// the last component of `path` (the worktree dir name). Branch deletion is
-/// best-effort — "not found" is silently ignored since older sessions may not
-/// have a branch. OsStr-safe path args avoid lossy UTF-8 coercion (#1840).
+/// `git -C <repo-root> worktree prune` and
+/// `git -C <repo-root> branch -D session/<leaf>` on success to clear stale git
+/// refs and the session branch, where `<leaf>` is the last component of `path`
+/// (the worktree dir name) and the `session/` prefix matches EXACTLY what
+/// `inproject::create_session_worktree` creates (issue #2032 fix — before
+/// this, the missing prefix meant the branch delete always targeted a
+/// nonexistent ref and silently no-opped, leaking every session's branch).
+/// Works identically for both pre-#2032 UUID-named leaves and the new
+/// semantic-tmux-name leaves, since both share the `session/<leaf>`
+/// convention. Branch deletion is best-effort — "not found" is silently
+/// ignored since older sessions may not have a branch. OsStr-safe path args
+/// avoid lossy UTF-8 coercion (#1840).
 /// Idempotent: if `path` is already absent, returns `true` (already removed).
 /// On git failure, best-effort falls back to `remove_dir_all` and logs WARN.
 /// Returns `true` when the workspace was removed (either via git or fallback)
@@ -205,22 +212,35 @@ pub(super) fn remove_session_worktree(path: &Path) -> bool {
             warn!(root = %repo_root.display(), "decommission: git worktree prune failed: {e}");
         }
 
-        // Step 3: delete the session branch ref (if any). The branch name matches
-        // the worktree dir name. Ignore "not found" — the branch may not exist for
-        // older sessions that never created one (#1840).
-        if let Some(session_name) = path.file_name() {
+        // Step 3: delete the session branch ref (if any). #2032 FIX: the branch
+        // `create_session_worktree` actually creates is `session/<worktree-leaf>`
+        // (see `crate::core::worktree_naming::worktree_branch_for` — the SAME
+        // convention `daemon::managed_routes::inproject::create_session_worktree`
+        // uses), NOT the bare leaf name. Before this fix the missing `session/`
+        // prefix meant `git branch -D <leaf>` always targeted a nonexistent
+        // branch and silently fell into the "not found" debug-log path below —
+        // session branches were NEVER actually cleaned up. This works
+        // identically for both OLD (raw-UUID-named, pre-#2032) and NEW
+        // (semantic-tmux-name) worktree leaves, since both used/use the same
+        // `session/<leaf>` convention for the branch name. Ignore "not found"
+        // — the branch may not exist for older sessions that never created one
+        // (#1840). Uses `core::worktree_naming` (unconditionally compiled),
+        // NOT `daemon::managed_routes::inproject` (feature = "daemon"), so
+        // this module keeps compiling with the `daemon` feature disabled.
+        if let Some(session_name) = path.file_name().and_then(|n| n.to_str()) {
+            let branch = crate::core::worktree_naming::worktree_branch_for(session_name);
             let branch_out = std::process::Command::new("git")
                 .arg("-C")
                 .arg(repo_root)
                 .args(["branch", "-D"])
-                .arg(session_name)
+                .arg(&branch)
                 .output();
             match branch_out {
                 Ok(o) if o.status.success() => {
                     info!(
                         path = %path.display(),
                         "decommission: git branch -D {:?} (session ref cleaned)",
-                        session_name
+                        branch
                     );
                 }
                 Ok(o) => {
@@ -228,7 +248,7 @@ pub(super) fn remove_session_worktree(path: &Path) -> bool {
                     tracing::debug!(
                         path = %path.display(),
                         "decommission: git branch -D {:?} not needed: {}",
-                        session_name,
+                        branch,
                         String::from_utf8_lossy(&o.stderr).trim()
                     );
                 }

@@ -73,6 +73,7 @@ pub mod tmux;
 pub mod trusty_tools_config;
 pub mod update_check;
 pub mod workspace_scan;
+pub mod worktree_naming;
 
 pub use connect::{ResolveResult, SessionSummary, resolve_target};
 pub use discovery::{

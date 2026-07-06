@@ -183,9 +183,17 @@ pub(crate) async fn launch(
 
     // 7b. Create a per-session git worktree at `<project_dir>/.worktrees/<session-id>/`.
     //     Each session gets an isolated branch so concurrent sessions never collide.
+    //     NOTE (#2032): `tm launch` is a standalone CLI flow, not the daemon's
+    //     managed `SessionManager` spawn path — the tmux name here is derived
+    //     from the live folder AFTER the worktree already exists (see
+    //     `folder_name`/`fallback_session_name` below), so there is no
+    //     resolved semantic name available yet at worktree-creation time.
+    //     This keeps the pre-#2032 UUID-named worktree; only
+    //     `spawn_managed_inproject` (the daemon's HTTP/MCP spawn path) uses
+    //     the new semantic-name layout.
     let managed_path = trusty_mpm::daemon::managed_routes::inproject::create_session_worktree(
         &project_dir,
-        &session_uuid,
+        &session_uuid.to_string(),
     )
     .map_err(|e| anyhow::anyhow!("failed to create session worktree: {e}"))?;
 
