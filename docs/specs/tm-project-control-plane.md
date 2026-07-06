@@ -1,0 +1,554 @@
+# DOC-35 — `tm project`: Deterministic Project/Session Control Plane (CLI + Multipane TUI)
+
+**Status:** Draft (naming + scope decisions RESOLVED by owner; implementation not started)
+**Subsystem:** trusty-mpm — control plane / CLI / TUI / daemon API
+**Owner:** Engineering (trusty-mpm)
+**Last-updated:** 2026-07-06
+**Spec ID:** `SPEC-PROJCTL-01~draft` … `SPEC-PROJCTL-06~draft` (DOC-35)
+**Builds on:** DOC-22 — Multi-Repo Session Routing (`docs/specs/multi-repo-session-routing.md`);
+DOC-26 — trusty-mpm alpha-1 unified project/session control plane
+(`docs/specs/trusty-mpm-alpha-1-control-plane.md`); DOC-16 — Interactive Sessions TUI
+(`docs/specs/sessions-tui-interactive.md`); DOC-30 — Project Manager: Vision & Lifecycle
+Orchestrator (`docs/specs/DOC-30-project-manager-vision.md`).
+**Cross-ref:** epic **#2108** (`tm project` — deterministic CLI + multipane TUI project/session
+control plane, main entry point); issue **#2081** (project `gh_user`, CLOSED/shipped); issue
+**#2082** (JIRA boards to watch, OPEN); epic **#1517** (multi-project awareness); epic **#1272**
+(sessions TUI); the tmux-lifecycle "single owning `Session`, no fire-and-forget" standard (#1452).
+
+> **Scope note.** This is a **design spec**: it proposes the `tm project` command tree, the
+> daemon endpoints it consumes, the multipane TUI layout, the deterministic configurator model,
+> and — because investigation surfaced a real naming collision — a **naming reconciliation**
+> between this epic's `tm project` and three pre-existing "project" surfaces. It states *what*
+> should be built and *why*, flags every owner-level fork in the road, and closes with a
+> child-issue breakdown. **It carries no Rust changes.**
+>
+> **Revision note (2026-07-06):** the owner has resolved all six open decisions from §9 v1
+> (naming, TUI scope, config UX, entry-point gating, and the `jira_boards` placeholder). §2, §5,
+> §6, §7, §8, and §9 below reflect the RESOLVED decisions; §2.2's rejected alternatives are kept
+> for record but no longer represent an open choice. **Naming headline:** the CLI top-level noun
+> for this epic's project surface is the **plural `tm projects`** (registry B-backed, net-new);
+> today's registry-A `tm project init/list/info` (singular, unchanged backing) is **deprecated**,
+> not merged, and continues to work with a deprecation notice. Session lifecycle verbs are
+> promoted to a **sibling top-level plural `tm sessions`**, with today's singular `tm session`
+> kept as a deprecated alias — `tm projects` nests sessions **read-only** in its TUI/output, but
+> the mutating session verbs live at `tm sessions`, not under `tm projects`. The child issues in
+> §8 have been filed under epic #2108 (see the PR/issue list for numbers).
+
+---
+
+## 1. Overview and principles
+
+### 1.1 What this is
+
+Epic #2108 asks for a **deterministic control plane** for trusty-mpm's projects and sessions:
+list every registered project, configure each one, see its sessions nested underneath, see a
+live per-session "what's being done" status line, and launch/kill/resume/decommission sessions
+— from both a scriptable CLI and a multipane TUI. It is explicitly **not** an LLM/PM surface:
+
+| | Deterministic control plane (`tm project`, this spec) | LLM PM orchestration harness |
+|---|---|---|
+| Decision-making | None — pure config read/write + lifecycle verbs | Session Manager inference (DOC-14), autonomy tiers, learned auto-answer (DOC-23) |
+| Backing | Daemon HTTP API, daemon-owned JSON stores | Daemon + an LLM (OpenRouter/Bedrock/etc., DOC-16 D1) |
+| Output | Structured (`--json`) or fixed-format human tables | Natural-language summaries, chat |
+| Failure mode | Errors are typed, deterministic, retryable | Ambiguous — may re-prompt, re-classify |
+
+The two are **complementary layers on the same daemon**, not competitors: the control plane is
+the pipes and valves; the SM agent (DOC-14), the summarizer (DOC-16 D1), and DOC-30's future
+Project Manager reasoning all sit on top of it. This spec governs only the deterministic layer.
+
+### 1.2 Daemon as source of truth
+
+Every verb in this spec — CLI or TUI — is a thin client over the `tm` daemon's HTTP API
+(`crates/trusty-mpm/src/daemon/`). No client-side state is authoritative; the CLI/TUI read
+`--json` snapshots and re-poll after mutations, mirroring the pattern DOC-16 already established
+for the sessions TUI (`tui/coordinator/poll.rs`, timer + immediate re-poll-after-mutation).
+
+### 1.3 "Main entry point once tm is stable"
+
+Today, bare `tm` (no subcommand) dispatches to `commands::guided::run_guided_default`
+(`crates/trusty-mpm/src/bin/tm/main.rs:230`, cli.rs doc-comment "the guided default fires
+(#1708)") — an **in-project, cwd-scoped** spawn/reconnect flow. It is not a project browser and
+has no multi-project view. §7 proposes how `tm projects` (the plural CLI noun this epic
+introduces — §2) supersedes this as the landing surface without breaking the existing
+guided/first-run flows (`commands::first_run`, `commands::guided*` in
+`crates/trusty-mpm/src/bin/tm/commands/`), gated on three explicit conditions (§7, RESOLVED).
+
+---
+
+## 2. Naming reconciliation — RESOLVED (owner, 2026-07-06)
+
+Investigation surfaced **three pre-existing surfaces** that already use the word "project" (one
+of them literally the `tm project` CLI verb), plus the existing `tm session` verb family this
+epic must coexist with or absorb. Presenting all four together is the point: any naming decision
+here has to account for all of them at once, not just `tm project` vs `tm session`.
+
+### 2.1 The four surfaces
+
+| # | Surface | Backing type | Identity | CLI today | Status |
+|---|---|---|---|---|---|
+| A | **Directory registration** | `core::project::ProjectInfo` (`crates/trusty-mpm/src/core/project.rs`) — `{path, name, registered_at}` | absolute filesystem path | `tm project init/list/info` (`bin/tm/commands/project.rs`) → `POST/GET /projects`, `/projects/current`, `/projects/discover` | **Implemented, in use — now DEPRECATED (§2.2)** |
+| B | **NL-routing / session-spawn registry** | `project::Project` (`crates/trusty-mpm/src/project/record.rs`) — `{name, repo_url, default_branch, stack_hint, tags, description, gh_user}` | git `repo_url` | **MCP-only**: `project_register`/`project_get`/`project_list` (`mcp/tools/project.rs`); no CLI, no HTTP route | **Implemented (DOC-22, #1517), MCP-only — becomes the backbone of `tm projects` (§2.2)** |
+| C | **Project Manager vision** (DOC-30) | Unbuilt `Project`/`Deliverable`/`Milestone` model | git repo, 1:1 | Proposes `tm project create/show/add-deliverable/spawn-session/status` | **0% implemented — design only** |
+| D | **This epic (#2108)** | Registry B (§2.2) | git `repo_url` | `tm projects <verb>` + sibling `tm sessions <verb>` (§2.2, §3) | **New** |
+
+Additionally, `tm session ...` (`bin/tm/commands/session.rs`, `SessionAction` in `cli.rs:1209`)
+already carries **two verb families** in one enum: *local project sessions* (`start`, `stop`,
+`list`, `tui`, `clean`, `info`, `instructions`, `events`, `breakers`, `pause`, `resume`, `run`,
+`output` — scoped to A's directory registry) and *managed fleet sessions* (`new`, `ls`,
+`activity`, `send`, `answer`, `attach`, `decommission`, `delete`, `prune-idle` — scoped to B's
+`repo_url` identity via `SessionRecord`). This split is already visible in the source comments at
+`cli.rs:1203-1213`.
+
+**Why this matters:** #2108's requirement #5 ("sessions nested under projects") and the fleet
+grouping already shipped as `GET /api/v1/sessions/managed/fleet`
+(`crates/trusty-mpm/src/daemon/managed_routes/fleet.rs`) both key sessions by **B's `repo_url`
+identity**, not A's path identity. A session started from a fresh clone in
+`~/trusty-mpm-projects/<owner>/<repo>/<session-id>/` (DOC-26 §14.1) has no meaningful A-path —
+only a B-`repo_url`. So the control plane's project identity **must** be B, not A.
+
+### 2.2 RESOLVED reconciliation (owner, 2026-07-06)
+
+The owner resolved this as follows (supersedes the v1 "recommendation" below, which is kept as
+§2.3 for record):
+
+1. **Registry B is the identity backbone.** `tm projects` (this epic, plural, net-new top-level
+   CLI noun) adopts registry B as its backing store and gains the HTTP surface B has never had
+   (today B is MCP-only — §4).
+2. **Sessions are promoted to a sibling top-level plural namespace, `tm sessions` — NOT folded
+   under `tm project(s) session ...`.** `tm projects` and `tm sessions` are siblings: `tm
+   projects` owns project list/register/config/show/status; `tm sessions` owns every session
+   lifecycle verb (list, launch, kill, resume, decommission, attach, activity). `tm projects
+   show <name>` (and the TUI's Sessions pane, §5) display that project's sessions **read-only**
+   by calling the same fleet endpoint (§4) — but the *mutating* verbs (launch/kill/resume/
+   decommission/attach) live only at `tm sessions`, addressed via `--project <name>` or a bare
+   session id/ordinal, never as `tm projects <verb-that-mutates-a-session>`.
+3. **Today's singular `tm session <verb>` becomes a deprecated alias of `tm sessions <verb>`.**
+   This reuses the precedent already in the codebase (`cli.rs:1433-1459`:
+   `ManagedStop`/`RuntimeStop`/`ManagedResume` are `#[command(hide = true)]` aliases that print a
+   deprecation notice before falling through to the current verb) — apply the same pattern one
+   level up, at the top-level noun. `tm session ls` keeps working, prints a one-line deprecation
+   notice pointing at `tm sessions ls`, and behaves identically. No functional change to either
+   verb family carried by the old enum (local-project-session verbs and managed-fleet verbs both
+   move under the renamed top-level noun together); only the top-level word changes.
+4. **Registry A (`tm project init/list/info`, singular, unchanged path-based backing) is
+   DEPRECATED, not merged and not hard-cut.** It keeps working exactly as today, but every
+   invocation prints a deprecation notice pointing at the new registry-B-backed equivalents
+   (`tm projects register`/`tm projects list`/`tm projects show`). It is removed in a **later**
+   release, not this epic's. The local-checkout scaffold behavior it provides
+   (`.trusty-mpm/{config.toml,sessions/}`, `scaffold_project_dir` in
+   `bin/tm/commands/project.rs:105`) is **carried forward** into the new surface as `tm projects
+   config <name> --dir <path>` (§3, §6) — the scaffold logic itself is reused verbatim; only its
+   entry point and identity key (registry-B `name` instead of a bare path) change.
+5. **DOC-30's future CLI namespace still yields, unchanged from the v1 recommendation.** DOC-30
+   is 0% implemented (`docs/specs/DOC-30-project-manager-vision.md:3`); when it is picked up it
+   should nest under `tm projects plan ...` (deliverables/milestones/estimation) rather than
+   colliding with this epic's `tm projects list/config/show/status`. This spec does not modify
+   DOC-30; it only carries the flag forward so DOC-30's next revision reserves the sub-namespace.
+
+**Net naming result (canonical, use these going forward):**
+
+| Old (this spec, v1 draft) | New (RESOLVED) |
+|---|---|
+| `tm project list/register/config/sessions/launch/kill/resume/decommission/status/attach` | `tm projects list/register/config/show/status` (project ops only) + `tm sessions list/launch/kill/resume/decommission/attach/activity` (session ops, `--project <name>` scoped) |
+| `tm session <verb>` (singular, canonical) | `tm sessions <verb>` (plural, canonical); `tm session <verb>` deprecated alias |
+| `tm project init/list/info` (registry A, canonical) | unchanged verbs, now DEPRECATED with a notice; canonical replacement is `tm projects register/list/show` (registry B) |
+
+### 2.3 v1 recommendation and rejected alternatives (historical record)
+
+The v1 draft of this spec recommended keeping `tm session` completely unchanged (pure
+porcelain/plumbing split with no rename) and folding registry A directly into `tm project`. The
+owner's resolution (§2.2) instead **renames** the session surface to a sibling plural noun and
+**deprecates rather than folds** registry A. The alternatives considered and rejected at v1
+remain valid context for why a full silent rename (no alias) was avoided:
+
+- *Full silent rename with no alias* — would have broken every doc, skill
+  (`tm-session-management`, `tm-session-pause`, `tm-session-resume` in `.claude/skills/`), and
+  script referencing `tm session` with no migration path. **Rejected**: §2.2 item 3's
+  alias-with-deprecation-notice avoids this while still completing the rename.
+- *Merge A and B into one struct* — technically cleaner (one `Project` type, one identity), but
+  A's path-identity and B's `repo_url`-identity solve genuinely different problems (a bare local
+  directory with no remote is a legitimate A-only case — `derive_name_from_url` returning `None`
+  is exactly this, DOC-26 §14.4 "no remote → parent/dir slug"). **Rejected**: §2.2 item 4 keeps A
+  as its own (now-deprecated) surface rather than merging data models.
+
+---
+
+## 3. CLI command tree
+
+Per §2.2 (RESOLVED), the surface splits into two **sibling top-level plural nouns** — `tm
+projects` (project registry ops) and `tm sessions` (session lifecycle ops) — plus the now-
+deprecated singulars (`tm project`, registry A; `tm session`, alias of `tm sessions`). All verbs
+are thin HTTP clients (§1.2). Every list/show verb supports `--json` for scripting (matching the
+existing convention in `session.rs Ls { json: bool }`, `cli.rs:1360-1364`).
+
+### 3.1 `tm projects` — project registry (registry B)
+
+```
+tm projects list [--json] [--tag <tag>]
+    # GET /api/v1/projects  → table: name, repo_url, default_branch, gh_user,
+    #   session counts by state (via the sessions endpoint, read-only), last_used_at
+
+tm projects register <name> --repo-url <url> [--default-branch <b>] [--description <s>]
+                      [--tags <a,b,c>] [--stack-hint <s>] [--gh-user <login>]
+    # POST /api/v1/projects  (idempotent upsert — mirrors project_register MCP tool, §4)
+
+tm projects show <name> [--json]
+    # GET /api/v1/projects/{name}  → full config PLUS a READ-ONLY nested sessions
+    # listing (via the fleet endpoint, §4) — this is the "sessions nested under
+    # projects" requirement satisfied as a VIEW. Mutating a session from here is
+    # not supported; the output tells the operator to use `tm sessions <verb>`.
+
+tm projects config <name>
+    # GET /api/v1/projects/{name}  → config fields only, human or --json
+tm projects config <name> set <field> <value>
+tm projects config <name> unset <field>
+    # PATCH /api/v1/projects/{name}  — deterministic field=value forms, NOT free text.
+    # Fields (v1): default_branch, description, tags (append/remove via --add/--remove),
+    #              stack_hint, gh_user (#2081, shipped — validated against `gh auth status`).
+    # Field (RESOLVED as an opaque placeholder, concrete shape deferred to #2082):
+    #   jira_config — an untyped/opaque blob slot; see §6.
+tm projects config <name> --dir <path>
+    # Local-checkout scaffold (today's DEPRECATED `tm project init`, carried forward
+    # per §2.2 item 4): creates <path>/.trusty-mpm/{config.toml,sessions/} and links
+    # the checkout to the registry-B entry `<name>` rather than a bare path.
+
+tm projects status <name> [--json]
+    # Rollup: session counts by ManagedSessionState, last activity across sessions,
+    # config completeness (gh_user set? jira configured?). New aggregation endpoint (§4).
+```
+
+### 3.2 `tm sessions` — session lifecycle (registry B-scoped)
+
+```
+tm sessions list [--json] [--project <name>] [--all]
+    # GET /api/v1/sessions/managed  (optionally GET .../fleet?project=<name> when
+    #   --project is given) — the canonical MUTATING-CAPABLE session list; this is
+    #   where `tm sessions kill/resume/...` operators find the id/ordinal to target.
+
+tm sessions launch --project <name> --task "<text>" [--ref <branch>]
+                    [--name-hint <hint>] [--runtime claude-code|tcode]
+    # POST /api/v1/sessions/managed with repo_url/default_branch resolved FROM the
+    # named project registry entry — the operator never re-types the URL.
+
+tm sessions kill <session-id-or-ordinal> [--force]
+    # POST /api/v1/sessions/managed/{id}/runtime-stop  (workspace preserved, resumable)
+tm sessions resume <session-id-or-ordinal>
+    # POST /api/v1/sessions/managed/{id}/resume
+tm sessions decommission <session-id-or-ordinal>
+    # POST /api/v1/sessions/managed/{id}/decommission  (terminal, tombstoned)
+tm sessions attach <session-id-or-ordinal>
+    # GET /api/v1/sessions/managed/{id}/attach-cmd → prints the `tmux attach -t ...` command
+tm sessions activity <session-id-or-ordinal> [--json]
+    # GET /api/v1/sessions/managed/{id}/activity → the per-session status line (§5.4)
+```
+
+**Deprecated singulars (kept working, notice-only):**
+
+```
+tm project init/list/info ...   # registry A — deprecation notice → use `tm projects register/list/show`
+tm session <verb> ...           # alias of `tm sessions <verb>` — deprecation notice, identical behavior
+```
+
+**Ordinal addressing.** `<session-id-or-ordinal>` accepts either the full `ManagedSessionId` or
+the 1-based ordinal from the most recent `tm sessions list [--project <name>]` — mirroring
+DOC-16 §5.2's `/<n>` inline-addressing convention, so operators do not have to copy/paste UUIDs.
+
+---
+
+## 4. Daemon API
+
+Reuse is the default; only registry B's missing HTTP surface and one new aggregation route are
+net-new.
+
+| Endpoint | Status | Notes |
+|---|---|---|
+| `GET /api/v1/projects` | **NEW** | Mirrors `project_list` MCP tool (`mcp/tools/project.rs`) over HTTP so the deterministic CLI/TUI do not need an MCP client. |
+| `POST /api/v1/projects` | **NEW** | Mirrors `project_register`; idempotent upsert on `name` (matches `ProjectRegistry::register`, `crates/trusty-mpm/src/project/registry.rs:60`). |
+| `GET /api/v1/projects/{name}` | **NEW** | Mirrors `project_get`. |
+| `PATCH /api/v1/projects/{name}` | **NEW** | Field-level config update (§3 `config ... set/unset`); validates `gh_user` via the existing `resolve_gh_account_env`/`gh auth status` path (`core/gh_account.rs`) per #2081's "fail loudly" requirement. |
+| `GET /api/v1/sessions/managed/fleet?project=<name>` | **EXTEND** | Existing `fleet_by_project_route` (`daemon/managed_routes/fleet.rs:61`) already groups by project; add an optional filter param — no new grouping logic. Consumed by BOTH `tm projects show <name>` (read-only nested view, §3.1) and `tm sessions list --project <name>` (mutating-capable list, §3.2) — same data, two CLI entry points per §2.2 item 2. |
+| `POST /api/v1/sessions/managed` | **REUSE** | `tm sessions launch`, pre-filled `repo_url`/`default_branch` from the project record. |
+| `POST /api/v1/sessions/managed/{id}/runtime-stop` | **REUSE** | `tm sessions kill` (resumable stop). |
+| `POST /api/v1/sessions/managed/{id}/resume` | **REUSE** | `tm sessions resume`. |
+| `POST /api/v1/sessions/managed/{id}/decommission` | **REUSE** | `tm sessions decommission` (terminal). |
+| `GET /api/v1/sessions/managed/{id}/attach-cmd` | **REUSE** | `tm sessions attach`. |
+| `GET /api/v1/sessions/managed/{id}/activity` | **REUSE** | `tm sessions activity` / per-session status line (§5) — already returns `state`, `summary`, `pending_decision`, `raw_pane` (`daemon/managed_routes/activity.rs:44-90`). |
+| `GET /api/v1/projects/{name}/status` | **NEW** | `tm projects status <name>` aggregation: session counts by `ManagedSessionState`, most recent `last_activity_at`, config-completeness flags. Thin composition over existing `SessionManager::list()` + `ProjectRegistry::get()` — no new persistence. |
+
+**Everything is deterministic and daemon-hosted**, consistent with #2108's core principle — no
+endpoint here invokes an LLM classifier; the optional OpenRouter summarizer (DOC-16 D1,
+`activity.rs`'s `classification` field) remains an opt-in overlay the TUI may display but never
+depends on.
+
+---
+
+## 5. Multipane TUI
+
+**RESOLVED (owner, 2026-07-06): full 4-pane layout ships as v1 — there is no 2-pane MVP cut.**
+Projects, Sessions, Activity, and Actions all land together in the first TUI release; §8's
+child-issue breakdown reflects this as a single TUI slice (still split into a skeleton PR and a
+live-refresh/activity-wiring PR for reviewability, §8, but both are required for v1, not
+sequenced as MVP-then-follow-up). Invocation: `tm projects` with no further arguments launches
+this TUI when a TTY is attached (mirroring `tm session tui`'s existing invocation pattern,
+`cli.rs:1248` `SessionAction::Tui`); `tm projects list --json` remains the scriptable, non-TUI
+path.
+
+### 5.1 Pane layout (ASCII mockup)
+
+```
+┌─ tm projects ─────────────────────────── v0.x.y · daemon ● http://127.0.0.1:7880 ┐
+│ PROJECTS (4)              │ SESSIONS — trusty-tools (3)                          │
+│ ▸ trusty-tools      ●3    │  1. ● 4f9c…a1  main       Running tests — 12 passed  │
+│   trusty-search     ●1    │  2. ◍ 7b2e…c0  feat/x     Awaiting approval: write…  │
+│   genealogy         ○0    │  3. ○ d1a8…ff  fix/y      Idle — last activity 6m    │
+│   smarterthings     ●1    │                                                     │
+│                            │                                                     │
+├────────────────────────────┴─────────────────────────────────────────────────────┤
+│ ACTIVITY — session 2 (7b2e…c0)                                                    │
+│  state: blocked_on_permission · pending: "write to .github/workflows/ci.yml?"     │
+│  proposed default: yes · last 3 lines of raw_pane …                              │
+├───────────────────────────────────────────────────────────────────────────────────┤
+│ [l] launch  [k] kill  [r] resume  [d] decommission  [a] attach-cmd  [c] config    │
+│ [Tab] switch pane  [↑↓] select  [Enter] drill in  [q] quit                        │
+└───────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Four regions (ratatui vertical+horizontal `Layout`, mirroring the `Constraint` conventions
+already used in `tui/coordinator/layout.rs` and `tui/health/render.rs`):
+
+1. **Projects pane** (left column, `Constraint::Percentage(25)`) — one row per registered
+   project (registry B), a glyph for aggregate state, and a live session count. `▸` marks focus.
+2. **Sessions pane** (right column, `Constraint::Percentage(75)`) — the selected project's
+   sessions, numbered (DOC-16 §3.2 convention), sourced from `GET
+   .../fleet?project=<name>` (§4).
+3. **Activity pane** (bottom, `Constraint::Length(4)`) — the focused session's status line,
+   sourced from `GET .../{id}/activity` (§4) — the same fields DOC-16 §6.2 already specifies
+   (`state`, `summary`/`last_summary` equivalent, `pending_decision`, `proposed_default`).
+4. **Actions/key-hint line** (`Constraint::Length(1)`) — contextual verbs bound to the focused
+   pane.
+
+### 5.2 Keybindings
+
+| Key | Context | Action |
+|---|---|---|
+| `↑`/`↓`, `j`/`k` (as motion) | any pane | move selection within the focused pane |
+| `Tab` / `Shift+Tab` | — | cycle pane focus: Projects → Sessions → Activity |
+| `Enter` | Projects pane | drill into that project's Sessions pane (auto-focus) |
+| `l` | Sessions pane | `launch` — opens a small deterministic form (task, ref, name-hint) → `POST /api/v1/sessions/managed` |
+| `k` | Sessions pane, row selected | `kill` (runtime-stop) — confirmation gate if session is Active (mirrors DOC-16 §5.6 active-session confirmation) |
+| `r` | Sessions pane, row selected | `resume` |
+| `d` | Sessions pane, row selected | `decommission` — confirmation gate (terminal) |
+| `a` | Sessions pane, row selected | fetch + display `attach-cmd` (copy-to-clipboard where supported, else print) |
+| `c` | Projects pane, row selected | open the config view (§6) for that project |
+| `q` / `Ctrl-C` | not in a modal | quit (restore terminal) |
+| `Esc` | any modal/form | cancel, return to prior pane |
+
+### 5.3 Live-refresh model
+
+Timer-poll at a configurable `--interval-ms` (default 1500ms, matching DOC-16 §3.6 and the
+existing `tui/coordinator/poll.rs` cadence) **plus** an immediate re-poll after any mutating
+action (launch/kill/resume/decommission/config-set) — same "never wait for the next tick after a
+mutation" rule DOC-16 §3.6 already establishes. No event-stream/push channel in v1 (DOC-16 §9
+already defers this as future work for the sibling sessions TUI; this spec inherits that
+deferral rather than re-litigating it).
+
+### 5.4 Per-session "what's being done" status line
+
+Reuses `GET /api/v1/sessions/managed/{id}/activity` (§4, already shipped) verbatim: `state`
+(`working`/`idle`/`blocked_on_permission`/`errored`/`done`/`unknown`), `summary` (human string,
+LLM-backed when configured, deterministic fallback otherwise per DOC-16 D1's "clearly marked
+fallback" rule), `pending_decision`/`proposed_default`. **No new observability plumbing is
+required** — this is the same hook-event/activity-monitor pipeline DOC-16 §6.1 already
+specifies; the control-plane TUI is a new *consumer* of an existing *producer*.
+
+---
+
+## 6. Configurator model
+
+**RESOLVED (owner, 2026-07-06): the deterministic config surface ships as BOTH the CLI (`tm
+projects config <name> set/unset`, §3.1) AND a TUI config form (§5.2 `c` key) in v1 — same
+epic, not a CLI-first-TUI-later split.** Both are thin clients over the same `PATCH
+/api/v1/projects/{name}` endpoint (§4), so there is one validation/persistence implementation
+behind two front ends.
+
+| Field | Type | Persisted in | Validation |
+|---|---|---|---|
+| `default_branch` | string | registry B, `~/.trusty-mpm/projects.json` | non-empty |
+| `description` | string | registry B | none |
+| `tags` | `Vec<String>` | registry B | `--add`/`--remove`, no free-text replace-whole-list footgun |
+| `stack_hint` | string | registry B | none (advisory only) |
+| `gh_user` | string | registry B (`Project::gh_user`, #2081, already shipped) | must appear in `gh auth status` account list — **fail loudly** per #2081's explicit requirement, never silently accept an unauthenticated login |
+| `jira_config` | **opaque placeholder — RESOLVED (owner, 2026-07-06)** | registry B (**new field, reserved now**) | **No concrete shape in this spec.** The owner resolved that this epic reserves a minimal, opaque config slot (e.g. an untyped `Option<serde_json::Value>` or an empty marker struct) purely so the configurator's field table has a place for JIRA config to land, WITHOUT finalizing the schema here. The concrete shape (board id/key, instance URL, auth-token env var name, etc.) is deferred entirely to issue #2082's own design. `tm projects config <name> set jira_config ...` is a **no-op stub** (accepts and stores opaque JSON, does not validate or act on it) until #2082 lands and replaces it with a typed field + real validation. |
+| local checkout scaffold (`--dir`) | path | `.trusty-mpm/config.toml` in that checkout (unchanged scaffold from `scaffold_project_dir`) | path must be writable |
+
+**Precedence (unchanged from the existing system, stated for clarity):** a local checkout's
+`.trusty-mpm/config.toml` may layer further *local-only* overrides on top of the daemon-owned
+registry B entry; the registry entry is the cross-checkout source of truth. This mirrors the
+scope model already articulated in issue #920's RFC ("project config overrides system default")
+and requires no new precedence machinery.
+
+**Deterministic forms, not free text (explicit requirement):** every mutation is
+`set <field> <value>` / `unset <field>` / `--add`/`--remove` for list fields — never a prompt
+that accepts arbitrary prose. The TUI's config view (§5.2 `c` key) is a fixed-field form (tab
+between fields, edit, confirm), not a chat box — this holds for both the CLI and TUI front ends
+per the RESOLVED decision above.
+
+---
+
+## 7. "Main entry point" behavior — RESOLVED (owner, 2026-07-06)
+
+**Current state:** bare `tm` → `commands::guided::run_guided_default` (`bin/tm/main.rs:230`), a
+cwd-scoped spawn/reconnect flow with no multi-project awareness. `commands::first_run` handles
+true first-time setup.
+
+**RESOLVED transition (two phases; Phase 2 is explicitly gated on three conditions, not a time-
+box):**
+
+1. **Phase 1 (opt-in, ships with this epic).** Add a config flag (e.g. `ui.default_landing:
+   "guided" | "projects"` in `~/.trusty-mpm/config.toml`, `MpmConfig`, `core/config.rs`), default
+   `"guided"` (no behavior change). Operators who want the new dashboard opt in explicitly via
+   `tm projects` or the config flag.
+2. **Phase 2 (default flip) — BLOCKED until ALL THREE gates hold:**
+   - **Gate (a) — shipped and stable.** The 4-pane TUI (§5) and the full `tm projects`/`tm
+     sessions` CLI (§3) are shipped, and have not required a stabilization/bugfix pass in the
+     immediately preceding release.
+   - **Gate (b) — guided/first-run flow preserved, not regressed.** The existing
+     `commands::first_run` onboarding and `commands::guided*` cwd-scoped spawn/reconnect flow
+     must be reachable **from inside** the `tm projects` experience (e.g. a first-run project
+     lands the operator in the same guided setup they get today; `tm projects` with zero
+     registered projects does not present an empty, confusing dashboard — it defers to
+     `commands::first_run` exactly as bare `tm` does today). New users must not regress relative
+     to the current bare-`tm` experience.
+   - **Gate (c) — dogfood period.** A dogfood period (duration set by the owner at the time,
+     not fixed in this spec) where the opt-in flag (Phase 1) has been used in practice, with
+     issues surfaced and fixed, before it becomes the unconditional default.
+   Only once (a), (b), and (c) all hold does bare `tm` flip its default: bare `tm` with **zero
+   registered projects** still routes to `commands::first_run` (onboarding, unchanged); bare `tm`
+   with **≥1 registered project** lands on the `tm projects` multipane dashboard (§5) instead of
+   the guided cwd-scoped flow. The guided flow remains reachable explicitly (e.g. `tm guided` or
+   `tm sessions start`) for the cwd-scoped launch/reconnect use case it already serves well — it
+   is not deleted, only demoted from "default when no args" to "explicit verb."
+
+This phasing avoids a hard cutover that breaks the muscle memory of existing `tm` (no args)
+users. The three gates are the explicit, documented criteria the owner resolved on (§9) — Phase 2
+is not a calendar decision, it is a three-condition checklist that must all be satisfied.
+
+---
+
+## 8. Child-issue breakdown — FILED under epic #2108
+
+Numbered slices, each independently implementable and reviewable, updated to the RESOLVED naming
+(§2.2) and scope decisions (§5–§7). Filed as children of #2108; see the issue table below for the
+actual issue numbers (filed 2026-07-06).
+
+| # | Slice | Filed as |
+|---|---|---|
+| 1 | **Registry-B HTTP surface** — `GET/POST /api/v1/projects`, `GET/PATCH /api/v1/projects/{name}` (§4), mirroring the existing MCP tools so the CLI/TUI have a non-MCP path. Gate: HTTP round-trip tests parallel to the existing MCP tool tests. | #2114 |
+| 2 | **`tm projects` CLI: list/register/show/status** — §3.1's verbs wired to slice 1 and slice 4. Gate: `cli_parses_projects_*` tests + integration test against a live daemon. | #2115 |
+| 3 | **`tm sessions` CLI: promote to sibling top-level plural** — rename `tm session` → `tm sessions` (list/launch/kill/resume/decommission/attach/activity, `--project <name>` scoping, §3.2), with `tm session` retained as a hidden deprecated alias (mirroring the `ManagedStop`/`RuntimeStop` precedent, `cli.rs:1433-1459`). Gate: existing `cli_parses_session_*` tests continue to pass unchanged (alias), new `cli_parses_sessions_*` tests cover the canonical plural form, and a deprecation-notice-printed assertion. | #2116 |
+| 4 | **`GET /api/v1/projects/{name}/status` aggregation endpoint** — session-count rollup + config-completeness flags (§4). Gate: unit test with a fixture registry + session set. | #2117 |
+| 5 | **Multipane TUI skeleton — full 4-pane v1 (RESOLVED, no MVP cut)** — Projects/Sessions/Activity/Actions panes (§5.1), keyboard nav (§5.2), built as a new module under `crates/trusty-mpm/src/tui/` (e.g. `tui/project_ctl/`, split per the 500-SLOC convention: `layout`, `state`, `poll`, `panes/*`). Gate: manual + the existing TUI test patterns (`tui/coordinator/tests.rs`, `tui/health/tests.rs`) as a template. | #2118 |
+| 6 | **TUI live-refresh + activity-pane wiring** — poll cadence, re-poll-after-mutation, activity-pane consumption of `GET .../{id}/activity` (§5.3, §5.4). Gate: TUI state-machine unit tests for refresh timing (mirroring DOC-16 STUI-8's pattern). | #2119 |
+| 7 | **Deterministic project configurator — CLI + TUI, RESOLVED same-epic scope** — `tm projects config <name> set/unset` (§3.1) AND the TUI config form (§5.2 `c` key, §6), both thin clients over the same `PATCH /api/v1/projects/{name}`. Gate: one shared validation/persistence test suite exercised from both a CLI integration test and a TUI form unit test. | #2120 |
+| 8 | **`gh_user` validation wiring in `PATCH /api/v1/projects/{name}`** — enforce the #2081 fail-loud contract (`gh auth status` check) at config-write time, not just at `gh`-call time. Gate: unit test with a mocked `gh auth status` fixture. | #2121 |
+| 9 | **`jira_config` opaque placeholder field reservation** — add an untyped/opaque config slot to `Project`/`ProjectConfig` now (RESOLVED: no concrete schema — deferred to #2082), so the configurator's field table (§6) has a home for it without a breaking schema bump later. Gate: serde round-trip test showing the field defaults to absent/empty, round-trips arbitrary opaque JSON, and is forward-compatible. | #2122 |
+| 10 | **Deprecate registry-A `tm project init/list/info`** — RESOLVED: deprecation notice pointing at `tm projects register/list/show`, kept working (not hard-cut), removal deferred to a later release; fold the local-checkout scaffold (`scaffold_project_dir`) forward into `tm projects config <name> --dir <path>` keyed on registry-B `name` (§2.2 item 4, §3.1). Gate: regression test that the old verbs still work and print the notice; new test that `tm projects config --dir` produces the same scaffold output. | #2123 |
+| 11 | **Bare-`tm` → `tm projects` entry-point transition** — Phase 1: opt-in `ui.default_landing` config field (§7), wired but defaulting to unchanged (`"guided"`) behavior. Phase 2 (flip the default) is explicitly **BLOCKED** until all three RESOLVED gates hold (§7: shipped+stable, guided/first-run preserved inside `tm projects`, dogfood period) — tracked as a sub-task/checklist on this issue, not started until the owner confirms all three are satisfied. Gate (Phase 1 only, mergeable now): config test + manual verification that `tm` with no flag set behaves identically to today. | #2124 |
+
+---
+
+## 9. Open decisions for the owner — ALL SIX RESOLVED (2026-07-06)
+
+1. **Naming reconciliation (§2.2) — RESOLVED.** Registry B (`project::Project`, `repo_url`-keyed)
+   is the identity backbone for the new plural top-level noun **`tm projects`**. Sessions are
+   **promoted to a sibling top-level plural noun, `tm sessions`** — NOT nested under `tm
+   project(s) session ...`; `tm projects` shows sessions read-only in its output/TUI, but the
+   mutating session verbs live only at `tm sessions`. Today's singular `tm session` becomes a
+   **deprecated alias** of `tm sessions` (confirmed: yes, alias + deprecation notice, per the
+   existing `ManagedStop`/`RuntimeStop` precedent). DOC-30, when picked up, still reserves `tm
+   projects plan ...` rather than colliding with this epic's verbs (carried forward unchanged
+   from the v1 recommendation — not separately contested by the owner). Filed as #2116 (session
+   rename/alias) and reflected throughout §2.2, §3.
+2. **Registry A fold-in mechanics (§2.2, §8 slice 10) — RESOLVED.** DEPRECATE, do not merge, do
+   not hard-cut: `tm project init/list/info` keeps working, prints a deprecation notice pointing
+   at `tm projects register/list/show`, and is removed in a later release. Filed as #2123.
+3. **TUI scope/MVP cut (§5) — RESOLVED.** Full 4-pane v1 (Projects/Sessions/Activity/Actions).
+   No 2-pane MVP cut. Filed as #2118 (skeleton) and #2119 (live-refresh + activity wiring).
+4. **Deterministic-config UX (§6) — RESOLVED.** BOTH the CLI (`tm projects config set/unset`)
+   AND a TUI config form ship in v1, same epic — not CLI-first-TUI-later. Filed as #2120.
+5. **Bare-`tm` entry-point timing (§7, §8 slice 11) — RESOLVED.** Not a calendar trigger — gated
+   on three explicit conditions, ALL of which must hold before the Phase-2 default flip: (a) the
+   4-pane TUI + full CLI are shipped and stable, (b) the guided/first-run flow is preserved
+   reachable from inside `tm projects` so new users do not regress, (c) a dogfood period (with
+   the opt-in Phase-1 flag) has occurred. Filed as #2124 (Phase 1 actionable now; Phase 2 an
+   explicit checklist, not started until the owner confirms all three gates).
+6. **`jira_boards` schema shape (§6, §8 slice 9) — RESOLVED.** Reserve a minimal, OPAQUE
+   placeholder slot (`jira_config`) now; defer the concrete schema entirely to #2082's own
+   design — this epic does not guess at board-id/instance-URL/auth-token conventions. Filed as
+   #2122.
+
+All six decisions are reflected in §2, §3, §5, §6, §7 above, and in the filed child issues
+(§8, table with issue numbers).
+
+---
+
+## 10. References
+
+- **Epic #2108** — `tm project` deterministic CLI + multipane TUI control plane (this epic).
+- **Child issues (filed 2026-07-06):** #2114 (registry-B HTTP surface), #2115 (`tm projects`
+  CLI), #2116 (`tm sessions` rename/alias), #2117 (`/status` aggregation endpoint), #2118
+  (multipane TUI skeleton, 4-pane), #2119 (TUI live-refresh + activity wiring), #2120
+  (deterministic configurator, CLI+TUI), #2121 (`gh_user` fail-loud validation), #2122
+  (`jira_config` opaque placeholder), #2123 (deprecate registry A), #2124 (bare-`tm` entry-point
+  transition, gated Phase 2).
+- **DOC-22** — Multi-Repo Session Routing: `docs/specs/multi-repo-session-routing.md` (registry
+  B's origin, `Project`/`ProjectRegistry`/resolver/`fleet_by_project`).
+- **DOC-26** — alpha-1 unified control plane: `docs/specs/trusty-mpm-alpha-1-control-plane.md`
+  (session ID convention, `SessionActor`, activity observability pipeline this spec's Activity
+  pane consumes).
+- **DOC-16** — Interactive Sessions TUI: `docs/specs/sessions-tui-interactive.md` (poll cadence,
+  ordinal addressing, active-session confirmation, `last_summary`/`summarizing` precedent this
+  spec's Activity pane and keybindings follow).
+- **DOC-30** — Project Manager vision: `docs/specs/DOC-30-project-manager-vision.md` (the
+  namespace collision flagged in §2; deliverables/milestones layer this spec explicitly does not
+  build).
+- **Issue #2081** (CLOSED) — `gh_user` on `Project`, `crates/trusty-mpm/src/project/record.rs`,
+  `crates/trusty-mpm/src/core/gh_account.rs`.
+- **Issue #2082** (OPEN) — JIRA boards to watch; referenced in §6/§9 as a reserved, not yet
+  designed, field.
+- **Code:**
+  - `crates/trusty-mpm/src/project/` — registry B (`record.rs`, `store.rs`, `registry.rs`,
+    `resolver.rs`).
+  - `crates/trusty-mpm/src/core/project.rs` — registry A (`ProjectInfo`).
+  - `crates/trusty-mpm/src/bin/tm/commands/project.rs`, `cli.rs:1184-1201` — today's `tm project`
+    (registry A).
+  - `crates/trusty-mpm/src/bin/tm/commands/session.rs`, `cli.rs:1203-1600`+ — today's `tm
+    session` (both families).
+  - `crates/trusty-mpm/src/daemon/managed_routes/` (`fleet.rs`, `activity.rs`, `mod.rs`,
+    `lifecycle.rs`) — the managed-session HTTP surface this spec reuses almost entirely.
+  - `crates/trusty-mpm/src/mcp/tools/project.rs` — `project_register`/`project_get`/`project_list`
+    MCP tools, mirrored to HTTP in §4.
+  - `crates/trusty-mpm/src/tui/coordinator/`, `crates/trusty-mpm/src/tui/health/` — existing
+    ratatui modules this spec's TUI (§5) follows structurally.
+  - `crates/trusty-mpm/src/bin/tm/main.rs:230`, `commands/guided*.rs`, `commands/first_run.rs` —
+    the bare-`tm` dispatch this spec's §7 proposes evolving.
+
+---
+
+## 11. Change log
+
+- **2026-07-06 (v2)** — Owner resolved all six §9 open decisions from v1. Naming: sessions
+  promoted to sibling top-level plural `tm sessions` (not nested under `tm projects`), `tm
+  session` singular aliased+deprecated; registry A (`tm project init/list/info`) deprecated
+  (not merged, not hard-cut); TUI ships full 4-pane v1 (no MVP cut); config UX ships as CLI+TUI
+  in the same epic; bare-`tm` default flip gated on three explicit conditions (shipped+stable,
+  guided/first-run preserved, dogfood period); `jira_boards` replaced with an opaque
+  `jira_config` placeholder, concrete schema deferred to #2082. §2, §3, §5, §6, §7, §8, §9
+  rewritten to match. Filed the 11-item child-issue breakdown under #2108 as #2114–#2124.
+- **2026-07-06 (v1)** — Initial draft (DOC-35, `SPEC-PROJCTL-01~draft`). Design spec for #2108:
+  `tm project` command tree, daemon API (mostly reuse of the already-shipped managed-session
+  endpoints, plus a new HTTP surface for the MCP-only project registry), multipane TUI layout,
+  deterministic configurator model, bare-`tm` entry-point transition plan, and an 11-item
+  child-issue breakdown. Flagged a four-way "project" naming collision (registry A, registry B,
+  DOC-30's unbuilt vision, and this epic) as the primary owner decision, with a recommended
+  porcelain/plumbing reconciliation.
