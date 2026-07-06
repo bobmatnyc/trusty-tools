@@ -38,17 +38,25 @@
 #   mechanism cross-compiles `aarch64-unknown-linux-gnu` from the x86_64
 #   runner with no separate arm64 runner or Docker `cross` toolchain needed.
 #
-#   CAVEAT — ORT-bundling crates (trusty-search, trusty-analyze): their
-#   DEFAULT `bundled-ort` feature downloads a prebuilt ONNX Runtime binary
-#   that itself requires glibc >= 2.38 at runtime (see al2023-build.yml and
-#   issue #605) — that floor comes from the prebuilt archive's own symbol
-#   references, which zigbuild's linker choice cannot lower. Those two crates
-#   already ship a separate `x86_64-linux-al2023` asset built with
-#   `--features load-dynamic` (dlopen()s a system ONNX Runtime at runtime
-#   instead of bundling one) for exactly this reason; the NEW aarch64 leg
-#   reuses that same load-dynamic feature set for these crates (see the
-#   matrix-generation step below) since the bundled-ort path has no build-time
-#   aarch64 binary to download in the first place.
+#   CAVEAT — ORT-bundling crates (trusty-search, trusty-analyze), discovered
+#   via a real workflow_dispatch dry-run CI validation while building #2037:
+#   their DEFAULT `bundled-ort` feature links a prebuilt ONNX Runtime archive
+#   that was itself compiled with a real GNU toolchain (GNU libstdc++ ABI).
+#   zig's `cc` does not ship a GNU-ABI-compatible libstdc++ for its glibc
+#   cross targets (its own C++ support is LLVM libc++, a different, mutually
+#   unlinkable ABI), so the final link fails with `undefined symbol:
+#   std::...` — a genuine cargo-zigbuild + prebuilt-GNU-C++-archive
+#   limitation, not a one-line flag fix (confirmed: passing `-lstdc++`
+#   explicitly does not resolve it). So for these two crates the x86_64 leg
+#   below (see `native_linux_entry` in the matrix-generation step) is left on
+#   its ORIGINAL native `cargo build` — unchanged glibc floor, exactly what
+#   shipped before #2037, NOT a regression. Their portable-Linux option
+#   remains the existing `x86_64-linux-al2023` asset built with `--features
+#   load-dynamic` (dlopen()s a system ONNX Runtime at runtime instead of
+#   linking one at build time, sidestepping the ABI problem entirely). The
+#   NEW aarch64 leg reuses that same load-dynamic feature set for these two
+#   crates (see the matrix-generation step below) — proven working in CI,
+#   since it never links ONNX Runtime at build time either.
 #
 #   The Linux arm64 leg is marked `best_effort` (continue-on-error, like the
 #   existing AL2023 leg) because it is new and has not yet been validated by
@@ -519,6 +527,49 @@ jobs:
                   "al2023_features": "",
               }
 
+          def native_linux_entry(target):
+              # Original (pre-#2037) native x86_64 build: plain `cargo build`
+              # on ubuntu-latest, no zig. Reserved for ORT-bundling crates'
+              # x86_64 leg (see comment below) — NOT a regression, this is
+              # exactly what shipped before this issue.
+              return {
+                  **common,
+                  "runner": "ubuntu-latest",
+                  "target": target,
+                  "variant": "standard",
+                  "asset_suffix": target,
+                  "container": "",
+                  "zig_target": "",
+                  "best_effort": False,
+                  "cargo_features": feats,
+                  "no_default_features": no_def,
+                  "al2023_no_default": False,
+                  "al2023_features": "",
+              }
+
+          # x86_64 Linux — Tier-1, required.
+          #
+          # CAVEAT discovered via a real CI dry-run (see PR for #2037): for
+          # ORT-bundling crates (al2023 True) the DEFAULT `bundled-ort`
+          # feature links a prebuilt ONNX Runtime archive that was compiled
+          # with a real GNU toolchain (GNU libstdc++ ABI). zig's `cc` driver
+          # does not ship a GNU-ABI-compatible libstdc++ for its glibc cross
+          # targets (its own C++ support is LLVM libc++, a different ABI), so
+          # the final link fails with `undefined symbol: std::...` no matter
+          # what `-lstdc++`/`-l:libstdc++.a` variant is passed — this is a
+          # genuine cargo-zigbuild + prebuilt-GNU-C++-archive limitation, not
+          # a one-line fix. So ORT-bundling crates keep their ORIGINAL native
+          # x86_64 build here (unchanged glibc floor, exactly what shipped
+          # before #2037 — not a regression); their portable-Linux option
+          # remains the existing `x86_64-linux-al2023` load-dynamic asset
+          # below, which sidesteps the problem entirely by not linking ONNX
+          # Runtime at build time at all. All OTHER crates get the full
+          # glibc-2.17 zigbuild leg.
+          x86_64_entry = (
+              native_linux_entry("x86_64-unknown-linux-gnu") if al2023
+              else linux_zigbuild_entry("x86_64-unknown-linux-gnu", best_effort=False, use_al2023_features=False)
+          )
+
           includes = [
               {**common,
                "runner": "macos-14",
@@ -532,10 +583,13 @@ jobs:
                "no_default_features": no_def,
                "al2023_no_default": False,
                "al2023_features": ""},
-              # x86_64 Linux — Tier-1, required (portable glibc-2.17 baseline).
-              linux_zigbuild_entry("x86_64-unknown-linux-gnu", best_effort=False, use_al2023_features=False),
+              x86_64_entry,
               # aarch64 Linux — NEW (issue #2037), best-effort/non-blocking
-              # until validated by a real tagged-release CI run.
+              # until validated by a real tagged-release CI run. For
+              # ORT-bundling crates this reuses the load-dynamic feature set
+              # (see linux_zigbuild_entry) — proven working in CI, since it
+              # never links ONNX Runtime at build time and so never hits the
+              # libstdc++-ABI problem above.
               linux_zigbuild_entry("aarch64-unknown-linux-gnu", best_effort=True, use_al2023_features=al2023),
           ]
 
@@ -627,7 +681,11 @@ jobs:
       # so build-essential/pkg-config/libssl-dev are still needed for crates
       # whose build.rs shells out to a C compiler or pkg-config directly.
       - name: Install build prerequisites (Ubuntu)
-        if: matrix.variant == 'linux-zigbuild'
+        # `standard` here means the ORT-bundling-crate native x86_64 leg
+        # (see native_linux_entry in the matrix-generation step) — the only
+        # `standard`-variant entry that runs on ubuntu-latest; the OTHER
+        # `standard` entry is macOS (guarded out by the runner check).
+        if: matrix.variant == 'linux-zigbuild' || (matrix.variant == 'standard' && matrix.runner == 'ubuntu-latest')
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
