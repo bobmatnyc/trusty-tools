@@ -107,6 +107,7 @@ impl ProjectRegistry {
                 stack_hint: entry.stack_hint.clone(),
                 tags: entry.tags.clone().unwrap_or_default(),
                 description: entry.description.clone(),
+                gh_user: entry.gh_user.clone(),
             };
             let name = project.name.clone();
             if let Err(e) = self.register(project).await {
@@ -162,6 +163,7 @@ impl ProjectRegistry {
                 stack_hint: None,
                 tags: vec![],
                 description: None,
+                gh_user: None,
             };
             if let Err(e) = self.register(project).await {
                 warn!(name = %name, "auto_register: failed to register: {e}");
@@ -242,6 +244,7 @@ mod tests {
             stack_hint: None,
             tags: vec![],
             description: None,
+            gh_user: None,
         };
         registry.register(p.clone()).await.expect("register once");
         registry
@@ -265,6 +268,7 @@ mod tests {
             stack_hint: Some("rust".into()),
             tags: vec!["backend".into()],
             description: Some("desc".into()),
+            gh_user: Some("bob-work".into()),
         };
         registry.register(p.clone()).await.expect("register");
 
@@ -272,6 +276,7 @@ mod tests {
         assert_eq!(got.name, "beta");
         assert_eq!(got.default_branch, "develop");
         assert_eq!(got.stack_hint.as_deref(), Some("rust"));
+        assert_eq!(got.gh_user.as_deref(), Some("bob-work"));
 
         let err = registry.get("nonexistent").await;
         assert!(matches!(err, Err(ProjectStoreError::NotFound(_))));
@@ -290,6 +295,7 @@ mod tests {
                 stack_hint: None,
                 tags: vec![],
                 description: None,
+                gh_user: None,
             };
             registry.register(p).await.expect("register");
         }
@@ -311,6 +317,7 @@ mod tests {
                 stack_hint: Some("python".into()),
                 tags: Some(vec!["ml".into()]),
                 description: Some("ml project".into()),
+                gh_user: Some("bobmatnyc".into()),
             },
             ProjectConfig {
                 name: "from-config-b".into(),
@@ -319,6 +326,7 @@ mod tests {
                 stack_hint: None,
                 tags: None,
                 description: None,
+                gh_user: None,
             },
         ];
 
@@ -332,10 +340,13 @@ mod tests {
         let a = registry.get("from-config-a").await.expect("get a");
         assert_eq!(a.stack_hint.as_deref(), Some("python"));
         assert_eq!(a.default_branch, "main");
+        assert_eq!(a.gh_user.as_deref(), Some("bobmatnyc"));
 
-        // Entry without default_branch must fall back to "main".
+        // Entry without default_branch must fall back to "main"; gh_user stays
+        // unset (no regression for configs that predate #2081).
         let b = registry.get("from-config-b").await.expect("get b");
         assert_eq!(b.default_branch, "main");
+        assert_eq!(b.gh_user, None);
     }
 
     #[tokio::test]
@@ -383,6 +394,7 @@ mod tests {
             stack_hint: Some("rust".into()),
             tags: vec![],
             description: Some("manually registered".into()),
+            gh_user: None,
         };
         registry.register(existing).await.expect("pre-register");
 

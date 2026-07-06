@@ -248,6 +248,7 @@ mod tests {
             stack_hint: None,
             tags: vec![],
             description: None,
+            gh_user: None,
         }
     }
 
@@ -358,6 +359,7 @@ mod tests {
             stack_hint: Some("typescript".into()),
             tags: vec!["frontend".into(), "oss".into()],
             description: Some("a fully-populated project".into()),
+            gh_user: Some("bobmatnyc".into()),
         };
         store.upsert(full.clone()).await.expect("upsert full");
 

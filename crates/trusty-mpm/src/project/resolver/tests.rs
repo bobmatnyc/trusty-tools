@@ -22,6 +22,7 @@ fn proj(name: &str, repo_url: &str) -> Project {
         stack_hint: None,
         tags: vec![],
         description: None,
+        gh_user: None,
     }
 }
 
@@ -33,6 +34,7 @@ fn proj_tagged(name: &str, repo_url: &str, tags: &[&str], desc: &str) -> Project
         stack_hint: None,
         tags: tags.iter().map(|s| s.to_string()).collect(),
         description: Some(desc.to_string()),
+        gh_user: None,
     }
 }
 

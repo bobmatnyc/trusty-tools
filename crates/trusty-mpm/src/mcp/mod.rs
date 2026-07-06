@@ -313,11 +313,14 @@ pub trait OrchestratorBackend: Send + Sync {
     /// Why: operators and the driver skill must be able to add or update a
     ///      project without restarting the daemon or editing config.yaml.
     ///      Registration is idempotent — calling with the same `name` updates
-    ///      the entry rather than duplicating it.
+    ///      the entry rather than duplicating it. `gh_user` (#2081) lets an
+    ///      operator declare the project's preferred `gh` account so callers
+    ///      can scope `gh` operations to it without a per-session reminder.
     /// What: upserts the project keyed by `name` and returns the persisted
     ///      project record as JSON.
     /// Test: `dispatch_project_register_tool`,
     ///       `dispatch_project_register_requires_name` (mock).
+    #[allow(clippy::too_many_arguments)]
     async fn project_register(
         &self,
         name: &str,
@@ -326,6 +329,7 @@ pub trait OrchestratorBackend: Send + Sync {
         stack_hint: Option<&str>,
         tags: Option<Vec<String>>,
         description: Option<&str>,
+        gh_user: Option<&str>,
     ) -> Result<Value, String>;
 
     /// Back `project_get`: look up a single project by name.

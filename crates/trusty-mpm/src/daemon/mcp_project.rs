@@ -47,11 +47,16 @@ pub async fn project_list(state: &Arc<DaemonState>) -> Result<Value, String> {
 /// Register or update a project in the registry.
 ///
 /// Why: `project_register` is the typed, JSON-native way to add a project
-/// without editing `config.yaml` or restarting the daemon.
+/// without editing `config.yaml` or restarting the daemon. `gh_user` (#2081)
+/// lets an operator declare the project's preferred `gh` account so callers
+/// can scope `gh` operations to it instead of relying on a per-session
+/// reminder — see [`crate::core::gh_account::resolve_gh_account_env`] for the
+/// non-mutating resolution mechanism.
 /// What: builds a `Project` from the supplied fields (defaulting
 /// `default_branch` to `"main"` when omitted), calls `registry.register`,
 /// and returns the persisted record.
 /// Test: `dispatch_project_register_tool` in `crate::mcp::tests`.
+#[allow(clippy::too_many_arguments)]
 pub async fn project_register(
     state: &Arc<DaemonState>,
     name: &str,
@@ -60,6 +65,7 @@ pub async fn project_register(
     stack_hint: Option<&str>,
     tags: Option<Vec<String>>,
     description: Option<&str>,
+    gh_user: Option<&str>,
 ) -> Result<Value, String> {
     let project = Project {
         name: name.to_string(),
@@ -68,6 +74,7 @@ pub async fn project_register(
         stack_hint: stack_hint.map(str::to_string),
         tags: tags.unwrap_or_default(),
         description: description.map(str::to_string),
+        gh_user: gh_user.map(str::to_string),
     };
     let registry = state.project_registry().await;
     registry

@@ -546,6 +546,7 @@ impl OrchestratorBackend for StateBackend {
         stack_hint: Option<&str>,
         tags: Option<Vec<String>>,
         description: Option<&str>,
+        gh_user: Option<&str>,
     ) -> Result<Value, String> {
         super::mcp_project::project_register(
             &self.state,
@@ -555,6 +556,7 @@ impl OrchestratorBackend for StateBackend {
             stack_hint,
             tags,
             description,
+            gh_user,
         )
         .await
     }

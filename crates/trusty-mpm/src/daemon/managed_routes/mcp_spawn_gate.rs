@@ -250,6 +250,7 @@ mod tests {
             stack_hint: None,
             tags: vec![],
             description: None,
+            gh_user: None,
         }
     }
 
