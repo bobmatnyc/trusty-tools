@@ -16,25 +16,42 @@
 //! What: [`pane_runtime_exited`] is the pure per-pane gate (a bare shell with no
 //! live agent child); [`find_runtime_exited`] maps live panes + store records to
 //! the set of `Active` session ids whose runtime has exited; [`stop_runtime_exited`]
-//! is the async reconcile step that drives those ids through the EXISTING
-//! [`SessionManager::stop`] path (best-effort kill of the leftover shell + mark
-//! `Stopped`); [`reap_runtime_exited_managed`] is the thin tmux-facing wrapper the
-//! `reap_loop` calls each tick.
+//! is the async reconcile step that drives those ids through
+//! [`SessionManager::mark_runtime_exited_stopped`] — marks the record `Stopped`
+//! WITHOUT killing the tmux pane (#2023 A; see the note below on why this is
+//! deliberately NOT [`SessionManager::stop`]); [`reap_runtime_exited_managed`] is
+//! the thin tmux-facing wrapper the `reap_loop` calls each tick.
 //!
 //! Safety: reuses the orphan-GC's conservative, fail-closed primitives —
 //! [`crate::daemon::orphan_gc::is_idle_shell`] (an allowlist of known shells; any
 //! unrecognised command is treated as ACTIVE and kept) and the
 //! [`ChildLivenessProbe`] belt-and-braces gate (a pane momentarily showing a shell
 //! while `claude` is mid-spawn is spared because its shell PID still has a live
-//! child). Because `stop` is non-destructive (the workspace and record survive and
-//! the session is resumable), this reconciler errs toward correctness of state
-//! without risking data loss even in the unlikely false-positive case.
+//! child). Because the reconcile action only flips the record's state (the
+//! workspace, record, AND tmux pane all survive untouched), this reconciler errs
+//! toward correctness of state without risking data loss OR an unwanted pane
+//! teardown even in the unlikely false-positive case.
+//!
+//! #2023 A: this reaper previously drove the SAME [`SessionManager::stop`] path
+//! used by an explicit `tm session stop` — which gracefully terminates the
+//! runtime and then `kill_session`s the tmux pane. That killed a pane the runtime
+//! reaper itself observed was ALREADY just an idle shell (no runtime left to
+//! terminate), destroying a pane a human might still be looking at ~60s after
+//! their `claude` process exited. [`SessionManager::mark_runtime_exited_stopped`]
+//! is the non-destructive counterpart: it transitions the record exactly like
+//! `stop` does, but never calls `graceful_terminate_runtime` / `kill_session`, so
+//! the now-idle-shell pane is left alive. Explicit `tm session stop` and
+//! `decommission` are UNCHANGED — they still call `stop` /
+//! `graceful_terminate_runtime` and kill the pane, because those are
+//! human/client-initiated teardown requests, not self-healing state reconciles.
 //!
 //! Test: `pane_runtime_exited_*`, `find_runtime_exited_*`, and the end-to-end
 //! `stop_runtime_exited_transitions_active_to_stopped` /
-//! `stop_runtime_exited_keeps_running_session` in the `tests` module below drive a
+//! `stop_runtime_exited_keeps_running_session` /
+//! `stop_runtime_exited_does_not_kill_pane` in the `tests` module below drive a
 //! real [`SessionManager`] backed by [`crate::session_manager::FakeNoopTmuxDriver`]
-//! (no real tmux) and assert the record transition.
+//! (no real tmux) and assert the record transition (and, for the last, that
+//! `kill_session` is never called — #2023 A).
 
 use tracing::{info, warn};
 
@@ -101,16 +118,20 @@ pub fn find_runtime_exited(
 
 /// Reconcile step: mark every runtime-exited `Active` session `Stopped`.
 ///
-/// Why: this is the self-healing action for #1814. It routes through the EXISTING
-/// [`SessionManager::stop`] path rather than reimplementing the transition, so the
-/// leftover shell is killed, the workspace/record are preserved, and the session
-/// remains resumable — exactly the SESSION LIFECYCLE contract.
+/// Why: this is the self-healing action for #1814. Per #2023 A it routes
+/// through [`SessionManager::mark_runtime_exited_stopped`] — NOT
+/// [`SessionManager::stop`] — so the record transition (workspace/record
+/// preserved, session remains resumable) happens WITHOUT killing the tmux
+/// pane the runtime just vacated. `stop` remains reserved for explicit
+/// `tm session stop` / decommission requests.
 /// What: computes the exited-session ids via [`find_runtime_exited`], calls
-/// `manager.stop` on each (best-effort; a failure is logged and never aborts the
-/// rest), and returns the count transitioned. Takes an already-gathered `panes`
-/// slice so it is fully testable with a fake tmux driver and no real tmux binary.
+/// `manager.mark_runtime_exited_stopped` on each (best-effort; a failure is
+/// logged and never aborts the rest), and returns the count transitioned.
+/// Takes an already-gathered `panes` slice so it is fully testable with a fake
+/// tmux driver and no real tmux binary.
 /// Test: `stop_runtime_exited_transitions_active_to_stopped`,
-/// `stop_runtime_exited_keeps_running_session`.
+/// `stop_runtime_exited_keeps_running_session`,
+/// `stop_runtime_exited_does_not_kill_pane`.
 pub async fn stop_runtime_exited(
     manager: &SessionManager,
     panes: &[PaneInfo],
@@ -120,13 +141,13 @@ pub async fn stop_runtime_exited(
     let exited = find_runtime_exited(&records, panes, probe);
     let mut stopped = 0usize;
     for id in exited {
-        match manager.stop(&id).await {
+        match manager.mark_runtime_exited_stopped(&id).await {
             Ok(record) => {
                 stopped += 1;
                 info!(
                     id = %id,
                     name = %record.tmux_name,
-                    "runtime-reap: marked managed session Stopped (runtime process exited, #1814)"
+                    "runtime-reap: marked managed session Stopped (runtime process exited, #1814, pane left alive #2023)"
                 );
             }
             Err(e) => warn!(
@@ -171,8 +192,46 @@ pub async fn reap_runtime_exited_managed(
 mod tests {
     use super::*;
     use crate::daemon::orphan_gc::AlwaysIdleProbe;
-    use crate::session_manager::{FakeNoopTmuxDriver, SessionManager};
-    use std::sync::Arc;
+    use crate::session_manager::{
+        FakeNoopTmuxDriver, ManagedError, ManagedTmuxDriver, SessionManager,
+    };
+    use std::sync::{Arc, Mutex};
+
+    /// A tmux driver that records every `kill_session` call (#2023 A).
+    ///
+    /// Why: [`FakeNoopTmuxDriver`] is a zero-sized unit struct with no interior
+    /// mutability (it is shared by dozens of other tests as a bare no-op), so it
+    /// cannot be extended with a call counter without risking those callers. This
+    /// spy is local to this test module and exists solely to prove the
+    /// runtime-exit reconcile path (#2023 A) never reaches `kill_session` — the
+    /// pane must be left alive.
+    /// What: every method besides `kill_session` is a silent no-op (mirroring
+    /// `FakeNoopTmuxDriver`); `kill_session` pushes `name` onto `kill_calls`
+    /// before returning `Ok(())`.
+    /// Test: `stop_runtime_exited_does_not_kill_pane`.
+    #[derive(Default)]
+    struct KillSpyTmuxDriver {
+        kill_calls: Mutex<Vec<String>>,
+    }
+
+    impl ManagedTmuxDriver for KillSpyTmuxDriver {
+        fn create_session(&self, _name: &str, _workdir: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+            self.kill_calls.lock().unwrap().push(name.to_owned());
+            Ok(())
+        }
+        fn send_line(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+        fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+            Ok(String::new())
+        }
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(Vec::new())
+        }
+    }
 
     /// A probe that always reports a live child — forces the belt-and-braces gate
     /// to spare a pane even when it momentarily shows a bare shell.
@@ -233,7 +292,17 @@ mod tests {
         dir: &tempfile::TempDir,
         tmux_name_task: &str,
     ) -> (Arc<SessionManager>, ManagedSessionId) {
-        let mgr = SessionManager::new(dir.path(), Arc::new(FakeNoopTmuxDriver))
+        seed_active_with_driver(dir, tmux_name_task, Arc::new(FakeNoopTmuxDriver)).await
+    }
+
+    /// Same as [`seed_active`] but with a caller-supplied driver (#2023 A), so a
+    /// test can inject the [`KillSpyTmuxDriver`] to observe `kill_session` calls.
+    async fn seed_active_with_driver(
+        dir: &tempfile::TempDir,
+        tmux_name_task: &str,
+        driver: Arc<dyn ManagedTmuxDriver>,
+    ) -> (Arc<SessionManager>, ManagedSessionId) {
+        let mgr = SessionManager::new(dir.path(), driver)
             .await
             .expect("session manager");
         let mgr = Arc::new(mgr);
@@ -334,6 +403,33 @@ mod tests {
             after.state,
             ManagedSessionState::Active,
             "a session still running claude must stay Active"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_runtime_exited_does_not_kill_pane() {
+        // #2023 A: the runtime-exit reconcile must mark the record Stopped
+        // WITHOUT ever calling kill_session — the pane (now a bare shell) must
+        // be left alive for the operator, unlike an explicit `tm session stop`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let driver = Arc::new(KillSpyTmuxDriver::default());
+        let (mgr, id) =
+            seed_active_with_driver(&tmp, "exited-no-kill", driver.clone() as Arc<_>).await;
+        let record = mgr.get(&id).await.expect("get");
+        let panes = vec![pane(&record.tmux_name, "zsh")];
+
+        let stopped = stop_runtime_exited(&mgr, &panes, &AlwaysIdleProbe).await;
+        assert_eq!(stopped, 1, "exactly one session must be stopped");
+
+        let after = mgr.get(&id).await.expect("get after reap");
+        assert_eq!(
+            after.state,
+            ManagedSessionState::Stopped,
+            "runtime-exited Active session must become Stopped"
+        );
+        assert!(
+            driver.kill_calls.lock().unwrap().is_empty(),
+            "runtime-exit reconcile must NEVER kill the tmux pane (#2023 A)"
         );
     }
 }

@@ -5,9 +5,11 @@
 //! logic here keeps the HTTP handlers thin and makes the manager unit-testable
 //! through the [`ManagedTmuxDriver`] trait seam.
 //! What: [`SessionManager`] wraps a [`SessionStore`] and a [`ManagedTmuxDriver`]
-//! and provides `create`, `list`, `get`, `send_input`, `stop`, `resume`,
-//! `decommission`, and `reconcile_on_boot`. [`ReconcileReport`] describes
-//! what the reconciliation pass found. [`ManagedError`] is the module's error type.
+//! and provides `create`, `list`, `get`, `send_input`, `stop`,
+//! `mark_runtime_exited_stopped` (non-destructive counterpart to `stop`,
+//! #2023 A), `resume`, `decommission`, and `reconcile_on_boot`.
+//! [`ReconcileReport`] describes what the reconciliation pass found.
+//! [`ManagedError`] is the module's error type.
 //! Test: `manager_create_record`, `manager_stop_keeps_workspace`,
 //! `manager_resume_respawns`, `manager_decommission_removes_workspace`,
 //! `manager_reconcile_gone_tmux_yields_stopped` in tests.rs.
@@ -596,6 +598,67 @@ impl SessionManager {
         record.state = ManagedSessionState::Stopped;
         self.store.write().await.upsert(record.clone()).await?;
         info!(id = %id, name = %record.tmux_name, "managed session stopped (workspace intact)");
+        Ok(record)
+    }
+
+    /// Mark a runtime-exited session `Stopped` WITHOUT killing its tmux pane (#2023 A).
+    ///
+    /// Why: `stop` is the EXPLICIT-stop contract (`tm session stop`, HTTP
+    /// stop route, MCP `sessions.stop`) — a human or client asked to tear the
+    /// runtime down, so killing the pane is correct there. The runtime-exit
+    /// reaper ([`crate::daemon::runtime_reap::stop_runtime_exited`]) is a
+    /// DIFFERENT event: the inner `claude` process exited on its own and the
+    /// tmux pane already fell back to a bare login shell — the pane is not
+    /// misbehaving, it is simply idle. Routing that self-healing transition
+    /// through `stop` (and therefore `graceful_terminate_runtime` /
+    /// `kill_session`) killed a pane the user may still have attached, or
+    /// wanted to glance at, purely because the daemon noticed the runtime was
+    /// gone ~60s earlier than the human did. This method gives the reaper its
+    /// own non-destructive path: same record transition, no pane teardown.
+    ///
+    /// Scope: this ONLY preserves the pane — it marks `Stopped` and leaves the
+    /// tmux session/pane alive so an operator can still `tmux attach` and look
+    /// at the trailing output, or manually re-launch `claude` in that same
+    /// pane. It does NOT provide in-place runtime reuse by itself: today's
+    /// `tm session resume` / the guided-picker Restart path unconditionally
+    /// kills any surviving tmux session and creates a fresh one
+    /// (`Self::resume`, below — see the `kill_session` + `create_session` pair
+    /// there), so resuming a session marked `Stopped` by this method still
+    /// tears the preserved pane down. True bare-`tm`-in-pane relaunch reusing
+    /// the surviving shell is the scope of #2023 component C, not this method.
+    ///
+    /// NOTE — auto-resume supervisors: `tm supervisor --auto-resume`
+    /// (`supervisor::poller::run_tick`) auto-resumes EVERY `Stopped` record
+    /// once `cfg.auto_resume` is true, and `resume()` kills the preserved pane
+    /// as described above. So the "pane left alive" guarantee this method
+    /// provides only holds for `auto_resume = false` / interactive
+    /// deployments — under an auto-resume supervisor the session is still
+    /// revived (and its idle pane replaced) by that mode's own design.
+    /// Reconciling supervisor-revive vs. preserve-on-exit semantics is tracked
+    /// as a follow-up (#2026).
+    ///
+    /// What: loads the record, captures a pane snapshot the same way `stop`
+    /// does (best-effort — the pane usually still exists, it is just an idle
+    /// shell), sets `state = Stopped`, and persists. Deliberately never calls
+    /// [`Self::graceful_terminate_runtime`] or `kill_session` — the tmux
+    /// session and its pane are left exactly as they are.
+    /// Test: `stop_runtime_exited_transitions_active_to_stopped` (in
+    /// `daemon::runtime_reap`) asserts the record becomes `Stopped`;
+    /// `stop_runtime_exited_does_not_kill_pane` (same module) asserts
+    /// `kill_session` is never invoked on the fake driver.
+    pub async fn mark_runtime_exited_stopped(
+        &self,
+        id: &ManagedSessionId,
+    ) -> Result<SessionRecord, ManagedError> {
+        let mut record = self.get(id).await?;
+        super::snapshot::capture_into(&mut record, &*self.tmux).await;
+        record.state = ManagedSessionState::Stopped;
+        self.store.write().await.upsert(record.clone()).await?;
+        info!(
+            id = %id,
+            name = %record.tmux_name,
+            "runtime-reap: managed session marked Stopped (pane left alive, #2023)"
+        );
         Ok(record)
     }
 
