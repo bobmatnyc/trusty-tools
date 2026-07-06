@@ -292,7 +292,8 @@ fn optimizer_toml_is_parseable() {
 fn bundle_table_is_complete() {
     // `ALL` must enumerate every artifact with unique, non-empty paths.
     // Count: 4 hooks/instructions + 5 base agents + 36 concrete agents +
-    // 19 /tm- skills + 1 DOC-28 self-description doc = 65
+    // 19 /tm- skills + 1 DOC-28 self-description doc + 1 issue #2034
+    // bundled architecture doc = 66
     // (A4, tm-skills-portfolio epic: the `example-skill.md` placeholder was
     // removed — it shipped to every user with no real content. A3: the
     // previously-orphaned tm-doctor.md is now wired in. The 11 Phase 1 (#770)
@@ -315,11 +316,12 @@ fn bundle_table_is_complete() {
     //   tm-pr-workflow, tm-delegation-patterns, tm-session-management,
     //   tm-session-pause, tm-session-resume, tm-init, tm (overview)
     // DOC-28 R1 (1): docs/WHAT-IS-TRUSTY-MPM.md
-    assert_eq!(ALL.len(), 65);
+    // Issue #2034 (1): docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md
+    assert_eq!(ALL.len(), 66);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 65, "artifact paths must be unique");
+    assert_eq!(paths.len(), 66, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());

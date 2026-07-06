@@ -179,7 +179,8 @@ pub const WHAT_IS_TRUSTY_MPM: &str = include_str!("../../docs/WHAT-IS-TRUSTY-MPM
 /// trade-offs, and its integration with the others, then cross-references
 /// the deeper specs and source code so operators and framework users can
 /// understand the design from first principles.
-pub const ARCHITECTURE_MEMORY_SESSIONS_SEARCH: &str = include_str!("../../docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md");
+pub const ARCHITECTURE_MEMORY_SESSIONS_SEARCH: &str =
+    include_str!("../../docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md");
 
 // --- tm-skills-portfolio epic: the /tm- skill catalog — bundle_tm_skills.rs ---
 // Supersedes the Phase 1 (#770) mpm-* guidance skills (formerly
