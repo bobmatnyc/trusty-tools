@@ -41,6 +41,29 @@ use tokio::time::timeout;
 /// test in seconds rather than hanging the suite.
 const WIRE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Provision a throwaway project with `.claude/agents/{pm,python-engineer}.toml`.
+///
+/// Why: shared by `tests/task_e2e.rs` (drives the daemon directly) and
+/// (#2060) `tests/cli_e2e.rs` (drives the `tcode` CLI, which spawns its own
+/// nested daemon) — both need the SAME minimal two-agent fixture for
+/// `TCODE_MOCK_LLM=echo`'s scripted PM -> engineer delegation to resolve.
+pub fn project_with_agents() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("project tempdir");
+    let agents = tmp.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents).expect("mkdir agents");
+    std::fs::write(
+        agents.join("pm.toml"),
+        "[agent]\nname = \"pm\"\nmodel = \"openai/gpt-4o-mini\"\n[system_prompt]\ncontent = \"You are the PM. Delegate work to python-engineer.\"\n",
+    )
+    .expect("write pm.toml");
+    std::fs::write(
+        agents.join("python-engineer.toml"),
+        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n[system_prompt]\ncontent = \"You are a Python engineer.\"\n",
+    )
+    .expect("write python-engineer.toml");
+    tmp
+}
+
 /// A running `tcode serve --stdio` subprocess with line-buffered stdin/stdout.
 ///
 /// Why: the STDIO half of the API-driven e2e coverage — every call in
