@@ -80,7 +80,11 @@ impl SessionStatus {
 /// the caller — `session.create`, `session.list`, `session.status`.
 /// What: `id` is a UUIDv4 string; `agent`/`project` are optional because
 /// `session.create` does not require either in M1 (no real agent-loop
-/// wiring yet); `created_at` is UTC.
+/// wiring yet); `created_at` is UTC. `mode` (#2059) is `None` until
+/// `task.run` resolves and sets it (`SessionRegistry::set_mode`) — a session
+/// that has never run a task has no mode, mirroring the same "`None` means
+/// not yet run" convention `session::transcript::TranscriptRecord` already
+/// uses for `cost_usd`.
 /// Test: `model::tests::session_round_trips_through_json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -90,6 +94,8 @@ pub struct Session {
     pub project: Option<String>,
     pub status: SessionStatus,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub mode: Option<crate::mode::HarnessMode>,
 }
 
 #[cfg(test)]
@@ -159,15 +165,18 @@ mod tests {
             project: None,
             status: SessionStatus::Running,
             created_at: Utc::now(),
+            mode: Some(crate::mode::HarnessMode::DailyDriver),
         };
         let value = serde_json::to_value(&session).unwrap();
         assert_eq!(value["id"], "s-1");
         assert_eq!(value["status"], "running");
         assert_eq!(value["agent"], "engineer");
         assert!(value["project"].is_null());
+        assert_eq!(value["mode"], "daily-driver");
 
         let back: Session = serde_json::from_value(value).unwrap();
         assert_eq!(back.id, session.id);
         assert_eq!(back.status, session.status);
+        assert_eq!(back.mode, session.mode);
     }
 }

@@ -19,6 +19,9 @@
 //! must print live tool events and a final `status=finished` line, exit 0.
 //! `run_task_json_mode_prints_only_the_final_session` proves `--json`
 //! suppresses the per-event lines and emits one parseable JSON document.
+//! `run_task_mode_precedence_over_the_wire` (#2059) proves the three-tier
+//! `HarnessMode` precedence — env var > `--mode` flag > `.claude/settings.json`
+//! > default — end to end via the REAL CLI binary and its `--json` response.
 //!
 //! `session_list_on_fresh_project_reports_no_sessions`,
 //! `transcript_unknown_session_errors_cleanly`,
@@ -116,6 +119,87 @@ fn run_task_json_mode_prints_only_the_final_session() {
     let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("stdout must be valid JSON: {e}: {stdout}"));
     assert_eq!(parsed["status"], "finished");
+}
+
+/// Run `tcode run-task ... --json`, optionally with `--mode`, a
+/// `.claude/settings.json`, and/or `TRUSTY_CODE_MODE`, returning the
+/// resolved `mode` string from the parsed JSON response.
+fn run_task_resolved_mode(
+    project: &std::path::Path,
+    cli_mode: Option<&str>,
+    env_mode: Option<&str>,
+) -> String {
+    let mut args = vec![
+        "run-task".to_string(),
+        "pm".to_string(),
+        "say hi".to_string(),
+        "--project".to_string(),
+        project.display().to_string(),
+        "--json".to_string(),
+    ];
+    if let Some(m) = cli_mode {
+        args.push("--mode".to_string());
+        args.push(m.to_string());
+    }
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tcode"));
+    cmd.args(&args).env("TCODE_MOCK_LLM", "echo");
+    if let Some(m) = env_mode {
+        cmd.env("TRUSTY_CODE_MODE", m);
+    } else {
+        cmd.env_remove("TRUSTY_CODE_MODE");
+    }
+    let output = cmd.output().expect("spawn tcode run-task");
+    assert!(
+        output.status.success(),
+        "tcode run-task must exit 0: {:?}\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be valid JSON: {e}: {stdout}"));
+    parsed["mode"]
+        .as_str()
+        .unwrap_or_else(|| panic!("response must carry a mode string: {parsed}"))
+        .to_string()
+}
+
+/// #2059's three-tier `HarnessMode` precedence, proven over the REAL wire
+/// via the `tcode` CLI (not just `crate::mode::resolve_mode`'s own offline
+/// unit tests, and not just `task::protocol::tests`' direct-handler-call
+/// integration test): `TRUSTY_CODE_MODE` env var > `task.run`'s `mode` param
+/// (here, the CLI's `--mode` flag) > `.claude/settings.json`'s
+/// `code_harness.mode` > default `daily-driver`.
+#[test]
+fn run_task_mode_precedence_over_the_wire() {
+    // 1. Nothing set anywhere -> default.
+    let project = project_with_agents();
+    assert_eq!(
+        run_task_resolved_mode(project.path(), None, None),
+        "daily-driver"
+    );
+
+    // 2. `.claude/settings.json` alone sets parity.
+    std::fs::write(
+        project.path().join(".claude").join("settings.json"),
+        r#"{"code_harness": {"mode": "parity"}}"#,
+    )
+    .expect("write settings.json");
+    assert_eq!(run_task_resolved_mode(project.path(), None, None), "parity");
+
+    // 3. The CLI's `--mode` flag (task.run's `mode` param) overrides
+    //    settings.json.
+    assert_eq!(
+        run_task_resolved_mode(project.path(), Some("daily-driver"), None),
+        "daily-driver"
+    );
+
+    // 4. `TRUSTY_CODE_MODE` overrides EVERYTHING, including `--mode`.
+    assert_eq!(
+        run_task_resolved_mode(project.path(), Some("daily-driver"), Some("parity")),
+        "parity"
+    );
 }
 
 /// `tcode session list` on a project with no prior activity must report no

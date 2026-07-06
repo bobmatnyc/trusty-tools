@@ -38,6 +38,7 @@ fn params(agents: &TempDir, project: &TempDir, session_id: &str) -> TaskRunParam
         project: project.path().to_path_buf(),
         agents_dir: agents.path().to_path_buf(),
         model_override: None,
+        mode: crate::mode::HarnessMode::default(),
     }
 }
 
@@ -132,6 +133,7 @@ fn resolve_engineer_model_falls_back_when_config_missing() {
         project: empty_agents.path().to_path_buf(),
         agents_dir: empty_agents.path().to_path_buf(),
         model_override: None,
+        mode: crate::mode::HarnessMode::default(),
     };
     let model = resolve_engineer_model(&p);
     assert_eq!(model, "unknown");

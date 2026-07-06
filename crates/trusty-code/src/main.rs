@@ -133,6 +133,14 @@ enum Command {
         /// thin JSON-RPC client. See this variant's docs for why it is kept.
         #[arg(long)]
         legacy_in_process: bool,
+
+        /// Per-call `HarnessMode` override (#2059, vision spec §5.9):
+        /// `daily-driver` or `parity`. Passed as `task.run`'s `mode` param
+        /// (thin-client path only — ignored under `--legacy-in-process`,
+        /// which has no mode concept). `TRUSTY_CODE_MODE` still overrides
+        /// this per the resolution precedence in `crate::mode`'s docs.
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
     },
 
     /// Execute a named MPM workflow end-to-end.
@@ -238,12 +246,14 @@ async fn main() -> Result<()> {
             json,
             engineer_model,
             legacy_in_process,
+            mode,
         } => {
             if legacy_in_process {
                 run_task(&agent, &task, &project, json, engineer_model).await
             } else {
                 let project = canonicalize_project_or_exit(&project, "run-task");
-                match cli::run_task::run(&project, &agent, &task, json, engineer_model).await {
+                match cli::run_task::run(&project, &agent, &task, json, engineer_model, mode).await
+                {
                     Ok(code) => process::exit(code),
                     Err(e) => {
                         eprintln!("tcode run-task: {e:#}");

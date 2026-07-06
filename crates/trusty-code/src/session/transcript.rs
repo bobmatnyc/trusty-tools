@@ -19,11 +19,14 @@
 //! session — the two cases are indistinguishable here by design, matching
 //! `RunReport::cost_usd`'s existing convention). A session that has never
 //! run a task returns `turns: []`, `usage` all-zero, `cost_usd: null` — a
-//! valid, empty transcript, not an error.
+//! valid, empty transcript, not an error. `mode` (#2059) is the resolved
+//! `HarnessMode` `task.run` set via `SessionRegistry::set_mode` — `None` for
+//! the same "never run" case.
 //! Test: `session::registry_tests::get_transcript_*`.
 
 use serde::{Deserialize, Serialize};
 
+use crate::mode::HarnessMode;
 use crate::perf::TokenUsage;
 use crate::run_task::TurnRecord;
 
@@ -37,6 +40,8 @@ use crate::run_task::TurnRecord;
 /// cost, plus the `session_id` for a self-describing response (the wire
 /// method already takes `session_id` as a param, but echoing it back keeps
 /// the result self-contained for a caller inspecting the JSON alone).
+/// `mode` (#2059) mirrors `Session.mode` — the same field, read at
+/// `get_transcript` time.
 /// Test: `session::registry_tests::get_transcript_returns_stored_record`,
 /// `session::registry_tests::get_transcript_on_never_run_session_is_empty`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,4 +50,5 @@ pub struct TranscriptRecord {
     pub turns: Vec<TurnRecord>,
     pub usage: TokenUsage,
     pub cost_usd: Option<f64>,
+    pub mode: Option<HarnessMode>,
 }

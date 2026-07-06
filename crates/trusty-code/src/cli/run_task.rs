@@ -17,7 +17,13 @@
 //! and `cli_client::render::exit_code_for_status` for the process exit code.
 //! `--json` suppresses the live per-event lines and prints only the final
 //! `Session` snapshot as pretty JSON, matching the legacy path's `--json`
-//! contract (a single JSON document on stdout).
+//! contract (a single JSON document on stdout). `--mode` (#2059) is passed
+//! straight through as `task.run`'s own `mode` param — this function does
+//! NOT resolve or validate it; the daemon's `crate::mode::resolve_mode`
+//! (highest to lowest: `TRUSTY_CODE_MODE` > this param >
+//! `.claude/settings.json` > default) is the single source of truth, and
+//! the resolved value is printed back (human line and `--json` output both
+//! include `Session.mode`).
 //! Test: `tests/cli_e2e.rs::run_task_streams_live_events_and_reports_final_status`
 //! (the required black-box "replay via thin CLI" case, driven with
 //! `TCODE_MOCK_LLM=echo`).
@@ -38,7 +44,8 @@ use super::tcode_exe;
 /// How often the streaming loop wakes up to re-check for a terminal event.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// `tcode run-task <AGENT> <TASK> [--project P] [--json] [--engineer-model M]`.
+/// `tcode run-task <AGENT> <TASK> [--project P] [--json] [--engineer-model M]
+/// [--mode daily-driver|parity]`.
 ///
 /// Why/What: see module docs. Returns the process exit code the caller
 /// should use (mirrors the legacy path's `ExitCode` contract via
@@ -49,6 +56,7 @@ pub async fn run(
     task: &str,
     json_output: bool,
     engineer_model: Option<String>,
+    mode: Option<String>,
 ) -> Result<i32> {
     let exe = tcode_exe::resolve()?;
     let mut client = StdioRpcClient::spawn(&exe, project)?;
@@ -57,6 +65,7 @@ pub async fn run(
         "task_description": task,
         "agent_name": agent,
         "model_override": engineer_model,
+        "mode": mode,
     });
     let run_result = client.call("task.run", run_params).await?;
     let session_id = run_result
@@ -113,14 +122,15 @@ pub async fn run(
         );
     } else {
         println!(
-            "run {}: session={} status={}",
+            "run {}: session={} status={} mode={}",
             if session.status == trusty_code::session::SessionStatus::Finished {
                 "finished"
             } else {
                 "did not finish cleanly"
             },
             session.id,
-            session.status.as_str()
+            session.status.as_str(),
+            session.mode.map(|m| m.as_str()).unwrap_or("unknown")
         );
     }
 

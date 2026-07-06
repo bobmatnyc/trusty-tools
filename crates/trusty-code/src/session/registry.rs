@@ -40,6 +40,7 @@ use uuid::Uuid;
 
 use crate::events::{Event, SessionEventEnvelope};
 use crate::jsonrpc::{NotifySender, RpcError};
+use crate::mode::HarnessMode;
 use crate::perf::TokenUsage;
 use crate::run_task::TurnRecord;
 
@@ -155,6 +156,7 @@ impl SessionRegistry {
             project: project.clone(),
             status: SessionStatus::Created,
             created_at: Utc::now(),
+            mode: None,
         };
         {
             let mut sessions = self.lock();
@@ -574,7 +576,34 @@ impl SessionRegistry {
             turns: entry.transcript.clone(),
             usage: entry.usage,
             cost_usd: entry.cost_usd,
+            mode: entry.session.mode,
         })
+    }
+
+    /// `task.run`: persist the resolved `HarnessMode` onto the session
+    /// (#2059).
+    ///
+    /// Why: `task::protocol::task_run` resolves the mode (env var >
+    /// `task.run` param > `.claude/settings.json` > default) BEFORE spawning
+    /// the execution; storing it here — rather than waiting for
+    /// `set_run_outcome` at the end of the run — makes it queryable via
+    /// `session.status`/`session.list` (`Session.mode`) and
+    /// `session.get_transcript` (`TranscriptRecord.mode`, which reads the
+    /// SAME field) as soon as `task.run` returns, not only after the run
+    /// completes.
+    /// What: `Err(session_not_found)` if `id` is unknown; otherwise sets
+    /// `entry.session.mode = Some(mode)`. No event is published — mode is
+    /// bookkeeping metadata, not a session-lifecycle transition in the
+    /// #2055 event taxonomy.
+    /// Test: `registry_tests::set_mode_stores_on_session`,
+    /// `registry_tests::set_mode_unknown_session_errors`.
+    pub fn set_mode(&self, id: &str, mode: HarnessMode) -> Result<(), RpcError> {
+        let mut sessions = self.lock();
+        let entry = sessions
+            .get_mut(id)
+            .ok_or_else(|| RpcError::session_not_found(id))?;
+        entry.session.mode = Some(mode);
+        Ok(())
     }
 
     /// Cooperatively cancel every in-flight execution and wait, bounded by
