@@ -620,6 +620,22 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                     Ok(_) => {}
                     Err(e) => tracing::warn!("orphan-GC worktree sweep failed: {e}"),
                 }
+
+                // #2033: sweep orphaned / 0-chunk trusty-search indexes left
+                // behind by managed worktrees — sessions decommissioned before
+                // the decommission-time index-removal fix, or whose worktree
+                // was never populated before teardown. Best-effort: a
+                // discoverable-but-erroring daemon logs and is retried next tick.
+                match mgr.reap_orphaned_search_indexes().await {
+                    Ok(removed) if !removed.is_empty() => {
+                        info!(
+                            "orphan-GC removed {} orphaned trusty-search index(es)",
+                            removed.len()
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("orphan-GC search-index sweep failed: {e}"),
+                }
             }
         }
     }
