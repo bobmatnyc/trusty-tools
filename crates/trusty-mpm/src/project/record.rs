@@ -59,6 +59,27 @@ pub struct Project {
     /// when the name alone is ambiguous.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Preferred GitHub account login for `gh` operations on this project (#2081).
+    ///
+    /// Why: a host may have several `gh`-authenticated accounts; the operator
+    /// who has admin rights on THIS project's repo may not be the ambient
+    /// active `gh` account. #2081's motivating incident: a delegated agent's
+    /// active account (`bob-duetto`) lacked admin rights on
+    /// `bobmatnyc/trusty-tools`, so `gh pr merge --admin` failed until the
+    /// account was switched by hand. Storing the preferred login on the
+    /// project record lets callers resolve a per-invocation, non-mutating `gh`
+    /// identity for it (see [`crate::core::gh_account::resolve_gh_account_env`])
+    /// instead of relying on a per-session reminder.
+    /// What: `None` → no preference; `gh` calls made for this project use
+    /// whatever identity is ambient (no regression). `Some(login)` → the
+    /// login callers should scope `gh` operations to, resolved WITHOUT
+    /// mutating the shared `gh auth switch` state (concurrency-safe: two
+    /// projects with different `gh_user` values can run `gh` calls at the
+    /// same time without interfering with each other).
+    /// Test: `project_serde_round_trip`, `project_without_optionals`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_user: Option<String>,
 }
 
 /// Derive a project name from a repository URL by stripping the `.git` suffix
@@ -107,8 +128,10 @@ mod tests {
             stack_hint: Some("rust".into()),
             tags: vec!["backend".into(), "oss".into()],
             description: Some("the unified trusty workspace".into()),
+            gh_user: Some("bobmatnyc".into()),
         };
         let json = serde_json::to_string(&p).expect("serialize");
+        assert!(json.contains("gh_user"), "json: {json}");
         let back: Project = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(p, back);
     }
@@ -123,11 +146,16 @@ mod tests {
             stack_hint: None,
             tags: vec![],
             description: None,
+            gh_user: None,
         };
         let json = serde_json::to_string(&p).expect("serialize");
         assert!(
             !json.contains("stack_hint"),
             "absent optional must not serialise: {json}"
+        );
+        assert!(
+            !json.contains("gh_user"),
+            "absent gh_user must not serialise: {json}"
         );
         assert!(
             !json.contains("tags"),

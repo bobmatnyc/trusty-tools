@@ -47,9 +47,9 @@ pub async fn try_dispatch<B: OrchestratorBackend>(
 /// Parse `project_register` arguments and call the backend.
 ///
 /// Why: `project_register` has the widest argument surface (name, repo_url
-/// required + four optionals); a helper keeps [`try_dispatch`] readable.
+/// required + five optionals); a helper keeps [`try_dispatch`] readable.
 /// What: requires `name` and `repo_url`; reads optional `default_branch`,
-/// `stack_hint`, `tags`, and `description`; calls
+/// `stack_hint`, `tags`, `description`, and `gh_user` (#2081); calls
 /// [`OrchestratorBackend::project_register`]. Missing required fields yield a
 /// descriptive error string.
 /// Test: `super::tests::dispatch_project_register_tool`,
@@ -69,6 +69,7 @@ async fn project_register<B: OrchestratorBackend>(
             .collect()
     });
     let description = args.get("description").and_then(Value::as_str);
+    let gh_user = args.get("gh_user").and_then(Value::as_str);
     backend
         .project_register(
             &name,
@@ -77,6 +78,7 @@ async fn project_register<B: OrchestratorBackend>(
             stack_hint,
             tags,
             description,
+            gh_user,
         )
         .await
 }

@@ -31,8 +31,8 @@ pub(super) fn project_tools() -> Vec<Value> {
             "project_list",
             "List all projects registered in the project registry. Returns a JSON \
              array of project objects, each with `name`, `repo_url`, \
-             `default_branch`, and optional `stack_hint`, `tags`, and \
-             `description`.",
+             `default_branch`, and optional `stack_hint`, `tags`, `description`, \
+             and `gh_user` (the project's preferred GitHub account login, #2081).",
             json!({
                 "type": "object",
                 "properties": {},
@@ -72,6 +72,13 @@ pub(super) fn project_tools() -> Vec<Value> {
                     "description": {
                         "type": "string",
                         "description": "Optional free-form human-readable description."
+                    },
+                    "gh_user": {
+                        "type": "string",
+                        "description": "Optional preferred GitHub account login for `gh` \
+                                         operations on this project (#2081). When set, `gh` \
+                                         calls for this project should be scoped to this \
+                                         account rather than whatever identity is ambient."
                     }
                 },
                 "required": ["name", "repo_url"],
@@ -81,7 +88,8 @@ pub(super) fn project_tools() -> Vec<Value> {
         tool(
             "project_get",
             "Look up a single project by name. Returns the project record \
-             (`name`, `repo_url`, `default_branch`, and optional fields) or an \
+             (`name`, `repo_url`, `default_branch`, and optional fields including \
+             `gh_user`, the project's preferred GitHub account login) or an \
              error when the name is not found in the registry.",
             json!({
                 "type": "object",

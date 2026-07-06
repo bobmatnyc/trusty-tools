@@ -284,6 +284,16 @@ pub struct ProjectConfig {
     /// Free-form description of the project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+
+    /// Preferred GitHub account login for `gh` operations on this project (#2081).
+    ///
+    /// `None` → no preference declared; `gh_user` is left unset on the seeded
+    /// [`crate::project::record::Project`], so `gh` calls for this project use
+    /// whatever identity is ambient. See `Project::gh_user` for the full
+    /// rationale and the non-mutating resolution mechanism
+    /// ([`crate::core::gh_account::resolve_gh_account_env`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gh_user: Option<String>,
 }
 
 impl TrustyToolsConfig {
@@ -562,6 +572,47 @@ mod tests {
             !yaml.contains("token:"),
             "must not have a bare token field: {yaml}"
         );
+    }
+
+    /// Why (#2081): a `projects:` entry's `gh_user` preference must round-trip
+    /// through YAML, and an absent `gh_user` must not serialise (matching every
+    /// other optional field on `ProjectConfig`) so existing configs deserialise
+    /// unchanged.
+    /// Test: itself.
+    #[test]
+    fn project_config_gh_user_yaml_round_trip() {
+        let cfg = TrustyToolsConfig {
+            projects: vec![ProjectConfig {
+                name: "trusty-tools".into(),
+                repo_url: "https://github.com/bobmatnyc/trusty-tools".into(),
+                default_branch: Some("main".into()),
+                stack_hint: None,
+                tags: None,
+                description: None,
+                gh_user: Some("bobmatnyc".into()),
+            }],
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&cfg).expect("serialise");
+        assert!(yaml.contains("gh_user"), "yaml: {yaml}");
+        let back: TrustyToolsConfig = serde_yaml::from_str(&yaml).expect("deserialise");
+        assert_eq!(cfg, back);
+
+        // Absent gh_user must not serialise.
+        let no_pref = TrustyToolsConfig {
+            projects: vec![ProjectConfig {
+                name: "other".into(),
+                repo_url: "https://github.com/o/other".into(),
+                default_branch: None,
+                stack_hint: None,
+                tags: None,
+                description: None,
+                gh_user: None,
+            }],
+            ..Default::default()
+        };
+        let yaml_no_pref = serde_yaml::to_string(&no_pref).expect("serialise");
+        assert!(!yaml_no_pref.contains("gh_user"), "yaml: {yaml_no_pref}");
     }
 
     /// Why: the `daemon:` section (#1836) must round-trip through YAML, and an

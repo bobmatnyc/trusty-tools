@@ -183,6 +183,7 @@ async fn mcp_initiated_spawn_rejects_repo_name_impersonation() {
             stack_hint: None,
             tags: vec![],
             description: None,
+            gh_user: None,
         })
         .await
         .expect("register legitimate project");
@@ -240,6 +241,7 @@ async fn mcp_initiated_spawn_allowed_for_registered_project_reaches_provisioning
             stack_hint: None,
             tags: vec![],
             description: None,
+            gh_user: None,
         })
         .await
         .expect("register project");

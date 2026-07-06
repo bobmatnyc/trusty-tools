@@ -193,6 +193,7 @@ impl OrchestratorBackend for MockBackend {
         stack_hint: Option<&str>,
         tags: Option<Vec<String>>,
         description: Option<&str>,
+        gh_user: Option<&str>,
     ) -> Result<Value, String> {
         Ok(json!({
             "name": name,
@@ -201,6 +202,7 @@ impl OrchestratorBackend for MockBackend {
             "stack_hint": stack_hint,
             "tags": tags.unwrap_or_default(),
             "description": description,
+            "gh_user": gh_user,
         }))
     }
     async fn project_get(&self, name: &str) -> Result<Value, String> {
@@ -877,6 +879,33 @@ async fn dispatch_project_register_tool() {
     assert_eq!(result["isError"], false);
     let text = result["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("my-repo"), "expected 'my-repo' in: {text}");
+}
+
+/// Why (#2081): `project_register` must accept the optional `gh_user` field
+/// and thread it through to the registered record so operators can declare a
+/// project's preferred `gh` account.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_register_accepts_gh_user() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "project_register",
+            json!({
+                "name": "my-repo",
+                "repo_url": "https://github.com/o/my-repo",
+                "gh_user": "bobmatnyc"
+            }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("bobmatnyc"),
+        "expected 'bobmatnyc' in: {text}"
+    );
 }
 
 /// Why (#1519): `project_register` must error when the required `name` arg is missing.
