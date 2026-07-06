@@ -29,10 +29,13 @@ The workspace supports three installation channels per crate. Every distributabl
 
 **Tier 1 (required for every release)**:
 - **macOS arm64 (Apple Silicon)** (`aarch64-apple-darwin`) — built on GitHub Actions (apple-latest runner)
-- **Linux x86_64** (`x86_64-unknown-linux-gnu`) — built on GitHub Actions (ubuntu-latest runner)
+- **Linux x86_64** (`x86_64-unknown-linux-gnu`) — built on GitHub Actions (ubuntu-latest runner) via `cargo zigbuild` pinned to a glibc 2.17 baseline (the manylinux2014 floor — issue #2037), so releases run on RHEL 8/9, Debian 11/12, Ubuntu 20.04+, Amazon Linux 2/2023, etc., not just the runner's own (newer) glibc.
+
+**Tier 1.5 (best-effort, non-blocking — issue #2037)**:
+- **Linux arm64** (`aarch64-unknown-linux-gnu`) — cross-compiled from the x86_64 runner via `cargo zigbuild`, same glibc 2.17 baseline. Marked `continue-on-error` in CI until a real tagged release confirms the produced binaries run correctly; a missing/failed aarch64 asset never blocks a release. ONNX-runtime crates (`trusty-search`, `trusty-analyze`) build this leg with the load-dynamic feature set (see Tier 2) rather than default `bundled-ort`, since the bundled path has no aarch64 build-time binary to download.
 
 **Tier 2 (optional per crate)**:
-- **Amazon Linux 2023 / glibc < 2.38** — variant for ONNX-runtime crates only (`trusty-analyze`). Built with `--no-default-features --features http-server,load-dynamic` and requires runtime `ORT_DYLIB_PATH` configuration.
+- **Amazon Linux 2023 / glibc < 2.38** — variant for ONNX-runtime crates only (`trusty-analyze`, `trusty-search`). Built with `--no-default-features --features load-dynamic` (`trusty-analyze` additionally needs `http-server`) and requires runtime `ORT_DYLIB_PATH` configuration.
 - **Apple Silicon GPU acceleration** — CoreML auto-detected at runtime for `trusty-search` and `trusty-analyze`; no build variant needed.
 - **NVIDIA GPU (CUDA)** — optional feature flag; build documented separately if supported.
 
