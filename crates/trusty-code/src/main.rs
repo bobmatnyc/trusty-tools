@@ -8,8 +8,9 @@
 //! What: thin clap CLI. `run-task` resolves the agents dir, validates the agent
 //! name + project path, builds the real OpenRouter `LlmClient` from env, and
 //! delegates to `trusty_code::run_task::execute_run_task`, then prints a human or
-//! `--json` report and exits with the report's meaningful exit code. `serve` and
-//! `run-workflow` remain stubs.
+//! `--json` report and exits with the report's meaningful exit code. `serve`
+//! (#2053) delegates to `trusty_code::serve::{run_stdio, run_http}` for its
+//! two transports. `run-workflow` remains a stub.
 //!
 //! Test: `cargo run -p trusty-code -- --version` must exit 0 and print the
 //! crate version. The execution path is covered by `trusty_code::run_task::tests`
@@ -52,12 +53,36 @@ struct Cli {
 enum Command {
     /// Start the per-project orchestration server.
     ///
-    /// Binds an IPC socket and accepts task requests from CLI clients, TUI
-    /// frontends, and MCP callers. One instance per project.
+    /// Accepts JSON-RPC 2.0 task requests from CLI clients, TUI frontends,
+    /// and MCP callers. One instance per project. Exactly one transport must
+    /// be selected: `--stdio` XOR `--http` (they are independent modes, not
+    /// simultaneous — see `trusty_code::serve` module docs).
     Serve {
         /// Path to the project root (must contain a `.claude/` directory).
         #[arg(long, short, value_name = "PATH")]
         project: PathBuf,
+
+        /// Serve JSON-RPC 2.0 over stdio (NDJSON on stdin/stdout), matching
+        /// the trusty-memory/trusty-search MCP stdio convention.
+        #[arg(long, conflicts_with = "http")]
+        stdio: bool,
+
+        /// Serve JSON-RPC 2.0 over HTTP: `POST /rpc` + `GET /health`,
+        /// matching the trusty-memory/trusty-search axum daemon convention.
+        #[arg(long, conflicts_with = "stdio")]
+        http: bool,
+
+        /// TCP port for `--http`. `0` binds an OS-assigned ephemeral port.
+        /// Defaults to `trusty_code::serve::DEFAULT_HTTP_PORT`.
+        ///
+        /// Requires `--http` AND conflicts with `--stdio` — both are needed:
+        /// `requires = "http"` alone does not fire when `--stdio` is also
+        /// present, because clap evaluates `--stdio`'s `conflicts_with =
+        /// "http"` first and short-circuits before the requires-graph check,
+        /// so `--stdio --port N` would otherwise be silently accepted with
+        /// the port discarded.
+        #[arg(long, value_name = "PORT", requires = "http", conflicts_with = "stdio")]
+        port: Option<u16>,
     },
 
     /// Delegate a single task to a named agent and run it end-to-end.
@@ -112,13 +137,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Serve { project } => {
-            eprintln!(
-                "tcode serve: not yet implemented (#587 Phase 5+) [project={}]",
-                project.display()
-            );
-            process::exit(1);
-        }
+        Command::Serve {
+            project,
+            stdio,
+            http,
+            port,
+        } => run_serve(project, stdio, http, port).await,
 
         Command::RunTask {
             agent,
@@ -136,6 +160,51 @@ async fn main() -> Result<()> {
             process::exit(1);
         }
     }
+}
+
+/// Execute `tcode serve`: dispatches to whichever transport was selected.
+///
+/// Why: keeps `main`'s match arm a one-liner, matching the shape of the
+/// `run_task` wrapper below. The binary layer owns only the CLI-shaped
+/// concern (which transport was requested, and the port); `trusty_code::serve`
+/// owns router assembly and both transport loops, all fully unit-tested
+/// offline. clap's `conflicts_with`/`requires` on the `Serve` variant already
+/// reject `--stdio --http` together and `--port` without `--http` before this
+/// function ever runs.
+/// What: `--http` delegates to `trusty_code::serve::run_http` (port defaults
+/// to `serve::DEFAULT_HTTP_PORT` when `--port` is omitted); `--stdio`
+/// delegates to `trusty_code::serve::run_stdio`. Both run until shutdown
+/// (SIGTERM/SIGINT, or stdin EOF for `--stdio`), logging to stderr only.
+/// Neither flag given prints actionable usage and exits 1 rather than
+/// silently doing nothing.
+/// Test: exercised manually (`tcode serve --project . --stdio` /
+/// `--http [--port N]`); `trusty_code::serve::tests`,
+/// `serve::transport::tests`, and `serve::http::tests` cover the
+/// router/transport logic this delegates to.
+async fn run_serve(project: PathBuf, stdio: bool, http: bool, port: Option<u16>) -> Result<()> {
+    if http {
+        let port = port.unwrap_or(trusty_code::serve::DEFAULT_HTTP_PORT);
+        if let Err(e) = trusty_code::serve::run_http(project, port).await {
+            eprintln!("tcode serve --http: fatal error: {e:#}");
+            process::exit(1);
+        }
+        return Ok(());
+    }
+
+    if stdio {
+        if let Err(e) = trusty_code::serve::run_stdio(project).await {
+            eprintln!("tcode serve --stdio: fatal error: {e:#}");
+            process::exit(1);
+        }
+        return Ok(());
+    }
+
+    eprintln!(
+        "tcode serve: pick a transport — `--stdio` (NDJSON on stdin/stdout) or \
+         `--http [--port N]` (POST /rpc + GET /health) [project={}]",
+        project.display()
+    );
+    process::exit(1);
 }
 
 /// Validate that `agent_name` contains only safe filesystem characters.

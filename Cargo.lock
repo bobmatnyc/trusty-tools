@@ -10734,6 +10734,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
  "chrono",
  "clap",
  "libc",
@@ -10744,6 +10745,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "toml 0.8.23",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "trusty-common",
