@@ -170,7 +170,13 @@ fn scan_dir_recursive(
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         // Prune: do not descend into .trusty-search/ itself, .git/, or any
         // hidden dir other than known project markers — keeps the scan cheap.
-        if name == COLOCATED_DIR_NAME || name == ".git" || name == "node_modules" {
+        // Also skip ephemeral session dirs (`.worktrees/`) so throwaway MPM
+        // worktrees are never rediscovered and re-registered (orphan self-heal).
+        if name == COLOCATED_DIR_NAME
+            || name == ".git"
+            || name == "node_modules"
+            || crate::service::constants::is_ephemeral_dir_name(name)
+        {
             continue;
         }
         // Only scan subdirectories that are children of the original tracked
@@ -256,6 +262,38 @@ mod tests {
             "nested project must be found; got: {root_paths:?}"
         );
         assert_eq!(found.len(), 2, "exactly two indexes must be found");
+    }
+
+    #[test]
+    fn discovery_skips_ephemeral_worktree_dirs() {
+        // Why (orphan self-heal): a colocated index living inside an ephemeral
+        // `.worktrees/<uuid>/` must NOT be rediscovered — rediscovering these is
+        // exactly what leaked hundreds of dead registrations when the worktrees
+        // were later deleted. The top-level project is still found.
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        make_colocated(&root);
+
+        // A worktree with its own colocated index, nested under `.worktrees/`.
+        let worktree = root.join(".worktrees").join("abcd-uuid");
+        fs::create_dir_all(&worktree).unwrap();
+        make_colocated(&worktree);
+
+        let found =
+            scan_roots_for_colocated_indexes(std::slice::from_ref(&root), DEFAULT_SCAN_DEPTH);
+        let canon_root = root.canonicalize().unwrap();
+        let canon_worktree = worktree.canonicalize().unwrap();
+        let root_paths: Vec<_> = found.iter().map(|e| &e.root_path).collect();
+
+        assert!(
+            root_paths.contains(&&canon_root),
+            "top-level project must still be found; got: {root_paths:?}"
+        );
+        assert!(
+            !root_paths.contains(&&canon_worktree),
+            "ephemeral .worktrees/ index must be skipped; got: {root_paths:?}"
+        );
+        assert_eq!(found.len(), 1, "only the top-level index must be found");
     }
 
     #[test]

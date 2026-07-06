@@ -33,29 +33,48 @@ pub(super) async fn delete_index_handler(
     State(state): State<Arc<SearchAppState>>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let index_id = IndexId::new(id.clone());
-    // Issue #1090 / #1097 atomicity: capture root_path and unregister in a
-    // single DashMap `remove` so a concurrent PATCH cannot make the captured
-    // root_path stale before the roots.toml cleanup below.
+    // The interactive DELETE also destroys the on-disk footprint (delete_data).
+    let removed = unregister_index(&state, &id, /*delete_data=*/ true).await;
+    Json(serde_json::json!({ "id": id, "removed": removed }))
+}
+
+/// Fully unregister an index from the running daemon.
+///
+/// Why: shared by the interactive `DELETE /indexes/:id` handler and the
+/// automatic orphan-reaper ticker (orphan self-heal). Both must drop the
+/// in-memory registration, stop its filesystem watcher, and rewrite
+/// `indexes.toml` + `roots.toml` so the index cannot resurrect on the next
+/// warm-boot. The two callers differ only in whether the on-disk *data*
+/// directory is destroyed — the reaper passes `delete_data=false` so a
+/// false-positive orphan detection can never delete real index data.
+/// What: atomically removes the handle from the registry (capturing its
+/// `root_path` in the same `remove` so a concurrent PATCH cannot make it stale
+/// — issue #1090/#1097), stops the watcher (issue #1621), deletes the registry
+/// entry (issue #118), optionally removes the data dir (issue #85), scrubs the
+/// root from `roots.toml` so the colocated rescan cannot rediscover it (issue
+/// #1090), emits `IndexRemoved`, and re-syncs the index-count gauge (issue #41).
+/// Returns whether an index was actually removed.
+/// Test: delete-path handler tests; reaper behaviour covered by `orphan_reaper`
+/// unit tests plus the `spawn_orphan_reaper_ticker` wiring.
+pub(super) async fn unregister_index(
+    state: &Arc<SearchAppState>,
+    id: &str,
+    delete_data: bool,
+) -> bool {
+    let index_id = IndexId::new(id.to_string());
     let (removed, removed_handle) = state.registry.remove_and_get(&index_id);
     let root_path_for_cleanup = removed_handle.map(|h| h.root_path.clone());
     state.reindex_progress.remove(&index_id);
-    // Issue #1621: stop the filesystem watcher for this index so it does not
-    // keep firing into a now-dropped indexer after the handle is removed.
     state.watcher_manager.stop_for_index(&index_id).await;
     if removed {
-        // Issue #85: drop the on-disk footprint so the index doesn't come
-        // back on the next daemon restart. Best-effort — log on failure.
-        if let Err(e) = crate::service::persistence::remove_index_registry_entry(&id) {
+        if let Err(e) = crate::service::persistence::remove_index_registry_entry(id) {
             tracing::warn!("could not remove '{id}' from indexes.toml: {e}");
         }
-        if let Err(e) = crate::service::persistence::remove_index_data_dir(&id) {
-            tracing::warn!("could not remove on-disk data for '{id}': {e}");
+        if delete_data {
+            if let Err(e) = crate::service::persistence::remove_index_data_dir(id) {
+                tracing::warn!("could not remove on-disk data for '{id}': {e}");
+            }
         }
-        // Issue #1090: remove the root from roots.toml so the warm-boot
-        // colocated scan does not rediscover this root and resurrect the index.
-        // Without this, roots.toml retains the entry and warm-boot re-registers
-        // the deleted index from the leftover `.trusty-search/` data dir.
         if let Some(ref root) = root_path_for_cleanup {
             if let Err(e) = crate::service::roots_registry::remove_root(root) {
                 tracing::warn!(
@@ -71,11 +90,11 @@ pub(super) async fn delete_index_handler(
             }
         }
         // Push event so connected dashboards drop the row without refresh.
-        state.emit(DaemonEvent::IndexRemoved { id: id.clone() });
-        // Issue #41 Phase 1: keep the index-count gauge in sync.
+        state.emit(DaemonEvent::IndexRemoved { id: id.to_string() });
+        // Keep the index-count gauge in sync.
         crate::service::metrics::set_index_count(state.registry.list().len());
     }
-    Json(serde_json::json!({ "id": id, "removed": removed }))
+    removed
 }
 
 pub(super) async fn search_handler(

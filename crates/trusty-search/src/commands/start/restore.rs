@@ -52,7 +52,14 @@ pub(super) async fn restore_indexes(
     }
 
     // ── Collect: legacy + colocated entries ──────────────────────────────────
-    let legacy_entries = collect_legacy_entries();
+    // Self-heal (orphan self-heal): drop legacy registrations whose root_path
+    // was deleted (e.g. an ephemeral `.worktrees/<uuid>` removed while the
+    // daemon was down) before we try to restore or watch them. Without this the
+    // dead entries are re-read, re-warned, and re-skipped on every single boot
+    // and never leave `indexes.toml`. Colocated entries are left for the
+    // relocation scan; unmounted volumes are spared by `is_reapable_orphan`.
+    let legacy_entries =
+        crate::service::orphan_reaper::heal_boot_orphans(collect_legacy_entries());
     let mut seen_ids: HashSet<String> = HashSet::new();
     // Issue #860: track canonicalized root_paths from legacy entries so that
     // colocated scan suppresses entries for the same root.

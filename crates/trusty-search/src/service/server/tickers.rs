@@ -140,3 +140,79 @@ pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
         }
     });
 }
+
+/// Spawn a background ticker that unregisters indexes whose `root_path` was
+/// deleted while the daemon runs (orphan self-heal).
+///
+/// Why: MPM deletes ephemeral `.worktrees/<uuid>` roots continuously, so a
+/// long-lived daemon steadily accumulates dead registrations — each one an
+/// idle FSEvents watch that pins `fseventsd` (production: 485 orphans / 8 GB
+/// `fseventsd` over 26 days). The boot-time `heal_boot_orphans` pass only runs
+/// at startup; this ticker reclaims roots that vanish mid-run. It mirrors the
+/// other `spawn_*_ticker` shape: a detached task holding a `Weak` so it stops
+/// when the daemon drops its last `Arc`.
+/// What: every `TRUSTY_ORPHAN_REAP_SECS` seconds (default hourly; `0` disables
+/// and the ticker never spawns), snapshots each index's `(id, root_path)`,
+/// runs the existence checks on `spawn_blocking` (a stat-per-index is blocking
+/// I/O and must not park an async worker), then calls
+/// `unregister_index(.., delete_data=false)` for each reapable orphan —
+/// registration removed, on-disk data preserved. [`is_reapable_orphan`] only
+/// fires when the root is missing AND its parent survives, so an unmounted
+/// external volume is never reaped.
+/// Test: `orphan_reaper` unit tests cover the predicate + interval; this is a
+/// thin scheduling wrapper.
+///
+/// [`is_reapable_orphan`]: crate::service::orphan_reaper::is_reapable_orphan
+pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
+    use crate::service::orphan_reaper::{is_reapable_orphan, reap_interval_secs, REAP_INTERVAL_ENV};
+    let Some(secs) = reap_interval_secs() else {
+        tracing::info!("orphan-reaper: disabled via {REAP_INTERVAL_ENV}=0");
+        return;
+    };
+    let weak = Arc::downgrade(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(secs));
+        // Skip the immediate first tick so a freshly-started daemon (which just
+        // ran the boot heal) isn't sweeping again before it has served anything.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let Some(state) = weak.upgrade() else {
+                break;
+            };
+            // Snapshot (id, root_path) and run existence checks off the async
+            // runtime — a stat-per-index is blocking filesystem I/O.
+            let candidates: Vec<(String, std::path::PathBuf)> = state
+                .registry
+                .list_handles()
+                .into_iter()
+                .map(|h| (h.id.0.clone(), h.root_path.clone()))
+                .collect();
+            let reapable: Vec<String> = tokio::task::spawn_blocking(move || {
+                candidates
+                    .into_iter()
+                    .filter(|(_, root)| is_reapable_orphan(root))
+                    .map(|(id, _)| id)
+                    .collect()
+            })
+            .await
+            .unwrap_or_default();
+
+            let mut reaped = 0usize;
+            for id in reapable {
+                // delete_data=false: never destroy on-disk data automatically —
+                // a false-positive detection stays recoverable by re-registering.
+                if super::search::unregister_index(&state, &id, false).await {
+                    reaped += 1;
+                    tracing::info!(
+                        "orphan-reaper: unregistered index '{id}' — root_path deleted \
+                         (data preserved)"
+                    );
+                }
+            }
+            if reaped > 0 {
+                tracing::info!("orphan-reaper: reaped {reaped} orphaned registration(s) this cycle");
+            }
+        }
+    });
+}
