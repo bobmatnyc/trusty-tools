@@ -163,6 +163,105 @@ pub fn select_members(names: &[String]) -> (Vec<StableMember>, Vec<String>) {
     (selected, unknown)
 }
 
+/// Result of resolving a caller-named subset AND expanding it over the
+/// [`super::dependency_graph`] runtime "requires" edges (#2036).
+///
+/// Why: Install needs three things from one resolution pass: the full,
+/// topologically-ordered set to actually install; the unresolved names to
+/// error out on; and which members were pulled in by dependency (so the CLI
+/// and picker can tell the operator why).
+///
+/// What: `members` is the transitive closure of the resolved explicit names,
+/// filtered from [`stable_set`] (so it is already in topological — dependency
+/// before dependent — order); `unknown` mirrors [`select_members`]'s unknown
+/// list; `added` describes members present in `members` that were not named
+/// explicitly.
+///
+/// Test: `tests::select_transitive_expands_mpm`,
+/// `tests::select_transitive_noop_for_leaf`,
+/// `tests::select_transitive_idempotent_when_dep_named_explicitly`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransitiveSelection {
+    /// The resolved set, transitively closed, in topological install order.
+    pub members: Vec<StableMember>,
+    /// Names from the caller's request that matched no stable-set member.
+    pub unknown: Vec<String>,
+    /// Members pulled in because something explicitly requested requires them.
+    pub added: Vec<super::dependency_graph::AddedMember>,
+}
+
+/// Resolve a caller-named subset AND expand it to the transitive closure of
+/// its runtime dependencies (#2036).
+///
+/// Why: `tctl install trusty-mpm` must also bring up trusty-memory and
+/// trusty-search — the daemons trusty-mpm actually needs at runtime — rather
+/// than leaving the operator with a silently-incomplete stack. Scoped to
+/// install/picker only (not `upgrade`/`config`/`lifecycle`, which use
+/// [`select_members`] unchanged): those commands target already-installed,
+/// independently-running daemons where auto-expanding the blast radius (e.g.
+/// `tctl stop trusty-mpm` also stopping the shared trusty-search daemon) would
+/// surprise the operator rather than help them.
+///
+/// What: Resolves `names` against [`stable_set`] exactly like [`select_members`]
+/// (empty = all, matched by crate name or binary), then runs
+/// [`super::dependency_graph::transitive_closure`] over the resolved crate
+/// names and filters the master ordered list down to that closure — which is
+/// already a valid topological order because every dependency edge points to a
+/// crate earlier in [`stable_set`]'s list (see
+/// `dependency_graph::tests::edges_precede_dependent_in_stable_set_order`).
+/// `unknown` short-circuits: when any name is unrecognised, `members`/`added`
+/// are left empty (mirrors [`select_members`]'s existing "unknown wins"
+/// caller contract used by `install.rs`).
+///
+/// Test: `tests::select_transitive_expands_mpm`,
+/// `tests::select_transitive_reports_unknown`,
+/// `tests::select_transitive_preserves_order_with_explicit_deps`.
+pub fn select_members_transitive(names: &[String]) -> TransitiveSelection {
+    let all = stable_set();
+    if names.is_empty() {
+        return TransitiveSelection {
+            members: all,
+            unknown: Vec::new(),
+            added: Vec::new(),
+        };
+    }
+
+    let mut explicit: Vec<String> = Vec::new();
+    for n in names {
+        if let Some(m) = all.iter().find(|m| n == &m.crate_name || n == &m.binary) {
+            if !explicit.contains(&m.crate_name) {
+                explicit.push(m.crate_name.clone());
+            }
+        }
+    }
+    let unknown: Vec<String> = names
+        .iter()
+        .filter(|n| !all.iter().any(|m| *n == &m.crate_name || *n == &m.binary))
+        .cloned()
+        .collect();
+
+    if !unknown.is_empty() {
+        return TransitiveSelection {
+            members: Vec::new(),
+            unknown,
+            added: Vec::new(),
+        };
+    }
+
+    let closure = super::dependency_graph::transitive_closure(&explicit);
+    let members: Vec<StableMember> = all
+        .into_iter()
+        .filter(|m| closure.contains(&m.crate_name))
+        .collect();
+    let added = super::dependency_graph::added_members(&explicit, &closure);
+
+    TransitiveSelection {
+        members,
+        unknown: Vec::new(),
+        added,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +401,101 @@ mod tests {
         let (sel, unknown) = select_members(&["not-a-tool".to_owned()]);
         assert!(sel.is_empty());
         assert_eq!(unknown, vec!["not-a-tool".to_owned()]);
+    }
+
+    // ── select_members_transitive (#2036) ────────────────────────────────────
+
+    /// Why: The core #2036 contract — installing trusty-mpm must transitively
+    /// pull in trusty-memory and trusty-search, in topological (deps-first) order.
+    /// What: Requests only trusty-mpm; asserts the resolved set is exactly
+    /// [trusty-search, trusty-memory, trusty-mpm] (stable-set order) and both
+    /// pulled-in members are reported in `added`.
+    /// Test: This is the test.
+    #[test]
+    fn select_transitive_expands_mpm() {
+        let sel = select_members_transitive(&["trusty-mpm".to_owned()]);
+        let names: Vec<String> = sel.members.iter().map(|m| m.crate_name.clone()).collect();
+        assert_eq!(names, vec!["trusty-search", "trusty-memory", "trusty-mpm"]);
+        assert!(sel.unknown.is_empty());
+        let mut added_names: Vec<String> = sel.added.iter().map(|a| a.crate_name.clone()).collect();
+        added_names.sort();
+        assert_eq!(added_names, vec!["trusty-memory", "trusty-search"]);
+        for a in &sel.added {
+            assert_eq!(a.required_by, vec!["trusty-mpm".to_owned()]);
+        }
+    }
+
+    /// Why: The other #2036-confirmed edge — installing trusty-review alone
+    /// must transitively pull in trusty-search and trusty-analyze (the #590
+    /// required-context gate), in topological order.
+    /// What: Requests only trusty-review; asserts the resolved set is exactly
+    /// [trusty-search, trusty-analyze, trusty-review] and both pulled-in
+    /// members are reported in `added`.
+    /// Test: This is the test.
+    #[test]
+    fn select_transitive_expands_review() {
+        let sel = select_members_transitive(&["trusty-review".to_owned()]);
+        let names: Vec<String> = sel.members.iter().map(|m| m.crate_name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["trusty-search", "trusty-analyze", "trusty-review"]
+        );
+        let mut added_names: Vec<String> = sel.added.iter().map(|a| a.crate_name.clone()).collect();
+        added_names.sort();
+        assert_eq!(added_names, vec!["trusty-analyze", "trusty-search"]);
+    }
+
+    /// Why: A leaf crate (no dependents) must not pull in anything extra.
+    /// What: Requests only tga; asserts the resolved set is exactly `[tga]` with
+    /// no `added` entries.
+    /// Test: This is the test.
+    #[test]
+    fn select_transitive_noop_for_leaf() {
+        let sel = select_members_transitive(&["tga".to_owned()]);
+        let names: Vec<String> = sel.members.iter().map(|m| m.crate_name.clone()).collect();
+        assert_eq!(names, vec!["tga"]);
+        assert!(sel.added.is_empty());
+    }
+
+    /// Why: Naming a dependency explicitly alongside its dependent must be
+    /// idempotent — no duplicate, no spurious `added` entry for the
+    /// explicitly-named dependency, and order is still preserved.
+    /// What: Requests `["trusty-mpm", "trusty-memory"]`; asserts the resolved
+    /// set is still exactly [trusty-search, trusty-memory, trusty-mpm] and only
+    /// trusty-search shows up in `added`.
+    /// Test: This is the test.
+    #[test]
+    fn select_transitive_preserves_order_with_explicit_deps() {
+        let sel = select_members_transitive(&["trusty-mpm".to_owned(), "trusty-memory".to_owned()]);
+        let names: Vec<String> = sel.members.iter().map(|m| m.crate_name.clone()).collect();
+        assert_eq!(names, vec!["trusty-search", "trusty-memory", "trusty-mpm"]);
+        let added_names: Vec<String> = sel.added.iter().map(|a| a.crate_name.clone()).collect();
+        assert_eq!(added_names, vec!["trusty-search"]);
+    }
+
+    /// Why: Unknown names must still be surfaced (not silently dropped) even
+    /// though this function does dependency expansion.
+    /// What: Requests a bogus name; asserts `members`/`added` are empty and the
+    /// bogus name lands in `unknown`.
+    /// Test: This is the test.
+    #[test]
+    fn select_transitive_reports_unknown() {
+        let sel = select_members_transitive(&["not-a-tool".to_owned()]);
+        assert!(sel.members.is_empty());
+        assert!(sel.added.is_empty());
+        assert_eq!(sel.unknown, vec!["not-a-tool".to_owned()]);
+    }
+
+    /// Why: An empty selection means "the whole platform" — same contract as
+    /// `select_members`.
+    /// What: Asserts `select_members_transitive(&[])` returns the full set, no
+    /// unknowns, no added.
+    /// Test: This is the test.
+    #[test]
+    fn select_transitive_empty_returns_all() {
+        let sel = select_members_transitive(&[]);
+        assert_eq!(sel.members.len(), stable_set().len());
+        assert!(sel.unknown.is_empty());
+        assert!(sel.added.is_empty());
     }
 }
