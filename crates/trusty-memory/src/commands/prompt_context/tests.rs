@@ -796,3 +796,115 @@ async fn prompt_context_logs_attempt_without_daemon() {
     assert_eq!(parsed.hook_type, "UserPromptSubmit");
     assert_eq!(parsed.injection_kind, "prompt-context-facts");
 }
+
+/// Why (issue #2043): [`bounded_blocking`] is the mechanism that keeps the
+/// stdin read from ever hanging the hook. A real `std::io::Stdin` can't be
+/// swapped in-process, so this test drives the exact same
+/// `spawn_blocking` + `timeout` mechanism with a synthetic closure that
+/// sleeps past the deadline, proving the caller gets control back on time
+/// with a `None` (fail-open) result rather than waiting for the closure.
+/// What: races a closure that sleeps 400 ms against a 100 ms deadline;
+/// asserts `None` is returned and wall time stays close to the deadline,
+/// not the closure's sleep duration. The 400 ms sleep (rather than
+/// something longer) is deliberate: `tokio::test`'s per-test `Runtime`
+/// still waits for this abandoned blocking thread to finish during its
+/// own teardown (blocking-pool threads cannot be cancelled — this is the
+/// same reason `main.rs` calls `std::process::exit` after the
+/// `prompt-context` dispatch instead of returning normally), so the test
+/// itself pays that thread's full sleep as wall-clock tax regardless of
+/// the assertion below. Kept short to bound that tax.
+/// Test: itself.
+#[tokio::test]
+async fn bounded_blocking_times_out_on_slow_closure() {
+    let start = std::time::Instant::now();
+    let result: Option<String> = bounded_blocking(
+        || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            "too-late".to_string()
+        },
+        std::time::Duration::from_millis(100),
+    )
+    .await;
+    let elapsed = start.elapsed();
+    assert_eq!(result, None, "slow closure must fail open to None");
+    assert!(
+        elapsed < std::time::Duration::from_millis(300),
+        "bounded_blocking did not return promptly: elapsed={elapsed:?}"
+    );
+}
+
+/// Why (issue #2043): the deadline mechanism must not clip a value that
+/// finishes comfortably within budget — only genuinely slow closures
+/// should fail open.
+/// What: races an instantly-returning closure against a 300 ms deadline;
+/// asserts the real value comes back.
+/// Test: itself.
+#[tokio::test]
+async fn bounded_blocking_returns_value_when_fast_enough() {
+    let result =
+        bounded_blocking(|| "fast".to_string(), std::time::Duration::from_millis(300)).await;
+    assert_eq!(result, Some("fast".to_string()));
+}
+
+/// Why (issue #2043): proves the end-to-end fix — before this issue, a
+/// daemon that accepted a connection but never answered could block
+/// `handle_prompt_context` for as long as the daemon took (bounded only by
+/// Claude Code's own ~15 s hook ceiling, which is exactly the hang this
+/// issue reports). This test stands up a real HTTP listener that accepts
+/// every request and sleeps 5 s before responding — far longer than
+/// [`BODY_DEADLINE`] + [`EMIT_DEADLINE`] — and asserts the hook still
+/// returns `Ok(())` well inside its own deadline budget.
+/// What: writes the slow listener's address as the discovered daemon addr
+/// (via `write_daemon_addr`, matching what a real running daemon would
+/// have written), runs `handle_prompt_context`, and asserts both the
+/// `Ok(())` contract and a bounded wall-clock time.
+/// Test: itself.
+/// Note (issue #226): gated on `axum-server` — it needs a real `axum`
+/// listener to simulate the slow daemon.
+#[cfg(feature = "axum-server")]
+#[tokio::test]
+async fn handle_prompt_context_fails_open_on_slow_daemon() {
+    let _guard = crate::commands::env_test_lock().lock().await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    unsafe {
+        std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path());
+        std::env::remove_var(crate::prompt_log::ENV_ENABLED);
+        std::env::remove_var(crate::prompt_log::ENV_DIR);
+        std::env::remove_var(crate::prompt_log::ENV_HASH_PROMPTS);
+    }
+
+    async fn slow_handler() -> &'static str {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        "slow"
+    }
+    let app = axum::Router::new().fallback(axum::routing::any(slow_handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind 127.0.0.1:0");
+    let addr = listener.local_addr().expect("local_addr");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    trusty_common::write_daemon_addr("trusty-memory", &addr.to_string())
+        .expect("write fake daemon addr");
+
+    let start = std::time::Instant::now();
+    let res = handle_prompt_context().await;
+    let elapsed = start.elapsed();
+
+    server.abort();
+    unsafe {
+        std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
+    }
+
+    assert!(
+        res.is_ok(),
+        "must fail open even with a stalled daemon, got {res:?}"
+    );
+    let budget = BODY_DEADLINE + EMIT_DEADLINE + std::time::Duration::from_millis(750);
+    assert!(
+        elapsed < budget,
+        "handle_prompt_context took {elapsed:?}, expected under budget {budget:?} \
+         (a stalled daemon must never make the hook wait out its own timeout)"
+    );
+}
