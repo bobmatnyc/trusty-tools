@@ -1,7 +1,7 @@
 # trusty-code — Vision & Architecture Specification
 
 **Status:** FOUNDATIONAL SPEC — RE-VISION APPROVED  
-**Epic:** [#587](https://github.com/bobmatnyc/trusty-tools/issues/587) — trusty-code extraction from open-mpm  
+**Epic:** [#2052](https://github.com/bobmatnyc/trusty-tools/issues/2052) — trusty-code: original best-of-breed coding harness  
 **Owned by:** Bob Matsuoka (owner decision points marked below)  
 **Last updated:** 2026-07-06  
 **Supersedes:** Epic #1039 (old benchmark harness scope)
@@ -177,7 +177,7 @@ A table of best-of-breed features extracted from Claude Code, OpenCode, claude-m
 **Sources:**
 - Aider: [`aider/repomap.py`](https://github.com/paul-gauthier/aider/blob/main/aider/repomap.py); Gousios et al. edit-format A/B data (20%→61% success).
 - OpenCode: [github.com/valhuber/GenAI-Stack](https://github.com/valhuber/GenAI-Stack), non-destructive compaction RFC.
-- claude-mpm: crate `trusty-agents` (formerly `open-mpm`), permission model + circuit-breaker.
+- trusty-agents: separately-installable non-coding agent harness, permission model + circuit-breaker.
 - Cline: [cline/src](https://github.com/cline/cline), plan/act, subagent isolation.
 - Codex: Codex CLI sandboxing + approval-mode orthogonality (future reference).
 
@@ -746,7 +746,7 @@ This ties M1's "instructions are valid" acceptance criterion: before a task runs
 
 ## 7. Current State & Gap Analysis
 
-### What Works Today (Phase 1-3 modules extracted from open-mpm)
+### What Works Today (Core harness modules)
 
 | Module | Status | Notes |
 |--------|--------|-------|
@@ -1347,7 +1347,7 @@ All errors are returned in the JSON-RPC 2.0 error envelope:
 - **Known issues:** #1023 (cross-provider tool calling), #1027 (glob/grep tools), #1475 (cost, diff, git, symlink bugs).
 - **DOC-28:** Session catch-up context (trusty-mpm session registry integration).
 - **trusty-mpm circuit-breaker:** [`crates/trusty-mpm/src/core/circuit.rs`](../../crates/trusty-mpm/src/core/circuit.rs)
-- **trusty-agents workflow engine:** [`crates/open-mpm/src/workflow/`](../../crates/open-mpm/src/workflow/) (planned migration to trusty-mpm)
+- **trusty-agents workflow engine:** [`crates/trusty-agents/src/workflow/`](../../crates/trusty-agents/src/workflow/) (planned migration to trusty-mpm)
 
 ---
 
