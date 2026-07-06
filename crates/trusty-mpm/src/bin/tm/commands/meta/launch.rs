@@ -222,7 +222,12 @@ pub(crate) async fn launch_and_wait(
     // (3) Launch `claude` in the pane via the SAME adapter the daemon uses.
     let adapter = build_adapter(RuntimeKind::ClaudeCode, mgr.tmux_driver());
     adapter
-        .spawn(&record.tmux_name, project_dir, &record.task)
+        .spawn(
+            &record.tmux_name,
+            project_dir,
+            &record.task,
+            &record.id.to_string(),
+        )
         .context("failed to spawn the claude runtime in the tmux pane")?;
     info!(tmux = %record.tmux_name, "meta run: claude runtime spawned");
 

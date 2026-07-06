@@ -88,7 +88,8 @@ impl TcodeAdapter {
     /// tests exercise the send path deterministically through `FakeTmux` without
     /// a real `tcode` binary on PATH (the availability check is the only part
     /// that depends on the environment), closing the silent-skip gap in #1213.
-    /// What: constructs the command via [`build_spawn_command`], logs it, and
+    /// What: constructs the command via [`build_spawn_command`] (which carries
+    /// the `TM_MANAGED_SESSION_ID` export, #2023 component B), logs it, and
     /// forwards it to `send_line`, mapping any tmux failure to
     /// [`RuntimeError::TmuxUnavailable`]. It does NOT check binary availability.
     /// Test: `tcode_adapter_spawn_sends_run_task` (always runs in CI).
@@ -97,8 +98,9 @@ impl TcodeAdapter {
         tmux_name: &str,
         cwd: &Path,
         task: &str,
+        session_id: &str,
     ) -> Result<(), RuntimeError> {
-        let command = build_spawn_command(cwd, task);
+        let command = build_spawn_command(cwd, task, session_id);
         debug!(
             session = %tmux_name,
             cwd = %cwd.display(),
@@ -116,15 +118,23 @@ impl TcodeAdapter {
 /// Why: command construction is the single most regression-prone part of the
 /// adapter (quoting, project flag, agent selection), so it is factored into a
 /// pure function that can be unit-tested without spawning a process or tmux.
-/// What: returns `tcode run-task <DEFAULT_AGENT> '<task>' --project '<cwd>'`,
-/// single-quoting the task and project path so spaces and shell metacharacters
-/// in either are passed literally. Embedded single quotes are escaped using the
-/// POSIX `'\''` idiom. The `ANTHROPIC_API_KEY` is deliberately NOT scrubbed —
-/// `tcode` uses it for the direct-API path.
+/// An `export TM_MANAGED_SESSION_ID='<session_id>'; ` prefix (#2023 component B)
+/// is prepended so a command run in the pane's shell after `tcode` exits can
+/// identify the managed session — `tmux set-environment` alone does not reach
+/// the pane's already-running login shell, so the export must be part of the
+/// literal command line sent via `send_line` (see `claude_code::
+/// session_id_export_prefix` for the full rationale, shared verbatim here).
+/// What: returns `export TM_MANAGED_SESSION_ID='<id>'; tcode run-task
+/// <DEFAULT_AGENT> '<task>' --project '<cwd>'`, single-quoting the session id,
+/// task, and project path so spaces and shell metacharacters in any of them are
+/// passed literally. Embedded single quotes are escaped using the POSIX `'\''`
+/// idiom. The `ANTHROPIC_API_KEY` is deliberately NOT scrubbed — `tcode` uses
+/// it for the direct-API path.
 /// Test: `tcode_build_spawn_command_*` in the module test block.
-fn build_spawn_command(cwd: &Path, task: &str) -> String {
+fn build_spawn_command(cwd: &Path, task: &str, session_id: &str) -> String {
     format!(
-        "{TCODE_BINARY} run-task {DEFAULT_AGENT} {} --project {}",
+        "export TM_MANAGED_SESSION_ID={}; {TCODE_BINARY} run-task {DEFAULT_AGENT} {} --project {}",
+        shell_single_quote(session_id),
         shell_single_quote(task),
         shell_single_quote(&cwd.to_string_lossy()),
     )
@@ -150,14 +160,22 @@ impl RuntimeAdapter for TcodeAdapter {
     /// What: checks that `tcode` is on PATH (returns `BinaryNotFound` if not),
     /// builds the `tcode run-task` command via [`build_spawn_command`], and
     /// sends it to the pane. `ANTHROPIC_API_KEY` is preserved (API-key path).
+    /// `session_id` (the managed session UUID, #2023 component B) is exported
+    /// into the pane shell so it survives `tcode` exiting.
     /// Test: `tcode_adapter_spawn_sends_run_task`.
-    fn spawn(&self, tmux_name: &str, cwd: &Path, task: &str) -> Result<(), RuntimeError> {
+    fn spawn(
+        &self,
+        tmux_name: &str,
+        cwd: &Path,
+        task: &str,
+        session_id: &str,
+    ) -> Result<(), RuntimeError> {
         if !Self::tcode_available() {
             return Err(RuntimeError::BinaryNotFound(
                 "tcode binary not found on PATH — install trusty-code first".into(),
             ));
         }
-        self.send_spawn_command(tmux_name, cwd, task)
+        self.send_spawn_command(tmux_name, cwd, task, session_id)
     }
 
     /// Return `"tcode"` as the adapter's identifier.
@@ -176,6 +194,10 @@ mod tests {
     use super::super::test_helpers::FakeTmux;
     use super::*;
 
+    /// Fixed managed-session UUID string reused across command-builder tests
+    /// (#2023 component B) — a representative id, not a real session.
+    const TEST_SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
+
     #[test]
     fn tcode_adapter_identifies() {
         let fake = FakeTmux::new();
@@ -185,16 +207,33 @@ mod tests {
 
     #[test]
     fn tcode_build_spawn_command_starts_with_binary() {
-        let cmd = build_spawn_command(Path::new("/tmp/ws"), "do a thing");
+        let cmd = build_spawn_command(Path::new("/tmp/ws"), "do a thing", TEST_SESSION_ID);
         assert!(
-            cmd.starts_with("tcode run-task "),
+            cmd.contains("tcode run-task "),
             "command must invoke the tcode binary: {cmd}"
         );
     }
 
     #[test]
+    fn tcode_build_spawn_command_exports_managed_session_id() {
+        // #2023 component B: same mechanism as the claude adapter — the export
+        // must precede the tcode invocation so the pane shell retains the id
+        // after tcode exits.
+        let cmd = build_spawn_command(Path::new("/tmp/ws"), "do a thing", TEST_SESSION_ID);
+        let expected_prefix = format!("export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; ");
+        assert!(
+            cmd.starts_with(&expected_prefix),
+            "spawn command must start with the session-id export: {cmd}"
+        );
+        assert!(
+            cmd.find("export TM_MANAGED_SESSION_ID").unwrap() < cmd.find("tcode run-task").unwrap(),
+            "export must precede the tcode invocation: {cmd}"
+        );
+    }
+
+    #[test]
     fn tcode_build_spawn_command_uses_default_agent() {
-        let cmd = build_spawn_command(Path::new("/tmp/ws"), "do a thing");
+        let cmd = build_spawn_command(Path::new("/tmp/ws"), "do a thing", TEST_SESSION_ID);
         assert!(
             cmd.contains(&format!("run-task {DEFAULT_AGENT} ")),
             "command must target the default agent: {cmd}"
@@ -203,7 +242,7 @@ mod tests {
 
     #[test]
     fn tcode_build_spawn_command_includes_project_and_task() {
-        let cmd = build_spawn_command(Path::new("/work/space dir"), "fix bug #12");
+        let cmd = build_spawn_command(Path::new("/work/space dir"), "fix bug #12", TEST_SESSION_ID);
         assert!(
             cmd.contains("--project '/work/space dir'"),
             "command must root tcode at the (quoted) workspace cwd: {cmd}"
@@ -218,7 +257,7 @@ mod tests {
     fn tcode_build_spawn_command_does_not_scrub_api_key() {
         // The API-key path REQUIRES the key in the child env; the tcode adapter
         // must NOT prepend `env -u ANTHROPIC_API_KEY` like the claude adapter does.
-        let cmd = build_spawn_command(Path::new("/tmp/ws"), "task");
+        let cmd = build_spawn_command(Path::new("/tmp/ws"), "task", TEST_SESSION_ID);
         assert!(
             !cmd.contains("ANTHROPIC_API_KEY"),
             "tcode adapter must preserve ANTHROPIC_API_KEY (no env scrub): {cmd}"
@@ -253,14 +292,14 @@ mod tests {
         let fake = FakeTmux::new();
         let adapter = TcodeAdapter::new(fake.clone());
         adapter
-            .send_spawn_command("tmpm-test", Path::new("/tmp"), "some task")
+            .send_spawn_command("tmpm-test", Path::new("/tmp"), "some task", TEST_SESSION_ID)
             .expect("send_spawn_command");
         let sends = fake.sends.lock().expect("send log mutex");
         assert_eq!(sends.len(), 1);
         assert_eq!(sends[0].0, "tmpm-test");
         assert_eq!(
             sends[0].1,
-            build_spawn_command(Path::new("/tmp"), "some task")
+            build_spawn_command(Path::new("/tmp"), "some task", TEST_SESSION_ID)
         );
     }
 
@@ -273,7 +312,7 @@ mod tests {
         // happy path instead so the test is meaningful in both environments.
         let fake = FakeTmux::new();
         let adapter = TcodeAdapter::new(fake.clone());
-        let result = adapter.spawn("tmpm-test", Path::new("/tmp"), "some task");
+        let result = adapter.spawn("tmpm-test", Path::new("/tmp"), "some task", TEST_SESSION_ID);
         if TcodeAdapter::tcode_available() {
             assert!(result.is_ok(), "spawn should succeed when tcode is on PATH");
             assert_eq!(fake.sends.lock().expect("send log mutex").len(), 1);

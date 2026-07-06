@@ -67,9 +67,19 @@ pub trait RuntimeAdapter: Send + Sync {
     /// Why: the session manager creates the tmux session first, then calls
     /// `spawn` so the adapter can send the start command into the pane.
     /// What: sends the appropriate shell command(s) to start the runtime in the
-    /// named tmux pane; returns `RuntimeError` on any failure.
+    /// named tmux pane; returns `RuntimeError` on any failure. `session_id` is
+    /// the managed session's UUID (#2023 component B) — it is exported as
+    /// `TM_MANAGED_SESSION_ID` into the pane shell so a command run in that pane
+    /// AFTER the runtime exits can identify which managed session it belongs to
+    /// (needed by the in-place-relaunch path, #2023 component C).
     /// Test: `claude_code_adapter_spawn_sends_env_scrub_command`.
-    fn spawn(&self, tmux_name: &str, cwd: &Path, task: &str) -> Result<(), RuntimeError>;
+    fn spawn(
+        &self,
+        tmux_name: &str,
+        cwd: &Path,
+        task: &str,
+        session_id: &str,
+    ) -> Result<(), RuntimeError>;
 
     /// Start the runtime in a RESUME context — prefer conversation continuity.
     ///
@@ -82,7 +92,10 @@ pub trait RuntimeAdapter: Send + Sync {
     /// which is correct for the `tcode` adapter and any other runtime that does
     /// not support conversation continuity.
     /// What: same contract as `spawn` but with an optional `claude_session_id` for
-    /// the `--resume` flag. Called by `resume_managed` instead of `spawn`.
+    /// the `--resume` flag, plus the same `session_id` (managed session UUID,
+    /// #2023 component B) forwarded to [`Self::spawn`] for the
+    /// `TM_MANAGED_SESSION_ID` pane-shell export. Called by `resume_managed`
+    /// instead of `spawn`.
     /// Test: `spawn_resume_with_id_uses_resume_flag`,
     /// `spawn_resume_without_id_uses_continue_flag` in `claude_code` tests.
     fn spawn_resume(
@@ -91,9 +104,10 @@ pub trait RuntimeAdapter: Send + Sync {
         cwd: &Path,
         task: &str,
         claude_session_id: Option<&str>,
+        session_id: &str,
     ) -> Result<(), RuntimeError> {
         let _ = claude_session_id;
-        self.spawn(tmux_name, cwd, task)
+        self.spawn(tmux_name, cwd, task, session_id)
     }
 
     /// Return a short human-readable name for this runtime backend.
