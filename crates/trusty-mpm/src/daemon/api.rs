@@ -120,8 +120,8 @@ use super::managed_routes::{
     adopt_existing_session, answer_session_decision, decommission_ephemeral_route,
     decommission_managed_session, delete_managed_session, fleet_by_project_route, get_attach_cmd,
     get_managed_session, get_session_activity, list_managed_sessions, prune_managed_route,
-    prune_worktrees_route, resume_managed_session, send_to_session, spawn_session,
-    stop_managed_session, stop_managed_session_runtime,
+    prune_worktrees_route, reactivate_managed_session, resume_managed_session, send_to_session,
+    spawn_session, stop_managed_session, stop_managed_session_runtime,
 };
 
 /// Typed HTTP response bodies for every endpoint.
@@ -273,6 +273,13 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route(
             "/api/v1/sessions/managed/{id}/resume",
             post(resume_managed_session),
+        )
+        // #2023 C: bare-`tm` in-pane relaunch flips Stopped -> Active in place,
+        // with NO tmux mutation — distinct from `/resume` above, which always
+        // kills any surviving tmux session and creates a fresh one.
+        .route(
+            "/api/v1/sessions/managed/{id}/reactivate",
+            post(reactivate_managed_session),
         )
         .route(
             "/api/v1/sessions/managed/{id}/decommission",

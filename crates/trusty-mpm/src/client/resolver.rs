@@ -183,6 +183,7 @@ mod tests {
             source_id: None,
             task: None,
             cwd: None,
+            claude_session_id: None,
         };
         let items = vec![summary("m-1", "tmpm-red-owl"), summary("m-2", "api")];
         assert_eq!(

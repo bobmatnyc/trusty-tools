@@ -416,6 +416,13 @@ pub struct ManagedSessionSummary {
     /// Old daemon responses without the field deserialize as `None`.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Captured Claude Code conversation id, if any (additive; #2023 C).
+    ///
+    /// Why: the bare-`tm` in-pane relaunch path needs this to build the same
+    /// `--resume <id>` command the tmux-pane resume path uses. `None` for
+    /// sessions with no captured conversation id or predating this field.
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
 }
 
 /// Wrapper for `GET /api/v1/sessions/managed` (the list endpoint).

@@ -63,6 +63,36 @@ fn session_id_export_prefix(session_id: &str) -> String {
     )
 }
 
+/// The one-line hint printed to the pane AFTER `claude` exits (#2023 component D).
+///
+/// Why: component A leaves the pane alive as a bare shell when the runtime
+/// exits, and component C lets a bare `tm` run from inside that pane relaunch
+/// the same session in place — but neither is discoverable unless the pane
+/// itself says so. Backticks are used around the literal command name; they
+/// have no special meaning inside the single-quoted `echo` argument this is
+/// embedded in (see [`on_exit_hint_suffix`]), so no escaping is needed.
+/// What: a short, single-line, non-panicking string.
+/// Test: `spawn_command_prints_relaunch_hint_after_claude_exits`,
+/// `resume_command_prints_relaunch_hint_after_claude_exits`.
+const RELAUNCH_HINT: &str = "tm: run `tm` to relaunch this session";
+
+/// Build the `; echo '<hint>'` suffix appended AFTER every managed
+/// launch/resume command (#2023 component D).
+///
+/// Why: `;` sequences the `echo` to run only once the preceding `claude`
+/// invocation exits (successfully or not) and control returns to the pane's
+/// shell — exactly the moment component A leaves the pane idle at, and
+/// exactly what the in-place relaunch (component C) needs advertised.
+/// What: `; echo '<RELAUNCH_HINT>'`, single-quoted via [`shell_single_quote`]
+/// for the same reason [`env_bin_prefix`] quotes `CLAUDE_CONFIG_DIR` — a
+/// literal constant with no shell metacharacters, but quoting defensively
+/// costs nothing and matches this file's established convention.
+/// Test: `spawn_command_prints_relaunch_hint_after_claude_exits`,
+/// `resume_command_prints_relaunch_hint_after_claude_exits`.
+fn on_exit_hint_suffix() -> String {
+    format!("; echo {}", shell_single_quote(RELAUNCH_HINT))
+}
+
 /// Compose the `env …` prefix + resolved binary that starts every managed
 /// `claude`, wiring in the tm-owned `CLAUDE_CONFIG_DIR` when available (DOC-34).
 ///
@@ -124,24 +154,28 @@ fn env_bin_prefix(claude_bin: &str, config_dir: Option<&Path>) -> String {
 /// / [`crate::core::model_inject::PERMISSION_MODE_FLAG`] constants so this spawn
 /// path and the CLI launch path can never drift.
 /// What: [`session_id_export_prefix`] followed by [`env_bin_prefix`] plus the
-/// two shared flag constants; piped to `tmux send-keys … Enter`. `claude_bin`
-/// is the resolved binary — an absolute path under launchd so the pane (which
-/// inherits the daemon's minimal `PATH`) does not need `claude` on its own
-/// `PATH` (#1298). `session_id` is the managed session's UUID (#2023 component
-/// B), exported so in-pane commands can identify the session after `claude`
-/// exits.
+/// two shared flag constants, followed by [`on_exit_hint_suffix`] (#2023
+/// component D — `; echo '<hint>'`, which only runs once `claude` exits and
+/// control returns to the pane); piped to `tmux send-keys … Enter`.
+/// `claude_bin` is the resolved binary — an absolute path under launchd so the
+/// pane (which inherits the daemon's minimal `PATH`) does not need `claude` on
+/// its own `PATH` (#1298). `session_id` is the managed session's UUID (#2023
+/// component B), exported so in-pane commands can identify the session after
+/// `claude` exits.
 /// Test: `spawn_command_contains_env_scrub`,
 /// `spawn_command_contains_isolation_flags`,
 /// `spawn_command_uses_resolved_binary`,
 /// `spawn_command_sets_claude_config_dir`,
-/// `spawn_command_exports_managed_session_id`.
+/// `spawn_command_exports_managed_session_id`,
+/// `spawn_command_prints_relaunch_hint_after_claude_exits`.
 fn spawn_command(claude_bin: &str, config_dir: Option<&Path>, session_id: &str) -> String {
     format!(
-        "{}{} {} {}",
+        "{}{} {} {}{}",
         session_id_export_prefix(session_id),
         env_bin_prefix(claude_bin, config_dir),
         crate::core::model_inject::SETTING_SOURCES_FLAG,
         crate::core::model_inject::PERMISSION_MODE_FLAG,
+        on_exit_hint_suffix(),
     )
 }
 
@@ -158,12 +192,15 @@ fn spawn_command(claude_bin: &str, config_dir: Option<&Path>, session_id: &str) 
 /// `None, has_prior_conv=false` → plain spawn (no resume flag), so the session
 /// starts a fresh conversation instead of erroring. All three share the same
 /// env prefix (scrub + `CLAUDE_CONFIG_DIR`) and isolation flags as
-/// [`spawn_command`].
+/// [`spawn_command`], and all three get [`on_exit_hint_suffix`] appended
+/// (#2023 component D) so the pane always prints the relaunch hint once
+/// `claude` exits, whichever branch fired.
 /// Test: `resume_command_with_id_uses_resume_flag`,
 /// `resume_command_without_id_with_prior_conv_uses_continue`,
 /// `resume_command_without_id_no_prior_conv_uses_plain_spawn`,
 /// `resume_command_sets_claude_config_dir`,
-/// `resume_command_exports_managed_session_id`.
+/// `resume_command_exports_managed_session_id`,
+/// `resume_command_prints_relaunch_hint_after_claude_exits`.
 fn resume_command(
     claude_bin: &str,
     config_dir: Option<&Path>,
@@ -178,11 +215,12 @@ fn resume_command(
         crate::core::model_inject::SETTING_SOURCES_FLAG,
         crate::core::model_inject::PERMISSION_MODE_FLAG,
     );
-    match claude_session_id {
+    let cmd = match claude_session_id {
         Some(id) => format!("{base} --resume {id}"),
         None if has_prior_conv => format!("{base} --continue"),
         None => base, // No prior conversation: start fresh to avoid "no conversation found".
-    }
+    };
+    format!("{cmd}{}", on_exit_hint_suffix())
 }
 
 /// Encode a workspace path the same way Claude Code names its project dir.
@@ -380,6 +418,112 @@ fn prepare_managed_config(tmux_name: &str, cwd: &Path) -> Option<std::path::Path
     }
 
     Some(config_dir)
+}
+
+/// Owned pieces of an in-place `claude` relaunch command, built for direct
+/// process `exec` rather than a tmux `send_line` (#2023 component C).
+///
+/// Why: [`spawn_command`]/[`resume_command`] build single shell STRINGS meant
+/// for `tmux send-keys` into a pane whose shell does the quoting/splitting.
+/// The bare-`tm` in-pane relaunch instead replaces the CURRENT process image
+/// via `std::os::unix::process::CommandExt::exec` — no shell involved, so
+/// there is no command string to build (or parse back). This struct carries
+/// exactly what the caller (the `tm` CLI binary) needs to construct that
+/// [`std::process::Command`] itself.
+/// What: `claude_bin` (resolved absolute path), `args` (the isolation flags
+/// plus `--resume <id>`/`--continue`/neither, mirroring [`resume_command`]'s
+/// selection — see [`compose_inplace_args`]), and `config_dir` (the tm-owned
+/// `CLAUDE_CONFIG_DIR`, when resolved). The caller is expected to
+/// `env_remove("ANTHROPIC_API_KEY")` and, when `config_dir` is `Some`, set
+/// `CLAUDE_CONFIG_DIR` to it — the same two invariants [`env_bin_prefix`]
+/// encodes into the shell-string commands.
+/// Test: exercised via [`build_inplace_resume_command`]'s tests.
+#[derive(Debug)]
+pub struct InPlaceResumeCommand {
+    /// Resolved `claude` binary (absolute path).
+    pub claude_bin: String,
+    /// Full argv (isolation flags + resume/continue selection), EXCLUDING the
+    /// binary itself.
+    pub args: Vec<String>,
+    /// The tm-owned `CLAUDE_CONFIG_DIR`, when resolved (`None` when home is
+    /// unresolvable — mirrors [`prepare_managed_config`]'s fallback).
+    pub config_dir: Option<std::path::PathBuf>,
+}
+
+/// Pure argv composition shared by [`build_inplace_resume_command`] (#2023 C).
+///
+/// Why: separating the resume/continue/fresh SELECTION from claude-binary
+/// resolution (which needs a real `claude` install to exercise end-to-end)
+/// keeps the decision itself testable in every CI environment — mirroring how
+/// [`resume_command`]'s selection tests pass a fake `claude_bin` string rather
+/// than depending on [`ClaudeCodeAdapter::resolve_claude`].
+/// What: the isolation flags ([`crate::core::model_inject::SETTING_SOURCES_FLAG`]
+/// / [`crate::core::model_inject::PERMISSION_MODE_FLAG`], whitespace-split
+/// into argv tokens since both constants are simple space-separated flags with
+/// no embedded quoting) followed by `--resume <id>` (id exists under
+/// `config_dir`, per [`session_id_exists`]), `--continue` (no usable id but
+/// [`has_prior_conversation`] is true), or neither (fresh start) — the exact
+/// same three-way selection [`resume_command`] makes.
+/// Test: `compose_inplace_args_uses_resume_for_existing_id`,
+/// `compose_inplace_args_falls_back_for_missing_id`,
+/// `compose_inplace_args_uses_continue_when_no_id_but_prior_conv`.
+fn compose_inplace_args(
+    cwd: &Path,
+    config_dir: Option<&Path>,
+    claude_session_id: Option<&str>,
+) -> Vec<String> {
+    let effective_id = claude_session_id.filter(|id| session_id_exists(cwd, config_dir, id));
+
+    let mut args: Vec<String> = crate::core::model_inject::SETTING_SOURCES_FLAG
+        .split_whitespace()
+        .chain(crate::core::model_inject::PERMISSION_MODE_FLAG.split_whitespace())
+        .map(str::to_owned)
+        .collect();
+
+    match effective_id {
+        Some(id) => {
+            args.push("--resume".to_owned());
+            args.push(id.to_owned());
+        }
+        None if has_prior_conversation(cwd) => args.push("--continue".to_owned()),
+        None => {}
+    }
+    args
+}
+
+/// Build an [`InPlaceResumeCommand`] for the bare-`tm` in-pane relaunch path
+/// (#2023 component C).
+///
+/// Why: the in-place relaunch must use the SAME `--resume <id>`
+/// existence-check → `--continue`/fresh-spawn fallback semantics as the
+/// tmux-pane resume path (#2013) — reusing [`session_id_exists`] /
+/// [`has_prior_conversation`] / [`prepare_managed_config`] directly (via
+/// [`compose_inplace_args`]), rather than re-deriving them, means the two
+/// paths can never silently drift.
+/// What: resolves the `claude` binary (`Err(RuntimeError::BinaryNotFound)` if
+/// missing), provisions/trust-seeds the managed `CLAUDE_CONFIG_DIR` via
+/// [`prepare_managed_config`] (logged under the synthetic session name
+/// `"in-place-relaunch"` — there is no tmux session name in this context),
+/// then delegates argv composition to [`compose_inplace_args`].
+/// Test: `build_inplace_resume_command_resolves_claude_binary`.
+pub fn build_inplace_resume_command(
+    cwd: &Path,
+    claude_session_id: Option<&str>,
+) -> Result<InPlaceResumeCommand, RuntimeError> {
+    let claude_bin = ClaudeCodeAdapter::resolve_claude().ok_or_else(|| {
+        RuntimeError::BinaryNotFound(
+            "claude binary not found on PATH or in well-known dirs \
+             (e.g. ~/.local/bin) — install Claude Code first"
+                .into(),
+        )
+    })?;
+    let config_dir = prepare_managed_config("in-place-relaunch", cwd);
+    let args = compose_inplace_args(cwd, config_dir.as_deref(), claude_session_id);
+    Ok(InPlaceResumeCommand {
+        claude_bin,
+        args,
+        config_dir,
+    })
 }
 
 /// Runtime adapter that launches Claude Code CLI inside a tmux session.
@@ -1209,6 +1353,142 @@ mod tests {
             !sends[0].1.contains("--resume"),
             "adapter plain-spawn must NOT use --resume: {}",
             sends[0].1
+        );
+    }
+
+    // ── #2023 component D: on-exit relaunch hint ────────────────────────────
+
+    #[test]
+    fn spawn_command_prints_relaunch_hint_after_claude_exits() {
+        // The hint must appear AFTER the claude invocation, separated by `;` so
+        // it only runs once claude exits and control returns to the pane shell.
+        let cmd = spawn_command("claude", None, TEST_SESSION_ID);
+        assert!(
+            cmd.contains("; echo 'tm: run `tm` to relaunch this session'"),
+            "spawn command must print the relaunch hint after claude exits: {cmd}"
+        );
+        let claude_pos = cmd.find(" claude ").expect("claude invocation present");
+        let hint_pos = cmd.find("; echo").expect("relaunch hint present");
+        assert!(
+            claude_pos < hint_pos,
+            "relaunch hint must come AFTER the claude invocation: {cmd}"
+        );
+    }
+
+    #[test]
+    fn resume_command_prints_relaunch_hint_after_claude_exits() {
+        // Same invariant for the resume path (--resume branch here; the
+        // --continue/plain-spawn branches share the same trailing suffix).
+        let cmd = resume_command("claude", None, Some("abc-123"), false, TEST_SESSION_ID);
+        assert!(
+            cmd.contains("; echo 'tm: run `tm` to relaunch this session'"),
+            "resume command must print the relaunch hint after claude exits: {cmd}"
+        );
+        let resume_pos = cmd.find("--resume").expect("--resume flag present");
+        let hint_pos = cmd.find("; echo").expect("relaunch hint present");
+        assert!(
+            resume_pos < hint_pos,
+            "relaunch hint must come AFTER --resume: {cmd}"
+        );
+    }
+
+    // ── #2023 component C: in-place relaunch command builder ───────────────
+
+    #[test]
+    fn compose_inplace_args_uses_resume_for_existing_id() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let config_dir = tmp.path().join("config");
+        let encoded = cwd.to_string_lossy().replace('/', "-");
+        let project_dir = config_dir.join("projects").join(&encoded);
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("existing-id.jsonl"), "{}").unwrap();
+
+        let args = compose_inplace_args(&cwd, Some(&config_dir), Some("existing-id"));
+        assert!(
+            args.windows(2).any(|w| w == ["--resume", "existing-id"]),
+            "must select --resume <id> for an id that exists on disk: {args:?}"
+        );
+        assert!(
+            !args.contains(&"--continue".to_owned()),
+            "must not ALSO pass --continue when --resume is used: {args:?}"
+        );
+    }
+
+    #[test]
+    fn compose_inplace_args_falls_back_for_missing_id() {
+        // #2013 parity: a stale id (no matching .jsonl) with no prior
+        // conversation history falls back to a fresh spawn — neither
+        // --resume nor --continue.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cwd = tmp.path().join("workspace-missing");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let config_dir = tmp.path().join("config");
+
+        let args = compose_inplace_args(&cwd, Some(&config_dir), Some("stale-id"));
+        assert!(
+            !args.contains(&"--resume".to_owned()),
+            "a stale id must not be passed to --resume: {args:?}"
+        );
+        assert!(
+            !args.contains(&"--continue".to_owned()),
+            "no prior conversation history: must not fall back to --continue: {args:?}"
+        );
+        assert!(
+            args.contains(&"--setting-sources".to_owned()),
+            "isolation flags must still be present: {args:?}"
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn compose_inplace_args_uses_continue_when_no_id_but_prior_conv() {
+        // has_prior_conversation (unlike session_id_exists) always looks under
+        // `~/.claude/projects` regardless of `config_dir` — mirroring exactly
+        // what `resume_command`'s own `has_prior_conv` computation does — so
+        // this test redirects $HOME rather than seeding under a config dir.
+        let _home = HomeGuard::set();
+        let home = dirs::home_dir().expect("home resolves under redirected HOME");
+        let cwd = std::path::PathBuf::from("/tmp/inplace-continue-test");
+        // Seed prior conversation history (a .jsonl under the encoded cwd dir)
+        // WITHOUT seeding the specific stale id, so has_prior_conversation is
+        // true but session_id_exists for "stale-id" is false.
+        let encoded = cwd.to_string_lossy().replace('/', "-");
+        let project_dir = home.join(".claude").join("projects").join(&encoded);
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("some-other-session.jsonl"), "{}").unwrap();
+
+        let args = compose_inplace_args(&cwd, None, Some("stale-id"));
+        assert!(
+            !args.contains(&"--resume".to_owned()),
+            "a stale id must not be passed to --resume: {args:?}"
+        );
+        assert!(
+            args.contains(&"--continue".to_owned()),
+            "prior conversation history exists: must fall back to --continue: {args:?}"
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn build_inplace_resume_command_resolves_claude_binary() {
+        // Integration-style check that build_inplace_resume_command wires
+        // resolve_claude + prepare_managed_config + compose_inplace_args
+        // together; the pure selection logic is covered exhaustively above
+        // without needing a real claude binary.
+        let _home = HomeGuard::set();
+        let Some(claude_bin) = ClaudeCodeAdapter::resolve_claude() else {
+            return;
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let result =
+            build_inplace_resume_command(tmp.path(), Some("some-id")).expect("build succeeds");
+        assert_eq!(result.claude_bin, claude_bin);
+        assert!(
+            result.args.contains(&"--setting-sources".to_owned()),
+            "isolation flags must be present: {:?}",
+            result.args
         );
     }
 }
