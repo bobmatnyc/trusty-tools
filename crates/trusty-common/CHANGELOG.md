@@ -5,6 +5,11 @@ All notable changes are documented in this file.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
+## [Unreleased]
+
+### Added
+
+- extract managed-session naming to trusty-common; trusty-agents adopts it (DOC-33 Phase 1, SPEC-ONESM-01) ([#1989](https://github.com/bobmatnyc/trusty-tools/pull/1989)) ([`025941d`](https://github.com/bobmatnyc/trusty-tools/commit/025941dfe68b7806f1f7f6b82bc06923d1cd5b9e))
 ## [0.19.0] — 2026-07-03
 
 ### Added

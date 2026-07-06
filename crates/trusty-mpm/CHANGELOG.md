@@ -9,6 +9,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- in-place relaunch current session + on-exit hint (#2023 C+D) ([#2027](https://github.com/bobmatnyc/trusty-tools/pull/2027)) ([`dba2195`](https://github.com/bobmatnyc/trusty-tools/commit/dba21950daedb48e909ffa2aefd9c12b0d47537a))
+- export TM_MANAGED_SESSION_ID into managed pane shell ([#2025](https://github.com/bobmatnyc/trusty-tools/pull/2025)) ([`879343b`](https://github.com/bobmatnyc/trusty-tools/commit/879343b93c720c69b6c706535de7d2d8e0db8021))
+- non-destructive stop for runtime-exited sessions (#2023 A) ([#2024](https://github.com/bobmatnyc/trusty-tools/pull/2024)) ([`bca3685`](https://github.com/bobmatnyc/trusty-tools/commit/bca3685d665e67bcc0e1ba2f862410521b22c6fd))
+- add tm session delete <id> [--force] ([#2021](https://github.com/bobmatnyc/trusty-tools/pull/2021)) ([`72cf975`](https://github.com/bobmatnyc/trusty-tools/commit/72cf9754cf507bf5ee5271e01412a9bb41b1147a))
+- reformat tm statusline ([#2018](https://github.com/bobmatnyc/trusty-tools/pull/2018)) ([`138b0fb`](https://github.com/bobmatnyc/trusty-tools/commit/138b0fb8b76bf5fe22f56ddb74435fe1db7202ed))
+- managed sessions launch with tm-owned CLAUDE_CONFIG_DIR + full roster (DOC-34, #1996) ([#2002](https://github.com/bobmatnyc/trusty-tools/pull/2002)) ([`7c2d13d`](https://github.com/bobmatnyc/trusty-tools/commit/7c2d13dc7c1d39e747b65a9e6b23a7be45ec4fdc))
+- add /tm-init project-initialization skill ([#1997](https://github.com/bobmatnyc/trusty-tools/pull/1997)) ([`4c7332b`](https://github.com/bobmatnyc/trusty-tools/commit/4c7332b1abb8ab13ca8c9700625382823f57f7af))
+- native gh-account awareness — statusline @login + doctor check ([#1994](https://github.com/bobmatnyc/trusty-tools/pull/1994)) ([`521f696`](https://github.com/bobmatnyc/trusty-tools/commit/521f696f037092cd60493dfc748eeea5749ec867))
+- extract managed-session naming to trusty-common; trusty-agents adopts it (DOC-33 Phase 1, SPEC-ONESM-01) ([#1989](https://github.com/bobmatnyc/trusty-tools/pull/1989)) ([`025941d`](https://github.com/bobmatnyc/trusty-tools/commit/025941dfe68b7806f1f7f6b82bc06923d1cd5b9e))
+- add /tm-session-pause and /tm-session-resume skills ([#1986](https://github.com/bobmatnyc/trusty-tools/pull/1986)) ([`0829711`](https://github.com/bobmatnyc/trusty-tools/commit/0829711037723085f701363b93c2de67214425e7))
+- enforce PM delegation prohibitions via PreToolUse guard ([#1985](https://github.com/bobmatnyc/trusty-tools/pull/1985)) ([`ea14e69`](https://github.com/bobmatnyc/trusty-tools/commit/ea14e6981e40b1dac5d7faaf3d26476d0351932d))
+
+### Fixed
+
+- route Claude spawn through shared spawn_command builder ([#2017](https://github.com/bobmatnyc/trusty-tools/pull/2017)) ([`96b1ff5`](https://github.com/bobmatnyc/trusty-tools/commit/96b1ff5ef030e2cbafbca7fac9c3bcc5de746ea8))
+- stop managed-hook duplicate accumulation in shared settings.json ([#2019](https://github.com/bobmatnyc/trusty-tools/pull/2019)) ([`7706bf7`](https://github.com/bobmatnyc/trusty-tools/commit/7706bf72f17afabc9df306b884a993faa31da3e4))
+- resilient resume — existence-check before --resume ([#2016](https://github.com/bobmatnyc/trusty-tools/pull/2016)) ([`85197db`](https://github.com/bobmatnyc/trusty-tools/commit/85197db401499139d3a71069eb122ae4685fdcf4))
+- correct env arg order in managed spawn (-u before CLAUDE_CONFIG_DIR) ([#2009](https://github.com/bobmatnyc/trusty-tools/pull/2009)) ([`13a949d`](https://github.com/bobmatnyc/trusty-tools/commit/13a949da42f4d12bf3e535bb638d4ee77d030820))
+- make bundled PM skill examples stack-neutral (closes #2005) ([#2006](https://github.com/bobmatnyc/trusty-tools/pull/2006)) ([`53c3cdc`](https://github.com/bobmatnyc/trusty-tools/commit/53c3cdce3b99e2635565a58a1e722e3abcffc405))
+- auto-reconcile zombie sessions on guided resume instead of erroring (closes #2001) ([#2004](https://github.com/bobmatnyc/trusty-tools/pull/2004)) ([`f635216`](https://github.com/bobmatnyc/trusty-tools/commit/f635216c4b1e6edf7463b2202283c2b39e0e180e))
+- statusline shows user/repo, drops duplicate session-id branch ([#1991](https://github.com/bobmatnyc/trusty-tools/pull/1991)) ([`58f5b1f`](https://github.com/bobmatnyc/trusty-tools/commit/58f5b1f9df62dfae183389f5e279d8579f07de13))
+- graceful CLI session termination + managed-session delegation gating ([#1979](https://github.com/bobmatnyc/trusty-tools/pull/1979)) ([`139bde2`](https://github.com/bobmatnyc/trusty-tools/commit/139bde2938f8edf33cd71df1d0a2b2a09ef1580c))
+## [Unreleased]
+
+### Added
+
 - compact splash art update, supersede giant-robot banner ([#1973](https://github.com/bobmatnyc/trusty-tools/pull/1973)) ([`9dd65fb`](https://github.com/bobmatnyc/trusty-tools/commit/9dd65fb875585cb41aa6a6affe7aae9a01df578a))
 - switch session naming to tm-<leaf>-NN pattern ([#1966](https://github.com/bobmatnyc/trusty-tools/pull/1966)) ([`5c20a3d`](https://github.com/bobmatnyc/trusty-tools/commit/5c20a3dc3a0be4ea93ec298d7ee04ecabff0fb46))
 - giant-robot «TRUSTY» banner art + stale banner.txt seed refresh ([#1933](https://github.com/bobmatnyc/trusty-tools/pull/1933)) ([`25cd224`](https://github.com/bobmatnyc/trusty-tools/commit/25cd22434d2bce527c6b0b4d7cb123c73d167928))
