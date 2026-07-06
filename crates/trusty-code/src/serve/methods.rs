@@ -1,12 +1,16 @@
-//! Proof-of-life JSON-RPC methods for `tcode serve --stdio` (#2053).
+//! Proof-of-life JSON-RPC methods for `tcode serve` (#2053).
 //!
 //! Why: the transport + router need at least one real method to prove the
 //! whole path works end-to-end without pulling in `session.*`/`task.*`/
 //! `harness.describe` scope (those land in #2054/#2056/#2066). `ping` and
-//! `health` are the minimal, side-effect-free pair for that job.
+//! `health` are the minimal, side-effect-free pair for that job, shared
+//! verbatim across both transports: the STDIO `health` JSON-RPC method and
+//! the HTTP `GET /health` route (`crate::serve::http::health_handler`) both
+//! call [`health_payload`] so the two transports can never drift into
+//! different shapes.
 //! What: `register` wires both methods into a [`Router`]; `ping` returns
-//! `{"pong": true}`; `health` returns the server name, crate version, and a
-//! static `"ok"` status.
+//! `{"pong": true}`; `health` returns [`health_payload`]'s server name,
+//! crate version, and a static `"ok"` status.
 //! Test: `methods::tests::*`.
 
 use serde_json::{Value, json};
@@ -26,8 +30,8 @@ pub fn register(router: &mut Router) {
 
 /// `ping` — returns `{"pong": true}` regardless of `params`.
 ///
-/// Why: the cheapest possible round-trip proof that the STDIO transport and
-/// the router are wired correctly.
+/// Why: the cheapest possible round-trip proof that a transport and the
+/// router are wired correctly.
 /// What: ignores `params`, never fails.
 /// Test: `ping_returns_pong_true`.
 async fn ping(_params: Value) -> Result<Value, RpcError> {
@@ -38,15 +42,29 @@ async fn ping(_params: Value) -> Result<Value, RpcError> {
 ///
 /// Why: a slightly richer proof-of-life than `ping` that a caller can use to
 /// confirm which build of `tcode` it is talking to.
-/// What: ignores `params`, never fails. `version` is `crate::VERSION`
-/// (`CARGO_PKG_VERSION`).
+/// What: ignores `params`, never fails; the payload is [`health_payload`].
 /// Test: `health_returns_server_identity`.
 async fn health(_params: Value) -> Result<Value, RpcError> {
-    Ok(json!({
+    Ok(health_payload())
+}
+
+/// The shared `health` payload: `{"server","version","status"}`.
+///
+/// Why: pulled out of the `health` JSON-RPC handler so
+/// `crate::serve::http::health_handler` (`GET /health`) can return the
+/// identical shape without duplicating the `json!` literal — one source of
+/// truth for what "healthy" means over either transport.
+/// What: `server = "tcode"`, `version = crate::VERSION`
+/// (`CARGO_PKG_VERSION`), `status = "ok"`. Never fails — there is no
+/// fallible state to check yet; a future ticket that adds real readiness
+/// checks (e.g. project root validity) will extend this function.
+/// Test: `health_payload_has_expected_shape`.
+pub(crate) fn health_payload() -> Value {
+    json!({
         "server": "tcode",
         "version": crate::VERSION,
         "status": "ok",
-    }))
+    })
 }
 
 #[cfg(test)]
@@ -67,6 +85,16 @@ mod tests {
         assert_eq!(result["server"], "tcode");
         assert_eq!(result["status"], "ok");
         assert_eq!(result["version"], crate::VERSION);
+    }
+
+    /// `health_payload` (shared with the HTTP `GET /health` route) must
+    /// carry the same three fields.
+    #[test]
+    fn health_payload_has_expected_shape() {
+        let v = health_payload();
+        assert_eq!(v["server"], "tcode");
+        assert_eq!(v["status"], "ok");
+        assert_eq!(v["version"], crate::VERSION);
     }
 
     /// `register` must wire both methods so the router recognises them

@@ -19,9 +19,14 @@
 //!   - `-32601 Method not found` — no handler registered under the name.
 //!   - handler-returned [`RpcError`] (typically `-32602`/`-32603`) is copied
 //!     onto the wire error verbatim, `data` included.
-//!   - `-32700 Parse error` is NOT produced here — malformed JSON never
-//!     becomes a `Request` in the first place, so that code is only ever
-//!     emitted by the transport loop before `dispatch` is called.
+//!   - `-32700 Parse error` is produced by [`Router::dispatch_json`], not
+//!     [`Router::dispatch`] — the STDIO transport (`crate::serve::transport`,
+//!     one JSON object per line) and the HTTP transport
+//!     (`crate::serve::http`, one JSON object per `POST /rpc` body) both
+//!     receive raw bytes rather than an already-parsed `Request`, and both
+//!     need the exact same "parse or -32700" behaviour. Centralising it here
+//!     means the error message and code can never drift between the two
+//!     wire formats.
 //!
 //! Per JSON-RPC 2.0 §4.1, a request with no `id` is a *notification*: the
 //! server must never reply, even with an error, though the handler (if one
@@ -181,6 +186,31 @@ impl Router {
             }
         }
     }
+
+    /// Parse `raw` as a single JSON-RPC request and dispatch it, mapping a
+    /// JSON parse failure onto `-32700 Parse error` instead of propagating.
+    ///
+    /// Why: both wire transports (STDIO lines, HTTP request bodies) receive
+    /// raw bytes rather than an already-parsed `Request`; this is the one
+    /// place "parse or -32700" is implemented, so the message/code can never
+    /// drift between them. See the module docs for the full rationale.
+    /// What: `serde_json::from_slice::<Request>(raw)` then [`Self::dispatch`].
+    /// On parse failure, returns `Response::err(None, error_codes::PARSE_ERROR,
+    /// ...)` without ever invoking a handler — the request `id` is
+    /// unrecoverable from malformed JSON, so the response carries a `null`
+    /// id per the JSON-RPC 2.0 spec.
+    /// Test: `dispatch_json_valid_request_dispatches`,
+    /// `dispatch_json_malformed_bytes_return_parse_error`.
+    pub async fn dispatch_json(&self, raw: &[u8]) -> Response {
+        match serde_json::from_slice::<Request>(raw) {
+            Ok(req) => self.dispatch(req).await,
+            Err(e) => Response::err(
+                None,
+                error_codes::PARSE_ERROR,
+                format!("invalid JSON-RPC: {e}"),
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -294,5 +324,29 @@ mod tests {
             .dispatch(req(Some(json!(6)), "echo_params", None))
             .await;
         assert_eq!(resp.result, Some(Value::Null));
+    }
+
+    /// `dispatch_json` on well-formed bytes must behave exactly like
+    /// `dispatch` on the parsed request.
+    #[tokio::test]
+    async fn dispatch_json_valid_request_dispatches() {
+        let mut router = Router::new();
+        router.register(
+            "ping",
+            |_params: Value| async move { Ok(json!({"pong": true})) },
+        );
+
+        let raw = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let resp = router.dispatch_json(raw).await;
+        assert_eq!(resp.result, Some(json!({"pong": true})));
+    }
+
+    /// Malformed bytes must map to `-32700 Parse error`, not a panic.
+    #[tokio::test]
+    async fn dispatch_json_malformed_bytes_return_parse_error() {
+        let router = Router::new();
+        let resp = router.dispatch_json(b"not json at all").await;
+        let err = resp.error.expect("expected a parse error");
+        assert_eq!(err.code, error_codes::PARSE_ERROR);
     }
 }

@@ -60,10 +60,23 @@ libc = { workspace = true }
 # and trusty-search. `catchup` already pulls in `mcp` transitively
 # (`catchup = ["dep:rusqlite", "mcp"]`); `mcp` is listed explicitly too so the
 # direct dependency is documented rather than relying on the transitive edge.
-trusty-common = { workspace = true, features = ["catchup", "mcp"] }
+# `axum-server` enables `trusty_common::server::with_standard_middleware`
+# (CORS/trace/gzip) so `tcode serve --http` matches the trusty-memory/
+# trusty-search middleware stack exactly.
+trusty-common = { workspace = true, features = ["catchup", "mcp", "axum-server"] }
+
+# `tcode serve --http`: POST /rpc + GET /health over axum (#2053). Per
+# CLAUDE.md, axum stays feature-gated in *library* crates
+# (`trusty-common`'s `axum-server` flag); trusty-code is a binary crate that
+# actually serves HTTP, so it takes the dependency unconditionally, matching
+# how `trusty-search`/`trusty-memory` depend on it.
+axum = { workspace = true }
 
 [dev-dependencies]
 # Async test runtime (events, build_info, perf async tests, tools tests)
 tokio = { workspace = true }
 # Temp directories for build_info, delegate, and agents tests
 tempfile = { workspace = true }
+# HTTP router test-only helper (`tower::util::ServiceExt::oneshot`) for
+# driving the `tcode serve --http` axum router without a real socket (#2053).
+tower = { workspace = true }

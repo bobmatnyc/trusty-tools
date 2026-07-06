@@ -274,15 +274,18 @@ pub mod prompt;
 /// Test: `jsonrpc::error::tests::*`, `jsonrpc::router::tests::*`.
 pub mod jsonrpc;
 
-/// `tcode serve` daemon: STDIO JSON-RPC transport + proof-of-life methods.
+/// `tcode serve` daemon: STDIO + HTTP JSON-RPC transports + proof-of-life
+/// methods.
 ///
 /// Why: the foundation of the M1 control-plane cut line (#2053) — proves the
 /// transport + router work end-to-end via `ping`/`health` before `session.*`
 /// (#2054), `task.*` (#2056), and `harness.describe` (#2066) land on top.
-/// What: `build_router`, `run_stdio`, and the `methods`/`transport`
-/// submodules.
+/// Both transports dispatch through the same `Router`, so the method
+/// surface can never drift between `--stdio` and `--http`.
+/// What: `build_router`, `run_stdio`, `run_http`, `DEFAULT_HTTP_PORT`, and
+/// the `methods`/`transport`/`http` submodules.
 /// Test: `serve::tests::*`, `serve::methods::tests::*`,
-/// `serve::transport::tests::*`.
+/// `serve::transport::tests::*`, `serve::http::tests::*`.
 pub mod serve;
 
 // ── Package-level re-exports ──

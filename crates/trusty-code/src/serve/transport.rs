@@ -4,12 +4,17 @@
 //! — the same convention `trusty-search` (`mcp::stdio::run`) and
 //! `trusty-memory` (`commands::serve_stdio_bridge::run_stdio_bridge`) use,
 //! both built on the shared `trusty_common::mcp` primitives — while adding
-//! SIGTERM-aware graceful shutdown per the workspace's connection-safe
-//! daemon-restart convention (issue #534): the loop stops accepting new
-//! input on SIGTERM but always finishes whatever request is already
-//! in-flight before returning, and it never crashes on malformed input —
-//! a `serde_json` parse failure becomes a `-32700 Parse error` JSON-RPC
-//! response instead of propagating and killing the process.
+//! graceful shutdown per the workspace's connection-safe daemon-restart
+//! convention (issue #534): the loop stops accepting new input on SIGTERM/
+//! SIGINT but always finishes whatever request is already in-flight before
+//! returning, and it never crashes on malformed input — a `serde_json`
+//! parse failure becomes a `-32700 Parse error` JSON-RPC response instead of
+//! propagating and killing the process. Shutdown detection itself is the
+//! shared `trusty_common::shutdown_signal()` helper — the exact function
+//! `trusty-memory`'s `run_http_on` and `trusty-search`'s HTTP daemon install
+//! via `axum::serve(...).with_graceful_shutdown(...)` (see
+//! `crate::serve::http::run_http`) — rather than a second, STDIO-specific
+//! signal handler.
 //!
 //! What: [`run_stdio_loop`] wires the real `tokio::io::stdin()`/`stdout()`
 //! against a [`Router`]. The generic [`run_loop`] underneath accepts any
@@ -17,10 +22,6 @@
 //! it over an in-memory pipe without touching real stdio or process signals.
 //! Logging goes to stderr only (via `tracing`) — stdout carries only
 //! JSON-RPC response lines, never log output.
-//!
-//! Deferred: the parent issue (#2053) also lists an HTTP `POST /rpc`
-//! transport; this ticket implements STDIO only (see the crate's `serve`
-//! module docs).
 //!
 //! Test: `transport::tests::*` drive `run_loop` over an in-memory duplex
 //! pipe (successful dispatch, malformed JSON, notification suppression,
@@ -31,19 +32,19 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tracing::{info, warn};
-use trusty_common::mcp::{Response, error_codes};
+use tracing::info;
+use trusty_common::mcp::Response;
 
-use crate::jsonrpc::{Request, Router};
+use crate::jsonrpc::Router;
 
 /// Read JSON-RPC 2.0 requests line-by-line from stdin, dispatch each through
 /// `router`, and write the response to stdout. Returns on stdin EOF or on
-/// receipt of SIGTERM.
+/// receipt of SIGTERM/SIGINT.
 ///
 /// Why: the single entry point `crate::serve::run_stdio` calls once the
 /// router is assembled.
 /// What: thin wrapper over [`run_loop`] binding the real process stdio and
-/// [`shutdown_signal`].
+/// the shared `trusty_common::shutdown_signal()`.
 /// Test: exercised end-to-end (minus real signals/stdio) by `run_loop`'s
 /// tests below.
 pub async fn run_stdio_loop(router: Router) -> Result<()> {
@@ -52,7 +53,7 @@ pub async fn run_stdio_loop(router: Router) -> Result<()> {
         router,
         tokio::io::stdin(),
         tokio::io::stdout(),
-        shutdown_signal(),
+        trusty_common::shutdown_signal(),
     )
     .await
 }
@@ -102,7 +103,7 @@ where
                 if trimmed.is_empty() {
                     continue;
                 }
-                let response = parse_and_dispatch(&router, trimmed).await;
+                let response = router.dispatch_json(trimmed.as_bytes()).await;
                 if response.suppress {
                     continue;
                 }
@@ -111,27 +112,6 @@ where
         }
     }
     Ok(())
-}
-
-/// Parse one line as a JSON-RPC request and dispatch it, or produce a
-/// `-32700 Parse error` response on malformed JSON.
-///
-/// Why: keeps the parse-error mapping (the one error code the router itself
-/// never produces) next to the one place it can occur.
-/// What: `serde_json::from_str::<Request>` then `router.dispatch`.
-/// Test: `run_loop_malformed_json_returns_parse_error`.
-async fn parse_and_dispatch(router: &Router, line: &str) -> Response {
-    match serde_json::from_str::<Request>(line) {
-        Ok(req) => router.dispatch(req).await,
-        Err(e) => {
-            warn!("tcode serve: malformed JSON-RPC request: {e}");
-            Response::err(
-                None,
-                error_codes::PARSE_ERROR,
-                format!("invalid JSON-RPC: {e}"),
-            )
-        }
-    }
 }
 
 /// Write one JSON-RPC response as a single NDJSON line and flush.
@@ -148,41 +128,12 @@ async fn write_response<W: AsyncWrite + Unpin>(writer: &mut W, response: &Respon
     Ok(())
 }
 
-/// Resolve when the process receives SIGTERM.
-///
-/// Why: the connection-safe daemon-restart convention (issue #534) requires
-/// every trusty-* daemon to drain and exit cleanly on SIGTERM rather than
-/// being SIGKILLed.
-/// What: installs a `SIGTERM` listener and resolves on the first signal. On
-/// non-Unix platforms (or if installing the handler fails) this future never
-/// resolves, leaving stdin EOF as the only shutdown path.
-/// Test: not directly tested (requires a real process); `run_loop`'s
-/// shutdown-priority test substitutes `std::future::ready(())` for this.
-#[cfg(unix)]
-async fn shutdown_signal() {
-    use tokio::signal::unix::{SignalKind, signal};
-    match signal(SignalKind::terminate()) {
-        Ok(mut sig) => {
-            sig.recv().await;
-        }
-        Err(e) => {
-            warn!("tcode serve: failed to install SIGTERM handler: {e}");
-            std::future::pending::<()>().await;
-        }
-    }
-}
-
-/// Non-Unix fallback: never resolves (EOF remains the only shutdown path).
-#[cfg(not(unix))]
-async fn shutdown_signal() {
-    std::future::pending::<()>().await;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use tokio::io::AsyncReadExt;
+    use trusty_common::mcp::error_codes;
 
     fn router_with_ping() -> Arc<Router> {
         let mut router = Router::new();
