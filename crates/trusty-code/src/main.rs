@@ -72,10 +72,16 @@ enum Command {
         #[arg(long, conflicts_with = "stdio")]
         http: bool,
 
-        /// TCP port for `--http` (ignored otherwise). `0` binds an
-        /// OS-assigned ephemeral port. Defaults to
-        /// `trusty_code::serve::DEFAULT_HTTP_PORT`.
-        #[arg(long, value_name = "PORT", requires = "http")]
+        /// TCP port for `--http`. `0` binds an OS-assigned ephemeral port.
+        /// Defaults to `trusty_code::serve::DEFAULT_HTTP_PORT`.
+        ///
+        /// Requires `--http` AND conflicts with `--stdio` — both are needed:
+        /// `requires = "http"` alone does not fire when `--stdio` is also
+        /// present, because clap evaluates `--stdio`'s `conflicts_with =
+        /// "http"` first and short-circuits before the requires-graph check,
+        /// so `--stdio --port N` would otherwise be silently accepted with
+        /// the port discarded.
+        #[arg(long, value_name = "PORT", requires = "http", conflicts_with = "stdio")]
         port: Option<u16>,
     },
 
