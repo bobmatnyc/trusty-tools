@@ -4,11 +4,15 @@
 //! cap. `FastEmbedder` is the largest single item in the module (init +
 //! embed_batch combined exceed 250 SLOC after comments) so it lives on its own.
 //! What: `FastEmbedder` struct, its `new` / `with_cache_size` constructors,
-//! `init_options` (execution-provider selection), the CUDA provider builder
-//! (behind the `embedder-cuda` feature), and the `Embedder` trait impl.
+//! `init_options` (execution-provider selection), `try_new_bounded` (issue
+//! #2111 — bounds CoreML init so a hang auto-falls-back to CPU instead of
+//! blocking forever, and remembers the hang via `COREML_KNOWN_BAD` so it is
+//! never retried), the CUDA provider builder (behind the `embedder-cuda`
+//! feature), and the `Embedder` trait impl.
 //! Test: `fastembed_returns_correct_dim`, `fastembed_cache_hit_is_idempotent`
-//! (both `#[ignore]` — they download a real ONNX model), plus the env-var
-//! tests in `mod.rs` that call `FastEmbedder::init_options` directly.
+//! (both `#[ignore]` — they download a real ONNX model), the `decide_fallback`
+//! / `coreml_init_timeout` unit tests, plus the env-var tests in `mod.rs`
+//! that call `FastEmbedder::init_options` directly.
 
 use super::types::{
     DEFAULT_CACHE_CAPACITY, EMBED_DIM, ExecutionProvider, OrtThreadingOptions, is_zero_vector,
@@ -20,7 +24,10 @@ use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 #[cfg(feature = "embedder-cuda")]
 use super::types::{CudaOptions, resolve_cuda_options};
@@ -117,6 +124,105 @@ fn init_ort_runtime() -> OrtThreadingOptions {
 
         opts
     })
+}
+
+/// Set once a CoreML EP init attempt is observed to hang past
+/// [`coreml_init_timeout`].
+///
+/// Why: issue #2111 — `TextEmbedding::try_new` with the CoreML EP registered
+/// can block the underlying OS thread indefinitely on some Apple Silicon
+/// hosts (0% CPU, no error, no progress — not merely a slow cold-compile).
+/// `ort`/CoreML exposes no cancellation hook, so a hung attempt's OS thread
+/// can never be reclaimed; it is abandoned (leaked) for the rest of the
+/// process. Without this cache, every later `FastEmbedder::new()` (e.g. the
+/// `OnceCell::get_or_try_init` retries in `memory_core::retrieval::embedder`
+/// firing on each ~5-minute dream cycle after an outer timeout) would spawn
+/// *another* doomed thread, leaking one more per retry forever. Once a hang
+/// is observed we remember it for the lifetime of the process and every
+/// subsequent attempt skips CoreML entirely, so at most one thread is ever
+/// leaked.
+/// What: `true` once a `Hung` outcome (see [`InitOutcome`]) has been
+/// observed; `false` otherwise. Never reset — there is no safe way to
+/// "un-observe" a permanently blocked OS thread within a process lifetime.
+/// Test: exercised indirectly by `decide_fallback` unit tests (the boolean
+/// this cache is set from); the cache mutation itself requires a real hang
+/// and is not unit-testable without a live CoreML runtime.
+static COREML_KNOWN_BAD: AtomicBool = AtomicBool::new(false);
+
+/// Default bound (seconds) for a single CoreML EP init attempt before it is
+/// treated as hung and the caller falls back to CPU.
+///
+/// Why: issue #2111 — the ops workaround `TRUSTY_DEVICE=cpu` proves the CPU
+/// EP reaches ready in ~11 s on an affected host, so 60 s leaves generous
+/// headroom above the CPU path while still bounding the worst case far below
+/// the outer `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (default 180 s, see
+/// `memory_core::timeouts`) — the auto-fallback completes and the embedder
+/// becomes ready before that wrapper would otherwise give up and report a
+/// hard failure. 60 s also comfortably exceeds a legitimately slow (but
+/// working) CoreML cold-compile, which should complete in well under a
+/// minute; hosts that need more can raise
+/// [`TRUSTY_COREML_INIT_TIMEOUT_SECS`](coreml_init_timeout).
+pub(super) const DEFAULT_COREML_INIT_TIMEOUT_SECS: u64 = 60;
+
+/// Resolve the bounded CoreML init timeout from the environment.
+///
+/// Why: operators on a host with a legitimately slow (but eventually
+/// successful) CoreML cold-compile need to be able to raise the bound rather
+/// than have every embedder init permanently fall back to CPU.
+/// What: reads `TRUSTY_COREML_INIT_TIMEOUT_SECS` (positive integer seconds);
+/// falls back to [`DEFAULT_COREML_INIT_TIMEOUT_SECS`] (60) when unset,
+/// non-numeric, or non-positive.
+/// Test: `coreml_init_timeout_default`, `coreml_init_timeout_reads_env` in
+/// `mod.rs`.
+pub(super) fn coreml_init_timeout() -> Duration {
+    let secs = std::env::var("TRUSTY_COREML_INIT_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_COREML_INIT_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+/// Outcome of a single execution-provider init attempt, used to decide
+/// whether to fall back to CPU and whether to poison [`COREML_KNOWN_BAD`].
+///
+/// Why: separates the *decision* (fall back? poison the cache?) from the
+/// mechanics of spawning a guard thread and racing it against a timeout, so
+/// the decision is a pure function testable without any real ORT/CoreML
+/// runtime (issue #2111).
+/// What: the three ways a bounded init attempt can resolve.
+/// Test: `decide_fallback` tests in `mod.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum InitOutcome {
+    /// The provider initialised successfully within the bound.
+    Success,
+    /// The provider returned an `Err` quickly (pre-existing #763 behaviour).
+    FastError,
+    /// The provider did not return within [`coreml_init_timeout`] — the
+    /// underlying OS thread is presumed permanently blocked.
+    Hung,
+}
+
+/// Decide whether an [`InitOutcome`] should fall back to CPU, and whether
+/// [`COREML_KNOWN_BAD`] should be set as a result.
+///
+/// Why: a fast `Err` (e.g. a transient CoreML registration failure) does not
+/// prove the provider will misbehave on the next attempt, so the pre-existing
+/// #763 behaviour retries CoreML on the next full `FastEmbedder::new()`. A
+/// `Hung` outcome, by contrast, means an OS thread is permanently stuck
+/// inside ORT/CoreML with no cancellation point — retrying would leak one
+/// more blocked thread per attempt, so it must be remembered for the rest of
+/// the process (issue #2111).
+/// What: returns `(fall_back_to_cpu, mark_known_bad)`.
+/// Test: `fallback_decision_success_keeps_provider`,
+/// `fallback_decision_fast_error_falls_back_without_poisoning`,
+/// `fallback_decision_hang_falls_back_and_poisons` in `mod.rs`.
+pub(super) fn decide_fallback(outcome: InitOutcome) -> (bool, bool) {
+    match outcome {
+        InitOutcome::Success => (false, false),
+        InitOutcome::FastError => (true, false),
+        InitOutcome::Hung => (true, true),
+    }
 }
 
 /// Local CPU embedder backed by fastembed-rs (ONNX runtime, all-MiniLM-L6-v2).
@@ -305,6 +411,92 @@ impl FastEmbedder {
         }
     }
 
+    /// Attempt to construct a `TextEmbedding` for `opts`/`provider`, bounding
+    /// CoreML init by [`coreml_init_timeout`] so a hung ORT/CoreML init
+    /// cannot block the caller forever.
+    ///
+    /// Why: `TextEmbedding::try_new` offers no cancellation hook. On some
+    /// Apple Silicon hosts it blocks the calling OS thread indefinitely with
+    /// the CoreML EP registered but never returning (issue #2111). Running
+    /// the attempt on a dedicated `std::thread` and racing it against
+    /// `mpsc::Receiver::recv_timeout` lets the *caller* give up on schedule
+    /// even though the spawned thread itself cannot be cancelled. When the
+    /// bound elapses the spawned thread is abandoned — but this happens at
+    /// most once per process: [`COREML_KNOWN_BAD`] is set on the first
+    /// observed hang, and every later call short-circuits straight to
+    /// `TextEmbedding::try_new` on the current thread without spawning
+    /// another doomed CoreML attempt.
+    /// What: for `provider` other than `CoreML`/`CoreMLAne` (CPU, CUDA), or
+    /// once [`COREML_KNOWN_BAD`] is set, calls `TextEmbedding::try_new`
+    /// directly on the current thread — those paths have never been observed
+    /// to hang, so no bounding is needed. Otherwise spawns a guard thread,
+    /// waits up to `coreml_init_timeout()`, and on timeout marks
+    /// `COREML_KNOWN_BAD` and returns a descriptive `Err` (the caller's
+    /// existing #763 fallback-to-CPU branch then takes over, unchanged).
+    /// Test: the spawn/race mechanics require a real ORT session and are
+    /// exercised only via the `#[ignore]` embedder tests; the *decision*
+    /// logic they depend on (`decide_fallback`) is covered by unit tests in
+    /// `mod.rs` that need no live model.
+    fn try_new_bounded(
+        opts: TextInitOptions,
+        provider: ExecutionProvider,
+    ) -> Result<TextEmbedding> {
+        let accelerated = matches!(
+            provider,
+            ExecutionProvider::CoreML | ExecutionProvider::CoreMLAne
+        );
+        if !accelerated || COREML_KNOWN_BAD.load(Ordering::Relaxed) {
+            return TextEmbedding::try_new(opts);
+        }
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("trusty-embedder-coreml-init".to_string())
+            .spawn(move || {
+                // The receiver may already have given up (timed out) by the
+                // time this send happens — that is expected in the hang
+                // case and the send error is intentionally discarded; there
+                // is nothing left for this (possibly permanently blocked)
+                // thread to do either way.
+                let _ = tx.send(TextEmbedding::try_new(opts));
+            })
+            .context("failed to spawn CoreML init guard thread")?;
+
+        match rx.recv_timeout(coreml_init_timeout()) {
+            Ok(Ok(model)) => {
+                let (fall_back, mark_bad) = decide_fallback(InitOutcome::Success);
+                debug_assert!(
+                    !fall_back && !mark_bad,
+                    "a successful init must never fall back or poison COREML_KNOWN_BAD"
+                );
+                Ok(model)
+            }
+            Ok(Err(e)) => {
+                let (_, mark_bad) = decide_fallback(InitOutcome::FastError);
+                debug_assert!(!mark_bad, "a fast error must never poison COREML_KNOWN_BAD");
+                Err(e)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let (_, mark_bad) = decide_fallback(InitOutcome::Hung);
+                if mark_bad {
+                    COREML_KNOWN_BAD.store(true, Ordering::Relaxed);
+                }
+                Err(anyhow::anyhow!(
+                    "{provider} EP init did not complete within {:?} (issue #2111) \
+                     — presumed hung; the stuck OS thread is abandoned and \
+                     {provider} will be skipped for the rest of this process \
+                     (falling back to CPU). Set TRUSTY_COREML_INIT_TIMEOUT_SECS \
+                     to raise the bound if this host's CoreML cold-compile \
+                     legitimately needs more time.",
+                    coreml_init_timeout()
+                ))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow::anyhow!(
+                "{provider} EP init guard thread panicked or disconnected unexpectedly"
+            )),
+        }
+    }
+
     /// Construct with an explicit LRU capacity.
     pub async fn with_cache_size(capacity: usize) -> Result<Self> {
         let capacity =
@@ -324,7 +516,7 @@ impl FastEmbedder {
                     .unwrap_or(false);
 
                 let (q_opts, q_provider) = Self::init_options(EmbeddingModel::AllMiniLML6V2Q);
-                let (m, provider) = match TextEmbedding::try_new(q_opts) {
+                let (m, provider) = match Self::try_new_bounded(q_opts, q_provider) {
                     Ok(m) => (m, q_provider),
                     Err(q_err) => {
                         if q_provider != ExecutionProvider::Cpu && !require_gpu {
@@ -332,11 +524,14 @@ impl FastEmbedder {
                                 predicted_provider = %q_provider,
                                 actual_provider = "CPU",
                                 error = %q_err,
-                                "SILENT FALLBACK DETECTED (#763): {p} EP failed to \
-                                 initialise — falling back to CPU. The /health endpoint \
+                                "AUTO CPU FALLBACK (#2111 / #763): {p} EP failed to \
+                                 initialise (or hung past its bounded timeout) — \
+                                 falling back to CPU automatically. The /health endpoint \
                                  will report provider={p} but inference will run on CPU. \
                                  Set TRUSTY_DEVICE=gpu to surface this as a hard failure \
-                                 instead of a silent performance regression.",
+                                 instead of a silent performance regression, or \
+                                 TRUSTY_COREML_INIT_TIMEOUT_SECS to raise the CoreML \
+                                 hang-detection bound.",
                                 p = q_provider
                             );
                             // SAFETY: see TRUSTY_DEVICE comment in

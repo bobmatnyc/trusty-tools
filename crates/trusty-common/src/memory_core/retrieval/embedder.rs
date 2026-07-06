@@ -37,7 +37,23 @@ pub(super) static SHARED_EMBEDDER: OnceCell<Arc<dyn Embedder + Send + Sync>> =
 /// or a CUDA warm-up — without a timeout the first `memory_remember` or
 /// `memory_recall` call blocks indefinitely. Wrapping in
 /// `tokio::time::timeout` turns the hang into an explicit error that the
-/// caller (and the daemon) can surface to the user.
+/// caller (and the daemon) can surface to the user. Issue #2111: on some
+/// Apple Silicon hosts the CoreML EP init inside `FastEmbedder::new()` does
+/// not just run long — it hangs indefinitely with the OS thread blocked and
+/// no cancellation point, so this `tokio::time::timeout` only abandons the
+/// *future*; a naive retry from `get_or_try_init` on every subsequent caller
+/// (e.g. each ~5-minute dream cycle) would otherwise leak one more
+/// permanently blocked blocking-pool thread per retry. The fix lives one
+/// layer down, in `FastEmbedder::try_new_bounded`
+/// (`crate::embedder::fast_embedder`): it bounds the CoreML attempt itself
+/// (default 60 s, well inside this function's 180 s default) and
+/// auto-falls-back to CPU, remembering the hang process-wide via
+/// `COREML_KNOWN_BAD` so CoreML is never attempted again this process. That
+/// means `FastEmbedder::new()` now succeeds (on CPU) well within this
+/// timeout in the common case — `get_or_try_init` here does not need to
+/// retry at all — and even in the pathological case of a misconfigured
+/// (too-short) outer timeout, at most one extra thread can leak before the
+/// inner bound fires and poisons the cache, not an unbounded number.
 /// What: Returns a clone of the shared `Arc<dyn Embedder + Send + Sync>`,
 /// initialising it on first call via `FastEmbedder::new()`. The init is
 /// bounded by `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` (default 180 s). In test
@@ -45,7 +61,9 @@ pub(super) static SHARED_EMBEDDER: OnceCell<Arc<dyn Embedder + Send + Sync>> =
 /// the cell is pre-populated with `MockEmbedder` and no model download is
 /// attempted.
 /// Test: `shared_embedder_is_singleton`; timeout path covered by
-///       `timeout_wrapper_fires_on_embedder_init` in retrieval::tests.
+///       `timeout_wrapper_fires_on_embedder_init` in retrieval::tests; the
+///       CoreML hang auto-recovery decision logic is covered by the
+///       `decide_fallback` unit tests in `embedder::fast_embedder`.
 pub async fn shared_embedder() -> Result<Arc<dyn Embedder + Send + Sync>> {
     let timeout = timeouts::embedder_init_timeout();
     SHARED_EMBEDDER
