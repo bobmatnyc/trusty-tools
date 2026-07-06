@@ -170,6 +170,17 @@ pub const MPM_SKILLS_MANAGER_AGENT: &str = include_str!("../assets/agents/mpm-sk
 /// embeddable here, exactly like every other bundled artifact.
 pub const WHAT_IS_TRUSTY_MPM: &str = include_str!("../../docs/WHAT-IS-TRUSTY-MPM.md");
 
+/// Architecture overview doc installed to `docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md`
+/// (issue #2034 — bundled PM-facing reference for shipped design patterns).
+///
+/// Why: three foundational behaviours (memory over MCP, session↔worktree 1:1
+/// model, per-worktree search-index) are now shipped on main but not
+/// documented for PM audiences. This doc summarizes each pattern, its
+/// trade-offs, and its integration with the others, then cross-references
+/// the deeper specs and source code so operators and framework users can
+/// understand the design from first principles.
+pub const ARCHITECTURE_MEMORY_SESSIONS_SEARCH: &str = include_str!("../../docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md");
+
 // --- tm-skills-portfolio epic: the /tm- skill catalog — bundle_tm_skills.rs ---
 // Supersedes the Phase 1 (#770) mpm-* guidance skills (formerly
 // bundle_skills.rs), which were a mechanical port of claude-mpm's Python

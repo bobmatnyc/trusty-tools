@@ -118,6 +118,13 @@ Run this as part of session wrap-up when `tm doctor` reports orphaned
 worktrees, and always before ending a long working session that spawned
 managed sessions.
 
+**Worktree Architecture:** For the design of the session↔worktree 1:1 model,
+semantic naming, and per-worktree search-index lifecycle, see
+`docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md` § 2 (session↔worktree model)
+and § 3 (search index pinning). Managed sessions isolate work via git worktrees
+with semantic names (e.g., `tm-trusty-tools-01`); decommission removes the
+worktree, its branch, and its associated search index atomically.
+
 ## Task-List Integration
 
 Pause/resume snapshots capture the PM's own `TodoWrite` state, but for
