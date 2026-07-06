@@ -75,11 +75,7 @@ subprocess IPC.
 - The daemon / TUI / Telegram transports (trusty-mpm)
 - Search, memory, or analysis infrastructure (trusty-search / trusty-memory / trusty-analyze / trusty-common)
 
-**Current state:** Phase 0 scaffold (`crates/trusty-code/src/main.rs` lines 1-107,
-`src/lib.rs` lines 1-62). The `tcode` binary parses its CLI surface (`serve`,
-`run-task`, `run-workflow`) but every subcommand stubs out with "not yet
-implemented (#587 Phase N)". Full extraction from `open-mpm` is tracked in
-epic #587.
+**Current state & Status (updated 2026-07-06):** trusty-code is **being RE-VISIONED** from a narrow benchmark harness into a production-grade, token-efficient coding orchestrator. The crate contains Phase 1–3 modules (events, IPC, tools, agents, LLM layer) extracted from open-mpm; the daemon (`serve`) entry point is stubbed but the `run-task` CLI works end-to-end. Full vision and Phase 1–4 roadmap live in [`docs/trusty-code/vision-and-architecture-spec.md`](../../trusty-code/vision-and-architecture-spec.md). Epic [#587](https://github.com/bobmatnyc/trusty-tools/issues/587) tracks the extraction phases.
 
 ---
 
