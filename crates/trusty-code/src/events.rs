@@ -66,6 +66,37 @@ pub enum Event {
     SessionCancelled {
         session_id: String,
     },
+    /// A session's lifecycle status changed (#2054 session-attach protocol).
+    ///
+    /// Why: `SessionStarted`/`SessionDone`/`SessionCancelled` cover the two
+    /// endpoints of a session's life, but the daemon-owned `Session` model
+    /// (vision spec Axiom 4) also transitions through intermediate states
+    /// (e.g. `created` -> `running`) that a freshly-`session.attach`ed
+    /// client should see. This variant is the generic "status is now X"
+    /// signal `crate::session::registry::SessionRegistry` emits on every
+    /// transition, including the two endpoints (so a client that attaches
+    /// mid-stream sees a uniform status trail rather than mixing this
+    /// variant with the older ones).
+    /// What: `status` is a lowercase string matching
+    /// `session::model::SessionStatus`'s serde representation (`"created"`,
+    /// `"running"`, `"cancelled"`, `"finished"`, `"failed"`).
+    /// Test: `session::registry::tests::create_publishes_started_and_status_events`.
+    SessionStatusChanged {
+        session_id: String,
+        status: String,
+    },
+    /// Input was received for a session via `session.send` (#2054).
+    ///
+    /// Why: distinct from `AgentMessage` (sub-agent -> PM activity) —
+    /// this is the client -> daemon direction. Emitting it is what makes
+    /// `session.send` observably reach a freshly-`session.attach`ed client
+    /// in M1, ahead of any real agent-loop wiring (`task.*`, #2056).
+    /// What: `input` is the raw string the caller passed to `session.send`.
+    /// Test: `session::registry::tests::send_publishes_input_event`.
+    SessionInput {
+        session_id: String,
+        input: String,
+    },
 
     // -- PM activity --
     PmThinking {
@@ -246,6 +277,8 @@ impl Event {
             Event::SessionStarted { session_id, .. }
             | Event::SessionDone { session_id, .. }
             | Event::SessionCancelled { session_id }
+            | Event::SessionStatusChanged { session_id, .. }
+            | Event::SessionInput { session_id, .. }
             | Event::PmThinking { session_id, .. }
             | Event::PmDelegating { session_id, .. }
             | Event::AgentSpawned { session_id, .. }

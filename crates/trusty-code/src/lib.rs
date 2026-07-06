@@ -288,6 +288,19 @@ pub mod jsonrpc;
 /// `serve::transport::tests::*`, `serve::http::tests::*`.
 pub mod serve;
 
+/// Daemon-owned session model + attach/detach protocol (#2054, Axiom 4).
+///
+/// Why: "The Daemon OWNS Sessions; CLI Attaches Over the API" — sessions
+/// are first-class objects living inside `tcode serve`, reachable via
+/// `session.*` JSON-RPC methods over both transports.
+/// What: `Session`, `SessionStatus`, `SessionRegistry`, and
+/// `session::protocol::register` (wires the seven `session.*` methods onto
+/// a `Router`).
+/// Test: `session::model::tests::*`, `session::registry::registry_tests::*`,
+/// `session::protocol::tests::*`; API-driven end-to-end coverage in
+/// `tests/session_e2e.rs`.
+pub mod session;
+
 // ── Package-level re-exports ──
 
 /// Version string, re-exported so integration tests can assert it without
