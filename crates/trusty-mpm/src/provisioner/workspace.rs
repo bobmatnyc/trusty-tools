@@ -864,8 +864,11 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
         // it is entirely fail-open: any daemon-unreachable/parse error is
         // logged and swallowed, never propagated here.
         if self.prepare {
-            let memory_url = std::env::var("TRUSTY_MEMORY_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:7990".to_string());
+            // Discovery-first (issue #2030): resolves TRUSTY_MEMORY_URL when
+            // set, else the daemon's actual discovered bound address, never
+            // a hardcoded port.
+            let memory_url =
+                trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable();
             let override_value = trusty_common::palace_override_from_env();
             match trusty_common::derive_palace_id(
                 &workspace_path,

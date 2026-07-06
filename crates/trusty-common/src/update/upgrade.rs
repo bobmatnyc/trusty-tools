@@ -47,28 +47,82 @@ pub async fn perform_upgrade(crate_name: &str) -> anyhow::Result<()> {
     }
 }
 
+/// Resolve the ordered list of directories a binary might have been
+/// installed into, given an optional home directory and `CARGO_HOME` value.
+///
+/// Why: `cargo install` and the prebuilt-download installer path
+/// (`trusty-installer::download::default_install_dir`, `~/.local/bin`) place
+/// binaries in different directories, and the cargo path honours a
+/// `$CARGO_HOME` override (issue #1771). Extracting the rule into a pure
+/// function over explicit `home` / `cargo_home` inputs — rather than reading
+/// `dirs::home_dir()` / `std::env::var` directly — keeps it testable without
+/// mutating global process state for the common case.
+///
+/// What: Returns, in priority order: `<cargo_home>/bin` when `cargo_home` is
+/// `Some` and non-empty, else `<home>/.cargo/bin`; then `<home>/.local/bin`
+/// (the prebuilt installer's default). Entries that require `home` are
+/// omitted when `home` is `None`.
+///
+/// Test: `candidate_bin_dirs_prefers_cargo_home_override`,
+/// `candidate_bin_dirs_falls_back_to_dot_cargo`,
+/// `candidate_bin_dirs_includes_local_bin`,
+/// `candidate_bin_dirs_empty_without_home_or_cargo_home`.
+pub(crate) fn candidate_bin_dirs(
+    home: Option<&std::path::Path>,
+    cargo_home: Option<&str>,
+) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+
+    match cargo_home {
+        Some(h) if !h.is_empty() => dirs.push(std::path::PathBuf::from(h).join("bin")),
+        _ => {
+            if let Some(home) = home {
+                dirs.push(home.join(".cargo").join("bin"));
+            }
+        }
+    }
+
+    if let Some(home) = home {
+        dirs.push(home.join(".local").join("bin"));
+    }
+
+    dirs
+}
+
 /// Probe the freshly-installed binary with `--version` as a health gate.
 ///
 /// Why: Before the daemon self-exits to trigger launchd's KeepAlive respawn,
 /// we must confirm the new binary is not corrupt or incompatible. If the
 /// health gate fails we keep the old binary running and report the failure
-/// clearly — we never exit into a broken binary.
+/// clearly — we never exit into a broken binary. The binary may have landed
+/// in `~/.cargo/bin` (cargo-install path), `~/.local/bin` (the prebuilt
+/// installer's default — see `trusty-installer::download::default_install_dir`),
+/// or a custom `$CARGO_HOME/bin`; checking only `~/.cargo/bin` produced false
+/// "not installed" reports for prebuilt installs (issue #1771/#1992).
 ///
-/// What: Locates the binary by checking `~/.cargo/bin/<binary_name>` first,
-/// then falling back to PATH via `which`. Spawns `<bin> --version` with a
-/// 10-second timeout; returns `Ok(())` if the process exits 0.
-/// Returns `Err` on failure, timeout, or missing binary.
+/// What: Checks, in order, `$CARGO_HOME/bin/<binary_name>` (or
+/// `~/.cargo/bin/<binary_name>` when `CARGO_HOME` is unset), then
+/// `~/.local/bin/<binary_name>`, then falls back to PATH via `which`. Spawns
+/// `<bin> --version` with a 10-second timeout; returns `Ok(())` if the
+/// process exits 0. Returns `Err` on failure, timeout, or missing binary.
 ///
 /// Test: `verify_installed_binary_passes_for_cargo` (ignore-tagged integration);
-/// `verify_installed_binary_fails_for_missing_binary` tests the failure path.
+/// `verify_installed_binary_fails_for_missing_binary`,
+/// `verify_installed_binary_finds_binary_in_cargo_bin`,
+/// `verify_installed_binary_finds_binary_in_local_bin`,
+/// `verify_installed_binary_finds_binary_via_path`,
+/// `verify_installed_binary_honours_cargo_home_override`.
 pub async fn verify_installed_binary(binary_name: &str) -> anyhow::Result<()> {
-    // Prefer the explicit ~/.cargo/bin/<name> path — that is where
-    // `cargo install` drops the binary, and it may differ from PATH.
-    let cargo_bin = dirs::home_dir().map(|h| h.join(".cargo").join("bin").join(binary_name));
+    let home = dirs::home_dir();
+    let cargo_home = std::env::var("CARGO_HOME").ok();
+    let found = candidate_bin_dirs(home.as_deref(), cargo_home.as_deref())
+        .into_iter()
+        .map(|dir| dir.join(binary_name))
+        .find(|p| p.exists());
 
-    let bin_path = match cargo_bin {
-        Some(p) if p.exists() => p.to_string_lossy().into_owned(),
-        _ => {
+    let bin_path = match found {
+        Some(p) => p.to_string_lossy().into_owned(),
+        None => {
             let which_out = tokio::process::Command::new("which")
                 .arg(binary_name)
                 .output()
@@ -76,7 +130,7 @@ pub async fn verify_installed_binary(binary_name: &str) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("failed to run `which {binary_name}`: {e}"))?;
             if !which_out.status.success() {
                 return Err(anyhow::anyhow!(
-                    "binary `{binary_name}` not found in ~/.cargo/bin or PATH"
+                    "binary `{binary_name}` not found in ~/.cargo/bin, ~/.local/bin, or PATH"
                 ));
             }
             String::from_utf8_lossy(&which_out.stdout).trim().to_owned()

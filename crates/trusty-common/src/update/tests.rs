@@ -265,6 +265,222 @@ async fn verify_installed_binary_fails_for_missing_binary() {
     );
 }
 
+// ── candidate_bin_dirs (pure path-resolution logic, issue #1771) ──────────
+
+#[test]
+fn candidate_bin_dirs_falls_back_to_dot_cargo() {
+    let home = std::path::Path::new("/home/tester");
+    let dirs = super::upgrade::candidate_bin_dirs(Some(home), None);
+    assert_eq!(dirs[0], home.join(".cargo").join("bin"));
+}
+
+#[test]
+fn candidate_bin_dirs_prefers_cargo_home_override() {
+    let home = std::path::Path::new("/home/tester");
+    let dirs = super::upgrade::candidate_bin_dirs(Some(home), Some("/opt/custom-cargo"));
+    assert_eq!(
+        dirs[0],
+        std::path::PathBuf::from("/opt/custom-cargo").join("bin"),
+        "CARGO_HOME override must take priority over ~/.cargo/bin"
+    );
+}
+
+#[test]
+fn candidate_bin_dirs_ignores_empty_cargo_home() {
+    let home = std::path::Path::new("/home/tester");
+    let dirs = super::upgrade::candidate_bin_dirs(Some(home), Some(""));
+    assert_eq!(
+        dirs[0],
+        home.join(".cargo").join("bin"),
+        "empty CARGO_HOME must fall back to ~/.cargo/bin, not be treated as a path"
+    );
+}
+
+#[test]
+fn candidate_bin_dirs_includes_local_bin() {
+    let home = std::path::Path::new("/home/tester");
+    let dirs = super::upgrade::candidate_bin_dirs(Some(home), None);
+    assert!(
+        dirs.contains(&home.join(".local").join("bin")),
+        "~/.local/bin (the prebuilt installer's default) must be a candidate: {dirs:?}"
+    );
+    // ~/.local/bin must be checked after ~/.cargo/bin, not before.
+    let local_idx = dirs
+        .iter()
+        .position(|d| d == &home.join(".local").join("bin"))
+        .expect("local bin present");
+    let cargo_idx = dirs
+        .iter()
+        .position(|d| d == &home.join(".cargo").join("bin"))
+        .expect("cargo bin present");
+    assert!(cargo_idx < local_idx, "cargo bin must be checked first");
+}
+
+#[test]
+fn candidate_bin_dirs_empty_without_home_or_cargo_home() {
+    let dirs = super::upgrade::candidate_bin_dirs(None, None);
+    assert!(
+        dirs.is_empty(),
+        "no home and no CARGO_HOME override must yield zero candidates"
+    );
+}
+
+// ── verify_installed_binary directory resolution (issue #1771) ────────────
+//
+// These write a tiny executable shell script that exits 0 on `--version` and
+// point HOME at a tempdir so the real filesystem/env are never touched.
+
+/// Write a minimal executable shell script at `path` that responds
+/// successfully to `--version`, standing in for a real installed binary.
+#[cfg(unix)]
+fn write_fake_binary(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, b"#!/bin/sh\necho fake 1.0.0\nexit 0\n").expect("write fake binary");
+    let mut perms = std::fs::metadata(path)
+        .expect("stat fake binary")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms).expect("chmod fake binary");
+}
+
+/// Snapshot of the env vars mutated by the `verify_installed_binary_*`
+/// directory-resolution tests, captured so they can be restored verbatim.
+#[cfg(unix)]
+struct EnvSnapshot {
+    home: Option<String>,
+    cargo_home: Option<String>,
+    path: Option<String>,
+}
+
+/// Set `HOME` (and clear `CARGO_HOME` unless `cargo_home` is given) and
+/// return the prior values so the caller can restore them afterward.
+///
+/// Why: Split into non-async set/restore steps (rather than wrapping an
+/// awaited closure) so the `ENV_LOCK` guard is only ever held across the
+/// synchronous mutation, never across an `.await` point
+/// (`clippy::await_holding_lock`).
+#[cfg(unix)]
+fn set_home_env(home: &std::path::Path, cargo_home: Option<&str>) -> EnvSnapshot {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let snapshot = EnvSnapshot {
+        home: std::env::var("HOME").ok(),
+        cargo_home: std::env::var("CARGO_HOME").ok(),
+        path: std::env::var("PATH").ok(),
+    };
+    unsafe {
+        std::env::set_var("HOME", home);
+        match cargo_home {
+            Some(v) => std::env::set_var("CARGO_HOME", v),
+            None => std::env::remove_var("CARGO_HOME"),
+        }
+    }
+    snapshot
+}
+
+/// Restore env vars captured by [`set_home_env`]. Must be called after the
+/// awaited work under test has completed.
+#[cfg(unix)]
+fn restore_home_env(snapshot: EnvSnapshot) {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    unsafe {
+        match snapshot.home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        match snapshot.cargo_home {
+            Some(h) => std::env::set_var("CARGO_HOME", h),
+            None => std::env::remove_var("CARGO_HOME"),
+        }
+        match snapshot.path {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn verify_installed_binary_finds_binary_in_cargo_bin() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let cargo_bin = tmp.path().join(".cargo").join("bin");
+    std::fs::create_dir_all(&cargo_bin).expect("mkdir .cargo/bin");
+    write_fake_binary(&cargo_bin.join("fake_trusty_bin_cargo"));
+
+    let snapshot = set_home_env(tmp.path(), None);
+    let result = super::verify_installed_binary("fake_trusty_bin_cargo").await;
+    restore_home_env(snapshot);
+
+    assert!(result.is_ok(), "expected Ok, got {result:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn verify_installed_binary_finds_binary_in_local_bin() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Deliberately do NOT create ~/.cargo/bin — only ~/.local/bin has the
+    // binary, mirroring a prebuilt-installer-only install (issue #1771/#1992).
+    let local_bin = tmp.path().join(".local").join("bin");
+    std::fs::create_dir_all(&local_bin).expect("mkdir .local/bin");
+    write_fake_binary(&local_bin.join("fake_trusty_bin_local"));
+
+    let snapshot = set_home_env(tmp.path(), None);
+    let result = super::verify_installed_binary("fake_trusty_bin_local").await;
+    restore_home_env(snapshot);
+
+    assert!(
+        result.is_ok(),
+        "expected Ok when binary only exists in ~/.local/bin, got {result:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn verify_installed_binary_honours_cargo_home_override() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let custom_cargo_home = tmp.path().join("custom-cargo-home");
+    let custom_bin = custom_cargo_home.join("bin");
+    std::fs::create_dir_all(&custom_bin).expect("mkdir custom cargo bin");
+    write_fake_binary(&custom_bin.join("fake_trusty_bin_cargo_home"));
+
+    let home_dir = tmp.path().join("home");
+    std::fs::create_dir_all(&home_dir).expect("mkdir home");
+
+    let snapshot = set_home_env(
+        &home_dir,
+        Some(custom_cargo_home.to_str().expect("utf8 path")),
+    );
+    let result = super::verify_installed_binary("fake_trusty_bin_cargo_home").await;
+    restore_home_env(snapshot);
+
+    assert!(
+        result.is_ok(),
+        "expected Ok when binary is under $CARGO_HOME/bin, got {result:?}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn verify_installed_binary_finds_binary_via_path() {
+    // HOME points at an empty tempdir with neither ~/.cargo/bin nor
+    // ~/.local/bin containing the binary, forcing the PATH/`which` fallback.
+    let home_tmp = tempfile::tempdir().expect("home tempdir");
+    let path_tmp = tempfile::tempdir().expect("path tempdir");
+    write_fake_binary(&path_tmp.path().join("fake_trusty_bin_path"));
+
+    let snapshot = set_home_env(home_tmp.path(), None);
+    let prev_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{prev_path}", path_tmp.path().display());
+    unsafe { std::env::set_var("PATH", &new_path) };
+
+    let result = super::verify_installed_binary("fake_trusty_bin_path").await;
+    restore_home_env(snapshot);
+
+    assert!(
+        result.is_ok(),
+        "expected Ok via PATH fallback, got {result:?}"
+    );
+}
+
 /// Verify that `is_launchd_supervised` returns `false` in a normal test env.
 ///
 /// Why: Unit tests run in a developer terminal / CI, neither of which is a

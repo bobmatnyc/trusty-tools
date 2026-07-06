@@ -189,8 +189,10 @@ default = []
 # `run_catchup_blocking`, and the per-source submodules (`git`, `palace`,
 # `state`, `session_finder`, `mpm_session`, `mpm_registry`). Pulls in
 # `rusqlite` for the claude-mpm session-registry reader; all other deps are
-# already unconditional in this crate.
-catchup = ["dep:rusqlite"]
+# already unconditional in this crate. Also requires `mcp` (issue #2030):
+# `catchup::palace` reaches trusty-memory via `mcp::memory_rpc`'s discovery +
+# JSON-RPC helper rather than a hardcoded REST URL.
+catchup = ["dep:rusqlite", "mcp"]
 # Enables the `server` module: standard axum middleware stack (CORS, trace,
 # gzip) and a fast-fail reqwest client for daemon-to-daemon calls.
 axum-server = ["dep:axum", "dep:tower-http"]

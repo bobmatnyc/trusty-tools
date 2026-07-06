@@ -67,6 +67,58 @@ pub(super) const PALACE_KG_ALL_PATH: &str = "/api/v1/palaces/{slug}/kg/all";
 /// never block a Claude Code prompt for more than a couple seconds.
 pub(super) const HTTP_TIMEOUT: Duration = Duration::from_millis(2500);
 
+/// Deadline for reading the `UserPromptSubmit` stdin payload (issue #2043).
+///
+/// Why: `read_stdin_best_effort` used to be an untimed blocking read —
+/// proven under a slow FIFO writer to block the whole process for as long
+/// as the writer took (measured: a 4 s-delayed writer blocked the process
+/// 4.1 s). Under host contention (many concurrent hook subprocesses from
+/// sibling sub-agents) that read can eat the entire Claude Code hook
+/// budget before a single HTTP call is even attempted. 300 ms is generous
+/// for Claude Code's actual stdin write (a small JSON blob written and
+/// closed immediately) and short enough that a stalled/adversarial writer
+/// can never meaningfully delay the prompt.
+/// What: the timeout passed to [`bounded_blocking`] wrapping the
+/// `spawn_blocking` stdin read in [`read_stdin_bounded`].
+/// Test: `bounded_blocking_times_out_on_slow_closure` exercises the
+/// underlying deadline mechanism directly; manual FIFO-writer verification
+/// is documented in the #2043 PR description.
+const STDIN_READ_DEADLINE: Duration = Duration::from_millis(300);
+
+/// Deadline for the fetch + compose phase of [`build_injection_body`]
+/// (issue #2043).
+///
+/// Why: Claude Code's own hook ceiling is far lower than the `"timeout":
+/// 60` configured in `settings.json` implies (observed timeouts around
+/// 15 s) and prior to this budget the handler had no upper bound of its
+/// own beyond the sum of individual HTTP timeouts — the global fetch was
+/// awaited sequentially before the per-palace `tokio::join!`, so a
+/// degraded (not dead — dead fails fast) daemon could burn close to
+/// 2× [`HTTP_TIMEOUT`] before compose even started. This deadline is the
+/// hard backstop: if fetching + composing is not done in time, the hook
+/// fails open with whatever body it has (empty, if nothing finished).
+/// What: passed to [`tokio::time::timeout`] around `build_injection_body`
+/// in [`handle_prompt_context`].
+/// Test: `handle_prompt_context_fails_open_on_slow_daemon`.
+const BODY_DEADLINE: Duration = Duration::from_millis(1500);
+
+/// Deadline for the best-effort `HookFired` activity POST (issue #2043).
+///
+/// Why: `emit_hook_event` is pure telemetry — the activity feed being
+/// empty for one prompt is a cosmetic problem, while losing an already-
+/// composed injection body would be a real regression. It therefore gets
+/// its own short, separate deadline *after* the body has been printed
+/// rather than being folded into [`BODY_DEADLINE`], so a hung daemon on
+/// the telemetry POST can never cost us content that already rendered
+/// successfully. Combined with [`STDIN_READ_DEADLINE`] and
+/// [`BODY_DEADLINE`], the worst-case total wall time for the whole
+/// command is bounded at ~300 ms + 1.5 s + 300 ms = 2.1 s — well under
+/// Claude Code's real hook ceiling.
+/// What: passed to [`tokio::time::timeout`] around `emit_hook_event`.
+/// Test: covered indirectly — `emit_hook_event`'s own no-daemon path is
+/// exercised by `hook_fired_activity_emit_smoke`.
+const EMIT_DEADLINE: Duration = Duration::from_millis(300);
+
 /// Default top-K for drawer recall and KG triple selection.
 ///
 /// Why: 5 + 5 keeps the injection focused on the strongest signal without
@@ -169,25 +221,50 @@ pub(super) const EMPTY_PLACEHOLDER: &str = "No prompt facts stored yet.";
 /// the same prompt-context block as the PM because the marginal token cost
 /// is small and the convention/style signal is high — see the module-level
 /// note for the full rationale.
+///
+/// Deadline behaviour (issue #2043): every blocking or network-bound step
+/// is individually bounded — stdin read ([`STDIN_READ_DEADLINE`]), fetch +
+/// compose ([`BODY_DEADLINE`]), and activity emit ([`EMIT_DEADLINE`]) — so
+/// the command can never hang regardless of host contention or daemon
+/// health. A deadline miss always fails open (empty stdin, empty body, or
+/// a skipped activity event) rather than propagating an error, preserving
+/// the "never block the user's prompt" contract.
 /// Test: `prompt_context_returns_ok_without_daemon` covers the no-daemon
 /// branch; live-daemon paths are exercised by
 /// `prompt_context_recalls_palace_drawers` and
-/// `prompt_context_empty_palace_falls_back_to_global`.
+/// `prompt_context_empty_palace_falls_back_to_global`;
+/// `bounded_blocking_times_out_on_slow_closure` and
+/// `handle_prompt_context_fails_open_on_slow_daemon` cover the deadline
+/// fail-open paths added by #2043.
 pub async fn handle_prompt_context() -> Result<()> {
     let start = Instant::now();
-    let trigger_payload = read_stdin_best_effort();
-    let body = build_injection_body(&trigger_payload).await;
-    if body.ends_with('\n') {
-        print!("{body}");
-    } else {
-        println!("{body}");
+    let trigger_payload = read_stdin_bounded().await;
+
+    // Fetch + compose, hard-capped at BODY_DEADLINE. On timeout there is
+    // nothing safe to print yet, so fail open to an empty body — identical
+    // in effect to the existing "no daemon reachable" branch.
+    let body = tokio::time::timeout(BODY_DEADLINE, build_injection_body(&trigger_payload))
+        .await
+        .unwrap_or_default();
+
+    if !body.is_empty() {
+        if body.ends_with('\n') {
+            print!("{body}");
+        } else {
+            println!("{body}");
+        }
     }
 
     // Submission-logging Part A: emit a `HookFired` activity event so the
     // dashboard / TUI feed shows this prompt-context invocation. Best-effort
-    // — failures are swallowed inside `post_hook_event` so the hook never
-    // fails because of activity-emit problems.
-    emit_hook_event(&trigger_payload, &body, start).await;
+    // in two senses: failures are swallowed inside `post_hook_event`, and the
+    // whole call is separately deadline-bounded so a hung POST can never
+    // consume the budget we already spent producing `body` above.
+    let _ = tokio::time::timeout(
+        EMIT_DEADLINE,
+        emit_hook_event(&trigger_payload, &body, start),
+    )
+    .await;
 
     Ok(())
 }
@@ -214,6 +291,44 @@ async fn emit_hook_event(trigger_payload: &str, injection: &str, start: Instant)
         duration_ms: start.elapsed().as_millis() as u64,
     };
     post_hook_event(payload).await;
+}
+
+/// Run [`handle_prompt_context`] then terminate the process immediately.
+///
+/// Why (issue #2043): every blocking step in `handle_prompt_context` is
+/// bounded by [`bounded_blocking`] (`spawn_blocking` + `tokio::time::timeout`),
+/// but a timeout only stops the *caller* from awaiting the blocking thread
+/// — it cannot cancel the thread itself (blocking OS threads aren't
+/// preemptible). If the stdin data a slow/adversarial writer eventually
+/// sends never arrives, that thread stays parked in a blocking read
+/// syscall indefinitely. Returning normally from `main` would let
+/// `#[tokio::main]` drop its `Runtime`, and `Runtime::drop` waits for
+/// exactly that kind of outstanding blocking-pool thread before the
+/// process can exit — silently reintroducing the original hang this issue
+/// fixes, just moved from "awaiting the future" to "process teardown".
+/// `std::process::exit` terminates the whole process immediately without
+/// running that wait, so a stalled reader thread is simply abandoned (the
+/// OS reclaims it) instead of blocking the user's prompt.
+/// What: awaits `handle_prompt_context()` for its side effects (stdout
+/// print + best-effort logging/activity-emit), flushes stdout defensively
+/// (it already line-buffers, so this makes the ordering an explicit
+/// guarantee rather than an implicit one), then calls
+/// `std::process::exit(0)` — matching the documented "always exit 0"
+/// contract, since every internal path already degrades to `Ok(())`.
+/// Never actually returns, hence `-> !`.
+/// Test: not unit-tested directly — `process::exit` would terminate the
+/// test binary. The underlying deadline mechanism it depends on is
+/// covered by `bounded_blocking_times_out_on_slow_closure` and
+/// `handle_prompt_context_fails_open_on_slow_daemon`; the fail-open
+/// contract of the awaited call is covered by
+/// `prompt_context_returns_ok_without_daemon`. Manual verification (a
+/// slow-writer pipe returning promptly instead of blocking for the
+/// writer's full delay) is documented in the #2043 PR description.
+pub async fn run_prompt_context_and_exit() -> ! {
+    let _ = handle_prompt_context().await;
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    std::process::exit(0);
 }
 
 /// Build the prompt-context injection body for a given stdin payload.
@@ -270,13 +385,20 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
     let palace_slug = resolve_palace_slug(trigger_payload);
 
     // 4. Fan out the fetches. Each is best-effort; failures are skipped.
-    let global_facts = fetch_global_prompt_context(&client, &base).await;
-    let (drawers, kg_triples) = match &palace_slug {
+    //
+    // Issue #2043: all three HTTP calls now race concurrently via a single
+    // `tokio::join!` instead of awaiting the global fetch sequentially
+    // before starting the palace-scoped pair. The prior sequential shape
+    // could cost up to ~2× HTTP_TIMEOUT worst-case (global, then the
+    // slower of drawers/kg); joining all three caps the fetch phase at
+    // ~1× HTTP_TIMEOUT regardless of palace_slug.
+    let global_fut = fetch_global_prompt_context(&client, &base);
+    let (global_facts, drawers, kg_triples) = match &palace_slug {
         Some(slug) => {
             let top_k = configured_top_k();
             let drawers_fut = fetch_palace_recall(&client, &base, slug, &user_prompt, top_k);
             let kg_fut = fetch_palace_kg_triples(&client, &base, slug);
-            let (drawers, kg_all) = tokio::join!(drawers_fut, kg_fut);
+            let (global_facts, drawers, kg_all) = tokio::join!(global_fut, drawers_fut, kg_fut);
             // Issue #139: drop low-signal drawers (e.g. `claude-session` /
             // `user-prompt` auto-captures) before composition. When this
             // filter empties the recall set, `compose_injection` falls
@@ -284,9 +406,9 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
             let deny_tags = configured_deny_tags();
             let drawers = filter_drawers_by_deny_tags(drawers, &deny_tags);
             let kg_filtered = select_relevant_triples(&kg_all, &user_prompt, top_k);
-            (drawers, kg_filtered)
+            (global_facts, drawers, kg_filtered)
         }
-        None => (Vec::new(), Vec::new()),
+        None => (global_fut.await, Vec::new(), Vec::new()),
     };
 
     // 5. Compose the injection. If every section is empty, emit the legacy
@@ -313,17 +435,75 @@ pub(crate) async fn build_injection_body(trigger_payload: &str) -> String {
     body
 }
 
+/// Read the hook's stdin into a string, capped at 64 KiB, with a bounded
+/// deadline (issue #2043).
+///
+/// Why (issue #105, hardened by #2043): the UserPromptSubmit hook delivers
+/// the user prompt as stdin so we capture it for the enriched-prompt log.
+/// The underlying read is a synchronous, unbounded
+/// `Read::read_to_string` — proven to block the whole process for as long
+/// as the writer takes to finish (measured: a FIFO writer delayed 4 s
+/// blocked the process 4.1 s). Under host contention from concurrent
+/// sub-agent hook subprocesses, that unbounded read could consume the
+/// entire Claude Code hook budget before a single HTTP call is attempted.
+/// What: runs [`read_stdin_best_effort`] through [`bounded_blocking`],
+/// bounded by [`STDIN_READ_DEADLINE`]. On timeout (or a join error)
+/// degrades to an empty string immediately; the abandoned blocking thread
+/// is left to finish reading in the background and its result is simply
+/// dropped — it never blocks the caller.
+/// Test: `bounded_blocking_times_out_on_slow_closure` and
+/// `bounded_blocking_returns_value_when_fast_enough` cover the underlying
+/// deadline mechanism directly (a real `std::io::Stdin` can't be swapped
+/// in-process, so the mechanism is tested via a synthetic slow closure
+/// rather than a synthetic stdin).
+async fn read_stdin_bounded() -> String {
+    bounded_blocking(read_stdin_best_effort, STDIN_READ_DEADLINE)
+        .await
+        .unwrap_or_default()
+}
+
+/// Run a blocking closure on a dedicated thread, bounded by `deadline`
+/// (issue #2043).
+///
+/// Why: several hot-path steps in this handler are synchronous and
+/// potentially unbounded (currently just the stdin read); the pattern
+/// "spawn on a blocking thread, race it against a deadline, fail open on
+/// timeout" is the same each time and worth a single, independently
+/// testable helper rather than re-deriving it per call site.
+/// What: spawns `f` via `tokio::task::spawn_blocking`, races it against
+/// `deadline` with `tokio::time::timeout`. Returns `Some(value)` when `f`
+/// completes in time, `None` on timeout or a join error (e.g. `f`
+/// panicked). On timeout the spawned thread is *not* cancelled — blocking
+/// threads cannot be preempted — so it keeps running in the background and
+/// its eventual result is simply dropped; this never delays the caller.
+/// Test: `bounded_blocking_times_out_on_slow_closure`,
+/// `bounded_blocking_returns_value_when_fast_enough`.
+async fn bounded_blocking<F, T>(f: F, deadline: Duration) -> Option<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::time::timeout(deadline, tokio::task::spawn_blocking(f)).await {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
+
 /// Read the hook's stdin into a string, capped at 64 KiB.
 ///
 /// Why (issue #105): the UserPromptSubmit hook delivers the user prompt as
 /// stdin so we capture it for the enriched-prompt log. Stdin may be empty
 /// (e.g. when the daemon is probed manually). The cap defends against an
-/// adversarial prompt the size of a novel from inflating the log file.
+/// adversarial prompt the size of a novel from inflating the log file. This
+/// function is itself still a blocking, unbounded read — [`read_stdin_bounded`]
+/// is the deadline-aware entry point every caller should use; this is kept
+/// as a plain sync fn so it can run on a `spawn_blocking` thread.
 /// What: synchronously reads stdin to EOF (or 64 KiB), returns the trimmed
 /// payload. Failures degrade to an empty string — the hook continues either
 /// way.
-/// Test: not unit-tested (process stdin is hard to mock); covered by the
-/// integration test which writes the entry directly.
+/// Test: not unit-tested directly (process stdin is hard to mock);
+/// `read_stdin_bounded` and its wrapping deadline are covered by
+/// `prompt_context_stdin_read_bounded_by_deadline`.
 fn read_stdin_best_effort() -> String {
     use std::io::Read;
     const STDIN_CAP_BYTES: usize = 64 * 1024;

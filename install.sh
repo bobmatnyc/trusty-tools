@@ -47,6 +47,18 @@ TAG_PREFIX="${CRATE}-v"
 DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
 FDA_DOCS_URL="${REPO_URL}/blob/main/CLAUDE.md"
 
+# Linux arm64 (aarch64) release target triple.
+#
+# NOTE (#2038 / #2037 coordination): the release workflow only publishes
+# x86_64-unknown-linux-gnu for Linux today. Companion issue #2037 adds a
+# Linux arm64 build but has not yet landed, so the exact published triple
+# is not final. This constant is the ONLY place that needs to change once
+# #2037 lands: set it to whatever `.github/workflows/release.yml` actually
+# publishes for aarch64 Linux (e.g. "aarch64-unknown-linux-gnu" to mirror
+# the existing "-gnu" x86_64 target, or "aarch64-unknown-linux-musl" if
+# #2037 chooses musl for portability instead).
+LINUX_ARM64_TARGET="aarch64-unknown-linux-gnu"
+
 # ---------------------------------------------------------------------------
 # Output helpers — normal output to stdout, diagnostics to stderr.
 # ---------------------------------------------------------------------------
@@ -95,7 +107,8 @@ need_cmd() {
 #      fail with an actionable message rather than downloading a wrong asset.
 # What: Echo the supported Rust target triple for this host, or die.
 # Test: On macOS arm64 echoes aarch64-apple-darwin; on Linux x86_64 echoes
-#      x86_64-unknown-linux-gnu; macOS Intel / Linux arm64 die with guidance.
+#      x86_64-unknown-linux-gnu; on Linux aarch64 echoes ${LINUX_ARM64_TARGET};
+#      macOS Intel dies with guidance.
 detect_target() {
     _os="$(uname -s)"
     _arch="$(uname -m)"
@@ -125,7 +138,7 @@ detect_target() {
                     printf 'x86_64-unknown-linux-gnu'
                     ;;
                 aarch64 | arm64)
-                    die "Linux aarch64 is not yet supported. Build from source: cargo install ${CRATE}"
+                    printf '%s' "${LINUX_ARM64_TARGET}"
                     ;;
                 *)
                     die "unsupported Linux architecture '${_arch}'. Build from source: cargo install ${CRATE}"
@@ -378,20 +391,33 @@ download_and_install() {
 
 # Why: trusty-installer bootstraps the rest of the platform; running it completes setup.
 #      Use the freshly-installed binary by absolute path so we do not depend
-#      on the (possibly not-yet-updated) PATH.
+#      on the (possibly not-yet-updated) PATH. `trusty-installer install` itself
+#      installs each platform component and exits non-zero (2) if any member
+#      failed (see crates/trusty-installer/src/commands/install.rs) — that exit
+#      code must propagate instead of being swallowed (#1992 finding 4 / #2038).
 # What: Invoke `trusty-installer install` (or `trusty-installer install -y` in
-#      non-interactive mode), then print the macOS Full Disk Access note (macOS only).
+#      non-interactive mode), capture its exit status, then print the macOS Full
+#      Disk Access note (macOS only). Returns the captured bootstrap exit status
+#      as this function's own exit status (via `return`) so the caller can act
+#      on it.
 # Test: Confirm the binary at its absolute path is invoked; in non-interactive
-#      mode the -y flag is passed; on macOS the FDA box is printed.
+#      mode the -y flag is passed; on macOS the FDA box is printed; a non-zero
+#      exit from the bootstrap command is captured and returned rather than
+#      swallowed.
 post_install() {
     _bin_path="$1"
+    _bootstrap_status=0
 
     say ""
     say "Bootstrapping the platform with '${BIN} install'..."
     if [ "${ASSUME_YES}" = "1" ]; then
-        "${_bin_path}" install -y || warn "'${BIN} install -y' returned non-zero; review output above"
+        "${_bin_path}" install -y || _bootstrap_status=$?
     else
-        "${_bin_path}" install || warn "'${BIN} install' returned non-zero; review output above"
+        "${_bin_path}" install || _bootstrap_status=$?
+    fi
+
+    if [ "${_bootstrap_status}" -ne 0 ]; then
+        warn "'${BIN} install' exited ${_bootstrap_status}; one or more components may not be installed. Review output above."
     fi
 
     # macOS Full Disk Access note — daemons need FDA to read external volumes.
@@ -405,6 +431,8 @@ post_install() {
         say "See: ${FDA_DOCS_URL}"
         say "==================================================================="
     fi
+
+    return "${_bootstrap_status}"
 }
 
 # Why: Leave the user with concrete next steps regardless of platform/path.
@@ -420,6 +448,29 @@ print_next_steps() {
     say "  ${BIN} stack health    # full platform health check"
     say ""
     say "Restart Claude Code to load the new MCP servers."
+    say ""
+    say "Docs: ${REPO_URL}"
+    say "==================================================================="
+}
+
+# Why: A partial/failed bootstrap must not tell the user everything is fine
+#      (#1992 finding 4) — the summary and exit code must reflect reality.
+# What: Print an honest failure/partial-failure box referencing the captured
+#      bootstrap exit status and pointing at the retry command.
+# Test: Called with a non-zero status; confirm the box says "incomplete" (not
+#       "complete") and includes the retry command.
+print_failure_summary() {
+    _status="$1"
+    _bin_path="$2"
+    say ""
+    say "==================================================================="
+    say "Installation incomplete: '${BIN} install' exited with status ${_status}."
+    say "The ${BIN}/tctl binaries installed, but one or more platform"
+    say "components (daemons/MCP servers) failed to bootstrap — see the"
+    say "component table and errors printed above for which ones."
+    say ""
+    say "Retry the bootstrap once the underlying issue is resolved:"
+    say "  ${_bin_path} install"
     say ""
     say "Docs: ${REPO_URL}"
     say "==================================================================="
@@ -522,7 +573,14 @@ main() {
         _bin_path="${_existing}"
     fi
 
-    post_install "${_bin_path}"
+    _bootstrap_status=0
+    post_install "${_bin_path}" || _bootstrap_status=$?
+
+    if [ "${_bootstrap_status}" -ne 0 ]; then
+        print_failure_summary "${_bootstrap_status}" "${_bin_path}"
+        exit "${_bootstrap_status}"
+    fi
+
     print_next_steps
 }
 

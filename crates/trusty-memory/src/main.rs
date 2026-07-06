@@ -24,7 +24,7 @@ use trusty_memory::commands::inbox_check::handle_inbox_check;
 use trusty_memory::commands::link::handle_link;
 use trusty_memory::commands::migrate::{handle_migrate, MigrateTarget};
 use trusty_memory::commands::note::handle_note;
-use trusty_memory::commands::prompt_context::handle_prompt_context;
+use trusty_memory::commands::prompt_context::run_prompt_context_and_exit;
 use trusty_memory::commands::send_message::handle_send_message;
 use trusty_memory::commands::service::{handle_service, ServiceAction};
 use trusty_memory::commands::setup::handle_setup;
@@ -182,11 +182,16 @@ enum Command {
     /// stdout as additional context for the next prompt, so this command
     /// fetches the daemon's pre-formatted prompt-context block and prints it
     /// verbatim. Every failure path exits 0 silently so the hook can never
-    /// block a Claude Code prompt; the `CLAUDE_MPM_SUB_AGENT` env var also
-    /// short-circuits this command to keep nested MPM agents from piling on
-    /// duplicate prompt-context blocks.
+    /// block a Claude Code prompt, and every blocking/network step it runs
+    /// is deadline-bounded (issue #2043) so it can never hang either.
+    /// Note: unlike `trusty-mpm hook`, this command is **not** gated on
+    /// `CLAUDE_MPM_SUB_AGENT` — sub-agents benefit from the parent palace's
+    /// prompt-fact block just as much as the PM does. See the module-level
+    /// doc on `commands::prompt_context` for the full rationale; this
+    /// comment previously claimed a sub-agent short-circuit that was never
+    /// implemented here (issue #2043 cleanup).
     /// What: see `commands::prompt_context::handle_prompt_context`.
-    /// Test: covered by the unit test in that module plus the integration
+    /// Test: covered by the unit tests in that module plus the integration
     /// path `cargo run -p trusty-memory -- prompt-context` against a live
     /// daemon.
     #[command(name = "prompt-context")]
@@ -570,7 +575,7 @@ async fn main() -> Result<()> {
             limit,
         } => handle_migrate(target, dry_run, config_only, from, palace, limit),
         Command::Setup => handle_setup(),
-        Command::PromptContext => handle_prompt_context().await,
+        Command::PromptContext => run_prompt_context_and_exit().await,
         Command::Service { action } => handle_service(&action),
         Command::Doctor { fix_palaces, fix } => {
             if fix_palaces {
