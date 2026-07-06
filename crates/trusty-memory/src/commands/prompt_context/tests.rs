@@ -231,7 +231,10 @@ fn resolve_palace_for_log_falls_back_to_process_cwd() {
 /// What: redirects `trusty_common::resolve_data_dir` at a fresh tempdir
 /// via `TRUSTY_DATA_DIR_OVERRIDE` so `read_daemon_addr("trusty-memory")`
 /// observes a missing lockfile, then runs the handler and asserts it
-/// returns `Ok(())`.
+/// returns `Ok(())`. Calls `handle_prompt_context_with_payload` directly
+/// (issue #2079) with a fixed empty payload instead of
+/// `handle_prompt_context()` so the test never spawns a real blocking
+/// stdin read that could outlive the test's `Runtime` teardown.
 #[tokio::test]
 async fn prompt_context_returns_ok_without_daemon() {
     let _guard = crate::commands::env_test_lock().lock().await;
@@ -242,7 +245,7 @@ async fn prompt_context_returns_ok_without_daemon() {
     unsafe {
         std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path());
     }
-    let res = handle_prompt_context().await;
+    let res = handle_prompt_context_with_payload(String::new()).await;
     unsafe {
         std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
     }
@@ -754,7 +757,9 @@ async fn prompt_context_recall_all_filtered_falls_back_to_global() {
 /// What: pin a tempdir as the data directory, run the handler with no
 /// daemon, and assert exactly one log file landed under `<tmp>/logs/`
 /// with a single JSONL line whose `injection_kind` is the prompt-context
-/// kind.
+/// kind. Calls `handle_prompt_context_with_payload` directly (issue
+/// #2079) with a fixed empty payload so this test never spawns a real
+/// blocking stdin read.
 /// Test: itself.
 #[tokio::test]
 async fn prompt_context_logs_attempt_without_daemon() {
@@ -766,7 +771,7 @@ async fn prompt_context_logs_attempt_without_daemon() {
         std::env::remove_var(crate::prompt_log::ENV_DIR);
         std::env::remove_var(crate::prompt_log::ENV_HASH_PROMPTS);
     }
-    let res = handle_prompt_context().await;
+    let res = handle_prompt_context_with_payload(String::new()).await;
     let logs_dir = trusty_common::resolve_data_dir("trusty-memory")
         .expect("resolve data dir")
         .join("logs");
@@ -856,8 +861,10 @@ async fn bounded_blocking_returns_value_when_fast_enough() {
 /// returns `Ok(())` well inside its own deadline budget.
 /// What: writes the slow listener's address as the discovered daemon addr
 /// (via `write_daemon_addr`, matching what a real running daemon would
-/// have written), runs `handle_prompt_context`, and asserts both the
-/// `Ok(())` contract and a bounded wall-clock time.
+/// have written), runs `handle_prompt_context_with_payload` (issue #2079 —
+/// direct call with a fixed empty payload so this test never spawns a
+/// real blocking stdin read), and asserts both the `Ok(())` contract and
+/// a bounded wall-clock time.
 /// Test: itself.
 /// Note (issue #226): gated on `axum-server` — it needs a real `axum`
 /// listener to simulate the slow daemon.
@@ -889,7 +896,7 @@ async fn handle_prompt_context_fails_open_on_slow_daemon() {
         .expect("write fake daemon addr");
 
     let start = std::time::Instant::now();
-    let res = handle_prompt_context().await;
+    let res = handle_prompt_context_with_payload(String::new()).await;
     let elapsed = start.elapsed();
 
     server.abort();
