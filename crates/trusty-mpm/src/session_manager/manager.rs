@@ -8,6 +8,8 @@
 //! and provides `create`, `list`, `get`, `send_input`, `stop`,
 //! `mark_runtime_exited_stopped` (non-destructive counterpart to `stop`,
 //! #2023 A), `resume`, `decommission`, and `reconcile_on_boot`.
+//! `mark_reactivated` (the in-place counterpart to `resume`, #2023 C) lives in
+//! the sibling `reactivate.rs` to keep this file under the 500-SLOC cap.
 //! [`ReconcileReport`] describes what the reconciliation pass found.
 //! [`ManagedError`] is the module's error type.
 //! Test: `manager_create_record`, `manager_stop_keeps_workspace`,

@@ -391,6 +391,7 @@ fn make_session(
         source_id: None,
         task: None,
         cwd: None,
+        claude_session_id: None,
     }
 }
 

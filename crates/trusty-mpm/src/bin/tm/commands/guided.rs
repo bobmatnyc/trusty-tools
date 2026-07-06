@@ -70,6 +70,17 @@ pub(crate) enum PickerDecision {
 /// `guided_non_tty_gate_returns_false_skips_stdin`,
 /// `guided_fallback_never_pollutes_github_git_checkout` (#1724).
 pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
+    // #2023 component C: an in-pane relaunch takes priority over EVERYTHING
+    // below — project detection, the picker, the daemon-unreachable fallback.
+    // `TM_MANAGED_SESSION_ID` (exported by #2023 component B into the pane's
+    // shell) only resolves to a known managed session when bare `tm` is
+    // literally running inside that session's own pane after its runtime
+    // exited; any other case (unset, blank, stale/unknown to the daemon)
+    // falls through to the ordinary guided default below.
+    if let Some(result) = super::guided_inplace::try_inplace_relaunch(client, url).await {
+        return result;
+    }
+
     let cwd = std::env::current_dir().context("cannot resolve current directory")?;
     let workdir = cwd.to_string_lossy().to_string();
     eprintln!("tm: no subcommand — using guided default for {workdir}");

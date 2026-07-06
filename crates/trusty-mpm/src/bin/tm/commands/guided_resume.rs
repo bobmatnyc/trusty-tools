@@ -58,15 +58,23 @@ pub(crate) fn is_zombie(state: &str, tmux_live: bool) -> bool {
 /// pure function makes the control flow — including the new zombie
 /// auto-reconcile path (#2001) — unit-testable without a daemon, tmux, or HTTP.
 /// The I/O driver simply matches on the returned variant.
-/// What: three variants cover every case the picker can hand a resume:
+/// What: four variants cover every case bare `tm` can hand a resume:
+///   • [`ResumeAction::InPlace`] — bare `tm` is running INSIDE the pane of the
+///     managed session named by `TM_MANAGED_SESSION_ID`, whose runtime already
+///     exited (#2023 A/B); relaunch it in place via direct `exec`, never the
+///     daemon kill+recreate path (#2023 C). Takes priority over everything
+///     below — see [`try_inplace_relaunch`].
 ///   • [`ResumeAction::Attach`] — a live runtime; attach directly.
 ///   • [`ResumeAction::Restart`] — Stopped/Errored; POST `/resume` then attach.
 ///   • [`ResumeAction::ReconcileThenRestart`] — zombie (active/provisioning but
 ///     tmux gone); POST `/runtime-stop` to reset the record to Stopped, THEN
 ///     POST `/resume` then attach.
-/// Test: `guided_resume_plan_*` in `tests_behavior_c_tests.rs`.
+/// Test: `guided_resume_plan_*` in `tests_behavior_c_tests.rs`;
+/// `plan_inplace_*` in this module.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ResumeAction {
+    /// In-pane relaunch (#2023 C): see the variant doc above.
+    InPlace,
     /// Runtime is live — attach directly, no daemon round-trip.
     Attach,
     /// Stopped/Errored — restart via the daemon `/resume` endpoint, then attach.

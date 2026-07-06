@@ -120,6 +120,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         source_id: None,
         task: None,
         cwd: None,
+        claude_session_id: None,
     };
     let resp_owned = DecommissionResponse {
         summary: owned_summary,
@@ -149,6 +150,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         source_id: None,
         task: None,
         cwd: None,
+        claude_session_id: None,
     };
     let resp_unowned = DecommissionResponse {
         summary: unowned_summary,

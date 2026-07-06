@@ -15,6 +15,7 @@ pub mod driver;
 pub mod hook_sync;
 pub mod manager;
 pub mod prune;
+pub mod reactivate;
 pub mod record;
 pub mod restart_ops;
 pub mod session_guard;
@@ -27,6 +28,9 @@ mod tests;
 
 #[cfg(test)]
 mod restart_tests;
+
+#[cfg(test)]
+mod reactivate_tests;
 
 #[cfg(test)]
 mod backfill_tests;

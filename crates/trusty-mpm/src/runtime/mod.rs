@@ -5,8 +5,10 @@
 //! without changing its own code. A trait seam here means new adapters slot in
 //! without touching the manager.
 //! What: defines [`RuntimeAdapter`] trait, [`RuntimeError`] error type, the
-//! [`RuntimeKind`] selector + its [`build_adapter`] factory, and re-exports the
-//! two concrete adapters ([`ClaudeCodeAdapter`], [`TcodeAdapter`]).
+//! [`RuntimeKind`] selector + its [`build_adapter`] factory, re-exports the
+//! two concrete adapters ([`ClaudeCodeAdapter`], [`TcodeAdapter`]), and
+//! re-exports [`build_inplace_resume_command`]/[`InPlaceResumeCommand`] — the
+//! `tm` CLI's building block for the bare-`tm` in-pane relaunch path (#2023 C).
 //! Test: each adapter carries its own unit tests; both are testable without a
 //! real tmux binary via a fake tmux driver. `RuntimeKind` parsing/serde is
 //! covered by `runtime_kind_*` tests in this module.
@@ -17,7 +19,7 @@ mod tcode;
 #[cfg(test)]
 pub(crate) mod test_helpers;
 
-pub use claude_code::ClaudeCodeAdapter;
+pub use claude_code::{ClaudeCodeAdapter, InPlaceResumeCommand, build_inplace_resume_command};
 pub use tcode::TcodeAdapter;
 
 use std::path::Path;

@@ -24,7 +24,6 @@ use tracing::warn;
 
 use crate::daemon::state::DaemonState;
 use crate::runtime::RuntimeKind;
-use crate::session_manager::{ManagedSessionId, SessionRecord};
 
 pub mod activity;
 mod fleet;
@@ -34,6 +33,8 @@ pub mod inproject_hygiene;
 mod lifecycle;
 mod mcp_spawn_gate;
 pub mod prune;
+mod reactivate;
+mod summary;
 pub use activity::{ActivityResponse, get_session_activity};
 pub use fleet::{FleetByProjectResponse, FleetProjectGroup, fleet_by_project_route};
 pub use front_gate::{
@@ -46,6 +47,9 @@ pub use lifecycle::{
 pub use prune::{
     PruneRequest, decommission_ephemeral_route, prune_managed_route, prune_worktrees_route,
 };
+pub use reactivate::reactivate_managed_session;
+pub use summary::record_to_json;
+use summary::{attach_cmd_for, parse_id, record_to_summary};
 
 // ── Request / Response shapes ─────────────────────────────────────────────────
 
@@ -217,6 +221,16 @@ pub struct SessionSummary {
     /// Working directory for the session (additive; absent for legacy records).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Captured Claude Code conversation id, if any (additive; #2023 C).
+    ///
+    /// Why: the bare-`tm` in-pane relaunch path (#2023 component C) needs the
+    /// SAME `claude_session_id` the tmux-pane resume path uses for its
+    /// `--resume <id>` existence-check-and-fallback logic (#2013) — exposing it
+    /// on the wire lets the CLI build the identical command without a second,
+    /// divergent lookup. `None` for sessions where no `SessionStart` capture has
+    /// landed yet, or for legacy records predating the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_session_id: Option<String>,
 }
 
 /// Response body for POST /api/v1/sessions/managed/{id}/decommission.
@@ -343,93 +357,6 @@ pub struct AnswerResponse {
 pub struct AttachCmdResponse {
     /// tmux attach command string.
     pub attach_cmd: String,
-}
-
-/// Serialize a [`SessionRecord`] to the flat JSON shape the MCP tools return.
-///
-/// Why: the MCP tools return JSON values (not axum responses); reusing the same
-/// field set as [`SpawnResponse`]/[`SessionSummary`] keeps the MCP and HTTP
-/// payloads consistent for the driver skill. `source_id` is included so MCP
-/// callers can filter or reconnect by project identity, matching what the HTTP
-/// `GET /api/v1/sessions/managed` path already exposes (#1733).
-/// What: maps the record to a JSON object including the derived `attach_cmd`
-/// and `source_id` (null when the session has no project identity).
-/// Test: `serializers_include_source_id` unit test in this module; also covered
-/// by `crate::daemon::mcp_session` tests that assert echoed fields.
-pub fn record_to_json(r: &SessionRecord) -> serde_json::Value {
-    serde_json::json!({
-        "id": r.id.to_string(),
-        "name": r.tmux_name,
-        "state": r.state.to_string(),
-        "workspace_path": r.workspace_path.as_ref().map(|p| p.to_string_lossy().to_string()),
-        "cwd": r.cwd.to_string_lossy().to_string(),
-        "task": r.task,
-        "repo_url": r.repo_url,
-        "branch": r.branch,
-        "created_at": r.created_at.to_rfc3339(),
-        "last_activity_at": r.last_activity_at.map(|t| t.to_rfc3339()),
-        "attach_cmd": attach_cmd_for(&r.tmux_name),
-        "runtime": r.runtime.as_str(),
-        "pending_decision": r.pending_decision,
-        "proposed_default": r.proposed_default,
-        "source_id": r.source_id,
-    })
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/// Convert a [`SessionRecord`] into a wire [`SessionSummary`].
-///
-/// Why: the API exposes a flat, string-typed summary so clients don't depend on
-/// the internal record shape.
-/// What: maps every record field to its serialized form.
-/// Test: covered by the list/get handler tests.
-pub(super) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
-    SessionSummary {
-        id: r.id.to_string(),
-        name: r.tmux_name.clone(),
-        state: r.state.to_string(),
-        workspace_path: r
-            .workspace_path
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string()),
-        repo_url: r.repo_url.clone(),
-        branch: r.branch.clone(),
-        created_at: r.created_at.to_rfc3339(),
-        last_activity_at: r.last_activity_at.map(|t| t.to_rfc3339()),
-        pending_decision: r.pending_decision.clone(),
-        proposed_default: r.proposed_default.clone(),
-        source_id: r.source_id.clone(),
-        task: Some(r.task.clone()),
-        cwd: Some(r.cwd.to_string_lossy().to_string()),
-    }
-}
-
-/// Build the tmux attach command string for a session.
-///
-/// Why: clients need the exact attach command without hardcoding the convention.
-/// What: returns `tmux attach-session -t <name>`.
-/// Test: attach-cmd handler test.
-fn attach_cmd_for(tmux_name: &str) -> String {
-    format!("tmux attach-session -t {tmux_name}")
-}
-
-/// Parse a UUID path segment into a [`ManagedSessionId`].
-///
-/// Why: handlers receive the id as a string; an invalid UUID must produce a 400
-/// rather than a 404 or panic.
-/// What: parses the string into a UUID, mapping failure to a `400` tuple.
-/// Test: covered by handler tests that pass an invalid id.
-fn parse_id(id_str: &str) -> Result<ManagedSessionId, (StatusCode, String)> {
-    id_str
-        .parse::<uuid::Uuid>()
-        .map(ManagedSessionId::from)
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("invalid session id: {id_str}"),
-            )
-        })
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
