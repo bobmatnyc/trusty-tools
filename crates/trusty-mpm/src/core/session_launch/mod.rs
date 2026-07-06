@@ -484,6 +484,20 @@ fn prepare_session_inner(
         }
     };
 
+    // Issue #2125 item 2: ALSO deploy the bundled output styles under the
+    // PROJECT tier (`<project_dir>/.claude/output-styles/`). The daemon
+    // managed-spawn path launches `claude --setting-sources project,local`,
+    // which excludes the `user` tier the deploy above lands in — without a
+    // project-tier copy, the `outputStyle` id `write_output_style` writes into
+    // `<project_dir>/.claude/settings.json` cannot resolve under that flag, so
+    // Claude Code silently falls back to its own default (never applying the
+    // PM delegation persona). Non-fatal: a failure here only leaves that one
+    // carrier degraded — the home-tier deploy and the standalone `tm run`
+    // driver (which passes no `--setting-sources` flag) are unaffected.
+    if let Err(err) = deploy_output_style(project_dir) {
+        tracing::warn!("failed to deploy project-tier trusty-mpm output style: {err}");
+    }
+
     // DOC-28 cutover bridge — auto-inject catch-up as seed context (#1762).
     // Fail-open: if catch-up fails for any reason (daemon not running, no git
     // repo, runtime error), the session still launches; catchup_context is None.

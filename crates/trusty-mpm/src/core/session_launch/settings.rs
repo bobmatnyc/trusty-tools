@@ -137,23 +137,31 @@ pub(super) fn trusty_memory_mcp_value(palace_slug: Option<&str>) -> serde_json::
 pub(super) const GLOBAL_TRUSTY_MEMORY_EVENTS: &[&str] =
     &["UserPromptSubmit", "SessionStart", "PostToolUse", "Stop"];
 
-/// Deploy ALL bundled output styles under `<home>/.claude/output-styles/`.
+/// Deploy ALL bundled output styles under `<root>/.claude/output-styles/`.
 ///
 /// Why: [`write_output_style`] sets `"outputStyle": "<active>"` in the project
 /// settings; Claude Code honours that name only when a matching style file
-/// exists in `~/.claude/output-styles/`. HR-4 bundles three styles
+/// exists under a `.claude/output-styles/` directory that is actually loaded
+/// by the running session's `--setting-sources`. HR-4 bundles three styles
 /// (professional / teaching / research) and the operator may select any of
-/// them, so ALL of them must be on disk for the selection to resolve. `home` is
-/// passed in (rather than resolved here) so tests can target a temp directory
-/// instead of the operator's real home.
-/// What: creates `<home>/.claude/output-styles/` if absent, then writes every
+/// them, so ALL of them must be on disk for the selection to resolve. `root`
+/// is passed in (rather than resolved here) so callers can target either the
+/// operator's `$HOME`/`CLAUDE_CONFIG_DIR` (the `user` tier) or, since issue
+/// #2125 item 2, the PROJECT directory itself (the `project` tier) — the
+/// daemon managed-spawn path launches `claude --setting-sources project,local`,
+/// which EXCLUDES the `user` tier, so without a project-tier copy the
+/// `outputStyle` id written into the project's `settings.json` cannot resolve
+/// and Claude Code silently falls back to its own default. `prepare_session`
+/// calls this for BOTH roots; it is a plain additive deploy either way.
+/// What: creates `<root>/.claude/output-styles/` if absent, then writes every
 /// entry in [`crate::core::bundle::OUTPUT_STYLES`] to its `file_name`, always
 /// overwriting so framework upgrades to the styles propagate on the next launch.
 /// Returns the path of the default (professional) style for the [`PrepReport`].
 /// Test: `deploy_output_style_writes_file`, `deploy_output_style_overwrites`,
-/// `deploy_output_style_writes_all_styles`.
-pub(super) fn deploy_output_style(home: &Path) -> Result<PathBuf, PrepError> {
-    let style_dir = home.join(".claude").join("output-styles");
+/// `deploy_output_style_writes_all_styles`,
+/// `deploy_output_style_writes_under_project_root`.
+pub(super) fn deploy_output_style(root: &Path) -> Result<PathBuf, PrepError> {
+    let style_dir = root.join(".claude").join("output-styles");
     std::fs::create_dir_all(&style_dir).map_err(|source| PrepError::Io {
         path: style_dir.clone(),
         source,

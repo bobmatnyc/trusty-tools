@@ -228,6 +228,27 @@ fn prepare_session_writes_claude_md_and_stash() {
 }
 
 #[test]
+fn prepare_session_deploys_project_tier_output_style() {
+    // Why (#2125 item 2): the daemon managed-spawn path launches `claude`
+    // with `--setting-sources project,local`, excluding the `user` tier the
+    // home-dir deploy lands in. Without a project-tier copy the `outputStyle`
+    // id written into `<project>/.claude/settings.json` cannot resolve.
+    let tmp_home = tempdir().unwrap();
+    let tmp = tempdir().unwrap();
+    let project = tmp.path();
+    let fw = crate::core::paths::FrameworkPaths::under(tmp_home.path());
+
+    prepare_session(&fw, project).expect("prep succeeds");
+
+    let project_style = project.join(".claude/output-styles/trusty-mpm.md");
+    assert!(
+        project_style.exists(),
+        "project-tier output style file must be deployed: {}",
+        project_style.display()
+    );
+}
+
+#[test]
 fn prepare_session_self_heals_missing_skill_source() {
     // #1917: `fw.skills` (the framework skill *source* dir `skill_source_dir()`
     // falls back to) starts out completely absent here — simulating a machine
