@@ -49,6 +49,12 @@ is CB#2 / CB#10 in `tm-circuit-breaker`.
 mcp__trusty-search__search(query="skill deploy no-op", index_id="trusty-mpm", limit=5)
 ```
 
+**Index Pinning (Automatic):** In managed sessions, your `.mcp.json` pinpoints
+the session's own project index (via `trusty-search serve --index <id>`) so bare
+`search` calls never hit the wrong project. See
+`docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md` § 3 (per-worktree index model)
+for the design and lifecycle.
+
 ## mcp__trusty-memory__* — Persistent Context
 
 | Tool | Use |

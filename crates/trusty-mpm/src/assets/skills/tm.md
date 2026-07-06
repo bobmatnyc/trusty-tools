@@ -96,6 +96,17 @@ not exist here. Use the TUI (`tm tui`) or the MCP health tools above.
 | `/tm-adr` | Architecture Decision Records |
 | `/tm-postmortem` | Session-error analysis and reporting |
 
+## Architecture & Design Patterns
+
+**Core design patterns** (memory/sessions/search) are documented in
+`docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md`:
+- **Memory over MCP** — discovery-based daemon contact, never hardcoded ports
+- **Session↔Worktree 1:1 Model** — semantic naming, per-session isolation
+- **Per-Worktree Search Index** — automatic index derivation, lifecycle management
+
+Read this if you are building tools that rely on the framework's internals or
+debugging production behaviour.
+
 ## For Agents: Working Within trusty-mpm
 
 Focus on your delegated task; return results with evidence (file paths,

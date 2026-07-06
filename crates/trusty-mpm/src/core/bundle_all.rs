@@ -377,4 +377,10 @@ pub const ALL: &[BundledArtifact] = &[
         contents: WHAT_IS_TRUSTY_MPM,
         install: InstallPolicy::Overwrite,
     },
+    // --- Issue #2034: architecture doc covering memory/sessions/search ---
+    BundledArtifact {
+        rel_path: "docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md",
+        contents: ARCHITECTURE_MEMORY_SESSIONS_SEARCH,
+        install: InstallPolicy::Overwrite,
+    },
 ];
