@@ -1,5 +1,5 @@
 //! `tm hook --pm-guard` — PreToolUse enforcement for MPM-managed PM sessions
-//! (issue #1977).
+//! (issue #1977; native sub-agent exemption issue #2014).
 //!
 //! Why: the deployed PM instructions carry prohibitions P1–P11 ("delegate all
 //! file edits to rust-engineer", "never run builds/tests yourself", …) but
@@ -8,22 +8,33 @@
 //! `PreToolUse` hook is the single mechanical seam that can *block* a tool call
 //! before it runs, so wiring a guard here turns those prohibitions from advice
 //! into enforcement while still steering the PM toward the Task/Agent tool.
+//! Those prohibitions apply only to the PM's OWN direct tool calls — a
+//! sub-agent dispatched via the native `Task`/`Agent` tool is doing exactly the
+//! delegated work the PM is steered toward, so its Edit/Write calls must be
+//! exempt, not denied (issue #2014). The legacy `CLAUDE_MPM_SUB_AGENT` env-var
+//! exemption only covers trusty-mpm's own nested-process spawns; it is never
+//! set for a native subagent, so those calls were denied, forcing operators to
+//! fall back to the all-or-nothing `TRUSTY_MPM_PM_UNRESTRICTED=1` bypass just
+//! to get delegated work done.
 //! What: [`pm_guard`] is the `tm hook --pm-guard` entry point. It short-circuits
 //! (ALLOW) inside sub-agents / disabled-hook shells / the explicit
 //! `TRUSTY_MPM_PM_UNRESTRICTED=1` bypass, reads the `PreToolUse` stdin payload,
-//! classifies the tool **locally** (no daemon round-trip — a PreToolUse hook
-//! must be fast and must never hard-block when the daemon is down), and either
-//! stays silent (ALLOW) or prints a `permissionDecision: "deny"` response
-//! (DENY). The classification is a static default-ALLOW + explicit deny-list:
-//! [`evaluate_tool`] denies the file-edit tools and forbidden Bash verbs and
-//! allows everything else. Every error path (malformed stdin, missing fields)
-//! fails **open** — ALLOW — so a broken hook never wedges the PM.
-//! Test: `evaluate_tool_*` and `build_pretooluse_deny_response_*` below cover
-//! the tool policy + JSON shape; the Bash-command classifier (composition and
+//! exempts native sub-agent dispatches via [`payload_is_subagent_dispatch`]
+//! (the payload's documented `agent_id` field), classifies the tool **locally**
+//! (no daemon round-trip — a PreToolUse hook must be fast and must never
+//! hard-block when the daemon is down), and either stays silent (ALLOW) or
+//! prints a `permissionDecision: "deny"` response (DENY). The classification is
+//! a static default-ALLOW + explicit deny-list: [`evaluate_tool`] denies the
+//! file-edit tools and forbidden Bash verbs and allows everything else. Every
+//! error path (malformed stdin, missing fields) fails **open** — ALLOW — so a
+//! broken hook never wedges the PM.
+//! Test: `evaluate_tool_*`, `payload_is_subagent_dispatch_*`, and
+//! `build_pretooluse_deny_response_*` below cover the tool policy, sub-agent
+//! exemption, and JSON shape; the Bash-command classifier (composition and
 //! substitution handling) lives in the sibling [`super::pm_guard_bash`] module
 //! with its own tests; `tests/tm_hook_pm_guard.rs` exercises the
-//! stdin→decision→stdout path (and the env bypasses / fail-open) end to end
-//! through the real binary.
+//! stdin→decision→stdout path (and the env bypasses / sub-agent exemption /
+//! fail-open) end to end through the real binary.
 
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_payload};
 use crate::commands::pm_guard_bash::evaluate_bash_command;
@@ -35,7 +46,13 @@ use crate::commands::pm_guard_bash::evaluate_bash_command;
 /// explicitly tells the PM "you do it this time", there must be a way to lift
 /// the block without editing settings.json and restarting. Keying it on the
 /// exact value `"1"` (rather than mere presence) keeps an accidental empty
-/// export from silently disabling enforcement.
+/// export from silently disabling enforcement. This is a manual, opt-in,
+/// single-named-var override — never set by trusty-mpm's own session-launch or
+/// spawn code (verified: no occurrence outside this module and its tests) — so
+/// there is nothing for issue #2014 to "retire" in the launcher; the fix there
+/// is that [`payload_is_subagent_dispatch`] now makes this bypass unnecessary
+/// for ordinary delegated work. It remains available for the rare case an
+/// operator wants to lift enforcement on the PM's *own* direct edits too.
 /// What: the literal env var name. See [`pm_unrestricted`].
 pub(crate) const PM_UNRESTRICTED_ENV: &str = "TRUSTY_MPM_PM_UNRESTRICTED";
 
@@ -98,6 +115,17 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     };
     let tool_input = payload.get("tool_input");
 
+    // Guard 4: native Claude Code sub-agent dispatch (issue #2014). A
+    // Task/Agent-dispatched sub-agent is doing exactly the delegated work the
+    // PM is steered toward, so its Edit/Write calls are exempt, not denied.
+    if payload_is_subagent_dispatch(&payload) {
+        tracing::debug!(
+            tool_name,
+            "pm_guard: allow — native sub-agent dispatch (agent_id present in PreToolUse payload)"
+        );
+        return Ok(());
+    }
+
     let Some(reason) = evaluate_tool(tool_name, tool_input) else {
         // ALLOW: exit 0 with no output so the normal permission flow applies.
         return Ok(());
@@ -125,6 +153,40 @@ fn pm_unrestricted() -> bool {
     std::env::var(PM_UNRESTRICTED_ENV)
         .map(|v| v == "1")
         .unwrap_or(false)
+}
+
+/// Whether a `PreToolUse` payload originates from a native Claude Code
+/// sub-agent (a `Task`/`Agent`-tool-dispatched delegation) rather than the
+/// top-level PM's own tool call.
+///
+/// Why (issue #2014): the PM legitimately dispatches Edit/Write work to
+/// rust-engineer (and other) sub-agents via the native `Task`/`Agent` tool.
+/// That dispatched sub-agent's tool calls fire their own `PreToolUse` events,
+/// but the pre-existing [`SUB_AGENT_ENV`] exemption only covers trusty-mpm's
+/// own nested-process spawns (it stamps `CLAUDE_MPM_SUB_AGENT` on processes
+/// *it* forks) — a native Task-tool sub-agent never has that var set, so its
+/// Edit/Write calls were denied, forcing the all-or-nothing
+/// `TRUSTY_MPM_PM_UNRESTRICTED=1` bypass just to unblock ordinary delegation.
+/// Claude Code's hooks contract documents `agent_id` as present in the
+/// `PreToolUse` JSON payload "only when the hook fires inside a subagent
+/// call", specifically so hooks can "distinguish subagent hook calls from
+/// main-thread calls" (confirmed against the live hooks reference,
+/// <https://code.claude.com/docs/en/hooks>, 2026-07-06) — it is the documented,
+/// version-stable signal for exactly this distinction, unlike undocumented
+/// process env vars.
+/// What: returns `true` when `payload.agent_id` is present and non-empty.
+/// `agent_type` is deliberately NOT used as the signal — it is also stamped on
+/// a top-level session launched with `--agent`, so alone it would not reliably
+/// distinguish a dispatched sub-agent from the PM's own session.
+/// Test: `payload_is_subagent_dispatch_true_when_agent_id_present`,
+/// `payload_is_subagent_dispatch_false_when_absent_or_empty`; exercised end to
+/// end via `pm_guard_native_subagent_dispatch_allows_edit` in
+/// `tests/tm_hook_pm_guard.rs`.
+fn payload_is_subagent_dispatch(payload: &serde_json::Value) -> bool {
+    payload
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
 }
 
 /// Classify a `PreToolUse` tool call: `Some(reason)` denies, `None` allows.
@@ -254,6 +316,34 @@ mod tests {
                 "expected {tool} to be allowed"
             );
         }
+    }
+
+    #[test]
+    fn payload_is_subagent_dispatch_true_when_agent_id_present() {
+        assert!(payload_is_subagent_dispatch(&serde_json::json!({
+            "agent_id": "agent-abc123",
+            "agent_type": "rust-engineer",
+            "tool_name": "Edit"
+        })));
+    }
+
+    #[test]
+    fn payload_is_subagent_dispatch_false_when_absent_or_empty() {
+        // No agent_id key at all — the PM's own direct tool call.
+        assert!(!payload_is_subagent_dispatch(&serde_json::json!({
+            "tool_name": "Edit"
+        })));
+        // Empty-string agent_id must not count as a dispatch signal.
+        assert!(!payload_is_subagent_dispatch(&serde_json::json!({
+            "agent_id": "",
+            "tool_name": "Edit"
+        })));
+        // `agent_type` alone (e.g. a top-level session launched with
+        // `--agent`) must NOT be treated as a sub-agent dispatch.
+        assert!(!payload_is_subagent_dispatch(&serde_json::json!({
+            "agent_type": "rust-engineer",
+            "tool_name": "Edit"
+        })));
     }
 
     #[test]

@@ -1,11 +1,12 @@
 //! Integration test for `tm hook --pm-guard` — PM PreToolUse enforcement
-//! (issue #1977).
+//! (issue #1977; native sub-agent exemption issue #2014).
 //!
 //! Why: `commands::pm_guard`'s unit tests cover the pure policy (which tools /
 //! Bash verbs deny) in isolation, but none exercises the actual
 //! stdin-read → classify → stdout-print path end to end through the real
-//! binary — including the env short-circuits and fail-open behaviour Claude
-//! Code will actually depend on. This file closes that gap.
+//! binary — including the env short-circuits, the native sub-agent `agent_id`
+//! exemption, and fail-open behaviour Claude Code will actually depend on.
+//! This file closes that gap.
 //! What: runs the built `tm` binary as `tm --url http://127.0.0.1:1 hook
 //! --pm-guard` with a `PreToolUse` stdin payload, then asserts the printed
 //! `hookSpecificOutput.permissionDecision` (or that nothing is printed, meaning
@@ -17,7 +18,8 @@
 //! Note: the deny JSON shape asserted below
 //! (`hookSpecificOutput.{hookEventName, permissionDecision, permissionDecisionReason}`)
 //! and the stdin field names consumed (`hook_event_name`, `tool_name`,
-//! `tool_input`) are confirmed against the live Claude Code hooks reference
+//! `tool_input`, `agent_id`, `agent_type`) are confirmed against the live
+//! Claude Code hooks reference
 //! (<https://code.claude.com/docs/en/hooks>, confirmed 2026-07-03).
 
 use std::io::Write;
@@ -172,6 +174,61 @@ fn pm_guard_sub_agent_env_allows_all() {
         &[("CLAUDE_MPM_SUB_AGENT", "1")],
     );
     assert_eq!(stdout.trim(), "", "sub-agents must not be blocked");
+}
+
+#[test]
+fn pm_guard_native_subagent_dispatch_allows_edit() {
+    // Native Task/Agent-tool dispatch (issue #2014): Claude Code stamps
+    // `agent_id` on the PreToolUse payload when the hook fires inside a
+    // sub-agent. No CLAUDE_MPM_SUB_AGENT env var and no
+    // TRUSTY_MPM_PM_UNRESTRICTED bypass is set here — the exemption must come
+    // purely from the payload.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","agent_type":"rust-engineer","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#,
+        &[],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "a native sub-agent's Edit call must be allowed"
+    );
+}
+
+#[test]
+fn pm_guard_native_subagent_dispatch_allows_bash() {
+    // The exemption is not edit-tool-specific — it applies before any
+    // tool-specific classification, so a sub-agent's forbidden-verb Bash call
+    // (which the PM itself would be denied) is exempt too.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","agent_id":"agent-xyz789","tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ f"}}"#,
+        &[],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "a native sub-agent's Bash call must be allowed"
+    );
+}
+
+#[test]
+fn pm_guard_empty_agent_id_does_not_exempt() {
+    // Defensive: an empty agent_id string must not count as a dispatch signal.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","agent_id":"","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#,
+        &[],
+    );
+    assert_denied(&stdout);
+}
+
+#[test]
+fn pm_guard_agent_type_alone_does_not_exempt() {
+    // `agent_type` alone (e.g. a top-level session launched with `--agent`)
+    // must NOT be treated as a sub-agent dispatch — only `agent_id` does.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","agent_type":"rust-engineer","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#,
+        &[],
+    );
+    assert_denied(&stdout);
 }
 
 #[test]
