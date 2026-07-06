@@ -132,6 +132,28 @@ fn env_bin_prefix(claude_bin: &str, config_dir: Option<&Path>) -> String {
     }
 }
 
+/// Build the `--append-system-prompt-file <path>` flag fragment for a spawn
+/// command, when a prompt file was written (issue #2125 item 3).
+///
+/// Why: the flag must be single-quoted for the same reason
+/// [`env_bin_prefix`] quotes `CLAUDE_CONFIG_DIR` — the prompt file lives under
+/// `std::env::temp_dir()`, which is not attacker-controlled, but quoting
+/// defensively costs nothing and matches this file's established convention.
+/// What: `" --append-system-prompt-file '<path>'"` when `prompt_file` is
+/// `Some`; an empty string when `None` (no prompt was built — e.g. the write
+/// failed — so the flag is simply omitted rather than passing a bad path).
+/// Test: `spawn_command_with_prompt_file_contains_flag`,
+/// `spawn_command_without_prompt_file_omits_flag`.
+fn prompt_file_flag(prompt_file: Option<&Path>) -> String {
+    match prompt_file {
+        Some(p) => format!(
+            " --append-system-prompt-file {}",
+            shell_single_quote(&p.display().to_string())
+        ),
+        None => String::new(),
+    }
+}
+
 /// The shell command sent to the tmux pane to start Claude Code.
 ///
 /// Why: the env prefix (see [`env_bin_prefix`]) strips `ANTHROPIC_API_KEY` and,
@@ -152,31 +174,84 @@ fn env_bin_prefix(claude_bin: &str, config_dir: Option<&Path>) -> String {
 /// unattended orchestration session from blocking on per-tool prompts (#1269).
 /// Both flags reuse the shared [`crate::core::model_inject::SETTING_SOURCES_FLAG`]
 /// / [`crate::core::model_inject::PERMISSION_MODE_FLAG`] constants so this spawn
-/// path and the CLI launch path can never drift.
-/// What: [`session_id_export_prefix`] followed by [`env_bin_prefix`] plus the
-/// two shared flag constants, followed by [`on_exit_hint_suffix`] (#2023
-/// component D — `; echo '<hint>'`, which only runs once `claude` exits and
-/// control returns to the pane); piped to `tmux send-keys … Enter`.
-/// `claude_bin` is the resolved binary — an absolute path under launchd so the
-/// pane (which inherits the daemon's minimal `PATH`) does not need `claude` on
-/// its own `PATH` (#1298). `session_id` is the managed session's UUID (#2023
-/// component B), exported so in-pane commands can identify the session after
-/// `claude` exits.
+/// path and the CLI launch path can never drift. `prompt_file` (issue #2125
+/// item 3) carries the PM system prompt via `--append-system-prompt-file` — the
+/// same mechanism the CLI `tm launch` / client `/connect` paths already use —
+/// so this, previously the one driver missing it, can no longer silently spawn
+/// vanilla Claude Code.
+/// What: [`session_id_export_prefix`] followed by [`env_bin_prefix`], the
+/// optional [`prompt_file_flag`], the two shared flag constants, followed by
+/// [`on_exit_hint_suffix`] (#2023 component D — `; echo '<hint>'`, which only
+/// runs once `claude` exits and control returns to the pane); piped to
+/// `tmux send-keys … Enter`. `claude_bin` is the resolved binary — an absolute
+/// path under launchd so the pane (which inherits the daemon's minimal `PATH`)
+/// does not need `claude` on its own `PATH` (#1298). `session_id` is the
+/// managed session's UUID (#2023 component B), exported so in-pane commands
+/// can identify the session after `claude` exits.
 /// Test: `spawn_command_contains_env_scrub`,
 /// `spawn_command_contains_isolation_flags`,
 /// `spawn_command_uses_resolved_binary`,
 /// `spawn_command_sets_claude_config_dir`,
 /// `spawn_command_exports_managed_session_id`,
-/// `spawn_command_prints_relaunch_hint_after_claude_exits`.
-fn spawn_command(claude_bin: &str, config_dir: Option<&Path>, session_id: &str) -> String {
+/// `spawn_command_prints_relaunch_hint_after_claude_exits`,
+/// `spawn_command_with_prompt_file_contains_flag`,
+/// `spawn_command_without_prompt_file_omits_flag`.
+fn spawn_command(
+    claude_bin: &str,
+    config_dir: Option<&Path>,
+    session_id: &str,
+    prompt_file: Option<&Path>,
+) -> String {
     format!(
-        "{}{} {} {}{}",
+        "{}{}{} {} {}{}",
         session_id_export_prefix(session_id),
         env_bin_prefix(claude_bin, config_dir),
+        prompt_file_flag(prompt_file),
         crate::core::model_inject::SETTING_SOURCES_FLAG,
         crate::core::model_inject::PERMISSION_MODE_FLAG,
         on_exit_hint_suffix(),
     )
+}
+
+/// Build and write the PM system-prompt file for `project_dir`, for injection
+/// into the daemon managed-spawn command via `--append-system-prompt-file`
+/// (issue #2125 item 3 — the daemon-adapter carrier).
+///
+/// Why: this module's own DOC-34 audit trail established that under
+/// `--setting-sources project,local` the framework roster/instructions load
+/// from the PROJECT layer, not the `CLAUDE_CONFIG_DIR` [`prepare_managed_config`]
+/// provisions — but `spawn` never actually passed `--append-system-prompt-file`
+/// at all, so the one thing that turns a bare `claude` process into a
+/// trusty-mpm PM never reached the daemon's default managed-spawn path,
+/// leaving every bare-`tm` session running vanilla Claude Code (#2125). This
+/// reuses the exact same seam
+/// ([`crate::core::session_launch::build_system_prompt_for_with_style_and_native`])
+/// the CLI `tm launch` / client `/connect` paths already use, so all three
+/// drivers build byte-identical prompts for the same project.
+/// What: resolves live native-output-style support (fail-safe to injection via
+/// [`crate::core::output_style::claude_supports_native_output_style`]), builds
+/// the override-resolved + style-injected prompt for `project_dir`, and writes
+/// it to a fresh temp file via [`crate::core::model_inject::write_prompt_file`].
+/// Returns `None` (logged) on any write failure so `spawn` still proceeds —
+/// matching the non-fatal pattern every other `prepare_managed_config` step in
+/// this file follows; the CLAUDE.md carrier (#2125 item 1) still applies even
+/// without this flag.
+/// Test: `build_prompt_file_writes_resolved_prompt_for_project`.
+fn build_prompt_file(project_dir: &Path) -> Option<std::path::PathBuf> {
+    let native = crate::core::output_style::claude_supports_native_output_style();
+    let prompt = crate::core::session_launch::build_system_prompt_for_with_style_and_native(
+        project_dir,
+        None,
+        native,
+    );
+    let file = crate::core::model_inject::write_prompt_file(&prompt);
+    if file.is_none() {
+        tracing::warn!(
+            project = %project_dir.display(),
+            "failed to write PM system-prompt file; spawning without --append-system-prompt-file"
+        );
+    }
+    file
 }
 
 /// Build a resume-aware Claude Code command (#1744, #1840).
@@ -575,11 +650,12 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// What: resolves `claude` to an absolute path (returns `BinaryNotFound`
     /// if it cannot be found on `PATH` or in the well-known daemon dirs),
     /// provisions + trust-seeds the tm-owned `CLAUDE_CONFIG_DIR` via
-    /// [`prepare_managed_config`], then sends [`spawn_command`]
-    /// (`env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=<dir> <abs-claude>` plus the
-    /// isolation/permission flags) to the pane; the task is logged for
-    /// observability but not passed to the command (Claude Code reads
-    /// instructions from CLAUDE.md or an interactive prompt).
+    /// [`prepare_managed_config`], builds the PM system-prompt file via
+    /// [`build_prompt_file`] (issue #2125 item 3), then sends [`spawn_command`]
+    /// (`env -u ANTHROPIC_API_KEY CLAUDE_CONFIG_DIR=<dir> <abs-claude>
+    /// --append-system-prompt-file <prompt>` plus the isolation/permission
+    /// flags) to the pane; the task is logged for observability but not passed
+    /// to the command.
     /// Test: `spawn_sends_env_scrub_when_binary_available`.
     fn spawn(
         &self,
@@ -608,10 +684,20 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // `--setting-sources project,local`, not from this config dir (see
         // `prepare_managed_config`). Non-fatal throughout (closes #1696).
         let config_dir = prepare_managed_config(tmux_name, cwd);
+        // Build and inject the PM system prompt (issue #2125 item 3) so this,
+        // the default daemon on-ramp, can no longer silently spawn vanilla
+        // Claude Code. Non-fatal: a write failure omits the flag and falls
+        // back to the CLAUDE.md carrier (item 1).
+        let prompt_file = build_prompt_file(cwd);
         self.tmux
             .send_line(
                 tmux_name,
-                &spawn_command(&claude_bin, config_dir.as_deref(), session_id),
+                &spawn_command(
+                    &claude_bin,
+                    config_dir.as_deref(),
+                    session_id,
+                    prompt_file.as_deref(),
+                ),
             )
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
     }
@@ -770,7 +856,7 @@ mod tests {
     fn spawn_command_contains_env_scrub() {
         // The spawn command must always strip the API key from the environment
         // so the session falls back to OAuth (keyed by CLAUDE_CONFIG_DIR).
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID);
+        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None);
         assert!(
             cmd.contains("env -u ANTHROPIC_API_KEY"),
             "spawn command must contain env scrub: {cmd}"
@@ -789,7 +875,7 @@ mod tests {
         // can identify which managed session it belongs to. tmux
         // set-environment alone would NOT reach the pane's already-running
         // shell — the export must be part of the literal command line.
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID);
+        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None);
         let expected_prefix = format!("export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; ");
         assert!(
             cmd.starts_with(&expected_prefix),
@@ -812,7 +898,7 @@ mod tests {
         // home, not the project's committed `.claude/`. It must co-exist with the
         // API-key scrub.
         let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
-        let cmd = spawn_command("claude", Some(dir), TEST_SESSION_ID);
+        let cmd = spawn_command("claude", Some(dir), TEST_SESSION_ID, None);
         assert!(
             cmd.contains(
                 "env -u ANTHROPIC_API_KEY \
@@ -837,7 +923,7 @@ mod tests {
         // (`env: -u: No such file or directory`), fatally killing every managed
         // session spawn.
         let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
-        let cmd = spawn_command("claude", Some(dir), TEST_SESSION_ID);
+        let cmd = spawn_command("claude", Some(dir), TEST_SESSION_ID, None);
         let u_pos = cmd
             .find("-u ANTHROPIC_API_KEY")
             .expect("cmd must contain -u ANTHROPIC_API_KEY");
@@ -856,7 +942,7 @@ mod tests {
         // When home is unresolvable there is no config dir to point at; the
         // command must fall back to the legacy scrub-only prefix (no bare
         // `CLAUDE_CONFIG_DIR=` token).
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID);
+        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None);
         assert!(
             !cmd.contains("CLAUDE_CONFIG_DIR"),
             "no config dir → must not reference CLAUDE_CONFIG_DIR: {cmd}"
@@ -869,7 +955,7 @@ mod tests {
         // the pane command. The path must appear single-quoted and INTACT so
         // `env` receives one CLAUDE_CONFIG_DIR value, not two argv tokens.
         let dir = Path::new("/Users/John Doe/.trusty-tools/trusty-mpm/claude-config");
-        let cmd = spawn_command("claude", Some(dir), TEST_SESSION_ID);
+        let cmd = spawn_command("claude", Some(dir), TEST_SESSION_ID, None);
         assert!(
             cmd.contains(
                 "env -u ANTHROPIC_API_KEY \
@@ -909,7 +995,7 @@ mod tests {
         // Why: the session_manager spawn path must isolate from the user's global
         // settings and run fully unattended (bypass all permission prompts) so
         // multi-agent orchestration never stalls on interactive approval dialogs.
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID);
+        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None);
         assert!(
             cmd.contains("--setting-sources project,local"),
             "spawn command must isolate settings: {cmd}"
@@ -930,7 +1016,7 @@ mod tests {
         // Why (#1298): under launchd the pane inherits a minimal PATH, so the
         // spawn command must invoke claude by the resolved (absolute) path
         // rather than a bare `claude` that the pane's PATH cannot find.
-        let cmd = spawn_command("/Users/me/.local/bin/claude", None, TEST_SESSION_ID);
+        let cmd = spawn_command("/Users/me/.local/bin/claude", None, TEST_SESSION_ID, None);
         assert!(
             cmd.contains("env -u ANTHROPIC_API_KEY /Users/me/.local/bin/claude "),
             "spawn command must invoke the resolved absolute claude path: {cmd}"
@@ -954,7 +1040,7 @@ mod tests {
         // HOME is redirected so the spawn's config-dir provisioning + trust seed
         // land in a throwaway dir, not the developer's real ~/.trusty-tools.
         let _home = HomeGuard::set();
-        let Some(claude_bin) = ClaudeCodeAdapter::resolve_claude() else {
+        let Some(_claude_bin) = ClaudeCodeAdapter::resolve_claude() else {
             return;
         };
         let fake = FakeTmux::new();
@@ -965,16 +1051,65 @@ mod tests {
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1);
         assert_eq!(sends[0].0, "tmpm-test");
-        // The sent command must equal the builder output for whatever config dir
-        // resolves under the redirected HOME (Some in a normal env).
-        let config_dir = crate::core::trusty_tools_config::managed_claude_config_dir();
-        assert_eq!(
-            sends[0].1,
-            spawn_command(&claude_bin, config_dir.as_deref(), TEST_SESSION_ID)
+        let cmd = &sends[0].1;
+        // Must carry the env scrub regardless (the option must precede any
+        // intervening `CLAUDE_CONFIG_DIR=` assignment per POSIX env grammar).
+        assert!(cmd.contains("-u ANTHROPIC_API_KEY"));
+        // Issue #2125 item 3: the spawn command must inject the PM system
+        // prompt via --append-system-prompt-file — the third fail-closed
+        // carrier — so this, the default daemon on-ramp, can no longer
+        // silently spawn vanilla Claude Code. The prompt file path itself is
+        // non-deterministic (fresh UUID per call), so this asserts the flag's
+        // presence rather than an exact command match.
+        assert!(
+            cmd.contains("--append-system-prompt-file"),
+            "spawn command must inject the PM system prompt file: {cmd}"
         );
-        // And it must carry the env scrub regardless (the option must precede
-        // any intervening `CLAUDE_CONFIG_DIR=` assignment per POSIX env grammar).
-        assert!(sends[0].1.contains("-u ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn spawn_command_with_prompt_file_contains_flag() {
+        // #2125 item 3: when a prompt file is supplied, spawn_command must
+        // inject --append-system-prompt-file pointing at it, alongside the
+        // existing isolation flags — the third fail-closed carrier.
+        let path = Path::new("/tmp/trusty-mpm-system-prompt-test.txt");
+        let cmd = spawn_command("claude", None, TEST_SESSION_ID, Some(path));
+        assert!(
+            cmd.contains("--append-system-prompt-file '/tmp/trusty-mpm-system-prompt-test.txt'"),
+            "spawn command must pass the prompt file via --append-system-prompt-file: {cmd}"
+        );
+        assert!(
+            cmd.contains("--setting-sources project,local"),
+            "isolation flags must still be present alongside the prompt file: {cmd}"
+        );
+    }
+
+    #[test]
+    fn spawn_command_without_prompt_file_omits_flag() {
+        // #2125 item 3: no prompt file (e.g. the write failed) → the flag must
+        // be omitted entirely rather than passed with a bad/empty path.
+        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None);
+        assert!(
+            !cmd.contains("--append-system-prompt-file"),
+            "no prompt file → flag must be absent: {cmd}"
+        );
+    }
+
+    #[test]
+    fn build_prompt_file_writes_resolved_prompt_for_project() {
+        // #2125 item 3: build_prompt_file must reuse the SAME
+        // build_system_prompt_for_with_style_and_native seam the CLI/client
+        // launch paths use, so the daemon adapter's injected prompt is never a
+        // divergent copy — proven here by asserting the written file carries
+        // the bundled PM_INSTRUCTIONS heading.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = build_prompt_file(tmp.path()).expect("prompt file written");
+        let content = std::fs::read_to_string(&path).expect("prompt file readable");
+        assert!(
+            content.contains("# PM Agent -- Trusty MPM"),
+            "prompt file must contain the resolved PM system prompt: {content}"
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
@@ -1362,7 +1497,7 @@ mod tests {
     fn spawn_command_prints_relaunch_hint_after_claude_exits() {
         // The hint must appear AFTER the claude invocation, separated by `;` so
         // it only runs once claude exits and control returns to the pane shell.
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID);
+        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None);
         assert!(
             cmd.contains("; echo 'tm: run `tm` to relaunch this session'"),
             "spawn command must print the relaunch hint after claude exits: {cmd}"
