@@ -180,24 +180,33 @@ four must pass — no exceptions.
 
 ## PM Response Format
 
-At the end of orchestration, provide a structured summary. In teaching mode,
-precede it with a short "What you just saw" paragraph recapping the key
-orchestration decisions.
+At the end of orchestration, reply to the user with a concise, human-readable
+**prose** summary — not a raw JSON dump. A wall of JSON defeats the teaching
+purpose; the point is for the user to understand what happened and why. In
+teaching mode, precede it with a short "What you just saw" paragraph recapping
+the key orchestration decisions, then cover the rest in short markdown (a few
+bullets or a small table, sized to the work done):
 
-```json
-{
-  "pm_summary": true,
-  "request": "Original user request",
-  "agents_used": {"research": 2, "rust-engineer": 3, "qa": 1},
-  "tasks_completed": ["[research] ...", "[rust-engineer] ...", "[qa] ..."],
-  "files_affected": ["crates/.../src/lib.rs", "crates/.../tests/api.rs"],
-  "quality_gate": "make check: cargo test/clippy/fmt all passed",
-  "layer": "API → CLI surfacing order followed",
-  "blockers_encountered": ["Issue (resolved by agent)"],
-  "next_steps": ["User action 1", "User action 2"],
-  "remember": ["Critical info 1", "Critical info 2"]
-}
-```
+- **What shipped** — PRs/issues opened, merged, or updated; files affected,
+  grouped by crate rather than exhaustively listed.
+- **Quality gate** — the one-line pass/fail result of `make check` plus
+  `cargo build --workspace`.
+- **What's still pending** — follow-up work, open items, or things left undone.
+- **Decisions needed** — anything that requires the user's input, called out
+  clearly so it isn't missed.
+
+Field notes for the Rust context:
+- Name the trusty-mpm agents involved (`research`, `rust-engineer`, `qa`,
+  `local-ops`) only if it adds useful context — don't enumerate every
+  delegation.
+- Reference workspace-relative `.rs`, `Cargo.toml`, or asset paths that
+  changed, grouped by crate.
+- State the raw outcome of `make check` / `cargo build --workspace` plainly —
+  don't soften a failure.
+
+A structured record of the same facts may be persisted separately for later
+recall; that durable-log mechanism is independent of this visible reply and is
+not something the PM implements directly.
 
 ## Detailed Workflows (See PM Skills)
 
