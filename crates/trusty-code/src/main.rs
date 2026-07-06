@@ -52,12 +52,20 @@ struct Cli {
 enum Command {
     /// Start the per-project orchestration server.
     ///
-    /// Binds an IPC socket and accepts task requests from CLI clients, TUI
-    /// frontends, and MCP callers. One instance per project.
+    /// Accepts JSON-RPC 2.0 task requests from CLI clients, TUI frontends,
+    /// and MCP callers. One instance per project.
     Serve {
         /// Path to the project root (must contain a `.claude/` directory).
         #[arg(long, short, value_name = "PATH")]
         project: PathBuf,
+
+        /// Serve JSON-RPC 2.0 over stdio (NDJSON on stdin/stdout), matching
+        /// the trusty-memory/trusty-search MCP stdio convention.
+        ///
+        /// This is currently the only supported transport (#2053); an HTTP
+        /// `POST /rpc` transport is tracked as a follow-up.
+        #[arg(long)]
+        stdio: bool,
     },
 
     /// Delegate a single task to a named agent and run it end-to-end.
@@ -112,13 +120,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Serve { project } => {
-            eprintln!(
-                "tcode serve: not yet implemented (#587 Phase 5+) [project={}]",
-                project.display()
-            );
-            process::exit(1);
-        }
+        Command::Serve { project, stdio } => run_serve(project, stdio).await,
 
         Command::RunTask {
             agent,
@@ -136,6 +138,35 @@ async fn main() -> Result<()> {
             process::exit(1);
         }
     }
+}
+
+/// Execute `tcode serve`: currently only the `--stdio` transport is wired.
+///
+/// Why: keeps `main`'s match arm a one-liner, matching the shape of the
+/// `run_task` wrapper below. The binary layer owns only the CLI-shaped
+/// concern (which transport was requested); `trusty_code::serve` owns the
+/// router assembly and the transport loop, both fully unit-tested offline.
+/// What: `--stdio` delegates to `trusty_code::serve::run_stdio`, which runs
+/// until stdin EOF or SIGTERM, logging to stderr only. Without `--stdio`,
+/// prints an actionable error — HTTP `POST /rpc` is listed in the parent
+/// issue (#2053) but deferred to a follow-up ticket — and exits 1.
+/// Test: exercised manually (`tcode serve --project . --stdio`);
+/// `trusty_code::serve::tests` and `serve::transport::tests` cover the
+/// router/transport logic this delegates to.
+async fn run_serve(project: PathBuf, stdio: bool) -> Result<()> {
+    if !stdio {
+        eprintln!(
+            "tcode serve: only --stdio is implemented today (#2053); HTTP POST /rpc is a follow-up [project={}]",
+            project.display()
+        );
+        process::exit(1);
+    }
+
+    if let Err(e) = trusty_code::serve::run_stdio(project).await {
+        eprintln!("tcode serve --stdio: fatal error: {e:#}");
+        process::exit(1);
+    }
+    Ok(())
 }
 
 /// Validate that `agent_name` contains only safe filesystem characters.

@@ -260,6 +260,31 @@ pub mod catchup;
 /// Test: `prompt::tests::*`.
 pub mod prompt;
 
+// ── Phase 5 daemon transport layer (#2053, M1 control-plane cut line) ──
+
+/// JSON-RPC 2.0 core: wire types (re-exported from `trusty_common::mcp`) plus
+/// the tcode-specific `Router`/`RpcError` extensibility seam.
+///
+/// Why: `tcode serve` must speak the same JSON-RPC-over-STDIO contract as
+/// the rest of the trusty-* family; the `Router` is the new piece that lets
+/// later tickets register `session.*`/`task.*`/`harness.describe` methods
+/// without touching the transport loop.
+/// What: `Request`, `Response`, `error_codes` (re-exported), `RpcError`,
+/// `MethodHandler`, `Router`.
+/// Test: `jsonrpc::error::tests::*`, `jsonrpc::router::tests::*`.
+pub mod jsonrpc;
+
+/// `tcode serve` daemon: STDIO JSON-RPC transport + proof-of-life methods.
+///
+/// Why: the foundation of the M1 control-plane cut line (#2053) — proves the
+/// transport + router work end-to-end via `ping`/`health` before `session.*`
+/// (#2054), `task.*` (#2056), and `harness.describe` (#2066) land on top.
+/// What: `build_router`, `run_stdio`, and the `methods`/`transport`
+/// submodules.
+/// Test: `serve::tests::*`, `serve::methods::tests::*`,
+/// `serve::transport::tests::*`.
+pub mod serve;
+
 // ── Package-level re-exports ──
 
 /// Version string, re-exported so integration tests can assert it without

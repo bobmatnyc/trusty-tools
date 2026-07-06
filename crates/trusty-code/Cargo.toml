@@ -54,11 +54,13 @@ reqwest = { workspace = true }
 # Bash tool: process-group kill on Unix (setsid / kill syscalls)
 libc = { workspace = true }
 
-# DOC-28 catch-up digest for PM prompt seed context (#1762 PR2).
-# The `catchup` feature pulls in the incremental session/git/palace engine from
-# trusty-common so trusty-code can inject recent-activity context into the PM
-# prompt at task start without duplicating the engine here.
-trusty-common = { workspace = true, features = ["catchup"] }
+# DOC-28 catch-up digest for PM prompt seed context (#1762 PR2), plus the
+# shared JSON-RPC 2.0 / MCP wire types + STDIO loop (#2053) so `tcode serve
+# --stdio` speaks the exact same JSON-RPC-over-STDIO contract as trusty-memory
+# and trusty-search. `catchup` already pulls in `mcp` transitively
+# (`catchup = ["dep:rusqlite", "mcp"]`); `mcp` is listed explicitly too so the
+# direct dependency is documented rather than relying on the transitive edge.
+trusty-common = { workspace = true, features = ["catchup", "mcp"] }
 
 [dev-dependencies]
 # Async test runtime (events, build_info, perf async tests, tools tests)
