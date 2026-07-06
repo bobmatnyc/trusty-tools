@@ -3,9 +3,10 @@
 # WHY:
 #   Every distributable crate in the workspace shares the same tag convention
 #   (<crate>-v<version>), the same Rust MSRV, and the same macOS arm64 /
-#   Linux x86_64 platform matrix. Rather than maintaining a bespoke workflow per
-#   crate, a single data-driven workflow covers them all: adding support for a
-#   new crate is a one-line change to the CRATE_CONFIG map in the `setup` job.
+#   Linux x86_64 / Linux arm64 platform matrix. Rather than maintaining a
+#   bespoke workflow per crate, a single data-driven workflow covers them all:
+#   adding support for a new crate is a one-line change to the CRATE_CONFIG
+#   map in the `setup` job.
 #
 # WHAT:
 #   1. `setup`     — parse tag / dispatch inputs → validate crate → emit build matrix.
@@ -17,8 +18,48 @@
 #   - push of any tag matching `*-v*`  (e.g. `trusty-analyze-v0.5.0`)
 #   - workflow_dispatch for manual dry-runs (skips the release upload by default)
 #
+# LINUX BINARY PORTABILITY (issue #2037):
+#   Historically the Linux x86_64 leg ran a bare `cargo build` on the
+#   `ubuntu-latest` runner (Ubuntu 24.04, glibc 2.39), so every released
+#   binary carried a `GLIBC_2.39` floor and failed to even execute on
+#   Debian 12 (2.36), Ubuntu 22.04 LTS (2.35), RHEL 9 / AL2023 (2.34), etc.
+#   There was also no Linux arm64 build at all.
+#
+#   Fix: the `linux-zigbuild` variant below builds Linux gnu targets with
+#   `cargo zigbuild` (https://github.com/rust-cross/cargo-zigbuild) pinned to
+#   glibc 2.17 — the manylinux2014 floor, i.e. "runs on essentially any glibc
+#   Linux still in service" (RHEL 8/9, Debian 11/12, Ubuntu 20.04+, Amazon
+#   Linux 2/2023, ...). zigbuild is a drop-in `cargo build` wrapper: it only
+#   changes the *linker* (routes through `zig cc`, which ships its own
+#   versioned glibc stubs), so it changes nothing about which sources get
+#   compiled or which Cargo features are active — the resulting binary lands
+#   in the SAME `target/<triple>/release/` directory a plain `cargo build`
+#   would use, just linked against an older glibc baseline. This same
+#   mechanism cross-compiles `aarch64-unknown-linux-gnu` from the x86_64
+#   runner with no separate arm64 runner or Docker `cross` toolchain needed.
+#
+#   CAVEAT — ORT-bundling crates (trusty-search, trusty-analyze): their
+#   DEFAULT `bundled-ort` feature downloads a prebuilt ONNX Runtime binary
+#   that itself requires glibc >= 2.38 at runtime (see al2023-build.yml and
+#   issue #605) — that floor comes from the prebuilt archive's own symbol
+#   references, which zigbuild's linker choice cannot lower. Those two crates
+#   already ship a separate `x86_64-linux-al2023` asset built with
+#   `--features load-dynamic` (dlopen()s a system ONNX Runtime at runtime
+#   instead of bundling one) for exactly this reason; the NEW aarch64 leg
+#   reuses that same load-dynamic feature set for these crates (see the
+#   matrix-generation step below) since the bundled-ort path has no build-time
+#   aarch64 binary to download in the first place.
+#
+#   The Linux arm64 leg is marked `best_effort` (continue-on-error, like the
+#   existing AL2023 leg) because it is new and has not yet been validated by
+#   an actual tagged release — see the PR for #2037 for the target-triple /
+#   asset-name coordination with the companion install.sh issue (#2038).
+#
 # ASSET NAMING CONVENTION (matches INSTALL-CONVENTION.md / PR #891):
-#   <crate>-<version>-<target>.tar.gz           (standard variants)
+#   <crate>-<version>-<target>.tar.gz           (standard variants, e.g.
+#                                                 x86_64-unknown-linux-gnu,
+#                                                 aarch64-unknown-linux-gnu,
+#                                                 aarch64-apple-darwin)
 #   <crate>-<version>-x86_64-linux-al2023.tar.gz  (AL2023 load-dynamic variant)
 #   <crate>-<version>-<target>.tar.gz.sha256    (paired checksum)
 
@@ -389,13 +430,26 @@ jobs:
       # `strategy.matrix.include`.  Each entry carries all the fields the build
       # job needs so it never needs to repeat crate-specific logic.
       #
-      # Standard variants:
+      # Standard variant (macOS — native `cargo build`, no linker tricks needed):
       #   { runner: macos-14,      target: aarch64-apple-darwin,      variant: standard }
-      #   { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu,  variant: standard }
+      #
+      # linux-zigbuild variants (issue #2037 — portable glibc 2.17 baseline,
+      # built via `cargo zigbuild --target <triple>.2.17`; see the file-header
+      # comment for the full rationale):
+      #   { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu,  variant: linux-zigbuild, best_effort: false }
+      #   { runner: ubuntu-latest, target: aarch64-unknown-linux-gnu, variant: linux-zigbuild, best_effort: true  }
+      #   (aarch64 is cross-compiled from the x86_64 runner by zig/cargo-zigbuild;
+      #    for ORT-bundling crates it uses the load-dynamic feature set, same as
+      #    the AL2023 variant below, since bundled-ort has no aarch64 build-time
+      #    binary to download)
       #
       # AL2023 variant (ORT crates only):
       #   { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu,  variant: al2023   }
       #   (built inside an amazonlinux:2023 container; named …-x86_64-linux-al2023)
+      #
+      # `best_effort: true` legs run with `continue-on-error` at the job level —
+      # a failure there does not fail the workflow or block the release; it is
+      # for new/unverified legs (see file-header comment) and the AL2023 leg.
       # ─────────────────────────────────────────────────────────────────────────
       - name: Generate build matrix
         id: matrix
@@ -435,9 +489,35 @@ jobs:
               cargo_pkg=pkg,
               binaries=bins,
               skip_ui_build=skip_ui,
-              cargo_features=feats,
-              no_default_features=no_def,
           )
+
+          # Portable-Linux glibc baseline (issue #2037): manylinux2014's floor,
+          # runs on effectively every glibc Linux distro still in service.
+          ZIG_GLIBC = "2.17"
+
+          def linux_zigbuild_entry(target, best_effort, use_al2023_features):
+              # For ORT-bundling crates (al2023 True), the aarch64 leg reuses
+              # the load-dynamic feature set instead of default bundled-ort:
+              # bundled-ort downloads a prebuilt x86_64 ONNX Runtime archive at
+              # build time with no guaranteed aarch64 counterpart, so it would
+              # fail outright; load-dynamic dlopen()s at runtime instead, so it
+              # builds regardless of target arch (see file-header comment).
+              entry_features = al_feats if use_al2023_features else feats
+              entry_no_def   = al_no_def if use_al2023_features else no_def
+              return {
+                  **common,
+                  "runner": "ubuntu-latest",
+                  "target": target,
+                  "variant": "linux-zigbuild",
+                  "asset_suffix": target,
+                  "container": "",
+                  "zig_target": f"{target}.{ZIG_GLIBC}",
+                  "best_effort": best_effort,
+                  "cargo_features": entry_features,
+                  "no_default_features": entry_no_def,
+                  "al2023_no_default": False,
+                  "al2023_features": "",
+              }
 
           includes = [
               {**common,
@@ -446,16 +526,17 @@ jobs:
                "variant": "standard",
                "asset_suffix": "aarch64-apple-darwin",
                "container": "",
+               "zig_target": "",
+               "best_effort": False,
+               "cargo_features": feats,
+               "no_default_features": no_def,
                "al2023_no_default": False,
                "al2023_features": ""},
-              {**common,
-               "runner": "ubuntu-latest",
-               "target": "x86_64-unknown-linux-gnu",
-               "variant": "standard",
-               "asset_suffix": "x86_64-unknown-linux-gnu",
-               "container": "",
-               "al2023_no_default": False,
-               "al2023_features": ""},
+              # x86_64 Linux — Tier-1, required (portable glibc-2.17 baseline).
+              linux_zigbuild_entry("x86_64-unknown-linux-gnu", best_effort=False, use_al2023_features=False),
+              # aarch64 Linux — NEW (issue #2037), best-effort/non-blocking
+              # until validated by a real tagged-release CI run.
+              linux_zigbuild_entry("aarch64-unknown-linux-gnu", best_effort=True, use_al2023_features=al2023),
           ]
 
           if al2023:
@@ -469,6 +550,8 @@ jobs:
                   "cargo_features": al_feats,
                   "no_default_features": al_no_def,
                   "container": "amazonlinux:2023",
+                  "zig_target": "",
+                  "best_effort": True,
                   "al2023_no_default": al_no_def,
                   "al2023_features": al_feats,
               })
@@ -489,7 +572,10 @@ jobs:
   # Produces: one .tar.gz + one .tar.gz.sha256 per matrix entry.
   #
   # AL2023 entries run inside an amazonlinux:2023 container (glibc 2.34).
-  # Standard entries run natively on the GitHub runner.
+  # linux-zigbuild entries cross/native-compile on the ubuntu-latest runner via
+  # `cargo zigbuild` against a pinned old-glibc baseline (issue #2037; see the
+  # file-header comment). Standard (macOS) entries run natively, no linker
+  # tricks needed.
   # ─────────────────────────────────────────────────────────────────────────────
   build:
     name: Build ${{ matrix.crate }} ${{ matrix.asset_suffix }}
@@ -498,13 +584,16 @@ jobs:
     if: needs.setup.outputs.bundled != 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
-    # Why: AL2023 uses GCC 11 which rejects newer SIMD probe flags emitted by
-    # numkind (-mavx512fp16, -mamx-fp16, -mavx10.2-512, -mavxvnniint8; need
-    # GCC 12+). The AL2023 bottle is NOT required for Homebrew (Tier-1:
-    # macOS arm64 + linux x86_64-gnu). Allow it to fail without sinking the
-    # whole build matrix — the release job is conditioned to run when the
-    # Tier-1 legs succeed regardless of this leg's outcome.
-    continue-on-error: ${{ matrix.variant == 'al2023' }}
+    # Why: `best_effort` legs (AL2023, and the new Linux aarch64 leg from
+    # issue #2037) are allowed to fail without sinking the whole build matrix.
+    # AL2023 uses GCC 11 which rejects newer SIMD probe flags emitted by
+    # numkind (needs GCC 12+); the aarch64-linux-gnu leg is new/CI-unverified
+    # (cross-compiled via zig — see #2037 PR for what remains to be validated
+    # by a real tagged release). Neither is required for Homebrew (Tier-1:
+    # macOS arm64 + linux x86_64-gnu, unchanged). The release job is
+    # conditioned to run when the Tier-1 legs succeed regardless of a
+    # best_effort leg's outcome.
+    continue-on-error: ${{ matrix.best_effort == true }}
 
     strategy:
       fail-fast: false
@@ -533,17 +622,41 @@ jobs:
             gcc gcc-c++ make openssl-devel perl \
             curl tar gzip pkg-config findutils binutils
 
-      # ── Standard runners: install system deps ───────────────────────────────
+      # ── Linux runners (linux-zigbuild): install system deps ─────────────────
+      # Same base toolchain as before; zigbuild only replaces the final linker,
+      # so build-essential/pkg-config/libssl-dev are still needed for crates
+      # whose build.rs shells out to a C compiler or pkg-config directly.
       - name: Install build prerequisites (Ubuntu)
-        if: matrix.variant == 'standard' && matrix.runner == 'ubuntu-latest'
+        if: matrix.variant == 'linux-zigbuild'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libssl-dev binutils curl
 
+      # ── zig + cargo-zigbuild (issue #2037) ──────────────────────────────────
+      # cargo-zigbuild wraps `cargo build`, routing the link step through
+      # `zig cc`/`zig c++`/`zig ar` for the target in `matrix.zig_target`
+      # (e.g. `x86_64-unknown-linux-gnu.2.17`), which pins the glibc symbol
+      # baseline instead of whatever the build host happens to ship. It also
+      # cross-links `aarch64-unknown-linux-gnu` from this x86_64 runner with
+      # no separate arm64 runner or Docker `cross` toolchain required.
+      - name: Install zig (linux-zigbuild variant)
+        if: matrix.variant == 'linux-zigbuild'
+        uses: mlugg/setup-zig@v1
+        with:
+          version: "0.13.0"
+
+      - name: Install cargo-zigbuild (linux-zigbuild variant)
+        if: matrix.variant == 'linux-zigbuild'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
       # ── Rust toolchain ───────────────────────────────────────────────────────
       # AL2023 container cannot use the dtolnay action (needs runner Node.js),
-      # so we install via rustup directly.  Standard runners use the action.
+      # so we install via rustup directly. Standard (macOS) and linux-zigbuild
+      # runners both use the action — zigbuild just needs the target's std lib
+      # installed via rustup same as a native build would.
       - name: Install Rust 1.91 (MSRV) via rustup — AL2023
         if: matrix.variant == 'al2023'
         shell: bash
@@ -553,8 +666,8 @@ jobs:
                        --target ${{ matrix.target }}
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: Install Rust (MSRV 1.91) — standard runners
-        if: matrix.variant == 'standard'
+      - name: Install Rust (MSRV 1.91) — standard + linux-zigbuild runners
+        if: matrix.variant == 'standard' || matrix.variant == 'linux-zigbuild'
         uses: dtolnay/rust-toolchain@1.91
         with:
           targets: ${{ matrix.target }}
@@ -576,8 +689,8 @@ jobs:
             al2023-1.91-${{ matrix.crate }}-
             al2023-1.91-
 
-      - name: Cache cargo registry + artefacts (standard)
-        if: matrix.variant == 'standard'
+      - name: Cache cargo registry + artefacts (standard + linux-zigbuild)
+        if: matrix.variant == 'standard' || matrix.variant == 'linux-zigbuild'
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}-${{ matrix.crate }}
@@ -620,7 +733,15 @@ jobs:
       # ── Build ────────────────────────────────────────────────────────────────
       # Applies per-crate env vars, optional --no-default-features, optional
       # --features.  The build command is identical for all crates — only the
-      # env + flags differ.
+      # env + flags + linker (plain `cargo build` vs `cargo zigbuild`) differ.
+      #
+      # linux-zigbuild variant (issue #2037): uses `matrix.zig_target`, which
+      # carries the glibc-pinned target suffix (e.g.
+      # `x86_64-unknown-linux-gnu.2.17`). cargo-zigbuild strips that suffix
+      # for the actual rustc target and writes output to the SAME
+      # `target/<bare-triple>/release/` directory a plain `cargo build` would
+      # use — the "Strip, package, and checksum" step below reads from
+      # `target/${{ matrix.target }}/release/` (the bare triple) either way.
       - name: Build release binary
         shell: bash
         # SKIP_UI_BUILD is a per-step env var set from the matrix field.
@@ -629,7 +750,7 @@ jobs:
         env:
           SKIP_UI_BUILD: ${{ matrix.skip_ui_build && '1' || '' }}
         run: |
-          CARGO_ARGS="-p ${{ matrix.cargo_pkg }} --release --target ${{ matrix.target }}"
+          CARGO_ARGS="-p ${{ matrix.cargo_pkg }} --release"
 
           if [[ "${{ matrix.no_default_features }}" == "true" ]]; then
             CARGO_ARGS="$CARGO_ARGS --no-default-features"
@@ -639,21 +760,26 @@ jobs:
             CARGO_ARGS="$CARGO_ARGS --features ${{ matrix.cargo_features }}"
           fi
 
-          echo "Running: cargo build $CARGO_ARGS"
-          # SC2086 is intentional: CARGO_ARGS is word-split on purpose (flag list).
-          # shellcheck disable=SC2086
-          cargo build $CARGO_ARGS
+          if [[ "${{ matrix.variant }}" == "linux-zigbuild" ]]; then
+            echo "Running: cargo zigbuild $CARGO_ARGS --target ${{ matrix.zig_target }}"
+            # SC2086 is intentional: CARGO_ARGS is word-split on purpose (flag list).
+            # shellcheck disable=SC2086
+            cargo zigbuild $CARGO_ARGS --target ${{ matrix.zig_target }}
+          else
+            echo "Running: cargo build $CARGO_ARGS --target ${{ matrix.target }}"
+            # shellcheck disable=SC2086
+            cargo build $CARGO_ARGS --target ${{ matrix.target }}
+          fi
 
       # ── Strip + package ──────────────────────────────────────────────────────
       # Strips each binary to reduce asset size, packages them into a .tar.gz
       # alongside LICENSE and README.md, and computes a .sha256 checksum.
       #
       # Asset naming: <crate>-<version>-<asset_suffix>.tar.gz
-      #   Standard:  trusty-analyze-0.5.0-aarch64-apple-darwin.tar.gz
-      #   AL2023:    trusty-analyze-0.5.0-x86_64-linux-al2023.tar.gz
-      #
-      # AL2023 note: the asset README includes a note that ORT_DYLIB_PATH must
-      # be set at runtime to point at a compatible libonnxruntime.so.
+      #   macOS:        trusty-analyze-0.5.0-aarch64-apple-darwin.tar.gz
+      #   Linux x86_64: trusty-analyze-0.5.0-x86_64-unknown-linux-gnu.tar.gz  (glibc 2.17 baseline)
+      #   Linux arm64:  trusty-analyze-0.5.0-aarch64-unknown-linux-gnu.tar.gz (glibc 2.17 baseline, best-effort — issue #2037)
+      #   AL2023:       trusty-analyze-0.5.0-x86_64-linux-al2023.tar.gz
       - name: Strip, package, and checksum
         id: package
         shell: bash
@@ -684,18 +810,26 @@ jobs:
           [[ -f "crates/${CRATE}/README.md" ]]                 && cp "crates/${CRATE}/README.md" "${STAGING_DIR}/" || true
           [[ ! -f "crates/${CRATE}/README.md" && -f "README.md" ]] && cp "README.md" "${STAGING_DIR}/" || true
 
-          # AL2023 variant: append a runtime note about ORT_DYLIB_PATH.
+          # load-dynamic variants: append a runtime note about ORT_DYLIB_PATH.
+          # Covers BOTH the AL2023 leg (x86_64) and the linux-zigbuild aarch64
+          # leg for ORT-bundling crates (issue #2037 — that leg reuses the
+          # same load-dynamic feature set since bundled-ort has no aarch64
+          # build-time binary to download; see file-header comment).
           # The exact --features flag varies by crate:
           #   trusty-search:  --no-default-features --features load-dynamic
           #   trusty-analyze: --no-default-features --features http-server,load-dynamic
           # matrix.cargo_features holds the correct value for this matrix entry.
-          if [[ "${{ matrix.variant }}" == "al2023" ]]; then
-            AL2023_BUILD_FEATURES="${{ matrix.cargo_features }}"
+          LOAD_DYNAMIC_BUILD_FEATURES="${{ matrix.cargo_features }}"
+          if [[ "${LOAD_DYNAMIC_BUILD_FEATURES}" == *"load-dynamic"* ]]; then
+            case "${TARGET}" in
+              aarch64-*) ORT_ARCH="aarch64" ;;
+              *)         ORT_ARCH="x64" ;;
+            esac
             {
-              printf 'Amazon Linux 2023 / glibc < 2.38 variant -- load-dynamic ORT build\n'
-              printf '=====================================================================\n'
+              printf 'Linux load-dynamic ORT build (portable across glibc versions)\n'
+              printf '===============================================================\n'
               printf 'This binary was compiled with:\n'
-              printf '  --no-default-features --features %s\n' "${AL2023_BUILD_FEATURES}"
+              printf '  --no-default-features --features %s\n' "${LOAD_DYNAMIC_BUILD_FEATURES}"
               printf '\n'
               printf 'It does NOT bundle ONNX Runtime static libraries; instead it dlopen()s\n'
               printf 'libonnxruntime.so at startup.\n'
@@ -703,13 +837,13 @@ jobs:
               printf 'REQUIRED at runtime:\n'
               printf '  export ORT_DYLIB_PATH=/path/to/libonnxruntime.so\n'
               printf '\n'
-              printf 'Compatible ORT build: 1.20.1 linux-x64 (Ubuntu 20.04 / glibc 2.31)\n'
+              printf 'Compatible ORT build: 1.20.1 linux-%s (Ubuntu 20.04 / glibc 2.31)\n' "${ORT_ARCH}"
               printf '  https://github.com/microsoft/onnxruntime/releases/tag/v1.20.1\n'
               printf '\n'
               printf 'Example install:\n'
-              printf '  curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz \\\n'
+              printf '  curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-%s-1.20.1.tgz \\\n' "${ORT_ARCH}"
               printf '    | tar xz -C /opt\n'
-              printf '  export ORT_DYLIB_PATH=/opt/onnxruntime-linux-x64-1.20.1/lib/libonnxruntime.so.1.20.1\n'
+              printf '  export ORT_DYLIB_PATH=/opt/onnxruntime-linux-%s-1.20.1/lib/libonnxruntime.so.1.20.1\n' "${ORT_ARCH}"
             } > "${STAGING_DIR}/ORT-RUNTIME-NOTE.txt"
           fi
 
