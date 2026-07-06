@@ -181,6 +181,16 @@ documentation.
 └───────────────────────────────────────────────────────────────┘
 ```
 
+## Getting Started
+
+**New to trusty-tools?**
+
+- **Engineers:** Start with [**Install and Run trusty-mpm (tm) on Your Laptop**](docs/getting-started/install-and-run-tm.md) for the quickest path to a working session.
+- **Migrating from claude-mpm:** Read [**claude-mpm vs trusty-mpm — Differences & Install**](docs/getting-started/claude-mpm-vs-trusty-mpm.md) to understand what changed and how to migrate.
+- **Developers:** Consult [**Build & Test Commands**](#build--test-commands) below.
+
+---
+
 ## Installation
 
 ### One-liner: `curl | sh` Bootstrap Installer
