@@ -164,7 +164,9 @@ pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
 ///
 /// [`is_reapable_orphan`]: crate::service::orphan_reaper::is_reapable_orphan
 pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
-    use crate::service::orphan_reaper::{is_reapable_orphan, reap_interval_secs, REAP_INTERVAL_ENV};
+    use crate::service::orphan_reaper::{
+        is_reapable_orphan, reap_interval_secs, REAP_INTERVAL_ENV,
+    };
     let Some(secs) = reap_interval_secs() else {
         tracing::info!("orphan-reaper: disabled via {REAP_INTERVAL_ENV}=0");
         return;
@@ -211,7 +213,9 @@ pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
                 }
             }
             if reaped > 0 {
-                tracing::info!("orphan-reaper: reaped {reaped} orphaned registration(s) this cycle");
+                tracing::info!(
+                    "orphan-reaper: reaped {reaped} orphaned registration(s) this cycle"
+                );
             }
         }
     });

@@ -269,7 +269,11 @@ mod tests {
 
         let orphan_ids: Vec<&str> = orphans.iter().map(|e| e.id.as_str()).collect();
         let kept_ids: Vec<&str> = kept.iter().map(|e| e.id.as_str()).collect();
-        assert_eq!(orphan_ids, ["legacy"], "only the dead legacy root is reaped");
+        assert_eq!(
+            orphan_ids,
+            ["legacy"],
+            "only the dead legacy root is reaped"
+        );
         assert!(
             kept_ids.contains(&"colocated"),
             "colocated orphan must be preserved for relocation"
