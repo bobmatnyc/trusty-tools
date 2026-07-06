@@ -14,6 +14,7 @@
 
 pub mod auto_update;
 pub mod config;
+pub mod dependency_graph;
 pub mod doctor;
 pub mod ensure;
 pub mod install;

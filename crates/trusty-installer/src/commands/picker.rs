@@ -16,7 +16,8 @@
 //! interactive I/O surface (`prompt_picker`) is side-effect-only and validated
 //! manually.
 
-use crate::commands::stable_set::StableMember;
+use crate::commands::dependency_graph::describe_added;
+use crate::commands::stable_set::{select_members_transitive, StableMember};
 
 /// A short human-readable description for each stable-set member.
 ///
@@ -103,18 +104,23 @@ pub fn parse_selection(input: &str, n: usize) -> Result<Vec<usize>, String> {
 /// What: Prints a numbered list of `components` (index, crate name, description)
 /// and a selection prompt. Accepts `all`, `none`/empty, or comma/space-separated
 /// 1-based indices. On invalid input: re-prompts once with an error note, then
-/// returns an error if the second attempt also fails. On success returns the
-/// selected [`StableMember`] slice in stable-set order.
+/// returns an error if the second attempt also fails. On success, expands the
+/// chosen components over the runtime dependency graph (#2036) — auto-selecting
+/// (and announcing to stderr) any member required by a chosen one that the
+/// operator didn't pick themselves — and returns the resulting
+/// [`StableMember`] list in stable-set order. An empty choice (`none`/empty
+/// input) is returned as-is (never expanded to "everything").
 ///
-/// Test: Side-effect-only (stderr + stdin); `parse_selection` is unit-tested.
+/// Test: Side-effect-only (stderr + stdin); `parse_selection` and the
+/// dependency expansion (`dependency_graph::tests`) are unit-tested.
 pub fn prompt_picker(components: &[StableMember]) -> anyhow::Result<Vec<StableMember>> {
     use std::io::Write;
 
     print_menu(components);
 
     let first = read_line()?;
-    match parse_selection(&first, components.len()) {
-        Ok(indices) => Ok(indices.into_iter().map(|i| components[i].clone()).collect()),
+    let chosen = match parse_selection(&first, components.len()) {
+        Ok(indices) => indices.into_iter().map(|i| components[i].clone()).collect(),
         Err(e) => {
             // Re-prompt once with the error note.
             eprintln!("  (invalid: {e} — try again or type 'all'/'none')");
@@ -124,9 +130,39 @@ pub fn prompt_picker(components: &[StableMember]) -> anyhow::Result<Vec<StableMe
             let indices = parse_selection(&second, components.len()).map_err(|e2| {
                 anyhow::anyhow!("invalid selection: {e2} (aborting — re-run tctl install)")
             })?;
-            Ok(indices.into_iter().map(|i| components[i].clone()).collect())
+            indices.into_iter().map(|i| components[i].clone()).collect()
         }
+    };
+    Ok(expand_with_dependencies(chosen))
+}
+
+/// Expand a picker choice to include its runtime dependencies (#2036).
+///
+/// Why: A picker that lets the operator select `trusty-mpm` alone but not its
+/// runtime deps would recreate the exact gap #2036 fixes for the non-picker
+/// (`tctl install <names>`) path. Separated from `prompt_picker` so the
+/// dependency-expansion logic is reachable without stdin/stderr in tests.
+///
+/// What: An empty `chosen` is returned unchanged (no picker selection means
+/// "install nothing", not "install everything"). Otherwise resolves `chosen`'s
+/// crate names through [`select_members_transitive`] (against the full
+/// [`crate::commands::stable_set::stable_set`], independent of what subset
+/// `components` showed), prints one "adding …" line per distinct requester
+/// group via [`describe_added`], and returns the expanded, topologically
+/// ordered member list.
+///
+/// Test: `tests::expand_with_dependencies_pulls_in_mpm_deps`,
+/// `tests::expand_with_dependencies_noop_for_empty`.
+fn expand_with_dependencies(chosen: Vec<StableMember>) -> Vec<StableMember> {
+    if chosen.is_empty() {
+        return chosen;
     }
+    let names: Vec<String> = chosen.iter().map(|m| m.crate_name.clone()).collect();
+    let resolved = select_members_transitive(&names);
+    for line in describe_added(&resolved.added) {
+        eprintln!("  {line}");
+    }
+    resolved.members
 }
 
 /// Print the numbered component menu to stderr.
@@ -307,5 +343,47 @@ mod tests {
             member_description("nonexistent-crate"),
             "trusty-* component"
         );
+    }
+
+    // ── expand_with_dependencies (#2036) ─────────────────────────────────────
+
+    /// Why: Picking trusty-mpm alone in the picker must pull in its runtime
+    /// deps, same as the non-interactive `tctl install trusty-mpm` path.
+    /// What: Chooses only the trusty-mpm `StableMember`; asserts the expanded
+    /// result also contains trusty-memory and trusty-search, in stable-set order.
+    /// Test: This is the test.
+    #[test]
+    fn expand_with_dependencies_pulls_in_mpm_deps() {
+        let mpm = stable_set()
+            .into_iter()
+            .find(|m| m.crate_name == "trusty-mpm")
+            .expect("trusty-mpm in stable set");
+        let expanded = expand_with_dependencies(vec![mpm]);
+        let names: Vec<String> = expanded.into_iter().map(|m| m.crate_name).collect();
+        assert_eq!(names, vec!["trusty-search", "trusty-memory", "trusty-mpm"]);
+    }
+
+    /// Why: An empty picker choice ("none"/empty input) means "install
+    /// nothing" and must NOT be expanded to the whole stable set (which is
+    /// what `select_members_transitive(&[])` would otherwise return).
+    /// What: Passes an empty `Vec`; asserts the result is still empty.
+    /// Test: This is the test.
+    #[test]
+    fn expand_with_dependencies_noop_for_empty() {
+        assert!(expand_with_dependencies(Vec::new()).is_empty());
+    }
+
+    /// Why: A leaf choice (no dependents) must pass through unchanged.
+    /// What: Chooses only tga; asserts the expanded result is still `[tga]`.
+    /// Test: This is the test.
+    #[test]
+    fn expand_with_dependencies_noop_for_leaf() {
+        let tga = stable_set()
+            .into_iter()
+            .find(|m| m.crate_name == "tga")
+            .expect("tga in stable set");
+        let expanded = expand_with_dependencies(vec![tga]);
+        let names: Vec<String> = expanded.into_iter().map(|m| m.crate_name).collect();
+        assert_eq!(names, vec!["tga"]);
     }
 }

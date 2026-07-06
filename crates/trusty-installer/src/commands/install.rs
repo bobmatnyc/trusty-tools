@@ -24,9 +24,10 @@
 use serde::Serialize;
 use trusty_progress::{Component, ComponentTracker};
 
+use super::dependency_graph::describe_added;
 use super::progress_ui::{narrator, prompt_yes_no};
 use super::runtime::block_on;
-use super::stable_set::{select_members, StableMember};
+use super::stable_set::{select_members_transitive, StableMember};
 use crate::output::render_json;
 
 /// One member's install outcome for the `--json` report.
@@ -129,7 +130,8 @@ pub fn run(members: &[String], yes: bool, json: bool) -> i32 {
         members
     };
 
-    let (selected, unknown) = select_members(members);
+    let resolved = select_members_transitive(members);
+    let (selected, unknown) = (resolved.members, resolved.unknown);
 
     if !unknown.is_empty() {
         let msg = format!("unknown member(s): {}", unknown.join(", "));
@@ -147,6 +149,16 @@ pub fn run(members: &[String], yes: bool, json: bool) -> i32 {
             eprintln!("tctl install: {msg}");
         }
         return 3;
+    }
+
+    // #2036: surface members pulled in transitively by a runtime dependency
+    // (e.g. "adding trusty-memory, trusty-search (required by trusty-mpm)")
+    // before the blast-radius confirmation, so the operator knows why the set
+    // grew beyond what they typed.
+    if !json {
+        for line in describe_added(&resolved.added) {
+            eprintln!("tctl install: {line}");
+        }
     }
 
     // Phase 6: detect and optionally install external prerequisites.
