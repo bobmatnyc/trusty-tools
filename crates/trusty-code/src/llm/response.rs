@@ -55,12 +55,28 @@ pub struct ChatChoice {
 /// Why: Wraps the `choices` array and `usage` block so callers receive a single
 /// typed value from `LlmClient::chat`.
 /// What: `id` is the response ID; `choices` contains the generated turns;
-/// `usage` carries token accounting.
-/// Test: `chat_response_deserialises_fixture`.
+/// `usage` carries token accounting. `model` (#1475 bug 2) is the RESOLVED
+/// model slug the provider actually served the request with — OpenRouter
+/// (and the underlying OpenAI-compatible API) echoes this at the top level
+/// of every response, which can differ from the request's `model` field
+/// when routing/fallback resolves to a concrete backing model (e.g. an
+/// `:auto` or multi-model routing slug). `#[serde(default)]` so fixtures
+/// and mocks that omit it still deserialise — see
+/// [`Self::resolved_model`] for the fallback this enables.
+/// Test: `chat_response_deserialises_fixture`,
+/// `resolved_model_prefers_response_model_over_requested`,
+/// `resolved_model_falls_back_to_requested_when_absent`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatResponse {
     /// Opaque response identifier from the provider.
     pub id: String,
+
+    /// The resolved model slug the provider actually used (#1475 bug 2).
+    /// Empty when the response omits it (older fixtures, some mocks) —
+    /// callers should use [`Self::resolved_model`] rather than this field
+    /// directly.
+    #[serde(default)]
+    pub model: String,
 
     /// Generated choices (one per `n`; we always request `n = 1`).
     pub choices: Vec<ChatChoice>,
@@ -114,6 +130,26 @@ impl ChatResponse {
     /// Test: `chat_response_usage_into_token_usage`.
     pub fn token_usage(self) -> TokenUsage {
         self.usage.into_token_usage()
+    }
+
+    /// The model slug to attribute this turn to for recording/pricing
+    /// (#1475 bug 2): the RESOLVED model the provider reports, falling back
+    /// to the originally `requested` slug when the response didn't carry
+    /// one.
+    ///
+    /// Why: `run_task::recorder::RecordingLlmClient` and any future
+    /// transcript recorder must record what the provider actually ran, not
+    /// merely what was asked for — a routing/fallback slug (`:auto`, a
+    /// multi-model alias) can resolve to a different concrete model.
+    /// What: Returns `&self.model` when non-empty, else `requested`.
+    /// Test: `resolved_model_prefers_response_model_over_requested`,
+    /// `resolved_model_falls_back_to_requested_when_absent`.
+    pub fn resolved_model<'a>(&'a self, requested: &'a str) -> &'a str {
+        if self.model.is_empty() {
+            requested
+        } else {
+            &self.model
+        }
     }
 }
 
@@ -236,5 +272,30 @@ mod tests {
         assert!(resp.first_text().is_none());
         assert!(resp.first_tool_calls().is_empty());
         assert!(resp.finish_reason().is_none());
+    }
+
+    /// `resolved_model` prefers the response's own `model` field when
+    /// present, even if it differs from what was requested (#1475 bug 2).
+    #[test]
+    fn resolved_model_prefers_response_model_over_requested() {
+        let fixture =
+            r#"{"id":"x","model":"openai/gpt-4o-mini-2024-07-18","choices":[],"usage":{}}"#;
+        let resp: ChatResponse = serde_json::from_str(fixture).expect("deserialise");
+        assert_eq!(
+            resp.resolved_model("openai/gpt-4o-mini"),
+            "openai/gpt-4o-mini-2024-07-18"
+        );
+    }
+
+    /// `resolved_model` falls back to the requested slug when the response
+    /// omits `model` (older fixtures, some mocks) (#1475 bug 2).
+    #[test]
+    fn resolved_model_falls_back_to_requested_when_absent() {
+        let fixture = r#"{"id":"x","choices":[],"usage":{}}"#;
+        let resp: ChatResponse = serde_json::from_str(fixture).expect("deserialise");
+        assert_eq!(
+            resp.resolved_model("openai/gpt-4o-mini"),
+            "openai/gpt-4o-mini"
+        );
     }
 }

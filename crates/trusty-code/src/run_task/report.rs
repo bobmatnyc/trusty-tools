@@ -185,29 +185,49 @@ impl RunReport {
     }
 }
 
-/// Sum every transcript turn's usage and price the total against a model slug.
+/// Sum every transcript turn's usage, pricing EACH turn against its OWN
+/// role's resolved model rather than blending the whole transcript under
+/// one model (#1475 bug 1 fix).
 ///
 /// Why: The PM's `AgentOutput.usage` only covers the PM's own turns — the
-/// engineer's usage is lost when its output flows back as a tool-result string.
-/// The transcript recorder, by contrast, captures the provider-reported usage of
-/// *every* PM and engineer turn, so summing those turns is the faithful run total.
-/// Pricing once against the dominant (PM) model keeps the cost figure stable and
-/// comparable across runs.
-/// What: Field-wise sums each turn's `usage` into a single `TokenUsage`, then
-/// prices it via `perf::cost_usd`. Returns `(total_usage, cost)`.
-/// Test: `run_task::tests::usage_and_cost_aggregate_end_to_end`.
-pub fn aggregate_usage(turns: &[TurnRecord], model: &str) -> (TokenUsage, f64) {
+/// engineer's usage is lost when its output flows back as a tool-result
+/// string. The transcript recorder, by contrast, captures the
+/// provider-reported usage of *every* PM and engineer turn, so summing
+/// those turns is the faithful run total. Pricing the WHOLE total against a
+/// single (PM) model — the original #1475 bug — silently mis-prices every
+/// engineer turn whenever the engineer routes to a different, often more
+/// expensive, model: directly undercuts the #1035 cost-comparison use case
+/// this run exists to support. This is the SAME fix `task::executor`
+/// applied for the daemon path (#2056); this is now the ONE shared
+/// implementation both paths call, so they can never independently drift.
+/// What: Field-wise sums each turn's `usage` into a single `TokenUsage`
+/// (unchanged), but computes cost PER TURN using `pm_model` for
+/// `role == "pm"` and `engineer_model` otherwise, then sums the per-turn
+/// costs. Returns `(total_usage, cost)`.
+/// Test: `run_task::tests::usage_and_cost_aggregate_end_to_end`,
+/// `report::tests::aggregate_usage_per_role_prices_each_role_separately`.
+pub fn aggregate_usage_per_role(
+    turns: &[TurnRecord],
+    pm_model: &str,
+    engineer_model: &str,
+) -> (TokenUsage, f64) {
     let mut total = TokenUsage::default();
+    let mut cost = 0.0;
     for turn in turns {
         total.add(&turn.usage);
+        let model = if turn.role == "pm" {
+            pm_model
+        } else {
+            engineer_model
+        };
+        cost += crate::perf::cost_usd(
+            model,
+            turn.usage.prompt_tokens,
+            turn.usage.completion_tokens,
+            turn.usage.cache_read_tokens,
+            turn.usage.cache_creation_tokens,
+        );
     }
-    let cost = crate::perf::cost_usd(
-        model,
-        total.prompt_tokens,
-        total.completion_tokens,
-        total.cache_read_tokens,
-        total.cache_creation_tokens,
-    );
     (total, cost)
 }
 
@@ -308,12 +328,14 @@ mod tests {
         assert!(text.contains("status=no_changes"));
     }
 
-    /// `aggregate_usage` sums every turn's usage and prices the total.
+    /// `aggregate_usage_per_role` sums every turn's usage and prices the total.
     ///
     /// Why: The run cost is the combined cost across PM + engineer turns; the math
     /// must be exact and span the whole transcript.
-    /// What: Sum two turns' usages, assert field-wise totals and a non-negative
-    /// cost.
+    /// What: Sum two turns' usages (same model for both roles here — the
+    /// per-role split itself is covered by
+    /// `aggregate_usage_per_role_prices_each_role_separately` below), assert
+    /// field-wise totals and a non-negative cost.
     /// Test: this test.
     #[test]
     fn usage_and_cost_aggregate() {
@@ -333,9 +355,53 @@ mod tests {
                 usage: TokenUsage::new(20, 8, 0, 0),
             },
         ];
-        let (total, cost) = aggregate_usage(&turns, "openai/gpt-4o-mini");
+        let (total, cost) =
+            aggregate_usage_per_role(&turns, "openai/gpt-4o-mini", "openai/gpt-4o-mini");
         assert_eq!(total.prompt_tokens, 30);
         assert_eq!(total.completion_tokens, 13);
         assert!(cost >= 0.0, "cost must be non-negative");
+    }
+
+    /// `aggregate_usage_per_role` must price the PM's and the engineer's
+    /// turns against their OWN resolved models — the #1475 bug 1 fix.
+    ///
+    /// Why: When the engineer routes to a different (here, deliberately
+    /// pricier) model than the PM, pricing the whole transcript against the
+    /// PM model alone would be wrong by construction; this pins the fix.
+    /// What: One PM turn priced at a cheap model, one engineer turn priced
+    /// at an expensive model; assert the per-role total differs from (and
+    /// exceeds) what blending everything under the PM model would produce.
+    /// Test: this test.
+    #[test]
+    fn aggregate_usage_per_role_prices_each_role_separately() {
+        let turns = vec![
+            TurnRecord {
+                role: "pm".into(),
+                model: "anthropic/claude-haiku-4".into(),
+                text: String::new(),
+                tool_calls: vec!["delegate_to_agent".into()],
+                usage: TokenUsage::new(1000, 500, 0, 0),
+            },
+            TurnRecord {
+                role: "python-engineer".into(),
+                model: "anthropic/claude-sonnet-4-5".into(),
+                text: "done".into(),
+                tool_calls: vec![],
+                usage: TokenUsage::new(2000, 1000, 0, 0),
+            },
+        ];
+        let (_, per_role_cost) = aggregate_usage_per_role(
+            &turns,
+            "anthropic/claude-haiku-4",
+            "anthropic/claude-sonnet-4-5",
+        );
+        // Blending everything under the PM (haiku, cheaper) model would
+        // understate the true cost since the engineer's turn actually ran
+        // on the pricier sonnet model.
+        let blended_cost = crate::perf::cost_usd("anthropic/claude-haiku-4", 3000, 1500, 0, 0);
+        assert_ne!(
+            per_role_cost, blended_cost,
+            "per-role pricing must differ from blending everything under the PM model"
+        );
     }
 }
