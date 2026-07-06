@@ -24,7 +24,7 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use crate::core::names::{SessionNameError, build_managed_session_name, leaf_slug_from_dir};
+use crate::core::names::SessionNameError;
 use crate::core::sm::control::Submit;
 
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
@@ -176,7 +176,7 @@ impl SessionManager {
     ///
     /// Why: `POST /api/v1/sessions/managed` needs the full create-name-record-spawn
     /// flow in one operation so the HTTP handler stays thin.
-    /// What: derives the tmux name via [`build_managed_session_name`]
+    /// What: derives the tmux name via [`Self::resolve_session_name`]
     /// (`tm-<project-leaf>-NN`, #1955), creates the tmux session via the driver,
     /// persists a [`SessionRecord`] in state `Provisioning`, and returns it.
     /// The runtime backend defaults to [`crate::runtime::RuntimeKind::ClaudeCode`]
@@ -204,205 +204,6 @@ impl SessionManager {
             false,
         )
         .await
-    }
-
-    /// Create a new managed session with a caller-supplied session id.
-    ///
-    /// Why: the `spawn_session` handler must provision the workspace BEFORE
-    /// creating the tmux session so that the tmux pane is rooted in the
-    /// provisioned directory (not `$HOME`). Provisioning requires the session id
-    /// upfront (it is embedded in the workspace path). This method lets the
-    /// handler pre-generate the id, provision, and then call here with `cwd =
-    /// Some(workspace_path)` so `tmux new-session -c <workspace>` is issued.
-    /// What: identical to [`create`] except the id and runtime backend are
-    /// supplied by the caller. Creates the tmux session at `cwd` via the driver,
-    /// persists a [`SessionRecord`] in state `Provisioning` carrying `runtime`,
-    /// and returns it. The `ephemeral` flag (#1508) tags test/throwaway sessions
-    /// so the bulk-teardown and age-based reap paths may decommission them
-    /// automatically; real callers pass `false`. The `owned` flag (#1511) must be
-    /// `true` ONLY when the SM provisioned the workspace via git clone; local-path
-    /// spawn, adopt, and reconcile all pass `false` (safe default — never delete).
-    /// Test: `spawn_session_tmux_cwd_is_workspace` in session_manager/tests.rs;
-    /// `handler_spawn_creates_tmux_at_workspace_cwd` in session_manager_mvp.rs;
-    /// `manager_create_persists_runtime` in session_manager/tests.rs;
-    /// `manager_create_persists_ephemeral_flag` in session_manager/tests.rs.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn create_with_id(
-        &self,
-        id: ManagedSessionId,
-        task: String,
-        cwd: Option<PathBuf>,
-        name_hint: Option<String>,
-        workspace_path: Option<PathBuf>,
-        repo_url: Option<String>,
-        branch: Option<String>,
-        runtime: crate::runtime::RuntimeKind,
-        ephemeral: bool,
-        owned: bool,
-    ) -> Result<SessionRecord, ManagedError> {
-        let cwd = cwd.unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp")));
-        // Name selection priority (issue #1955, supersedes the #1789/#1791
-        // `tmpm-<repo-slug>-<8hex>` scheme):
-        //   1. Explicit `name_hint` from the user → leaf = sanitized hint
-        //      (treated as a directory-like basename, matching pre-#1955
-        //      behaviour for the hint itself) → `tm-<hint-slug>-NN`.
-        //   2. GitHub-parseable `repo_url`         → leaf = repo name →
-        //      `tm-<repo>-NN` (project-identifiable; preferred over the cwd
-        //      basename because for the clone path `cwd` is
-        //      `<workspace-root>/<owner>/<repo>/<session-id>/`, whose BASENAME
-        //      is the session UUID — not useful).
-        //   3. Otherwise                            → leaf = basename(cwd), or
-        //      the literal `"local"` if that sanitizes to empty (e.g. cwd is
-        //      `/` or unset and fell back to `$HOME`'s unusable basename).
-        // Every branch now allocates a per-project serial (issue #1955) so
-        // concurrent sessions for the SAME leaf get distinguishable `-01`,
-        // `-02`, `-03` names instead of relying solely on the raw tmux
-        // `NameCollision` error — the hint path previously had NO uniqueness
-        // suffix at all.
-        let mut existing_names = self.names_for_serial_allocation().await?;
-        let leaf_hint = name_hint
-            .as_deref()
-            .map(|h| leaf_slug_from_dir(Path::new(h)));
-        let github_project = repo_url
-            .as_deref()
-            .and_then(trusty_common::github_path::parse_github_path)
-            .map(|gh| gh.repo);
-
-        // Allocate a name, then check for a live tmux collision (belt-and-
-        // suspenders: the serial allocation above should already guarantee
-        // freedom from collision, but a concurrent create for the same leaf
-        // between the allocation read and this check is possible under load).
-        // Why a bounded retry loop (#1966 review follow-up) rather than a
-        // single check-and-fail: a lost race is recoverable — feeding the
-        // just-collided name back into `existing_names` makes the next
-        // allocation pick the following free serial, so a concurrent create
-        // only costs an extra loop iteration instead of a hard user-visible
-        // failure. `NameCollision` is still returned if every attempt in the
-        // bounded window collides (e.g. sustained, pathological contention),
-        // so this can never loop forever.
-        //
-        // Residual race window (KNOWN, not closed by this loop): there is
-        // still a gap between THIS `session_exists` check and the
-        // `create_session` call a few lines below. Note this does NOT
-        // surface as a `TmuxUnavailable` error the way a naive analysis might
-        // suggest — `create_session` shells out to `tmux new-session -A -d`
-        // (see `crate::core::tmux::tmux_argv`), and `-A` makes tmux ATTACH to
-        // an existing session of the same name instead of failing. So if two
-        // concurrent creates lose this exact race, both succeed, but the
-        // second one silently attaches to the first one's pane — an aliasing
-        // risk (two `SessionRecord`s could end up pointing at one tmux
-        // session), not a crash. Closing this fully would require a
-        // distributed lock across the external `tmux` process (e.g. a
-        // per-name lock file) — out of scope for this naming-scheme ticket;
-        // tracked as a follow-up if it proves to matter in practice.
-        const MAX_NAME_ALLOCATION_ATTEMPTS: u8 = 5;
-        let mut tmux_name = None;
-        for _ in 0..MAX_NAME_ALLOCATION_ATTEMPTS {
-            let candidate = if let Some(ref leaf) = leaf_hint {
-                // Explicit name hint from the user — treat the hint as a path
-                // basename (callers may pass a bare "ticket-1234" or a
-                // directory path like "/repos/project"), then allocate a
-                // serial for it same as every other leaf.
-                crate::core::names::build_session_name(leaf, &existing_names)?
-            } else {
-                // Derive project from repo_url if it carries a parseable
-                // GitHub identity; otherwise `build_managed_session_name`
-                // falls back to the basename of `cwd`, then to `"local"`.
-                build_managed_session_name(github_project.as_deref(), &cwd, &existing_names)?
-            };
-            if self.tmux.session_exists(&candidate) {
-                existing_names.push(candidate);
-                continue;
-            }
-            tmux_name = Some(candidate);
-            break;
-        }
-        let Some(tmux_name) = tmux_name else {
-            return Err(ManagedError::NameCollision(format!(
-                "no free `tm-<leaf>-NN` name after {MAX_NAME_ALLOCATION_ATTEMPTS} attempts \
-                 (sustained concurrent creates for the same project)"
-            )));
-        };
-
-        let workdir = cwd.to_string_lossy().to_string();
-        self.tmux
-            .create_session(&tmux_name, &workdir)
-            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
-
-        // OWN the freshly-created tmux session immediately (#1453). From here
-        // until the record is durably persisted, this guard is the session's
-        // sole owner: any early return (e.g. a failing `store.upsert`) drops the
-        // guard and reaps the otherwise-orphaned tmux session. Ownership is
-        // transferred to the persistent store via `disarm` only AFTER upsert
-        // succeeds — closing the window that let 159 orphans accumulate (#1452).
-        let mut tmux_guard =
-            super::session_guard::TmuxSessionGuard::new(tmux_name.clone(), self.tmux.clone());
-
-        // Seed the session↔artifact correlation from what we know at creation
-        // time (worktree path + branch). PR / issue ids accrue later as the
-        // driver pushes work and opens a PR.
-        let mut correlation = crate::driver::SessionCorrelation::new();
-        if let Some(ref ws) = workspace_path {
-            correlation = correlation.with_worktree(ws.clone());
-        }
-        if let Some(ref b) = branch {
-            correlation = correlation.with_branch(b.clone());
-        }
-
-        let record = SessionRecord {
-            id,
-            tmux_name: tmux_name.clone(),
-            cwd,
-            task,
-            state: ManagedSessionState::Provisioning,
-            created_at: Utc::now(),
-            last_activity_at: None,
-            workspace_path,
-            repo_url,
-            branch,
-            pending_decision: None,
-            proposed_default: None,
-            correlation,
-            runtime,
-            ephemeral,
-            // Ownership is set atomically at creation: `true` ONLY when the SM
-            // provisioned the workspace via git clone; local-path spawn (#1502),
-            // adopt (#1433), and reconcile all pass `false` (safe default —
-            // prefer NOT deleting over accidental deletion).
-            workspace_owned: owned,
-            // source_id is set post-creation by the in-project spawn path
-            // (via SessionManager::set_source_id); `create_with_id` itself
-            // never knows the source project — it is set by the caller.
-            source_id: None,
-            claude_session_id: None,
-            scrollback_path: None,
-            last_cwd: None,
-        };
-
-        // Persist the record. On failure the freshly-created tmux session has
-        // NO registry owner — the armed `tmux_guard` above reaps it on the early
-        // return below, preventing the orphan (#1457). The reap itself happens
-        // silently in the guard's `Drop`; log here first so the rollback is
-        // visible in the daemon's stderr logs alongside the other lifecycle
-        // events (never stdout — that carries MCP JSON-RPC framing).
-        if let Err(e) = self.store.write().await.upsert(record.clone()).await {
-            warn!(
-                id = %id,
-                name = %tmux_name,
-                "registry upsert failed; rolling back (reaping) the orphaned tmux session: {e}"
-            );
-            // Returning here drops the still-armed `tmux_guard`, which kills the
-            // session. The original store error propagates unchanged.
-            return Err(ManagedError::from(e));
-        }
-
-        // The record is durably persisted; the store/registry now owns the
-        // session's lifetime. Disarm so the guard's drop is a no-op and the
-        // tracked session is NOT reaped at the end of this request scope (#1453).
-        tmux_guard.disarm();
-
-        info!(id = %id, name = %tmux_name, runtime = %runtime.as_str(), "managed session created");
-        Ok(record)
     }
 
     /// Inject an answer to the session's pending decision.
@@ -923,7 +724,7 @@ impl SessionManager {
     /// so a read-only guard would not compile and the read-only
     /// `cached_all()` alternative would risk a stale serial set.
     /// Test: `manager_serial_reuses_decommissioned_gap` in tests.rs.
-    async fn names_for_serial_allocation(&self) -> Result<Vec<String>, ManagedError> {
+    pub(crate) async fn names_for_serial_allocation(&self) -> Result<Vec<String>, ManagedError> {
         let mut names: Vec<String> = self
             .tmux
             .list_sessions()

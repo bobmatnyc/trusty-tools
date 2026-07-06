@@ -145,10 +145,22 @@ pub async fn spawn_managed(
 /// function is exactly the routing logic `spawn_managed` used to run inline
 /// after `is_local_workdir` detection, before #1919 moved the scope to cover it.
 /// What: local-path fast path (#1433) — if `repo_url` is an existing local
-/// absolute directory, tries in-project detection (#1706, via
-/// `try_inproject_spawn`) first and dispatches to `spawn_managed_inproject` on
-/// a match, else falls through to `spawn_managed_local`. A remote repo URL
-/// (the common case) falls straight through to `spawn_managed_cloned`.
+/// absolute directory, tries in-project DETECTION (#1706, via
+/// `try_inproject_spawn`, which since #2032 only ensures the base clone and
+/// returns `(base_path, owner, repo)` — it no longer creates the worktree
+/// itself). On a match, this function resolves the SEMANTIC tmux name here —
+/// BEFORE the per-session worktree exists — via
+/// `SessionManager::resolve_session_name`, folding in
+/// `inproject::worktree_name_collides` as the extra collision predicate so a
+/// name whose worktree dir/branch already exists is retried with the next
+/// free serial instead of silently colliding. It then creates the worktree at
+/// that resolved name (`inproject::create_session_worktree`) and dispatches to
+/// `spawn_managed_inproject`, threading the resolved name through so
+/// `create_with_id` never re-derives it (issue #2032 — a session's tmux name
+/// is derived in exactly ONE place). Any failure in detection, name
+/// resolution, or worktree creation falls through to `spawn_managed_local`. A
+/// remote repo URL (the common case) falls straight through to
+/// `spawn_managed_cloned`.
 /// Test: exercised transitively by the same tests that covered the inline
 /// version before extraction (HTTP spawn tests, MCP session tests); the
 /// stage-emission behaviour added by #1919 is covered by
@@ -173,18 +185,38 @@ async fn spawn_managed_routed(
         // with a GitHub remote (no `.git`, no remote origin, non-GitHub URL), fall
         // through to the existing local-path spawn.
         let local_path = std::path::Path::new(&params.repo_url);
-        match try_inproject_spawn(local_path, &session_id) {
-            Ok(Some((worktree, owner, repo))) => {
-                return spawn_managed_inproject(
+        match try_inproject_spawn(local_path) {
+            Ok(Some((base, owner, repo))) => {
+                match reserve_inproject_worktree(
                     state,
                     &session_id,
                     &params,
-                    runtime,
-                    worktree,
-                    owner,
-                    repo,
+                    local_path,
+                    &base,
+                    &repo,
                 )
-                .await;
+                .await
+                {
+                    Ok((worktree, reserved_name)) => {
+                        return spawn_managed_inproject(
+                            state,
+                            &session_id,
+                            &params,
+                            runtime,
+                            worktree,
+                            owner,
+                            repo,
+                            reserved_name,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            id = %session_id,
+                            "in-project spawn: {e}; falling back to local-path spawn"
+                        );
+                    }
+                }
             }
             Ok(None) => {
                 // Not a git repo with a GitHub remote — use local-path fast path.
@@ -200,6 +232,52 @@ async fn spawn_managed_routed(
     }
 
     spawn_managed_cloned(state, session_id, params, runtime, config).await
+}
+
+/// Resolve the semantic tmux name and create the per-session worktree for the
+/// in-project spawn path (issue #2032).
+///
+/// Why: split out of [`spawn_managed_routed`] so the name-resolution-then-
+/// worktree-creation sequence — the actual #2032 hoist — reads as one clear
+/// step, and so its two fallible sub-steps (name resolution, worktree
+/// creation) share one error-formatting path back to the caller's
+/// fall-through-to-local-path handling.
+/// What: (1) resolves a collision-free tmux name via
+/// `SessionManager::resolve_session_name`, using `params.name_hint`, the
+/// detected repo name as the GitHub-project fallback (`cwd` is passed only as
+/// the third-priority basename fallback — it is never actually reached here
+/// since the repo name is always `Some`), and
+/// `inproject::worktree_name_collides(base, candidate)` as the extra
+/// collision predicate (so a name whose `.worktrees/<name>` dir or
+/// `session/<name>` branch already exists is retried with the next serial,
+/// not silently reused); (2) creates the worktree at that name via
+/// `inproject::create_session_worktree`. Returns `(worktree_path,
+/// reserved_name)` so the caller can create the tmux session under the SAME
+/// name without re-deriving it.
+/// Test: exercised transitively by the in-project spawn integration tests.
+async fn reserve_inproject_worktree(
+    state: &Arc<DaemonState>,
+    session_id: &ManagedSessionId,
+    params: &SpawnParams,
+    local_path: &std::path::Path,
+    base: &std::path::Path,
+    repo: &str,
+) -> Result<(std::path::PathBuf, String), String> {
+    let mgr = state.session_manager().await;
+    let reserved_name = mgr
+        .resolve_session_name(
+            params.name_hint.as_deref(),
+            Some(repo),
+            local_path,
+            |candidate| super::inproject::worktree_name_collides(base, candidate),
+        )
+        .await
+        .map_err(|e| format!("name resolution failed for session {session_id}: {e}"))?;
+
+    let worktree = super::inproject::create_session_worktree(base, &reserved_name)
+        .map_err(|e| format!("worktree creation failed for session {session_id}: {e}"))?;
+
+    Ok((worktree, reserved_name))
 }
 
 /// The clone-based provisioning tail of [`spawn_managed_routed`] (issue #1904).
@@ -455,21 +533,26 @@ fn find_reusable_inproject_session(
 ///
 /// #1913: unlike `spawn_managed`'s clone path and `spawn_managed_local`, this
 /// path does not go through `WorkspaceProvisioner::provision_in` (there is no
-/// clone step — the worktree already exists via `try_inproject_spawn`), so it
-/// must call [`crate::core::session_launch::prepare_session_with_repo_url`]
-/// itself. Before this fix it never did, so every in-project session silently
-/// got no statusline, no deployed agents/skills, no injected trusty-memory/
+/// clone step — the worktree already exists via `try_inproject_spawn` +
+/// `reserve_inproject_worktree`), so it must call
+/// [`crate::core::session_launch::prepare_session_with_repo_url`] itself.
+/// Before this fix it never did, so every in-project session silently got no
+/// statusline, no deployed agents/skills, no injected trusty-memory/
 /// trusty-search MCP config, and no merged CLAUDE.md.
 /// What: in order — (1) writes `TASK.md` into the worktree; (2) runs
 /// [`prepare_inproject_session`] (best-effort, mirrors `provision_in`'s
 /// non-fatal error handling); (3) creates the tmux session rooted at the
-/// worktree via `create_with_id`; (4) sets `source_id` via `set_source_id`;
-/// (5) runs the FRONT gate (fail-open); (6) marks `Active`; (7) spawns the
-/// runtime. A spawn failure marks the record errored (non-fatal).
+/// worktree via `create_with_reserved_name` (issue #2032 — `reserved_name` was
+/// already resolved by `reserve_inproject_worktree` and used to name the
+/// worktree/branch, so this step reuses it verbatim instead of re-deriving);
+/// (4) sets `source_id` via `set_source_id`; (5) runs the FRONT gate
+/// (fail-open); (6) marks `Active`; (7) spawns the runtime. A spawn failure
+/// marks the record errored (non-fatal).
 /// Test: covered transitively by the in-project spawn integration tests;
 /// `prepare_inproject_session_writes_statusline` in this module's `tests`
 /// submodule exercises the new prep-call in isolation (hermetic — no daemon,
 /// tmux, or git required).
+#[allow(clippy::too_many_arguments)]
 async fn spawn_managed_inproject(
     state: &std::sync::Arc<crate::daemon::state::DaemonState>,
     session_id: &crate::session_manager::ManagedSessionId,
@@ -478,6 +561,7 @@ async fn spawn_managed_inproject(
     worktree: std::path::PathBuf,
     owner: String,
     repo: String,
+    reserved_name: String,
 ) -> Result<crate::session_manager::SessionRecord, String> {
     use crate::core::provisioning_stage::{ProvisioningStage, emit};
     use crate::session_manager::ManagedSessionState;
@@ -542,11 +626,11 @@ async fn spawn_managed_inproject(
     emit(ProvisioningStage::CreatingTmuxSession);
     let mgr = state.session_manager().await;
     let record = mgr
-        .create_with_id(
+        .create_with_reserved_name(
             *session_id,
+            reserved_name,
             params.task.clone(),
             Some(worktree.clone()),
-            params.name_hint.clone(),
             Some(worktree.clone()),
             Some(synthetic_repo_url),
             None,
@@ -1337,6 +1421,102 @@ mod tests {
             ],
             "prepare_inproject_session's call tree must emit exactly these \
              four stages, in order, when a StageEmitter scope is active"
+        );
+    }
+
+    /// Issue #2032: [`reserve_inproject_worktree`] must name the per-session
+    /// worktree/branch after the SEMANTIC tmux name (`tm-<repo>-NN`), not the
+    /// raw session UUID — and the returned name must be the exact name used
+    /// for both the worktree directory and (via `create_session_worktree`)
+    /// the `session/<name>` branch.
+    ///
+    /// Why hermetic: `DaemonState::with_root_isolated_managed` (the same
+    /// helper `tests/session_manager_mvp.rs` uses) gives this test a real
+    /// `SessionManager` backed by `FakeNoopTmuxDriver` — no real tmux, no
+    /// production store — while a real temp git repo stands in for the base
+    /// clone so `create_session_worktree`'s `git worktree add` actually runs.
+    /// What: builds a real git repo (init + one commit) as `base`, calls
+    /// `reserve_inproject_worktree` with `repo = "trusty-tools"`, and asserts
+    /// (a) the resolved name matches `tm-trusty-tools-01` (NOT a UUID); (b)
+    /// the returned worktree path ends with that exact name; (c) the
+    /// worktree directory actually exists on disk.
+    /// Test: this function IS the test.
+    #[tokio::test]
+    async fn reserve_inproject_worktree_uses_semantic_name_not_uuid() {
+        let data_root = tempfile::TempDir::new().expect("tmp data root");
+        let state = std::sync::Arc::new(
+            crate::daemon::state::DaemonState::with_root_isolated_managed(
+                data_root.path().to_path_buf(),
+            )
+            .await,
+        );
+
+        let base_dir = tempfile::TempDir::new().expect("tmp base dir");
+        let base = base_dir.path().to_path_buf();
+        assert!(
+            std::process::Command::new("git")
+                .arg("init")
+                .current_dir(&base)
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false),
+            "git init must succeed in this test fixture"
+        );
+        for (k, v) in [("user.email", "t@example.com"), ("user.name", "T")] {
+            let _ = std::process::Command::new("git")
+                .args(["-C", base.to_str().unwrap(), "config", k, v])
+                .status();
+        }
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-C",
+                    base.to_str().unwrap(),
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "init",
+                ])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false),
+            "git commit must succeed in this test fixture"
+        );
+
+        let session_id = ManagedSessionId::new();
+        let params = SpawnParams {
+            repo_url: base.to_string_lossy().into_owned(),
+            git_ref: "main".into(),
+            task: "task".into(),
+            name_hint: None,
+            runtime: None,
+            ephemeral: Some(true),
+            mcp_initiated: false,
+        };
+
+        let (worktree, reserved_name) =
+            reserve_inproject_worktree(&state, &session_id, &params, &base, &base, "trusty-tools")
+                .await
+                .expect("reserve_inproject_worktree must succeed against a real git repo");
+
+        assert_eq!(
+            reserved_name, "tm-trusty-tools-01",
+            "the resolved name must be the SEMANTIC tm-<repo>-NN form, not the raw session UUID"
+        );
+        assert!(
+            worktree.ends_with(&reserved_name),
+            "the worktree path must end with the resolved semantic name, got {}",
+            worktree.display()
+        );
+        assert!(
+            !worktree.to_string_lossy().contains(&session_id.to_string()),
+            "the worktree path must NOT contain the raw session UUID (issue #2032), got {}",
+            worktree.display()
+        );
+        assert!(
+            worktree.is_dir(),
+            "the worktree directory must exist on disk, got {}",
+            worktree.display()
         );
     }
 }

@@ -205,8 +205,7 @@ fn migrate_old_layout_aside_ignores_empty_and_git_dirs() {
 fn try_inproject_spawn_returns_none_for_non_git_path() {
     // A directory that is not a git repo must return Ok(None), not an error.
     let tmp = std::env::temp_dir();
-    let id = ManagedSessionId::new();
-    let result = try_inproject_spawn(&tmp, &id);
+    let result = try_inproject_spawn(&tmp);
     assert!(
         matches!(result, Ok(None)),
         "non-git path should yield Ok(None), got {result:?}"
@@ -257,17 +256,19 @@ fn base_clone_path_resolves_to_canonical_root() {
 
 #[test]
 fn session_worktree_path_uses_dot_prefix() {
-    // create_session_worktree must place the worktree at <base>/.worktrees/<id>
-    // (dot-prefixed) so it is gitignored via .git/info/exclude (#1803).
+    // create_session_worktree must place the worktree at
+    // <base>/.worktrees/<worktree_name> (dot-prefixed) so it is gitignored via
+    // .git/info/exclude (#1803). Since #2032 `worktree_name` is the resolved
+    // SEMANTIC tmux name (e.g. `tm-trusty-tools-01`), not a raw session UUID.
     // We call the PRODUCTION function against a real temporary git repository
     // (with an initial commit so `git worktree add` can branch from HEAD) and
-    // assert: (a) path is under <base>/.worktrees/, (b) ends with session id,
+    // assert: (a) path is under <base>/.worktrees/, (b) ends with the name,
     // (c) the directory actually exists after the call.
     //
     // Non-tautology proof: `expected_parent` is hardcoded as `base.join(".worktrees")`
     // — NOT derived from production code. If `create_session_worktree` changed
     // to `base_path.join("worktrees").join(...)` the `starts_with` assertion
-    // would fail because `base/worktrees/<id>` does NOT start with `base/.worktrees`.
+    // would fail because `base/worktrees/<name>` does NOT start with `base/.worktrees`.
     let tmp = tempfile::TempDir::new().expect("tmp dir");
     let base = tmp.path();
 
@@ -311,8 +312,8 @@ fn session_worktree_path_uses_dot_prefix() {
     assert!(commit.success(), "git commit failed");
 
     // Call the production function.
-    let id = ManagedSessionId::new();
-    let worktree_path = create_session_worktree(base, &id)
+    let name = "tm-test-repo-01";
+    let worktree_path = create_session_worktree(base, name)
         .expect("create_session_worktree must succeed on a real git repo");
 
     // (a) Path must be under <base>/.worktrees/ — hardcoded, not from production.
@@ -323,10 +324,10 @@ fn session_worktree_path_uses_dot_prefix() {
         worktree_path.display()
     );
 
-    // (b) Path must end with the session id.
+    // (b) Path must end with the semantic worktree name.
     assert!(
-        worktree_path.ends_with(id.to_string()),
-        "worktree path must end with session id {id}, got {}",
+        worktree_path.ends_with(name),
+        "worktree path must end with worktree name {name}, got {}",
         worktree_path.display()
     );
 
@@ -335,6 +336,142 @@ fn session_worktree_path_uses_dot_prefix() {
         worktree_path.is_dir(),
         "worktree directory must exist on disk, got {}",
         worktree_path.display()
+    );
+}
+
+/// Issue #2032: a worktree directory OR branch that already exists for a
+/// candidate name must be detected by [`worktree_name_collides`] so
+/// `SessionManager::resolve_session_name`'s extra-collision predicate steers
+/// away from it instead of `create_session_worktree` silently clobbering (or
+/// confusingly erroring on) it.
+///
+/// Why: the tmux-liveness check alone cannot see git worktrees/branches — a
+/// stale worktree left behind by a hand-deleted-but-not-decommissioned
+/// session must still be treated as a collision.
+/// What: (a) an absent name must not collide; (b) after creating a worktree
+/// for a name, THAT SAME name must collide (both the dir and the branch
+/// exist); (c) a name whose branch exists but whose worktree dir was manually
+/// removed must still collide (branch-only check).
+/// Test: this function IS the test.
+#[test]
+fn worktree_name_collides_detects_existing_dir_and_branch() {
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    let base = tmp.path();
+
+    let init = std::process::Command::new("git")
+        .args(["init", base.to_str().expect("base is utf8")])
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+    for (k, v) in [("user.email", "test@example.com"), ("user.name", "Test")] {
+        let ok = std::process::Command::new("git")
+            .args(["-C", base.to_str().expect("utf8"), "config", k, v])
+            .status()
+            .expect("git config");
+        assert!(ok.success(), "git config {k} failed");
+    }
+    std::fs::write(base.join("README"), b"init").expect("write README");
+    let add = std::process::Command::new("git")
+        .args(["-C", base.to_str().expect("utf8"), "add", "."])
+        .status()
+        .expect("git add");
+    assert!(add.success(), "git add failed");
+    let commit = std::process::Command::new("git")
+        .args(["-C", base.to_str().expect("utf8"), "commit", "-m", "init"])
+        .status()
+        .expect("git commit");
+    assert!(commit.success(), "git commit failed");
+
+    // (a) No collision before anything exists.
+    assert!(
+        !worktree_name_collides(base, "tm-fresh-01"),
+        "an unused name must not collide"
+    );
+
+    // (b) After creating the worktree, the SAME name must collide.
+    create_session_worktree(base, "tm-fresh-01").expect("create_session_worktree");
+    assert!(
+        worktree_name_collides(base, "tm-fresh-01"),
+        "an in-use name (dir + branch both exist) must collide"
+    );
+
+    // (c) Remove the worktree directory (but not the branch) via `git worktree
+    // remove`, which deletes the dir but leaves the branch ref intact — the
+    // branch-only check must still report a collision.
+    let remove = std::process::Command::new("git")
+        .arg("-C")
+        .arg(base)
+        .args(["worktree", "remove", "--force"])
+        .arg(base.join(".worktrees").join("tm-fresh-01"))
+        .output()
+        .expect("git worktree remove");
+    assert!(
+        remove.status.success(),
+        "git worktree remove failed: {}",
+        String::from_utf8_lossy(&remove.stderr)
+    );
+    assert!(
+        !base.join(".worktrees").join("tm-fresh-01").exists(),
+        "worktree dir must be gone after `git worktree remove`"
+    );
+    assert!(
+        worktree_name_collides(base, "tm-fresh-01"),
+        "a name whose branch still exists must still collide even after the \
+         worktree dir was removed"
+    );
+}
+
+/// Issue #2032: [`create_session_worktree`] must refuse to clobber an
+/// existing worktree directory rather than silently overwriting it.
+///
+/// Why: `worktree_name_collides` is the PROACTIVE guard used by name
+/// resolution; this is the DEFENSIVE guard inside `create_session_worktree`
+/// itself, covering a caller that skips the collision check (or a TOCTOU
+/// race).
+/// What: creates a worktree for a name, then calls `create_session_worktree`
+/// again for the SAME name and asserts it returns `Err` (not a panic, not a
+/// silent overwrite) and that the original worktree directory is untouched.
+/// Test: this function IS the test.
+#[test]
+fn create_session_worktree_rejects_existing_worktree_dir() {
+    let tmp = tempfile::TempDir::new().expect("tmp dir");
+    let base = tmp.path();
+
+    let init = std::process::Command::new("git")
+        .args(["init", base.to_str().expect("base is utf8")])
+        .output()
+        .expect("git init");
+    assert!(init.status.success(), "git init failed");
+    for (k, v) in [("user.email", "test@example.com"), ("user.name", "Test")] {
+        let ok = std::process::Command::new("git")
+            .args(["-C", base.to_str().expect("utf8"), "config", k, v])
+            .status()
+            .expect("git config");
+        assert!(ok.success(), "git config {k} failed");
+    }
+    std::fs::write(base.join("README"), b"init").expect("write README");
+    let add = std::process::Command::new("git")
+        .args(["-C", base.to_str().expect("utf8"), "add", "."])
+        .status()
+        .expect("git add");
+    assert!(add.success(), "git add failed");
+    let commit = std::process::Command::new("git")
+        .args(["-C", base.to_str().expect("utf8"), "commit", "-m", "init"])
+        .status()
+        .expect("git commit");
+    assert!(commit.success(), "git commit failed");
+
+    let first = create_session_worktree(base, "tm-dup-01").expect("first create must succeed");
+    assert!(first.is_dir(), "first worktree must exist");
+
+    let second = create_session_worktree(base, "tm-dup-01");
+    assert!(
+        second.is_err(),
+        "creating a worktree for an already-existing name must error, not clobber"
+    );
+    assert!(
+        first.is_dir(),
+        "the original worktree must remain untouched after the rejected re-create"
     );
 }
 
