@@ -10,16 +10,20 @@
 //! (`crate::serve`), reusing the SAME method surface both transports
 //! dispatch through.
 //! What: [`model::Session`]/[`model::SessionStatus`] (the domain type),
-//! [`registry::SessionRegistry`] (storage + ring buffer + attach/detach),
-//! and [`protocol::register`] (wires `session.create`/`list`/`status`/
-//! `send`/`attach`/`detach`/`cancel` onto a `Router`).
+//! [`registry::SessionRegistry`] (storage + ring buffer + attach/detach +,
+//! since #2056, execution tracking), [`transcript::TranscriptRecord`]
+//! (#2058's `session.get_transcript` response DTO), and [`protocol::register`]
+//! (wires `session.create`/`list`/`status`/`send`/`attach`/`detach`/`cancel`/
+//! `get_transcript` onto a `Router`).
 //! Test: `model::tests::*`, `registry::registry_tests::*`,
 //! `protocol::tests::*`; end-to-end over the real daemon in
-//! `tests/session_e2e.rs`.
+//! `tests/session_e2e.rs` and (#2058) `tests/task_e2e.rs`.
 
 pub mod model;
 pub mod protocol;
 pub mod registry;
+pub mod transcript;
 
 pub use model::{Session, SessionStatus};
 pub use registry::SessionRegistry;
+pub use transcript::TranscriptRecord;

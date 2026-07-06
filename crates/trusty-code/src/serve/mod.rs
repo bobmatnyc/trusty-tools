@@ -1,6 +1,6 @@
 //! `tcode serve` daemon: STDIO + HTTP JSON-RPC transports + proof-of-life,
-//! `session.*`, and `task.*` methods (#2053, #2054, #2056, M1 control-plane
-//! cut line).
+//! `session.*`, and `task.*` methods (#2053, #2054, #2056, #2058,
+//! M1 control-plane cut line).
 //!
 //! Why: this module is the foundation the `tcode serve` binary subcommand
 //! delegates to. It owns assembling the [`crate::jsonrpc::Router`] (and,
@@ -10,8 +10,9 @@
 //! of the crate's CLI wiring.
 //! What: [`build_router`] registers every currently-known method group
 //! (today: [`methods::register`]'s `ping`/`health` proof-of-life pair,
-//! `crate::session::protocol::register`'s seven `session.*` methods, and
-//! (#2056) `crate::task::protocol::register`'s `task.run` — later tickets add
+//! `crate::session::protocol::register`'s eight `session.*` methods
+//! (including #2058's read-only `session.get_transcript`), and (#2056)
+//! `crate::task::protocol::register`'s `task.run` — later tickets add
 //! `harness.describe` #2066 here, one line each). [`run_stdio`] and
 //! [`run_http`] both build a router + registry via `build_router` and hand
 //! them to their respective transport ([`transport::run_stdio_loop`] /

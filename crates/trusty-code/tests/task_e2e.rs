@@ -1,9 +1,11 @@
-//! API-driven end-to-end test for #2056's `task.run` — the M1
-//! control-plane cut line: a task actually EXECUTES through the daemon and
-//! produces LIVE tool events via the #2055 emission plumbing.
+//! API-driven end-to-end test for #2056's `task.run` and #2058's
+//! `session.get_transcript` — the M1 control-plane cut line: a task actually
+//! EXECUTES through the daemon, produces LIVE tool events via the #2055
+//! emission plumbing, and its transcript/usage/cost can be inspected
+//! afterward over the wire.
 //!
 //! Why: the vision spec's Testability requirement (§9, "100% CLI/API
-//! Testable") mandates that #2056's slice be validated by spawning the REAL
+//! Testable") mandates that each slice be validated by spawning the REAL
 //! `tcode serve` daemon and driving it over the actual wire protocol — never
 //! by calling into `trusty_code`'s Rust API directly (see
 //! `tests/session_e2e.rs`'s module docs for the same rationale, applied
@@ -24,13 +26,19 @@
 //! [`task_run_rejects_a_second_overlapping_run`] proves the "no overlapping
 //! runs per session" guarantee over the real wire, not just at the
 //! `SessionRegistry` unit level.
+//! [`task_run_then_get_transcript_exposes_turns_usage_and_cost`] (#2058) runs
+//! a task to completion, then calls `session.get_transcript` and asserts the
+//! returned turns cover both the `pm` and `python-engineer` roles with their
+//! `delegate_to_agent`/`bash` tool calls, and that aggregate usage/cost are
+//! non-zero — proving the stored run record is readable over the real wire,
+//! not just at the `SessionRegistry` unit level.
 //! Test: this file IS the test; see `support` for the process/protocol
 //! plumbing shared with `session_e2e.rs`.
 
 mod support;
 
 use serde_json::json;
-use support::{StdioSession, find_session_event};
+use support::{StdioSession, find_session_event, run_task_to_completion};
 
 /// Provision a throwaway project with `.claude/agents/{pm,python-engineer}.toml`.
 fn project_with_agents() -> tempfile::TempDir {
@@ -198,6 +206,82 @@ async fn task_run_rejects_a_second_overlapping_run() {
         "a second overlapping task.run must be rejected: {second}"
     );
     assert_eq!(second["error"]["code"], -32003);
+
+    daemon.shutdown_via_eof_and_assert_clean_exit().await;
+}
+
+/// `task.run` -> (wait for completion) -> `session.get_transcript` must
+/// expose the stored run record over the real wire: turns for BOTH the `pm`
+/// and `python-engineer` roles, their `delegate_to_agent`/`bash` tool calls,
+/// and non-zero aggregate usage + a priced cost (#2058).
+#[tokio::test]
+async fn task_run_then_get_transcript_exposes_turns_usage_and_cost() {
+    let project = project_with_agents();
+    let mut daemon = StdioSession::spawn_with_mock_llm(project.path());
+
+    // `run_task_to_completion` reserves request ids 1 (task.run) and 2
+    // (session.attach); this test's own next id is 3.
+    let session_id = run_task_to_completion(&mut daemon, "say hi").await;
+
+    let transcript_resp = daemon
+        .call(
+            3,
+            "session.get_transcript",
+            json!({"session_id": session_id}),
+        )
+        .await;
+    assert!(
+        transcript_resp["error"].is_null(),
+        "get_transcript failed: {transcript_resp}"
+    );
+    let result = &transcript_resp["result"];
+    assert_eq!(result["session_id"], session_id);
+
+    let turns = result["turns"].as_array().expect("turns must be an array");
+    assert!(
+        !turns.is_empty(),
+        "a completed run must have recorded turns"
+    );
+
+    let roles: Vec<&str> = turns.iter().map(|t| t["role"].as_str().unwrap()).collect();
+    assert!(roles.contains(&"pm"), "expected a pm turn: {roles:?}");
+    assert!(
+        roles.contains(&"python-engineer"),
+        "expected a python-engineer turn: {roles:?}"
+    );
+
+    let all_tool_calls: Vec<&str> = turns
+        .iter()
+        .flat_map(|t| t["tool_calls"].as_array().unwrap())
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    assert!(
+        all_tool_calls.contains(&"delegate_to_agent"),
+        "expected the pm's delegate_to_agent call in the transcript: {all_tool_calls:?}"
+    );
+    assert!(
+        all_tool_calls.contains(&"bash"),
+        "expected the engineer's bash call in the transcript: {all_tool_calls:?}"
+    );
+
+    // Aggregate usage/cost must be non-zero (the mock script's fixtures
+    // carry non-zero token counts on every turn) — and must NOT be
+    // recomputed here, only read back exactly as `task::executor` stored it.
+    assert!(
+        result["usage"]["prompt_tokens"].as_u64().unwrap() > 0,
+        "expected non-zero aggregate prompt_tokens: {}",
+        result["usage"]
+    );
+    assert!(
+        result["usage"]["completion_tokens"].as_u64().unwrap() > 0,
+        "expected non-zero aggregate completion_tokens: {}",
+        result["usage"]
+    );
+    assert!(
+        result["cost_usd"].as_f64().unwrap() > 0.0,
+        "expected a priced, non-zero cost_usd: {}",
+        result["cost_usd"]
+    );
 
     daemon.shutdown_via_eof_and_assert_clean_exit().await;
 }
