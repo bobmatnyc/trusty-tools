@@ -21,7 +21,7 @@
 
 use std::time::Duration;
 
-use crate::tui::health::{DEFAULT_MEMORY_URL, DEFAULT_SEARCH_URL};
+use crate::tui::health::DEFAULT_SEARCH_URL;
 
 /// Per-probe HTTP timeout for the startup backplane checks.
 ///
@@ -244,11 +244,20 @@ pub async fn probe_search(base: Option<&str>) -> ProbeOutcome {
 /// create it. Builds a single bounded client and threads it into both helpers.
 /// Returns [`ProbeOutcome::active`] with note `palace: user` when memory is live
 /// and the palace is present/creatable, else [`ProbeOutcome::unreachable`] with a
-/// short reason. `base` defaults to [`DEFAULT_MEMORY_URL`] when `None`.
+/// short reason. `base` defaults to the discovered trusty-memory address
+/// (issue #2030: `TRUSTY_MEMORY_URL` override, else the daemon's actual
+/// discovered bound address — never a hardcoded port) when `None`.
 /// Test: `probe_unreachable_memory_is_inactive` drives the dead-daemon branch;
 /// the live + palace-assertion path is exercised against a running daemon.
 pub async fn probe_memory(base: Option<&str>) -> ProbeOutcome {
-    let base = base.unwrap_or(DEFAULT_MEMORY_URL);
+    let resolved;
+    let base = match base {
+        Some(b) => b,
+        None => {
+            resolved = trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable();
+            resolved.as_str()
+        }
+    };
     let client = probe_client();
     if !health_ok_with(&client, base).await {
         return ProbeOutcome::unreachable(Some("memory daemon down".to_string()));

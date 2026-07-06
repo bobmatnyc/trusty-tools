@@ -39,8 +39,14 @@ pub(super) async fn run_loop<B: ratatui::backend::Backend>(
     // show; otherwise the coordinator chat gets the full width immediately.
     let mut state = DashboardState::default();
     let mut screen = Screen::default();
-    let mut health_screen =
-        HealthScreen::new(health::DEFAULT_SEARCH_URL, health::DEFAULT_MEMORY_URL);
+    // Issue #2030: seed the memory panel from discovery (TRUSTY_MEMORY_URL
+    // override, else the daemon's actual discovered bound address) rather
+    // than a hardcoded port. This resolved value is what the background
+    // poller's `HealthClient` is built with and polls for the TUI's lifetime.
+    let mut health_screen = HealthScreen::new(
+        health::DEFAULT_SEARCH_URL,
+        trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable(),
+    );
 
     // The health pollers run on detached tasks and push updates down a channel
     // the loop drains without blocking.

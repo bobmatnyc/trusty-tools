@@ -26,14 +26,6 @@ use serde::Deserialize;
 /// Test: `default_urls_are_local`.
 pub const DEFAULT_SEARCH_URL: &str = "http://127.0.0.1:7878";
 
-/// Default trusty-memory daemon address used when no override is supplied.
-///
-/// Why: mirrors [`DEFAULT_SEARCH_URL`]; the memory daemon's health endpoint is
-/// reached at `127.0.0.1:7990` for the monitor surface.
-/// What: the canonical local trusty-memory HTTP base URL.
-/// Test: `default_urls_are_local`.
-pub const DEFAULT_MEMORY_URL: &str = "http://127.0.0.1:7990";
-
 /// Interval between health polls for each panel.
 ///
 /// Why: the ticket mandates a 5-second refresh cadence for both the online and

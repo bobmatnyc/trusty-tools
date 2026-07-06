@@ -16,17 +16,6 @@ use std::path::Path;
 use tracing::debug;
 use trusty_common::catchup::{CatchupOptions, run_catchup};
 
-/// Environment variable for overriding the trusty-memory daemon base URL.
-///
-/// Why: tests and CI environments may not have the daemon running at the default
-/// port; an env var lets operators point trusty-code at any accessible instance.
-/// What: when set to a non-empty string, this value is used as the `memory_url`
-/// in [`CatchupOptions`]; otherwise the engine default (`http://127.0.0.1:7990`)
-/// is used.
-/// Test: exercised indirectly — tests use an unreachable port to verify
-/// fail-open behaviour without depending on a live daemon.
-const TRUSTY_MEMORY_URL_ENV: &str = "TRUSTY_MEMORY_URL";
-
 /// Build PM-prompt catch-up seed context for the given project directory.
 ///
 /// Why: the PM prompt benefits from a one-time digest of what happened in the
@@ -48,17 +37,15 @@ const TRUSTY_MEMORY_URL_ENV: &str = "TRUSTY_MEMORY_URL";
 /// propagating, so prompt assembly always succeeds even when the daemon is
 /// offline or the project has no git history.
 ///
-/// What: resolves `memory_url` from `TRUSTY_MEMORY_URL` env (falling back to
-/// the engine default), builds `CatchupOptions` with sane limits, calls
-/// `run_catchup` with `advance_watermark = false`, and returns `Some(digest)`
-/// when the result is non-whitespace, else `None`.
+/// What: resolves `memory_url` via
+/// [`trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable`] (env override
+/// `TRUSTY_MEMORY_URL` first, else the daemon's discovered bound address,
+/// else a fail-fast placeholder — issue #2030), builds `CatchupOptions` with
+/// sane limits, calls `run_catchup` with `advance_watermark = false`, and
+/// returns `Some(digest)` when the result is non-whitespace, else `None`.
 /// Test: `catchup::tests::pm_catchup_context_does_not_panic_on_empty_repo`.
 pub async fn pm_catchup_context(project_dir: &Path) -> Option<String> {
-    let memory_url = std::env::var(TRUSTY_MEMORY_URL_ENV)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        // fall through to the engine's built-in default
-        .unwrap_or_else(|| CatchupOptions::default().memory_url);
+    let memory_url = trusty_common::mcp::memory_rpc::resolve_memory_base_url_or_unreachable();
 
     let opts = CatchupOptions {
         project_dir: project_dir.to_path_buf(),
@@ -130,7 +117,12 @@ mod tests {
 
         // Point memory_url at an unreachable port so palace fetch fails-open.
         // SAFETY: single-threaded test; no concurrent env reads.
-        unsafe { std::env::set_var(TRUSTY_MEMORY_URL_ENV, "http://127.0.0.1:19999") };
+        unsafe {
+            std::env::set_var(
+                trusty_common::mcp::memory_rpc::TRUSTY_MEMORY_URL_ENV,
+                "http://127.0.0.1:19999",
+            )
+        };
 
         let result = pm_catchup_context(tmp.path()).await;
 
@@ -179,7 +171,12 @@ mod tests {
 
         // Point memory_url at an unreachable port.
         // SAFETY: single-threaded test; no concurrent env reads.
-        unsafe { std::env::set_var(TRUSTY_MEMORY_URL_ENV, "http://127.0.0.1:19999") };
+        unsafe {
+            std::env::set_var(
+                trusty_common::mcp::memory_rpc::TRUSTY_MEMORY_URL_ENV,
+                "http://127.0.0.1:19999",
+            )
+        };
 
         // Must not panic — fall through to None or Some(whitespace-only) path.
         let _result = pm_catchup_context(tmp.path()).await;
