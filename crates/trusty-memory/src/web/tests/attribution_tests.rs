@@ -310,10 +310,13 @@ async fn drawer_creator_attribution_mcp_default() {
 /// return `Ok(())` so the user's prompt is not blocked. The activity
 /// emit failure is surfaced via a stderr warn-log only.
 /// What: pins a tempdir as the data dir (so `read_daemon_addr`
-/// returns `Ok(None)` — no http_addr file), runs `handle_prompt_context`,
-/// and asserts it returns `Ok(())`. Separately verifies the emit
-/// helper does not panic — covered by `post_hook_event_no_daemon_is_noop`
-/// in `hook_emit::tests`.
+/// returns `Ok(None)` — no http_addr file), runs
+/// `handle_prompt_context_with_payload` directly with a fixed empty
+/// payload (issue #2079 — avoids spawning a real blocking stdin read
+/// that could outlive this test's `Runtime` teardown), and asserts it
+/// returns `Ok(())`. Separately verifies the emit helper does not
+/// panic — covered by `post_hook_event_no_daemon_is_noop` in
+/// `hook_emit::tests`.
 /// Test: itself.
 #[tokio::test]
 async fn hook_emit_failure_isolated() {
@@ -323,7 +326,8 @@ async fn hook_emit_failure_isolated() {
     unsafe {
         std::env::set_var(trusty_common::DATA_DIR_OVERRIDE_ENV, tmp.path());
     }
-    let res = crate::commands::prompt_context::handle_prompt_context().await;
+    let res =
+        crate::commands::prompt_context::handle_prompt_context_with_payload(String::new()).await;
     unsafe {
         std::env::remove_var(trusty_common::DATA_DIR_OVERRIDE_ENV);
     }

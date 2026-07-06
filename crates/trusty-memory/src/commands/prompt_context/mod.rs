@@ -235,10 +235,41 @@ pub(super) const EMPTY_PLACEHOLDER: &str = "No prompt facts stored yet.";
 /// `prompt_context_empty_palace_falls_back_to_global`;
 /// `bounded_blocking_times_out_on_slow_closure` and
 /// `handle_prompt_context_fails_open_on_slow_daemon` cover the deadline
-/// fail-open paths added by #2043.
+/// fail-open paths added by #2043. This wrapper itself is intentionally
+/// NOT unit-tested (see [`handle_prompt_context_with_payload`]) — it would
+/// require a real blocking stdin read inside a `#[tokio::test]`, which is
+/// exactly the orphaned-thread hang fixed by issue #2079.
 pub async fn handle_prompt_context() -> Result<()> {
-    let start = Instant::now();
     let trigger_payload = read_stdin_bounded().await;
+    handle_prompt_context_with_payload(trigger_payload).await
+}
+
+/// Core body of [`handle_prompt_context`], parameterised over the stdin
+/// payload (issue #2079).
+///
+/// Why: #2048 bounded the stdin read with `spawn_blocking` + a timeout, but
+/// a blocking OS thread can't be cancelled — on timeout it keeps running,
+/// parked in the real `read_to_string` syscall, until stdin actually closes.
+/// In production that's harmless (`run_prompt_context_and_exit` calls
+/// `std::process::exit(0)` right after, abandoning the thread). But the
+/// `#[tokio::test]` functions that used to call `handle_prompt_context()`
+/// directly returned normally, so their per-test `Runtime::drop()` waited
+/// for that orphaned thread — which never finished when the test binary's
+/// own stdin was a held-open, non-EOF pipe (exactly the shape of GitHub
+/// Actions' runner stdin), wedging `cargo test --workspace` forever.
+/// Splitting the payload out means the tested logic never spawns a real
+/// stdin read, so it can never hang regardless of the test process's stdin.
+/// What: takes the already-resolved stdin payload, builds the injection
+/// body (bounded by [`BODY_DEADLINE`]), prints it, and best-effort emits
+/// the `HookFired` activity event (bounded by [`EMIT_DEADLINE`]). Identical
+/// behaviour to the pre-#2079 `handle_prompt_context` body.
+/// Test: `prompt_context_returns_ok_without_daemon`,
+/// `prompt_context_logs_attempt_without_daemon`,
+/// `handle_prompt_context_fails_open_on_slow_daemon` — all call this
+/// directly with a fixed in-memory payload instead of
+/// `handle_prompt_context()`.
+pub(crate) async fn handle_prompt_context_with_payload(trigger_payload: String) -> Result<()> {
+    let start = Instant::now();
 
     // Fetch + compose, hard-capped at BODY_DEADLINE. On timeout there is
     // nothing safe to print yet, so fail open to an empty body — identical
