@@ -248,19 +248,34 @@ async fn detach(
 /// `session.cancel(session_id) -> Session` (vision spec §12, 11.6
 /// Cancellation Semantics).
 ///
-/// Why: explicit termination signal.
-/// What: idempotent on an already-terminal session (see
-/// `SessionRegistry::cancel`). `-32007 session_not_found` if `session_id`
-/// is unknown; otherwise the post-cancellation `Session` snapshot
-/// (`status: "cancelled"`).
-/// Test: `protocol::tests::cancel_unknown_session_maps_to_session_not_found`.
+/// Why: explicit termination signal. #2056 splits this into two paths: a
+/// session with a background `task.run` execution in flight must be
+/// signalled COOPERATIVELY (the executing `AgentLoop`(s) observe the flag at
+/// their next turn boundary and unwind themselves — see
+/// `agent_loop::AgentLoopError::Cancelled` — before `crate::task::executor`
+/// lands the terminal transition via `SessionRegistry::finish`); a session
+/// with nothing executing keeps the original #2054 immediate-transition
+/// behaviour.
+/// What: idempotent either way. `-32007 session_not_found` if `session_id`
+/// is unknown. When `SessionRegistry::is_executing` is true, calls
+/// `request_cancel` (sets the flag) and returns the CURRENT snapshot — still
+/// `status: "running"` until the executor actually observes cancellation and
+/// transitions it. Otherwise falls back to `SessionRegistry::cancel` (the
+/// #2054 immediate `status: "cancelled"` path).
+/// Test: `protocol::tests::cancel_unknown_session_maps_to_session_not_found`,
+/// `protocol::tests::cancel_executing_session_requests_cooperative_cancel`.
 async fn cancel(
     registry: &SessionRegistry,
     params: Value,
     _ctx: ConnectionContext,
 ) -> Result<Value, RpcError> {
     let p: SessionIdParams = parse(params, "session.cancel")?;
-    Ok(json!(registry.cancel(&p.session_id)?))
+    if registry.is_executing(&p.session_id) {
+        registry.request_cancel(&p.session_id)?;
+        Ok(json!(registry.status(&p.session_id)?))
+    } else {
+        Ok(json!(registry.cancel(&p.session_id)?))
+    }
 }
 
 #[cfg(test)]
@@ -407,5 +422,29 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, -32007);
+    }
+
+    /// `session.cancel` on a session with an in-flight execution must request
+    /// cooperative cancellation (set the flag) rather than immediately
+    /// transitioning to `cancelled` — the executor lands that transition once
+    /// it actually observes the flag.
+    #[tokio::test]
+    async fn cancel_executing_session_requests_cooperative_cancel() {
+        let registry = SessionRegistry::new();
+        let session = registry.create("t".to_string(), None, None);
+        let flag = registry.begin_execution(&session.id).unwrap();
+
+        let result = cancel(&registry, json!({"session_id": &session.id}), test_ctx())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result["status"], "running",
+            "status must NOT be transitioned immediately for an executing session"
+        );
+        assert!(
+            flag.load(std::sync::atomic::Ordering::Relaxed),
+            "the shared cancel flag must have been set"
+        );
     }
 }

@@ -28,15 +28,20 @@
 //! Test: see `registry_tests` (sibling file, `#[cfg(test)]`).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::json;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::events::{Event, SessionEventEnvelope};
 use crate::jsonrpc::{NotifySender, RpcError};
+use crate::perf::TokenUsage;
+use crate::run_task::TurnRecord;
 
 use super::model::{Session, SessionStatus};
 
@@ -50,7 +55,8 @@ use super::model::{Session, SessionStatus};
 pub const DEFAULT_RING_CAPACITY: usize = 1000;
 
 /// One session's storage: the domain snapshot, its sequence counter, ring
-/// buffer, and the live attachments forwarding its events.
+/// buffer, the live attachments forwarding its events, and (#2056) its
+/// background execution state + last completed run's outcome.
 struct SessionEntry {
     session: Session,
     /// Last-assigned per-session sequence number; the next event gets
@@ -61,6 +67,33 @@ struct SessionEntry {
     /// task. Re-attaching the same connection to the same session replaces
     /// (and thus cancels, via `Sender` drop) the previous forwarder.
     attachments: HashMap<Uuid, oneshot::Sender<()>>,
+    /// #2056: set while a background task-execution is in flight; `None`
+    /// when idle (never started, or already finished).
+    execution: Option<Execution>,
+    /// #2056: the run transcript populated once an execution finishes —
+    /// ready for a future `session.get_transcript` (#2058) to expose. Empty
+    /// until then.
+    transcript: Vec<TurnRecord>,
+    /// #2056: aggregated token usage from the last completed execution.
+    usage: TokenUsage,
+    /// #2056: summed USD cost from the last completed execution (`None` if
+    /// pricing was unavailable — mirrors `run_task::RunReport::cost_usd`).
+    cost_usd: Option<f64>,
+}
+
+/// #2056: bookkeeping for one in-flight background task execution.
+///
+/// Why: `SessionRegistry` needs to (a) reject a second overlapping run for
+/// the same session, (b) signal cooperative cancellation, and (c) — on
+/// graceful daemon shutdown — wait, bounded, for the task to actually stop.
+/// What: `cancel` is shared with every `AgentLoop`/`InProcessAgentRunner`
+/// the execution drives (via `with_cancel_flag`); `handle` is the
+/// `tokio::spawn` join handle, attached shortly after `begin_execution`
+/// returns (see [`SessionRegistry::attach_execution_handle`]) since the
+/// handle does not exist until the caller has actually spawned the task.
+struct Execution {
+    cancel: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
 }
 
 /// The daemon-owned session registry (Axiom 4).
@@ -131,6 +164,10 @@ impl SessionRegistry {
                     seq: 0,
                     ring: VecDeque::new(),
                     attachments: HashMap::new(),
+                    execution: None,
+                    transcript: Vec::new(),
+                    usage: TokenUsage::default(),
+                    cost_usd: None,
                 },
             );
         }
@@ -244,6 +281,48 @@ impl SessionRegistry {
         self.status(id)
     }
 
+    /// Mark a session terminal (finished, failed, or cancelled while
+    /// executing) and publish the terminal `Event::SessionDone` (#2056).
+    ///
+    /// Why: the background executor (`crate::task::executor`) needs to set
+    /// the FINAL status once an agent loop returns, distinctly from the
+    /// user-initiated `session.cancel` JSON-RPC path ([`Self::cancel`]),
+    /// which ALSO emits a dedicated `Event::SessionCancelled` signal that
+    /// only makes sense for an explicit user cancel request — not a natural
+    /// finish or failure, and not a cancellation the EXECUTOR itself
+    /// observed (that path already went through `request_cancel`, which
+    /// does not transition status; the executor calls this afterward to
+    /// actually land the transition once it has unwound).
+    /// What: idempotent — a no-op (returns the current snapshot) if the
+    /// session is already terminal, since a race between `request_cancel`'s
+    /// caller and the executor noticing cancellation is possible but
+    /// harmless. Errors with `session_not_found` if `id` is unknown.
+    /// Otherwise transitions to `status` and publishes
+    /// `Event::SessionDone { status }`.
+    /// Test: `registry_tests::finish_transitions_and_publishes_session_done`,
+    /// `registry_tests::finish_is_idempotent_on_terminal_session`,
+    /// `registry_tests::finish_unknown_session_errors`.
+    pub fn finish(&self, id: &str, status: SessionStatus) -> Result<Session, RpcError> {
+        let already_terminal = {
+            let sessions = self.lock();
+            let entry = sessions
+                .get(id)
+                .ok_or_else(|| RpcError::session_not_found(id))?;
+            entry.session.status.is_terminal()
+        };
+        if !already_terminal {
+            self.transition(id, status);
+            self.record(
+                id,
+                Event::SessionDone {
+                    session_id: id.to_string(),
+                    status: status.as_str().to_string(),
+                },
+            );
+        }
+        self.status(id)
+    }
+
     /// `session.attach`: replay recent history and start forwarding this
     /// session's live events to `notify`.
     ///
@@ -332,6 +411,173 @@ impl SessionRegistry {
             .get(id)
             .map(|e| e.ring.iter().cloned().collect())
             .ok_or_else(|| RpcError::session_not_found(id))
+    }
+
+    /// Begin tracking a new background task execution for `id` (#2056).
+    ///
+    /// Why: `task.run` (and `session.send` on an idle session) must not start
+    /// a second overlapping run for the same session, and the returned flag
+    /// is how the executor's `AgentLoop`(s) later observe cancellation.
+    /// What: errors with `session_not_found` if `id` is unknown,
+    /// `invalid_argument` if the session is already terminal or already has
+    /// an execution in flight. On success, stores a fresh `Arc<AtomicBool>`
+    /// cancel flag (initially `false`) with `handle: None` — the caller
+    /// attaches the real `JoinHandle` via
+    /// [`Self::attach_execution_handle`] immediately after spawning, since
+    /// the handle cannot exist before that — and returns the flag.
+    /// Test: `registry_tests::begin_execution_rejects_second_overlapping_run`,
+    /// `registry_tests::begin_execution_rejects_terminal_session`,
+    /// `registry_tests::begin_execution_unknown_session_errors`.
+    pub fn begin_execution(&self, id: &str) -> Result<Arc<AtomicBool>, RpcError> {
+        let mut sessions = self.lock();
+        let entry = sessions
+            .get_mut(id)
+            .ok_or_else(|| RpcError::session_not_found(id))?;
+        if entry.session.status.is_terminal() {
+            return Err(RpcError::invalid_argument(format!(
+                "session {id} is already terminal"
+            )));
+        }
+        if entry.execution.is_some() {
+            return Err(RpcError::invalid_argument(format!(
+                "session {id} already has a task running"
+            )));
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        entry.execution = Some(Execution {
+            cancel: Arc::clone(&cancel),
+            handle: None,
+        });
+        Ok(cancel)
+    }
+
+    /// Attach the real `JoinHandle` to `id`'s tracked execution (#2056).
+    ///
+    /// Why: the handle only exists once the caller has actually called
+    /// `tokio::spawn`, which must happen after `begin_execution` returns (the
+    /// spawned future needs the cancel flag `begin_execution` produces).
+    /// What: best-effort — a no-op if `id` or its execution is already gone
+    /// (e.g. the run finished astonishingly fast, or the session vanished).
+    /// Test: `registry_tests::shutdown_executions_awaits_cancelled_tasks`
+    /// (exercises this indirectly via a real spawn).
+    pub fn attach_execution_handle(&self, id: &str, handle: JoinHandle<()>) {
+        let mut sessions = self.lock();
+        if let Some(entry) = sessions.get_mut(id)
+            && let Some(execution) = entry.execution.as_mut()
+        {
+            execution.handle = Some(handle);
+        }
+    }
+
+    /// Clear the execution-in-flight marker for `id` (#2056).
+    ///
+    /// Why: called by the executor once the background task has stopped
+    /// (finished, failed, or cancelled) so a later `task.run`/`session.send`
+    /// can start a new run against the same session.
+    /// What: best-effort — a no-op if `id` is already gone.
+    /// Test: `registry_tests::begin_execution_rejects_second_overlapping_run`
+    /// (calls this between the two `begin_execution` attempts).
+    pub fn finish_execution(&self, id: &str) {
+        let mut sessions = self.lock();
+        if let Some(entry) = sessions.get_mut(id) {
+            entry.execution = None;
+        }
+    }
+
+    /// Whether `id` currently has a background execution in flight (#2056).
+    ///
+    /// Why: `session::protocol::cancel` uses this to choose between
+    /// cooperative cancellation ([`Self::request_cancel`]) and the original
+    /// #2054 immediate-transition [`Self::cancel`].
+    /// What: `false` for both "unknown session" and "known but idle" — callers
+    /// that need to distinguish those already call another method first.
+    /// Test: `registry_tests::request_cancel_*`.
+    pub fn is_executing(&self, id: &str) -> bool {
+        self.lock().get(id).is_some_and(|e| e.execution.is_some())
+    }
+
+    /// Request cooperative cancellation of `id`'s in-flight execution, if any
+    /// (#2056).
+    ///
+    /// Why: `session.cancel` on a RUNNING session must signal the background
+    /// task rather than force an immediate status transition — the task
+    /// itself transitions to `Cancelled` once it actually observes the flag
+    /// and unwinds (see `crate::task::executor`).
+    /// What: `Err(session_not_found)` if `id` is unknown. `Ok(true)` if an
+    /// execution was in flight and its flag was set; `Ok(false)` if the
+    /// session exists but nothing is executing (the caller should fall back
+    /// to [`Self::cancel`] for the immediate-transition path).
+    /// Test: `registry_tests::request_cancel_sets_flag_when_executing`,
+    /// `registry_tests::request_cancel_returns_false_when_idle`.
+    pub fn request_cancel(&self, id: &str) -> Result<bool, RpcError> {
+        let sessions = self.lock();
+        let entry = sessions
+            .get(id)
+            .ok_or_else(|| RpcError::session_not_found(id))?;
+        match &entry.execution {
+            Some(execution) => {
+                execution.cancel.store(true, Ordering::Relaxed);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Persist a finished execution's transcript/usage/cost into the session
+    /// (#2056).
+    ///
+    /// Why: populates the storage a future `session.get_transcript` (#2058)
+    /// will expose — #2056's scope is populating it, not adding a new
+    /// retrieval method.
+    /// What: best-effort — a no-op if `id` is already gone (e.g. the daemon
+    /// is shutting down mid-run).
+    /// Test: `registry_tests::set_run_outcome_stores_transcript_and_usage`.
+    pub fn set_run_outcome(
+        &self,
+        id: &str,
+        transcript: Vec<TurnRecord>,
+        usage: TokenUsage,
+        cost_usd: Option<f64>,
+    ) {
+        let mut sessions = self.lock();
+        if let Some(entry) = sessions.get_mut(id) {
+            entry.transcript = transcript;
+            entry.usage = usage;
+            entry.cost_usd = cost_usd;
+        }
+    }
+
+    /// Cooperatively cancel every in-flight execution and wait, bounded by
+    /// `grace`, for them to actually stop (#2056 — graceful daemon shutdown).
+    ///
+    /// Why: without this, a `tokio::spawn`'d background execution would be
+    /// abruptly dropped — never given a chance to unwind — the instant the
+    /// process's tokio runtime shuts down, violating the connection-safe
+    /// daemon-restart convention (issue #534) this extends from connections
+    /// to long-running tasks.
+    /// What: flips every tracked execution's cancel flag, takes ownership of
+    /// each `JoinHandle`, then awaits all of them concurrently with an
+    /// overall `grace` timeout. A handle that doesn't finish in time is left
+    /// to be dropped when the process exits (best-effort, not a hard
+    /// guarantee — matching the same best-effort framing as every other
+    /// shutdown step in this codebase).
+    /// Test: `registry_tests::shutdown_executions_awaits_cancelled_tasks`.
+    pub async fn shutdown_executions(&self, grace: Duration) {
+        let handles: Vec<JoinHandle<()>> = {
+            let mut sessions = self.lock();
+            sessions
+                .values_mut()
+                .filter_map(|entry| {
+                    let execution = entry.execution.as_mut()?;
+                    execution.cancel.store(true, Ordering::Relaxed);
+                    execution.handle.take()
+                })
+                .collect()
+        };
+        if handles.is_empty() {
+            return;
+        }
+        let _ = tokio::time::timeout(grace, futures_util::future::join_all(handles)).await;
     }
 
     /// Record a tool invocation starting (#2055 emission plumbing for

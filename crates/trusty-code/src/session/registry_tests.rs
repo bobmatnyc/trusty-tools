@@ -450,3 +450,186 @@ async fn record_plumbing_methods_reject_unknown_session() {
         -32007
     );
 }
+
+// ── #2056: execution-lifecycle tracking ─────────────────────────────────────────
+
+/// `begin_execution` on an unknown session must error.
+#[tokio::test]
+async fn begin_execution_unknown_session_errors() {
+    let registry = SessionRegistry::new();
+    let err = registry.begin_execution("nope").unwrap_err();
+    assert_eq!(err.code, -32007);
+}
+
+/// `begin_execution` on an already-terminal session must be rejected.
+#[tokio::test]
+async fn begin_execution_rejects_terminal_session() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    registry.cancel(&session.id).unwrap();
+
+    let err = registry.begin_execution(&session.id).unwrap_err();
+    assert_eq!(
+        err.code, -32003,
+        "must be invalid_argument, not session_not_found"
+    );
+}
+
+/// A second `begin_execution` while one is already in flight must be
+/// rejected; after `finish_execution`, a new one must succeed.
+#[tokio::test]
+async fn begin_execution_rejects_second_overlapping_run() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+
+    let _first = registry.begin_execution(&session.id).unwrap();
+    let err = registry.begin_execution(&session.id).unwrap_err();
+    assert_eq!(err.code, -32003);
+
+    registry.finish_execution(&session.id);
+    assert!(
+        registry.begin_execution(&session.id).is_ok(),
+        "a new execution must be startable once the prior one finished"
+    );
+}
+
+/// `request_cancel` on a session with no in-flight execution must return
+/// `Ok(false)` (the caller falls back to the immediate-transition `cancel`).
+#[tokio::test]
+async fn request_cancel_returns_false_when_idle() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    assert!(!registry.request_cancel(&session.id).unwrap());
+}
+
+/// `request_cancel` on an executing session must set the flag and return
+/// `Ok(true)`; `is_executing` must reflect the in-flight state throughout.
+#[tokio::test]
+async fn request_cancel_sets_flag_when_executing() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    assert!(!registry.is_executing(&session.id));
+
+    let cancel = registry.begin_execution(&session.id).unwrap();
+    assert!(registry.is_executing(&session.id));
+    assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
+
+    assert!(registry.request_cancel(&session.id).unwrap());
+    assert!(
+        cancel.load(std::sync::atomic::Ordering::Relaxed),
+        "the SAME flag must observe the request"
+    );
+}
+
+/// `request_cancel` on an unknown session must error.
+#[tokio::test]
+async fn request_cancel_unknown_session_errors() {
+    let registry = SessionRegistry::new();
+    assert_eq!(registry.request_cancel("nope").unwrap_err().code, -32007);
+}
+
+/// `set_run_outcome` must store the transcript/usage/cost verbatim, and must
+/// not panic when the session no longer exists.
+#[tokio::test]
+async fn set_run_outcome_stores_transcript_and_usage() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+
+    let turns = vec![crate::run_task::TurnRecord {
+        role: "pm".to_string(),
+        model: "openai/gpt-4o-mini".to_string(),
+        text: "done".to_string(),
+        tool_calls: vec![],
+        usage: crate::perf::TokenUsage::new(10, 5, 0, 0),
+    }];
+    registry.set_run_outcome(
+        &session.id,
+        turns.clone(),
+        crate::perf::TokenUsage::new(10, 5, 0, 0),
+        Some(0.01),
+    );
+
+    // No public getter exists yet (session.get_transcript is #2058); this
+    // test proves the call is infallible and side-effect-free on a missing
+    // session, which is the only externally-observable contract for now.
+    registry.set_run_outcome("nope", turns, crate::perf::TokenUsage::default(), None);
+}
+
+/// `shutdown_executions` must flip every tracked execution's cancel flag and
+/// await its handle within the grace period.
+#[tokio::test]
+async fn shutdown_executions_awaits_cancelled_tasks() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    let cancel = registry.begin_execution(&session.id).unwrap();
+
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done_clone = done.clone();
+    let handle = tokio::spawn(async move {
+        // A well-behaved execution loop: poll the flag, exit promptly once set.
+        while !cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        done_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    registry.attach_execution_handle(&session.id, handle);
+
+    registry.shutdown_executions(Duration::from_secs(2)).await;
+    assert!(
+        done.load(std::sync::atomic::Ordering::Relaxed),
+        "the task must have observed cancellation and finished"
+    );
+}
+
+/// `finish` must transition the session and publish `SessionDone` with the
+/// given status.
+#[tokio::test]
+async fn finish_transitions_and_publishes_session_done() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    let mut events = crate::events::subscribe();
+
+    let finished = registry
+        .finish(&session.id, SessionStatus::Finished)
+        .unwrap();
+    assert_eq!(finished.status, SessionStatus::Finished);
+
+    // `finish` publishes `SessionStatusChanged` (via `transition`) THEN
+    // `SessionDone` — consume the former before asserting on the latter.
+    let status_changed = next_event_for(&mut events, &session.id).await;
+    assert!(
+        matches!(status_changed.event, Event::SessionStatusChanged { status, .. } if status == "finished")
+    );
+
+    let done = next_event_for(&mut events, &session.id).await;
+    assert!(matches!(done.event, Event::SessionDone { status, .. } if status == "finished"));
+    assert!(done.seq > status_changed.seq);
+}
+
+/// `finish` on an already-terminal session must be a no-op, not a double
+/// transition.
+#[tokio::test]
+async fn finish_is_idempotent_on_terminal_session() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    registry
+        .finish(&session.id, SessionStatus::Finished)
+        .unwrap();
+
+    let again = registry.finish(&session.id, SessionStatus::Failed).unwrap();
+    assert_eq!(
+        again.status,
+        SessionStatus::Finished,
+        "must not overwrite an existing terminal status"
+    );
+}
+
+/// `finish` on an unknown session must error.
+#[tokio::test]
+async fn finish_unknown_session_errors() {
+    let registry = SessionRegistry::new();
+    let err = registry
+        .finish("nope", SessionStatus::Finished)
+        .unwrap_err();
+    assert_eq!(err.code, -32007);
+}

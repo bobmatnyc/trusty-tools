@@ -6,35 +6,41 @@
 //! calls through the gated registry, feeds results back, and iterates until the
 //! model produces a final answer — bounded by a turn cap, a wall-clock timeout,
 //! and token-usage accounting so runs stay cheap and observable.
-//! What: Exposes `AgentLoop`, `AgentLoopConfig`, and `AgentLoopError`. `run`
-//! seeds a `Transcript`, then loops: build a `ChatRequest` from the running
-//! history + registry schemas, call `LlmClientTrait::chat`, accrue usage into a
-//! `PerfCollector`, append the assistant turn, and — if there are tool calls —
-//! dispatch each via `ToolRegistry::dispatch_gated` and append the results.
-//! Exits with `AgentOutput` on the first assistant turn that has NO tool calls
-//! (the D3 no-tool-call finish convention); aborts with a partial output when
-//! the turn cap or timeout fires.
+//! What: Exposes `AgentLoop`, `AgentLoopConfig`, `AgentLoopError`, and (#2056)
+//! `ToolEventSink`. `run` seeds a `Transcript`, then loops: build a
+//! `ChatRequest` from the running history + registry schemas, call
+//! `LlmClientTrait::chat`, accrue usage into a `PerfCollector`, append the
+//! assistant turn, and — if there are tool calls — dispatch each via
+//! `ToolRegistry::dispatch_gated` (notifying the optional sink around each
+//! dispatch) and append the results. Exits with `AgentOutput` on the first
+//! assistant turn that has NO tool calls (the D3 no-tool-call finish
+//! convention); aborts with a partial output when the turn cap, timeout, or
+//! (#2056) an external cancellation flag fires.
 //! What: The whole `chat → dispatch → iterate` body runs inside a single
 //! `tokio::time::timeout` so a stalled model or hung tool cannot block forever.
 //! Test: `agent_loop::tests` — stubbed two-turn flow, turn-cap abort, recoverable
-//! tool-error continuation, usage accrual, plus an `#[ignore]`-gated live test.
+//! tool-error continuation, usage accrual, sink notification order, cancellation,
+//! plus an `#[ignore]`-gated live test.
 
 mod error;
+mod sink;
 mod transcript;
 
 #[cfg(test)]
 mod tests;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, ToolCall, ToolDefinition};
 use crate::perf::PerfCollector;
-use crate::tools::{AgentOutput, ToolRegistry};
+use crate::tools::{AgentOutput, ToolRegistry, ToolResult};
 
 pub use error::AgentLoopError;
+pub use sink::ToolEventSink;
 pub use transcript::Transcript;
 
 /// Phase name used when accruing token usage into the `PerfCollector`.
@@ -84,23 +90,31 @@ impl Default for AgentLoopConfig {
 /// Why: Encapsulates the repetitive, error-prone control flow (call → extract
 /// tool calls → dispatch → append → repeat) behind one `run` method so call
 /// sites express intent ("run this task") not mechanics.
-/// What: Holds the config, an `Arc<dyn LlmClientTrait>` (mockable in tests), and
-/// an `Arc<ToolRegistry>` whose schemas are advertised and whose
-/// `dispatch_gated` executes tool calls.
+/// What: Holds the config, an `Arc<dyn LlmClientTrait>` (mockable in tests), an
+/// `Arc<ToolRegistry>` whose schemas are advertised and whose `dispatch_gated`
+/// executes tool calls, and (#2056) two OPTIONAL collaborators set via builder
+/// methods after construction: a `sink` notified around every tool dispatch,
+/// and a `cancel` flag checked once per turn boundary. Both default to `None`,
+/// so every existing call site (`run_task`, `runner::in_process`) is unaffected.
 /// Test: `agent_loop::tests::*`.
 pub struct AgentLoop {
     config: AgentLoopConfig,
     llm: Arc<dyn LlmClientTrait>,
     registry: Arc<ToolRegistry>,
+    sink: Option<Arc<dyn ToolEventSink>>,
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 impl AgentLoop {
-    /// Construct an agent loop from its three collaborators.
+    /// Construct an agent loop from its three core collaborators.
     ///
     /// Why: Constructor injection keeps the loop testable — production passes a
     /// real `LlmClient`, tests pass a scripted mock, both as
     /// `Arc<dyn LlmClientTrait>`.
-    /// What: Stores the config, LLM client, and tool registry.
+    /// What: Stores the config, LLM client, and tool registry; `sink`/`cancel`
+    /// start `None` — attach them via [`Self::with_tool_event_sink`]/
+    /// [`Self::with_cancel_flag`] when the caller needs them (#2056's
+    /// daemon-driven task execution does; `run_task`'s CLI path does not).
     /// Test: `agent_loop::tests::two_turn_flow_completes`.
     pub fn new(
         config: AgentLoopConfig,
@@ -111,7 +125,35 @@ impl AgentLoop {
             config,
             llm,
             registry,
+            sink: None,
+            cancel: None,
         }
+    }
+
+    /// Attach a [`ToolEventSink`] notified around every tool dispatch (#2056).
+    ///
+    /// Why: Lets a daemon-driven run make its tool activity observable to a
+    /// `session.attach`ed client without forking the dispatch loop.
+    /// What: Builder-style setter; returns `self` for chaining.
+    /// Test: `agent_loop::tests::sink_receives_started_then_finished_in_order`.
+    pub fn with_tool_event_sink(mut self, sink: Arc<dyn ToolEventSink>) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    /// Attach a cancellation flag checked once per turn boundary (#2056).
+    ///
+    /// Why: `session.cancel` on an in-flight daemon-driven run must stop the
+    /// loop cooperatively; sharing one `Arc<AtomicBool>` between the caller and
+    /// every loop it spawns (PM + any delegated sub-agent loops) is the
+    /// cheapest possible cancellation signal.
+    /// What: Builder-style setter; returns `self` for chaining. The flag is
+    /// checked with `Ordering::Relaxed` — only "has it been set at all" matters,
+    /// not fine-grained memory ordering with other state.
+    /// Test: `agent_loop::tests::cancel_flag_aborts_before_next_turn`.
+    pub fn with_cancel_flag(mut self, cancel: Arc<AtomicBool>) -> Self {
+        self.cancel = Some(cancel);
+        self
     }
 
     /// Run the loop to completion (or to a budget limit) and return the output.
@@ -144,13 +186,15 @@ impl AgentLoop {
     /// Why: Keeping the iteration logic out of the timeout match arm makes both
     /// halves readable and lets the timeout path reuse the same transcript/perf
     /// state to assemble a partial result.
-    /// What: Iterates up to `max_turns`: build request → chat → accrue usage →
-    /// append assistant turn → if tool calls are present, dispatch each and
-    /// append results, then continue; otherwise (a no-tool-call turn) return the
-    /// assembled output. Per D3, `finish_reason` never gates termination —
+    /// What: Iterates up to `max_turns`: check the (#2056) cancellation flag →
+    /// build request → chat → accrue usage → append assistant turn → if tool
+    /// calls are present, dispatch each (notifying the optional sink) and
+    /// append results, then continue; otherwise (a no-tool-call turn) return
+    /// the assembled output. Per D3, `finish_reason` never gates termination —
     /// pending tool calls always run first. Exhausting the turn budget returns
-    /// `TurnCapExceeded` with the partial transcript.
-    /// Test: Same tests as `run`.
+    /// `TurnCapExceeded`; an observed cancellation returns `Cancelled` — both
+    /// with the partial transcript.
+    /// Test: Same tests as `run`, plus `cancel_flag_aborts_before_next_turn`.
     async fn run_inner(
         &self,
         transcript: &mut Transcript,
@@ -159,6 +203,17 @@ impl AgentLoop {
         let schemas = self.tool_definitions();
 
         for _turn in 0..self.config.max_turns {
+            // #2056: checked at the top of every turn boundary — never
+            // mid-tool-call — matching the vision spec's "cancellation is not
+            // instantaneous" semantics (§12, 11.6).
+            if let Some(cancel) = &self.cancel
+                && cancel.load(Ordering::Relaxed)
+            {
+                return Err(AgentLoopError::Cancelled {
+                    partial: Box::new(build_output(transcript, perf)),
+                });
+            }
+
             let request = self.build_request(transcript, &schemas);
             let response = self.llm.chat(&request).await?;
 
@@ -193,18 +248,30 @@ impl AgentLoop {
     /// Why: A single assistant turn may request several tools; all must run and
     /// be answered before the next chat call, or the API rejects the follow-up.
     /// What: For each call, parse its JSON arguments (a parse failure becomes a
-    /// recoverable error string rather than aborting the loop), dispatch through
-    /// `dispatch_gated` with no per-agent allowlist, and append the result as a
-    /// `tool` message.
-    /// Test: `agent_loop::tests::recoverable_tool_error_continues`.
+    /// recoverable error string rather than aborting the loop), notify the
+    /// optional (#2056) sink's `tool_started`, dispatch through `dispatch_gated`
+    /// with no per-agent allowlist, notify `tool_finished` (success) or
+    /// `tool_error` (a fatal/non-recoverable `ToolResult::Error`) based on the
+    /// result, and append the result as a `tool` message.
+    /// Test: `agent_loop::tests::recoverable_tool_error_continues`,
+    /// `sink_receives_started_then_finished_in_order`,
+    /// `sink_receives_tool_error_for_fatal_failures`.
     async fn dispatch_all(&self, tool_calls: &[ToolCall], transcript: &mut Transcript) {
         for call in tool_calls {
             let args = parse_args(&call.function.arguments);
-            let result = self
-                .registry
-                .dispatch_gated(&call.function.name, args, None)
-                .await;
-            transcript.push_tool_result(&call.id, &call.function.name, result.content());
+            let tool = call.function.name.as_str();
+
+            if let Some(sink) = &self.sink {
+                sink.tool_started(&call.id, tool, &args.to_string()).await;
+            }
+
+            let result = self.registry.dispatch_gated(tool, args, None).await;
+
+            if let Some(sink) = &self.sink {
+                notify_result(sink.as_ref(), &call.id, tool, &result).await;
+            }
+
+            transcript.push_tool_result(&call.id, tool, result.content());
         }
     }
 
@@ -280,6 +347,25 @@ fn schema_tool_name(schema: &Value) -> &str {
         .and_then(|f| f.get("name"))
         .and_then(Value::as_str)
         .unwrap_or("<unknown>")
+}
+
+/// Notify a [`ToolEventSink`] of one tool dispatch's outcome (#2056).
+///
+/// Why: Maps `ToolResult`'s three real states onto the sink's two completion
+/// hooks: a non-recoverable (`is_fatal`) error is exceptional — `tool_error` —
+/// while success and a recoverable error are both ordinary completions
+/// distinguished by `success`, matching #2055's `ToolFinished{success}`/
+/// `ToolError` taxonomy split.
+/// What: `is_fatal()` -> `tool_error`; otherwise -> `tool_finished(!is_error())`.
+/// Test: `agent_loop::tests::sink_receives_started_then_finished_in_order`,
+/// `sink_receives_tool_error_for_fatal_failures`.
+async fn notify_result(sink: &dyn ToolEventSink, call_id: &str, tool: &str, result: &ToolResult) {
+    if result.is_fatal() {
+        sink.tool_error(call_id, tool, result.content()).await;
+    } else {
+        sink.tool_finished(call_id, tool, !result.is_error(), result.content())
+            .await;
+    }
 }
 
 /// Parse a tool call's JSON argument string into a `Value`.

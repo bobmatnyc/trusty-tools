@@ -21,11 +21,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::agent_loop::{AgentLoop, AgentLoopConfig};
+use crate::agent_loop::{AgentLoop, AgentLoopConfig, ToolEventSink};
 use crate::agents::AgentConfig;
 use crate::llm::LlmClientTrait;
 use crate::prompt::assemble_system_prompt;
@@ -127,6 +128,14 @@ pub struct InProcessAgentRunner {
     config_dir: PathBuf,
     project_context: Option<String>,
     config: InProcessRunnerConfig,
+    /// #2056: propagated to every sub-agent `AgentLoop` this runner drives, so
+    /// a delegated sub-agent's tool activity is observable to the same sink
+    /// the delegating (PM) loop uses. `None` (the default) matches the
+    /// pre-#2056 behaviour exactly.
+    sink: Option<Arc<dyn ToolEventSink>>,
+    /// #2056: propagated to every sub-agent `AgentLoop`, so cancelling the
+    /// PM's run also stops any in-flight delegated sub-agent loop.
+    cancel: Option<Arc<AtomicBool>>,
 }
 
 impl InProcessAgentRunner {
@@ -150,7 +159,34 @@ impl InProcessAgentRunner {
             config_dir: config_dir.into(),
             project_context: None,
             config: InProcessRunnerConfig::default(),
+            sink: None,
+            cancel: None,
         }
+    }
+
+    /// Attach a [`ToolEventSink`] every delegated sub-agent loop this runner
+    /// drives will notify around its own tool dispatches (#2056).
+    ///
+    /// Why: Makes a delegated sub-agent's tool activity observable to the
+    /// same sink the delegating loop uses, without the delegate tool or the
+    /// PM loop needing to know about it.
+    /// What: Builder-style setter; returns `self` for chaining.
+    /// Test: `runner::tests::sink_reaches_delegated_loop`.
+    pub fn with_tool_event_sink(mut self, sink: Arc<dyn ToolEventSink>) -> Self {
+        self.sink = Some(sink);
+        self
+    }
+
+    /// Attach a cancellation flag every delegated sub-agent loop this runner
+    /// drives will check (#2056).
+    ///
+    /// Why: Cancelling the delegating (PM) run must also stop an in-flight
+    /// delegated sub-agent loop, not just the PM's own turns.
+    /// What: Builder-style setter; returns `self` for chaining.
+    /// Test: `runner::tests::cancel_flag_reaches_delegated_loop`.
+    pub fn with_cancel_flag(mut self, cancel: Arc<AtomicBool>) -> Self {
+        self.cancel = Some(cancel);
+        self
     }
 
     /// Attach project `CLAUDE.md` context injected into every assembled prompt.
@@ -239,7 +275,13 @@ impl InProcessAgentRunner {
         // Fallback guidance (the #1023 per-tier seam) is not wired here yet.
         let system = assemble_system_prompt(&agent, self.project_context.as_deref(), None);
 
-        let agent_loop = AgentLoop::new(loop_config, Arc::clone(&self.llm), registry);
+        let mut agent_loop = AgentLoop::new(loop_config, Arc::clone(&self.llm), registry);
+        if let Some(sink) = &self.sink {
+            agent_loop = agent_loop.with_tool_event_sink(Arc::clone(sink));
+        }
+        if let Some(cancel) = &self.cancel {
+            agent_loop = agent_loop.with_cancel_flag(Arc::clone(cancel));
+        }
 
         agent_loop
             .run(&system, task)
