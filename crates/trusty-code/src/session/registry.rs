@@ -44,13 +44,14 @@ use crate::perf::TokenUsage;
 use crate::run_task::TurnRecord;
 
 use super::model::{Session, SessionStatus};
+use super::transcript::TranscriptRecord;
 
 /// Default ring-buffer capacity per session (vision spec §12, 11.5).
 ///
 /// Why: bounds per-session memory use; a freshly-attached client sees
-/// "recent progress but not the full session history" per spec, with full
-/// history reserved for a future `session.get_transcript` (out of scope for
-/// #2054/#2055 — not in either issue's method list).
+/// "recent progress but not the full session history" per spec — the ring
+/// buffer is the LIVE-event window, distinct from the full run transcript
+/// `session.get_transcript` (#2058) exposes via `Self::get_transcript`.
 /// Test: `registry_tests::ring_buffer_drops_oldest_when_full`.
 pub const DEFAULT_RING_CAPACITY: usize = 1000;
 
@@ -70,9 +71,9 @@ struct SessionEntry {
     /// #2056: set while a background task-execution is in flight; `None`
     /// when idle (never started, or already finished).
     execution: Option<Execution>,
-    /// #2056: the run transcript populated once an execution finishes —
-    /// ready for a future `session.get_transcript` (#2058) to expose. Empty
-    /// until then.
+    /// #2056: the run transcript populated once an execution finishes;
+    /// exposed read-only via `session.get_transcript` (#2058,
+    /// `Self::get_transcript`). Empty until the first execution completes.
     transcript: Vec<TurnRecord>,
     /// #2056: aggregated token usage from the last completed execution.
     usage: TokenUsage,
@@ -526,9 +527,8 @@ impl SessionRegistry {
     /// Persist a finished execution's transcript/usage/cost into the session
     /// (#2056).
     ///
-    /// Why: populates the storage a future `session.get_transcript` (#2058)
-    /// will expose — #2056's scope is populating it, not adding a new
-    /// retrieval method.
+    /// Why: populates the storage `Self::get_transcript` (#2058) reads back
+    /// over the wire.
     /// What: best-effort — a no-op if `id` is already gone (e.g. the daemon
     /// is shutting down mid-run).
     /// Test: `registry_tests::set_run_outcome_stores_transcript_and_usage`.
@@ -545,6 +545,36 @@ impl SessionRegistry {
             entry.usage = usage;
             entry.cost_usd = cost_usd;
         }
+    }
+
+    /// `session.get_transcript`: fetch the stored run record for a session
+    /// (#2058).
+    ///
+    /// Why: [`Self::set_run_outcome`] populates the storage; this is its read
+    /// counterpart — the M1 cut-line's "inspect transcript" verb. A never-run
+    /// session is a valid, empty transcript, not an error: `SessionEntry`'s
+    /// `transcript`/`usage`/`cost_usd` fields already default to
+    /// empty/zero/`None` at `create` time, so returning them unconditionally
+    /// (once the session itself is confirmed to exist) is correct with no
+    /// extra branching.
+    /// What: `Err(session_not_found)` if `id` is unknown; otherwise a clone of
+    /// whatever is currently stored, wrapped in a self-describing
+    /// [`TranscriptRecord`]. Never recomputes cost or usage — exposes exactly
+    /// what [`Self::set_run_outcome`] last stored.
+    /// Test: `registry_tests::get_transcript_returns_stored_record`,
+    /// `registry_tests::get_transcript_on_never_run_session_is_empty`,
+    /// `registry_tests::get_transcript_unknown_session_errors`.
+    pub fn get_transcript(&self, id: &str) -> Result<TranscriptRecord, RpcError> {
+        let sessions = self.lock();
+        let entry = sessions
+            .get(id)
+            .ok_or_else(|| RpcError::session_not_found(id))?;
+        Ok(TranscriptRecord {
+            session_id: id.to_string(),
+            turns: entry.transcript.clone(),
+            usage: entry.usage,
+            cost_usd: entry.cost_usd,
+        })
     }
 
     /// Cooperatively cancel every in-flight execution and wait, bounded by

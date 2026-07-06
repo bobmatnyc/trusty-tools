@@ -4,16 +4,16 @@
 //! goes through JSON-RPC, reachable identically over STDIO and HTTP, so the
 //! CLI (and later TUI/TELGUI/REST) never touch `SessionRegistry` directly.
 //! What: [`register`] wires `session.create`, `session.list`,
-//! `session.status`, `session.send`, `session.attach`, `session.detach`, and
-//! `session.cancel` onto a [`Router`], all closed over the SAME
-//! `Arc<SessionRegistry>` so every method sees a consistent view. Each
-//! handler parses its typed `params`, forwards to the matching
-//! `SessionRegistry` method, and maps the result onto the JSON-RPC result
-//! shape the vision spec's §4.3 examples describe.
+//! `session.status`, `session.send`, `session.attach`, `session.detach`,
+//! `session.cancel`, and (#2058) `session.get_transcript` onto a [`Router`],
+//! all closed over the SAME `Arc<SessionRegistry>` so every method sees a
+//! consistent view. Each handler parses its typed `params`, forwards to the
+//! matching `SessionRegistry` method, and maps the result onto the JSON-RPC
+//! result shape the vision spec's §4.3 examples describe.
 //! Test: `protocol::tests::*` (parameter validation, error mapping); the
 //! full attach/detach streaming behaviour is covered by
 //! `session::registry_tests` (registry-level) and
-//! `tests/session_e2e.rs` (API-driven, real daemon).
+//! `tests/session_e2e.rs`/`tests/task_e2e.rs` (API-driven, real daemon).
 
 use std::sync::Arc;
 
@@ -93,6 +93,15 @@ pub fn register(router: &mut Router, registry: Arc<SessionRegistry>) {
         move |params: Value, ctx: ConnectionContext| {
             let r = r.clone();
             async move { cancel(&r, params, ctx).await }
+        },
+    );
+
+    let r = registry.clone();
+    router.register(
+        "session.get_transcript",
+        move |params: Value, ctx: ConnectionContext| {
+            let r = r.clone();
+            async move { get_transcript(&r, params, ctx).await }
         },
     );
 }
@@ -278,6 +287,28 @@ async fn cancel(
     }
 }
 
+/// `session.get_transcript(session_id) -> TranscriptRecord` (#2058, vision
+/// spec §11.1 Transcript Persistence / §4.3 API Surface).
+///
+/// Why: completes the M1 cut-line's "inspect transcript" verb — read-only
+/// access to the run record `task.run` (#2056) persists via
+/// `SessionRegistry::set_run_outcome`.
+/// What: `-32007 session_not_found` if `session_id` is unknown; otherwise
+/// `SessionRegistry::get_transcript`'s `TranscriptRecord` verbatim — turns,
+/// aggregate usage, and stored cost, never recomputed here. A session that
+/// has never run a task returns a `TranscriptRecord` with an empty `turns`
+/// array rather than an error (see `SessionRegistry::get_transcript`'s docs).
+/// Test: `protocol::tests::get_transcript_unknown_session_maps_to_session_not_found`,
+/// `protocol::tests::get_transcript_on_never_run_session_is_empty`.
+async fn get_transcript(
+    registry: &SessionRegistry,
+    params: Value,
+    _ctx: ConnectionContext,
+) -> Result<Value, RpcError> {
+    let p: SessionIdParams = parse(params, "session.get_transcript")?;
+    Ok(json!(registry.get_transcript(&p.session_id)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +339,7 @@ mod tests {
             ),
             ("session.attach", json!({"session_id": session.id})),
             ("session.detach", json!({"session_id": session.id})),
+            ("session.get_transcript", json!({"session_id": session.id})),
         ];
         for (method, params) in cases {
             let req = Request {
@@ -378,6 +410,31 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, -32007);
+    }
+
+    /// `session.get_transcript` on an unknown id must map to
+    /// `session_not_found` (#2058).
+    #[tokio::test]
+    async fn get_transcript_unknown_session_maps_to_session_not_found() {
+        let registry = SessionRegistry::new();
+        let err = get_transcript(&registry, json!({"session_id": "nope"}), test_ctx())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, -32007);
+    }
+
+    /// `session.get_transcript` on a session that has never run a task
+    /// returns an empty transcript, not an error (#2058).
+    #[tokio::test]
+    async fn get_transcript_on_never_run_session_is_empty() {
+        let registry = SessionRegistry::new();
+        let session = registry.create("t".to_string(), None, None);
+        let result = get_transcript(&registry, json!({"session_id": session.id}), test_ctx())
+            .await
+            .unwrap();
+        assert_eq!(result["session_id"], session.id);
+        assert_eq!(result["turns"].as_array().unwrap().len(), 0);
+        assert_eq!(result["cost_usd"], Value::Null);
     }
 
     /// `session.send` on an unknown id must map to `session_not_found`.
