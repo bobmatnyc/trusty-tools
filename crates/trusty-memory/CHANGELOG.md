@@ -9,6 +9,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- slim build (`--no-default-features`) now compiles: `tools::dream_ops` reached
+  the user-config loader through the `axum-server`-gated `crate::web::` re-export,
+  breaking any dependent that opts out of `axum-server` (e.g. `trusty-agents`,
+  which uses `default-features = false`). Now routes through the axum-free
+  `crate::service::load_user_config` like `chat_provider()` already does
+  (closes #2049).
 - decouple recall/remember from embedder warm-up (closes #1970) ([#1972](https://github.com/bobmatnyc/trusty-tools/pull/1972)) ([`bb322d4`](https://github.com/bobmatnyc/trusty-tools/commit/bb322d4678f8e167691688e77190b44d9c08627a))
 - palace-level alias resolution for claude-mpm parity (owner-repo -> bare palace) ([#1945](https://github.com/bobmatnyc/trusty-tools/pull/1945)) ([`af7f904`](https://github.com/bobmatnyc/trusty-tools/commit/af7f90499402971ac65aed5b104cde251e182599))
 - stop console_metrics force-opening every palace on poll (closes #1924) ([#1926](https://github.com/bobmatnyc/trusty-tools/pull/1926)) ([`74e9e54`](https://github.com/bobmatnyc/trusty-tools/commit/74e9e54243efc6de3778d7c43d938add2ab7b676))

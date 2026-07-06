@@ -53,7 +53,13 @@ pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value)
     // Seed the consolidation config from the daemon's user config so the
     // inference backend (OpenRouter key / local model) matches the idle dream
     // cycle. Everything else uses the dream defaults (semantic enabled).
-    let cfg = crate::web::load_user_config().unwrap_or_default();
+    //
+    // Use `crate::service::load_user_config` (the axum-free home of the loader,
+    // issue #226) rather than the `crate::web::` re-export: this `tools` module
+    // is compiled unconditionally, but `mod web` is `#[cfg(feature =
+    // "axum-server")]`-gated, so the re-export vanishes when a dependent builds
+    // trusty-memory without that feature — which broke the build (E0433).
+    let cfg = crate::service::load_user_config().unwrap_or_default();
     let dream_cfg = DreamConfig {
         openrouter_api_key: cfg.openrouter_api_key,
         local_model_enabled: cfg.local_model.enabled,
