@@ -25,6 +25,7 @@
 //! tool-error continuation, usage accrual, sink notification order, cancellation,
 //! plus an `#[ignore]`-gated live test.
 
+mod compaction;
 mod error;
 mod sink;
 mod transcript;
@@ -46,6 +47,7 @@ use crate::mode::HarnessMode;
 use crate::perf::PerfCollector;
 use crate::tools::{AgentOutput, FINISH_TASK_TOOL_NAME, FinishTaskArgs, ToolRegistry, ToolResult};
 
+pub use compaction::CompactionConfig;
 pub use error::AgentLoopError;
 pub use sink::ToolEventSink;
 pub use transcript::Transcript;
@@ -82,6 +84,12 @@ pub struct AgentLoopConfig {
     /// The resolved harness mode for this run (#2059). See
     /// `Self::tool_definitions`' docs for the branch point this feeds.
     pub mode: HarnessMode,
+
+    /// Non-destructive context compaction tuning (#2070, §5.4). Only
+    /// consulted when `mode == HarnessMode::DailyDriver` — see
+    /// `Self::maybe_compact_transcript`'s docs for why Parity must never
+    /// compact.
+    pub compaction: CompactionConfig,
 }
 
 impl Default for AgentLoopConfig {
@@ -89,7 +97,8 @@ impl Default for AgentLoopConfig {
     ///
     /// Why: Most callers want a bounded but generous loop; defaults avoid
     /// boilerplate at every construction site.
-    /// What: 8 turns, 120s timeout, `openai/gpt-4o-mini`, `HarnessMode::default()`.
+    /// What: 8 turns, 120s timeout, `openai/gpt-4o-mini`, `HarnessMode::default()`,
+    /// `CompactionConfig::default()`.
     /// Test: `config_defaults_are_sane`.
     fn default() -> Self {
         Self {
@@ -97,6 +106,7 @@ impl Default for AgentLoopConfig {
             timeout_secs: 120,
             model: "openai/gpt-4o-mini".to_string(),
             mode: HarnessMode::default(),
+            compaction: CompactionConfig::default(),
         }
     }
 }
@@ -234,6 +244,10 @@ impl AgentLoop {
                 });
             }
 
+            // #2070: compaction check, same turn boundary as the cancellation
+            // check above — never mid-tool-call.
+            self.maybe_compact_transcript(transcript);
+
             let request = self.build_request(transcript, &schemas);
             let response = self.llm.chat(&request).await?;
 
@@ -369,6 +383,26 @@ impl AgentLoop {
             sink.tool_error(call_id, tool, &message).await;
         }
         transcript.push_tool_result(call_id, tool, &message);
+    }
+
+    /// Apply non-destructive context compaction to `transcript`, gated on mode
+    /// (#2070, §5.4; reconciled with §5.9's D2 the same way `tool_definitions`
+    /// is).
+    ///
+    /// Why: The parity-spec (D2) requires `HarnessMode::Parity` runs to stay
+    /// byte-identical / full-history for cross-model benchmark fairness —
+    /// compacting would silently change what a Parity run sends after enough
+    /// turns, breaking that guarantee. `HarnessMode::DailyDriver` is
+    /// production's token-efficiency mode, so it is the only mode this method
+    /// ever calls `Transcript::maybe_compact` for.
+    /// What: No-op under `HarnessMode::Parity`; under `HarnessMode::DailyDriver`,
+    /// delegates to `transcript.maybe_compact(&self.config.compaction)`.
+    /// Test: `agent_loop::tests::daily_driver_mode_compacts_long_running_loop`,
+    /// `agent_loop::tests::parity_mode_never_compacts_even_past_threshold`.
+    fn maybe_compact_transcript(&self, transcript: &mut Transcript) {
+        if self.config.mode == HarnessMode::DailyDriver {
+            transcript.maybe_compact(&self.config.compaction);
+        }
     }
 
     /// Build a `ChatRequest` from the running transcript and tool schemas.

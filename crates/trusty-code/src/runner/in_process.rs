@@ -317,6 +317,7 @@ impl InProcessAgentRunner {
             timeout_secs: self.config.timeout_secs,
             model,
             mode: self.mode,
+            compaction: crate::agent_loop::CompactionConfig::default(),
         };
 
         // Assemble the mode-branched system prompt (BASE + agent prompt +

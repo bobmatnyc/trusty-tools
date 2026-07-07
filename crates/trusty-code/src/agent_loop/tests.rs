@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use super::{AgentLoop, AgentLoopConfig, AgentLoopError, ToolEventSink};
+use super::{AgentLoop, AgentLoopConfig, AgentLoopError, CompactionConfig, ToolEventSink};
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
 use crate::tools::{FinishTaskTool, ToolExecutor, ToolRegistry, ToolResult};
 
@@ -35,6 +35,10 @@ use crate::tools::{FinishTaskTool, ToolExecutor, ToolRegistry, ToolResult};
 struct ScriptedLlm {
     responses: Vec<ChatResponse>,
     cursor: AtomicUsize,
+    /// (#2070) Every request's message list, in call order — lets compaction
+    /// tests inspect exactly what the loop sent the model on each turn
+    /// without reaching into `Transcript` internals.
+    requests: Mutex<Vec<Vec<crate::llm::ChatMessage>>>,
 }
 
 impl ScriptedLlm {
@@ -52,6 +56,7 @@ impl ScriptedLlm {
         Self {
             responses,
             cursor: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -64,11 +69,27 @@ impl ScriptedLlm {
     fn calls(&self) -> usize {
         self.cursor.load(Ordering::SeqCst)
     }
+
+    /// Every request's message list, in call order (#2070).
+    ///
+    /// Why: Compaction tests need to inspect what the loop actually sent the
+    /// model on a given turn — e.g. the last turn's request should carry a
+    /// `[compacted` summary and a replayed last-user message once compaction
+    /// has fired.
+    /// What: Clones the recorded request message lists.
+    /// Test: `agent_loop::tests::daily_driver_mode_compacts_long_running_loop`,
+    /// `agent_loop::tests::parity_mode_never_compacts_even_past_threshold`.
+    fn requests(&self) -> Vec<Vec<crate::llm::ChatMessage>> {
+        self.requests.lock().expect("lock").clone()
+    }
 }
 
 #[async_trait]
 impl LlmClientTrait for ScriptedLlm {
-    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        if let Ok(mut guard) = self.requests.lock() {
+            guard.push(req.messages.clone());
+        }
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         match self.responses.get(idx) {
             Some(resp) => Ok(resp.clone()),
@@ -393,6 +414,130 @@ fn tool_definitions_identical_across_modes_in_m1() {
     );
 
     assert_eq!(parity.tool_definitions(), daily_driver.tool_definitions());
+}
+
+/// A low-threshold `CompactionConfig` for a `DailyDriver` run to compact
+/// aggressively and deterministically inside a test.
+fn aggressive_compaction() -> CompactionConfig {
+    CompactionConfig {
+        token_threshold: 1,
+        keep_last_messages: 2,
+    }
+}
+
+/// A long-running `DailyDriver` loop compacts older turns; the request it
+/// finally sends carries a summary and a replayed last user message (#2070).
+///
+/// Why: §5.4's whole mechanism only matters if it is actually wired into the
+/// live turn loop, not just the `Transcript` unit — this is the
+/// loop-level integration proof.
+/// What: Scripts 5 tool-call round-trips then a final stop, with an
+/// aggressive `CompactionConfig` so compaction fires well before the run
+/// ends. Asserts the LAST request the scripted client received contains a
+/// `[compacted` summary message and ends with a replayed `user` message
+/// matching the original task, and that it is far shorter than the raw
+/// message count the run accumulated.
+/// Test: this test.
+#[tokio::test]
+async fn daily_driver_mode_compacts_long_running_loop() {
+    let mut fixtures: Vec<Value> = (0..5)
+        .map(|i| tool_call_response(&format!("call_{i}"), &format!("turn-{i}")))
+        .collect();
+    fixtures.push(stop_response("all done"));
+    let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
+    let registry = registry_with_echo(false);
+
+    let agent = make_loop(
+        llm.clone(),
+        registry,
+        AgentLoopConfig {
+            max_turns: 10,
+            mode: crate::mode::HarnessMode::DailyDriver,
+            compaction: aggressive_compaction(),
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    agent
+        .run("system prompt", "the original task")
+        .await
+        .expect("run completes");
+
+    let requests = llm.requests();
+    let last_request = requests.last().expect("at least one request");
+
+    let has_summary = last_request
+        .iter()
+        .any(|m| m.content.as_deref().unwrap_or("").contains("[compacted"));
+    assert!(
+        has_summary,
+        "expected a compaction summary in {last_request:?}"
+    );
+
+    let tail = last_request.last().expect("non-empty request");
+    assert_eq!(tail.role, "user");
+    assert_eq!(tail.content.as_deref(), Some("the original task"));
+
+    // Raw history at this point is 2 seed + 5*(assistant+tool) = 12 messages;
+    // the compacted view sent on the last turn must be materially smaller.
+    assert!(
+        last_request.len() < 12,
+        "expected a shrunk request, got {} messages",
+        last_request.len()
+    );
+}
+
+/// `Parity` mode never compacts, even past the same aggressive threshold
+/// that triggers compaction under `DailyDriver` (#2070, §5.9 reconciliation).
+///
+/// Why: The parity-spec (D2) requires byte-identical, full-history requests
+/// for cross-model benchmark fairness; compaction silently changing what a
+/// Parity run sends would break that guarantee.
+/// What: Same script and the SAME aggressive `CompactionConfig` as
+/// `daily_driver_mode_compacts_long_running_loop`, but `mode: Parity`.
+/// Asserts no request ever carries a `[compacted` summary and the last
+/// request's message count equals the full raw history (2 seed + 5 tool
+/// round-trips' worth of turns).
+/// Test: this test.
+#[tokio::test]
+async fn parity_mode_never_compacts_even_past_threshold() {
+    let mut fixtures: Vec<Value> = (0..5)
+        .map(|i| tool_call_response(&format!("call_{i}"), &format!("turn-{i}")))
+        .collect();
+    fixtures.push(stop_response("all done"));
+    let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
+    let registry = registry_with_echo(false);
+
+    let agent = make_loop(
+        llm.clone(),
+        registry,
+        AgentLoopConfig {
+            max_turns: 10,
+            mode: crate::mode::HarnessMode::Parity,
+            compaction: aggressive_compaction(),
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    agent
+        .run("system prompt", "the original task")
+        .await
+        .expect("run completes");
+
+    let requests = llm.requests();
+    for request in &requests {
+        let has_summary = request
+            .iter()
+            .any(|m| m.content.as_deref().unwrap_or("").contains("[compacted"));
+        assert!(!has_summary, "Parity must never compact, got {request:?}");
+    }
+
+    let last_request = requests.last().expect("at least one request");
+    assert_eq!(
+        last_request.len(),
+        12,
+        "Parity must send the full raw history"
+    );
 }
 
 /// A two-turn flow: assistant calls the tool, then stops with final text.
@@ -769,6 +914,7 @@ async fn agent_loop_live() {
             timeout_secs: 60,
             model: "openai/gpt-4o-mini".to_string(),
             mode: crate::mode::HarnessMode::default(),
+            ..AgentLoopConfig::default()
         },
         Arc::new(client),
         registry,
