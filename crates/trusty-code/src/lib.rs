@@ -116,9 +116,10 @@ pub mod build_info;
 /// plug in without touching orchestration code.
 /// What: `ToolExecutor`, `AgentRunner`, `RunContext`, `AgentOutput`,
 /// `SearchProvider`, `SkillResolver`, `ToolResult`, `ToolRegistry`,
-/// `DelegateToAgentTool`.
+/// `DelegateToAgentTool`, `UseSkillTool` (#2069's progressive-disclosure
+/// on-invoke skill-body loader).
 /// Test: `tools::traits::tests::*`, `tools::registry::tests::*`,
-/// `tools::delegate::tests::*`.
+/// `tools::delegate::tests::*`, `tools::skill::tests::*`.
 pub mod tools;
 
 /// Role-based access control for tool execution.
@@ -154,6 +155,23 @@ pub mod llm;
 /// `RunnerConfig`, `RunnerKind`, `discover_agents`, `load_all_agents`.
 /// Test: `agents::tests::*`.
 pub mod agents;
+
+/// Progressive-disclosure skill discovery for `.claude/skills/` (#2069,
+/// vision spec §5.3, Resolved Decision #7).
+///
+/// Why: A skill catalog's full Markdown bodies cost far more tokens than the
+/// PM/agents need up front — most skills in a session are never invoked.
+/// Splitting discovery into cheap, always-cached metadata (name +
+/// description) and an on-demand-loaded body is the token-efficiency layer
+/// P1B wires into `prompt::assemble_system_prompt_for_mode`'s `DailyDriver`
+/// arm.
+/// What: `SkillMetadata`, `locate_skills_dir` (`.claude/skills`, the
+/// Claude-Code-compatible path), `discover_skill_metadata`,
+/// `load_skill_body` (the lazy on-invoke loader), `format_skill_catalog`
+/// (prompt-injection rendering), and `FsSkillResolver` (the concrete
+/// `tools::SkillResolver` impl the `use_skill` tool is built on).
+/// Test: `skills::tests::*`.
+pub mod skills;
 
 /// Harness mode selection: `daily-driver` (default, token-efficiency
 /// consumption point) vs `parity` (full-schema benchmark mode) — #2059,

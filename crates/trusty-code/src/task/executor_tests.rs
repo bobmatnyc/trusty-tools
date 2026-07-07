@@ -103,3 +103,59 @@ fn resolve_engineer_model_falls_back_when_config_missing() {
     let model = resolve_engineer_model(&p);
     assert_eq!(model, "unknown");
 }
+
+/// `daily_driver_skills_catalog` returns `None` under `HarnessMode::Parity`,
+/// even when the project has a real `.claude/skills/` catalog (#2069's
+/// scope note: "Parity mode should NOT progressively disclose").
+#[test]
+fn daily_driver_skills_catalog_none_in_parity() {
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let skills_dir = project.path().join(".claude").join("skills").join("demo");
+    std::fs::create_dir_all(&skills_dir).expect("mkdir skill dir");
+    std::fs::write(
+        skills_dir.join("SKILL.md"),
+        "---\nname: demo\ndescription: Demo skill\n---\nbody\n",
+    )
+    .expect("write SKILL.md");
+
+    let mut p = params(&agents, &project, "s");
+    p.mode = crate::mode::HarnessMode::Parity;
+
+    assert!(daily_driver_skills_catalog(&p).is_none());
+}
+
+/// `daily_driver_skills_catalog` returns `None` when the project has no
+/// `.claude/skills/` directory at all, even in `HarnessMode::DailyDriver`.
+#[test]
+fn daily_driver_skills_catalog_none_when_no_skills_dir() {
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let mut p = params(&agents, &project, "s");
+    p.mode = crate::mode::HarnessMode::DailyDriver;
+
+    assert!(daily_driver_skills_catalog(&p).is_none());
+}
+
+/// `daily_driver_skills_catalog` returns the rendered catalog + a working
+/// resolver under `HarnessMode::DailyDriver` when skills exist.
+#[test]
+fn daily_driver_skills_catalog_some_when_skills_exist() {
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    let skills_dir = project.path().join(".claude").join("skills").join("demo");
+    std::fs::create_dir_all(&skills_dir).expect("mkdir skill dir");
+    std::fs::write(
+        skills_dir.join("SKILL.md"),
+        "---\nname: demo\ndescription: Demo skill\n---\nfull body\n",
+    )
+    .expect("write SKILL.md");
+
+    let mut p = params(&agents, &project, "s");
+    p.mode = crate::mode::HarnessMode::DailyDriver;
+
+    let (catalog, resolver) = daily_driver_skills_catalog(&p).expect("catalog present");
+    assert!(catalog.contains("demo: Demo skill"));
+    assert_eq!(resolver.resolve("demo").as_deref(), Some("full body"));
+}

@@ -144,6 +144,13 @@ pub struct InProcessAgentRunner {
     /// pre-#2059 behaviour exactly (both modes are functionally identical
     /// in M1 regardless).
     mode: HarnessMode,
+    /// #2069: the rendered, metadata-only skill catalog
+    /// (`skills::format_skill_catalog`) threaded into every sub-agent prompt
+    /// this runner assembles, in `HarnessMode::DailyDriver` only (the mode
+    /// arm ignores it entirely in `Parity` — see
+    /// `assemble_system_prompt_for_mode`'s docs). `None` until
+    /// `with_skills_catalog` is called, matching pre-#2069 behaviour exactly.
+    skills_catalog: Option<String>,
 }
 
 impl InProcessAgentRunner {
@@ -170,6 +177,7 @@ impl InProcessAgentRunner {
             sink: None,
             cancel: None,
             mode: HarnessMode::default(),
+            skills_catalog: None,
         }
     }
 
@@ -221,6 +229,23 @@ impl InProcessAgentRunner {
     /// prompt captured by the scripted client).
     pub fn with_project_context(mut self, context: impl Into<String>) -> Self {
         self.project_context = Some(context.into());
+        self
+    }
+
+    /// Attach the rendered skill catalog (#2069) injected into every
+    /// `HarnessMode::DailyDriver` prompt this runner assembles.
+    ///
+    /// Why: A delegated sub-agent should see the same cheap, metadata-only
+    /// skill catalog the delegating PM does, without the runner needing to
+    /// know how the catalog was discovered (the caller renders it via
+    /// `skills::format_skill_catalog` and passes the result straight
+    /// through).
+    /// What: Builder-style setter; returns `self` for chaining. Ignored
+    /// entirely by `HarnessMode::Parity` at prompt-assembly time.
+    /// Test: `runner::tests::skills_catalog_reaches_daily_driver_prompt`,
+    /// `runner::tests::skills_catalog_ignored_in_parity`.
+    pub fn with_skills_catalog(mut self, catalog: impl Into<String>) -> Self {
+        self.skills_catalog = Some(catalog.into());
         self
     }
 
@@ -297,11 +322,13 @@ impl InProcessAgentRunner {
         // Assemble the mode-branched system prompt (BASE + agent prompt +
         // project ctx) — see `assemble_system_prompt_for_mode`'s docs (#2059).
         // Fallback guidance (the #1023 per-tier seam) is not wired here yet.
+        // `skills_catalog` (#2069) is appended only in `HarnessMode::DailyDriver`.
         let system = assemble_system_prompt_for_mode(
             self.mode,
             &agent,
             self.project_context.as_deref(),
             None,
+            self.skills_catalog.as_deref(),
         );
 
         let mut agent_loop = AgentLoop::new(loop_config, Arc::clone(&self.llm), registry);

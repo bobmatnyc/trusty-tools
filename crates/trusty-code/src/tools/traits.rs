@@ -327,16 +327,25 @@ pub trait SearchProvider: Send + Sync {
 /// Resolves named skills to their Markdown content.
 ///
 /// Why: Skill sources vary (project `.claude/`, user `~/.claude/`, bundled
-/// config); callers should not care which.
+/// config); callers should not care which. #2069 splits skills into cheap,
+/// always-cached metadata (name + description) and an on-demand-loaded body
+/// so the PM/agents can see the full catalog without paying every skill's
+/// token cost up front — `metadata()` is the cached catalog, `resolve()` is
+/// the lazy, per-invocation body load.
 /// What: `resolve(name)` returns `Some(content)` if found. `list()` returns
-/// all discoverable names.
-/// Test: A `FsSkillResolver` in tests places a file in a tempdir and asserts
-/// `resolve()` returns its contents.
+/// all discoverable names. `metadata()` returns the full cached
+/// `SkillMetadata` catalog (name + description), the progressive-disclosure
+/// prompt injection uses.
+/// Test: `crate::skills::tests::fs_skill_resolver_*` construct an
+/// `FsSkillResolver` (this trait's concrete filesystem impl) over a tempdir
+/// and assert `resolve()`/`list()`/`metadata()` all agree.
 pub trait SkillResolver: Send + Sync {
     /// Look up a skill by name and return its Markdown content, if found.
     fn resolve(&self, name: &str) -> Option<String>;
     /// List all discoverable skill names.
     fn list(&self) -> Vec<String>;
+    /// Cached metadata (name + description) for every discoverable skill.
+    fn metadata(&self) -> Vec<crate::skills::SkillMetadata>;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

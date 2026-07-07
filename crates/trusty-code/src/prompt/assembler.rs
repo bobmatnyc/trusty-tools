@@ -99,38 +99,46 @@ pub fn assemble_system_prompt(
     sections.join(SECTION_SEPARATOR)
 }
 
-/// Mode-aware prompt assembly — the CONSUMPTION POINT #2059 wires up for
-/// P1B's token-efficiency work, without implementing any of it here.
+/// Mode-aware prompt assembly — the CONSUMPTION POINT #2059 wired up for
+/// P1B's token-efficiency work; #2069 is the first arm to actually land in
+/// it (progressive-disclosure skill loading).
 ///
 /// Why: vision spec §5.9 resolves the parity/daily-driver split at the
 /// prompt-assembly and tool-schema layers. This function is where the
-/// prompt-assembly half of that branch lives — real code, both arms
-/// currently identical, so P1B has an obvious, already-wired seam to change
-/// ONE arm without touching every call site (`task::executor`,
-/// `runner::in_process::InProcessAgentRunner::run_pipeline`) that currently
-/// calls [`assemble_system_prompt`] directly.
-/// What: `HarnessMode::Parity` calls [`assemble_system_prompt`] verbatim —
-/// this is contractually permanent, since parity-spec D2 requires
-/// byte-identical schemas/prompts for benchmark fairness and must never
-/// change. `HarnessMode::DailyDriver` ALSO calls it verbatim today (M1: no
-/// token-efficiency built yet — see the crate-level `mode` module docs);
-/// P1B is expected to replace only this arm (progressive-disclosure skill
-/// loading, compaction, etc.), never the `Parity` arm.
-/// Test: `prompt::tests::assemble_system_prompt_for_mode_is_identical_in_m1`.
+/// prompt-assembly half of that branch lives — a single seam both call
+/// sites (`task::executor`, `runner::in_process::InProcessAgentRunner::run_pipeline`)
+/// go through, so a token-efficiency change lands in ONE arm without
+/// touching either caller's call shape beyond the one new argument.
+/// What: `HarnessMode::Parity` calls [`assemble_system_prompt`] verbatim and
+/// ignores `skills_catalog` entirely — this is contractually permanent,
+/// since parity-spec D2 requires byte-identical schemas/prompts for
+/// benchmark fairness and must never progressively disclose (#2069's own
+/// scope note: "Parity mode should NOT progressively disclose").
+/// `HarnessMode::DailyDriver` appends `skills_catalog` (the cheap,
+/// always-cached `skills::format_skill_catalog` output — NOT any skill's
+/// full body) as a trailing section when non-empty, via the same
+/// [`SECTION_SEPARATOR`] every other section uses; when `skills_catalog` is
+/// `None` or empty, `DailyDriver` output is still byte-identical to
+/// `Parity`, preserving the pre-#2069 M1 contract for projects with no
+/// `.claude/skills/` catalog.
+/// Test: `prompt::tests::assemble_system_prompt_for_mode_identical_when_no_skills`,
+/// `prompt::tests::daily_driver_appends_skills_catalog`,
+/// `prompt::tests::parity_ignores_skills_catalog`.
 pub fn assemble_system_prompt_for_mode(
     mode: crate::mode::HarnessMode,
     config: &AgentConfig,
     project_context: Option<&str>,
     fallback_guidance: Option<&str>,
+    skills_catalog: Option<&str>,
 ) -> String {
+    let base = assemble_system_prompt(config, project_context, fallback_guidance);
     match mode {
-        crate::mode::HarnessMode::Parity => {
-            assemble_system_prompt(config, project_context, fallback_guidance)
-        }
-        // P1B hooks in here: deferred/progressive-disclosure prompt assembly.
-        // Byte-identical to `Parity` until then (#2059 M1 scope).
+        crate::mode::HarnessMode::Parity => base,
         crate::mode::HarnessMode::DailyDriver => {
-            assemble_system_prompt(config, project_context, fallback_guidance)
+            match skills_catalog.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(catalog) => format!("{base}{SECTION_SEPARATOR}{catalog}"),
+                None => base,
+            }
         }
     }
 }
