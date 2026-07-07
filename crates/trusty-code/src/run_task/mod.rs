@@ -32,7 +32,7 @@ use crate::agents::AgentConfig;
 use crate::llm::LlmClientTrait;
 use crate::project_context::load_project_context;
 use crate::prompt::assemble_system_prompt;
-use crate::provider::resolve_model;
+use crate::provider::{resolve_max_tokens, resolve_model};
 use crate::runner::{InProcessAgentRunner, RegistryFactory};
 use crate::tools::{
     AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, FinishTaskTool,
@@ -149,6 +149,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     let pm_loop = AgentLoop::new(
         AgentLoopConfig {
             model: pm_model.clone(),
+            max_tokens: resolve_max_tokens(&pm_config),
             ..AgentLoopConfig::default()
         },
         pm_llm,

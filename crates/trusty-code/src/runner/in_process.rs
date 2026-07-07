@@ -31,7 +31,7 @@ use crate::agents::AgentConfig;
 use crate::llm::LlmClientTrait;
 use crate::mode::HarnessMode;
 use crate::prompt::assemble_system_prompt_for_mode;
-use crate::provider::resolve_model;
+use crate::provider::{resolve_max_tokens, resolve_model};
 use crate::runner::error::RunnerError;
 use crate::tools::{AgentOutput, AgentRunner, RunContext, ToolRegistry};
 
@@ -311,11 +311,16 @@ impl InProcessAgentRunner {
         // Resolve the model and the per-call turn cap (RunContext wins).
         let model = resolve_model(&agent, Some(ctx));
         let max_turns = ctx.max_turns_override.unwrap_or(self.config.max_turns);
+        // #run_task-maxtokens-bug: the delegated agent's own `[llm].max_tokens`
+        // must reach its loop — previously this was dropped entirely and every
+        // sub-agent turn was silently capped at the agent-loop default.
+        let max_tokens = resolve_max_tokens(&agent);
 
         let loop_config = AgentLoopConfig {
             max_turns,
             timeout_secs: self.config.timeout_secs,
             model,
+            max_tokens,
             mode: self.mode,
             compaction: crate::agent_loop::CompactionConfig::default(),
         };

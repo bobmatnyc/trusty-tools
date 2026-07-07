@@ -42,6 +42,11 @@ struct ScriptedLlm {
     responses: Vec<ChatResponse>,
     cursor: AtomicUsize,
     seen: Mutex<Vec<(String, String)>>,
+    /// Every request's `max_tokens`, in call order — lets
+    /// `engineer_llm_max_tokens_reaches_chat_request` assert the delegated
+    /// engineer's `[llm].max_tokens` reached the wire request rather than
+    /// being silently dropped in favour of the agent-loop default.
+    max_tokens_seen: Mutex<Vec<Option<u32>>>,
 }
 
 impl ScriptedLlm {
@@ -59,6 +64,7 @@ impl ScriptedLlm {
             responses,
             cursor: AtomicUsize::new(0),
             seen: Mutex::new(Vec::new()),
+            max_tokens_seen: Mutex::new(Vec::new()),
         }
     }
 
@@ -76,6 +82,16 @@ impl ScriptedLlm {
             .cloned()
             .expect("at least one request recorded")
     }
+
+    /// The `max_tokens` of the first recorded request.
+    fn first_max_tokens(&self) -> Option<u32> {
+        self.max_tokens_seen
+            .lock()
+            .expect("max_tokens_seen lock")
+            .first()
+            .copied()
+            .expect("at least one request recorded")
+    }
 }
 
 #[async_trait]
@@ -91,6 +107,10 @@ impl LlmClientTrait for ScriptedLlm {
             .lock()
             .expect("seen lock")
             .push((req.model.clone(), system));
+        self.max_tokens_seen
+            .lock()
+            .expect("max_tokens_seen lock")
+            .push(req.max_tokens);
 
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         match self.responses.get(idx) {
@@ -304,6 +324,59 @@ content = "You are a Python engineer."
         invoked.lock().expect("invoked").as_slice(),
         ["work_tool"],
         "the engineer's tool must have run inside its own loop"
+    );
+}
+
+/// The delegated engineer's own `[llm].max_tokens` reaches its `ChatRequest`.
+///
+/// Why: This is the regression guard for the run_task bug where
+/// `InProcessAgentRunner::run_pipeline` built the engineer's `AgentLoopConfig`
+/// without ever consulting `agent.llm.max_tokens`, silently capping every
+/// engineer turn at the agent-loop default (formerly a hard-coded 1024) and
+/// truncating real file writes. `resolve_max_tokens` must now flow the
+/// configured cap into the loop that actually drives the engineer.
+/// What: Engineer config sets `[llm].max_tokens = 8192`. Script a single stop
+/// turn; assert the `ScriptedLlm` observed `Some(8192)`.
+/// Test: this test.
+#[tokio::test]
+async fn engineer_llm_max_tokens_reaches_chat_request() {
+    let body = r#"
+[agent]
+name = "python-engineer"
+model = "deepseek/deepseek-chat"
+
+[llm]
+max_tokens = 8192
+
+[system_prompt]
+content = "You are a Python engineer."
+"#;
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("engineer done")]));
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec!["work_tool"], Arc::clone(&invoked)));
+
+    let runner = Arc::new(InProcessAgentRunner::new(
+        llm.clone(),
+        factory,
+        tmp.path().to_path_buf(),
+    ));
+
+    let delegate = DelegateToAgentTool::new(runner).with_config_dir(tmp.path().to_path_buf());
+    let result = delegate
+        .execute(json!({"agent_name": "python-engineer", "task": "write a function"}))
+        .await;
+
+    assert!(
+        !result.is_error(),
+        "delegation should succeed: {}",
+        result.content()
+    );
+    assert_eq!(
+        llm.first_max_tokens(),
+        Some(8192),
+        "the engineer's configured [llm].max_tokens must reach its ChatRequest"
     );
 }
 

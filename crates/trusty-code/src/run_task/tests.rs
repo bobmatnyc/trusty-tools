@@ -37,6 +37,12 @@ struct ScriptedLlm {
     responses: Vec<ChatResponse>,
     cursor: AtomicUsize,
     models: Mutex<Vec<String>>,
+    /// Every request's `max_tokens`, in call order — lets
+    /// `pm_llm_max_tokens_reaches_chat_request` assert the PM's configured
+    /// `[llm].max_tokens` reached the wire request rather than being silently
+    /// dropped in favour of the agent-loop default (the run_task max-tokens
+    /// bug this test guards against).
+    max_tokens: Mutex<Vec<Option<u32>>>,
 }
 
 impl ScriptedLlm {
@@ -49,12 +55,23 @@ impl ScriptedLlm {
             responses,
             cursor: AtomicUsize::new(0),
             models: Mutex::new(Vec::new()),
+            max_tokens: Mutex::new(Vec::new()),
         }
     }
 
     /// Every model slug the client was asked to use, in call order.
     fn models_seen(&self) -> Vec<String> {
         self.models.lock().expect("models lock").clone()
+    }
+
+    /// The `max_tokens` of the first recorded request (the PM's first turn).
+    fn first_max_tokens(&self) -> Option<u32> {
+        self.max_tokens
+            .lock()
+            .expect("max_tokens lock")
+            .first()
+            .copied()
+            .expect("at least one request recorded")
     }
 }
 
@@ -65,6 +82,10 @@ impl LlmClientTrait for ScriptedLlm {
             .lock()
             .expect("models lock")
             .push(req.model.clone());
+        self.max_tokens
+            .lock()
+            .expect("max_tokens lock")
+            .push(req.max_tokens);
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         match self.responses.get(idx) {
             Some(resp) => Ok(resp.clone()),
@@ -243,6 +264,48 @@ async fn end_to_end_pm_delegates_to_engineer() {
     assert!(
         roles.contains(&"python-engineer"),
         "transcript must have an engineer turn: {roles:?}"
+    );
+}
+
+/// The PM's configured `[llm].max_tokens` reaches its `ChatRequest` via
+/// `execute_run_task` — the exact entry point of the run_task max-tokens bug.
+///
+/// Why: `execute_run_task` previously built the PM's `AgentLoopConfig` via
+/// `AgentLoopConfig { model: pm_model, ..AgentLoopConfig::default() }`,
+/// dropping `pm_config.llm.max_tokens` entirely so every PM turn was capped at
+/// the hard-coded default regardless of what `pm.toml` declared. This is the
+/// end-to-end regression guard: a `pm.toml` with `[llm].max_tokens = 8192`
+/// must produce a `ChatRequest.max_tokens` of `8192`, never the old 1024.
+/// What: `pm.toml` declares `[llm].max_tokens = 8192`; script a single PM stop
+/// turn; assert the scripted client observed `Some(8192)`.
+/// Test: this test.
+#[tokio::test]
+async fn pm_llm_max_tokens_reaches_chat_request() {
+    let agents = tempfile::tempdir().expect("agents tempdir");
+    std::fs::write(
+        agents.path().join("pm.toml"),
+        "[agent]\nname = \"pm\"\nmodel = \"openai/gpt-4o-mini\"\n\
+         [llm]\nmax_tokens = 8192\n\
+         [system_prompt]\ncontent = \"You are the PM.\"\n",
+    )
+    .expect("write pm.toml");
+    std::fs::write(
+        agents.path().join("python-engineer.toml"),
+        "[agent]\nname = \"python-engineer\"\nmodel = \"deepseek/deepseek-chat\"\n[system_prompt]\ncontent = \"You are a Python engineer.\"\n",
+    )
+    .expect("write python-engineer.toml");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response(
+        "pm: nothing to do",
+    )]));
+
+    let _report = execute_run_task(params(&agents, &project, None), llm.clone()).await;
+
+    assert_eq!(
+        llm.first_max_tokens(),
+        Some(8192),
+        "PM's configured [llm].max_tokens must reach its ChatRequest, not the old 1024 default"
     );
 }
 
