@@ -5,13 +5,14 @@
 //! touching the core orchestration code. This module is the assembly point.
 //! What: Re-exports `ToolExecutor`, `AgentRunner`, `RunContext`, `AgentOutput`,
 //! `SearchProvider`, `SearchResult`, `SkillResolver`, and `ToolResult` from
-//! `traits`; `ToolRegistry` from `registry`; and `DelegateToAgentTool` from
-//! `delegate`.
+//! `traits`; `ToolRegistry` from `registry`; `DelegateToAgentTool` from
+//! `delegate`; and `FinishTaskTool` (#2072) from `finish_task`.
 //! Test: Unit tests live in each submodule; integration tests use
 //! `DelegateToAgentTool` with a `MockAgentRunner`.
 
 pub mod bash;
 pub mod delegate;
+pub mod finish_task;
 pub mod fs;
 pub mod registry;
 pub mod traits;
@@ -21,6 +22,9 @@ pub mod traits;
 pub use bash::BashTool;
 #[allow(unused_imports)]
 pub use delegate::DelegateToAgentTool;
+pub use finish_task::{
+    FINISH_TASK_TOOL_NAME, FinishTaskArgs, FinishTaskTool, render_finish_summary,
+};
 pub use fs::{EditTool, ReadFileTool, WriteFileTool};
 pub use registry::ToolRegistry;
 pub use traits::{
