@@ -640,6 +640,46 @@ impl ClaudeCodeAdapter {
         trusty_common::bin_resolve::resolve_binary("claude")
             .and_then(|p| p.to_str().map(str::to_owned))
     }
+
+    /// Durably publish `TM_MANAGED_SESSION_ID` (and `CLAUDE_CONFIG_DIR` when
+    /// resolved) into the tmux SESSION environment (#2157 item 1).
+    ///
+    /// Why: [`session_id_export_prefix`] only lands in the ONE pane shell that
+    /// runs the spawn/resume command line — a sibling pane/window in the same
+    /// tmux session, or a pane spawned by a pre-#2157 build, never sees it. This
+    /// is belt-and-suspenders alongside that export: `tmux set-environment`
+    /// writes into the session's own environment table, which
+    /// `tmux show-environment` can read from ANY pane in the session — the
+    /// fallback the in-place-relaunch gate (`bin/tm/commands/guided_inplace.rs`)
+    /// now uses when the process environment is empty.
+    /// What: best-effort — a failure is logged at `warn` and never propagated;
+    /// the pane-shell export remains the primary mechanism, so a tmux driver
+    /// that cannot support `set_environment` must not fail the spawn/resume it
+    /// is attached to.
+    /// Test: `spawn_publishes_session_id_via_set_environment`,
+    /// `spawn_resume_publishes_session_id_via_set_environment`.
+    fn publish_session_env(&self, tmux_name: &str, session_id: &str, config_dir: Option<&str>) {
+        if let Err(e) = self
+            .tmux
+            .set_environment(tmux_name, "TM_MANAGED_SESSION_ID", session_id)
+        {
+            tracing::warn!(
+                session = %tmux_name,
+                "tmux set-environment TM_MANAGED_SESSION_ID failed (in-place relaunch \
+                 fallback impaired, non-fatal): {e}"
+            );
+        }
+        if let Some(dir) = config_dir
+            && let Err(e) = self
+                .tmux
+                .set_environment(tmux_name, "CLAUDE_CONFIG_DIR", dir)
+        {
+            tracing::warn!(
+                session = %tmux_name,
+                "tmux set-environment CLAUDE_CONFIG_DIR failed (non-fatal): {e}"
+            );
+        }
+    }
 }
 
 impl RuntimeAdapter for ClaudeCodeAdapter {
@@ -699,7 +739,15 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
                     prompt_file.as_deref(),
                 ),
             )
-            .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
+            .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))?;
+        // #2157 item 1: durable publish, belt-and-suspenders alongside the
+        // pane-shell export baked into spawn_command above.
+        self.publish_session_env(
+            tmux_name,
+            session_id,
+            config_dir.as_deref().and_then(|p| p.to_str()),
+        );
+        Ok(())
     }
 
     /// Resume Claude Code with conversation continuity (#1744, #1840, #2013).
@@ -791,7 +839,16 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
                     session_id,
                 ),
             )
-            .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
+            .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))?;
+        // #2157 item 1: durable publish for the RESUME path too — a fresh tmux
+        // session is created on resume, so it needs the same belt-and-suspenders
+        // set-environment call as spawn().
+        self.publish_session_env(
+            tmux_name,
+            session_id,
+            config_dir.as_deref().and_then(|p| p.to_str()),
+        );
+        Ok(())
     }
 
     /// Return `"claude-code"` as the adapter's identifier.
@@ -1068,6 +1125,73 @@ mod tests {
     }
 
     #[test]
+    fn publish_session_env_sets_id_and_config_dir() {
+        // #2157 item 1: exercises publish_session_env directly (no HOME
+        // redirection or real `claude` binary needed) so this call-shape
+        // assertion runs unconditionally in CI, unlike the full-spawn tests
+        // below which are gated on a real `claude` binary being present.
+        let fake = FakeTmux::new();
+        let adapter = ClaudeCodeAdapter::new(fake.clone());
+        adapter.publish_session_env("tmpm-test", TEST_SESSION_ID, Some("/tmp/config-dir"));
+        let env_sets = fake.env_sets.lock().unwrap();
+        assert_eq!(
+            env_sets.len(),
+            2,
+            "expected id + config-dir sets: {env_sets:?}"
+        );
+        assert!(env_sets.contains(&(
+            "tmpm-test".to_string(),
+            "TM_MANAGED_SESSION_ID".to_string(),
+            TEST_SESSION_ID.to_string()
+        )));
+        assert!(env_sets.contains(&(
+            "tmpm-test".to_string(),
+            "CLAUDE_CONFIG_DIR".to_string(),
+            "/tmp/config-dir".to_string()
+        )));
+    }
+
+    #[test]
+    fn publish_session_env_omits_config_dir_when_absent() {
+        let fake = FakeTmux::new();
+        let adapter = ClaudeCodeAdapter::new(fake.clone());
+        adapter.publish_session_env("tmpm-test", TEST_SESSION_ID, None);
+        let env_sets = fake.env_sets.lock().unwrap();
+        assert_eq!(
+            env_sets.len(),
+            1,
+            "expected only the session-id set: {env_sets:?}"
+        );
+        assert_eq!(env_sets[0].1, "TM_MANAGED_SESSION_ID");
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn spawn_publishes_session_id_via_set_environment() {
+        // #2157 item 1: spawn must durably publish TM_MANAGED_SESSION_ID via
+        // `tmux set-environment`, not just the pane-shell export baked into the
+        // command line — belt-and-suspenders so a sibling pane/window in the
+        // same tmux session (which never ran the export line) can still resolve
+        // it via `tmux show-environment`.
+        let _home = HomeGuard::set();
+        if ClaudeCodeAdapter::resolve_claude().is_none() {
+            return;
+        }
+        let fake = FakeTmux::new();
+        let adapter = ClaudeCodeAdapter::new(fake.clone());
+        adapter
+            .spawn("tmpm-test", Path::new("/tmp"), "some task", TEST_SESSION_ID)
+            .expect("spawn");
+        let env_sets = fake.env_sets.lock().unwrap();
+        assert!(
+            env_sets.iter().any(|(name, key, value)| name == "tmpm-test"
+                && key == "TM_MANAGED_SESSION_ID"
+                && value == TEST_SESSION_ID),
+            "spawn must call tmux set-environment with TM_MANAGED_SESSION_ID: {env_sets:?}"
+        );
+    }
+
+    #[test]
     fn spawn_command_with_prompt_file_contains_flag() {
         // #2125 item 3: when a prompt file is supplied, spawn_command must
         // inject --append-system-prompt-file pointing at it, alongside the
@@ -1286,6 +1410,16 @@ mod tests {
             sends[0].1.contains("--resume my-session-id"),
             "spawn_resume with an existing id must use --resume: {}",
             sends[0].1
+        );
+        // #2157 item 1: the RESUME path must ALSO durably publish the id — a
+        // fresh tmux session is created on resume, so it starts with no
+        // set-environment history at all.
+        let env_sets = fake.env_sets.lock().unwrap();
+        assert!(
+            env_sets.iter().any(|(name, key, value)| name == "tmpm-test"
+                && key == "TM_MANAGED_SESSION_ID"
+                && value == TEST_SESSION_ID),
+            "spawn_resume must call tmux set-environment with TM_MANAGED_SESSION_ID: {env_sets:?}"
         );
     }
 

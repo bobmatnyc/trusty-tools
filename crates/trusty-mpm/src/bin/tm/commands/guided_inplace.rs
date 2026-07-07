@@ -41,11 +41,29 @@
 //! failure aborts rather than proceeding to exec regardless.
 //!
 //! Test: `plan_inplace_*` cover the pure decision; `reactivate_managed_session`'s
+<<<<<<< HEAD
 //! success/409/404 outcomes and `fetch_until_stopped_*`'s retry behavior (#2148)
 //! are exercised against a local `TcpListener` mock (#2027, mirroring
 //! `core::sm::providers`' mock convention — no external mock-server crate); the
 //! full exec path is not unit-tested — it requires a live daemon and a real
 //! `claude` binary, mirroring the rest of the guided-resume I/O surface.
+=======
+//! success/409/404 outcomes are exercised against a local one-shot `TcpListener`
+//! mock (#2027, mirroring `core::sm::providers`' mock convention — no external
+//! mock-server crate); the full exec path is not unit-tested — it requires a
+//! live daemon and a real `claude` binary, mirroring the rest of the
+//! guided-resume I/O surface.
+//!
+//! #2157 item 2/6: [`try_inplace_relaunch`] no longer trusts the process
+//! environment alone for `TM_MANAGED_SESSION_ID` — a sibling pane/window in the
+//! same tmux session (or a pane spawned before the durable `tmux
+//! set-environment` publish existed) never had the export line run in its
+//! shell. [`read_tmux_env_managed_session_id`] falls back to `tmux
+//! show-environment` when the process env is empty; its parsing half,
+//! [`parse_show_environment_value`], is pure and exhaustively unit-tested. Every
+//! rejected gate now also emits a `tracing::debug!` so a stuck-in-the-picker
+//! report is diagnosable from `RUST_LOG=debug` output without code archaeology.
+>>>>>>> 3991706f (fix(trusty-mpm): publish TM_MANAGED_SESSION_ID via tmux set-environment + fallback read, heal stale panes, guard against nested-session spawn, harden source_id)
 
 use anyhow::Context as _;
 
@@ -97,6 +115,65 @@ fn read_env_managed_session_id() -> Option<String> {
     std::env::var(MANAGED_SESSION_ID_ENV)
         .ok()
         .filter(|v| !v.trim().is_empty())
+}
+
+/// Fallback read of [`MANAGED_SESSION_ID_ENV`] from the current tmux SESSION's
+/// environment via `tmux show-environment` (#2157 item 2).
+///
+/// Why: [`read_env_managed_session_id`] only sees the id when the CURRENT
+/// process's own environment carries it — true for the exact shell that ran
+/// the `export TM_MANAGED_SESSION_ID=…;` prefix, but NOT for a sibling
+/// pane/window in the same tmux session, nor for a pane spawned by a
+/// pre-#2157 build that never got the durable `tmux set-environment` publish
+/// either. Since `tm` running bare here is, by definition, inside a tmux
+/// client (`$TMUX` is set) whenever this path is reachable at all, querying
+/// the SESSION's own environment table is a reliable second source — durably
+/// published at spawn/resume time by `runtime::claude_code::
+/// ClaudeCodeAdapter::publish_session_env` and healed for stale panes by
+/// `SessionManager::mark_runtime_exited_stopped` (item 3).
+/// What: when `$TMUX` is unset (not inside tmux), returns `None` immediately
+/// — there is no session to query. Otherwise shells out to
+/// `tmux show-environment TM_MANAGED_SESSION_ID` and parses the id via
+/// [`parse_show_environment_value`]. Any I/O failure, non-zero exit, or the
+/// variable being unset in the session (`tmux` prints `-NAME` for an unset
+/// variable) folds into `None` — the caller then falls through exactly as if
+/// no env var was found anywhere.
+/// Test: the I/O shell-out is not unit-tested (requires a live tmux server);
+/// [`parse_show_environment_value`] covers the pure parsing logic exhaustively.
+fn read_tmux_env_managed_session_id() -> Option<String> {
+    let inside_tmux = std::env::var("TMUX")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if !inside_tmux {
+        return None;
+    }
+    let output = std::process::Command::new("tmux")
+        .args(["show-environment", MANAGED_SESSION_ID_ENV])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_show_environment_value(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Parse the id out of `tmux show-environment <name>`'s stdout.
+///
+/// Why: separating the parse from the process spawn makes the format-handling
+/// logic exhaustively unit-testable without a live tmux server.
+/// What: `tmux show-environment NAME` prints `NAME=value` when the variable is
+/// set in the session, or `-NAME` when it is explicitly unset. Returns
+/// `Some(value)` (trimmed, non-empty) only for the `NAME=value` form;
+/// everything else (unset `-NAME` form, empty output, an empty value, or
+/// unrecognised text) is `None`.
+/// Test: `parse_show_environment_value_extracts_id`,
+/// `parse_show_environment_value_none_when_unset`,
+/// `parse_show_environment_value_none_when_empty`.
+fn parse_show_environment_value(stdout: &str) -> Option<String> {
+    let line = stdout.lines().next()?;
+    let value = line.strip_prefix(&format!("{MANAGED_SESSION_ID_ENV}="))?;
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// Decide whether bare `tm`'s in-pane environment signals an in-place
@@ -369,20 +446,56 @@ pub(crate) async fn try_inplace_relaunch(
     client: &reqwest::Client,
     url: &str,
 ) -> Option<anyhow::Result<()>> {
+<<<<<<< HEAD
     let env_id = read_env_managed_session_id()?;
     // #2148: bounded retry absorbs the Active->Stopped transition race instead
     // of giving up on a single unlucky fetch — see `fetch_managed_session_until_stopped`.
     let record = fetch_managed_session_until_stopped(client, url, &env_id).await;
+=======
+    // #2157 item 2: process env is the primary source (it is set for the exact
+    // shell that ran the export prefix); the tmux SESSION environment is the
+    // fallback for every pane/shell that never ran it (a sibling pane/window,
+    // or a pre-#2157-build pane) — see `read_tmux_env_managed_session_id`.
+    let env_id = match read_env_managed_session_id() {
+        Some(id) => id,
+        None => match read_tmux_env_managed_session_id() {
+            Some(id) => id,
+            None => {
+                tracing::debug!(
+                    "tm: in-place relaunch gate: TM_MANAGED_SESSION_ID absent from both \
+                     process env and tmux session env — falling through to guided default"
+                );
+                return None;
+            }
+        },
+    };
+    let record = fetch_managed_session(client, url, &env_id).await;
+>>>>>>> 3991706f (fix(trusty-mpm): publish TM_MANAGED_SESSION_ID via tmux set-environment + fallback read, heal stale panes, guard against nested-session spawn, harden source_id)
     let record_state = record.as_ref().map(|r| r.state.as_str());
     match plan_inplace(Some(&env_id), record_state) {
         Some(ResumeAction::InPlace) => {
             let record = record.expect("plan_inplace only selects InPlace when record is Some");
             match run_inplace_relaunch(client, url, &env_id, record).await {
                 InPlaceOutcome::Result(r) => Some(r),
-                InPlaceOutcome::FallThrough => None,
+                InPlaceOutcome::FallThrough => {
+                    tracing::debug!(
+                        id = %env_id,
+                        "tm: in-place relaunch gate: daemon reactivate refused/failed — \
+                         falling through to guided default"
+                    );
+                    None
+                }
             }
         }
-        _ => None,
+        _ => {
+            tracing::debug!(
+                id = %env_id,
+                state = ?record_state,
+                "tm: in-place relaunch gate: session id did not resolve to a known, \
+                 Stopped managed session — falling through to guided default"
+            );
+            None
+        }
     }
 }
 
@@ -572,6 +685,35 @@ mod tests {
         assert!(
             hits.load(Ordering::SeqCst) > 1,
             "must have retried at least once before giving up"
+        );
+    }
+
+    #[test]
+    fn parse_show_environment_value_extracts_id() {
+        assert_eq!(
+            parse_show_environment_value(
+                "TM_MANAGED_SESSION_ID=11111111-2222-3333-4444-555555555555\n"
+            ),
+            Some("11111111-2222-3333-4444-555555555555".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_show_environment_value_none_when_unset() {
+        // tmux prints "-NAME" (no "=") when the variable is explicitly unset in
+        // the session.
+        assert_eq!(
+            parse_show_environment_value("-TM_MANAGED_SESSION_ID\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_show_environment_value_none_when_empty() {
+        assert_eq!(parse_show_environment_value(""), None);
+        assert_eq!(
+            parse_show_environment_value("TM_MANAGED_SESSION_ID=\n"),
+            None
         );
     }
 

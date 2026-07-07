@@ -239,6 +239,30 @@ impl TmuxDriver {
         })
     }
 
+    /// Durably publish `key=value` into the tmux SESSION environment (#2157 item 1).
+    ///
+    /// Why: `runtime::claude_code::session_id_export_prefix` exports
+    /// `TM_MANAGED_SESSION_ID` into the ONE pane shell that ran the spawn/resume
+    /// command line — a sibling pane/window in the same session, or a pane
+    /// spawned before this fix landed, never sees it, which is why the
+    /// in-place-relaunch gate (`bin/tm/commands/guided_inplace.rs`) could fail
+    /// silently and bare `tm` fell through to spawning a nested session
+    /// (issue #2157). `set-environment` writes into the session's own
+    /// environment table, queryable via `tmux show-environment` from ANY
+    /// pane/shell in that session regardless of vintage.
+    /// What: runs `tmux set-environment -t <session> <key> <value>`; maps a
+    /// non-zero exit to `Error::Protocol`. Callers treat this as best-effort —
+    /// the shell-export prefix remains the primary mechanism.
+    /// Test: argv shape covered by `core::tmux::set_environment_argv`.
+    pub fn set_environment(&self, session: &str, key: &str, value: &str) -> Result<()> {
+        self.run(&TmuxCommand::SetEnvironment {
+            session: session.to_string(),
+            key: key.to_string(),
+            value: value.to_string(),
+        })?;
+        Ok(())
+    }
+
     /// List every pane on the host as `session_name pane_current_command`.
     ///
     /// Why: session auto-discovery scans all panes to find ones running Claude

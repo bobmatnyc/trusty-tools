@@ -53,6 +53,36 @@ pub(crate) fn inside_tmux() -> bool {
         .unwrap_or(false)
 }
 
+/// Resolve the tmux session name of the CURRENT client's pane (#2157 item 4).
+///
+/// Why: the nested-session guard in `guided.rs` needs to know which tmux
+/// session bare `tm` is running inside, so it can check whether that session
+/// already maps to a managed record BEFORE offering to launch a brand-new
+/// (nested) one. `$TMUX`'s own value encodes a socket path and a numeric
+/// window/pane index, not the session's NAME, so the name has to come from
+/// tmux itself.
+/// What: returns `None` immediately when [`inside_tmux`] is `false` (no
+/// session to query). Otherwise runs `tmux display-message -p '#S'` and
+/// returns the trimmed, non-empty stdout, or `None` on any I/O failure,
+/// non-zero exit, or empty output.
+/// Test: I/O path, not unit-tested (requires a live tmux server); the guard's
+/// decision logic that CONSUMES this value is pure and tested separately
+/// (`nested_managed_match_*` in `tests_behavior_c_tests.rs`).
+pub(crate) fn current_tmux_session_name() -> Option<String> {
+    if !inside_tmux() {
+        return None;
+    }
+    let output = std::process::Command::new("tmux")
+        .args(["display-message", "-p", "#S"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
 /// Attach (or switch) the current terminal into the tmux session `name`.
 ///
 /// Why: single choke point for the nested-tmux-safe attach behavior so
