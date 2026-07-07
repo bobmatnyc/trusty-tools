@@ -20,6 +20,18 @@ use serde_json::{Value, json};
 
 use crate::tools::traits::{SkillResolver, ToolExecutor, ToolResult};
 
+/// The stable tool name for `UseSkillTool` (matches `name()`/the schema's
+/// `function.name` verbatim).
+///
+/// Why: (#2070) The agent loop must identify a skill-body-load result by tool
+/// name to pin it against compaction (vision spec §5.4 item 5: "preserve
+/// skill outputs... forever"); a shared constant — mirroring
+/// `tools::finish_task::FINISH_TASK_TOOL_NAME`'s identical role for
+/// `finish_task` — means that identification can never drift from the tool's
+/// actual wire name.
+/// Test: `tools::skill::tests::name_matches_constant`.
+pub const USE_SKILL_TOOL_NAME: &str = "use_skill";
+
 /// `ToolExecutor` that lazily fetches a named skill's full Markdown body.
 ///
 /// Why: Keeps the LLM-facing surface (`name()`, `schema()`, `execute()`)
@@ -45,7 +57,7 @@ impl UseSkillTool {
 #[async_trait]
 impl ToolExecutor for UseSkillTool {
     fn name(&self) -> &str {
-        "use_skill"
+        USE_SKILL_TOOL_NAME
     }
 
     /// OpenAI function-call schema for `use_skill`.
@@ -57,7 +69,7 @@ impl ToolExecutor for UseSkillTool {
         json!({
             "type": "function",
             "function": {
-                "name": "use_skill",
+                "name": USE_SKILL_TOOL_NAME,
                 "description": "Load the full instructions for a skill listed in the 'Available skills' catalog. Only call this for a skill you actually intend to use — it returns the skill's complete body.",
                 "parameters": {
                     "type": "object",
@@ -169,6 +181,22 @@ mod tests {
         let result = tool.execute(json!({})).await;
         assert!(result.is_error());
         assert!(result.content().contains("missing required argument"));
+    }
+
+    /// `name()` and the schema's `function.name` both match
+    /// `USE_SKILL_TOOL_NAME` — no drift between the constant and the wire
+    /// name (#2070 depends on this identifying skill outputs for pinning).
+    ///
+    /// Test: this test.
+    #[test]
+    fn name_matches_constant() {
+        let tool = make_tool();
+        assert_eq!(tool.name(), USE_SKILL_TOOL_NAME);
+        assert_eq!(
+            tool.schema()["function"]["name"].as_str(),
+            Some(USE_SKILL_TOOL_NAME)
+        );
+        assert_eq!(USE_SKILL_TOOL_NAME, "use_skill");
     }
 
     /// The schema requires `name`.
