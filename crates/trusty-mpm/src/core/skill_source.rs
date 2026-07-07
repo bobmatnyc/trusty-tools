@@ -84,7 +84,18 @@ pub fn skill_bundle_stamp() -> String {
 /// path, not the user-facing incremental `tm install`), then removes any
 /// existing top-level `*.md` file whose name is not one of the artifacts just
 /// written. Hidden files (leading `.`, e.g. the stamp marker) are never
-/// touched. Returns the basenames written.
+/// touched. An artifact whose basename (stem, `.md`-stripped) contains "mcp"
+/// (case-insensitive) is skipped entirely — never written, and any stale copy
+/// already on disk is pruned by the sweep below (exercised indirectly by
+/// `materialize_skill_artifacts_prunes_files_not_in_table`, which asserts the
+/// prune sweep removes a file absent from `keep`) — as a defense-in-depth
+/// mirror of the `skill_deployer` deploy guard (#2186): such a name would
+/// shadow Claude Code's built-in `/mcp` command once deployed. The compiled-in
+/// `bundle::ALL` table currently contains no such artifact, so this branch has
+/// no dedicated fixture-backed unit test here; coverage lives in
+/// `skill_deployer::tests::deploy_skips_mcp_named_skill`, which exercises the
+/// identical stem-matching rule against an arbitrary source directory. Returns
+/// the basenames written.
 /// Test: `materialize_skill_artifacts_writes_all_skills`,
 /// `materialize_skill_artifacts_prunes_files_not_in_table`.
 pub fn materialize_skill_artifacts(paths: &FrameworkPaths) -> Result<Vec<String>> {
@@ -100,6 +111,21 @@ pub fn materialize_skill_artifacts(paths: &FrameworkPaths) -> Result<Vec<String>
             .rel_path
             .strip_prefix("skills/")
             .unwrap_or(artifact.rel_path);
+
+        // Defense-in-depth mirror of the `skill_deployer::deploy_skills_filtered`
+        // guard (#2186): a bundled skill whose basename (stem, `.md`-stripped)
+        // contains "mcp" would shadow Claude Code's built-in `/mcp` command
+        // once deployed. Refuse to even materialize it into the framework
+        // source dir, so a bad name never reaches the deploy step at all.
+        let stem = basename.strip_suffix(".md").unwrap_or(basename);
+        if stem.to_lowercase().contains("mcp") {
+            tracing::warn!(
+                skill = %stem,
+                "refusing to materialize bundled skill whose name contains \"mcp\" — it would shadow Claude Code's built-in /mcp command"
+            );
+            continue;
+        }
+
         let dest = paths.skills.join(basename);
         atomic_write(&dest, artifact.contents)?;
         keep.insert(basename.to_string());

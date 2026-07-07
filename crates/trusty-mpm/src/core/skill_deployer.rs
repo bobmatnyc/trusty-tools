@@ -31,7 +31,9 @@ use crate::core::skill_manifest::{SkillManifest, SkillManifestEntry};
 pub struct DeployStats {
     /// Filenames successfully (re)written this run.
     pub deployed: Vec<String>,
-    /// Filenames skipped because the user owns or modified them.
+    /// Filenames skipped because the user owns or modified them, or because
+    /// the name collides with a Claude Code built-in slash command (e.g.
+    /// contains "mcp" — see [`deploy_skills_filtered`]).
     pub skipped: Vec<String>,
     /// Filenames left untouched because their checksum already matched.
     pub unchanged: Vec<String>,
@@ -64,13 +66,16 @@ fn skill_stem(filename: &str) -> &str {
 /// clobbering user-owned or user-modified files.
 ///
 /// Rules:
+///   - Name (stem) contains "mcp" (case-insensitive) → collides with Claude
+///     Code's built-in `/mcp` command → skip, never written (#2186)
 ///   - Not in manifest, file exists → user-owned → skip silently
 ///   - In manifest, checksum matches deployed copy → overwrite when stale
 ///   - In manifest, checksum differs → user-modified → skip
 ///   - New trusty-mpm skill → write + add to manifest
 ///
 /// Test: `deploy_new_skill`, `deploy_skips_user_modified`,
-/// `deploy_unchanged_no_write`, `deploy_user_owned_skipped`.
+/// `deploy_unchanged_no_write`, `deploy_user_owned_skipped`,
+/// `deploy_skips_mcp_named_skill`.
 pub fn deploy_skills(source: &Path, dest: &Path) -> Result<DeployStats, Error> {
     // Default policy: deploy every skill in the source directory.
     deploy_skills_filtered(source, dest, |_name| true)
@@ -146,6 +151,21 @@ pub fn deploy_skills_filtered(
 
     for filename in names {
         let stem = skill_stem(&filename).to_string();
+
+        // Claude Code ships a built-in `/mcp` slash command. A deployed skill
+        // whose invocable name (the stem, i.e. the directory Claude Code
+        // exposes as `/<stem>`) contains "mcp" shadows that built-in and
+        // makes `/mcp` unreachable for the user (#2186). Reject before any
+        // file I/O or manifest write so a bad name never lands on disk.
+        if stem.to_lowercase().contains("mcp") {
+            tracing::warn!(
+                skill = %stem,
+                "refusing to deploy skill whose name contains \"mcp\" — it would shadow Claude Code's built-in /mcp command"
+            );
+            stats.skipped.push(stem);
+            continue;
+        }
+
         let source_path = source.join(&filename);
         let content = std::fs::read_to_string(&source_path)?;
         // Claude Code discovers skills from <dest>/<name>/SKILL.md.
@@ -341,6 +361,66 @@ mod tests {
         assert!(stats.deployed.contains(&"tm-doctor".to_string()));
         let refreshed = fs::read_to_string(tgt.path().join("tm-doctor").join("SKILL.md")).unwrap();
         assert!(refreshed.contains("Doctor v2"));
+    }
+
+    #[test]
+    fn deploy_skips_mcp_named_skill() {
+        // #2186: a skill whose name (stem) contains "mcp" must never be
+        // deployed — Claude Code's built-in `/mcp` command would be shadowed
+        // by `/toolchains-ai-protocols-mcp` (or any other mcp-containing
+        // name). It must be recorded as skipped, not deployed, and must not
+        // block sibling skills in the same batch from deploying normally.
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_sources(src.path()); // tm-doctor.md + example-skill.md
+        fs::write(
+            src.path().join("toolchains-ai-protocols-mcp.md"),
+            "---\nname: toolchains-ai-protocols-mcp\n---\n\n# AI Protocols\n\nMCP guidance.\n",
+        )
+        .unwrap();
+
+        let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+
+        assert!(
+            stats
+                .skipped
+                .contains(&"toolchains-ai-protocols-mcp".to_string())
+        );
+        assert!(
+            !stats
+                .deployed
+                .contains(&"toolchains-ai-protocols-mcp".to_string())
+        );
+        assert!(
+            !tgt.path()
+                .join("toolchains-ai-protocols-mcp")
+                .join("SKILL.md")
+                .exists(),
+            "an mcp-named skill must never be written to disk"
+        );
+
+        // Sibling non-mcp skills in the same batch must still deploy.
+        assert!(stats.deployed.contains(&"tm-doctor".to_string()));
+        assert!(stats.deployed.contains(&"example-skill".to_string()));
+    }
+
+    #[test]
+    fn deploy_skips_mcp_named_skill_case_insensitive() {
+        // The guard must match "mcp" regardless of case (e.g. `Foo-MCP.md`).
+        let src = TempDir::new().unwrap();
+        let tgt = TempDir::new().unwrap();
+        write_sources(src.path()); // tm-doctor.md + example-skill.md
+        fs::write(
+            src.path().join("Foo-MCP.md"),
+            "---\nname: Foo-MCP\n---\n\n# Foo MCP\n\nSomething.\n",
+        )
+        .unwrap();
+
+        let stats = deploy_skills(src.path(), tgt.path()).unwrap();
+
+        assert!(stats.skipped.contains(&"Foo-MCP".to_string()));
+        assert!(!stats.deployed.contains(&"Foo-MCP".to_string()));
+        assert!(!tgt.path().join("Foo-MCP").exists());
     }
 
     #[test]
