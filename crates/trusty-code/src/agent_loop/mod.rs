@@ -40,8 +40,8 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::llm::{
-    ChatRequest, ChatResponse, LlmClientTrait, ToolCall, ToolCallExtractError, ToolCallExtractor,
-    ToolDefinition,
+    CacheControl, ChatMessage, ChatRequest, ChatResponse, LlmClientTrait, ToolCall,
+    ToolCallExtractError, ToolCallExtractor, ToolDefinition,
 };
 use crate::mode::HarnessMode;
 use crate::perf::PerfCollector;
@@ -431,24 +431,65 @@ impl AgentLoop {
     /// any turn (e.g. a real `write_file`) needing more than 1024 tokens.
     /// What: Clones the transcript messages, attaches tools (when any), and sets
     /// `tool_choice = "auto"` so the model may call tools but isn't forced to.
+    /// (#2156) When [`Self::prompt_cache_enabled`] is `true`, marks the LAST
+    /// tool definition and the system-role message with an ephemeral
+    /// prompt-cache breakpoint — the byte-stable prefix this turn resends
+    /// unchanged from the last. When `false` (Parity mode, or a
+    /// provider/model that hasn't verified the passthrough), the request is
+    /// byte-identical to pre-#2156.
     /// Test: Exercised by every loop test; `config_max_tokens_reaches_chat_request`
-    /// pins that a configured cap flows through unchanged.
+    /// pins that a configured cap flows through unchanged;
+    /// `daily_driver_anthropic_model_marks_cache_breakpoints` and
+    /// `parity_mode_never_marks_cache_breakpoints` cover the #2156 gate.
     fn build_request(&self, transcript: &Transcript, schemas: &[ToolDefinition]) -> ChatRequest {
+        let cache_prefix = self.prompt_cache_enabled();
+
         let tools = if schemas.is_empty() {
             None
         } else {
-            Some(schemas.to_vec())
+            let mut schemas = schemas.to_vec();
+            if cache_prefix {
+                mark_cache_breakpoint_on_tools(&mut schemas);
+            }
+            Some(schemas)
         };
         let tool_choice = tools.as_ref().map(|_| Value::String("auto".to_string()));
 
+        let mut messages = transcript.to_messages();
+        if cache_prefix {
+            mark_cache_breakpoint_on_system(&mut messages);
+        }
+
         ChatRequest {
             model: self.config.model.clone(),
-            messages: transcript.to_messages(),
+            messages,
             temperature: Some(0.0),
             max_tokens: Some(self.config.max_tokens),
             tools,
             tool_choice,
         }
+    }
+
+    /// Whether this run should mark the static tools+system prefix with a
+    /// prompt-cache breakpoint (#2156).
+    ///
+    /// Why: Caching changes cost/latency only, never model output, so it is
+    /// safe in principle under any mode — but per the #2156 spec this stays
+    /// scoped to `HarnessMode::DailyDriver` (mirroring
+    /// `Self::maybe_compact_transcript`'s existing mode gate) rather than
+    /// silently changing Parity's wire payload. It is further gated on the
+    /// resolved `Provider::supports_prompt_caching` so a model/backend whose
+    /// `cache_control` passthrough hasn't been verified never receives the
+    /// marker.
+    /// What: `true` only when `self.config.mode == HarnessMode::DailyDriver`
+    /// AND `crate::provider::provider_for(&self.config.model)
+    /// .supports_prompt_caching()` is `true`.
+    /// Test: `agent_loop::tests::daily_driver_anthropic_model_marks_cache_breakpoints`,
+    /// `agent_loop::tests::parity_mode_never_marks_cache_breakpoints`,
+    /// `agent_loop::tests::non_anthropic_model_never_marks_cache_breakpoints`.
+    fn prompt_cache_enabled(&self) -> bool {
+        self.config.mode == HarnessMode::DailyDriver
+            && crate::provider::provider_for(&self.config.model).supports_prompt_caching()
     }
 
     /// Convert the registry's raw JSON schemas into typed `ToolDefinition`s.
@@ -492,6 +533,39 @@ impl AgentLoop {
                 },
             )
             .collect()
+    }
+}
+
+/// Mark the LAST tool definition with an ephemeral prompt-cache breakpoint
+/// (#2156).
+///
+/// Why: Anthropic caches everything up to and including a `cache_control`
+/// breakpoint as one prefix; tools render first on the wire, so marking only
+/// the last tool caches the entire (byte-stable) tools array as a unit —
+/// matching `block/goose`'s verified OpenRouter provider.
+/// What: No-op on an empty slice; otherwise sets
+/// `schemas.last_mut().function.cache_control = Some(CacheControl::ephemeral())`.
+/// Test: `agent_loop::tests::daily_driver_anthropic_model_marks_cache_breakpoints`.
+fn mark_cache_breakpoint_on_tools(schemas: &mut [ToolDefinition]) {
+    if let Some(last) = schemas.last_mut() {
+        last.function.cache_control = Some(CacheControl::ephemeral());
+    }
+}
+
+/// Mark the system-role message with an ephemeral prompt-cache breakpoint
+/// (#2156).
+///
+/// Why: The system prompt is the second (and, combined with the tools
+/// breakpoint, final) segment of the byte-stable prefix `build_request`
+/// resends every turn; marking it caches tools+system together as OpenRouter
+/// renders tools before the system message on the wire.
+/// What: Finds the first `role == "system"` entry (there is always exactly
+/// one, from `Transcript::seed`) and sets its `cache_control`; no-op if none
+/// is found.
+/// Test: `agent_loop::tests::daily_driver_anthropic_model_marks_cache_breakpoints`.
+fn mark_cache_breakpoint_on_system(messages: &mut [ChatMessage]) {
+    if let Some(system) = messages.iter_mut().find(|m| m.role == "system") {
+        system.cache_control = Some(CacheControl::ephemeral());
     }
 }
 

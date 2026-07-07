@@ -14,6 +14,41 @@ use serde::{Deserialize, Serialize};
 
 use super::message::ChatMessage;
 
+// ── Prompt-caching types (#2156) ────────────────────────────────────────────────
+
+/// An Anthropic-style ephemeral prompt-cache breakpoint.
+///
+/// Why: Anthropic (and OpenRouter's passthrough for `anthropic/*` slugs) prices
+/// everything up to and including a `cache_control` marker as one cached
+/// prefix — a cache HIT on a later turn bills at roughly 0.1x the normal input
+/// price instead of re-billing the full prefix. `agent_loop::build_request`
+/// places this marker on the byte-stable tools+system-prompt prefix it
+/// resends every turn, which is the make-or-break cost lever for #2156.
+/// What: `kind` is always `"ephemeral"` — the only breakpoint type Anthropic
+/// currently supports. Serialises to `{"type":"ephemeral"}`.
+/// Test: `cache_control_ephemeral_serialises_expected_shape`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CacheControl {
+    /// Always `"ephemeral"`.
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
+impl CacheControl {
+    /// Construct the (only) ephemeral cache-breakpoint marker.
+    ///
+    /// Why: Every call site wants the identical `{"type":"ephemeral"}` value;
+    /// naming the constructor after the wire concept avoids a stringly-typed
+    /// literal at each use site.
+    /// What: Returns `CacheControl { kind: "ephemeral".into() }`.
+    /// Test: `cache_control_ephemeral_serialises_expected_shape`.
+    pub fn ephemeral() -> Self {
+        Self {
+            kind: "ephemeral".into(),
+        }
+    }
+}
+
 // ── Tool-calling types ─────────────────────────────────────────────────────────
 
 /// A tool call emitted by the model.
@@ -107,6 +142,17 @@ pub struct FunctionDefinition {
     /// JSON Schema object describing the function's parameter shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parameters: Option<serde_json::Value>,
+
+    /// Prompt-cache breakpoint (#2156). When set, serialises as a sibling
+    /// `"cache_control":{"type":"ephemeral"}` field alongside this function's
+    /// schema — the shape `block/goose`'s (verified, production) OpenRouter
+    /// provider uses to cache Claude tool definitions via the OpenAI-compat
+    /// endpoint. `agent_loop::build_request` sets this on the LAST tool
+    /// definition only: Anthropic caches everything up to and including a
+    /// breakpoint, so marking just the last tool caches the entire
+    /// (byte-stable) tools array as a single prefix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 // ── Request type ───────────────────────────────────────────────────────────────
@@ -193,6 +239,7 @@ mod tests {
                 "properties": { "location": { "type": "string" } },
                 "required": ["location"]
             })),
+            cache_control: None,
         });
         let req = ChatRequest {
             model: "openai/gpt-4o-mini".into(),
@@ -222,10 +269,15 @@ mod tests {
             name: "ping".into(),
             description: None,
             parameters: None,
+            cache_control: None,
         });
         let v: serde_json::Value = serde_json::to_value(&tool).expect("serialise");
         assert_eq!(v["type"], "function");
         assert_eq!(v["function"]["name"], "ping");
+        assert!(
+            v["function"].get("cache_control").is_none(),
+            "cache_control must be omitted when unset"
+        );
     }
 
     /// `FunctionDefinition` round-trips through JSON.
@@ -242,11 +294,54 @@ mod tests {
             name: "my_fn".into(),
             description: Some("does stuff".into()),
             parameters: Some(params.clone()),
+            cache_control: None,
         };
         let serialised = serde_json::to_string(&def).expect("serialise");
         let de: FunctionDefinition = serde_json::from_str(&serialised).expect("deserialise");
         assert_eq!(de.name, "my_fn");
         assert_eq!(de.description.as_deref(), Some("does stuff"));
         assert_eq!(de.parameters.as_ref(), Some(&params));
+        assert!(de.cache_control.is_none());
+    }
+
+    /// `CacheControl::ephemeral` serialises to the exact Anthropic-ephemeral
+    /// shape (#2156).
+    ///
+    /// Why: This is the literal JSON marker OpenRouter's Claude passthrough
+    /// looks for; a typo (wrong key name, wrong value) would silently disable
+    /// caching without any test noticing.
+    /// What: Serialise `CacheControl::ephemeral()`, assert the exact object.
+    /// Test: this test.
+    #[test]
+    fn cache_control_ephemeral_serialises_expected_shape() {
+        let v = serde_json::to_value(CacheControl::ephemeral()).expect("serialise");
+        assert_eq!(v, serde_json::json!({"type": "ephemeral"}));
+    }
+
+    /// A `FunctionDefinition` with `cache_control` set serialises the marker
+    /// nested inside the function object (#2156), matching the shape
+    /// `block/goose`'s verified OpenRouter provider uses.
+    ///
+    /// Why: The breakpoint must land on the tool's `function` object, not on
+    /// the wrapping `ToolDefinition` — placing it at the wrong nesting level
+    /// would mean OpenRouter's OpenAI→Anthropic conversion drops the marker
+    /// entirely and caching silently never activates.
+    /// What: Build a `ToolDefinition` whose `FunctionDefinition.cache_control`
+    /// is `Some`, serialise, assert `tools[0].function.cache_control` matches
+    /// the ephemeral shape.
+    /// Test: this test.
+    #[test]
+    fn function_definition_with_cache_control_serialises_marker() {
+        let tool = ToolDefinition::function(FunctionDefinition {
+            name: "write_file".into(),
+            description: Some("Write a file".into()),
+            parameters: None,
+            cache_control: Some(CacheControl::ephemeral()),
+        });
+        let v: serde_json::Value = serde_json::to_value(&tool).expect("serialise");
+        assert_eq!(
+            v["function"]["cache_control"],
+            serde_json::json!({"type": "ephemeral"})
+        );
     }
 }

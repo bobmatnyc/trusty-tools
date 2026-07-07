@@ -84,4 +84,20 @@ pub trait Provider: Send + Sync {
     /// Test: `openrouter::tests::supports_native_tools_*`,
     /// `bedrock::tests::bedrock_supports_native_tools`.
     fn supports_native_tools(&self) -> bool;
+
+    /// Whether this backend/model honours Anthropic-style `cache_control`
+    /// prompt-cache breakpoints (#2156).
+    ///
+    /// Why: Emitting a `cache_control` marker to a backend/model that ignores
+    /// it is harmless (the field is simply dropped), but gating on this flag
+    /// keeps the wire payload minimal for models that can never benefit and
+    /// documents, in one place, exactly which backends this has been
+    /// verified against — rather than scattering `model.starts_with(...)`
+    /// checks at every call site.
+    /// What: Returns `true` when `agent_loop::build_request` should mark the
+    /// static tools+system-prompt prefix with an ephemeral cache breakpoint;
+    /// `false` otherwise.
+    /// Test: `openrouter::tests::supports_prompt_caching_*`,
+    /// `bedrock::tests::bedrock_does_not_support_prompt_caching`.
+    fn supports_prompt_caching(&self) -> bool;
 }

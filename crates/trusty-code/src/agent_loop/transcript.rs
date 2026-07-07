@@ -146,6 +146,7 @@ impl Transcript {
             tool_calls,
             tool_call_id: None,
             name: None,
+            cache_control: None,
         }));
     }
 
