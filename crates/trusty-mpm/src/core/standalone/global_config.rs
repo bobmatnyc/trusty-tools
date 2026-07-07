@@ -6,13 +6,16 @@
 //! it via the required `CLAUDE_CONFIG_DIR` env var.
 //! This module creates that dir once and never regenerates it per project.
 //! What: [`ensure_global_config_dir`] creates `<managed_root>/claude-config/`,
-//! writes a minimal `settings.json`, seeds `.credentials.json` from
-//! `~/.claude/.credentials.json` if it exists (NOTE: this file holds MCP OAuth
-//! tokens, NOT the primary session auth — see WI-10 for the auth model), writes
-//! a minimal `.mcp.json` with trusty-memory, trusty-review, and trusty-search server stubs, and
-//! (WI-2) deploys bundled agents and skills from
-//! `<managed_root>/framework/{agents,skills}` into the managed config dir so
-//! that every tm-launched session starts with the full agent/skill set.
+//! writes a minimal `settings.json` seeded with the `outputStyle`/`statusLine`
+//! defaults via [`super::settings_defaults::ensure_settings_defaults`] (issue
+//! #2214 defense-in-depth — see that module's doc comment), merges the MPM hook
+//! triad, seeds `.credentials.json` from `~/.claude/.credentials.json` if it
+//! exists (NOTE: this file holds MCP OAuth tokens, NOT the primary session auth
+//! — see WI-10 for the auth model), writes a minimal `.mcp.json` with
+//! trusty-memory, trusty-review, and trusty-search server stubs, and (WI-2)
+//! deploys bundled agents and skills from `<managed_root>/framework/{agents,skills}`
+//! into the managed config dir so that every tm-launched session starts with
+//! the full agent/skill set.
 //!
 //! # WI-10 Auth Model
 //!
@@ -41,26 +44,30 @@ use std::path::{Path, PathBuf};
 /// Why: `tm run` calls this before launching `claude` so the CLAUDE_CONFIG_DIR
 /// always contains a valid `settings.json`, MCP config, and (WI-2) the bundled
 /// agents and skills. Idempotent — safe to call on every launch.
-/// What: creates `<managed_root>/claude-config/`, writes `settings.json` (`{}`
-/// when absent), merges the MPM hook triad into `settings.json` via
-/// [`super::hooks::ensure_managed_hooks`] (WI-3), copies
-/// `~/.claude/.credentials.json` if found (silently skips otherwise), writes
-/// `.mcp.json` with trusty-memory, trusty-review, and trusty-search stubs
-/// (idempotent via the inject pattern; WI-8 adds trusty-review), then deploys
-/// bundled agents and skills via [`deploy_agents_and_skills`].
+/// What: creates `<managed_root>/claude-config/`, seeds `settings.json` with the
+/// `outputStyle`/`statusLine` defaults via
+/// [`super::settings_defaults::ensure_settings_defaults`] (issue #2214;
+/// non-destructive — never overwrites an already-set value), merges the MPM
+/// hook triad into `settings.json` via [`super::hooks::ensure_managed_hooks`]
+/// (WI-3), copies `~/.claude/.credentials.json` if found (silently skips
+/// otherwise), writes `.mcp.json` with trusty-memory, trusty-review, and
+/// trusty-search stubs (idempotent via the inject pattern; WI-8 adds
+/// trusty-review), then deploys bundled agents and skills via
+/// [`deploy_agents_and_skills`].
 /// Test: `test_global_config_dir_ensure_idempotent`,
 /// `test_deploy_agents_and_skills_populates_config_dir`,
-/// `test_deploy_agents_and_skills_missing_source_is_ok`.
+/// `test_deploy_agents_and_skills_missing_source_is_ok`,
+/// `test_global_config_dir_seeds_output_style_and_status_line`.
 pub fn ensure_global_config_dir(
     managed_root: &Path,
     claude_config_dir: &Path,
 ) -> anyhow::Result<PathBuf> {
     std::fs::create_dir_all(claude_config_dir)?;
 
-    let settings_path = claude_config_dir.join("settings.json");
-    if !settings_path.exists() {
-        std::fs::write(&settings_path, "{}\n")?;
-    }
+    // Issue #2214: seed `outputStyle`/`statusLine` defaults directly into the
+    // tm-owned settings.json (defense-in-depth, independent of the project tier
+    // + `--setting-sources`). Non-destructive — see module doc comment.
+    super::settings_defaults::ensure_settings_defaults(claude_config_dir)?;
 
     // WI-3: merge the MPM lifecycle hook triad (PreToolUse/PostToolUse/Stop)
     // into settings.json so managed sessions emit lifecycle events to the daemon.
@@ -375,6 +382,56 @@ mod tests {
         // Second call must not fail (idempotent).
         ensure_global_config_dir(&managed_root, &claude_config).unwrap();
         assert!(claude_config.join("settings.json").exists());
+    }
+
+    // Issue #2214: ensure_global_config_dir must seed outputStyle/statusLine
+    // into a FRESH tm-owned settings.json, and must preserve any pre-existing
+    // unrelated keys (e.g. a client-persisted `theme`) on a second call.
+    #[test]
+    fn test_global_config_dir_seeds_output_style_and_status_line() {
+        let tmp = TempDir::new().unwrap();
+        let managed_root = tmp.path().join("managed");
+        let claude_config = managed_root.join("claude-config");
+
+        ensure_global_config_dir(&managed_root, &claude_config).unwrap();
+
+        let text = std::fs::read_to_string(claude_config.join("settings.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            val["outputStyle"].as_str(),
+            Some(crate::core::session_launch::OUTPUT_STYLE),
+            "fresh tm-owned settings.json must have outputStyle seeded"
+        );
+        assert!(
+            val["statusLine"]["command"]
+                .as_str()
+                .is_some_and(|c| c.ends_with(" statusline")),
+            "fresh tm-owned settings.json must have statusLine seeded"
+        );
+
+        // Simulate a client-persisted key (e.g. self-persisted theme) landing
+        // in the tm-owned settings.json between launches.
+        let mut with_theme = val.clone();
+        with_theme["theme"] = serde_json::json!("dark");
+        std::fs::write(
+            claude_config.join("settings.json"),
+            serde_json::to_string_pretty(&with_theme).unwrap(),
+        )
+        .unwrap();
+
+        // Re-running ensure_global_config_dir must not clobber that key.
+        ensure_global_config_dir(&managed_root, &claude_config).unwrap();
+        let text_after = std::fs::read_to_string(claude_config.join("settings.json")).unwrap();
+        let val_after: serde_json::Value = serde_json::from_str(&text_after).unwrap();
+        assert_eq!(
+            val_after["theme"].as_str(),
+            Some("dark"),
+            "client-persisted keys must survive re-provisioning"
+        );
+        assert_eq!(
+            val_after["outputStyle"].as_str(),
+            Some(crate::core::session_launch::OUTPUT_STYLE)
+        );
     }
 
     // WI-3 + WI-8: ensure_mcp_config must define all three managed MCP servers,

@@ -38,6 +38,23 @@ use settings::{
     remove_global_trusty_memory_hooks, write_output_style, write_project_hooks, write_status_line,
 };
 
+/// Re-export of the project-tier output-style/statusLine resolution primitives
+/// for reuse by `core::standalone::settings_defaults` (issue #2214).
+///
+/// Why: `mod settings` above is private, so a `pub(crate)` item inside it is
+/// still unreachable from outside `session_launch` without a re-export at this
+/// (public) module boundary. `core::standalone::settings_defaults::ensure_settings_defaults`
+/// seeds `outputStyle`/`statusLine` into the tm-owned `CLAUDE_CONFIG_DIR`
+/// settings.json using these exact same values, rather than duplicating the
+/// default-id constant or the absolute-binary-path resolution logic.
+/// What: re-exports [`settings::OUTPUT_STYLE`] and
+/// [`settings::resolve_statusline_command`] as `session_launch::OUTPUT_STYLE` /
+/// `session_launch::resolve_statusline_command`.
+/// Test: covered indirectly by
+/// `core::standalone::settings_defaults` tests (this is a plain re-export, no
+/// logic of its own).
+pub(crate) use settings::{OUTPUT_STYLE, resolve_statusline_command};
+
 /// Outcome of the pre-launch preparation for one session.
 ///
 /// Why: callers (CLI, client) report agent-deploy counts and CLAUDE.md status
