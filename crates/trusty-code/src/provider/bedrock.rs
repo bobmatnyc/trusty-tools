@@ -67,6 +67,16 @@ impl Provider for BedrockProvider {
         // strategy matrix (#1023) may refine this per-model later.
         true
     }
+
+    fn supports_prompt_caching(&self) -> bool {
+        // Bedrock's Converse API expresses prompt caching via its own
+        // `cachePoint` block shape, not Anthropic's `cache_control` marker
+        // (#2156) — a different wire format this stub does not implement.
+        // `false` until the real Bedrock integration lands so
+        // `agent_loop::build_request` never emits a marker Bedrock can't
+        // interpret.
+        false
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -93,6 +103,20 @@ mod tests {
     #[test]
     fn bedrock_supports_native_tools() {
         assert!(BedrockProvider::new().supports_native_tools());
+    }
+
+    /// Bedrock does NOT report Anthropic-style prompt-caching support
+    /// (#2156).
+    ///
+    /// Why: Bedrock's Converse API caching uses a different wire shape
+    /// (`cachePoint` blocks); until that integration lands, `build_request`
+    /// must never emit an Anthropic `cache_control` marker for a Bedrock
+    /// route.
+    /// What: Assert `supports_prompt_caching()` is `false`.
+    /// Test: this test.
+    #[test]
+    fn bedrock_does_not_support_prompt_caching() {
+        assert!(!BedrockProvider::new().supports_prompt_caching());
     }
 
     /// `map_tool_choice` panics while stubbed.

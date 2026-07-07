@@ -43,6 +43,11 @@ struct ScriptedLlm {
     /// `configured_max_tokens_reaches_chat_request` regression test assert the
     /// configured cap (not the old hard-coded 1024) reached the wire request.
     max_tokens_seen: Mutex<Vec<Option<u32>>>,
+    /// (#2156) Every request's `tools` array, in call order — lets the
+    /// prompt-caching gate tests inspect whether the last tool definition
+    /// carries a `cache_control` breakpoint without reaching into
+    /// `AgentLoop` internals.
+    tools_seen: Mutex<Vec<Option<Vec<crate::llm::ToolDefinition>>>>,
 }
 
 impl ScriptedLlm {
@@ -62,6 +67,7 @@ impl ScriptedLlm {
             cursor: AtomicUsize::new(0),
             requests: Mutex::new(Vec::new()),
             max_tokens_seen: Mutex::new(Vec::new()),
+            tools_seen: Mutex::new(Vec::new()),
         }
     }
 
@@ -97,6 +103,19 @@ impl ScriptedLlm {
     fn max_tokens_seen(&self) -> Vec<Option<u32>> {
         self.max_tokens_seen.lock().expect("lock").clone()
     }
+
+    /// Every request's `tools` array, in call order (#2156).
+    ///
+    /// Why: The prompt-caching gate tests need to see exactly what tool
+    /// schemas (and whether they carry a `cache_control` breakpoint) reached
+    /// the wire on a given turn.
+    /// What: Clones the recorded `tools` values.
+    /// Test: `daily_driver_anthropic_model_marks_cache_breakpoints`,
+    /// `parity_mode_never_marks_cache_breakpoints`,
+    /// `non_anthropic_model_never_marks_cache_breakpoints`.
+    fn tools_seen(&self) -> Vec<Option<Vec<crate::llm::ToolDefinition>>> {
+        self.tools_seen.lock().expect("lock").clone()
+    }
 }
 
 #[async_trait]
@@ -107,6 +126,9 @@ impl LlmClientTrait for ScriptedLlm {
         }
         if let Ok(mut guard) = self.max_tokens_seen.lock() {
             guard.push(req.max_tokens);
+        }
+        if let Ok(mut guard) = self.tools_seen.lock() {
+            guard.push(req.tools.clone());
         }
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         match self.responses.get(idx) {
@@ -1304,5 +1326,158 @@ async fn cancel_flag_aborts_before_next_turn() {
         llm.calls(),
         0,
         "cancellation must be observed before any chat call"
+    );
+}
+
+// ── Prompt-caching gate tests (#2156) ────────────────────────────────────────────
+
+/// A `DailyDriver` run against an `anthropic/*` model marks the static
+/// tools+system prefix with an ephemeral prompt-cache breakpoint.
+///
+/// Why: This is the make-or-break cost lever #2156 exists for — the bake-off
+/// L1 pilot showed tcode doing ZERO caching, re-billing the full tools+system
+/// prefix every turn. This test proves the wire request the loop actually
+/// sends carries the breakpoint in both required places: the last tool
+/// definition's `function.cache_control`, and the system message's
+/// `cache_control`.
+/// What: Run a single-turn `DailyDriver` loop with model
+/// `"anthropic/claude-sonnet-4-5"` and the echo tool registered; inspect the
+/// `ScriptedLlm`'s recorded request for both markers.
+/// Test: this test.
+#[tokio::test]
+async fn daily_driver_anthropic_model_marks_cache_breakpoints() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
+    let registry = registry_with_echo(false);
+    let agent = make_loop(
+        llm.clone(),
+        registry,
+        AgentLoopConfig {
+            model: "anthropic/claude-sonnet-4-5".into(),
+            mode: crate::mode::HarnessMode::DailyDriver,
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    agent
+        .run("you are a helpful assistant", "do the thing")
+        .await
+        .expect("single stop turn should complete");
+
+    let requests = llm.requests();
+    let system_msg = requests[0]
+        .iter()
+        .find(|m| m.role == "system")
+        .expect("system message present");
+    assert_eq!(
+        system_msg.cache_control,
+        Some(crate::llm::CacheControl::ephemeral()),
+        "system message must carry the cache breakpoint"
+    );
+
+    let tools = llm.tools_seen()[0]
+        .clone()
+        .expect("tools array present (echo tool registered)");
+    let last_tool = tools.last().expect("at least one tool");
+    assert_eq!(
+        last_tool.function.cache_control,
+        Some(crate::llm::CacheControl::ephemeral()),
+        "last tool definition must carry the cache breakpoint"
+    );
+}
+
+/// `Parity` mode never marks a cache breakpoint, even for an `anthropic/*`
+/// model — the request stays byte-identical to pre-#2156.
+///
+/// Why: #2156's spec scopes caching to `DailyDriver`; Parity's cross-model
+/// benchmark fairness guarantee must not have its wire payload altered.
+/// What: Same setup as the DailyDriver test but with `mode:
+/// HarnessMode::Parity`; assert neither the system message nor the tool
+/// definition carries `cache_control`.
+/// Test: this test.
+#[tokio::test]
+async fn parity_mode_never_marks_cache_breakpoints() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
+    let registry = registry_with_echo(false);
+    let agent = make_loop(
+        llm.clone(),
+        registry,
+        AgentLoopConfig {
+            model: "anthropic/claude-sonnet-4-5".into(),
+            mode: crate::mode::HarnessMode::Parity,
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    agent
+        .run("you are a helpful assistant", "do the thing")
+        .await
+        .expect("single stop turn should complete");
+
+    let requests = llm.requests();
+    let system_msg = requests[0]
+        .iter()
+        .find(|m| m.role == "system")
+        .expect("system message present");
+    assert!(
+        system_msg.cache_control.is_none(),
+        "Parity mode must never carry a cache breakpoint on the system message"
+    );
+
+    let tools = llm.tools_seen()[0]
+        .clone()
+        .expect("tools array present (echo tool registered)");
+    let last_tool = tools.last().expect("at least one tool");
+    assert!(
+        last_tool.function.cache_control.is_none(),
+        "Parity mode must never carry a cache breakpoint on the tools array"
+    );
+}
+
+/// A `DailyDriver` run against a non-Anthropic model never marks a cache
+/// breakpoint — the passthrough is only verified for `anthropic/*` slugs.
+///
+/// Why: Emitting `cache_control` to a family whose OpenRouter passthrough
+/// hasn't been verified risks silently malformed requests; the gate must key
+/// off the resolved `Provider::supports_prompt_caching`, not the mode alone.
+/// What: Same setup as the DailyDriver test but with model
+/// `"openai/gpt-4o-mini"`; assert neither the system message nor the tool
+/// definition carries `cache_control`.
+/// Test: this test.
+#[tokio::test]
+async fn non_anthropic_model_never_marks_cache_breakpoints() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
+    let registry = registry_with_echo(false);
+    let agent = make_loop(
+        llm.clone(),
+        registry,
+        AgentLoopConfig {
+            model: "openai/gpt-4o-mini".into(),
+            mode: crate::mode::HarnessMode::DailyDriver,
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    agent
+        .run("you are a helpful assistant", "do the thing")
+        .await
+        .expect("single stop turn should complete");
+
+    let requests = llm.requests();
+    let system_msg = requests[0]
+        .iter()
+        .find(|m| m.role == "system")
+        .expect("system message present");
+    assert!(
+        system_msg.cache_control.is_none(),
+        "non-Anthropic models must never carry a cache breakpoint on the system message"
+    );
+
+    let tools = llm.tools_seen()[0]
+        .clone()
+        .expect("tools array present (echo tool registered)");
+    let last_tool = tools.last().expect("at least one tool");
+    assert!(
+        last_tool.function.cache_control.is_none(),
+        "non-Anthropic models must never carry a cache breakpoint on the tools array"
     );
 }

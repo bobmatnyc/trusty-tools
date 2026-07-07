@@ -28,7 +28,9 @@ pub use client::{LlmClient, LlmClientConfig};
 pub use client_trait::LlmClientTrait;
 pub use error::LlmError;
 pub use message::ChatMessage;
-pub use request::{ChatRequest, FunctionCall, FunctionDefinition, ToolCall, ToolDefinition};
+pub use request::{
+    CacheControl, ChatRequest, FunctionCall, FunctionDefinition, ToolCall, ToolDefinition,
+};
 pub use response::{AssistantMessage, ChatChoice, ChatResponse};
 pub use tool_call_extractor::{
     DEFAULT_MAX_REPAIR_ATTEMPTS, ExtractedToolCall, ExtractionStrategy, SchemaViolation,

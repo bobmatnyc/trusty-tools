@@ -56,6 +56,25 @@ fn slug_supports_native_tools(slug: &str) -> bool {
     NATIVE_MARKERS.iter().any(|m| lower.contains(m))
 }
 
+/// Whether a model slug belongs to the Anthropic family, routed via
+/// OpenRouter's OpenAI-compatible endpoint (#2156).
+///
+/// Why: OpenRouter's `cache_control` passthrough for the OpenAI-compat path
+/// is verified (via OpenRouter's prompt-caching docs and `block/goose`'s
+/// production OpenRouter provider, which gates the identical marker on this
+/// exact prefix check) to work for `anthropic/*` slugs. Other families either
+/// don't support Anthropic-style `cache_control` at all or the passthrough
+/// behaviour is unverified; conservative by design, matching
+/// `slug_supports_native_tools`'s posture.
+/// What: Returns `true` when the slug (OpenRouter-namespaced, e.g.
+/// `"anthropic/claude-sonnet-4-5"`) starts with `"anthropic/"`, case
+/// insensitively.
+/// Test: `openrouter::tests::supports_prompt_caching_anthropic_family`,
+/// `openrouter::tests::supports_prompt_caching_non_anthropic_families`.
+fn slug_supports_prompt_caching(slug: &str) -> bool {
+    slug.to_ascii_lowercase().starts_with("anthropic/")
+}
+
 impl Provider for OpenRouterProvider {
     fn name(&self) -> &str {
         "openrouter"
@@ -79,6 +98,10 @@ impl Provider for OpenRouterProvider {
 
     fn supports_native_tools(&self) -> bool {
         slug_supports_native_tools(&self.slug)
+    }
+
+    fn supports_prompt_caching(&self) -> bool {
+        slug_supports_prompt_caching(&self.slug)
     }
 }
 
@@ -187,6 +210,49 @@ mod tests {
             assert!(
                 !OpenRouterProvider::new(slug).supports_native_tools(),
                 "expected NO native-tool support for {slug}"
+            );
+        }
+    }
+
+    /// `anthropic/*` slugs report prompt-caching support (#2156).
+    ///
+    /// Why: This is the gate `agent_loop::build_request` consults before
+    /// marking the tools+system prefix with a cache breakpoint; it must be
+    /// `true` for the exact family the passthrough was verified against.
+    /// What: Construct providers for Anthropic-family slugs (including a
+    /// non-default casing), assert `true`.
+    /// Test: this test.
+    #[test]
+    fn supports_prompt_caching_anthropic_family() {
+        for slug in [
+            "anthropic/claude-sonnet-4-5",
+            "anthropic/claude-haiku-4-5",
+            "Anthropic/Claude-Opus-4",
+        ] {
+            assert!(
+                OpenRouterProvider::new(slug).supports_prompt_caching(),
+                "expected prompt-caching support for {slug}"
+            );
+        }
+    }
+
+    /// Non-Anthropic slugs do NOT report prompt-caching support (#2156).
+    ///
+    /// Why: The OpenRouter passthrough shape has only been verified for
+    /// `anthropic/*`; emitting `cache_control` to other families is
+    /// unverified and must stay off by default.
+    /// What: Construct providers for OpenAI/Gemini/Qwen slugs, assert `false`.
+    /// Test: this test.
+    #[test]
+    fn supports_prompt_caching_non_anthropic_families() {
+        for slug in [
+            "openai/gpt-4o-mini",
+            "google/gemini-2.5-pro",
+            "qwen/qwen-2.5-coder-32b-instruct",
+        ] {
+            assert!(
+                !OpenRouterProvider::new(slug).supports_prompt_caching(),
+                "expected NO prompt-caching support for {slug}"
             );
         }
     }
