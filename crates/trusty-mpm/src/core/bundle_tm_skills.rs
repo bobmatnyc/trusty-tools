@@ -188,3 +188,16 @@ pub const TM_INIT: &str = include_str!("../assets/skills/tm-init.md");
 /// What: embedded markdown skill file deployed to `skills/tm.md`.
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_OVERVIEW: &str = include_str!("../assets/skills/tm.md");
+
+/// `/tm-issues-prune` — GitHub issue backlog prune & prioritize (issue #2185).
+///
+/// Why: backlogs accumulate stale, duplicate, and obsolete issues, and open
+/// issues drift out of accurate priority; this is a natural-language PM
+/// delegation pattern (not a new Rust command) that has the `ticketing`
+/// agent survey the repo via `gh issue list/close/edit`, presents prune
+/// candidates with reasons for confirmation before any close, and proposes
+/// priority-label corrections. gh-first; JIRA is deferred (`TicketSystemKind::Jira`
+/// is stubbed).
+/// What: embedded markdown skill file deployed to `skills/tm-issues-prune.md`.
+/// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
+pub const TM_ISSUES_PRUNE: &str = include_str!("../assets/skills/tm-issues-prune.md");

@@ -371,6 +371,12 @@ pub const ALL: &[BundledArtifact] = &[
         contents: TM_OVERVIEW,
         install: InstallPolicy::Overwrite,
     },
+    // --- Issue #2185: gh issue backlog prune/prioritize PM delegation skill ---
+    BundledArtifact {
+        rel_path: "skills/tm-issues-prune.md",
+        contents: TM_ISSUES_PRUNE,
+        install: InstallPolicy::Overwrite,
+    },
     // --- DOC-28 R1: canonical self-description doc ---
     BundledArtifact {
         rel_path: "docs/WHAT-IS-TRUSTY-MPM.md",

@@ -307,17 +307,18 @@ fn install_then_deploy_deploys_skills() {
         &paths.claude_skills_dir(),
     )
     .unwrap();
-    // The full /tm- skill portfolio deploys on first install: 19 skills total
-    // — 17 /tm- portfolio skills (tm-circuit-breaker, tm-verification-protocols,
+    // The full /tm- skill portfolio deploys on first install: 20 skills total
+    // — 18 /tm- portfolio skills (tm-circuit-breaker, tm-verification-protocols,
     // tm-tool-usage-guide, tm-git-file-tracking, tm-adr, tm-workflow,
     // tm-agent-architecture, tm-postmortem, tm-bug-reporting,
     // tm-teaching-templates, tm-ticketing, tm-pr-workflow,
     // tm-delegation-patterns, tm-session-management, tm-session-pause,
-    // tm-session-resume, tm-init) + tm-doctor + the tm
+    // tm-session-resume, tm-init, tm-issues-prune) + tm-doctor + the tm
     // overview skill (tm-skills-portfolio epic: the `example-skill.md`
     // placeholder and the 11 mpm-* guidance skills no longer ship; the
-    // previously-orphaned tm-doctor.md is now wired in). See
-    // `bundle_tm_skills.rs`/`bundle_all.rs::ALL` for the authoritative list.
+    // previously-orphaned tm-doctor.md is now wired in; issue #2185 added
+    // tm-issues-prune). See `bundle_tm_skills.rs`/`bundle_all.rs::ALL` for
+    // the authoritative list.
     // Stats report stems (no .md suffix) because each skill lands as
     // <dest>/<name>/SKILL.md to match Claude Code's native discovery format.
     assert!(
@@ -330,10 +331,15 @@ fn install_then_deploy_deploys_skills() {
         "tm-doctor must be deployed; got {:?}",
         result.deployed
     );
+    assert!(
+        result.deployed.contains(&"tm-issues-prune".to_string()),
+        "tm-issues-prune must be deployed; got {:?}",
+        result.deployed
+    );
     assert_eq!(
         result.deployed.len(),
-        19,
-        "expected 19 skill files deployed (17 /tm- portfolio + tm-doctor + tm overview); got {:?}",
+        20,
+        "expected 20 skill files deployed (18 /tm- portfolio + tm-doctor + tm overview); got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());
