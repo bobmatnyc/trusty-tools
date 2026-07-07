@@ -117,7 +117,8 @@ runs of the same task. Those either belong to other sections or are excluded
 > **Naming note:** "claude-code-equivalent" means *functionally* equivalent —
 > the same categories of guidance Claude Code's harness supplies (act-via-tools,
 > path safety, completion signaling) — re-expressed natively. Per the milestone
-> note, we **build this natively**; we do not extract or port open-mpm text.
+> note, we **build this natively**; we do not extract or port text from
+> trusty-agents (trusty-code's non-coding sibling).
 
 ### 2b. Per-agent `system_prompt.content`
 

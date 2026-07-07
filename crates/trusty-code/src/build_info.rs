@@ -34,7 +34,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The package name, resolved at compile time.
 ///
 /// Why: Allows display strings to use the correct crate name without
-/// hardcoding it, so this module is reusable across open-mpm and trusty-code.
+/// hardcoding it, so this module is reusable across trusty-agents and trusty-code.
 /// What: `env!("CARGO_PKG_NAME")` forwarded as a `'static str`.
 /// Test: Indirectly via `version_string_contains_version`.
 pub const PKG_NAME: &str = env!("CARGO_PKG_NAME");

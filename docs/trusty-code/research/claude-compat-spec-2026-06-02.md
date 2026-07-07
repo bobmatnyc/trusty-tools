@@ -30,7 +30,7 @@ Claude Code's free-form main agent.
 ### What "single-instance, per-project" means
 
 - tcode runs **exactly one project** at a time — it is not a daemon managing
-  multiple projects concurrently. The `open-mpm` daemon is the multi-project
+  multiple projects concurrently. The `trusty-mpm` daemon is the multi-project
   coordinator; it spawns each tcode instance as a **separate OS process** and
   communicates over a per-project **socket/NDJSON IPC** channel (reusing the
   existing `ctrl/socket` + `ipc/` NDJSON code).
@@ -416,15 +416,16 @@ Provider + model selection order (highest priority first):
 2. MPM per-agent model config (in `HarnessConfig`)
 3. `settings.json` top-level `model:` field (fallback default)
 
-This builds on `open-mpm`'s existing `llm/` adapter layer, which already
+This is trusty-code's own native `llm/` adapter layer, which already
 supports both Bedrock and OpenRouter. No new provider integration is required.
 
 ### 5.4 API / CLI / TUI driven
 
 tcode's interaction surfaces are:
 
-- **API** — the per-project socket/NDJSON IPC inherited from open-mpm's `ctrl/`
-  module; an optional HTTP surface may be added later.
+- **API** — trusty-code's own native per-project socket/NDJSON IPC layer
+  (mirroring the `ctrl/` module shape); an optional HTTP surface may be
+  added later.
 - **CLI** — the `tcode` binary with subcommands:
   - `tcode serve --project <path>` — boots a per-project instance serving its
     socket

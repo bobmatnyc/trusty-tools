@@ -538,7 +538,7 @@ pub fn publish(envelope: SessionEventEnvelope) {
 /// Publish an envelope AND emit it on stderr with the `__OMPM_EVENT__` prefix
 /// so a parent process can re-broadcast on its own bus.
 ///
-/// Why: Workflow runs spawn as `open-mpm --workflow ...` subprocesses of the
+/// Why: Workflow runs spawn as `tcode --workflow ...` subprocesses of the
 /// API server (`api/server.rs::run_task`). Events emitted inside that child
 /// reach the parent's bus only via the existing stderr stream. This helper
 /// does both in one call so emit sites don't have to know whether they're

@@ -50,7 +50,7 @@ fn self_questions_are_conversational() {
     assert_eq!(classify_intent("How are you?"), IntentClass::Conversational);
     assert_eq!(classify_intent("Who are you"), IntentClass::Conversational);
     assert_eq!(
-        classify_intent("what is open-mpm"),
+        classify_intent("what is trusty-code"),
         IntentClass::Conversational
     );
 }

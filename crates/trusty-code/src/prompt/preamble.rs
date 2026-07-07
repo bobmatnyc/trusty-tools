@@ -4,7 +4,7 @@
 //! is the *same* for every model (parity-spec §1, §2a). This constant is the
 //! cross-provider analogue of trusty-mpm's `BASE_PM` floor: the minimum
 //! claude-code-equivalent instruction surface that every agent shares,
-//! re-expressed natively (not ported from open-mpm, per milestone note).
+//! expressed natively and originally for trusty-code (per milestone note).
 //! What: A single compile-time `&str` holding the five required blocks of
 //! spec §2a — identity, tool-use protocol, filesystem safety, output
 //! convention, and the finish-convention pointer — and nothing host-specific.
