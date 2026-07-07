@@ -108,6 +108,12 @@ impl ProjectRegistry {
                 tags: entry.tags.clone().unwrap_or_default(),
                 description: entry.description.clone(),
                 gh_user: entry.gh_user.clone(),
+                // #2184: mirror the per-project gh identity + commit identity
+                // onto the registry record so `project_get`/`project_list`
+                // surface it without a separate config-file read.
+                github: entry.github.clone(),
+                commit_name: entry.commit_name.clone(),
+                commit_email: entry.commit_email.clone(),
             };
             let name = project.name.clone();
             if let Err(e) = self.register(project).await {
@@ -164,6 +170,12 @@ impl ProjectRegistry {
                 tags: vec![],
                 description: None,
                 gh_user: None,
+                // No source of a gh/commit identity binding for an implicitly
+                // auto-registered project (#2184) — the operator declares
+                // these explicitly via `config.projects`/`config_write`.
+                github: None,
+                commit_name: None,
+                commit_email: None,
             };
             if let Err(e) = self.register(project).await {
                 warn!(name = %name, "auto_register: failed to register: {e}");
@@ -245,6 +257,9 @@ mod tests {
             tags: vec![],
             description: None,
             gh_user: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
         };
         registry.register(p.clone()).await.expect("register once");
         registry
@@ -269,6 +284,9 @@ mod tests {
             tags: vec!["backend".into()],
             description: Some("desc".into()),
             gh_user: Some("bob-work".into()),
+            github: None,
+            commit_name: None,
+            commit_email: None,
         };
         registry.register(p.clone()).await.expect("register");
 
@@ -296,6 +314,9 @@ mod tests {
                 tags: vec![],
                 description: None,
                 gh_user: None,
+                github: None,
+                commit_name: None,
+                commit_email: None,
             };
             registry.register(p).await.expect("register");
         }
@@ -318,6 +339,14 @@ mod tests {
                 tags: Some(vec!["ml".into()]),
                 description: Some("ml project".into()),
                 gh_user: Some("bobmatnyc".into()),
+                github: Some(crate::core::trusty_tools_config::GithubConfig {
+                    config_dir: Some("/home/bob/.config/gh-ml".into()),
+                    token_env: None,
+                    account: None,
+                    host: None,
+                }),
+                commit_name: Some("ML Bot".into()),
+                commit_email: Some("ml-bot@example.com".into()),
             },
             ProjectConfig {
                 name: "from-config-b".into(),
@@ -327,6 +356,9 @@ mod tests {
                 tags: None,
                 description: None,
                 gh_user: None,
+                github: None,
+                commit_name: None,
+                commit_email: None,
             },
         ];
 
@@ -341,12 +373,24 @@ mod tests {
         assert_eq!(a.stack_hint.as_deref(), Some("python"));
         assert_eq!(a.default_branch, "main");
         assert_eq!(a.gh_user.as_deref(), Some("bobmatnyc"));
+        // #2184: the github/commit-identity binding must be mirrored onto the
+        // registry record verbatim.
+        assert_eq!(
+            a.github.as_ref().and_then(|g| g.config_dir.as_deref()),
+            Some(std::path::Path::new("/home/bob/.config/gh-ml"))
+        );
+        assert_eq!(a.commit_name.as_deref(), Some("ML Bot"));
+        assert_eq!(a.commit_email.as_deref(), Some("ml-bot@example.com"));
 
-        // Entry without default_branch must fall back to "main"; gh_user stays
-        // unset (no regression for configs that predate #2081).
+        // Entry without default_branch must fall back to "main"; gh_user and
+        // the #2184 github/commit-identity fields stay unset (no regression
+        // for configs that predate #2081/#2184).
         let b = registry.get("from-config-b").await.expect("get b");
         assert_eq!(b.default_branch, "main");
         assert_eq!(b.gh_user, None);
+        assert_eq!(b.github, None);
+        assert_eq!(b.commit_name, None);
+        assert_eq!(b.commit_email, None);
     }
 
     #[tokio::test]
@@ -395,6 +439,9 @@ mod tests {
             tags: vec![],
             description: Some("manually registered".into()),
             gh_user: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
         };
         registry.register(existing).await.expect("pre-register");
 

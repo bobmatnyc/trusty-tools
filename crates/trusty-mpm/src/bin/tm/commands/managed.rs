@@ -545,7 +545,7 @@ pub(crate) async fn catalog(action: CatalogAction) -> anyhow::Result<()> {
     let framework_root = trusty_mpm::core::paths::FrameworkPaths::default().root;
     let config = trusty_mpm::core::config::MpmConfig::load_default();
     let sync = trusty_mpm::content::CatalogSync::for_framework(
-        trusty_mpm::provisioner::RealGitBackend,
+        trusty_mpm::provisioner::RealGitBackend::default(),
         &framework_root,
         Some(&config.manifest),
     );
@@ -626,7 +626,7 @@ pub(crate) async fn catalog(action: CatalogAction) -> anyhow::Result<()> {
             // HR-3: accept the rebuild offer — sync, redeploy the selected set,
             // optionally prune deselected managed files.
             let report = trusty_mpm::core::update_check::apply_catalog(
-                trusty_mpm::provisioner::RealGitBackend,
+                trusty_mpm::provisioner::RealGitBackend::default(),
                 &trusty_mpm::core::paths::FrameworkPaths::default(),
                 &framework_root,
                 force,

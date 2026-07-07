@@ -523,13 +523,32 @@ impl OrchestratorBackend for StateBackend {
         super::mcp_console::config_read()
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn config_write(
         &self,
         workspace_root_template: Option<&str>,
         auto_resume: Option<bool>,
         default_model: Option<&str>,
+        project_name: Option<&str>,
+        github_config_dir: Option<&str>,
+        github_token_env: Option<&str>,
+        github_account: Option<&str>,
+        github_host: Option<&str>,
+        commit_name: Option<&str>,
+        commit_email: Option<&str>,
     ) -> Result<Value, String> {
-        super::mcp_console::config_write(workspace_root_template, auto_resume, default_model)
+        super::mcp_console::config_write(
+            workspace_root_template,
+            auto_resume,
+            default_model,
+            project_name,
+            github_config_dir,
+            github_token_env,
+            github_account,
+            github_host,
+            commit_name,
+            commit_email,
+        )
     }
 
     // ── #1519 WI-2: project-registry tools (delegate to mcp_project) ─────────

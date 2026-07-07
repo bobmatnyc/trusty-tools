@@ -81,8 +81,11 @@ pub(super) fn console_tools() -> Vec<Value> {
             "config_read",
             "Read trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml` (the #1220 \
              cross-crate config convention) and return its current settings as JSON: \
-             `workspace_root_template`, `auto_resume`, and `default_model`. An absent \
-             file returns the defaults (all null). Backs the trusty-console Config tab.",
+             `workspace_root_template`, `auto_resume`, `default_model`, the global \
+             `github` GitHub-identity binding, and the full `projects` list (each \
+             entry may carry its own `github`/`commit_name`/`commit_email` \
+             per-project override, #2184). An absent file returns the defaults (all \
+             null/empty). Backs the trusty-console Config tab.",
             json!({
                 "type": "object",
                 "properties": {},
@@ -91,12 +94,21 @@ pub(super) fn console_tools() -> Vec<Value> {
         ),
         tool(
             "config_write",
-            "Write trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml` (#1220). \
-             Supplied fields replace the corresponding settings; omitted fields are \
-             left unchanged. `workspace_root_template` sets the managed-session \
-             workspace root (a leading `~` is expanded); `auto_resume` sets the \
-             supervisor default; `default_model` sets the launch model. Returns the \
-             merged config that was persisted.",
+            "Write trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml` (#1220, \
+             #2184). Supplied fields replace the corresponding settings; omitted \
+             fields are left unchanged. `workspace_root_template` sets the \
+             managed-session workspace root (a leading `~` is expanded); \
+             `auto_resume` sets the supervisor default; `default_model` sets the \
+             launch model. The `github_*` fields set a GitHub-CLI identity binding \
+             (`config_dir` > `token_env` > `account`, plus `host`) — with no \
+             `project_name` they set the GLOBAL binding; with `project_name` set to \
+             an ALREADY-REGISTERED project (via `project_register` or a static \
+             `config.projects` entry) they set that project's OWN binding instead, \
+             which takes precedence over the global one for that project's `gh` \
+             calls. `commit_name`/`commit_email` set a per-project git commit-author \
+             override applied to managed/provisioner git operations — they REQUIRE \
+             `project_name` (commit identity has no global tier). Returns the merged \
+             config that was persisted.",
             json!({
                 "type": "object",
                 "properties": {
@@ -111,6 +123,34 @@ pub(super) fn console_tools() -> Vec<Value> {
                     "default_model": {
                         "type": "string",
                         "description": "Default model id or tier alias for launched sessions."
+                    },
+                    "project_name": {
+                        "type": "string",
+                        "description": "Route the github_*/commit_* fields to this ALREADY-REGISTERED project's own binding instead of the global one."
+                    },
+                    "github_config_dir": {
+                        "type": "string",
+                        "description": "Private gh config home (GH_CONFIG_DIR) — highest-precedence identity strategy."
+                    },
+                    "github_token_env": {
+                        "type": "string",
+                        "description": "NAME (never the value) of an env var to resolve a gh token from at call time."
+                    },
+                    "github_account": {
+                        "type": "string",
+                        "description": "gh username documenting intent; must be paired with github_config_dir to actually select an identity."
+                    },
+                    "github_host": {
+                        "type": "string",
+                        "description": "gh host (e.g. a GitHub Enterprise host); defaults to github.com."
+                    },
+                    "commit_name": {
+                        "type": "string",
+                        "description": "Git commit author name override for this project (requires project_name)."
+                    },
+                    "commit_email": {
+                        "type": "string",
+                        "description": "Git commit author email override for this project (requires project_name)."
                     }
                 },
                 "additionalProperties": false
