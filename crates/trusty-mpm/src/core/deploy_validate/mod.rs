@@ -1,5 +1,6 @@
 //! Validate a managed workspace's deployed `.claude/{agents,skills}` payload
-//! and `settings.json` against the canonical bundled roster (issue #2158).
+//! and `settings.json` against the expected per-project roster (issue #2158,
+//! refined by #2171).
 //!
 //! Why: a managed worktree can launch with an INCOMPLETE `.claude/` payload —
 //! missing agents, no deployed skills, a stripped `settings.json` with no
@@ -11,20 +12,26 @@
 //! loudly instead of handing the operator a half-provisioned session.
 //! What: [`validate_workspace`] compares the deployed `.claude/agents/` and
 //! `.claude/skills/` directories (plus their ownership manifests) against the
-//! CANONICAL bundled roster resolved via [`FrameworkPaths::agent_source_dir`]
-//! / [`FrameworkPaths::skill_source_dir`] — the same source
-//! [`crate::core::agent_deployer::deploy_agents`] /
-//! [`crate::core::skill_deployer::deploy_skills`] draw from when called
-//! unfiltered. The default HR-2 manifest selects every bundled agent/skill
-//! (see `session_launch::mod`'s doc comment), so in the common,
-//! no-custom-manifest case the full bundled source set IS the expected
-//! deployed set — a project that opts into a narrower manifest may see
-//! benign `AgentMissing`/`SkillMissing` gaps for deliberately-excluded
-//! entries; callers that need manifest-exact precision should additionally
-//! consult `core::manifest::HarnessPlan` (out of scope here, see #2158 PR
-//! notes). [`validate_workspace`] also checks `.claude/settings.json` (at
-//! [`FrameworkPaths::claude_home_dir`]) for a resolvable `outputStyle` and a
-//! configured `hooks` key. [`validate_and_repair`] re-runs
+//! EXPECTED set [`expected_set::expected_agent_stems`] /
+//! [`expected_set::expected_skill_stems`] resolve for this workspace — the
+//! SAME per-project [`crate::core::manifest::HarnessPlan`]
+//! `prepare_session_inner` computes before calling
+//! [`crate::core::agent_deployer::deploy_agents_filtered`] /
+//! [`crate::core::skill_deployer::deploy_skills_filtered`], not the
+//! unconditional full bundled roster (issue #2171 — a workspace legitimately
+//! provisioned from a FILTERED roster, e.g. every specialist `*-engineer`
+//! present but the generic `engineer` catch-all deliberately excluded, was
+//! previously reported incomplete for every excluded entry). When the plan
+//! cannot be usefully reconstructed (its resolved source directory is empty
+//! or missing), `expected_set` falls back to the workspace's OWN deployed
+//! ownership manifest (validating internal consistency: every entry the
+//! manifest claims to manage must exist on disk), and only when neither
+//! yields anything falls back further to the unconditional full canonical
+//! bundled roster (the pre-#2171 behavior) — see `expected_set`'s module doc
+//! for the full fallback contract. [`validate_workspace`] also checks
+//! `.claude/settings.json` (at [`FrameworkPaths::claude_home_dir`]) for a
+//! resolvable `outputStyle` and a configured `hooks` key.
+//! [`validate_and_repair`] re-runs
 //! [`crate::core::session_launch::prepare_session_with_repo_url`] — the exact
 //! deploy pipeline `spawn_managed`/`resume_managed` already use — when the
 //! initial validation finds gaps, then re-validates so callers can tell
@@ -35,8 +42,12 @@
 //! `validate_missing_output_style_key_is_a_gap`,
 //! `validate_unknown_output_style_id_is_a_gap`,
 //! `validate_output_style_file_missing_is_a_gap`, `validate_missing_hooks_is_a_gap`,
-//! `validate_complete_workspace_has_no_gaps`, `repair_closes_gaps_on_incomplete_workspace`,
-//! `repair_is_a_noop_on_already_complete_workspace`.
+//! `validate_complete_workspace_has_no_gaps`,
+//! `validate_filtered_but_manifest_matching_workspace_has_no_gaps`,
+//! `validate_entry_missing_on_disk_but_in_manifest_is_still_a_gap`,
+//! `repair_closes_gaps_on_incomplete_workspace`,
+//! `repair_is_a_noop_on_already_complete_workspace`; the expected-set
+//! resolution itself is covered by `expected_set`'s own test module.
 
 use std::path::Path;
 
@@ -44,6 +55,9 @@ use crate::core::agent_manifest::{self, AgentManifest, ManifestLoad};
 use crate::core::bundle::OUTPUT_STYLES;
 use crate::core::paths::FrameworkPaths;
 use crate::core::skill_manifest;
+
+mod expected_set;
+use expected_set::{expected_agent_stems, expected_skill_stems};
 
 /// One concrete gap between a deployed workspace and the canonical roster.
 ///
@@ -160,31 +174,39 @@ pub fn validate_workspace(fw: &FrameworkPaths) -> ValidationReport {
     ValidationReport { gaps }
 }
 
-/// Probe the deployed agent roster against the canonical bundled source.
+/// Probe the deployed agent roster against the EXPECTED per-project set
+/// (issue #2171 — see [`expected_set::expected_agent_stems`]).
 fn validate_agents(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
     let target = fw.claude_agents_dir();
-    match AgentManifest::load_checked(&target) {
-        ManifestLoad::Corrupt(detail) => gaps.push(DeploymentGap::AgentManifestCorrupt(detail)),
-        ManifestLoad::Ok(_) => {
+    let manifest = match AgentManifest::load_checked(&target) {
+        ManifestLoad::Corrupt(detail) => {
+            gaps.push(DeploymentGap::AgentManifestCorrupt(detail));
+            None
+        }
+        ManifestLoad::Ok(m) => {
             if !target.join(agent_manifest::MANIFEST_FILE).is_file() {
                 gaps.push(DeploymentGap::AgentManifestMissing);
             }
+            Some(m)
         }
-    }
-    for name in canonical_stems(&fw.agent_source_dir()) {
+    };
+    for name in expected_agent_stems(fw, manifest.as_ref()) {
         if !target.join(format!("{name}.md")).is_file() {
             gaps.push(DeploymentGap::AgentMissing(name));
         }
     }
 }
 
-/// Probe the deployed skill roster against the canonical bundled source.
+/// Probe the deployed skill roster against the EXPECTED per-project set
+/// (issue #2171 — see [`expected_set::expected_skill_stems`]).
 fn validate_skills(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
     let target = fw.claude_skills_dir();
-    if !target.join(skill_manifest::SKILL_MANIFEST_FILE).is_file() {
+    let manifest_present = target.join(skill_manifest::SKILL_MANIFEST_FILE).is_file();
+    if !manifest_present {
         gaps.push(DeploymentGap::SkillManifestMissing);
     }
-    for name in canonical_stems(&fw.skill_source_dir()) {
+    let manifest = manifest_present.then(|| skill_manifest::SkillManifest::load(&target));
+    for name in expected_skill_stems(fw, manifest.as_ref()) {
         if !target.join(&name).join("SKILL.md").is_file() {
             gaps.push(DeploymentGap::SkillMissing(name));
         }
@@ -241,38 +263,6 @@ fn validate_settings(fw: &FrameworkPaths, gaps: &mut Vec<DeploymentGap>) {
     if !hooks_present {
         gaps.push(DeploymentGap::HooksMissing);
     }
-}
-
-/// Canonical `.md` stems (filename without extension) directly under `dir`.
-///
-/// Why: shared by the agent and skill probes — both compare the deployed
-/// target against every `.md` file in a bundled source directory.
-/// What: returns the sorted, deterministic list of `.md` stems; an
-/// unreadable/missing `dir` yields an empty list (no canonical roster to
-/// check against — matches `deploy_agents`/`deploy_skills`'s own "missing
-/// source is an empty no-op" convention).
-/// Test: covered indirectly by every `validate_*` gap test.
-fn canonical_stems(dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let is_md = path
-                .extension()
-                .and_then(|x| x.to_str())
-                .map(|x| x.eq_ignore_ascii_case("md"))
-                .unwrap_or(false);
-            if !is_md {
-                return None;
-            }
-            path.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
-        })
-        .collect();
-    names.sort_unstable();
-    names
 }
 
 /// The outcome of [`validate_and_repair`].
@@ -409,6 +399,17 @@ mod tests {
         std::fs::write(style_dir.join(default.file_name), default.content).unwrap();
     }
 
+    /// A minimal, deterministic agent-manifest entry for the entries the
+    /// #2171 fallback tests record directly (no real deploy pipeline run).
+    fn sample_agent_entry(source_name: &str) -> crate::core::agent_manifest::ManifestEntry {
+        crate::core::agent_manifest::ManifestEntry {
+            source_chain: vec![source_name.to_string()],
+            checksum: agent_manifest::checksum("agent"),
+            deployed_at: "2026-01-01T00:00:00Z".to_string(),
+            origin: crate::core::agent_manifest::Origin::Bundled,
+        }
+    }
+
     /// A fully-provisioned workspace matching everything `prepare_session`
     /// would have written, used as the positive-path baseline every negative
     /// test starts from and mutates one field of.
@@ -446,6 +447,110 @@ mod tests {
         assert!(
             report.is_complete(),
             "expected no gaps, got: {:?}",
+            report.gaps
+        );
+    }
+
+    #[test]
+    fn validate_filtered_but_manifest_matching_workspace_has_no_gaps() {
+        // #2171: a workspace provisioned from a FILTERED per-project roster
+        // (a project manifest override excludes the generic `engineer`
+        // catch-all; only `rust-engineer` is deployed, matching its own
+        // ownership manifest exactly) must validate COMPLETE. The pre-fix
+        // validator diffed against the unconditional full bundled roster and
+        // falsely reported `engineer` missing even though it was never
+        // supposed to be deployed here.
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut fw = FrameworkPaths::for_managed_project(tmp.path(), &workspace);
+        fw.trusty_mpm_root = None;
+
+        seed_agent_source(&fw, &["engineer", "rust-engineer"]);
+        seed_skill_source(&fw, &["tm-doctor"]);
+
+        let manifest_dir = workspace.join(".trusty-mpm");
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(
+            manifest_dir.join("manifest.toml"),
+            "[agents]\nexclude = [\"engineer\"]\n",
+        )
+        .unwrap();
+
+        let agents_dir = fw.claude_agents_dir();
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("rust-engineer.md"), "agent").unwrap();
+        let mut agent_manifest = AgentManifest::default();
+        agent_manifest.managed.insert(
+            "rust-engineer.md".to_string(),
+            sample_agent_entry("rust-engineer"),
+        );
+        agent_manifest.save(&agents_dir).unwrap();
+
+        let skills_dir = fw.claude_skills_dir();
+        std::fs::create_dir_all(skills_dir.join("tm-doctor")).unwrap();
+        std::fs::write(skills_dir.join("tm-doctor").join("SKILL.md"), "skill").unwrap();
+        crate::core::skill_manifest::SkillManifest::default()
+            .save(&skills_dir)
+            .unwrap();
+
+        deploy_style_file(&fw);
+        write_settings(
+            &fw,
+            r#"{"outputStyle": "trusty-mpm", "hooks": {"SessionStart": []}}"#,
+        );
+
+        let report = validate_workspace(&fw);
+        assert!(
+            report.is_complete(),
+            "filtered-but-complete workspace must validate as complete, got: {:?}",
+            report.gaps
+        );
+    }
+
+    #[test]
+    fn validate_entry_missing_on_disk_but_in_manifest_is_still_a_gap() {
+        // The plan's bundled source directory is unpopulated (a binary-only
+        // install with no `framework/agents` yet), so expected-set resolution
+        // falls through to tier (b): the workspace's own deployed manifest.
+        // An entry the manifest claims to manage but which is NOT actually
+        // present on disk must still be reported — the fallback must never
+        // suppress a genuine gap, and an entry that IS on disk must not be
+        // falsely flagged.
+        let tmp = TempDir::new().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut fw = FrameworkPaths::for_managed_project(tmp.path(), &workspace);
+        fw.trusty_mpm_root = None;
+        // No seed_agent_source call — the plan's bundled source stays empty.
+
+        let agents_dir = fw.claude_agents_dir();
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("rust-engineer.md"), "agent").unwrap();
+        let mut agent_manifest = AgentManifest::default();
+        agent_manifest.managed.insert(
+            "rust-engineer.md".to_string(),
+            sample_agent_entry("rust-engineer"),
+        );
+        agent_manifest.managed.insert(
+            "python-engineer.md".to_string(),
+            sample_agent_entry("python-engineer"),
+        );
+        agent_manifest.save(&agents_dir).unwrap();
+
+        let report = validate_workspace(&fw);
+        assert!(
+            report
+                .gaps
+                .contains(&DeploymentGap::AgentMissing("python-engineer".to_string())),
+            "manifest-recorded entry missing on disk must still be reported, got: {:?}",
+            report.gaps
+        );
+        assert!(
+            !report
+                .gaps
+                .contains(&DeploymentGap::AgentMissing("rust-engineer".to_string())),
+            "the entry that IS on disk must not be falsely reported missing, got: {:?}",
             report.gaps
         );
     }
