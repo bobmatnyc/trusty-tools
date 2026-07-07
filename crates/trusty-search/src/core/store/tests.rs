@@ -493,3 +493,137 @@ async fn test_save_populated_index_writes_correctly() {
         "top hit for vec-a direction must be vec-a"
     );
 }
+
+/// Full re-view lifecycle (issue #2164): view → write (promotes to heap) →
+/// save (clean again) → demote (back to view, heap reclaimed) → search
+/// (identical results) → write again (re-promotes) → search (still correct).
+///
+/// Why: this is the exact cycle the idle sweep drives in production —
+/// asserts no vectors are ever lost and `is_view`/`in_view_mode()` flips at
+/// every expected step.
+#[tokio::test]
+async fn test_demote_to_view_full_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+
+    // Seed a snapshot with two vectors and load it back via `view`.
+    let seed = UsearchStore::new(4).unwrap();
+    seed.upsert("alpha", vec![1.0, 0.0, 0.0, 0.0])
+        .await
+        .unwrap();
+    seed.upsert("beta", vec![0.0, 1.0, 0.0, 0.0]).await.unwrap();
+    seed.save(&path).await.expect("seed save");
+    drop(seed);
+
+    let store = UsearchStore::load_from(&path)
+        .await
+        .expect("load ok")
+        .expect("load returned Some");
+    assert!(store.in_view_mode(), "load_from must land in view mode");
+
+    // Not eligible yet: still a view (nothing to demote from mutable).
+    assert!(
+        !store.try_demote_to_view().await.unwrap(),
+        "demoting an already-view store must be a no-op"
+    );
+
+    // Write promotes view -> mutable; the store is now dirty (unsaved).
+    store
+        .upsert("gamma", vec![0.0, 0.0, 1.0, 0.0])
+        .await
+        .expect("upsert promotes");
+    assert!(!store.in_view_mode(), "write must promote to mutable");
+    assert!(
+        !store.try_demote_to_view().await.unwrap(),
+        "demoting a dirty (unsaved) store must be refused — would lose 'gamma'"
+    );
+    assert!(!store.in_view_mode(), "refused demotion must not flip mode");
+
+    // Save flushes the new vector to disk and clears dirty.
+    store.save(&path).await.expect("save after write");
+
+    // Now clean + mutable: demotion must succeed.
+    assert!(
+        store.try_demote_to_view().await.expect("demote"),
+        "clean, mutable, path-backed store must demote"
+    );
+    assert!(store.in_view_mode(), "demote must flip back to view mode");
+
+    // Search after demotion must return identical results — no vectors lost.
+    let hits = store.search(&[1.0, 0.0, 0.0, 0.0], 3).await.unwrap();
+    let ids: std::collections::HashSet<&str> = hits.iter().map(|h| h.chunk_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["alpha", "beta", "gamma"].into_iter().collect(),
+        "all 3 vectors must survive the demotion round-trip"
+    );
+    assert_eq!(store.len().await.unwrap(), 3);
+
+    // A demoted (view-mode) store is once again a no-op to demote.
+    assert!(!store.try_demote_to_view().await.unwrap());
+
+    // Re-promote on the next write (view -> mutable -> view -> mutable cycle
+    // must be sound).
+    store
+        .upsert("delta", vec![0.0, 0.0, 0.0, 1.0])
+        .await
+        .expect("upsert after demote must re-promote");
+    assert!(!store.in_view_mode(), "second write must re-promote");
+    let hits = store.search(&[0.0, 0.0, 0.0, 1.0], 1).await.unwrap();
+    assert_eq!(
+        hits[0].chunk_id, "delta",
+        "post-re-promote search must work"
+    );
+    assert_eq!(
+        store.len().await.unwrap(),
+        4,
+        "no vectors lost across the full cycle"
+    );
+}
+
+/// Demotion must refuse a dirty (unsaved) mutable store rather than risk
+/// losing unpersisted vectors (issue #2164 — "when in doubt, skip").
+#[tokio::test]
+async fn test_demote_to_view_skips_when_dirty() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+
+    let store = UsearchStore::new(4).unwrap();
+    store.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    store.save(&path).await.unwrap();
+    assert!(
+        !store.dirty.load(Ordering::Acquire),
+        "clean immediately after save"
+    );
+
+    // Mutate without saving — now dirty.
+    store.upsert("b", vec![0.0, 1.0, 0.0, 0.0]).await.unwrap();
+    assert!(store.dirty.load(Ordering::Acquire), "write must set dirty");
+
+    assert!(
+        !store.try_demote_to_view().await.unwrap(),
+        "a dirty store must never be demoted — would lose 'b' on next promote"
+    );
+    assert!(
+        !store.in_view_mode(),
+        "refused demotion must leave the store mutable"
+    );
+    assert_eq!(
+        store.len().await.unwrap(),
+        2,
+        "both vectors must still be present in the (mutable) index"
+    );
+}
+
+/// A store that was never associated with an on-disk path (e.g. a freshly
+/// constructed `UsearchStore::new()` that has never been saved) has nothing
+/// safe to re-view from and must never attempt it.
+#[tokio::test]
+async fn test_demote_to_view_skips_without_path() {
+    let store = UsearchStore::new(4).unwrap();
+    store.upsert("a", vec![1.0, 0.0, 0.0, 0.0]).await.unwrap();
+    assert!(
+        !store.try_demote_to_view().await.unwrap(),
+        "a store with no known hnsw_path must never demote"
+    );
+}

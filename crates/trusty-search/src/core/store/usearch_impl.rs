@@ -58,6 +58,10 @@ impl VectorStore for UsearchStore {
         index
             .add(key, &embedding)
             .map_err(|e| anyhow!("usearch add failed: {e}"))?;
+        // The in-memory graph now differs from the on-disk snapshot (issue
+        // #2164) — the idle-demote sweep must skip this store until the next
+        // `save()` flushes it.
+        self.dirty.store(true, Ordering::Release);
         Ok(())
     }
 
@@ -115,6 +119,8 @@ impl VectorStore for UsearchStore {
             index
                 .remove(key)
                 .map_err(|e| anyhow!("usearch remove failed: {e}"))?;
+            // Graph changed — see the `dirty` note in `upsert` (issue #2164).
+            self.dirty.store(true, Ordering::Release);
         }
         Ok(())
     }
@@ -341,6 +347,12 @@ impl VectorStore for UsearchStore {
                 failed.push((id.clone(), e.to_string()));
             }
         }
+        // The graph was mutated above (removes and/or adds attempted) — mark
+        // dirty so the idle-demote sweep skips this store until the next
+        // `save()` flush (issue #2164). Set while still holding the write
+        // lock so a racing `try_demote_to_view` re-check under the same lock
+        // always observes it.
+        self.dirty.store(true, Ordering::Release);
         // Drop the HNSW write lock before touching the id maps so we don't
         // hold two write locks at once.
         drop(index);
@@ -401,5 +413,11 @@ impl VectorStore for UsearchStore {
             failed.len()
         );
         Ok(())
+    }
+
+    /// See [`VectorStore::demote_to_view`]; delegates to
+    /// [`UsearchStore::try_demote_to_view`] (issue #2164).
+    async fn demote_to_view(&self) -> Result<bool> {
+        self.try_demote_to_view().await
     }
 }
