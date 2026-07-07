@@ -164,6 +164,9 @@ impl CodeIndexer {
     /// `index_file`.
     pub(super) async fn add_chunk_inner(&self, chunk: RawChunk) -> Result<()> {
         self.ensure_chunks_loaded().await;
+        // Issue #2162: rehydrate BM25/entities before the direct bm25 upsert
+        // below, mirroring `commit_parsed_batch`.
+        self.ensure_bm25_entities_loaded().await;
         self.touch_activity();
         let id = chunk.id.clone();
 

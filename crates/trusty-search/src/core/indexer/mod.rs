@@ -38,6 +38,7 @@ pub(crate) mod archive;
 pub(crate) mod docs_penalty;
 mod files;
 pub(crate) mod helpers;
+mod idle_evict;
 mod ingest;
 pub(crate) mod migrations;
 mod persist;
@@ -54,6 +55,8 @@ pub(crate) use search::KG_REFINE_THRESHOLD;
 mod tests;
 #[cfg(test)]
 mod tests_cursor;
+#[cfg(test)]
+mod tests_idle_evict;
 
 // Re-export helpers so sibling modules can use the crate-internal API.
 pub(crate) use helpers::{
@@ -159,6 +162,11 @@ pub struct CodeIndexer {
     /// `true` once the in-memory `chunks` map has been evicted.
     pub(super) chunks_evicted: Arc<AtomicBool>,
 
+    /// `true` once the in-memory BM25 corpus and per-file entity map have
+    /// been evicted (issue #2162). See [`Self::evict_bm25_entities_if_idle`]
+    /// / [`Self::ensure_bm25_entities_loaded`] in `idle_evict.rs`.
+    pub(super) bm25_entities_evicted: Arc<AtomicBool>,
+
     /// Issue #1158: `true` when the redb corpus file existed but could NOT be
     /// opened on this boot (e.g. incompatible page format, corruption).
     ///
@@ -225,6 +233,7 @@ impl CodeIndexer {
             created_at: Instant::now(),
             last_activity_ms: Arc::new(AtomicU64::new(0)),
             chunks_evicted: Arc::new(AtomicBool::new(false)),
+            bm25_entities_evicted: Arc::new(AtomicBool::new(false)),
             corpus_open_failed: false,
         }
     }
@@ -276,7 +285,10 @@ impl CodeIndexer {
     /// What: a no-op when idle_threshold is zero, no durable corpus is wired,
     /// the map is already empty, or the index was recently active. Otherwise
     /// clears the map, marks `chunks_evicted`, and logs an `info` with the
-    /// reclaimed count. BM25 and the symbol graph are intentionally left hot.
+    /// reclaimed count. The symbol graph is intentionally left hot (rebuilding
+    /// it is far more expensive than a redb read). The BM25 corpus and
+    /// per-file entities have their own idle-eviction path (issue #2162) —
+    /// see [`Self::evict_bm25_entities_if_idle`] in `idle_evict.rs`.
     /// Returns the number of chunks evicted (0 when skipped).
     /// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks`.
     pub async fn evict_chunks_if_idle(&self, idle_threshold: std::time::Duration) -> usize {
