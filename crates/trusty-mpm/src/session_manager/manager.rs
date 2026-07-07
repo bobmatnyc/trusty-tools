@@ -483,20 +483,34 @@ impl SessionManager {
         Ok(record)
     }
 
-    /// Resume a stopped session by re-spawning the runtime in its existing workspace.
+    /// Resume a stopped session, reusing its tmux pane when one already survives.
     ///
     /// Why: a session ENDURES until decommissioned; after `stop` the workspace
     /// directory is still on disk and `resume` brings the runtime back without
-    /// re-cloning. A new tmux session is created with `cwd = workspace_path` and
-    /// the caller is responsible for spawning claude inside it (via
-    /// `ClaudeCodeAdapter::spawn`) so the runtime restarts cleanly.
-    /// What: validates the session is `Stopped` or `Errored`, creates a fresh
-    /// tmux session with `cwd = workspace_path` (falls back to `cwd` when
-    /// `workspace_path` is absent), marks the record `Active`, and persists.
-    /// Returns the updated record; the HTTP handler then calls
-    /// `ClaudeCodeAdapter::spawn` on the new tmux session.
-    /// Test: `manager_resume_respawns` — asserts a new `create_session` call is
-    /// issued with cwd = existing workspace_path, no re-clone occurs.
+    /// re-cloning. Prior to #2148 this UNCONDITIONALLY killed any surviving tmux
+    /// session and created a brand-new one, even when the pane was left alive on
+    /// purpose (e.g. [`Self::mark_runtime_exited_stopped`], #2023 A, which marks a
+    /// session `Stopped` WITHOUT touching its pane so the operator can glance at
+    /// trailing output or keep a live `tmux attach`). Every caller of `resume`
+    /// (CLI restart, HTTP `/resume`, MCP `sessions.resume`, the auto-resume
+    /// supervisor) inherited that destructiveness, dropping the operator into a
+    /// freshly recreated pane instead of the one they were already looking at.
+    /// What: validates the session is `Stopped` or `Errored`, then branches on
+    /// [`ManagedTmuxDriver::session_exists`]: if the tmux pane is STILL alive, it
+    /// is reused as-is — no `kill_session`, no `create_session` — because the
+    /// caller (e.g. `resume_managed`) re-spawns the runtime via
+    /// `RuntimeAdapter::spawn_resume`, which types the resume command straight
+    /// into that same pane (already rooted at the right cwd from its original
+    /// creation). If the pane is gone, behavior is unchanged from before: a
+    /// best-effort `kill_session` guard followed by a fresh `create_session` with
+    /// `cwd = workspace_path` (falls back to `cwd` when `workspace_path` is
+    /// absent). Either way the record is marked `Active` and persisted.
+    /// Test: `manager_resume_respawns_in_existing_workspace` (`tests.rs`) —
+    /// asserts a new `create_session` call is issued when no pane survives (the
+    /// `stop()` path, which kills the pane); `resume_reattach_tests.rs`'s
+    /// `manager_resume_reuses_live_pane_without_recreate` — asserts NEITHER
+    /// `kill_session` NOR `create_session` fires when the pane survives (the
+    /// `mark_runtime_exited_stopped` path, #2148).
     pub async fn resume(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
         let mut record = self.get(id).await?;
         match record.state {
@@ -528,23 +542,39 @@ impl SessionManager {
             .to_string_lossy()
             .to_string();
 
-        // Kill the old tmux session if still somehow alive (best-effort).
-        if self.tmux.session_exists(&record.tmux_name)
-            && let Err(e) = self.tmux.kill_session(&record.tmux_name)
-        {
-            warn!(name = %record.tmux_name, "resume: kill stale session failed: {e}");
-        }
+        // #2148: a pane that survived the runtime exit (e.g.
+        // `mark_runtime_exited_stopped`, #2023 A) must be REUSED, not destroyed.
+        // Only recreate the tmux session when no live pane remains.
+        if self.tmux.session_exists(&record.tmux_name) {
+            info!(
+                id = %id,
+                name = %record.tmux_name,
+                workdir = %workdir,
+                "managed session resumed: re-attached to live pane (#2148, no recreate)"
+            );
+        } else {
+            // Best-effort guard: clear any stale entry the driver may still report
+            // before creating the replacement session.
+            if let Err(e) = self.tmux.kill_session(&record.tmux_name) {
+                warn!(name = %record.tmux_name, "resume: kill stale session failed: {e}");
+            }
 
-        // Create a fresh tmux session rooted at the EXISTING workspace.
-        // No re-clone — workspace_path is reused as-is.
-        self.tmux
-            .create_session(&record.tmux_name, &workdir)
-            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+            // Create a fresh tmux session rooted at the EXISTING workspace.
+            // No re-clone — workspace_path is reused as-is.
+            self.tmux
+                .create_session(&record.tmux_name, &workdir)
+                .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+            info!(
+                id = %id,
+                name = %record.tmux_name,
+                workdir = %workdir,
+                "managed session resumed: recreated pane"
+            );
+        }
 
         record.state = ManagedSessionState::Active;
         record.last_activity_at = Some(Utc::now());
         self.store.write().await.upsert(record.clone()).await?;
-        info!(id = %id, name = %record.tmux_name, workdir = %workdir, "managed session resumed");
         Ok(record)
     }
 

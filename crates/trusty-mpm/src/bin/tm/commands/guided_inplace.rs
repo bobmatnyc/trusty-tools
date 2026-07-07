@@ -17,9 +17,13 @@
 //! logic. [`plan_inplace`] is the pure decision (env var present AND the
 //! fetched record's state is `"stopped"` → [`super::guided_resume::
 //! ResumeAction::InPlace`]; otherwise `None`, meaning "fall through to the
-//! normal guided flow"). The daemon round-trips ([`fetch_managed_session`],
-//! [`reactivate_managed_session`]) and the process-replacing exec
-//! ([`exec_claude_in_place`]) are the I/O driver, sequenced by
+//! normal guided flow"). The record is fetched via
+//! [`fetch_managed_session_until_stopped`] (#2148), which retries
+//! [`fetch_managed_session`] over a short bounded budget so a record that is
+//! still transitioning `Active` -> `Stopped` (the `SessionEnd` stop racing this
+//! exact invocation) is not mistaken for "not stopped" on a single unlucky
+//! read. [`reactivate_managed_session`] and the process-replacing exec
+//! ([`exec_claude_in_place`]) are the rest of the I/O driver, sequenced by
 //! [`run_inplace_relaunch`] as: resolve the `claude` binary + build the resume
 //! command (pure, local — can fail on a missing binary before anything is
 //! mutated) → reactivate on the daemon (network — a 404/409/unreachable
@@ -70,6 +74,25 @@ const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 /// identifies which managed session bare `tm`, run after `claude` exits,
 /// belongs to.
 const MANAGED_SESSION_ID_ENV: &str = "TM_MANAGED_SESSION_ID";
+
+/// Total time budget for polling the managed-session fetch while the record is
+/// transitioning `Active` -> `Stopped` (#2148 race hardening).
+///
+/// Why: `SessionEnd` marks the record `Stopped` asynchronously (via
+/// `mark_runtime_exited_stopped`) at roughly the same moment bare `tm` runs in
+/// the just-vacated pane. A single unlucky fetch can observe the record still
+/// `"active"`, causing [`plan_inplace`] to reject the in-place path and fall
+/// through to the destructive guided-picker `/resume` — exactly the pane loss
+/// #2148 is about. A short, bounded poll absorbs that race without adding a
+/// human-perceptible delay to every bare-`tm` invocation.
+const FETCH_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Delay between polls within [`FETCH_RETRY_BUDGET`].
+///
+/// Why: a handful of short polls (400ms / 80ms ≈ up to 5 attempts) is enough
+/// to ride out the `SessionEnd` race without noticeably slowing the common
+/// case, where the very first fetch already sees `"stopped"`.
+const FETCH_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(80);
 
 /// Read [`MANAGED_SESSION_ID_ENV`] from the environment, treating a blank
 /// value the same as absent.
@@ -196,6 +219,42 @@ async fn fetch_managed_session(
         return None;
     }
     resp.json().await.ok()
+}
+
+/// Poll [`fetch_managed_session`] until the record reads `"stopped"` or the
+/// [`FETCH_RETRY_BUDGET`] is exhausted (#2148 race hardening).
+///
+/// Why: [`plan_inplace`] requires the FIRST fetch to already show `"stopped"`;
+/// a record that is transitioning `Active` -> `Stopped` (the `SessionEnd` stop
+/// racing this exact bare-`tm` invocation) would otherwise be seen as
+/// unresolved/non-stopped and fall through to the destructive guided-picker
+/// `/resume` path — the very pane loss #2148 fixes. Retrying a few times over
+/// a small, bounded budget lets the transition land before giving up.
+/// What: fetches once immediately; returns as soon as `state == "stopped"`.
+/// Otherwise sleeps [`FETCH_RETRY_INTERVAL`] and retries, stopping the moment
+/// the elapsed time reaches [`FETCH_RETRY_BUDGET`] — returning whatever the
+/// LAST attempt produced (`Some` non-stopped record, or `None` if the fetch
+/// itself kept failing). Never blocks longer than the budget, so a genuinely
+/// unresolved/unknown id still falls through promptly.
+/// Test: `fetch_until_stopped_returns_immediately_when_already_stopped`,
+/// `fetch_until_stopped_gives_up_after_budget_when_never_stopped` (both use a
+/// local one-shot/counting mock, mirroring [`spawn_mock`]'s convention).
+async fn fetch_managed_session_until_stopped(
+    client: &reqwest::Client,
+    url: &str,
+    id: &str,
+) -> Option<trusty_mpm::client::ManagedSessionSummary> {
+    let start = std::time::Instant::now();
+    loop {
+        let record = fetch_managed_session(client, url, id).await;
+        if record.as_ref().map(|r| r.state.as_str()) == Some("stopped") {
+            return record;
+        }
+        if start.elapsed() >= FETCH_RETRY_BUDGET {
+            return record;
+        }
+        tokio::time::sleep(FETCH_RETRY_INTERVAL).await;
+    }
 }
 
 /// POST `/api/v1/sessions/managed/{id}/reactivate` — flip Stopped -> Active
@@ -396,7 +455,9 @@ pub(crate) async fn try_inplace_relaunch(
             }
         },
     };
-    let record = fetch_managed_session(client, url, &env_id).await;
+    // #2148: bounded retry absorbs the Active->Stopped transition race instead
+    // of giving up on a single unlucky fetch — see `fetch_managed_session_until_stopped`.
+    let record = fetch_managed_session_until_stopped(client, url, &env_id).await;
     let record_state = record.as_ref().map(|r| r.state.as_str());
     match plan_inplace(Some(&env_id), record_state) {
         Some(ResumeAction::InPlace) => {
@@ -513,6 +574,105 @@ mod tests {
                 Err(_) => return,
             }
         }
+    }
+
+    /// Spawn a background HTTP mock that replies 200 OK with `{"state": ..}`,
+    /// walking through `states` one entry per connection (clamping to the last
+    /// entry once exhausted) — used to simulate a record transitioning
+    /// `Active` -> `Stopped` across retries (#2148).
+    ///
+    /// Why: [`fetch_managed_session_until_stopped`]'s retry behavior needs a
+    /// mock whose response changes across calls, unlike [`spawn_mock`]'s fixed
+    /// status line; this mirrors the same "read the full request before
+    /// replying" convention.
+    /// What: binds an ephemeral port, loops accepting connections, and for the
+    /// Nth connection replies with `states[min(N, states.len() - 1)]` as the
+    /// summary's `state` field. Runs until the test's tokio runtime shuts down.
+    /// Test: `fetch_until_stopped_*` below.
+    async fn spawn_state_mock(states: Vec<&'static str>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_task = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let n = hits_task.fetch_add(1, Ordering::SeqCst);
+                read_full_request(&mut sock).await;
+                let idx = n.min(states.len().saturating_sub(1));
+                let state = states.get(idx).copied().unwrap_or("active");
+                let body = format!(r#"{{"id":"{TEST_ID}","name":"tm-test","state":"{state}"}}"#);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (format!("http://{addr}"), hits)
+    }
+
+    #[tokio::test]
+    async fn fetch_until_stopped_returns_immediately_when_already_stopped() {
+        // #2148: the common case — no race — must not pay any retry delay.
+        let (url, hits) = spawn_state_mock(vec!["stopped"]).await;
+        let client = reqwest::Client::new();
+        let start = std::time::Instant::now();
+        let record = fetch_managed_session_until_stopped(&client, &url, TEST_ID).await;
+        assert_eq!(record.map(|r| r.state), Some("stopped".to_string()));
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "must not retry once the first fetch already reads stopped"
+        );
+        assert!(
+            start.elapsed() < FETCH_RETRY_BUDGET,
+            "must return promptly, not wait out the whole retry budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_until_stopped_retries_past_transitioning_state() {
+        // #2148: the race this hardens against — the record briefly reads
+        // "active" while the SessionEnd stop is still in flight, then settles
+        // on "stopped" a couple of polls later.
+        let (url, hits) = spawn_state_mock(vec!["active", "active", "stopped"]).await;
+        let client = reqwest::Client::new();
+        let record = fetch_managed_session_until_stopped(&client, &url, TEST_ID).await;
+        assert_eq!(record.map(|r| r.state), Some("stopped".to_string()));
+        assert!(
+            hits.load(Ordering::SeqCst) >= 3,
+            "must retry past the transitioning reads before accepting stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_until_stopped_gives_up_after_budget_when_never_stopped() {
+        // A genuinely non-stopped record (e.g. still active, or the id belongs
+        // to some other running session) must not retry forever — it gives up
+        // once the bounded budget elapses so the caller falls through promptly.
+        let (url, hits) = spawn_state_mock(vec!["active"]).await;
+        let client = reqwest::Client::new();
+        let start = std::time::Instant::now();
+        let record = fetch_managed_session_until_stopped(&client, &url, TEST_ID).await;
+        let elapsed = start.elapsed();
+        assert_eq!(record.map(|r| r.state), Some("active".to_string()));
+        assert!(
+            elapsed >= FETCH_RETRY_BUDGET,
+            "must not give up before the retry budget elapses"
+        );
+        assert!(
+            elapsed < FETCH_RETRY_BUDGET + FETCH_RETRY_INTERVAL * 3,
+            "must not overrun the budget by more than a poll or two"
+        );
+        assert!(
+            hits.load(Ordering::SeqCst) > 1,
+            "must have retried at least once before giving up"
+        );
     }
 
     #[test]

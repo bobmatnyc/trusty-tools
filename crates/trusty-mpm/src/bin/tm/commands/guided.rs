@@ -33,9 +33,13 @@ use crate::formatters::info_box::DaemonInfo;
 /// Why: extracting the parse-and-decide logic from the I/O driver makes it
 /// unit-testable without stdin/tmux. The driver calls parse, checks the variant,
 /// and shells out only for Resume and LaunchNew.
-/// What: four variants cover every valid and invalid input the picker can receive.
+/// What: five variants cover every valid and invalid input the picker can
+/// receive. [`Self::ConfirmRestart`] is the #2148 safety default: a bare Enter
+/// that WOULD have silently restarted (destructively recreated the tmux pane
+/// of) a stopped/errored session instead asks for an explicit numeric choice.
 /// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
-/// `guided_picker_bare_enter_with_sessions_resumes_first`,
+/// `guided_picker_bare_enter_live_session_resumes_first`,
+/// `guided_picker_bare_enter_stopped_session_requires_confirm`,
 /// `guided_picker_q_returns_quit`, `guided_picker_numeric_valid_resumes`,
 /// `guided_picker_numeric_launch_new`, `guided_picker_out_of_range_unrecognised`,
 /// `guided_picker_non_numeric_unrecognised`.
@@ -49,6 +53,12 @@ pub(crate) enum PickerDecision {
     Quit,
     /// Input was not recognised; the caller quits cleanly.
     Unrecognised,
+    /// Bare Enter was pressed but the 0-based-indexed session at this slot is
+    /// stopped/errored — resuming it would KILL and recreate its tmux pane
+    /// (or, if the pane already happened to be dead, spawn a fresh one). #2148:
+    /// this is no longer an implicit default; the operator must type the
+    /// number explicitly to confirm the restart.
+    ConfirmRestart(usize),
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -436,30 +446,48 @@ pub(crate) fn print_non_tty_hint(
 /// Parse one line of picker input into a [`PickerDecision`].
 ///
 /// Why: separating parse-and-decide from the I/O driver makes the dispatch
-/// logic unit-testable without needing a real stdin, tmux, or daemon.
+/// logic unit-testable without needing a real stdin, tmux, or daemon. Folding
+/// `first_needs_restart` in here (rather than deciding safety in the I/O
+/// driver) keeps the destructive-default guard (#2148) exhaustively
+/// unit-testable alongside every other picker-input case.
 /// What: `session_count` is the number of existing sessions in the menu (the
-/// menu slot `session_count + 1` is always "launch new").
+/// menu slot `session_count + 1` is always "launch new"); `first_needs_restart`
+/// is true when the session at index 0 is `stopped`/`errored` — i.e. resuming
+/// it goes through the daemon's restart path, which can recreate its tmux pane
+/// (see [`super::guided_resume::needs_restart`]).
 ///   • `"q"` / `"Q"` → `Quit`
-///   • empty / whitespace → `Resume(0)` when `session_count > 0`, else `LaunchNew`
-///   • `N` (1..=session_count) → `Resume(N-1)` (0-based index)
+///   • empty / whitespace, `session_count == 0` → `LaunchNew`
+///   • empty / whitespace, `session_count > 0`, session 0 is live → `Resume(0)`
+///   • empty / whitespace, `session_count > 0`, session 0 needs a restart →
+///     `ConfirmRestart(0)` (#2148: no longer an implicit destructive default)
+///   • `N` (1..=session_count) → `Resume(N-1)` (0-based index) — an EXPLICIT
+///     numeric choice always restarts/resumes directly, confirm or not
 ///   • `session_count + 1` → `LaunchNew`
 ///   • anything else → `Unrecognised`
 /// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
-/// `guided_picker_bare_enter_with_sessions_resumes_first`,
+/// `guided_picker_bare_enter_live_session_resumes_first`,
+/// `guided_picker_bare_enter_stopped_session_requires_confirm`,
 /// `guided_picker_q_returns_quit`, `guided_picker_q_uppercase_returns_quit`,
 /// `guided_picker_numeric_valid_resumes`, `guided_picker_numeric_launch_new`,
 /// `guided_picker_out_of_range_unrecognised`,
 /// `guided_picker_non_numeric_unrecognised`.
-pub(crate) fn parse_picker_choice(line: &str, session_count: usize) -> PickerDecision {
+pub(crate) fn parse_picker_choice(
+    line: &str,
+    session_count: usize,
+    first_needs_restart: bool,
+) -> PickerDecision {
     let choice = line.trim();
     if choice.eq_ignore_ascii_case("q") {
         return PickerDecision::Quit;
     }
     if choice.is_empty() {
-        return if session_count > 0 {
-            PickerDecision::Resume(0)
+        if session_count == 0 {
+            return PickerDecision::LaunchNew;
+        }
+        return if first_needs_restart {
+            PickerDecision::ConfirmRestart(0)
         } else {
-            PickerDecision::LaunchNew
+            PickerDecision::Resume(0)
         };
     }
     if let Ok(n) = choice.parse::<usize>() {
@@ -485,6 +513,8 @@ pub(crate) fn parse_picker_choice(line: &str, session_count: usize) -> PickerDec
 ///   • `Resume(i)` → [`resume_guided_session`] which handles daemon restart
 ///     when needed and then calls [`tmux_attach`] internally;
 ///   • `LaunchNew` → [`launch_new_session_and_attach`];
+///   • `ConfirmRestart(i)` (#2148) → print a one-line "type the number to
+///     confirm" notice and redisplay the SAME menu — no daemon round-trip;
 ///   • `Quit` / EOF / `Unrecognised` → print notice and return `Ok`.
 /// Test: `parse_picker_choice` is the testable seam; I/O path is exercised by
 /// manual smoke tests and the e2e suite.
@@ -498,6 +528,13 @@ async fn run_tty_picker(
     loop {
         eprintln!();
         let new_idx = sessions.len() + 1;
+        // #2148: bare Enter must not silently restart (kill+recreate the tmux
+        // pane of) a stopped/errored session — only used to pick the menu's
+        // default hint and to gate `parse_picker_choice`'s bare-Enter branch.
+        let first_needs_restart = sessions
+            .first()
+            .map(|s| super::guided_resume::needs_restart(&s.state))
+            .unwrap_or(false);
         if sessions.is_empty() {
             eprintln!("tm:   [Enter] launch new session");
             eprintln!("tm:   [q]     quit");
@@ -511,7 +548,12 @@ async fn run_tty_picker(
             }
             eprintln!("tm:   [{new_idx}] launch new session");
             eprintln!("tm:   [q] quit");
-            eprintln!("tm: default: [1] resume/restart most recent");
+            if first_needs_restart {
+                // #2148: no implicit destructive default — an explicit [1] is required.
+                eprintln!("tm: [Enter] does NOT restart — type [1] to confirm the restart");
+            } else {
+                eprintln!("tm: default: [1] resume most recent");
+            }
         }
         eprint!("tm: > ");
 
@@ -523,7 +565,7 @@ async fn run_tty_picker(
             break;
         } // EOF (Ctrl-D): exit cleanly.
 
-        match parse_picker_choice(&line, sessions.len()) {
+        match parse_picker_choice(&line, sessions.len(), first_needs_restart) {
             PickerDecision::Quit => {
                 eprintln!("tm: quit.");
                 break;
@@ -535,6 +577,21 @@ async fn run_tty_picker(
             }
             PickerDecision::LaunchNew => {
                 launch_new_session_and_attach(client, url, repo_url).await?
+            }
+            // #2148: bare Enter hit a session that needs a restart — ask for an
+            // explicit choice instead of silently destroying its pane. No daemon
+            // round-trip; redisplay the SAME menu.
+            PickerDecision::ConfirmRestart(i) => {
+                eprintln!(
+                    "tm: '{}' requires a restart (its pane is gone or will be recreated) — \
+                     bare Enter no longer does this automatically.",
+                    sessions[i].name
+                );
+                eprintln!(
+                    "tm: type [{}] to confirm the restart, or [q] to quit.",
+                    i + 1
+                );
+                continue;
             }
             PickerDecision::Unrecognised => {
                 eprintln!("tm: unrecognised choice '{}'; quitting.", line.trim());
