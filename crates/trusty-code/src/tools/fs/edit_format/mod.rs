@@ -17,7 +17,10 @@
 //! bundles the format-specific arguments recovered from the LLM's tool call;
 //! [`format_order_for`] returns the per-model fallback order; [`select_and_apply`]
 //! tries the caller-supplied payloads in that order against the current file
-//! content and returns the first one that applies cleanly.
+//! content and returns the first one that applies cleanly. [`format_order_for_mode`]
+//! and [`select_and_apply_for_mode`] (#2073) are the `HarnessMode`-aware
+//! variants that reconcile this per-model matrix with vision spec §5.9's
+//! Parity/DailyDriver split (see their own docs).
 //!
 //! ## Per-model format matrix
 //!
@@ -33,7 +36,9 @@
 //! out-performs exact match for that family (per the Aider leaderboard data
 //! referenced in #2068). Weaker/unknown models frequently botch both
 //! precision-dependent formats, so the most forgiving format (whole-file)
-//! leads for the catch-all bucket.
+//! leads for the catch-all bucket. This table is the `HarnessMode::DailyDriver`
+//! behaviour (#2073, §5.9): production, per-model-optimised edit-format
+//! selection. `HarnessMode::Parity` overrides it — see [`format_order_for_mode`].
 //! Test: `tests::format_order_*`, `tests::select_and_apply_*`.
 
 mod diff;
@@ -41,6 +46,7 @@ mod diff;
 use std::path::Path;
 
 use super::FsError;
+use crate::mode::HarnessMode;
 
 pub(crate) use diff::apply_unified_diff;
 
@@ -201,7 +207,79 @@ pub fn select_and_apply(
     path: &Path,
     payloads: &[EditPayload],
 ) -> Result<(String, EditFormat), FsError> {
-    let order = format_order_for(model_slug);
+    apply_in_order(format_order_for(model_slug), content, path, payloads)
+}
+
+/// `HarnessMode`-aware fallback order for edit-format application (#2073,
+/// §5.9's reconciliation table).
+///
+/// Why: The parity spec's benchmark-fairness goal (D2) extends to the edit
+/// layer: §5.9's table lists Parity's edit-format column as "unified-diff
+/// only", in contrast to DailyDriver's "per-model optimized". The literal
+/// reading ("reject every other format outright") would strand a Parity run
+/// against any model that cannot reliably emit a diff, which defeats
+/// "benchmark fairness" more than it serves it — so this applies the
+/// spec's INTENT (edit-format choice must not vary by model in Parity) by
+/// returning a FIXED, model-independent order with unified-diff leading,
+/// rather than hard-rejecting the other two formats. A caller wanting the
+/// stricter literal reading can inspect the returned `EditFormat` and treat
+/// anything but `UnifiedDiff` as a policy violation; `select_and_apply_for_mode`
+/// itself still falls back so a Parity run can always complete an edit.
+/// What: `HarnessMode::Parity` ignores `model_slug` and always returns
+/// `[UnifiedDiff, SearchReplace, WholeFile]`. `HarnessMode::DailyDriver`
+/// delegates to [`format_order_for`] unchanged (the existing per-model
+/// matrix, #2068).
+/// Test: `tests::format_order_for_mode_parity_is_model_independent`,
+/// `tests::format_order_for_mode_daily_driver_matches_legacy_order`.
+pub fn format_order_for_mode(mode: HarnessMode, model_slug: &str) -> [EditFormat; 3] {
+    match mode {
+        HarnessMode::Parity => [
+            EditFormat::UnifiedDiff,
+            EditFormat::SearchReplace,
+            EditFormat::WholeFile,
+        ],
+        HarnessMode::DailyDriver => format_order_for(model_slug),
+    }
+}
+
+/// `HarnessMode`-aware [`select_and_apply`] (#2073).
+///
+/// Why: The single call site (`EditTool::edit_inner`) that needs to pick
+/// between the plain per-model order and the Parity-fixed order without
+/// duplicating the apply loop.
+/// What: Computes the order via [`format_order_for_mode`], then applies it
+/// exactly as [`select_and_apply`] does.
+/// Test: `tests::select_and_apply_for_mode_parity_prefers_unified_diff_regardless_of_model`.
+pub fn select_and_apply_for_mode(
+    mode: HarnessMode,
+    model_slug: &str,
+    content: &str,
+    path: &Path,
+    payloads: &[EditPayload],
+) -> Result<(String, EditFormat), FsError> {
+    apply_in_order(
+        format_order_for_mode(mode, model_slug),
+        content,
+        path,
+        payloads,
+    )
+}
+
+/// Shared apply loop behind both [`select_and_apply`] and
+/// [`select_and_apply_for_mode`].
+///
+/// Why: Both public entry points differ only in how they compute the
+/// preference order; centralising the loop keeps that the ONLY difference.
+/// What: Tries each format in `order`, applying the first present payload
+/// that succeeds; returns the last error if none apply, or `EditNotFound` if
+/// `payloads` never contained any of `order`'s formats.
+/// Test: Exercised transitively by every `select_and_apply*` test.
+fn apply_in_order(
+    order: [EditFormat; 3],
+    content: &str,
+    path: &Path,
+    payloads: &[EditPayload],
+) -> Result<(String, EditFormat), FsError> {
     let mut last_err: Option<FsError> = None;
 
     for format in order {
@@ -369,5 +447,94 @@ mod tests {
         let err = select_and_apply("claude-opus", "content", Path::new("f.py"), &[])
             .expect_err("no payloads must error");
         assert!(matches!(err, FsError::EditNotFound { .. }));
+    }
+
+    /// `HarnessMode::Parity` returns the SAME fixed order regardless of
+    /// `model_slug` (#2073) — proves edit-format selection is model-independent
+    /// under Parity, matching every other reconciled layer (prompt assembly,
+    /// tool schemas, compaction).
+    #[test]
+    fn format_order_for_mode_parity_is_model_independent() {
+        let expected = [
+            EditFormat::UnifiedDiff,
+            EditFormat::SearchReplace,
+            EditFormat::WholeFile,
+        ];
+        for slug in [
+            "anthropic/claude-opus-4-5",
+            "qwen/qwen-2.5-72b-instruct",
+            "google/gemma-2-9b-it",
+            "",
+        ] {
+            assert_eq!(
+                format_order_for_mode(HarnessMode::Parity, slug),
+                expected,
+                "Parity order must not vary for {slug}"
+            );
+        }
+    }
+
+    /// `HarnessMode::DailyDriver` delegates verbatim to the pre-#2073
+    /// per-model matrix (#2068) — no behavioural change for the production
+    /// default.
+    #[test]
+    fn format_order_for_mode_daily_driver_matches_legacy_order() {
+        for slug in [
+            "anthropic/claude-opus-4-5",
+            "qwen/qwen-2.5-72b-instruct",
+            "google/gemma-2-9b-it",
+        ] {
+            assert_eq!(
+                format_order_for_mode(HarnessMode::DailyDriver, slug),
+                format_order_for(slug),
+                "DailyDriver order must match the legacy per-model matrix for {slug}"
+            );
+        }
+    }
+
+    /// A flagship model slug (SEARCH/REPLACE-first under DailyDriver) must
+    /// still prefer unified-diff under Parity when both payloads are present
+    /// and the diff applies cleanly (#2073).
+    #[test]
+    fn select_and_apply_for_mode_parity_prefers_unified_diff_regardless_of_model() {
+        let payloads = [
+            EditPayload::SearchReplace {
+                old_string: "line2".into(),
+                new_string: "replaced".into(),
+            },
+            EditPayload::UnifiedDiff {
+                diff: "@@ -2,1 +2,1 @@\n-line2\n+line2-diffed\n".into(),
+            },
+        ];
+        let (updated, format) = select_and_apply_for_mode(
+            HarnessMode::Parity,
+            "anthropic/claude-opus-4-5",
+            "line1\nline2\n",
+            Path::new("f.py"),
+            &payloads,
+        )
+        .expect("unified diff must apply");
+        assert_eq!(format, EditFormat::UnifiedDiff);
+        assert_eq!(updated, "line1\nline2-diffed\n");
+    }
+
+    /// Parity still falls back to a present, applicable format when no
+    /// unified-diff payload was supplied at all — Parity must never strand a
+    /// run that only emitted SEARCH/REPLACE or whole-file.
+    #[test]
+    fn select_and_apply_for_mode_parity_falls_back_without_a_diff_payload() {
+        let payloads = [EditPayload::WholeFile {
+            content: "brand new\n".into(),
+        }];
+        let (updated, format) = select_and_apply_for_mode(
+            HarnessMode::Parity,
+            "anthropic/claude-opus-4-5",
+            "old\n",
+            Path::new("f.py"),
+            &payloads,
+        )
+        .expect("whole-file fallback must apply");
+        assert_eq!(format, EditFormat::WholeFile);
+        assert_eq!(updated, "brand new\n");
     }
 }

@@ -23,7 +23,10 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::tools::fs::edit_format::{EditFormat, EditPayload, select_and_apply};
+use crate::mode::HarnessMode;
+use crate::tools::fs::edit_format::{
+    EditFormat, EditPayload, select_and_apply, select_and_apply_for_mode,
+};
 use crate::tools::fs::{FsError, scoped_path};
 use crate::tools::traits::{ToolExecutor, ToolResult};
 
@@ -42,6 +45,13 @@ use crate::tools::traits::{ToolExecutor, ToolResult};
 pub struct EditTool {
     working_dir: PathBuf,
     model_slug: Option<String>,
+    /// The resolved `HarnessMode` for this tool's owning run (#2073). `None`
+    /// (the default, and every pre-#2073 call site) preserves the exact
+    /// pre-#2073 behaviour: always the plain per-model order via
+    /// `edit_format::select_and_apply`. `Some(mode)` routes through
+    /// `edit_format::select_and_apply_for_mode`, whose `HarnessMode::Parity`
+    /// arm ignores `model_slug` (§5.9's edit-format reconciliation).
+    mode: Option<HarnessMode>,
 }
 
 impl EditTool {
@@ -56,6 +66,7 @@ impl EditTool {
         Self {
             working_dir: working_dir.into(),
             model_slug: None,
+            mode: None,
         }
     }
 
@@ -72,11 +83,31 @@ impl EditTool {
         self
     }
 
+    /// Set the resolved `HarnessMode` this tool's owning run uses (#2073).
+    ///
+    /// Why: `HarnessMode::Parity` must select edit-format order the same way
+    /// regardless of the calling model (§5.9's reconciliation table); without
+    /// this the tool always used the plain per-model matrix even in Parity.
+    /// Every call site that does not opt in (`mode` stays `None`) keeps the
+    /// exact pre-#2073 behaviour.
+    /// What: Stores `mode` for use in `execute`/`edit_inner`.
+    /// Test: `edit_under_parity_mode_prefers_unified_diff_even_for_flagship_model_slug`,
+    /// `edit_under_daily_driver_mode_matches_legacy_model_based_order`.
+    pub fn with_mode(mut self, mode: HarnessMode) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+
     /// Perform the edit: read the file, apply the best-fit payload, write back.
     ///
     /// Why: Centralises the IO so `execute` stays focused on argument parsing.
     /// What: Returns the `EditFormat` that was actually applied. Errors
-    /// propagate from `scoped_path`, file IO, or `edit_format::select_and_apply`.
+    /// propagate from `scoped_path`, file IO, or the underlying
+    /// `edit_format::select_and_apply`/`select_and_apply_for_mode` call.
+    /// `self.mode` (#2073) picks which of the two: `None` (unset) preserves
+    /// the exact pre-#2073 plain per-model selection; `Some(mode)` routes
+    /// through the mode-aware variant, whose `Parity` arm ignores the model
+    /// slug entirely.
     /// Test: All `EditTool` unit tests exercise this path.
     fn edit_inner(
         &self,
@@ -94,7 +125,10 @@ impl EditTool {
         })?;
 
         let model_slug = self.model_slug.as_deref().unwrap_or("");
-        let (updated, format) = select_and_apply(model_slug, &content, &scoped, payloads)?;
+        let (updated, format) = match self.mode {
+            Some(mode) => select_and_apply_for_mode(mode, model_slug, &content, &scoped, payloads)?,
+            None => select_and_apply(model_slug, &content, &scoped, payloads)?,
+        };
         std::fs::write(&scoped, updated).map_err(|e| FsError::io(&scoped, e))?;
         Ok(format)
     }
@@ -453,6 +487,62 @@ mod tests {
                 "content": "fallback content\n"
             }))
             .await;
+        assert!(!result.is_error(), "unexpected error: {}", result.content());
+        assert!(result.content().contains("whole_file"));
+        let updated = fs::read_to_string(tmp.path().join("f.py")).expect("read");
+        assert_eq!(updated, "fallback content\n");
+    }
+
+    /// Under `HarnessMode::Parity`, a flagship model slug (which would prefer
+    /// SEARCH/REPLACE first under the plain per-model matrix) still applies
+    /// the unified-diff payload when both are supplied (#2073, §5.9's
+    /// edit-format reconciliation: Parity's selection must not vary by model).
+    #[tokio::test]
+    async fn edit_under_parity_mode_prefers_unified_diff_even_for_flagship_model_slug() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(tmp.path().join("f.py"), "line1\nline2\n").expect("write");
+        let tool = EditTool::new(tmp.path())
+            .with_model_slug("anthropic/claude-opus-4-5")
+            .with_mode(crate::mode::HarnessMode::Parity);
+
+        let result = tool
+            .execute(json!({
+                "path": "f.py",
+                // Deliberately non-matching, so a SEARCH/REPLACE-first order
+                // would fail; only the diff below can actually apply.
+                "old_string": "not-present",
+                "new_string": "x",
+                "diff": "@@ -2,1 +2,1 @@\n-line2\n+line2-diffed\n"
+            }))
+            .await;
+
+        assert!(!result.is_error(), "unexpected error: {}", result.content());
+        assert!(result.content().contains("unified_diff"));
+        let updated = fs::read_to_string(tmp.path().join("f.py")).expect("read");
+        assert_eq!(updated, "line1\nline2-diffed\n");
+    }
+
+    /// Under `HarnessMode::DailyDriver`, `with_mode` must produce the exact
+    /// same outcome as the pre-#2073 default (no `with_mode` call at all) —
+    /// the mode-aware path is a no-op wrapper around the legacy per-model
+    /// matrix for this mode.
+    #[tokio::test]
+    async fn edit_under_daily_driver_mode_matches_legacy_model_based_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(tmp.path().join("f.py"), "original\n").expect("write");
+        let tool = EditTool::new(tmp.path())
+            .with_model_slug("anthropic/claude-opus-4-5")
+            .with_mode(crate::mode::HarnessMode::DailyDriver);
+
+        let result = tool
+            .execute(json!({
+                "path": "f.py",
+                "old_string": "not-present-in-file",
+                "new_string": "x",
+                "content": "fallback content\n"
+            }))
+            .await;
+
         assert!(!result.is_error(), "unexpected error: {}", result.content());
         assert!(result.content().contains("whole_file"));
         let updated = fs::read_to_string(tmp.path().join("f.py")).expect("read");

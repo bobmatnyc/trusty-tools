@@ -260,6 +260,7 @@ fn build_engineer_runner(
 
     let factory: Arc<dyn RegistryFactory> = Arc::new(ProjectToolFactory {
         project: params.project.clone(),
+        mode: params.mode,
     });
 
     let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
@@ -304,6 +305,14 @@ fn daily_driver_skills_catalog(params: &TaskRunParams) -> Option<(String, Arc<dy
 /// (mirrors `run_task::ProjectToolFactory`, which is private to that module).
 struct ProjectToolFactory {
     project: PathBuf,
+    /// #2073: the delegating run's resolved `HarnessMode`, threaded onto the
+    /// engineer's `EditTool` so `HarnessMode::Parity` selects edit-format
+    /// order the same way regardless of which model is delegated to (§5.9's
+    /// edit-format reconciliation). `run_task::ProjectToolFactory` (the
+    /// legacy CLI path, which never resolves a `HarnessMode`) intentionally
+    /// does not carry this field — its `EditTool` stays on the pre-#2073
+    /// plain per-model order, unchanged.
+    mode: HarnessMode,
 }
 
 #[async_trait]
@@ -317,7 +326,9 @@ impl RegistryFactory for ProjectToolFactory {
         reg.register(Arc::new(ReadFileTool::new(&self.project)));
         reg.register(Arc::new(WriteFileTool::new(&self.project)));
         reg.register(Arc::new(
-            EditTool::new(&self.project).with_model_slug(model_slug),
+            EditTool::new(&self.project)
+                .with_model_slug(model_slug)
+                .with_mode(self.mode),
         ));
         reg.register(Arc::new(BashTool::new(
             Some(self.project.clone()),

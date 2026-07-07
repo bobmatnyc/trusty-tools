@@ -540,6 +540,74 @@ async fn parity_mode_never_compacts_even_past_threshold() {
     );
 }
 
+/// The FULL parity conformance check tying the model-routing layer to the
+/// compaction layer (#2073, the "M2 integration" proof §5.9 asks for): two
+/// `HarnessMode::Parity` runs over the identical script, registry, and
+/// aggressive `CompactionConfig`, differing ONLY in `AgentLoopConfig.model`,
+/// must send the model IDENTICAL message sequences turn-by-turn — proving
+/// Parity's assembled requests are deterministic and model-independent, not
+/// merely "does not compact" (`parity_mode_never_compacts_even_past_threshold`)
+/// or "same schema in M1" (`tool_definitions_identical_across_modes_in_m1`)
+/// in isolation.
+///
+/// Why: Each P1B layer (#2059 mode, #2068 edit-format, #2069 skills, #2070
+/// compaction) already has its own per-layer unit test proving IT respects
+/// the mode branch; #2073's job is proving the layers hold TOGETHER — that
+/// swapping the model under Parity changes nothing about what the loop sends
+/// except the `model` field itself (which `ChatRequest.messages` never
+/// carries, so comparing `ScriptedLlm::requests()` — the recorded message
+/// lists — directly proves this).
+/// What: Runs the SAME 5-tool-call-then-stop script against two configs that
+/// differ only in `model`, both `mode: Parity` with the SAME aggressive
+/// `CompactionConfig` used by the two single-mode tests above. Asserts the
+/// two runs' full `requests()` vectors are byte-for-byte equal.
+/// Test: this test.
+#[tokio::test]
+async fn parity_mode_message_sequences_are_model_independent() {
+    fn script() -> Vec<Value> {
+        let mut fixtures: Vec<Value> = (0..5)
+            .map(|i| tool_call_response(&format!("call_{i}"), &format!("turn-{i}")))
+            .collect();
+        fixtures.push(stop_response("all done"));
+        fixtures
+    }
+
+    fn run_with_model(model: &str) -> (AgentLoop, Arc<ScriptedLlm>) {
+        let llm = Arc::new(ScriptedLlm::from_json(&script()));
+        let registry = registry_with_echo(false);
+        let agent = make_loop(
+            llm.clone(),
+            registry,
+            AgentLoopConfig {
+                max_turns: 10,
+                model: model.to_string(),
+                mode: crate::mode::HarnessMode::Parity,
+                compaction: aggressive_compaction(),
+                ..AgentLoopConfig::default()
+            },
+        );
+        (agent, llm)
+    }
+
+    let (agent_a, llm_a) = run_with_model("openai/gpt-4o-mini");
+    let (agent_b, llm_b) = run_with_model("anthropic/claude-opus-4-5");
+
+    agent_a
+        .run("system prompt", "the original task")
+        .await
+        .expect("run a completes");
+    agent_b
+        .run("system prompt", "the original task")
+        .await
+        .expect("run b completes");
+
+    assert_eq!(
+        llm_a.requests(),
+        llm_b.requests(),
+        "Parity's assembled message sequences must be identical across models"
+    );
+}
+
 /// A two-turn flow: assistant calls the tool, then stops with final text.
 ///
 /// Why: This is the canonical happy path the loop exists to support.
