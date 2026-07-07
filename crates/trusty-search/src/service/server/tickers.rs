@@ -1,15 +1,20 @@
-//! Background ticker tasks: status, disk-size, and idle-chunk-eviction.
+//! Background ticker tasks: status, disk-size, idle-eviction, watcher-suspend,
+//! orphan-reap, and the residency-cap sweep.
 //!
 //! Why: Separating long-running background spawns from handler code keeps
 //! the handler files focused on request/response logic.
-//! What: Three `pub(super) spawn_*_ticker` functions, each detached as a
+//! What: `pub(super) spawn_*_ticker` functions, each detached as a
 //! `tokio::spawn` task holding a `Weak<SearchAppState>`.
-//! Test: covered indirectly via handler tests that observe side-effects.
+//! Test: covered indirectly via handler tests that observe side-effects, plus
+//! `residency_sweep_tests` for the issue #2161 sweep's per-tick logic.
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::admin::collect_status_counts;
 use super::state::{DaemonEvent, SearchAppState};
+use crate::core::registry::IndexId;
+use crate::service::reindex::ReindexStatus;
 
 /// Spawn a background ticker that emits `StatusChanged` every 2 seconds.
 ///
@@ -297,3 +302,149 @@ pub(super) fn spawn_orphan_reaper_ticker(state: Arc<SearchAppState>) {
         }
     });
 }
+
+/// Spawn the usage-based resident-index cap sweep (issue #2161).
+///
+/// Why: `TRUSTY_WARMBOOT_MAX_INDEXES` only bounds how many indexes are
+/// loaded EAGERLY at boot; once queried, an index stays resident for the
+/// daemon's whole lifetime. A host tracking a long tail of occasionally-used
+/// projects steadily accumulates unbounded RSS as more of them get their
+/// first query. This ticker bounds that: every `TRUSTY_RESIDENCY_SWEEP_SECS`
+/// (default 120 s), it ranks currently-resident indexes by the same recency
+/// key used at boot (`lazy_loader::ids_to_park`, sharing
+/// `select_warmboot_entries`'s comparator) and cold-parks everything beyond
+/// `TRUSTY_MAX_RESIDENT_INDEXES` via `lazy_loader::cold_park_index` — a
+/// non-destructive detach that leaves `indexes.toml`, `roots.toml`, and every
+/// on-disk artifact untouched. A subsequent query reloads the index lazily
+/// through the existing cold-store path, exactly like a never-yet-queried
+/// boot-time cold index.
+/// What: spawns a detached task (mirrors every other `spawn_*_ticker`) that
+/// ticks at a FIXED interval resolved once at spawn time
+/// (`residency_sweep_secs()`; `0` disables the ticker entirely, never
+/// spawning). Inside the loop, `max_resident_indexes()` is re-read on every
+/// tick so `TRUSTY_MAX_RESIDENT_INDEXES` can be toggled via `daemon.env`
+/// without a restart — when it is unset the tick is a cheap no-op (back-compat
+/// default: nothing is ever parked).
+/// Test: the pure selection logic is covered by `lazy_loader::residency::tests`;
+/// this function is a thin scheduling wrapper — `run_residency_sweep_tick` (the
+/// per-tick logic) is covered directly by `residency_sweep_tests`; the full
+/// on-disk round trip is covered by `tests/residency_cold_park.rs`.
+pub(super) fn spawn_residency_sweep_ticker(state: Arc<SearchAppState>) {
+    let secs = crate::service::lazy_loader::residency_sweep_secs();
+    if secs == 0 {
+        tracing::info!("residency-sweep: disabled via TRUSTY_RESIDENCY_SWEEP_SECS=0");
+        return;
+    }
+    let weak = Arc::downgrade(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(secs));
+        // Skip the immediate first tick so a freshly-started daemon isn't
+        // parking indexes before it has served anything.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let Some(state) = weak.upgrade() else {
+                break;
+            };
+            run_residency_sweep_tick(&state).await;
+        }
+    });
+}
+
+/// One residency-sweep tick: rank resident indexes, cold-park everything
+/// beyond the cap. Extracted from `spawn_residency_sweep_ticker` so the
+/// per-tick logic can be reasoned about (and, via the pure helpers it calls,
+/// tested) independently of the `tokio::spawn` scaffolding.
+///
+/// Why (TOCTOU / composition with reindex): an index with a `Running`
+/// reindex must never be parked. The reindex task holds its OWN `Arc` to the
+/// live `IndexHandle` (captured when the reindex started) and keeps mutating
+/// it — including `handle.stages`, which lives on that specific instance.
+/// Parking would detach the handle from the registry while the reindex is
+/// still writing into it; a query landing after that point would lazily
+/// rebuild a BRAND NEW `IndexHandle` from disk (via `get_or_load_index`) that
+/// the in-flight reindex task knows nothing about, so its completion would
+/// update a `stages` `Arc` no future request will ever observe. Skipping any
+/// index with a `Running` entry in `reindex_progress` avoids that permanently
+/// wedged status.
+///
+/// Why (watcher lifetime): `cold_park_index` deliberately never touches the
+/// file watcher (see its own doc). But leaving the OLD watcher attached to
+/// the now-detached indexer would starve the NEXT reload: `WatcherManager`
+/// keys `is_watching` purely by `IndexId`, so after a lazy reload builds a
+/// FRESH `IndexHandle` + `CodeIndexer`, the search handler's
+/// `if !is_watching(id) { spawn_for_index(...) }` wake-up would see `true`
+/// (the stale watcher is still registered under that id) and never spawn a
+/// watcher pointed at the fresh indexer — silently freezing that index's
+/// live-update path until the next full daemon restart. Stopping the watcher
+/// here mirrors `spawn_watcher_idle_suspend_ticker` exactly: the query-time
+/// wake-up already re-spawns the watcher AND runs `reconcile_one_index` to
+/// catch up on anything that changed while unwatched, so nothing is lost —
+/// this is the identical, already-tested mechanism idle-suspend relies on.
+async fn run_residency_sweep_tick(state: &Arc<SearchAppState>) {
+    let Some(cap) = crate::service::lazy_loader::max_resident_indexes() else {
+        return; // Feature disabled — back-compat default (issue #2161).
+    };
+
+    let resident_ids: HashSet<String> = state.registry.list().into_iter().map(|id| id.0).collect();
+    if resident_ids.len() <= cap {
+        return;
+    }
+
+    let toml_entries = match crate::service::persistence::load_index_registry() {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("residency-sweep: could not read indexes.toml: {e}");
+            return;
+        }
+    };
+    let resident_entries: Vec<_> = toml_entries
+        .into_iter()
+        .filter(|e| resident_ids.contains(&e.id))
+        .collect();
+
+    let to_park = crate::service::lazy_loader::ids_to_park(resident_entries, cap);
+    if to_park.is_empty() {
+        return;
+    }
+
+    let mut parked = 0usize;
+    for entry in to_park {
+        let id = IndexId::new(entry.id.clone());
+
+        // Never park an index with an in-flight reindex — see the function
+        // doc for why this composes badly with the residency detach.
+        if state
+            .reindex_progress
+            .get(&id)
+            .is_some_and(|p| p.status.load() == ReindexStatus::Running)
+        {
+            continue;
+        }
+
+        if crate::service::lazy_loader::cold_park_index(
+            &id,
+            &state.registry,
+            &state.cold_store,
+            entry,
+        )
+        .await
+        {
+            // See the function doc: stop the watcher so the next reload's
+            // wake-up path re-establishes it (and reconciles) against the
+            // FRESH indexer instance instead of leaving a stale one pinned.
+            state.watcher_manager.stop_for_index(&id).await;
+            parked += 1;
+        }
+    }
+
+    if parked > 0 {
+        tracing::info!(
+            "residency-sweep: cold-parked {parked} index(es) beyond top-{cap} resident cap"
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "residency_sweep_tests.rs"]
+mod residency_sweep_tests;

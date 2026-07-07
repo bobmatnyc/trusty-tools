@@ -13,10 +13,16 @@ use dashmap::DashMap;
 use crate::core::registry::IndexId;
 use crate::service::persistence::{warmboot_sort_key, PersistedIndex};
 
-/// Split `entries` into `(eager, cold)` based on `TRUSTY_WARMBOOT_MAX_INDEXES`.
+/// Split `entries` into `(eager, cold)` based on a recency cap.
 ///
 /// Why: the warm-boot loop in `start.rs` calls `restore_indexes` for the eager
-/// slice and registers the cold slice into `ColdIndexStore` without loading them.
+/// slice (driven by `TRUSTY_WARMBOOT_MAX_INDEXES`) and registers the cold
+/// slice into `ColdIndexStore` without loading them. Issue #2161 reuses this
+/// exact ranking for a second caller: the runtime residency sweep
+/// (`lazy_loader::residency::ids_to_park`) calls this with the *currently
+/// resident* entries and `TRUSTY_MAX_RESIDENT_INDEXES` to decide which
+/// already-loaded indexes to cold-park. Sharing one comparator means the
+/// boot-time and runtime "keep the hottest N" decisions can never drift apart.
 /// What: when `max_n` is `None` (env var unset), all entries are eager and the
 /// cold list is empty (back-compat). When `max_n == Some(0)`, all entries go
 /// cold. Otherwise the top-N most-recently-used entries are eager (sort key:
@@ -24,7 +30,8 @@ use crate::service::persistence::{warmboot_sort_key, PersistedIndex};
 /// ascending so the split is deterministic across restarts).
 /// The sort is stable: entries with the same sort key keep their original order
 /// within the sorted group, then id-alpha tie-break.
-/// Test: `select_warmboot_entries_*` in the parent module's `tests` block.
+/// Test: `select_warmboot_entries_*` in the parent module's `tests` block;
+///       `ids_to_park_*` in `residency::tests` for the runtime-sweep reuse.
 pub fn select_warmboot_entries(
     entries: Vec<PersistedIndex>,
     max_n: Option<usize>,
