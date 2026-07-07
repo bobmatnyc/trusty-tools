@@ -44,7 +44,7 @@ use crate::llm::LlmClientTrait;
 use crate::mode::HarnessMode;
 use crate::project_context::load_project_context;
 use crate::prompt::assemble_system_prompt_for_mode;
-use crate::provider::resolve_model;
+use crate::provider::{resolve_max_tokens, resolve_model};
 use crate::run_task::{
     RecordingLlmClient, SharedTranscript, aggregate_usage_per_role, resolve_agent_model_slug,
 };
@@ -206,6 +206,7 @@ async fn run_and_record(
     let pm_loop = AgentLoop::new(
         AgentLoopConfig {
             model: pm_model.clone(),
+            max_tokens: resolve_max_tokens(&pm_config),
             mode: params.mode,
             ..AgentLoopConfig::default()
         },

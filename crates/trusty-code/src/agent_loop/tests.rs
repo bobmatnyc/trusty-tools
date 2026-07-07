@@ -39,6 +39,10 @@ struct ScriptedLlm {
     /// tests inspect exactly what the loop sent the model on each turn
     /// without reaching into `Transcript` internals.
     requests: Mutex<Vec<Vec<crate::llm::ChatMessage>>>,
+    /// Every request's `max_tokens`, in call order — lets the
+    /// `configured_max_tokens_reaches_chat_request` regression test assert the
+    /// configured cap (not the old hard-coded 1024) reached the wire request.
+    max_tokens_seen: Mutex<Vec<Option<u32>>>,
 }
 
 impl ScriptedLlm {
@@ -57,6 +61,7 @@ impl ScriptedLlm {
             responses,
             cursor: AtomicUsize::new(0),
             requests: Mutex::new(Vec::new()),
+            max_tokens_seen: Mutex::new(Vec::new()),
         }
     }
 
@@ -82,6 +87,16 @@ impl ScriptedLlm {
     fn requests(&self) -> Vec<Vec<crate::llm::ChatMessage>> {
         self.requests.lock().expect("lock").clone()
     }
+
+    /// Every request's `max_tokens`, in call order.
+    ///
+    /// Why: The regression guard for the max-tokens bug needs to see exactly
+    /// what cap the loop sent per turn, independent of message contents.
+    /// What: Clones the recorded `max_tokens` values.
+    /// Test: `configured_max_tokens_reaches_chat_request`.
+    fn max_tokens_seen(&self) -> Vec<Option<u32>> {
+        self.max_tokens_seen.lock().expect("lock").clone()
+    }
 }
 
 #[async_trait]
@@ -89,6 +104,9 @@ impl LlmClientTrait for ScriptedLlm {
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         if let Ok(mut guard) = self.requests.lock() {
             guard.push(req.messages.clone());
+        }
+        if let Ok(mut guard) = self.max_tokens_seen.lock() {
+            guard.push(req.max_tokens);
         }
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         match self.responses.get(idx) {
@@ -257,7 +275,9 @@ fn registry_with_finish_task() -> Arc<ToolRegistry> {
 /// Config defaults are present and sane.
 ///
 /// Why: Defaults are the most-used construction path; guard them.
-/// What: Assert `max_turns`, `timeout_secs`, and a non-empty model.
+/// What: Assert `max_turns`, `timeout_secs`, a non-empty model, and that
+/// `max_tokens` is generous enough for a real write turn (not the old
+/// hard-coded 1024 that truncated file writes).
 /// Test: this test.
 #[test]
 fn config_defaults_are_sane() {
@@ -265,6 +285,48 @@ fn config_defaults_are_sane() {
     assert!(cfg.max_turns >= 1);
     assert!(cfg.timeout_secs >= 1);
     assert!(!cfg.model.is_empty());
+    assert!(
+        cfg.max_tokens > 1024,
+        "default max_tokens must exceed the old hard-coded 1024 cap"
+    );
+}
+
+/// A configured `max_tokens` reaches the outgoing `ChatRequest` unchanged.
+///
+/// Why: This is the direct regression guard for the bug where `build_request`
+/// hard-coded `max_tokens: Some(1024)` regardless of `AgentLoopConfig` —
+/// truncating any turn (e.g. a real file write) that needed more. Every call
+/// site now resolves the agent's `[llm].max_tokens` into `AgentLoopConfig`
+/// before constructing the loop; this test pins that the loop itself honours
+/// whatever value it is given rather than overriding it.
+/// What: Configure `max_tokens: 8192`, run a single-turn stop, and assert the
+/// `ScriptedLlm` observed `Some(8192)` — never `Some(1024)`.
+/// Test: this test.
+#[tokio::test]
+async fn configured_max_tokens_reaches_chat_request() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
+    let registry = registry_with_echo(false);
+    let agent = make_loop(
+        llm.clone(),
+        registry,
+        AgentLoopConfig {
+            max_tokens: 8192,
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    agent
+        .run("system", "write a file")
+        .await
+        .expect("single stop turn should complete");
+
+    let seen = llm.max_tokens_seen();
+    assert_eq!(seen, vec![Some(8192)]);
+    assert_ne!(
+        seen[0],
+        Some(1024),
+        "configured max_tokens must not be clamped back to the old default"
+    );
 }
 
 /// A tool call with syntactically malformed JSON arguments is reported as a

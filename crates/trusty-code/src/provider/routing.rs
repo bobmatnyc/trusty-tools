@@ -20,6 +20,18 @@ use crate::tools::RunContext;
 /// Test: `routing::tests::resolve_model_falls_back_to_default`.
 pub const DEFAULT_MODEL: &str = "openai/gpt-4o-mini";
 
+/// Default per-turn completion token cap when `[llm].max_tokens` is unset.
+///
+/// Why: A turn cap must always resolve to *some* value, and it must be large
+/// enough for a real tool-calling turn (e.g. `write_file` emitting a whole
+/// source file) to complete without truncation — the bug this constant fixes
+/// was every turn silently capped at 1024 regardless of agent config,
+/// truncating real writes. 8192 is generous enough for typical file writes
+/// while still bounding a single turn's cost.
+/// What: The fallback completion-token cap used by [`resolve_max_tokens`].
+/// Test: `routing::tests::resolve_max_tokens_falls_back_to_default`.
+pub const DEFAULT_MAX_TOKENS: u32 = 8192;
+
 /// Resolve the model slug for an invocation.
 ///
 /// Why: Centralises the precedence so per-call overrides, per-agent config, and
@@ -50,6 +62,22 @@ pub fn resolve_model(agent_config: &AgentConfig, run_context: Option<&RunContext
 
     // 4. Built-in default.
     DEFAULT_MODEL.to_string()
+}
+
+/// Resolve the per-turn completion-token cap for an invocation.
+///
+/// Why: `[llm].max_tokens` is how an operator declares that an agent's turns
+/// need a larger completion budget than the default (e.g. an engineer that
+/// writes whole files needs far more than a chat-only PM). Before this fix,
+/// every call site building an `AgentLoopConfig` ignored the agent's
+/// `[llm].max_tokens` entirely and the loop hard-coded a 1024-token cap,
+/// truncating any turn that needed to emit more (#run_task-maxtokens-bug).
+/// What: Returns `agent_config.llm.max_tokens` when set, else
+/// [`DEFAULT_MAX_TOKENS`]. There is no per-call `RunContext` override yet —
+/// the config-file value or the built-in default are the only two tiers.
+/// Test: `routing::tests::resolve_max_tokens_*`.
+pub fn resolve_max_tokens(agent_config: &AgentConfig) -> u32 {
+    agent_config.llm.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS)
 }
 
 /// Treat empty/whitespace-only strings as absent.
@@ -205,5 +233,36 @@ mod tests {
             "deepseek/deepseek-chat",
             "all-whitespace agent.model must fall through to the next tier"
         );
+    }
+
+    /// A configured `[llm].max_tokens` is honoured, not clamped to the default.
+    ///
+    /// Why: This is the regression guard for the bug this function fixes — a
+    /// configured cap higher than the old hard-coded 1024 must reach the
+    /// caller unchanged.
+    /// What: `[llm].max_tokens = 8192` resolves to `8192`.
+    /// Test: this test.
+    #[test]
+    fn resolve_max_tokens_honours_configured_value() {
+        let config = AgentConfig {
+            llm: LlmParams {
+                max_tokens: Some(8192),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(resolve_max_tokens(&config), 8192);
+    }
+
+    /// Falls back to `DEFAULT_MAX_TOKENS` when `[llm].max_tokens` is unset.
+    ///
+    /// Why: A run must always resolve to a usable, generous-enough cap even
+    /// when the agent TOML doesn't specify one.
+    /// What: Empty config resolves to `DEFAULT_MAX_TOKENS`.
+    /// Test: this test.
+    #[test]
+    fn resolve_max_tokens_falls_back_to_default() {
+        let config = AgentConfig::default();
+        assert_eq!(resolve_max_tokens(&config), DEFAULT_MAX_TOKENS);
     }
 }

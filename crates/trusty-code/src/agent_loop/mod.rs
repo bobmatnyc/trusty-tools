@@ -81,6 +81,18 @@ pub struct AgentLoopConfig {
     /// OpenRouter model slug sent on every chat request.
     pub model: String,
 
+    /// Per-turn completion-token cap sent as `ChatRequest.max_tokens`.
+    ///
+    /// Why: A single hard-coded cap starves any turn that must emit more than
+    /// its value — e.g. `write_file` on a real source file — silently
+    /// truncating output until the loop churns out its turn budget. Callers
+    /// must resolve this from the agent's own `[llm].max_tokens` (via
+    /// `crate::provider::resolve_max_tokens`) rather than relying on the
+    /// default below.
+    /// What: Sent verbatim as `Some(self.max_tokens)` on every `ChatRequest`
+    /// built by `AgentLoop::build_request`.
+    pub max_tokens: u32,
+
     /// The resolved harness mode for this run (#2059). See
     /// `Self::tool_definitions`' docs for the branch point this feeds.
     pub mode: HarnessMode,
@@ -96,15 +108,20 @@ impl Default for AgentLoopConfig {
     /// Sensible defaults for an interactive agent run.
     ///
     /// Why: Most callers want a bounded but generous loop; defaults avoid
-    /// boilerplate at every construction site.
-    /// What: 8 turns, 120s timeout, `openai/gpt-4o-mini`, `HarnessMode::default()`,
-    /// `CompactionConfig::default()`.
+    /// boilerplate at every construction site. `max_tokens` defaults to
+    /// `crate::provider::DEFAULT_MAX_TOKENS` — callers that need the agent's
+    /// configured `[llm].max_tokens` must set this field explicitly via
+    /// `crate::provider::resolve_max_tokens`; this default is only the
+    /// generous fallback for when no agent config is consulted.
+    /// What: 8 turns, 120s timeout, `openai/gpt-4o-mini`,
+    /// `DEFAULT_MAX_TOKENS`, `HarnessMode::default()`, `CompactionConfig::default()`.
     /// Test: `config_defaults_are_sane`.
     fn default() -> Self {
         Self {
             max_turns: 8,
             timeout_secs: 120,
             model: "openai/gpt-4o-mini".to_string(),
+            max_tokens: crate::provider::DEFAULT_MAX_TOKENS,
             mode: HarnessMode::default(),
             compaction: CompactionConfig::default(),
         }
@@ -408,10 +425,14 @@ impl AgentLoop {
     /// Build a `ChatRequest` from the running transcript and tool schemas.
     ///
     /// Why: Each turn re-sends the full history plus the advertised tools so the
-    /// model has complete context.
+    /// model has complete context. The completion-token cap must come from
+    /// `self.config.max_tokens` (the caller-resolved agent `[llm].max_tokens`,
+    /// or `DEFAULT_MAX_TOKENS`) — a hard-coded cap here previously truncated
+    /// any turn (e.g. a real `write_file`) needing more than 1024 tokens.
     /// What: Clones the transcript messages, attaches tools (when any), and sets
     /// `tool_choice = "auto"` so the model may call tools but isn't forced to.
-    /// Test: Exercised by every loop test.
+    /// Test: Exercised by every loop test; `config_max_tokens_reaches_chat_request`
+    /// pins that a configured cap flows through unchanged.
     fn build_request(&self, transcript: &Transcript, schemas: &[ToolDefinition]) -> ChatRequest {
         let tools = if schemas.is_empty() {
             None
@@ -424,7 +445,7 @@ impl AgentLoop {
             model: self.config.model.clone(),
             messages: transcript.to_messages(),
             temperature: Some(0.0),
-            max_tokens: Some(1024),
+            max_tokens: Some(self.config.max_tokens),
             tools,
             tool_choice,
         }
