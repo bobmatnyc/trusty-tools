@@ -69,6 +69,35 @@ When a project is detected, recommend skills that match its stack:
 - React → `react-patterns`, `webapp-testing`
 - Elixir/Phoenix → `phoenix-api-channels`, `ecto-patterns`
 
+### Naming Convention — Never Collide With a Built-In Slash Command
+
+Claude Code discovers a skill at `<dest>/<name>/SKILL.md` and exposes it as
+the slash command `/<name>` — the filename stem (`.md`-stripped), not the
+frontmatter `name:` field, IS the invocable command. A skill whose stem
+matches or contains a Claude Code built-in command shadows that built-in and
+makes it unreachable for the user.
+
+🔴 **Never name a skill such that its slug contains a Claude Code built-in
+command name (e.g. `mcp`) — it will shadow the built-in.** trusty-mpm's
+deploy guard (`skill_deployer::deploy_skills_filtered`, #2186) refuses to
+deploy any skill whose stem contains `"mcp"` (case-insensitive) as a
+mechanical backstop, but the convention below exists so a colliding name is
+never proposed or authored in the first place.
+
+The reserved set includes at least: `mcp`, `init`, `review`, `clear`,
+`compact`, `config`, `help`.
+
+When naming a topic-area skill (e.g. covering AI/agent protocols, MCP server
+integration, tool-calling conventions), do **not** fold the protocol acronym
+into the slug (e.g. never `toolchains-ai-protocols-mcp`). Prefer a `tm-`
+prefixed or otherwise domain-scoped slug that describes the *capability*,
+not the protocol name — e.g. `tm-agent-protocols` or
+`toolchains-agent-integration` instead of anything containing `mcp`. The
+existing `toolchains-rust-core` naming (language/toolchain-scoped, no
+built-in-command collision) remains the reference pattern for toolchain
+skills — it is not renamed by this rule, only cited as the non-colliding
+baseline new names should follow.
+
 ## Adding a New Skill
 
 1. Create `crates/trusty-mpm/src/assets/skills/<name>.md`
