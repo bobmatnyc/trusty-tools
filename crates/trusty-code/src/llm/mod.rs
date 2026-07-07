@@ -29,7 +29,8 @@ pub use client_trait::LlmClientTrait;
 pub use error::LlmError;
 pub use message::ChatMessage;
 pub use request::{
-    CacheControl, ChatRequest, FunctionCall, FunctionDefinition, ToolCall, ToolDefinition,
+    CacheControl, ChatRequest, FunctionCall, FunctionDefinition, RequestUsageConfig, ToolCall,
+    ToolDefinition,
 };
 pub use response::{AssistantMessage, ChatChoice, ChatResponse};
 pub use tool_call_extractor::{

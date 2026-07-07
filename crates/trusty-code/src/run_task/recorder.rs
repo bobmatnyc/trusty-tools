@@ -38,7 +38,7 @@ use crate::perf::TokenUsage;
 /// `tcode`'s CLI thin client parse a `session.get_transcript` JSON-RPC result
 /// straight back into `Vec<TurnRecord>`.
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TurnRecord {
     /// Agent label that produced this turn (e.g. `"pm"`, `"python-engineer"`).
     pub role: String,

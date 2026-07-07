@@ -24,6 +24,35 @@ fn token_usage_accumulates() {
     assert_eq!(a, TokenUsage::new(13, 12, 2, 5));
 }
 
+/// `TokenUsage::add` sums `cost_usd` when both sides have an authoritative
+/// cost, preserves the one present side when only one does, and stays `None`
+/// only when neither side has one.
+///
+/// Why: The response-side cache-usage fix threads OpenRouter's authoritative
+/// per-call `cost` through `TokenUsage`; accumulation across turns must not
+/// silently drop it.
+/// What: Exercise all three `(Some, Some)` / `(Some, None)` / `(None, None)`
+/// cases.
+/// Test: this test.
+#[test]
+fn token_usage_cost_accumulates() {
+    let mut both = TokenUsage::new(10, 5, 2, 1);
+    both.cost_usd = Some(0.01);
+    let mut other = TokenUsage::new(3, 7, 0, 4);
+    other.cost_usd = Some(0.02);
+    both.add(&other);
+    assert_eq!(both.cost_usd, Some(0.03));
+
+    let mut one_sided = TokenUsage::new(10, 5, 2, 1);
+    one_sided.cost_usd = Some(0.01);
+    one_sided.add(&TokenUsage::new(3, 7, 0, 4));
+    assert_eq!(one_sided.cost_usd, Some(0.01));
+
+    let mut neither = TokenUsage::new(10, 5, 2, 1);
+    neither.add(&TokenUsage::new(3, 7, 0, 4));
+    assert_eq!(neither.cost_usd, None);
+}
+
 #[test]
 fn cost_usd_known_sonnet() {
     // 1M prompt tokens of sonnet = $3.00
@@ -117,6 +146,26 @@ fn collector_records_phases() {
     assert!(r.totals.cost_usd > 0.0);
     assert_eq!(r.build, 7);
     assert_eq!(r.workflow, "prescriptive");
+}
+
+/// `record_phase` uses `usage.cost_usd` verbatim when the provider reported
+/// an authoritative cost, instead of recomputing from the static pricing
+/// table (which cannot see the cache discount).
+///
+/// Why: This is the exact behaviour the response-side cache-usage fix
+/// depends on to make OpenRouter's cache discount visible in the perf record.
+/// What: Record a phase with a `TokenUsage` carrying a deliberately
+/// implausible static-vs-authoritative mismatch cost, assert the phase's
+/// `cost_usd` is the authoritative value, not the static recompute.
+/// Test: this test.
+#[test]
+fn record_phase_prefers_authoritative_cost() {
+    let mut c = PerfCollector::new(1, "wf", "task");
+    let mut usage = TokenUsage::new(1_000_000, 0, 0, 0);
+    usage.cost_usd = Some(0.000001); // far below the static per-token price
+    c.record_phase("turn", 10, "anthropic/claude-sonnet-4-5", &usage);
+    let r = c.build_record();
+    assert_eq!(r.phases[0].cost_usd, 0.000001);
 }
 
 #[test]

@@ -77,6 +77,14 @@ impl Provider for BedrockProvider {
         // interpret.
         false
     }
+
+    fn wants_detailed_usage(&self) -> bool {
+        // `RequestUsageConfig`/`usage: {"include": true}` is an
+        // OpenRouter-specific OpenAI-compat wire directive; Bedrock's
+        // Converse API reports usage in its own response envelope entirely,
+        // so this must stay `false` until the real Bedrock integration lands.
+        false
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -117,6 +125,19 @@ mod tests {
     #[test]
     fn bedrock_does_not_support_prompt_caching() {
         assert!(!BedrockProvider::new().supports_prompt_caching());
+    }
+
+    /// Bedrock does NOT request OpenRouter-style detailed usage accounting
+    /// (response-side cache-usage fix).
+    ///
+    /// Why: `usage: {"include": true}` is an OpenRouter-only OpenAI-compat
+    /// directive; sending it to Bedrock (once implemented) would be a
+    /// meaningless no-op at best.
+    /// What: Assert `wants_detailed_usage()` is `false`.
+    /// Test: this test.
+    #[test]
+    fn bedrock_does_not_want_detailed_usage() {
+        assert!(!BedrockProvider::new().wants_detailed_usage());
     }
 
     /// `map_tool_choice` panics while stubbed.

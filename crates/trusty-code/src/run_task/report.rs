@@ -214,11 +214,16 @@ impl RunReport {
 /// applied for the daemon path (#2056); this is now the ONE shared
 /// implementation both paths call, so they can never independently drift.
 /// What: Field-wise sums each turn's `usage` into a single `TokenUsage`
-/// (unchanged), but computes cost PER TURN using `pm_model` for
-/// `role == "pm"` and `engineer_model` otherwise, then sums the per-turn
-/// costs. Returns `(total_usage, cost)`.
+/// (unchanged). Per turn, PREFERS the turn's own `usage.cost_usd` —
+/// OpenRouter's authoritative, already cache-discount-aware cost
+/// (response-side cache-usage fix) — when present; only falls back to the
+/// static per-token recompute (priced per role: `pm_model` for
+/// `role == "pm"`, `engineer_model` otherwise) when the turn carries no
+/// authoritative cost. Sums the per-turn costs. Returns `(total_usage,
+/// cost)`.
 /// Test: `run_task::tests::usage_and_cost_aggregate_end_to_end`,
-/// `report::tests::aggregate_usage_per_role_prices_each_role_separately`.
+/// `report::tests::aggregate_usage_per_role_prices_each_role_separately`,
+/// `report::tests::aggregate_usage_per_role_prefers_authoritative_cost`.
 pub fn aggregate_usage_per_role(
     turns: &[TurnRecord],
     pm_model: &str,
@@ -228,18 +233,20 @@ pub fn aggregate_usage_per_role(
     let mut cost = 0.0;
     for turn in turns {
         total.add(&turn.usage);
-        let model = if turn.role == "pm" {
-            pm_model
-        } else {
-            engineer_model
-        };
-        cost += crate::perf::cost_usd(
-            model,
-            turn.usage.prompt_tokens,
-            turn.usage.completion_tokens,
-            turn.usage.cache_read_tokens,
-            turn.usage.cache_creation_tokens,
-        );
+        cost += turn.usage.cost_usd.unwrap_or_else(|| {
+            let model = if turn.role == "pm" {
+                pm_model
+            } else {
+                engineer_model
+            };
+            crate::perf::cost_usd(
+                model,
+                turn.usage.prompt_tokens,
+                turn.usage.completion_tokens,
+                turn.usage.cache_read_tokens,
+                turn.usage.cache_creation_tokens,
+            )
+        });
     }
     (total, cost)
 }
@@ -416,6 +423,51 @@ mod tests {
         assert_ne!(
             per_role_cost, blended_cost,
             "per-role pricing must differ from blending everything under the PM model"
+        );
+    }
+
+    /// `aggregate_usage_per_role` prefers a turn's own authoritative
+    /// `usage.cost_usd` over the static per-token recompute (response-side
+    /// cache-usage fix).
+    ///
+    /// Why: The static pricing table cannot see OpenRouter's cache discount;
+    /// only the provider-reported `cost` reflects it. This is the exact gap
+    /// that made #2156's cost thesis unverifiable end-to-end.
+    /// What: One turn carries an authoritative cost that is deliberately far
+    /// below what static pricing would compute for its token counts; one turn
+    /// carries no authoritative cost (static fallback). Assert the total cost
+    /// is exactly the authoritative value plus the static fallback for the
+    /// second turn — i.e. the first turn's static price is NOT used.
+    /// Test: this test.
+    #[test]
+    fn aggregate_usage_per_role_prefers_authoritative_cost() {
+        let mut authoritative_usage = TokenUsage::new(1_000_000, 0, 900_000, 100_000);
+        authoritative_usage.cost_usd = Some(0.0005); // far below static per-token price
+        let turns = vec![
+            TurnRecord {
+                role: "pm".into(),
+                model: "anthropic/claude-sonnet-4-5".into(),
+                text: String::new(),
+                tool_calls: vec![],
+                usage: authoritative_usage,
+            },
+            TurnRecord {
+                role: "python-engineer".into(),
+                model: "anthropic/claude-sonnet-4-5".into(),
+                text: "done".into(),
+                tool_calls: vec![],
+                usage: TokenUsage::new(100, 50, 0, 0),
+            },
+        ];
+        let (_, cost) = aggregate_usage_per_role(
+            &turns,
+            "anthropic/claude-sonnet-4-5",
+            "anthropic/claude-sonnet-4-5",
+        );
+        let expected_fallback = crate::perf::cost_usd("anthropic/claude-sonnet-4-5", 100, 50, 0, 0);
+        assert!(
+            (cost - (0.0005 + expected_fallback)).abs() < 1e-12,
+            "expected authoritative cost + static fallback, got {cost}"
         );
     }
 }

@@ -40,8 +40,8 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::llm::{
-    CacheControl, ChatMessage, ChatRequest, ChatResponse, LlmClientTrait, ToolCall,
-    ToolCallExtractError, ToolCallExtractor, ToolDefinition,
+    CacheControl, ChatMessage, ChatRequest, ChatResponse, LlmClientTrait, RequestUsageConfig,
+    ToolCall, ToolCallExtractError, ToolCallExtractor, ToolDefinition,
 };
 use crate::mode::HarnessMode;
 use crate::perf::PerfCollector;
@@ -436,13 +436,21 @@ impl AgentLoop {
     /// prompt-cache breakpoint — the byte-stable prefix this turn resends
     /// unchanged from the last. When `false` (Parity mode, or a
     /// provider/model that hasn't verified the passthrough), the request is
-    /// byte-identical to pre-#2156.
+    /// byte-identical to pre-#2156. Independently, when the resolved
+    /// provider's `Provider::wants_detailed_usage()` is `true` (currently
+    /// OpenRouter, unconditionally), attaches
+    /// `usage: Some(RequestUsageConfig::detailed())` so the response carries
+    /// OpenRouter's authoritative `cost` and cache-token breakdown (the
+    /// response-side cache-usage fix).
     /// Test: Exercised by every loop test; `config_max_tokens_reaches_chat_request`
     /// pins that a configured cap flows through unchanged;
     /// `daily_driver_anthropic_model_marks_cache_breakpoints` and
-    /// `parity_mode_never_marks_cache_breakpoints` cover the #2156 gate.
+    /// `parity_mode_never_marks_cache_breakpoints` cover the #2156 gate;
+    /// `build_request_sets_detailed_usage_for_openrouter` covers the
+    /// detailed-usage gate.
     fn build_request(&self, transcript: &Transcript, schemas: &[ToolDefinition]) -> ChatRequest {
         let cache_prefix = self.prompt_cache_enabled();
+        let provider = crate::provider::provider_for(&self.config.model);
 
         let tools = if schemas.is_empty() {
             None
@@ -460,6 +468,10 @@ impl AgentLoop {
             mark_cache_breakpoint_on_system(&mut messages);
         }
 
+        let usage = provider
+            .wants_detailed_usage()
+            .then(RequestUsageConfig::detailed);
+
         ChatRequest {
             model: self.config.model.clone(),
             messages,
@@ -467,6 +479,7 @@ impl AgentLoop {
             max_tokens: Some(self.config.max_tokens),
             tools,
             tool_choice,
+            usage,
         }
     }
 

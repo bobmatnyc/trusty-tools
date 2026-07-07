@@ -201,6 +201,7 @@ mod tests {
             max_tokens: None,
             tools: None,
             tool_choice: None,
+            usage: None,
         };
 
         let turn1 = client.chat(&req).await.expect("turn 1");

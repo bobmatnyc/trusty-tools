@@ -67,7 +67,7 @@ impl HistoryMessage {
 /// Error (sub -> PM failure). All carry a correlation `id`.
 /// Test: Serialize each variant, assert the `"type"` tag matches; parse back
 /// and assert structural equality.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IpcMessage {
     /// PM -> sub-agent: new task to execute.

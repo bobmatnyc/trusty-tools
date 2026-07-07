@@ -299,6 +299,7 @@ mod tests {
             max_tokens: Some(16),
             tools: None,
             tool_choice: None,
+            usage: None,
         };
 
         let resp = client.chat(&req).await.expect("chat call succeeded");
