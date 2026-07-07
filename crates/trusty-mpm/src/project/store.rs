@@ -249,6 +249,9 @@ mod tests {
             tags: vec![],
             description: None,
             gh_user: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
         }
     }
 
@@ -360,6 +363,14 @@ mod tests {
             tags: vec!["frontend".into(), "oss".into()],
             description: Some("a fully-populated project".into()),
             gh_user: Some("bobmatnyc".into()),
+            github: Some(crate::core::trusty_tools_config::GithubConfig {
+                config_dir: Some("/home/bob/.config/gh-full".into()),
+                token_env: None,
+                account: None,
+                host: Some("github.example.com".into()),
+            }),
+            commit_name: Some("Full Bot".into()),
+            commit_email: Some("full-bot@example.com".into()),
         };
         store.upsert(full.clone()).await.expect("upsert full");
 

@@ -162,17 +162,28 @@ impl OrchestratorBackend for MockBackend {
             "workspace_root": "/home/test/trusty-mpm-projects",
         }))
     }
+    #[allow(clippy::too_many_arguments)]
     async fn config_write(
         &self,
         workspace_root_template: Option<&str>,
         auto_resume: Option<bool>,
         default_model: Option<&str>,
+        project_name: Option<&str>,
+        github_config_dir: Option<&str>,
+        _github_token_env: Option<&str>,
+        _github_account: Option<&str>,
+        _github_host: Option<&str>,
+        commit_name: Option<&str>,
+        _commit_email: Option<&str>,
     ) -> Result<Value, String> {
         Ok(json!({
             "workspace_root_template": workspace_root_template,
             "auto_resume": auto_resume,
             "default_model": default_model,
             "workspace_root": workspace_root_template.unwrap_or("/home/test/trusty-mpm-projects"),
+            "project_name": project_name,
+            "github_config_dir": github_config_dir,
+            "commit_name": commit_name,
         }))
     }
 

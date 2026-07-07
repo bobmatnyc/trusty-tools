@@ -37,6 +37,8 @@ pub mod error;
 pub mod external_session;
 pub mod frontmatter;
 pub mod gh_account;
+pub mod gh_identity;
+pub mod git_identity;
 pub mod home_trust_seed;
 pub mod hook;
 pub mod instruction_overrides;

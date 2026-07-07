@@ -157,15 +157,22 @@ pub async fn auto_resume_set(enabled: bool) -> Result<Value, String> {
 /// Why: both `config_read` and `config_write` return the same shape — the raw
 /// config fields plus the `workspace_root` the resolver would actually use — so the
 /// UI can show the effective path even when the template field is null. One helper
-/// keeps the two tools in lockstep.
-/// What: returns `{ workspace_root_template, auto_resume, default_model,
-/// workspace_root }` where `workspace_root` is [`trusty_tools_config::workspace_root`].
-/// Test: `config_read_returns_resolved_root`.
+/// keeps the two tools in lockstep. #2184 adds the global `github` binding and the
+/// full `projects` list (each entry now carries its own optional `github`/
+/// `commit_name`/`commit_email` per-project override) so the Config tab can render
+/// and edit them without a separate MCP round-trip or hand-editing the YAML.
+/// What: returns `{ workspace_root_template, auto_resume, default_model, github,
+/// projects, workspace_root }` where `workspace_root` is
+/// [`trusty_tools_config::workspace_root`].
+/// Test: `config_read_returns_resolved_root`,
+/// `config_to_json_includes_github_and_projects`.
 fn config_to_json(config: &TrustyToolsConfig) -> Value {
     json!({
         "workspace_root_template": config.workspace_root_template,
         "auto_resume": config.auto_resume,
         "default_model": config.default_model,
+        "github": config.github,
+        "projects": config.projects,
         "workspace_root": trusty_tools_config::workspace_root(config).to_string_lossy(),
     })
 }
@@ -184,19 +191,96 @@ pub fn config_read() -> Result<Value, String> {
 /// Back the `config_write` tool: merge edits and persist the config file.
 ///
 /// Why: the console Config tab's save action durably records the operator's
-/// workspace-root / auto-resume / default-model choices (#1220) without touching
-/// the legacy `~/.trusty-mpm/config.toml`.
-/// What: loads the current config, overlays only the supplied fields (omitted
-/// fields stay unchanged), writes it back via
-/// [`trusty_common::crate_config::save`], and returns the merged config (with the
-/// resolved root) on success.
-/// Test: `config_write_merges_and_persists`.
+/// workspace-root / auto-resume / default-model choices (#1220), and — since
+/// #2184 — the global GitHub identity binding plus per-project GitHub/commit
+/// identity overrides, all without touching the legacy
+/// `~/.trusty-mpm/config.toml` or requiring the operator to hand-edit YAML.
+/// What: loads the current config, applies [`apply_config_write`] (the
+/// testable merge step), writes it back via
+/// [`trusty_common::crate_config::save`], and returns the merged config (with
+/// the resolved root) on success.
+/// Test: `config_write_merges_and_persists` covers `apply_config_write`
+/// directly (no real filesystem I/O against the operator's real config file —
+/// see that function's own doc for why `config_write` itself is not unit
+/// tested against the real file).
+#[allow(clippy::too_many_arguments)]
 pub fn config_write(
     workspace_root_template: Option<&str>,
     auto_resume: Option<bool>,
     default_model: Option<&str>,
+    project_name: Option<&str>,
+    github_config_dir: Option<&str>,
+    github_token_env: Option<&str>,
+    github_account: Option<&str>,
+    github_host: Option<&str>,
+    commit_name: Option<&str>,
+    commit_email: Option<&str>,
 ) -> Result<Value, String> {
     let mut config = TrustyToolsConfig::load();
+    apply_config_write(
+        &mut config,
+        workspace_root_template,
+        auto_resume,
+        default_model,
+        project_name,
+        github_config_dir,
+        github_token_env,
+        github_account,
+        github_host,
+        commit_name,
+        commit_email,
+    )?;
+
+    trusty_common::crate_config::save(trusty_tools_config::CRATE_NAME, &config)
+        .map_err(|e| format!("persisting trusty-mpm config: {e}"))?;
+
+    Ok(config_to_json(&config))
+}
+
+/// The pure merge step behind `config_write` (#2184).
+///
+/// Why: `config_write` persists to the operator's REAL
+/// `~/.trusty-tools/trusty-mpm/config.yaml` (there is no dependency-injected
+/// base directory in production), so unit-testing `config_write` itself would
+/// mutate the developer's actual config file on every `cargo test` run.
+/// Extracting the merge decision into a pure `&mut TrustyToolsConfig` function
+/// makes the actual field-merge logic — including the #2184 `project_name`
+/// routing — fully unit-testable in memory, with `config_write` reduced to
+/// "load, merge, save".
+/// What: when `workspace_root_template`/`auto_resume`/`default_model` are
+/// `Some`, they overlay the corresponding TOP-LEVEL field (unchanged
+/// behaviour, #1220). When `project_name` is `None`, the `github_*` args
+/// overlay the GLOBAL `config.github` tier (creating it if absent and at
+/// least one `github_*` field is supplied); `commit_*` args with no
+/// `project_name` are rejected (#2184 defines commit identity as
+/// project-scoped only). When `project_name` is `Some(name)`, the `github_*`
+/// AND `commit_*` args overlay the MATCHING entry in `config.projects`
+/// instead — `Err` when no entry with that `name` already exists
+/// (`config_write` deliberately does not fabricate a `ProjectConfig` with an
+/// empty `repo_url`; register the project first via `project_register` or a
+/// static `config.projects` entry). Each `github_*` field only overlays its
+/// own sub-field — omitted sub-fields keep their previous value, matching the
+/// top-level "omitted fields unchanged" contract.
+/// Test: `config_write_merges_top_level_fields`,
+/// `config_write_sets_global_github_binding`,
+/// `config_write_sets_project_github_and_commit_identity`,
+/// `config_write_project_not_found_errors`,
+/// `config_write_preserves_omitted_github_subfields`,
+/// `config_write_global_commit_identity_rejected`.
+#[allow(clippy::too_many_arguments)]
+fn apply_config_write(
+    config: &mut TrustyToolsConfig,
+    workspace_root_template: Option<&str>,
+    auto_resume: Option<bool>,
+    default_model: Option<&str>,
+    project_name: Option<&str>,
+    github_config_dir: Option<&str>,
+    github_token_env: Option<&str>,
+    github_account: Option<&str>,
+    github_host: Option<&str>,
+    commit_name: Option<&str>,
+    commit_email: Option<&str>,
+) -> Result<(), String> {
     if let Some(t) = workspace_root_template {
         config.workspace_root_template = Some(t.to_string());
     }
@@ -207,10 +291,102 @@ pub fn config_write(
         config.default_model = Some(m.to_string());
     }
 
-    trusty_common::crate_config::save(trusty_tools_config::CRATE_NAME, &config)
-        .map_err(|e| format!("persisting trusty-mpm config: {e}"))?;
+    let has_github_edit = github_config_dir.is_some()
+        || github_token_env.is_some()
+        || github_account.is_some()
+        || github_host.is_some();
+    let has_commit_edit = commit_name.is_some() || commit_email.is_some();
+    if !has_github_edit && !has_commit_edit {
+        return Ok(());
+    }
 
-    Ok(config_to_json(&config))
+    match project_name {
+        None => {
+            if has_github_edit {
+                config.github = Some(merge_github_config(
+                    config.github.take(),
+                    github_config_dir,
+                    github_token_env,
+                    github_account,
+                    github_host,
+                ));
+            }
+            // #2184 defines commit identity as PROJECT-scoped only (no global
+            // tier) — a caller supplying commit_name/commit_email with no
+            // project_name has nowhere to persist them.
+            if has_commit_edit {
+                return Err(
+                    "commit_name/commit_email require project_name (commit identity is \
+                     project-scoped; there is no global commit identity tier)"
+                        .to_string(),
+                );
+            }
+        }
+        Some(name) => {
+            let entry = config
+                .projects
+                .iter_mut()
+                .find(|p| p.name == name)
+                .ok_or_else(|| {
+                    format!(
+                        "project '{name}' not found in config.projects; register it first \
+                         (e.g. via `project_register` or a static config.yaml entry) before \
+                         setting its github/commit identity"
+                    )
+                })?;
+            if has_github_edit {
+                entry.github = Some(merge_github_config(
+                    entry.github.take(),
+                    github_config_dir,
+                    github_token_env,
+                    github_account,
+                    github_host,
+                ));
+            }
+            if let Some(n) = commit_name {
+                entry.commit_name = Some(n.to_string());
+            }
+            if let Some(e) = commit_email {
+                entry.commit_email = Some(e.to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Overlay supplied `github_*` sub-fields onto an existing (or absent)
+/// [`trusty_tools_config::GithubConfig`], keeping omitted sub-fields unchanged.
+///
+/// Why: shared by both the global and per-project branches of
+/// [`apply_config_write`] so the "only overlay what was supplied" rule cannot
+/// drift between the two.
+/// What: starts from `existing.unwrap_or_default()`, overlays each `Some`
+/// argument onto the matching field, and returns the result (never
+/// meaningfully empty — the caller only invokes this when at least one
+/// `github_*` field was supplied).
+/// Test: `config_write_preserves_omitted_github_subfields`.
+fn merge_github_config(
+    existing: Option<trusty_tools_config::GithubConfig>,
+    config_dir: Option<&str>,
+    token_env: Option<&str>,
+    account: Option<&str>,
+    host: Option<&str>,
+) -> trusty_tools_config::GithubConfig {
+    let mut cfg = existing.unwrap_or_default();
+    if let Some(d) = config_dir {
+        cfg.config_dir = Some(d.into());
+    }
+    if let Some(t) = token_env {
+        cfg.token_env = Some(t.to_string());
+    }
+    if let Some(a) = account {
+        cfg.account = Some(a.to_string());
+    }
+    if let Some(h) = host {
+        cfg.host = Some(h.to_string());
+    }
+    cfg
 }
 
 #[cfg(test)]
@@ -237,6 +413,276 @@ mod tests {
                 && !got["workspace_root"].as_str().unwrap().is_empty(),
             "workspace_root must be a non-empty resolved path: {got}"
         );
+    }
+
+    /// Why: `config_to_json` must surface the #2184 `github`/`projects` fields
+    /// so the Config tab can render/edit them without a separate round-trip.
+    /// Test: this test.
+    #[test]
+    fn config_to_json_includes_github_and_projects() {
+        let config = TrustyToolsConfig {
+            github: Some(trusty_tools_config::GithubConfig {
+                config_dir: Some("/cfg/global".into()),
+                token_env: None,
+                account: None,
+                host: None,
+            }),
+            projects: vec![trusty_tools_config::ProjectConfig {
+                name: "widget".into(),
+                repo_url: "https://github.com/acme/widget".into(),
+                default_branch: None,
+                stack_hint: None,
+                tags: None,
+                description: None,
+                gh_user: None,
+                github: None,
+                commit_name: Some("Bot".into()),
+                commit_email: None,
+            }],
+            ..Default::default()
+        };
+        let json = config_to_json(&config);
+        assert_eq!(json["github"]["config_dir"], "/cfg/global");
+        assert_eq!(json["projects"][0]["name"], "widget");
+        assert_eq!(json["projects"][0]["commit_name"], "Bot");
+    }
+
+    // ── apply_config_write (#2184) — pure merge logic, no real config file I/O ──
+
+    fn project(name: &str) -> trusty_tools_config::ProjectConfig {
+        trusty_tools_config::ProjectConfig {
+            name: name.to_string(),
+            repo_url: format!("https://github.com/acme/{name}"),
+            default_branch: None,
+            stack_hint: None,
+            tags: None,
+            description: None,
+            gh_user: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
+        }
+    }
+
+    /// Why: the pre-#2184 top-level fields must still merge exactly as before
+    /// (no regression from the new params).
+    /// Test: this test.
+    #[test]
+    fn config_write_merges_top_level_fields() {
+        let mut config = TrustyToolsConfig::default();
+        apply_config_write(
+            &mut config,
+            Some("~/custom-projects"),
+            Some(true),
+            Some("opus"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("ok");
+        assert_eq!(
+            config.workspace_root_template.as_deref(),
+            Some("~/custom-projects")
+        );
+        assert_eq!(config.auto_resume, Some(true));
+        assert_eq!(config.default_model.as_deref(), Some("opus"));
+        assert_eq!(config.github, None, "no github edit supplied");
+    }
+
+    /// Why: with no `project_name`, `github_*` fields must set the GLOBAL
+    /// `config.github` tier.
+    /// Test: this test.
+    #[test]
+    fn config_write_sets_global_github_binding() {
+        let mut config = TrustyToolsConfig::default();
+        apply_config_write(
+            &mut config,
+            None,
+            None,
+            None,
+            None,
+            Some("/cfg/global"),
+            None,
+            None,
+            Some("github.example.com"),
+            None,
+            None,
+        )
+        .expect("ok");
+        let gh = config.github.expect("global github set");
+        assert_eq!(
+            gh.config_dir.as_deref(),
+            Some(std::path::Path::new("/cfg/global"))
+        );
+        assert_eq!(gh.host.as_deref(), Some("github.example.com"));
+    }
+
+    /// Why: with `project_name` set, `github_*`/`commit_*` fields must
+    /// overlay the MATCHING `config.projects` entry, not the global tier.
+    /// Test: this test.
+    #[test]
+    fn config_write_sets_project_github_and_commit_identity() {
+        let mut config = TrustyToolsConfig {
+            projects: vec![project("widget")],
+            ..Default::default()
+        };
+        apply_config_write(
+            &mut config,
+            None,
+            None,
+            None,
+            Some("widget"),
+            Some("/cfg/widget"),
+            None,
+            Some("bob-work"),
+            None,
+            Some("Widget Bot"),
+            Some("widget-bot@example.com"),
+        )
+        .expect("ok");
+        assert_eq!(config.github, None, "global tier must be untouched");
+        let entry = &config.projects[0];
+        let gh = entry.github.as_ref().expect("project github set");
+        assert_eq!(
+            gh.config_dir.as_deref(),
+            Some(std::path::Path::new("/cfg/widget"))
+        );
+        assert_eq!(gh.account.as_deref(), Some("bob-work"));
+        assert_eq!(entry.commit_name.as_deref(), Some("Widget Bot"));
+        assert_eq!(
+            entry.commit_email.as_deref(),
+            Some("widget-bot@example.com")
+        );
+    }
+
+    /// Why: setting a project's identity for a `project_name` that is NOT
+    /// already declared in `config.projects` must error, never fabricate a
+    /// `ProjectConfig` with an empty `repo_url`.
+    /// Test: this test.
+    #[test]
+    fn config_write_project_not_found_errors() {
+        let mut config = TrustyToolsConfig::default();
+        let err = apply_config_write(
+            &mut config,
+            None,
+            None,
+            None,
+            Some("does-not-exist"),
+            Some("/cfg/x"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("does-not-exist"), "err: {err}");
+        assert!(err.contains("not found"), "err: {err}");
+    }
+
+    /// Why: `merge_github_config` must overlay only the SUPPLIED sub-fields,
+    /// preserving whatever was already set for the omitted ones — matching
+    /// the top-level "omitted fields unchanged" contract.
+    /// Test: this test.
+    #[test]
+    fn config_write_preserves_omitted_github_subfields() {
+        let mut config = TrustyToolsConfig {
+            github: Some(trusty_tools_config::GithubConfig {
+                config_dir: Some("/cfg/original".into()),
+                token_env: None,
+                account: Some("original-account".into()),
+                host: None,
+            }),
+            ..Default::default()
+        };
+        // Only update `host`; config_dir/account must survive untouched.
+        apply_config_write(
+            &mut config,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("github.example.com"),
+            None,
+            None,
+        )
+        .expect("ok");
+        let gh = config.github.expect("github still set");
+        assert_eq!(
+            gh.config_dir.as_deref(),
+            Some(std::path::Path::new("/cfg/original"))
+        );
+        assert_eq!(gh.account.as_deref(), Some("original-account"));
+        assert_eq!(gh.host.as_deref(), Some("github.example.com"));
+    }
+
+    /// Why: commit identity is project-scoped only (#2184) — supplying
+    /// `commit_name`/`commit_email` with no `project_name` must be rejected
+    /// rather than silently discarded or persisted somewhere unexpected.
+    /// Test: this test.
+    #[test]
+    fn config_write_global_commit_identity_rejected() {
+        let mut config = TrustyToolsConfig::default();
+        let err = apply_config_write(
+            &mut config,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("Global Bot"),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("project_name"), "err: {err}");
+    }
+
+    /// Why: the doc-referenced round-trip contract — every supplied field
+    /// makes it into the merged config and NOTHING supplied is silently
+    /// dropped. Exercises the full param list together (the shape
+    /// `config_write` itself passes through to `apply_config_write`).
+    /// Test: this test.
+    #[test]
+    fn config_write_merges_and_persists() {
+        let mut config = TrustyToolsConfig {
+            projects: vec![project("widget")],
+            ..Default::default()
+        };
+        apply_config_write(
+            &mut config,
+            Some("~/custom-projects"),
+            Some(false),
+            Some("sonnet"),
+            Some("widget"),
+            Some("/cfg/widget"),
+            Some("WIDGET_GH_TOKEN"),
+            None,
+            Some("github.example.com"),
+            Some("Widget Bot"),
+            Some("widget-bot@example.com"),
+        )
+        .expect("ok");
+        assert_eq!(
+            config.workspace_root_template.as_deref(),
+            Some("~/custom-projects")
+        );
+        assert_eq!(config.auto_resume, Some(false));
+        assert_eq!(config.default_model.as_deref(), Some("sonnet"));
+        let entry = &config.projects[0];
+        let gh = entry.github.as_ref().expect("project github set");
+        assert_eq!(gh.token_env.as_deref(), Some("WIDGET_GH_TOKEN"));
+        assert_eq!(gh.host.as_deref(), Some("github.example.com"));
+        assert_eq!(entry.commit_name.as_deref(), Some("Widget Bot"));
     }
 
     /// Why: the console deserialises the report with `parse_report`; the tool must

@@ -628,7 +628,7 @@ fn live_provision_real_repo() {
     }
 
     let root = TempDir::new().unwrap();
-    let prov = WorkspaceProvisioner::new(RealGitBackend, root.path().to_owned());
+    let prov = WorkspaceProvisioner::new(RealGitBackend::default(), root.path().to_owned());
     let id = ManagedSessionId::new();
     let repo_url = format!("file://{}", bare.display());
     let ws = prov

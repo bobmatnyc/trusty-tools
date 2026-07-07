@@ -184,7 +184,53 @@ pub trait GitBackend: Send + Sync {
 /// Test: used in the `#[ignore]` integration test only; unit tests use
 /// `FakeGitBackend`. The empty-ref contract is locked in by
 /// `blank_git_ref_omits_branch_flag` in `workspace.rs` tests.
-pub struct RealGitBackend;
+#[derive(Debug, Clone, Default)]
+pub struct RealGitBackend {
+    /// Resolved per-project GitHub identity (#2184): env overrides applied to
+    /// every git subprocess plus an optional commit author override. The
+    /// `Default` (empty) identity reproduces pre-#2184 behaviour exactly — no
+    /// env overrides, no `-c user.*` args — so every construction site that
+    /// has no project context (`RealGitBackend::default()`, e.g. the
+    /// framework catalog sync) is unaffected.
+    identity: crate::core::git_identity::GitIdentity,
+}
+
+impl RealGitBackend {
+    /// Construct a backend bound to a resolved per-project [`GitIdentity`]
+    /// (#2184).
+    ///
+    /// Why: the daemon's `spawn_managed` path resolves ONE identity per spawn
+    /// (via `core::git_identity::resolve_for_config`) and must apply it to
+    /// every git subprocess the provisioner runs for that session.
+    /// What: stores `identity`; every `GitBackend` method below applies it via
+    /// [`Self::command`].
+    /// Test: `git_identity_env_applied_to_command`,
+    /// `git_identity_commit_args_applied_to_command`.
+    pub fn new(identity: crate::core::git_identity::GitIdentity) -> Self {
+        Self { identity }
+    }
+
+    /// Build a `git` [`std::process::Command`] with this backend's resolved
+    /// identity applied.
+    ///
+    /// Why: every git subprocess this backend spawns must apply the SAME
+    /// identity (env overrides for auth, `-c user.*` for commit authorship);
+    /// centralising the construction means no call site can diverge or forget
+    /// one half of the identity.
+    /// What: `-c user.name=…`/`-c user.email=…` (when set) are added BEFORE
+    /// any subcommand args (git accepts `-c` overrides only in that
+    /// position); the resolved env overrides are applied via `Command::envs`.
+    /// An empty (`Default`) identity produces a plain `git` command
+    /// byte-for-byte equivalent to the pre-#2184 `Command::new("git")`.
+    /// Test: `git_identity_env_applied_to_command`,
+    /// `git_identity_commit_args_applied_to_command`.
+    fn command(&self) -> std::process::Command {
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(self.identity.commit_config_args());
+        cmd.envs(self.identity.env.iter().cloned());
+        cmd
+    }
+}
 
 // #1935 review findings (PR #1936): bare-checkout detection + the advisory
 // provisioning lock live in the `base_lock` submodule to keep this file under
@@ -202,7 +248,6 @@ impl GitBackend for RealGitBackend {
         git_ref: &str,
         target_dir: &Path,
     ) -> Result<(), ProvisionError> {
-        use std::process::Command;
         // When `git_ref` is blank omit `--branch` entirely so git clones the
         // remote's default branch (HEAD). An empty `--branch ""` arg causes
         // git to fail with "not a valid branch name" rather than falling back.
@@ -217,7 +262,10 @@ impl GitBackend for RealGitBackend {
         // Use the destination's parent as cwd so a deleted inherited cwd cannot
         // cause git to fail with "fatal: Unable to read current working directory".
         let cwd = target_dir.parent().unwrap_or(std::path::Path::new("/"));
-        let out = Command::new("git")
+        // #2184: applies the resolved per-project identity (env overrides +
+        // commit args) to this clone; a `Default` identity is a no-op.
+        let out = self
+            .command()
             .args(&args)
             .current_dir(cwd)
             .output()
@@ -240,9 +288,9 @@ impl GitBackend for RealGitBackend {
     }
 
     fn remote_url(&self, dir: &Path) -> Result<String, ProvisionError> {
-        use std::process::Command;
         let dir_s = dir.to_string_lossy();
-        let out = Command::new("git")
+        let out = self
+            .command()
             .args(["-C", &dir_s, "remote", "get-url", "origin"])
             .output()
             .map_err(|e| ProvisionError::Git(format!("git remote get-url exec failed: {e}")))?;
@@ -257,13 +305,13 @@ impl GitBackend for RealGitBackend {
     }
 
     fn fetch_and_reset(&self, dir: &Path, git_ref: &str) -> Result<(), ProvisionError> {
-        use std::process::Command;
         let dir_s = dir.to_string_lossy();
         // Fetch the specific ref so tags and SHAs work correctly.
         // `git fetch origin <ref>` writes FETCH_HEAD; `git reset --hard FETCH_HEAD`
         // then works for branches, tags, and commit SHAs alike — unlike
         // `origin/<ref>` which only resolves for branches.
-        let fetch = Command::new("git")
+        let fetch = self
+            .command()
             .args(["-C", &dir_s, "fetch", "origin", git_ref])
             .output()
             .map_err(|e| ProvisionError::Git(format!("git fetch exec failed: {e}")))?;
@@ -271,7 +319,8 @@ impl GitBackend for RealGitBackend {
             let stderr = String::from_utf8_lossy(&fetch.stderr);
             return Err(ProvisionError::Git(format!("git fetch failed: {stderr}")));
         }
-        let reset = Command::new("git")
+        let reset = self
+            .command()
             .args(["-C", &dir_s, "reset", "--hard", "FETCH_HEAD"])
             .output()
             .map_err(|e| ProvisionError::Git(format!("git reset exec failed: {e}")))?;
@@ -324,7 +373,6 @@ impl GitBackend for RealGitBackend {
     /// non-bare repo at `base_dir` and asserts a loud error, not silent
     /// reuse), both in `provisioner/workspace/tests.rs`.
     fn ensure_base_checkout(&self, repo_url: &str, base_dir: &Path) -> Result<(), ProvisionError> {
-        use std::process::Command;
         // A bare clone has no working tree of its own, so it can never conflict
         // with a session worktree checking out the same branch (a non-bare
         // clone's own checked-out branch would collide with a worktree trying
@@ -373,7 +421,8 @@ impl GitBackend for RealGitBackend {
         // Use the destination's parent as cwd so a deleted inherited cwd cannot
         // cause git to fail with "fatal: Unable to read current working directory".
         let cwd = base_dir.parent().unwrap_or(std::path::Path::new("/"));
-        let out = Command::new("git")
+        let out = self
+            .command()
             .args(["clone", "--bare", repo_url])
             .arg(base_dir)
             .current_dir(cwd)
@@ -398,7 +447,6 @@ impl GitBackend for RealGitBackend {
         worktree_path: &Path,
         branch_name: &str,
     ) -> Result<(), ProvisionError> {
-        use std::process::Command;
         let base_s = base_dir.to_string_lossy();
         // Blank git_ref means "the remote's default branch" — mirror clone_repo's
         // blank-ref handling by fetching `HEAD` (the remote's default branch
@@ -414,7 +462,8 @@ impl GitBackend for RealGitBackend {
         // other session's `worktree add` observes. The leading `+` allows a
         // non-fast-forward overwrite in case a retry reuses `branch_name`.
         let refspec = format!("+{src_ref}:refs/heads/{branch_name}");
-        let fetch = Command::new("git")
+        let fetch = self
+            .command()
             .args(["-C", &base_s, "fetch", "origin", &refspec])
             .output()
             .map_err(|e| ProvisionError::Git(format!("git fetch exec failed: {e}")))?;
@@ -427,7 +476,8 @@ impl GitBackend for RealGitBackend {
             std::fs::create_dir_all(parent)?;
         }
 
-        let out = Command::new("git")
+        let out = self
+            .command()
             .args(["-C", &base_s, "worktree", "add"])
             .arg(worktree_path)
             .arg(branch_name)

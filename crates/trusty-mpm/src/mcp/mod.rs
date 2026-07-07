@@ -284,16 +284,31 @@ pub trait OrchestratorBackend: Send + Sync {
     /// Back `config_write`: persist edits to the config-convention file.
     ///
     /// Why: the console Config tab's save action durably records the operator's
-    ///      workspace-root / auto-resume / default-model choices (#1220).
+    ///      workspace-root / auto-resume / default-model choices (#1220), and —
+    ///      since #2184 — the global GitHub identity binding plus per-project
+    ///      GitHub/commit identity overrides, all MCP-settable without
+    ///      hand-editing YAML.
     /// What: merges the supplied fields onto the current config (omitted fields
     ///      unchanged), writes `~/.trusty-tools/trusty-mpm/config.yaml`, and returns
-    ///      the merged config that was persisted.
+    ///      the merged config that was persisted. `project_name` routes the
+    ///      `github_*`/`commit_*` fields to that `config.projects` entry instead of
+    ///      the global `github:` section; omitting it targets the global section
+    ///      (commit identity has no global tier — supplying `commit_name`/
+    ///      `commit_email` with no `project_name` is an error).
     /// Test: `dispatch_config_write_tool` (mock).
+    #[allow(clippy::too_many_arguments)]
     async fn config_write(
         &self,
         workspace_root_template: Option<&str>,
         auto_resume: Option<bool>,
         default_model: Option<&str>,
+        project_name: Option<&str>,
+        github_config_dir: Option<&str>,
+        github_token_env: Option<&str>,
+        github_account: Option<&str>,
+        github_host: Option<&str>,
+        commit_name: Option<&str>,
+        commit_email: Option<&str>,
     ) -> Result<Value, String>;
 
     // ── #1519 WI-2: project-registry tools ───────────────────────────────────
@@ -484,8 +499,26 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
             let template = args.get("workspace_root_template").and_then(Value::as_str);
             let auto_resume = args.get("auto_resume").and_then(Value::as_bool);
             let default_model = args.get("default_model").and_then(Value::as_str);
+            let project_name = args.get("project_name").and_then(Value::as_str);
+            let github_config_dir = args.get("github_config_dir").and_then(Value::as_str);
+            let github_token_env = args.get("github_token_env").and_then(Value::as_str);
+            let github_account = args.get("github_account").and_then(Value::as_str);
+            let github_host = args.get("github_host").and_then(Value::as_str);
+            let commit_name = args.get("commit_name").and_then(Value::as_str);
+            let commit_email = args.get("commit_email").and_then(Value::as_str);
             backend
-                .config_write(template, auto_resume, default_model)
+                .config_write(
+                    template,
+                    auto_resume,
+                    default_model,
+                    project_name,
+                    github_config_dir,
+                    github_token_env,
+                    github_account,
+                    github_host,
+                    commit_name,
+                    commit_email,
+                )
                 .await
         }
         // #1519 WI-2: the three project-registry tools route through a sibling

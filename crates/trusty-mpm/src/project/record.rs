@@ -10,6 +10,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::core::trusty_tools_config::GithubConfig;
+
 /// A project entry in the project registry.
 ///
 /// Why: the registry tracks repositories an operator works with so that session
@@ -80,6 +82,79 @@ pub struct Project {
     /// Test: `project_serde_round_trip`, `project_without_optionals`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_user: Option<String>,
+
+    /// Per-project `gh`-CLI identity binding, mirrored from
+    /// [`crate::core::trusty_tools_config::ProjectConfig::github`] (#2184).
+    ///
+    /// Why: `seed_from_config` upserts static `projects:` entries into the
+    /// registry; carrying the binding onto the registry record lets
+    /// `project_get`/`project_list` surface it via MCP without a separate
+    /// config-file read. Resolution (project > global > ambient) is applied by
+    /// [`crate::core::gh_identity::select_github_config`], not here.
+    /// What: `None` → no per-project override (falls back to the global
+    /// `github:` section, then ambient). `Some(cfg)` → the full `gh` identity
+    /// binding for this project.
+    /// Test: `project_serde_round_trip`, `project_without_optionals`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<GithubConfig>,
+
+    /// Preferred git commit author name for this project, mirrored from
+    /// [`crate::core::trusty_tools_config::ProjectConfig::commit_name`] (#2184).
+    /// `None` → no override; applied via
+    /// [`crate::core::git_identity::GitIdentity::commit_config_args`] when set.
+    /// Test: `project_serde_round_trip`, `project_without_optionals`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_name: Option<String>,
+
+    /// Preferred git commit author email for this project, mirrored from
+    /// [`crate::core::trusty_tools_config::ProjectConfig::commit_email`]
+    /// (#2184). See [`Self::commit_name`].
+    /// Test: `project_serde_round_trip`, `project_without_optionals`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_email: Option<String>,
+}
+
+/// Compare two repository URLs for identity, tolerating scheme/`.git`/
+/// trailing-slash differences (#2184).
+///
+/// Why: `resolve_for_config`'s project lookup must match
+/// `https://github.com/owner/repo`, `https://github.com/owner/repo.git`, and
+/// `git@github.com:owner/repo.git` as the SAME project — operators write
+/// `repo_url` in whichever form is convenient, and the URL `spawn_managed`
+/// receives (or the CLI's detected origin) may use a different form than the
+/// one declared in `config.projects`.
+/// What: parses both sides via [`trusty_common::github_path::parse_github_path`]
+/// and compares the slugified `owner`/`repo` case-insensitively when BOTH
+/// parse; falls back to a normalised (trailing-slash- and `.git`-stripped)
+/// exact string comparison when either side fails to parse (e.g. a bare local
+/// path), so non-GitHub-shaped inputs still get a sensible exact-match result
+/// instead of silently never matching.
+/// Test: `repo_url_matches_https_vs_git_suffix`, `repo_url_matches_ssh_form`,
+/// `repo_url_matches_case_insensitive`, `repo_url_matches_rejects_different_repo`,
+/// `repo_url_matches_falls_back_to_string_compare`.
+pub fn repo_url_matches(a: &str, b: &str) -> bool {
+    match (
+        trusty_common::github_path::parse_github_path(a),
+        trusty_common::github_path::parse_github_path(b),
+    ) {
+        (Some(pa), Some(pb)) => {
+            pa.owner.eq_ignore_ascii_case(&pb.owner) && pa.repo.eq_ignore_ascii_case(&pb.repo)
+        }
+        _ => normalise_repo_url(a) == normalise_repo_url(b),
+    }
+}
+
+/// Normalise a repo URL for the exact-string fallback in [`repo_url_matches`].
+///
+/// Why: isolated so the fallback rule (trim trailing `/`, strip trailing
+/// `.git`, lowercase) is a single tested transform.
+/// What: returns a lowercased copy with a trailing `/` and `.git` suffix
+/// stripped.
+/// Test: covered via `repo_url_matches_falls_back_to_string_compare`.
+fn normalise_repo_url(url: &str) -> String {
+    url.trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_lowercase()
 }
 
 /// Derive a project name from a repository URL by stripping the `.git` suffix
@@ -129,9 +204,20 @@ mod tests {
             tags: vec!["backend".into(), "oss".into()],
             description: Some("the unified trusty workspace".into()),
             gh_user: Some("bobmatnyc".into()),
+            github: Some(GithubConfig {
+                config_dir: Some("/home/bob/.config/gh-work".into()),
+                token_env: None,
+                account: None,
+                host: None,
+            }),
+            commit_name: Some("Bob".into()),
+            commit_email: Some("bob@example.com".into()),
         };
         let json = serde_json::to_string(&p).expect("serialize");
         assert!(json.contains("gh_user"), "json: {json}");
+        assert!(json.contains("github"), "json: {json}");
+        assert!(json.contains("commit_name"), "json: {json}");
+        assert!(json.contains("commit_email"), "json: {json}");
         let back: Project = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(p, back);
     }
@@ -147,6 +233,9 @@ mod tests {
             tags: vec![],
             description: None,
             gh_user: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
         };
         let json = serde_json::to_string(&p).expect("serialize");
         assert!(
@@ -161,9 +250,76 @@ mod tests {
             !json.contains("tags"),
             "empty tags must not serialise: {json}"
         );
+        assert!(
+            // NOTE: `repo_url`'s value legitimately contains the substring
+            // "github" (github.com), so the check must look for the JSON KEY
+            // `"github":`, not the bare substring.
+            !json.contains("\"github\":"),
+            "absent github binding must not serialise: {json}"
+        );
+        assert!(
+            !json.contains("commit_name") && !json.contains("commit_email"),
+            "absent commit identity must not serialise: {json}"
+        );
         let back: Project = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.stack_hint, None);
         assert!(back.tags.is_empty());
+    }
+
+    // ── repo_url_matches (#2184) ─────────────────────────────────────────────
+
+    /// Why: the SAME repo declared with and without a `.git` suffix must match.
+    /// Test: itself.
+    #[test]
+    fn repo_url_matches_https_vs_git_suffix() {
+        assert!(repo_url_matches(
+            "https://github.com/acme/widget",
+            "https://github.com/acme/widget.git"
+        ));
+    }
+
+    /// Why: an SSH-form remote must match its HTTPS equivalent.
+    /// Test: itself.
+    #[test]
+    fn repo_url_matches_ssh_form() {
+        assert!(repo_url_matches(
+            "git@github.com:acme/widget.git",
+            "https://github.com/acme/widget"
+        ));
+    }
+
+    /// Why: owner/repo comparison must be case-insensitive (GitHub logins are).
+    /// Test: itself.
+    #[test]
+    fn repo_url_matches_case_insensitive() {
+        assert!(repo_url_matches(
+            "https://github.com/Acme/Widget",
+            "https://github.com/acme/widget"
+        ));
+    }
+
+    /// Why: a different repo (even same owner) must NOT match.
+    /// Test: itself.
+    #[test]
+    fn repo_url_matches_rejects_different_repo() {
+        assert!(!repo_url_matches(
+            "https://github.com/acme/widget",
+            "https://github.com/acme/gadget"
+        ));
+    }
+
+    /// Why: an input `parse_github_path` cannot derive an identity from (e.g.
+    /// an empty string or a bare host-only URL) must fall back to normalised
+    /// exact-string comparison rather than panicking or always matching.
+    /// Test: itself.
+    #[test]
+    fn repo_url_matches_falls_back_to_string_compare() {
+        assert!(repo_url_matches("", ""));
+        assert!(!repo_url_matches("", "https://github.com/acme/widget"));
+        assert!(!repo_url_matches(
+            "https://github.com/",
+            "https://gitlab.com/"
+        ));
     }
 
     #[test]

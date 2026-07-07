@@ -294,6 +294,55 @@ pub struct ProjectConfig {
     /// ([`crate::core::gh_account::resolve_gh_account_env`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gh_user: Option<String>,
+
+    /// Per-project `gh`-CLI identity binding (#2184), overriding the global
+    /// `github:` section for this project only.
+    ///
+    /// Why: #1265's `github:` section is a single global binding, but a host
+    /// working on several projects may need a DIFFERENT `gh` identity per
+    /// project (e.g. a personal account for an OSS repo, a work account for a
+    /// client repo). This is a SEPARATE concern from `gh_user` above: `gh_user`
+    /// only documents a preferred login for the non-mutating
+    /// `ensure_gh_account_for_project` enforcement path (#2081), while `github`
+    /// carries the full `config_dir`/`token_env`/`account`/`host` binding that
+    /// [`crate::core::gh_identity::resolve_gh_env`] resolves into concrete env
+    /// overrides for every `gh` subprocess `tm` spawns for this project.
+    /// What: `None` → this project has no override; resolution falls back to
+    /// the global `github:` section, then to the ambient gh identity (no
+    /// regression). `Some(cfg)` → `cfg` is resolved in place of the global
+    /// section for every `gh` call scoped to this project. Mirrored onto the
+    /// seeded [`crate::project::record::Project::github`] by `seed_from_config`.
+    /// Test: `project_config_github_and_commit_identity_yaml_round_trip`;
+    /// resolution precedence in `core::gh_identity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<GithubConfig>,
+
+    /// Preferred git commit author name for commits made on behalf of this
+    /// project (#2184).
+    ///
+    /// Why: `tm`'s managed/provisioner git operations previously never set a
+    /// commit identity, inheriting whatever `user.name` happened to be
+    /// globally configured (or none, causing a hard commit failure). A
+    /// per-project override lets an operator pin the right author for
+    /// projects that require a specific bot/service identity, independent of
+    /// the `gh`-CLI identity above (commit authorship and `gh` API auth are
+    /// distinct git/GitHub concerns).
+    /// What: `None` → no override; git uses whatever `user.name` is already
+    /// configured (no regression). `Some(name)` → applied as `-c
+    /// user.name=<name>` on every git invocation the provisioner makes for
+    /// this project. Mirrored onto
+    /// [`crate::project::record::Project::commit_name`] by `seed_from_config`.
+    /// Test: `project_config_github_and_commit_identity_yaml_round_trip`;
+    /// applied via `core::git_identity::GitIdentity::commit_config_args`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_name: Option<String>,
+
+    /// Preferred git commit author email for commits made on behalf of this
+    /// project (#2184). See [`Self::commit_name`] for the full rationale;
+    /// applied as `-c user.email=<email>` alongside it.
+    /// Test: `project_config_github_and_commit_identity_yaml_round_trip`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_email: Option<String>,
 }
 
 impl TrustyToolsConfig {
@@ -590,6 +639,9 @@ mod tests {
                 tags: None,
                 description: None,
                 gh_user: Some("bobmatnyc".into()),
+                github: None,
+                commit_name: None,
+                commit_email: None,
             }],
             ..Default::default()
         };
@@ -608,11 +660,76 @@ mod tests {
                 tags: None,
                 description: None,
                 gh_user: None,
+                github: None,
+                commit_name: None,
+                commit_email: None,
             }],
             ..Default::default()
         };
         let yaml_no_pref = serde_yaml::to_string(&no_pref).expect("serialise");
         assert!(!yaml_no_pref.contains("gh_user"), "yaml: {yaml_no_pref}");
+    }
+
+    /// Why (#2184): a project's per-project `github:` binding and commit
+    /// identity (`commit_name`/`commit_email`) must round-trip through YAML,
+    /// and absent fields must not serialise — matching every other optional
+    /// `ProjectConfig` field so existing configs deserialise unchanged.
+    /// Test: itself.
+    #[test]
+    fn project_config_github_and_commit_identity_yaml_round_trip() {
+        let cfg = TrustyToolsConfig {
+            projects: vec![ProjectConfig {
+                name: "work-repo".into(),
+                repo_url: "https://github.com/acme/work-repo".into(),
+                default_branch: None,
+                stack_hint: None,
+                tags: None,
+                description: None,
+                gh_user: None,
+                github: Some(GithubConfig {
+                    config_dir: Some(PathBuf::from("/home/bob/.config/gh-work")),
+                    token_env: None,
+                    account: Some("bob-work".into()),
+                    host: None,
+                }),
+                commit_name: Some("Bob (work bot)".into()),
+                commit_email: Some("bob@acme.example.com".into()),
+            }],
+            ..Default::default()
+        };
+        let yaml = serde_yaml::to_string(&cfg).expect("serialise");
+        assert!(yaml.contains("github:"), "yaml: {yaml}");
+        assert!(yaml.contains("commit_name"), "yaml: {yaml}");
+        assert!(yaml.contains("commit_email"), "yaml: {yaml}");
+        let back: TrustyToolsConfig = serde_yaml::from_str(&yaml).expect("deserialise");
+        assert_eq!(cfg, back);
+
+        // Absent per-project github/commit fields must not serialise.
+        let minimal = TrustyToolsConfig {
+            projects: vec![ProjectConfig {
+                name: "minimal".into(),
+                repo_url: "https://github.com/o/minimal".into(),
+                default_branch: None,
+                stack_hint: None,
+                tags: None,
+                description: None,
+                gh_user: None,
+                github: None,
+                commit_name: None,
+                commit_email: None,
+            }],
+            ..Default::default()
+        };
+        let yaml_minimal = serde_yaml::to_string(&minimal).expect("serialise");
+        assert!(!yaml_minimal.contains("github:"), "yaml: {yaml_minimal}");
+        assert!(
+            !yaml_minimal.contains("commit_name"),
+            "yaml: {yaml_minimal}"
+        );
+        assert!(
+            !yaml_minimal.contains("commit_email"),
+            "yaml: {yaml_minimal}"
+        );
     }
 
     /// Why: the `daemon:` section (#1836) must round-trip through YAML, and an

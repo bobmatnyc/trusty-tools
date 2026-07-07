@@ -251,6 +251,9 @@ mod tests {
             tags: vec![],
             description: None,
             gh_user: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
         }
     }
 

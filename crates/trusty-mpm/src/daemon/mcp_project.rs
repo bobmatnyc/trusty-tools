@@ -67,6 +67,13 @@ pub async fn project_register(
     description: Option<&str>,
     gh_user: Option<&str>,
 ) -> Result<Value, String> {
+    let registry = state.project_registry().await;
+    // #2184: `register` REPLACES the whole record and `project_register`'s
+    // params don't carry the github/commit-identity binding (operators set
+    // those via `config_write`'s per-project fields instead) — preserve any
+    // existing binding across a `project_register` call rather than silently
+    // wiping it.
+    let existing = registry.get(name).await.ok();
     let project = Project {
         name: name.to_string(),
         repo_url: repo_url.to_string(),
@@ -75,8 +82,10 @@ pub async fn project_register(
         tags: tags.unwrap_or_default(),
         description: description.map(str::to_string),
         gh_user: gh_user.map(str::to_string),
+        github: existing.as_ref().and_then(|p| p.github.clone()),
+        commit_name: existing.as_ref().and_then(|p| p.commit_name.clone()),
+        commit_email: existing.as_ref().and_then(|p| p.commit_email.clone()),
     };
-    let registry = state.project_registry().await;
     registry
         .register(project.clone())
         .await

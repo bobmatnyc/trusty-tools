@@ -23,6 +23,9 @@ fn proj(name: &str, repo_url: &str) -> Project {
         tags: vec![],
         description: None,
         gh_user: None,
+        github: None,
+        commit_name: None,
+        commit_email: None,
     }
 }
 
@@ -35,6 +38,9 @@ fn proj_tagged(name: &str, repo_url: &str, tags: &[&str], desc: &str) -> Project
         tags: tags.iter().map(|s| s.to_string()).collect(),
         description: Some(desc.to_string()),
         gh_user: None,
+        github: None,
+        commit_name: None,
+        commit_email: None,
     }
 }
 

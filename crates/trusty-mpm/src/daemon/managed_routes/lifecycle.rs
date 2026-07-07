@@ -308,6 +308,19 @@ async fn spawn_managed_cloned(
 ) -> Result<SessionRecord, String> {
     use crate::core::provisioning_stage::{ProvisioningStage, emit};
 
+    // #2184: resolve the per-project gh identity + commit identity ONCE for
+    // this spawn (project `github:`/commit fields in `config.projects` >
+    // global `github:` > fully ambient) and apply it to every git subprocess
+    // the provisioner runs below. A `GhIdentityError` (the `account`-only
+    // refusal — see `core::gh_identity` module docs) is surfaced as a spawn
+    // failure BEFORE any provisioning side effect, mirroring how the MCP
+    // spawn gate above already fails closed before touching disk.
+    let git_identity = crate::core::git_identity::resolve_for_config(&config, &params.repo_url)
+        .map_err(|e| {
+            warn!(id = %session_id, "spawn_managed: git identity resolution failed: {e}");
+            format!("git identity resolution failed: {e}")
+        })?;
+
     // Provision an isolated workspace under the pre-generated `session_id` (the id
     // is generated ONCE in `spawn_managed`, before the local-path/clone branch
     // split, so both branches register the same id).
@@ -330,7 +343,7 @@ async fn spawn_managed_cloned(
             // `provision_in` only appends the session id; pass an empty workspace
             // root because the project dir is already absolute.
             let provisioner = WorkspaceProvisioner::new(
-                crate::provisioner::RealGitBackend,
+                crate::provisioner::RealGitBackend::new(git_identity),
                 std::path::PathBuf::new(),
             );
             provisioner.provision_in(
@@ -343,8 +356,10 @@ async fn spawn_managed_cloned(
         }
         None => {
             let workspace_root = crate::core::trusty_tools_config::workspace_root(&config);
-            let provisioner =
-                WorkspaceProvisioner::new(crate::provisioner::RealGitBackend, workspace_root);
+            let provisioner = WorkspaceProvisioner::new(
+                crate::provisioner::RealGitBackend::new(git_identity),
+                workspace_root,
+            );
             provisioner.provision(&session_id, &params.repo_url, &params.git_ref, &params.task)
         }
     }
@@ -832,8 +847,16 @@ async fn spawn_managed_local(
     let source_id_str = format!("{}/{}", gh.owner, gh.repo);
     let config = crate::core::trusty_tools_config::TrustyToolsConfig::load();
     let project_dir = crate::core::trusty_tools_config::workspace_subpath(&config, &gh);
+    // #2184: same per-project identity resolution as the clone-based path
+    // (`spawn_managed_cloned`) — this branch also provisions a managed clone
+    // (of `origin_url`), so it must honour the same binding.
+    let git_identity = crate::core::git_identity::resolve_for_config(&config, &origin_url)
+        .map_err(|e| {
+            warn!(id = %session_id, "spawn_managed (local→managed): git identity resolution failed: {e}");
+            format!("git identity resolution failed: {e}")
+        })?;
     let provisioner = crate::provisioner::WorkspaceProvisioner::new(
-        crate::provisioner::RealGitBackend,
+        crate::provisioner::RealGitBackend::new(git_identity),
         std::path::PathBuf::new(),
     );
     let prepared = provisioner

@@ -384,7 +384,9 @@ fn ensure_base_checkout_recovers_from_concurrent_race() {
         .map(|_| {
             let repo_url = repo_url.clone();
             let base_dir = base_dir.clone();
-            std::thread::spawn(move || RealGitBackend.ensure_base_checkout(&repo_url, &base_dir))
+            std::thread::spawn(move || {
+                RealGitBackend::default().ensure_base_checkout(&repo_url, &base_dir)
+            })
         })
         .collect();
 
@@ -452,7 +454,7 @@ fn ensure_base_checkout_rejects_stale_non_bare_directory() {
         "sanity check: a lone HEAD file with no repo structure must NOT read as bare"
     );
 
-    let result = RealGitBackend.ensure_base_checkout(&repo_url, &base_dir);
+    let result = RealGitBackend::default().ensure_base_checkout(&repo_url, &base_dir);
     assert!(
         result.is_err(),
         "a stale non-repo directory must be rejected loudly, not silently reused: {result:?}"
@@ -588,5 +590,76 @@ fn base_checkout_lock_recovers_stale_lock_marker() {
     assert!(
         !lock_path.exists(),
         "dropping the lock guard must remove the marker file"
+    );
+}
+
+// ── #2184: RealGitBackend applies the resolved GitIdentity to every command ──
+
+/// Why: a `RealGitBackend::default()` (no identity resolved) must build a
+/// PLAIN `git` command — no env overrides, no `-c` args — so every existing
+/// production call site (which constructs `RealGitBackend::default()` when it
+/// has no project context) is byte-for-byte unaffected by #2184.
+/// Test: itself.
+#[test]
+fn default_identity_produces_plain_git_command() {
+    let backend = RealGitBackend::default();
+    let cmd = backend.command();
+    assert_eq!(
+        cmd.get_args().count(),
+        0,
+        "no -c args for an empty identity"
+    );
+    assert_eq!(
+        cmd.get_envs().count(),
+        0,
+        "no env overrides for an empty identity"
+    );
+}
+
+/// Why: the resolved `GitIdentity::env` overrides must be applied to every
+/// command this backend builds, so `git`/its credential helper authenticate
+/// as the right per-project identity.
+/// Test: itself.
+#[test]
+fn git_identity_env_applied_to_command() {
+    let identity = crate::core::git_identity::GitIdentity {
+        env: vec![("GH_CONFIG_DIR".to_string(), "/cfg/project".to_string())],
+        commit_name: None,
+        commit_email: None,
+    };
+    let backend = RealGitBackend::new(identity);
+    let cmd = backend.command();
+    let envs: Vec<_> = cmd.get_envs().collect();
+    assert!(
+        envs.iter().any(|(k, v)| {
+            *k == std::ffi::OsStr::new("GH_CONFIG_DIR")
+                && *v == Some(std::ffi::OsStr::new("/cfg/project"))
+        }),
+        "GH_CONFIG_DIR override must be applied: {envs:?}"
+    );
+}
+
+/// Why: a resolved commit-identity override must render as `-c user.name=…`/
+/// `-c user.email=…` BEFORE any subcommand arg (git only accepts `-c`
+/// overrides in that position).
+/// Test: itself.
+#[test]
+fn git_identity_commit_args_applied_to_command() {
+    let identity = crate::core::git_identity::GitIdentity {
+        env: vec![],
+        commit_name: Some("Bot".to_string()),
+        commit_email: Some("bot@example.com".to_string()),
+    };
+    let backend = RealGitBackend::new(identity);
+    let cmd = backend.command();
+    let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+    assert_eq!(
+        args,
+        vec![
+            std::ffi::OsStr::new("-c"),
+            std::ffi::OsStr::new("user.name=Bot"),
+            std::ffi::OsStr::new("-c"),
+            std::ffi::OsStr::new("user.email=bot@example.com"),
+        ]
     );
 }
