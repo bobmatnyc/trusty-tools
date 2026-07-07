@@ -41,13 +41,6 @@
 //! failure aborts rather than proceeding to exec regardless.
 //!
 //! Test: `plan_inplace_*` cover the pure decision; `reactivate_managed_session`'s
-<<<<<<< HEAD
-//! success/409/404 outcomes and `fetch_until_stopped_*`'s retry behavior (#2148)
-//! are exercised against a local `TcpListener` mock (#2027, mirroring
-//! `core::sm::providers`' mock convention — no external mock-server crate); the
-//! full exec path is not unit-tested — it requires a live daemon and a real
-//! `claude` binary, mirroring the rest of the guided-resume I/O surface.
-=======
 //! success/409/404 outcomes are exercised against a local one-shot `TcpListener`
 //! mock (#2027, mirroring `core::sm::providers`' mock convention — no external
 //! mock-server crate); the full exec path is not unit-tested — it requires a
@@ -63,7 +56,6 @@
 //! [`parse_show_environment_value`], is pure and exhaustively unit-tested. Every
 //! rejected gate now also emits a `tracing::debug!` so a stuck-in-the-picker
 //! report is diagnosable from `RUST_LOG=debug` output without code archaeology.
->>>>>>> 3991706f (fix(trusty-mpm): publish TM_MANAGED_SESSION_ID via tmux set-environment + fallback read, heal stale panes, guard against nested-session spawn, harden source_id)
 
 use anyhow::Context as _;
 
@@ -446,12 +438,6 @@ pub(crate) async fn try_inplace_relaunch(
     client: &reqwest::Client,
     url: &str,
 ) -> Option<anyhow::Result<()>> {
-<<<<<<< HEAD
-    let env_id = read_env_managed_session_id()?;
-    // #2148: bounded retry absorbs the Active->Stopped transition race instead
-    // of giving up on a single unlucky fetch — see `fetch_managed_session_until_stopped`.
-    let record = fetch_managed_session_until_stopped(client, url, &env_id).await;
-=======
     // #2157 item 2: process env is the primary source (it is set for the exact
     // shell that ran the export prefix); the tmux SESSION environment is the
     // fallback for every pane/shell that never ran it (a sibling pane/window,
@@ -469,8 +455,9 @@ pub(crate) async fn try_inplace_relaunch(
             }
         },
     };
-    let record = fetch_managed_session(client, url, &env_id).await;
->>>>>>> 3991706f (fix(trusty-mpm): publish TM_MANAGED_SESSION_ID via tmux set-environment + fallback read, heal stale panes, guard against nested-session spawn, harden source_id)
+    // #2148: bounded retry absorbs the Active->Stopped transition race instead
+    // of giving up on a single unlucky fetch — see `fetch_managed_session_until_stopped`.
+    let record = fetch_managed_session_until_stopped(client, url, &env_id).await;
     let record_state = record.as_ref().map(|r| r.state.as_str());
     match plan_inplace(Some(&env_id), record_state) {
         Some(ResumeAction::InPlace) => {
