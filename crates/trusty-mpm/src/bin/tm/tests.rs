@@ -482,6 +482,20 @@ fn cli_session_stop_requires_arg() {
 }
 
 #[test]
+fn cli_parses_session_kill() {
+    // `kill` is a visible alias (#2191) for `stop` — it parses to the same
+    // `SessionAction::Stop` variant so it dispatches through the identical
+    // managed-aware handler with zero other changes.
+    let cli = Cli::try_parse_from(["trusty-mpm", "session", "kill", "tmpm-quiet-falcon"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::Stop { id_or_name },
+        } => assert_eq!(id_or_name, "tmpm-quiet-falcon"),
+        other => panic!("expected session kill (stop), got {other:?}"),
+    }
+}
+
+#[test]
 fn cli_parses_session_list() {
     let cli = Cli::try_parse_from(["trusty-mpm", "session", "list"]).unwrap();
     match cli.command.unwrap() {

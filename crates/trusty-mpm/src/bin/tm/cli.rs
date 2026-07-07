@@ -1244,6 +1244,11 @@ pub(crate) enum SessionAction {
     /// Managed-aware (#1218): if the id/name is a managed session, this stops its
     /// runtime (workspace preserved, resumable); otherwise it stops the local
     /// project session.
+    ///
+    /// `kill` is a visible alias (#2191) for this same non-destructive stop —
+    /// the workspace is preserved and the session remains resumable. For the
+    /// terminal, workspace-removing teardown use `decommission` instead.
+    #[command(visible_alias = "kill")]
     Stop {
         /// Session id or friendly name (e.g. `tm-quiet-falcon`).
         id_or_name: String,
