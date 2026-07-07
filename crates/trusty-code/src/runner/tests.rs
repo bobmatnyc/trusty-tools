@@ -568,6 +568,68 @@ async fn project_context_reaches_prompt() {
     );
 }
 
+/// The skill catalog (#2069) reaches the assembled prompt in
+/// `HarnessMode::DailyDriver`.
+///
+/// Why: A delegated sub-agent must see the same cheap, metadata-only skill
+/// catalog the delegating PM does.
+/// What: Attach a distinctive catalog marker via `with_skills_catalog`,
+/// default mode (`DailyDriver`); assert it appears in the assembled prompt.
+/// Test: this test.
+#[tokio::test]
+async fn skills_catalog_reaches_daily_driver_prompt() {
+    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec![], invoked));
+    let runner = InProcessAgentRunner::new(llm.clone(), factory, tmp.path().to_path_buf())
+        .with_skills_catalog("SKILLS-CATALOG-MARKER");
+
+    runner
+        .run("python-engineer", "task")
+        .await
+        .expect("completes");
+
+    let (_, system) = llm.first_request();
+    assert!(
+        system.contains("SKILLS-CATALOG-MARKER"),
+        "assembled DailyDriver prompt must include the skill catalog"
+    );
+}
+
+/// The skill catalog (#2069) is ignored entirely under `HarnessMode::Parity`.
+///
+/// Why: Parity's byte-identical-schema/prompt guarantee (parity-spec D2)
+/// must never depend on a project's skill catalog.
+/// What: Attach a catalog marker AND `with_mode(Parity)`; assert the marker
+/// is absent from the assembled prompt.
+/// Test: this test.
+#[tokio::test]
+async fn skills_catalog_ignored_in_parity() {
+    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec![], invoked));
+    let runner = InProcessAgentRunner::new(llm.clone(), factory, tmp.path().to_path_buf())
+        .with_skills_catalog("SKILLS-CATALOG-MARKER")
+        .with_mode(crate::mode::HarnessMode::Parity);
+
+    runner
+        .run("python-engineer", "task")
+        .await
+        .expect("completes");
+
+    let (_, system) = llm.first_request();
+    assert!(
+        !system.contains("SKILLS-CATALOG-MARKER"),
+        "Parity prompt must never include the skill catalog"
+    );
+}
+
 /// `with_mode` must be chainable and a delegated run must complete
 /// successfully under EITHER `HarnessMode` (#2059) — both modes are
 /// functionally identical in M1, so this pins "the builder wires through

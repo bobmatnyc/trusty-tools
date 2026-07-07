@@ -303,28 +303,87 @@ fn all_sections_present_when_supplied() {
     assert!(out.contains("FALLBACK"));
 }
 
-/// #2059's mode-aware branch point must produce IDENTICAL output for both
-/// modes in M1 — no token-efficiency behaviour has been built yet, so the
-/// branch existing (and being exercised by this test) matters more than any
-/// difference in its output today.
+/// With no skills catalog, #2059's mode-aware branch point must produce
+/// IDENTICAL output for both modes — this is the pre-#2069 M1 contract,
+/// preserved for any project with no `.claude/skills/` catalog (or when the
+/// catalog happens to be empty).
 ///
-/// Why: pins the documented "byte-identical until P1B" contract so a future
-/// change to ONE arm is a deliberate, visible diff to this test, not a
-/// silent divergence.
-/// What: asserts `assemble_system_prompt_for_mode` returns the exact same
-/// string as `assemble_system_prompt` for both `HarnessMode` variants.
+/// Why: pins the "byte-identical when there is nothing to progressively
+/// disclose" contract so a future change to the `DailyDriver` arm cannot
+/// silently regress projects with no skills.
+/// What: asserts `assemble_system_prompt_for_mode` with `skills_catalog:
+/// None` returns the exact same string as `assemble_system_prompt` for both
+/// `HarnessMode` variants.
 /// Test: this test.
 #[test]
-fn assemble_system_prompt_for_mode_is_identical_in_m1() {
+fn assemble_system_prompt_for_mode_identical_when_no_skills() {
     let cfg = config_with_prompt("AGENT");
     let baseline = assemble_system_prompt(&cfg, Some("PROJECT"), Some("FALLBACK"));
 
     for mode in [HarnessMode::DailyDriver, HarnessMode::Parity] {
         let via_mode =
-            assemble_system_prompt_for_mode(mode, &cfg, Some("PROJECT"), Some("FALLBACK"));
+            assemble_system_prompt_for_mode(mode, &cfg, Some("PROJECT"), Some("FALLBACK"), None);
         assert_eq!(
             via_mode, baseline,
-            "mode {mode:?} must match baseline in M1"
+            "mode {mode:?} must match baseline when there is no skills catalog"
         );
     }
+}
+
+/// `HarnessMode::DailyDriver` appends a non-empty skills catalog as a
+/// trailing section (#2069).
+///
+/// Why: This is the actual token-efficiency payoff — the DailyDriver prompt
+/// gains the cheap metadata-only catalog, never a skill's full body.
+/// What: Asserts the DailyDriver output contains both the baseline (BASE +
+/// agent + project + fallback) and the catalog text, with the catalog
+/// appearing after the baseline.
+/// Test: this test.
+#[test]
+fn daily_driver_appends_skills_catalog() {
+    let cfg = config_with_prompt("AGENT");
+    let catalog = "Available skills:\n- demo-skill: Does demo things";
+
+    let out = assemble_system_prompt_for_mode(
+        HarnessMode::DailyDriver,
+        &cfg,
+        Some("PROJECT"),
+        Some("FALLBACK"),
+        Some(catalog),
+    );
+
+    assert!(out.contains("AGENT"));
+    assert!(out.contains(catalog));
+    assert!(
+        out.find("FALLBACK").unwrap() < out.find(catalog).unwrap(),
+        "the skills catalog must be the trailing section"
+    );
+}
+
+/// `HarnessMode::Parity` ignores `skills_catalog` entirely, even when given
+/// one (#2069's scope note: "Parity mode should NOT progressively
+/// disclose").
+///
+/// Why: The parity spec's byte-identical-schema guarantee (D2) must never
+/// depend on which project's `.claude/skills/` catalog happens to be
+/// present.
+/// What: Asserts `Parity` output with `Some(catalog)` equals the plain
+/// `assemble_system_prompt` baseline and does not contain the catalog text.
+/// Test: this test.
+#[test]
+fn parity_ignores_skills_catalog() {
+    let cfg = config_with_prompt("AGENT");
+    let baseline = assemble_system_prompt(&cfg, Some("PROJECT"), Some("FALLBACK"));
+    let catalog = "Available skills:\n- demo-skill: Does demo things";
+
+    let out = assemble_system_prompt_for_mode(
+        HarnessMode::Parity,
+        &cfg,
+        Some("PROJECT"),
+        Some("FALLBACK"),
+        Some(catalog),
+    );
+
+    assert_eq!(out, baseline);
+    assert!(!out.contains("demo-skill"));
 }

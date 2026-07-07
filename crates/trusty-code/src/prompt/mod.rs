@@ -9,8 +9,10 @@
 //! What: Re-exports [`BASE_PREAMBLE`], [`BASE_PREAMBLE_VERSION`],
 //! [`PromptAssembler`], [`assemble_system_prompt`], and (#2059)
 //! [`assemble_system_prompt_for_mode`] — the `HarnessMode`-branching entry
-//! point `task::executor`/`runner::in_process` call so P1B's daily-driver
-//! token-efficiency work has a real, already-wired seam to land in.
+//! point `task::executor`/`runner::in_process` call. Its `skills_catalog`
+//! parameter (#2069) is P1B's first token-efficiency layer to actually land:
+//! `DailyDriver` appends the cheap, always-cached skill metadata catalog
+//! (`crate::skills::format_skill_catalog`); `Parity` ignores it.
 //! Test: `prompt::tests::*` (via `assembler.rs`'s inline test include).
 
 mod assembler;

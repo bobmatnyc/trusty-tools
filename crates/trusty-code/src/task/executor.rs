@@ -50,9 +50,10 @@ use crate::run_task::{
 };
 use crate::runner::{InProcessAgentRunner, RegistryFactory};
 use crate::session::{SessionRegistry, SessionStatus};
+use crate::skills::{FsSkillResolver, format_skill_catalog, locate_skills_dir};
 use crate::tools::{
     AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, FinishTaskTool,
-    ReadFileTool, RunContext, ToolRegistry, WriteFileTool,
+    ReadFileTool, RunContext, SkillResolver, ToolRegistry, UseSkillTool, WriteFileTool,
 };
 
 use super::sink::SessionToolEventSink;
@@ -160,10 +161,17 @@ async fn run_and_record(
     let pm_model = resolve_model(&pm_config, None);
     let engineer_model = resolve_engineer_model(&params);
 
+    // #2069: discover the (cheap, metadata-only) skill catalog and, in
+    // DailyDriver mode only, register `use_skill` so the PM can lazily fetch
+    // a skill's full body on demand. Parity never sees the catalog or the
+    // tool — see `assemble_system_prompt_for_mode`'s docs.
+    let skills_catalog = daily_driver_skills_catalog(&params);
+
     let engineer_runner = build_engineer_runner(
         Arc::clone(&llm),
         &params,
         project_context.clone(),
+        skills_catalog.as_ref().map(|(catalog, _)| catalog.clone()),
         Arc::clone(&transcript),
         Arc::clone(&sink),
         Arc::clone(&cancel),
@@ -176,6 +184,9 @@ async fn run_and_record(
         DelegateToAgentTool::new(engineer_runner).with_config_dir(params.agents_dir.clone()),
     ));
     pm_registry.register(Arc::new(FinishTaskTool::new()));
+    if let Some((_, resolver)) = &skills_catalog {
+        pm_registry.register(Arc::new(UseSkillTool::new(Arc::clone(resolver))));
+    }
 
     let pm_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
         Arc::clone(&llm),
@@ -189,6 +200,7 @@ async fn run_and_record(
         &pm_config,
         project_context.as_deref(),
         catchup_ctx.as_deref(),
+        skills_catalog.as_ref().map(|(catalog, _)| catalog.as_str()),
     );
 
     let pm_loop = AgentLoop::new(
@@ -225,10 +237,17 @@ async fn run_and_record(
 /// the #2056 sink, the shared cancel flag, and (#2059) the SAME resolved
 /// `HarnessMode` as the delegating PM (mirrors `run_task::build_engineer_runner`,
 /// which is private to that module).
+///
+/// `skills_catalog` (#2069) is the same rendered metadata catalog the PM's own
+/// prompt gets, threaded through so the delegated engineer's DailyDriver
+/// prompt also sees it. Wiring the `use_skill` *tool* into the engineer's own
+/// per-delegation registry (`ProjectToolFactory::build`) is deferred — see
+/// this crate's #2069 delivery notes.
 fn build_engineer_runner(
     llm: Arc<dyn LlmClientTrait>,
     params: &TaskRunParams,
     project_context: Option<String>,
+    skills_catalog: Option<String>,
     transcript: SharedTranscript,
     sink: Arc<dyn ToolEventSink>,
     cancel: Arc<AtomicBool>,
@@ -250,7 +269,35 @@ fn build_engineer_runner(
     if let Some(ctx) = project_context {
         runner = runner.with_project_context(ctx);
     }
+    if let Some(catalog) = skills_catalog {
+        runner = runner.with_skills_catalog(catalog);
+    }
     apply_engineer_model_override(Arc::new(runner), params)
+}
+
+/// Discover the (cheap, metadata-only) skill catalog for `params.project` and
+/// build a resolver over it — but only in `HarnessMode::DailyDriver`.
+///
+/// Why: #2069's scope note is explicit — "Parity mode should NOT
+/// progressively disclose" — so `Parity` runs must never discover
+/// `.claude/skills/` at all, let alone advertise the `use_skill` tool or
+/// inject the catalog into the prompt.
+/// What: Returns `None` for `HarnessMode::Parity` or when the project has no
+/// (or an empty) skill catalog; otherwise `Some((rendered_catalog,
+/// resolver))` — the resolver backs the `use_skill` tool registration.
+/// Test: `task::executor::tests::daily_driver_skills_catalog_*`.
+fn daily_driver_skills_catalog(params: &TaskRunParams) -> Option<(String, Arc<dyn SkillResolver>)> {
+    if params.mode != HarnessMode::DailyDriver {
+        return None;
+    }
+    let skills_dir = locate_skills_dir(&params.project);
+    let resolver: Arc<dyn SkillResolver> = Arc::new(FsSkillResolver::new(skills_dir));
+    let catalog = format_skill_catalog(&resolver.metadata());
+    if catalog.is_empty() {
+        None
+    } else {
+        Some((catalog, resolver))
+    }
 }
 
 /// Builds the engineer's project-scoped tool registry for each delegation

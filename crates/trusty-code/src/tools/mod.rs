@@ -6,7 +6,8 @@
 //! What: Re-exports `ToolExecutor`, `AgentRunner`, `RunContext`, `AgentOutput`,
 //! `SearchProvider`, `SearchResult`, `SkillResolver`, and `ToolResult` from
 //! `traits`; `ToolRegistry` from `registry`; `DelegateToAgentTool` from
-//! `delegate`; and `FinishTaskTool` (#2072) from `finish_task`.
+//! `delegate`; `FinishTaskTool` (#2072) from `finish_task`; and `UseSkillTool`
+//! (#2069's progressive-disclosure on-invoke loader) from `skill`.
 //! Test: Unit tests live in each submodule; integration tests use
 //! `DelegateToAgentTool` with a `MockAgentRunner`.
 
@@ -15,6 +16,7 @@ pub mod delegate;
 pub mod finish_task;
 pub mod fs;
 pub mod registry;
+pub mod skill;
 pub mod traits;
 
 // Flat re-exports for `crate::tools::*` convenience.
@@ -27,6 +29,7 @@ pub use finish_task::{
 };
 pub use fs::{EditTool, ReadFileTool, WriteFileTool};
 pub use registry::ToolRegistry;
+pub use skill::UseSkillTool;
 pub use traits::{
     AgentOutput, AgentRunner, HistoryMessage, RunContext, SearchProvider, SearchResult,
     ServiceTier, SkillResolver, ToolExecutor, ToolResult,
