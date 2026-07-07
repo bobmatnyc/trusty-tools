@@ -892,6 +892,104 @@ async fn resume_managed_backfills_missing_status_line() {
     );
 }
 
+/// P0 regression (#2172): the #2158 deployment-completeness check must NEVER
+/// prevent `resume_managed` from reaching the runtime spawn, even when
+/// validation (and its auto-repair attempt) still reports the workspace
+/// incomplete afterward.
+///
+/// Why: before this fix, `ensure_deployment_complete` returning `Err` caused
+/// `resume_managed` to `mark_errored` the session with the gate's own
+/// "deployment incomplete after auto-repair" message and skip
+/// `adapter.spawn_resume` entirely — collapsing runtime launch on every
+/// session whose validator reported INCOMPLETE, including false positives
+/// (#2171, not yet fixed). This is the exact regression that broke every
+/// new/restarted managed session in production.
+/// What: seeds a resumable session whose workspace has no `.claude/` payload
+/// at all (guaranteeing `ensure_deployment_complete` sees gaps before repair),
+/// then makes the workspace directory READ-ONLY (`chmod 0o555`) so the
+/// auto-repair pipeline can never create `.claude/settings.json` inside it —
+/// the simplest deterministic way to force the gate's `Err` branch (gaps
+/// remain after repair too) without depending on the still-open #2171 bug.
+/// Resumes the session and asserts the resulting record's `task` field
+/// (where `SessionManager::mark_errored` appends `[error: …]`) never contains
+/// the gate's own "deployment incomplete" wording — proving the gate no
+/// longer aborts the handler before `adapter.spawn_resume` runs. (The runtime
+/// adapter itself is still allowed to fail in CI — no real `tmux`/`claude`
+/// binary on PATH — so this test does not assert the final state is
+/// `Active`; only that the deployment gate is never the terminal error,
+/// mirroring `resume_managed_backfills_missing_status_line`'s established
+/// pattern of not asserting on the spawn outcome.)
+/// Test: this function IS the test.
+#[tokio::test]
+async fn resume_managed_launches_despite_incomplete_deployment() {
+    let root = TempDir::new().unwrap();
+    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let mgr = state.session_manager().await;
+
+    let id = ResumeSessionId::new();
+    let ws = root.path().join(format!("{id}-incomplete-ws"));
+    std::fs::create_dir_all(&ws).expect("create workspace dir");
+
+    // Precondition: no `.claude/` payload at all — guarantees the pre-repair
+    // validation pass reports gaps (e.g. SettingsMissing).
+    assert!(
+        !ws.join(".claude").exists(),
+        "precondition: workspace must start with no .claude/ payload"
+    );
+
+    let _seeded = mgr
+        .create_with_id(
+            id,
+            "regression: non-blocking deployment gate on resume (#2172)".to_string(),
+            Some(ws.clone()),
+            None,
+            Some(ws.clone()),
+            Some("https://github.com/owner/repo".to_string()),
+            Some("main".to_string()),
+            ResumeRuntimeKind::default(),
+            false,
+            false,
+        )
+        .await
+        .expect("seed session");
+
+    // Stop first — resume is only valid from Stopped/Errored.
+    mgr.stop(&id).await.expect("stop");
+
+    // Make the workspace read-only so the repair pipeline cannot create
+    // `.claude/settings.json` inside it — after-repair validation must still
+    // report the workspace incomplete, forcing `ensure_deployment_complete`
+    // to return `Err`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&ws, std::fs::Permissions::from_mode(0o555))
+            .expect("chmod workspace read-only");
+    }
+
+    let result = resume_managed(&state, &id).await;
+
+    // Restore write permission unconditionally so the TempDir's Drop impl can
+    // clean up the directory even if an assertion below panics.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&ws, std::fs::Permissions::from_mode(0o755));
+    }
+
+    let record = result.expect(
+        "resume_managed must still return Ok even when the deployment gate \
+         reports incomplete (P0 #2172) — the gate must never abort the handler",
+    );
+    assert!(
+        !record.task.contains("deployment incomplete"),
+        "the #2158 deployment-completeness gate must be non-blocking (#2172): \
+         it must never be the reason a spawn/resume is marked errored; got \
+         task: {}",
+        record.task
+    );
+}
+
 /// #1914 self-heal: `resume_managed` must also upgrade a STALE bare
 /// `tm statusline` command already on disk to an absolute path, not just
 /// backfill a missing key.
