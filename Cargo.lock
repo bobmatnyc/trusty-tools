@@ -10652,7 +10652,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-analyze"
-version = "0.7.2"
+version = "0.7.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10715,7 +10715,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-bm25-daemon"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -10756,7 +10756,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10829,7 +10829,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -10868,7 +10868,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-embedderd"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -10905,7 +10905,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-installer"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -10930,7 +10930,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.18.2"
+version = "0.18.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10970,7 +10970,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "0.16.2"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11091,7 +11091,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.31.0"
+version = "0.32.0"
 dependencies = [
  "anyhow",
  "async-trait",
