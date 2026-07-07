@@ -103,6 +103,32 @@ pub trait ManagedTmuxDriver: Send + Sync {
             .unwrap_or(false)
     }
 
+    /// Durably publish `key=value` into the named session's tmux environment
+    /// (#2157 item 1) — belt-and-suspenders alongside the pane-shell `export …;`
+    /// prefix `runtime::claude_code`/`runtime::tcode` already send.
+    ///
+    /// Why: the pane-shell export only lands in the ONE shell process that ran
+    /// the spawn/resume command line; a sibling pane/window in the same tmux
+    /// session (or a pane spawned before this method existed) never sees it.
+    /// `tmux set-environment` writes into the SESSION's own environment table,
+    /// which `tmux show-environment` can read from ANY pane in that session
+    /// regardless of vintage — this is what lets the in-place-relaunch gate
+    /// (`bin/tm/commands/guided_inplace.rs`) fall back to a tmux-side read when
+    /// the process environment does not carry `TM_MANAGED_SESSION_ID`.
+    /// What: the default is a silent `Ok(())` no-op — this is best-effort
+    /// durability plumbing, not a caller-visible control action like
+    /// `send_keys_literal`/`send_interrupt`, so a driver that cannot support it
+    /// (e.g. tmux absent) must never fail the spawn/resume it is attached to.
+    /// [`super::real_tmux::RealTmuxDriver`] overrides this to actually call
+    /// tmux; test doubles record the call for assertions.
+    /// Test: `RealTmuxDriver` override is asserted via `core::tmux::
+    /// set_environment_argv`; call-site assertions live in
+    /// `runtime::test_helpers::FakeTmux` and `session_manager::tests::
+    /// FakeTmuxDriver`.
+    fn set_environment(&self, _name: &str, _key: &str, _value: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+
     /// Signal a session's process to stop, then kill the tmux session.
     ///
     /// Why: abruptly killing a session (`kill_session`) discards any in-flight

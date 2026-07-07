@@ -51,7 +51,11 @@ mod reap_orphaned_worktrees_tests;
 mod naming_tests;
 
 #[cfg(test)]
+<<<<<<< HEAD
 mod resume_reattach_tests;
+=======
+mod set_source_id_tests;
+>>>>>>> 3991706f (fix(trusty-mpm): publish TM_MANAGED_SESSION_ID via tmux set-environment + fallback read, heal stale panes, guard against nested-session spawn, harden source_id)
 
 /// Real tmux driver adapter — only available when the `daemon` feature (and thus
 /// the daemon's `TmuxDriver`) is compiled in.
