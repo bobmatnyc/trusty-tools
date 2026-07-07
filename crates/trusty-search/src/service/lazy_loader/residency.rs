@@ -131,26 +131,71 @@ pub fn ids_to_park(resident_entries: Vec<PersistedIndex>, cap: usize) -> Vec<Per
 /// (registered in step 1) and reloads it through the existing cold-load path.
 /// Worst case is one redundant reload — never a lost or corrupted index.
 ///
+/// **In-flight-cold-load guard (found by QA against an earlier revision of
+/// this function — the fix below closes it):** `get_or_load_index`
+/// (`loader.rs`) has an unavoidable internal gap between `restore_fn`
+/// resolving — at which point the freshly-built handle is ALREADY registered
+/// into the hot `registry` — and its own `cold_store.mark_loaded(id)` call,
+/// which is what finally clears `id` from `cold_store.entries`. `id` is
+/// therefore present in BOTH stores for the whole duration of that gap. If
+/// this function parked `id` during that window, `register_cold_entries`
+/// would re-insert a cold entry, `remove_and_get` would detach the
+/// just-loaded handle, and then the racing loader's `mark_loaded(id)` would
+/// remove the very entry we just added — orphaning `id` in NEITHER store and
+/// turning the racing query's success into a spurious `NotFound`. The guard:
+/// bail out immediately (`return false`, nothing touched) whenever `id` is
+/// still present in `cold_store` at call time — that membership is the exact,
+/// already-existing tell for "a cold-load has this id's entry claimed and
+/// hasn't finished settling it" (a purely resident, settled id is never a
+/// member of `cold_store.entries`). Parking is an optimisation; skipping one
+/// id for one sweep tick is always safe — the next tick tries again once the
+/// load has settled.
+///
+/// Reverse ordering (a load starting while a park is mid-flight): between
+/// this function's step 1 (`register_cold_entries`) and step 2
+/// (`remove_and_get`), `id` is a member of BOTH stores, never neither. A
+/// concurrent `get_or_load_index` call either (a) reads the hot registry
+/// before step 2 runs and returns the still-valid old handle via its normal
+/// fast path — step 2 having not yet run, nothing races; or (b) reads the hot
+/// registry after step 2 has removed it, finds `None`, then finds the cold
+/// entry step 1 already installed, and proceeds through the ordinary
+/// cold-load path. Because a call can only reach `get_or_load_index`'s cold
+/// branch once the hot registry lookup has ALREADY returned `None`, a fresh
+/// load can never observe `id` as "neither" either. Combined with the
+/// in-flight guard above, `id` is provably in at least one of {hot registry,
+/// cold store} at every observable instant of any park/load interleaving.
+///
 /// The caller (the residency-sweep ticker) is responsible for stopping the
 /// index's file watcher after a successful park — see
 /// `service::server::tickers::run_residency_sweep_tick` for why that is a
 /// deliberate, documented choice rather than something this primitive does.
 ///
-/// What: (1) `cold_store.register_cold_entries([entry])`; (2)
-/// `registry.remove_and_get(id)`. Returns `true` when an index was actually
-/// resident and got parked. Returns `false` — and rolls back the cold-store
-/// registration — when the id had already been removed by a concurrent
-/// delete / orphan-reap (benign race: nothing to park, and we must not leave
-/// a stray, unloadable cold entry for an index that no longer exists).
+/// What: (0) bail out with `false` if `id` is already in `cold_store`
+/// (in-flight load guard, see above); (1) `cold_store.register_cold_entries([entry])`;
+/// (2) `registry.remove_and_get(id)`. Returns `true` when an index was
+/// actually resident and got parked. Returns `false` — and rolls back the
+/// cold-store registration — when the id had already been removed by a
+/// concurrent delete / orphan-reap (benign race: nothing to park, and we must
+/// not leave a stray, unloadable cold entry for an index that no longer
+/// exists).
 /// Test: `cold_park_index_moves_hot_to_cold`,
-/// `cold_park_index_absent_returns_false_and_leaves_no_stray_entry`; full
-/// disk-round-trip coverage in `tests/residency_cold_park.rs`.
+/// `cold_park_index_absent_returns_false_and_leaves_no_stray_entry`,
+/// `cold_park_index_never_orphans_a_racing_cold_load`; full disk-round-trip
+/// coverage in `tests/residency_cold_park.rs`.
 pub async fn cold_park_index(
     id: &IndexId,
     registry: &IndexRegistry,
     cold_store: &ColdIndexStore,
     entry: PersistedIndex,
 ) -> bool {
+    // 0. In-flight-cold-load guard: `id` still being a member of `cold_store`
+    //    means a concurrent `get_or_load_index` call has this id's cold entry
+    //    claimed and has not yet reached `mark_loaded` — see the function doc
+    //    for the full race analysis. Skip; the next sweep tick retries once
+    //    the load has settled.
+    if cold_store.contains(id) {
+        return false;
+    }
     // 1. Make the index discoverable as "cold" FIRST — closes the gap where a
     //    concurrent query would otherwise see it in neither store.
     cold_store.register_cold_entries(vec![entry]);
@@ -324,5 +369,92 @@ mod tests {
             "index must be discoverable in exactly one of hot/cold after park, never neither"
         );
         assert!(!hot && is_cold, "park must leave the index cold, not hot");
+    }
+
+    /// Deterministic (synchronization-based, not timing-based) reproduction
+    /// of the orphan race a QA pass caught against an earlier revision of
+    /// `cold_park_index`: a residency-sweep park landing in the gap between
+    /// `get_or_load_index`'s `restore_fn` registering the freshly-loaded
+    /// handle into the hot registry and its own `mark_loaded` call clearing
+    /// the id from the cold store.
+    ///
+    /// Why deterministic rather than timing-based: `restore_fn` is `await`ed
+    /// synchronously by `get_or_load_index` — injecting the racing
+    /// `cold_park_index` call INSIDE the closure, after it registers the
+    /// handle but before it returns, reproduces the exact interleaving on
+    /// every run with no `sleep`/`yield_now` and no flakiness.
+    ///
+    /// What: seeds a cold entry, then drives `get_or_load_index` with a
+    /// `restore_fn` that (a) registers the handle — mirroring
+    /// `restore_index_on_demand` — then (b) calls `cold_park_index` for the
+    /// SAME id right there, mid-load. Asserts: the racing park must refuse
+    /// (returns `false`, the in-flight guard); the original load must still
+    /// resolve `Ok` (never a spurious `NotFound`); and afterward the id is in
+    /// EXACTLY one of {hot registry, cold store} — never neither, never both.
+    /// Test: this test (issue #2161 QA follow-up).
+    #[tokio::test]
+    async fn cold_park_index_never_orphans_a_racing_cold_load() {
+        let registry = IndexRegistry::default();
+        let cold = ColdIndexStore::new();
+        let id = IndexId::new("race-load-park".to_string());
+        cold.register_cold_entries(vec![mk_entry("race-load-park", Some(1))]);
+
+        let registry_for_restore = registry.clone();
+        let cold_for_restore = cold.clone();
+        let id_for_restore = id.clone();
+
+        let result = crate::service::lazy_loader::get_or_load_index(
+            &id,
+            &registry,
+            &cold,
+            std::time::Duration::from_secs(5),
+            move |restored_entry| {
+                let registry_for_restore = registry_for_restore.clone();
+                let cold_for_restore = cold_for_restore.clone();
+                let id_for_restore = id_for_restore.clone();
+                async move {
+                    // Mirror `restore_index_on_demand`: register the handle
+                    // into the hot registry BEFORE `get_or_load_index` has
+                    // had a chance to call `mark_loaded`. `restored_entry`
+                    // still lives in `cold_store.entries` at this exact
+                    // instant — this is the race window under test.
+                    registry_for_restore.register(build_mock_handle("race-load-park"));
+
+                    // The residency sweep races in here, mid-load, and tries
+                    // to park the very id that is being loaded right now.
+                    let parked = cold_park_index(
+                        &id_for_restore,
+                        &registry_for_restore,
+                        &cold_for_restore,
+                        restored_entry,
+                    )
+                    .await;
+                    assert!(
+                        !parked,
+                        "cold_park_index must refuse an id with an in-flight cold-load"
+                    );
+
+                    true
+                }
+            },
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "the racing load must still succeed — never a spurious NotFound"
+        );
+
+        let hot = registry.get(&id).is_some();
+        let is_cold = cold.contains(&id);
+        assert!(
+            hot ^ is_cold,
+            "after the race the id must be in EXACTLY one of {{hot, cold}} — \
+             hot={hot} is_cold={is_cold}"
+        );
+        assert!(
+            hot,
+            "the load won the race and must leave the index resident, not cold"
+        );
     }
 }
