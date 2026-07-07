@@ -12,22 +12,30 @@
 //!     `LAST_QUERIED_WRITE_INTERVAL_SECS`.
 //!   - `store` — `ColdIndexStore` + `select_warmboot_entries()`.
 //!   - `loader` — `get_or_load_index()` + `LazyLoadError`.
+//!   - `residency` — issue #2161's usage-based resident-index cap:
+//!     `max_resident_indexes()`, `residency_sweep_secs()`, `ids_to_park()`,
+//!     and `cold_park_index()`, the non-destructive runtime counterpart to
+//!     boot-time selective warm-boot.
 //!
 //! Back-compat: when `TRUSTY_WARMBOOT_MAX_INDEXES` is unset, `select_warmboot_entries`
 //! returns all entries as eager and the cold store is empty — exact same behaviour
-//! as the pre-#993 daemon.
+//! as the pre-#993 daemon. Likewise, when `TRUSTY_MAX_RESIDENT_INDEXES` is unset,
+//! the residency sweep never cold-parks a resident index (issue #2161).
 //!
 //! Test: `select_warmboot_entries_*`, `cold_reload_timeout_parses_env`,
-//!       `warmboot_max_indexes_parses_env`, `get_or_load_index_*`.
+//!       `warmboot_max_indexes_parses_env`, `get_or_load_index_*`,
+//!       `residency::tests::*`.
 
 mod env;
 mod loader;
+mod residency;
 mod store;
 
 // Re-export all public symbols so callers that use
 // `crate::service::lazy_loader::*` need no changes.
 pub use env::{cold_reload_timeout, warmboot_max_indexes, LAST_QUERIED_WRITE_INTERVAL_SECS};
 pub use loader::{get_or_load_index, LazyLoadError};
+pub use residency::{cold_park_index, ids_to_park, max_resident_indexes, residency_sweep_secs};
 pub use store::{select_warmboot_entries, ColdIndexStore};
 
 #[cfg(test)]
