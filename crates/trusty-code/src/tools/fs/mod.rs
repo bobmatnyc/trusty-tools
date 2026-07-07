@@ -7,12 +7,16 @@
 //! impossible.
 //! What: Three `ToolExecutor` impls — `ReadFileTool`, `WriteFileTool`, and
 //! `EditTool` — each with an OpenAI-function-call schema and registration helpers.
+//! `EditTool` (#2068) supports three edit wire formats — SEARCH/REPLACE,
+//! unified-diff, and whole-file — selected per-model via `edit_format`.
 //! Errors use `thiserror` for clean structured error types.
 //! Test: `read.rs`, `write.rs`, and `edit.rs` each carry tempdir-based unit
-//! tests; `registry_tests` verifies all three appear in `schemas()` and dispatch
-//! through `dispatch_gated`.
+//! tests; `edit_format` carries its own matrix/application tests;
+//! `registry_tests` verifies all three tools appear in `schemas()` and
+//! dispatch through `dispatch_gated`.
 
 pub mod edit;
+pub mod edit_format;
 pub mod read;
 pub mod write;
 
@@ -52,6 +56,19 @@ pub enum FsError {
     /// `edit` found more than one occurrence of `old_string`.
     #[error("edit: old_string is ambiguous ({count} matches) in {path}")]
     EditAmbiguous { path: PathBuf, count: usize },
+
+    /// A `unified_diff` edit's hunk header (`@@ -l,s +l,s @@`) could not be parsed.
+    #[error("edit: invalid unified diff: {reason}")]
+    DiffHunkHeader { reason: String },
+
+    /// A `unified_diff` edit's context or removal line did not match the
+    /// file's current content at the expected position.
+    #[error("edit: diff context mismatch in {path} near original line {line}: {reason}")]
+    DiffContextMismatch {
+        path: PathBuf,
+        line: usize,
+        reason: String,
+    },
 
     /// Underlying IO error.
     #[error("io error on {path}: {source}")]

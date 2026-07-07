@@ -261,11 +261,17 @@ struct ProjectToolFactory {
 
 #[async_trait]
 impl RegistryFactory for ProjectToolFactory {
-    async fn build(&self, _agent: &AgentConfig, _ctx: &RunContext) -> Arc<ToolRegistry> {
+    async fn build(&self, agent: &AgentConfig, ctx: &RunContext) -> Arc<ToolRegistry> {
+        // #2068: resolve the engineer's model slug so `EditTool` can pick its
+        // per-model edit-format fallback order (mirrors
+        // `run_task::ProjectToolFactory::build`, which is private to that module).
+        let model_slug = resolve_model(agent, Some(ctx));
         let mut reg = ToolRegistry::new();
         reg.register(Arc::new(ReadFileTool::new(&self.project)));
         reg.register(Arc::new(WriteFileTool::new(&self.project)));
-        reg.register(Arc::new(EditTool::new(&self.project)));
+        reg.register(Arc::new(
+            EditTool::new(&self.project).with_model_slug(model_slug),
+        ));
         reg.register(Arc::new(BashTool::new(
             Some(self.project.clone()),
             Duration::from_secs(ENGINEER_BASH_TIMEOUT_SECS),
