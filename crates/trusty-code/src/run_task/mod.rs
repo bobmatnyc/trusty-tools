@@ -35,8 +35,8 @@ use crate::prompt::assemble_system_prompt;
 use crate::provider::resolve_model;
 use crate::runner::{InProcessAgentRunner, RegistryFactory};
 use crate::tools::{
-    AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, ReadFileTool, RunContext,
-    ToolRegistry, WriteFileTool,
+    AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, FinishTaskTool,
+    ReadFileTool, RunContext, ToolRegistry, WriteFileTool,
 };
 
 pub use recorder::{RecordingLlmClient, SharedTranscript, TurnRecord};
@@ -117,12 +117,16 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
         Arc::clone(&transcript),
     );
 
-    // The PM's tool registry: just the delegate tool (the PM orchestrates; the
-    // engineer does the file work). Pre-flight validation uses the agents dir.
+    // The PM's tool registry: the delegate tool (the PM orchestrates; the
+    // engineer does the file work) plus `finish_task` (#2072) so the PM can
+    // signal completion with a structured report instead of relying solely on
+    // the implicit no-tool-call convention. Pre-flight validation uses the
+    // agents dir.
     let mut pm_registry = ToolRegistry::new();
     pm_registry.register(Arc::new(
         DelegateToAgentTool::new(engineer_runner).with_config_dir(params.agents_dir.clone()),
     ));
+    pm_registry.register(Arc::new(FinishTaskTool::new()));
 
     // The PM's loop uses a transcript-recording client tagged "pm".
     let pm_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
@@ -211,11 +215,13 @@ fn build_engineer_runner(
 /// Builds the engineer's project-scoped tool registry for each delegation.
 ///
 /// Why: The engineer needs real file and shell tools that cannot escape the
-/// project root. This factory constructs `read_file`, `write_file`, `edit`, and
-/// `bash` all scoped to `self.project` so the engineer operates only inside the
-/// project working tree.
+/// project root, plus (#2072) `finish_task` so it can signal completion with a
+/// structured report. This factory constructs `read_file`, `write_file`,
+/// `edit`, and `bash` all scoped to `self.project`, so the engineer operates
+/// only inside the project working tree; `finish_task` has no filesystem
+/// footprint and needs no scoping.
 /// What: Implements `RegistryFactory::build`, returning an `Arc<ToolRegistry>`
-/// with the four tools; the runner then gates them by the engineer's
+/// with all five tools; the runner then gates them by the engineer's
 /// `tools.allowed`.
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer` (the engineer's
 /// `write_file` actually writes into the project).
@@ -234,6 +240,7 @@ impl RegistryFactory for ProjectToolFactory {
             Some(self.project.clone()),
             Duration::from_secs(ENGINEER_BASH_TIMEOUT_SECS),
         )));
+        reg.register(Arc::new(FinishTaskTool::new()));
         Arc::new(reg)
     }
 }

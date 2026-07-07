@@ -12,10 +12,13 @@
 //! `LlmClientTrait::chat`, accrue usage into a `PerfCollector`, append the
 //! assistant turn, and — if there are tool calls — dispatch each via
 //! `ToolRegistry::dispatch_gated` (notifying the optional sink around each
-//! dispatch) and append the results. Exits with `AgentOutput` on the first
-//! assistant turn that has NO tool calls (the D3 no-tool-call finish
-//! convention); aborts with a partial output when the turn cap, timeout, or
-//! (#2056) an external cancellation flag fires.
+//! dispatch) and append the results. Exits with `AgentOutput` in either of two
+//! ways: the first assistant turn that has NO tool calls (the D3 no-tool-call
+//! finish convention, preserved unchanged as the fallback), or (#2072) an
+//! explicit, successfully-validated `finish_task` tool call, whose structured
+//! `status`/`summary`/`changes`/test-count fields become the final
+//! `AgentOutput` via `build_finish_output`. Aborts with a partial output when
+//! the turn cap, timeout, or (#2056) an external cancellation flag fires.
 //! What: The whole `chat → dispatch → iterate` body runs inside a single
 //! `tokio::time::timeout` so a stalled model or hung tool cannot block forever.
 //! Test: `agent_loop::tests` — stubbed two-turn flow, turn-cap abort, recoverable
@@ -41,7 +44,7 @@ use crate::llm::{
 };
 use crate::mode::HarnessMode;
 use crate::perf::PerfCollector;
-use crate::tools::{AgentOutput, ToolRegistry, ToolResult};
+use crate::tools::{AgentOutput, FINISH_TASK_TOOL_NAME, FinishTaskArgs, ToolRegistry, ToolResult};
 
 pub use error::AgentLoopError;
 pub use sink::ToolEventSink;
@@ -202,12 +205,16 @@ impl AgentLoop {
     /// What: Iterates up to `max_turns`: check the (#2056) cancellation flag →
     /// build request → chat → accrue usage → append assistant turn → if tool
     /// calls are present, dispatch each (notifying the optional sink) and
-    /// append results, then continue; otherwise (a no-tool-call turn) return
-    /// the assembled output. Per D3, `finish_reason` never gates termination —
-    /// pending tool calls always run first. Exhausting the turn budget returns
-    /// `TurnCapExceeded`; an observed cancellation returns `Cancelled` — both
-    /// with the partial transcript.
-    /// Test: Same tests as `run`, plus `cancel_flag_aborts_before_next_turn`.
+    /// append results, then continue — UNLESS one of those calls was a
+    /// successfully-validated `finish_task` (#2072), in which case the loop
+    /// returns immediately with the structured completion output built by
+    /// `build_finish_output`. Otherwise (a no-tool-call turn) return the
+    /// assembled output — the D3 fallback, unchanged. Per D3, `finish_reason`
+    /// never gates termination — pending tool calls always run first.
+    /// Exhausting the turn budget returns `TurnCapExceeded`; an observed
+    /// cancellation returns `Cancelled` — both with the partial transcript.
+    /// Test: Same tests as `run`, plus `cancel_flag_aborts_before_next_turn`,
+    /// `explicit_finish_task_terminates_loop_with_structured_summary`.
     async fn run_inner(
         &self,
         transcript: &mut Transcript,
@@ -247,7 +254,15 @@ impl AgentLoop {
                 return Ok(build_output(transcript, perf));
             }
 
-            self.dispatch_all(&tool_calls, transcript).await;
+            // #2072: an explicit, successfully-validated `finish_task` call
+            // terminates the loop immediately with the structured completion
+            // report, rather than waiting for a later no-tool-call turn. Every
+            // tool call in this turn is still dispatched and answered first
+            // (the API requires a result for each), so this check happens
+            // AFTER `dispatch_all`, not instead of it.
+            if let Some(finish_args) = self.dispatch_all(&tool_calls, transcript).await {
+                return Ok(build_finish_output(transcript, perf, &finish_args));
+            }
         }
 
         Err(AgentLoopError::TurnCapExceeded {
@@ -269,13 +284,32 @@ impl AgentLoop {
     /// dispatches through `dispatch_gated` with no per-agent allowlist,
     /// notifies `tool_finished` (success) or `tool_error` (a
     /// fatal/non-recoverable `ToolResult::Error`) based on the result, and
-    /// appends the result as a `tool` message.
+    /// appends the result as a `tool` message. EVERY call in `tool_calls` is
+    /// dispatched and answered, regardless of whether an earlier one was
+    /// `finish_task` — the API requires a result for each pending call.
+    /// What (#2072): if any call names [`FINISH_TASK_TOOL_NAME`] and its
+    /// dispatch did not return an error (i.e. its arguments passed both the
+    /// generic schema validation above AND `FinishTaskTool::execute`'s own
+    /// deserialisation), returns `Some(args)` with that call's validated
+    /// argument `Value` — the LAST such call wins if the model (unusually)
+    /// emits more than one in a single turn. A malformed/invalid `finish_task`
+    /// call is reported through the same recoverable-error path as any other
+    /// tool and does NOT terminate the loop, letting the model retry.
     /// Test: `agent_loop::tests::recoverable_tool_error_continues`,
     /// `agent_loop::tests::malformed_tool_arguments_report_recoverable_error_and_loop_continues`,
     /// `sink_receives_started_then_finished_in_order`,
-    /// `sink_receives_tool_error_for_fatal_failures`.
-    async fn dispatch_all(&self, tool_calls: &[ToolCall], transcript: &mut Transcript) {
+    /// `sink_receives_tool_error_for_fatal_failures`,
+    /// `explicit_finish_task_terminates_loop_with_structured_summary`,
+    /// `malformed_finish_task_repairs_then_terminates`,
+    /// `finish_task_missing_required_field_is_recoverable_not_terminal`,
+    /// `finish_task_invalid_enum_value_is_recoverable_not_terminal`.
+    async fn dispatch_all(
+        &self,
+        tool_calls: &[ToolCall],
+        transcript: &mut Transcript,
+    ) -> Option<Value> {
         let extractor = ToolCallExtractor::new(|name| self.registry.schema_for(name));
+        let mut finish_args: Option<Value> = None;
 
         for call in tool_calls {
             let tool = call.function.name.as_str();
@@ -293,14 +327,20 @@ impl AgentLoop {
                 sink.tool_started(&call.id, tool, &args.to_string()).await;
             }
 
-            let result = self.registry.dispatch_gated(tool, args, None).await;
+            let result = self.registry.dispatch_gated(tool, args.clone(), None).await;
 
             if let Some(sink) = &self.sink {
                 notify_result(sink.as_ref(), &call.id, tool, &result).await;
             }
 
             transcript.push_tool_result(&call.id, tool, result.content());
+
+            if tool == FINISH_TASK_TOOL_NAME && !result.is_error() {
+                finish_args = Some(args);
+            }
         }
+
+        finish_args
     }
 
     /// Report an invalid or malformed tool call as a recoverable tool result.
@@ -466,5 +506,34 @@ fn build_output(transcript: &Transcript, perf: &PerfCollector) -> AgentOutput {
         totals.cache_read_tokens,
         totals.cache_creation_tokens,
     );
+    output
+}
+
+/// Assemble the final `AgentOutput` from an explicit `finish_task` call (#2072).
+///
+/// Why: An explicit `finish_task` call carries a deterministic, structured
+/// completion report the model built on purpose — reusing that report as the
+/// loop's final output (rather than falling back to whatever prose the
+/// transcript happens to contain) is the entire point of §5.8's "-20 to -30%
+/// per agent output; deterministic, no prose interpretation" impact claim.
+/// What: Starts from the same usage/content baseline as [`build_output`], then
+/// — if `finish_args` deserialises into a `FinishTaskArgs` (it always should,
+/// since `dispatch_all` only calls this after a successful `finish_task`
+/// dispatch, which itself required a successful deserialisation) — overwrites
+/// `content` with [`crate::tools::render_finish_summary`] and sets `summary` to
+/// the model's own one-line `summary` field. On the (should-be-unreachable)
+/// deserialisation failure, falls back to the transcript-derived content
+/// `build_output` already computed, rather than panicking.
+/// Test: `agent_loop::tests::explicit_finish_task_terminates_loop_with_structured_summary`.
+fn build_finish_output(
+    transcript: &Transcript,
+    perf: &PerfCollector,
+    finish_args: &Value,
+) -> AgentOutput {
+    let mut output = build_output(transcript, perf);
+    if let Ok(parsed) = serde_json::from_value::<FinishTaskArgs>(finish_args.clone()) {
+        output.summary = Some(parsed.summary.clone());
+        output.content = crate::tools::render_finish_summary(&parsed);
+    }
     output
 }
