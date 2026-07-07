@@ -9,6 +9,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- statusline shows session + weekly account-usage % ([#2141](https://github.com/bobmatnyc/trusty-tools/pull/2141)) ([`18a7942`](https://github.com/bobmatnyc/trusty-tools/commit/18a79426bd9b618910fbc3869d1929f98de19aec))
+- statusline renders context >50% in red ([#2099](https://github.com/bobmatnyc/trusty-tools/pull/2099)) ([`a821b9d`](https://github.com/bobmatnyc/trusty-tools/commit/a821b9da89d7c076dfb4557094f632859b53642e))
+- manage trusty-search index lifecycle for session worktrees ([#2094](https://github.com/bobmatnyc/trusty-tools/pull/2094)) ([`299e993`](https://github.com/bobmatnyc/trusty-tools/commit/299e9931edd2b7faf9236bd5ccc3b6ddb038329d))
+- project config stores preferred gh user; default gh ops to it ([#2087](https://github.com/bobmatnyc/trusty-tools/pull/2087)) ([`d49e385`](https://github.com/bobmatnyc/trusty-tools/commit/d49e385826c0befb0d4cece01a032c71e67e1aa3))
+- name managed-session worktrees by tmux session name, not UUID ([#2076](https://github.com/bobmatnyc/trusty-tools/pull/2076)) ([`39abd2e`](https://github.com/bobmatnyc/trusty-tools/commit/39abd2e02b47e5b4e739ad30de57c33cfdf4dc54))
+
+### Fixed
+
+- guarantee PM delegation persona loads (CLAUDE.md carrier + project-tier output-style + daemon-adapter system-prompt injection) ([#2129](https://github.com/bobmatnyc/trusty-tools/pull/2129)) ([`3a071a0`](https://github.com/bobmatnyc/trusty-tools/commit/3a071a0a2897911279433522d2564cb532f310be))
+- pm_guard exempts native delegated sub-agent edits; retire global UNRESTRICTED bypass ([#2107](https://github.com/bobmatnyc/trusty-tools/pull/2107)) ([`0f413d0`](https://github.com/bobmatnyc/trusty-tools/commit/0f413d0c5d611178dbd5344475ae61ba5fa21213))
+- PM summarizes orchestration in prose instead of raw pm_summary JSON ([#2045](https://github.com/bobmatnyc/trusty-tools/pull/2045)) ([`53731f4`](https://github.com/bobmatnyc/trusty-tools/commit/53731f4849436607cdef55237680a230c798d94f))
+- statusline shows tmux session name instead of worktree UUID branch ([#2035](https://github.com/bobmatnyc/trusty-tools/pull/2035)) ([`bbafad1`](https://github.com/bobmatnyc/trusty-tools/commit/bbafad11063accc2631be4fd97cb610c13152faa))
+- reach trusty-memory over discovered JSON-RPC, never a hardcoded port ([#2040](https://github.com/bobmatnyc/trusty-tools/pull/2040)) ([`e0f41c5`](https://github.com/bobmatnyc/trusty-tools/commit/e0f41c51f1baa7ddf0e427cb5c7e86cbe9bba5fa))
+
+### Changed
+
+- bump version 0.16.0 -> 0.16.1 ([#2139](https://github.com/bobmatnyc/trusty-tools/pull/2139)) ([`931917c`](https://github.com/bobmatnyc/trusty-tools/commit/931917cdc2606f563be7c711a5adb2842e7ce229))
+
+### Documentation
+
+- bundled architecture doc for memory-MCP, session/worktree, search-index ([#2096](https://github.com/bobmatnyc/trusty-tools/pull/2096)) ([`d82e15a`](https://github.com/bobmatnyc/trusty-tools/commit/d82e15ae9367a4c17cdd8fb714e053eb6da9cab7))
+## [Unreleased]
+
+### Added
+
 - statusline renders context >50% in red ([#2099](https://github.com/bobmatnyc/trusty-tools/pull/2099)) ([`a821b9d`](https://github.com/bobmatnyc/trusty-tools/commit/a821b9da89d7c076dfb4557094f632859b53642e))
 - manage trusty-search index lifecycle for session worktrees ([#2094](https://github.com/bobmatnyc/trusty-tools/pull/2094)) ([`299e993`](https://github.com/bobmatnyc/trusty-tools/commit/299e9931edd2b7faf9236bd5ccc3b6ddb038329d))
 - project config stores preferred gh user; default gh ops to it ([#2087](https://github.com/bobmatnyc/trusty-tools/pull/2087)) ([`d49e385`](https://github.com/bobmatnyc/trusty-tools/commit/d49e385826c0befb0d4cece01a032c71e67e1aa3))
