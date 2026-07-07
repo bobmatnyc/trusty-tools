@@ -844,6 +844,20 @@ impl<G: GitBackend> WorkspaceProvisioner<G> {
                     path = %workspace_path.display(),
                     "workspace provisioned and session prepared"
                 );
+                // Issue #2149: `prepare_session_with_repo_url` no longer aborts
+                // on a roster-deploy failure, so a broken agent/skill catalog
+                // would otherwise only show up as a suspiciously low
+                // `deployed` count above. Surface it loudly and explicitly —
+                // this is the gap that previously shipped a session with no
+                // roster AND no trusty-mpm identity.
+                for err in &report.roster_errors {
+                    tracing::error!(
+                        session = %session_id,
+                        path = %workspace_path.display(),
+                        "roster provisioning gap (session still launches with its \
+                         trusty-mpm identity): {err}"
+                    );
+                }
             }
             Err(e) => {
                 tracing::warn!(

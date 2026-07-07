@@ -202,15 +202,27 @@ pub(crate) async fn launch(
     //     run `tm install` / `tm catalog sync` to populate agents manually.
     {
         let fw = trusty_mpm::core::paths::FrameworkPaths::default();
-        if let Err(e) = trusty_mpm::core::session_launch::prepare_session_with_repo_url(
+        match trusty_mpm::core::session_launch::prepare_session_with_repo_url(
             &fw,
             &managed_path,
             Some(&origin_url),
         ) {
-            tracing::warn!(
-                "session prep failed for worktree {} (non-fatal): {e}",
-                managed_path.display()
-            );
+            Ok(report) => {
+                // Issue #2149: a roster-deploy failure no longer aborts
+                // preparation — surface it loudly rather than let it hide.
+                for err in &report.roster_errors {
+                    tracing::error!(
+                        "roster provisioning gap for worktree {}: {err}",
+                        managed_path.display()
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "session prep failed for worktree {} (non-fatal): {e}",
+                    managed_path.display()
+                );
+            }
         }
         // Pre-seed workspace trust so claude starts without blocking prompts.
         if let Err(e) = trusty_mpm::core::home_trust_seed::preseed_home_trust(&managed_path) {

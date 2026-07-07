@@ -147,6 +147,13 @@ async fn start_session_in_place(
             if let Some(ctx) = report.catchup_context {
                 println!("\n---\n\n## Recent Activity (catch-up)\n\n{ctx}");
             }
+            // Issue #2149: a roster-deploy failure no longer aborts
+            // preparation (the trusty-mpm identity/output-style still gets
+            // written), but the operator must see it — not just a
+            // suspiciously low deploy count above.
+            for err in &report.roster_errors {
+                eprintln!("error: roster provisioning gap: {err}");
+            }
         }
         Err(err) => eprintln!("warning: session preparation failed: {err}"),
     }

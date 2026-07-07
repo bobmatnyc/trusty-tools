@@ -66,19 +66,36 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// (when `Some`) gives the managed workspace root for the worktree scan;
 /// `active_workspace_paths` is the full set of workspace paths currently
 /// registered to live sessions.
-/// Test: `run_doctor_produces_nine_checks`.
+///
+/// Issue #2149: `check_agents`/`check_skills` are ALSO scoped by
+/// `project_dir` when it is supplied. A managed session (#1931) deploys its
+/// roster under `<workspace>/.claude/{agents,skills}`, not the operator's
+/// `$HOME/.claude` — probing only the home-tier directories previously let a
+/// managed workspace with a completely empty roster report a false `agents`
+/// `Ok` (because the operator's OWN `$HOME/.claude/agents/` was populated),
+/// silently missing the exact provisioning gap this issue is about. With no
+/// `project_dir` (the pre-existing CLI/standalone usage) this is unchanged —
+/// [`FrameworkPaths::default`] still probes the home tier.
+/// Test: `run_doctor_produces_nine_checks`,
+/// `check_agents_scoped_to_managed_workspace_fails_on_empty_roster`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
     repos_root: Option<&Path>,
     active_workspace_paths: &[PathBuf],
 ) -> DoctorReport {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let paths = FrameworkPaths::default();
+    let paths = match project_dir {
+        Some(dir) => FrameworkPaths::for_managed_workspace(dir),
+        None => FrameworkPaths::default(),
+    };
+    // Skills are probed at the same root the roster deploys to: the workspace
+    // itself for a managed session, else the operator's home directory.
+    let skills_root: &Path = project_dir.unwrap_or(&home);
 
     let mut checks = vec![
         check_instructions(project_dir),
         check_agents(&paths),
-        check_skills(&home),
+        check_skills(skills_root),
         check_skill_source(&paths),
         check_output_style(project_dir, &home),
     ];
@@ -428,6 +445,63 @@ mod tests {
             std::env::remove_var("TRUSTY_SEARCH_ADDR");
         }
         assert_eq!(check.status, CheckStatus::Fail);
+    }
+
+    #[tokio::test]
+    async fn agents_check_scopes_to_managed_workspace_when_project_given() {
+        // Issue #2149: a managed session deploys its roster under
+        // `<workspace>/.claude/agents/` (issue #1931), NOT the operator's
+        // `$HOME/.claude/agents/`. Before this fix `run_doctor` always probed
+        // `FrameworkPaths::default()` (the home tier) even when a `project_dir`
+        // was supplied, so a managed workspace with a completely empty/broken
+        // roster could report a false `agents` `Ok` purely because the
+        // OPERATOR's own `$HOME/.claude/agents/` happened to be populated —
+        // silently missing the exact provisioning gap this issue is about.
+        // A fresh, empty `project_dir` with NO `.claude/agents/` at all must
+        // now `Fail`, regardless of whatever the real test-runner's home
+        // directory holds.
+        let project = tempfile::tempdir().unwrap();
+        let report = run_doctor(Some(project.path()), None, &[]).await;
+        let agents_check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "agents")
+            .expect("agents check present");
+        assert_eq!(agents_check.status, CheckStatus::Fail);
+        // The message must name the WORKSPACE-scoped path, not the operator's
+        // home directory, proving the probe was scoped to `project_dir`.
+        let expected_dir = project.path().join(".claude").join("agents");
+        assert!(
+            agents_check
+                .message
+                .contains(&expected_dir.display().to_string()),
+            "message must name the workspace-scoped agents dir: {}",
+            agents_check.message
+        );
+    }
+
+    #[tokio::test]
+    async fn agents_check_ok_when_managed_workspace_roster_populated() {
+        // The positive counterpart: a project-scoped roster (with its manifest)
+        // must report `Ok`, proving the probe reads the WORKSPACE tier rather
+        // than always falling through to the home tier.
+        let project = tempfile::tempdir().unwrap();
+        let agents_dir = project.path().join(".claude").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("engineer.md"), "agent").unwrap();
+        std::fs::write(
+            agents_dir.join(crate::core::agent_manifest::MANIFEST_FILE),
+            "{}",
+        )
+        .unwrap();
+
+        let report = run_doctor(Some(project.path()), None, &[]).await;
+        let agents_check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "agents")
+            .expect("agents check present");
+        assert_eq!(agents_check.status, CheckStatus::Ok);
     }
 
     #[tokio::test]

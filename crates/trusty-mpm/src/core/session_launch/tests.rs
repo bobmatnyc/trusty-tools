@@ -298,6 +298,11 @@ fn prepare_session_self_heals_renamed_skill_source() {
     );
 }
 
+// Issue #2149 roster-deploy-failure-continues coverage lives in the sibling
+// `tests_roster.rs` file (split out to keep this file under the 1500-SLOC
+// test-file cap, mirroring the `doctor_output_style.rs` / `doctor_fs_checks.rs`
+// split pattern already used elsewhere in this crate).
+
 /// Why (issue #1904 stretch goal): `prepare_session_inner` emits discrete
 /// `provisioning_stage` events (DeployingAgents/DeployingSkills/
 /// BuildingInstructions/ConfiguringMcp) so the daemon's SSE stream can drive
