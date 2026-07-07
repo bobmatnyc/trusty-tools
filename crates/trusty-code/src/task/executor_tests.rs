@@ -159,3 +159,46 @@ fn daily_driver_skills_catalog_some_when_skills_exist() {
     assert!(catalog.contains("demo: Demo skill"));
     assert_eq!(resolver.resolve("demo").as_deref(), Some("full body"));
 }
+
+/// `ProjectToolFactory::build` threads the run's resolved `HarnessMode` onto
+/// the engineer's `EditTool` (#2073) — under `HarnessMode::Parity`, the
+/// dispatched `edit` call must prefer a supplied unified-diff payload even
+/// when the calling model slug would prefer SEARCH/REPLACE under the plain
+/// per-model matrix, proving the daemon path actually wires `with_mode`
+/// through, not just that `EditTool` supports it in isolation
+/// (`tools::fs::edit::tests::edit_under_parity_mode_prefers_unified_diff_even_for_flagship_model_slug`
+/// covers the tool itself).
+#[tokio::test]
+async fn project_tool_factory_threads_parity_mode_into_edit_tool() {
+    let project = tempfile::tempdir().expect("project tempdir");
+    std::fs::write(project.path().join("f.py"), "line1\nline2\n").expect("seed file");
+
+    let factory = ProjectToolFactory {
+        project: project.path().to_path_buf(),
+        mode: crate::mode::HarnessMode::Parity,
+    };
+    let agent = crate::agents::AgentConfig::default();
+    let ctx = crate::tools::RunContext {
+        model: Some("anthropic/claude-opus-4-5".to_string()),
+        ..Default::default()
+    };
+    let registry = factory.build(&agent, &ctx).await;
+
+    let result = registry
+        .dispatch_gated(
+            "edit",
+            serde_json::json!({
+                "path": "f.py",
+                "old_string": "not-present",
+                "new_string": "x",
+                "diff": "@@ -2,1 +2,1 @@\n-line2\n+line2-diffed\n"
+            }),
+            None,
+        )
+        .await;
+
+    assert!(!result.is_error(), "unexpected error: {}", result.content());
+    assert!(result.content().contains("unified_diff"));
+    let updated = std::fs::read_to_string(project.path().join("f.py")).expect("read");
+    assert_eq!(updated, "line1\nline2-diffed\n");
+}
