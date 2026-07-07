@@ -22,6 +22,12 @@
 //! Test: `bm25_entities_idle_eviction_drops_and_lazily_rehydrates` and
 //! `bm25_entities_idle_eviction_skips_indexers_without_corpus` in
 //! `indexer::tests`.
+//!
+//! Also home to [`CodeIndexer::demote_vector_store_if_idle`] (issue #2164),
+//! which rides the exact same idle sweep to re-view (mmap-demote) an idle,
+//! write-promoted HNSW vector store back to `Index::view` — see that
+//! method's doc comment and `UsearchStore::try_demote_to_view` for the full
+//! design.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -153,6 +159,62 @@ impl CodeIndexer {
                 "index '{index_id}': BM25/entities rehydration task panicked ({e}); \
                  will retry on next access"
             ),
+        }
+    }
+
+    /// Demote this index's HNSW vector store back to mmap-view mode when it
+    /// has been idle longer than `idle_threshold` (issue #2164).
+    ///
+    /// Why: the #709 mmap-view optimization keeps a warm-booted HNSW index
+    /// pageable, but any write promotes it to a full heap copy
+    /// (`UsearchStore::ensure_mutable`) with no path back — so in practice
+    /// almost every index a daemon ever writes to stays heap-resident
+    /// forever, even long after it goes idle. This reclaims that heap the
+    /// same way `evict_chunks_if_idle` / `evict_bm25_entities_if_idle`
+    /// reclaim theirs, riding the same idle window and the same ticker tick
+    /// so there is exactly one idle sweep, not a competing second one.
+    /// What: a no-op when `idle_threshold` is zero, the
+    /// [`crate::core::store_config::hnsw_review_idle_enabled`] env gate is
+    /// off, no vector store is wired (BM25-only mode), or the index was
+    /// recently active. Otherwise delegates to
+    /// [`crate::core::store::VectorStore::demote_to_view`], which is the
+    /// authoritative gate on safety (only demotes a store that is currently
+    /// mutable AND has no unpersisted writes — see
+    /// `UsearchStore::try_demote_to_view`). Logs an `info` on an actual
+    /// demotion, a `warn` on failure (never fatal — demotion is an
+    /// optimization). Returns `true` when a demotion happened.
+    /// Test: `hnsw_idle_demotion_reviews_clean_promoted_store` and
+    /// `hnsw_idle_demotion_skips_when_disabled_via_env` in `indexer::tests`.
+    pub async fn demote_vector_store_if_idle(&self, idle_threshold: Duration) -> bool {
+        if idle_threshold.is_zero() {
+            return false;
+        }
+        if !crate::core::store_config::hnsw_review_idle_enabled() {
+            return false;
+        }
+        let Some(store) = &self.store else {
+            return false;
+        };
+        if self.idle_duration() < idle_threshold {
+            return false;
+        }
+        match store.demote_to_view().await {
+            Ok(true) => {
+                tracing::info!(
+                    "index '{}': demoted HNSW vector store to mmap-view after {}s idle",
+                    self.index_id,
+                    idle_threshold.as_secs(),
+                );
+                true
+            }
+            Ok(false) => false,
+            Err(e) => {
+                tracing::warn!(
+                    "index '{}': HNSW demote-to-view failed ({e}); leaving heap-resident",
+                    self.index_id
+                );
+                false
+            }
         }
     }
 }

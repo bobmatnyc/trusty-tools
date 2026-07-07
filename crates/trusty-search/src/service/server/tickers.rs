@@ -90,9 +90,10 @@ pub(super) fn spawn_disk_size_ticker(state: Arc<SearchAppState>) {
 }
 
 /// Spawn a background ticker that evicts each index's in-memory `chunks` map,
-/// BM25 corpus, and per-file entity map after the index has been idle past
-/// the configured window (issue #83 follow-up; BM25/entities added by issue
-/// #2162).
+/// BM25 corpus, and per-file entity map, and demotes its HNSW vector store
+/// back to mmap-view mode, after the index has been idle past the configured
+/// window (issue #83 follow-up; BM25/entities added by issue #2162; HNSW
+/// re-view added by issue #2164).
 ///
 /// Why (idle-memory audit): the durable redb corpus already serves the query
 /// hot path, so an index that hasn't been queried or ingested for a while is
@@ -113,9 +114,10 @@ pub(super) fn spawn_disk_size_ticker(state: Arc<SearchAppState>) {
 /// walk is cheap. Each eviction acquires the relevant read lock only to check
 /// `corpus`/idle state and a brief write lock only when it actually clears
 /// its structure.
-/// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks` and
-/// `bm25_entities_idle_eviction_drops_and_lazily_rehydrates` cover the
-/// per-indexer logic directly; the ticker is a thin scheduling wrapper.
+/// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks`,
+/// `bm25_entities_idle_eviction_drops_and_lazily_rehydrates`, and
+/// `hnsw_idle_demotion_reviews_clean_promoted_store` cover the per-indexer
+/// logic directly; the ticker is a thin scheduling wrapper.
 pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
     let weak = Arc::downgrade(&state);
     tokio::spawn(async move {
@@ -143,6 +145,7 @@ pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
                 let indexer = handle.indexer.read().await;
                 indexer.evict_chunks_if_idle(threshold).await;
                 indexer.evict_bm25_entities_if_idle(threshold).await;
+                indexer.demote_vector_store_if_idle(threshold).await;
             }
         }
     });

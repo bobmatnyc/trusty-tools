@@ -105,4 +105,24 @@ pub trait VectorStore: Send + Sync {
     async fn rewrite_keys_to_relative(&self, _root_path: &Path) -> Result<usize> {
         Ok(0)
     }
+
+    /// Demote a promoted-but-idle store back to mmap-view mode, reclaiming
+    /// its heap-resident copy. Default = no-op (in-memory / mock backends
+    /// have no view-vs-mutable distinction to demote between).
+    ///
+    /// Why (issue #2164): `UsearchStore` promotes its HNSW index to a heap
+    /// copy on the first write (#709's `ensure_mutable`), and until this
+    /// method existed there was no path back — every index ever written even
+    /// once stayed heap-resident for the rest of the process lifetime. This
+    /// is the counterpart demotion path, called from the same idle sweep
+    /// that already evicts chunks/BM25/entities
+    /// (`server::tickers::spawn_idle_chunk_eviction_ticker`).
+    /// What: `UsearchStore` overrides to re-open its HNSW via `Index::view`
+    /// when idle and clean (no unpersisted writes); mock/BM25-only stores
+    /// keep this no-op. Returns `Ok(true)` when an actual demotion happened.
+    /// Test: `UsearchStore` tests — `test_demote_to_view_full_cycle` et al.
+    /// in `store::tests`.
+    async fn demote_to_view(&self) -> Result<bool> {
+        Ok(false)
+    }
 }

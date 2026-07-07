@@ -346,3 +346,150 @@ async fn rebuild_symbol_graph_rehydrates_entities_after_idle_eviction() {
          ensure_bm25_entities_loaded"
     );
 }
+
+/// HNSW idle re-view (issue #2164): a clean, promoted (write-touched)
+/// `UsearchStore` wired into a `CodeIndexer` gets demoted back to mmap-view
+/// mode by the same idle sweep that drives chunk/BM25/entity eviction, and
+/// search returns identical results before and after.
+#[tokio::test]
+async fn hnsw_idle_demotion_reviews_clean_promoted_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+    let dim = 32;
+
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
+    // Keep a concrete handle alongside the `dyn VectorStore` the indexer
+    // holds so the test can assert `in_view_mode()` directly, mirroring how
+    // production code's `store: Option<Arc<dyn VectorStore>>` and a
+    // `UsearchStore`-typed warm-boot handle are the same underlying object.
+    let usearch = Arc::new(UsearchStore::new(dim).expect("usearch new"));
+    let store: Arc<dyn VectorStore> = usearch.clone();
+    let idx = CodeIndexer::new("hnsw-demote-test", "/tmp/hnsw-demote-test")
+        .with_components(embedder, store);
+
+    idx.add_chunk(raw("a", "src/a.rs", "fn a() {}"))
+        .await
+        .expect("add chunk a");
+    idx.add_chunk(raw("b", "src/b.rs", "fn b() {}"))
+        .await
+        .expect("add chunk b");
+    assert!(
+        !usearch.in_view_mode(),
+        "a freshly built, never-loaded store starts mutable"
+    );
+
+    // Flush to disk — this is what `spawn_incremental_persist` /
+    // `force_incremental_persist` do in production, and (issue #2164) is
+    // also what makes a `new()`-built store demotion-eligible by recording
+    // `hnsw_path` and clearing `dirty`.
+    idx.save_vector_store(&path).await.expect("save hnsw");
+
+    let q = SearchQuery {
+        text: "fn a".to_string(),
+        top_k: 5,
+        expand_graph: false,
+        compact: false,
+        ..Default::default()
+    };
+    let results_before = idx.search(&q).await.expect("search before demotion");
+    assert!(!results_before.is_empty(), "expected at least one hit");
+
+    // `search()` touches activity — sleep past ms resolution (see the BM25
+    // idle tests above) so the near-zero threshold below observes genuine
+    // idleness rather than skipping as "just active".
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    // Zero threshold disables the sweep — no-op.
+    assert!(!idx.demote_vector_store_if_idle(Duration::ZERO).await);
+    assert!(!usearch.in_view_mode());
+
+    // A long threshold means "not idle yet" — no-op.
+    assert!(
+        !idx.demote_vector_store_if_idle(Duration::from_secs(3600))
+            .await
+    );
+    assert!(!usearch.in_view_mode());
+
+    // Near-zero idle window: demotion fires.
+    assert!(
+        idx.demote_vector_store_if_idle(Duration::from_nanos(1))
+            .await,
+        "expected the idle sweep to demote the clean, promoted store"
+    );
+    assert!(
+        usearch.in_view_mode(),
+        "store must be back in mmap-view mode after the idle sweep"
+    );
+
+    // Search after demotion returns identical results — no vectors lost.
+    let results_after = idx.search(&q).await.expect("search after demotion");
+    assert_eq!(
+        results_after.iter().map(|c| &c.id).collect::<Vec<_>>(),
+        results_before.iter().map(|c| &c.id).collect::<Vec<_>>(),
+        "search results must be identical before and after HNSW re-view"
+    );
+
+    // A write after demotion re-promotes (view -> mutable -> view -> mutable
+    // is sound); search still finds the new chunk.
+    idx.add_chunk(raw("c", "src/c.rs", "fn c() {}"))
+        .await
+        .expect("add chunk c after demotion");
+    assert!(
+        !usearch.in_view_mode(),
+        "write after demotion must re-promote to mutable"
+    );
+}
+
+/// The `TRUSTY_HNSW_REVIEW_IDLE=0` escape hatch disables demotion while
+/// leaving the store otherwise untouched (issue #2164).
+#[tokio::test]
+async fn hnsw_idle_demotion_skips_when_disabled_via_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hnsw.usearch");
+    let dim = 32;
+
+    let embedder: Arc<dyn Embedder> = Arc::new(MockEmbedder::new(dim));
+    let usearch = Arc::new(UsearchStore::new(dim).expect("usearch new"));
+    let store: Arc<dyn VectorStore> = usearch.clone();
+    let idx = CodeIndexer::new(
+        "hnsw-demote-disabled-test",
+        "/tmp/hnsw-demote-disabled-test",
+    )
+    .with_components(embedder, store);
+
+    idx.add_chunk(raw("a", "src/a.rs", "fn a() {}"))
+        .await
+        .expect("add chunk a");
+    idx.save_vector_store(&path).await.expect("save hnsw");
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    let prior = std::env::var("TRUSTY_HNSW_REVIEW_IDLE").ok();
+    // SAFETY: this test is the only reader/writer of this env var while it runs.
+    unsafe { std::env::set_var("TRUSTY_HNSW_REVIEW_IDLE", "0") };
+
+    assert!(
+        !idx.demote_vector_store_if_idle(Duration::from_nanos(1))
+            .await,
+        "TRUSTY_HNSW_REVIEW_IDLE=0 must disable demotion"
+    );
+    assert!(
+        !usearch.in_view_mode(),
+        "store must remain mutable while the gate is disabled"
+    );
+
+    // SAFETY: see above.
+    unsafe {
+        match prior {
+            Some(v) => std::env::set_var("TRUSTY_HNSW_REVIEW_IDLE", v),
+            None => std::env::remove_var("TRUSTY_HNSW_REVIEW_IDLE"),
+        }
+    }
+
+    // Re-enabled (default): demotion now proceeds.
+    assert!(
+        idx.demote_vector_store_if_idle(Duration::from_nanos(1))
+            .await,
+        "demotion must proceed once the gate is re-enabled"
+    );
+    assert!(usearch.in_view_mode());
+}

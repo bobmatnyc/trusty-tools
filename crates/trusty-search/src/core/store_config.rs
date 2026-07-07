@@ -26,6 +26,16 @@ pub const HNSW_MMAP_SERVE_ENV: &str = "TRUSTY_HNSW_MMAP_SERVE";
 /// forced reindex (existing snapshots keep the precision they were built with).
 pub const VECTOR_QUANT_ENV: &str = "TRUSTY_VECTOR_QUANT";
 
+/// Environment variable gating the idle-sweep HNSW re-view (demotion) added
+/// by issue #2164. `true` (the default) lets the shared idle sweep
+/// (`server::tickers::spawn_idle_chunk_eviction_ticker`, same window as
+/// `TRUSTY_CHUNKS_IDLE_EVICT_SECS`) demote a promoted-but-clean, idle HNSW
+/// store back to `Index::view` (mmap), reclaiming its heap-resident copy.
+/// `false` disables demotion while leaving chunk/BM25/entity eviction
+/// untouched — an escape hatch in case the view↔load↔view cycle proves
+/// riskier than the memory it reclaims on some deployment.
+pub const HNSW_REVIEW_IDLE_ENV: &str = "TRUSTY_HNSW_REVIEW_IDLE";
+
 /// How a warm-booted (on-disk) HNSW snapshot is served on the read/search path.
 ///
 /// Why (issue #709, quick win #1): the warm-boot memory fix opens snapshots via
@@ -173,6 +183,36 @@ impl VectorQuant {
     }
 }
 
+/// `true` (default) when the idle sweep should demote idle, clean, promoted
+/// HNSW stores back to mmap-view mode; resolved from [`HNSW_REVIEW_IDLE_ENV`]
+/// (issue #2164).
+///
+/// Why: operators who want the memory reclamation but are wary of a new
+/// code path touching a hot HNSW index can turn just this piece off without
+/// losing chunk/BM25/entity idle eviction (issue #2162), which stays on its
+/// own always-on path.
+/// What: unset / `1` / `true` / `yes` / `on` (any case, trimmed) → enabled
+/// (the default); `0` / `false` / `no` / `off` → disabled. Any other value is
+/// treated as enabled with a `tracing::warn!` so a typo never silently
+/// disables the reclamation.
+/// Test: `tests::hnsw_review_idle_enabled_*`.
+pub fn hnsw_review_idle_enabled() -> bool {
+    match std::env::var(HNSW_REVIEW_IDLE_ENV) {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "1" | "true" | "yes" | "on" | "enabled" => true,
+            "0" | "false" | "no" | "off" | "disabled" => false,
+            other => {
+                tracing::warn!(
+                    "{HNSW_REVIEW_IDLE_ENV}={other:?} is not a recognised boolean; \
+                     defaulting to enabled"
+                );
+                true
+            }
+        },
+        Err(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +288,38 @@ mod tests {
         assert_eq!(VectorQuant::None.label(), "f32 (none)");
         assert_eq!(VectorQuant::F16.label(), "f16");
         assert_eq!(VectorQuant::I8.label(), "i8");
+    }
+
+    /// `hnsw_review_idle_enabled` honours unset (default on), explicit
+    /// on/off spellings, and falls back to enabled on garbage (issue #2164).
+    #[test]
+    fn hnsw_review_idle_enabled_default_and_env_override() {
+        let prior = std::env::var(HNSW_REVIEW_IDLE_ENV).ok();
+
+        // SAFETY: this test is the only reader/writer of this env var in the
+        // process while it runs; `cargo test` for this crate runs each test
+        // binary's tests on one thread group but env vars are process-global,
+        // matching the pattern used by the sibling `mmap_serve_mode_*` tests.
+        unsafe { std::env::remove_var(HNSW_REVIEW_IDLE_ENV) };
+        assert!(hnsw_review_idle_enabled());
+
+        unsafe { std::env::set_var(HNSW_REVIEW_IDLE_ENV, "0") };
+        assert!(!hnsw_review_idle_enabled());
+
+        unsafe { std::env::set_var(HNSW_REVIEW_IDLE_ENV, "false") };
+        assert!(!hnsw_review_idle_enabled());
+
+        unsafe { std::env::set_var(HNSW_REVIEW_IDLE_ENV, "1") };
+        assert!(hnsw_review_idle_enabled());
+
+        unsafe { std::env::set_var(HNSW_REVIEW_IDLE_ENV, "banana") };
+        assert!(hnsw_review_idle_enabled());
+
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var(HNSW_REVIEW_IDLE_ENV, v),
+                None => std::env::remove_var(HNSW_REVIEW_IDLE_ENV),
+            }
+        }
     }
 }
