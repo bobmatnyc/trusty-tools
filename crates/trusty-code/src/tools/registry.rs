@@ -165,6 +165,18 @@ impl ToolRegistry {
         self.tools.values().map(|t| t.schema()).collect()
     }
 
+    /// Return the raw schema for a single registered tool by name.
+    ///
+    /// Why: `llm::ToolCallExtractor` (#1023) validates one tool call's
+    /// arguments at a time; looking up exactly one schema is cheaper and
+    /// simpler than enumerating and filtering the full `schemas()` vector on
+    /// every dispatch.
+    /// What: Returns `Some(tool.schema())` for a registered `name`, else `None`.
+    /// Test: `schema_for_returns_registered_tool_schema`, `schema_for_none_when_missing`.
+    pub fn schema_for(&self, name: &str) -> Option<Value> {
+        self.tools.get(name).map(|t| t.schema())
+    }
+
     /// Return the subset of registered tools that `user` may invoke.
     ///
     /// Why: Schema emission for the LLM request must reflect what the user can
@@ -294,6 +306,30 @@ mod tests {
         reg.register(Arc::new(MockTool::new("tool_a")));
         reg.register(Arc::new(MockTool::new("tool_b")));
         assert_eq!(reg.schemas().len(), 2);
+    }
+
+    /// `schema_for` returns the registered tool's schema.
+    ///
+    /// Why: Guard the direct single-tool lookup used by `ToolCallExtractor`.
+    /// What: Register "mock", fetch its schema by name, assert its shape.
+    /// Test: this test.
+    #[test]
+    fn schema_for_returns_registered_tool_schema() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(MockTool::new("mock")));
+        let schema = reg.schema_for("mock").expect("schema present");
+        assert_eq!(schema["function"]["name"], "mock");
+    }
+
+    /// `schema_for` returns `None` for an unregistered name.
+    ///
+    /// Why: Guard the miss path — no panic, no default schema fabricated.
+    /// What: Query a name that was never registered.
+    /// Test: this test.
+    #[test]
+    fn schema_for_none_when_missing() {
+        let reg = ToolRegistry::new();
+        assert!(reg.schema_for("does_not_exist").is_none());
     }
 
     /// `dispatch_gated` rejects a tool not in the allowlist.
