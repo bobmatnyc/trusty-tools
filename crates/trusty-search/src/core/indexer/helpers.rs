@@ -48,17 +48,36 @@ pub(crate) fn embedding_cache_cap() -> usize {
 }
 
 /// Default idle window (seconds) after which a durably-backed index's
-/// in-memory `chunks` HashMap is evicted to reclaim heap.
-pub(crate) const DEFAULT_CHUNKS_IDLE_EVICT_SECS: u64 = 300;
+/// in-memory `chunks` HashMap, BM25 corpus, and per-file entity map are
+/// evicted to reclaim heap.
+///
+/// Why (issue #2166): a production daemon (77 indexes) held ~13 GB resident
+/// against ~3.9 GB of on-disk data. The original 300s window meant an index
+/// only had to go 5 minutes without a query or ingest to become eligible for
+/// eviction, but most idle indexes on a multi-project host sit idle far
+/// longer than that between bursts of activity — so 300s rarely fired in
+/// practice while the daemon accumulated dozens of permanently-hot,
+/// rarely-queried indexes. Lowering the default to 60s (matched to the
+/// ticker's own 60s cadence — see
+/// `service::server::tickers::spawn_idle_chunk_eviction_ticker`) means an
+/// index that goes even one tick without activity gets reclaimed, trading a
+/// small amount of rehydration latency on the next query (a redb read,
+/// typically well under 100ms) for materially lower steady-state RSS on
+/// hosts tracking many projects. Still fully overridable per-deployment.
+pub(crate) const DEFAULT_CHUNKS_IDLE_EVICT_SECS: u64 = 60;
 
-/// Resolve the in-memory-chunks idle-eviction window (in seconds) from the
-/// environment, falling back to [`DEFAULT_CHUNKS_IDLE_EVICT_SECS`].
+/// Resolve the in-memory-chunks / BM25 / entities idle-eviction window (in
+/// seconds) from the environment, falling back to
+/// [`DEFAULT_CHUNKS_IDLE_EVICT_SECS`].
 ///
 /// Why: operators on memory-constrained hosts may want a tighter window
 /// (evict sooner) while large-corpus hosts that re-query frequently may want
-/// to disable eviction entirely.
+/// to disable eviction entirely. Issue #2162 extended this single window to
+/// also gate BM25 corpus + per-file entity eviction, so both structures ride
+/// the same operator-tunable knob instead of adding a second env var.
 /// What: reads `TRUSTY_CHUNKS_IDLE_EVICT_SECS` as `u64` seconds. A value of
-/// `0` **disables** idle eviction. Unset / unparseable falls back to default.
+/// `0` **disables** idle eviction (chunks, BM25, and entities all stay hot).
+/// Unset / unparseable falls back to default.
 /// Test: `idle_evict_secs_default_and_env_override`.
 pub(crate) fn idle_evict_secs() -> u64 {
     match std::env::var("TRUSTY_CHUNKS_IDLE_EVICT_SECS") {
@@ -79,8 +98,8 @@ pub(crate) fn idle_evict_secs() -> u64 {
 /// Default idle window (seconds) after which a live index's FSEvents watcher is
 /// suspended to stop burning CPU / `fseventsd` load on a project nobody is using.
 ///
-/// Why: 900s (15 min) sits above the 300s chunk-eviction window
-/// ([`DEFAULT_CHUNKS_IDLE_EVICT_SECS`]) so the escalation is gradual — a briefly
+/// Why: 900s (15 min) sits well above the 60s chunk/BM25/entity-eviction
+/// window ([`DEFAULT_CHUNKS_IDLE_EVICT_SECS`]) so the escalation is gradual — a briefly
 /// idle index keeps its watcher (cheap incremental indexing on the next save),
 /// and only a genuinely-dormant one drops it. The watcher resumes on the next
 /// query, so suspension is invisible to an active user.

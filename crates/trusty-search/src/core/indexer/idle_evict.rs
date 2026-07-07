@@ -1,0 +1,158 @@
+//! Idle eviction + lazy rehydration for the BM25 corpus and per-file
+//! entities (issue #2162).
+//!
+//! Why: heap-profiling a production daemon (77 indexes, 3.9 GB on-disk vs.
+//! ~13 GB resident) found two structures that are permanently resident once
+//! loaded, independent of query activity: `BM25Index::doc_terms` (a full
+//! second, tokenized copy of every chunk's text — see
+//! `crates/trusty-common/src/bm25.rs`) and the per-file entity map. Both are
+//! rebuilt in-heap on every warm-boot (`persist::load_chunks_from_redb`) and
+//! neither has an eviction path today — only the chunk-text map does
+//! (`CodeIndexer::evict_chunks_if_idle` in `mod.rs`). Since both are 100%
+//! recoverable from the durable redb corpus, they can follow the exact same
+//! idle-evict / lazy-rehydrate shape, just for a different pair of fields.
+//! What: [`CodeIndexer::evict_bm25_entities_if_idle`] clears `self.bm25` and
+//! `self.entities` once the index has been idle past a threshold (shares the
+//! same `TRUSTY_CHUNKS_IDLE_EVICT_SECS` window and the same 60s ticker as
+//! chunk eviction — see `service::server::tickers::spawn_idle_chunk_eviction_ticker`).
+//! [`CodeIndexer::ensure_bm25_entities_loaded`] rehydrates both from redb the
+//! next time a query lane or ingest-commit path needs them, mirroring
+//! `ensure_chunks_loaded`'s guard-flag-then-rebuild shape so concurrent
+//! readers never observe a half-populated structure.
+//! Test: `bm25_entities_idle_eviction_drops_and_lazily_rehydrates` and
+//! `bm25_entities_idle_eviction_skips_indexers_without_corpus` in
+//! `indexer::tests`.
+
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use anyhow::Result;
+
+use crate::core::bm25::Bm25Index;
+use crate::core::chunker::RawChunk;
+use crate::core::entity::RawEntity;
+
+use super::CodeIndexer;
+
+/// Restored (chunks, per-file entities) pair read from the durable corpus.
+/// Named for readability at the `spawn_blocking` closure boundary, mirroring
+/// `persist::RestoredCorpus`.
+type RestoredCorpus = (Vec<RawChunk>, Vec<(String, Vec<RawEntity>)>);
+
+impl CodeIndexer {
+    /// Drop the in-memory BM25 corpus and per-file entity map when the index
+    /// has been idle longer than `idle_threshold` and a durable corpus can
+    /// repopulate them.
+    ///
+    /// Why: see the module docs — BM25's `doc_terms` is a full tokenized
+    /// second copy of every chunk's text, permanently resident regardless of
+    /// query activity once an index has been queried or ingested once.
+    /// What: a no-op when `idle_threshold` is zero, no durable corpus is
+    /// wired, BM25 is already empty (nothing to reclaim — also covers the
+    /// "already evicted" case since eviction empties it), or the index was
+    /// recently active. Otherwise replaces `self.bm25` with a fresh empty
+    /// index and clears `self.entities`, marks `bm25_entities_evicted`, and
+    /// logs an `info` with the reclaimed BM25 document count. Chunks and the
+    /// symbol graph are untouched by this method — they have their own
+    /// (chunks) or no (symbol graph) eviction path.
+    /// Returns the number of BM25 documents evicted (0 when skipped).
+    /// Test: `bm25_entities_idle_eviction_drops_and_lazily_rehydrates`.
+    pub async fn evict_bm25_entities_if_idle(&self, idle_threshold: Duration) -> usize {
+        if idle_threshold.is_zero() {
+            return 0;
+        }
+        if self.corpus.is_none() {
+            return 0;
+        }
+        if self.idle_duration() < idle_threshold {
+            return 0;
+        }
+        let mut bm25 = self.bm25.write().await;
+        if bm25.is_empty() {
+            return 0;
+        }
+        let evicted = bm25.len();
+        *bm25 = Bm25Index::new();
+        drop(bm25);
+
+        let mut entities = self.entities.write().await;
+        entities.clear();
+        entities.shrink_to_fit();
+        drop(entities);
+
+        self.bm25_entities_evicted.store(true, Ordering::Relaxed);
+        tracing::info!(
+            "index '{}': evicted {} in-memory BM25 documents + entities after {}s idle \
+             (durable corpus retained; lazily rehydrates on next access)",
+            self.index_id,
+            evicted,
+            idle_threshold.as_secs(),
+        );
+        evicted
+    }
+
+    /// Repopulate the BM25 corpus and per-file entity map from the durable
+    /// corpus if they were previously evicted while idle.
+    ///
+    /// Why: query lanes (`bm25_search`, `entity_exact_match`, `entities_for`)
+    /// and ingest commit paths (`commit_parsed_batch`, `add_chunk_inner`)
+    /// read or mutate `self.bm25` / `self.entities` directly; after an idle
+    /// eviction both are empty and `bm25_entities_evicted` is set. Every call
+    /// site guards itself the same way `ensure_chunks_loaded` call sites do,
+    /// rather than relying on a single upstream gate.
+    /// What: a fast no-op (single relaxed atomic load) when never evicted.
+    /// When evicted, reloads every chunk + entity row from `CorpusStore` on a
+    /// blocking worker, rebuilds BM25 via `Self::bm25_doc_text` (identical
+    /// rebuild logic to `persist::load_chunks_from_redb`), refills entities,
+    /// then clears the flag. A `None` corpus (shouldn't happen — eviction
+    /// requires one — but defensive) just clears the flag.
+    /// Test: `bm25_entities_idle_eviction_drops_and_lazily_rehydrates`.
+    pub(super) async fn ensure_bm25_entities_loaded(&self) {
+        if !self.bm25_entities_evicted.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(corpus) = self.corpus.clone() else {
+            self.bm25_entities_evicted.store(false, Ordering::Relaxed);
+            return;
+        };
+        let index_id = self.index_id.clone();
+        let loaded = tokio::task::spawn_blocking(move || -> Result<RestoredCorpus> {
+            let chunks = corpus.load_all_chunks()?;
+            let entities = corpus.load_all_entities()?;
+            Ok((chunks, entities))
+        })
+        .await;
+        match loaded {
+            Ok(Ok((chunks, entities))) => {
+                let n_docs = chunks.len();
+                {
+                    let mut bm25 = self.bm25.write().await;
+                    for chunk in &chunks {
+                        let text = Self::bm25_doc_text(chunk);
+                        bm25.upsert_document(&chunk.id, &text);
+                    }
+                }
+                let n_files = entities.len();
+                {
+                    let mut emap = self.entities.write().await;
+                    for (file, ents) in entities {
+                        emap.insert(file, ents);
+                    }
+                }
+                self.bm25_entities_evicted.store(false, Ordering::Relaxed);
+                tracing::info!(
+                    "index '{index_id}': rehydrated {n_docs} BM25 documents + \
+                     {n_files} file entity lists from redb after idle eviction"
+                );
+            }
+            Ok(Err(e)) => tracing::warn!(
+                "index '{index_id}': failed to rehydrate BM25/entities from redb ({e}); \
+                 will retry on next access"
+            ),
+            Err(e) => tracing::warn!(
+                "index '{index_id}': BM25/entities rehydration task panicked ({e}); \
+                 will retry on next access"
+            ),
+        }
+    }
+}

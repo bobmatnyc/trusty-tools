@@ -234,10 +234,13 @@ impl CodeIndexer {
     }
 
     /// Read-only access to the entity list for a file (None if never indexed).
+    ///
+    /// Rehydrates an idle-evicted entity map from redb first (issue #2162).
     pub async fn entities_for(
         &self,
         file_path: &str,
     ) -> Option<Vec<crate::core::entity::RawEntity>> {
+        self.ensure_bm25_entities_loaded().await;
         self.entities.read().await.get(file_path).cloned()
     }
 
@@ -258,6 +261,7 @@ impl CodeIndexer {
             return None;
         }
         self.ensure_chunks_loaded().await;
+        self.ensure_bm25_entities_loaded().await;
         let entities = self.entities.read().await;
         let chunks = self.chunks.read().await;
         for (file, ents) in entities.iter() {

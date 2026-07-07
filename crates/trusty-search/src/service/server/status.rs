@@ -170,7 +170,7 @@ pub(super) async fn index_status_handler(
     // read lock is released before we build the JSON response.
     let walk_diag = handle.walk_diagnostics.read().await.clone();
     // Issue #681: prefer durable corpus count; in-memory map returns 0 after
-    // idle eviction (TRUSTY_CHUNKS_IDLE_EVICT_SECS default 300s). Falls back to
+    // idle eviction (TRUSTY_CHUNKS_IDLE_EVICT_SECS default 60s). Falls back to
     // in-memory for BM25-only / test indexers that have no corpus wired.
     let chunk_count = indexer
         .corpus_arc()

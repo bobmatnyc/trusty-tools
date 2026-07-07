@@ -141,9 +141,11 @@ impl CodeIndexer {
     /// Why: the previous implementation rebuilt the entire posting list on
     /// every search (~9.5s on a 115k-chunk index). The index is now maintained
     /// incrementally so the search hot path is just a read lock + posting walk.
-    /// What: acquires the BM25 read lock, runs `score_query_all`.
+    /// What: rehydrates an idle-evicted BM25 corpus (issue #2162), then
+    /// acquires the BM25 read lock and runs `score_query_all`.
     /// Test: BM25 results are covered by every search integration test.
     pub(super) async fn bm25_search(&self, query: &str, want: usize) -> Result<Vec<(String, f32)>> {
+        self.ensure_bm25_entities_loaded().await;
         let bm25 = self.bm25.read().await;
         if bm25.is_empty() {
             return Ok(Vec::new());

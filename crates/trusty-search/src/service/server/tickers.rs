@@ -89,26 +89,32 @@ pub(super) fn spawn_disk_size_ticker(state: Arc<SearchAppState>) {
     });
 }
 
-/// Spawn a background ticker that evicts each index's in-memory `chunks` map
-/// after it has been idle past the configured window (issue #83 follow-up).
+/// Spawn a background ticker that evicts each index's in-memory `chunks` map,
+/// BM25 corpus, and per-file entity map after the index has been idle past
+/// the configured window (issue #83 follow-up; BM25/entities added by issue
+/// #2162).
 ///
 /// Why (idle-memory audit): the durable redb corpus already serves the query
 /// hot path, so an index that hasn't been queried or ingested for a while is
-/// holding hundreds of MB of `RawChunk` text in the process heap for nothing.
-/// `CodeIndexer::evict_chunks_if_idle` reclaims that heap and lazily rehydrates
-/// from redb on the next access; this ticker is what drives it on a fixed
-/// cadence across every registered index. It mirrors the `spawn_*_ticker`
-/// pattern: a detached task holding a `Weak<SearchAppState>` so it stops when
-/// the daemon drops its last `Arc`.
-/// What: every 60 s, resolves the idle window via
-/// `crate::core::indexer::idle_evict_secs()` (env-overridable;
-/// `0` disables eviction and the ticker idles), then walks the registry and
-/// calls `evict_chunks_if_idle` on each indexer. The per-indexer call is itself
-/// a no-op for active indexes, indexes without a durable corpus, and
-/// already-empty maps, so the walk is cheap. The eviction acquires each
-/// indexer's read lock only to check `corpus`/idle state and a brief write lock
-/// only when it actually clears the map.
-/// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks` covers the
+/// holding hundreds of MB of `RawChunk` text, a full tokenized BM25 copy of
+/// that same text, and per-file entity lists in the process heap for nothing.
+/// `CodeIndexer::evict_chunks_if_idle` and `evict_bm25_entities_if_idle` each
+/// reclaim their slice of that heap and lazily rehydrate from redb on the
+/// next access; this ticker is what drives both on a fixed cadence across
+/// every registered index. It mirrors the `spawn_*_ticker` pattern: a
+/// detached task holding a `Weak<SearchAppState>` so it stops when the daemon
+/// drops its last `Arc`.
+/// What: every 60 s, resolves the shared idle window via
+/// `crate::core::indexer::idle_evict_secs()` (env `TRUSTY_CHUNKS_IDLE_EVICT_SECS`;
+/// `0` disables both evictions and the ticker idles), then walks the registry
+/// and calls `evict_chunks_if_idle` followed by `evict_bm25_entities_if_idle`
+/// on each indexer. Both calls are themselves no-ops for active indexes,
+/// indexes without a durable corpus, and already-empty structures, so the
+/// walk is cheap. Each eviction acquires the relevant read lock only to check
+/// `corpus`/idle state and a brief write lock only when it actually clears
+/// its structure.
+/// Test: `idle_eviction_drops_and_lazily_rehydrates_chunks` and
+/// `bm25_entities_idle_eviction_drops_and_lazily_rehydrates` cover the
 /// per-indexer logic directly; the ticker is a thin scheduling wrapper.
 pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
     let weak = Arc::downgrade(&state);
@@ -136,6 +142,7 @@ pub(super) fn spawn_idle_chunk_eviction_ticker(state: Arc<SearchAppState>) {
                 };
                 let indexer = handle.indexer.read().await;
                 indexer.evict_chunks_if_idle(threshold).await;
+                indexer.evict_bm25_entities_if_idle(threshold).await;
             }
         }
     });

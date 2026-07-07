@@ -40,6 +40,11 @@ impl CodeIndexer {
     ) -> Result<CommitTimings> {
         // Rehydrate an idle-evicted map before the cap check / insert below.
         self.ensure_chunks_loaded().await;
+        // Issue #2162: also rehydrate BM25/entities before this batch's
+        // commit_bm25_batch / commit_entities writes below, or an idle
+        // eviction that raced this commit would leave BM25/entities holding
+        // only the new batch instead of the full corpus.
+        self.ensure_bm25_entities_loaded().await;
         self.touch_activity();
         let ParsedBatch {
             chunks: mut all_chunks,
