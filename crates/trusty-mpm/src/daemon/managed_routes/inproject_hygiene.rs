@@ -7,18 +7,228 @@
 //! fetch + hard-reset sequence at daemon startup keeps every base clone
 //! current. Dead worktrees from previous sessions are also pruned to prevent
 //! the base clone's worktree list from growing indefinitely.
+//!
+//! CRITICAL SAFETY INVARIANT (#2177): the hygiene sweep must NEVER discard
+//! local commits or uncommitted changes. Before the hard-reset step runs, the
+//! base clone's current branch is checked for unpushed commits (ahead of its
+//! origin counterpart) and a dirty working tree; either condition SKIPS the
+//! reset entirely and logs a warning instead. This closed a data-loss bug
+//! where an unconditional `git reset --hard origin/<branch>` on every daemon
+//! startup silently discarded committed-but-unpushed work.
 //! What: [`get_default_branch`] reads the origin/HEAD symref; [`run_hygiene_for_base`]
-//! runs fetch, hard-reset, and worktree prune for one base clone directory;
-//! [`run_hygiene_for_all_bases`] walks `<repos_root>/<owner>/<repo>/` and calls
-//! the per-base function for each; wired into daemon startup via
-//! [`super::super::serve_http`] (the main `serve_http` function in daemon/mod.rs).
+//! runs fetch, a safety-gated hard-reset, and worktree prune for one base
+//! clone directory; [`run_hygiene_for_all_bases`] walks
+//! `<repos_root>/<owner>/<repo>/` and calls the per-base function for each;
+//! wired into daemon startup via [`super::super::serve_http`] (the main
+//! `serve_http` function in daemon/mod.rs).
 //! Test: `get_default_branch_returns_none_for_non_git` and
-//! `run_hygiene_skips_missing_dir` unit tests; integration coverage via daemon
-//! startup tests.
+//! `run_hygiene_skips_missing_dir` unit tests; `decide_reset_*` unit tests
+//! cover the pure decision logic; `hygiene_*` integration tests exercise real
+//! temp git repos for the ahead/dirty/clean/recovery-ref cases; integration
+//! coverage via daemon startup tests.
 
 use std::path::Path;
 
 use tracing::{info, warn};
+
+/// Decision on whether the destructive `git reset --hard` step may proceed.
+///
+/// Why: the reset decision has several independent inputs (ahead-count,
+/// working-tree cleanliness, detached/unknown states) that are easiest to
+/// reason about — and unit-test — as a small pure function separated from the
+/// git-shelling plumbing that gathers those inputs.
+/// What: two variants — `Reset` (safe to fast-forward the base clone to
+/// origin) and `Skip(reason)` (refuse, carrying a human-readable reason for
+/// the warning log).
+/// Test: `decide_reset_*` unit tests below.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ResetDecision {
+    Reset,
+    Skip(String),
+}
+
+/// Decide whether a hard-reset may proceed, given ahead-count and dirty state.
+///
+/// Why: centralizes the data-loss-prevention rule in one pure, testable place
+/// rather than scattering conditionals through the git-shelling code. Any
+/// input that could not be determined (detached HEAD, no upstream, a failed
+/// `git` invocation) is treated conservatively as "do not reset" — the reset
+/// is only ever allowed when we have positive confirmation the branch is not
+/// ahead of origin and the working tree is clean.
+/// What: `ahead_count: None` (unknown — detached HEAD, no upstream, or a
+/// `rev-list` failure) always yields `Skip`. `dirty: None` (a `status`
+/// failure) always yields `Skip`. `ahead_count: Some(n) if n > 0` yields
+/// `Skip` (unpushed commits would be discarded). `dirty: Some(true)` yields
+/// `Skip` (uncommitted changes would be discarded). Only `ahead_count:
+/// Some(0)` combined with `dirty: Some(false)` yields `Reset`.
+/// Test: `decide_reset_ahead_skips`, `decide_reset_dirty_skips`,
+/// `decide_reset_unknown_ahead_skips`, `decide_reset_unknown_dirty_skips`,
+/// `decide_reset_clean_and_even_resets`.
+fn decide_reset(ahead_count: Option<usize>, dirty: Option<bool>) -> ResetDecision {
+    let Some(ahead) = ahead_count else {
+        return ResetDecision::Skip(
+            "branch ahead-count unknown (detached HEAD, no upstream, or git error); \
+             refusing to discard local work"
+                .to_string(),
+        );
+    };
+    let Some(is_dirty) = dirty else {
+        return ResetDecision::Skip(
+            "working tree status unknown (git error); refusing hard reset".to_string(),
+        );
+    };
+    if ahead > 0 {
+        return ResetDecision::Skip(format!(
+            "{ahead} commit(s) ahead of origin (unpushed); refusing to discard local work"
+        ));
+    }
+    if is_dirty {
+        return ResetDecision::Skip("uncommitted changes present; refusing hard reset".to_string());
+    }
+    ResetDecision::Reset
+}
+
+/// Read the short name of the currently checked-out branch, if any.
+///
+/// Why: the ahead-count and reset-target checks need to know which branch is
+/// actually checked out in the base clone (not merely the repo's configured
+/// default branch) — resetting a detached HEAD or misidentifying the branch
+/// could silently discard work on the wrong ref.
+/// What: runs `git -C <base_path> symbolic-ref --short HEAD`; returns `None`
+/// on any failure, including detached HEAD (where `symbolic-ref` exits
+/// non-zero because `HEAD` does not point at a branch).
+/// Test: covered indirectly via `hygiene_*` integration tests (a normal
+/// branch checkout resolves; detached HEAD is exercised through
+/// `decide_reset_unknown_ahead_skips`, which models the `None` case this
+/// function would produce).
+fn current_branch(base_path: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(base_path)
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
+/// Count commits on `branch` that are not yet on `origin/<branch>`.
+///
+/// Why: this is the direct measure of "would a hard reset to origin discard
+/// committed work" — the data-loss bug this module fixes.
+/// What: runs `git -C <base_path> rev-list --count origin/<branch>..<branch>`
+/// and parses the count. Returns `None` if the command fails (e.g. no
+/// `origin/<branch>` upstream exists) or the output does not parse as a
+/// number — both are treated as "unknown" by [`decide_reset`], which refuses
+/// to reset on unknown input.
+/// Test: `hygiene_ahead_branch_is_not_reset` integration test (via
+/// [`run_hygiene_for_base`]).
+fn ahead_count(base_path: &Path, branch: &str) -> Option<usize> {
+    let range = format!("origin/{branch}..{branch}");
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(base_path)
+        .args(["rev-list", "--count", &range])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Determine whether the working tree has uncommitted changes.
+///
+/// Why: a hard reset discards uncommitted modifications just as readily as
+/// unpushed commits; this is the second half of the data-loss guard.
+/// What: runs `git -C <base_path> status --porcelain`; `Some(true)` if any
+/// output is produced (dirty), `Some(false)` if output is empty (clean),
+/// `None` if the command itself fails.
+/// Test: `hygiene_dirty_tree_is_not_reset` integration test (via
+/// [`run_hygiene_for_base`]).
+fn is_dirty(base_path: &Path) -> Option<bool> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(base_path)
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(!out.stdout.is_empty())
+}
+
+/// Best-effort write of a recovery ref pointing at the pre-reset HEAD.
+///
+/// Why: defense-in-depth — even when the ahead/dirty checks correctly clear a
+/// reset to proceed, leaving a cheap breadcrumb to the prior HEAD costs
+/// nothing and gives a manual recovery path (`git reset --hard
+/// refs/trusty-mpm/pre-hygiene/<branch>`) if some unanticipated case still
+/// loses work. This must never abort the sweep: any failure here is logged
+/// and swallowed, matching the file's existing "every step logged, no step is
+/// fatal" pattern.
+/// What: resolves the current HEAD sha via `git rev-parse HEAD`, then runs
+/// `git update-ref refs/trusty-mpm/pre-hygiene/<branch> <sha>`. Both steps are
+/// best-effort; failures are logged via `warn!` and otherwise ignored.
+/// Test: `hygiene_recovery_ref_written_before_reset` integration test (via
+/// [`run_hygiene_for_base`]).
+fn write_recovery_ref(base_path: &Path, branch: &str) {
+    let head = std::process::Command::new("git")
+        .arg("-C")
+        .arg(base_path)
+        .args(["rev-parse", "HEAD"])
+        .output();
+    let sha = match head {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Ok(out) => {
+            warn!(
+                path = %base_path.display(),
+                "inproject-hygiene: recovery-ref rev-parse failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            return;
+        }
+        Err(e) => {
+            warn!(path = %base_path.display(), "inproject-hygiene: recovery-ref rev-parse error: {e}");
+            return;
+        }
+    };
+    if sha.is_empty() {
+        return;
+    }
+
+    let refname = format!("refs/trusty-mpm/pre-hygiene/{branch}");
+    let update = std::process::Command::new("git")
+        .arg("-C")
+        .arg(base_path)
+        .args(["update-ref", &refname, &sha])
+        .output();
+    match update {
+        Ok(out) if out.status.success() => {
+            info!(path = %base_path.display(), refname = %refname, sha = %sha, "inproject-hygiene: recovery ref written");
+        }
+        Ok(out) => {
+            warn!(
+                path = %base_path.display(),
+                "inproject-hygiene: recovery-ref update-ref failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => {
+            warn!(path = %base_path.display(), "inproject-hygiene: recovery-ref update-ref error: {e}");
+        }
+    }
+}
 
 /// Read the default branch for a base clone by inspecting `origin/HEAD`.
 ///
@@ -52,18 +262,32 @@ pub fn get_default_branch(base_path: &Path) -> Option<String> {
     }
 }
 
-/// Run hygiene for a single base clone: fetch, hard-reset to default, prune worktrees.
+/// Run hygiene for a single base clone: fetch, safety-gated hard-reset, prune worktrees.
 ///
 /// Why: each step targets a distinct failure mode — fetch syncs the remote object
-/// store; hard-reset discards any accidental local modifications; worktree prune
-/// cleans up working-tree entries for worktrees whose paths no longer exist (left
-/// behind by decommissioned sessions). All three steps are non-fatal: a failure
-/// is logged as a warning and the next step still runs, so a transient git error
-/// does not prevent the other steps from running.
-/// What: (1) `git -C <base_path> fetch origin`; (2) determines the default branch
-/// via [`get_default_branch`] (falls back to `"main"`); (3) `git -C <base_path>
-/// reset --hard origin/<branch>`; (4) `git -C <base_path> worktree prune`.
-/// Test: `run_hygiene_skips_missing_dir` (unit — directory absent → early return).
+/// store; hard-reset (when safe) discards any accidental local modifications;
+/// worktree prune cleans up working-tree entries for worktrees whose paths no
+/// longer exist (left behind by decommissioned sessions). All steps are
+/// non-fatal: a failure is logged as a warning and the next step still runs,
+/// so a transient git error does not prevent the other steps from running.
+/// Critically (#2177), the hard-reset step is gated: it only runs when the
+/// checked-out branch has zero unpushed commits ahead of its origin
+/// counterpart AND the working tree is clean, so it can never discard local
+/// work. When it does proceed, a recovery ref is written first as a
+/// defense-in-depth breadcrumb.
+/// What: (1) `git -C <base_path> fetch origin`; (2) resolves the current
+/// branch via [`current_branch`] and, if resolvable, its ahead-count via
+/// [`ahead_count`] and dirty state via [`is_dirty`]; feeds both into
+/// [`decide_reset`] — on `Skip`, logs a warning and does not reset; on
+/// `Reset`, writes a recovery ref via [`write_recovery_ref`] then runs `git
+/// -C <base_path> reset --hard origin/<default-branch>` (default branch via
+/// [`get_default_branch`], falls back to `"main"`); (3) `git -C <base_path>
+/// worktree prune`.
+/// Test: `run_hygiene_skips_missing_dir` (unit — directory absent → early
+/// return); `hygiene_ahead_branch_is_not_reset`,
+/// `hygiene_dirty_tree_is_not_reset`, `hygiene_clean_branch_is_reset`,
+/// `hygiene_recovery_ref_written_before_reset` (integration, real temp git
+/// repos).
 pub fn run_hygiene_for_base(base_path: &Path) -> Result<(), String> {
     if !base_path.join(".git").exists() {
         return Ok(());
@@ -94,28 +318,50 @@ pub fn run_hygiene_for_base(base_path: &Path) -> Result<(), String> {
         }
     }
 
-    // Step 2: hard-reset to the default branch.
-    let branch = get_default_branch(base_path).unwrap_or_else(|| "main".to_string());
-    let target = format!("origin/{branch}");
-    let reset = std::process::Command::new("git")
-        .arg("-C")
-        .arg(base_path)
-        .args(["reset", "--hard", &target])
-        .output();
-    match reset {
-        Ok(out) if out.status.success() => {
-            info!(path = %base_path.display(), branch = %branch, "inproject-hygiene: reset OK");
-        }
-        Ok(out) => {
+    // Step 2: safety-gated hard-reset to the default branch (#2177 — never
+    // discard local commits or uncommitted changes).
+    let default_branch = get_default_branch(base_path).unwrap_or_else(|| "main".to_string());
+    let checked_out = current_branch(base_path);
+    let ahead = checked_out
+        .as_deref()
+        .and_then(|b| ahead_count(base_path, b));
+    let dirty = is_dirty(base_path);
+
+    match decide_reset(ahead, dirty) {
+        ResetDecision::Skip(reason) => {
             warn!(
                 path = %base_path.display(),
-                "inproject-hygiene: reset failed ({}): {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
+                branch = %checked_out.as_deref().unwrap_or("<unknown/detached>"),
+                "inproject-hygiene: SKIP reset — {reason}"
             );
         }
-        Err(e) => {
-            warn!(path = %base_path.display(), "inproject-hygiene: reset error: {e}");
+        ResetDecision::Reset => {
+            if let Some(branch) = checked_out.as_deref() {
+                write_recovery_ref(base_path, branch);
+            }
+
+            let target = format!("origin/{default_branch}");
+            let reset = std::process::Command::new("git")
+                .arg("-C")
+                .arg(base_path)
+                .args(["reset", "--hard", &target])
+                .output();
+            match reset {
+                Ok(out) if out.status.success() => {
+                    info!(path = %base_path.display(), branch = %default_branch, "inproject-hygiene: reset OK");
+                }
+                Ok(out) => {
+                    warn!(
+                        path = %base_path.display(),
+                        "inproject-hygiene: reset failed ({}): {}",
+                        out.status,
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    );
+                }
+                Err(e) => {
+                    warn!(path = %base_path.display(), "inproject-hygiene: reset error: {e}");
+                }
+            }
         }
     }
 
@@ -224,5 +470,51 @@ mod tests {
         // A non-existent repos root must complete without panicking.
         let missing = std::path::Path::new("/tmp/trusty-nonexistent-repos-root-hygiene-test");
         run_hygiene_for_all_bases(missing); // must not panic
+    }
+
+    // ── decide_reset: pure decision-logic unit tests (#2177) ──────────────
+
+    #[test]
+    fn decide_reset_ahead_skips() {
+        // Any unpushed commit must refuse the reset, even on a clean tree.
+        match decide_reset(Some(1), Some(false)) {
+            ResetDecision::Skip(reason) => assert!(reason.contains("ahead")),
+            ResetDecision::Reset => panic!("an ahead branch must never be reset"),
+        }
+    }
+
+    #[test]
+    fn decide_reset_dirty_skips() {
+        // A dirty tree must refuse the reset, even when not ahead.
+        match decide_reset(Some(0), Some(true)) {
+            ResetDecision::Skip(reason) => assert!(reason.contains("uncommitted")),
+            ResetDecision::Reset => panic!("a dirty tree must never be reset"),
+        }
+    }
+
+    #[test]
+    fn decide_reset_unknown_ahead_skips() {
+        // Detached HEAD / no upstream / rev-list failure (ahead=None) must
+        // conservatively refuse, regardless of the dirty state.
+        match decide_reset(None, Some(false)) {
+            ResetDecision::Skip(_) => {}
+            ResetDecision::Reset => panic!("unknown ahead-count must never be reset"),
+        }
+    }
+
+    #[test]
+    fn decide_reset_unknown_dirty_skips() {
+        // A `git status` failure (dirty=None) must conservatively refuse,
+        // regardless of the ahead-count.
+        match decide_reset(Some(0), None) {
+            ResetDecision::Skip(_) => {}
+            ResetDecision::Reset => panic!("unknown dirty-state must never be reset"),
+        }
+    }
+
+    #[test]
+    fn decide_reset_clean_and_even_resets() {
+        // The only case that may proceed: zero ahead AND confirmed clean.
+        assert_eq!(decide_reset(Some(0), Some(false)), ResetDecision::Reset);
     }
 }
