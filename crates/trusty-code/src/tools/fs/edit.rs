@@ -50,7 +50,9 @@ pub struct EditTool {
     /// pre-#2073 behaviour: always the plain per-model order via
     /// `edit_format::select_and_apply`. `Some(mode)` routes through
     /// `edit_format::select_and_apply_for_mode`, whose `HarnessMode::Parity`
-    /// arm ignores `model_slug` (§5.9's edit-format reconciliation).
+    /// arm requires a `diff` payload and does NOT fall back to SEARCH/REPLACE
+    /// or whole-file (owner-tightened 2026-07-07, §5.9's edit-format
+    /// reconciliation read literally for benchmark fairness).
     mode: Option<HarnessMode>,
 }
 
@@ -85,13 +87,16 @@ impl EditTool {
 
     /// Set the resolved `HarnessMode` this tool's owning run uses (#2073).
     ///
-    /// Why: `HarnessMode::Parity` must select edit-format order the same way
-    /// regardless of the calling model (§5.9's reconciliation table); without
-    /// this the tool always used the plain per-model matrix even in Parity.
-    /// Every call site that does not opt in (`mode` stays `None`) keeps the
-    /// exact pre-#2073 behaviour.
+    /// Why: `HarnessMode::Parity` must score a model's raw diff-editing
+    /// ability, unforgivingly — without this the tool always used the
+    /// per-model fallback matrix even in Parity, letting a model "pass" an
+    /// edit via SEARCH/REPLACE or whole-file without ever demonstrating a
+    /// valid diff (owner decision, 2026-07-07: this would defeat M3's model
+    /// bake-off). Every call site that does not opt in (`mode` stays `None`)
+    /// keeps the exact pre-#2073 behaviour.
     /// What: Stores `mode` for use in `execute`/`edit_inner`.
-    /// Test: `edit_under_parity_mode_prefers_unified_diff_even_for_flagship_model_slug`,
+    /// Test: `edit_under_parity_mode_applies_a_valid_diff`,
+    /// `edit_under_parity_mode_errors_without_a_diff_payload`,
     /// `edit_under_daily_driver_mode_matches_legacy_model_based_order`.
     pub fn with_mode(mut self, mode: HarnessMode) -> Self {
         self.mode = Some(mode);
@@ -106,8 +111,11 @@ impl EditTool {
     /// `edit_format::select_and_apply`/`select_and_apply_for_mode` call.
     /// `self.mode` (#2073) picks which of the two: `None` (unset) preserves
     /// the exact pre-#2073 plain per-model selection; `Some(mode)` routes
-    /// through the mode-aware variant, whose `Parity` arm ignores the model
-    /// slug entirely.
+    /// through the mode-aware variant, whose `Parity` arm accepts ONLY a
+    /// `diff` payload and returns a recoverable
+    /// `FsError::ParityDiffRequired` (never a panic) when none was supplied
+    /// or the diff fails to apply — no fallback to SEARCH/REPLACE or
+    /// whole-file, even then.
     /// Test: All `EditTool` unit tests exercise this path.
     fn edit_inner(
         &self,
@@ -495,10 +503,12 @@ mod tests {
 
     /// Under `HarnessMode::Parity`, a flagship model slug (which would prefer
     /// SEARCH/REPLACE first under the plain per-model matrix) still applies
-    /// the unified-diff payload when both are supplied (#2073, §5.9's
-    /// edit-format reconciliation: Parity's selection must not vary by model).
+    /// ONLY the unified-diff payload when both are supplied — the
+    /// SEARCH/REPLACE payload is never even attempted (#2073, tightened
+    /// 2026-07-07: Parity's edit-format is strict unified-diff only, not
+    /// merely model-independent).
     #[tokio::test]
-    async fn edit_under_parity_mode_prefers_unified_diff_even_for_flagship_model_slug() {
+    async fn edit_under_parity_mode_applies_a_valid_diff() {
         let tmp = tempfile::tempdir().expect("tempdir");
         fs::write(tmp.path().join("f.py"), "line1\nline2\n").expect("write");
         let tool = EditTool::new(tmp.path())
@@ -509,7 +519,8 @@ mod tests {
             .execute(json!({
                 "path": "f.py",
                 // Deliberately non-matching, so a SEARCH/REPLACE-first order
-                // would fail; only the diff below can actually apply.
+                // would fail; only the diff below can actually apply. Under
+                // strict Parity this payload is never even attempted.
                 "old_string": "not-present",
                 "new_string": "x",
                 "diff": "@@ -2,1 +2,1 @@\n-line2\n+line2-diffed\n"
@@ -520,6 +531,48 @@ mod tests {
         assert!(result.content().contains("unified_diff"));
         let updated = fs::read_to_string(tmp.path().join("f.py")).expect("read");
         assert_eq!(updated, "line1\nline2-diffed\n");
+    }
+
+    /// Under `HarnessMode::Parity`, an `edit` call that supplies only
+    /// SEARCH/REPLACE (no `diff`) must return a RECOVERABLE tool error — the
+    /// same `ToolResult::err` mechanism every other edit failure uses, never
+    /// a panic — whose message makes clear Parity requires a unified-diff
+    /// edit, and must NOT silently succeed via the fallback matrix (#2073,
+    /// tightened 2026-07-07: the model is scored as failing the edit, per
+    /// the owner's benchmark-fairness decision).
+    #[tokio::test]
+    async fn edit_under_parity_mode_errors_without_a_diff_payload() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fs::write(tmp.path().join("f.py"), "line1\nline2\n").expect("write");
+        let tool = EditTool::new(tmp.path())
+            .with_model_slug("anthropic/claude-opus-4-5")
+            .with_mode(crate::mode::HarnessMode::Parity);
+
+        // A payload that WOULD succeed under DailyDriver's fallback matrix
+        // (unique old_string match) — under Parity it must never be tried.
+        let result = tool
+            .execute(json!({
+                "path": "f.py",
+                "old_string": "line2",
+                "new_string": "line2-replaced"
+            }))
+            .await;
+
+        assert!(
+            result.is_error(),
+            "Parity must reject an edit with no diff payload, got: {}",
+            result.content()
+        );
+        assert!(
+            result.content().contains("unified-diff"),
+            "error must make the Parity requirement clear: {}",
+            result.content()
+        );
+        let unchanged = fs::read_to_string(tmp.path().join("f.py")).expect("read");
+        assert_eq!(
+            unchanged, "line1\nline2\n",
+            "the file must be untouched when Parity rejects the edit"
+        );
     }
 
     /// Under `HarnessMode::DailyDriver`, `with_mode` must produce the exact

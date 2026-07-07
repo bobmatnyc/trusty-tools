@@ -17,10 +17,14 @@
 //! bundles the format-specific arguments recovered from the LLM's tool call;
 //! [`format_order_for`] returns the per-model fallback order; [`select_and_apply`]
 //! tries the caller-supplied payloads in that order against the current file
-//! content and returns the first one that applies cleanly. [`format_order_for_mode`]
-//! and [`select_and_apply_for_mode`] (#2073) are the `HarnessMode`-aware
-//! variants that reconcile this per-model matrix with vision spec §5.9's
-//! Parity/DailyDriver split (see their own docs).
+//! content and returns the first one that applies cleanly. [`select_and_apply_for_mode`]
+//! (#2073) is the `HarnessMode`-aware entry point that reconciles this
+//! per-model matrix with vision spec §5.9's Parity/DailyDriver split:
+//! `HarnessMode::DailyDriver` keeps this per-model matrix with full
+//! fallback, unchanged; `HarnessMode::Parity` is STRICT unified-diff only,
+//! with NO fallback to SEARCH/REPLACE or whole-file (owner decision,
+//! 2026-07-07 — see [`apply_parity_diff_only`]'s docs for the
+//! benchmark-fairness rationale).
 //!
 //! ## Per-model format matrix
 //!
@@ -38,7 +42,9 @@
 //! precision-dependent formats, so the most forgiving format (whole-file)
 //! leads for the catch-all bucket. This table is the `HarnessMode::DailyDriver`
 //! behaviour (#2073, §5.9): production, per-model-optimised edit-format
-//! selection. `HarnessMode::Parity` overrides it — see [`format_order_for_mode`].
+//! selection with full fallback. `HarnessMode::Parity` does NOT use this
+//! table at all — see [`apply_parity_diff_only`] for its strict,
+//! no-fallback unified-diff-only behaviour.
 //! Test: `tests::format_order_*`, `tests::select_and_apply_*`.
 
 mod diff;
@@ -213,43 +219,52 @@ pub fn select_and_apply(
 /// `HarnessMode`-aware fallback order for edit-format application (#2073,
 /// §5.9's reconciliation table).
 ///
-/// Why: The parity spec's benchmark-fairness goal (D2) extends to the edit
-/// layer: §5.9's table lists Parity's edit-format column as "unified-diff
-/// only", in contrast to DailyDriver's "per-model optimized". The literal
-/// reading ("reject every other format outright") would strand a Parity run
-/// against any model that cannot reliably emit a diff, which defeats
-/// "benchmark fairness" more than it serves it — so this applies the
-/// spec's INTENT (edit-format choice must not vary by model in Parity) by
-/// returning a FIXED, model-independent order with unified-diff leading,
-/// rather than hard-rejecting the other two formats. A caller wanting the
-/// stricter literal reading can inspect the returned `EditFormat` and treat
-/// anything but `UnifiedDiff` as a policy violation; `select_and_apply_for_mode`
-/// itself still falls back so a Parity run can always complete an edit.
-/// What: `HarnessMode::Parity` ignores `model_slug` and always returns
-/// `[UnifiedDiff, SearchReplace, WholeFile]`. `HarnessMode::DailyDriver`
+/// Why: §5.9's table lists Parity's edit-format column as "unified-diff
+/// only", in contrast to DailyDriver's "per-model optimized". An earlier
+/// revision of this function returned a fixed-but-still-falling-back order
+/// (`[UnifiedDiff, SearchReplace, WholeFile]`) for Parity; the owner
+/// tightened that decision (2026-07-07): Parity/Benchmark mode exists to
+/// measure MODELS unforgivingly, and silently rescuing a model that fails
+/// at diff-editing via a SearchReplace/WholeFile fallback defeats that
+/// purpose (M3's model bake-off depends on the stricter reading). Parity is
+/// therefore STRICT unified-diff only — see [`select_and_apply_for_mode`],
+/// which is what actually enforces this (NOT this function — see below).
+/// What: Kept for API-shape parity with [`format_order_for`] and existing
+/// callers that introspect "what would be preferred", but for
+/// `HarnessMode::Parity` this returns `[UnifiedDiff, UnifiedDiff,
+/// UnifiedDiff]` — not a real preference order, since Parity has none —
+/// purely to keep the fixed 3-element return type; `model_slug` is ignored.
+/// `select_and_apply_for_mode`'s `Parity` arm does NOT consult this
+/// function's return value at all; it dispatches through the dedicated,
+/// no-fallback [`apply_parity_diff_only`] instead, so there is exactly ONE
+/// place Parity's strictness is enforced. `HarnessMode::DailyDriver`
 /// delegates to [`format_order_for`] unchanged (the existing per-model
-/// matrix, #2068).
-/// Test: `tests::format_order_for_mode_parity_is_model_independent`,
+/// matrix, #2068) and IS still consulted by `select_and_apply_for_mode`.
+/// Test: `tests::format_order_for_mode_parity_is_unified_diff_only`,
 /// `tests::format_order_for_mode_daily_driver_matches_legacy_order`.
 pub fn format_order_for_mode(mode: HarnessMode, model_slug: &str) -> [EditFormat; 3] {
     match mode {
-        HarnessMode::Parity => [
-            EditFormat::UnifiedDiff,
-            EditFormat::SearchReplace,
-            EditFormat::WholeFile,
-        ],
+        HarnessMode::Parity => [EditFormat::UnifiedDiff; 3],
         HarnessMode::DailyDriver => format_order_for(model_slug),
     }
 }
 
-/// `HarnessMode`-aware [`select_and_apply`] (#2073).
+/// `HarnessMode`-aware edit-format dispatch (#2073).
 ///
 /// Why: The single call site (`EditTool::edit_inner`) that needs to pick
-/// between the plain per-model order and the Parity-fixed order without
-/// duplicating the apply loop.
-/// What: Computes the order via [`format_order_for_mode`], then applies it
-/// exactly as [`select_and_apply`] does.
-/// Test: `tests::select_and_apply_for_mode_parity_prefers_unified_diff_regardless_of_model`.
+/// between DailyDriver's per-model fallback chain and Parity's strict,
+/// no-fallback unified-diff requirement.
+/// What: `HarnessMode::DailyDriver` applies [`format_order_for`] (ignoring
+/// `format_order_for_mode`'s Parity-shaped return entirely for this arm —
+/// it calls the per-model matrix directly) via the shared [`apply_in_order`]
+/// loop, unchanged from pre-#2073 behaviour. `HarnessMode::Parity` ignores
+/// `model_slug` and delegates to [`apply_parity_diff_only`], which accepts
+/// ONLY a supplied `diff` payload — a present `old_string`/`new_string` or
+/// `content` payload is never attempted, even if the diff fails to apply.
+/// Test: `tests::select_and_apply_for_mode_parity_applies_a_valid_diff`,
+/// `tests::select_and_apply_for_mode_parity_errors_without_a_diff_payload`,
+/// `tests::select_and_apply_for_mode_parity_does_not_fall_back_on_diff_failure`,
+/// `tests::select_and_apply_for_mode_daily_driver_still_falls_back_per_model`.
 pub fn select_and_apply_for_mode(
     mode: HarnessMode,
     model_slug: &str,
@@ -257,12 +272,52 @@ pub fn select_and_apply_for_mode(
     path: &Path,
     payloads: &[EditPayload],
 ) -> Result<(String, EditFormat), FsError> {
-    apply_in_order(
-        format_order_for_mode(mode, model_slug),
-        content,
-        path,
-        payloads,
-    )
+    match mode {
+        HarnessMode::Parity => apply_parity_diff_only(content, path, payloads),
+        HarnessMode::DailyDriver => {
+            apply_in_order(format_order_for(model_slug), content, path, payloads)
+        }
+    }
+}
+
+/// Strict, no-fallback unified-diff application for `HarnessMode::Parity`
+/// (#2073, owner-tightened 2026-07-07 per vision spec §5.9's literal
+/// "unified-diff only" reading and the benchmark-fairness rationale).
+///
+/// Why: Parity/Benchmark mode exists to measure MODELS, unforgivingly — a
+/// model that cannot produce a valid unified diff must be scored as FAILING
+/// at the edit, not silently rescued by falling back to SEARCH/REPLACE or
+/// whole-file replacement. M3's model bake-off depends on this: a fallback
+/// would let a model "pass" an edit it did not actually demonstrate
+/// diff-editing competence at.
+/// What: Requires a present `EditPayload::UnifiedDiff` in `payloads`; any
+/// other payload present (`SearchReplace`, `WholeFile`) is ignored entirely
+/// and never attempted. Returns [`FsError::ParityDiffRequired`] when no diff
+/// payload was supplied at all. When a diff payload IS present, propagates
+/// `apply_unified_diff`'s own error verbatim on failure (bad hunk header,
+/// context mismatch, …) — NO fallback to another format is attempted even
+/// then. Both outcomes are ordinary recoverable `FsError`s (never a panic),
+/// so the model sees a clear message and can retry with a corrected diff,
+/// scored as a failed attempt in the interim.
+/// Test: `tests::select_and_apply_for_mode_parity_applies_a_valid_diff`,
+/// `tests::select_and_apply_for_mode_parity_errors_without_a_diff_payload`,
+/// `tests::select_and_apply_for_mode_parity_does_not_fall_back_on_diff_failure`.
+fn apply_parity_diff_only(
+    content: &str,
+    path: &Path,
+    payloads: &[EditPayload],
+) -> Result<(String, EditFormat), FsError> {
+    let diff_payload = payloads
+        .iter()
+        .find(|p| p.format() == EditFormat::UnifiedDiff);
+
+    let Some(EditPayload::UnifiedDiff { diff }) = diff_payload else {
+        return Err(FsError::ParityDiffRequired {
+            path: path.to_path_buf(),
+        });
+    };
+
+    apply_unified_diff(content, diff, path).map(|updated| (updated, EditFormat::UnifiedDiff))
 }
 
 /// Shared apply loop behind both [`select_and_apply`] and
@@ -449,16 +504,16 @@ mod tests {
         assert!(matches!(err, FsError::EditNotFound { .. }));
     }
 
-    /// `HarnessMode::Parity` returns the SAME fixed order regardless of
-    /// `model_slug` (#2073) — proves edit-format selection is model-independent
-    /// under Parity, matching every other reconciled layer (prompt assembly,
-    /// tool schemas, compaction).
+    /// `HarnessMode::Parity` returns `[UnifiedDiff, UnifiedDiff, UnifiedDiff]`
+    /// regardless of `model_slug` (#2073, tightened 2026-07-07) — reflects
+    /// that Parity has no real fallback order at all; `model_slug` is
+    /// ignored entirely.
     #[test]
-    fn format_order_for_mode_parity_is_model_independent() {
+    fn format_order_for_mode_parity_is_unified_diff_only() {
         let expected = [
             EditFormat::UnifiedDiff,
-            EditFormat::SearchReplace,
-            EditFormat::WholeFile,
+            EditFormat::UnifiedDiff,
+            EditFormat::UnifiedDiff,
         ];
         for slug in [
             "anthropic/claude-opus-4-5",
@@ -469,7 +524,7 @@ mod tests {
             assert_eq!(
                 format_order_for_mode(HarnessMode::Parity, slug),
                 expected,
-                "Parity order must not vary for {slug}"
+                "Parity must report unified-diff-only for {slug}"
             );
         }
     }
@@ -492,11 +547,12 @@ mod tests {
         }
     }
 
-    /// A flagship model slug (SEARCH/REPLACE-first under DailyDriver) must
-    /// still prefer unified-diff under Parity when both payloads are present
-    /// and the diff applies cleanly (#2073).
+    /// A valid `diff` payload applies cleanly under Parity, even alongside a
+    /// SEARCH/REPLACE payload that would otherwise win under a flagship
+    /// model's DailyDriver order — Parity must use ONLY the diff, never even
+    /// consider the other payload (#2073, tightened 2026-07-07).
     #[test]
-    fn select_and_apply_for_mode_parity_prefers_unified_diff_regardless_of_model() {
+    fn select_and_apply_for_mode_parity_applies_a_valid_diff() {
         let payloads = [
             EditPayload::SearchReplace {
                 old_string: "line2".into(),
@@ -518,23 +574,92 @@ mod tests {
         assert_eq!(updated, "line1\nline2-diffed\n");
     }
 
-    /// Parity still falls back to a present, applicable format when no
-    /// unified-diff payload was supplied at all — Parity must never strand a
-    /// run that only emitted SEARCH/REPLACE or whole-file.
+    /// Parity with NO diff payload supplied — only SEARCH/REPLACE or
+    /// whole-file — must return a recoverable `FsError::ParityDiffRequired`,
+    /// NOT silently fall back and succeed (#2073, tightened 2026-07-07: the
+    /// owner's benchmark-fairness decision — a model that never emitted a
+    /// diff must be scored as failing the edit).
     #[test]
-    fn select_and_apply_for_mode_parity_falls_back_without_a_diff_payload() {
+    fn select_and_apply_for_mode_parity_errors_without_a_diff_payload() {
         let payloads = [EditPayload::WholeFile {
             content: "brand new\n".into(),
         }];
-        let (updated, format) = select_and_apply_for_mode(
+        let err = select_and_apply_for_mode(
             HarnessMode::Parity,
             "anthropic/claude-opus-4-5",
             "old\n",
             Path::new("f.py"),
             &payloads,
         )
-        .expect("whole-file fallback must apply");
+        .expect_err("Parity must reject a run with no diff payload");
+        assert!(
+            matches!(err, FsError::ParityDiffRequired { .. }),
+            "expected ParityDiffRequired, got {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("Parity mode requires a unified-diff edit"),
+            "error message must make the Parity requirement clear: {err}"
+        );
+    }
+
+    /// Parity with a PRESENT but inapplicable diff (bad hunk/context
+    /// mismatch), plus a whole-file payload that WOULD otherwise succeed,
+    /// must still fail — no fallback to the whole-file payload is attempted
+    /// even when the diff itself is the one that failed (#2073, tightened
+    /// 2026-07-07).
+    #[test]
+    fn select_and_apply_for_mode_parity_does_not_fall_back_on_diff_failure() {
+        let payloads = [
+            EditPayload::UnifiedDiff {
+                diff: "@@ -99,1 +99,1 @@\n-nonexistent-line\n+replacement\n".into(),
+            },
+            EditPayload::WholeFile {
+                content: "would-have-worked\n".into(),
+            },
+        ];
+        let err = select_and_apply_for_mode(
+            HarnessMode::Parity,
+            "anthropic/claude-opus-4-5",
+            "line1\nline2\n",
+            Path::new("f.py"),
+            &payloads,
+        )
+        .expect_err("an inapplicable diff must error, not fall back to whole-file");
+        assert!(
+            matches!(
+                err,
+                FsError::DiffContextMismatch { .. } | FsError::DiffHunkHeader { .. }
+            ),
+            "expected a diff-application error (not a fallback success), got {err:?}"
+        );
+    }
+
+    /// `HarnessMode::DailyDriver` still falls back per-model exactly as
+    /// before #2073 tightened Parity — guards against accidentally
+    /// tightening the wrong mode.
+    #[test]
+    fn select_and_apply_for_mode_daily_driver_still_falls_back_per_model() {
+        let payloads = [
+            EditPayload::SearchReplace {
+                old_string: "not-present".into(),
+                new_string: "x".into(),
+            },
+            EditPayload::WholeFile {
+                content: "fallback content\n".into(),
+            },
+        ];
+        // Flagship order is SearchReplace -> UnifiedDiff -> WholeFile; the
+        // non-matching SearchReplace payload must fall through to WholeFile.
+        let (updated, format) = select_and_apply_for_mode(
+            HarnessMode::DailyDriver,
+            "anthropic/claude-opus-4-5",
+            "orig\n",
+            Path::new("f.py"),
+            &payloads,
+        )
+        .expect("DailyDriver must still fall back to whole-file");
         assert_eq!(format, EditFormat::WholeFile);
-        assert_eq!(updated, "brand new\n");
+        assert_eq!(updated, "fallback content\n");
     }
 }

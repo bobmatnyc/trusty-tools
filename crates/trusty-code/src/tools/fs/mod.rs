@@ -57,6 +57,15 @@ pub enum FsError {
     #[error("edit: old_string is ambiguous ({count} matches) in {path}")]
     EditAmbiguous { path: PathBuf, count: usize },
 
+    /// `HarnessMode::Parity` (#2073) requires a `diff` payload and none was
+    /// supplied — SEARCH/REPLACE and whole-file payloads are ignored under
+    /// Parity, never used as a fallback.
+    #[error(
+        "edit: Parity mode requires a unified-diff edit (provide 'diff'); \
+         SEARCH/REPLACE and whole-file are not accepted under Parity for {path}"
+    )]
+    ParityDiffRequired { path: PathBuf },
+
     /// A `unified_diff` edit's hunk header (`@@ -l,s +l,s @@`) could not be parsed.
     #[error("edit: invalid unified diff: {reason}")]
     DiffHunkHeader { reason: String },
