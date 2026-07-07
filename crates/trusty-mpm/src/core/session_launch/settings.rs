@@ -19,8 +19,11 @@ use super::PrepError;
 /// is configured, launched trusty-mpm sessions advertise the professional
 /// default `trusty-mpm`. HR-4 lets the operator select a different bundled style
 /// (teaching/research); [`write_output_style`] takes the resolved active id and
-/// falls back to this constant when none is supplied.
-pub(super) const OUTPUT_STYLE: &str = crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID;
+/// falls back to this constant when none is supplied. `pub(crate)` (rather than
+/// `pub(super)`) so `core::standalone::settings_defaults::ensure_settings_defaults`
+/// can seed the SAME default id into the tm-owned `CLAUDE_CONFIG_DIR` settings.json
+/// (issue #2214), re-exported via `session_launch::OUTPUT_STYLE`.
+pub(crate) const OUTPUT_STYLE: &str = crate::core::bundle::DEFAULT_OUTPUT_STYLE_ID;
 
 /// trusty-mpm-specific spinner tips shown during Claude Code loading.
 ///
@@ -878,11 +881,15 @@ pub(super) fn is_stale_bare_statusline_command(entry: &serde_json::Value) -> boo
 /// `statusLine.command`.
 ///
 /// Why (#1914): see [`write_status_line`]'s doc comment for the full
-/// PATH-resolution motivation.
+/// PATH-resolution motivation. `pub(crate)` (rather than private) so
+/// `core::standalone::settings_defaults::ensure_settings_defaults` can reuse the
+/// SAME absolute-path resolution when seeding `statusLine` into the tm-owned
+/// `CLAUDE_CONFIG_DIR` settings.json (issue #2214), re-exported via
+/// `session_launch::resolve_statusline_command`.
 /// What: appends the `statusline` subcommand to [`resolve_statusline_binary`].
 /// Test: exercised indirectly by `write_status_line_injects_when_absent`
 /// (asserts the written command is an absolute path ending in ` statusline`).
-fn resolve_statusline_command() -> String {
+pub(crate) fn resolve_statusline_command() -> String {
     format!("{} statusline", resolve_statusline_binary())
 }
 
