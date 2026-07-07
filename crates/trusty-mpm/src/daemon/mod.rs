@@ -128,15 +128,19 @@ pub async fn serve_http(
     }
 
     // Run inproject-hygiene for all managed base clones (#1709):
-    // fetch, hard-reset to default branch, prune stale worktrees.
-    // This is intentionally synchronous (git subprocess calls) so we offload it
-    // to a blocking thread. Failures are logged as warnings; they do not block
-    // the daemon from starting.
-    {
+    // fetch, safety-gated hard-reset (#2177) to default branch, prune stale
+    // worktrees. This is intentionally synchronous (git subprocess calls) so
+    // we offload it to a blocking thread. Failures are logged as warnings;
+    // they do not block the daemon from starting.
+    // Default ON (the #2177 guard makes it safe); set
+    // TRUSTY_MPM_INPROJECT_HYGIENE=0 to disable the whole sweep (#2190).
+    if inproject_hygiene_enabled() {
         let repos_root = managed_routes::inproject::repos_root();
         tokio::task::spawn_blocking(move || {
             managed_routes::inproject_hygiene::run_hygiene_for_all_bases(&repos_root);
         });
+    } else {
+        info!("inproject-hygiene disabled via TRUSTY_MPM_INPROJECT_HYGIENE");
     }
 
     let app = api::router(Arc::clone(&state));
@@ -471,6 +475,46 @@ fn parse_orphan_gc_enabled(raw: Option<&str>) -> bool {
     }
 }
 
+/// Whether the startup inproject-hygiene sweep is enabled (default ON).
+///
+/// Why: operators need an escape hatch to disable the hygiene sweep entirely
+/// (e.g. while investigating an unexpected git state in a base clone).
+/// Defaulting ON is safe now that the reset step is gated by the #2177
+/// dirty/ahead-of-origin guard, so the fetch + prune + guarded-reset behaviour
+/// still applies out of the box.
+/// What: reads `TRUSTY_MPM_INPROJECT_HYGIENE` and delegates to the pure
+/// [`parse_inproject_hygiene_enabled`]; a thin wrapper so the parsing is
+/// testable without mutating process-global env.
+/// Test: parsing covered by `parse_inproject_hygiene_enabled_*` below.
+fn inproject_hygiene_enabled() -> bool {
+    parse_inproject_hygiene_enabled(
+        std::env::var("TRUSTY_MPM_INPROJECT_HYGIENE")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure parse of the `TRUSTY_MPM_INPROJECT_HYGIENE` raw value into an
+/// on/off decision.
+///
+/// Why: mirrors [`parse_orphan_gc_enabled`] — env vars are process-global, so
+/// testing the policy by mutating them is racy under the multi-threaded test
+/// harness. Taking the raw value as a parameter makes the decision a pure
+/// function that needs no env mutation.
+/// What: returns `false` only for an explicit `0`/`false`/`off`/`no`
+/// (case-insensitive, trimmed); `true` for any other value, including `None`
+/// (unset) — i.e. default ON.
+/// Test: `parse_inproject_hygiene_enabled_default_and_overrides`.
+fn parse_inproject_hygiene_enabled(raw: Option<&str>) -> bool {
+    match raw {
+        Some(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            !matches!(v.as_str(), "0" | "false" | "off" | "no")
+        }
+        None => true,
+    }
+}
+
 /// Resolve the orphan-GC sweep interval, honouring an env override.
 ///
 /// Why: long-running hosts may want a slower (or faster) cadence than the
@@ -743,6 +787,38 @@ mod orphan_gc_config_tests {
                 parse_orphan_gc_interval(Some(bad)),
                 ORPHAN_GC_INTERVAL_SECS,
                 "{bad:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod inproject_hygiene_config_tests {
+    use super::parse_inproject_hygiene_enabled;
+
+    /// `TRUSTY_MPM_INPROJECT_HYGIENE` defaults ON and only explicit falsey
+    /// values disable (#2190).
+    ///
+    /// Tests the PURE parser with raw values — no process-global env mutation,
+    /// so it is safe to run in parallel with any sibling test (the #1458 review
+    /// fix for env-var test flakiness).
+    #[test]
+    fn parse_inproject_hygiene_enabled_default_and_overrides() {
+        assert!(
+            parse_inproject_hygiene_enabled(None),
+            "unset must default ON"
+        );
+
+        for off in ["0", "false", "off", "no", "OFF", " false "] {
+            assert!(
+                !parse_inproject_hygiene_enabled(Some(off)),
+                "{off:?} must disable"
+            );
+        }
+        for on in ["1", "true", "yes", "anything", "  "] {
+            assert!(
+                parse_inproject_hygiene_enabled(Some(on)),
+                "{on:?} must keep enabled"
             );
         }
     }
