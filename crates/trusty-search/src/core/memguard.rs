@@ -265,40 +265,51 @@ pub fn over_index_memory_limit() -> bool {
 /// Current process Resident Set Size in megabytes. Returns `None` if sysinfo
 /// could not resolve the current process (extremely unlikely; only seen in
 /// containerised environments with /proc hidden).
+///
+/// Why (issue #2165): this backs [`over_memory_limit`] / [`over_index_memory_limit`],
+/// the guardrails that bail a reindex or warn an operator before the kernel
+/// OOM-kills the daemon. Delegates to [`current_rss_mb_for_pid`] with our own
+/// pid so both the self-sample and arbitrary-pid paths (used for the
+/// embedderd sidecar) share one true-physical-footprint implementation on
+/// macOS instead of two copies of the same sysinfo-only logic silently
+/// under-reporting compressed memory.
 pub fn current_rss_mb() -> Option<u64> {
-    let pid = Pid::from_u32(std::process::id());
-    let mut sys = System::new_with_specifics(
-        RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
-    );
-    sys.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::Some(&[pid]),
-        true,
-        ProcessRefreshKind::nothing().with_memory(),
-    );
-    // `Process::memory()` returns bytes on every supported platform as of
-    // sysinfo 0.30+. Convert to MB with a saturating divide.
-    sys.process(pid).map(|p| p.memory() / (1024 * 1024))
+    current_rss_mb_for_pid(std::process::id())
 }
 
-/// Resident Set Size in megabytes for an arbitrary child process (by OS PID).
+/// Resident Set Size in megabytes for an arbitrary process (by OS PID),
+/// including the current process itself.
 ///
 /// Why: the embedderd sidecar runs in a separate process. Its RSS is not
-/// captured by `current_rss_mb()` (which reads only the daemon's own RSS).
-/// This helper uses the same platform-agnostic `sysinfo` approach to sample
-/// any process by its OS PID — the same path used for the daemon-parent RSS
-/// but parameterised on an external PID.
+/// captured by a self-only sampler. This helper also backs
+/// [`current_rss_mb`] for the daemon's own pid so there is exactly one RSS
+/// implementation to keep correct.
 ///
-/// What: asks `sysinfo` to refresh exactly the named PID (minimal overhead).
-/// Returns `None` if the PID is 0 (sentinel for "no sidecar running"), if
-/// sysinfo cannot locate the process (exited between spawn and sample), or if
-/// the platform `procfs`/`task_info` call fails.
+/// Why the macOS-first path (issue #2165): `sysinfo::Process::memory()` on
+/// macOS reads `PROC_PIDTASKINFO.pti_resident_size`, a getrusage-style
+/// figure that excludes pages the memory compressor currently holds. A daemon
+/// with several GB compressed can read as tens of MB, so `TRUSTY_MEMORY_LIMIT_MB`
+/// never trips. On macOS this now tries
+/// [`trusty_common::sys_metrics::physical_footprint_mb`] (the `ri_phys_footprint`
+/// counter `vmmap`/`footprint`/Activity Monitor report) first, falling back to
+/// the `sysinfo` reading if the `libproc` call fails (e.g. cross-user
+/// permission denial sampling a foreign pid).
+///
+/// What: returns `None` if the PID is 0 (sentinel for "no sidecar running"),
+/// if neither sampling path can locate the process (exited between spawn and
+/// sample), or if the platform call fails.
 ///
 /// Test: `tests::test_rss_for_self_pid` calls this with `std::process::id()`
-/// and asserts the result matches `current_rss_mb()` within 10 MB. Negative
-/// cases (pid=0, bogus pid) assert `None`.
+/// and asserts the result matches `current_rss_mb()` within 10 MB (trivially
+/// true now that both delegate to this function). Negative cases (pid=0,
+/// bogus pid) assert `None`.
 pub fn current_rss_mb_for_pid(pid: u32) -> Option<u64> {
     if pid == 0 {
         return None;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(mb) = trusty_common::sys_metrics::physical_footprint_mb(pid) {
+        return Some(mb);
     }
     let sysinfo_pid = Pid::from_u32(pid);
     let mut sys = System::new_with_specifics(
