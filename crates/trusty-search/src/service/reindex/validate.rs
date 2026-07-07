@@ -10,15 +10,17 @@
 //! counters and paths. Extracting them here makes each decision independently
 //! testable and keeps the monolith from growing.
 //!
-//! What: three pure helpers —
+//! What: four pure helpers —
 //! - [`reindex_outcome`] decides Ready vs. Failed from the vector/file counters
 //!   (the #601 non-empty gate), honouring the lexical-only exception.
 //! - [`canonical_walk_root`] canonicalizes a root exactly as the walker does so
 //!   `strip_prefix` reliably yields root-relative (portable) chunk paths (#602).
 //! - [`needs_path_relativization`] decides whether a root change between reindex
 //!   runs should re-trigger path relativization (#602).
+//! - [`root_move_is_trusted`] decides whether a detected root move is backed by
+//!   durable, persisted config before the caller may walk/prune against it (#2178).
 //!
-//! Test: `super::validate::tests` covers every branch of all three.
+//! Test: `super::validate::tests` covers every branch of all four.
 
 use std::path::{Path, PathBuf};
 
@@ -185,6 +187,45 @@ pub(crate) fn needs_path_relativization(previous_root: Option<&Path>, current_ro
         return false;
     };
     canonical_walk_root(prev) != canonical_walk_root(current_root)
+}
+
+/// Decide whether a detected root move is safe to walk/prune against (#2178).
+///
+/// Why: incident #2178 — a live daemon ran `reindex -i cto`, and the #402/#1073
+/// "colocated root moved" heuristic (see [`needs_path_relativization`]) decided
+/// `cto`'s root had moved from its real, persisted location to an unrelated git
+/// worktree that merely happened to also have colocated `.trusty-search/`
+/// storage (this very workspace self-indexes). The heuristic's only legitimacy
+/// check was `has_colocated_storage(candidate)` — trivially satisfied by ANY
+/// colocated project, not just the right one. The daemon walked the unrelated
+/// worktree (2,506 files) and the post-loop prune pass then deleted every one
+/// of the real corpus's 369,568 chunks that weren't seen in that walk. The
+/// root cause: `POST /indexes/:id/reindex` accepts a caller-supplied
+/// `root_path` override (issue #63) that is swapped into the in-memory
+/// registry entry but is **never** written to `indexes.toml` — so the
+/// in-memory `IndexHandle::root_path` can silently diverge from the durably
+/// persisted source of truth, and the old heuristic trusted the in-memory
+/// value unconditionally.
+///
+/// What: returns `true` iff the candidate root should be trusted enough to
+/// walk and (eventually) prune the corpus against — either there is no
+/// persisted `indexes.toml` entry for this index at all (a fresh or
+/// test-only index has nothing durable to validate against, so the existing
+/// in-memory value is trusted by default), or the candidate's canonical form
+/// matches the persisted entry's canonical `root_path`. Returns `false` when
+/// a persisted entry exists and disagrees — the caller MUST refuse to
+/// walk/prune against the candidate in that case (abort with a clear error
+/// rather than silently reindexing/pruning the wrong tree). This intentionally
+/// narrows the #402/#1073 auto-detected-move convenience: an operator-driven
+/// relocation must go through `POST /indexes/:id/relocate`, which persists the
+/// new `root_path` to `indexes.toml` BEFORE the handle is swapped, so it
+/// always passes this check.
+/// Test: `root_move_is_trusted_*` below.
+pub(crate) fn root_move_is_trusted(persisted_root: Option<&Path>, candidate_root: &Path) -> bool {
+    let Some(persisted) = persisted_root else {
+        return true;
+    };
+    canonical_walk_root(persisted) == canonical_walk_root(candidate_root)
 }
 
 #[cfg(test)]
@@ -404,5 +445,55 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         // prev = symlink alias, current = real target → same canonical root.
         assert!(!needs_path_relativization(Some(&link), &real));
+    }
+
+    /// Why: a fresh/test index has no persisted `indexes.toml` entry to check
+    /// against — nothing to validate, so the existing in-memory root is
+    /// trusted by default (must not regress indexes that never persist).
+    /// Test: this test.
+    #[test]
+    fn root_move_is_trusted_no_persisted_entry_is_trusted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(root_move_is_trusted(None, tmp.path()));
+    }
+
+    /// Why: the legitimate case — the candidate root IS the persisted
+    /// `indexes.toml` root_path (e.g. after `POST /indexes/:id/relocate`,
+    /// which persists before swapping the handle). Must be trusted.
+    /// Test: this test.
+    #[test]
+    fn root_move_is_trusted_matches_persisted_is_trusted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(root_move_is_trusted(Some(tmp.path()), tmp.path()));
+    }
+
+    /// Why: the #2178 incident — the in-memory candidate root diverges from
+    /// the persisted `indexes.toml` root_path (e.g. an unpersisted `root_path`
+    /// override on `POST /indexes/:id/reindex`, or a CWD-derived accident).
+    /// Must NOT be trusted — this is exactly the corpus-wipe trigger.
+    /// Test: this test.
+    #[test]
+    fn root_move_is_trusted_diverges_from_persisted_is_untrusted() {
+        let real_root = tempfile::tempdir().expect("tempdir a");
+        let hijacked_root = tempfile::tempdir().expect("tempdir b");
+        assert!(!root_move_is_trusted(
+            Some(real_root.path()),
+            hijacked_root.path()
+        ));
+    }
+
+    /// Why: a pure symlink-alias against the persisted root (same real target)
+    /// must not be treated as a divergence — canonicalization collapses both
+    /// sides.
+    /// Test: this test.
+    #[cfg(unix)]
+    #[test]
+    fn root_move_is_trusted_symlink_alias_of_persisted_is_trusted() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(root_move_is_trusted(Some(&real), &link));
     }
 }
