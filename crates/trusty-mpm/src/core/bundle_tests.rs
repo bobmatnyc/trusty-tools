@@ -81,6 +81,7 @@ fn constants_are_non_empty() {
     assert!(!TM_SESSION_RESUME.trim().is_empty());
     assert!(!TM_INIT.trim().is_empty());
     assert!(!TM_OVERVIEW.trim().is_empty());
+    assert!(!TM_ISSUES_PRUNE.trim().is_empty());
     assert!(!WHAT_IS_TRUSTY_MPM.trim().is_empty());
 }
 
@@ -114,6 +115,7 @@ fn tm_skills_are_in_bundle() {
         "skills/tm-session-resume.md",
         "skills/tm-init.md",
         "skills/tm.md",
+        "skills/tm-issues-prune.md",
     ] {
         assert!(
             skill_paths.contains(expected),
@@ -145,6 +147,7 @@ fn tm_skills_have_frontmatter() {
         ("tm-session-resume", TM_SESSION_RESUME),
         ("tm-init", TM_INIT),
         ("tm", TM_OVERVIEW),
+        ("tm-issues-prune", TM_ISSUES_PRUNE),
     ];
     for (name, content) in skills {
         assert!(
@@ -292,8 +295,8 @@ fn optimizer_toml_is_parseable() {
 fn bundle_table_is_complete() {
     // `ALL` must enumerate every artifact with unique, non-empty paths.
     // Count: 4 hooks/instructions + 5 base agents + 36 concrete agents +
-    // 19 /tm- skills + 1 DOC-28 self-description doc + 1 issue #2034
-    // bundled architecture doc = 66
+    // 20 /tm- skills + 1 DOC-28 self-description doc + 1 issue #2034
+    // bundled architecture doc = 67
     // (A4, tm-skills-portfolio epic: the `example-skill.md` placeholder was
     // removed — it shipped to every user with no real content. A3: the
     // previously-orphaned tm-doctor.md is now wired in. The 11 Phase 1 (#770)
@@ -309,19 +312,20 @@ fn bundle_table_is_complete() {
     //   tauri-engineer, web-ui-engineer, refactoring-engineer, prompt-engineer,
     //   code-critic, gcp-ops, vercel-ops, local-ops,
     //   memory-manager, mpm-agent-manager, mpm-skills-manager
-    // /tm- portfolio (tm-skills-portfolio epic) (19): tm-doctor,
+    // /tm- portfolio (tm-skills-portfolio epic + issue #2185) (20): tm-doctor,
     //   tm-circuit-breaker, tm-verification-protocols, tm-tool-usage-guide,
     //   tm-git-file-tracking, tm-adr, tm-workflow, tm-agent-architecture,
     //   tm-postmortem, tm-bug-reporting, tm-teaching-templates, tm-ticketing,
     //   tm-pr-workflow, tm-delegation-patterns, tm-session-management,
-    //   tm-session-pause, tm-session-resume, tm-init, tm (overview)
+    //   tm-session-pause, tm-session-resume, tm-init, tm (overview),
+    //   tm-issues-prune (#2185: gh issue backlog prune/prioritize)
     // DOC-28 R1 (1): docs/WHAT-IS-TRUSTY-MPM.md
     // Issue #2034 (1): docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md
-    assert_eq!(ALL.len(), 66);
+    assert_eq!(ALL.len(), 67);
     let mut paths: Vec<&str> = ALL.iter().map(|a| a.rel_path).collect();
     paths.sort_unstable();
     paths.dedup();
-    assert_eq!(paths.len(), 66, "artifact paths must be unique");
+    assert_eq!(paths.len(), 67, "artifact paths must be unique");
     for artifact in ALL {
         assert!(!artifact.rel_path.is_empty());
         assert!(!artifact.contents.trim().is_empty());
