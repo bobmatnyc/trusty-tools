@@ -200,3 +200,103 @@ async fn manager_reconcile_adopts_new_prefix_session() {
         .expect("adopted record present");
     assert_eq!(adopted.state, ManagedSessionState::Active);
 }
+
+/// Minimal `ManagedTmuxDriver` test double whose `get_pane_cwd` is
+/// controllable, mirroring `lifecycle.rs`'s local `StubTmux` pattern rather
+/// than extending the shared `tests::FakeTmuxDriver` (already near its
+/// 1500-SLOC test-file cap).
+///
+/// Why (#2158): the adopted-session cwd-resolution fix needs a driver whose
+/// `get_pane_cwd` returns a controllable value; every other trait method is
+/// unused by these two tests and panics if called, so a wiring mistake fails
+/// loudly instead of silently passing.
+/// What: `list_sessions` returns `alive`; `get_pane_cwd` returns `pane_cwd`
+/// for every session name (both fields set at construction).
+/// Test: used by `reconcile_resolves_adopted_session_cwd_from_pane` and
+/// `reconcile_flags_unresolvable_adopted_session_as_unmanaged` below.
+struct PaneCwdTmux {
+    alive: Vec<String>,
+    pane_cwd: Option<PathBuf>,
+}
+
+impl ManagedTmuxDriver for PaneCwdTmux {
+    fn create_session(
+        &self,
+        _name: &str,
+        _workdir: &str,
+    ) -> Result<(), super::manager::ManagedError> {
+        unimplemented!("not exercised by PaneCwdTmux tests")
+    }
+    fn kill_session(&self, _name: &str) -> Result<(), super::manager::ManagedError> {
+        unimplemented!("not exercised by PaneCwdTmux tests")
+    }
+    fn send_line(&self, _name: &str, _text: &str) -> Result<(), super::manager::ManagedError> {
+        unimplemented!("not exercised by PaneCwdTmux tests")
+    }
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, super::manager::ManagedError> {
+        unimplemented!("not exercised by PaneCwdTmux tests")
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, super::manager::ManagedError> {
+        Ok(self.alive.clone())
+    }
+    fn get_pane_cwd(&self, _name: &str) -> Option<PathBuf> {
+        self.pane_cwd.clone()
+    }
+}
+
+/// Why (#2158): an adopted session whose pane cwd resolves to a real,
+/// existing directory must carry that directory as BOTH `cwd` and
+/// `workspace_path` — never the permanent `/unknown` stub — so it can be
+/// validated/auto-repaired like any other managed workspace.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reconcile_resolves_adopted_session_cwd_from_pane() {
+    let dir = TempDir::new().unwrap();
+    let workspace = TempDir::new().unwrap();
+    let fake = std::sync::Arc::new(PaneCwdTmux {
+        alive: vec!["tm-resolvable-01".into()],
+        pane_cwd: Some(workspace.path().to_path_buf()),
+    });
+
+    let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
+    mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    let listed = mgr.list().await;
+    let adopted = listed
+        .iter()
+        .find(|r| r.tmux_name == "tm-resolvable-01")
+        .expect("adopted record present");
+    assert_eq!(adopted.cwd, workspace.path());
+    assert_eq!(adopted.workspace_path.as_deref(), Some(workspace.path()));
+    assert_eq!(adopted.task, "adopted session");
+}
+
+/// Why (#2158): an adopted session whose pane cwd cannot be resolved (the
+/// driver returns `None`, or resolves to a path that does not exist) must
+/// keep the `/unknown` sentinel AND carry a task string that clearly flags it
+/// as unmanaged — never an indistinguishable-from-normal "adopted session".
+/// Test: this function IS the test.
+#[tokio::test]
+async fn reconcile_flags_unresolvable_adopted_session_as_unmanaged() {
+    let dir = TempDir::new().unwrap();
+    let fake = std::sync::Arc::new(PaneCwdTmux {
+        alive: vec!["tm-unresolvable-01".into()],
+        pane_cwd: None,
+    });
+
+    let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
+    mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    let listed = mgr.list().await;
+    let adopted = listed
+        .iter()
+        .find(|r| r.tmux_name == "tm-unresolvable-01")
+        .expect("adopted record present");
+    assert_eq!(adopted.cwd, PathBuf::from("/unknown"));
+    assert!(adopted.workspace_path.is_none());
+    assert!(
+        adopted.task.contains("unmanaged"),
+        "task must clearly flag the record as unmanaged, got: {}",
+        adopted.task
+    );
+}

@@ -126,6 +126,31 @@ fn cli_parses_doctor_prune_stale_skills() {
 }
 
 #[test]
+fn cli_parses_validate() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "validate"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Validate { path, repair } => {
+            assert_eq!(path, None);
+            assert!(!repair);
+        }
+        other => panic!("expected Command::Validate, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_validate_with_path_and_repair() {
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "validate", "--path", "/tmp/ws", "--repair"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Validate { path, repair } => {
+            assert_eq!(path, Some(std::path::PathBuf::from("/tmp/ws")));
+            assert!(repair);
+        }
+        other => panic!("expected Command::Validate, got {other:?}"),
+    }
+}
+
+#[test]
 fn cli_parses_health() {
     let cli = Cli::try_parse_from(["trusty-mpm", "health"]).unwrap();
     assert!(matches!(cli.command.unwrap(), Command::Health));

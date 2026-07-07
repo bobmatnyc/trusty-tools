@@ -209,6 +209,86 @@ fn prune_stale_skills_locally() {
     }
 }
 
+/// `validate` subcommand — diff a workspace's deployed `.claude/{agents,skills}`
+/// payload against the canonical bundled roster (issue #2158).
+///
+/// Why: unlike `tm doctor` (which round-trips through a reachable daemon),
+/// this runs [`trusty_mpm::core::deploy_validate::validate_workspace`]
+/// directly against the local filesystem, so it works standalone — useful in
+/// CI, in a freshly-provisioned worktree with no daemon yet, or as a
+/// non-interactive gate (`tm validate --path <dir> || exit 1`).
+/// What: resolves `path` (default: the current directory) to a
+/// [`FrameworkPaths`] via [`FrameworkPaths::for_managed_workspace`], runs the
+/// validator, and — when `repair` is set and gaps were found — re-runs
+/// [`trusty_mpm::core::deploy_validate::validate_and_repair`] (which itself
+/// calls `prepare_session_with_repo_url`, the same pipeline `spawn_managed`
+/// uses) before printing the final verdict. Exits the process with status `1`
+/// when the final report is incomplete, `0` otherwise.
+/// Test: `cli_parses_validate`, `cli_parses_validate_with_path_and_repair`
+/// cover parsing; the diff/repair logic itself is covered by
+/// `core::deploy_validate`'s own unit tests.
+pub(crate) async fn validate(path: Option<std::path::PathBuf>, repair: bool) -> anyhow::Result<()> {
+    use trusty_mpm::core::deploy_validate::{validate_and_repair, validate_workspace};
+    use trusty_mpm::core::paths::FrameworkPaths;
+
+    let workspace = match path {
+        Some(p) => p,
+        None => std::env::current_dir()?,
+    };
+    let fw = FrameworkPaths::for_managed_workspace(&workspace);
+
+    println!("tm validate: {}", workspace.display());
+
+    let complete = if repair {
+        let outcome = validate_and_repair(&fw, &workspace, None);
+        if outcome.repaired {
+            println!(
+                "auto-repair ran ({} gap(s) found before repair)",
+                outcome.before.gaps.len()
+            );
+            if let Some(err) = &outcome.repair_error {
+                eprintln!("repair pipeline reported an error (non-fatal): {err}");
+            }
+        }
+        print_gaps(&outcome.after.gaps);
+        outcome.is_complete()
+    } else {
+        let report = validate_workspace(&fw);
+        print_gaps(&report.gaps);
+        report.is_complete()
+    };
+
+    if complete {
+        println!("deployment is complete");
+    } else {
+        eprintln!(
+            "deployment is INCOMPLETE — run `tm validate --path {} --repair` to auto-repair",
+            workspace.display()
+        );
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+/// Print each deployment gap as one `  - <description>` line, or a
+/// "no gaps" line when the slice is empty.
+///
+/// Why: shared by both branches of [`validate`] so the report formatting
+/// cannot drift between the plain and `--repair` paths.
+/// What: thin formatting loop over [`trusty_mpm::core::deploy_validate::DeploymentGap::describe`].
+/// Test: covered indirectly via `validate`'s own behaviour; the gap
+/// descriptions themselves are unit-tested in `core::deploy_validate`.
+fn print_gaps(gaps: &[trusty_mpm::core::deploy_validate::DeploymentGap]) {
+    if gaps.is_empty() {
+        println!("  no gaps found");
+        return;
+    }
+    for gap in gaps {
+        println!("  - {}", gap.describe());
+    }
+}
+
 /// `health` subcommand — report daemon health through chat-core.
 ///
 /// Why: the operator (and scripts) want a quick "is the daemon up, is the catalog

@@ -140,6 +140,28 @@ pub(crate) enum Command {
         #[arg(long, hide = true)]
         prune_stale_skills: bool,
     },
+    /// Validate a workspace's deployed `.claude/{agents,skills}` payload and
+    /// `settings.json` against the canonical bundled roster (issue #2158).
+    ///
+    /// Why: `tm doctor` requires a reachable daemon (it round-trips through
+    /// `GET /api/v1/doctor`); this command runs the identical diff engine
+    /// ([`trusty_mpm::core::deploy_validate::validate_workspace`]) directly
+    /// against the local filesystem, so it works standalone (no daemon
+    /// needed) and can gate a script/CI step on a non-zero exit code.
+    /// What: prints every gap found, or a completeness confirmation, and
+    /// exits non-zero when the workspace is incomplete (after an optional
+    /// `--repair` attempt still leaves gaps).
+    /// Test: `cli_parses_validate`, `cli_parses_validate_with_path_and_repair`.
+    Validate {
+        /// Workspace directory to validate. Defaults to the current directory.
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+        /// Attempt to auto-repair any gaps found by re-running the deploy
+        /// pipeline ([`trusty_mpm::core::session_launch::prepare_session_with_repo_url`])
+        /// before reporting the final verdict.
+        #[arg(long)]
+        repair: bool,
+    },
     /// Report daemon health: reachability, catalog freshness, and a fleet summary.
     Health,
     /// Launch the ratatui multi-session TUI dashboard.

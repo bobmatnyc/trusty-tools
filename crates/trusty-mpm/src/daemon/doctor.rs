@@ -33,6 +33,13 @@ use doctor_output_style::check_output_style;
 mod doctor_fs_checks;
 use doctor_fs_checks::{check_agents, check_instructions, check_skill_source, check_skills};
 
+// Split out to keep this file under the 500-SLOC production cap (issue #2158
+// — the full manifest-completeness diff, layered on top of the narrower
+// check_agents/check_skills/check_output_style probes above).
+#[path = "doctor_deploy_validate.rs"]
+mod doctor_deploy_validate;
+use doctor_deploy_validate::check_deployment_completeness;
+
 /// Per-probe network timeout.
 ///
 /// Why: a sidecar that is down or wedged must not stall the whole diagnostic;
@@ -48,13 +55,16 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// running all probes here keeps the check set identical across every UI.
 /// What: runs the instruction / agent / skill / output-style filesystem
 /// probes (the output-style probe closes DOC-28 F4 — the "did the
-/// trusty-mpm instructions actually load" gap), then the memory and search
-/// HTTP probes (each bounded by [`PROBE_TIMEOUT`]), a worktree-orphan scan
-/// (Fix 1b, #1840), the `skill_source` probe (A2, tm-skills-portfolio epic), and
-/// the `gh_account` probe (#gh-account-awareness — surfaces the active
-/// github.com identity and warns on the multi-account ambiguity) — folding the
-/// resulting nine [`DoctorCheck`]s into a [`DoctorReport`] whose `overall` status
-/// is the worst of them.
+/// trusty-mpm instructions actually load" gap), the `deployment` probe (issue
+/// #2158 — a full manifest-completeness diff against the canonical bundled
+/// roster, layered on top of the narrower agent/skill/output-style probes),
+/// then the memory and search HTTP probes (each bounded by [`PROBE_TIMEOUT`]),
+/// a worktree-orphan scan (Fix 1b, #1840), the `skill_source` probe (A2,
+/// tm-skills-portfolio epic), and the `gh_account` probe
+/// (#gh-account-awareness — surfaces the active github.com identity and warns
+/// on the multi-account ambiguity) — folding the resulting ten
+/// [`DoctorCheck`]s into a [`DoctorReport`] whose `overall` status is the
+/// worst of them.
 ///
 /// Note (#1905): the mpm-*→tm-* stale-skill cleanup is intentionally NOT a
 /// permanent probe here — it is a one-time migration
@@ -76,7 +86,7 @@ const EXPECTED_SEARCH_INDEX: &str = "trusty-mpm";
 /// silently missing the exact provisioning gap this issue is about. With no
 /// `project_dir` (the pre-existing CLI/standalone usage) this is unchanged —
 /// [`FrameworkPaths::default`] still probes the home tier.
-/// Test: `run_doctor_produces_nine_checks`,
+/// Test: `run_doctor_produces_ten_checks`,
 /// `check_agents_scoped_to_managed_workspace_fails_on_empty_roster`.
 pub async fn run_doctor(
     project_dir: Option<&Path>,
@@ -98,6 +108,7 @@ pub async fn run_doctor(
         check_skills(skills_root),
         check_skill_source(&paths),
         check_output_style(project_dir, &home),
+        check_deployment_completeness(&paths),
     ];
     checks.push(check_memory(&home).await);
     checks.push(check_search(&home).await);
@@ -505,12 +516,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_doctor_produces_nine_checks() {
-        // #gh-account-awareness: adds the `gh_account` probe, bringing the total
-        // from eight to nine checks. #1905's stale-skill cleanup is deliberately
-        // NOT a `run_doctor` probe — see the `run_doctor` doc comment.
+    async fn run_doctor_produces_ten_checks() {
+        // Issue #2158 adds the `deployment` probe, bringing the total from
+        // nine to ten checks. #1905's stale-skill cleanup is deliberately NOT
+        // a `run_doctor` probe — see the `run_doctor` doc comment.
         let report = run_doctor(None, None, &[]).await;
-        assert_eq!(report.checks.len(), 9);
+        assert_eq!(report.checks.len(), 10);
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(
             names,
@@ -520,6 +531,7 @@ mod tests {
                 "skills",
                 "skill_source",
                 "output_style",
+                "deployment",
                 "memory",
                 "search",
                 "worktrees",

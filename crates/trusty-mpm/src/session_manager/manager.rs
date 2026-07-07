@@ -648,18 +648,41 @@ impl SessionManager {
             guard.upsert(record).await?;
         }
 
-        // Adopt tmux sessions the store has never seen.
+        // Adopt tmux sessions the store has never seen. Issue #2158: an
+        // adopted session must never be left as a silent half-record with
+        // cwd/workspace_path permanently stubbed to "/unknown" — re-resolve
+        // the pane's real working directory via `get_pane_cwd` (the same
+        // primitive the idle-auto-stop snapshot uses) so it can be validated
+        // and provisioned like any other managed workspace; a pane whose cwd
+        // cannot be resolved is left CLEARLY flagged as unmanaged in `task`
+        // rather than an indistinguishable-from-normal "adopted session".
+        let mut newly_resolved: Vec<(ManagedSessionId, PathBuf)> = Vec::new();
         for name in &live_names {
             if !known_names.contains(name) {
+                let resolved_cwd = self.tmux.get_pane_cwd(name).filter(|p| p.is_dir());
+                let (cwd, workspace_path, task) = match &resolved_cwd {
+                    Some(path) => (
+                        path.clone(),
+                        Some(path.clone()),
+                        "adopted session".to_string(),
+                    ),
+                    None => (
+                        PathBuf::from("/unknown"),
+                        None,
+                        "adopted session (unmanaged — workspace path could not be resolved)"
+                            .to_string(),
+                    ),
+                };
+                let id = ManagedSessionId::new();
                 let external = SessionRecord {
-                    id: ManagedSessionId::new(),
+                    id,
                     tmux_name: name.clone(),
-                    cwd: PathBuf::from("/unknown"),
-                    task: "adopted session".into(),
+                    cwd,
+                    task,
                     state: ManagedSessionState::Active,
                     created_at: Utc::now(),
                     last_activity_at: None,
-                    workspace_path: None,
+                    workspace_path,
                     repo_url: None,
                     branch: None,
                     pending_decision: None,
@@ -681,6 +704,9 @@ impl SessionManager {
                     scrollback_path: None,
                     last_cwd: None,
                 };
+                if let Some(path) = resolved_cwd {
+                    newly_resolved.push((id, path));
+                }
                 guard.upsert(external).await?;
                 report.external_adopted.push(name.clone());
                 info!(name = %name, "reconcile: adopted external managed session");
@@ -689,6 +715,27 @@ impl SessionManager {
 
         // Release write guard before auto-resume (which needs its own locks).
         drop(guard);
+
+        // #2158: best-effort validate + auto-repair the deployed `.claude/`
+        // payload for every adopted session whose workspace was resolved
+        // above. Non-fatal — a repair failure only leaves the workspace as-is;
+        // the operator can run `tm validate --path <dir> --repair` manually.
+        for (id, workspace) in newly_resolved {
+            let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
+            let outcome = crate::core::deploy_validate::validate_and_repair(&fw, &workspace, None);
+            if outcome.before.is_complete() {
+                continue;
+            }
+            if outcome.is_complete() {
+                info!(id = %id, "reconcile: auto-repaired adopted session's deployment");
+            } else {
+                warn!(
+                    id = %id,
+                    gaps = outcome.after.gaps.len(),
+                    "reconcile: adopted session's deployment remains incomplete after auto-repair"
+                );
+            }
+        }
 
         if auto_resume && !to_resume.is_empty() {
             info!(

@@ -1059,15 +1059,16 @@ async fn pair_reset_clears_pairing() {
 
 #[tokio::test]
 async fn doctor_endpoint_returns_report() {
-    // `GET /api/v1/doctor` returns a nine-check report (#1840 added the
+    // `GET /api/v1/doctor` returns a ten-check report (#1840 added the
     // worktrees check; DOC-28 R4(a) added the output_style check; A2
     // (tm-skills-portfolio epic) added the skill_source check;
-    // #gh-account-awareness added the gh_account check). #1905's stale-skill
-    // cleanup is a one-time migration, not a `run_doctor` probe, so it does not
-    // appear here; the per-check statuses carry the diagnosis, not the HTTP status.
+    // #gh-account-awareness added the gh_account check; #2158 added the
+    // deployment check). #1905's stale-skill cleanup is a one-time migration,
+    // not a `run_doctor` probe, so it does not appear here; the per-check
+    // statuses carry the diagnosis, not the HTTP status.
     let state = DaemonState::shared();
     let Json(report) = doctor(State(state), Query(DoctorQuery::default())).await;
-    assert_eq!(report.checks.len(), 9);
+    assert_eq!(report.checks.len(), 10);
     let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
         names,
@@ -1077,6 +1078,7 @@ async fn doctor_endpoint_returns_report() {
             "skills",
             "skill_source",
             "output_style",
+            "deployment",
             "memory",
             "search",
             "worktrees",
