@@ -82,10 +82,16 @@ struct TaskRunRequestParams {
     /// to "this source does not contribute", NOT a request error.
     #[serde(default)]
     mode: Option<String>,
+    /// #2207: per-call wall-clock deadline override, in seconds, applied to
+    /// BOTH the PM's own loop and the delegated engineer's loop. `None`
+    /// falls through to `crate::provider::resolve_deadline_secs`'s env-var
+    /// (`TCODE_RUN_DEADLINE_SECONDS`) and default (1800s) tiers.
+    #[serde(default)]
+    deadline_secs: Option<u64>,
 }
 
 /// `task.run(task_description, agent_name?, context?, model_override?,
-/// session_id?, mode?) -> { session_id, status, mode }`.
+/// session_id?, mode?, deadline_secs?) -> { session_id, status, mode }`.
 ///
 /// Why: the single entry point that turns a request into a running
 /// background execution.
@@ -152,6 +158,7 @@ async fn task_run(
         agents_dir,
         model_override: p.model_override,
         mode,
+        deadline_secs: p.deadline_secs,
     };
     spawn_task_run(registry, llm, task_params)?;
 

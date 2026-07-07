@@ -32,7 +32,7 @@ use crate::agents::AgentConfig;
 use crate::llm::LlmClientTrait;
 use crate::project_context::load_project_context;
 use crate::prompt::assemble_system_prompt;
-use crate::provider::{resolve_max_tokens, resolve_model};
+use crate::provider::{resolve_deadline_secs, resolve_max_tokens, resolve_model};
 use crate::runner::{InProcessAgentRunner, RegistryFactory};
 use crate::tools::{
     AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, FinishTaskTool,
@@ -74,6 +74,12 @@ pub struct RunTaskParams {
     /// Optional per-run engineer model override (#1035). `None` routes the
     /// engineer via its own config model.
     pub engineer_model: Option<String>,
+    /// Optional per-run wall-clock deadline override, in seconds (#2207).
+    /// `None` falls through to [`crate::provider::resolve_deadline_secs`]'s
+    /// env-var/default tiers — see that function's docs for the full
+    /// precedence. Applied to BOTH the PM's own loop and the delegated
+    /// engineer's loop (`build_engineer_runner`).
+    pub deadline_secs: Option<u64>,
 }
 
 /// Execute a `run-task` end-to-end and return the rendered report.
@@ -108,6 +114,11 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     // Resolve the PM's own model (no per-call override for the PM).
     let pm_model = resolve_model(&pm_config, None);
 
+    // #2207: resolve the run's wall-clock deadline once, applied to BOTH the
+    // PM's own loop (below) and the delegated engineer's loop
+    // (`build_engineer_runner`, via `with_timeout_secs`).
+    let deadline_secs = resolve_deadline_secs(params.deadline_secs);
+
     // Build the engineer runner, scoped to the project working dir, sharing the
     // transcript (engineer turns are tagged "python-engineer").
     let engineer_runner = build_engineer_runner(
@@ -115,6 +126,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
         &params,
         project_context.clone(),
         Arc::clone(&transcript),
+        deadline_secs,
     );
 
     // The PM's tool registry: the delegate tool (the PM orchestrates; the
@@ -150,6 +162,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
         AgentLoopConfig {
             model: pm_model.clone(),
             max_tokens: resolve_max_tokens(&pm_config),
+            timeout_secs: deadline_secs,
             ..AgentLoopConfig::default()
         },
         pm_llm,
@@ -187,6 +200,9 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
 /// project context as the PM. This wires a `RegistryFactory` that constructs fs +
 /// bash tools scoped to the project dir plus the project context, then routes the
 /// result through the per-run model-override seam (`apply_engineer_model_override`).
+/// `deadline_secs` (#2207) is the SAME resolved wall-clock budget applied to the
+/// delegating PM's own loop, so a raised deadline covers the whole run, not just
+/// the PM's half of it.
 /// What: Returns an `Arc<dyn AgentRunner>` the `DelegateToAgentTool` dispatches
 /// to. The engineer's own LLM turns are recorded under the "python-engineer" role.
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`.
@@ -195,6 +211,7 @@ fn build_engineer_runner(
     params: &RunTaskParams,
     project_context: Option<String>,
     transcript: SharedTranscript,
+    deadline_secs: u64,
 ) -> Arc<dyn AgentRunner> {
     let engineer_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
         llm,
@@ -206,7 +223,8 @@ fn build_engineer_runner(
         project: params.project.clone(),
     });
 
-    let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone());
+    let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
+        .with_timeout_secs(deadline_secs);
     if let Some(ctx) = project_context {
         runner = runner.with_project_context(ctx);
     }
@@ -393,12 +411,19 @@ fn config_error_report(
 /// Why: Centralises the mapping from (PM loop result, before/after snapshots) to a
 /// `RunReport` with the correct exit code so the success / no-change / failure
 /// branches never drift.
-/// What: On a PM-loop error → `RunFailure` (with whatever transcript accrued). On
-/// success → compute the diff; empty diff → `NoChanges`, else `Success`. Usage and
-/// cost are aggregated from the transcript and priced PER ROLE — `pm_model` for
-/// `"pm"` turns, `engineer_model` for the delegated engineer's — per the #1475
-/// bug 1 fix (`aggregate_usage_per_role`), not blended under one model.
-/// Test: `run_task::tests::*` (success, no-change, and failure paths).
+/// What: On a PM-loop error → `DeadlineExceeded` when the error is specifically
+/// `AgentLoopError::Timeout` (#2207 — distinct from a genuine failure so a
+/// caller can tell "timed out" from "errored"), else `RunFailure` (with
+/// whatever transcript accrued). On success → compute the diff; empty diff →
+/// `NoChanges`, else `Success`. Usage and cost are aggregated from the
+/// transcript and priced PER ROLE — `pm_model` for `"pm"` turns,
+/// `engineer_model` for the delegated engineer's — per the #1475 bug 1 fix
+/// (`aggregate_usage_per_role`), not blended under one model. #2206: this
+/// aggregation now runs on the error path too, so a `run_failure` or
+/// `deadline_exceeded` report still carries the real usage/cost of every turn
+/// that DID complete before the error/deadline, rather than the zeroed
+/// placeholder the pre-#2206 code returned unconditionally on this branch.
+/// Test: `run_task::tests::*` (success, no-change, failure, and deadline paths).
 fn assemble_report(
     params: &RunTaskParams,
     transcript: &SharedTranscript,
@@ -410,18 +435,32 @@ fn assemble_report(
 ) -> RunReport {
     let turns = drain_transcript(transcript);
 
-    // A PM-loop error is a runtime failure; the transcript still reflects whatever
-    // turns ran before the error. The PM's `AgentOutput` content is not needed for
-    // the report — the transcript and diff are the authoritative artifacts.
+    // A PM-loop error is a runtime failure (or, #2207, a deadline); the
+    // transcript still reflects whatever turns ran before the error. The PM's
+    // `AgentOutput` content is not needed for the report — the transcript and
+    // diff are the authoritative artifacts. #2206: usage/cost are aggregated
+    // from those completed turns here too, not zeroed.
     if let Err(e) = pm_result {
+        let (usage, cost) = aggregate_usage_per_role(&turns, pm_model, engineer_model);
+        let is_deadline = matches!(e, crate::agent_loop::AgentLoopError::Timeout { .. });
+        let exit = if is_deadline {
+            ExitCode::DeadlineExceeded
+        } else {
+            ExitCode::RunFailure
+        };
+        let label = if is_deadline {
+            "deadline exceeded"
+        } else {
+            "run failure"
+        };
         return RunReport {
             agent: params.agent.clone(),
-            task: format!("{} [run failure: {e}]", params.task),
+            task: format!("{} [{label}: {e}]", params.task),
             diff: String::new(),
             transcript: turns,
-            usage: crate::perf::TokenUsage::default(),
-            cost_usd: None,
-            exit: ExitCode::RunFailure,
+            usage,
+            cost_usd: Some(cost),
+            exit,
         };
     }
 

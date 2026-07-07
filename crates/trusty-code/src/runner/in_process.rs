@@ -261,6 +261,23 @@ impl InProcessAgentRunner {
         self
     }
 
+    /// Override only the wall-clock timeout of the default loop budget (#2207).
+    ///
+    /// Why: `run_task`/`task::executor` resolve a single run-wide deadline
+    /// (`crate::provider::resolve_deadline_secs`) that must apply to the
+    /// delegated engineer's loop as well as the delegating PM's own — but
+    /// they have no reason to touch `max_turns`. A dedicated setter avoids
+    /// forcing every call site to reconstruct a whole `InProcessRunnerConfig`
+    /// (and risk silently resetting `max_turns` to its default) just to
+    /// change one field.
+    /// What: Builder-style setter; returns `self` for chaining. Leaves
+    /// `self.config.max_turns` untouched.
+    /// Test: `runner::tests::with_timeout_secs_overrides_only_timeout`.
+    pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
+        self.config.timeout_secs = timeout_secs;
+        self
+    }
+
     /// Load the agent config for `agent_name` from the config directory.
     ///
     /// Why: Each delegation targets a named agent; its model, prompt, and

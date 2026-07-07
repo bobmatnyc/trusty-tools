@@ -24,9 +24,14 @@ use serde::{Deserialize, Serialize};
 /// naming).
 /// What: `Created` -> `Running` happens immediately on `session.create` in
 /// M1 (there is no queue to sit in ahead of real task execution, which
-/// lands with `task.*` in #2056). `Cancelled`/`Finished`/`Failed` are the
-/// three terminal states; `session.cancel` is the only one #2054 can drive
-/// today (`Finished`/`Failed` are set by the future task-execution wiring).
+/// lands with `task.*` in #2056). `Cancelled`/`Finished`/`Failed`/
+/// `DeadlineExceeded` are the four terminal states; `session.cancel` is the
+/// only one #2054 can drive directly (`Finished`/`Failed`/`DeadlineExceeded`
+/// are set by `task::executor::run_and_record` when the PM's `AgentLoop`
+/// resolves). `DeadlineExceeded` (#2207) is distinct from `Failed`: it means
+/// the run's configured wall-clock budget elapsed before the PM reached a
+/// terminal state, NOT that the loop or LLM call errored — a run that hit
+/// this status may have made real, useful progress.
 /// Test: `model::tests::session_status_serialises_snake_case`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,6 +41,7 @@ pub enum SessionStatus {
     Cancelled,
     Finished,
     Failed,
+    DeadlineExceeded,
 }
 
 impl SessionStatus {
@@ -54,6 +60,7 @@ impl SessionStatus {
             SessionStatus::Cancelled => "cancelled",
             SessionStatus::Finished => "finished",
             SessionStatus::Failed => "failed",
+            SessionStatus::DeadlineExceeded => "deadline_exceeded",
         }
     }
 
@@ -63,12 +70,16 @@ impl SessionStatus {
     /// Why: `session.cancel` and any future completion handler need to
     /// reject transitions out of a terminal state (e.g. cancelling an
     /// already-finished session is a no-op error, not a silent overwrite).
-    /// What: `true` for `Cancelled`/`Finished`/`Failed`; `false` otherwise.
+    /// What: `true` for `Cancelled`/`Finished`/`Failed`/`DeadlineExceeded`;
+    /// `false` otherwise.
     /// Test: `model::tests::is_terminal_covers_terminal_states`.
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            SessionStatus::Cancelled | SessionStatus::Finished | SessionStatus::Failed
+            SessionStatus::Cancelled
+                | SessionStatus::Finished
+                | SessionStatus::Failed
+                | SessionStatus::DeadlineExceeded
         )
     }
 }
@@ -127,6 +138,10 @@ mod tests {
             serde_json::to_value(SessionStatus::Failed).unwrap(),
             json!("failed")
         );
+        assert_eq!(
+            serde_json::to_value(SessionStatus::DeadlineExceeded).unwrap(),
+            json!("deadline_exceeded")
+        );
     }
 
     /// `as_str` must match the serde wire representation exactly.
@@ -138,6 +153,7 @@ mod tests {
             SessionStatus::Cancelled,
             SessionStatus::Finished,
             SessionStatus::Failed,
+            SessionStatus::DeadlineExceeded,
         ] {
             let via_str = status.as_str();
             let via_serde = serde_json::to_value(status).unwrap();
@@ -145,7 +161,7 @@ mod tests {
         }
     }
 
-    /// Only `Cancelled`/`Finished`/`Failed` are terminal.
+    /// Only `Cancelled`/`Finished`/`Failed`/`DeadlineExceeded` are terminal.
     #[test]
     fn is_terminal_covers_terminal_states() {
         assert!(!SessionStatus::Created.is_terminal());
@@ -153,6 +169,7 @@ mod tests {
         assert!(SessionStatus::Cancelled.is_terminal());
         assert!(SessionStatus::Finished.is_terminal());
         assert!(SessionStatus::Failed.is_terminal());
+        assert!(SessionStatus::DeadlineExceeded.is_terminal());
     }
 
     /// A `Session` must round-trip through JSON with the expected shape.

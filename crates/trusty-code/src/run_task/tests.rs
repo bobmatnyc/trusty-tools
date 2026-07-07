@@ -206,6 +206,7 @@ fn params(agents: &TempDir, project: &TempDir, engineer_model: Option<&str>) -> 
         project: project.path().to_path_buf(),
         agents_dir: agents.path().to_path_buf(),
         engineer_model: engineer_model.map(str::to_string),
+        deadline_secs: None,
     }
 }
 
@@ -429,6 +430,7 @@ async fn missing_pm_config_is_config_error() {
             project: project.path().to_path_buf(),
             agents_dir: empty_agents.path().to_path_buf(),
             engineer_model: None,
+            deadline_secs: None,
         },
         llm,
     )
@@ -465,6 +467,159 @@ async fn exit_code_reflects_run_failure() {
         report.exit,
         ExitCode::RunFailure,
         "an LLM/loop error must map to RunFailure"
+    );
+}
+
+// ── #2207/#2206: configurable deadline + distinct status + telemetry ───────────
+
+/// A response in which the assistant calls `finish_task` with a required
+/// field (`summary`) missing — recoverable per #2072's schema-validation
+/// path, NOT terminal.
+fn malformed_finish_task_response() -> Value {
+    json!({
+        "id": "gen-finish-malformed",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-missing",
+                    "type": "function",
+                    "function": {
+                        "name": "finish_task",
+                        "arguments": json!({"status": "completed"}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50}
+    })
+}
+
+/// An `LlmClientTrait` that sleeps before its Nth `chat` call, then delegates.
+///
+/// Why: Deterministically drives the PM's own wall-clock deadline past its
+/// configured budget — the FIRST call (index 0) completes instantly and is
+/// recorded with real usage before the deadline fires, then a later call
+/// sleeps well past the remaining budget, so `AgentLoop::run`'s outer
+/// `tokio::time::timeout` aborts mid-flight rather than the loop reaching a
+/// clean or genuinely failed terminal state.
+/// What: Wraps a `ScriptedLlm`; sleeps `stall_for` on the call whose index
+/// equals `stall_at_call`, then delegates to the inner scripted client.
+/// Test: `exit_code_reflects_deadline_exceeded_distinct_from_run_failure`.
+struct DeadlineTriggerLlm {
+    inner: ScriptedLlm,
+    counter: AtomicUsize,
+    stall_at_call: usize,
+    stall_for: std::time::Duration,
+}
+
+#[async_trait]
+impl LlmClientTrait for DeadlineTriggerLlm {
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        let idx = self.counter.fetch_add(1, Ordering::SeqCst);
+        if idx == self.stall_at_call {
+            tokio::time::sleep(self.stall_for).await;
+        }
+        self.inner.chat(req).await
+    }
+}
+
+/// A tiny configured deadline yields `DeadlineExceeded` — distinct from
+/// `RunFailure` — AND the report still carries non-zero usage/cost from the
+/// turn(s) that DID complete before the deadline fired (#2207 + #2206).
+///
+/// Why: This is the exact scenario #2207 found blocking the M3 bake-off: a
+/// real, otherwise-productive run cut off mid-flight must be distinguishable
+/// from a genuine crash, and its accrued cost/usage must not be silently
+/// zeroed (#2206) — the bake-off runner needs real telemetry on EVERY
+/// terminal path, not just the clean one.
+/// What: `deadline_secs: Some(1)`. The scenario stays entirely within the
+/// PM's OWN loop (no delegation) to avoid a race against the delegated
+/// engineer's own independently-resolved deadline: turn 0 is a malformed
+/// `finish_task` call (instant, recoverable, recorded with real usage), then
+/// turn 1 sleeps 3s — well past the 1s budget — so the PM's own outer
+/// `tokio::time::timeout` fires before that second turn ever completes.
+/// Assert `exit == DeadlineExceeded` (not `RunFailure`) and `usage`/`cost_usd`
+/// are non-zero/`Some`.
+/// Test: this test.
+#[tokio::test]
+async fn exit_code_reflects_deadline_exceeded_distinct_from_run_failure() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm = Arc::new(DeadlineTriggerLlm {
+        inner: ScriptedLlm::from_json(&[
+            malformed_finish_task_response(),
+            stop_response("recovered (never reached in time)"),
+        ]),
+        counter: AtomicUsize::new(0),
+        stall_at_call: 1,
+        stall_for: std::time::Duration::from_secs(3),
+    });
+
+    let mut task_params = params(&agents, &project, None);
+    task_params.deadline_secs = Some(1);
+
+    let started = std::time::Instant::now();
+    let report = execute_run_task(task_params, llm).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        report.exit,
+        ExitCode::DeadlineExceeded,
+        "a deadline hit must map to DeadlineExceeded, not RunFailure"
+    );
+    assert!(
+        report.usage.prompt_tokens > 0,
+        "the PM's completed first turn must still contribute real usage, got {:?}",
+        report.usage
+    );
+    assert!(
+        report.cost_usd.is_some(),
+        "cost must be populated (not None) on the deadline-exceeded path"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "the 1s deadline must fire well before the mock's 3s delay, elapsed={elapsed:?}"
+    );
+
+    let rendered = report.render_json();
+    let parsed: Value = serde_json::from_str(&rendered).expect("report JSON must parse");
+    assert_eq!(parsed["status"], "deadline_exceeded");
+}
+
+/// A generous configured deadline does NOT prematurely kill a normal run
+/// (#2207).
+///
+/// Why: The companion regression guard — raising the deadline (e.g. for the
+/// M3 bake-off's L2/L3 multi-hour tasks) must not itself break a run that
+/// would otherwise complete quickly.
+/// What: `deadline_secs: Some(5)` against the standard instant PM->engineer
+/// happy path; assert `exit == Success`.
+/// Test: this test.
+#[tokio::test]
+async fn generous_deadline_does_not_abort_a_normal_run() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        delegate_response("create j.py"),
+        write_file_response("j.py", "y=2"),
+        stop_response("engineer done"),
+        stop_response("pm done"),
+    ]));
+
+    let mut task_params = params(&agents, &project, None);
+    task_params.deadline_secs = Some(5);
+
+    let report = execute_run_task(task_params, llm).await;
+
+    assert_eq!(
+        report.exit,
+        ExitCode::Success,
+        "a generous deadline must not abort a run that finishes well within budget"
     );
 }
 

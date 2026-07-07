@@ -143,14 +143,18 @@ pub fn render_transcript_human(record: &TranscriptRecord) -> String {
 /// Why: `run-task` via the thin client and the legacy in-process
 /// `run-task` must agree on what a script checking `$?` sees.
 /// What: `Finished` -> `ExitCode::Success`; `Cancelled`/`Failed` ->
-/// `ExitCode::RunFailure`; `Created`/`Running` (should never be passed here
-/// — the caller only calls this once a run has reached a terminal status)
-/// also map to `RunFailure` defensively rather than panicking.
+/// `ExitCode::RunFailure`; `DeadlineExceeded` (#2207) -> its own distinct
+/// `ExitCode::DeadlineExceeded`, so a script can tell "timed out" from
+/// "errored" the same way the legacy path's `RunReport::exit` does;
+/// `Created`/`Running` (should never be passed here — the caller only calls
+/// this once a run has reached a terminal status) also map to `RunFailure`
+/// defensively rather than panicking.
 /// Test: `tests::exit_code_for_status_maps_terminal_states`.
 pub fn exit_code_for_status(status: SessionStatus) -> ExitCode {
     match status {
         SessionStatus::Finished => ExitCode::Success,
         SessionStatus::Cancelled | SessionStatus::Failed => ExitCode::RunFailure,
+        SessionStatus::DeadlineExceeded => ExitCode::DeadlineExceeded,
         SessionStatus::Created | SessionStatus::Running => ExitCode::RunFailure,
     }
 }
@@ -281,6 +285,10 @@ mod tests {
         assert_eq!(
             exit_code_for_status(SessionStatus::Failed).code(),
             ExitCode::RunFailure.code()
+        );
+        assert_eq!(
+            exit_code_for_status(SessionStatus::DeadlineExceeded).code(),
+            ExitCode::DeadlineExceeded.code()
         );
     }
 }
