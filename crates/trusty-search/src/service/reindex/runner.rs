@@ -89,6 +89,73 @@ pub(super) async fn run_reindex(
     let canonical_root = validate::canonical_walk_root(&root);
     let index_id: IndexId = handle.id.clone();
 
+    // Issue #602/#1073: detect a root move against the corpus's own
+    // persisted `indexed_root` (read from the redb `_meta` table, i.e. the
+    // root the CURRENT corpus's chunk paths are actually relative to).
+    let prior_indexed_root = handle.read_indexed_root().await.unwrap_or(None);
+    let root_moved =
+        validate::needs_path_relativization(prior_indexed_root.as_deref(), &canonical_root);
+
+    // Issue #2178 (P0 data-risk): before trusting ANY detected root move
+    // enough to walk — and, later, prune — the corpus against it, cross-check
+    // the candidate against the durably persisted `indexes.toml` entry for
+    // this index. See `validate::root_move_is_trusted` for the full incident
+    // writeup: the #402/#1073 heuristic below only checked whether the
+    // candidate root merely *had* colocated storage, not whether it was
+    // *this index's* actual registered root, and `POST /indexes/:id/reindex`
+    // can silently repoint the in-memory handle's `root_path` (issue #63)
+    // without ever touching `indexes.toml`. This gate runs BEFORE Phase 1
+    // (the walk) even starts, so an untrusted candidate never touches the
+    // filesystem walk or the finish-phase prune pass — the existing corpus is
+    // left completely untouched.
+    if root_moved {
+        let persisted_root = crate::service::persistence::load_index_registry()
+            .ok()
+            .and_then(|entries| entries.into_iter().find(|e| e.id == index_id.0))
+            .map(|e| e.root_path);
+        if !validate::root_move_is_trusted(persisted_root.as_deref(), &canonical_root) {
+            tracing::warn!(
+                "reindex[{}]: REFUSING untrusted root move — in-memory root is \
+                 {} but the corpus's last-indexed root is {:?} and the persisted \
+                 indexes.toml root_path is {:?}; these disagree, which is exactly \
+                 the #2178 root-hijack signature (an unpersisted root_path \
+                 override or a stale in-memory handle), not a legitimate \
+                 relocation. Aborting before any walk/prune — the existing \
+                 corpus is untouched. Use POST /indexes/:id/relocate for an \
+                 explicit, durable move.",
+                index_id.0,
+                canonical_root.display(),
+                prior_indexed_root,
+                persisted_root,
+            );
+            let reason = format!(
+                "reindex aborted: candidate root {} does not match this index's \
+                 persisted indexes.toml root_path — refusing to walk/prune \
+                 against an unvalidated root to protect the existing corpus \
+                 (issue #2178); use POST /indexes/:id/relocate for an explicit move",
+                canonical_root.display(),
+            );
+            mark_reindex_failed(&handle, &reason).await;
+            progress.status.store(ReindexStatus::Failed);
+            progress
+                .push(serde_json::json!({
+                    "event": "error",
+                    "index_id": index_id.0,
+                    "message": reason,
+                    "fatal": true,
+                }))
+                .await;
+            // term_guard drops here → broadcasts error event via Drop (mirrors
+            // the carryover-copy-failure abort path below).
+            drop(term_guard);
+            schedule_progress_cleanup(cleanup_map, cleanup_id);
+            if let Some(ref q) = quarantine {
+                q.record_failure(&index_id);
+            }
+            return;
+        }
+    }
+
     // Issue #109, Phase 1: reset the staged-pipeline status surface.
     super::stages::reset_stages_for_reindex(&handle).await;
 
@@ -126,17 +193,15 @@ pub(super) async fn run_reindex(
     // Issues #840 / #662: load the persisted hash cache BEFORE emitting
     // the `start` event so `hashes_loaded` is available for the event payload.
     let hashes: FileHashes = hashes_for(&index_id);
-    // Issue #602: detect a root move against the corpus's persisted
-    // `indexed_root` and, for legacy (non-colocated) indexes, clear the
-    // hash cache so every file is re-written relative to the new canonical root.
+    // Issue #602: `root_moved` (computed above, before the walk, and gated by
+    // the #2178 trust check) decides, for legacy (non-colocated) indexes,
+    // whether to clear the hash cache so every file is re-written relative to
+    // the new canonical root.
     //
     // Issue #1073: for colocated indexes the chunk and hash keys are
     // ROOT-RELATIVE (#402), so they are valid at any root location — a pure
     // move changes the root prefix only. Do NOT clear the hash cache on a
     // root move for colocated indexes.
-    let prior_indexed_root = handle.read_indexed_root().await.unwrap_or(None);
-    let root_moved =
-        validate::needs_path_relativization(prior_indexed_root.as_deref(), &canonical_root);
     let is_colocated = crate::service::colocated_storage::has_colocated_storage(&canonical_root);
     let hashes_loaded: usize = if force {
         hashes.clear();

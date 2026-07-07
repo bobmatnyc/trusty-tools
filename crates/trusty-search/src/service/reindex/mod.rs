@@ -30,6 +30,9 @@
 //! - `staging`     — decide whether to stage the rebuilt corpus.
 //! - `validate`    — `ReindexOutcome`, `canonical_walk_root`, path-relativization.
 //! - `tests`       — integration / unit tests (test-file cap: 1 500 SLOC).
+//! - `root_hijack_tests` — issue #2178 P0 data-risk regression tests (a
+//!   detected root move must be validated against persisted `indexes.toml`
+//!   config before the corpus can be walked/pruned against it).
 //!
 //! Test: see `tests.rs`; the primary coverage is
 //! `reindex_walks_directory_and_emits_events`.
@@ -114,3 +117,7 @@ pub(crate) use tokio::sync::Semaphore;
 // ── test module ──────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests;
+// Issue #2178: isolated from `tests.rs` to keep it under the 1500-SLOC
+// test-file cap; see the module doc comment there for the incident writeup.
+#[cfg(test)]
+mod root_hijack_tests;
