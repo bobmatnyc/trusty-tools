@@ -175,6 +175,8 @@ impl OrchestratorBackend for MockBackend {
         _github_host: Option<&str>,
         commit_name: Option<&str>,
         _commit_email: Option<&str>,
+        untracked_sync_patterns: Option<Vec<String>>,
+        untracked_sync_enabled: Option<bool>,
     ) -> Result<Value, String> {
         Ok(json!({
             "workspace_root_template": workspace_root_template,
@@ -184,6 +186,8 @@ impl OrchestratorBackend for MockBackend {
             "project_name": project_name,
             "github_config_dir": github_config_dir,
             "commit_name": commit_name,
+            "untracked_sync_patterns": untracked_sync_patterns,
+            "untracked_sync_enabled": untracked_sync_enabled,
         }))
     }
 

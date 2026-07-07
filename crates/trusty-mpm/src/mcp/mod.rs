@@ -294,7 +294,10 @@ pub trait OrchestratorBackend: Send + Sync {
     ///      `github_*`/`commit_*` fields to that `config.projects` entry instead of
     ///      the global `github:` section; omitting it targets the global section
     ///      (commit identity has no global tier — supplying `commit_name`/
-    ///      `commit_email` with no `project_name` is an error).
+    ///      `commit_email` with no `project_name` is an error). `untracked_sync_*`
+    ///      (#2196) sets the untracked/secret-file sync allowlist and follows the
+    ///      SAME `project_name` routing as `github_*` (it DOES have a global tier,
+    ///      unlike commit identity).
     /// Test: `dispatch_config_write_tool` (mock).
     #[allow(clippy::too_many_arguments)]
     async fn config_write(
@@ -309,6 +312,8 @@ pub trait OrchestratorBackend: Send + Sync {
         github_host: Option<&str>,
         commit_name: Option<&str>,
         commit_email: Option<&str>,
+        untracked_sync_patterns: Option<Vec<String>>,
+        untracked_sync_enabled: Option<bool>,
     ) -> Result<Value, String>;
 
     // ── #1519 WI-2: project-registry tools ───────────────────────────────────
@@ -506,6 +511,15 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
             let github_host = args.get("github_host").and_then(Value::as_str);
             let commit_name = args.get("commit_name").and_then(Value::as_str);
             let commit_email = args.get("commit_email").and_then(Value::as_str);
+            let untracked_sync_patterns = args.get("untracked_sync_patterns").and_then(|v| {
+                v.as_array().map(|arr| {
+                    arr.iter()
+                        .filter_map(|p| p.as_str().map(str::to_string))
+                        .collect::<Vec<String>>()
+                })
+            });
+            let untracked_sync_enabled =
+                args.get("untracked_sync_enabled").and_then(Value::as_bool);
             backend
                 .config_write(
                     template,
@@ -518,6 +532,8 @@ async fn dispatch_tool_call<B: OrchestratorBackend>(
                     github_host,
                     commit_name,
                     commit_email,
+                    untracked_sync_patterns,
+                    untracked_sync_enabled,
                 )
                 .await
         }
