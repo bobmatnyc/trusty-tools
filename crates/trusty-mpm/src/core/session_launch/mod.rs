@@ -19,6 +19,12 @@ mod search_index;
 mod settings;
 #[cfg(test)]
 mod tests;
+// Split out of `tests.rs` to keep it under the 1500-SLOC test-file cap
+// (issue #2149 roster-deploy-failure-continues coverage) — mirrors the
+// `doctor_output_style.rs` / `doctor_fs_checks.rs` split pattern.
+#[cfg(test)]
+#[path = "tests_roster.rs"]
+mod tests_roster;
 
 use std::path::{Path, PathBuf};
 
@@ -69,6 +75,21 @@ pub struct PrepReport {
     ///
     // CUTOVER BRIDGE — remove post-migration (#1762)
     pub catchup_context: Option<String>,
+    /// Non-fatal errors raised while deploying the agent/skill roster.
+    ///
+    /// Why (issue #2149): a roster-deploy failure (e.g. a corrupt agent
+    /// manifest) must NEVER abort the rest of preparation — the identity
+    /// carrier (the trusty-mpm output style + `outputStyle` settings key)
+    /// still has to be written so the session self-identifies as trusty-mpm
+    /// even with an empty/broken agent roster. This field is how that failure
+    /// is surfaced instead of being silently swallowed: one formatted message
+    /// per failed stage (`"agent deploy failed: …"` / `"skill deploy failed:
+    /// …"`). Empty when both deploys succeeded.
+    /// What: callers (CLI, daemon provisioner) MUST log this at error level
+    /// and MAY surface it in `tm doctor` / the operator-facing launch summary.
+    /// Test: `prepare_session_continues_after_agent_deploy_failure`,
+    /// `prepare_session_continues_after_skill_deploy_failure`.
+    pub roster_errors: Vec<String>,
 }
 
 /// A failure raised while preparing a session for launch.
@@ -234,8 +255,18 @@ pub fn prepare_session_with_style_and_native(
 /// back to the workspace's own git origin remote).
 /// What: identical to the documented [`prepare_session_with_style_and_native`]
 /// behaviour, plus it passes `repo_url` to [`inject_trusty_memory_mcp`].
+/// Issue #2149: an agent-deploy or skill-deploy failure is captured into
+/// [`PrepReport::roster_errors`] rather than short-circuiting the function via
+/// `?` — every step after the roster deploy (CLAUDE.md/instructions, the
+/// trusty-mpm output-style write, MCP injection, hooks) still runs
+/// unconditionally, so a session ALWAYS launches carrying its trusty-mpm
+/// identity even when the roster itself is empty or broken. This function now
+/// only returns `Err` for genuinely fatal failures (the instruction pipeline,
+/// or the inspection-stash IO).
 /// Test: covered by every `prepare_session_*` test plus
-/// `prepare_session_repo_url_pins_palace`.
+/// `prepare_session_repo_url_pins_palace`,
+/// `prepare_session_continues_after_agent_deploy_failure`,
+/// `prepare_session_continues_after_skill_deploy_failure`.
 fn prepare_session_inner(
     fw: &FrameworkPaths,
     project_dir: &Path,
@@ -268,6 +299,16 @@ fn prepare_session_inner(
     let manifest = crate::core::manifest::resolve_manifest(&manifest_sources);
     let plan = crate::core::manifest::HarnessPlan::from_manifest(&manifest, fw, &catalog_root);
 
+    // Non-fatal roster-deploy errors accumulate here (issue #2149) instead of
+    // aborting the function early — every step below this point (output-style
+    // write, MCP injection, hooks) MUST still run so a session always carries
+    // its trusty-mpm identity even when the agent/skill roster fails to
+    // deploy. Errors are surfaced loudly via `tracing::error!` at the point of
+    // failure AND collected here so callers (the daemon provisioner, `tm
+    // doctor`) can report the gap instead of it being silently swallowed by a
+    // best-effort `warn` at the call site.
+    let mut roster_errors: Vec<String> = Vec::new();
+
     // Deploy composed agents — Claude Code reads `~/.claude/agents/` at startup.
     // The manifest's agent-set selection (include/exclude) restricts WHICH source
     // agents deploy; the default manifest selects all of them. Announce the
@@ -277,10 +318,24 @@ fn prepare_session_inner(
     crate::core::provisioning_stage::emit(
         crate::core::provisioning_stage::ProvisioningStage::DeployingAgents,
     );
-    let deploy = deploy_agents_filtered(&plan.agent_source, &fw.claude_agents_dir(), |name| {
+    let deploy = match deploy_agents_filtered(&plan.agent_source, &fw.claude_agents_dir(), |name| {
         plan.agent_selected(name)
-    })
-    .map_err(|err| PrepError::Deploy(err.to_string()))?;
+    }) {
+        Ok(result) => result,
+        Err(err) => {
+            // LOUD: an empty agent roster means the launched session has
+            // nothing to delegate to. This must never be a quiet `warn` — it
+            // is the exact failure mode that shipped issue #2149 (a session
+            // with no roster AND no trusty-mpm identity).
+            tracing::error!(
+                project_dir = %project_dir.display(),
+                "agent deploy FAILED — session will launch WITHOUT the tm/mpm agent \
+                 roster: {err}. Identity/output-style provisioning continues regardless."
+            );
+            roster_errors.push(format!("agent deploy failed: {err}"));
+            DeployResult::default()
+        }
+    };
 
     // Self-heal the skill *source* directory before deploying from it
     // (#1917): `plan.skill_source` falls back to `fw.skill_source_dir()`,
@@ -305,10 +360,20 @@ fn prepare_session_inner(
         crate::core::provisioning_stage::ProvisioningStage::DeployingSkills,
     );
     let skill_deploy =
-        deploy_skills_filtered(&plan.skill_source, &fw.claude_skills_dir(), |name| {
+        match deploy_skills_filtered(&plan.skill_source, &fw.claude_skills_dir(), |name| {
             plan.skill_selected(name)
-        })
-        .map_err(|err| PrepError::SkillDeploy(err.to_string()))?;
+        }) {
+            Ok(result) => result,
+            Err(err) => {
+                tracing::error!(
+                    project_dir = %project_dir.display(),
+                    "skill deploy FAILED — session will launch WITHOUT the tm/mpm skill \
+                     set: {err}. Identity/output-style provisioning continues regardless."
+                );
+                roster_errors.push(format!("skill deploy failed: {err}"));
+                DeployStats::default()
+            }
+        };
 
     // Compose the effective launch instructions (framework + delegation
     // authority + project CLAUDE.md); this loads or creates the project
@@ -532,6 +597,7 @@ fn prepare_session_inner(
         output_style,
         hooks_written,
         catchup_context,
+        roster_errors,
     })
 }
 

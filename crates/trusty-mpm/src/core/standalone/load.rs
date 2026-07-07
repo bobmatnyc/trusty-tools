@@ -196,9 +196,18 @@ fn run_prepare_session(
     managed_root: &Path,
 ) -> anyhow::Result<()> {
     let fw = crate::core::paths::FrameworkPaths::for_managed_project(managed_root, repo_dir);
-    crate::core::session_launch::prepare_session_with_repo_url(&fw, repo_dir, repo_url)
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("prepare_session failed: {e}"))
+    let report =
+        crate::core::session_launch::prepare_session_with_repo_url(&fw, repo_dir, repo_url)
+            .map_err(|e| anyhow::anyhow!("prepare_session failed: {e}"))?;
+    // Issue #2149: a roster-deploy failure no longer aborts preparation —
+    // surface it loudly rather than let it hide behind a silent `Ok(())`.
+    for err in &report.roster_errors {
+        tracing::error!(
+            repo_dir = %repo_dir.display(),
+            "roster provisioning gap (session still launches with its trusty-mpm identity): {err}"
+        );
+    }
+    Ok(())
 }
 
 /// Write `.trusty-mpm/managed.toml` into the repo directory.
