@@ -215,23 +215,97 @@ fn config_defaults_are_sane() {
     assert!(!cfg.model.is_empty());
 }
 
-/// Malformed / empty tool argument strings degrade to an empty object.
+/// A tool call with syntactically malformed JSON arguments is reported as a
+/// recoverable tool result, and the loop continues to completion.
 ///
-/// Why: Models sometimes emit blank or invalid argument JSON; the loop must not
-/// panic. This guards the private `parse_args` helper via a tool dispatch.
-/// What: Script a tool call whose arguments are intentionally exercised through
-/// the echo tool with a valid arg, then via a second fixture with empty args.
+/// Why: #1023 replaces the pre-#1023 silent `{}` degrade (the old private
+/// `parse_args` helper) with `llm::ToolCallExtractor::parse_and_validate`.
+/// The model must see the real parse failure — not have its malformed call
+/// silently dispatched with empty arguments — and the loop must still
+/// recover exactly like any other recoverable tool error.
+/// What: Script [malformed tool_call, stop]; assert the run completes with
+/// the stop text and made exactly two LLM calls (proving it continued past
+/// the malformed call rather than aborting).
 /// Test: this test.
-#[test]
-fn parse_args_handles_malformed() {
-    // Directly exercise the helper through the public surface by routing an
-    // empty-argument call: the echo tool sees `{}` and returns "<none>".
-    let parsed = super::parse_args("");
-    assert!(parsed.is_object());
-    let parsed_bad = super::parse_args("not json");
-    assert!(parsed_bad.is_object());
-    let parsed_ok = super::parse_args(r#"{"text":"hi"}"#);
-    assert_eq!(parsed_ok["text"], "hi");
+#[tokio::test]
+async fn malformed_tool_arguments_report_recoverable_error_and_loop_continues() {
+    let malformed_call = json!({
+        "id": "gen-tool-malformed",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_bad",
+                    "type": "function",
+                    "function": { "name": "echo", "arguments": "{not valid json" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10 }
+    });
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        malformed_call,
+        stop_response("Recovered from malformed arguments"),
+    ]));
+    let registry = registry_with_echo(false);
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default());
+
+    let out = agent
+        .run("system", "call echo with bad json")
+        .await
+        .expect("loop should continue past malformed tool arguments");
+
+    assert_eq!(out.content, "Recovered from malformed arguments");
+    assert_eq!(
+        llm.calls(),
+        2,
+        "loop should make two calls despite the malformed call"
+    );
+}
+
+/// An unknown tool name (not registered) is also reported as a recoverable
+/// tool result rather than panicking or dispatching against a missing tool.
+///
+/// Why: `ToolCallExtractor::parse_and_validate` returns `UnknownTool` when the
+/// schema lookup misses; `dispatch_all` must route that through the same
+/// recoverable path as a malformed-JSON failure.
+/// What: Script a tool call naming an unregistered tool, then a stop; assert
+/// the run still completes.
+/// Test: this test.
+#[tokio::test]
+async fn unknown_tool_call_reports_recoverable_error_and_loop_continues() {
+    let unknown_call = json!({
+        "id": "gen-tool-unknown",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call_unknown",
+                    "type": "function",
+                    "function": { "name": "does_not_exist", "arguments": "{}" }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10 }
+    });
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        unknown_call,
+        stop_response("Recovered from unknown tool"),
+    ]));
+    let registry = registry_with_echo(false);
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default());
+
+    let out = agent
+        .run("system", "call a nonexistent tool")
+        .await
+        .expect("loop should continue past an unknown tool call");
+
+    assert_eq!(out.content, "Recovered from unknown tool");
+    assert_eq!(llm.calls(), 2);
 }
 
 /// `schema_tool_name` extracts `function.name` and degrades gracefully.

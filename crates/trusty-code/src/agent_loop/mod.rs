@@ -35,7 +35,10 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, ToolCall, ToolDefinition};
+use crate::llm::{
+    ChatRequest, ChatResponse, LlmClientTrait, ToolCall, ToolCallExtractError, ToolCallExtractor,
+    ToolDefinition,
+};
 use crate::mode::HarnessMode;
 use crate::perf::PerfCollector;
 use crate::tools::{AgentOutput, ToolRegistry, ToolResult};
@@ -257,19 +260,34 @@ impl AgentLoop {
     ///
     /// Why: A single assistant turn may request several tools; all must run and
     /// be answered before the next chat call, or the API rejects the follow-up.
-    /// What: For each call, parse its JSON arguments (a parse failure becomes a
-    /// recoverable error string rather than aborting the loop), notify the
-    /// optional (#2056) sink's `tool_started`, dispatch through `dispatch_gated`
-    /// with no per-agent allowlist, notify `tool_finished` (success) or
-    /// `tool_error` (a fatal/non-recoverable `ToolResult::Error`) based on the
-    /// result, and append the result as a `tool` message.
+    /// What: For each call, parse and schema-validate its JSON arguments via
+    /// [`crate::llm::ToolCallExtractor::parse_and_validate`] (#1023) — a parse
+    /// or validation failure is reported through [`Self::report_invalid_arguments`]
+    /// as a recoverable tool result rather than aborting the loop OR (the
+    /// pre-#1023 behaviour) silently dispatching with `{}`. On valid
+    /// arguments, notifies the optional (#2056) sink's `tool_started`,
+    /// dispatches through `dispatch_gated` with no per-agent allowlist,
+    /// notifies `tool_finished` (success) or `tool_error` (a
+    /// fatal/non-recoverable `ToolResult::Error`) based on the result, and
+    /// appends the result as a `tool` message.
     /// Test: `agent_loop::tests::recoverable_tool_error_continues`,
+    /// `agent_loop::tests::malformed_tool_arguments_report_recoverable_error_and_loop_continues`,
     /// `sink_receives_started_then_finished_in_order`,
     /// `sink_receives_tool_error_for_fatal_failures`.
     async fn dispatch_all(&self, tool_calls: &[ToolCall], transcript: &mut Transcript) {
+        let extractor = ToolCallExtractor::new(|name| self.registry.schema_for(name));
+
         for call in tool_calls {
-            let args = parse_args(&call.function.arguments);
             let tool = call.function.name.as_str();
+
+            let args = match extractor.parse_and_validate(tool, &call.function.arguments) {
+                Ok(args) => args,
+                Err(error) => {
+                    self.report_invalid_arguments(&call.id, tool, &error, transcript)
+                        .await;
+                    continue;
+                }
+            };
 
             if let Some(sink) = &self.sink {
                 sink.tool_started(&call.id, tool, &args.to_string()).await;
@@ -283,6 +301,34 @@ impl AgentLoop {
 
             transcript.push_tool_result(&call.id, tool, result.content());
         }
+    }
+
+    /// Report an invalid or malformed tool call as a recoverable tool result.
+    ///
+    /// Why: #1023 replaces the prior silent `{}` degrade with the extractor's
+    /// precise validation failure. Feeding it back through the SAME
+    /// tool-result channel used for a real execution error lets the model
+    /// see exactly what was wrong and self-correct on its next turn — bounded
+    /// by the loop's existing `max_turns`, with no separate network
+    /// round-trip required for this same-turn dispatch path.
+    /// What: Notifies the optional sink (`tool_started` with a placeholder
+    /// arguments string, then `tool_error` with `error`'s `Display` text),
+    /// then appends a `tool` message carrying that same text.
+    /// Test: `agent_loop::tests::malformed_tool_arguments_report_recoverable_error_and_loop_continues`.
+    async fn report_invalid_arguments(
+        &self,
+        call_id: &str,
+        tool: &str,
+        error: &ToolCallExtractError,
+        transcript: &mut Transcript,
+    ) {
+        let message = error.to_string();
+        if let Some(sink) = &self.sink {
+            sink.tool_started(call_id, tool, "<invalid-arguments>")
+                .await;
+            sink.tool_error(call_id, tool, &message).await;
+        }
+        transcript.push_tool_result(call_id, tool, &message);
     }
 
     /// Build a `ChatRequest` from the running transcript and tool schemas.
@@ -388,20 +434,6 @@ async fn notify_result(sink: &dyn ToolEventSink, call_id: &str, tool: &str, resu
         sink.tool_finished(call_id, tool, !result.is_error(), result.content())
             .await;
     }
-}
-
-/// Parse a tool call's JSON argument string into a `Value`.
-///
-/// Why: Models occasionally emit malformed or empty argument strings; the loop
-/// must not panic on them. An unparseable string degrades to an empty object so
-/// the tool can surface its own validation error.
-/// What: Parses `raw`; on error or empty input returns `{}`.
-/// Test: `agent_loop::tests::parse_args_handles_malformed`.
-fn parse_args(raw: &str) -> Value {
-    if raw.trim().is_empty() {
-        return Value::Object(Default::default());
-    }
-    serde_json::from_str(raw).unwrap_or_else(|_| Value::Object(Default::default()))
 }
 
 /// Accrue one response's token usage into the collector as a phase record.

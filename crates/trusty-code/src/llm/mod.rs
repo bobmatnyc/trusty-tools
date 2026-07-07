@@ -19,6 +19,7 @@ mod error;
 mod message;
 mod request;
 mod response;
+mod tool_call_extractor;
 mod usage;
 
 // ── Public API re-exports ─────────────────────────────────────────────────────
@@ -29,4 +30,8 @@ pub use error::LlmError;
 pub use message::ChatMessage;
 pub use request::{ChatRequest, FunctionCall, FunctionDefinition, ToolCall, ToolDefinition};
 pub use response::{AssistantMessage, ChatChoice, ChatResponse};
+pub use tool_call_extractor::{
+    DEFAULT_MAX_REPAIR_ATTEMPTS, ExtractedToolCall, ExtractionStrategy, SchemaViolation,
+    ToolCallExtractError, ToolCallExtractor, extract_with_repair, strategy_order_for,
+};
 pub use usage::UsageBlock;
