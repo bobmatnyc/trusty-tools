@@ -190,7 +190,7 @@ async fn register_project_succeeds() {
 
 #[tokio::test]
 async fn execute_doctor_against_test_daemon() {
-    // `/doctor` returns a nine-check report against a live daemon.
+    // `/doctor` returns a ten-check report against a live daemon.
     let (_state, url) = spawn_test_daemon().await;
     let executor = CommandExecutor::new(url);
     match executor.execute(TrustyCommand::Doctor).await {
@@ -198,9 +198,10 @@ async fn execute_doctor_against_test_daemon() {
             // #1840 added the worktrees check (6); DOC-28 R4(a) added the
             // output_style check (7); A2 (tm-skills-portfolio epic) added the
             // skill_source check (8); #gh-account-awareness added the gh_account
-            // check, bringing the total to 9. #1905's stale-skill cleanup is a
-            // one-time migration, not a probe here.
-            assert_eq!(report.checks.len(), 9);
+            // check (9); #2158 added the deployment check, bringing the total to
+            // 10. #1905's stale-skill cleanup is a one-time migration, not a
+            // probe here.
+            assert_eq!(report.checks.len(), 10);
         }
         other => panic!("expected Doctor, got {other:?}"),
     }

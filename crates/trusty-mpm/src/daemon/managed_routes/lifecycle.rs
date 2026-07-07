@@ -410,6 +410,18 @@ async fn spawn_managed_cloned(
         warn!(id = %record.id, "spawn_managed: set_workspace failed: {e}");
     }
 
+    // Deployment-completeness gate (#2158): never hand an incomplete
+    // `.claude/` payload to the operator. Skips the runtime spawn entirely
+    // when auto-repair cannot close every gap.
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&prepared.path);
+    if let Err(reason) =
+        ensure_deployment_complete(&fw, &prepared.path, record.repo_url.as_deref(), &record.id)
+    {
+        warn!(id = %record.id, "spawn_managed: {reason}");
+        let _ = mgr.mark_errored(&record.id, &reason).await;
+        return Ok(mgr.get(&record.id).await.unwrap_or(record));
+    }
+
     // Step 3: spawn the selected runtime in the pane. A spawn failure is recorded
     // (the record is marked errored) but is not fatal — the record exists and the
     // caller still gets it back.
@@ -664,6 +676,17 @@ async fn spawn_managed_inproject(
         warn!(id = %session_id, "spawn_managed (inproject): set_workspace failed: {e}");
     }
 
+    // Deployment-completeness gate (#2158): see `spawn_managed_cloned`'s
+    // identical gate for the full rationale. Reuses the `fw` already resolved
+    // above for `prepare_inproject_session`.
+    if let Err(reason) =
+        ensure_deployment_complete(&fw, &worktree, record.repo_url.as_deref(), session_id)
+    {
+        warn!(id = %session_id, "spawn_managed (inproject): {reason}");
+        let _ = mgr.mark_errored(session_id, &reason).await;
+        return Ok(mgr.get(session_id).await.unwrap_or(record));
+    }
+
     emit(ProvisioningStage::LaunchingRuntime);
     let tmux_arc = mgr.tmux_driver();
     let adapter = crate::runtime::build_adapter(record.runtime, tmux_arc);
@@ -880,6 +903,17 @@ async fn spawn_managed_local(
         .await
     {
         warn!(id = %record.id, "spawn_managed (local→managed): set_workspace failed: {e}");
+    }
+
+    // Deployment-completeness gate (#2158): see `spawn_managed_cloned`'s
+    // identical gate for the full rationale.
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
+    if let Err(reason) =
+        ensure_deployment_complete(&fw, &workspace, record.repo_url.as_deref(), &record.id)
+    {
+        warn!(id = %record.id, "spawn_managed (local→managed): {reason}");
+        let _ = mgr.mark_errored(&record.id, &reason).await;
+        return Ok(mgr.get(&record.id).await.unwrap_or(record));
     }
 
     emit(ProvisioningStage::LaunchingRuntime);
@@ -1147,6 +1181,20 @@ pub async fn resume_managed(
         );
     }
 
+    // Deployment-completeness gate (#2158): see `spawn_managed_cloned`'s
+    // identical gate for the full rationale. `ensure_deployment_complete`
+    // itself no-ops for an unresolved (`/unknown`) workspace — an adopted
+    // session with no known cwd is handled separately by the reconcile-on-boot
+    // fix, not here.
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
+    if let Err(reason) =
+        ensure_deployment_complete(&fw, &workspace, record.repo_url.as_deref(), &record.id)
+    {
+        warn!(id = %record.id, "resume_managed: {reason}");
+        let _ = mgr.mark_errored(&record.id, &reason).await;
+        return Ok(mgr.get(id).await.unwrap_or(record));
+    }
+
     let tmux_arc = mgr.tmux_driver();
     let adapter = build_adapter(record.runtime, tmux_arc);
     // #1744: prefer --resume <id> when a claude_session_id was captured at
@@ -1179,6 +1227,64 @@ pub async fn resume_managed(
     }
 
     Ok(mgr.get(id).await.unwrap_or(record))
+}
+
+/// Validate a workspace against the canonical bundled roster before handing
+/// the session to the operator, auto-repairing first when gaps are found
+/// (issue #2158).
+///
+/// Why: `prepare_session_inner`'s roster/output-style/hooks steps are already
+/// best-effort/non-fatal (issue #2149) so a session always launches carrying
+/// SOME identity — but "launches" is not the same as "launches complete". A
+/// worktree whose `.claude/` payload came up incomplete (missing agents, a
+/// stripped `settings.json`, no ownership manifest — see #2158) could
+/// otherwise silently reach the operator. This gate closes that hole:
+/// validate, and if incomplete, re-run the deploy pipeline once via
+/// [`crate::core::deploy_validate::validate_and_repair`] (which reuses
+/// [`crate::core::session_launch::prepare_session_with_repo_url`] — the exact
+/// #2149 pipeline, no parallel repair implementation), then re-validate. Every
+/// `spawn_managed_*`/`resume_managed` call site skips the runtime
+/// spawn/respawn and marks the record errored instead of handing over a
+/// silently broken session when this returns `Err`.
+/// What: no-ops (`Ok(())`) when `workspace` is the adopted-session sentinel
+/// `/unknown` or does not exist on disk — an unresolved workspace has nothing
+/// to validate; that case is handled separately by the `reconcile_on_boot`
+/// adopted-session fix, not here. Otherwise delegates to `validate_and_repair`
+/// using the caller-resolved `fw` (production call sites pass
+/// [`crate::core::paths::FrameworkPaths::for_managed_workspace`]`(workspace)`;
+/// tests inject a hermetic [`crate::core::paths::FrameworkPaths::under`]).
+/// `Ok(())` when the workspace is (or becomes) complete; `Err(detail)` naming
+/// every residual gap otherwise.
+/// Test: `ensure_deployment_complete_noops_for_unknown_workspace`,
+/// `ensure_deployment_complete_ok_when_already_complete`,
+/// `ensure_deployment_complete_repairs_and_succeeds`.
+fn ensure_deployment_complete(
+    fw: &crate::core::paths::FrameworkPaths,
+    workspace: &std::path::Path,
+    repo_url: Option<&str>,
+    session_id: &ManagedSessionId,
+) -> Result<(), String> {
+    if workspace == std::path::Path::new("/unknown") || !workspace.is_dir() {
+        return Ok(());
+    }
+    let outcome = crate::core::deploy_validate::validate_and_repair(fw, workspace, repo_url);
+    if outcome.before.is_complete() {
+        return Ok(());
+    }
+    if outcome.is_complete() {
+        info!(
+            id = %session_id,
+            gaps = outcome.before.gaps.len(),
+            "deployment validation: auto-repair closed all gaps before handoff"
+        );
+        return Ok(());
+    }
+    let detail: Vec<String> = outcome.after.gaps.iter().map(|g| g.describe()).collect();
+    Err(format!(
+        "deployment incomplete after auto-repair ({} gap(s) remain): {}",
+        detail.len(),
+        detail.join("; ")
+    ))
 }
 
 #[cfg(test)]
@@ -1529,5 +1635,74 @@ mod tests {
             "the worktree directory must exist on disk, got {}",
             worktree.display()
         );
+    }
+
+    /// Why (#2158): the adopted-session sentinel `/unknown` (and any
+    /// non-existent workspace) must never be handed to `validate_and_repair`
+    /// — there is nothing on disk to diff, and the repair pipeline would
+    /// fail trying to `create_dir_all` under it. The gate must silently no-op
+    /// instead.
+    /// Test: itself.
+    #[test]
+    fn ensure_deployment_complete_noops_for_unknown_workspace() {
+        // `fw`'s fields are never dereferenced on this early-return path, so
+        // a fixed placeholder base (no I/O, no tempdir) is sufficient.
+        let id = ManagedSessionId::new();
+        let fw = crate::core::paths::FrameworkPaths::under("/nonexistent-fw-base-for-test");
+        let result = ensure_deployment_complete(&fw, std::path::Path::new("/unknown"), None, &id);
+        assert!(result.is_ok());
+
+        let missing = std::path::Path::new("/this/path/does/not/exist/anywhere");
+        let result = ensure_deployment_complete(&fw, missing, None, &id);
+        assert!(result.is_ok());
+    }
+
+    /// Why (#2158): a workspace whose `.claude/` payload already matches the
+    /// canonical roster must pass the gate without attempting a repair.
+    /// Test: itself.
+    #[test]
+    fn ensure_deployment_complete_ok_when_already_complete() {
+        use crate::core::agent_manifest::AgentManifest;
+        use crate::core::paths::FrameworkPaths;
+        use crate::core::skill_manifest::SkillManifest;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        // Fully hermetic: `trusty_mpm_root = None` forces the canonical SOURCE
+        // dirs to resolve under the temp `fw.agents`/`fw.skills` (empty here),
+        // never the real daemon-default `~/.trusty-mpm` — so this test's
+        // verdict cannot depend on what happens to be installed on the
+        // machine running it. An empty canonical roster plus a fully
+        // manifested + settings-configured target is "complete" by
+        // definition (nothing to diff against).
+        let mut fw = FrameworkPaths::for_managed_project(tmp.path(), &workspace);
+        fw.trusty_mpm_root = None;
+        let agents_dir = fw.claude_agents_dir();
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        AgentManifest::default().save(&agents_dir).unwrap();
+        let skills_dir = fw.claude_skills_dir();
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        SkillManifest::default().save(&skills_dir).unwrap();
+
+        let claude_dir = workspace.join(".claude");
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            r#"{"outputStyle": "trusty-mpm", "hooks": {"SessionStart": []}}"#,
+        )
+        .unwrap();
+        let style_dir = claude_dir.join("output-styles");
+        std::fs::create_dir_all(&style_dir).unwrap();
+        let default_style = crate::core::bundle::OUTPUT_STYLES[0];
+        std::fs::write(
+            style_dir.join(default_style.file_name),
+            default_style.content,
+        )
+        .unwrap();
+
+        let id = ManagedSessionId::new();
+        let result = ensure_deployment_complete(&fw, &workspace, None, &id);
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 }

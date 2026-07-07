@@ -20,7 +20,7 @@ use commands::{
     daemon::{restart, run_daemon, start, stop_daemon},
     install::install,
     launch::{connect, launch},
-    misc::{attach_cmd, coordinator, doctor, health, hook, optimizer, overseer, status},
+    misc::{attach_cmd, coordinator, doctor, health, hook, optimizer, overseer, status, validate},
     project::project,
     repair::repair_deploy,
     services::services,
@@ -246,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Session { action }) => session(&client, &url, action).await,
         Some(Command::Events) => commands::misc::events(&client, &url).await,
         Some(Command::Doctor { prune_stale_skills }) => doctor(&url, prune_stale_skills).await,
+        Some(Command::Validate { path, repair }) => validate(path, repair).await,
         Some(Command::Health) => health(&url).await,
         Some(Command::Tui {
             url: tui_url,

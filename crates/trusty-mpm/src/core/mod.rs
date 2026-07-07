@@ -29,6 +29,7 @@ pub mod compress;
 pub mod config;
 pub mod connect;
 pub mod delegation_authority;
+pub mod deploy_validate;
 pub mod deterministic_overseer;
 pub mod discovery;
 pub mod doctor;
