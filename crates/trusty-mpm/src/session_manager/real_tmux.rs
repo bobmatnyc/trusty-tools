@@ -99,6 +99,14 @@ impl ManagedTmuxDriver for RealTmuxDriver {
     fn get_pane_cwd(&self, name: &str) -> Option<std::path::PathBuf> {
         self.driver.pane_current_path(name)
     }
+
+    /// Overrides the no-op trait default so the production path actually calls
+    /// `tmux set-environment` (#2157 item 1).
+    fn set_environment(&self, name: &str, key: &str, value: &str) -> Result<(), ManagedError> {
+        self.driver
+            .set_environment(name, key, value)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
 }
 
 /// A no-op tmux driver used when `tmux` is not installed.
@@ -132,6 +140,13 @@ impl ManagedTmuxDriver for NoopTmuxDriver {
 
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(Vec::new())
+    }
+
+    /// Fails loudly like every other mutating op on this driver — mirrors
+    /// `create_session`/`send_line` rather than the trait's silent-no-op
+    /// default, keeping "tmux is absent" uniformly observable.
+    fn set_environment(&self, _name: &str, _key: &str, _value: &str) -> Result<(), ManagedError> {
+        Err(ManagedError::TmuxUnavailable("tmux not installed".into()))
     }
 }
 
@@ -210,6 +225,14 @@ mod tests {
             driver.create_session("tmpm-test-abc123", "/tmp").is_ok(),
             "FakeNoopTmuxDriver::create_session must succeed"
         );
+    }
+
+    #[test]
+    fn noop_driver_set_environment_fails_loudly() {
+        // #2157: the no-tmux fallback must fail this best-effort mutating op the
+        // same way it fails create_session/send_line, not silently no-op.
+        let driver = NoopTmuxDriver;
+        assert!(driver.set_environment("s", "K", "v").is_err());
     }
 
     #[test]

@@ -205,13 +205,16 @@ mod tests {
     /// spy is local to this test module and exists solely to prove the
     /// runtime-exit reconcile path (#2023 A) never reaches `kill_session` — the
     /// pane must be left alive.
-    /// What: every method besides `kill_session` is a silent no-op (mirroring
-    /// `FakeNoopTmuxDriver`); `kill_session` pushes `name` onto `kill_calls`
-    /// before returning `Ok(())`.
-    /// Test: `stop_runtime_exited_does_not_kill_pane`.
+    /// What: every method besides `kill_session`/`set_environment` is a silent
+    /// no-op (mirroring `FakeNoopTmuxDriver`); `kill_session` pushes `name` onto
+    /// `kill_calls`; `set_environment` (#2157 item 3) pushes `(name, key,
+    /// value)` onto `env_set_calls` before returning `Ok(())`.
+    /// Test: `stop_runtime_exited_does_not_kill_pane`,
+    /// `stop_runtime_exited_heals_stale_pane_env`.
     #[derive(Default)]
     struct KillSpyTmuxDriver {
         kill_calls: Mutex<Vec<String>>,
+        env_set_calls: Mutex<Vec<(String, String, String)>>,
     }
 
     impl ManagedTmuxDriver for KillSpyTmuxDriver {
@@ -230,6 +233,14 @@ mod tests {
         }
         fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
             Ok(Vec::new())
+        }
+        fn set_environment(&self, name: &str, key: &str, value: &str) -> Result<(), ManagedError> {
+            self.env_set_calls.lock().unwrap().push((
+                name.to_owned(),
+                key.to_owned(),
+                value.to_owned(),
+            ));
+            Ok(())
         }
     }
 
@@ -430,6 +441,33 @@ mod tests {
         assert!(
             driver.kill_calls.lock().unwrap().is_empty(),
             "runtime-exit reconcile must NEVER kill the tmux pane (#2023 A)"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_runtime_exited_heals_stale_pane_env() {
+        // #2157 item 3: when the reaper confirms a pane's runtime has exited, it
+        // must durably publish TM_MANAGED_SESSION_ID into that pane's tmux
+        // session — healing panes that never got the durable publish at spawn
+        // time (e.g. created by a pre-#2157 build).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let driver = Arc::new(KillSpyTmuxDriver::default());
+        let (mgr, id) =
+            seed_active_with_driver(&tmp, "exited-heal-env", driver.clone() as Arc<_>).await;
+        let record = mgr.get(&id).await.expect("get");
+        let panes = vec![pane(&record.tmux_name, "zsh")];
+
+        let stopped = stop_runtime_exited(&mgr, &panes, &AlwaysIdleProbe).await;
+        assert_eq!(stopped, 1, "exactly one session must be stopped");
+
+        let env_sets = driver.env_set_calls.lock().unwrap();
+        assert!(
+            env_sets
+                .iter()
+                .any(|(name, key, value)| name == &record.tmux_name
+                    && key == "TM_MANAGED_SESSION_ID"
+                    && value == &id.to_string()),
+            "runtime-exit reconcile must heal the pane's tmux env: {env_sets:?}"
         );
     }
 }

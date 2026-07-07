@@ -113,6 +113,27 @@ pub enum TmuxCommand {
         /// Optional number of trailing scrollback lines to capture.
         lines: Option<u32>,
     },
+    /// `set-environment -t <session> <key> <value>` — durably publish a
+    /// variable into the tmux SESSION environment (#2157 item 1).
+    ///
+    /// Why: the pane-shell `export …;` prefix ([`crate::runtime::claude_code`]'s
+    /// `session_id_export_prefix`) only lands in the ONE shell process that ran
+    /// it — a sibling pane/window in the same session, or a pane spawned by a
+    /// pre-fix build, never sees it. `tmux set-environment` writes into the
+    /// session's OWN environment table instead, which any process can query via
+    /// `tmux show-environment -t <session>` regardless of which pane/shell asks
+    /// or when it was created.
+    /// What: targets the SESSION (not a pane) — `set-environment` interprets
+    /// `-t` as a session target here, unlike `send-keys`/`capture-pane` which
+    /// address a specific pane.
+    SetEnvironment {
+        /// Session to set the variable in.
+        session: String,
+        /// Environment variable name.
+        key: String,
+        /// Environment variable value.
+        value: String,
+    },
 }
 
 /// tmux `-F` format string for `list-sessions`.
@@ -213,6 +234,19 @@ pub fn tmux_argv(cmd: &TmuxCommand) -> Vec<String> {
                 argv.push(format!("-{n}"));
             }
             argv
+        }
+        TmuxCommand::SetEnvironment {
+            session,
+            key,
+            value,
+        } => {
+            vec![
+                "set-environment".to_string(),
+                "-t".to_string(),
+                session.clone(),
+                key.clone(),
+                value.clone(),
+            ]
         }
     }
 }
@@ -316,5 +350,24 @@ mod tests {
             name: "work".into(),
         });
         assert_eq!(argv, ["list-panes", "-t", "work", "-F", PANE_LIST_FORMAT]);
+    }
+
+    #[test]
+    fn set_environment_argv() {
+        let argv = tmux_argv(&TmuxCommand::SetEnvironment {
+            session: "tmpm-brave-otter".into(),
+            key: "TM_MANAGED_SESSION_ID".into(),
+            value: "11111111-2222-3333-4444-555555555555".into(),
+        });
+        assert_eq!(
+            argv,
+            [
+                "set-environment",
+                "-t",
+                "tmpm-brave-otter",
+                "TM_MANAGED_SESSION_ID",
+                "11111111-2222-3333-4444-555555555555"
+            ]
+        );
     }
 }

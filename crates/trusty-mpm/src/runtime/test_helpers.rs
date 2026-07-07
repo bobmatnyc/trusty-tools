@@ -27,6 +27,10 @@ use crate::session_manager::{ManagedError, ManagedTmuxDriver};
 /// Test: exercised by every runtime adapter test that calls `spawn`.
 pub(crate) struct FakeTmux {
     pub(crate) sends: Mutex<Vec<(String, String)>>,
+    /// Records every `set_environment` call as `(session, key, value)` (#2157
+    /// item 1) so adapter tests can assert `TM_MANAGED_SESSION_ID` is durably
+    /// published at spawn/resume, not just exported into the pane shell line.
+    pub(crate) env_sets: Mutex<Vec<(String, String, String)>>,
 }
 
 impl FakeTmux {
@@ -40,6 +44,7 @@ impl FakeTmux {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             sends: Mutex::new(Vec::new()),
+            env_sets: Mutex::new(Vec::new()),
         })
     }
 }
@@ -71,5 +76,13 @@ impl ManagedTmuxDriver for FakeTmux {
 
     fn session_exists(&self, _name: &str) -> bool {
         false
+    }
+
+    fn set_environment(&self, name: &str, key: &str, value: &str) -> Result<(), ManagedError> {
+        self.env_sets
+            .lock()
+            .expect("FakeTmux env-set log mutex poisoned")
+            .push((name.to_owned(), key.to_owned(), value.to_owned()));
+        Ok(())
     }
 }

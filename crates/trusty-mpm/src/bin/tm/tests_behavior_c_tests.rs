@@ -27,8 +27,8 @@ use crate::commands::first_run::needs_first_run_clone;
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
     PickerDecision, derive_project, fallback_protected, github_host, is_github_remote,
-    non_github_refusal_message, parse_picker_choice, print_non_tty_hint, print_project_context,
-    tty_gate,
+    nested_managed_match, non_github_refusal_message, parse_picker_choice, print_non_tty_hint,
+    print_project_context, tty_gate,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{ResumeAction, is_zombie, needs_restart, plan_resume};
@@ -1211,4 +1211,61 @@ fn daily_banner_two_panel_version_in_title_bar_not_content() {
         );
     }
     colored::control::unset_override();
+}
+
+// ── nested_managed_match (#2157 item 4) ──────────────────────────────────────
+// The nested-session guard's pure decision: does any known managed record
+// belong to the pane bare `tm` is currently running inside? Matched either by
+// tmux session name (the primary signal — works even when the env var was
+// never exported into THIS particular pane) or by TM_MANAGED_SESSION_ID
+// (belt-and-suspenders).
+
+#[test]
+fn nested_managed_match_by_session_name() {
+    let sessions = vec![make_session("tm-proj-01", "active", None)];
+    let matched = nested_managed_match(Some("tm-proj-01"), None, &sessions);
+    assert_eq!(matched.map(|s| s.name.as_str()), Some("tm-proj-01"));
+}
+
+#[test]
+fn nested_managed_match_by_env_id() {
+    let sessions = vec![make_session("tm-proj-01", "active", None)];
+    // make_session sets id = "<name>-id".
+    let matched = nested_managed_match(None, Some("tm-proj-01-id"), &sessions);
+    assert_eq!(matched.map(|s| s.name.as_str()), Some("tm-proj-01"));
+}
+
+#[test]
+fn nested_managed_match_none_when_no_match() {
+    let sessions = vec![make_session("tm-proj-01", "active", None)];
+    // Neither the session name nor the env id matches any record — e.g. a
+    // plain terminal opened outside any managed tmux session.
+    let matched = nested_managed_match(Some("some-other-session"), Some("unrelated-id"), &sessions);
+    assert!(matched.is_none());
+}
+
+#[test]
+fn nested_managed_match_none_when_both_inputs_absent() {
+    // The "not inside tmux" case: the guard's I/O wrapper passes None for
+    // both keys, which must never spuriously match any record.
+    let sessions = vec![make_session("tm-proj-01", "active", None)];
+    let matched = nested_managed_match(None, None, &sessions);
+    assert!(matched.is_none());
+}
+
+#[test]
+fn nested_managed_match_finds_record_missing_from_source_id_filtered_list() {
+    // #2157 items 4+5 interplay: the guard fetches the UNFILTERED session
+    // list specifically so it can still find a record whose source_id write
+    // never landed (item 5's failure mode) — this record would be invisible
+    // to a `?source_id=` filtered fetch, but the guard must still catch it by
+    // tmux session name.
+    let mut orphaned = make_session("tm-orphan-02", "active", None);
+    orphaned.source_id = None;
+    let sessions = vec![orphaned];
+    let matched = nested_managed_match(Some("tm-orphan-02"), None, &sessions);
+    assert!(
+        matched.is_some(),
+        "must match by session name regardless of source_id"
+    );
 }

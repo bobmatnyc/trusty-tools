@@ -22,7 +22,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use thiserror::Error;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::core::names::SessionNameError;
 use crate::core::sm::control::Submit;
@@ -462,6 +462,24 @@ impl SessionManager {
             name = %record.tmux_name,
             "runtime-reap: managed session marked Stopped (pane left alive, #2023)"
         );
+        // #2157 item 3: heal stale panes — durably publish TM_MANAGED_SESSION_ID
+        // into this session's tmux environment right when the runtime is
+        // confirmed to have exited (the pane is now an idle shell). This covers
+        // panes that never got the durable publish at spawn time (created by a
+        // pre-#2157 build, or whose set-environment call failed at spawn), so a
+        // LATER bare `tm` run inside this pane can still resolve the id via
+        // `tmux show-environment` even though the process-env export never
+        // landed. Best-effort — never fails the reap.
+        if let Err(e) =
+            self.tmux
+                .set_environment(&record.tmux_name, "TM_MANAGED_SESSION_ID", &id.to_string())
+        {
+            warn!(
+                id = %id,
+                name = %record.tmux_name,
+                "runtime-reap: tmux set-environment heal failed (non-fatal): {e}"
+            );
+        }
         Ok(record)
     }
 
@@ -834,24 +852,71 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Record a source project identity on a session.
+    /// Record a source project identity on a session, with a bounded retry
+    /// (#2157 item 5, the #2154 remedy).
     ///
     /// Why: the in-project spawn path (#1706) associates a session with a
     /// specific `owner/repo` so callers can later filter sessions by project
     /// and reconnect instead of spawning duplicates. Setting it post-creation
     /// (rather than via `create_with_id`) keeps the manager's SINGLE generic
-    /// create path clean of in-project concerns.
-    /// What: looks up the record, sets `source_id`, and persists. No tmux I/O.
-    /// Test: covered transitively by the in-project spawn integration tests.
+    /// create path clean of in-project concerns. Previously a single transient
+    /// `get`/`upsert` failure here was `warn!`-and-continue at the call site —
+    /// leaving `source_id: None` on the record PERMANENTLY, which makes the
+    /// session invisible to every `?source_id=` filtered listing (the guided
+    /// picker, `tm session ls --project`) forever, since nothing else ever
+    /// retries the write.
+    /// What: retries the read-modify-write up to `MAX_SET_SOURCE_ID_ATTEMPTS`
+    /// times with a short linear backoff between attempts, returning `Ok(())`
+    /// on the first success. If every attempt fails, logs a `tracing::error!`
+    /// (loud, not `warn!`) carrying `id` and `source_id` so a future
+    /// reconcile/doctor pass can self-heal a `source_id: None` record from its
+    /// `repo_url`/`workspace_path`, then returns the last error.
+    /// Test: `set_source_id_succeeds_first_try`,
+    /// `set_source_id_returns_err_after_retries_for_missing_session` in
+    /// `tests.rs`.
     pub async fn set_source_id(
         &self,
         id: &ManagedSessionId,
         source_id: &str,
     ) -> Result<(), ManagedError> {
-        let mut record = self.get(id).await?;
-        record.source_id = Some(source_id.to_string());
-        self.store.write().await.upsert(record).await?;
-        Ok(())
+        const MAX_SET_SOURCE_ID_ATTEMPTS: u8 = 3;
+        let mut last_err: Option<ManagedError> = None;
+        for attempt in 1..=MAX_SET_SOURCE_ID_ATTEMPTS {
+            let result: Result<(), ManagedError> = async {
+                let mut record = self.get(id).await?;
+                record.source_id = Some(source_id.to_string());
+                self.store.write().await.upsert(record).await?;
+                Ok(())
+            }
+            .await;
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    warn!(
+                        id = %id,
+                        attempt,
+                        max_attempts = MAX_SET_SOURCE_ID_ATTEMPTS,
+                        "set_source_id: attempt failed: {e}"
+                    );
+                    last_err = Some(e);
+                    if attempt < MAX_SET_SOURCE_ID_ATTEMPTS {
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            50 * u64::from(attempt),
+                        ))
+                        .await;
+                    }
+                }
+            }
+        }
+        error!(
+            id = %id,
+            source_id = %source_id,
+            attempts = MAX_SET_SOURCE_ID_ATTEMPTS,
+            "set_source_id: exhausted all attempts — session will be invisible to \
+             project-filtered listing (source_id: None) until a reconcile/doctor pass \
+             repairs it from repo_url/workspace_path"
+        );
+        Err(last_err.unwrap_or_else(|| ManagedError::SessionNotFound(id.to_string())))
     }
 
     /// Clear a pending decision WITHOUT injecting any text into the pane.

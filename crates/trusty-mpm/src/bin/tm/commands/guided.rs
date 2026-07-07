@@ -81,6 +81,23 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
         return result;
     }
 
+    // #2157 item 4: nested-session guard. `try_inplace_relaunch` above only
+    // fires when bare `tm` runs in THIS EXACT pane after its runtime exited
+    // (env var resolved + record Stopped). A sibling pane/window in the SAME
+    // tmux session is a different case entirely: no env var to key off, the
+    // record may still be Active, yet launching a brand-new session from here
+    // would nest one tmux client's session inside another (the root cause of
+    // #2157). Check BEFORE any project detection or picker logic runs.
+    if let Some(record) = nested_session_guard(client, url).await {
+        eprintln!(
+            "tm: this tmux session ('{}') is already a managed session (state={}) — \
+             refusing to launch a nested session here.",
+            record.name, record.state
+        );
+        eprintln!("tm: reconnecting to '{}' instead…", record.name);
+        return super::guided_resume::resume_guided_session(client, url, &record).await;
+    }
+
     let cwd = std::env::current_dir().context("cannot resolve current directory")?;
     let workdir = cwd.to_string_lossy().to_string();
     eprintln!("tm: no subcommand — using guided default for {workdir}");
@@ -209,6 +226,96 @@ pub(crate) fn derive_project(
     let source_id = format!("{}/{}", gh.owner, gh.repo);
     let workspace = inproject::base_clone_path(&gh.owner, &gh.repo);
     Some((source_id, workspace, git_root))
+}
+
+// ── Nested-session guard (#2157 item 4) ──────────────────────────────────────
+
+/// I/O driver for the nested-session guard: resolve the current tmux context,
+/// fetch every managed session (unfiltered — a record's `source_id` may be
+/// missing, see #2157 item 5), and apply [`nested_managed_match`].
+///
+/// Why: extracted from [`run_guided_default`] so the "gather the two matching
+/// keys, ask the daemon, apply the pure predicate" sequence is one readable
+/// unit. Fetches the FULL session list (no `?source_id=` filter) rather than
+/// reusing `list_project_sessions` — the whole point of this guard is to catch
+/// a managed record the project-filtered list would MISS (e.g. one whose
+/// `source_id` write never landed, #2157 item 5's failure mode).
+/// What: short-circuits to `None` when not inside tmux (nothing to guard
+/// against) or when the daemon is unreachable/errors (fail-open — matches
+/// every other daemon round-trip in this file, which falls through to the
+/// picker/autostart rather than blocking on a down daemon). Uses a 2-second
+/// timeout, matching the `guided_inplace` probe convention.
+/// Test: the pure decision is `nested_managed_match_*` in
+/// `tests_behavior_c_tests.rs`; this I/O wrapper is exercised by manual smoke
+/// tests and the e2e suite (requires a live daemon + tmux).
+async fn nested_session_guard(
+    client: &reqwest::Client,
+    url: &str,
+) -> Option<trusty_mpm::client::ManagedSessionSummary> {
+    if !super::tmux_attach::inside_tmux() {
+        return None;
+    }
+    let current_session_name = super::tmux_attach::current_tmux_session_name();
+    let env_session_id = std::env::var("TM_MANAGED_SESSION_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let all = list_all_managed_sessions(client, url).await.ok()?;
+    nested_managed_match(
+        current_session_name.as_deref(),
+        env_session_id.as_deref(),
+        &all,
+    )
+    .cloned()
+}
+
+/// Pure predicate: does ANY record in `records` belong to the pane bare `tm`
+/// is currently running inside?
+///
+/// Why: isolating the match rule from the daemon round-trip and the tmux
+/// shell-out makes the actual guard DECISION exhaustively unit-testable
+/// without a live daemon or tmux server.
+/// What: returns the first record whose `name` (tmux session name) equals
+/// `current_session_name`, OR whose `id` equals `env_session_id` — either
+/// match is sufficient (the env id is belt-and-suspenders for the rare case
+/// where the session was renamed after spawn). `None` when both inputs are
+/// `None`/non-matching, which includes the "not inside tmux" case (callers
+/// pass `current_session_name: None` then).
+/// Test: `nested_managed_match_by_session_name`,
+/// `nested_managed_match_by_env_id`, `nested_managed_match_none_when_no_match`,
+/// `nested_managed_match_none_when_both_inputs_absent`.
+pub(crate) fn nested_managed_match<'a>(
+    current_session_name: Option<&str>,
+    env_session_id: Option<&str>,
+    records: &'a [trusty_mpm::client::ManagedSessionSummary],
+) -> Option<&'a trusty_mpm::client::ManagedSessionSummary> {
+    records.iter().find(|r| {
+        current_session_name.is_some_and(|n| n == r.name)
+            || env_session_id.is_some_and(|id| id == r.id)
+    })
+}
+
+/// Fetch EVERY managed session, unfiltered — `GET /api/v1/sessions/managed`
+/// with no `?source_id=` query.
+///
+/// Why: [`nested_session_guard`] must find a match even when the record's
+/// `source_id` is missing (#2157 item 5's failure mode), so it cannot reuse
+/// [`list_project_sessions`]'s source_id-filtered query.
+/// What: identical to [`list_project_sessions`] minus the query parameter, with
+/// a 2-second timeout so a hung daemon cannot add a long stall to every bare
+/// `tm` invocation made from inside tmux.
+/// Test: I/O path; requires a live daemon.
+async fn list_all_managed_sessions(
+    client: &reqwest::Client,
+    url: &str,
+) -> anyhow::Result<Vec<trusty_mpm::client::ManagedSessionSummary>> {
+    let resp = client
+        .get(format!("{url}/api/v1/sessions/managed"))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await?
+        .error_for_status()?;
+    let body: trusty_mpm::client::ManagedListResponse = resp.json().await?;
+    Ok(body.sessions)
 }
 
 // ── Daemon communication ─────────────────────────────────────────────────────

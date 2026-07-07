@@ -109,7 +109,21 @@ impl TcodeAdapter {
         );
         self.tmux
             .send_line(tmux_name, &command)
-            .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))
+            .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))?;
+        // #2157 item 1: durable publish, belt-and-suspenders alongside the
+        // pane-shell export baked into build_spawn_command above — see
+        // `claude_code::ClaudeCodeAdapter::publish_session_env` for the full
+        // rationale (shared verbatim here). Best-effort; never fails the spawn.
+        if let Err(e) = self
+            .tmux
+            .set_environment(tmux_name, "TM_MANAGED_SESSION_ID", session_id)
+        {
+            debug!(
+                session = %tmux_name,
+                "tmux set-environment TM_MANAGED_SESSION_ID failed (non-fatal): {e}"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -300,6 +314,14 @@ mod tests {
         assert_eq!(
             sends[0].1,
             build_spawn_command(Path::new("/tmp"), "some task", TEST_SESSION_ID)
+        );
+        // #2157 item 1: durable publish alongside the pane-shell export.
+        let env_sets = fake.env_sets.lock().expect("env-set log mutex");
+        assert!(
+            env_sets.iter().any(|(name, key, value)| name == "tmpm-test"
+                && key == "TM_MANAGED_SESSION_ID"
+                && value == TEST_SESSION_ID),
+            "send_spawn_command must call tmux set-environment with TM_MANAGED_SESSION_ID: {env_sets:?}"
         );
     }
 
