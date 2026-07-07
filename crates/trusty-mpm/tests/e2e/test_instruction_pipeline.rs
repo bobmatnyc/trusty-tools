@@ -65,9 +65,10 @@ fn pipeline_produces_merged_output() {
     assert!(auth < proj, "delegation authority precedes project notes");
 }
 
-/// An existing project `CLAUDE.md` with custom content has that content
-/// preserved; the framework additively upserts its own fenced
-/// delegation-directive block alongside it (issue #2125 item 1).
+/// An existing project `CLAUDE.md` with custom content is left completely
+/// untouched on disk (issue #2170 — trusty-mpm must never modify a target
+/// project's `CLAUDE.md`; the delegation directive is delivered exclusively
+/// via the `trusty-mpm` output style).
 #[test]
 fn pipeline_preserves_claude_md() {
     let tmp = TempDir::new().unwrap();
@@ -82,13 +83,13 @@ fn pipeline_preserves_claude_md() {
     assert!(!out.claude_md_created, "existing CLAUDE.md not recreated");
 
     let on_disk = std::fs::read_to_string(&input.claude_md_path).unwrap();
-    assert!(
-        on_disk.contains("CUSTOM HAND-WRITTEN CONTENT"),
-        "custom content preserved: {on_disk}"
+    assert_eq!(
+        on_disk, custom,
+        "CLAUDE.md must be left byte-identical: {on_disk}"
     );
     assert!(
-        on_disk.contains("trusty-mpm:delegation-directive:begin"),
-        "delegation-directive block additively inserted: {on_disk}"
+        !on_disk.contains("trusty-mpm:delegation-directive:begin"),
+        "no delegation-directive block may be injected: {on_disk}"
     );
     assert!(out.merged.contains("CUSTOM HAND-WRITTEN CONTENT"));
 }

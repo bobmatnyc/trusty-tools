@@ -109,12 +109,13 @@ pub fn install_system_prompt() -> std::io::Result<std::path::PathBuf> {
 /// The CLAUDE.md stub seeded into a project on first session start.
 ///
 /// Why: the project needs a place for project-specific notes; trusty-mpm
-/// creates it once and then never touches it (outside the fenced delegation
-/// block below), so the operator can edit freely.
+/// creates it exactly once and then never touches it again, so the operator
+/// can edit freely (issue #2170 — trusty-mpm must never modify a target
+/// project's `CLAUDE.md`).
 const CLAUDE_MD_STUB: &str = "# Project Instructions
 
 <!-- trusty-mpm: created by `trusty-mpm session start` — customize for your project -->
-<!-- Everything below the delegation directive block is yours: trusty-mpm will never overwrite it after creation. -->
+<!-- trusty-mpm will never modify this file again after creating it. -->
 
 ## Project Context
 
@@ -126,136 +127,64 @@ const CLAUDE_MD_STUB: &str = "# Project Instructions
 ";
 
 // ---------------------------------------------------------------------------
-// CLAUDE.md delegation-directive carrier (issue #2125 item 1)
+// CLAUDE.md legacy delegation-directive cleanup (issue #2170)
 //
-// Why: the output-style file and `--append-system-prompt-file` carriers can
-// both silently fail to reach a launched session — wrong `--setting-sources`
-// tier, a missing adapter flag, an old Claude Code build. CLAUDE.md is the one
-// instruction surface Claude Code ALWAYS reads at session start regardless of
-// any of those knobs, so it is the fail-closed fallback carrier for the core
-// "PM must not do work directly; delegate" directive.
+// Why: issue #2125 previously had trusty-mpm regenerate a framework-owned
+// delegation-directive block into the TOP of every managed workspace's
+// CLAUDE.md on every session start and during `prepare_session` re-runs. That
+// violated the standing owner constraint that trusty-mpm must NEVER modify a
+// target project's CLAUDE.md. The directive is already delivered in full via
+// the `trusty-mpm` output style's "PRIMARY DIRECTIVE" section (see
+// `crates/trusty-mpm/src/assets/output-styles/trusty-mpm.md` and its
+// `-research` / `-teacher` variants), which Claude Code loads as the
+// session's system prompt through the `outputStyle` settings key — making the
+// CLAUDE.md copy redundant. No code path writes this block anymore; the
+// markers below are retained only so [`strip_delegation_block`] can find and
+// remove pre-existing pollution from workspaces provisioned before this fix
+// (e.g. `apex`).
 // ---------------------------------------------------------------------------
 
-/// Begin marker fencing the framework-owned delegation-directive block that
-/// [`load_or_create_claude_md`] idempotently upserts into the project
-/// `CLAUDE.md`.
+/// Begin marker fencing the legacy framework-owned delegation-directive block
+/// that trusty-mpm injected into project `CLAUDE.md` files prior to issue
+/// #2170.
 ///
-/// Why: the fence lets [`upsert_delegation_block`] find and replace ONLY the
-/// framework-owned span on re-runs, so repeated `prepare_session` calls update
-/// the block in place instead of duplicating it, and every byte outside the
-/// fence — the operator's own notes — is left untouched.
 /// What: an HTML-comment marker, invisible in rendered Markdown and harmless
-/// to Claude Code's raw-text reading.
-/// Test: `upsert_delegation_block_inserts_when_absent`,
-/// `upsert_delegation_block_updates_in_place`,
-/// `upsert_delegation_block_preserves_operator_content`.
+/// to Claude Code's raw-text reading. Used only by [`strip_delegation_block`]
+/// to locate legacy pollution — nothing writes it anymore.
+/// Test: `strip_delegation_block_removes_legacy_block`.
 const DELEGATION_BLOCK_BEGIN: &str = "<!-- trusty-mpm:delegation-directive:begin \
 (framework-owned — do not edit; regenerated on every session start, see issue #2125) -->";
 
 /// End marker paired with [`DELEGATION_BLOCK_BEGIN`].
 const DELEGATION_BLOCK_END: &str = "<!-- trusty-mpm:delegation-directive:end -->";
 
-/// Fallback delegation-directive text used only if the bundled `trusty-mpm`
-/// output style's PRIMARY DIRECTIVE section cannot be located.
+/// One-time cleanup helper: remove a legacy trusty-mpm delegation-directive
+/// block from `content`, if present.
 ///
-/// Why: [`delegation_directive_text`] extracts the live wording from the
-/// bundled output-style asset so this carrier can never drift from what the
-/// output-style / system-prompt carriers state; this fallback is the
-/// fail-closed floor if that extraction ever comes up empty — the CLAUDE.md
-/// carrier must NEVER end up blank. Verbatim excerpt of the same directive.
-/// Test: `delegation_directive_text_falls_back_when_marker_missing`.
-const DELEGATION_DIRECTIVE_FALLBACK: &str = "## PM Delegation Directive (Non-Overridable)
-
-**YOU ARE STRICTLY FORBIDDEN FROM DOING ANY WORK DIRECTLY.**
-
-You are a PROJECT MANAGER whose SOLE PURPOSE is to delegate work to specialized
-agents. You orchestrate; you do not implement.
-
-**THIS IS ABSOLUTE. NO EXCEPTIONS.**";
-
-/// Extract the "PRIMARY DIRECTIVE" heading section from `source`.
-///
-/// Why: item 1 must reuse the SAME wording the output-style / BASE_PM carriers
-/// already state rather than hand-duplicate prose that can drift; separating
-/// the source as a parameter (rather than reading the bundled constant
-/// directly) lets the fallback branch be exercised in tests without editing
-/// the real asset.
-/// What: locates the line containing `PRIMARY DIRECTIVE` and returns
-/// everything from the start of that line up to (excluding) the next
-/// Markdown `##` heading, trimmed. Returns `None` when the marker is absent.
-/// Test: `delegation_directive_text_extracts_primary_directive`,
-/// `delegation_directive_text_falls_back_when_marker_missing`.
-fn extract_primary_directive(source: &'static str) -> Option<&'static str> {
-    let heading_pos = source.find("PRIMARY DIRECTIVE")?;
-    let line_start = source[..heading_pos]
-        .rfind('\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let rest = &source[line_start..];
-    let after_heading_line = rest.find('\n').map(|i| i + 1).unwrap_or(rest.len());
-    let end = rest[after_heading_line..]
-        .find("\n## ")
-        .map(|i| after_heading_line + i)
-        .unwrap_or(rest.len());
-    let section = rest[..end].trim();
-    if section.is_empty() {
-        None
-    } else {
-        Some(section)
-    }
-}
-
-/// Resolve the live delegation-directive text for the CLAUDE.md carrier.
-///
-/// What: [`extract_primary_directive`] applied to the bundled `trusty-mpm`
-/// output style ([`crate::core::bundle::OUTPUT_STYLE`]), falling back to
-/// [`DELEGATION_DIRECTIVE_FALLBACK`] (fail-closed — never an empty directive).
-/// Test: `delegation_directive_text_extracts_primary_directive`.
-fn delegation_directive_text() -> &'static str {
-    extract_primary_directive(crate::core::bundle::OUTPUT_STYLE)
-        .unwrap_or(DELEGATION_DIRECTIVE_FALLBACK)
-}
-
-/// Compose the fenced delegation-directive block written into `CLAUDE.md`.
-///
-/// Test: `upsert_delegation_block_inserts_when_absent`.
-fn delegation_block() -> String {
-    format!(
-        "{DELEGATION_BLOCK_BEGIN}\n\n{}\n\n{DELEGATION_BLOCK_END}",
-        delegation_directive_text()
-    )
-}
-
-/// Idempotently upsert the delegation-directive block into `content`.
-///
-/// Why: [`load_or_create_claude_md`] must guarantee the block is present and
-/// current on every `prepare_session` run without duplicating it on repeated
-/// calls or disturbing the operator's own notes.
-/// What: if both fence markers are present (in order), replaces the span
-/// between them (inclusive) with a freshly-built block; otherwise prepends the
-/// block (followed by a blank line) to `content`, leaving all pre-existing
-/// content intact beneath it.
-/// Test: `upsert_delegation_block_inserts_when_absent`,
-/// `upsert_delegation_block_updates_in_place`,
-/// `upsert_delegation_block_preserves_operator_content`.
-fn upsert_delegation_block(content: &str) -> String {
-    let block = delegation_block();
+/// Why: workspaces provisioned before issue #2170 landed may still carry the
+/// block trusty-mpm used to inject, fenced by [`DELEGATION_BLOCK_BEGIN`] /
+/// [`DELEGATION_BLOCK_END`]. This function is deliberately NOT called from
+/// [`load_or_create_claude_md`] or anywhere in the session-launch pipeline —
+/// trusty-mpm must never touch a project's `CLAUDE.md` on its own. It exists
+/// so an operator (or a future explicit, opt-in cleanup command) can strip
+/// already-polluted files on demand.
+/// What: if both fence markers are present (in order), removes the span
+/// between them (inclusive) plus the blank line that follows it, leaving
+/// every other byte of `content` untouched. Returns `content` unchanged when
+/// no fenced block is found.
+/// Test: `strip_delegation_block_removes_legacy_block`,
+/// `strip_delegation_block_noop_when_absent`.
+pub fn strip_delegation_block(content: &str) -> String {
     match (
         content.find(DELEGATION_BLOCK_BEGIN),
         content.find(DELEGATION_BLOCK_END),
     ) {
         (Some(start), Some(end)) if end > start => {
             let end = end + DELEGATION_BLOCK_END.len();
-            format!("{}{}{}", &content[..start], block, &content[end..])
+            let remainder = content[end..].trim_start_matches('\n');
+            format!("{}{}", &content[..start], remainder)
         }
-        _ => {
-            let rest = content.trim_start_matches('\n');
-            if rest.is_empty() {
-                format!("{block}\n")
-            } else {
-                format!("{block}\n\n{rest}")
-            }
-        }
+        _ => content.to_string(),
     }
 }
 
@@ -373,28 +302,21 @@ pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, Pipel
     })
 }
 
-/// Load `CLAUDE.md`, seeding the stub (and parents) if it does not exist, then
-/// additively + idempotently upsert the fail-closed delegation-directive block
-/// (issue #2125 item 1).
+/// Load `CLAUDE.md`, seeding the stub (and parent directories) if it does not
+/// exist. A pre-existing `CLAUDE.md` is read back byte-identical and never
+/// written to (issue #2170 — trusty-mpm must never modify a target project's
+/// `CLAUDE.md`).
 ///
-/// Why: section 5 is otherwise project-owned; trusty-mpm creates the stub
-/// exactly once and never overwrites the operator's own notes, so they always
-/// survive. But the delegation directive must be active on EVERY session
-/// start regardless of which other carriers (output-style, system-prompt file)
-/// happen to load — so this one small, clearly-fenced block IS regenerated on
-/// every call, additively, alongside whatever the operator has written.
-/// What: reads the existing file (creating it from [`CLAUDE_MD_STUB`], plus
-/// parent directories, when absent), upserts the delegation block via
-/// [`upsert_delegation_block`], and writes back only when the content
-/// actually changed (or the file was just created). Returns the final content
-/// and whether this call created the file.
-/// Test: `pipeline_creates_claude_md`, `pipeline_claude_md_not_overwritten`,
-/// `upsert_delegation_block_inserts_when_absent`,
-/// `upsert_delegation_block_updates_in_place`,
-/// `upsert_delegation_block_preserves_operator_content`.
+/// Why: section 5 is entirely project-owned; trusty-mpm creates the stub
+/// exactly once, on first session start, so the operator always has a place
+/// for project-specific notes, and never touches the file again afterward.
+/// What: reads the existing file and returns it unchanged; if absent, writes
+/// [`CLAUDE_MD_STUB`] (creating parent directories as needed) and returns
+/// that. Returns the final content and whether this call created the file.
+/// Test: `pipeline_creates_claude_md`, `pipeline_claude_md_left_byte_identical`.
 fn load_or_create_claude_md(path: &PathBuf) -> Result<(String, bool), PipelineError> {
-    let (existing, created) = match std::fs::read_to_string(path) {
-        Ok(text) => (text, false),
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok((text, false)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             if let Some(parent) = path.parent()
                 && !parent.as_os_str().is_empty()
@@ -404,24 +326,17 @@ fn load_or_create_claude_md(path: &PathBuf) -> Result<(String, bool), PipelineEr
                     source,
                 })?;
             }
-            (CLAUDE_MD_STUB.to_string(), true)
-        }
-        Err(err) => {
-            return Err(PipelineError::Io {
+            std::fs::write(path, CLAUDE_MD_STUB).map_err(|source| PipelineError::Io {
                 path: path.clone(),
-                source: err,
-            });
+                source,
+            })?;
+            Ok((CLAUDE_MD_STUB.to_string(), true))
         }
-    };
-
-    let updated = upsert_delegation_block(&existing);
-    if created || updated != existing {
-        std::fs::write(path, &updated).map_err(|source| PipelineError::Io {
+        Err(err) => Err(PipelineError::Io {
             path: path.clone(),
-            source,
-        })?;
+            source: err,
+        }),
     }
-    Ok((updated, created))
 }
 
 /// Concatenate the three instruction sections in the fixed 3 → 4 → 5 order.
@@ -542,16 +457,17 @@ mod tests {
 
         let on_disk = fs::read_to_string(&input.claude_md_path).unwrap();
         assert!(on_disk.contains("# Project Instructions"));
-        assert!(on_disk.contains("trusty-mpm will never overwrite it"));
+        assert!(on_disk.contains("trusty-mpm will never modify this file again"));
         assert!(out.merged.contains("# Project Instructions"));
     }
 
     #[test]
-    fn pipeline_claude_md_not_overwritten() {
-        // An existing CLAUDE.md with custom content must have that content
-        // preserved; the framework additively upserts its own fenced
-        // delegation-directive block alongside it (issue #2125 item 1) rather
-        // than leaving the file byte-for-byte untouched.
+    fn pipeline_claude_md_left_byte_identical() {
+        // Why (#2170): trusty-mpm must NEVER modify a target project's
+        // CLAUDE.md. An existing file — including one that happens to
+        // contain the literal delegation-block markers as ordinary operator
+        // text — must come back out of `build_instructions` completely
+        // untouched on disk.
         let tmp = TempDir::new().unwrap();
         let input = input_in(&tmp);
         write_file(&input.framework_instructions_path, "# Framework\n");
@@ -562,80 +478,38 @@ mod tests {
         let out = build_instructions(&input).unwrap();
         assert!(!out.claude_md_created);
         let on_disk = fs::read_to_string(&input.claude_md_path).unwrap();
-        assert!(
-            on_disk.contains("CUSTOM HAND-WRITTEN CONTENT"),
-            "custom CLAUDE.md content must be preserved: {on_disk}"
+        assert_eq!(
+            on_disk, custom,
+            "pre-existing CLAUDE.md must be left byte-identical: {on_disk}"
         );
         assert!(
-            on_disk.contains(DELEGATION_BLOCK_BEGIN),
-            "delegation-directive block must be additively inserted: {on_disk}"
+            !on_disk.contains(DELEGATION_BLOCK_BEGIN),
+            "no delegation-directive block may be injected: {on_disk}"
         );
         assert!(out.merged.contains("CUSTOM HAND-WRITTEN CONTENT"));
     }
 
     #[test]
-    fn upsert_delegation_block_inserts_when_absent() {
-        // Why (#2125 item 1): a CLAUDE.md with no prior fence gets the block
-        // prepended, and the block itself must carry the real directive text.
-        let updated = upsert_delegation_block("# My Project\n\nSome notes.\n");
-        assert!(updated.contains(DELEGATION_BLOCK_BEGIN));
-        assert!(updated.contains(DELEGATION_BLOCK_END));
-        assert!(updated.contains("Some notes."));
-        assert!(
-            updated.contains("DELEGATE") || updated.contains("delegate"),
-            "block must carry the delegation directive: {updated}"
+    fn strip_delegation_block_removes_legacy_block() {
+        // Why (#2170 cleanup helper): a workspace polluted by the old #2125
+        // injection must have the fenced block removed, leaving the
+        // operator's own content untouched.
+        let polluted = format!(
+            "{DELEGATION_BLOCK_BEGIN}\n\nSome injected directive text.\n\n{DELEGATION_BLOCK_END}\n\n# My Project\n\nOperator notes.\n"
         );
+        let cleaned = strip_delegation_block(&polluted);
+        assert!(!cleaned.contains(DELEGATION_BLOCK_BEGIN));
+        assert!(!cleaned.contains(DELEGATION_BLOCK_END));
+        assert!(!cleaned.contains("Some injected directive text."));
+        assert_eq!(cleaned, "# My Project\n\nOperator notes.\n");
     }
 
     #[test]
-    fn upsert_delegation_block_updates_in_place() {
-        // Why (#2125 item 1): re-running the upsert on content that already
-        // carries the block must replace it IN PLACE — never duplicate it —
-        // and must not disturb content outside the fence.
-        let first = upsert_delegation_block("# My Project\n\nOperator notes.\n");
-        let second = upsert_delegation_block(&first);
-        assert_eq!(
-            second.matches(DELEGATION_BLOCK_BEGIN).count(),
-            1,
-            "a second upsert must not duplicate the begin marker: {second}"
-        );
-        assert_eq!(
-            second.matches(DELEGATION_BLOCK_END).count(),
-            1,
-            "a second upsert must not duplicate the end marker: {second}"
-        );
-        assert!(second.contains("Operator notes."));
-    }
-
-    #[test]
-    fn upsert_delegation_block_preserves_operator_content() {
-        // Why: everything outside the fence is the operator's — it must
-        // survive both the initial insert and a subsequent re-upsert.
-        let operator = "# Custom\n\n## Section\n\nOperator-owned text.\n";
-        let first = upsert_delegation_block(operator);
-        assert!(first.contains("Operator-owned text."));
-        assert!(first.contains("## Section"));
-        let second = upsert_delegation_block(&first);
-        assert!(second.contains("Operator-owned text."));
-        assert!(second.contains("## Section"));
-    }
-
-    #[test]
-    fn delegation_directive_text_extracts_primary_directive() {
-        // Why: the CLAUDE.md carrier must reuse the SAME wording the bundled
-        // output style states, not invented prose.
-        let text = delegation_directive_text();
-        assert!(text.contains("PRIMARY DIRECTIVE"));
-        assert!(text.to_uppercase().contains("DELEGATE"));
-    }
-
-    #[test]
-    fn delegation_directive_text_falls_back_when_marker_missing() {
-        // Why: if the marker is ever absent from the source text, extraction
-        // must fail closed to `None` rather than panicking or returning junk —
-        // `delegation_directive_text` then supplies the fallback text.
-        assert_eq!(extract_primary_directive("# no marker here\n"), None);
-        assert!(!DELEGATION_DIRECTIVE_FALLBACK.is_empty());
+    fn strip_delegation_block_noop_when_absent() {
+        // Why: a clean CLAUDE.md (the common case post-#2170) must be
+        // returned byte-identical.
+        let clean = "# My Project\n\nOperator notes.\n";
+        assert_eq!(strip_delegation_block(clean), clean);
     }
 
     #[test]
