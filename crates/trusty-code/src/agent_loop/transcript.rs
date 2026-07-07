@@ -10,18 +10,22 @@
 //! being deleted, so the outward, model-facing view can shrink while the
 //! stored history stays fully auditable.
 //! What: `Transcript` owns an ordered `Vec<TranscriptEntry>` (message +
-//! compacted flag); helpers append the seed messages, an assistant turn (text
-//! and/or tool calls), and a `tool` role result message. `assistant_text`
-//! concatenates the assistant text turns for the final `AgentOutput`.
-//! `maybe_compact` (#2070) applies [`super::compaction`]'s threshold policy;
-//! `to_messages` renders the model-facing view — contiguous compacted runs
-//! collapsed to one summary message, followed by a replayed copy of the last
-//! user message once any compaction has occurred (§5.4 items 2-3) — while
-//! `messages` always returns the complete, uncompacted raw history.
+//! compacted flag + pinned flag); helpers append the seed messages, an
+//! assistant turn (text and/or tool calls), and a `tool` role result message.
+//! `assistant_text` concatenates the assistant text turns for the final
+//! `AgentOutput`. `maybe_compact` (#2070) applies [`super::compaction`]'s
+//! threshold policy; `to_messages` renders the model-facing view —
+//! contiguous compacted runs collapsed to one summary message, followed by a
+//! replayed copy of the last user message once any compaction has occurred
+//! (§5.4 items 2-3) — while `messages` always returns the complete,
+//! uncompacted raw history. `push_tool_result` (#2070) pins any
+//! [`crate::tools::USE_SKILL_TOOL_NAME`] result forever — §5.4 item 5's
+//! "preserve skill outputs... forever" — alongside `system`/`user` turns.
 //! Test: `agent_loop::tests` build transcripts indirectly through the loop;
 //! `transcript::tests` cover the helpers and compaction directly.
 
 use crate::llm::{ChatMessage, ChatResponse, ToolCall};
+use crate::tools::USE_SKILL_TOOL_NAME;
 
 use super::compaction::{CompactionConfig, should_compact, summarize_span};
 
@@ -31,22 +35,45 @@ use super::compaction::{CompactionConfig, should_compact, summarize_span};
 /// even after it stops being sent to the model verbatim; a bare flag next to
 /// the message (rather than removing it from the vector) is the simplest
 /// representation that satisfies both "shrink what the model sees" and
-/// "never lose the audit trail".
+/// "never lose the audit trail". `pinned` is a SEPARATE flag from `compacted`
+/// (rather than overloading `compacted`) because a pinned entry must never
+/// transition to `compacted` at all — it is a permanent exemption, not a
+/// one-way state like compaction itself.
 /// What: `message` is the original, untouched `ChatMessage`; `compacted`
 /// starts `false` and is set `true` by `Transcript::maybe_compact` — never
-/// reset, since compaction is a one-way transform for a given entry.
-/// Test: `transcript::tests::maybe_compact_marks_middle_span_only`.
+/// reset, since compaction is a one-way transform for a given entry. `pinned`
+/// starts `false` and is set `true` only at construction time (never later)
+/// for entries `maybe_compact` must always skip — currently: skill outputs
+/// (`push_tool_result` sets it when `name == USE_SKILL_TOOL_NAME`; §5.4 item
+/// 5 also covers `system`/`user` role turns, but those are matched by role
+/// directly in `maybe_compact` rather than via this flag, since they are
+/// identifiable without extra state).
+/// Test: `transcript::tests::maybe_compact_marks_middle_span_only`,
+/// `transcript::tests::maybe_compact_never_compacts_pinned_skill_output`.
 #[derive(Debug, Clone)]
 struct TranscriptEntry {
     message: ChatMessage,
     compacted: bool,
+    pinned: bool,
 }
 
 impl TranscriptEntry {
+    /// An ordinary entry: uncompacted, unpinned.
     fn fresh(message: ChatMessage) -> Self {
         Self {
             message,
             compacted: false,
+            pinned: false,
+        }
+    }
+
+    /// A permanently-exempt entry (#2070): uncompacted and, unlike `fresh`,
+    /// never eligible to become compacted by `Transcript::maybe_compact`.
+    fn pinned(message: ChatMessage) -> Self {
+        Self {
+            message,
+            compacted: false,
+            pinned: true,
         }
     }
 }
@@ -126,16 +153,24 @@ impl Transcript {
     ///
     /// Why: The API requires each tool call to be answered by a `tool` message
     /// referencing its `tool_call_id`, or the next assistant turn errors.
+    /// (#2070) A `use_skill` result is the loaded body of a skill the model
+    /// deliberately chose to invoke — §5.4 item 5 requires it survive
+    /// compaction forever, the same guarantee `system`/`user` turns get.
     /// What: Pushes a `ChatMessage::tool_result` with the call id, function
-    /// name, and textual result.
-    /// Test: `transcript::tests::push_tool_result_sets_call_id`.
+    /// name, and textual result — as a permanently `pinned` entry when
+    /// `name == `[`USE_SKILL_TOOL_NAME`], otherwise as an ordinary compaction-
+    /// eligible entry.
+    /// Test: `transcript::tests::push_tool_result_sets_call_id`,
+    /// `transcript::tests::maybe_compact_never_compacts_pinned_skill_output`,
+    /// `transcript::tests::maybe_compact_still_compacts_non_skill_tool_results`.
     pub fn push_tool_result(&mut self, tool_call_id: &str, name: &str, content: &str) {
-        self.entries
-            .push(TranscriptEntry::fresh(ChatMessage::tool_result(
-                tool_call_id,
-                name,
-                content,
-            )));
+        let message = ChatMessage::tool_result(tool_call_id, name, content);
+        let entry = if name == USE_SKILL_TOOL_NAME {
+            TranscriptEntry::pinned(message)
+        } else {
+            TranscriptEntry::fresh(message)
+        };
+        self.entries.push(entry);
     }
 
     /// Return the complete, uncompacted raw message history.
@@ -205,14 +240,17 @@ impl Transcript {
     /// sent) exceeds `cfg.token_threshold`. Otherwise, marks every entry
     /// before the trailing `cfg.keep_last_messages` (the active work zone,
     /// §5.4 item 4) as `compacted = true`, EXCEPT entries already compacted
-    /// (a one-way transform) and `system`/`user` role entries (§5.4 item 5:
-    /// "preserve... user requests forever"). Sets `compaction_triggered` and
-    /// returns `true` only if at least one entry was newly marked (an
-    /// already-fully-compacted or entirely-preserved prefix is a no-op, not a
-    /// spurious trigger).
+    /// (a one-way transform), `pinned` entries (§5.4 item 5's skill-output
+    /// half — see `push_tool_result`), and `system`/`user` role entries
+    /// (§5.4 item 5's "preserve... user requests forever" half). Sets
+    /// `compaction_triggered` and returns `true` only if at least one entry
+    /// was newly marked (an already-fully-compacted or entirely-preserved
+    /// prefix is a no-op, not a spurious trigger).
     /// Test: `transcript::tests::maybe_compact_marks_middle_span_only`,
     /// `transcript::tests::maybe_compact_is_noop_below_threshold`,
-    /// `transcript::tests::maybe_compact_never_touches_system_or_user`.
+    /// `transcript::tests::maybe_compact_never_touches_system_or_user`,
+    /// `transcript::tests::maybe_compact_never_compacts_pinned_skill_output`,
+    /// `transcript::tests::maybe_compact_still_compacts_non_skill_tool_results`.
     pub fn maybe_compact(&mut self, cfg: &CompactionConfig) -> bool {
         if !should_compact(&self.to_messages(), cfg) {
             return false;
@@ -222,7 +260,7 @@ impl Transcript {
         let mut newly_compacted = false;
 
         for entry in &mut self.entries[..keep_from] {
-            if entry.compacted {
+            if entry.compacted || entry.pinned {
                 continue;
             }
             if entry.message.role == "system" || entry.message.role == "user" {
@@ -448,6 +486,84 @@ mod tests {
         // Non-destructive: every original entry is still present in the raw
         // history even though some are now marked compacted internally.
         assert_eq!(raw.len(), 2 + 20);
+    }
+
+    /// A `use_skill` tool result is pinned: it survives compaction even when
+    /// it falls outside the active zone and the transcript is well past the
+    /// threshold (#2070, §5.4 item 5).
+    ///
+    /// Why: This is the exact gap QA flagged — skill outputs flow through the
+    /// ordinary `push_tool_result` channel and, without pinning, would be
+    /// just as compaction-eligible as any other tool result.
+    /// What: Push a `use_skill` result early, then enough later turns to push
+    /// it well outside a small active zone; force compaction with an
+    /// aggressive config; assert `to_messages()` still contains the skill
+    /// result's ORIGINAL content verbatim (not replaced by a summary), and
+    /// that `messages()` (raw) also still has it — pinned entries are never
+    /// marked `compacted` at all, not merely retrievable via raw history.
+    /// Test: this test.
+    #[test]
+    fn maybe_compact_never_compacts_pinned_skill_output() {
+        let mut t = Transcript::seed("s", "task");
+        t.push_tool_result(
+            "call_skill",
+            USE_SKILL_TOOL_NAME,
+            "full skill body: do the distinctive thing",
+        );
+        for i in 0..10 {
+            t.push_assistant(Some(format!("turn {i}")), &[]);
+            t.push_tool_result(&format!("c{i}"), "bash", "output");
+        }
+        let cfg = CompactionConfig {
+            token_threshold: 1,
+            keep_last_messages: 2,
+        };
+        assert!(t.maybe_compact(&cfg));
+
+        let compacted_view = t.to_messages();
+        assert!(
+            compacted_view
+                .iter()
+                .any(|m| m.content.as_deref() == Some("full skill body: do the distinctive thing")),
+            "pinned skill output must survive verbatim in the compacted view: {compacted_view:?}"
+        );
+    }
+
+    /// Non-skill tool results (e.g. `bash`, `read_file`) remain
+    /// compaction-eligible — pinning must not accidentally exempt everything
+    /// and defeat compaction (#2070).
+    ///
+    /// Why: The fix for the skill-output gap must be narrowly scoped to
+    /// `USE_SKILL_TOOL_NAME`; a broad "pin every tool result" mistake would
+    /// silently disable compaction for ordinary long tool-heavy runs.
+    /// What: Same shape as the skill-pinning test but with only ordinary
+    /// `bash` tool results outside the active zone; assert compaction still
+    /// collapses them into a summary (the compacted view is materially
+    /// smaller than the raw history, and a summary marker is present).
+    /// Test: this test.
+    #[test]
+    fn maybe_compact_still_compacts_non_skill_tool_results() {
+        let mut t = Transcript::seed("s", "task");
+        for i in 0..10 {
+            t.push_assistant(Some(format!("turn {i}")), &[]);
+            t.push_tool_result(&format!("c{i}"), "bash", "output");
+        }
+        let cfg = CompactionConfig {
+            token_threshold: 1,
+            keep_last_messages: 2,
+        };
+        assert!(t.maybe_compact(&cfg));
+
+        let compacted_view = t.to_messages();
+        assert!(compacted_view.len() < t.messages().len());
+        assert!(
+            compacted_view.iter().any(|m| m
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .contains("[compacted")),
+            "expected non-skill tool results to still collapse into a summary: {compacted_view:?}"
+        );
     }
 
     /// A compacted span collapses to exactly one summary message.

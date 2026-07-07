@@ -7,7 +7,9 @@
 //! `SearchProvider`, `SearchResult`, `SkillResolver`, and `ToolResult` from
 //! `traits`; `ToolRegistry` from `registry`; `DelegateToAgentTool` from
 //! `delegate`; `FinishTaskTool` (#2072) from `finish_task`; and `UseSkillTool`
-//! (#2069's progressive-disclosure on-invoke loader) from `skill`.
+//! plus `USE_SKILL_TOOL_NAME` (#2069's progressive-disclosure on-invoke
+//! loader; the constant lets #2070's compaction pin skill outputs by tool
+//! name) from `skill`.
 //! Test: Unit tests live in each submodule; integration tests use
 //! `DelegateToAgentTool` with a `MockAgentRunner`.
 
@@ -29,7 +31,7 @@ pub use finish_task::{
 };
 pub use fs::{EditTool, ReadFileTool, WriteFileTool};
 pub use registry::ToolRegistry;
-pub use skill::UseSkillTool;
+pub use skill::{USE_SKILL_TOOL_NAME, UseSkillTool};
 pub use traits::{
     AgentOutput, AgentRunner, HistoryMessage, RunContext, SearchProvider, SearchResult,
     ServiceTier, SkillResolver, ToolExecutor, ToolResult,
