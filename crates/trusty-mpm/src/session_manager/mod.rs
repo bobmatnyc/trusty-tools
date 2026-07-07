@@ -50,6 +50,9 @@ mod reap_orphaned_worktrees_tests;
 #[cfg(test)]
 mod naming_tests;
 
+#[cfg(test)]
+mod resume_reattach_tests;
+
 /// Real tmux driver adapter — only available when the `daemon` feature (and thus
 /// the daemon's `TmuxDriver`) is compiled in.
 #[cfg(feature = "daemon")]
