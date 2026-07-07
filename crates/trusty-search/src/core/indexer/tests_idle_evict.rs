@@ -18,10 +18,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{CodeIndexer, SearchQuery};
+use super::{CodeIndexer, ParsedBatch, SearchQuery};
 use crate::core::chunker::{ChunkType, RawChunk};
 use crate::core::corpus::CorpusStore;
 use crate::core::embed::{Embedder, MockEmbedder};
+use crate::core::entity::{EdgeKind, EntityType, RawEntity};
 use crate::core::store::{UsearchStore, VectorStore};
 
 /// Minimal in-memory `RawChunk` builder (mirrors `tests::raw`).
@@ -44,6 +45,16 @@ fn raw(id: &str, file: &str, content: &str) -> RawChunk {
         nlp_code_refs: Vec::new(),
         virtual_terms: Vec::new(),
     }
+}
+
+/// `RawChunk` builder with a `function_name`/`calls`/`chunk_type`, for
+/// symbol-graph-relevant tests (mirrors `symbol_graph::tests::chunk_full`).
+fn raw_named(id: &str, file: &str, name: &str, calls: &[&str], chunk_type: ChunkType) -> RawChunk {
+    let mut c = raw(id, file, &format!("fn {name}() {{}}"));
+    c.function_name = Some(name.to_string());
+    c.calls = calls.iter().map(|s| s.to_string()).collect();
+    c.chunk_type = chunk_type;
+    c
 }
 
 /// Indexer with an embedder + HNSW store but no durable corpus (mirrors
@@ -216,4 +227,122 @@ async fn bm25_entities_idle_eviction_skips_indexers_without_corpus() {
     assert_eq!(evicted, 0, "must not evict without a durable corpus");
     assert_eq!(idx.bm25.read().await.len(), before);
     assert!(!idx.bm25_entities_evicted.load(Ordering::Relaxed));
+}
+
+/// Regression test (QA follow-up on #2162): `rebuild_symbol_graph` must
+/// rehydrate an idle-evicted entity map BEFORE snapshotting it, or a rebuild
+/// triggered by an unrelated mutation (`remove_file`, `remove_chunk`, a
+/// prune-only reindex, contrib-graph ingest — none of which rehydrate first)
+/// would silently persist a graph missing every entity-derived KG edge
+/// (`Documents`, `ReferencesConcept`, ...) for the WHOLE corpus, not just the
+/// touched file — and that impoverished graph survives a restart because it
+/// gets written to redb.
+///
+/// Reproduces via the exact vulnerable path: build a graph with a
+/// `Documents` edge (owner symbol "prose_owner" -> "target", wired from a
+/// `DocConcept` entity on "src/owner.rs"), force-evict BM25/entities, then
+/// call `remove_file` on a *third, unrelated* file — the same call path
+/// `service/reconcile.rs` and the delete HTTP handler use. Without the
+/// `ensure_bm25_entities_loaded()` guard at the top of `rebuild_symbol_graph`,
+/// this removal would rebuild the graph from an empty entity snapshot and the
+/// `Documents` edge would vanish even though `src/owner.rs` was never touched.
+#[tokio::test]
+async fn rebuild_symbol_graph_rehydrates_entities_after_idle_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let redb_path = dir.path().join("index.redb");
+    let idx = make_indexer_with_corpus(&redb_path);
+
+    let chunks = vec![
+        raw_named(
+            "owner",
+            "src/owner.rs",
+            "prose_owner",
+            &[],
+            ChunkType::Function,
+        ),
+        raw_named(
+            "target",
+            "src/target.rs",
+            "target",
+            &[],
+            ChunkType::Function,
+        ),
+        raw_named(
+            "unrelated",
+            "src/unrelated.rs",
+            "unrelated_fn",
+            &[],
+            ChunkType::Function,
+        ),
+    ];
+    let entities_by_file = vec![(
+        "src/owner.rs".to_string(),
+        vec![RawEntity::new(
+            EntityType::DocConcept,
+            "target".to_string(),
+            (0, 6),
+            "src/owner.rs",
+            1,
+        )],
+    )];
+    let parsed = ParsedBatch {
+        embeddings: vec![None; chunks.len()],
+        chunks,
+        entities_by_file,
+        parse_ms: 0,
+        embed_ms: 0,
+        vector_count: 0,
+    };
+    // defer_graph_rebuild=false: builds the graph immediately, exercising the
+    // same commit path `index_files_batch` uses.
+    idx.commit_parsed_batch(parsed, false)
+        .await
+        .expect("commit batch");
+
+    // Sanity: the Documents edge exists before any eviction.
+    let g_before = idx.snapshot_symbol_graph().await;
+    let docs_before = g_before.neighbors_by_edge("prose_owner", &[EdgeKind::Documents], 1);
+    assert!(
+        docs_before.iter().any(|(n, _, _)| n == "target"),
+        "expected a Documents edge prose_owner -> target before eviction, got {docs_before:?}"
+    );
+
+    // Force BM25/entities eviction (sleep past ms resolution — see the other
+    // tests in this file for why).
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let evicted = idx
+        .evict_bm25_entities_if_idle(Duration::from_nanos(1))
+        .await;
+    assert!(evicted > 0, "expected eviction to actually clear BM25 docs");
+    assert_eq!(
+        idx.entities.read().await.len(),
+        0,
+        "entities must be empty immediately after eviction"
+    );
+    assert!(idx.bm25_entities_evicted.load(Ordering::Relaxed));
+
+    // Trigger a graph rebuild via `remove_file` on an *unrelated* file — the
+    // exact production path (`service/reconcile.rs`, the delete HTTP
+    // handler, and the FSEvents watcher's `remove_chunk`) that does NOT
+    // rehydrate entities before reaching `rebuild_symbol_graph`.
+    idx.remove_file("src/unrelated.rs")
+        .await
+        .expect("remove unrelated file");
+
+    // The guard inside `rebuild_symbol_graph` must have rehydrated entities
+    // before snapshotting, so the untouched owner/target Documents edge must
+    // still be present.
+    let g_after = idx.snapshot_symbol_graph().await;
+    let docs_after = g_after.neighbors_by_edge("prose_owner", &[EdgeKind::Documents], 1);
+    assert!(
+        docs_after.iter().any(|(n, _, _)| n == "target"),
+        "Documents edge prose_owner -> target was DROPPED after remove_file on an \
+         unrelated file post-eviction — rebuild_symbol_graph rebuilt from an empty \
+         entity snapshot instead of rehydrating first; got {docs_after:?}"
+    );
+    assert!(
+        !idx.bm25_entities_evicted.load(Ordering::Relaxed),
+        "rebuild_symbol_graph must rehydrate (and clear the flag) via \
+         ensure_bm25_entities_loaded"
+    );
 }

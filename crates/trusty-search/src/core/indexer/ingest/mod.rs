@@ -47,6 +47,21 @@ impl CodeIndexer {
     /// Test: every test that calls `add_chunk` or `index_file` exercises the
     /// rebuild path indirectly.
     pub(super) async fn rebuild_symbol_graph(&self) {
+        // Issue #2162 follow-up: this function reads `self.chunks` and
+        // `self.entities` directly below, but several call paths
+        // (`remove_file`, `remove_chunk` from the FSEvents watcher,
+        // `rebuild_symbol_graph_for_reindex` on a prune-only reindex,
+        // the contributed-graph ingest endpoint) reach this function without
+        // having rehydrated either structure first. An idle-evicted map read
+        // here would silently rebuild the graph from an EMPTY chunk/entity
+        // snapshot, dropping every entity-derived KG edge for the WHOLE
+        // corpus — and that impoverished graph then gets persisted to redb,
+        // so the loss survives a restart. Guarding at this single choke
+        // point (every caller funnels through here) is a fast no-op when
+        // nothing was evicted.
+        self.ensure_chunks_loaded().await;
+        self.ensure_bm25_entities_loaded().await;
+
         // Issue (180GB RSS fix): the temporary `Vec<ChunkTuple>` snapshot clones
         // every chunk's strings (id, file, function_name, calls, inherits_from)
         // and can hit 1-2 GB on a 1M-chunk corpus. We can't avoid the snapshot
