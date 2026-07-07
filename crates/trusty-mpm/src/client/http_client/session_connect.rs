@@ -37,10 +37,17 @@ impl DaemonClient {
         // `CLAUDE.md`. A prep failure is logged but not fatal — the session can
         // still launch with whatever instructions already exist on disk.
         let fw = crate::core::paths::FrameworkPaths::default();
-        if let Err(err) =
-            crate::core::session_launch::prepare_session(&fw, std::path::Path::new(workdir))
-        {
-            tracing::warn!(%err, "session pre-launch preparation failed");
+        match crate::core::session_launch::prepare_session(&fw, std::path::Path::new(workdir)) {
+            Ok(report) => {
+                // Issue #2149: a roster-deploy failure no longer aborts
+                // preparation — surface it loudly rather than let it hide.
+                for err in &report.roster_errors {
+                    tracing::error!(%err, "roster provisioning gap (non-fatal)");
+                }
+            }
+            Err(err) => {
+                tracing::warn!(%err, "session pre-launch preparation failed");
+            }
         }
 
         #[derive(Deserialize)]

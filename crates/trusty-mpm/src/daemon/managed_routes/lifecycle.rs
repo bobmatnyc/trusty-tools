@@ -728,6 +728,17 @@ fn prepare_inproject_session(
                 worktree = %worktree.display(),
                 "spawn_managed (inproject): session prepared"
             );
+            // Issue #2149: a roster-deploy failure no longer aborts
+            // preparation, so surface it loudly here rather than letting it
+            // hide behind a low `deployed`/`skills_deployed` count.
+            for err in &report.roster_errors {
+                tracing::error!(
+                    id = %session_id,
+                    worktree = %worktree.display(),
+                    "spawn_managed (inproject): roster provisioning gap (session \
+                     still launches with its trusty-mpm identity): {err}"
+                );
+            }
         }
         Err(e) => {
             warn!(
