@@ -410,16 +410,17 @@ async fn spawn_managed_cloned(
         warn!(id = %record.id, "spawn_managed: set_workspace failed: {e}");
     }
 
-    // Deployment-completeness gate (#2158): never hand an incomplete
-    // `.claude/` payload to the operator. Skips the runtime spawn entirely
-    // when auto-repair cannot close every gap.
+    // Deployment-completeness check (#2158, made non-blocking by #2172): best-
+    // effort auto-repair of an incomplete `.claude/` payload. #2171 tracks the
+    // validator over-reporting INCOMPLETE; until that lands, a false positive
+    // here must never withhold the runtime launch (P0: it was leaving every
+    // session at a bare shell). Any gap — real or falsely reported — is now
+    // logged and the session proceeds to `adapter.spawn` regardless.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&prepared.path);
     if let Err(reason) =
         ensure_deployment_complete(&fw, &prepared.path, record.repo_url.as_deref(), &record.id)
     {
-        warn!(id = %record.id, "spawn_managed: {reason}");
-        let _ = mgr.mark_errored(&record.id, &reason).await;
-        return Ok(mgr.get(&record.id).await.unwrap_or(record));
+        warn!(id = %record.id, "spawn_managed: deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
     }
 
     // Step 3: spawn the selected runtime in the pane. A spawn failure is recorded
@@ -676,15 +677,13 @@ async fn spawn_managed_inproject(
         warn!(id = %session_id, "spawn_managed (inproject): set_workspace failed: {e}");
     }
 
-    // Deployment-completeness gate (#2158): see `spawn_managed_cloned`'s
-    // identical gate for the full rationale. Reuses the `fw` already resolved
-    // above for `prepare_inproject_session`.
+    // Deployment-completeness check (#2158, made non-blocking by #2172): see
+    // `spawn_managed_cloned`'s identical check for the full rationale. Reuses
+    // the `fw` already resolved above for `prepare_inproject_session`.
     if let Err(reason) =
         ensure_deployment_complete(&fw, &worktree, record.repo_url.as_deref(), session_id)
     {
-        warn!(id = %session_id, "spawn_managed (inproject): {reason}");
-        let _ = mgr.mark_errored(session_id, &reason).await;
-        return Ok(mgr.get(session_id).await.unwrap_or(record));
+        warn!(id = %session_id, "spawn_managed (inproject): deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
     }
 
     emit(ProvisioningStage::LaunchingRuntime);
@@ -905,15 +904,13 @@ async fn spawn_managed_local(
         warn!(id = %record.id, "spawn_managed (local→managed): set_workspace failed: {e}");
     }
 
-    // Deployment-completeness gate (#2158): see `spawn_managed_cloned`'s
-    // identical gate for the full rationale.
+    // Deployment-completeness check (#2158, made non-blocking by #2172): see
+    // `spawn_managed_cloned`'s identical check for the full rationale.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
     if let Err(reason) =
         ensure_deployment_complete(&fw, &workspace, record.repo_url.as_deref(), &record.id)
     {
-        warn!(id = %record.id, "spawn_managed (local→managed): {reason}");
-        let _ = mgr.mark_errored(&record.id, &reason).await;
-        return Ok(mgr.get(&record.id).await.unwrap_or(record));
+        warn!(id = %record.id, "spawn_managed (local→managed): deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
     }
 
     emit(ProvisioningStage::LaunchingRuntime);
@@ -1181,18 +1178,16 @@ pub async fn resume_managed(
         );
     }
 
-    // Deployment-completeness gate (#2158): see `spawn_managed_cloned`'s
-    // identical gate for the full rationale. `ensure_deployment_complete`
-    // itself no-ops for an unresolved (`/unknown`) workspace — an adopted
-    // session with no known cwd is handled separately by the reconcile-on-boot
-    // fix, not here.
+    // Deployment-completeness check (#2158, made non-blocking by #2172): see
+    // `spawn_managed_cloned`'s identical check for the full rationale.
+    // `ensure_deployment_complete` itself no-ops for an unresolved (`/unknown`)
+    // workspace — an adopted session with no known cwd is handled separately by
+    // the reconcile-on-boot fix, not here.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&workspace);
     if let Err(reason) =
         ensure_deployment_complete(&fw, &workspace, record.repo_url.as_deref(), &record.id)
     {
-        warn!(id = %record.id, "resume_managed: {reason}");
-        let _ = mgr.mark_errored(&record.id, &reason).await;
-        return Ok(mgr.get(id).await.unwrap_or(record));
+        warn!(id = %record.id, "resume_managed: deployment incomplete after auto-repair (non-blocking, launch proceeds): {reason}");
     }
 
     let tmux_arc = mgr.tmux_driver();
@@ -1238,14 +1233,24 @@ pub async fn resume_managed(
 /// SOME identity — but "launches" is not the same as "launches complete". A
 /// worktree whose `.claude/` payload came up incomplete (missing agents, a
 /// stripped `settings.json`, no ownership manifest — see #2158) could
-/// otherwise silently reach the operator. This gate closes that hole:
+/// otherwise silently reach the operator. This function surfaces that gap:
 /// validate, and if incomplete, re-run the deploy pipeline once via
 /// [`crate::core::deploy_validate::validate_and_repair`] (which reuses
 /// [`crate::core::session_launch::prepare_session_with_repo_url`] — the exact
-/// #2149 pipeline, no parallel repair implementation), then re-validate. Every
-/// `spawn_managed_*`/`resume_managed` call site skips the runtime
-/// spawn/respawn and marks the record errored instead of handing over a
-/// silently broken session when this returns `Err`.
+/// #2149 pipeline, no parallel repair implementation), then re-validate.
+/// **Non-blocking as of #2172 (P0):** every `spawn_managed_*`/`resume_managed`
+/// call site now treats `Err` as a `tracing::warn!`-only diagnostic and always
+/// proceeds to `adapter.spawn`/`adapter.spawn_resume` regardless of the
+/// result. The original #2158 contract — skip the runtime launch and mark the
+/// record errored on `Err` — turned out to be unsafe to wire as a hard gate:
+/// the validator over-reports INCOMPLETE (#2171), so the gate was aborting
+/// `adapter.spawn` on effectively every new/restarted managed session,
+/// leaving the pane at a bare shell. This function's return type is
+/// deliberately still `Result<(), String>` (callers/tests still want the
+/// pass/fail detail to log or assert on) — it is the CALLERS' responsibility
+/// to never let that `Err` skip the launch. Do not reintroduce an early
+/// return/`mark_errored` on this `Err` at any call site without first fixing
+/// #2171 and re-litigating whether a hard gate is safe.
 /// What: no-ops (`Ok(())`) when `workspace` is the adopted-session sentinel
 /// `/unknown` or does not exist on disk — an unresolved workspace has nothing
 /// to validate; that case is handled separately by the `reconcile_on_boot`
@@ -1257,7 +1262,10 @@ pub async fn resume_managed(
 /// every residual gap otherwise.
 /// Test: `ensure_deployment_complete_noops_for_unknown_workspace`,
 /// `ensure_deployment_complete_ok_when_already_complete`,
-/// `ensure_deployment_complete_repairs_and_succeeds`.
+/// `ensure_deployment_complete_repairs_and_succeeds`;
+/// `spawn_managed_cloned_launches_despite_incomplete_deployment` (added by
+/// #2172) asserts the call site itself no longer skips `adapter.spawn` on
+/// `Err`.
 fn ensure_deployment_complete(
     fw: &crate::core::paths::FrameworkPaths,
     workspace: &std::path::Path,
