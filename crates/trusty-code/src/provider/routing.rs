@@ -32,6 +32,67 @@ pub const DEFAULT_MODEL: &str = "openai/gpt-4o-mini";
 /// Test: `routing::tests::resolve_max_tokens_falls_back_to_default`.
 pub const DEFAULT_MAX_TOKENS: u32 = 8192;
 
+/// Environment variable overriding the `run-task` wall-clock deadline (#2207).
+///
+/// Why: Lets an operator (or the M3 bake-off runner) raise the deadline for a
+/// whole invocation without a CLI flag at every call site — mirrors
+/// `crate::mode::MODE_ENV_VAR`'s "escape hatch" precedent for a small, direct
+/// `std::env` read in production code.
+/// What: Read by [`resolve_deadline_secs`] as the middle precedence tier.
+/// Test: `routing::tests::resolve_deadline_secs_*`.
+pub const RUN_DEADLINE_ENV_VAR: &str = "TCODE_RUN_DEADLINE_SECONDS";
+
+/// Generous default wall-clock deadline for a `run-task` invocation, in
+/// seconds, when neither a CLI override nor [`RUN_DEADLINE_ENV_VAR`] is set.
+///
+/// Why: The AgentLoop's own built-in default (120s, `crate::agent_loop::AgentLoopConfig::default`)
+/// is tuned for a short interactive turn, not a full PM->engineer run-task
+/// invocation — #2207 found that cap cutting off a real, otherwise-successful
+/// task at turn 13 before it reached `finish_task`. 30 minutes is generous
+/// enough for the M3 bake-off's L1 pilot to complete cleanly while L2/L3 (1-3
+/// hour problems) can still raise it further via the flag/env override.
+/// What: The fallback tier of [`resolve_deadline_secs`].
+/// Test: `routing::tests::resolve_deadline_secs_falls_back_to_default`.
+pub const DEFAULT_RUN_DEADLINE_SECS: u64 = 1800;
+
+/// Resolve the wall-clock deadline (in seconds) for a `run-task` invocation.
+///
+/// Why: #2207 — the AgentLoop's built-in 120s timeout is too tight for a real
+/// PM->engineer run-task on anything but a trivial task, cutting off
+/// otherwise-successful runs before they reach `finish_task`. A single
+/// resolver mirrors [`resolve_model`]/[`resolve_max_tokens`]'s precedence-
+/// ladder pattern so every call site (the CLI's legacy in-process path, the
+/// daemon's `task.run`, and the in-process sub-agent runner) agrees.
+/// What: Returns, in priority order, the first of: (1) `cli_override` (the
+/// `run-task --timeout-seconds`/`task.run` `deadline_secs` request param,
+/// threaded in by the caller), (2) [`RUN_DEADLINE_ENV_VAR`] parsed as a `u64`
+/// (an unparseable value is treated as absent, falling through — logged at
+/// `warn` — rather than erroring the whole run), else (3)
+/// [`DEFAULT_RUN_DEADLINE_SECS`].
+/// Test: `routing::tests::resolve_deadline_secs_cli_override_wins`,
+/// `routing::tests::resolve_deadline_secs_env_wins_over_default`,
+/// `routing::tests::resolve_deadline_secs_invalid_env_falls_back_to_default`,
+/// `routing::tests::resolve_deadline_secs_falls_back_to_default`.
+pub fn resolve_deadline_secs(cli_override: Option<u64>) -> u64 {
+    if let Some(secs) = cli_override {
+        return secs;
+    }
+
+    if let Ok(raw) = std::env::var(RUN_DEADLINE_ENV_VAR) {
+        match raw.trim().parse::<u64>() {
+            Ok(secs) => return secs,
+            Err(e) => {
+                tracing::warn!(
+                    "{RUN_DEADLINE_ENV_VAR}={raw:?} is not a valid u64 ({e}); \
+                     falling back to DEFAULT_RUN_DEADLINE_SECS"
+                );
+            }
+        }
+    }
+
+    DEFAULT_RUN_DEADLINE_SECS
+}
+
 /// Resolve the model slug for an invocation.
 ///
 /// Why: Centralises the precedence so per-call overrides, per-agent config, and
@@ -97,6 +158,13 @@ fn non_empty(value: Option<&str>) -> Option<&str> {
         }
     })
 }
+
+/// Serializes every test in this module that sets/reads the process-wide
+/// [`RUN_DEADLINE_ENV_VAR`] — `cargo test` runs tests in parallel within one
+/// binary, and an unguarded `set_var`/`remove_var` pair would race across
+/// tests (mirrors `crate::mode::MODE_ENV_LOCK`'s identical rationale).
+#[cfg(test)]
+pub(crate) static RUN_DEADLINE_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -264,5 +332,83 @@ mod tests {
     fn resolve_max_tokens_falls_back_to_default() {
         let config = AgentConfig::default();
         assert_eq!(resolve_max_tokens(&config), DEFAULT_MAX_TOKENS);
+    }
+
+    // ── #2207: resolve_deadline_secs precedence ─────────────────────────────
+
+    /// Serializes access to [`RUN_DEADLINE_ENV_VAR`] for one test closure,
+    /// restoring the prior (absent) state afterward.
+    async fn with_env_deadline<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = RUN_DEADLINE_ENV_LOCK.lock().await;
+        // SAFETY: test-only env mutation; serialized by `RUN_DEADLINE_ENV_LOCK`.
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var(RUN_DEADLINE_ENV_VAR, v),
+                None => std::env::remove_var(RUN_DEADLINE_ENV_VAR),
+            }
+        }
+        let result = f();
+        unsafe {
+            std::env::remove_var(RUN_DEADLINE_ENV_VAR);
+        }
+        result
+    }
+
+    /// The explicit CLI override wins over both the env var and the default.
+    ///
+    /// Why: `run-task --timeout-seconds` (or `task.run`'s `deadline_secs`
+    /// param) must be the highest-precedence source — an operator setting it
+    /// explicitly for one run must never be silently overridden.
+    /// What: Set the env var to a different value; assert the override wins.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_deadline_secs_cli_override_wins() {
+        with_env_deadline(Some("60"), || {
+            assert_eq!(resolve_deadline_secs(Some(7200)), 7200);
+        })
+        .await;
+    }
+
+    /// The env var wins over the built-in default when no override is given.
+    ///
+    /// Why: `TCODE_RUN_DEADLINE_SECONDS` is the escape-hatch tier for a whole
+    /// invocation without threading a flag through every call site.
+    /// What: No CLI override; env var set; assert the env value is returned.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_deadline_secs_env_wins_over_default() {
+        with_env_deadline(Some("900"), || {
+            assert_eq!(resolve_deadline_secs(None), 900);
+        })
+        .await;
+    }
+
+    /// An unparseable env var falls through to the default rather than
+    /// erroring the whole run.
+    ///
+    /// Why: A misconfigured environment must degrade gracefully, not crash a
+    /// long-running task.
+    /// What: Env var set to a non-numeric string; assert the default wins.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_deadline_secs_invalid_env_falls_back_to_default() {
+        with_env_deadline(Some("not-a-number"), || {
+            assert_eq!(resolve_deadline_secs(None), DEFAULT_RUN_DEADLINE_SECS);
+        })
+        .await;
+    }
+
+    /// Falls back to [`DEFAULT_RUN_DEADLINE_SECS`] when nothing is set.
+    ///
+    /// Why: A run must always resolve to a usable, generous deadline even
+    /// when no override is configured anywhere.
+    /// What: No CLI override, no env var; assert the default.
+    /// Test: this test.
+    #[tokio::test]
+    async fn resolve_deadline_secs_falls_back_to_default() {
+        with_env_deadline(None, || {
+            assert_eq!(resolve_deadline_secs(None), DEFAULT_RUN_DEADLINE_SECS);
+        })
+        .await;
     }
 }

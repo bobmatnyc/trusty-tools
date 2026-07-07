@@ -122,6 +122,27 @@ impl LlmClientTrait for ScriptedLlm {
     }
 }
 
+/// An `LlmClientTrait` that sleeps before every `chat` call, then delegates.
+///
+/// Why: #2207's `with_timeout_secs` override must actually shorten the loop's
+/// wall-clock budget; the only deterministic, offline way to prove that is a
+/// mock whose response arrives later than a short configured deadline.
+/// What: Wraps a `ScriptedLlm`; `chat` sleeps `delay` before returning
+/// whatever the inner scripted client would have returned.
+/// Test: `runner::tests::with_timeout_secs_shortens_the_deadline`.
+struct SleepyLlm {
+    inner: ScriptedLlm,
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl LlmClientTrait for SleepyLlm {
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.chat(req).await
+    }
+}
+
 /// A tool whose invocations are recorded, used to prove gating.
 ///
 /// Why: To assert `tools.allowed` enforcement we need a tool that records
@@ -604,6 +625,96 @@ async fn run_context_overrides_max_turns() {
         llm.calls(),
         1,
         "loop must stop after the single allowed turn"
+    );
+}
+
+/// `with_timeout_secs` actually shortens the loop's wall-clock deadline
+/// (#2207).
+///
+/// Why: This is the direct regression guard for `run_task`/`task::executor`
+/// threading a resolved run-wide deadline onto the delegated engineer's
+/// runner — if `with_timeout_secs` were a no-op, a raised or lowered deadline
+/// on the PM side would never actually reach the engineer's own loop.
+/// What: A response that would otherwise arrive instantly is delayed 3s by
+/// `SleepyLlm`; the runner's timeout is overridden down to 1s. Assert the run
+/// errors with the `Timeout` variant's message (not `TurnCapExceeded` or a
+/// transport error) and that it does so well before the full 3s delay would
+/// have elapsed.
+/// Test: this test.
+#[tokio::test]
+async fn with_timeout_secs_shortens_the_deadline() {
+    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    let llm = Arc::new(SleepyLlm {
+        inner: ScriptedLlm::from_json(&[stop_response("done")]),
+        delay: std::time::Duration::from_secs(3),
+    });
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec![], invoked));
+    let runner =
+        InProcessAgentRunner::new(llm, factory, tmp.path().to_path_buf()).with_timeout_secs(1);
+
+    let started = std::time::Instant::now();
+    let err = runner
+        .run("python-engineer", "task")
+        .await
+        .expect_err("a 1s deadline against a 3s-delayed response must time out");
+    let elapsed = started.elapsed();
+
+    assert!(
+        err.to_string().contains("wall-clock timeout of 1s"),
+        "error must be the Timeout variant, got: {err}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "the 1s override must fire well before the mock's 3s delay, elapsed={elapsed:?}"
+    );
+}
+
+/// `with_timeout_secs` changes ONLY the timeout, leaving a previously
+/// configured `max_turns` untouched (#2207).
+///
+/// Why: `with_timeout_secs` is a targeted setter specifically so callers
+/// don't have to reconstruct a whole `InProcessRunnerConfig` (risking a
+/// silent `max_turns` reset to its default) just to change the deadline.
+/// What: Configure `max_turns: 2` via `with_config`, then call
+/// `with_timeout_secs` with a generous value; script tool calls that never
+/// converge. Assert the run still aborts via `TurnCapExceeded` at exactly 2
+/// calls, proving `max_turns` survived the later `with_timeout_secs` call.
+/// Test: this test.
+#[tokio::test]
+async fn with_timeout_secs_preserves_configured_max_turns() {
+    let body = "[agent]\nname = \"python-engineer\"\nmodel = \"openai/gpt-4o-mini\"\n";
+    let tmp = agents_dir_with(body, "python-engineer");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("c1", "any_tool"),
+        tool_call_response("c2", "any_tool"),
+        tool_call_response("c3", "any_tool"),
+    ]));
+    let invoked = Arc::new(Mutex::new(Vec::new()));
+    let factory = Arc::new(recording_factory(vec!["any_tool"], invoked));
+    let runner = InProcessAgentRunner::new(llm.clone(), factory, tmp.path().to_path_buf())
+        .with_config(InProcessRunnerConfig {
+            max_turns: 2,
+            timeout_secs: 30,
+        })
+        .with_timeout_secs(300);
+
+    let err = runner
+        .run("python-engineer", "task")
+        .await
+        .expect_err("a 2-turn cap on a non-converging loop must abort");
+
+    assert!(
+        err.to_string().contains("turn cap of 2"),
+        "max_turns=2 from with_config must survive the later with_timeout_secs call, got: {err}"
+    );
+    assert_eq!(
+        llm.calls(),
+        2,
+        "loop must stop after the configured 2 turns"
     );
 }
 

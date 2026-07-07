@@ -44,7 +44,7 @@ use crate::llm::LlmClientTrait;
 use crate::mode::HarnessMode;
 use crate::project_context::load_project_context;
 use crate::prompt::assemble_system_prompt_for_mode;
-use crate::provider::{resolve_max_tokens, resolve_model};
+use crate::provider::{resolve_deadline_secs, resolve_max_tokens, resolve_model};
 use crate::run_task::{
     RecordingLlmClient, SharedTranscript, aggregate_usage_per_role, resolve_agent_model_slug,
 };
@@ -90,6 +90,11 @@ pub struct TaskRunParams {
     pub agents_dir: PathBuf,
     pub model_override: Option<String>,
     pub mode: HarnessMode,
+    /// Per-run wall-clock deadline override, in seconds (#2207). `None`
+    /// falls through to `crate::provider::resolve_deadline_secs`'s env-var
+    /// and default tiers — resolved once in `run_and_record` and applied to
+    /// BOTH the PM's own loop and the delegated engineer's loop.
+    pub deadline_secs: Option<u64>,
 }
 
 /// Reserve the session's execution slot and spawn the background run.
@@ -161,6 +166,11 @@ async fn run_and_record(
     let pm_model = resolve_model(&pm_config, None);
     let engineer_model = resolve_engineer_model(&params);
 
+    // #2207: resolve the run's wall-clock deadline once, applied to BOTH the
+    // PM's own loop (below) and the delegated engineer's loop
+    // (`build_engineer_runner`, via `with_timeout_secs`).
+    let deadline_secs = resolve_deadline_secs(params.deadline_secs);
+
     // #2069: discover the (cheap, metadata-only) skill catalog and, in
     // DailyDriver mode only, register `use_skill` so the PM can lazily fetch
     // a skill's full body on demand. Parity never sees the catalog or the
@@ -208,6 +218,7 @@ async fn run_and_record(
             model: pm_model.clone(),
             max_tokens: resolve_max_tokens(&pm_config),
             mode: params.mode,
+            timeout_secs: deadline_secs,
             ..AgentLoopConfig::default()
         },
         pm_llm,
@@ -218,13 +229,24 @@ async fn run_and_record(
 
     let result = pm_loop.run(&pm_system, &params.task).await;
 
+    // #2206: usage/cost are aggregated from every turn that DID complete
+    // regardless of `result` — this call already ran unconditionally before
+    // the terminal-status match below, so a `Failed`/`DeadlineExceeded`
+    // outcome still persists real telemetry, not zeroed placeholders.
     let turns = transcript.lock().map(|g| g.clone()).unwrap_or_default();
     let (usage, cost) = aggregate_usage_per_role(&turns, &pm_model, &engineer_model);
     registry.set_run_outcome(&session_id, turns, usage, Some(cost));
 
+    // #2207: a wall-clock deadline is distinct from a genuine run failure —
+    // `SessionStatus::DeadlineExceeded` lets a `session.status`/`task.run`
+    // consumer tell "timed out, possibly close to done" from "errored".
     let terminal_status = match result {
         Ok(_output) => SessionStatus::Finished,
         Err(crate::agent_loop::AgentLoopError::Cancelled { .. }) => SessionStatus::Cancelled,
+        Err(e @ crate::agent_loop::AgentLoopError::Timeout { .. }) => {
+            let _ = registry.record_log(&session_id, "error", &format!("run failed: {e}"));
+            SessionStatus::DeadlineExceeded
+        }
         Err(e) => {
             let _ = registry.record_log(&session_id, "error", &format!("run failed: {e}"));
             SessionStatus::Failed
@@ -243,7 +265,13 @@ async fn run_and_record(
 /// prompt gets, threaded through so the delegated engineer's DailyDriver
 /// prompt also sees it. Wiring the `use_skill` *tool* into the engineer's own
 /// per-delegation registry (`ProjectToolFactory::build`) is deferred — see
-/// this crate's #2069 delivery notes.
+/// this crate's #2069 delivery notes. #2207: resolves the SAME wall-clock
+/// budget applied to the delegating PM's own loop via
+/// `crate::provider::resolve_deadline_secs(params.deadline_secs)` — called
+/// again here (rather than threaded in as an extra argument) purely to keep
+/// this function's arity under clippy's `too_many_arguments` gate; the
+/// resolver is pure given the same `params.deadline_secs`/env state, so a
+/// second call is not a correctness risk.
 fn build_engineer_runner(
     llm: Arc<dyn LlmClientTrait>,
     params: &TaskRunParams,
@@ -267,7 +295,8 @@ fn build_engineer_runner(
     let mut runner = InProcessAgentRunner::new(engineer_llm, factory, params.agents_dir.clone())
         .with_tool_event_sink(sink)
         .with_cancel_flag(cancel)
-        .with_mode(params.mode);
+        .with_mode(params.mode)
+        .with_timeout_secs(resolve_deadline_secs(params.deadline_secs));
     if let Some(ctx) = project_context {
         runner = runner.with_project_context(ctx);
     }

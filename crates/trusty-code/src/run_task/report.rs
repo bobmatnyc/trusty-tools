@@ -22,7 +22,12 @@ use crate::run_task::recorder::TurnRecord;
 /// Why: A caller (CI, the PM smoke-test, a wrapper script) needs to distinguish
 /// outcomes without parsing output. The ladder separates a clean success, a
 /// successful run that changed nothing, a configuration error (bad agent, bad
-/// project), and a runtime failure (the loop or LLM errored).
+/// project), a runtime failure (the loop or LLM errored), and (#2207) the
+/// wall-clock deadline firing before the PM reached `finish_task` — a run that
+/// may have made real, useful progress and must not be conflated with a
+/// genuine `RunFailure` (the bug that blocked the M3 bake-off L1 pilot: a
+/// deadline hit at turn 13 on an otherwise fully-passing solution reported the
+/// same `run_failure` a real crash would).
 /// What: `repr(i32)` so the values are stable and documented; `Success = 0`.
 /// Test: `run_task::tests::exit_codes_are_distinct`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,10 +37,16 @@ pub enum ExitCode {
     Success = 0,
     /// Configuration error: missing/invalid agent, bad project path, missing key. `2`.
     ConfigError = 2,
-    /// Runtime failure: the agent loop or LLM call errored. `3`.
+    /// Runtime failure: the agent loop or LLM call errored (excludes the
+    /// deadline — see `DeadlineExceeded`). `3`.
     RunFailure = 3,
     /// The run completed but changed nothing (empty diff). `4`.
     NoChanges = 4,
+    /// The configured wall-clock deadline elapsed before the PM loop reached
+    /// a terminal state (#2207). Distinct from `RunFailure` so a caller (e.g.
+    /// the M3 bake-off runner) can tell "timed out, possibly close to done"
+    /// from "genuinely errored". `5`.
+    DeadlineExceeded = 5,
 }
 
 impl ExitCode {
@@ -172,15 +183,17 @@ impl RunReport {
     /// Map the exit outcome to a stable status string.
     ///
     /// Why: Both output forms label the outcome with the same vocabulary.
-    /// What: Returns `"success"`, `"no_changes"`, `"config_error"`, or
-    /// `"run_failure"`.
-    /// Test: `run_task::tests::report_renders_json`.
+    /// What: Returns `"success"`, `"no_changes"`, `"config_error"`,
+    /// `"run_failure"`, or (#2207) `"deadline_exceeded"`.
+    /// Test: `run_task::tests::report_renders_json`,
+    /// `run_task::tests::exit_code_reflects_deadline_exceeded_distinct_from_run_failure`.
     fn status_str(&self) -> &'static str {
         match self.exit {
             ExitCode::Success => "success",
             ExitCode::NoChanges => "no_changes",
             ExitCode::ConfigError => "config_error",
             ExitCode::RunFailure => "run_failure",
+            ExitCode::DeadlineExceeded => "deadline_exceeded",
         }
     }
 }
@@ -267,7 +280,7 @@ mod tests {
     /// Exit codes are distinct and stable.
     ///
     /// Why: Scripts branch on these; collisions would be silent breakage.
-    /// What: Assert the four codes are 0/2/3/4 and pairwise distinct.
+    /// What: Assert the five codes are 0/2/3/4/5 and pairwise distinct.
     /// Test: this test.
     #[test]
     fn exit_codes_are_distinct() {
@@ -275,6 +288,7 @@ mod tests {
         assert_eq!(ExitCode::ConfigError.code(), 2);
         assert_eq!(ExitCode::RunFailure.code(), 3);
         assert_eq!(ExitCode::NoChanges.code(), 4);
+        assert_eq!(ExitCode::DeadlineExceeded.code(), 5);
     }
 
     /// JSON render carries status, diff, transcript, usage, and cost.

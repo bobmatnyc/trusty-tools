@@ -141,6 +141,17 @@ enum Command {
         /// this per the resolution precedence in `crate::mode`'s docs.
         #[arg(long, value_name = "MODE")]
         mode: Option<String>,
+
+        /// Override the run's wall-clock deadline, in seconds (#2207).
+        /// Applies to BOTH the PM's own loop and the delegated engineer's
+        /// loop, in either execution path (`--legacy-in-process` or the
+        /// default thin-client/daemon path). Falls back to the
+        /// `TCODE_RUN_DEADLINE_SECONDS` env var, then a generous 1800s (30
+        /// minute) default — see `crate::provider::resolve_deadline_secs`'s
+        /// docs for the full precedence. Use a large value (e.g. 7200-10800)
+        /// for multi-hour tasks.
+        #[arg(long, value_name = "SECONDS")]
+        timeout_seconds: Option<u64>,
     },
 
     /// Execute a named MPM workflow end-to-end.
@@ -247,12 +258,30 @@ async fn main() -> Result<()> {
             engineer_model,
             legacy_in_process,
             mode,
+            timeout_seconds,
         } => {
             if legacy_in_process {
-                run_task(&agent, &task, &project, json, engineer_model).await
+                run_task(
+                    &agent,
+                    &task,
+                    &project,
+                    json,
+                    engineer_model,
+                    timeout_seconds,
+                )
+                .await
             } else {
                 let project = canonicalize_project_or_exit(&project, "run-task");
-                match cli::run_task::run(&project, &agent, &task, json, engineer_model, mode).await
+                match cli::run_task::run(
+                    &project,
+                    &agent,
+                    &task,
+                    json,
+                    engineer_model,
+                    mode,
+                    timeout_seconds,
+                )
+                .await
                 {
                     Ok(code) => process::exit(code),
                     Err(e) => {
@@ -442,8 +471,11 @@ fn validate_agent_name(agent_name: &str) -> Result<()> {
 /// What: Validates the agent name and project path (traversal guards), locates the
 /// agents dir, resolves the engineer-model override (CLI flag > `TCODE_ENGINEER_MODEL`
 /// env), builds the real `LlmClient` from `OPENROUTER_API_KEY`, runs
-/// `execute_run_task`, prints the human or JSON report, and exits with the
-/// report's `ExitCode`. A missing API key is a config error (exit 2).
+/// `execute_run_task` (threading `--timeout-seconds` (#2207) through as
+/// `RunTaskParams.deadline_secs` — final flag/env/default resolution happens
+/// inside `execute_run_task` via `resolve_deadline_secs`), prints the human or
+/// JSON report, and exits with the report's `ExitCode`. A missing API key is a
+/// config error (exit 2).
 /// Test: Orchestration (incl. the model swap) is covered by `run_task::tests`; the
 /// wrapper is exercised manually via `tcode run-task pm "<task>" --project <path>`.
 async fn run_task(
@@ -452,6 +484,7 @@ async fn run_task(
     project: &Path,
     json: bool,
     engineer_model_flag: Option<String>,
+    timeout_seconds: Option<u64>,
 ) -> Result<()> {
     if let Err(e) = validate_agent_name(agent_name) {
         eprintln!("tcode run-task: {e}");
@@ -489,6 +522,7 @@ async fn run_task(
         agents_dir = %agents_dir.display(),
         json,
         engineer_model = engineer_model.as_deref().unwrap_or("(agent default)"),
+        timeout_seconds = ?timeout_seconds,
         "tcode run-task: starting"
     );
 
@@ -507,6 +541,7 @@ async fn run_task(
         project: project_root,
         agents_dir,
         engineer_model,
+        deadline_secs: timeout_seconds,
     };
 
     let report = execute_run_task(params, llm).await;

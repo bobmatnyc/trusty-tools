@@ -45,11 +45,15 @@ use super::tcode_exe;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// `tcode run-task <AGENT> <TASK> [--project P] [--json] [--engineer-model M]
-/// [--mode daily-driver|parity]`.
+/// [--mode daily-driver|parity] [--timeout-seconds N]`.
 ///
 /// Why/What: see module docs. Returns the process exit code the caller
 /// should use (mirrors the legacy path's `ExitCode` contract via
-/// `exit_code_for_status`).
+/// `exit_code_for_status`). `timeout_seconds` (#2207) is passed straight
+/// through as `task.run`'s own `deadline_secs` param — this function does NOT
+/// resolve env/default tiers itself; `task::protocol::task_run` ->
+/// `task::executor` resolve it the same way the legacy path's
+/// `crate::provider::resolve_deadline_secs` does.
 pub async fn run(
     project: &Path,
     agent: &str,
@@ -57,6 +61,7 @@ pub async fn run(
     json_output: bool,
     engineer_model: Option<String>,
     mode: Option<String>,
+    timeout_seconds: Option<u64>,
 ) -> Result<i32> {
     let exe = tcode_exe::resolve()?;
     let mut client = StdioRpcClient::spawn(&exe, project)?;
@@ -66,6 +71,7 @@ pub async fn run(
         "agent_name": agent,
         "model_override": engineer_model,
         "mode": mode,
+        "deadline_secs": timeout_seconds,
     });
     let run_result = client.call("task.run", run_params).await?;
     let session_id = run_result

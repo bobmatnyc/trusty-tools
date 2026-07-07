@@ -770,6 +770,103 @@ async fn turn_cap_returns_partial_transcript() {
     assert_eq!(llm.calls(), 2, "loop must stop calling at the cap");
 }
 
+/// The wall-clock timeout aborts the loop with a partial transcript (#2207).
+///
+/// Why: #2207 raised the default `timeout_secs` and made it configurable, but
+/// the underlying mechanism — `AgentLoop::run` wrapping the whole loop body in
+/// `tokio::time::timeout` — is otherwise unchanged; this pins that it still
+/// fires, returns `AgentLoopError::Timeout` (not `TurnCapExceeded` or a
+/// transport error), carries the configured `timeout_secs`, and preserves
+/// whatever usage accrued before the deadline.
+/// What: Configure a tiny `timeout_secs: 1`; the scripted client sleeps 3s
+/// before responding. Assert the run errors with `Timeout { timeout_secs: 1,
+/// .. }` well before the full 3s delay would have elapsed.
+/// Test: this test.
+#[tokio::test]
+async fn timeout_returns_partial() {
+    struct SleepyLlm {
+        inner: ScriptedLlm,
+        delay: std::time::Duration,
+    }
+
+    #[async_trait]
+    impl LlmClientTrait for SleepyLlm {
+        async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+            tokio::time::sleep(self.delay).await;
+            self.inner.chat(req).await
+        }
+    }
+
+    let llm: Arc<dyn LlmClientTrait> = Arc::new(SleepyLlm {
+        inner: ScriptedLlm::from_json(&[stop_response("too slow")]),
+        delay: std::time::Duration::from_secs(3),
+    });
+    let registry = registry_with_echo(false);
+    let config = AgentLoopConfig {
+        timeout_secs: 1,
+        ..AgentLoopConfig::default()
+    };
+    let agent = AgentLoop::new(config, llm, registry);
+
+    let started = std::time::Instant::now();
+    let err = agent
+        .run("system", "a task that takes too long")
+        .await
+        .expect_err("a 1s deadline against a 3s-delayed response must time out");
+    let elapsed = started.elapsed();
+
+    match err {
+        AgentLoopError::Timeout {
+            timeout_secs,
+            partial,
+        } => {
+            assert_eq!(timeout_secs, 1, "must report the configured deadline");
+            // No turn completed before the deadline (the single chat call
+            // never returned), so usage is legitimately still zero here —
+            // the assertion is on the ERROR VARIANT and its `timeout_secs`,
+            // not on partial usage (that is covered end-to-end by
+            // `run_task::tests::exit_code_reflects_deadline_exceeded_distinct_from_run_failure`,
+            // where an earlier turn DOES complete before the deadline).
+            let _ = partial;
+        }
+        other => panic!("expected Timeout, got {other:?}"),
+    }
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "the 1s deadline must fire well before the mock's 3s delay, elapsed={elapsed:?}"
+    );
+}
+
+/// A generous timeout does NOT prematurely abort a loop that finishes well
+/// within budget (#2207).
+///
+/// Why: The companion regression guard to `timeout_returns_partial` — a
+/// caller raising the deadline (e.g. for the M3 bake-off's L2/L3 multi-hour
+/// tasks) must not have their run cut short by an unrelated bug in the
+/// timeout wiring.
+/// What: Configure a 5s timeout against a normal, instantly-responding
+/// two-turn script; assert the run completes successfully.
+/// Test: this test.
+#[tokio::test]
+async fn generous_timeout_does_not_abort_a_fast_run() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("call_1", "world"),
+        stop_response("done well within budget"),
+    ]));
+    let registry = registry_with_echo(false);
+    let config = AgentLoopConfig {
+        timeout_secs: 5,
+        ..AgentLoopConfig::default()
+    };
+    let agent = make_loop(llm, registry, config);
+
+    let output = agent
+        .run("system", "quick task")
+        .await
+        .expect("a fast run under a generous deadline must not be aborted");
+    assert_eq!(output.content, "done well within budget");
+}
+
 /// A recoverable tool error does not abort the loop; iteration continues.
 ///
 /// Why: Tool failures are usually recoverable — the model should see the error

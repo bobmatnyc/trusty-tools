@@ -4,12 +4,15 @@
 //! under the 500-SLOC cap.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use async_trait::async_trait;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use super::*;
-use crate::llm::LlmClientTrait;
-use crate::session::SessionRegistry;
+use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
+use crate::session::{SessionRegistry, SessionStatus};
 use crate::task::mock_llm::EchoLlmClient;
 
 /// Agents dir fixture with `pm.toml` + `python-engineer.toml` (mirrors
@@ -38,6 +41,7 @@ fn params(agents: &TempDir, project: &TempDir, session_id: &str) -> TaskRunParam
         agents_dir: agents.path().to_path_buf(),
         model_override: None,
         mode: crate::mode::HarnessMode::default(),
+        deadline_secs: None,
     }
 }
 
@@ -99,6 +103,7 @@ fn resolve_engineer_model_falls_back_when_config_missing() {
         agents_dir: empty_agents.path().to_path_buf(),
         model_override: None,
         mode: crate::mode::HarnessMode::default(),
+        deadline_secs: None,
     };
     let model = resolve_engineer_model(&p);
     assert_eq!(model, "unknown");
@@ -201,4 +206,165 @@ async fn project_tool_factory_threads_parity_mode_into_edit_tool() {
     assert!(result.content().contains("unified_diff"));
     let updated = std::fs::read_to_string(project.path().join("f.py")).expect("read");
     assert_eq!(updated, "line1\nline2-diffed\n");
+}
+
+// ── #2207/#2206: daemon-path deadline wiring + distinct status + telemetry ─────
+
+/// A response in which the assistant calls `finish_task` with a required
+/// field (`summary`) missing — recoverable per #2072's schema-validation
+/// path, NOT terminal (mirrors `run_task::tests::malformed_finish_task_response`).
+fn malformed_finish_task_response() -> Value {
+    json!({
+        "id": "gen-finish-malformed",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-missing",
+                    "type": "function",
+                    "function": {
+                        "name": "finish_task",
+                        "arguments": json!({"status": "completed"}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50}
+    })
+}
+
+/// A response in which the assistant emits final text and stops.
+fn stop_response(text: &str) -> Value {
+    json!({
+        "id": "gen-stop",
+        "choices": [{
+            "message": { "role": "assistant", "content": text, "tool_calls": [] },
+            "finish_reason": "stop"
+        }],
+        "usage": { "prompt_tokens": 15, "completion_tokens": 5, "total_tokens": 20 }
+    })
+}
+
+/// An `LlmClientTrait` that sleeps before its Nth `chat` call, then replays a
+/// scripted response (mirrors `run_task::tests::DeadlineTriggerLlm`).
+///
+/// Why: deterministically drives the PM's own wall-clock deadline past its
+/// configured budget, entirely within the PM's own loop (no delegation), so
+/// the daemon path's `run_and_record` observes a genuine
+/// `AgentLoopError::Timeout` rather than racing against the delegated
+/// engineer's own independently-resolved deadline.
+struct DeadlineTriggerLlm {
+    responses: Vec<ChatResponse>,
+    cursor: AtomicUsize,
+    stall_at_call: usize,
+    stall_for: std::time::Duration,
+}
+
+impl DeadlineTriggerLlm {
+    fn new(fixtures: &[Value], stall_at_call: usize, stall_for: std::time::Duration) -> Self {
+        let responses = fixtures
+            .iter()
+            .map(|v| serde_json::from_value(v.clone()).expect("valid ChatResponse fixture"))
+            .collect();
+        Self {
+            responses,
+            cursor: AtomicUsize::new(0),
+            stall_at_call,
+            stall_for,
+        }
+    }
+}
+
+#[async_trait]
+impl LlmClientTrait for DeadlineTriggerLlm {
+    async fn chat(&self, _req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
+        if idx == self.stall_at_call {
+            tokio::time::sleep(self.stall_for).await;
+        }
+        match self.responses.get(idx) {
+            Some(resp) => Ok(resp.clone()),
+            None => Err(LlmError::MissingConfig(format!(
+                "scripted LLM exhausted at call {idx}"
+            ))),
+        }
+    }
+}
+
+/// A tiny `deadline_secs` override on the daemon path yields
+/// `SessionStatus::DeadlineExceeded` (distinct from `Failed`), and the
+/// persisted transcript/usage still reflect the turn that completed before
+/// the deadline fired (#2207 + #2206's daemon-path equivalent of
+/// `run_task::tests::exit_code_reflects_deadline_exceeded_distinct_from_run_failure`).
+///
+/// Why: `task::executor::run_and_record` calls `registry.set_run_outcome`
+/// unconditionally before branching on the loop's `result` (#2206 was
+/// already correct here — this test pins that #2207's new
+/// `SessionStatus::DeadlineExceeded` arm doesn't regress it), and the
+/// deadline must actually reach the PM's `AgentLoopConfig` via
+/// `resolve_deadline_secs(params.deadline_secs)`.
+/// What: `deadline_secs: Some(1)`; turn 0 is a malformed `finish_task` call
+/// (instant, recoverable, recorded with real usage), turn 1 sleeps 3s. Assert
+/// the session ends `DeadlineExceeded` (not `Failed`) and its stored usage is
+/// non-zero.
+/// Test: this test.
+#[tokio::test]
+async fn spawn_task_run_deadline_exceeded_is_distinct_and_preserves_usage() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, None);
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm: Arc<dyn LlmClientTrait> = Arc::new(DeadlineTriggerLlm::new(
+        &[
+            malformed_finish_task_response(),
+            stop_response("recovered (never reached in time)"),
+        ],
+        1,
+        std::time::Duration::from_secs(3),
+    ));
+
+    let mut p = params(&agents, &project, &session.id);
+    p.deadline_secs = Some(1);
+
+    spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+
+    // Poll for the run to reach a terminal state naturally (via its own 1s
+    // deadline), WITHOUT `shutdown_executions` — that flips every tracked
+    // execution's cancel flag immediately, which would race the deadline and
+    // spuriously report `Cancelled` instead of `DeadlineExceeded`.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let status = registry.status(&session.id).expect("session must exist");
+        if status.status.is_terminal() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "run did not reach a terminal state within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    let status = registry.status(&session.id).expect("session must exist");
+    assert_eq!(
+        status.status,
+        SessionStatus::DeadlineExceeded,
+        "a deadline hit must map to DeadlineExceeded, not Failed"
+    );
+
+    let transcript = registry
+        .get_transcript(&session.id)
+        .expect("transcript must exist");
+    assert!(
+        transcript.usage.prompt_tokens > 0,
+        "the completed first turn must still contribute real usage, got {:?}",
+        transcript.usage
+    );
+    assert!(
+        transcript.cost_usd.is_some(),
+        "cost must be populated (not None) on the deadline-exceeded path"
+    );
 }
