@@ -122,6 +122,7 @@ mod tests {
             github,
             commit_name: None,
             commit_email: None,
+            untracked_sync: None,
         }
     }
 

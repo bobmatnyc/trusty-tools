@@ -236,6 +236,7 @@ mod tests {
             github,
             commit_name: Some("Project Bot".into()),
             commit_email: Some("bot@project.example.com".into()),
+            untracked_sync: None,
         }
     }
 

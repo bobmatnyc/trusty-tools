@@ -347,6 +347,7 @@ mod tests {
                 }),
                 commit_name: Some("ML Bot".into()),
                 commit_email: Some("ml-bot@example.com".into()),
+                untracked_sync: None,
             },
             ProjectConfig {
                 name: "from-config-b".into(),
@@ -359,6 +360,7 @@ mod tests {
                 github: None,
                 commit_name: None,
                 commit_email: None,
+                untracked_sync: None,
             },
         ];
 

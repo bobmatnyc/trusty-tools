@@ -194,6 +194,7 @@ async fn spawn_managed_routed(
                     local_path,
                     &base,
                     &repo,
+                    &config,
                 )
                 .await
                 {
@@ -251,10 +252,21 @@ async fn spawn_managed_routed(
 /// collision predicate (so a name whose `.worktrees/<name>` dir or
 /// `session/<name>` branch already exists is retried with the next serial,
 /// not silently reused); (2) creates the worktree at that name via
-/// `inproject::create_session_worktree`. Returns `(worktree_path,
-/// reserved_name)` so the caller can create the tmux session under the SAME
-/// name without re-deriving it.
-/// Test: exercised transitively by the in-project spawn integration tests.
+/// `inproject::create_session_worktree`; (3) best-effort syncs the
+/// operator's allowlisted untracked/secret files (`.env*` by default, #2196)
+/// from `local_path` (the operator's live checkout) into the new worktree via
+/// [`super::inproject::untracked_sync::sync_untracked_files`] — resolved
+/// per-project-over-global-over-default via
+/// `trusty_tools_config::resolve_untracked_sync(config, Some(repo))`, and
+/// SKIPPED entirely (not even attempted) when resolution says `enabled ==
+/// false`. Step 3 can never fail this function: sync failures are `warn!`-
+/// logged inside `sync_untracked_files` itself and never propagate. Returns
+/// `(worktree_path, reserved_name)` so the caller can create the tmux
+/// session under the SAME name without re-deriving it.
+/// Test: exercised transitively by the in-project spawn integration tests;
+/// the sync step's own behaviour (matching, size cap, path-escape guard,
+/// `.git/info/exclude` append) is unit-tested directly in
+/// `inproject::untracked_sync::tests`.
 async fn reserve_inproject_worktree(
     state: &Arc<DaemonState>,
     session_id: &ManagedSessionId,
@@ -262,6 +274,7 @@ async fn reserve_inproject_worktree(
     local_path: &std::path::Path,
     base: &std::path::Path,
     repo: &str,
+    config: &crate::core::trusty_tools_config::TrustyToolsConfig,
 ) -> Result<(std::path::PathBuf, String), String> {
     let mgr = state.session_manager().await;
     let reserved_name = mgr
@@ -276,6 +289,19 @@ async fn reserve_inproject_worktree(
 
     let worktree = super::inproject::create_session_worktree(base, &reserved_name)
         .map_err(|e| format!("worktree creation failed for session {session_id}: {e}"))?;
+
+    // #2196: best-effort sync of the operator's allowlisted untracked/secret
+    // files (default `.env*`) from the live checkout into the fresh
+    // worktree. Never fails the spawn — see the doc above.
+    let resolved_sync =
+        crate::core::trusty_tools_config::resolve_untracked_sync(config, Some(repo));
+    if resolved_sync.enabled {
+        super::inproject::untracked_sync::sync_untracked_files(
+            local_path,
+            &worktree,
+            &resolved_sync.patterns,
+        );
+    }
 
     Ok((worktree, reserved_name))
 }
@@ -1642,10 +1668,18 @@ mod tests {
             mcp_initiated: false,
         };
 
-        let (worktree, reserved_name) =
-            reserve_inproject_worktree(&state, &session_id, &params, &base, &base, "trusty-tools")
-                .await
-                .expect("reserve_inproject_worktree must succeed against a real git repo");
+        let config = crate::core::trusty_tools_config::TrustyToolsConfig::default();
+        let (worktree, reserved_name) = reserve_inproject_worktree(
+            &state,
+            &session_id,
+            &params,
+            &base,
+            &base,
+            "trusty-tools",
+            &config,
+        )
+        .await
+        .expect("reserve_inproject_worktree must succeed against a real git repo");
 
         assert_eq!(
             reserved_name, "tm-trusty-tools-01",

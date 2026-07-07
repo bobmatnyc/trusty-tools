@@ -536,6 +536,8 @@ impl OrchestratorBackend for StateBackend {
         github_host: Option<&str>,
         commit_name: Option<&str>,
         commit_email: Option<&str>,
+        untracked_sync_patterns: Option<Vec<String>>,
+        untracked_sync_enabled: Option<bool>,
     ) -> Result<Value, String> {
         super::mcp_console::config_write(
             workspace_root_template,
@@ -548,6 +550,8 @@ impl OrchestratorBackend for StateBackend {
             github_host,
             commit_name,
             commit_email,
+            untracked_sync_patterns,
+            untracked_sync_enabled,
         )
     }
 

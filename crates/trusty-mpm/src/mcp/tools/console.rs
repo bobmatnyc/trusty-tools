@@ -82,10 +82,11 @@ pub(super) fn console_tools() -> Vec<Value> {
             "Read trusty-mpm's `~/.trusty-tools/trusty-mpm/config.yaml` (the #1220 \
              cross-crate config convention) and return its current settings as JSON: \
              `workspace_root_template`, `auto_resume`, `default_model`, the global \
-             `github` GitHub-identity binding, and the full `projects` list (each \
-             entry may carry its own `github`/`commit_name`/`commit_email` \
-             per-project override, #2184). An absent file returns the defaults (all \
-             null/empty). Backs the trusty-console Config tab.",
+             `github` GitHub-identity binding, the global `untracked_sync` \
+             untracked/secret-file sync allowlist (#2196), and the full `projects` \
+             list (each entry may carry its own `github`/`commit_name`/`commit_email`/ \
+             `untracked_sync` per-project override). An absent file returns the \
+             defaults (all null/empty). Backs the trusty-console Config tab.",
             json!({
                 "type": "object",
                 "properties": {},
@@ -107,8 +108,13 @@ pub(super) fn console_tools() -> Vec<Value> {
              which takes precedence over the global one for that project's `gh` \
              calls. `commit_name`/`commit_email` set a per-project git commit-author \
              override applied to managed/provisioner git operations — they REQUIRE \
-             `project_name` (commit identity has no global tier). Returns the merged \
-             config that was persisted.",
+             `project_name` (commit identity has no global tier). `untracked_sync_patterns`/ \
+             `untracked_sync_enabled` (#2196) set the allowlist of untracked/secret filename \
+             patterns (default `.env*`) synced from the operator's live checkout into each \
+             session worktree at spawn, and the on/off toggle for that sync; like `github_*` \
+             (and unlike commit identity) these DO have a global tier — omit `project_name` to \
+             set it, or supply an ALREADY-REGISTERED `project_name` to override it for that \
+             project only. Returns the merged config that was persisted.",
             json!({
                 "type": "object",
                 "properties": {
@@ -151,6 +157,15 @@ pub(super) fn console_tools() -> Vec<Value> {
                     "commit_email": {
                         "type": "string",
                         "description": "Git commit author email override for this project (requires project_name)."
+                    },
+                    "untracked_sync_patterns": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Allowlist of untracked/secret filename patterns to sync into session worktrees (e.g. [\".env\", \".env.local\", \".env.*\"]). Global unless project_name is set."
+                    },
+                    "untracked_sync_enabled": {
+                        "type": "boolean",
+                        "description": "Whether untracked/secret file sync runs at all. Global unless project_name is set."
                     }
                 },
                 "additionalProperties": false

@@ -23,13 +23,20 @@
 //! resolution away from an existing worktree dir/branch;
 //! [`ensure_worktrees_gitignored`] keeps the worktree directory out of
 //! `git status`; [`get_origin_url`] reads the remote.origin.url from a git
-//! directory.
+//! directory. The sibling [`untracked_sync`] module (#2196) syncs an
+//! allowlist of untracked/secret files (e.g. `.env*`) from the operator's
+//! live checkout into a freshly-created session worktree; it is called from
+//! `lifecycle::reserve_inproject_worktree`, not from this module directly,
+//! since only that call site holds both the live-checkout source path and
+//! the resolved worktree destination.
 //! Test: `try_inproject_spawn_returns_none_for_non_git_path` unit test covers the
 //! non-git early exit; integration coverage via `tests/local_spawn.rs`.
 
 use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
+
+pub mod untracked_sync;
 
 /// Environment variable that overrides the managed repos root.
 ///

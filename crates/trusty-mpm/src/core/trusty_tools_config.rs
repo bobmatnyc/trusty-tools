@@ -28,6 +28,15 @@ use serde::{Deserialize, Serialize};
 
 use trusty_common::github_path::GithubPath;
 
+/// Untracked/secret file sync config shape + resolution (#2196), split into
+/// its own module to keep this file under the 500-SLOC production cap. See
+/// that module's doc for the full rationale.
+pub mod untracked_sync;
+pub use untracked_sync::{
+    DEFAULT_UNTRACKED_SYNC_PATTERNS, ResolvedUntrackedSync, UntrackedSyncConfig,
+    resolve_untracked_sync,
+};
+
 /// Crate name used as the `~/.trusty-tools/<crate>/` directory segment.
 ///
 /// Why: the cross-crate convention keys each crate's config dir by its crate name;
@@ -133,6 +142,16 @@ pub struct TrustyToolsConfig {
     /// stays disabled).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub daemon: Option<DaemonConfig>,
+
+    /// Global allowlisted untracked/secret file sync settings (the
+    /// `untracked_sync:` YAML section, #2196).
+    ///
+    /// `None` → the built-in default applies: sync is ENABLED with the
+    /// built-in `.env*` pattern set (see [`resolve_untracked_sync`]). A
+    /// per-project `untracked_sync` override (on [`ProjectConfig`]) takes
+    /// precedence over this global section for that project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untracked_sync: Option<UntrackedSyncConfig>,
 }
 
 /// The `daemon:` section of `~/.trusty-tools/trusty-mpm/config.yaml` (#1836).
@@ -343,6 +362,16 @@ pub struct ProjectConfig {
     /// Test: `project_config_github_and_commit_identity_yaml_round_trip`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_email: Option<String>,
+
+    /// Per-project untracked/secret file sync override (#2196), overriding
+    /// the global `untracked_sync:` section for this project only.
+    ///
+    /// `None` → no override; resolution falls through to the global section,
+    /// then the built-in default. See [`resolve_untracked_sync`] for the
+    /// full precedence chain.
+    /// Test: `untracked_sync_config_yaml_round_trip`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untracked_sync: Option<UntrackedSyncConfig>,
 }
 
 impl TrustyToolsConfig {
@@ -642,6 +671,7 @@ mod tests {
                 github: None,
                 commit_name: None,
                 commit_email: None,
+                untracked_sync: None,
             }],
             ..Default::default()
         };
@@ -663,6 +693,7 @@ mod tests {
                 github: None,
                 commit_name: None,
                 commit_email: None,
+                untracked_sync: None,
             }],
             ..Default::default()
         };
@@ -694,6 +725,7 @@ mod tests {
                 }),
                 commit_name: Some("Bob (work bot)".into()),
                 commit_email: Some("bob@acme.example.com".into()),
+                untracked_sync: None,
             }],
             ..Default::default()
         };
@@ -717,6 +749,7 @@ mod tests {
                 github: None,
                 commit_name: None,
                 commit_email: None,
+                untracked_sync: None,
             }],
             ..Default::default()
         };
@@ -775,4 +808,8 @@ mod tests {
             PathBuf::from("/projects/bobmatnyc/trusty-tools")
         );
     }
+
+    // untracked_sync (#2196) resolution + YAML round-trip tests live in
+    // `untracked_sync::tests` (split out to keep this file under the
+    // 500-SLOC cap; see that module's doc).
 }
