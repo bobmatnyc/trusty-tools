@@ -420,6 +420,11 @@ pub fn create_session_worktree(base_path: &Path, worktree_name: &str) -> Result<
         ));
     }
 
+    // #2189: give the new worktree a working `git pull` (upstream tracking the
+    // default branch) WITHOUT letting `git push` target that branch. Best-effort
+    // and non-fatal — see `configure_session_branch_tracking`.
+    configure_session_branch_tracking(base_path, &worktree_path);
+
     // Item 5 (#1845): write the SM ownership sentinel so remove_session_worktree
     // can confirm this directory was TM-created and not a user-owned path that
     // happens to sit under a `.worktrees/` parent. The sentinel is best-effort:
@@ -436,6 +441,127 @@ pub fn create_session_worktree(base_path: &Path, worktree_name: &str) -> Result<
 
     info!(worktree = %worktree_path.display(), "inproject: per-session worktree created");
     Ok(worktree_path)
+}
+
+/// Give a freshly-created session worktree a working `git pull` from the
+/// default branch, WITHOUT making `git push` target that branch (#2189).
+///
+/// Why: [`create_session_worktree`] leaves the new `session/<name>` branch
+/// with no upstream at all, so a bare `git pull` inside the worktree fails
+/// with "There is no tracking information for the current branch." Setting
+/// the upstream to `origin/<default>` fixes `pull`/`fetch`-with-merge, but
+/// naively doing so ALSO makes a bare `git push` try to push the session
+/// branch's commits onto the shared default branch — which is exactly what a
+/// per-session isolated branch must never do. Scoping `push.default =
+/// current` to this one worktree (via `extensions.worktreeConfig` +
+/// `--worktree` config) keeps push targeting `origin/session/<name>` while
+/// pull still tracks the default branch.
+/// What: (1) resolves the default branch via
+/// [`super::inproject_hygiene::get_default_branch`], falling back to `"main"`
+/// when it cannot be determined; (2) runs `git -C <worktree_path> branch
+/// --set-upstream-to=origin/<default>` so `git pull` works; (3) runs `git -C
+/// <base_path> config extensions.worktreeConfig true` to enable per-worktree
+/// config on the shared base repo (idempotent — safe to set on every call);
+/// (4) runs `git -C <worktree_path> config --worktree push.default current`
+/// so `git push` always targets the current (session) branch, never the
+/// default branch. Every step is best-effort: a failure is logged via `warn!`
+/// and does NOT fail worktree creation — the worktree itself was already
+/// created successfully by the time this runs, and an operator can always set
+/// tracking manually as a fallback.
+/// Test: `create_session_worktree_sets_pull_upstream_and_worktree_scoped_push`
+/// (integration, real temp git repos with a bare `origin` remote).
+fn configure_session_branch_tracking(base_path: &Path, worktree_path: &Path) {
+    let default_branch = super::inproject_hygiene::get_default_branch(base_path)
+        .unwrap_or_else(|| "main".to_string());
+
+    // Step 1: set upstream so `git pull` (and `git fetch` + merge) works.
+    let upstream = format!("origin/{default_branch}");
+    let set_upstream = std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["branch", &format!("--set-upstream-to={upstream}")])
+        .output();
+    match set_upstream {
+        Ok(out) if out.status.success() => {
+            info!(
+                worktree = %worktree_path.display(),
+                upstream = %upstream,
+                "inproject: session worktree branch upstream set (git pull now works)"
+            );
+        }
+        Ok(out) => {
+            warn!(
+                worktree = %worktree_path.display(),
+                upstream = %upstream,
+                "inproject: failed to set branch upstream (non-fatal; `git pull` will \
+                 require manual tracking setup) ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => {
+            warn!(
+                worktree = %worktree_path.display(),
+                "inproject: git branch --set-upstream-to failed to spawn (non-fatal): {e}"
+            );
+        }
+    }
+
+    // Step 2: enable per-worktree config on the shared base repo (idempotent).
+    let enable_worktree_config = std::process::Command::new("git")
+        .arg("-C")
+        .arg(base_path)
+        .args(["config", "extensions.worktreeConfig", "true"])
+        .output();
+    match enable_worktree_config {
+        Ok(out) if out.status.success() => {
+            info!(base = %base_path.display(), "inproject: extensions.worktreeConfig enabled on base clone");
+        }
+        Ok(out) => {
+            warn!(
+                base = %base_path.display(),
+                "inproject: git config extensions.worktreeConfig failed (non-fatal) ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => {
+            warn!(
+                base = %base_path.display(),
+                "inproject: failed to spawn git config extensions.worktreeConfig (non-fatal): {e}"
+            );
+        }
+    }
+
+    // Step 3: scope push.default=current to THIS worktree only, so `git push`
+    // always targets `origin/session/<name>` and never the default branch.
+    let set_push_default = std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["config", "--worktree", "push.default", "current"])
+        .output();
+    match set_push_default {
+        Ok(out) if out.status.success() => {
+            info!(
+                worktree = %worktree_path.display(),
+                "inproject: worktree-scoped push.default=current set (git push cannot target the default branch)"
+            );
+        }
+        Ok(out) => {
+            warn!(
+                worktree = %worktree_path.display(),
+                "inproject: failed to set worktree-scoped push.default (non-fatal) ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => {
+            warn!(
+                worktree = %worktree_path.display(),
+                "inproject: git config --worktree push.default failed to spawn (non-fatal): {e}"
+            );
+        }
+    }
 }
 
 /// Best-effort-idempotent: add `.worktrees/` to the base clone's `.git/info/exclude`.

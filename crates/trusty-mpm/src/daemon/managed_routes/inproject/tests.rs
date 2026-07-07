@@ -610,3 +610,184 @@ async fn ensure_base_clone_emits_cloning_repo_only_on_fresh_clone() {
         "reusing an existing base clone must NOT re-emit CloningRepo, got: {stages2:?}"
     );
 }
+
+/// #2189: [`create_session_worktree`] must leave the new session branch with a
+/// working `git pull` (upstream tracking `origin/<default>`) WITHOUT letting a
+/// bare `git push` target the default branch.
+///
+/// Why: before this fix the new `session/<name>` branch had no upstream at
+/// all, so `git pull` inside a session worktree failed with "There is no
+/// tracking information for the current branch." Naively setting the
+/// upstream to `origin/<default>` would fix `pull` but ALSO make a bare `git
+/// push` try to push session commits onto the shared default branch — this
+/// test proves both halves: pull-tracking works AND push is scoped to the
+/// worktree's own branch.
+/// What: builds a real bare `origin` remote with one commit on `main`, clones
+/// it into `base` (mirroring what `ensure_base_clone` produces in
+/// production — `origin` wired up, `refs/remotes/origin/HEAD` set), then
+/// calls the production `create_session_worktree` and asserts: (a) `git -C
+/// <worktree> rev-parse --abbrev-ref --symbolic-full-name @{u}` resolves to
+/// `origin/main`; (b) `git -C <worktree> config --worktree push.default` ==
+/// `"current"`; (c) `git -C <base> config extensions.worktreeConfig` ==
+/// `"true"`.
+/// Test: this function IS the test.
+#[test]
+fn create_session_worktree_sets_pull_upstream_and_worktree_scoped_push() {
+    // 1. A real bare `origin` remote, explicitly on `main` so the assertions
+    //    below are not at the mercy of the host's `init.defaultBranch`.
+    let origin_dir = tempfile::TempDir::new().expect("origin tmp dir");
+    let origin_path = origin_dir.path();
+    let init = std::process::Command::new("git")
+        .args([
+            "init",
+            "--bare",
+            "-b",
+            "main",
+            origin_path.to_str().expect("origin utf8"),
+        ])
+        .output()
+        .expect("git init --bare origin");
+    assert!(
+        init.status.success(),
+        "git init --bare origin failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    // 2. Seed the bare origin with one commit via a scratch clone (a bare repo
+    //    has no working tree to commit into directly).
+    let seed = tempfile::TempDir::new().expect("seed tmp dir");
+    let seed_path = seed.path();
+    let clone_seed = std::process::Command::new("git")
+        .args([
+            "clone",
+            origin_path.to_str().expect("origin utf8"),
+            seed_path.to_str().expect("seed utf8"),
+        ])
+        .output()
+        .expect("git clone seed");
+    assert!(
+        clone_seed.status.success(),
+        "git clone seed failed: {}",
+        String::from_utf8_lossy(&clone_seed.stderr)
+    );
+    for (k, v) in [("user.email", "t@example.com"), ("user.name", "T")] {
+        let ok = std::process::Command::new("git")
+            .args(["-C", seed_path.to_str().expect("seed utf8"), "config", k, v])
+            .status()
+            .expect("git config");
+        assert!(ok.success(), "git config {k} failed");
+    }
+    std::fs::write(seed_path.join("README"), b"seed").expect("write README");
+    let add = std::process::Command::new("git")
+        .args(["-C", seed_path.to_str().expect("seed utf8"), "add", "."])
+        .status()
+        .expect("git add");
+    assert!(add.success(), "git add failed");
+    let commit = std::process::Command::new("git")
+        .args([
+            "-C",
+            seed_path.to_str().expect("seed utf8"),
+            "commit",
+            "-m",
+            "init",
+        ])
+        .status()
+        .expect("git commit");
+    assert!(commit.success(), "git commit failed");
+    let push_seed = std::process::Command::new("git")
+        .args([
+            "-C",
+            seed_path.to_str().expect("seed utf8"),
+            "push",
+            "origin",
+            "main",
+        ])
+        .status()
+        .expect("git push seed");
+    assert!(push_seed.success(), "git push seed failed");
+
+    // 3. Clone the now-non-empty bare origin into `base` — this mirrors what
+    //    `ensure_base_clone` produces in production: `origin` remote wired up
+    //    and `refs/remotes/origin/HEAD` set by the clone itself.
+    let base_parent = tempfile::TempDir::new().expect("base parent tmp dir");
+    let base = base_parent.path().join("base");
+    let clone_base = std::process::Command::new("git")
+        .args([
+            "clone",
+            origin_path.to_str().expect("origin utf8"),
+            base.to_str().expect("base utf8"),
+        ])
+        .output()
+        .expect("git clone base");
+    assert!(
+        clone_base.status.success(),
+        "git clone base failed: {}",
+        String::from_utf8_lossy(&clone_base.stderr)
+    );
+    for (k, v) in [("user.email", "t@example.com"), ("user.name", "T")] {
+        let ok = std::process::Command::new("git")
+            .args(["-C", base.to_str().expect("base utf8"), "config", k, v])
+            .status()
+            .expect("git config");
+        assert!(ok.success(), "git config {k} failed");
+    }
+
+    // 4. Call the production function under test.
+    let worktree_path =
+        create_session_worktree(&base, "tm-pull-01").expect("create_session_worktree must succeed");
+
+    // (a) `git pull` must work: @{u} resolves to origin/main.
+    let upstream = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&worktree_path)
+        .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+        .output()
+        .expect("git rev-parse @{u}");
+    assert!(
+        upstream.status.success(),
+        "worktree branch must have an upstream set (git pull must work): {}",
+        String::from_utf8_lossy(&upstream.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&upstream.stdout).trim(),
+        "origin/main",
+        "worktree branch upstream must track origin/main"
+    );
+
+    // (b) push.default=current must be scoped to THIS worktree only, so a
+    // bare `git push` targets `origin/session/tm-pull-01`, never `main`.
+    let push_default = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&worktree_path)
+        .args(["config", "--worktree", "push.default"])
+        .output()
+        .expect("git config --worktree push.default");
+    assert!(
+        push_default.status.success(),
+        "worktree-scoped push.default must be set: {}",
+        String::from_utf8_lossy(&push_default.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&push_default.stdout).trim(),
+        "current",
+        "push.default must be worktree-scoped to 'current' so push never targets main"
+    );
+
+    // (c) extensions.worktreeConfig must be enabled on the base clone —
+    // required for the worktree-scoped config in (b) to take effect at all.
+    let ext = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&base)
+        .args(["config", "extensions.worktreeConfig"])
+        .output()
+        .expect("git config extensions.worktreeConfig");
+    assert!(
+        ext.status.success(),
+        "extensions.worktreeConfig must be set on the base clone"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&ext.stdout).trim(),
+        "true",
+        "extensions.worktreeConfig must be true"
+    );
+}
