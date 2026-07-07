@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 
 use super::{AgentLoop, AgentLoopConfig, AgentLoopError, ToolEventSink};
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
-use crate::tools::{ToolExecutor, ToolRegistry, ToolResult};
+use crate::tools::{FinishTaskTool, ToolExecutor, ToolRegistry, ToolResult};
 
 // ── Test doubles ───────────────────────────────────────────────────────────────
 
@@ -197,6 +197,37 @@ fn make_loop(
 fn registry_with_echo(fail: bool) -> Arc<ToolRegistry> {
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(EchoTool { fail }));
+    Arc::new(reg)
+}
+
+/// Build a response fixture in which the assistant calls `finish_task`.
+///
+/// Why: `raw_arguments` is passed through verbatim (not re-serialised) so
+/// tests can construct both well-formed JSON and deliberately malformed
+/// strings for the repair-path tests.
+fn finish_task_call_response(call_id: &str, raw_arguments: &str) -> Value {
+    json!({
+        "id": "gen-finish",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": { "name": "finish_task", "arguments": raw_arguments }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 6, "completion_tokens": 6, "total_tokens": 12 }
+    })
+}
+
+/// A registry containing only `FinishTaskTool` (#2072).
+fn registry_with_finish_task() -> Arc<ToolRegistry> {
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(FinishTaskTool::new()));
     Arc::new(reg)
 }
 
@@ -536,6 +567,170 @@ async fn no_tools_immediate_stop() {
         .expect("completes");
     assert_eq!(out.content, "just text");
     assert_eq!(llm.calls(), 1);
+}
+
+// ── #2072: `finish_task` tool + repair loop ─────────────────────────────────────
+
+/// A valid, explicit `finish_task` call terminates the loop immediately with
+/// the structured completion report, WITHOUT waiting for a later
+/// no-tool-call turn.
+///
+/// Why: This is the core #2072 acceptance criterion — an explicit finish call
+/// is a first-class alternative to the implicit D3 no-tool-call convention.
+/// What: Script a single `finish_task` response with valid `status`/`summary`;
+/// assert the loop returns after exactly ONE chat call (proving it did not
+/// wait for a second turn) with `AgentOutput.summary` and `.content` reflecting
+/// the structured report.
+/// Test: this test.
+#[tokio::test]
+async fn explicit_finish_task_terminates_loop_with_structured_summary() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[finish_task_call_response(
+        "call-finish",
+        r#"{"status": "completed", "summary": "implemented the feature"}"#,
+    )]));
+    let registry = registry_with_finish_task();
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default());
+
+    let out = agent
+        .run("system", "do the task")
+        .await
+        .expect("explicit finish_task should terminate the loop");
+
+    assert_eq!(llm.calls(), 1, "loop must not make a second chat call");
+    assert_eq!(out.summary.as_deref(), Some("implemented the feature"));
+    assert_eq!(
+        out.content, "Task completed: implemented the feature",
+        "content must reflect the structured report, not raw transcript text"
+    );
+}
+
+/// A `finish_task` call with syntactically malformed JSON arguments is
+/// reported as a recoverable error and repaired on the next turn, after which
+/// the corrected call terminates the loop.
+///
+/// Why: This is the #2072 "malformed args → recoverable error → repair →
+/// success" acceptance-criterion scenario, reusing #1023's
+/// `ToolCallExtractor::parse_and_validate` — no bespoke validation exists in
+/// `finish_task.rs` itself.
+/// What: Script [malformed finish_task call, valid finish_task call]; assert
+/// exactly two chat calls and a final structured summary from the SECOND
+/// (corrected) call.
+/// Test: this test.
+#[tokio::test]
+async fn malformed_finish_task_repairs_then_terminates() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        finish_task_call_response("call-bad", "{not valid json"),
+        finish_task_call_response(
+            "call-good",
+            r#"{"status": "completed", "summary": "fixed and done"}"#,
+        ),
+    ]));
+    let registry = registry_with_finish_task();
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default());
+
+    let out = agent
+        .run("system", "do the task")
+        .await
+        .expect("loop should repair and terminate on the corrected call");
+
+    assert_eq!(
+        llm.calls(),
+        2,
+        "one malformed attempt, one repaired attempt"
+    );
+    assert_eq!(out.summary.as_deref(), Some("fixed and done"));
+    assert_eq!(out.content, "Task completed: fixed and done");
+}
+
+/// A `finish_task` call missing the required `summary` field is reported as a
+/// recoverable schema violation and does NOT terminate the loop — the run
+/// continues to whatever comes next (here, a plain no-tool-call finish).
+///
+/// Why: #2072's "missing required field → recoverable error (no panic)"
+/// acceptance criterion. Also guards that an invalid finish_task call is never
+/// mistaken for a successful one (`dispatch_all` only treats a NON-error
+/// dispatch as a finish signal).
+/// What: Script [finish_task missing `summary`, stop response]; assert the run
+/// completes via the D3 fallback, not the finish_task path, after two chat
+/// calls.
+/// Test: this test.
+#[tokio::test]
+async fn finish_task_missing_required_field_is_recoverable_not_terminal() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        finish_task_call_response("call-missing", r#"{"status": "completed"}"#),
+        stop_response("recovered from missing summary"),
+    ]));
+    let registry = registry_with_finish_task();
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default());
+
+    let out = agent
+        .run("system", "do the task")
+        .await
+        .expect("missing required field must not abort the loop");
+
+    assert_eq!(llm.calls(), 2);
+    assert_eq!(out.content, "recovered from missing summary");
+    assert_eq!(
+        out.summary, None,
+        "the D3 fallback path must not set a finish_task summary"
+    );
+}
+
+/// A `finish_task` call with a `status` value outside the declared enum is
+/// reported as a recoverable schema violation, not a panic, and does not
+/// terminate the loop.
+///
+/// Why: #2072's "schema-invalid enum value → recoverable error" acceptance
+/// criterion.
+/// What: Script [finish_task with `status: "in_progress"`, stop response];
+/// assert the run recovers via the D3 fallback after two chat calls.
+/// Test: this test.
+#[tokio::test]
+async fn finish_task_invalid_enum_value_is_recoverable_not_terminal() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        finish_task_call_response(
+            "call-bad-enum",
+            r#"{"status": "in_progress", "summary": "still working"}"#,
+        ),
+        stop_response("recovered from bad enum value"),
+    ]));
+    let registry = registry_with_finish_task();
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default());
+
+    let out = agent
+        .run("system", "do the task")
+        .await
+        .expect("invalid enum value must not abort the loop");
+
+    assert_eq!(llm.calls(), 2);
+    assert_eq!(out.content, "recovered from bad enum value");
+}
+
+/// A `finish_task` call carrying `changes` and test-count fields propagates
+/// all of them into the final rendered content.
+///
+/// Why: Guards the full-shape structured report end to end through the loop,
+/// not just the tool's own unit tests.
+/// What: Script a `finish_task` call with `changes` + `tests_run`/
+/// `tests_passed`; assert the rendered content contains every section.
+/// Test: this test.
+#[tokio::test]
+async fn finish_task_full_shape_propagates_into_output() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[finish_task_call_response(
+        "call-full",
+        r#"{"status": "completed", "summary": "shipped it", "changes": [{"file": "a.rs", "lines_added": 10, "lines_removed": 2}], "tests_run": 4, "tests_passed": 4}"#,
+    )]));
+    let registry = registry_with_finish_task();
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default());
+
+    let out = agent
+        .run("system", "do the task")
+        .await
+        .expect("full-shape finish_task should terminate the loop");
+
+    assert!(out.content.contains("Task completed: shipped it"));
+    assert!(out.content.contains("a.rs (+10/-2)"));
+    assert!(out.content.contains("Tests: 4/4 passed"));
 }
 
 /// Live OpenRouter test: trivial task through the real client + a real tool.

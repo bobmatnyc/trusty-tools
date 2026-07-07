@@ -51,8 +51,8 @@ use crate::run_task::{
 use crate::runner::{InProcessAgentRunner, RegistryFactory};
 use crate::session::{SessionRegistry, SessionStatus};
 use crate::tools::{
-    AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, ReadFileTool, RunContext,
-    ToolRegistry, WriteFileTool,
+    AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, FinishTaskTool,
+    ReadFileTool, RunContext, ToolRegistry, WriteFileTool,
 };
 
 use super::sink::SessionToolEventSink;
@@ -169,10 +169,13 @@ async fn run_and_record(
         Arc::clone(&cancel),
     );
 
+    // #2072: `finish_task` gives the PM a structured, schema-validated way to
+    // signal completion alongside the delegate tool.
     let mut pm_registry = ToolRegistry::new();
     pm_registry.register(Arc::new(
         DelegateToAgentTool::new(engineer_runner).with_config_dir(params.agents_dir.clone()),
     ));
+    pm_registry.register(Arc::new(FinishTaskTool::new()));
 
     let pm_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
         Arc::clone(&llm),
@@ -267,6 +270,7 @@ impl RegistryFactory for ProjectToolFactory {
             Some(self.project.clone()),
             Duration::from_secs(ENGINEER_BASH_TIMEOUT_SECS),
         )));
+        reg.register(Arc::new(FinishTaskTool::new()));
         Arc::new(reg)
     }
 }
