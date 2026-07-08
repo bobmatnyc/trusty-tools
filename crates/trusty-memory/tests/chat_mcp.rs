@@ -113,6 +113,73 @@ async fn chat_session_add_turn_appends() {
     assert!(r2["updated_at"].is_string());
 }
 
+/// Why (issue #1712): concurrent `chat_session_add_turn` calls on the same
+/// session used to race on a non-atomic get_session/upsert_session sequence,
+/// silently dropping turns. `ChatSessionStore::append_message` now does the
+/// read-modify-write inside one redb write transaction, so every concurrent
+/// call must land.
+/// What: spawns `N` concurrent `dispatch_tool("chat_session_add_turn", …)`
+/// calls (each a distinct tokio task) against the same session id, awaits
+/// them all, then reads the session back via `chat_session_get` and asserts
+/// all `N` turns are present.
+/// Test: this function.
+#[tokio::test]
+async fn chat_session_add_turn_concurrent_calls_all_land() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = state_at(&tmp);
+    let sid = dispatch_tool(&state, "chat_session_create", json!({ "palace": PALACE }))
+        .await
+        .expect("create")["session_id"]
+        .as_str()
+        .expect("sid")
+        .to_string();
+
+    const N: usize = 25;
+    let mut handles = Vec::with_capacity(N);
+    for i in 0..N {
+        let state = state.clone();
+        let sid = sid.clone();
+        handles.push(tokio::spawn(async move {
+            dispatch_tool(
+                &state,
+                "chat_session_add_turn",
+                json!({
+                    "palace": PALACE,
+                    "session_id": sid,
+                    "role": "user",
+                    "content": format!("turn-{i}"),
+                }),
+            )
+            .await
+            .expect("concurrent add_turn")
+        }));
+    }
+    for h in handles {
+        h.await.expect("task join");
+    }
+
+    let session = dispatch_tool(
+        &state,
+        "chat_session_get",
+        json!({ "palace": PALACE, "session_id": sid }),
+    )
+    .await
+    .expect("get session");
+    let history = session["history"].as_array().expect("history array");
+    assert_eq!(
+        history.len(),
+        N,
+        "all {N} concurrent turns must land — none silently dropped"
+    );
+    for i in 0..N {
+        let marker = format!("turn-{i}");
+        assert!(
+            history.iter().any(|m| m["content"] == marker),
+            "missing {marker}"
+        );
+    }
+}
+
 /// An unknown role is rejected before any write.
 #[tokio::test]
 async fn chat_session_add_turn_rejects_bad_role() {

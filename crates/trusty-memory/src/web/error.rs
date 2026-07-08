@@ -88,6 +88,14 @@ impl ApiError {
             message: msg.into(),
         }
     }
+    /// Build a 403 Forbidden response (issue #1714: `force=true` refused by
+    /// the multi-tenant authz seam).
+    pub(crate) fn forbidden(msg: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: msg.into(),
+        }
+    }
     /// Build a 422 Unprocessable Entity response.
     ///
     /// Why (issue #466): content that is structurally valid JSON but fails
@@ -118,6 +126,7 @@ impl From<crate::service::ServiceError> for ApiError {
             crate::service::ServiceError::NotFound(m) => ApiError::not_found(m),
             crate::service::ServiceError::Conflict(m) => ApiError::conflict(m),
             crate::service::ServiceError::Internal(m) => ApiError::internal(m),
+            crate::service::ServiceError::Forbidden(m) => ApiError::forbidden(m),
         }
     }
 }

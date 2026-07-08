@@ -5,10 +5,14 @@
 //! two helper functions (`resolve_redb_path`, `write_record`).
 //! What: `ChatSessionStore` owns an `Arc<redb::Database>` and exposes
 //! `open` / `create_session` / `list_sessions` / `get_session` /
-//! `upsert_session` / `delete_session`.
+//! `upsert_session` / `append_message` / `append_messages` /
+//! `delete_session`. `append_message(s)` (issue #1712) does its
+//! read-modify-write inside a single write transaction so concurrent callers
+//! on the same session id never race and drop a message, unlike the
+//! `get_session` + `upsert_session` two-transaction sequence.
 //! Test: `create_then_get_session_round_trips`, `list_sessions_returns_meta`,
 //! `delete_session_removes_row`, `upsert_session_overwrites_history`,
-//! `roundtrip_persists_across_reopen`.
+//! `roundtrip_persists_across_reopen`, `append_message_is_atomic_under_concurrency`.
 
 use super::types::{
     ChatMessage, ChatSession, ChatSessionMeta, ChatSessionRecord, ChatSessionStoreError, Result,
@@ -291,6 +295,138 @@ impl ChatSessionStore {
         };
 
         self.write_record(id, &record)
+    }
+
+    /// Atomically append one message to a session's history.
+    ///
+    /// Why (issue #1712): thin wrapper over [`Self::append_messages`] for the
+    /// common single-turn case (`chat_session_add_turn`).
+    /// What: Delegates to `append_messages` with a one-element vec.
+    /// Test: `append_message_is_atomic_under_concurrency`,
+    /// `append_message_creates_session_when_missing`.
+    pub fn append_message(&self, id: &str, message: ChatMessage) -> anyhow::Result<ChatSession> {
+        self.append_messages(id, vec![message])
+    }
+
+    /// Atomically append one or more messages to a session's history within a
+    /// single redb write transaction.
+    ///
+    /// Why (issue #1712): the historical call sites (`handle_chat_session_
+    /// add_turn`, `handle_chat_turn_append`) did `get_session` (a read txn)
+    /// followed by `upsert_session` (a separate write txn) — a non-atomic
+    /// read-modify-write. Two concurrent callers on the same `session_id`
+    /// could both read the same history snapshot; the second `upsert_session`
+    /// then clobbers the first, silently dropping a message. redb serialises
+    /// all write transactions on one database (`begin_write` blocks until any
+    /// prior writer commits or aborts), so reading the current row and
+    /// appending to it INSIDE the same write transaction closes the race
+    /// entirely: a second concurrent caller's `begin_write` cannot proceed
+    /// until the first transaction commits, and when it does proceed it reads
+    /// the already-appended history and appends after it.
+    /// What: Begins one write transaction, reads the current row (if any),
+    /// decodes its JSON history, pushes every message in `messages` in order,
+    /// re-encodes, and inserts — all before commit. Creates the session
+    /// (`title = None`) when `id` is unseen, matching `upsert_session`'s
+    /// historical create-on-write behaviour. Returns the full post-append
+    /// session so callers don't need a second `get_session` round trip.
+    /// Test: `append_message_is_atomic_under_concurrency`,
+    /// `append_messages_appends_pair_in_order`.
+    pub fn append_messages(
+        &self,
+        id: &str,
+        messages: Vec<ChatMessage>,
+    ) -> anyhow::Result<ChatSession> {
+        Ok(self.append_messages_inner(id, messages)?)
+    }
+
+    fn append_messages_inner(&self, id: &str, messages: Vec<ChatMessage>) -> Result<ChatSession> {
+        let now = Utc::now().to_rfc3339();
+        let wtx = self
+            .db
+            .begin_write()
+            .map_err(|e| ChatSessionStoreError::Transaction {
+                path: self.path.clone(),
+                source: Box::new(e),
+            })?;
+
+        // Read the current row THROUGH THIS SAME write transaction (not a
+        // separate `begin_read`) so no other writer can land a commit between
+        // the read and the append below. Scoped to its own block so the
+        // read-only `table` handle (and the `AccessGuard` borrow it hands
+        // back from `get`) drops before we re-open the table mutably for the
+        // insert — redb permits opening the same table more than once inside
+        // one write transaction as long as the handles don't overlap.
+        let existing_record: Option<ChatSessionRecord> = {
+            let table = wtx
+                .open_table(SESSIONS)
+                .map_err(|e| ChatSessionStoreError::Table {
+                    path: self.path.clone(),
+                    source: Box::new(e),
+                })?;
+            match table.get(id).map_err(|e| ChatSessionStoreError::Storage {
+                path: self.path.clone(),
+                source: Box::new(e),
+            })? {
+                Some(g) => Some(
+                    postcard::from_bytes(g.value())
+                        .map_err(|e| ChatSessionStoreError::Postcard { source: e })?,
+                ),
+                None => None,
+            }
+        };
+
+        let (title, created_at, mut history) = match existing_record {
+            Some(r) => {
+                let history: Vec<ChatMessage> =
+                    serde_json::from_str(&r.history).unwrap_or_default();
+                (r.title, r.created_at, history)
+            }
+            None => (None, now.clone(), Vec::new()),
+        };
+        history.extend(messages);
+
+        let history_json =
+            serde_json::to_string(&history).map_err(|e| ChatSessionStoreError::Json {
+                source: Box::new(e),
+            })?;
+        let record = ChatSessionRecord {
+            title,
+            created_at,
+            updated_at: now.clone(),
+            history: history_json,
+        };
+        let value_bytes = postcard::to_allocvec(&record)
+            .map_err(|e| ChatSessionStoreError::Postcard { source: e })?;
+        {
+            let mut table = wtx
+                .open_table(SESSIONS)
+                .map_err(|e| ChatSessionStoreError::Table {
+                    path: self.path.clone(),
+                    source: Box::new(e),
+                })?;
+            table.insert(id, value_bytes.as_slice()).map_err(|e| {
+                ChatSessionStoreError::Storage {
+                    path: self.path.clone(),
+                    source: Box::new(e),
+                }
+            })?;
+        }
+
+        wtx.commit().map_err(|e| ChatSessionStoreError::Commit {
+            path: self.path.clone(),
+            source: Box::new(e),
+        })?;
+
+        let created_at = parse_timestamp(&record.created_at, "created_at")?;
+        let updated_at = parse_timestamp(&record.updated_at, "updated_at")?;
+        let history: Vec<ChatMessage> = serde_json::from_str(&record.history).unwrap_or_default();
+        Ok(ChatSession {
+            id: id.to_string(),
+            title: record.title,
+            created_at,
+            updated_at,
+            history,
+        })
     }
 
     /// Delete a session row. No-op if `id` is unknown.

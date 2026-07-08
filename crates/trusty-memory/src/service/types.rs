@@ -198,6 +198,15 @@ pub enum ServiceError {
     Conflict(String),
     #[error("{0}")]
     Internal(String),
+    /// 403 Forbidden — an authorization check failed.
+    ///
+    /// Why (issue #1714): `palace_create force=true` in multi-tenant mode
+    /// fails the (currently fail-closed) `authz::authorize_force_palace_
+    /// create` check. `BadRequest` would be misleading (the request is
+    /// well-formed) and `Conflict` implies a state clash, not a permissions
+    /// gate.
+    #[error("{0}")]
+    Forbidden(String),
 }
 
 impl ServiceError {
@@ -206,6 +215,10 @@ impl ServiceError {
     }
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self::NotFound(msg.into())
+    }
+    /// Build a 403 Forbidden service error (issue #1714).
+    pub fn forbidden(msg: impl Into<String>) -> Self {
+        Self::Forbidden(msg.into())
     }
     /// Build a 409 Conflict service error.
     ///
