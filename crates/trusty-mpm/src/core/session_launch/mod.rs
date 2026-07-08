@@ -47,13 +47,15 @@ use settings::{
 /// seeds `outputStyle`/`statusLine` into the tm-owned `CLAUDE_CONFIG_DIR`
 /// settings.json using these exact same values, rather than duplicating the
 /// default-id constant or the absolute-binary-path resolution logic.
-/// What: re-exports [`settings::OUTPUT_STYLE`] and
-/// [`settings::resolve_statusline_command`] as `session_launch::OUTPUT_STYLE` /
-/// `session_launch::resolve_statusline_command`.
+/// What: re-exports [`settings::OUTPUT_STYLE`],
+/// [`settings::resolve_statusline_command`], and
+/// [`settings::is_stale_statusline_command`] (so `settings_defaults` can
+/// self-heal a stale/ephemeral `statusLine` entry — #2229) under the
+/// `session_launch::` path.
 /// Test: covered indirectly by
 /// `core::standalone::settings_defaults` tests (this is a plain re-export, no
 /// logic of its own).
-pub(crate) use settings::{OUTPUT_STYLE, resolve_statusline_command};
+pub(crate) use settings::{OUTPUT_STYLE, is_stale_statusline_command, resolve_statusline_command};
 
 /// Outcome of the pre-launch preparation for one session.
 ///

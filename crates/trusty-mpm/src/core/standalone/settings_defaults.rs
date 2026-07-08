@@ -13,11 +13,13 @@
 //! independent of the project tier.
 //! What: [`ensure_settings_defaults`] reads the tm-owned
 //! `<claude_config_dir>/settings.json` (tolerating absent/malformed content by
-//! starting from `{}`), sets `outputStyle` and `statusLine` ONLY when each key
-//! is not already present — never overwriting a value the client (or a prior
-//! `tm login`) already persisted there — and writes back atomically only when
-//! something actually changed. The values reused are the exact same ones the
-//! project-tier writer computes: [`crate::core::session_launch::OUTPUT_STYLE`]
+//! starting from `{}`), seeds `outputStyle` only when absent, and sets
+//! `statusLine` when absent OR when its existing command is stale — a binary
+//! that is an ephemeral build path or no longer exists on disk (#2229). A
+//! genuinely user-customized value pointing at an existing, non-ephemeral binary
+//! is never overwritten; the file is written back atomically only when something
+//! actually changed. The values reused are the exact same ones the project-tier
+//! writer computes: [`crate::core::session_launch::OUTPUT_STYLE`]
 //! (the default output-style id) and
 //! [`crate::core::session_launch::resolve_statusline_command`] (the resolved
 //! absolute `<tm-binary> statusline` command).
@@ -40,16 +42,23 @@ use trusty_common::claude_config::write_json_atomic;
 /// What: reads the on-disk `settings.json` (or starts from `{}` if
 /// absent/malformed/non-object), inserts `outputStyle` =
 /// [`crate::core::session_launch::OUTPUT_STYLE`] only if the key is not already
-/// present, inserts `statusLine` = `{ "type": "command", "command":
+/// present, and sets `statusLine` = `{ "type": "command", "command":
 /// <resolved absolute path> statusline", "padding": 0 }` (via
-/// [`crate::core::session_launch::resolve_statusline_command`]) only if the key
-/// is not already present, then writes back via
-/// [`trusty_common::claude_config::write_json_atomic`] only when the merged
-/// value actually differs from what was on disk (idempotent — no spurious
+/// [`crate::core::session_launch::resolve_statusline_command`]) when the key is
+/// absent OR when the existing command is stale — a binary that is an ephemeral
+/// build path or no longer exists on disk (#2229), per
+/// [`crate::core::session_launch::is_stale_statusline_command`]. A genuinely
+/// user-customized `statusLine` pointing at an existing, non-ephemeral binary is
+/// left untouched. Managed hook commands self-heal separately via
+/// [`super::hooks::write_project_hooks`]'s replace-by-identity merge. Writes
+/// back via [`trusty_common::claude_config::write_json_atomic`] only when the
+/// merged value actually differs from what was on disk (idempotent — no spurious
 /// rewrite / mtime bump on repeat calls).
 /// Test: `ensure_settings_defaults_seeds_fresh_file`,
 /// `ensure_settings_defaults_preserves_existing_keys`,
 /// `ensure_settings_defaults_does_not_overwrite_customized_values`,
+/// `ensure_settings_defaults_heals_stale_ephemeral_statusline`,
+/// `ensure_settings_defaults_preserves_existing_valid_binary_statusline`,
 /// `ensure_settings_defaults_is_idempotent`.
 pub(crate) fn ensure_settings_defaults(claude_config_dir: &Path) -> anyhow::Result<()> {
     let settings_path = claude_config_dir.join("settings.json");
@@ -69,13 +78,26 @@ pub(crate) fn ensure_settings_defaults(claude_config_dir: &Path) -> anyhow::Resu
     obj.entry("outputStyle").or_insert_with(|| {
         serde_json::Value::String(crate::core::session_launch::OUTPUT_STYLE.to_string())
     });
-    obj.entry("statusLine").or_insert_with(|| {
-        serde_json::json!({
-            "type": "command",
-            "command": crate::core::session_launch::resolve_statusline_command(),
-            "padding": 0
-        })
-    });
+
+    // statusLine: seed when absent, and self-heal when the existing command
+    // points at a binary that is an ephemeral build path or no longer exists on
+    // disk (#2229). A genuinely user-customized command that still points at an
+    // existing, non-ephemeral binary is left untouched by
+    // `is_stale_statusline_command`.
+    let statusline_needs_write = match obj.get("statusLine") {
+        None => true,
+        Some(existing) => crate::core::session_launch::is_stale_statusline_command(existing),
+    };
+    if statusline_needs_write {
+        obj.insert(
+            "statusLine".to_string(),
+            serde_json::json!({
+                "type": "command",
+                "command": crate::core::session_launch::resolve_statusline_command(),
+                "padding": 0
+            }),
+        );
+    }
 
     // Structural comparison (not byte-wise) so formatting differences left by
     // editors or prior writes never trigger a spurious rewrite, matching the
@@ -182,6 +204,76 @@ mod tests {
             "a pre-existing statusLine must never be clobbered"
         );
         assert_eq!(val["statusLine"]["padding"].as_i64(), Some(2));
+    }
+
+    #[test]
+    fn ensure_settings_defaults_heals_stale_ephemeral_statusline() {
+        // #2229: a statusLine.command baked from an ephemeral build path
+        // (target/debug/deps) — the exact defect — must be re-resolved to a
+        // stable command, NOT treated as untouchable customization.
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().to_path_buf();
+        let stale = "/tmp/target/debug/deps/tm-deadbeef statusline";
+        std::fs::write(
+            cfg.join("settings.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "statusLine": { "type": "command", "command": stale, "padding": 0 },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        ensure_settings_defaults(&cfg).unwrap();
+
+        let text = std::fs::read_to_string(cfg.join("settings.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let healed = val["statusLine"]["command"].as_str().unwrap();
+        assert_ne!(
+            healed, stale,
+            "a stale ephemeral statusLine must be rewritten"
+        );
+        assert!(
+            !healed.contains("target/debug"),
+            "healed command must not point at an ephemeral build path, got {healed}"
+        );
+        assert!(
+            healed.ends_with(" statusline"),
+            "healed command must still invoke the statusline subcommand, got {healed}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_settings_defaults_preserves_existing_valid_binary_statusline() {
+        // A genuinely custom statusLine.command whose binary EXISTS on disk and
+        // is not an ephemeral build path must be left completely untouched
+        // (#2229 must not over-heal). `/bin/sh` exists on every supported unix.
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().to_path_buf();
+        let custom = "/bin/sh statusline";
+        std::fs::write(
+            cfg.join("settings.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "statusLine": { "type": "command", "command": custom, "padding": 3 },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        ensure_settings_defaults(&cfg).unwrap();
+
+        let text = std::fs::read_to_string(cfg.join("settings.json")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            val["statusLine"]["command"].as_str(),
+            Some(custom),
+            "a valid, existing custom binary statusLine must never be clobbered"
+        );
+        assert_eq!(
+            val["statusLine"]["padding"].as_i64(),
+            Some(3),
+            "the rest of a valid custom statusLine must survive untouched"
+        );
     }
 
     #[test]
