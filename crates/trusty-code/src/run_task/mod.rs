@@ -30,7 +30,7 @@ use async_trait::async_trait;
 
 use crate::agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopError};
 use crate::agents::AgentConfig;
-use crate::llm::LlmClientTrait;
+use crate::llm::{DebugCaptureSink, LlmClientTrait, wrap_with_debug_capture};
 use crate::project_context::load_project_context;
 use crate::prompt::assemble_system_prompt;
 use crate::provider::{resolve_deadline_secs, resolve_max_tokens, resolve_model};
@@ -103,6 +103,15 @@ pub struct RunTaskParams {
 pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait>) -> RunReport {
     let transcript: SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 
+    // #2264: resolve the (optional) full wire-level debug-capture sink once
+    // per run, shared by BOTH the pm and engineer wrappers below so a
+    // directory-mode capture lands in one file with a single globally
+    // ordered turn sequence — mirrors `transcript`'s own "one shared
+    // accumulator per run" shape. `None` when `TCODE_DEBUG_TRANSCRIPT` is
+    // unset (the default): `wrap_with_debug_capture` then returns each
+    // inner client unchanged, so this costs nothing when disabled.
+    let debug_sink: Option<Arc<DebugCaptureSink>> = DebugCaptureSink::from_env();
+
     // Load the PM config; a missing/invalid config is a configuration error.
     let pm_config =
         match AgentConfig::load(&params.agents_dir.join(format!("{}.toml", params.agent))) {
@@ -131,7 +140,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     // Build the engineer runner, scoped to the project working dir, sharing the
     // transcript (engineer turns are tagged "python-engineer").
     let engineer_runner = build_engineer_runner(
-        Arc::clone(&llm),
+        wrap_with_debug_capture(Arc::clone(&llm), ENGINEER_AGENT_NAME, debug_sink.as_ref()),
         &params,
         project_context.clone(),
         Arc::clone(&transcript),
@@ -152,7 +161,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
 
     // The PM's loop uses a transcript-recording client tagged "pm".
     let pm_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
-        Arc::clone(&llm),
+        wrap_with_debug_capture(Arc::clone(&llm), "pm", debug_sink.as_ref()),
         "pm",
         Arc::clone(&transcript),
     ));
