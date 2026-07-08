@@ -113,6 +113,19 @@ pub struct WeeklyActivity {
     /// Counts inline-completion commits (Cursor, GitHub Copilot).
     #[serde(default)]
     pub ide_assisted_count: usize,
+    /// Why: `commit_count` counts revert commits identically to original
+    /// work, so a developer who lands N commits and reverts all N shows 2N
+    /// commits with zero net code change — a 2x+ inflation downstream
+    /// consumers cannot correct without re-deriving it themselves (issue
+    /// #660). `persist_weekly_engineer` already computed this exact formula
+    /// privately for `fact_weekly_engineer.net_commits`; this field exposes
+    /// it on the report row itself.
+    /// What: `commit_count` minus `revert_count` for this (week, author,
+    /// repository) bucket, saturating at zero. Additive field — `commit_count`
+    /// keeps its existing gross-count meaning unchanged for backward compatibility.
+    /// Test: `report::tests::weekly_activity_commit_count_net_excludes_reverts`.
+    #[serde(default)]
+    pub commit_count_net: usize,
 }
 
 /// Per-week aggregated metrics across all developers and repositories.

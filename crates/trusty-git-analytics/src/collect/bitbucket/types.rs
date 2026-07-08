@@ -88,3 +88,14 @@ pub struct BbCommitRef {
     /// Full commit hash (Bitbucket Cloud uses git, so 40-char hex).
     pub hash: String,
 }
+
+/// A single commit record as returned by
+/// `GET /2.0/repositories/{workspace}/{repo_slug}/pullrequests/{id}/commits`.
+///
+/// Only `hash` is consumed; the endpoint also returns author/message/date
+/// but the collector only needs the SHA to join against `commits.sha`.
+#[derive(Debug, Deserialize)]
+pub struct BbCommit {
+    /// Full commit hash (40-char hex for Bitbucket Cloud git repos).
+    pub hash: String,
+}

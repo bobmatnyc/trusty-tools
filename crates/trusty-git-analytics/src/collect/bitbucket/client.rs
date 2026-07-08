@@ -8,10 +8,14 @@
 //!   a page counter.
 //! - **Auth** supports either Bearer token (workspace / repo access token)
 //!   or Basic auth (`username` + App Password). Tokens win when both are set.
-//! - **Per-PR commit fetch is skipped** — Bitbucket returns the merge
-//!   commit hash directly in the PR list payload, matching what the GitHub
-//!   client stores today. This keeps `commit_shas` parity without N extra
-//!   round-trips.
+//! - **Per-PR commit fetch** — the PR list payload only carries the (often
+//!   abbreviated) merge commit hash, which cannot be joined against
+//!   `commits.sha` and discards the PR's actual commit composition (#841).
+//!   [`BitbucketClient::fetch_pr_commits`] hits the dedicated per-PR commits
+//!   endpoint, paginating with the same `next`-cursor convention, so
+//!   `commit_shas` carries the full list — one extra round-trip (or more,
+//!   under pagination) per PR, same tradeoff GitHub's equivalent
+//!   `fetch_pr_commits` makes.
 
 use std::time::Duration;
 
@@ -21,7 +25,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use rusqlite::params;
 use tracing::{debug, warn};
 
-use crate::collect::bitbucket::types::{BbPaged, BbPullRequest};
+use crate::collect::bitbucket::types::{BbCommit, BbPaged, BbPullRequest};
 use crate::collect::errors::{CollectError, Result};
 use crate::collect::pr_provider::PrProvider;
 use crate::core::config::BitbucketConfig;
@@ -252,8 +256,62 @@ impl BitbucketClient {
             let page: BbPaged<BbPullRequest> = resp.json().await?;
             let repository = format!("{}/{}", self.workspace, self.repo_slug);
             for pr in page.values {
-                out.push(map_pr(pr, &repository));
+                let pr_number = pr.id;
+                let mut mapped = map_pr(pr, &repository);
+                match self.fetch_pr_commits(pr_number).await {
+                    Ok(shas) => {
+                        mapped.commit_shas = encode_commit_shas(&shas)?;
+                    }
+                    Err(e) => {
+                        // Graceful degradation (mirrors the per-repo partial-success
+                        // precedent in the GitHub client, issue #87): one PR's
+                        // commits endpoint hiccuping must not drop the whole PR,
+                        // nor abort the rest of the batch. `mapped.commit_shas`
+                        // already holds the merge-commit fallback from `map_pr`.
+                        warn!(
+                            pr_number,
+                            error = %e,
+                            "Bitbucket PR commit fetch failed; keeping merge-commit fallback"
+                        );
+                    }
+                }
+                out.push(mapped);
             }
+            next_url = page.next;
+        }
+        Ok(out)
+    }
+
+    /// Fetch every commit SHA attached to a pull request, following `next`
+    /// cursors until exhausted.
+    ///
+    /// Why: the PR list endpoint only carries the merge commit hash (often
+    /// abbreviated), which cannot be joined against `commits.sha` by equality
+    /// and discards the PR's real commit composition (issue #841). This is
+    /// the per-PR enrichment call `fetch_pull_requests` makes for every PR it
+    /// returns.
+    /// What: `GET /2.0/repositories/{workspace}/{repo_slug}/pullrequests/{pr_number}/commits`,
+    /// following `next` cursors exactly like [`Self::fetch_pull_requests`].
+    /// Test: `fetch_pr_commits_follows_next_cursor`,
+    /// `fetch_pull_requests_persists_full_commit_list`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CollectError::Http`] on transport or non-success HTTP
+    /// responses, and [`CollectError::Json`] on payload parse failures.
+    pub async fn fetch_pr_commits(&self, pr_number: u64) -> Result<Vec<String>> {
+        let initial = format!(
+            "{}/repositories/{}/{}/pullrequests/{pr_number}/commits?pagelen={PAGE_SIZE}",
+            self.api_base, self.workspace, self.repo_slug
+        );
+
+        let mut out: Vec<String> = Vec::new();
+        let mut next_url: Option<String> = Some(initial);
+        while let Some(url) = next_url.take() {
+            debug!(url = %url, "GET (bitbucket pr commits)");
+            let resp = self.retry_request(&url).await?.error_for_status()?;
+            let page: BbPaged<BbCommit> = resp.json().await?;
+            out.extend(page.values.into_iter().map(|c| c.hash));
             next_url = page.next;
         }
         Ok(out)
@@ -353,6 +411,11 @@ impl BitbucketClient {
 /// `DECLINED` and `SUPERSEDED` collapse to [`PrState::Closed`] because the
 /// shared schema has no richer variants. The collapse is lossy but documented
 /// in the configuration reference.
+///
+/// `commit_shas` here is seeded from the list payload's (often abbreviated)
+/// `merge_commit` hash only as a fallback; [`BitbucketClient::fetch_pull_requests`]
+/// overwrites it with the full per-PR commit list from
+/// [`BitbucketClient::fetch_pr_commits`] whenever that call succeeds (#841).
 fn map_pr(pr: BbPullRequest, repository: &str) -> PullRequest {
     let state = match pr.state.as_str() {
         "MERGED" => PrState::Merged,
@@ -389,6 +452,21 @@ fn map_pr(pr: BbPullRequest, repository: &str) -> PullRequest {
         merged_at,
         commit_shas,
     }
+}
+
+/// Serialize a full commit SHA list into the JSON-array string stored in
+/// `pull_requests.commit_shas`.
+///
+/// Why: shares the on-disk convention with the GitHub provider's
+/// `commit_shas_for_pull` (a JSON array of SHA strings) so downstream
+/// consumers — e.g. the `commits.sha` join — don't need per-provider
+/// parsing.
+/// What: `serde_json::to_string(shas)`. `Vec<String>` serialization cannot
+/// fail in practice, but the `Result` return keeps the call site symmetric
+/// with the rest of this module's fallible JSON handling.
+/// Test: `fetch_pull_requests_persists_full_commit_list`.
+fn encode_commit_shas(shas: &[String]) -> Result<String> {
+    Ok(serde_json::to_string(shas)?)
 }
 
 /// Parse a Bitbucket ISO8601 timestamp into UTC.
