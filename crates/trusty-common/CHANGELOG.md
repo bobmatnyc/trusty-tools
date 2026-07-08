@@ -9,6 +9,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `is_ephemeral_build_path` bin-resolve helper, detecting `target/debug|release`
+  and worktree binary paths so callers can fall back to a PATH-resolved
+  installed binary instead of baking in an ephemeral path (consumed by
+  trusty-mpm's hooks/statusLine binary resolution, closes #2229) ([#2234](https://github.com/bobmatnyc/trusty-tools/pull/2234))
+
+### Fixed
+
+- resolve stable binary for hooks/statusLine + self-heal stale paths (closes #2229) ([#2234](https://github.com/bobmatnyc/trusty-tools/pull/2234)) ([`ae87bbb`](https://github.com/bobmatnyc/trusty-tools/commit/ae87bbb3827b9dfc9fccae4732c66104af6912b7))
+- harden chat-session consolidation, atomic turns, and force= authz ([#2221](https://github.com/bobmatnyc/trusty-tools/pull/2221)) ([`14ab3b7`](https://github.com/bobmatnyc/trusty-tools/commit/14ab3b7202ff98ef72a75ba69b8c9153ac6b5a17))
+
+### Changed
+
+- re-cut common 0.22.1 / embedderd 0.3.6 / search 0.32.2 to escape #2209 crates.io version collision ([#2236](https://github.com/bobmatnyc/trusty-tools/pull/2236)) ([`805a458`](https://github.com/bobmatnyc/trusty-tools/commit/805a458a67a69983b84ec4012436dc00b0e22e35))
+## [Unreleased]
+
+### Added
+
 - manage trusty-search index lifecycle for session worktrees ([#2094](https://github.com/bobmatnyc/trusty-tools/pull/2094)) ([`299e993`](https://github.com/bobmatnyc/trusty-tools/commit/299e9931edd2b7faf9236bd5ccc3b6ddb038329d))
 
 ## [0.22.1] — 2026-07-08
