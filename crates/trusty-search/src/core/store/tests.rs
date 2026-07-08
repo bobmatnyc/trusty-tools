@@ -256,6 +256,74 @@ async fn test_load_corrupt_sidecar_returns_none() {
     assert!(loaded.is_none(), "corrupt sidecar must fall back to None");
 }
 
+/// Issue #2179 regression: `rewrite_keys_to_relative` (the M003 one-time
+/// key-migration path) must leave `is_view` truthful relative to the
+/// underlying `usearch::Index` mode — not just flip the flag to `false`
+/// while the Index handle is still literally an mmap view.
+///
+/// Why: before the fix, `rewrite_keys_to_relative` set `is_view.store(false,
+/// ...)` directly instead of calling `ensure_mutable()` / `Index::load()`.
+/// When applied against a store that was warm-booted via `load_from` (view
+/// mode), that left a latent invariant violation: `in_view_mode()` reported
+/// `false` (claiming a mutable heap-resident copy) while the Index was still
+/// a read-only mmap — the exact mismatch `#2164`'s demote/dirty logic
+/// assumes can never happen. A subsequent write (`upsert`/`remove`) would
+/// then see `is_view == false`, skip `ensure_mutable`'s promotion, and
+/// mutate the view directly (usearch documents this as erroring or UB for
+/// a genuine view).
+/// What: builds a store with one absolute-keyed vector, saves it, reloads it
+/// via `load_from` (asserts `in_view_mode() == true`), calls
+/// `rewrite_keys_to_relative`, and asserts `in_view_mode() == false`
+/// afterward — AND that a subsequent `upsert` (which would UB/error against
+/// a real, un-promoted view) succeeds and is searchable, proving the
+/// underlying Index was genuinely promoted, not just flagged.
+/// Test: this test.
+#[tokio::test]
+async fn test_rewrite_keys_to_relative_promotes_view_to_mutable() {
+    let dir = tempfile::tempdir().unwrap();
+    let hnsw_path = dir.path().join("hnsw.usearch");
+    let root = dir.path().join("proj");
+    let abs_id = format!("{}/src/lib.rs:1:10", root.display());
+
+    // Build + save a store with one absolute-keyed vector.
+    {
+        let store = UsearchStore::new(4).unwrap();
+        store
+            .upsert(&abs_id, vec![1.0, 0.0, 0.0, 0.0])
+            .await
+            .unwrap();
+        store.save(&hnsw_path).await.unwrap();
+    }
+
+    // Reload — this lands in view (mmap) mode.
+    let store = UsearchStore::load_from(&hnsw_path)
+        .await
+        .unwrap()
+        .expect("load returned Some");
+    assert!(store.in_view_mode(), "load_from must land in view mode");
+
+    // Apply the M003 key rewrite (one absolute key → relative).
+    let count = store.rewrite_keys_to_relative(&root).await.unwrap();
+    assert_eq!(count, 1, "must rewrite the one absolute key");
+
+    // The flag must now be false, AND the underlying Index must genuinely
+    // be promoted — not just the flag flipped.
+    assert!(
+        !store.in_view_mode(),
+        "rewrite must leave is_view truthfully false"
+    );
+
+    // Prove genuine promotion happened: a write against a real (un-promoted)
+    // view would error/UB per usearch's contract. If this upsert succeeds
+    // and is searchable, the Index was actually reloaded mutable.
+    store
+        .upsert("src/other.rs:1:5", vec![0.0, 1.0, 0.0, 0.0])
+        .await
+        .expect("upsert after rewrite must succeed against a genuinely promoted store");
+    let hits = store.search(&[0.0, 1.0, 0.0, 0.0], 1).await.unwrap();
+    assert_eq!(hits[0].chunk_id, "src/other.rs:1:5");
+}
+
 #[tokio::test]
 async fn test_view_promotes_to_mutable_on_write() {
     // Why: warm-boot opens the snapshot via `Index::view` (mmap) to keep

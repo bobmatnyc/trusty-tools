@@ -108,6 +108,64 @@ fn warm_boot_respects_lexical_only_flag() {
     assert!(!caps.contains(&"kg"));
 }
 
+/// Issues #1870 / #2203 (joint root cause): a failed durable-corpus open
+/// must fail EVERY stage — lexical, semantic, AND graph — even when the
+/// HNSW snapshot and symbol graph independently loaded fine from disk.
+///
+/// Why: before this fix, `corpus_open_failed` only forced `lexical` to
+/// `Failed`; `semantic` and `graph` were still classified purely from
+/// `hnsw_snapshot_ready` / `graph_node_count`, which are on-disk signals
+/// completely independent of the redb corpus. That let `/health` and
+/// `GET /indexes/:id/status` report `semantic.status: "ready"` (and
+/// `"vector"` in `search_capabilities`) while the query hot path's
+/// `fetch_chunks_for_ids` could never resolve any HNSW hit against the
+/// (unwired) corpus — every result was silently dropped at materialisation,
+/// producing HTTP 200 + `results: []` for essentially every query (#2203)
+/// while the status endpoint kept lying about health (#1870).
+/// What: constructs `WarmBootInputs` with `corpus_open_failed: true` AND
+/// healthy-looking `hnsw_snapshot_ready` / `graph_node_count` values, then
+/// asserts all three stages are `Failed`, `lifecycle_status() == "failed"`,
+/// and `search_capabilities()` is empty (no lane is falsely advertised).
+/// Test: this test.
+#[test]
+fn warm_boot_corpus_open_failure_fails_every_stage() {
+    let stages = derive_warm_boot_stages(WarmBootInputs {
+        chunk_count: 48_742,
+        hnsw_snapshot_ready: true,
+        graph_node_count: 7_402,
+        lexical_only: false,
+        skip_kg: false,
+        corpus_open_failed: true,
+    });
+    assert_eq!(
+        stages.lexical.status,
+        StageStatus::Failed,
+        "corpus open failure must fail lexical"
+    );
+    assert_eq!(
+        stages.semantic.status,
+        StageStatus::Failed,
+        "corpus open failure must fail semantic even though the HNSW snapshot loaded fine \
+         — without the corpus, no HNSW hit can ever resolve to chunk text (issues #1870, #2203)"
+    );
+    assert_eq!(
+        stages.graph.status,
+        StageStatus::Failed,
+        "corpus open failure must fail graph even though the symbol graph loaded fine"
+    );
+    assert_eq!(stages.lifecycle_status(), "failed");
+    assert!(
+        stages.search_capabilities().is_empty(),
+        "no lane may be advertised as queryable when the durable corpus is unavailable; got: {:?}",
+        stages.search_capabilities()
+    );
+    // Every failed stage must carry the actionable reason (issue #1158's
+    // original contract, now extended to semantic + graph).
+    assert!(stages.lexical.failure.is_some());
+    assert!(stages.semantic.failure.is_some());
+    assert!(stages.graph.failure.is_some());
+}
+
 /// Mid-reindex recovery: the registry has the entry but the redb corpus is
 /// empty. Lexical must come back as `InProgress` — not `Pending` — so the
 /// lifecycle status surfaces "walking".

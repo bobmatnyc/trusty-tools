@@ -6,6 +6,38 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.31.1] — 2026-07-07
+
+### Fixed — corpus/status desync bug cluster (issues #2203, #1870, #2211, #2179)
+
+- **#2203 / #1870 (joint root cause): a failed durable-corpus open no longer
+  leaves `semantic`/`graph` falsely reporting `"ready"`.** `derive_warm_boot_stages`
+  previously threaded `corpus_open_failed` into the `lexical` stage only;
+  `semantic` and `graph` were classified purely from `hnsw_snapshot_ready` /
+  `graph_node_count` — signals entirely independent of the redb corpus. A
+  restored HNSW mmap snapshot (or symbol graph) can load successfully even
+  when the redb corpus failed to open (`DatabaseAlreadyOpen` or any other
+  open error, #1870), so `/health` and `GET /indexes/:id/status` kept
+  reporting `semantic.status: "ready"` while the query hot path's
+  `fetch_chunks_for_ids` could never resolve any HNSW hit against the
+  unwired corpus — every result was silently dropped at materialisation
+  (`search/materialize.rs`), producing HTTP 200 + `results: []` for
+  essentially every query (#2203). A corpus-open failure now fails all three
+  stages together, and `search_capabilities` correctly advertises no lanes.
+- **#2211: `stages.semantic.status` no longer flips to `"ready"` prematurely
+  when `defer_embed` is active.** `finish_reindex` called
+  `mark_semantic_ready_graph_in_progress` unconditionally right after the
+  fast pass, before the deferred background embed pass had even started —
+  reporting `"ready"` for the entire duration of the real embedding job.
+  Semantic now stays `InProgress` until the deferred pass actually
+  completes and marks it `Ready`.
+- **#2179 (tech debt): `rewrite_keys_to_relative` (M003's one-time HNSW
+  key-migration path) now genuinely promotes a view-mode store to mutable
+  instead of just flipping the `is_view` flag**, keeping the flag truthful
+  relative to the underlying `usearch::Index` mode.
+
+---
+
 ## [0.31.0] — 2026-07-06
 
 ### Added — idle watcher suspension (stop watching projects nobody is using)

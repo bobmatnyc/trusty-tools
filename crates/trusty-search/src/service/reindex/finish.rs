@@ -258,13 +258,24 @@ pub(super) async fn finish_reindex(ctx: FinishCtx, totals: BatchTotals) {
         return;
     }
 
-    // Issue #109, Phase 1: flip the semantic stage to `Ready`.
-    mark_semantic_ready_graph_in_progress(
-        &handle,
-        total_vector_count,
-        progress.total_chunks.load(AtomicOrdering::Acquire),
-    )
-    .await;
+    // Issue #109, Phase 1 / #2211: flip the semantic stage to `Ready` — but
+    // ONLY when embedding actually ran to completion as part of this pass.
+    // When `defer_embed` is active with an embedder wired, the real
+    // embedding happens in the background pass spawned below (after this
+    // function returns); marking semantic Ready here reported a false
+    // "ready" signal for the entire duration of that background pass — see
+    // `validate::semantic_ready_now` for the full rationale. In that case
+    // semantic stays `InProgress` (already set by
+    // `mark_lexical_ready_semantic_in_progress` above) until
+    // `spawn_deferred_embed_pass` itself marks it `Ready`.
+    if validate::semantic_ready_now(defer_embed, embedder_present) {
+        mark_semantic_ready_graph_in_progress(
+            &handle,
+            total_vector_count,
+            progress.total_chunks.load(AtomicOrdering::Acquire),
+        )
+        .await;
+    }
 
     // Phase 3: rebuild the symbol graph.
     let kg = rebuild_kg(

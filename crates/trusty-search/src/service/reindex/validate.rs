@@ -142,6 +142,38 @@ pub(crate) fn reindex_outcome(
     ReindexOutcome::Ready
 }
 
+/// Issue #2211: decide whether the semantic stage may be marked `Ready`
+/// immediately after the C1 fast pass completes, or must wait for a
+/// deferred-embed background pass to actually finish first.
+///
+/// Why: `defer_embed` (issue #923) intentionally embeds nothing synchronously
+/// during the fast pass — the real embedding runs in the background job
+/// spawned by `spawn_deferred_embed_pass` right after `finish_reindex`
+/// returns. Before this gate, `finish_reindex` called
+/// `mark_semantic_ready_graph_in_progress` unconditionally after the batch
+/// loop, which flipped `stages.semantic.status` to `Ready` — carrying
+/// whatever tiny `total_vector_count` happened to be embedded synchronously
+/// before deferral kicked in (observed in production: `embedded: 512` out of
+/// `total: 48742`) — regardless of `defer_embed`. The deferred background
+/// pass (`defer_embed.rs`) never resets the status back to `InProgress`, so
+/// `semantic.status` stayed `"ready"` for the ENTIRE duration of the real
+/// background embed — a false-green signal that callers treating `status`
+/// as authoritative (health checks) trusted immediately after a reindex was
+/// triggered.
+/// What: returns `true` (safe to mark Ready now) whenever embedding actually
+/// ran to completion as part of THIS pass — i.e. not deferred, or no
+/// embedder is wired at all (in which case `defer_embed` is a no-op and
+/// `total_vector_count` is definitionally final). Returns `false` only when
+/// a real deferred background pass is about to be spawned; in that case the
+/// semantic stage is left `InProgress` (already set earlier by
+/// `mark_lexical_ready_semantic_in_progress`) until
+/// `spawn_deferred_embed_pass` itself flips it to `Ready` once embedding
+/// truly completes.
+/// Test: `semantic_ready_now_*` below.
+pub(crate) fn semantic_ready_now(defer_embed: bool, embedder_present: bool) -> bool {
+    !(defer_embed && embedder_present)
+}
+
 /// Canonicalize `root` exactly as the walker does (#602).
 ///
 /// Why: `walk_source_files_with_options` canonicalizes its root via
@@ -366,6 +398,42 @@ mod tests {
             "defer_embed fast pass must be Ready despite zero vectors"
         );
         assert_eq!(outcome.failure_reason(), None);
+    }
+
+    /// Issue #2211 regression: when `defer_embed` is active AND an embedder
+    /// is wired, the semantic stage must NOT be marked Ready right after the
+    /// fast pass — the real embedding happens in a background pass that
+    /// hasn't started yet.
+    /// Test: this test.
+    #[test]
+    fn semantic_ready_now_false_when_deferring_with_embedder() {
+        assert!(
+            !semantic_ready_now(true, true),
+            "must NOT mark semantic Ready synchronously when a real deferred embed pass \
+             is about to be spawned"
+        );
+    }
+
+    /// Issue #2211: without `defer_embed`, embedding always ran synchronously
+    /// as part of this pass, so semantic Ready reflects the true, final state.
+    /// Test: this test.
+    #[test]
+    fn semantic_ready_now_true_when_not_deferring() {
+        assert!(semantic_ready_now(false, true));
+        assert!(semantic_ready_now(false, false));
+    }
+
+    /// Issue #2211: `defer_embed=true` with NO embedder wired is a no-op —
+    /// there is no background pass to wait for (BM25-only / test indexer),
+    /// so it is safe to mark semantic Ready immediately (it stays vacuously
+    /// "ready" with nothing to embed).
+    /// Test: this test.
+    #[test]
+    fn semantic_ready_now_true_when_deferring_without_embedder() {
+        assert!(
+            semantic_ready_now(true, false),
+            "defer_embed without an embedder has no background pass to wait for"
+        );
     }
 
     /// Why: confirms the strip-prefix root resolves a real symlinked directory
