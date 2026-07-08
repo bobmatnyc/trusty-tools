@@ -1,5 +1,33 @@
 # Changelog — trusty-embedderd
 
+## [0.3.5] — 2026-07-07
+
+### Fixed (mitigation for #1633; toolchain root cause deferred to infra decision)
+
+- **Bounded model-init — fail loud instead of hanging forever.** The published
+  binary's `FastEmbedder::new()` model-load call had no timeout at all. On
+  Amazon Linux 2023 / glibc 2.34 hosts, ONNX Runtime CPU(no-arena)
+  execution-provider init deadlocks in `futex_wait_queue` indefinitely (0% CPU,
+  no error, no further log output) — the daemon would sit hung for hours with
+  no HTTP/stdio/UDS listener ever bound, silently degrading semantic search to
+  lexical-only with no signal to the operator. `run_with_args` now races the
+  model load against a bounded timeout (`readiness::run_bounded`, default
+  180 s, overridable via `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS`); on expiry the
+  process exits nonzero with a stderr message naming issue #1633 and the
+  remediation (raise the timeout, or reinstall with
+  `--features embedder-load-dynamic` + `ORT_DYLIB_PATH` on AL2023/older-glibc
+  hosts). Because every transport listener is only bound after model load
+  succeeds, the daemon already could not report readiness while init was
+  outstanding — this change makes the failure observable (bounded, loud exit)
+  instead of an unbounded silent hang.
+- Suspected toolchain root cause (see issue #1633 for full writeup, deferred to
+  an infra/release-workflow decision): the crates.io-published default feature
+  set (`embedder-bundled-ort`) links a statically-bundled ONNX Runtime built
+  assuming glibc >= 2.38; AL2023 ships glibc 2.34. `cargo install` always
+  builds with default features regardless of host glibc, so AL2023 users who
+  `cargo install` never get the already-existing `embedder-load-dynamic` /
+  AL2023 release-asset variant that the GitHub Releases build matrix produces.
+
 ## [0.3.4] — 2026-06-16
 
 ### Changed (BREAKING for the binary; closes part of #1318)
