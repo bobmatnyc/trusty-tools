@@ -1,33 +1,42 @@
-//! AWS Bedrock provider — STUB (real implementation deferred).
+//! AWS Bedrock provider (#1021 phase 1: real Converse-API implementation).
 //!
-//! Why: #1021 establishes the provider abstraction and the `bedrock/*` routing
-//! seam so per-agent model routing can name Bedrock slugs today, while the
-//! actual Bedrock wire integration (SigV4 auth, Converse API tool-choice
-//! mapping, usage extraction) lands in a later ticket. The stub keeps the
-//! factory total and lets routing tests pass without pulling in the AWS SDK.
-//! What: [`BedrockProvider`] implements [`Provider`]. `name` and
-//! `supports_native_tools` are real; `map_tool_choice` and `extract_usage` are
-//! NOT yet implemented and will panic if called — the agent loop never invokes
-//! a Bedrock provider until the real implementation lands, so a panic here is a
-//! loud programmer-error signal rather than a silent wrong answer.
-//! Test: `bedrock::tests::*` cover the implemented methods and assert the stubs
-//! panic.
+//! Why: #1021 established the provider abstraction and the `bedrock/*`
+//! routing seam with a stub that panicked on `map_tool_choice`/`extract_usage`
+//! (the agent loop never called a Bedrock provider yet). This phase wires the
+//! real Bedrock wire integration: the Converse API's own tool-choice JSON
+//! shape and its `TokenUsage` envelope, plus (`crate::llm::dispatch`) the
+//! transport that actually calls Bedrock via `crate::llm::BedrockChatClient`.
+//! What: [`BedrockProvider`] implements [`Provider`]. `map_tool_choice`
+//! returns Converse's own toolChoice JSON shape (`{"auto":{}}`, `{"any":{}}`,
+//! `{"tool":{"name":...}}`, or the sentinel string `"none"` when tools should
+//! be suppressed entirely) — `crate::llm::bedrock::convert::build_tool_config`
+//! interprets exactly this shape (and, for now, the plain OpenAI strings
+//! `agent_loop::build_request` still hardcodes) when building the Converse
+//! request. `extract_usage` delegates to `ChatResponse::token_usage`, the
+//! same conversion `OpenRouterProvider` uses — by the time a Bedrock response
+//! reaches here it has already been mapped into `ChatResponse`'s `UsageBlock`
+//! shape by `crate::llm::bedrock::convert::converse_output_to_chat_response`,
+//! so no Bedrock-specific parsing is needed at this layer.
+//! Test: `bedrock::tests::*` cover `map_tool_choice`'s Converse-shaped output
+//! and `extract_usage`'s delegation; `crate::llm::bedrock::tests` covers the
+//! actual Converse wire conversion this provider's mapping feeds.
 //!
-//! NOTE: Real Bedrock implementation deferred (see #1021 acceptance criteria —
-//! "Stub BedrockProvider needs no change to agent loop").
+//! DEFERRED to a follow-up: cachePoint prompt-caching
+//! (`supports_prompt_caching` stays `false` — see its doc below).
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::traits::{Provider, ToolChoice};
 use crate::llm::ChatResponse;
 use crate::perf::TokenUsage;
 
-/// Stub provider for AWS Bedrock-hosted models (`bedrock/*` slugs).
+/// Provider for AWS Bedrock-hosted models (`bedrock/*` slugs), backed by the
+/// Converse API.
 ///
-/// Why: Reserves the routing target and proves the abstraction is multi-backend
-/// without committing to the AWS SDK surface yet.
-/// What: Zero-sized marker type implementing [`Provider`]; tool-choice mapping
-/// and usage extraction are deferred stubs.
+/// Why: Reserves the routing target and (#1021 phase 1) normalises
+/// tool-choice/usage for the Converse wire shape, which differs from
+/// OpenRouter's OpenAI-compatible schema on both axes.
+/// What: Zero-sized marker type implementing [`Provider`].
 /// Test: `bedrock::tests::*`.
 #[derive(Debug, Clone, Default)]
 pub struct BedrockProvider;
@@ -48,18 +57,47 @@ impl Provider for BedrockProvider {
         "bedrock"
     }
 
-    fn map_tool_choice(&self, _choice: ToolChoice) -> Value {
-        // NOTE: Real implementation deferred. Bedrock's Converse API expresses
-        // tool choice differently from the OpenAI schema; mapping lands with the
-        // full Bedrock integration. The agent loop does not call this stub yet.
-        unimplemented!("BedrockProvider::map_tool_choice is a deferred stub (#1021)")
+    /// Translate a neutral [`ToolChoice`] into Converse's own toolChoice JSON
+    /// shape.
+    ///
+    /// Why: Converse's `toolChoice` is `{"auto":{}}` / `{"any":{}}` /
+    /// `{"tool":{"name":...}}` — structurally different from OpenAI's bare
+    /// strings and `{"type":"function","function":{"name":...}}` object.
+    /// `crate::llm::bedrock::convert::build_tool_config`'s
+    /// `interpret_tool_choice` accepts BOTH this shape and the OpenAI shape
+    /// (since `agent_loop::build_request` currently sends the OpenAI
+    /// `"auto"` string unconditionally — #1021 doesn't rewire that call
+    /// site), so wiring this mapping in later is a drop-in change with no
+    /// transport update required.
+    /// What: `None` -> `"none"` (a sentinel string; Converse has no "don't
+    /// call any tool" choice, so the transport omits `toolConfig` entirely
+    /// when it sees this). `Auto` -> `{"auto":{}}`. `Required` -> `{"any":{}}`
+    /// (Converse's "must call some tool" choice). `Function(name)` ->
+    /// `{"tool":{"name":name}}`.
+    /// Test: `bedrock::tests::map_tool_choice_*`.
+    fn map_tool_choice(&self, choice: ToolChoice) -> Value {
+        match choice {
+            ToolChoice::None => json!("none"),
+            ToolChoice::Auto => json!({"auto": {}}),
+            ToolChoice::Required => json!({"any": {}}),
+            ToolChoice::Function(name) => json!({"tool": {"name": name}}),
+        }
     }
 
-    fn extract_usage(&self, _response: &ChatResponse) -> TokenUsage {
-        // NOTE: Real implementation deferred. Bedrock reports usage in its own
-        // response envelope, not the OpenAI `usage` block parsed by
-        // `ChatResponse`. The agent loop does not call this stub yet.
-        unimplemented!("BedrockProvider::extract_usage is a deferred stub (#1021)")
+    /// Extract canonical token usage from a (Bedrock-originated) chat response.
+    ///
+    /// Why: By the time a Bedrock Converse response reaches `Provider`, the
+    /// transport (`crate::llm::bedrock::convert::converse_output_to_chat_response`)
+    /// has already mapped Converse's `TokenUsage` (`inputTokens`/
+    /// `outputTokens`/`cacheReadInputTokens`/`cacheWriteInputTokens`) into
+    /// `ChatResponse.usage: UsageBlock` — the same canonical shape every
+    /// other provider's response is normalised into. No Bedrock-specific
+    /// parsing is needed at this layer.
+    /// What: Delegates to `ChatResponse::token_usage` (identical to
+    /// `OpenRouterProvider::extract_usage`).
+    /// Test: `bedrock::tests::extract_usage_maps_fields`.
+    fn extract_usage(&self, response: &ChatResponse) -> TokenUsage {
+        response.clone().token_usage()
     }
 
     fn supports_native_tools(&self) -> bool {
@@ -69,20 +107,22 @@ impl Provider for BedrockProvider {
     }
 
     fn supports_prompt_caching(&self) -> bool {
-        // Bedrock's Converse API expresses prompt caching via its own
-        // `cachePoint` block shape, not Anthropic's `cache_control` marker
-        // (#2156) — a different wire format this stub does not implement.
-        // `false` until the real Bedrock integration lands so
-        // `agent_loop::build_request` never emits a marker Bedrock can't
-        // interpret.
+        // DEFERRED to a follow-up (#1021 phase 2): Bedrock's Converse API
+        // expresses prompt caching via its own `cachePoint` block shape, not
+        // Anthropic's `cache_control` marker (#2156) — a different wire
+        // format this phase does not implement. `false` until that follow-up
+        // lands so `agent_loop::build_request` never emits a marker Bedrock
+        // can't interpret (harmless if it did — the field would just be
+        // ignored — but sending a marker for an unimplemented feature is
+        // misleading).
         false
     }
 
     fn wants_detailed_usage(&self) -> bool {
         // `RequestUsageConfig`/`usage: {"include": true}` is an
         // OpenRouter-specific OpenAI-compat wire directive; Bedrock's
-        // Converse API reports usage in its own response envelope entirely,
-        // so this must stay `false` until the real Bedrock integration lands.
+        // Converse API always returns its `usage` envelope unconditionally,
+        // so there is nothing to request.
         false
     }
 }
@@ -96,7 +136,7 @@ mod tests {
     /// `name()` returns `"bedrock"`.
     ///
     /// Why: Routing and telemetry distinguish Bedrock from OpenRouter by name.
-    /// What: Construct the stub, assert the name.
+    /// What: Construct the provider, assert the name.
     /// Test: this test.
     #[test]
     fn name_is_bedrock() {
@@ -113,11 +153,11 @@ mod tests {
         assert!(BedrockProvider::new().supports_native_tools());
     }
 
-    /// Bedrock does NOT report Anthropic-style prompt-caching support
-    /// (#2156).
+    /// Bedrock does NOT report Anthropic-style prompt-caching support yet
+    /// (#2156, deferred to a follow-up).
     ///
     /// Why: Bedrock's Converse API caching uses a different wire shape
-    /// (`cachePoint` blocks); until that integration lands, `build_request`
+    /// (`cachePoint` blocks); until that follow-up lands, `build_request`
     /// must never emit an Anthropic `cache_control` marker for a Bedrock
     /// route.
     /// What: Assert `supports_prompt_caching()` is `false`.
@@ -127,12 +167,10 @@ mod tests {
         assert!(!BedrockProvider::new().supports_prompt_caching());
     }
 
-    /// Bedrock does NOT request OpenRouter-style detailed usage accounting
-    /// (response-side cache-usage fix).
+    /// Bedrock does NOT request OpenRouter-style detailed usage accounting.
     ///
     /// Why: `usage: {"include": true}` is an OpenRouter-only OpenAI-compat
-    /// directive; sending it to Bedrock (once implemented) would be a
-    /// meaningless no-op at best.
+    /// directive; Bedrock always returns its usage envelope unconditionally.
     /// What: Assert `wants_detailed_usage()` is `false`.
     /// Test: this test.
     #[test]
@@ -140,28 +178,62 @@ mod tests {
         assert!(!BedrockProvider::new().wants_detailed_usage());
     }
 
-    /// `map_tool_choice` panics while stubbed.
+    /// `map_tool_choice` maps the three scalar policies to Converse's own
+    /// JSON shape (NOT the OpenAI shape `OpenRouterProvider` uses).
     ///
-    /// Why: Document and lock in the deferred-stub contract so a future caller
-    /// hits a loud error rather than a silent wrong mapping.
-    /// What: Expect the call to panic.
+    /// Why: This is the exact JSON `crate::llm::bedrock::convert::build_tool_config`
+    /// interprets; a wrong shape here would silently fail to force/suppress
+    /// tool calls once this mapping is wired into `agent_loop::build_request`.
+    /// What: Map each scalar variant, assert the JSON value.
     /// Test: this test.
     #[test]
-    #[should_panic(expected = "deferred stub")]
-    fn map_tool_choice_is_stubbed() {
-        let _ = BedrockProvider::new().map_tool_choice(ToolChoice::Auto);
+    fn map_tool_choice_scalars() {
+        let p = BedrockProvider::new();
+        assert_eq!(p.map_tool_choice(ToolChoice::None), json!("none"));
+        assert_eq!(p.map_tool_choice(ToolChoice::Auto), json!({"auto": {}}));
+        assert_eq!(p.map_tool_choice(ToolChoice::Required), json!({"any": {}}));
     }
 
-    /// `extract_usage` panics while stubbed.
+    /// `map_tool_choice(Function)` produces Converse's specific-tool selector
+    /// object.
     ///
-    /// Why: Same deferred-stub contract for usage extraction.
-    /// What: Expect the call to panic.
+    /// Why: Forcing a specific tool requires Converse's
+    /// `{"tool":{"name":...}}` shape, not OpenAI's
+    /// `{"type":"function","function":{"name":...}}`.
+    /// What: Map `Function("search_code")`, assert the object structure.
     /// Test: this test.
     #[test]
-    #[should_panic(expected = "deferred stub")]
-    fn extract_usage_is_stubbed() {
-        let fixture = r#"{"id":"x","choices":[],"usage":{}}"#;
+    fn map_tool_choice_function() {
+        let p = BedrockProvider::new();
+        let v = p.map_tool_choice(ToolChoice::Function("search_code".into()));
+        assert_eq!(v, json!({"tool": {"name": "search_code"}}));
+    }
+
+    /// `extract_usage` maps a (pre-normalised) usage block into `TokenUsage`,
+    /// identically to `OpenRouterProvider::extract_usage`.
+    ///
+    /// Why: By the time a response reaches `Provider::extract_usage`, the
+    /// Bedrock transport has already normalised Converse's usage envelope
+    /// into `ChatResponse.usage`; this test pins that `BedrockProvider`
+    /// performs no extra (and potentially inconsistent) transformation.
+    /// What: Deserialise a fixture shaped like the Bedrock/Anthropic-native
+    /// flat usage fields, extract usage, assert each field.
+    /// Test: this test.
+    #[test]
+    fn extract_usage_maps_fields() {
+        let fixture = r#"{
+          "id": "bedrock-1",
+          "model": "us.anthropic.claude-sonnet-4-6",
+          "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "end_turn"}],
+          "usage": {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120,
+                    "cache_read_input_tokens": 30, "cache_creation_input_tokens": 10}
+        }"#;
         let resp: ChatResponse = serde_json::from_str(fixture).expect("deserialise");
-        let _ = BedrockProvider::new().extract_usage(&resp);
+        let p = BedrockProvider::new();
+        let usage = p.extract_usage(&resp);
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 20);
+        assert_eq!(usage.cache_read_tokens, 30);
+        assert_eq!(usage.cache_creation_tokens, 10);
     }
 }
