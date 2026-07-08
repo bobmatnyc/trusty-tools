@@ -13,14 +13,35 @@
 //! selected transport. Returns `Ok(())` on clean shutdown; propagates any
 //! startup error.
 //!
+//! Issue #1633: the ONNX model load is bounded by `readiness::run_bounded`
+//! (default 180 s, `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS`). A provider-init
+//! deadlock (observed on AL2023/glibc 2.34 — the CPU(no-arena) execution
+//! provider blocks in `futex_wait_queue` indefinitely) now fails loudly with
+//! a nonzero exit and an actionable stderr message instead of hanging the
+//! process forever with no HTTP/stdio/UDS listener ever bound. Because every
+//! transport listener is only started *after* this call returns `Ok`, the
+//! daemon structurally cannot report readiness (`/health`, a stdio response,
+//! a UDS accept) while init is still outstanding — there is no code path that
+//! answers anything until model load has actually succeeded.
+//!
 //! Test: `cargo test -p trusty-embedderd` (unit + integration).
 //! The `run()` path is exercised indirectly by `embedder_supervisor_e2e`
-//! integration tests in `trusty-search` (which spawn the binary).
+//! integration tests in `trusty-search` (which spawn the binary). The bounded
+//! model-init mechanics are unit-tested in `readiness` against synthetic
+//! futures (no ONNX runtime required).
 
 pub mod batch_queue;
 pub mod protocol;
 pub mod stdio_server;
 pub mod uds_server;
+
+// Why (issue #1633): bounds the model-init call below so an ORT
+// provider-init deadlock (observed on AL2023/glibc 2.34) fails loudly within
+// a fixed ceiling instead of hanging the process forever. Private — no
+// public API surface change, gated behind `http-server` since that is the
+// only place `FastEmbedder::new()` is called from this crate.
+#[cfg(feature = "http-server")]
+mod readiness;
 
 // Why (issue #250): the daemon's HTTP startup sequence (`run`, `run_with_args`,
 // `AppState`, `health_handler`, `embed_handler`, and the `Args` clap struct
@@ -229,11 +250,17 @@ pub async fn run_with_args(args: Args) -> Result<()> {
         );
     }
 
-    // Load the ONNX model (expensive one-time init).
+    // Load the ONNX model (expensive one-time init), bounded so a
+    // provider-init deadlock (issue #1633 — AL2023/glibc 2.34) fails loudly
+    // instead of hanging forever with no listener ever bound.
     info!("loading AllMiniLML6V2Q model...");
-    let embedder = FastEmbedder::new()
-        .await
-        .context("failed to load AllMiniLML6V2Q model")?;
+    let init_timeout = readiness::model_init_timeout();
+    let embedder = readiness::run_bounded(
+        "FastEmbedder::new (AllMiniLML6V2Q model load)",
+        init_timeout,
+        FastEmbedder::new(),
+    )
+    .await?;
     let dim = embedder.dimension();
     info!("model loaded: dim={dim}");
 
