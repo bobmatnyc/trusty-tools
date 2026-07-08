@@ -287,6 +287,83 @@ fn build_converse_messages_omits_cache_point_when_not_marked() {
     );
 }
 
+/// A non-system message marked cache-eligible (`cache_control: Some(...)`,
+/// exactly as `agent_loop::mark_cache_breakpoint_on_history` produces it)
+/// gets a trailing Bedrock `cachePoint` content block appended after its own
+/// content, inside the SAME `Message` — the rolling-history follow-up to
+/// #2260.
+///
+/// Why: Without this, `agent_loop`'s rolling-history marker would be a lie
+/// on the Bedrock transport: the growing transcript (the dominant token
+/// cost) would never actually get a native `cachePoint`, so cache_read would
+/// stay 0 regardless of what `build_request` marks.
+/// What: Convert a request with an unmarked user message followed by a
+/// marked assistant message; assert the assistant `Message`'s content ends
+/// with a `CachePoint` block immediately after its `Text` block, and the
+/// user `Message` (unmarked) has no such block.
+/// Test: this test.
+#[test]
+fn build_converse_messages_emits_cache_point_after_marked_history_message() {
+    let mut assistant_msg = ChatMessage::assistant("on it");
+    assistant_msg.cache_control = Some(CacheControl::ephemeral());
+    let req = minimal_request(vec![
+        ChatMessage::system("s"),
+        ChatMessage::user("do the thing"),
+        assistant_msg,
+    ]);
+    let (_, messages) = build_converse_messages(&req).expect("convert");
+
+    // user(unmarked), assistant(marked) — different roles, not merged.
+    assert_eq!(messages.len(), 2);
+    assert_eq!(
+        messages[0].content().len(),
+        1,
+        "unmarked user message must not get a cachePoint"
+    );
+    assert!(matches!(&messages[0].content()[0], ContentBlock::Text(_)));
+
+    assert_eq!(
+        messages[1].content().len(),
+        2,
+        "expected Text + CachePoint on the marked assistant message"
+    );
+    assert!(matches!(&messages[1].content()[0], ContentBlock::Text(_)));
+    assert!(matches!(
+        &messages[1].content()[1],
+        ContentBlock::CachePoint(_)
+    ));
+}
+
+/// A non-system message WITHOUT `cache_control` set never gets a
+/// `cachePoint`, regardless of role or content — the regression guard for
+/// the rolling-history follow-up to #2260.
+///
+/// Why: A run outside the cache-eligible gate (Parity mode, or a
+/// provider/model that hasn't verified the passthrough) must produce
+/// byte-identical Converse requests to pre-rolling-history behaviour.
+/// What: Convert a request with ordinary (unmarked) user/assistant/tool
+/// messages; assert none of the resulting Converse messages contain a
+/// `CachePoint` block.
+/// Test: this test.
+#[test]
+fn build_converse_messages_omits_cache_point_for_unmarked_history_messages() {
+    let req = minimal_request(vec![
+        ChatMessage::system("s"),
+        ChatMessage::user("do two things"),
+        ChatMessage::assistant("on it"),
+    ]);
+    let (_, messages) = build_converse_messages(&req).expect("convert");
+
+    for message in &messages {
+        for block in message.content() {
+            assert!(
+                !matches!(block, ContentBlock::CachePoint(_)),
+                "no message should carry a cachePoint when unmarked"
+            );
+        }
+    }
+}
+
 /// A large-enough LAST tool definition, marked cache-eligible, gets a
 /// Bedrock `cachePoint` appended after all `ToolSpec` entries.
 ///
