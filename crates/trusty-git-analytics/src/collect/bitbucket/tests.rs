@@ -182,6 +182,182 @@ async fn fetch_pull_requests_follows_next_cursor() {
     assert!(prs[1].commit_shas.contains("abc123"));
 }
 
+/// The per-PR commits endpoint follows its own `next` cursor across two
+/// pages, returning the union of both pages' SHAs in order.
+///
+/// Why: this is the same cursor-pagination contract as the PR list endpoint
+/// (issue #841's fix reuses it for `fetch_pr_commits`); a regression here
+/// would silently truncate large PRs to their first page of commits.
+#[tokio::test]
+async fn fetch_pr_commits_follows_next_cursor() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    let page2_url = format!("{base}/repositories/acme/widgets/pullrequests/9/commits?page=2");
+    let page1 = serde_json::json!({
+        "values": [{"hash": "1111111111111111111111111111111111111a"}],
+        "next": page2_url,
+    });
+    let page2 = serde_json::json!({
+        "values": [{"hash": "2222222222222222222222222222222222222b"}],
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/repositories/acme/widgets/pullrequests/9/commits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page1.clone()))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repositories/acme/widgets/pullrequests/9/commits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page2.clone()))
+        .mount(&server)
+        .await;
+
+    let client = BitbucketClient::new(&BitbucketConfig {
+        token: Some("dummy".into()),
+        workspace: Some("acme".into()),
+        repo_slug: Some("widgets".into()),
+        fetch_prs: true,
+        api_base_url: Some(base),
+        ..Default::default()
+    })
+    .expect("client builds");
+
+    let shas = client.fetch_pr_commits(9).await.expect("fetch");
+    assert_eq!(
+        shas,
+        vec![
+            "1111111111111111111111111111111111111a".to_string(),
+            "2222222222222222222222222222222222222b".to_string(),
+        ]
+    );
+}
+
+/// `fetch_pull_requests` persists the *full* per-PR commit list (from the
+/// dedicated commits endpoint), not the abbreviated `merge_commit` hash —
+/// the regression this issue (#841) was filed against.
+///
+/// Why: the PR list payload alone yields only a short, often-unjoinable
+/// merge SHA; this proves the enrichment call overwrites it with the real,
+/// fully-qualified, potentially multi-commit list.
+#[tokio::test]
+async fn fetch_pull_requests_persists_full_commit_list() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    let prs_page = serde_json::json!({
+        "values": [{
+            "id": 5,
+            "title": "multi-commit PR",
+            "state": "MERGED",
+            "created_on": "2024-01-01T00:00:00Z",
+            "updated_on": "2024-01-02T00:00:00Z",
+            "merge_commit": {"hash": "36c721d47ff0"}
+        }]
+    });
+    let commits_page = serde_json::json!({
+        "values": [
+            {"hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            {"hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+        ]
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/repositories/acme/widgets/pullrequests"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(prs_page))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repositories/acme/widgets/pullrequests/5/commits"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(commits_page))
+        .mount(&server)
+        .await;
+
+    let client = BitbucketClient::new(&BitbucketConfig {
+        token: Some("dummy".into()),
+        workspace: Some("acme".into()),
+        repo_slug: Some("widgets".into()),
+        fetch_prs: true,
+        api_base_url: Some(base),
+        ..Default::default()
+    })
+    .expect("client builds");
+
+    let prs = client.fetch_pull_requests().await.expect("fetch");
+    assert_eq!(prs.len(), 1);
+    let shas: Vec<String> =
+        serde_json::from_str(&prs[0].commit_shas).expect("commit_shas is a JSON array");
+    assert_eq!(
+        shas,
+        vec![
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+        ]
+    );
+    // The abbreviated merge SHA must NOT be what gets persisted.
+    assert!(!prs[0].commit_shas.contains("36c721d47ff0"));
+}
+
+/// When the per-PR commits endpoint errors (e.g. transient 5xx exhausting
+/// retries), `fetch_pull_requests` degrades gracefully: the PR is still
+/// returned, keeping the merge-commit fallback rather than failing the
+/// whole batch or dropping the PR.
+///
+/// Why: one PR's enrichment call hiccuping must not take down collection
+/// for every other PR in the repository (same partial-success philosophy
+/// as the GitHub per-repo fetch, issue #87).
+#[tokio::test]
+async fn fetch_pull_requests_falls_back_on_commit_fetch_error() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    let prs_page = serde_json::json!({
+        "values": [{
+            "id": 6,
+            "title": "commits endpoint unreachable",
+            "state": "MERGED",
+            "created_on": "2024-01-01T00:00:00Z",
+            "updated_on": "2024-01-02T00:00:00Z",
+            "merge_commit": {"hash": "deadbeefcafe"}
+        }]
+    });
+
+    Mock::given(method("GET"))
+        .and(path("/repositories/acme/widgets/pullrequests"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(prs_page))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repositories/acme/widgets/pullrequests/6/commits"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let client = BitbucketClient::new(&BitbucketConfig {
+        token: Some("dummy".into()),
+        workspace: Some("acme".into()),
+        repo_slug: Some("widgets".into()),
+        fetch_prs: true,
+        api_base_url: Some(base),
+        ..Default::default()
+    })
+    .expect("client builds");
+
+    let prs = client.fetch_pull_requests().await.expect("fetch");
+    assert_eq!(prs.len(), 1);
+    assert!(prs[0].commit_shas.contains("deadbeefcafe"));
+}
+
 /// Build a `BitbucketConfig` with workspace/repo set and the given auth
 /// fields, so each auth test only states what it actually cares about.
 fn auth_config(
