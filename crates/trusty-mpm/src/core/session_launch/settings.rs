@@ -758,10 +758,12 @@ pub(super) fn clean_global_trusty_memory_hooks(settings_path: &Path) -> Result<(
 /// without ever touching a genuinely user-customized `statusLine.command`.
 /// What: reads the existing `.claude/settings.json` (or `{}` when absent/invalid).
 /// When `statusLine` is absent, inserts it with the resolved absolute command.
-/// When present and it matches [`is_stale_bare_statusline_command`], rewrites
-/// ONLY its `command` field in place. Any other existing `statusLine` value —
-/// a genuine user customization — is left completely untouched. The file is
-/// written back pretty-printed only when a change was actually made.
+/// When present and it matches [`is_stale_statusline_command`] (a bare default,
+/// OR a `"<binary> statusline"` command whose absolute binary is ephemeral or
+/// no longer on disk — #2229), rewrites ONLY its `command` field in place. Any
+/// other existing `statusLine` value — a genuine user customization pointing at
+/// an existing binary — is left completely untouched. The file is written back
+/// pretty-printed only when a change was actually made.
 /// Test: `write_status_line_injects_when_absent`,
 /// `write_status_line_skips_when_already_set`,
 /// `write_status_line_preserves_user_config`,
@@ -796,7 +798,7 @@ pub(super) fn write_status_line(project_dir: &Path) -> Result<(), PrepError> {
             );
             true
         }
-        Some(existing) if is_stale_bare_statusline_command(existing) => {
+        Some(existing) if is_stale_statusline_command(existing) => {
             let resolved = resolve_statusline_command();
             match obj
                 .get_mut("statusLine")
@@ -877,6 +879,50 @@ pub(super) fn is_stale_bare_statusline_command(entry: &serde_json::Value) -> boo
             .is_some_and(|cmd| KNOWN_BARE_STATUSLINE_COMMANDS.contains(&cmd))
 }
 
+/// Whether an existing `statusLine` entry is a broken/stale trusty-mpm default
+/// that [`write_status_line`] / `ensure_settings_defaults` may safely re-resolve
+/// — a strict superset of [`is_stale_bare_statusline_command`].
+///
+/// Why (#2229): the original heal recognised ONLY the exact pre-#1914 bare
+/// literals; every other absolute `statusLine.command` was treated as an
+/// untouchable user customization. But a command baked from an ephemeral
+/// `current_exe()` (`.../target/debug/deps/tm statusline`, or a worktree path)
+/// is NOT a customization — it is our own output pointing at a build artifact
+/// that no longer exists on disk, so the statusline silently breaks and never
+/// self-heals. This predicate additionally flags a `"<binary> statusline"`
+/// command whose absolute binary path is ephemeral or missing on disk, while
+/// still leaving a genuine customization that points at an EXISTING,
+/// non-ephemeral binary completely alone.
+/// What: returns `true` when `entry.type == "command"` and either (a) the
+/// command is one of [`KNOWN_BARE_STATUSLINE_COMMANDS`], or (b) the command has
+/// our managed `"<binary> statusline"` shape AND the binary token is an
+/// absolute path that is either an ephemeral build path
+/// ([`trusty_common::bin_resolve::is_ephemeral_build_path`]) or does not exist.
+/// A command not ending in ` statusline`, or whose absolute binary still exists
+/// and is non-ephemeral, is left untouched.
+/// Test: `is_stale_statusline_command_flags_missing_and_ephemeral`,
+/// `is_stale_statusline_command_respects_existing_custom_binary`.
+pub(crate) fn is_stale_statusline_command(entry: &serde_json::Value) -> bool {
+    // Reuse the strict bare-default fingerprint for the pre-#1914 literals so
+    // that predicate stays the single source of truth for "our own bare
+    // default", then extend it with the ephemeral/missing absolute-path check.
+    if is_stale_bare_statusline_command(entry) {
+        return true;
+    }
+    if entry.get("type").and_then(serde_json::Value::as_str) != Some("command") {
+        return false;
+    }
+    let Some(cmd) = entry.get("command").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(binary) = cmd.strip_suffix(" statusline") else {
+        return false;
+    };
+    let path = Path::new(binary);
+    path.is_absolute()
+        && (trusty_common::bin_resolve::is_ephemeral_build_path(path) || !path.exists())
+}
+
 /// Resolve the absolute `<binary> statusline` command to write into
 /// `statusLine.command`.
 ///
@@ -937,12 +983,15 @@ fn resolve_statusline_binary() -> String {
 /// `has_prior_conversation_in` injected-I/O-root pattern used elsewhere in
 /// this crate (`crate::runtime::claude_code`).
 /// What: returns `current_exe()`'s path as a `String` when it resolves to
-/// valid UTF-8; else the first hit of `path_lookup` over [`STATUSLINE_BIN_NAMES`]
+/// valid UTF-8 AND is not an ephemeral build/worktree path (#2229 — a
+/// `target/debug` or worktree exe would bake a path that 404s after a rebuild);
+/// else the first hit of `path_lookup` over [`STATUSLINE_BIN_NAMES`]
 /// (`"tm"` then `"trusty-mpm"` — #1914 review finding 1: a bare single-name
 /// PATH lookup reproduces the original bug on a `trusty-mpm`-only install);
 /// else the literal `"tm"` so the statusline segment degrades to pre-#1914
 /// behaviour rather than disappearing outright.
 /// Test: `resolve_statusline_binary_with_prefers_current_exe`,
+/// `resolve_statusline_binary_with_rejects_ephemeral_current_exe`,
 /// `resolve_statusline_binary_with_falls_back_to_path_lookup`,
 /// `resolve_statusline_binary_with_falls_back_to_trusty_mpm_name`,
 /// `resolve_statusline_binary_with_falls_back_to_bare_name`.
@@ -951,6 +1000,7 @@ pub(super) fn resolve_statusline_binary_with(
     path_lookup: impl Fn(&str) -> Option<PathBuf>,
 ) -> String {
     if let Ok(exe) = current_exe()
+        && !trusty_common::bin_resolve::is_ephemeral_build_path(&exe)
         && let Some(s) = exe.to_str()
     {
         return s.to_string();

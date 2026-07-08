@@ -3,8 +3,9 @@ use super::search_index::{
 };
 use super::settings::{
     clean_global_trusty_memory_hooks, deploy_output_style, inject_trusty_memory_mcp,
-    is_stale_bare_statusline_command, preseed_workspace_trust, resolve_statusline_binary_with,
-    trusty_memory_mcp_value, write_output_style, write_project_hooks, write_status_line,
+    is_stale_bare_statusline_command, is_stale_statusline_command, preseed_workspace_trust,
+    resolve_statusline_binary_with, trusty_memory_mcp_value, write_output_style,
+    write_project_hooks, write_status_line,
 };
 use super::*;
 use tempfile::tempdir;
@@ -1815,12 +1816,19 @@ fn prepare_session_config_style_overrides_manifest() {
 /// the test binary's path traverses a symlink (e.g. macOS `/tmp` ->
 /// `/private/tmp`).
 fn assert_resolved_statusline_command(cmd: &str) {
-    let exe = std::env::current_exe().expect("current_exe resolvable in test process");
-    let exe = exe.canonicalize().unwrap_or(exe);
-    let expected = format!("{} statusline", exe.to_str().expect("utf8 test exe path"));
-    assert_eq!(
-        cmd, expected,
-        "command must be '<current_exe> statusline', got {cmd}"
+    // #2229: the resolved statusline command must invoke the `statusline`
+    // subcommand and must NOT bake an ephemeral build/worktree path (the test
+    // process's own `current_exe()` is `target/debug/deps/...`, exactly the path
+    // that must be rejected). The binary is either a stable PATH-resolved
+    // install (`~/.cargo/bin/tm`) or the bare `tm`/`trusty-mpm` fallback — never
+    // the transient artifact — so we assert the invariant, not an exact path
+    // (which would depend on whether `tm` is installed in the test env).
+    let binary = cmd
+        .strip_suffix(" statusline")
+        .unwrap_or_else(|| panic!("command must end with ' statusline', got {cmd}"));
+    assert!(
+        !trusty_common::bin_resolve::is_ephemeral_build_path(std::path::Path::new(binary)),
+        "resolved statusline binary must not be an ephemeral build path, got {binary}"
     );
 }
 
@@ -1979,6 +1987,51 @@ fn is_stale_bare_statusline_command_ignores_non_command_type() {
     ));
 }
 
+// ── is_stale_statusline_command tests (#2229) ─────────────────────────────────
+
+#[test]
+fn is_stale_statusline_command_flags_missing_and_ephemeral() {
+    // Bare pre-#1914 defaults are stale (superset of is_stale_bare).
+    assert!(is_stale_statusline_command(
+        &serde_json::json!({"type": "command", "command": "tm statusline"})
+    ));
+    // An ephemeral build path is stale even though it is absolute.
+    assert!(is_stale_statusline_command(&serde_json::json!({
+        "type": "command",
+        "command": "/repo/target/debug/deps/trusty_mpm-abc statusline"
+    })));
+    // A worktree path is stale.
+    assert!(is_stale_statusline_command(&serde_json::json!({
+        "type": "command",
+        "command": "/repo/.claude/worktrees/fix-1/target/release/tm statusline"
+    })));
+    // An absolute path that does not exist on disk is stale.
+    assert!(is_stale_statusline_command(&serde_json::json!({
+        "type": "command",
+        "command": "/no/such/dir/definitely-missing-2229 statusline"
+    })));
+}
+
+#[cfg(unix)]
+#[test]
+fn is_stale_statusline_command_respects_existing_custom_binary() {
+    // An absolute binary that EXISTS and is not ephemeral is a genuine
+    // customization — never flagged. `/bin/sh` exists on every supported unix.
+    assert!(!is_stale_statusline_command(&serde_json::json!({
+        "type": "command",
+        "command": "/bin/sh statusline"
+    })));
+    // A command that is not our "<binary> statusline" shape is never flagged.
+    assert!(!is_stale_statusline_command(
+        &serde_json::json!({"type": "command", "command": "my-custom-line"})
+    ));
+    // Non-command entries are ignored.
+    assert!(!is_stale_statusline_command(&serde_json::json!({
+        "type": "text",
+        "command": "/no/such/dir/x statusline"
+    })));
+}
+
 // ── resolve_statusline_binary_with tests ──────────────────────────────────────
 
 #[test]
@@ -1988,6 +2041,27 @@ fn resolve_statusline_binary_with_prefers_current_exe() {
         |_name| Some(PathBuf::from("/should/not/be/used/tm")),
     );
     assert_eq!(resolved, "/abs/path/to/tm");
+}
+
+#[test]
+fn resolve_statusline_binary_with_rejects_ephemeral_current_exe() {
+    // #2229: when current_exe() is an ephemeral build/worktree path it must be
+    // rejected so the PATH-lookup fallback (a stable installed binary) is used
+    // instead — never the transient artifact.
+    let resolved = resolve_statusline_binary_with(
+        || Ok(PathBuf::from("/repo/target/debug/deps/trusty_mpm-abc123")),
+        |name| {
+            assert_eq!(
+                name, "tm",
+                "path lookup must search for the bare 'tm' name first"
+            );
+            Some(PathBuf::from("/opt/homebrew/bin/tm"))
+        },
+    );
+    assert_eq!(
+        resolved, "/opt/homebrew/bin/tm",
+        "an ephemeral current_exe must be rejected in favour of the PATH-resolved install"
+    );
 }
 
 #[test]

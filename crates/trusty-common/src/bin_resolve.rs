@@ -174,9 +174,71 @@ fn candidate(dir: &Path, name: &str) -> Option<PathBuf> {
     }
 }
 
+/// Path segments that mark a binary as an ephemeral (non-installed) build.
+///
+/// Why: a `target/debug`/`target/release` binary and any binary living under a
+/// git worktree directory are rebuilt/deleted on the next `cargo` invocation or
+/// worktree cleanup. Baking such a path into a persisted, shared config
+/// (managed hook commands, statusline command) leaves a stale absolute path
+/// that 404s once the build artifact is gone (#2229).
+/// What: the worktree layout markers this workspace uses
+/// (`.claude/worktrees/`, `.base/.worktrees/`) plus the two Cargo build
+/// profiles. Matched as substrings so `deps/`-nested and profile-suffixed
+/// variants are all covered.
+const EPHEMERAL_PATH_SEGMENTS: &[&str] = &[
+    "target/debug",
+    "target/release",
+    ".claude/worktrees/",
+    ".base/.worktrees/",
+];
+
+/// Whether `path` points inside an ephemeral build/worktree location that will
+/// not survive a rebuild or worktree cleanup.
+///
+/// Why: `std::env::current_exe()` returns a `target/debug/deps/...` path when
+/// `tm`/`trusty-mpm` runs from a worktree or a debug build. Persisting that
+/// path into the SHARED global `settings.json` (hook commands, statusline)
+/// breaks every managed session once the artifact is rebuilt away (#2229).
+/// Callers use this to reject `current_exe()` and fall back to a stable,
+/// PATH-resolved installed binary instead.
+/// What: returns `true` when the path's string form contains any of
+/// [`EPHEMERAL_PATH_SEGMENTS`]. Uses a lossy string comparison so non-UTF-8
+/// path components degrade to "not ephemeral" rather than panicking.
+/// Test: `is_ephemeral_build_path_flags_build_and_worktree_paths`,
+/// `is_ephemeral_build_path_accepts_installed_paths`.
+pub fn is_ephemeral_build_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    EPHEMERAL_PATH_SEGMENTS.iter().any(|seg| s.contains(seg))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_ephemeral_build_path_flags_build_and_worktree_paths() {
+        for p in [
+            "/Users/x/trusty-tools/target/debug/deps/trusty_mpm-abc123",
+            "/Users/x/trusty-tools/target/release/tm",
+            "/Users/x/repo/.claude/worktrees/fix-123/target/debug/tm",
+            "/Users/x/repo/.base/.worktrees/abc/crates/trusty-mpm",
+        ] {
+            assert!(
+                is_ephemeral_build_path(Path::new(p)),
+                "{p} must be flagged as an ephemeral build path"
+            );
+        }
+    }
+
+    #[test]
+    fn is_ephemeral_build_path_accepts_installed_paths() {
+        for p in ["/Users/x/.cargo/bin/trusty-mpm", "/usr/local/bin/tm", "tm"] {
+            assert!(
+                !is_ephemeral_build_path(Path::new(p)),
+                "{p} must NOT be flagged as an ephemeral build path"
+            );
+        }
+    }
 
     #[test]
     fn daemon_path_dirs_orders_user_before_system() {
