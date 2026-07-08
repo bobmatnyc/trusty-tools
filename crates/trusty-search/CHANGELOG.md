@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.32.1] — 2026-07-07
+
+### Fixed — re-cut with P0 corpus-identity fixes (supersedes 0.32.0)
+
+- **0.32.1 = 0.32.0 versioning + 0.31.1's P0 fixes.** Version 0.32.0 was
+  published out-of-band (PR #2209) without corpus-identity hardening. This
+  re-cut applies the essential P0 fixes from 0.31.1 to the 0.32.0 version
+  line, becoming the latest published version. Consume 0.32.1 instead of 0.32.0.
+  
+  P0 fixes included (from 0.31.1):
+  - **Issues #2203, #1870 (corpus open failure):** failed durable-corpus open no
+    longer leaves `semantic`/`graph` falsely reporting `"ready"` (#2203).
+  - **Issue #2211 (`defer_embed` premature ready):** `stages.semantic.status`
+    no longer flips to `"ready"` prematurely during deferred embedding.
+  - **Issue #2179 (HNSW key-migration):** `rewrite_keys_to_relative` (M003
+    one-time migration) now genuinely promotes a view-mode store to mutable.
+
+---
+
 ## [0.31.1] — 2026-07-07
 
 ### Fixed — corpus/status desync bug cluster (issues #2203, #1870, #2211, #2179)
