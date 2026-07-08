@@ -384,18 +384,32 @@ pub(crate) async fn launch(
     Ok(())
 }
 
-/// `connect` subcommand — start or attach to a session without deployment.
+/// `connect` subcommand — start or attach to a session in the live checkout.
 ///
 /// Why: `tm connect` is the lightweight sibling of `tm launch`. Where `launch`
 /// provisions a managed clone, `connect` runs directly in the live checkout without
 /// any cloning. This is the recommended path for repos without a GitHub remote, or
-/// when the operator needs to work with uncommitted local changes.
+/// when the operator needs to work with uncommitted local changes. Issue #2230:
+/// `connect` used to deploy NOTHING and launch a bare
+/// `claude --dangerously-skip-permissions` with no PM persona — the one launch
+/// path that could silently spawn vanilla Claude Code. It now runs the same
+/// [`trusty_mpm::core::session_launch::prepare_session`] seam
+/// `DaemonClient::launch_session` (the TUI's `/connect`) uses, deploying agents,
+/// skills, the project-tier output-style, and the `trusty-memory`/PM-guard
+/// project hooks directly into the live checkout — no clone, no git-remote or
+/// clean-tree requirement, so repos with no GitHub remote or uncommitted
+/// changes (this command's whole reason to exist) still launch.
 /// What: resolves `dir`, reconnects to a live session for the directory when
-/// one exists, otherwise registers the session via
-/// `POST /api/v1/sessions/connect`, creates the tmux host idempotently
-/// (`tmux new-session -A`), starts `claude` only when the session is freshly
-/// created, and `attach`es to it. No agents, skills, instructions, or
-/// system-prompt files are written.
+/// one exists, otherwise runs [`trusty_mpm::core::session_launch::prepare_session`]
+/// (best-effort — logs and continues on any failure, never aborts the
+/// connect), registers the session via `POST /api/v1/sessions/connect`,
+/// builds the PM system prompt via
+/// [`trusty_mpm::core::session_launch::build_system_prompt_for_with_style_and_native`]
+/// and writes it to a temp file, creates the tmux host idempotently
+/// (`tmux new-session -A`), and — only when the session is freshly created —
+/// starts `claude` via [`connect_claude_cmd`] (`--append-system-prompt-file`
+/// plus the shared `--setting-sources project,local` /
+/// `--dangerously-skip-permissions` isolation flags), then `attach`es to it.
 /// Test: `cli_parses_connect`, `cli_parses_connect_with_dir`.
 pub(crate) async fn connect(
     client: &reqwest::Client,
@@ -423,10 +437,46 @@ pub(crate) async fn connect(
         return Ok(());
     }
 
-    // 2. Register the session with the daemon via the connect endpoint. No
-    //    `prepare_session` and no `install_system_prompt` — `connect` skips the
-    //    entire deployment sequence. When the daemon is unreachable we still
-    //    bring the session up under the folder-derived name.
+    // 1c. Deploy the framework directly into the live checkout — agents,
+    //     skills, the project-tier output-style, and the
+    //     `trusty-memory`/PM-guard project hooks (issue #2230). This is the
+    //     SAME `prepare_session` seam `DaemonClient::launch_session` (the
+    //     TUI's `/connect`) uses; unlike `tm launch` it performs no
+    //     git-remote or clean-tree check at all — only filesystem writes
+    //     under `path` — so a repo with no GitHub remote or with uncommitted
+    //     changes still launches. Best-effort: a prep failure is logged and
+    //     never aborts the connect.
+    let fw = trusty_mpm::core::paths::FrameworkPaths::default();
+    match trusty_mpm::core::session_launch::prepare_session(&fw, &path) {
+        Ok(report) => {
+            for err in &report.roster_errors {
+                tracing::error!("roster provisioning gap for {}: {err}", path.display());
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                "session prep failed for {} (non-fatal): {err}",
+                path.display()
+            );
+        }
+    }
+
+    // 1d. Build the PM system-prompt text for the live checkout (where 1c just
+    //     deployed the framework) and write it to a temp file for
+    //     `--append-system-prompt-file` (issue #2230). Non-fatal: a write
+    //     failure omits the flag rather than blocking the connect.
+    let native = trusty_mpm::core::output_style::claude_supports_native_output_style();
+    let prompt = trusty_mpm::core::session_launch::build_system_prompt_for_with_style_and_native(
+        &path, None, native,
+    );
+    let prompt_path = trusty_mpm::core::model_inject::write_prompt_file(&prompt);
+    if prompt_path.is_none() {
+        eprintln!("warning: failed to write system prompt file; connecting without prompt");
+    }
+
+    // 2. Register the session with the daemon via the connect endpoint. When
+    //    the daemon is unreachable we still bring the session up under the
+    //    folder-derived name.
     #[derive(Deserialize)]
     struct Body {
         #[serde(default)]
@@ -460,7 +510,7 @@ pub(crate) async fn connect(
     };
 
     // 3. Print the full-screen robot splash + rich info panel before tmux takes over.
-    print_launch_banner(&workdir, &tmux_name, None, None);
+    print_launch_banner(&workdir, &tmux_name, prompt_path.as_deref(), None);
 
     // 4. Create the tmux host idempotently. `new-session -A` attaches to an
     //    existing session and creates a detached one (`-d`) otherwise; the
@@ -481,13 +531,10 @@ pub(crate) async fn connect(
         Some(LaunchSessionGuard::new(&tmux_name))
     };
 
-    // 5. Start `claude` with bypass-permissions inside a freshly-created session.
-    //    `connect` does not compose a `--append-system-prompt` — it does no deployment.
+    // 5. Start `claude` inside a freshly-created session, carrying the PM
+    //    system-prompt injection plus the shared isolation flags (#2230).
     if !already_running {
-        let claude_cmd = format!(
-            "claude {}",
-            trusty_mpm::core::model_inject::PERMISSION_MODE_FLAG
-        );
+        let claude_cmd = connect_claude_cmd(prompt_path.as_deref());
         let send = std::process::Command::new("tmux")
             .args(["send-keys", "-t", &tmux_name, &claude_cmd, "Enter"])
             .status();
@@ -503,6 +550,25 @@ pub(crate) async fn connect(
         g.disarm();
     }
     Ok(())
+}
+
+/// Compose the `claude` invocation `connect` sends to a freshly-created tmux pane.
+///
+/// Why (issue #2230): before this fix, `connect` sent a bare
+/// `claude --dangerously-skip-permissions` with no PM system-prompt injection
+/// and no `--setting-sources` isolation — the one launch path that could
+/// silently spawn vanilla Claude Code. This gives `connect` the same carrier
+/// every other launch path (`spawn`/`resume_command` in the daemon adapter,
+/// `launch`'s own `claude_cmd`) already has.
+/// What: thin wrapper over [`trusty_mpm::core::model_inject::build_claude_command`]
+/// with no `--model` override (`connect` does not resolve a PM model tier);
+/// always carries `SETTING_SOURCES_FLAG` (`--setting-sources project,local`)
+/// and `PERMISSION_MODE_FLAG` (`--dangerously-skip-permissions`), plus
+/// `--append-system-prompt-file <path>` when `prompt_file` is `Some`.
+/// Test: `cli_parses_connect`, `cli_parses_connect_with_dir` (in
+/// `tests_behavior_b_tests.rs`) assert both flags are present in the output.
+pub(crate) fn connect_claude_cmd(prompt_file: Option<&std::path::Path>) -> String {
+    trusty_mpm::core::model_inject::build_claude_command(None, prompt_file)
 }
 
 /// Find the first LIVE session whose `workdir` matches `workdir` (exact) or lies
