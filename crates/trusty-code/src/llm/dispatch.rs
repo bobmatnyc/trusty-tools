@@ -12,15 +12,22 @@
 //! already consults for tool-choice/caching decisions (#1021's `provider`
 //! module) — so there is exactly one source of truth for "is this a Bedrock
 //! slug".
-//! What: Wraps the existing OpenRouter `LlmClient` (built eagerly, exactly as
-//! before) plus a lazily-constructed `BedrockChatClient` behind a
-//! `tokio::sync::OnceCell`. The Bedrock client is only ever built the first
-//! time a `bedrock/*` slug is actually requested — a pure-OpenRouter run
-//! never touches the AWS SDK or needs AWS credentials, preserving the
-//! "default configuration works standalone" rule.
+//! What: Wraps an OPTIONAL OpenRouter `LlmClient` (built eagerly when a
+//! config is supplied, matching the original behaviour) plus a
+//! lazily-constructed `BedrockChatClient` behind a `tokio::sync::OnceCell`.
+//! The Bedrock client is only ever built the first time a `bedrock/*` slug is
+//! actually requested — a pure-OpenRouter run never touches the AWS SDK or
+//! needs AWS credentials, preserving the "default configuration works
+//! standalone" rule. Symmetrically (#2245), the OpenRouter transport is
+//! OPTIONAL at construction time: a pure-Bedrock run must not be blocked by a
+//! missing `OPENROUTER_API_KEY` — that error now surfaces only if a
+//! non-bedrock model slug is actually dispatched through a client built
+//! without OpenRouter config.
 //! Test: `dispatch::tests::*` — routing by slug prefix (mocked, no network),
 //! `bedrock_construction_is_lazy` proves the OpenRouter-only path never
-//! initialises the Bedrock cell.
+//! initialises the Bedrock cell, `construction_succeeds_with_no_openrouter_config`
+//! and `openrouter_request_without_config_fails_at_chat_time` prove the
+//! reverse: a Bedrock-only client builds fine and only fails at request time.
 
 use async_trait::async_trait;
 use tokio::sync::OnceCell;
@@ -45,37 +52,66 @@ const BEDROCK_PROVIDER_NAME: &str = "bedrock";
 /// identified. Production call sites (`main.rs`, `task::mock_llm`) construct
 /// this instead of a bare `LlmClient`; every other caller keeps depending on
 /// the object-safe `LlmClientTrait`, so no signature at any call site changes.
-/// What: `openrouter` is built eagerly (unchanged from before this ticket);
-/// `bedrock` is a `OnceCell` populated on the first `bedrock/*` request via
-/// `BedrockChatClient::from_env` (standard AWS credential chain — no key
-/// required at construction time; a missing/invalid credential surfaces as an
-/// `LlmError` on that first call, not at startup).
+/// What: `openrouter` is `Some(LlmClient)` when a config was supplied at
+/// construction (built eagerly — the reqwest client itself is cheap and
+/// synchronous to build), `None` otherwise; `bedrock` is a `OnceCell`
+/// populated on the first `bedrock/*` request via `BedrockChatClient::from_env`
+/// (standard AWS credential chain — no key required at construction time; a
+/// missing/invalid credential surfaces as an `LlmError` on that first call,
+/// not at startup). A request that resolves to the missing transport (either
+/// direction) fails with `LlmError::MissingConfig` at `chat()` time, never at
+/// construction — so a pure-Bedrock run never needs `OPENROUTER_API_KEY` and
+/// a pure-OpenRouter run never needs AWS credentials (#2245).
 /// Test: `dispatch::tests::*`.
 #[derive(Debug)]
 pub struct DispatchingLlmClient {
-    openrouter: LlmClient,
+    openrouter: Option<LlmClient>,
     bedrock: OnceCell<BedrockChatClient>,
 }
 
 impl DispatchingLlmClient {
-    /// Construct from an explicit OpenRouter config.
+    /// Construct from an optional OpenRouter config.
     ///
-    /// Why: Mirrors `LlmClient::from_config` so existing call sites
-    /// (`main.rs::build_llm_client`, `task::mock_llm::build_llm_client`) swap
-    /// in this type with a one-line change.
-    /// What: Builds the OpenRouter `LlmClient` eagerly (identical behaviour
-    /// to before); the Bedrock cell starts empty.
-    /// Test: `dispatch::tests::openrouter_slug_never_touches_bedrock_cell`.
-    pub fn from_config(config: LlmClientConfig) -> Result<Self, LlmError> {
+    /// Why: The single constructor every entry point (`main.rs`,
+    /// `task::mock_llm`) should funnel through: whether OpenRouter creds are
+    /// available is decided by the CALLER (typically "did
+    /// `LlmClientConfig::from_env()` succeed"), and this type must not
+    /// second-guess that decision by hard-failing when it's `None` — only a
+    /// request that actually needs OpenRouter should ever surface that
+    /// error (#2245).
+    /// What: Builds the OpenRouter `LlmClient` eagerly when `config.is_some()`
+    /// (identical behaviour to the pre-#2245 mandatory path); leaves it unset
+    /// otherwise. The Bedrock cell always starts empty. Only fails if a
+    /// SUPPLIED config fails to build (the underlying reqwest/TLS setup,
+    /// "extremely rare" per `LlmClient::from_config`'s own docs).
+    /// Test: `dispatch::tests::construction_succeeds_with_no_openrouter_config`,
+    /// `dispatch::tests::openrouter_slug_never_touches_bedrock_cell`.
+    pub fn new(openrouter_config: Option<LlmClientConfig>) -> Result<Self, LlmError> {
+        let openrouter = openrouter_config.map(LlmClient::from_config).transpose()?;
         Ok(Self {
-            openrouter: LlmClient::from_config(config)?,
+            openrouter,
             bedrock: OnceCell::new(),
         })
     }
 
-    /// Construct from the `OPENROUTER_API_KEY` environment variable.
+    /// Construct from an explicit, MANDATORY OpenRouter config.
     ///
-    /// Why: Convenience entry point mirroring `LlmClient::from_env`.
+    /// Why: Back-compat convenience for callers that already know they need
+    /// OpenRouter (e.g. tests constructing a client for an OpenRouter-only
+    /// scenario) and want construction itself to fail fast on a bad config.
+    /// What: `Self::new(Some(config))`.
+    /// Test: `dispatch::tests::openrouter_slug_never_touches_bedrock_cell`.
+    pub fn from_config(config: LlmClientConfig) -> Result<Self, LlmError> {
+        Self::new(Some(config))
+    }
+
+    /// Construct from the `OPENROUTER_API_KEY` environment variable,
+    /// MANDATORY (fails if unset).
+    ///
+    /// Why: Convenience entry point mirroring `LlmClient::from_env` for
+    /// callers that want the original "key required" behaviour. Production
+    /// call sites that must tolerate a Bedrock-only run instead call
+    /// [`Self::new`] with `LlmClientConfig::from_env().ok()` (#2245).
     /// What: Delegates to [`Self::from_config`] via `LlmClientConfig::from_env`.
     /// Test: Exercised transitively wherever `LlmClient::from_env` already was.
     pub fn from_env() -> Result<Self, LlmError> {
@@ -120,13 +156,23 @@ impl LlmClientTrait for DispatchingLlmClient {
     /// Why: The single method every caller (`AgentLoop`, `run_task`,
     /// `task::executor`) invokes through `Arc<dyn LlmClientTrait>`.
     /// What: `bedrock/*` slugs go through [`Self::bedrock`]; every other
-    /// slug goes through the unchanged OpenRouter `LlmClient::chat` path.
+    /// slug goes through the OpenRouter `LlmClient::chat` path IF one was
+    /// configured — a request that needs the missing transport returns
+    /// `LlmError::MissingConfig` naming the model and the env var to set
+    /// (#2245), rather than the client having refused to construct at all.
     /// Test: `dispatch::tests::*`.
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         if Self::routes_to_bedrock(&req.model) {
             self.bedrock().await?.chat(req).await
         } else {
-            self.openrouter.chat(req).await
+            let client = self.openrouter.as_ref().ok_or_else(|| {
+                LlmError::MissingConfig(format!(
+                    "OPENROUTER_API_KEY is required to reach model '{}' (not a bedrock/* \
+                     slug). Export it before running, e.g. `export OPENROUTER_API_KEY=sk-or-...`.",
+                    req.model
+                ))
+            })?;
+            client.chat(req).await
         }
     }
 }
@@ -185,6 +231,49 @@ mod tests {
         let config = LlmClientConfig::new("sk-or-test").expect("config");
         let client = DispatchingLlmClient::from_config(config);
         assert!(client.is_ok(), "expected Ok, got: {client:?}");
+    }
+
+    /// A client built with NO OpenRouter config still constructs successfully
+    /// — the exact shape a Bedrock-only run takes (#2245).
+    ///
+    /// Why: Pins the fix for the reported bug: building `DispatchingLlmClient`
+    /// must not require `OPENROUTER_API_KEY` just because the OpenRouter
+    /// transport theoretically exists — only an OpenRouter-bound `chat()`
+    /// call should ever need it.
+    /// What: `DispatchingLlmClient::new(None)` returns `Ok`.
+    /// Test: this test.
+    #[test]
+    fn construction_succeeds_with_no_openrouter_config() {
+        let client = DispatchingLlmClient::new(None);
+        assert!(client.is_ok(), "expected Ok, got: {client:?}");
+    }
+
+    /// A non-bedrock request through a Bedrock-only client (no OpenRouter
+    /// config) fails at `chat()` time with a clear `MissingConfig` error —
+    /// not silently, and not at construction time (#2245).
+    ///
+    /// Why: Confirms the deferred failure actually surfaces a useful error
+    /// instead of e.g. a panic or a confusing transport-level failure.
+    /// What: Build with `new(None)`, dispatch an `anthropic/*`-slugged
+    /// request, assert `LlmError::MissingConfig`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn openrouter_request_without_config_fails_at_chat_time() {
+        let client = DispatchingLlmClient::new(None).expect("construction succeeds");
+        let req = ChatRequest {
+            model: "anthropic/claude-sonnet-4-5".to_string(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            usage: None,
+        };
+        let err = client.chat(&req).await.unwrap_err();
+        assert!(
+            matches!(err, LlmError::MissingConfig(_)),
+            "expected MissingConfig, got: {err:?}"
+        );
     }
 
     // NOTE: `chat()` end-to-end dispatch for a `bedrock/*` slug is

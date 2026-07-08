@@ -470,12 +470,15 @@ fn validate_agent_name(agent_name: &str) -> Result<()> {
 /// stdout; logs always go to stderr.
 /// What: Validates the agent name and project path (traversal guards), locates the
 /// agents dir, resolves the engineer-model override (CLI flag > `TCODE_ENGINEER_MODEL`
-/// env), builds the real `LlmClient` from `OPENROUTER_API_KEY`, runs
-/// `execute_run_task` (threading `--timeout-seconds` (#2207) through as
-/// `RunTaskParams.deadline_secs` — final flag/env/default resolution happens
-/// inside `execute_run_task` via `resolve_deadline_secs`), prints the human or
-/// JSON report, and exits with the report's `ExitCode`. A missing API key is a
-/// config error (exit 2).
+/// env), builds the dispatching LLM client (`build_llm_client`, OpenRouter and/or
+/// Bedrock depending on what's configured and what the resolved model actually
+/// needs — see #2245), runs `execute_run_task` (threading `--timeout-seconds`
+/// (#2207) through as `RunTaskParams.deadline_secs` — final flag/env/default
+/// resolution happens inside `execute_run_task` via `resolve_deadline_secs`),
+/// prints the human or JSON report, and exits with the report's `ExitCode`. A
+/// missing OpenRouter key is only a config error (exit 2) when the resolved
+/// model actually needs OpenRouter; a pure-Bedrock model needs only AWS
+/// credentials, surfaced (if absent) as a run failure from the first Bedrock call.
 /// Test: Orchestration (incl. the model swap) is covered by `run_task::tests`; the
 /// wrapper is exercised manually via `tcode run-task pm "<task>" --project <path>`.
 async fn run_task(
@@ -556,8 +559,9 @@ async fn run_task(
     process::exit(report.exit.code());
 }
 
-/// Build the real LLM client from `OPENROUTER_API_KEY`, dispatching `bedrock/*`
-/// model slugs to AWS Bedrock (#1021 phase 1).
+/// Build the real LLM client, dispatching `bedrock/*` model slugs to AWS
+/// Bedrock and everything else to OpenRouter via `OPENROUTER_API_KEY` (#1021
+/// phase 1).
 ///
 /// Why: The binary is the only place that reads the API key from the environment
 /// (library code never touches `std::env` for secrets). Attribution headers help
@@ -566,23 +570,25 @@ async fn run_task(
 /// `TCODE_ENGINEER_MODEL`) actually reach AWS Bedrock instead of OpenRouter's
 /// HTTP endpoint; the Bedrock transport is only constructed lazily on first use
 /// (standard AWS credential chain, e.g. `AWS_PROFILE=cto`), so a pure-OpenRouter
-/// run never needs AWS credentials.
-/// What: Reads the key via `LlmClientConfig::from_env`, attaches referer/title,
-/// and constructs a `DispatchingLlmClient`. Returns a descriptive error when the
-/// key is unset.
-/// Test: Exercised manually (a live run requires a real key); the offline tests
-/// inject a mock client instead.
+/// run never needs AWS credentials. Symmetrically (#2245), a MISSING
+/// `OPENROUTER_API_KEY` is no longer a hard construction-time error here: a
+/// pure-Bedrock run (`TCODE_ENGINEER_MODEL=bedrock/...`) must not be blocked
+/// by a key it will never use. `OPENROUTER_API_KEY` still surfaces as a clear
+/// error the moment a non-bedrock model actually needs it (from
+/// `DispatchingLlmClient::chat`), just no longer at startup.
+/// What: Attempts `LlmClientConfig::from_env`, attaching referer/title on
+/// success; on failure (key unset) passes `None` through instead of
+/// propagating the error. Always constructs a `DispatchingLlmClient` — it
+/// can only fail here if a PRESENT key somehow fails to build the underlying
+/// HTTP client (see `LlmClient::from_config`'s docs: "extremely rare").
+/// Test: `tests::build_llm_client_succeeds_without_openrouter_key`; a live
+/// run against either backend is exercised manually.
 fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>> {
-    let config = LlmClientConfig::from_env()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "OPENROUTER_API_KEY is required for run-task ({e}). \
-                 Export it before running, e.g. `export OPENROUTER_API_KEY=sk-or-...`."
-            )
-        })?
-        .with_referer("https://github.com/bobmatnyc/trusty-tools")
-        .with_title("trusty-code run-task");
-    let client = DispatchingLlmClient::from_config(config)
+    let openrouter_config = LlmClientConfig::from_env().ok().map(|cfg| {
+        cfg.with_referer("https://github.com/bobmatnyc/trusty-tools")
+            .with_title("trusty-code run-task")
+    });
+    let client = DispatchingLlmClient::new(openrouter_config)
         .map_err(|e| anyhow::anyhow!("failed to build LLM client: {e}"))?;
     Ok(Arc::new(client))
 }
@@ -591,7 +597,43 @@ fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_agent_name;
+    use super::{build_llm_client, validate_agent_name};
+
+    /// `build_llm_client` must succeed even when `OPENROUTER_API_KEY` is unset
+    /// — a pure-Bedrock run (`TCODE_ENGINEER_MODEL=bedrock/...`) must not be
+    /// blocked by a missing OpenRouter key it will never use (#2245).
+    ///
+    /// Why: Pins the exact bug reported by the live smoke test: construction
+    /// used to hard-fail with "OPENROUTER_API_KEY is required" regardless of
+    /// which model was actually being targeted.
+    /// What: Temporarily unsets `OPENROUTER_API_KEY` (restoring it afterwards
+    /// even on panic-free assertion failure — the restore runs before the
+    /// assert), calls `build_llm_client`, asserts `Ok`.
+    /// Test: this test. No other test in this binary touches
+    /// `OPENROUTER_API_KEY`, so this is safe under `cargo test`'s default
+    /// parallel test execution.
+    #[test]
+    fn build_llm_client_succeeds_without_openrouter_key() {
+        let prev = std::env::var("OPENROUTER_API_KEY").ok();
+        // SAFETY: test-only env mutation; no other test in this binary reads
+        // or writes `OPENROUTER_API_KEY`.
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+        let result = build_llm_client();
+        if let Some(key) = prev {
+            // SAFETY: see above.
+            unsafe {
+                std::env::set_var("OPENROUTER_API_KEY", key);
+            }
+        }
+        assert!(
+            result.is_ok(),
+            "expected Ok when OPENROUTER_API_KEY is unset (pure-Bedrock runs must not \
+             be blocked by it), got err: {:?}",
+            result.err()
+        );
+    }
 
     /// A path-traversal agent name is rejected.
     ///

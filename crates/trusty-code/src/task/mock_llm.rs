@@ -41,23 +41,23 @@ pub const MOCK_LLM_ECHO: &str = "echo";
 /// here (not inlined at each call site) so the decision is made exactly
 /// once and is easy to find.
 /// What: if [`MOCK_LLM_ENV`] is set to [`MOCK_LLM_ECHO`], returns an
-/// [`EchoLlmClient`]. Otherwise builds a real `DispatchingLlmClient` from
-/// `OPENROUTER_API_KEY` (via `LlmClientConfig::from_env`) — routing `bedrock/*`
-/// model slugs to AWS Bedrock and everything else to OpenRouter, unchanged
-/// (#1021 phase 1) — mapping a missing key to `RpcError::internal` — a
-/// server-side configuration problem, not a caller mistake — with an
-/// actionable message naming both escape hatches.
-/// Test: `task::mock_llm::tests::mock_env_selects_echo_client`.
+/// [`EchoLlmClient`]. Otherwise builds a real `DispatchingLlmClient` — routing
+/// `bedrock/*` model slugs to AWS Bedrock and everything else to OpenRouter
+/// via `OPENROUTER_API_KEY` (#1021 phase 1). `OPENROUTER_API_KEY` is read
+/// best-effort (via `LlmClientConfig::from_env().ok()`): a pure-Bedrock
+/// `task.run` must not be blocked by a key it will never use (#2245) — a
+/// missing key only surfaces as `RpcError::internal` if a non-bedrock model
+/// actually needs OpenRouter and it turns out to be unconfigured, at which
+/// point `DispatchingLlmClient::chat` returns that error and the caller
+/// still gets an actionable message naming both escape hatches.
+/// Test: `task::mock_llm::tests::mock_env_selects_echo_client`,
+/// `task::mock_llm::tests::real_client_builds_without_openrouter_key`.
 pub fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>, RpcError> {
     if std::env::var(MOCK_LLM_ENV).ok().as_deref() == Some(MOCK_LLM_ECHO) {
         return Ok(Arc::new(EchoLlmClient::new()));
     }
-    let config = LlmClientConfig::from_env().map_err(|e| {
-        RpcError::internal(format!(
-            "task.run requires OPENROUTER_API_KEY (or {MOCK_LLM_ENV}={MOCK_LLM_ECHO} for offline testing): {e}"
-        ))
-    })?;
-    let client = DispatchingLlmClient::from_config(config)
+    let openrouter_config = LlmClientConfig::from_env().ok();
+    let client = DispatchingLlmClient::new(openrouter_config)
         .map_err(|e| RpcError::internal(format!("build LLM client: {e}")))?;
     Ok(Arc::new(client))
 }
@@ -240,5 +240,40 @@ mod tests {
             std::env::remove_var(MOCK_LLM_ENV);
         }
         assert!(result.is_ok(), "echo mode must never fail to construct");
+    }
+
+    /// `build_llm_client` must succeed even when `OPENROUTER_API_KEY` is
+    /// unset and mock mode is off — the real daemon `task.run` path a
+    /// pure-Bedrock run takes (#2245).
+    ///
+    /// Why: This is the exact function the default (non-`--legacy-in-process`)
+    /// `tcode run-task` path calls inside the daemon; pinning the fix here,
+    /// not just in `main.rs`, covers both entry points the smoke test's root
+    /// cause named.
+    /// What: Locks out `mock_env_selects_echo_client` (both mutate process
+    /// env), unsets `OPENROUTER_API_KEY`, asserts `Ok`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn real_client_builds_without_openrouter_key() {
+        let _guard = MOCK_LLM_ENV_LOCK.lock().await;
+        let prev = std::env::var("OPENROUTER_API_KEY").ok();
+        // SAFETY: test-only env mutation; serialized by `MOCK_LLM_ENV_LOCK`
+        // (every test touching process-wide LLM-selection env vars in this
+        // module takes that lock, so this is safe alongside them too).
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+        let result = build_llm_client();
+        if let Some(key) = prev {
+            // SAFETY: see above.
+            unsafe {
+                std::env::set_var("OPENROUTER_API_KEY", key);
+            }
+        }
+        assert!(
+            result.is_ok(),
+            "expected Ok when OPENROUTER_API_KEY is unset, got err: {:?}",
+            result.err()
+        );
     }
 }
