@@ -55,6 +55,19 @@ what the tools expose.
 contents are extracted downstream as the run summary. Keep it concise and \
 factual.
 
+## Verification before finishing
+
+- Before you report the task as complete, if the project already has its own \
+automated test suite (existing unit/integration tests, a documented test \
+command, or a CI configuration), you MUST discover and run it, then report the \
+ACTUAL results you observed.
+- Tests you authored yourself for this task are not a substitute for the \
+project's own pre-existing test suite. Running only your own new tests while \
+an existing suite goes unrun is not verification.
+- Never claim tests passed without having actually executed a test command and \
+observed its output. If you could not run the suite, say so explicitly instead \
+of asserting an unverified result.
+
 ## Finish convention
 
 - You signal that the task is complete by producing an assistant turn that \

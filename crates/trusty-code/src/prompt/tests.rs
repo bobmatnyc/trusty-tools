@@ -192,6 +192,35 @@ fn base_preamble_contains_required_blocks() {
     );
 }
 
+/// `BASE_PREAMBLE` requires running the project's OWN test suite before
+/// finishing, not just self-authored tests (bake-off L1 diagnosis: a
+/// delegated engineer's self-reported "my tests pass" previously let a
+/// missing feature ship unnoticed).
+///
+/// Why: This is the default finish-gate strengthening — it must apply to
+/// every agent (PM and delegated sub-agents alike), not just a benchmark
+/// harness, so it belongs in the model-agnostic BASE preamble every prompt
+/// assembles.
+/// What: Asserts the preamble instructs discovering/running the project's
+/// existing suite and explicitly rejects self-authored tests as a substitute.
+/// Test: this test.
+#[test]
+fn base_preamble_requires_running_project_test_suite_before_finishing() {
+    assert!(
+        BASE_PREAMBLE.contains("run it, then report the")
+            || BASE_PREAMBLE.to_lowercase().contains("run it"),
+        "must instruct running the project's own test suite before finishing"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("not a substitute for the"),
+        "must reject self-authored tests as a substitute for the project's own suite"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("Never claim tests passed without"),
+        "must forbid claiming unverified test results"
+    );
+}
+
 /// `BASE_PREAMBLE` carries no host- or model-specific tokens (spec §2a/§3).
 ///
 /// Why: Any model name, provider name, or host path in the BASE preamble would
@@ -229,7 +258,7 @@ fn base_preamble_version_is_semver_shaped() {
 /// Expected FNV-1a-style fold of [`BASE_PREAMBLE`]'s bytes, folded with its
 /// byte length. Regenerate this whenever the preamble legitimately changes
 /// (see [`base_preamble_hash_tripwire`] for the contributor instructions).
-const EXPECTED_PREAMBLE_HASH: u64 = 0x4443_27ac_ff1b_c454;
+const EXPECTED_PREAMBLE_HASH: u64 = 0x9376_d3b2_eb84_3e4e;
 
 /// Test-time guard coupling `BASE_PREAMBLE` *content* to its version constant.
 ///

@@ -270,6 +270,32 @@ fn config_default_is_sane() {
     assert!(cfg.timeout_secs >= 1);
 }
 
+/// The default turn budget is generous enough for a real multi-file task, not
+/// the old 8-turn default that a package-sized delegation could exhaust
+/// mid-work (bake-off L1 diagnosis).
+///
+/// Why: A regression here would silently reintroduce the destructive
+/// re-delegation failure mode: a delegated engineer running out of turns
+/// before finishing a multi-file package, forcing a `TurnCapExceeded` abort.
+/// What: Asserts the default is comfortably above the old value of 8 and
+/// still overridable (`with_config`/`RunContext.max_turns_override` are
+/// covered by other tests in this module).
+/// Test: this test.
+#[test]
+fn default_max_turns_is_generous() {
+    let cfg = InProcessRunnerConfig::default();
+    assert!(
+        cfg.max_turns > 8,
+        "default max_turns must be raised above the old 8-turn cap, got {}",
+        cfg.max_turns
+    );
+    assert!(
+        cfg.max_turns >= 30,
+        "default max_turns should comfortably fit a multi-file package task, got {}",
+        cfg.max_turns
+    );
+}
+
 /// `agent_config_exists` detects present and absent configs.
 ///
 /// Why: Callers pre-check agent names with the same path rule the runner uses.
