@@ -51,6 +51,21 @@ fn email_local_part(email: &str) -> String {
     }
 }
 
+/// Extract the domain-part (after the last `@`) of an email address,
+/// lowercased. Returns an empty string when no `@` is present.
+///
+/// Why: Tier-3 fuzzy matching (issue #2253) must gate email similarity on
+/// domain equality, and it needs the two domains to compare. `email_local_part`
+/// covers the complementary half; this pairs with it.
+/// What: splits on the last `@` and lowercases the remainder.
+/// Test: see `resolver_tests::email_domain_basic`.
+fn email_domain(email: &str) -> String {
+    match email.rfind('@') {
+        Some(i) => email[i + 1..].to_lowercase(),
+        None => String::new(),
+    }
+}
+
 /// Why: `IdentityResolver::upsert_author` and the suggester both need to ask
 /// "does this email live under the configured canonical_domain?". Centralising
 /// the check avoids subtle case- or `@`-prefix bugs at the two call sites.
@@ -244,11 +259,26 @@ impl IdentityResolver {
             }
         }
 
-        // 3. Fuzzy match against member names/emails (raw Jaro-Winkler).
+        // 3. Fuzzy match against member names/emails (Jaro-Winkler).
+        //    Name similarity uses the raw names. Email similarity compares
+        //    LOCAL-PARTS only, and only when both addresses share the same
+        //    domain (issue #2253). Comparing full email strings let a long
+        //    shared domain suffix alone clear the 0.85 threshold — e.g.
+        //    jaro_winkler("ops+snyk@duettoresearch.com",
+        //    "jenkins@duettoresearch.com") = 0.857 — merging unrelated bots.
+        //    Gating on domain equality + local-part comparison removes that
+        //    false-positive class while keeping genuine same-domain,
+        //    near-identical-local-part matches.
+        let inbound_domain = email_domain(email);
         let mut best: Option<(f64, &(String, String))> = None;
         for m in &self.members {
             let s_name = jaro_winkler(&name_lc, &m.0.to_lowercase());
-            let s_email = jaro_winkler(&email_lc, &m.1.to_lowercase());
+            let member_domain = email_domain(&m.1);
+            let s_email = if !inbound_domain.is_empty() && inbound_domain == member_domain {
+                jaro_winkler(&email_local_part(email), &email_local_part(&m.1))
+            } else {
+                0.0
+            };
             let score = s_name.max(s_email);
             if score >= self.threshold && best.map(|(b, _)| score > b).unwrap_or(true) {
                 best = Some((score, m));
