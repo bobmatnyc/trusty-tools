@@ -75,19 +75,16 @@ pub(crate) async fn handle_chat_session_create(state: &AppState, args: Value) ->
 /// Why: each conversational turn must persist immediately and survive daemon
 /// restarts; appending here (rather than via `memory_remember`) keeps turns out
 /// of the noisy generic dedup path.
-/// What: validates `role` against [`VALID_ROLES`], loads the existing history
-/// (creating the session implicitly when missing, per spec), pushes the new
-/// `ChatMessage`, and writes it back via `upsert_session`. Reads the row back
-/// to return the authoritative `message_count` and `updated_at`.
+/// What: validates `role` against [`VALID_ROLES`], then delegates to
+/// `ChatSessionStore::append_message` (issue #1712), which performs the
+/// read-modify-write inside a single redb write transaction instead of the
+/// previous separate get_session/upsert_session calls — so concurrent
+/// `add_turn` calls on the same `session_id` can no longer race and drop a
+/// message. Missing session ids are created implicitly (per spec) by
+/// `append_message` itself.
 /// Test: `chat_session_add_turn_appends`,
-/// `chat_session_add_turn_rejects_bad_role` in `tests/chat_mcp.rs`.
-///
-/// KNOWN MVP LIMITATION (tracked follow-up): the load→append→write sequence is
-/// NOT atomic. Two concurrent `add_turn` calls on the same `session_id` can both
-/// read the same history snapshot and the second write clobbers the first,
-/// dropping a message. The MVP assumes a single sequential caller per session; a
-/// follow-up issue covers making this a transactional read-modify-write (or a
-/// per-session append lock) before concurrent callers are supported.
+/// `chat_session_add_turn_rejects_bad_role`,
+/// `chat_session_add_turn_concurrent_calls_all_land` in `tests/chat_mcp.rs`.
 pub(crate) async fn handle_chat_session_add_turn(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "chat_session_add_turn")?;
     let session_id = args
@@ -109,21 +106,13 @@ pub(crate) async fn handle_chat_session_add_turn(state: &AppState, args: Value) 
         .ok_or_else(|| anyhow!("chat_session_add_turn: missing 'content'"))?;
 
     let store = state.session_store(&palace)?;
-    // Load → append → write. Missing session => start from empty history so the
-    // turn implicitly creates the session (spec contract).
-    let mut history = store
-        .get_session(session_id)?
-        .map(|s| s.history)
-        .unwrap_or_default();
-    history.push(ChatMessage {
-        role: role.to_string(),
-        content: content.to_string(),
-    });
-    store.upsert_session(session_id, &history)?;
-
-    let session = store
-        .get_session(session_id)?
-        .ok_or_else(|| anyhow!("chat_session_add_turn: session vanished after write"))?;
+    let session = store.append_message(
+        session_id,
+        ChatMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+        },
+    )?;
     Ok(json!({
         "message_count": session.history.len(),
         "updated_at": session.updated_at,
@@ -221,10 +210,13 @@ pub(crate) async fn handle_chat_session_recall(state: &AppState, args: Value) ->
 /// the caller supplies both sides of the exchange in one call so they are
 /// atomically appended. `chat_session_add_turn` remains for callers that
 /// need to stream a single message at a time.
-/// What: validates args, loads the existing history, appends a `user` message
-/// (the prompt) immediately followed by an `assistant` message (the response),
-/// and writes back via `upsert_session`. Returns the updated `message_count`
-/// and `updated_at`.
+/// What: validates args, then delegates to `ChatSessionStore::
+/// append_messages` (issue #1712) with the `user` message (the prompt)
+/// immediately followed by the `assistant` message (the response) — both
+/// land in the same redb write transaction as the existing history, so a
+/// concurrent `add_turn` / `chat_turn_append` call on the same session can
+/// no longer race and drop either message. Returns the updated
+/// `message_count` and `updated_at`.
 /// Test: `chat_turn_append_stores_pair` in `tests/chat_mcp.rs`.
 pub(crate) async fn handle_chat_turn_append(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "chat_turn_append")?;
@@ -242,23 +234,19 @@ pub(crate) async fn handle_chat_turn_append(state: &AppState, args: Value) -> Re
         .ok_or_else(|| anyhow!("chat_turn_append: missing 'response'"))?;
 
     let store = state.session_store(&palace)?;
-    let mut history = store
-        .get_session(session_id)?
-        .map(|s| s.history)
-        .unwrap_or_default();
-    history.push(ChatMessage {
-        role: "user".to_string(),
-        content: prompt.to_string(),
-    });
-    history.push(ChatMessage {
-        role: "assistant".to_string(),
-        content: response.to_string(),
-    });
-    store.upsert_session(session_id, &history)?;
-
-    let session = store
-        .get_session(session_id)?
-        .ok_or_else(|| anyhow!("chat_turn_append: session vanished after write"))?;
+    let session = store.append_messages(
+        session_id,
+        vec![
+            ChatMessage {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: response.to_string(),
+            },
+        ],
+    )?;
     Ok(json!({
         "message_count": session.history.len(),
         "updated_at": session.updated_at,

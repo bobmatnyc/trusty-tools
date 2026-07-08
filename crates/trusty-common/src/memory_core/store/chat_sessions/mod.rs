@@ -186,4 +186,116 @@ mod tests {
         assert_eq!(s.history.len(), 1);
         assert_eq!(s.history[0].content, "remember me");
     }
+
+    /// Why (issue #1712): the historical `get_session` + `upsert_session`
+    /// sequence (two separate transactions) let concurrent callers on the
+    /// same session id race — the second write clobbers the first, silently
+    /// dropping a message. `append_message` must instead read-modify-write
+    /// inside one redb write transaction so redb's own write serialisation
+    /// makes every concurrent append land.
+    /// What: Spawns `N` OS threads that each call `append_message` on the
+    /// same shared `Arc<ChatSessionStore>` / session id with a distinct
+    /// marker string, joins them all, then asserts the persisted history has
+    /// exactly `N` entries and every marker is present (order is not
+    /// asserted — only that none were dropped).
+    /// Test: this function.
+    #[test]
+    fn append_message_is_atomic_under_concurrency() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use std::thread;
+
+        let (_d, store) = open();
+        let store = Arc::new(store);
+        let id = store.create_session(None).unwrap();
+
+        const N: usize = 25;
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let store = Arc::clone(&store);
+                let id = id.clone();
+                thread::spawn(move || {
+                    store
+                        .append_message(
+                            &id,
+                            ChatMessage {
+                                role: "user".into(),
+                                content: format!("turn-{i}"),
+                            },
+                        )
+                        .unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let session = store.get_session(&id).unwrap().expect("session exists");
+        assert_eq!(
+            session.history.len(),
+            N,
+            "all {N} concurrent appends must land — none silently dropped"
+        );
+        let contents: HashSet<&str> = session.history.iter().map(|m| m.content.as_str()).collect();
+        for i in 0..N {
+            let marker = format!("turn-{i}");
+            assert!(contents.contains(marker.as_str()), "missing {marker}");
+        }
+    }
+
+    /// Why: `append_message` must create the session (matching
+    /// `upsert_session`'s historical create-on-write behaviour) when the id
+    /// hasn't been seen yet, so `chat_session_add_turn` can implicitly start
+    /// a session on the first turn.
+    /// What: Calls `append_message` with a fresh id and no prior
+    /// `create_session`; asserts the returned session has that id, one
+    /// message, and no title.
+    /// Test: this function.
+    #[test]
+    fn append_message_creates_session_when_missing() {
+        let (_d, store) = open();
+        let id = "auto-created-id";
+        let session = store
+            .append_message(
+                id,
+                ChatMessage {
+                    role: "user".into(),
+                    content: "first".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(session.id, id);
+        assert_eq!(session.history.len(), 1);
+        assert_eq!(session.title, None);
+    }
+
+    /// Why: `handle_chat_turn_append` appends a prompt+response pair in one
+    /// call; `append_messages` must preserve their relative order within the
+    /// single commit.
+    /// What: Appends a two-message vec and asserts both landed in order.
+    /// Test: this function.
+    #[test]
+    fn append_messages_appends_pair_in_order() {
+        let (_d, store) = open();
+        let id = store.create_session(None).unwrap();
+        let session = store
+            .append_messages(
+                &id,
+                vec![
+                    ChatMessage {
+                        role: "user".into(),
+                        content: "prompt".into(),
+                    },
+                    ChatMessage {
+                        role: "assistant".into(),
+                        content: "response".into(),
+                    },
+                ],
+            )
+            .unwrap();
+        assert_eq!(session.history.len(), 2);
+        assert_eq!(session.history[0].role, "user");
+        assert_eq!(session.history[1].role, "assistant");
+    }
 }

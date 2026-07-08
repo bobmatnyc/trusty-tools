@@ -75,6 +75,12 @@ pub(crate) async fn handle_palace_create(state: &AppState, args: Value) -> Resul
     // test contexts; either short-circuits the same validation call.
     let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
     let skip_enforcement = std::env::var("TRUSTY_SKIP_PALACE_ENFORCEMENT").as_deref() == Ok("1");
+    // Issue #1714: `force=true` is a privileged bypass; gate it behind the
+    // minimal authz seam (no-op in the default single-tenant mode, fails
+    // closed in multi-tenant mode). See `crate::authz` for the full design.
+    if force {
+        crate::authz::authorize_force_palace_create(state)?;
+    }
     // Even when `force=true`, validate that the slug is a safe filesystem name:
     // lowercase letters, digits, and hyphens only; must start with a letter or
     // digit; max 63 chars. This prevents path traversal and redb table-name

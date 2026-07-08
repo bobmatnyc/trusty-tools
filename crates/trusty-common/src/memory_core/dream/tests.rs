@@ -1484,6 +1484,71 @@ async fn consolidate_scoped_non_positive_age_is_noop() {
     );
 }
 
+/// Why (issue #1713): consolidation must never evict an original drawer
+/// unless the `superseded_by` KG-triple write actually landed — evicting on
+/// a failed (previously logged-only) write leaves the canonical drawer with
+/// no recorded provenance link back to the original, silently destroying
+/// history with no way to recover it.
+/// What: Opens a `KnowledgeGraph` forced into read-only snapshot mode via
+/// the same lock-contention trick as
+/// `kg_redb::tests::open_on_locked_file_returns_snapshot_handle` (seed the
+/// file, drop the handle so the in-process cache entry expires, hold the
+/// file's exclusive flock via the raw `redb` API, then reopen) so every
+/// `handle.kg.assert` call fails. Calls
+/// `record_provenance_and_collect_superseded` directly — the extracted
+/// per-canonical provenance step of `apply_consolidation_result` — and
+/// asserts the original id is NOT added to the eviction-candidate list.
+/// Test: this function.
+#[tokio::test]
+async fn apply_consolidation_result_keeps_original_when_kg_write_fails() {
+    use super::cycle::record_provenance_and_collect_superseded;
+    use crate::memory_core::store::kg::KnowledgeGraph;
+    use crate::memory_core::store::kg_redb::KgStoreRedb;
+    use crate::memory_core::store::vector::UsearchStore;
+
+    let dir = tempdir().unwrap();
+    let kg_path = dir.path().join("kg.redb");
+    // Seed the file via the lower-level `KgStoreRedb` (no `KgWriter` actor
+    // spawned, unlike `KnowledgeGraph::open`), then drop it so the in-process
+    // db cache entry expires synchronously — no async drop race to wait out
+    // — before we grab the raw lock below.
+    drop(KgStoreRedb::open(&kg_path).unwrap());
+    // Hold the file's exclusive flock via the raw redb API so the next
+    // `KnowledgeGraph::open` hits the lock-contention path and falls back to
+    // a read-only snapshot (issue #59 behaviour).
+    let _live = redb::Database::create(&kg_path).unwrap();
+
+    let kg = KnowledgeGraph::open(&kg_path).unwrap();
+    assert!(
+        kg.is_read_only(),
+        "precondition: KG must be a read-only snapshot for this test to be valid"
+    );
+
+    let vs = UsearchStore::new(dir.path().join("idx.usearch"), 384).unwrap();
+    let handle = Arc::new(PalaceHandle::new(
+        PalaceId::new("kg-write-fail"),
+        "test".to_string(),
+        vs,
+        kg,
+    ));
+
+    let canonical_id = Uuid::new_v4();
+    let orig_id = Uuid::new_v4();
+    let mut superseded_ids: Vec<Uuid> = Vec::new();
+    record_provenance_and_collect_superseded(
+        &handle,
+        canonical_id,
+        &[orig_id],
+        &mut superseded_ids,
+    )
+    .await;
+
+    assert!(
+        superseded_ids.is_empty(),
+        "original must NOT be marked evictable when the superseded_by KG write failed"
+    );
+}
+
 // ─── RAII env-var guard for tests ────────────────────────────────────────
 //
 // Safety: test-only; the tokio::test macro with default settings uses the

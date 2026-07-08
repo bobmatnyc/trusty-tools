@@ -183,6 +183,43 @@ async fn dispatch_palace_create_persists() {
     assert!(ids.iter().any(|v| v.as_str() == Some("alpha")));
 }
 
+/// Why (issue #1714): `force=true` bypasses slug validation with no
+/// authorization check by default (single-tenant mode, unchanged
+/// behaviour) — confirm that default mode still lets `force=true` through
+/// end-to-end via the MCP `palace_create` tool.
+#[tokio::test]
+async fn dispatch_palace_create_force_allowed_in_single_tenant_default() {
+    let (state, _tmp) = test_state();
+    let created = dispatch_tool(
+        &state,
+        "palace_create",
+        json!({"name": "forced-slug", "force": true}),
+    )
+    .await
+    .expect("palace_create with force must succeed in default single-tenant mode");
+    assert_eq!(created["palace_id"], "forced-slug");
+}
+
+/// Why (issue #1714): in multi-tenant mode there is no capability model yet
+/// to decide whether the caller may bypass slug validation, so
+/// `authz::authorize_force_palace_create` fails closed and `palace_create
+/// force=true` must be refused end-to-end through the MCP dispatcher.
+/// `force=false` (or omitted) is unaffected by the multi-tenant flag.
+#[tokio::test]
+async fn dispatch_palace_create_force_denied_in_multi_tenant_mode() {
+    let (mut state, _tmp) = test_state();
+    state.multi_tenant_mode = true;
+
+    let err = dispatch_tool(
+        &state,
+        "palace_create",
+        json!({"name": "forced-slug", "force": true}),
+    )
+    .await
+    .expect_err("force=true must be refused in multi-tenant mode");
+    assert!(format!("{err:#}").contains("authorization signal"));
+}
+
 /// Why: End-to-end confirmation that a remembered drawer is recallable
 /// through the MCP tool surface using the real embedder + retrieval path.
 #[tokio::test]

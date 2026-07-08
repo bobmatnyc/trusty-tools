@@ -352,12 +352,17 @@ fn build_consolidator_from_config(config: &DreamConfig) -> Option<Arc<SemanticCo
 /// Why: the canonical-add / `superseded_by` / `alias_of` / flagged-log logic is
 /// identical for the idle pass and the on-demand room consolidation; extracting
 /// it removes duplication and keeps side-effect ordering consistent.
-/// What: for each canonical drawer, writes it via `handle.remember` and asserts
-/// a `superseded_by` triple per original; stores `alias_of` triples; logs
-/// flagged contradictions. Returns `(canonical_count, superseded_ids)` where
-/// `superseded_ids` are the original drawer ids that were folded into a
-/// canonical (callers that compact — e.g. the room tool — evict these).
-/// Test: `dream_cycle_semantic_consolidation_with_mock`, `consolidate_scoped_*`.
+/// What: for each canonical drawer, writes it via `handle.remember` and
+/// delegates provenance recording to
+/// [`record_provenance_and_collect_superseded`], which only marks an original
+/// as evictable when its `superseded_by` triple write actually succeeded
+/// (issue #1713); stores `alias_of` triples; logs flagged contradictions.
+/// Returns `(canonical_count, superseded_ids)` where `superseded_ids` are the
+/// original drawer ids that were folded into a canonical AND durably linked
+/// via KG provenance (callers that compact — e.g. the room tool — evict
+/// these).
+/// Test: `dream_cycle_semantic_consolidation_with_mock`, `consolidate_scoped_*`,
+/// `apply_consolidation_result_keeps_original_when_kg_write_fails`.
 async fn apply_consolidation_result(
     handle: &Arc<PalaceHandle>,
     result: &crate::memory_core::semantic_consolidation::ConsolidationResult,
@@ -377,25 +382,13 @@ async fn apply_consolidation_result(
         {
             Ok(canonical_id) => {
                 canonical_count += 1;
-                for &orig_id in &canonical.canonical_for {
-                    superseded_ids.push(orig_id);
-                    let triple = crate::memory_core::store::kg::Triple {
-                        subject: format!("drawer:{orig_id}"),
-                        predicate: "superseded_by".to_string(),
-                        object: format!("drawer:{canonical_id}"),
-                        valid_from: chrono::Utc::now(),
-                        valid_to: None,
-                        confidence: 1.0,
-                        provenance: Some("dream:semantic_consolidation".to_string()),
-                    };
-                    if let Err(e) = handle.kg.assert(triple).await {
-                        tracing::warn!(
-                            orig = %orig_id,
-                            canonical = %canonical_id,
-                            "failed to write superseded_by triple: {e:#}"
-                        );
-                    }
-                }
+                record_provenance_and_collect_superseded(
+                    handle,
+                    canonical_id,
+                    &canonical.canonical_for,
+                    &mut superseded_ids,
+                )
+                .await;
             }
             Err(e) => {
                 tracing::warn!(
@@ -406,6 +399,75 @@ async fn apply_consolidation_result(
         }
     }
 
+    apply_alias_and_flag_passes(handle, result).await;
+
+    (canonical_count, superseded_ids)
+}
+
+/// Record `superseded_by` KG provenance for one canonical's originals, only
+/// marking an original id as evictable once its triple write actually lands.
+///
+/// Why (issue #1713): consolidation previously pushed every original in
+/// `canonical.canonical_for` onto the eviction list unconditionally, even
+/// when the following `superseded_by` KG-triple write failed (only logged as
+/// a warning, never propagated). Once `consolidate_scoped` started evicting
+/// originals (the idle pass is additive-only and never hit this path), that
+/// meant the canonical drawer could exist with no recorded provenance link
+/// back to the original it replaced — the original was gone and the history
+/// silently unrecoverable. Extracting this loop into its own function also
+/// gives it a real, direct test seam (`pub(super)`) so the failure path can
+/// be exercised without needing to fake a `remember()` failure on the same
+/// handle used for the KG write.
+/// What: Asserts a `superseded_by` triple per `orig_id`; appends `orig_id` to
+/// `superseded_ids` (the caller's eviction-candidate accumulator) ONLY when
+/// `handle.kg.assert` returns `Ok`. A failed assert is logged at WARN and the
+/// original is left out of `superseded_ids` entirely, so it is never evicted
+/// and remains a live, recoverable drawer.
+/// Test: `apply_consolidation_result_keeps_original_when_kg_write_fails`.
+pub(super) async fn record_provenance_and_collect_superseded(
+    handle: &Arc<PalaceHandle>,
+    canonical_id: Uuid,
+    originals: &[Uuid],
+    superseded_ids: &mut Vec<Uuid>,
+) {
+    for &orig_id in originals {
+        let triple = crate::memory_core::store::kg::Triple {
+            subject: format!("drawer:{orig_id}"),
+            predicate: "superseded_by".to_string(),
+            object: format!("drawer:{canonical_id}"),
+            valid_from: chrono::Utc::now(),
+            valid_to: None,
+            confidence: 1.0,
+            provenance: Some("dream:semantic_consolidation".to_string()),
+        };
+        match handle.kg.assert(triple).await {
+            Ok(()) => superseded_ids.push(orig_id),
+            Err(e) => {
+                tracing::warn!(
+                    orig = %orig_id,
+                    canonical = %canonical_id,
+                    "failed to write superseded_by triple: {e:#} — original \
+                     retained (no eviction without recorded provenance)"
+                );
+            }
+        }
+    }
+}
+
+/// Alias-triple and flagged-contradiction passes of `apply_consolidation_result`.
+///
+/// Why: split out of `apply_consolidation_result` purely to keep that
+/// function's body focused on the canonical/provenance loop; no behavioural
+/// change from the original inline code.
+/// What: Asserts an `alias_of` triple per `(from, to)` pair (logging failures
+/// at WARN, non-fatal), then logs each flagged contradiction at INFO for
+/// human review.
+/// Test: Covered transitively by `dream_cycle_semantic_consolidation_with_mock`
+/// and `consolidate_scoped_*`.
+async fn apply_alias_and_flag_passes(
+    handle: &Arc<PalaceHandle>,
+    result: &crate::memory_core::semantic_consolidation::ConsolidationResult,
+) {
     for (from, to) in &result.aliases {
         let triple = crate::memory_core::store::kg::Triple {
             subject: from.clone(),
@@ -433,8 +495,6 @@ async fn apply_consolidation_result(
             "dream semantic: flagged drawer for human review (contradiction)"
         );
     }
-
-    (canonical_count, superseded_ids)
 }
 
 /// Optional inference-backed semantic consolidation pass.

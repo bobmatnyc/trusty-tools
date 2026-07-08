@@ -81,6 +81,7 @@ impl DaemonReadiness {
 
 pub mod activity;
 pub mod attribution;
+pub mod authz;
 pub mod bm25_supervisor;
 pub mod bootstrap;
 /// Autonomous Dreamer scheduler — spawns per-palace dream loops on daemon startup.
@@ -558,6 +559,14 @@ pub struct AppState {
     /// Test: compile-presence is verified by the `trusty-memory` build; Phase 2
     ///      will add query tests in `web.rs`.
     pub error_store: Option<trusty_common::error_capture::ErrorStore>,
+    /// Minimal multi-tenant authorization seam (issue #1714). `false`
+    /// (single-tenant, the default) preserves today's behaviour — every
+    /// existing caller of `palace_create force=true` keeps working. `true`
+    /// opts into `authz::authorize_force_palace_create` failing closed on
+    /// every `force=true` request until a real capability check lands. Set
+    /// via `with_multi_tenant_mode_from_env` (`TRUSTY_MEMORY_MULTI_TENANT=1`);
+    /// see the `authz` module docs for the full design rationale.
+    pub multi_tenant_mode: bool,
     /// Most recent on-disk footprint of `data_root`, in bytes (issue #35).
     ///
     /// Why: `GET /health` reports `disk_bytes`. Walking the data directory on
@@ -819,6 +828,7 @@ impl AppState {
             // during daemon startup (HTTP mode). Tests keep `None` so no
             // unexpected files are written to the OS data dir.
             error_store: None,
+            multi_tenant_mode: false,
             disk_bytes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             sys_metrics: Arc::new(tokio::sync::Mutex::new(
                 trusty_common::sys_metrics::SysMetrics::new(),
@@ -1092,6 +1102,20 @@ impl AppState {
     #[must_use]
     pub fn with_error_store(mut self, store: trusty_common::error_capture::ErrorStore) -> Self {
         self.error_store = Some(store);
+        self
+    }
+
+    /// Builder-style: opt into multi-tenant authorization mode (issue #1714).
+    ///
+    /// Why: mirrors `with_bm25_client_from_env`'s pattern of keeping env-var
+    /// gating in one place. Unset (the default) preserves today's
+    /// single-tenant behaviour with zero change for existing callers.
+    /// What: sets `multi_tenant_mode` from `TRUSTY_MEMORY_MULTI_TENANT=1`; see
+    /// the `authz` module for what the flag then enforces.
+    /// Test: `authorize_force_palace_create_denies_multi_tenant_without_capability`.
+    #[must_use]
+    pub fn with_multi_tenant_mode_from_env(mut self) -> Self {
+        self.multi_tenant_mode = std::env::var("TRUSTY_MEMORY_MULTI_TENANT").as_deref() == Ok("1");
         self
     }
 
