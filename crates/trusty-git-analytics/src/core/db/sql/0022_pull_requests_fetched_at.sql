@@ -1,0 +1,22 @@
+-- Migration v22: add fetched_at column to pull_requests for a stale-write guard.
+--
+-- Issue #821 (advisory follow-up to #752/#808): #808 replaced the
+-- destructive `INSERT OR REPLACE` with `ON CONFLICT … DO UPDATE`, but the
+-- `DO UPDATE SET` clause still overwrites `state`/`merged_at`/`commit_shas`
+-- unconditionally on every conflict. If a background job re-ingests an
+-- OLDER snapshot (e.g. a delayed or retried collection run), a PR already
+-- recorded as `merged` could be silently overwritten back to `open`.
+--
+-- A reviewer originally suggested guarding on `created_at`, but that's the
+-- PR's immutable creation date — identical across re-ingests, so it can
+-- never detect staleness. This migration adds `fetched_at`, a client-set
+-- ingestion/snapshot timestamp (RFC3339, UTC) that changes on every fetch,
+-- so the upsert can guard with
+-- `WHERE excluded.fetched_at > pull_requests.fetched_at` (see
+-- `store_pull_requests` in the GitHub and Bitbucket collectors).
+--
+-- Additive only — no existing columns are modified and no data is removed.
+-- Existing rows default to '' (empty string), which sorts before any real
+-- RFC3339 timestamp string, so the first genuine re-ingest of a
+-- pre-migration row always satisfies the guard and applies normally.
+ALTER TABLE pull_requests ADD COLUMN fetched_at TEXT NOT NULL DEFAULT '';

@@ -139,6 +139,11 @@ pub const MIGRATIONS: &[Migration] = &[
         // Placeholder — execution is routed to v21::apply (with column guard).
         sql: "",
     },
+    Migration {
+        version: 22,
+        name: "pull_requests_fetched_at",
+        sql: include_str!("../sql/0022_pull_requests_fetched_at.sql"),
+    },
 ];
 
 /// Ensure the `schema_migrations` bookkeeping table exists.

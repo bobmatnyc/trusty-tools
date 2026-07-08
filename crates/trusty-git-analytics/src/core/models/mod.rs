@@ -201,6 +201,24 @@ pub struct PullRequest {
 
     /// JSON-encoded array of commit SHAs in the PR.
     pub commit_shas: String,
+
+    /// Client-set ingestion/snapshot timestamp (RFC3339, UTC).
+    ///
+    /// Why: issue #821, advisory follow-up to #752/#808. The upsert's
+    /// `ON CONFLICT … DO UPDATE` unconditionally overwrote `state` /
+    /// `merged_at` / `commit_shas` on every re-ingest; if a background job
+    /// re-ingests an OLDER snapshot, a PR already recorded as `merged`
+    /// could be overwritten back to `open`. `created_at` is the PR's
+    /// immutable creation date — identical across re-ingests — so it
+    /// cannot detect staleness. `fetched_at` changes on every fetch, so
+    /// `store_pull_requests` guards the update with
+    /// `WHERE excluded.fetched_at > pull_requests.fetched_at`.
+    /// What: set once per fetch (`Utc::now().to_rfc3339()`) by the GitHub
+    /// and Bitbucket collectors when the PR row is constructed; persisted
+    /// via migration v22 (`0022_pull_requests_fetched_at.sql`).
+    /// Test: `store_pull_requests_stale_write_guard_*` in
+    /// `collect::github::client_tests` and `collect::bitbucket::tests`.
+    pub fetched_at: String,
 }
 
 /// Cascade tier that produced a classification.
