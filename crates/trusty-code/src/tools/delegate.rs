@@ -4,14 +4,25 @@
 //! registry can register a single type that owns both. Pre-flight validation of
 //! `agent_name` against the on-disk agent config directory prevents the LLM from
 //! hallucinating sub-agent names and crashing the subprocess runner with a
-//! confusing IO error (#204 equivalent).
+//! confusing IO error (#204 equivalent). (bake-off L1 diagnosis) A delegated
+//! engineer that exhausts its turn/time budget has usually already written
+//! real, partial progress to disk; the PM's recovery historically was a
+//! free-text "re-delegate with a streamlined brief" that never told the next
+//! engineer instance to look at what was already there, so it silently
+//! rebuilt a simpler (sometimes incomplete) solution and orphaned the correct
+//! work. `redelegation_hint` makes the safer instruction automatic: it fires
+//! on every `TurnCapExceeded`/`Timeout`/`Cancelled` abort, regardless of
+//! whether the PM's own free text remembers to ask for it.
 //! What: `DelegateToAgentTool` wraps an `AgentRunner` and (optionally) an agent
 //! config directory. `execute()` parses `{agent_name, task}`, validates the agent
 //! config exists, and hands off to the runner. On miss, returns a helpful error
-//! listing available agents.
+//! listing available agents. On a runner failure caused by the sub-agent's own
+//! loop aborting with partial work still on disk, the returned `ToolResult`
+//! error appends a fixed reuse/continue directive (`redelegation_hint`).
 //! Test: `unknown_agent_returns_helpful_error` builds a tool pointed at a tempdir
 //! containing `engineer.toml` only, calls `execute({"agent_name":"ghost",...})`,
 //! and asserts the error names the unknown agent and lists `engineer`.
+//! `redelegation_hint_*` tests cover the reuse-directive behaviour.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,7 +30,53 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
+use crate::agent_loop::AgentLoopError;
+use crate::runner::RunnerError;
 use crate::tools::traits::{AgentRunner, ToolExecutor, ToolResult};
+
+/// Detect whether an `AgentRunner` failure means the sub-agent's OWN loop
+/// aborted with partial work already on disk (turn cap, timeout, or
+/// cancellation), as opposed to a hard failure (unknown agent, bad config,
+/// LLM/transport error) that leaves nothing to reuse.
+///
+/// Why: (bake-off L1 diagnosis) The PM only sees this failure as opaque error
+/// text; without a structured signal, its free-text re-delegation brief has no
+/// reliable reason to mention the sub-agent's partial progress, so the next
+/// delegated instance rebuilds from scratch and orphans correct prior work.
+/// Surfacing a fixed directive automatically — every time this specific
+/// failure shape occurs — makes "read existing files, then continue" the
+/// default recovery instead of something the PM must remember to ask for.
+/// What: Downcasts `err` to [`RunnerError`] and matches `RunnerError::Loop`
+/// whose source is `AgentLoopError::TurnCapExceeded`, `Timeout`, or
+/// `Cancelled` (every abort variant that carries a partial `AgentOutput`,
+/// per that enum's own docs). Returns `None` for `UnknownAgent`, `ConfigLoad`,
+/// and `AgentLoopError::Llm` — those failure modes have no partial work to
+/// reuse.
+/// Test: `redelegation_hint_present_on_turn_cap_exceeded`,
+/// `redelegation_hint_present_on_timeout`,
+/// `redelegation_hint_present_on_cancelled`,
+/// `redelegation_hint_absent_on_unknown_agent`,
+/// `redelegation_hint_absent_on_llm_error`.
+fn redelegation_hint(err: &anyhow::Error) -> Option<&'static str> {
+    let RunnerError::Loop { source, .. } = err.downcast_ref::<RunnerError>()? else {
+        return None;
+    };
+    match source {
+        AgentLoopError::TurnCapExceeded { .. }
+        | AgentLoopError::Timeout { .. }
+        | AgentLoopError::Cancelled { .. } => Some(
+            "\n\nNOTE for re-delegation: the sub-agent stopped because it ran out of turns, \
+             time, or was cancelled — NOT because the task failed outright. It has likely \
+             already written real, partial progress to disk. Before delegating this task again: \
+             (1) inspect the project's current files to see what the sub-agent already \
+             produced, (2) instruct the next sub-agent to READ and CONTINUE/BUILD ON that \
+             existing work rather than rewriting it from scratch, and (3) consider a narrower \
+             follow-up task (or a higher turn budget) so it can finish what is already started \
+             instead of starting over.",
+        ),
+        AgentLoopError::Llm(_) => None,
+    }
+}
 
 /// Tool executor that delegates a task to a named sub-agent.
 ///
@@ -170,7 +227,10 @@ impl ToolExecutor for DelegateToAgentTool {
 
         match self.runner.run(agent_name, task).await {
             Ok(out) => ToolResult::ok(out.content),
-            Err(e) => ToolResult::err(format!("sub-agent '{agent_name}' failed: {e:#}")),
+            Err(e) => {
+                let hint = redelegation_hint(&e).unwrap_or("");
+                ToolResult::err(format!("sub-agent '{agent_name}' failed: {e:#}{hint}"))
+            }
         }
     }
 }
@@ -186,6 +246,9 @@ mod tests {
     use serde_json::json;
 
     use super::DelegateToAgentTool;
+    use crate::agent_loop::AgentLoopError;
+    use crate::llm::LlmError;
+    use crate::runner::RunnerError;
     use crate::tools::traits::{AgentOutput, AgentRunner, ToolExecutor};
 
     /// Recording mock runner.
@@ -400,5 +463,186 @@ mod tests {
             4,
             "runner must be called for each valid name"
         );
+    }
+
+    /// Mock runner that always fails with a caller-supplied error.
+    ///
+    /// Why: `redelegation_hint` tests need to control exactly which
+    /// `RunnerError`/`AgentLoopError` shape `execute()` observes, without
+    /// driving a real `AgentLoop`.
+    /// What: `run` always returns `Err` built from the stored `anyhow::Error`
+    /// factory (a `Fn` so each call gets a fresh error, since `anyhow::Error`
+    /// is not `Clone`).
+    /// Test: `redelegation_hint_present_on_turn_cap_exceeded` and siblings.
+    struct FailingRunner<F: Fn() -> anyhow::Error + Send + Sync> {
+        make_err: F,
+    }
+
+    #[async_trait]
+    impl<F: Fn() -> anyhow::Error + Send + Sync> AgentRunner for FailingRunner<F> {
+        async fn run(&self, _agent_name: &str, _task: &str) -> Result<AgentOutput> {
+            Err((self.make_err)())
+        }
+    }
+
+    /// A `TurnCapExceeded` sub-agent failure carries the reuse/continue
+    /// directive in the tool's error text.
+    ///
+    /// Why: This is the core bake-off L1 fix — the PM must see an automatic,
+    /// structured instruction to inspect and reuse partial work instead of
+    /// relying on its own free text remembering to ask for it.
+    /// What: `FailingRunner` returns `RunnerError::Loop` wrapping
+    /// `AgentLoopError::TurnCapExceeded`; assert the rendered error mentions
+    /// both re-delegation and reading/continuing existing work.
+    /// Test: this test.
+    #[tokio::test]
+    async fn redelegation_hint_present_on_turn_cap_exceeded() {
+        let runner = Arc::new(FailingRunner {
+            make_err: || {
+                anyhow::Error::from(RunnerError::Loop {
+                    name: "engineer".to_string(),
+                    source: AgentLoopError::TurnCapExceeded {
+                        max_turns: 8,
+                        partial: Box::new(AgentOutput::from_content("partial work")),
+                    },
+                })
+            },
+        });
+        let tool = DelegateToAgentTool::new(runner);
+
+        let result = tool
+            .execute(json!({"agent_name": "engineer", "task": "build the package"}))
+            .await;
+
+        assert!(result.is_error());
+        let msg = result.content();
+        assert!(
+            msg.contains("READ and CONTINUE"),
+            "must instruct the PM to reuse existing work, got: {msg}"
+        );
+        assert!(
+            msg.contains("already written real, partial progress"),
+            "must explain why re-delegation should not start over, got: {msg}"
+        );
+    }
+
+    /// A `Timeout` sub-agent failure gets the same reuse/continue directive.
+    ///
+    /// Why: A wall-clock timeout carries partial work exactly like a turn-cap
+    /// abort (per `AgentLoopError`'s own docs); the hint must not be
+    /// TurnCapExceeded-specific.
+    /// What: `FailingRunner` returns `RunnerError::Loop` wrapping
+    /// `AgentLoopError::Timeout`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn redelegation_hint_present_on_timeout() {
+        let runner = Arc::new(FailingRunner {
+            make_err: || {
+                anyhow::Error::from(RunnerError::Loop {
+                    name: "engineer".to_string(),
+                    source: AgentLoopError::Timeout {
+                        timeout_secs: 120,
+                        partial: Box::new(AgentOutput::from_content("partial work")),
+                    },
+                })
+            },
+        });
+        let tool = DelegateToAgentTool::new(runner);
+
+        let result = tool
+            .execute(json!({"agent_name": "engineer", "task": "build the package"}))
+            .await;
+
+        assert!(result.is_error());
+        assert!(result.content().contains("READ and CONTINUE"));
+    }
+
+    /// A `Cancelled` sub-agent failure gets the same reuse/continue directive.
+    ///
+    /// What: `FailingRunner` returns `RunnerError::Loop` wrapping
+    /// `AgentLoopError::Cancelled`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn redelegation_hint_present_on_cancelled() {
+        let runner = Arc::new(FailingRunner {
+            make_err: || {
+                anyhow::Error::from(RunnerError::Loop {
+                    name: "engineer".to_string(),
+                    source: AgentLoopError::Cancelled {
+                        partial: Box::new(AgentOutput::from_content("partial work")),
+                    },
+                })
+            },
+        });
+        let tool = DelegateToAgentTool::new(runner);
+
+        let result = tool
+            .execute(json!({"agent_name": "engineer", "task": "build the package"}))
+            .await;
+
+        assert!(result.is_error());
+        assert!(result.content().contains("READ and CONTINUE"));
+    }
+
+    /// An `UnknownAgent` runner failure gets NO reuse directive — there is no
+    /// partial work to reuse when the agent config never resolved.
+    ///
+    /// Why: The hint must not fire indiscriminately on every failure; guard
+    /// the negative case.
+    /// What: `FailingRunner` returns `RunnerError::UnknownAgent`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn redelegation_hint_absent_on_unknown_agent() {
+        let runner = Arc::new(FailingRunner {
+            make_err: || {
+                anyhow::Error::from(RunnerError::UnknownAgent {
+                    name: "ghost".to_string(),
+                    dir: std::path::PathBuf::from("/agents"),
+                })
+            },
+        });
+        let tool = DelegateToAgentTool::new(runner);
+
+        let result = tool
+            .execute(json!({"agent_name": "ghost", "task": "build the package"}))
+            .await;
+
+        assert!(result.is_error());
+        assert!(
+            !result.content().contains("READ and CONTINUE"),
+            "no partial work exists for an unresolved agent config, got: {}",
+            result.content()
+        );
+    }
+
+    /// A plain LLM/transport failure (no turn/time budget involved) gets NO
+    /// reuse directive.
+    ///
+    /// Why: Guards the negative case for the `Loop` variant itself — only the
+    /// three partial-output abort arms should trigger the hint.
+    /// What: `FailingRunner` returns `RunnerError::Loop` wrapping
+    /// `AgentLoopError::Llm`.
+    /// Test: this test.
+    #[tokio::test]
+    async fn redelegation_hint_absent_on_llm_error() {
+        let runner = Arc::new(FailingRunner {
+            make_err: || {
+                anyhow::Error::from(RunnerError::Loop {
+                    name: "engineer".to_string(),
+                    source: AgentLoopError::Llm(LlmError::ApiError {
+                        status: 500,
+                        body: "internal error".to_string(),
+                    }),
+                })
+            },
+        });
+        let tool = DelegateToAgentTool::new(runner);
+
+        let result = tool
+            .execute(json!({"agent_name": "engineer", "task": "build the package"}))
+            .await;
+
+        assert!(result.is_error());
+        assert!(!result.content().contains("READ and CONTINUE"));
     }
 }

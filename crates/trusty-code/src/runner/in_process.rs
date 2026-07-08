@@ -96,15 +96,29 @@ pub struct InProcessRunnerConfig {
 }
 
 impl Default for InProcessRunnerConfig {
-    /// Generous-but-bounded defaults matching `AgentLoopConfig`.
+    /// Generous-but-bounded defaults for a delegated sub-agent's own loop.
     ///
-    /// Why: Avoids boilerplate at construction; mirrors the loop's own defaults
-    /// so behaviour is unsurprising.
-    /// What: 8 turns, 120s timeout.
-    /// Test: `runner::tests::config_default_is_sane`.
+    /// Why: (bake-off L1 diagnosis) The former default of 8 turns was tuned for
+    /// a toy/single-file task; a realistic multi-file package build (reading
+    /// several existing files, writing/editing several more, running the
+    /// project's own tests before finishing per the strengthened finish-gate
+    /// convention) routinely needs more than 8 LLM round-trips. Exhausting the
+    /// cap mid-task forces a `TurnCapExceeded` abort, which historically
+    /// triggered a destructive PM re-delegation that discarded correct partial
+    /// work and rebuilt a simpler (sometimes incomplete) solution from scratch
+    /// — see `tools::delegate::redelegation_hint`, the companion fix that makes
+    /// re-delegation reuse-aware regardless of this budget. 40 turns is
+    /// deliberately generous: the tradeoff is a higher worst-case cost/latency
+    /// ceiling per delegation in exchange for comfortably fitting a real
+    /// package-sized task without truncation. Still fully overridable per call
+    /// via `RunContext.max_turns_override` (`run_pipeline`) or per-runner via
+    /// `with_config`/`InProcessRunnerConfig::default().max_turns = N`.
+    /// What: 40 turns, 120s timeout.
+    /// Test: `runner::tests::config_default_is_sane`,
+    /// `runner::tests::default_max_turns_is_generous`.
     fn default() -> Self {
         Self {
-            max_turns: 8,
+            max_turns: 40,
             timeout_secs: 120,
         }
     }
@@ -252,7 +266,7 @@ impl InProcessAgentRunner {
     /// Override the default loop budget (turn cap + timeout).
     ///
     /// Why: Deployments and tests may want a tighter or looser default than the
-    /// built-in 8 turns / 120s.
+    /// built-in 40 turns / 120s.
     /// What: Replaces `self.config`.
     /// Test: `runner::tests::run_context_overrides_max_turns` sets a config then
     /// overrides it per-call.
