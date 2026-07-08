@@ -19,6 +19,11 @@
 //! listing available agents. On a runner failure caused by the sub-agent's own
 //! loop aborting with partial work still on disk, the returned `ToolResult`
 //! error appends a fixed reuse/continue directive (`redelegation_hint`).
+//! (#2265) `redelegation_hint` is also `pub(crate)` so
+//! `run_task::redelegation::RedelegatingRunner` can reuse the SAME hint logic
+//! to decide, entirely inside one `delegate_to_agent` dispatch, whether a
+//! failed engineer attempt is worth automatically retrying — see that
+//! module's docs for the retry/cap mechanics.
 //! Test: `unknown_agent_returns_helpful_error` builds a tool pointed at a tempdir
 //! containing `engineer.toml` only, calls `execute({"agent_name":"ghost",...})`,
 //! and asserts the error names the unknown agent and lists `engineer`.
@@ -34,10 +39,10 @@ use crate::agent_loop::AgentLoopError;
 use crate::runner::RunnerError;
 use crate::tools::traits::{AgentRunner, ToolExecutor, ToolResult};
 
-/// Detect whether an `AgentRunner` failure means the sub-agent's OWN loop
-/// aborted with partial work already on disk (turn cap, timeout, or
-/// cancellation), as opposed to a hard failure (unknown agent, bad config,
-/// LLM/transport error) that leaves nothing to reuse.
+/// Detect whether an `AgentRunner` failure means the sub-agent's OWN attempt
+/// may have left partial work already on disk (turn cap, timeout,
+/// cancellation, or a retryable LLM/transport hiccup), as opposed to a hard
+/// failure (unknown agent, bad config) that leaves nothing to reuse.
 ///
 /// Why: (bake-off L1 diagnosis) The PM only sees this failure as opaque error
 /// text; without a structured signal, its free-text re-delegation brief has no
@@ -46,35 +51,45 @@ use crate::tools::traits::{AgentRunner, ToolExecutor, ToolResult};
 /// Surfacing a fixed directive automatically — every time this specific
 /// failure shape occurs — makes "read existing files, then continue" the
 /// default recovery instead of something the PM must remember to ask for.
+/// (#2265) `AgentLoopError::Llm` — a recoverable Bedrock/transport error that
+/// aborts the engineer's sub-loop mid-session — is the DOMINANT failure mode
+/// observed in the bake-off transcripts, yet #2233 left it out of this match,
+/// so the reuse hint never fired for the most common case and every retry
+/// re-read PROBLEM.md from zero. It now gets the same hint: tool calls the
+/// engineer already dispatched before the failing `chat` call (e.g.
+/// `write_file`) already landed on disk even though `AgentLoopError::Llm`
+/// itself carries no `partial: Box<AgentOutput>` (unlike the three
+/// budget-abort variants) — there is real, on-disk work to reuse even though
+/// there is no partial transcript snapshot to point to.
 /// What: Downcasts `err` to [`RunnerError`] and matches `RunnerError::Loop`
-/// whose source is `AgentLoopError::TurnCapExceeded`, `Timeout`, or
-/// `Cancelled` (every abort variant that carries a partial `AgentOutput`,
-/// per that enum's own docs). Returns `None` for `UnknownAgent`, `ConfigLoad`,
-/// and `AgentLoopError::Llm` — those failure modes have no partial work to
-/// reuse.
+/// whose source is `AgentLoopError::TurnCapExceeded`, `Timeout`, `Cancelled`,
+/// or (#2265) `Llm`. Returns `None` only for `UnknownAgent`/`ConfigLoad` —
+/// failures that never reached a sub-agent loop at all, so there is nothing
+/// on disk to reuse.
 /// Test: `redelegation_hint_present_on_turn_cap_exceeded`,
 /// `redelegation_hint_present_on_timeout`,
 /// `redelegation_hint_present_on_cancelled`,
-/// `redelegation_hint_absent_on_unknown_agent`,
-/// `redelegation_hint_absent_on_llm_error`.
-fn redelegation_hint(err: &anyhow::Error) -> Option<&'static str> {
+/// `redelegation_hint_present_on_llm_error`,
+/// `redelegation_hint_absent_on_unknown_agent`.
+pub(crate) fn redelegation_hint(err: &anyhow::Error) -> Option<&'static str> {
     let RunnerError::Loop { source, .. } = err.downcast_ref::<RunnerError>()? else {
         return None;
     };
     match source {
         AgentLoopError::TurnCapExceeded { .. }
         | AgentLoopError::Timeout { .. }
-        | AgentLoopError::Cancelled { .. } => Some(
-            "\n\nNOTE for re-delegation: the sub-agent stopped because it ran out of turns, \
-             time, or was cancelled — NOT because the task failed outright. It has likely \
-             already written real, partial progress to disk. Before delegating this task again: \
+        | AgentLoopError::Cancelled { .. }
+        | AgentLoopError::Llm(_) => Some(
+            "\n\nNOTE for re-delegation: the sub-agent's previous attempt did not reach a \
+             normal finish — it ran out of turns or time, was cancelled, or hit a \
+             transient LLM/transport error — NOT a task failure. It has likely already \
+             written real, partial progress to disk. Before delegating this task again: \
              (1) inspect the project's current files to see what the sub-agent already \
              produced, (2) instruct the next sub-agent to READ and CONTINUE/BUILD ON that \
              existing work rather than rewriting it from scratch, and (3) consider a narrower \
              follow-up task (or a higher turn budget) so it can finish what is already started \
              instead of starting over.",
         ),
-        AgentLoopError::Llm(_) => None,
     }
 }
 
@@ -245,7 +260,7 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
 
-    use super::DelegateToAgentTool;
+    use super::{DelegateToAgentTool, redelegation_hint};
     use crate::agent_loop::AgentLoopError;
     use crate::llm::LlmError;
     use crate::runner::RunnerError;
@@ -615,16 +630,20 @@ mod tests {
         );
     }
 
-    /// A plain LLM/transport failure (no turn/time budget involved) gets NO
-    /// reuse directive.
+    /// A plain LLM/transport failure gets the SAME reuse/continue directive
+    /// (#2265 fix #2: this is the dominant bake-off failure mode, previously
+    /// excluded from the hint).
     ///
-    /// Why: Guards the negative case for the `Loop` variant itself — only the
-    /// three partial-output abort arms should trigger the hint.
+    /// Why: A recoverable Bedrock/transport error aborting the engineer's
+    /// sub-loop is the dominant failure mode observed in the bake-off
+    /// transcripts; the reuse hint must fire here too so re-delegation checks
+    /// for and continues from files already on disk instead of restarting
+    /// exploration from scratch.
     /// What: `FailingRunner` returns `RunnerError::Loop` wrapping
-    /// `AgentLoopError::Llm`.
+    /// `AgentLoopError::Llm`; assert the hint is present.
     /// Test: this test.
     #[tokio::test]
-    async fn redelegation_hint_absent_on_llm_error() {
+    async fn redelegation_hint_present_on_llm_error() {
         let runner = Arc::new(FailingRunner {
             make_err: || {
                 anyhow::Error::from(RunnerError::Loop {
@@ -643,6 +662,35 @@ mod tests {
             .await;
 
         assert!(result.is_error());
-        assert!(!result.content().contains("READ and CONTINUE"));
+        assert!(
+            result.content().contains("READ and CONTINUE"),
+            "an LLM/transport error must ALSO carry the reuse directive (#2265), got: {}",
+            result.content()
+        );
+    }
+
+    /// `redelegation_hint` itself (unit-level, not through the tool) returns
+    /// `Some` for `AgentLoopError::Llm` (#2265 fix #2).
+    ///
+    /// Why: The tool-level test above proves the end-to-end wiring; this test
+    /// pins the specific function contract directly, matching the task's
+    /// required "redelegation_hint(AgentLoopError::Llm) now returns
+    /// Some(<reuse hint>)" assertion.
+    /// What: Builds a `RunnerError::Loop` wrapping `AgentLoopError::Llm`,
+    /// calls `redelegation_hint` directly, asserts `Some`.
+    /// Test: this test.
+    #[test]
+    fn redelegation_hint_fn_returns_some_for_llm_error() {
+        let err = anyhow::Error::from(RunnerError::Loop {
+            name: "engineer".to_string(),
+            source: AgentLoopError::Llm(LlmError::ApiError {
+                status: 503,
+                body: "bedrock throttled".to_string(),
+            }),
+        });
+        assert!(
+            redelegation_hint(&err).is_some(),
+            "redelegation_hint must return Some for AgentLoopError::Llm (#2265)"
+        );
     }
 }

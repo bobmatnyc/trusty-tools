@@ -266,6 +266,15 @@ impl AgentLoop {
             self.maybe_compact_transcript(transcript);
 
             let request = self.build_request(transcript, &schemas);
+            // TODO(#2265 follow-up): add in-loop retry-with-backoff for
+            // AgentLoopError::Llm before aborting to re-delegation — a single
+            // retryable Bedrock/transport hiccup here currently propagates
+            // straight out via `?` and aborts this whole engineer turn
+            // immediately, forcing a full re-delegation cycle (now bounded by
+            // `run_task::redelegation::MAX_REDELEGATIONS`, #2265) rather than
+            // a cheap in-loop retry of just this one `chat` call. Deferred
+            // (optional fix #5) to keep #2265's required scope (fixes 1-4)
+            // tightly bounded.
             let response = self.llm.chat(&request).await?;
 
             accrue_usage(perf, &self.config.model, &response);
