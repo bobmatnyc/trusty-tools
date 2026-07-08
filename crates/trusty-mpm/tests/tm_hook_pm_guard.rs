@@ -1,5 +1,6 @@
 //! Integration test for `tm hook --pm-guard` — PM PreToolUse enforcement
-//! (issue #1977; native sub-agent exemption issue #2014).
+//! (issue #1977; native sub-agent exemption issue #2014; opt-in deny-by-default
+//! persona gate issue #2231).
 //!
 //! Why: `commands::pm_guard`'s unit tests cover the pure policy (which tools /
 //! Bash verbs deny) in isolation, but none exercises the actual
@@ -35,6 +36,8 @@ fn run_pm_guard(stdin_json: &str, extra_env: &[(&str, &str)]) -> String {
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
         .env_remove("CLAUDE_MPM_SUB_AGENT")
         .env_remove("TRUSTY_MPM_PM_UNRESTRICTED")
+        .env_remove("TRUSTY_MPM_PM_DENY_BY_DEFAULT")
+        .env_remove("TM_MANAGED_SESSION_ID")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -207,6 +210,61 @@ fn pm_guard_native_subagent_dispatch_allows_bash() {
         stdout.trim(),
         "",
         "a native sub-agent's Bash call must be allowed"
+    );
+}
+
+#[test]
+fn pm_guard_deny_by_default_unset_allows_subagent_edit_unchanged() {
+    // Issue #2231, case (i): TRUSTY_MPM_PM_DENY_BY_DEFAULT unset (default) — a
+    // native sub-agent's Edit call must be allowed exactly as before, with no
+    // TM_MANAGED_SESSION_ID at all (not a managed session).
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#,
+        &[],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "deny-by-default unset must leave the sub-agent exemption unchanged"
+    );
+}
+
+#[test]
+fn pm_guard_deny_by_default_allows_subagent_edit_when_not_managed() {
+    // Issue #2231, case (iv, unmanaged branch): TRUSTY_MPM_PM_DENY_BY_DEFAULT=1
+    // but no TM_MANAGED_SESSION_ID (ad-hoc/`tm connect`/vanilla session) — the
+    // permissive #2172-lesson default must still allow.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#,
+        &[("TRUSTY_MPM_PM_DENY_BY_DEFAULT", "1")],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "an unmanaged session must be allowed even in strict mode"
+    );
+}
+
+#[test]
+fn pm_guard_deny_by_default_allows_subagent_edit_when_daemon_unreachable() {
+    // Issue #2231, case (iv, ambiguous branch): TRUSTY_MPM_PM_DENY_BY_DEFAULT=1
+    // AND a managed-session id set, but the daemon (fixed at an unreachable
+    // address by `run_pm_guard`) cannot confirm the session's state — ambiguous
+    // must allow, never hang and never deny.
+    let stdout = run_pm_guard(
+        r#"{"hook_event_name":"PreToolUse","agent_id":"agent-abc123","tool_name":"Edit","tool_input":{"file_path":"/x/a.rs","old_string":"a","new_string":"b"}}"#,
+        &[
+            ("TRUSTY_MPM_PM_DENY_BY_DEFAULT", "1"),
+            (
+                "TM_MANAGED_SESSION_ID",
+                "11111111-1111-1111-1111-111111111111",
+            ),
+        ],
+    );
+    assert_eq!(
+        stdout.trim(),
+        "",
+        "an unresolvable (ambiguous) persona status must allow, not deny"
     );
 }
 

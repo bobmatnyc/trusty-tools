@@ -27,17 +27,28 @@
 //! a static default-ALLOW + explicit deny-list: [`evaluate_tool`] denies the
 //! file-edit tools and forbidden Bash verbs and allows everything else. Every
 //! error path (malformed stdin, missing fields) fails **open** — ALLOW — so a
-//! broken hook never wedges the PM.
+//! broken hook never wedges the PM. **Opt-in deny-by-default (issue #2231):**
+//! the sub-agent exemption is narrowed, ONLY when
+//! [`pm_guard_deny_by_default::deny_by_default_enabled`] is truthy, so a
+//! delegated dispatch of an [`evaluate_tool`]-guarded tool is denied when
+//! [`pm_guard_deny_by_default::persona_status`] resolves to
+//! `PersonaStatus::ExplicitlyFailed` (a positively-recorded managed-session
+//! persona-deployment failure). This is the ONE place default behavior can
+//! change, and only when the operator explicitly opts in — see that module's
+//! doc comment for the full #2172-lesson rationale. Unset (the default),
+//! Guard 4 is byte-for-byte identical to the pre-#2231 unconditional exemption.
 //! Test: `evaluate_tool_*`, `payload_is_subagent_dispatch_*`, and
 //! `build_pretooluse_deny_response_*` below cover the tool policy, sub-agent
 //! exemption, and JSON shape; the Bash-command classifier (composition and
 //! substitution handling) lives in the sibling [`super::pm_guard_bash`] module
-//! with its own tests; `tests/tm_hook_pm_guard.rs` exercises the
-//! stdin→decision→stdout path (and the env bypasses / sub-agent exemption /
-//! fail-open) end to end through the real binary.
+//! with its own tests; the opt-in persona gate's policy lives in
+//! [`super::pm_guard_deny_by_default`] with its own tests; `tests/tm_hook_pm_guard.rs`
+//! exercises the stdin→decision→stdout path (and the env bypasses / sub-agent
+//! exemption / fail-open) end to end through the real binary.
 
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV, read_stdin_hook_payload};
 use crate::commands::pm_guard_bash::evaluate_bash_command;
+use crate::commands::pm_guard_deny_by_default::{self, PERSONA_DENY_REASON};
 
 /// Escape-hatch env var: `TRUSTY_MPM_PM_UNRESTRICTED=1` disables all PM
 /// enforcement for the invocation.
@@ -114,11 +125,32 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
         return Ok(());
     };
     let tool_input = payload.get("tool_input");
+    let session_id = payload
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
 
     // Guard 4: native Claude Code sub-agent dispatch (issue #2014). A
     // Task/Agent-dispatched sub-agent is doing exactly the delegated work the
-    // PM is steered toward, so its Edit/Write calls are exempt, not denied.
+    // PM is steered toward, so its Edit/Write calls are exempt, not denied —
+    // UNLESS the opt-in deny-by-default persona gate (issue #2231) is enabled
+    // AND this tool is one `evaluate_tool` would itself guard AND the
+    // session's persona is positively confirmed failed. `deny_by_default_enabled`
+    // short-circuits the `&&` below to `false` in the (default) unset case, so
+    // `evaluate_tool` is never even called on that path — this branch is
+    // byte-for-byte identical to the pre-#2231 unconditional exemption when
+    // the env var is unset.
     if payload_is_subagent_dispatch(&payload) {
+        if pm_guard_deny_by_default::deny_by_default_enabled()
+            && evaluate_tool(tool_name, tool_input).is_some()
+        {
+            let status = pm_guard_deny_by_default::persona_status(url).await;
+            if status.should_deny() {
+                audit_denied_tool(url, session_id, tool_name, PERSONA_DENY_REASON).await;
+                println!("{}", build_pretooluse_deny_response(PERSONA_DENY_REASON));
+                return Ok(());
+            }
+        }
         tracing::debug!(
             tool_name,
             "pm_guard: allow — native sub-agent dispatch (agent_id present in PreToolUse payload)"
@@ -135,10 +167,6 @@ pub(crate) async fn pm_guard(url: &str) -> anyhow::Result<()> {
     // emit the block. The audit POST is intentionally the *only* daemon call
     // and fires solely on the rare deny path, so the common ALLOW path adds
     // zero latency to every tool invocation.
-    let session_id = payload
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
     audit_denied_tool(url, session_id, tool_name, reason).await;
     println!("{}", build_pretooluse_deny_response(reason));
     Ok(())
