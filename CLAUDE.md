@@ -276,8 +276,12 @@ versions by version number.
 4. Commit the version bump.
 5. Create the tag: `git tag <crate-name>-v<version>`.
 6. Push the tag: `git push origin <crate-name>-v<version>`.
-7. Publish: `cargo publish -p <crate-name>` (or `SKIP_UI_BUILD=1 cargo publish` for UI-embedding crates).
-8. Build and install: `cargo install --path crates/<dir> --locked`.
+7. Run `scripts/check-publish-ready.sh <crate>` (or `make publish-check CRATE=<crate>`) —
+   must pass (publish only from merged main; never an unmerged branch). See
+   issue #2227; escape hatch `ALLOW_UNMERGED_PUBLISH=1` is for rare, deliberate
+   use only.
+8. Publish: `cargo publish -p <crate-name>` (or `SKIP_UI_BUILD=1 cargo publish` for UI-embedding crates).
+9. Build and install: `cargo install --path crates/<dir> --locked`.
 
 🟢 **`tga` tag aliases (issue #1128):** `trusty-git-analytics` publishes to
 crates.io under the short package name `tga`. The binary-release workflow

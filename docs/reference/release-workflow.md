@@ -40,16 +40,54 @@ e.g. `trusty-mcp-core-v0.2.0`. The version comes from the crate's `Cargo.toml`.
 4. Commit the version bump.
 5. Create the tag: `git tag <crate-name>-v<version>`.
 6. Push the tag: `git push origin <crate-name>-v<version>`.
-7. Publish: `cargo publish -p <crate-name>`.
+7. Run `scripts/check-publish-ready.sh <crate-name>` (or
+   `make publish-check CRATE=<crate-name>`) — must pass before publishing. See
+   [Publish-Only-From-Merged-Main Guard](#publish-only-from-merged-main-guard-issue-2227) below.
+8. Publish: `cargo publish -p <crate-name>`.
    - **UI-embedding crates** (trusty-search, trusty-memory, trusty-analyze): prefix with `SKIP_UI_BUILD=1`:
      ```bash
      SKIP_UI_BUILD=1 cargo publish -p <crate-name>
      ```
      The committed `ui-dist/` bundle is already in the repo; without this flag, `build.rs` will attempt to invoke `pnpm` inside cargo's verification tarball, which fails because it tries to modify files outside `OUT_DIR`.
-8. Build the release binary (if not already fresh): `cargo build --release -p <crate-name>`.
-9. Install the binary locally with `cargo install --path crates/<dir> --locked`
+9. Build the release binary (if not already fresh): `cargo build --release -p <crate-name>`.
+10. Install the binary locally with `cargo install --path crates/<dir> --locked`
    (for crates with binaries, e.g. trusty-search, trusty-mpm). This ensures the
    binary on PATH is always the version that was just released.
+
+## Publish-Only-From-Merged-Main Guard (issue #2227)
+
+🔴 **Publish only from merged main / the pushed release tag — never an
+unmerged branch.** `scripts/check-publish-ready.sh <crate-name-or-dir>` (also
+exposed as `make publish-check CRATE=<crate-name-or-dir>`) is a mandatory
+preflight gate that must pass before running `cargo publish -p <crate-name>`.
+
+It re-fetches the TRUE `origin/main` tip via `git ls-remote origin
+refs/heads/main` (never trusting a possibly-stale local
+`refs/remotes/origin/main`) and enforces two guards:
+
+1. **GUARD 1 (merged-main)** — current HEAD must be `origin/main` itself or an
+   ancestor of it (`git merge-base --is-ancestor`).
+2. **GUARD 2 (version tag on main)** — the release tag `<crate>-v<version>`
+   (or `tga-v<version>` for `trusty-git-analytics`) must be pushed to origin
+   and its commit must be an ancestor of origin/main.
+
+Either guard failing aborts with an actionable message and a non-zero exit
+code; both passing prints an "OK — safe to publish" line and exits 0.
+
+**Why**: issue #2209 — a publish ran from an unmerged feature branch that was
+missing a P0 fix. That branch's build became the crates.io "latest" version,
+and every concurrent worktree session that subsequently ran
+`cargo install <crate>` silently picked up the regressed build until the
+mistake was caught. Because this repo routinely runs multiple concurrent
+Claude Code worktree sessions, "publish from whatever branch happens to be
+checked out" is a correctness hazard, not just a process nicety — this script
+turns "publish only from merged main" into a mechanical gate instead of a
+convention someone can forget under pressure.
+
+**Escape hatch (rare, deliberate use only)**: setting `ALLOW_UNMERGED_PUBLISH=1`
+downgrades both guard failures to a loud warning and exits 0 instead of
+failing. Use it only when you have a specific, understood reason to publish
+from an unmerged commit; the default path is always "merge to main first."
 
 ## macOS Code-Signing Critical Alert
 

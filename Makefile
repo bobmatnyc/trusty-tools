@@ -5,13 +5,13 @@
 #
 # What: currently exposes `clean-runtime` to delete per-crate runtime
 # artefacts that accumulate during development (SQLite analytics DB and
-# the trusty-analyze facts redb).
+# the trusty-analyze facts redb), plus `publish-check` to gate publishing.
 #
 # Test: run `make clean-runtime` in a checkout that has these files; assert
 # they are deleted and the target exits 0.  Run it again on a clean tree
 # and assert it still exits 0 (idempotent).
 
-.PHONY: clean-runtime e2e-docker install-search-signed
+.PHONY: clean-runtime e2e-docker install-search-signed publish-check
 
 # Remove per-crate runtime artefacts that accumulate during development.
 #
@@ -74,3 +74,29 @@ e2e-docker:
 #   TRUSTY_CODESIGN_DRY_RUN=1     skip cargo install + codesign, test guidance only
 install-search-signed:
 	bash scripts/install-trusty-search-signed.sh
+
+# Publish-only-from-merged-main preflight guard (issue #2227).
+#
+# Why: issue #2209 published from an unmerged branch, making a P0-missing
+# build the crates.io "latest" for every concurrent session. This gate makes
+# "publish only from merged main, with the release tag present" a mechanical
+# check instead of a documented convention someone can forget under pressure.
+#
+# What: delegates to scripts/check-publish-ready.sh CRATE, which asserts HEAD
+# is an ancestor of the TRUE origin/main tip and that the release tag
+# <prefix>-v<version> exists there too. Escape hatch (deliberate, rare use
+# only): ALLOW_UNMERGED_PUBLISH=1.
+#
+# Test: `make publish-check CRATE=trusty-mpm` from a checkout at merged main
+# exits 0; from an unmerged branch it exits non-zero with an actionable
+# message. `ALLOW_UNMERGED_PUBLISH=1 make publish-check CRATE=<crate>`
+# downgrades failures to a warning and exits 0.
+#
+# Usage:
+#   make publish-check CRATE=trusty-mpm
+publish-check:
+	@if [ -z "$(CRATE)" ]; then \
+		echo "Usage: make publish-check CRATE=<crate-name-or-dir>" >&2; \
+		exit 2; \
+	fi
+	bash scripts/check-publish-ready.sh $(CRATE)
