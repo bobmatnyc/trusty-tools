@@ -12,7 +12,7 @@
 //! Test: `single_box_title_bar_contains_version`, `image_clip_correct_rows`,
 //! `right_col_no_inner_border`, `reconnect_label_in_narrow_box`,
 //! `two_panel_compose_alignment`, `two_panel_version_present`,
-//! `wide_layout_has_vertical_divider`.
+//! `wide_layout_has_vertical_divider` in the sibling `tests` module.
 
 use colored::Colorize as _;
 use unicode_width::UnicodeWidthStr as _;
@@ -57,7 +57,9 @@ const DIVIDER_BOTTOM: char = '┴';
 ///
 /// Why: a single outer box with version in the title bar is more cohesive than
 /// two separate side-by-side frames. Signature is unchanged so callers need no edits.
-/// What: wide terminals (≥ MIN_WIDTH_TWO_PANEL) show the clipped art image (left),
+/// What: loads the operator's banner art (disk override or embedded default)
+/// via `load_and_shade_banner`, then delegates to `render_two_panel_banner_with_image`.
+/// Wide terminals (≥ MIN_WIDTH_TWO_PANEL) show the clipped art image (left),
 /// 1-char gutter, and info content (right) inside one `╭─╮` box. Narrow
 /// terminals stack the same content vertically. Very narrow (< MIN_WIDTH_BOX)
 /// returns `None`.
@@ -67,11 +69,37 @@ pub(crate) fn render_two_panel_banner(
     term_width: usize,
     reconnecting: bool,
 ) -> Option<String> {
+    let (image_lines, image_cols) = load_and_shade_banner();
+    render_two_panel_banner_with_image(data, term_width, reconnecting, &image_lines, image_cols)
+}
+
+/// Render the single-box banner from an explicit, already-shaded art image.
+///
+/// Why: issue #2224 — `render_two_panel_banner` used to load banner art from
+/// disk (`~/.trusty-mpm/banner.txt`) internally, so every test exercising it
+/// was unintentionally coupled to whatever the *operator's own machine*
+/// happened to have on disk. A hand-customised banner containing legitimate
+/// rounded box-drawing glyphs (`╭ ╮ ╰ ╯`, e.g. custom robot-face art) made
+/// `right_col_no_inner_border` panic on that machine even though the renderer
+/// itself was working correctly — the test had no control over its input.
+/// Splitting the disk read out into this pure, parameterised function lets
+/// tests pass a fixed, known art source (`DEFAULT_BANNER_ART`) so results are
+/// deterministic and independent of `$HOME` state, while `render_two_panel_banner`
+/// keeps the exact same production behaviour for real callers.
+/// What: same rendering logic as before, but `image_lines`/`image_cols` are
+/// caller-supplied instead of being loaded from disk internally.
+/// Test: all `two_panel::tests` call this directly with a fixed art source;
+/// `render_two_panel_banner` (disk-backed) is covered indirectly through it.
+pub(crate) fn render_two_panel_banner_with_image(
+    data: &WelcomeData,
+    term_width: usize,
+    reconnecting: bool,
+    image_lines: &[String],
+    image_cols: usize,
+) -> Option<String> {
     if term_width < MIN_WIDTH_BOX {
         return None;
     }
-
-    let (image_lines, image_cols) = load_and_shade_banner();
 
     let inner = term_width.saturating_sub(2);
 
@@ -82,7 +110,7 @@ pub(crate) fn render_two_panel_banner(
                 data,
                 term_width,
                 reconnecting,
-                &image_lines,
+                image_lines,
                 image_cols,
                 right_col,
             ));
@@ -93,7 +121,7 @@ pub(crate) fn render_two_panel_banner(
         data,
         term_width,
         reconnecting,
-        &image_lines,
+        image_lines,
         image_cols,
     ))
 }
@@ -365,324 +393,11 @@ fn tint_border(s: &str) -> String {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
-
+//
+// The test suite lives in the sibling `tests.rs` file rather than an inline
+// `#[cfg(test)] mod tests { ... }` block: it is classified as a test file
+// under the workspace's 500/1500 SLOC dual cap (basename `tests.rs`), so it
+// carries the much larger 1500-line test-file budget instead of counting
+// against this file's 500-line production cap (see issue #2224).
 #[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    use crate::formatters::info_box::{CommitLine, DaemonInfo, WelcomeData};
-
-    fn base_data() -> WelcomeData {
-        WelcomeData {
-            project: "owner/repo".to_string(),
-            workspace: "/home/user/projects/repo".to_string(),
-            user: "alice".to_string(),
-            reconnecting: false,
-            session_name: String::new(),
-            daemon: DaemonInfo::default(),
-            recent_commits: vec![],
-            memory_status: "(not detected)".to_string(),
-            search_status: "(not detected)".to_string(),
-            review_status: "(not detected)".to_string(),
-        }
-    }
-
-    fn reconnect_data() -> WelcomeData {
-        WelcomeData {
-            reconnecting: true,
-            session_name: "tmpm-my-proj".to_string(),
-            ..base_data()
-        }
-    }
-
-    fn data_with_commits() -> WelcomeData {
-        WelcomeData {
-            recent_commits: vec![CommitLine {
-                sha: "abc1234".to_string(),
-                age: "2h".to_string(),
-                subject: "fix: something important".to_string(),
-            }],
-            ..base_data()
-        }
-    }
-
-    /// Single-box banner renders without panic; every line starts with a border char.
-    #[test]
-    fn two_panel_compose_alignment() {
-        colored::control::set_override(false);
-        let data = base_data();
-        let result = render_two_panel_banner(&data, 120, false);
-        assert!(result.is_some(), "wide terminal should produce a banner");
-        let out = result.unwrap();
-        for line in out.lines() {
-            let bare = strip_ansi(line);
-            if bare.is_empty() {
-                continue;
-            }
-            let first = bare.chars().next().unwrap_or(' ');
-            assert!(
-                matches!(first, '╭' | '╰' | '│'),
-                "each line must start with a box corner or side: {bare:?}"
-            );
-        }
-        colored::control::unset_override();
-    }
-
-    /// Title bar must embed the crate version.
-    #[test]
-    fn single_box_title_bar_contains_version() {
-        colored::control::set_override(false);
-        let data = base_data();
-        let out =
-            render_two_panel_banner(&data, 120, false).expect("wide terminal produces banner");
-        let first_line = out.lines().next().unwrap_or("");
-        let bare = strip_ansi(first_line);
-        assert!(
-            bare.contains(env!("CARGO_PKG_VERSION")),
-            "title bar must contain CARGO_PKG_VERSION: {bare:?}"
-        );
-        assert!(
-            bare.starts_with('╭'),
-            "title bar must start with ╭: {bare:?}"
-        );
-        colored::control::unset_override();
-    }
-
-    /// Shaded art rows match the actual line count of the embedded default.
-    #[test]
-    fn image_clip_correct_rows() {
-        let (lines, _cols) =
-            super::super::shade_image(super::super::source::DEFAULT_BANNER_ART, false);
-        let raw_count = super::super::source::DEFAULT_BANNER_ART.lines().count();
-        assert_eq!(
-            lines.len(),
-            raw_count,
-            "shade_image must return one row per art line: expected {raw_count}, got {}",
-            lines.len()
-        );
-        assert!(raw_count >= 2, "default art must have at least 2 lines");
-    }
-
-    /// Each shaded row has the same display width (auto-sized to art max width).
-    #[test]
-    fn image_clip_correct_cols() {
-        let (lines, expected_cols) =
-            super::super::shade_image(super::super::source::DEFAULT_BANNER_ART, false);
-        assert!(expected_cols > 0, "auto-sized cols must be > 0");
-        for (i, line) in lines.iter().enumerate() {
-            let bare = strip_ansi(line);
-            let width = bare.width();
-            assert_eq!(
-                width, expected_cols,
-                "row {i} display width ({width}) must equal auto-sized cols ({expected_cols})"
-            );
-        }
-    }
-
-    /// Non-space art characters emit truecolor escapes when color is enabled.
-    #[test]
-    fn image_shading_emits_truecolor() {
-        // Issue #1858: `shade_image` used to read the process-global
-        // `colored::control` override internally, so this test raced every
-        // sibling test in this file that flips the same global via
-        // `set_override(false)`. Now that `use_color` is an explicit
-        // parameter, this test needs no global mutation at all — it is fully
-        // deterministic and immune to parallel-test interleaving.
-        let (lines, _) = super::super::shade_image(super::super::source::DEFAULT_BANNER_ART, true);
-        let any_colored = lines.iter().any(|l| l.contains("\x1B[38;2;"));
-        assert!(
-            any_colored,
-            "shaded art must emit truecolor escapes when color is enabled"
-        );
-    }
-
-    /// Auto-sizing picks up dimensions from a custom art string.
-    #[test]
-    fn image_autosize_uses_art_dimensions() {
-        let custom_art = "ABC\nDE\nFGHI\n";
-        let (lines, cols) = super::super::shade_image(custom_art, false);
-        // "FGHI" is the widest line: 4 chars.
-        assert_eq!(cols, 4, "max width of 'FGHI' is 4");
-        assert_eq!(lines.len(), 3, "three non-empty lines");
-        // Each row must be padded to cols=4.
-        for (i, line) in lines.iter().enumerate() {
-            let bare = strip_ansi(line);
-            assert_eq!(bare.width(), 4, "row {i} must be padded to 4 display cols");
-        }
-    }
-
-    /// The right-column content has no inner-box border chars (╭╮╰╯).
-    #[test]
-    fn right_col_no_inner_border() {
-        colored::control::set_override(false);
-        let data = base_data();
-        let out = render_two_panel_banner(&data, 120, false).expect("banner");
-        for line in out.lines() {
-            let bare = strip_ansi(line);
-            if bare.starts_with('╭') || bare.starts_with('╰') {
-                continue;
-            }
-            let inner: String = bare.chars().skip(1).collect();
-            let inner_trimmed = inner.trim_end_matches('│');
-            for ch in ['╭', '╮', '╰', '╯'] {
-                assert!(
-                    !inner_trimmed.contains(ch),
-                    "inner border char {ch:?} must not appear inside content rows: {bare:?}"
-                );
-            }
-        }
-        colored::control::unset_override();
-    }
-
-    /// Reconnecting label appears in the stacked narrow-fallback box.
-    #[test]
-    fn reconnect_label_in_narrow_box() {
-        colored::control::set_override(false);
-        let data = reconnect_data();
-        let out = render_two_panel_banner(&data, 80, true).expect("narrow box");
-        let bare = strip_ansi(&out);
-        assert!(
-            bare.contains("Reconnecting..."),
-            "narrow box must contain 'Reconnecting...' label: {bare:.200}"
-        );
-        colored::control::unset_override();
-    }
-
-    /// Reconnecting label is absent from a normal (non-reconnect) narrow banner.
-    #[test]
-    fn narrow_box_no_reconnect_label_when_not_reconnecting() {
-        colored::control::set_override(false);
-        let data = base_data();
-        let out = render_two_panel_banner(&data, 80, false).expect("narrow box");
-        let bare = strip_ansi(&out);
-        assert!(
-            !bare.contains("Reconnecting..."),
-            "normal narrow box must not contain 'Reconnecting...' label"
-        );
-        colored::control::unset_override();
-    }
-
-    /// Both panels reach equal height (shorter one is padded).
-    #[test]
-    fn two_panel_shorter_panel_padded_to_equal_height() {
-        let data = data_with_commits();
-        colored::control::set_override(false);
-        let out = render_two_panel_banner(&data, 130, false).expect("wide banner");
-        for line in out.lines() {
-            let bare = strip_ansi(line);
-            if bare.starts_with('│') {
-                assert!(
-                    bare.ends_with('│'),
-                    "content line must end with │: {bare:?}"
-                );
-            }
-        }
-        colored::control::unset_override();
-    }
-
-    /// Very narrow terminal (< MIN_WIDTH_BOX) returns None.
-    #[test]
-    fn two_panel_narrow_fallback() {
-        let data = base_data();
-        assert!(
-            render_two_panel_banner(&data, MIN_WIDTH_BOX - 1, false).is_none(),
-            "very narrow terminal must return None"
-        );
-    }
-
-    /// Terminals narrower than MIN_WIDTH_TWO_PANEL but ≥ MIN_WIDTH_BOX get a stacked box.
-    #[test]
-    fn two_panel_stacked_on_medium_width() {
-        let data = base_data();
-        let result = render_two_panel_banner(&data, 80, false);
-        assert!(
-            result.is_some(),
-            "80-col terminal must produce a stacked box (not None)"
-        );
-    }
-
-    /// At the wide-mode threshold boundary, no panic.
-    #[test]
-    fn two_panel_at_threshold_boundary() {
-        let data = base_data();
-        let _ = render_two_panel_banner(&data, MIN_WIDTH_TWO_PANEL - 1, false);
-        let _ = render_two_panel_banner(&data, MIN_WIDTH_TWO_PANEL, false);
-    }
-
-    /// Version string must appear in the output (in the title bar).
-    #[test]
-    fn two_panel_version_present() {
-        colored::control::set_override(false);
-        let data = base_data();
-        let out = render_two_panel_banner(&data, 120, false).expect("two-panel");
-        let bare = strip_ansi(&out);
-        assert!(
-            bare.contains(env!("CARGO_PKG_VERSION")),
-            "version must appear in banner: {bare:.100}"
-        );
-        colored::control::unset_override();
-    }
-
-    /// The two-panel banner must not repeat the version in the right panel:
-    /// the title bar already shows it.  The full banner has exactly one copy.
-    #[test]
-    fn right_panel_omits_version_line() {
-        colored::control::set_override(false);
-        let data = base_data();
-        let version = env!("CARGO_PKG_VERSION");
-        let out = render_two_panel_banner(&data, 120, false).expect("wide banner");
-        let bare = strip_ansi(&out);
-        let count = bare.matches(version).count();
-        assert_eq!(
-            count, 1,
-            "version string must appear exactly once (title bar only); found {count}"
-        );
-        colored::control::unset_override();
-    }
-
-    /// Reconnecting state shows the reconnecting label in the wide layout.
-    #[test]
-    fn two_panel_reconnecting_shows_indicator() {
-        colored::control::set_override(false);
-        let data = reconnect_data();
-        let out = render_two_panel_banner(&data, 120, true).expect("two-panel");
-        let bare = strip_ansi(&out);
-        assert!(
-            bare.contains("Reconnecting..."),
-            "reconnecting indicator must appear: {bare:.200}"
-        );
-        colored::control::unset_override();
-    }
-
-    /// `strip_ansi` correctly removes SGR colour escapes.
-    #[test]
-    fn strip_ansi_removes_color_codes() {
-        let colored = "\x1B[38;2;183;65;14mhello\x1B[0m world";
-        let bare = strip_ansi(colored);
-        assert_eq!(bare, "hello world");
-    }
-
-    /// Wide layout has a `│` vertical divider between columns; every line is
-    /// exactly `term_width` display columns wide.
-    #[test]
-    fn wide_layout_has_vertical_divider() {
-        colored::control::set_override(false);
-        let data = base_data();
-        let out = render_two_panel_banner(&data, 120, false).expect("wide banner");
-        let mut checked = 0usize;
-        for line in out.lines() {
-            let bare = strip_ansi(line);
-            if bare.is_empty() {
-                continue;
-            }
-            assert_eq!(bare.width(), 120, "line width mismatch: {bare:?}");
-            if bare.starts_with('│') {
-                let chars: Vec<char> = bare.chars().collect();
-                let inner = &chars[1..chars.len().saturating_sub(1)];
-                assert!(inner.contains(&'│'), "no interior │ divider in: {bare:?}");
-                checked += 1;
-            }
-        }
-        assert!(checked > 0, "no content lines found in wide banner");
-        colored::control::unset_override();
-    }
-}
+pub(crate) mod tests;
