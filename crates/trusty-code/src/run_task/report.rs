@@ -22,12 +22,15 @@ use crate::run_task::recorder::TurnRecord;
 /// Why: A caller (CI, the PM smoke-test, a wrapper script) needs to distinguish
 /// outcomes without parsing output. The ladder separates a clean success, a
 /// successful run that changed nothing, a configuration error (bad agent, bad
-/// project), a runtime failure (the loop or LLM errored), and (#2207) the
+/// project), a runtime failure (the loop or LLM errored), (#2207) the
 /// wall-clock deadline firing before the PM reached `finish_task` — a run that
 /// may have made real, useful progress and must not be conflated with a
 /// genuine `RunFailure` (the bug that blocked the M3 bake-off L1 pilot: a
 /// deadline hit at turn 13 on an otherwise fully-passing solution reported the
-/// same `run_failure` a real crash would).
+/// same `run_failure` a real crash would) — and (#2265) a PM turn-cap or
+/// re-delegation-cap hit that STILL produced a deliverable, the same class of
+/// bug as #2207's but triggered by exhausting turns/re-delegation attempts
+/// rather than wall-clock time.
 /// What: `repr(i32)` so the values are stable and documented; `Success = 0`.
 /// Test: `run_task::tests::exit_codes_are_distinct`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +41,7 @@ pub enum ExitCode {
     /// Configuration error: missing/invalid agent, bad project path, missing key. `2`.
     ConfigError = 2,
     /// Runtime failure: the agent loop or LLM call errored (excludes the
-    /// deadline — see `DeadlineExceeded`). `3`.
+    /// deadline and partial paths — see `DeadlineExceeded` and `Partial`). `3`.
     RunFailure = 3,
     /// The run completed but changed nothing (empty diff). `4`.
     NoChanges = 4,
@@ -47,6 +50,14 @@ pub enum ExitCode {
     /// the M3 bake-off runner) can tell "timed out, possibly close to done"
     /// from "genuinely errored". `5`.
     DeadlineExceeded = 5,
+    /// The PM's own turn cap, or the (#2265) engineer re-delegation cap, was
+    /// exhausted, but a non-empty diff shows a deliverable was actually
+    /// produced. Distinct from `RunFailure` so a caller does not discard a
+    /// working, on-disk solution as an opaque crash purely because the PM ran
+    /// out of turns/retries absorbing engineer failures — trusty-code cannot
+    /// generically verify correctness, so this status only claims "work was
+    /// produced", leaving scoring to the downstream harness. `6`.
+    Partial = 6,
 }
 
 impl ExitCode {
@@ -184,7 +195,7 @@ impl RunReport {
     ///
     /// Why: Both output forms label the outcome with the same vocabulary.
     /// What: Returns `"success"`, `"no_changes"`, `"config_error"`,
-    /// `"run_failure"`, or (#2207) `"deadline_exceeded"`.
+    /// `"run_failure"`, (#2207) `"deadline_exceeded"`, or (#2265) `"partial"`.
     /// Test: `run_task::tests::report_renders_json`,
     /// `run_task::tests::exit_code_reflects_deadline_exceeded_distinct_from_run_failure`.
     fn status_str(&self) -> &'static str {
@@ -194,6 +205,7 @@ impl RunReport {
             ExitCode::ConfigError => "config_error",
             ExitCode::RunFailure => "run_failure",
             ExitCode::DeadlineExceeded => "deadline_exceeded",
+            ExitCode::Partial => "partial",
         }
     }
 }
@@ -287,7 +299,7 @@ mod tests {
     /// Exit codes are distinct and stable.
     ///
     /// Why: Scripts branch on these; collisions would be silent breakage.
-    /// What: Assert the five codes are 0/2/3/4/5 and pairwise distinct.
+    /// What: Assert the six codes are 0/2/3/4/5/6 and pairwise distinct.
     /// Test: this test.
     #[test]
     fn exit_codes_are_distinct() {
@@ -296,6 +308,24 @@ mod tests {
         assert_eq!(ExitCode::RunFailure.code(), 3);
         assert_eq!(ExitCode::NoChanges.code(), 4);
         assert_eq!(ExitCode::DeadlineExceeded.code(), 5);
+        assert_eq!(ExitCode::Partial.code(), 6);
+    }
+
+    /// The `"partial"` status string renders for `ExitCode::Partial` (#2265).
+    ///
+    /// Why: Downstream callers (the bake-off harness) branch on this exact
+    /// string; it must render distinctly from `"run_failure"`.
+    /// What: Render a report with `exit: ExitCode::Partial`; assert the JSON
+    /// `status` field and the human summary line both say `"partial"`.
+    /// Test: this test.
+    #[test]
+    fn partial_status_renders_distinctly_from_run_failure() {
+        let report = sample_report(ExitCode::Partial, "+++ added: x.py\n");
+        let rendered = report.render_json();
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+        assert_eq!(parsed["status"], "partial");
+        assert_eq!(parsed["exit_code"], 6);
+        assert!(report.render_human().contains("status=partial"));
     }
 
     /// JSON render carries status, diff, transcript, usage, and cost.

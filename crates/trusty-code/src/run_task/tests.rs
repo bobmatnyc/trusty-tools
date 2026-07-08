@@ -12,6 +12,7 @@
 //! dir; tests assert on the returned `RunReport`.
 //! Test: this module is itself the test surface.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -19,8 +20,10 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::{ExitCode, RunTaskParams, execute_run_task};
+use super::{ExitCode, RedelegationCapSignal, RunTaskParams, execute_run_task};
+use crate::agent_loop::AgentLoopError;
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
+use crate::tools::AgentOutput;
 
 // ── Scripted offline LLM ───────────────────────────────────────────────────────
 
@@ -743,4 +746,174 @@ async fn two_runs_route_engineer_to_distinct_slugs() {
             "scripted client must have seen {slug}"
         );
     }
+}
+
+// ── #2265: re-delegation cap, reuse-aware Llm hint, partial status ─────────────
+
+/// Repeated `AgentLoopError::Llm` failures from the engineer trigger the
+/// re-delegation cap (fix #1) — NOT the PM's own turn cap — producing a
+/// report that names the cap explicitly, using only a couple of PM turns
+/// regardless of how many internal engineer retries occurred (fix #3,
+/// decoupled design).
+///
+/// Why: This is the exact regression #2265 closes: before this fix, each
+/// PM-driven retry could burn up to 40 engineer turns (#2233) while the PM
+/// itself had only 8 attempts to notice and react, so a recurring retryable
+/// Bedrock/transport error blew up session turn counts (~40 to ~111) and hit
+/// the PM's OWN turn cap, reported as an opaque `run_failure`. Now the cap in
+/// `run_task::redelegation` governs retry count entirely inside ONE
+/// `delegate_to_agent` dispatch.
+/// What: Script ONLY the PM's initial `delegate_to_agent` call — every
+/// subsequent `chat` call (every engineer retry attempt, and the PM's own
+/// follow-up turn) exhausts the scripted queue and returns
+/// `LlmError::MissingConfig`, i.e. a retryable `AgentLoopError::Llm` per
+/// fix #2. No file is ever written, so the report is a genuine `RunFailure`
+/// (no deliverable) — but assert its `task` text names "re-delegation limit
+/// reached" (the fix #1 label), not a bare/opaque failure, and that at most 2
+/// PM-role transcript turns were recorded — proof the engineer's internal
+/// retries never touched the PM's own turn budget.
+/// Test: this test.
+#[tokio::test]
+async fn repeated_llm_errors_trigger_redelegation_cap_not_pm_turn_cap() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[delegate_response("do work")]));
+
+    let report = execute_run_task(params(&agents, &project, None), llm).await;
+
+    assert_eq!(
+        report.exit,
+        ExitCode::RunFailure,
+        "no deliverable was ever produced, so this must stay a genuine failure"
+    );
+    assert!(
+        report.task.contains("re-delegation limit reached"),
+        "the report must name the re-delegation cap (fix #1), not an opaque \
+         failure, got: {}",
+        report.task
+    );
+
+    let pm_turns = report.transcript.iter().filter(|t| t.role == "pm").count();
+    assert!(
+        pm_turns <= 2,
+        "the PM must need only a couple of turns regardless of how many internal \
+         engineer retries occurred — decoupling proof (fix #3), got {pm_turns} PM turns"
+    );
+}
+
+/// `assemble_report` maps a PM-loop `TurnCapExceeded` error to the new
+/// `Partial` status (fix #4) — NOT `RunFailure` — when a non-empty diff shows
+/// a deliverable was actually produced.
+///
+/// Why: This is fix #4's core contract: trusty-code cannot generically verify
+/// correctness, so a turn-cap hit must not discard a working, on-disk
+/// solution as an opaque crash purely because the PM ran out of turns.
+/// What: Calls the crate-private `assemble_report` directly with a
+/// `TurnCapExceeded` `pm_result` and a before/after `Snapshot::Files` pair
+/// that differ (one new file). Assert `exit == ExitCode::Partial`, the
+/// rendered diff is non-empty, and the task label mentions the turn cap.
+/// Test: this test.
+#[test]
+fn assemble_report_maps_turn_cap_exceeded_with_deliverable_to_partial() {
+    let params = RunTaskParams {
+        agent: "pm".into(),
+        task: "write hello.py".into(),
+        project: PathBuf::from("/tmp/does-not-matter"),
+        agents_dir: PathBuf::from("/tmp/does-not-matter-agents"),
+        engineer_model: None,
+        deadline_secs: None,
+    };
+    let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
+
+    let before = super::diff::Snapshot::Files(std::collections::BTreeMap::new());
+    let mut after_map = std::collections::BTreeMap::new();
+    after_map.insert("hello.py".to_string(), "print('hi')".to_string());
+    let after = super::diff::Snapshot::Files(after_map);
+
+    let pm_result: Result<AgentOutput, AgentLoopError> = Err(AgentLoopError::TurnCapExceeded {
+        max_turns: 8,
+        partial: Box::new(AgentOutput::from_content("partial pm output")),
+    });
+
+    let signal = RedelegationCapSignal::new();
+    let report = super::assemble_report(
+        &params,
+        &transcript,
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o-mini",
+        super::RunOutcome {
+            before,
+            after,
+            pm_result,
+        },
+        &signal,
+    );
+
+    assert_eq!(
+        report.exit,
+        ExitCode::Partial,
+        "a TurnCapExceeded PM error with a real deliverable must map to Partial, \
+         not RunFailure (fix #4)"
+    );
+    assert!(
+        report.diff.contains("hello.py"),
+        "the deliverable's diff must still be rendered, got: {}",
+        report.diff
+    );
+    assert!(
+        report.task.contains("turn cap"),
+        "the label must explain the turn-cap condition, got: {}",
+        report.task
+    );
+}
+
+/// The mirror negative case: a `TurnCapExceeded` PM error with an EMPTY diff
+/// (no deliverable at all) stays `RunFailure` — the gate is purely "was work
+/// produced", per fix #4's requirement to not weaken the genuine-failure path.
+///
+/// Why: Guards against over-broadly reclassifying every turn-cap hit as
+/// `Partial` regardless of whether anything was actually produced.
+/// What: Same as the positive test, but before == after (no change). Assert
+/// `exit == ExitCode::RunFailure`.
+/// Test: this test.
+#[test]
+fn assemble_report_keeps_turn_cap_exceeded_with_no_deliverable_as_run_failure() {
+    let params = RunTaskParams {
+        agent: "pm".into(),
+        task: "write hello.py".into(),
+        project: PathBuf::from("/tmp/does-not-matter"),
+        agents_dir: PathBuf::from("/tmp/does-not-matter-agents"),
+        engineer_model: None,
+        deadline_secs: None,
+    };
+    let transcript: super::SharedTranscript = Arc::new(Mutex::new(Vec::new()));
+
+    let before = super::diff::Snapshot::Files(std::collections::BTreeMap::new());
+    let after = super::diff::Snapshot::Files(std::collections::BTreeMap::new());
+
+    let pm_result: Result<AgentOutput, AgentLoopError> = Err(AgentLoopError::TurnCapExceeded {
+        max_turns: 8,
+        partial: Box::new(AgentOutput::from_content("partial pm output")),
+    });
+
+    let signal = RedelegationCapSignal::new();
+    let report = super::assemble_report(
+        &params,
+        &transcript,
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o-mini",
+        super::RunOutcome {
+            before,
+            after,
+            pm_result,
+        },
+        &signal,
+    );
+
+    assert_eq!(
+        report.exit,
+        ExitCode::RunFailure,
+        "a TurnCapExceeded PM error with NO deliverable must stay RunFailure (fix #4)"
+    );
 }
