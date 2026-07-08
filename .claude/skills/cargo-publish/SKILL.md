@@ -19,16 +19,17 @@ Codifies lessons from 18+ publishes across two recent sessions.
 Every publish follows this exact sequence:
 
 ```
-0. scripts/check-publish-ready.sh <crate>  — MANDATORY, MUST PASS
+0. scripts/check-publish-ready.sh <crate>   — MANDATORY, MUST PASS
 1. Pre-flight checks (fmt, clippy, tests)
 2. cargo publish --dry-run
 3. git tag <crate-name>-v<version>
 4. git push origin <crate-name>-v<version>
-5. cargo publish
-6. Wait 60-120s for propagation
-7. Verify with curl to crates.io API
-8. cargo install --path crates/<dir> --locked (binaries only)
-9. Verify <binary> --version
+5. scripts/preflight-publish.sh <crate>     — MANDATORY, MUST PASS (run again, immediately before step 6)
+6. cargo publish
+7. Wait 60-120s for propagation
+8. Verify with curl to crates.io API
+9. cargo install --path crates/<dir> --locked (binaries only)
+10. Verify <binary> --version
 ```
 
 **Critical**: Never skip dry-run. Never publish from the main checkout.
@@ -67,6 +68,41 @@ mechanical gate instead of a convention someone can forget under pressure.
 downgrades both guard failures to a loud warning and exits 0. Only use this
 when you have a specific, understood reason to publish from an unmerged
 commit — the default path is always "merge to main first, then publish."
+
+## Step 5: Identity + Clean-Tree + Version-Not-Live Guard (MANDATORY, closes the 2026-07-08 collision)
+
+🔴 **Run `scripts/preflight-publish.sh` immediately before every `cargo publish`
+— treat any nonzero exit as an absolute stop.** On 2026-07-08 a crate was
+published to crates.io out-of-band — from an UNMERGED branch, under the
+WRONG gh account — burning crates.io version 0.22.0 with fix-less content
+(a burned version number can never be reused). `check-publish-ready.sh`
+above already covers "merged main" + "tag pushed"; this script closes the two
+gaps that incident fell through — WHO is publishing, and whether the target
+version is already live:
+
+```bash
+scripts/preflight-publish.sh trusty-mpm
+```
+
+Reads the crate's name/version straight from `crates/trusty-mpm/Cargo.toml`
+(pass an explicit version as a second argument to check a hypothetical
+version instead). Runs four checks and fails loud on any of them:
+
+1. **merged-main**: current HEAD's commit SHA is EXACTLY `origin/main`'s HEAD
+   SHA (stricter than `check-publish-ready.sh`'s ancestor check).
+2. **identity**: the active `gh auth status` account is `bobmatnyc`. Any
+   other active account fails with the remedy `gh auth switch --user bobmatnyc`.
+3. **clean-tree**: `git status --porcelain` is empty.
+4. **version-not-live**: the target version is not already published on
+   crates.io (queries `https://crates.io/api/v1/crates/<name>/<version>`) —
+   this is the exact guard that would have caught the 0.22.0 collision.
+
+`scripts/preflight-publish.sh --check-only <crate>` runs all four checks
+unconditionally and prints a `[PASS]`/`[FAIL]` line per check without
+assuming you're mid-publish — use it to preview status. `--help` documents
+the rare, logged `PREFLIGHT_ALLOW_DETACHED=1` override for check 1 (validated
+release worktrees only — misuse of it is exactly how the incident happened).
+No override exists for the identity check.
 
 ## Worktree Discipline (MANDATORY)
 
