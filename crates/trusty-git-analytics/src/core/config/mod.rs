@@ -405,6 +405,35 @@ pub struct TeamMember {
     pub aliases: Vec<String>,
 }
 
+/// Build the alias list consumed by `IdentityResolver::from_alias_map` for
+/// a single [`TeamMember`], seeding the member's primary `email` as the
+/// first entry.
+///
+/// Why: without this, a team member declared with no `aliases:` sub-list
+/// produces an empty alias vec downstream. `IdentityResolver::from_alias_map`
+/// derives `canon_email` as "the first alias-list entry containing `@`",
+/// which is the empty string for such a member. Because
+/// `authors.canonical_email` carries a UNIQUE constraint, two or more
+/// non-aliased members collide on the same empty `canonical_email` row
+/// (issue #2244). This mirrors [`AliasFile::to_alias_map`]'s
+/// `primary_email`-seeding behavior so the `team.members` and
+/// `aliases_file` config paths derive `canon_email` consistently.
+/// What: prepends `member.email` (when non-empty) to `member.aliases`,
+/// then dedupes case-insensitively while preserving order.
+/// Test: see `resolved_aliases_seeds_primary_email_for_non_aliased_members`
+/// in this module's `tests` block.
+fn team_member_alias_list(member: &TeamMember) -> Vec<String> {
+    let mut combined: Vec<String> = Vec::with_capacity(member.aliases.len() + 1);
+    if !member.email.is_empty() {
+        combined.push(member.email.clone());
+    }
+    combined.extend(member.aliases.iter().cloned());
+    // Dedupe while preserving order (mirrors `AliasFile::to_alias_map`).
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    combined.retain(|s| seen.insert(s.to_lowercase()));
+    combined
+}
+
 /// Output / reporting configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OutputConfig {
@@ -1254,7 +1283,7 @@ impl Config {
                 if let Some(team) = &self.team {
                     team.members
                         .iter()
-                        .map(|m| (m.name.clone(), m.aliases.clone()))
+                        .map(|m| (m.name.clone(), team_member_alias_list(m)))
                         .collect()
                 } else {
                     HashMap::new()
@@ -1620,5 +1649,81 @@ mod tests {
     fn github_config_review_fetch_concurrency_default() {
         let cfg: GithubConfig = serde_yaml::from_str("fetch_prs: true\n").expect("parse");
         assert_eq!(cfg.review_fetch_concurrency, 1);
+    }
+
+    /// Why: issue #2244 — a `team.members` entry with no `aliases:`
+    /// sub-list used to resolve to an alias list containing only its own
+    /// (empty) contribution, so `IdentityResolver::from_alias_map` derived
+    /// `canon_email` as "" (the first alias-list entry containing `@`,
+    /// which does not exist). Two such non-aliased members then collided
+    /// on the same empty `canonical_email`, which is UNIQUE in the
+    /// `authors` table.
+    /// What: build a `Config` with two `team.members` entries, neither
+    /// carrying an `aliases:` sub-list nor a `canonical_domain`, and
+    /// assert `resolved_aliases()` seeds each member's `email` into its
+    /// alias list so the two members resolve to distinct, non-empty
+    /// canonical emails downstream.
+    /// Test: this test — regression guard for #2244.
+    #[test]
+    fn resolved_aliases_seeds_primary_email_for_non_aliased_members() {
+        let cfg = Config {
+            team: Some(TeamConfig {
+                members: vec![
+                    TeamMember {
+                        name: "Alice Alpha".into(),
+                        email: "alice@example.com".into(),
+                        aliases: vec![],
+                    },
+                    TeamMember {
+                        name: "Bob Beta".into(),
+                        email: "bob@example.com".into(),
+                        aliases: vec![],
+                    },
+                ],
+                aliases: HashMap::new(),
+                canonical_domain: None,
+            }),
+            ..Config::default()
+        };
+
+        let resolved = cfg.resolved_aliases();
+        let alice_aliases = resolved
+            .get("Alice Alpha")
+            .expect("Alice Alpha present in resolved aliases");
+        let bob_aliases = resolved
+            .get("Bob Beta")
+            .expect("Bob Beta present in resolved aliases");
+
+        assert!(
+            alice_aliases.contains(&"alice@example.com".to_string()),
+            "Alice's primary email must be seeded as an alias: {alice_aliases:?}"
+        );
+        assert!(
+            bob_aliases.contains(&"bob@example.com".to_string()),
+            "Bob's primary email must be seeded as an alias: {bob_aliases:?}"
+        );
+
+        // Downstream: IdentityResolver::from_alias_map derives canon_email
+        // as the first alias-list entry containing '@'. Both members must
+        // derive distinct, non-empty canonical emails — no collision.
+        let resolver =
+            crate::collect::identity::resolver::IdentityResolver::from_alias_map(&resolved);
+        let (alice_name, alice_email) = resolver.resolve("whoever", "alice@example.com");
+        let (bob_name, bob_email) = resolver.resolve("whoever", "bob@example.com");
+
+        assert_eq!(alice_name, "Alice Alpha");
+        assert_eq!(bob_name, "Bob Beta");
+        assert!(
+            !alice_email.is_empty(),
+            "Alice's canonical email must not be empty"
+        );
+        assert!(
+            !bob_email.is_empty(),
+            "Bob's canonical email must not be empty"
+        );
+        assert_ne!(
+            alice_email, bob_email,
+            "distinct members must not collide on the same canonical_email"
+        );
     }
 }
