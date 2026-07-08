@@ -406,6 +406,32 @@ pub(crate) enum Command {
         action: RepairAction,
     },
 
+    /// Manage the tm-managed `CLAUDE_CODE_OAUTH_TOKEN` store (issue #2246).
+    ///
+    /// Why: managed sessions run `claude` under a relocated `CLAUDE_CONFIG_DIR`
+    /// (`~/.trusty-tools/trusty-mpm/claude-config/`). On macOS, Claude Code's
+    /// primary OAuth login lives in the Keychain under an entry keyed by a
+    /// hash of `CLAUDE_CONFIG_DIR` — so a `/login` run inside a managed
+    /// session diverges from the login stored under the operator's default
+    /// config dir, producing a "login successful" then immediately
+    /// "not logged in" loop. `CLAUDE_CODE_OAUTH_TOKEN` bypasses the Keychain
+    /// entirely; this command manages the tm-owned store the daemon injects
+    /// it from. Get a token via `claude setup-token`, then store it here.
+    /// What: `set-token` stores a token (0600) at
+    /// `~/.trusty-tools/trusty-mpm/claude-code-oauth.token` — read from stdin
+    /// by default, or `--token <val>` (avoid the latter in a shared shell
+    /// history); `clear-token` removes it; `status` reports presence/absence
+    /// of the stored token, the `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY`
+    /// env vars, and a best-effort on-disk credentials check — NEVER the
+    /// token value itself.
+    /// Test: `cli_parses_auth_set_token`, `cli_parses_auth_clear_token`,
+    /// `cli_parses_auth_status`.
+    Auth {
+        /// Auth action to perform.
+        #[command(subcommand)]
+        action: AuthAction,
+    },
+
     /// Sync and inspect the claude-mpm agent/skill catalog.
     ///
     /// Why: the session-manager MVP deploys agents and skills sourced from the
@@ -1280,6 +1306,56 @@ pub(crate) enum RepairAction {
         #[arg(long)]
         force: bool,
     },
+}
+
+/// Actions for the `auth` subcommand (issue #2246).
+///
+/// Why: scoped sub-actions keep the token lifecycle (store/remove/inspect)
+/// under one command group without cluttering the top-level CLI surface.
+/// What: `SetToken`, `ClearToken`, `Status` — see [`Command::Auth`]'s doc
+/// comment for the full rationale.
+/// Test: `cli_parses_auth_set_token`, `cli_parses_auth_set_token_stdin`,
+/// `cli_parses_auth_clear_token`, `cli_parses_auth_status`.
+#[derive(Debug, Subcommand)]
+pub(crate) enum AuthAction {
+    /// Store a `CLAUDE_CODE_OAUTH_TOKEN` for managed sessions to use.
+    ///
+    /// Why: `--token <val>` is convenient for scripting but lands the token in
+    /// shell history; the default (no `--token`) reads it from stdin instead
+    /// (e.g. `claude setup-token | tm auth set-token`), so this is the safer
+    /// path for interactive use.
+    /// What: reads the token from `--token` when given, else from stdin
+    /// (trimmed of surrounding whitespace/newline), and writes it to
+    /// `~/.trusty-tools/trusty-mpm/claude-code-oauth.token` with mode 0600.
+    /// Test: `cli_parses_auth_set_token`, `cli_parses_auth_set_token_stdin`.
+    SetToken {
+        /// The token value. When omitted, read from stdin instead.
+        #[arg(long)]
+        token: Option<String>,
+        /// Explicitly read the token from stdin (the default when `--token`
+        /// is omitted; accepted for clarity in scripts/docs).
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// Remove the stored token, if present.
+    ///
+    /// Why: lets an operator roll back to ambient Keychain/`ANTHROPIC_API_KEY`
+    /// auth, or rotate to a freshly generated token via a subsequent
+    /// `set-token`.
+    /// What: deletes the stored token file; a no-op (not an error) when no
+    /// token is stored.
+    /// Test: `cli_parses_auth_clear_token`.
+    ClearToken,
+    /// Report the current auth configuration without printing any secret.
+    ///
+    /// Why: the fastest way for an operator (or `tm doctor`) to see whether a
+    /// managed session is at risk of the `CLAUDE_CONFIG_DIR` login loop
+    /// (#2246) before it happens.
+    /// What: prints presence/absence of the stored token, the
+    /// `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` env vars, and a
+    /// best-effort on-disk credentials check. NEVER prints the token value.
+    /// Test: `cli_parses_auth_status`.
+    Status,
 }
 
 /// Actions for the `telegram` subcommand.

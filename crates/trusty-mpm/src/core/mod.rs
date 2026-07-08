@@ -51,6 +51,7 @@ pub mod mcp_config;
 pub mod memory;
 pub mod model_inject;
 pub mod names;
+pub mod oauth_token;
 // DOC-28 cutover bridge: unified session finder — CUTOVER BRIDGE — remove post-migration (#1762)
 pub mod native_session_finder;
 pub mod output_style;

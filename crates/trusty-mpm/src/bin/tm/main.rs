@@ -304,6 +304,14 @@ async fn main() -> anyhow::Result<()> {
                 RepairAction::Deploy { force } => repair_deploy(force),
             }
         }
+        Some(Command::Auth { action }) => {
+            use cli::AuthAction;
+            match action {
+                AuthAction::SetToken { token, stdin } => commands::auth::set_token(token, stdin),
+                AuthAction::ClearToken => commands::auth::clear_token(),
+                AuthAction::Status => commands::auth::status(),
+            }
+        }
         Some(Command::Catalog { action }) => commands::managed::catalog(action).await,
         Some(Command::Ticket {
             issue,
