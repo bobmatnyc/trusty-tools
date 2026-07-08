@@ -143,7 +143,14 @@ impl VectorStore for UsearchStore {
     /// as a prefix, strips the prefix (mirrors M002's `strip_prefix` logic),
     /// replaces the entry in both maps. Idempotent: already-relative IDs are
     /// skipped. Outside-root absolute IDs are left unchanged and logged at warn.
-    /// Test: `tests::test_rewrite_keys_to_relative`.
+    /// Issue #2179: when any rewrite happened, promotes the store view →
+    /// mutable via [`Self::ensure_mutable`] (rather than flipping the
+    /// `is_view` flag directly) so the flag never claims "mutable" while the
+    /// underlying `usearch::Index` is still literally an mmap view — see
+    /// [`Self::ensure_mutable`]'s doc comment for why that mismatch is unsafe
+    /// (a subsequent write path would skip promotion and mutate the view).
+    /// Test: `tests::test_rewrite_keys_to_relative`,
+    /// `tests::test_rewrite_keys_to_relative_promotes_view_to_mutable`.
     async fn rewrite_keys_to_relative(&self, root_path: &Path) -> Result<usize> {
         let mut id_map = self.id_to_key.write().await;
         let mut key_map = self.key_to_id.write().await;
@@ -193,13 +200,27 @@ impl VectorStore for UsearchStore {
             id_map.insert(new_id.clone(), key);
             key_map.insert(key, new_id);
         }
+        // Release the id-map locks before touching the HNSW index lock inside
+        // `ensure_mutable` below — the two lock pairs are never held together
+        // elsewhere in this store, and doing so here would be a new (and
+        // unnecessary) lock-ordering dependency.
+        drop(id_map);
+        drop(key_map);
 
-        // The in-memory maps now differ from the on-disk sidecar: clear the
-        // view flag so `save()` does not treat the snapshot as clean and skip
-        // the flush. We use `Release` ordering to pair with the `Acquire` load
-        // in `save()` — the updated map state must be visible before save reads it.
+        // Issue #2179: the in-memory maps now differ from the on-disk
+        // sidecar, so `save()` must not treat the snapshot as clean and skip
+        // the flush. Previously this set `is_view = false` directly, which
+        // left the flag claiming "mutable" while the underlying
+        // `usearch::Index` handle was still literally an mmap view whenever
+        // this ran against a warm-booted (view-mode) store — a later write
+        // path (`upsert`/`remove`/`upsert_batch`) would then see `is_view ==
+        // false`, skip `ensure_mutable`'s promotion, and mutate the view
+        // directly, which usearch documents as erroring or UB. Routing
+        // through `ensure_mutable()` instead performs the real `Index::load`
+        // promotion when the store was a view (no-op when it was already
+        // mutable), keeping `is_view` truthful in both cases.
         if count > 0 {
-            self.is_view.store(false, Ordering::Release);
+            self.ensure_mutable().await?;
         }
 
         Ok(count)

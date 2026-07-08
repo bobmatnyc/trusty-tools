@@ -55,7 +55,9 @@ pub struct WarmBootInputs {
 ///
 /// Why (issue #135): see [`WarmBootInputs`].
 /// What: applies rules in order:
-///   1. `corpus_open_failed == true` → lexical is `Failed` (issue #1158).
+///   1. `corpus_open_failed == true` → lexical, semantic, AND graph are all
+///      `Failed` (issues #1158, #1870, #2203 — see the inline rationale
+///      below).
 ///   2. `chunk_count > 0` → lexical is `Ready`.
 ///   3. `chunk_count == 0` → lexical is `InProgress`.
 ///   4. `lexical_only == true` → semantic + graph are `Skipped`.
@@ -64,17 +66,38 @@ pub struct WarmBootInputs {
 ///
 /// Test: `warm_boot_*` tests in `commands/start.rs`.
 pub fn derive_warm_boot_stages(inputs: WarmBootInputs) -> IndexStages {
+    // Issues #1870 / #2203 (joint root cause): a failed durable-corpus open
+    // must fail EVERY stage, not just lexical. Before this guard, `semantic`
+    // and `graph` were classified purely from `hnsw_snapshot_ready` /
+    // `graph_node_count` — signals that are entirely independent of the
+    // corpus. A restored HNSW mmap snapshot (or symbol graph) can load
+    // successfully even when the redb corpus failed to open (e.g.
+    // `DatabaseAlreadyOpen`, #1870), so `semantic` kept reporting `Ready`
+    // while the query hot path's `fetch_chunks_for_ids` could never resolve
+    // any chunk id against the (unwired) corpus — every HNSW hit was
+    // silently dropped at materialisation (`search/materialize.rs`'s "fused
+    // id not in corpus" trace), producing HTTP 200 + `results: []` for
+    // essentially every query while `/health` / `GET /indexes/:id/status`
+    // kept reporting `semantic.status: "ready"` (#2203). Both lanes depend
+    // on the same durable corpus for chunk text, so both must fail together
+    // with it — this is the `search_capabilities`/corpus-resolvability
+    // consistency guard.
+    if inputs.corpus_open_failed {
+        let reason = "redb corpus could not be opened (incompatible or corrupted format); \
+             run `trusty-search index <path> --force` to rebuild from source \
+             (issues #1158, #1870, #2203)";
+        return IndexStages {
+            lexical: StageState::failed(reason),
+            semantic: StageState::failed(reason),
+            graph: StageState::failed(reason),
+        };
+    }
+
     // Issue #1158: corpus open failure must surface as Failed, not InProgress.
     // Before this guard, `chunk_count == 0` (corpus store absent) was treated
     // identically to a freshly-created, never-indexed handle — silently
     // appearing healthy while the durable store was unreadable.
-    let lexical = if inputs.corpus_open_failed {
-        StageState::failed(
-            "redb corpus could not be opened (incompatible or corrupted format); \
-             run `trusty-search index <path> --force` to rebuild from source \
-             (issue #1158)",
-        )
-    } else if inputs.chunk_count > 0 {
+    let lexical = if inputs.chunk_count > 0 {
         StageState {
             status: StageStatus::Ready,
             ..Default::default()

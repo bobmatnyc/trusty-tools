@@ -618,6 +618,122 @@ async fn reindex_marks_failed_on_zero_vectors_and_preserves_corpus() {
     );
 }
 
+/// Issue #2211 regression: with `defer_embed=true` (the default) and a real
+/// embedder wired, the semantic stage must NOT report `Ready` the instant
+/// the fast pass (C1: walk → chunk → BM25 → KG) completes — the actual
+/// embedding runs in a background pass that has not finished yet. Before the
+/// fix, `finish_reindex` called `mark_semantic_ready_graph_in_progress`
+/// unconditionally right after the batch loop, flipping `semantic.status`
+/// to `Ready` regardless of `defer_embed`; the deferred background pass
+/// never reset it back to `InProgress`, so operators polling
+/// `/indexes/:id/status` (or health-check callers like apex-companion) saw
+/// a false "ready" signal for the entire embedding window.
+///
+/// Why: uses a `SlowEmbedder` that sleeps briefly per call so the background
+/// pass takes long enough to reliably observe the intermediate (non-Ready)
+/// state between the fast-pass `Complete` event and the deferred pass
+/// actually finishing.
+/// What: runs a full `spawn_reindex` with `defer_embed` defaulted `true`
+/// (via `IndexHandle::bare`) and a real (slow) embedder + HNSW store; polls
+/// for `ReindexStatus::Complete` (fast pass done), then immediately asserts
+/// `semantic.status != Ready`; then polls further and asserts it eventually
+/// does become `Ready` once the deferred pass finishes.
+/// Test: this test.
+#[tokio::test]
+async fn defer_embed_semantic_stage_not_ready_before_background_pass_completes() {
+    use crate::core::embed::Embedder;
+    use crate::core::store::{UsearchStore, VectorStore};
+    use std::sync::atomic::AtomicUsize;
+
+    /// Embedder that sleeps briefly per call so the deferred background pass
+    /// takes long enough to observe an intermediate (non-Ready) semantic
+    /// stage state before it completes.
+    struct SlowEmbedder {
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl Embedder for SlowEmbedder {
+        async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            Ok(vec![0.1; 32])
+        }
+        async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            Ok(texts.iter().map(|_| vec![0.1; 32]).collect())
+        }
+        fn dimension(&self) -> usize {
+            32
+        }
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    fs::write(root.join("lib.rs"), "pub fn alpha() {}\n").unwrap();
+
+    let dim = 32;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let embedder: Arc<dyn Embedder> = Arc::new(SlowEmbedder {
+        calls: calls.clone(),
+    });
+    let store: Arc<dyn VectorStore> = Arc::new(UsearchStore::new(dim).expect("usearch new"));
+    let indexer = CodeIndexer::new("defer-2211", root.clone()).with_components(embedder, store);
+
+    // `defer_embed` defaults to `true` via `IndexHandle::bare`.
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new("defer-2211"),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root.clone(),
+    ));
+    assert!(
+        handle.defer_embed,
+        "precondition: defer_embed must default true"
+    );
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex(handle.clone(), progress.clone(), false);
+
+    // Wait for the fast pass to complete (lexical/BM25/KG done, embedding deferred).
+    for _ in 0..200 {
+        if progress.status.load() == ReindexStatus::Complete {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(progress.status.load(), ReindexStatus::Complete);
+
+    // Issue #2211: right after the fast pass, the background embed pass has
+    // NOT finished yet (SlowEmbedder blocks 300ms per call) — the semantic
+    // stage must not report Ready. Before the fix this was already Ready
+    // here, because `finish_reindex` marked it Ready unconditionally.
+    let semantic_status = handle.stages.read().await.semantic.status;
+    assert_ne!(
+        semantic_status,
+        StageStatus::Ready,
+        "semantic stage must not be Ready while the deferred embed pass is still running \
+         (issue #2211 — false-ready before embedding actually completes)"
+    );
+
+    // Eventually the deferred pass finishes and semantic really does flip Ready.
+    let mut final_status = semantic_status;
+    for _ in 0..100 {
+        final_status = handle.stages.read().await.semantic.status;
+        if final_status == StageStatus::Ready {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        final_status,
+        StageStatus::Ready,
+        "semantic stage must eventually become Ready once the deferred pass completes"
+    );
+    assert!(
+        calls.load(Ordering::Acquire) > 0,
+        "the (slow) embedder must have been invoked by the deferred pass"
+    );
+}
+
 /// Issue #112: when no recognised metadata files exist, the context
 /// embedding stays `None` so the router falls back to a neutral 1.0
 /// weight for this index.
