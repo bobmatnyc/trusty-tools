@@ -16,6 +16,9 @@
 //!   single workflow name via `dora.deployment_workflow`. Requires
 //!   `GITHUB_TOKEN`; falls back to `git_tags` when absent.
 //! * `manual` — no-op (operator is expected to INSERT directly).
+//! * `file` — ingest a JSON or CSV export whose schema mirrors
+//!   `fact_deployments` columns directly (issue #2204). See
+//!   `file_source` for the documented schema.
 
 use chrono::{DateTime, TimeZone, Utc};
 use clap::Args;
@@ -26,6 +29,8 @@ use tracing::{info, warn};
 use tga::core::config::{Config, DoraConfig, RepositoryConfig};
 use tga::core::db::Database;
 
+mod file_source;
+use file_source::ingest_file;
 mod github;
 use github::{ingest_github_actions, ingest_github_releases};
 // The inline test module (path = "deployments_tests.rs") exercises several
@@ -55,6 +60,7 @@ pub(super) const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
   git_tags         -- match tags against dora.deployment_tag_pattern (default)\n\
   github_releases  -- paginate GitHub Releases API (requires GITHUB_TOKEN)\n\
   github_actions   -- paginate GitHub Actions runs (requires GITHUB_TOKEN)\n\
+  file             -- ingest a JSON or CSV export (requires --file <path>)\n\
   manual           -- no-op (operator INSERTs directly into fact_deployments)\n\n\
 The source is configured via `dora.deployment_source` in config.yaml.\n\
 Use --source to override at runtime without editing the config file.",
@@ -63,6 +69,8 @@ Use --source to override at runtime without editing the config file.",
   tga deployments collect\n\n\
   # Force GitHub Releases source regardless of config\n\
   tga deployments collect --source github_releases\n\n\
+  # Ingest a downstream ETL export (see file_source module docs for schema)\n\
+  tga deployments collect --source file --file deployments.json\n\n\
 TIPS:\n\
   - Set GITHUB_TOKEN before using github_releases or github_actions sources.\n\
   - After ingestion, run `tga dora` to compute deployment frequency and lead time."
@@ -73,6 +81,11 @@ pub struct DeploymentsCollectArgs {
     /// present).
     #[arg(long, value_name = "SOURCE")]
     pub source: Option<String>,
+    /// Path to a JSON or CSV deployment export. Required when
+    /// `--source file` is used; format is inferred from the extension
+    /// (`.json` or `.csv`). See `file_source` module docs for the schema.
+    #[arg(long, value_name = "PATH")]
+    pub file: Option<std::path::PathBuf>,
 }
 
 /// Per-run counters surfaced on the CLI output.
@@ -113,6 +126,24 @@ pub async fn run(
         "git_tags" => ingest_git_tags(db, &config.repositories, &dora)?,
         "github_releases" => ingest_github_releases(db, &config.repositories, &dora).await?,
         "github_actions" => ingest_github_actions(db, &config.repositories, &dora).await?,
+        "file" => {
+            let path = args.file.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--source file requires --file <path> pointing at a JSON or CSV \
+                     deployment export"
+                )
+            })?;
+            let stats = ingest_file(db, path)?;
+            println!(
+                "File ingestion ({}): {} record(s) read; {} inserted into \
+                 fact_deployments, {} skipped (already present).",
+                path.display(),
+                stats.inserted + stats.skipped,
+                stats.inserted,
+                stats.skipped,
+            );
+            return Ok(());
+        }
         "manual" => {
             println!(
                 "deployment_source = 'manual' — no-op. INSERT into \
@@ -123,7 +154,7 @@ pub async fn run(
         other => {
             anyhow::bail!(
                 "unknown deployment_source '{other}'. Expected one of: \
-                 git_tags, github_releases, github_actions, manual."
+                 git_tags, github_releases, github_actions, file, manual."
             );
         }
     };

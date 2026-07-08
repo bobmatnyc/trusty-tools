@@ -5,6 +5,27 @@ All notable changes to trusty-git-analytics will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.9.0] - 2026-07-07
+
+### Added
+
+- **`tga rules list --format json` — machine-readable taxonomy rollup (#2205)**
+  — emits the subcategory→top-level taxonomy rollup (built-in defaults merged
+  with any `classification.custom_categories`) as JSON, so downstream
+  consumers (e.g. cto-reports) can consume `TaxonomyRegistry` programmatically
+  instead of hand-copying it as a Python dict. `--format text` (the previous
+  behaviour) remains the default.
+- **`--source file` for `tga deployments collect` and `tga incidents collect`
+  (#2204)** — generic JSON/CSV file ingestion with a documented, stable
+  schema for each (a flat `fact_deployments`-mirroring record for
+  deployments; a generic `{incident_id, detected_at, resolved_at, severity,
+  repo, triggering_deploy, jira_ticket}` record for incidents). Lets
+  downstream consumers (e.g. cto-reports) go through the supported `tga …
+  collect` CLI contract instead of writing `fact_deployments` /
+  `fact_incidents` directly into `tga.db` via raw `sqlite3`. See the
+  `commands::deployments::file_source` and `commands::incidents::file_source`
+  module docs for the exact schemas.
+
 ## [2.8.1] - 2026-06-16
 
 ### Fixed

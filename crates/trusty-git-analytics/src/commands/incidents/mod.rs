@@ -14,6 +14,12 @@
 //!    schema into `fact_incidents`. Three envelope shapes are recognised
 //!    (single-incident, list, monitor-trigger); unrecognised files are
 //!    logged at WARN level and skipped.
+//!
+//! 3. **File** (`--source file`, issue #2204): ingest a JSON or CSV
+//!    export whose schema is a generic incident record — see the
+//!    `file_source` module docs for the exact shape. This is the
+//!    supported alternative to writing `fact_incidents` directly via raw
+//!    `sqlite3`.
 
 use chrono::{DateTime, Utc};
 use clap::Args;
@@ -23,6 +29,9 @@ use tracing::{info, warn};
 use tga::core::config::Config;
 use tga::core::db::Database;
 
+mod file_source;
+use file_source::ingest_file;
+
 /// Arguments for `tga incidents collect`.
 #[derive(Args, Debug)]
 #[command(
@@ -30,23 +39,33 @@ use tga::core::db::Database;
     long_about = "Walk configured incident sources and persist incident records into\n\
 `fact_incidents`. Supported sources:\n\n\
   jira     -- query work_items for SRE bugs and incidents (default; no credentials)\n\
-  datadog  -- walk dora.datadog_dir for .json incident files\n\n\
-Both sources can run in the same invocation when --source is omitted.\n\
+  datadog  -- walk dora.datadog_dir for .json incident files\n\
+  file     -- ingest a JSON or CSV export (requires --file <path>; issue #2204)\n\n\
+jira and datadog run in the same invocation when --source is omitted; file\n\
+only runs when explicitly requested via --source file (it needs --file).\n\
 Rows already present are skipped (idempotent UPSERT semantics).",
     after_help = "EXAMPLES:\n\
   # Ingest from all configured sources\n\
   tga incidents collect\n\n\
   # Ingest from Datadog JSON exports only\n\
   tga incidents collect --source datadog\n\n\
+  # Ingest a downstream ETL export (see file_source module docs for schema)\n\
+  tga incidents collect --source file --file incidents.json\n\n\
 TIPS:\n\
   - Set `dora.datadog_dir` in config.yaml to point at your exported JSON files.\n\
   - After ingestion, run `tga dora` to compute MTTR and Change Failure Rate."
 )]
 pub struct IncidentsCollectArgs {
-    /// Restrict ingestion to a single source (`jira`, `datadog`). When
-    /// unset, every configured source is consulted.
+    /// Restrict ingestion to a single source (`jira`, `datadog`, `file`).
+    /// When unset, `jira` and `datadog` are both consulted (`file` is
+    /// opt-in only, since it requires `--file`).
     #[arg(long, value_name = "SOURCE")]
     pub source: Option<String>,
+    /// Path to a JSON or CSV incident export. Required when `--source
+    /// file` is used; format is inferred from the extension (`.json` or
+    /// `.csv`). See `file_source` module docs for the schema.
+    #[arg(long, value_name = "PATH")]
+    pub file: Option<std::path::PathBuf>,
 }
 
 /// Per-run counters surfaced on the CLI output.
@@ -56,13 +75,16 @@ struct CollectStats {
     jira_inserted: usize,
     datadog_files: usize,
     datadog_inserted: usize,
+    file_scanned: usize,
+    file_inserted: usize,
 }
 
 /// Dispatch entry point for `tga incidents collect`.
 ///
 /// # Errors
 ///
-/// Propagates DB errors from the underlying ingestors.
+/// Propagates DB errors from the underlying ingestors, or an error if
+/// `--source file` is passed without `--file <path>`.
 pub fn run(config: Config, db: &mut Database, args: IncidentsCollectArgs) -> anyhow::Result<()> {
     let mut stats = CollectStats::default();
     let restrict = args.source.as_deref();
@@ -79,6 +101,19 @@ pub fn run(config: Config, db: &mut Database, args: IncidentsCollectArgs) -> any
         stats.datadog_files = files;
         stats.datadog_inserted = inserted;
     }
+    // `file` is opt-in only (needs --file) — never runs on a bare
+    // `tga incidents collect` with no --source.
+    if matches!(restrict, Some("file")) {
+        let path = args.file.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "--source file requires --file <path> pointing at a JSON or CSV \
+                 incident export"
+            )
+        })?;
+        let (scanned, inserted) = ingest_file(db, path)?;
+        stats.file_scanned = scanned;
+        stats.file_inserted = inserted;
+    }
 
     println!(
         "JIRA SRE: scanned {} work items, inserted {} incidents.",
@@ -87,6 +122,10 @@ pub fn run(config: Config, db: &mut Database, args: IncidentsCollectArgs) -> any
     println!(
         "Datadog: processed {} files, inserted {} incidents.",
         stats.datadog_files, stats.datadog_inserted,
+    );
+    println!(
+        "File: scanned {} record(s), inserted {} incidents.",
+        stats.file_scanned, stats.file_inserted,
     );
     Ok(())
 }
