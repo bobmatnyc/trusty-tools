@@ -52,6 +52,11 @@ pub struct FakeTmuxDriver {
     /// `send_interrupt`. Recording it lets `graceful_terminate_runtime_signals_then_kills`
     /// assert the signal fired before the pane was reclaimed.
     pub interrupt_calls: Mutex<Vec<String>>,
+    /// Controllable `get_pane_cwd` response (#2250) — `None` by default,
+    /// matching the trait's "cannot verify" default; set to `Some(path)` to
+    /// simulate a real driver reporting the pane's actual cwd, including a
+    /// deliberate mismatch against the requested workdir.
+    pub pane_cwd_override: Mutex<Option<PathBuf>>,
 }
 
 impl FakeTmuxDriver {
@@ -65,6 +70,7 @@ impl FakeTmuxDriver {
             create_cwd_calls: Mutex::new(Vec::new()),
             graceful_stop_calls: Mutex::new(Vec::new()),
             interrupt_calls: Mutex::new(Vec::new()),
+            pane_cwd_override: Mutex::new(None),
         })
     }
 }
@@ -139,6 +145,13 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
     fn send_interrupt(&self, name: &str) -> Result<(), ManagedError> {
         self.interrupt_calls.lock().unwrap().push(name.to_owned());
         Ok(())
+    }
+
+    /// Report the controllable `pane_cwd_override` (#2250) instead of the
+    /// trait's silent `None` default, so tests can simulate a real driver
+    /// confirming (or disagreeing with) the pane's actual cwd.
+    fn get_pane_cwd(&self, _name: &str) -> Option<PathBuf> {
+        self.pane_cwd_override.lock().unwrap().clone()
     }
 }
 
@@ -1022,6 +1035,12 @@ async fn manager_create_persists_runtime() {
 #[tokio::test]
 async fn manager_get_reflects_out_of_process_write() {
     let dir = TempDir::new().unwrap();
+    // #2250: resume() now existence-checks cwd/workspace_path before handing
+    // either to tmux, so the workspace must be a REAL directory (a fake
+    // "/tmp/wt-shared" placeholder made `mgr_b.resume` below fail loudly with
+    // `WorkspaceMissing` — correct new behavior, but orthogonal to what this
+    // test actually verifies: cross-manager reload-on-read).
+    let workspace_dir = TempDir::new().unwrap();
 
     // Manager A = the daemon's view; Manager B = the supervisor's view.
     // Both point at the same data dir / sessions.json.
@@ -1032,7 +1051,7 @@ async fn manager_get_reflects_out_of_process_write() {
     let record = mgr_a
         .create(
             "shared-state task".into(),
-            Some(PathBuf::from("/tmp/wt-shared")),
+            Some(workspace_dir.path().to_owned()),
             None,
             None,
             None,
