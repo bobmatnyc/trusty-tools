@@ -6,6 +6,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 ## [Unreleased]
+## [Unreleased]
 
 ### Added
 
@@ -15,6 +16,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - delegation persona reaches resume path + harden tm connect ([#2239](https://github.com/bobmatnyc/trusty-tools/pull/2239)) ([`df09b16`](https://github.com/bobmatnyc/trusty-tools/commit/df09b1655e9b316396ecbda47cd29395a057cf18))
 - resolve stable binary for hooks/statusLine + self-heal stale paths (closes #2229) ([#2234](https://github.com/bobmatnyc/trusty-tools/pull/2234)) ([`ae87bbb`](https://github.com/bobmatnyc/trusty-tools/commit/ae87bbb3827b9dfc9fccae4732c66104af6912b7))
+
+### Changed
+
+- re-cut as 0.19.1: depends on trusty-common 0.22.2 (0.19.0 was git-tagged but
+  never published to crates.io, so republishing the same content under a new
+  patch version rather than moving an existing tag). Ships #2214/#2229/#2230/#2231.
 ## [Unreleased]
 
 ### Added

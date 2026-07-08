@@ -28,7 +28,7 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 # publish=false; version 0.0.0 intentionally — pre-release scaffold.
 trusty-code = { path = "crates/trusty-code" }
 trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.2.0" }
-trusty-common = { path = "crates/trusty-common", version = "0.22.1" }
+trusty-common = { path = "crates/trusty-common", version = "0.22.2" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.6" }
