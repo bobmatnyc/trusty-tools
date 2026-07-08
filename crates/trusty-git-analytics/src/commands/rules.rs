@@ -12,10 +12,11 @@
 //!   commit message and print the verdict + which tier fired. Useful for
 //!   verifying a new rule before re-classifying the corpus.
 
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 
 use tga::classify::classifier::{ClassificationEngine, ClassificationEngineConfig};
 use tga::classify::rules::{default_rules, Rule};
+use tga::classify::taxonomy::{TaxonomyRegistry, TopLevelCategory};
 use tga::core::config::Config;
 use tga::core::db::Database;
 
@@ -65,6 +66,29 @@ pub struct ListArgs {
     /// Override the rules file (defaults to `classification.rules_file`).
     #[arg(long)]
     pub rules: Option<std::path::PathBuf>,
+    /// Output format. `text` prints the human-readable rule table (default);
+    /// `json` emits the subcategory-to-top-level taxonomy rollup so
+    /// downstream consumers (e.g. cto-reports) can consume it instead of
+    /// hand-copying a taxonomy dict (issue #2205).
+    #[arg(long, value_enum, default_value_t = ListFormat::Text)]
+    pub format: ListFormat,
+}
+
+/// Output format for `tga rules list`.
+///
+/// Why: the taxonomy rollup is a stable, machine-readable contract that
+/// downstream ETL pipelines want to consume programmatically rather than
+/// scraping the human-readable table (issue #2205).
+/// What: `Text` (default) prints the existing fixed-width rule table;
+/// `Json` prints the subcategory→top-level taxonomy rollup as JSON.
+/// Test: `list_json_format_emits_taxonomy_rollup`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum ListFormat {
+    /// Human-readable fixed-width rule table (default).
+    #[default]
+    Text,
+    /// Machine-readable subcategory→top-level taxonomy rollup.
+    Json,
 }
 
 /// Arguments for `tga rules show`.
@@ -104,7 +128,54 @@ pub fn run(config: Config, db: &Database, args: RulesArgs) -> anyhow::Result<()>
 
 /// Implementation of `tga rules list`.
 fn list(config: &Config, args: ListArgs) -> anyhow::Result<()> {
-    let ruleset = resolve_rules(config, args.rules.as_deref())?;
+    match args.format {
+        ListFormat::Json => print_taxonomy_json(config),
+        ListFormat::Text => print_rule_table(config, args.rules.as_deref()),
+    }
+}
+
+/// Print the subcategory→top-level taxonomy rollup as JSON (issue #2205).
+///
+/// Why: cto-reports hand-copies TGA's `built_in_defs()` rollup as a Python
+/// dict that silently drifts whenever the taxonomy changes. Emitting the
+/// registry as JSON gives downstream consumers a stable, scriptable
+/// contract instead.
+/// What: builds the effective [`TaxonomyRegistry`] (built-ins merged with
+/// any `classification.custom_categories` from config, mirroring how the
+/// classification engine resolves the same registry), then prints a JSON
+/// object with `subcategory_to_top_level` (name -> `as_str_snake()` parent)
+/// and `top_level_categories` (the canonical 7-value list, in order).
+/// Test: `list_json_format_emits_taxonomy_rollup`.
+fn print_taxonomy_json(config: &Config) -> anyhow::Result<()> {
+    let custom = config
+        .classification
+        .as_ref()
+        .map(|c| c.custom_categories.clone())
+        .unwrap_or_default();
+    let registry = TaxonomyRegistry::new(custom);
+
+    let rollup: std::collections::BTreeMap<&str, &str> = registry
+        .all()
+        .iter()
+        .map(|d| (d.name.as_str(), d.parent.as_str_snake()))
+        .collect();
+    let top_level: Vec<&str> = TopLevelCategory::all()
+        .iter()
+        .map(TopLevelCategory::as_str_snake)
+        .collect();
+
+    let payload = serde_json::json!({
+        "subcategory_to_top_level": rollup,
+        "top_level_categories": top_level,
+    });
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+/// Print the human-readable fixed-width rule table (the pre-#2205 default
+/// behaviour of `tga rules list`).
+fn print_rule_table(config: &Config, cli_rules: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let ruleset = resolve_rules(config, cli_rules)?;
     let sorted = ruleset.by_priority();
     println!(
         "Loaded {} rule(s) (version: {})",
@@ -356,5 +427,64 @@ mod tests {
             commit_sha: "does-not-exist".into(),
         };
         show(&db, args).expect("show should not error on missing SHA");
+    }
+
+    /// Why: issue #2205 — cto-reports needs a machine-readable taxonomy
+    /// rollup instead of hand-copying a Python dict. This is the primary
+    /// regression test for the new `--format json` contract.
+    /// What: builds the registry the same way `print_taxonomy_json` does
+    /// and asserts the same rollup a known built-in subcategory resolves
+    /// to, plus that the top-level list has exactly the 7 canonical
+    /// snake_case values in stable order.
+    /// Test: this test itself.
+    #[test]
+    fn list_json_format_emits_taxonomy_rollup() {
+        let registry = TaxonomyRegistry::with_builtins();
+        let rollup: std::collections::BTreeMap<&str, &str> = registry
+            .all()
+            .iter()
+            .map(|d| (d.name.as_str(), d.parent.as_str_snake()))
+            .collect();
+
+        assert_eq!(rollup.get("feature"), Some(&"feature"));
+        assert_eq!(rollup.get("security"), Some(&"bugfix"));
+        assert_eq!(rollup.get("bug_fix"), Some(&"bugfix"));
+        assert_eq!(rollup.get("documentation"), Some(&"content"));
+
+        let top_level: Vec<&str> = TopLevelCategory::all()
+            .iter()
+            .map(TopLevelCategory::as_str_snake)
+            .collect();
+        assert_eq!(
+            top_level,
+            vec![
+                "feature",
+                "bugfix",
+                "ktlo",
+                "integrations",
+                "platform_work",
+                "content",
+                "maintenance",
+            ]
+        );
+
+        // The full payload must serialize cleanly (this is what
+        // `print_taxonomy_json` actually prints).
+        let payload = serde_json::json!({
+            "subcategory_to_top_level": rollup,
+            "top_level_categories": top_level,
+        });
+        let s = serde_json::to_string(&payload).expect("serialize");
+        assert!(s.contains("\"feature\":\"feature\""));
+    }
+
+    /// Why: `--format` must default to `Text` so existing scripts/muscle
+    /// memory relying on the human-readable table are unaffected by
+    /// issue #2205.
+    /// What: asserts `ListFormat::default()` is `Text`.
+    /// Test: this test itself.
+    #[test]
+    fn list_format_defaults_to_text() {
+        assert_eq!(ListFormat::default(), ListFormat::Text);
     }
 }
