@@ -1,5 +1,11 @@
 # Changelog — trusty-embedderd
 
+## [0.3.6] — 2026-07-08
+
+### Changed
+
+- re-cut to escape collision with PR #2209's 0.3.5; carries PR #2218's fail-loud ORT-init watchdog (#1633)
+
 ## [0.3.5] — 2026-07-07
 
 ### Fixed (mitigation for #1633; toolchain root cause deferred to infra decision)

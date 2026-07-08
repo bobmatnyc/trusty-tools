@@ -11,6 +11,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - manage trusty-search index lifecycle for session worktrees ([#2094](https://github.com/bobmatnyc/trusty-tools/pull/2094)) ([`299e993`](https://github.com/bobmatnyc/trusty-tools/commit/299e9931edd2b7faf9236bd5ccc3b6ddb038329d))
 
+## [0.22.1] — 2026-07-08
+
+### Changed
+
+- re-cut to escape crates.io collision with PR #2209's source-deficient 0.22.0; carries PR #2221's chat-session/consolidation hardening (#1712/#1713/#1714)
+
 ### Fixed
 
 - auto-fall back to CPU when CoreML embedder init hangs; stop leaking blocked ORT threads ([#2127](https://github.com/bobmatnyc/trusty-tools/pull/2127)) ([`f7dc2dd`](https://github.com/bobmatnyc/trusty-tools/commit/f7dc2dd20524ee9d1a9c6146245aaacc5d1e7b2b))
