@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.32.2] — 2026-07-08
+
+### Changed
+
+- re-cut so bundled trusty-embedderd is 0.3.6 (carries #1633 watchdog); no trusty-search source changes vs 0.32.1
+
 ## [0.32.1] — 2026-07-07
 
 ### Fixed — re-cut with P0 corpus-identity fixes (supersedes 0.32.0)
