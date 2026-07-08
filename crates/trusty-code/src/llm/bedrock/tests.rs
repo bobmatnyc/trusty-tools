@@ -18,7 +18,7 @@ use super::convert::{
     build_converse_messages, build_tool_config, converse_output_to_chat_response,
     document_to_json_string, json_to_document,
 };
-use super::resolve_bedrock_region;
+use super::{bedrock_model_id, resolve_bedrock_region};
 use crate::llm::{
     ChatMessage, ChatRequest, FunctionCall, FunctionDefinition, ToolCall, ToolDefinition,
 };
@@ -397,6 +397,43 @@ fn converse_output_to_chat_response_no_usage_is_zeroed() {
     assert_eq!(usage.completion_tokens, 0);
 }
 
+// ─── Model id prefix stripping (#2247 follow-up: ValidationException fix) ────
+
+/// `bedrock_model_id` strips the `bedrock/` dispatch-routing prefix so the
+/// value handed to AWS Bedrock's Converse `model_id` is the bare id.
+///
+/// Why: This is the exact regression that shipped in PR #2247: the full
+/// dispatch slug (`bedrock/us.anthropic.claude-sonnet-4-6`) was sent
+/// verbatim to `.model_id(...)`, and AWS rejects that with
+/// `ValidationException: The provided model identifier is invalid` —
+/// confirmed live. This test locks in the fix at the pure-function level so
+/// it fails loudly if the strip is ever removed or broken.
+/// What: Assert the prefixed slug maps to the bare inference-profile id.
+/// Test: this test.
+#[test]
+fn bedrock_model_id_strips_prefix() {
+    assert_eq!(
+        bedrock_model_id("bedrock/us.anthropic.claude-sonnet-4-6"),
+        "us.anthropic.claude-sonnet-4-6"
+    );
+}
+
+/// `bedrock_model_id` passes a slug through unchanged when it has no
+/// `bedrock/` prefix.
+///
+/// Why: Defensive — some callers (e.g. the `live_bedrock_call` test, or a
+/// future caller that already resolved the bare id) may hand over an
+/// unprefixed slug; the strip must not mangle or panic on that input.
+/// What: Assert a bare model id round-trips unchanged.
+/// Test: this test.
+#[test]
+fn bedrock_model_id_passthrough_without_prefix() {
+    assert_eq!(
+        bedrock_model_id("us.anthropic.claude-sonnet-4-6"),
+        "us.anthropic.claude-sonnet-4-6"
+    );
+}
+
 // ─── JSON <-> Document ───────────────────────────────────────────────────────
 
 #[test]
@@ -426,6 +463,10 @@ fn json_to_document_rejects_non_object_top_level() {
 ///
 /// Why: End-to-end validation that `BedrockChatClient::chat` produces a
 /// non-empty assistant response and non-zero usage against the real service.
+/// Uses the FULL `bedrock/`-prefixed dispatch slug (matching what
+/// `DispatchingLlmClient` actually passes through in production) so this
+/// also exercises [`super::bedrock_model_id`]'s strip on the live path, not
+/// just the bare id.
 /// What: Requires AWS credentials resolvable by the default chain (e.g.
 /// `AWS_PROFILE=cto`) and a reachable `us.anthropic.claude-*` inference
 /// profile; skipped (not failed) when credential resolution or the call
@@ -443,7 +484,7 @@ async fn live_bedrock_call() {
     };
 
     let req = ChatRequest {
-        model: "us.anthropic.claude-haiku-4-5".into(),
+        model: "bedrock/us.anthropic.claude-haiku-4-5".into(),
         messages: vec![
             ChatMessage::system("You are a concise assistant."),
             ChatMessage::user("Reply with exactly the word: pong"),

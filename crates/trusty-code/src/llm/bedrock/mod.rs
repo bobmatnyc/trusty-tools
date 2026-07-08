@@ -128,10 +128,14 @@ impl BedrockChatClient {
     /// `LlmClientTrait::chat` for `bedrock/*` model slugs.
     /// What: Converts `req` via [`convert::build_converse_messages`] and
     /// [`convert::build_tool_config`], sends the Converse request (model id =
-    /// `req.model`, e.g. `us.anthropic.claude-sonnet-4-6` — the
-    /// `bedrock/` prefix is stripped by the caller, see `dispatch.rs`),
-    /// maps SDK errors to `LlmError::Bedrock`, and converts the response via
-    /// [`convert::converse_output_to_chat_response`].
+    /// [`bedrock_model_id`] applied to `req.model`, e.g.
+    /// `us.anthropic.claude-sonnet-4-6` with the `bedrock/` routing prefix
+    /// stripped — see that function's doc for why this is the single place
+    /// the strip happens), maps SDK errors to `LlmError::Bedrock` with full
+    /// source-chain context via `DisplayErrorContext`, and converts the
+    /// response back via [`convert::converse_output_to_chat_response`] (which
+    /// keeps the FULL `req.model` slug, prefix included, for telemetry
+    /// readability — only the value sent to AWS is stripped).
     /// Test: `bedrock::tests::*` cover the conversion helpers directly; the
     /// `#[ignore]`-gated `live_bedrock_call` test exercises this end-to-end.
     pub async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
@@ -145,7 +149,7 @@ impl BedrockChatClient {
         let mut sdk_req = self
             .client
             .converse()
-            .model_id(&req.model)
+            .model_id(bedrock_model_id(&req.model))
             .inference_config(inference)
             .set_messages(Some(messages));
 
@@ -162,13 +166,39 @@ impl BedrockChatClient {
 
         let resp = sdk_req.send().await.map_err(|e| {
             LlmError::Bedrock(format!(
-                "Converse call failed (model={}, region={}): {e}",
-                req.model, self.region
+                "Converse call failed (model={}, region={}): {}",
+                req.model,
+                self.region,
+                aws_smithy_types::error::display::DisplayErrorContext(&e)
             ))
         })?;
 
         Ok(convert::converse_output_to_chat_response(&resp, &req.model))
     }
+}
+
+/// Strip the `bedrock/` dispatch-routing prefix from a model slug, yielding
+/// the bare id the Converse API's `model_id` parameter expects.
+///
+/// Why: `req.model` carries the FULL dispatch slug (e.g.
+/// `bedrock/us.anthropic.claude-sonnet-4-6`) so `provider::provider_for` and
+/// `DispatchingLlmClient::routes_to_bedrock` can pattern-match the `bedrock/`
+/// prefix to pick this transport — but AWS Bedrock's Converse `model_id`
+/// rejects that prefixed form outright: confirmed live against the `cto`
+/// account/`us-east-1`, `aws bedrock-runtime converse --model-id
+/// "bedrock/us.anthropic.claude-sonnet-4-6"` returns `ValidationException:
+/// The provided model identifier is invalid`, while the bare id
+/// (`us.anthropic.claude-sonnet-4-6`) succeeds. This is now the single
+/// authoritative strip point — `chat` calls it right before `.model_id(...)`
+/// so the provider is correct regardless of what any caller passes.
+/// What: Returns `slug` with a leading `"bedrock/"` removed via
+/// `str::strip_prefix`, or `slug` unchanged when there is no such prefix
+/// (defensive passthrough — a caller that already hands over a bare id must
+/// not be mangled or panic).
+/// Test: `bedrock::tests::bedrock_model_id_strips_prefix`,
+/// `bedrock::tests::bedrock_model_id_passthrough_without_prefix`.
+fn bedrock_model_id(slug: &str) -> &str {
+    slug.strip_prefix("bedrock/").unwrap_or(slug)
 }
 
 #[cfg(test)]
