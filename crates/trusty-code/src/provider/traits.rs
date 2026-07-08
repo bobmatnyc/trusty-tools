@@ -100,4 +100,22 @@ pub trait Provider: Send + Sync {
     /// Test: `openrouter::tests::supports_prompt_caching_*`,
     /// `bedrock::tests::bedrock_does_not_support_prompt_caching`.
     fn supports_prompt_caching(&self) -> bool;
+
+    /// Whether this backend should be asked for detailed usage accounting
+    /// (response-side cache-usage fix).
+    ///
+    /// Why: OpenRouter's detailed-usage directive
+    /// (`RequestUsageConfig::detailed`, `usage: {"include": true}`) is what
+    /// makes OpenRouter return its authoritative, cache-discount-aware
+    /// `usage.cost` and the nested `prompt_tokens_details` cache counters —
+    /// without it only the bare prompt/completion/total counts are
+    /// guaranteed. This is an OpenRouter-specific wire directive with no
+    /// equivalent on the direct/Bedrock path, so it must stay gated per
+    /// backend rather than sent unconditionally.
+    /// What: Returns `true` when `agent_loop::build_request` should attach
+    /// `ChatRequest.usage = Some(RequestUsageConfig::detailed())`; `false`
+    /// otherwise.
+    /// Test: `openrouter::tests::wants_detailed_usage_is_true`,
+    /// `bedrock::tests::bedrock_does_not_want_detailed_usage`.
+    fn wants_detailed_usage(&self) -> bool;
 }

@@ -103,6 +103,16 @@ impl Provider for OpenRouterProvider {
     fn supports_prompt_caching(&self) -> bool {
         slug_supports_prompt_caching(&self.slug)
     }
+
+    fn wants_detailed_usage(&self) -> bool {
+        // Unconditional for every OpenRouter-routed model (unlike prompt
+        // caching, which is verified only for `anthropic/*` slugs): detailed
+        // usage accounting is a wire-format directive OpenRouter honours
+        // uniformly across model families, and the response-side parsing in
+        // `UsageBlock` degrades gracefully (falls back to static pricing)
+        // when a particular upstream model/route doesn't populate `cost`.
+        true
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -253,6 +263,30 @@ mod tests {
             assert!(
                 !OpenRouterProvider::new(slug).supports_prompt_caching(),
                 "expected NO prompt-caching support for {slug}"
+            );
+        }
+    }
+
+    /// Every OpenRouter-routed slug requests detailed usage accounting
+    /// (response-side cache-usage fix).
+    ///
+    /// Why: Unlike prompt caching, detailed usage accounting isn't gated to
+    /// a specific model family — it must be requested for every OpenRouter
+    /// call so `usage.cost` and cache counters are available whenever the
+    /// upstream route supports them.
+    /// What: Construct providers for a representative spread of families,
+    /// assert `wants_detailed_usage() == true` for all of them.
+    /// Test: this test.
+    #[test]
+    fn wants_detailed_usage_is_true() {
+        for slug in [
+            "anthropic/claude-sonnet-4-5",
+            "openai/gpt-4o-mini",
+            "qwen/qwen-2.5-coder-32b-instruct",
+        ] {
+            assert!(
+                OpenRouterProvider::new(slug).wants_detailed_usage(),
+                "expected detailed-usage request for {slug}"
             );
         }
     }

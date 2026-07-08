@@ -49,6 +49,38 @@ impl CacheControl {
     }
 }
 
+/// OpenRouter's request-side "return detailed usage" directive (response-side
+/// cache-usage fix).
+///
+/// Why: Requesting detailed usage accounting is what makes OpenRouter return
+/// its authoritative, already cache-discount-aware `usage.cost` field (and
+/// the nested `prompt_tokens_details` cache counters) on the response —
+/// without it, only the bare prompt/completion/total counts are guaranteed.
+/// Sent only for the OpenRouter provider (`agent_loop::build_request`); other
+/// providers (direct/Bedrock) never see this field.
+/// What: `include: true` serialises to the wire shape `{"include":true}`
+/// under the request's top-level `usage` key.
+/// Test: `request_usage_config_detailed_serialises_expected_shape`,
+/// `chat_request_with_detailed_usage_serialises`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RequestUsageConfig {
+    /// Whether to request detailed (cost + cache-breakdown) usage accounting.
+    pub include: bool,
+}
+
+impl RequestUsageConfig {
+    /// Construct the "include detailed usage" directive.
+    ///
+    /// Why: Every call site wants the identical `{"include":true}` value;
+    /// naming the constructor after the wire concept avoids a bare `true`
+    /// literal scattered at call sites.
+    /// What: Returns `RequestUsageConfig { include: true }`.
+    /// Test: `request_usage_config_detailed_serialises_expected_shape`.
+    pub fn detailed() -> Self {
+        Self { include: true }
+    }
+}
+
 // ── Tool-calling types ─────────────────────────────────────────────────────────
 
 /// A tool call emitted by the model.
@@ -189,6 +221,13 @@ pub struct ChatRequest {
     /// function selector.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>,
+
+    /// Request OpenRouter's detailed usage accounting (response-side
+    /// cache-usage fix). `Some(RequestUsageConfig::detailed())` for the
+    /// OpenRouter provider; `None` (omitted from the wire payload) for every
+    /// other provider/path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<RequestUsageConfig>,
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -213,6 +252,7 @@ mod tests {
             max_tokens: None,
             tools: None,
             tool_choice: None,
+            usage: None,
         };
         let v: serde_json::Value = serde_json::to_value(&req).expect("serialise");
         assert_eq!(v["model"], "anthropic/claude-haiku-4-5");
@@ -220,6 +260,10 @@ mod tests {
         assert_eq!(v["messages"][0]["content"], "hello");
         assert!(v.get("temperature").is_none() || v["temperature"].is_null());
         assert!(v.get("tools").is_none() || v["tools"].is_null());
+        assert!(
+            v.get("usage").is_none() || v["usage"].is_null(),
+            "usage must be omitted when unset"
+        );
     }
 
     /// `ChatRequest` with tools serialises the `tools` and `tool_choice` fields.
@@ -248,6 +292,7 @@ mod tests {
             max_tokens: Some(256),
             tools: Some(vec![tool]),
             tool_choice: Some(serde_json::json!("auto")),
+            usage: None,
         };
         let v: serde_json::Value = serde_json::to_value(&req).expect("serialise");
         assert_eq!(v["tools"][0]["type"], "function");
@@ -255,6 +300,56 @@ mod tests {
         assert_eq!(v["tool_choice"], "auto");
         assert_eq!(v["temperature"], 0.0_f32);
         assert_eq!(v["max_tokens"], 256);
+    }
+
+    /// `RequestUsageConfig::detailed` serialises to the exact
+    /// `{"include":true}` shape OpenRouter expects.
+    ///
+    /// Why: A typo (wrong key, wrong value) would silently disable detailed
+    /// usage accounting without any test noticing — the same failure mode
+    /// `cache_control_ephemeral_serialises_expected_shape` guards against.
+    /// What: Serialise `RequestUsageConfig::detailed()`, assert the exact
+    /// object.
+    /// Test: this test.
+    #[test]
+    fn request_usage_config_detailed_serialises_expected_shape() {
+        let v = serde_json::to_value(RequestUsageConfig::detailed()).expect("serialise");
+        assert_eq!(v, serde_json::json!({"include": true}));
+    }
+
+    /// A `ChatRequest` with `usage` set serialises the top-level `"usage"`
+    /// key; a request with `usage: None` omits it entirely (response-side
+    /// cache-usage fix — gated to the OpenRouter provider only).
+    ///
+    /// Why: `agent_loop::build_request` must only attach this directive for
+    /// OpenRouter; verifying both the present and absent cases in one test
+    /// pins the exact wire contract other providers must never see.
+    /// What: Serialise a request with `usage: Some(...)`, assert the field;
+    /// serialise one with `usage: None`, assert it's absent.
+    /// Test: this test.
+    #[test]
+    fn chat_request_with_detailed_usage_serialises() {
+        let with_usage = ChatRequest {
+            model: "anthropic/claude-sonnet-4-5".into(),
+            messages: vec![ChatMessage::user("hi")],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+            usage: Some(RequestUsageConfig::detailed()),
+        };
+        let v: serde_json::Value = serde_json::to_value(&with_usage).expect("serialise");
+        assert_eq!(v["usage"], serde_json::json!({"include": true}));
+
+        let without_usage = ChatRequest {
+            usage: None,
+            ..with_usage
+        };
+        let v: serde_json::Value = serde_json::to_value(&without_usage).expect("serialise");
+        assert!(
+            v.get("usage").is_none() || v["usage"].is_null(),
+            "usage must be omitted when None"
+        );
     }
 
     /// `ToolDefinition::function` sets `kind = "function"`.

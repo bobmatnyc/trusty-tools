@@ -41,34 +41,54 @@ pub use pricing::cost_usd;
 /// and cache_creation_input_tokens alongside the standard prompt/completion
 /// counts. Exposing those as first-class fields lets `PerfCollector` track
 /// cache effectiveness over time. For non-Anthropic models these stay 0.
+/// `cost_usd` (response-side cache-usage fix) carries OpenRouter's
+/// authoritative, already cache-discounted USD cost for this one round-trip
+/// when the provider reported one; `None` means no authoritative cost was
+/// available and callers must fall back to static per-token pricing.
 /// What: Plain struct; additive (`+`-style) accumulation is done inline in
 /// `PerfCollector::totals`.
-/// Test: `token_usage_default_is_zeros`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Test: `token_usage_default_is_zeros`, `token_usage_accumulates`,
+/// `token_usage_cost_accumulates`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub cache_read_tokens: u32,
     pub cache_creation_tokens: u32,
+    /// Authoritative per-call USD cost reported by the provider (OpenRouter),
+    /// already netting any cache discount. `None` when unavailable.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
 }
 
 impl TokenUsage {
     /// Construct a `TokenUsage` from the four individual counts.
+    ///
+    /// Why: Most call sites (tests, static-pricing paths) don't have an
+    /// authoritative provider-reported cost; `cost_usd` starts `None` and
+    /// callers set it explicitly (e.g. `UsageBlock::into_token_usage`) when
+    /// one is available.
     pub fn new(prompt: u32, completion: u32, cache_read: u32, cache_creation: u32) -> Self {
         Self {
             prompt_tokens: prompt,
             completion_tokens: completion,
             cache_read_tokens: cache_read,
             cache_creation_tokens: cache_creation,
+            cost_usd: None,
         }
     }
 
     /// Add another usage record into this one (in place).
     ///
     /// Why: Each phase may comprise multiple LLM turns (tool loop); we sum
-    /// them into a single `PhaseRecord`.
-    /// What: Field-wise saturating add.
-    /// Test: `token_usage_accumulates`.
+    /// them into a single `PhaseRecord`. `cost_usd` sums the two authoritative
+    /// costs when both are present; when only one side carries a cost it is
+    /// preserved rather than discarded, and the sum is `None` only when
+    /// neither side has one — a partial per-turn cost is still meaningful
+    /// signal that must not silently disappear.
+    /// What: Field-wise saturating add for token counts; `Option<f64>` sum for
+    /// cost.
+    /// Test: `token_usage_accumulates`, `token_usage_cost_accumulates`.
     pub fn add(&mut self, other: &TokenUsage) {
         self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
         self.completion_tokens = self
@@ -80,6 +100,11 @@ impl TokenUsage {
         self.cache_creation_tokens = self
             .cache_creation_tokens
             .saturating_add(other.cache_creation_tokens);
+        self.cost_usd = match (self.cost_usd, other.cost_usd) {
+            (Some(a), Some(b)) => Some(a + b),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
     }
 }
 
@@ -311,17 +336,23 @@ impl PerfCollector {
     ///
     /// Why: Engines call this once per phase with the agent model and the
     /// summed `TokenUsage` from all LLM turns in that phase.
-    /// What: Computes `cost_usd` via `cost_usd(model, ...)`, pushes a
+    /// What: Prefers `usage.cost_usd` (OpenRouter's authoritative,
+    /// cache-discount-aware cost) when the provider reported one; otherwise
+    /// falls back to the static per-token recompute via `cost_usd(model, ...)`
+    /// — the static table cannot see the cache discount, so it is a fallback
+    /// only, never a substitute when an authoritative figure exists. Pushes a
     /// `PhaseRecord`.
-    /// Test: `collector_records_phases`.
+    /// Test: `collector_records_phases`, `record_phase_prefers_authoritative_cost`.
     pub fn record_phase(&mut self, name: &str, duration_ms: u64, model: &str, usage: &TokenUsage) {
-        let cost = cost_usd(
-            model,
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            usage.cache_read_tokens,
-            usage.cache_creation_tokens,
-        );
+        let cost = usage.cost_usd.unwrap_or_else(|| {
+            cost_usd(
+                model,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                usage.cache_read_tokens,
+                usage.cache_creation_tokens,
+            )
+        });
         self.phases.push(PhaseRecord {
             name: name.to_string(),
             duration_ms,

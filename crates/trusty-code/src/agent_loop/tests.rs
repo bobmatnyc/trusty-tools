@@ -48,6 +48,11 @@ struct ScriptedLlm {
     /// carries a `cache_control` breakpoint without reaching into
     /// `AgentLoop` internals.
     tools_seen: Mutex<Vec<Option<Vec<crate::llm::ToolDefinition>>>>,
+    /// Every request's `usage` directive, in call order — lets the
+    /// detailed-usage gate test inspect whether `RequestUsageConfig::detailed`
+    /// reached the wire without reaching into `AgentLoop` internals
+    /// (response-side cache-usage fix).
+    usage_seen: Mutex<Vec<Option<crate::llm::RequestUsageConfig>>>,
 }
 
 impl ScriptedLlm {
@@ -68,6 +73,7 @@ impl ScriptedLlm {
             requests: Mutex::new(Vec::new()),
             max_tokens_seen: Mutex::new(Vec::new()),
             tools_seen: Mutex::new(Vec::new()),
+            usage_seen: Mutex::new(Vec::new()),
         }
     }
 
@@ -116,6 +122,17 @@ impl ScriptedLlm {
     fn tools_seen(&self) -> Vec<Option<Vec<crate::llm::ToolDefinition>>> {
         self.tools_seen.lock().expect("lock").clone()
     }
+
+    /// Every request's `usage` directive, in call order (response-side
+    /// cache-usage fix).
+    ///
+    /// Why: The detailed-usage gate test needs to see exactly what
+    /// `ChatRequest.usage` reached the wire on a given turn.
+    /// What: Clones the recorded `usage` values.
+    /// Test: `build_request_sets_detailed_usage_for_openrouter`.
+    fn usage_seen(&self) -> Vec<Option<crate::llm::RequestUsageConfig>> {
+        self.usage_seen.lock().expect("lock").clone()
+    }
 }
 
 #[async_trait]
@@ -129,6 +146,9 @@ impl LlmClientTrait for ScriptedLlm {
         }
         if let Ok(mut guard) = self.tools_seen.lock() {
             guard.push(req.tools.clone());
+        }
+        if let Ok(mut guard) = self.usage_seen.lock() {
+            guard.push(req.usage.clone());
         }
         let idx = self.cursor.fetch_add(1, Ordering::SeqCst);
         match self.responses.get(idx) {
@@ -1479,5 +1499,61 @@ async fn non_anthropic_model_never_marks_cache_breakpoints() {
     assert!(
         last_tool.function.cache_control.is_none(),
         "non-Anthropic models must never carry a cache breakpoint on the tools array"
+    );
+}
+
+/// `build_request` attaches OpenRouter's detailed-usage directive
+/// (`RequestUsageConfig::detailed`) for an OpenRouter-routed model, but never
+/// for a Bedrock-routed model (response-side cache-usage fix).
+///
+/// Why: This is the request-side half of the fix that makes OpenRouter return
+/// its authoritative `usage.cost` and cache-token breakdown — without it,
+/// only the bare prompt/completion/total counts are guaranteed. It must stay
+/// gated per-provider so the direct/Bedrock path never receives a directive
+/// it doesn't understand.
+/// What: Run the loop once against `"anthropic/claude-sonnet-4-5"` (routes to
+/// OpenRouter) and once against `"bedrock/us.anthropic.claude-sonnet-4-5"`
+/// (routes to Bedrock); assert the recorded `usage` directive is
+/// `Some(RequestUsageConfig::detailed())` for the former and `None` for the
+/// latter.
+/// Test: this test.
+#[tokio::test]
+async fn build_request_sets_detailed_usage_for_openrouter() {
+    let or_llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
+    let or_agent = make_loop(
+        or_llm.clone(),
+        registry_with_echo(false),
+        AgentLoopConfig {
+            model: "anthropic/claude-sonnet-4-5".into(),
+            ..AgentLoopConfig::default()
+        },
+    );
+    or_agent
+        .run("you are a helpful assistant", "do the thing")
+        .await
+        .expect("single stop turn should complete");
+    assert_eq!(
+        or_llm.usage_seen()[0],
+        Some(crate::llm::RequestUsageConfig::detailed()),
+        "OpenRouter-routed requests must carry the detailed-usage directive"
+    );
+
+    let bedrock_llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
+    let bedrock_agent = make_loop(
+        bedrock_llm.clone(),
+        registry_with_echo(false),
+        AgentLoopConfig {
+            model: "bedrock/us.anthropic.claude-sonnet-4-5".into(),
+            ..AgentLoopConfig::default()
+        },
+    );
+    bedrock_agent
+        .run("you are a helpful assistant", "do the thing")
+        .await
+        .expect("single stop turn should complete");
+    assert_eq!(
+        bedrock_llm.usage_seen()[0],
+        None,
+        "Bedrock-routed requests must never carry the OpenRouter-only detailed-usage directive"
     );
 }
