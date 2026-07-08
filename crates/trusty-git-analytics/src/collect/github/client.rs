@@ -1,5 +1,6 @@
 //! Async GitHub REST API v3 client for pull-request and issue metadata.
 
+use chrono::Utc;
 use rusqlite::params;
 use tracing::{debug, warn};
 
@@ -231,6 +232,7 @@ impl GitHubClient {
                     created_at: p.created_at,
                     merged_at: p.merged_at,
                     commit_shas,
+                    fetched_at: Utc::now().to_rfc3339(),
                 });
             }
             if (n as u32) < PAGE_SIZE {
@@ -245,9 +247,20 @@ impl GitHubClient {
     ///
     /// Why: `ON CONFLICT … DO UPDATE` keeps existing `id` so FK-linked
     /// `pr_reviewers` survive re-collection; `INSERT OR REPLACE` wiped them (#752).
-    /// What: new rows insert all columns; existing update `title`/`author`/`state`/
-    /// `merged_at`/`commit_shas`; `id` and `created_at` are never overwritten.
-    /// Test: reviewer_store tests cover FK-preservation.
+    /// A bare `DO UPDATE` still overwrote `state`/`merged_at`/`commit_shas`
+    /// unconditionally on every conflict, so a background job re-ingesting an
+    /// OLDER snapshot could downgrade an already-`merged` PR back to `open`
+    /// (issue #821). The `WHERE excluded.fetched_at > pull_requests.fetched_at`
+    /// guard rejects such stale writes: the conflicting row is left untouched
+    /// and the statement still succeeds with no error.
+    /// What: new rows insert all columns, including `fetched_at`; existing
+    /// rows update `title`/`author`/`state`/`merged_at`/`commit_shas`/`fetched_at`
+    /// only when the incoming `fetched_at` is strictly newer; `id` and
+    /// `created_at` are never overwritten.
+    /// Test: reviewer_store tests cover FK-preservation;
+    /// `store_pull_requests_stale_write_guard_rejects_older_fetched_at` and
+    /// `store_pull_requests_applies_genuinely_newer_fetched_at` (in
+    /// `client_tests.rs`) cover the guard itself.
     ///
     /// # Errors
     ///
@@ -262,11 +275,13 @@ impl GitHubClient {
         for pr in prs {
             conn.execute(
                 "INSERT INTO pull_requests \
-                 (provider,repository,pr_number,title,author,state,created_at,merged_at,commit_shas) \
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+                 (provider,repository,pr_number,title,author,state,created_at,merged_at,commit_shas,fetched_at) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) \
                  ON CONFLICT(provider,repository,pr_number) DO UPDATE SET \
                    title=excluded.title,author=excluded.author,state=excluded.state,\
-                   merged_at=excluded.merged_at,commit_shas=excluded.commit_shas",
+                   merged_at=excluded.merged_at,commit_shas=excluded.commit_shas,\
+                   fetched_at=excluded.fetched_at \
+                 WHERE excluded.fetched_at > pull_requests.fetched_at",
                 params![
                     "github",
                     pr.repository,
@@ -277,6 +292,7 @@ impl GitHubClient {
                     pr.created_at.to_rfc3339(),
                     pr.merged_at.map(|t| t.to_rfc3339()),
                     pr.commit_shas,
+                    pr.fetched_at,
                 ],
             )?;
             count += 1;
