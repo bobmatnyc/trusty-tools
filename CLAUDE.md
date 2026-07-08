@@ -280,6 +280,13 @@ versions by version number.
    must pass (publish only from merged main; never an unmerged branch). See
    issue #2227; escape hatch `ALLOW_UNMERGED_PUBLISH=1` is for rare, deliberate
    use only.
+7b. Run `scripts/preflight-publish.sh <crate>` — must pass immediately before
+    `cargo publish`. Rule: **publish only from merged main, as bobmatnyc.**
+    Checks HEAD == origin/main exactly, the active `gh auth status` account is
+    `bobmatnyc`, the tree is clean, and the target version isn't already live
+    on crates.io. This closes the gap behind the 2026-07-08 incident, where a
+    crate was published from an unmerged branch under the wrong gh account and
+    burned crates.io version 0.22.0 with fix-less content.
 8. Publish: `cargo publish -p <crate-name>` (or `SKIP_UI_BUILD=1 cargo publish` for UI-embedding crates).
 9. Build and install: `cargo install --path crates/<dir> --locked`.
 
