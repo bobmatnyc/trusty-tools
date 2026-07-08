@@ -21,8 +21,13 @@
 //! and `extract_usage`'s delegation; `crate::llm::bedrock::tests` covers the
 //! actual Converse wire conversion this provider's mapping feeds.
 //!
-//! DEFERRED to a follow-up: cachePoint prompt-caching
-//! (`supports_prompt_caching` stays `false` — see its doc below).
+//! (#2260) `supports_prompt_caching` now returns `true`: the Converse
+//! transport (`crate::llm::bedrock::cache`) translates the SAME
+//! `agent_loop::build_request` cache markers (`ChatMessage.cache_control`,
+//! `FunctionDefinition.cache_control`) that OpenRouter's `cache_control`
+//! passthrough consumes into Bedrock's native `cachePoint` content blocks —
+//! see that module's doc for the wire-shape translation and the minimum-size
+//! guard.
 
 use serde_json::{Value, json};
 
@@ -107,15 +112,13 @@ impl Provider for BedrockProvider {
     }
 
     fn supports_prompt_caching(&self) -> bool {
-        // DEFERRED to a follow-up (#1021 phase 2): Bedrock's Converse API
-        // expresses prompt caching via its own `cachePoint` block shape, not
-        // Anthropic's `cache_control` marker (#2156) — a different wire
-        // format this phase does not implement. `false` until that follow-up
-        // lands so `agent_loop::build_request` never emits a marker Bedrock
-        // can't interpret (harmless if it did — the field would just be
-        // ignored — but sending a marker for an unimplemented feature is
-        // misleading).
-        false
+        // (#2260) Bedrock's Converse API supports prompt caching via its own
+        // `cachePoint` block shape (not Anthropic's `cache_control` marker
+        // used by the OpenRouter passthrough, #2156) — `crate::llm::bedrock`
+        // now implements that translation, so a Bedrock route is eligible
+        // for `agent_loop::build_request`'s cache markers exactly like an
+        // `anthropic/*` OpenRouter slug is.
+        true
     }
 
     fn wants_detailed_usage(&self) -> bool {
@@ -153,18 +156,17 @@ mod tests {
         assert!(BedrockProvider::new().supports_native_tools());
     }
 
-    /// Bedrock does NOT report Anthropic-style prompt-caching support yet
-    /// (#2156, deferred to a follow-up).
+    /// Bedrock reports prompt-caching support (#2260).
     ///
-    /// Why: Bedrock's Converse API caching uses a different wire shape
-    /// (`cachePoint` blocks); until that follow-up lands, `build_request`
-    /// must never emit an Anthropic `cache_control` marker for a Bedrock
-    /// route.
-    /// What: Assert `supports_prompt_caching()` is `false`.
+    /// Why: `crate::llm::bedrock::cache` translates `build_request`'s cache
+    /// markers into Bedrock's native `cachePoint` blocks, so
+    /// `agent_loop::prompt_cache_enabled` must now treat a Bedrock route the
+    /// same as an `anthropic/*` OpenRouter slug.
+    /// What: Assert `supports_prompt_caching()` is `true`.
     /// Test: this test.
     #[test]
-    fn bedrock_does_not_support_prompt_caching() {
-        assert!(!BedrockProvider::new().supports_prompt_caching());
+    fn bedrock_supports_prompt_caching() {
+        assert!(BedrockProvider::new().supports_prompt_caching());
     }
 
     /// Bedrock does NOT request OpenRouter-style detailed usage accounting.

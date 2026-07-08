@@ -19,6 +19,10 @@
 //! `BedrockProvider::map_tool_choice` produces) so either input flows
 //! correctly. [`converse_output_to_chat_response`] maps the Converse
 //! response's content blocks and token usage back into `ChatResponse`.
+//! (#2260) Both [`build_converse_messages`] and [`build_tool_config`] also
+//! translate `build_request`'s `cache_control` markers into Bedrock-native
+//! `cachePoint` blocks via `super::cache` — see that module's doc for the
+//! wire-shape translation and minimum-size guard.
 //! Test: `bedrock::tests::*` (this module has no inline tests — see the
 //! module-level SLOC-cap convention already used by
 //! `trusty-review::llm::bedrock`).
@@ -38,6 +42,7 @@ use super::super::{
     AssistantMessage, ChatChoice, ChatMessage, ChatRequest, ChatResponse, FunctionCall, LlmError,
     ToolCall, ToolDefinition, UsageBlock,
 };
+use super::cache;
 
 /// Split `req.messages` into Converse's system-prompt array and the
 /// alternating user/assistant message list.
@@ -69,6 +74,15 @@ pub(super) fn build_converse_messages(
         if msg.role == "system" {
             if let Some(text) = &msg.content {
                 system_blocks.push(SystemContentBlock::Text(text.clone()));
+                // (#2260) `agent_loop::build_request` marks exactly one
+                // system-role entry (the seed system prompt) with
+                // `cache_control` when the run is cache-eligible; translate
+                // that marker into a Bedrock-native cachePoint immediately
+                // after its Text block, guarded by the minimum-size floor so
+                // a too-small prompt never wastes a checkpoint slot.
+                if msg.cache_control.is_some() && cache::system_cacheable(text) {
+                    system_blocks.push(SystemContentBlock::CachePoint(cache::cache_point_block()));
+                }
             }
             continue;
         }
@@ -299,6 +313,20 @@ pub(super) fn build_tool_config(
             .build()
             .map_err(|e| LlmError::Bedrock(format!("build ToolSpecification: {e}")))?;
         builder = builder.tools(Tool::ToolSpec(spec));
+    }
+
+    // (#2260) `agent_loop::build_request` marks the LAST tool definition's
+    // `function.cache_control` when the run is cache-eligible; translate
+    // that marker into a Bedrock-native cachePoint appended after all
+    // `ToolSpec` entries, so the entire (byte-stable) tools array caches as
+    // one unit — mirroring `mark_cache_breakpoint_on_tools`'s OpenRouter
+    // placement. Guarded by the minimum-size floor.
+    if tools
+        .last()
+        .is_some_and(|def| def.function.cache_control.is_some())
+        && cache::tools_cacheable(tools)
+    {
+        builder = builder.tools(Tool::CachePoint(cache::cache_point_block()));
     }
 
     let sdk_choice = match decision {

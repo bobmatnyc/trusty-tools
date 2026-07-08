@@ -16,13 +16,16 @@
 //! [`convert::converse_output_to_chat_response`]. Region resolves
 //! `TRUSTY_AWS_REGION` > `AWS_REGION` > `us-east-1`; credentials come from the
 //! standard AWS credential chain (env vars, `~/.aws/credentials`, IMDS, SSO —
-//! so `AWS_PROFILE=cto` works with zero code changes). cachePoint prompt
-//! caching is DEFERRED to a follow-up (see `provider::BedrockProvider`'s
-//! module doc).
+//! so `AWS_PROFILE=cto` works with zero code changes). (#2260) When
+//! `req`'s messages/tools carry `build_request`'s cache markers,
+//! [`convert::build_converse_messages`]/[`convert::build_tool_config`] also
+//! emit Bedrock-native `cachePoint` breakpoints via `cache` — see that
+//! module's doc for the wire-shape translation and minimum-size guard.
 //! Test: `bedrock::tests::*` (region resolution, message/tool-choice/response
 //! conversion — all unit-level, no real AWS calls) plus an `#[ignore]`-gated
 //! live Converse call.
 
+mod cache;
 mod convert;
 
 use aws_config::BehaviorVersion;

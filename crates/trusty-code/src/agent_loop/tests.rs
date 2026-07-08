@@ -1405,6 +1405,61 @@ async fn daily_driver_anthropic_model_marks_cache_breakpoints() {
     );
 }
 
+/// A `DailyDriver` run against a `bedrock/*` model ALSO marks the static
+/// tools+system prefix with an ephemeral prompt-cache breakpoint (#2260).
+///
+/// Why: `BedrockProvider::supports_prompt_caching` now returns `true`, so
+/// `AgentLoop::prompt_cache_enabled` must treat a Bedrock route the same as
+/// an `anthropic/*` OpenRouter slug — this is the `agent_loop`-level half of
+/// #2260 (the Converse-transport half, translating this marker into a
+/// native `cachePoint` block, is covered by
+/// `llm::bedrock::tests::build_converse_messages_emits_cache_point_after_large_cached_system`
+/// and its tool-config sibling).
+/// What: Same setup as `daily_driver_anthropic_model_marks_cache_breakpoints`
+/// but with model `"bedrock/us.anthropic.claude-sonnet-4-5"`; assert both
+/// markers are present on the `ChatRequest` the loop builds.
+/// Test: this test.
+#[tokio::test]
+async fn daily_driver_bedrock_model_marks_cache_breakpoints() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response("done")]));
+    let registry = registry_with_echo(false);
+    let agent = make_loop(
+        llm.clone(),
+        registry,
+        AgentLoopConfig {
+            model: "bedrock/us.anthropic.claude-sonnet-4-5".into(),
+            mode: crate::mode::HarnessMode::DailyDriver,
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    agent
+        .run("you are a helpful assistant", "do the thing")
+        .await
+        .expect("single stop turn should complete");
+
+    let requests = llm.requests();
+    let system_msg = requests[0]
+        .iter()
+        .find(|m| m.role == "system")
+        .expect("system message present");
+    assert_eq!(
+        system_msg.cache_control,
+        Some(crate::llm::CacheControl::ephemeral()),
+        "system message must carry the cache breakpoint for a Bedrock route"
+    );
+
+    let tools = llm.tools_seen()[0]
+        .clone()
+        .expect("tools array present (echo tool registered)");
+    let last_tool = tools.last().expect("at least one tool");
+    assert_eq!(
+        last_tool.function.cache_control,
+        Some(crate::llm::CacheControl::ephemeral()),
+        "last tool definition must carry the cache breakpoint for a Bedrock route"
+    );
+}
+
 /// `Parity` mode never marks a cache breakpoint, even for an `anthropic/*`
 /// model — the request stays byte-identical to pre-#2156.
 ///
