@@ -99,6 +99,20 @@ pub(super) fn build_converse_messages(
         }
 
         append_content_blocks(msg, &mut current_blocks)?;
+
+        // (rolling-history follow-up to #2260) `agent_loop::build_request`
+        // marks the last two non-system messages with `cache_control` when
+        // the run is cache-eligible (`mark_cache_breakpoint_on_history`);
+        // translate that marker into a trailing Bedrock-native cachePoint
+        // content block for THIS message, appended after its own content so
+        // it lands inside the right (possibly same-role-merged) `Message`
+        // once `flush_message` runs. Unlike the system/tools breakpoints,
+        // no minimum-size floor is applied here — the history segments this
+        // marks are, by construction, the dominant token cost, never a
+        // too-small fixture.
+        if msg.cache_control.is_some() {
+            current_blocks.push(ContentBlock::CachePoint(cache::cache_point_block()));
+        }
     }
 
     flush_message(&mut messages, &mut current_role, &mut current_blocks)?;
