@@ -1,5 +1,23 @@
 # Changelog
 
+All notable changes are documented in this file.
+
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+
+---
+## [Unreleased]
+
+### Added
+
+- add commit_count_net to weekly reports excluding reverts ([#2248](https://github.com/bobmatnyc/trusty-tools/pull/2248)) ([`68d3872`](https://github.com/bobmatnyc/trusty-tools/commit/68d38724c66bcd945574b7031ff243298ea836ab))
+
+### Fixed
+
+- seed primary email + local-part Tier-3 fuzzy to prevent identity collisions/misattribution ([`b8f5291`](https://github.com/bobmatnyc/trusty-tools/commit/b8f52914e4c8f33b196029fc4e6b6d5d20d40431))
+- store full Bitbucket PR commit SHA list, not abbreviated merge SHA ([#2251](https://github.com/bobmatnyc/trusty-tools/pull/2251)) ([`e57a036`](https://github.com/bobmatnyc/trusty-tools/commit/e57a036bcbf1cb149dd428191c0ca87051a4c2b0))
+- seed primary_email as alias for non-aliased team members to avoid empty canonical_email collisions ([#2249](https://github.com/bobmatnyc/trusty-tools/pull/2249)) ([`4f9cef3`](https://github.com/bobmatnyc/trusty-tools/commit/4f9cef3e7141c31288c31257266a3fe145732897))
+# Changelog
+
 All notable changes to trusty-git-analytics will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
