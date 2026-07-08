@@ -387,9 +387,12 @@ pub(super) fn materialize_repositories(repos: HashMap<String, RepoAcc>) -> Vec<R
 /// display names so a single identity reads the same across the report.
 /// What: drains the weekly map into [`WeeklyActivity`] rows, resolving each
 /// row's email to its canonical display name via the `email_to_name` lookup
-/// built from the already-materialised author summaries.
+/// built from the already-materialised author summaries. Also computes
+/// `commit_count_net` (issue #660: `commit_count - revert_count`) so
+/// downstream consumers get the net-new figure without recomputing it.
 /// Test: indirectly via `aggregator_builds_report_data` (two weekly rows
-/// for two authors in different weeks).
+/// for two authors in different weeks); `commit_count_net` specifically via
+/// `weekly_activity_commit_count_net_excludes_reverts`.
 pub(super) fn materialize_weekly_activity(
     weekly: BTreeMap<(String, String, String), WeekAcc>,
     email_to_name: &HashMap<String, String>,
@@ -451,6 +454,10 @@ pub(super) fn materialize_weekly_activity(
                 // Issue #1113: agentic-mode commit counts.
                 agentic_count: w.agentic_count,
                 ide_assisted_count: w.ide_assisted_count,
+                // Issue #660: net-new commits excluding reverts. `commit_count`
+                // is left untouched above so downstream consumers relying on
+                // the gross total keep working unmodified.
+                commit_count_net: w.commits.saturating_sub(w.reverts),
             }
         })
         .collect()

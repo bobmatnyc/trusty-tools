@@ -207,12 +207,14 @@ pub fn persist_weekly_engineer(db: &Database, data: &ReportData) -> Result<usize
         .iter()
         .filter_map(|wa| {
             let (iso_year, iso_week) = parse_week_label_to_parts(&wa.week)?;
-            // net_commits = commit_count - revert_count. Merge commits are
+            // net_commits = commit_count - revert_count, i.e.
+            // `wa.commit_count_net` (issue #660). Merge commits are
             // intentionally INCLUDED in this denominator (per #1113 spec) —
             // only reverts are subtracted. Future specs that wish to also
-            // exclude merge commits must update both this formula and the
-            // column description in the DB schema docs.
-            let net = wa.commit_count.saturating_sub(wa.revert_count) as i64;
+            // exclude merge commits must update both the `commit_count_net`
+            // materialisation formula and the column description in the DB
+            // schema docs.
+            let net = wa.commit_count_net as i64;
             // agentic_pct = agentic_count / net * 100 — intentionally
             // EXCLUDES ide_assisted_count (full-agentic only, per #1113 spec).
             // ide_assisted is tracked separately and must NOT inflate the numerator.

@@ -400,6 +400,33 @@ fn weekly_activity_carries_quality_columns() {
     assert_eq!(wa.quality_tshirt, "4");
 }
 
+/// Why: issue #660 — downstream consumers (e.g. the Duetto CTO weekly org
+/// report) misreported commit volume because the report's gross
+/// `commit_count` counts revert commits identically to original work. This
+/// regression-proves both halves of the additive fix: the new
+/// `commit_count_net` field excludes reverts, AND the existing gross
+/// `commit_count` field is completely unaffected by the change.
+/// What: reuses `seed_quality_db` (4 commits: 2 ticketed features, 1 revert,
+/// 1 bugfix) and asserts `commit_count_net == commit_count - revert_count`.
+/// Test: this test itself.
+#[test]
+fn weekly_activity_commit_count_net_excludes_reverts() {
+    let db = seed_quality_db();
+    let cfg = baseline_config();
+    let data = Aggregator::build(&db, &cfg).expect("aggregate");
+
+    assert_eq!(data.weekly_activity.len(), 1);
+    let wa = &data.weekly_activity[0];
+    // Gross total is unchanged by this fix — still counts the revert.
+    assert_eq!(wa.commit_count, 4, "gross commit_count must stay unchanged");
+    assert_eq!(wa.revert_count, 1);
+    // Net excludes the one revert: 4 - 1 = 3.
+    assert_eq!(
+        wa.commit_count_net, 3,
+        "commit_count_net must equal commit_count - revert_count"
+    );
+}
+
 #[test]
 fn weekly_quality_perfect_when_clean_and_ticketed() {
     // All commits ticketed, no reverts, no bugfixes ⇒ score 1.0, tshirt 5.
@@ -428,6 +455,8 @@ fn weekly_quality_perfect_when_clean_and_ticketed() {
     assert_eq!(wa.bugfix_count, 0);
     assert_eq!(wa.ticketed_count, 3);
     assert_eq!(wa.abandoned_pr_count, 0);
+    // No reverts ⇒ net equals gross (issue #660).
+    assert_eq!(wa.commit_count_net, wa.commit_count);
 }
 
 #[test]
@@ -485,6 +514,8 @@ fn weekly_csv_includes_quality_columns() {
         "quality_score",
         "quality_tshirt",
         "abandoned_pr_count",
+        // Issue #660: net-new commit count excluding reverts.
+        "commit_count_net",
     ] {
         assert!(header.contains(col), "header missing {col}: {header}");
     }
@@ -517,6 +548,10 @@ fn json_report_exposes_weekly_quality_fields() {
     assert_eq!(wa["quality_tshirt"], "4");
     assert!(wa["quality_score"].as_f64().expect("score is f64") > 0.68);
     assert_eq!(wa["abandoned_pr_count"], 0);
+    // Issue #660: net-new commits round-trip through JSON too, and the
+    // gross commit_count is untouched by the additive fix.
+    assert_eq!(wa["commit_count"], 4);
+    assert_eq!(wa["commit_count_net"], 3);
 
     std::fs::remove_dir_all(&dir).ok();
 }

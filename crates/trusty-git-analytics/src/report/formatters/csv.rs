@@ -80,6 +80,9 @@ pub fn write_weekly_csv(data: &ReportData, output_dir: &Path) -> Result<PathBuf>
         // Issue #445 batch B (request #6): mean LLM-assigned complexity for
         // this bucket; empty string when no commit has a complexity score.
         "avg_complexity",
+        // Issue #660: net-new commit count excluding reverts, appended last
+        // so existing column-index consumers are unaffected.
+        "commit_count_net",
     ])?;
     for row in &data.weekly_activity {
         let categories = serialize_categories(&row.categories);
@@ -103,6 +106,7 @@ pub fn write_weekly_csv(data: &ReportData, output_dir: &Path) -> Result<PathBuf>
             &row.abandoned_pr_count.to_string(),
             &row.ai_assisted_count.to_string(),
             avg_complexity_str.as_str(),
+            &row.commit_count_net.to_string(),
         ])?;
     }
     w.flush()?;
