@@ -11,7 +11,7 @@
 # they are deleted and the target exits 0.  Run it again on a clean tree
 # and assert it still exits 0 (idempotent).
 
-.PHONY: clean-runtime e2e-docker install-search-signed publish-check
+.PHONY: check clean-runtime e2e-docker install-search-signed publish-check
 
 # Remove per-crate runtime artefacts that accumulate during development.
 #
@@ -28,6 +28,24 @@ clean-runtime:
 	@echo "Removing runtime artefacts..."
 	@rm -f tga.db trusty-analyze.facts.redb
 	@echo "Done."
+
+# Run the documented workspace quality gate referenced throughout CLAUDE.md.
+#
+# Why: CLAUDE.md instructs contributors to run the test/lint/format gate
+# before committing, but until now there was no single target to invoke —
+# every contributor had to remember and chain the three commands by hand.
+#
+# What: runs `cargo test --workspace`, then `cargo clippy --workspace
+# --all-targets -- -D warnings`, then `cargo fmt --check`, in that order,
+# failing fast on the first failing step (default Make behaviour).
+#
+# Test: `make check` on a clean, formatted, warning-free workspace exits 0.
+# Introduce a clippy warning or an unformatted file and confirm `make check`
+# exits non-zero at the corresponding step.
+check:
+	cargo test --workspace
+	cargo clippy --workspace --all-targets -- -D warnings
+	cargo fmt --check
 
 # Run the Docker-based install-from-crates.io E2E smoke test for all four
 # trusty-* tools.
