@@ -24,7 +24,9 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::jsonrpc::RpcError;
-use crate::llm::{ChatRequest, ChatResponse, LlmClient, LlmClientConfig, LlmClientTrait, LlmError};
+use crate::llm::{
+    ChatRequest, ChatResponse, DispatchingLlmClient, LlmClientConfig, LlmClientTrait, LlmError,
+};
 
 /// Environment variable selecting the mock LLM. Set to [`MOCK_LLM_ECHO`] to
 /// enable [`EchoLlmClient`] instead of a real OpenRouter client.
@@ -39,10 +41,12 @@ pub const MOCK_LLM_ECHO: &str = "echo";
 /// here (not inlined at each call site) so the decision is made exactly
 /// once and is easy to find.
 /// What: if [`MOCK_LLM_ENV`] is set to [`MOCK_LLM_ECHO`], returns an
-/// [`EchoLlmClient`]. Otherwise builds a real `LlmClient` from
-/// `OPENROUTER_API_KEY` (via `LlmClientConfig::from_env`), mapping a missing
-/// key to `RpcError::internal` — a server-side configuration problem, not a
-/// caller mistake — with an actionable message naming both escape hatches.
+/// [`EchoLlmClient`]. Otherwise builds a real `DispatchingLlmClient` from
+/// `OPENROUTER_API_KEY` (via `LlmClientConfig::from_env`) — routing `bedrock/*`
+/// model slugs to AWS Bedrock and everything else to OpenRouter, unchanged
+/// (#1021 phase 1) — mapping a missing key to `RpcError::internal` — a
+/// server-side configuration problem, not a caller mistake — with an
+/// actionable message naming both escape hatches.
 /// Test: `task::mock_llm::tests::mock_env_selects_echo_client`.
 pub fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>, RpcError> {
     if std::env::var(MOCK_LLM_ENV).ok().as_deref() == Some(MOCK_LLM_ECHO) {
@@ -53,7 +57,7 @@ pub fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>, RpcError> {
             "task.run requires OPENROUTER_API_KEY (or {MOCK_LLM_ENV}={MOCK_LLM_ECHO} for offline testing): {e}"
         ))
     })?;
-    let client = LlmClient::from_config(config)
+    let client = DispatchingLlmClient::from_config(config)
         .map_err(|e| RpcError::internal(format!("build LLM client: {e}")))?;
     Ok(Arc::new(client))
 }

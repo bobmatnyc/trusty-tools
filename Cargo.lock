@@ -10734,6 +10734,10 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "aws-config",
+ "aws-sdk-bedrockruntime",
+ "aws-smithy-types",
+ "aws-types",
  "axum",
  "chrono",
  "clap",

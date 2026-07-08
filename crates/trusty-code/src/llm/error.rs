@@ -57,6 +57,18 @@ pub enum LlmError {
     /// receiving a cryptic 401 from the API.
     #[error("missing configuration: {0}")]
     MissingConfig(String),
+
+    /// An AWS Bedrock Converse-API-level failure (#1021 phase 1): SDK
+    /// transport/auth/validation/throttling errors, or a request/response
+    /// shape the Converse transport could not build.
+    ///
+    /// Why: Bedrock errors arrive as `aws_sdk_bedrockruntime` SDK error types,
+    /// not `reqwest::Error` or an HTTP status code, so they don't fit
+    /// [`Self::Transport`] or [`Self::ApiError`]. Carrying the SDK's own
+    /// `Display` text (rather than inventing a fake status code) keeps the
+    /// error message honest.
+    #[error("Bedrock error: {0}")]
+    Bedrock(String),
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -93,6 +105,19 @@ mod tests {
         let err = LlmError::MissingConfig("OPENROUTER_API_KEY".into());
         let s = err.to_string();
         assert!(s.contains("OPENROUTER_API_KEY"), "field name missing: {s}");
+    }
+
+    /// `LlmError::Bedrock` carries the SDK error text verbatim in its display.
+    ///
+    /// Why: Operators debugging a Bedrock failure need the underlying SDK
+    /// message (auth, validation, throttling) surfaced unchanged.
+    /// What: Construct a `Bedrock` error, assert the message appears.
+    /// Test: this test.
+    #[test]
+    fn bedrock_error_display_includes_message() {
+        let err = LlmError::Bedrock("ValidationException: bad model id".into());
+        let s = err.to_string();
+        assert!(s.contains("ValidationException"), "message missing: {s}");
     }
 
     /// `LlmError::Deserialise` includes both the error and the body.

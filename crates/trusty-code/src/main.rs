@@ -30,7 +30,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::info;
 
-use trusty_code::llm::{LlmClient, LlmClientConfig, LlmClientTrait};
+use trusty_code::llm::{DispatchingLlmClient, LlmClientConfig, LlmClientTrait};
 use trusty_code::run_task::{ExitCode, RunTaskParams, execute_run_task};
 
 mod cli;
@@ -556,13 +556,20 @@ async fn run_task(
     process::exit(report.exit.code());
 }
 
-/// Build the real OpenRouter `LlmClient` from `OPENROUTER_API_KEY`.
+/// Build the real LLM client from `OPENROUTER_API_KEY`, dispatching `bedrock/*`
+/// model slugs to AWS Bedrock (#1021 phase 1).
 ///
 /// Why: The binary is the only place that reads the API key from the environment
 /// (library code never touches `std::env` for secrets). Attribution headers help
-/// OpenRouter dashboards label tcode traffic.
+/// OpenRouter dashboards label tcode traffic. `DispatchingLlmClient` (rather than
+/// a bare `LlmClient`) is what lets `--engineer-model bedrock/us.anthropic.*` (or
+/// `TCODE_ENGINEER_MODEL`) actually reach AWS Bedrock instead of OpenRouter's
+/// HTTP endpoint; the Bedrock transport is only constructed lazily on first use
+/// (standard AWS credential chain, e.g. `AWS_PROFILE=cto`), so a pure-OpenRouter
+/// run never needs AWS credentials.
 /// What: Reads the key via `LlmClientConfig::from_env`, attaches referer/title,
-/// and constructs the client. Returns a descriptive error when the key is unset.
+/// and constructs a `DispatchingLlmClient`. Returns a descriptive error when the
+/// key is unset.
 /// Test: Exercised manually (a live run requires a real key); the offline tests
 /// inject a mock client instead.
 fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>> {
@@ -575,7 +582,7 @@ fn build_llm_client() -> Result<Arc<dyn LlmClientTrait>> {
         })?
         .with_referer("https://github.com/bobmatnyc/trusty-tools")
         .with_title("trusty-code run-task");
-    let client = LlmClient::from_config(config)
+    let client = DispatchingLlmClient::from_config(config)
         .map_err(|e| anyhow::anyhow!("failed to build LLM client: {e}"))?;
     Ok(Arc::new(client))
 }
