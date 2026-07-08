@@ -19,6 +19,7 @@ Codifies lessons from 18+ publishes across two recent sessions.
 Every publish follows this exact sequence:
 
 ```
+0. scripts/check-publish-ready.sh <crate>  — MANDATORY, MUST PASS
 1. Pre-flight checks (fmt, clippy, tests)
 2. cargo publish --dry-run
 3. git tag <crate-name>-v<version>
@@ -31,6 +32,41 @@ Every publish follows this exact sequence:
 ```
 
 **Critical**: Never skip dry-run. Never publish from the main checkout.
+
+## Step 0: Publish-Only-From-Merged-Main Guard (MANDATORY, issue #2227)
+
+🔴 **Publish only from merged main / the pushed release tag — never an
+unmerged branch.** Before running `cargo publish` for ANY crate, run:
+
+```bash
+scripts/check-publish-ready.sh <crate-name-or-dir>
+# or
+make publish-check CRATE=<crate-name-or-dir>
+```
+
+**Do NOT run `cargo publish` if this fails.** It asserts two things against
+the true `origin/main` tip (fetched fresh, never trusted from a possibly-stale
+local ref):
+
+1. **GUARD 1 (merged-main)**: current HEAD is `origin/main` itself or an
+   ancestor of it.
+2. **GUARD 2 (version tag)**: the release tag `<crate>-v<version>` (accepts
+   `tga-v<version>` too, for `trusty-git-analytics`) has been pushed to origin
+   and its commit is on merged main.
+
+**Why this exists**: issue #2209 — a publish ran from an unmerged feature
+branch that was missing a P0 fix. That branch's build became the crates.io
+"latest" version, and every concurrent worktree session that ran
+`cargo install <crate>` picked up the regressed build until it was caught and
+corrected. With concurrent sessions routinely running in this repo,
+"whatever branch happens to be checked out" is a correctness hazard, not just
+a process nicety — this script turns "publish only from merged main" into a
+mechanical gate instead of a convention someone can forget under pressure.
+
+**Escape hatch (rare, deliberate use only)**: `ALLOW_UNMERGED_PUBLISH=1`
+downgrades both guard failures to a loud warning and exits 0. Only use this
+when you have a specific, understood reason to publish from an unmerged
+commit — the default path is always "merge to main first, then publish."
 
 ## Worktree Discipline (MANDATORY)
 
@@ -86,6 +122,7 @@ codesign --force --sign - ~/.cargo/bin/<binary>  # Regenerate signature
 All of these must pass. No `--allow-dirty`, `--no-verify`, or `--force` flags:
 
 ```bash
+scripts/check-publish-ready.sh <crate>   # Step 0 — merged-main guard (issue #2227)
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p <crate>
@@ -528,6 +565,7 @@ git push origin --delete feature/publish-<crate>
 
 Before declaring a publish complete:
 
+- [ ] `scripts/check-publish-ready.sh <crate>` (or `make publish-check CRATE=<crate>`) passed
 - [ ] Pre-flight checks passed (fmt, clippy, tests, check)
 - [ ] Dry-run succeeded
 - [ ] Tag created with correct name pattern
