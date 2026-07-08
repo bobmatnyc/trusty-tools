@@ -321,10 +321,20 @@ impl BitbucketClient {
     ///
     /// Why: `ON CONFLICT … DO UPDATE` keeps existing `id` so FK-linked `pr_reviewers`
     /// survive re-collection; `INSERT OR REPLACE` cascade-deleted them (#752).
+    /// A bare `DO UPDATE` still overwrote `state`/`merged_at`/`commit_shas`
+    /// unconditionally on every conflict, so a background job re-ingesting an
+    /// OLDER snapshot could downgrade an already-`merged` PR back to `open`
+    /// (issue #821). The `WHERE excluded.fetched_at > pull_requests.fetched_at`
+    /// guard rejects such stale writes: the conflicting row is left untouched
+    /// and the statement still succeeds with no error.
     /// What: `provider='bitbucket'`; `repository="<workspace>/<repo_slug>"`;
     /// deduplicates on `(provider,repository,pr_number)` (0012/#88); existing rows
-    /// update `title`/`author`/`state`/`merged_at`/`commit_shas`. Test: see
-    /// reviewer_store integration tests for FK-preservation coverage.
+    /// update `title`/`author`/`state`/`merged_at`/`commit_shas`/`fetched_at` only
+    /// when the incoming `fetched_at` is strictly newer. Test: see
+    /// reviewer_store integration tests for FK-preservation coverage;
+    /// `store_pull_requests_stale_write_guard_rejects_older_fetched_at` and
+    /// `store_pull_requests_applies_genuinely_newer_fetched_at` (in `tests.rs`)
+    /// cover the guard itself.
     /// # Errors
     ///
     /// Propagates [`crate::core::TgaError::DbError`] on SQL failures.
@@ -338,11 +348,13 @@ impl BitbucketClient {
         for pr in prs {
             conn.execute(
                 "INSERT INTO pull_requests \
-                 (provider,repository,pr_number,title,author,state,created_at,merged_at,commit_shas) \
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+                 (provider,repository,pr_number,title,author,state,created_at,merged_at,commit_shas,fetched_at) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) \
                  ON CONFLICT(provider,repository,pr_number) DO UPDATE SET \
                    title=excluded.title,author=excluded.author,state=excluded.state,\
-                   merged_at=excluded.merged_at,commit_shas=excluded.commit_shas",
+                   merged_at=excluded.merged_at,commit_shas=excluded.commit_shas,\
+                   fetched_at=excluded.fetched_at \
+                 WHERE excluded.fetched_at > pull_requests.fetched_at",
                 params![
                     "bitbucket",
                     pr.repository,
@@ -353,6 +365,7 @@ impl BitbucketClient {
                     pr.created_at.to_rfc3339(),
                     pr.merged_at.map(|t| t.to_rfc3339()),
                     pr.commit_shas,
+                    pr.fetched_at,
                 ],
             )?;
             count += 1;
@@ -451,6 +464,7 @@ fn map_pr(pr: BbPullRequest, repository: &str) -> PullRequest {
         created_at,
         merged_at,
         commit_shas,
+        fetched_at: Utc::now().to_rfc3339(),
     }
 }
 
