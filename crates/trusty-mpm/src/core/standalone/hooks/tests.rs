@@ -45,6 +45,28 @@ fn test_hook_command_without_override_is_absolute_or_fallback() {
     );
 }
 
+/// Why (#2229): an ephemeral build/worktree `exe_override` (e.g.
+/// `target/debug/deps/...`) must NOT be baked into the hook command — it 404s
+/// once the artifact is rebuilt away. The command must instead resolve a stable
+/// installed binary via PATH, or degrade to the bare fallback — never the
+/// worktree path.
+/// What: passes a `target/debug/deps` path as exe_override and asserts the
+/// resulting command never contains that ephemeral path and still ends with
+/// " hook".
+#[test]
+fn test_hook_command_rejects_ephemeral_exe_override() {
+    let ephemeral = PathBuf::from("/Users/x/trusty-tools/target/debug/deps/trusty_mpm-deadbeef");
+    let cmd = mpm_hook_command(Some(&ephemeral));
+    assert!(
+        !cmd.contains("target/debug/deps"),
+        "ephemeral build path must never be baked into the hook command, got: {cmd:?}"
+    );
+    assert!(
+        cmd.ends_with(" hook"),
+        "hook command must still end with ' hook', got: {cmd:?}"
+    );
+}
+
 #[test]
 fn test_mpm_hook_additions_has_five_events() {
     // #1744: SessionStart/SessionEnd must be present so the daemon receives

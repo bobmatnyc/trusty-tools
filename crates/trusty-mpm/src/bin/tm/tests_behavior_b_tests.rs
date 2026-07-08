@@ -46,13 +46,17 @@ fn cli_attach_requires_target() {
 
 #[test]
 fn cli_parses_connect() {
-    // `tm connect` is the no-deployment session starter; it takes an
+    // `tm connect` is the live-checkout session starter; it takes an
     // optional project directory, exactly like `tm launch`.
     let cli = Cli::try_parse_from(["trusty-mpm", "connect"]).unwrap();
     match cli.command.unwrap() {
         Command::Connect { dir } => assert_eq!(dir, None),
         other => panic!("expected Connect, got {other:?}"),
     }
+    // Issue #2230: `connect` must carry the same PM system-prompt +
+    // isolation-flag carrier every other launch path has — no more bare
+    // `claude --dangerously-skip-permissions` with nothing injected.
+    assert_connect_claude_cmd_carries_persona_flags();
 }
 
 #[test]
@@ -62,6 +66,27 @@ fn cli_parses_connect_with_dir() {
         Command::Connect { dir } => assert_eq!(dir.as_deref(), Some("/work/p")),
         other => panic!("expected Connect, got {other:?}"),
     }
+    assert_connect_claude_cmd_carries_persona_flags();
+}
+
+/// Assert `connect`'s composed `claude` invocation carries both the injected
+/// PM system prompt and the shared session-isolation flag (issue #2230).
+///
+/// Why: `crate::commands::launch::connect_claude_cmd` is the exact function
+/// `connect()` calls to build the command sent to `tmux send-keys`; asserting
+/// on it directly proves the wiring without needing a live daemon/tmux to
+/// drive the full async `connect()` end-to-end.
+fn assert_connect_claude_cmd_carries_persona_flags() {
+    let path = std::path::Path::new("/tmp/trusty-mpm-connect-test-prompt.txt");
+    let cmd = crate::commands::launch::connect_claude_cmd(Some(path));
+    assert!(
+        cmd.contains("--append-system-prompt-file"),
+        "connect claude_cmd must inject the PM system prompt file: {cmd}"
+    );
+    assert!(
+        cmd.contains("--setting-sources project,local"),
+        "connect claude_cmd must carry the session-isolation flag: {cmd}"
+    );
 }
 
 #[test]

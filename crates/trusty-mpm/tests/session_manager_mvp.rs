@@ -731,6 +731,74 @@ use trusty_mpm::daemon::state::DaemonState;
 use trusty_mpm::runtime::RuntimeKind as ResumeRuntimeKind;
 use trusty_mpm::session_manager::ManagedSessionId as ResumeSessionId;
 
+// ── RAII PATH guard (#2229 CI determinism) ─────────────────────────────────
+//
+// Why: `resolve_statusline_binary`'s PATH-lookup fallback (see
+// `core::session_launch::settings::STATUSLINE_BIN_NAMES`) is exercised by
+// `resume_managed_heals_stale_bare_status_line_command` below. `current_exe()`
+// is unconditionally an ephemeral `target/debug/deps/...` path inside a
+// `cargo test` binary, so that test ALWAYS falls through to the PATH-lookup
+// branch — whether it then finds a real `tm`/`trusty-mpm` binary depends
+// entirely on the ambient environment (present on a dev machine with
+// `~/.cargo/bin` on PATH, absent in a stripped-down CI runner). Prepending a
+// temp dir containing a fake, executable `tm` to `PATH` for the duration of
+// the test makes the PATH-lookup hit deterministic in both environments,
+// mirroring the `HomeGuard` pattern in `tests/standalone_isolation.rs`.
+// `std::env::set_var`/`remove_var` are `unsafe` in Rust 2024 (thread-unsafe),
+// so every caller pairs this guard with `#[serial_test::serial]`.
+struct PathGuard(Option<String>);
+
+impl PathGuard {
+    /// Prepend `dir` to `PATH` and return a guard that restores the original
+    /// value on drop.
+    ///
+    /// Why: `trusty_common::bin_resolve::resolve_binary` checks the live
+    /// `PATH` before its well-known-dirs fallback, so prepending here is
+    /// sufficient to make a fake binary the first hit.
+    /// What: saves the current `PATH`, sets `PATH` to `<dir>:<old PATH>`,
+    /// returns a guard.
+    /// Test: exercised by `resume_managed_heals_stale_bare_status_line_command`.
+    fn prepend(dir: &std::path::Path) -> Self {
+        let prev = std::env::var("PATH").ok();
+        let new_path = match &prev {
+            Some(p) => format!("{}:{p}", dir.display()),
+            None => dir.display().to_string(),
+        };
+        // SAFETY: guarded by #[serial_test::serial] on all callers — only one
+        // thread mutates PATH at a time.
+        unsafe { std::env::set_var("PATH", new_path) };
+        PathGuard(prev)
+    }
+}
+
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(p) => unsafe { std::env::set_var("PATH", p) },
+            None => unsafe { std::env::remove_var("PATH") },
+        }
+    }
+}
+
+/// Create a fake, executable `tm` binary at `<dir>/tm` so
+/// `trusty_common::bin_resolve::resolve_binary("tm")` resolves it.
+///
+/// Why: `candidate()` (the leaf of `resolve_binary`) requires the file to
+/// exist AND carry an execute bit on Unix — an empty regular file is rejected.
+/// What: writes a trivial shell script and chmods it `0o755`.
+/// Test: exercised by `resume_managed_heals_stale_bare_status_line_command`.
+fn write_fake_tm_binary(dir: &std::path::Path) -> PathBuf {
+    let bin = dir.join("tm");
+    std::fs::write(&bin, "#!/bin/sh\nexit 0\n").expect("write fake tm binary");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake tm binary executable");
+    }
+    bin
+}
+
 /// Resuming a missing session yields the typed `NotFound` variant (→ HTTP 404).
 ///
 /// Why: a session decommissioned (or never created) must produce a 404, and the
@@ -1002,11 +1070,30 @@ async fn resume_managed_launches_despite_incomplete_deployment() {
 /// second hook, so both self-heal concerns land through one code path.
 /// What: seeds a workspace whose `.claude/settings.json` already has the exact
 /// pre-#1914 bare `statusLine.command`, resumes it, and asserts the on-disk
-/// command is no longer the bare literal (it now carries a `/`, i.e. an
-/// absolute path).
+/// command is upgraded to the fake, PATH-resolved `tm` binary this test seeds
+/// (see `PathGuard`/`write_fake_tm_binary`) rather than merely checking for a
+/// `/` — #2229 made `current_exe()` always ineligible inside a `cargo test`
+/// binary (ephemeral `target/debug/deps/...`), so without a seeded PATH hit
+/// the outcome depends on whether the ambient environment happens to have
+/// `tm`/`trusty-mpm` installed, which is exactly what made this test pass
+/// locally and fail in CI.
 /// Test: this function IS the test.
 #[tokio::test]
+#[serial_test::serial]
 async fn resume_managed_heals_stale_bare_status_line_command() {
+    // #2229 CI determinism: `resolve_statusline_binary`'s `current_exe()`
+    // branch is ALWAYS rejected inside a `cargo test` binary (it lives under
+    // `target/debug/deps/...`, an ephemeral build path), so this test always
+    // exercises the PATH-lookup fallback. Whether that fallback finds a real
+    // `tm`/`trusty-mpm` binary is otherwise environment-dependent (present on
+    // a dev machine with `~/.cargo/bin` on PATH, absent in CI, which is
+    // exactly why this test flaked green-locally/red-in-CI) — prepend a fake,
+    // executable `tm` onto `PATH` so the upgrade is deterministic in both
+    // environments. See `PathGuard`/`write_fake_tm_binary` above.
+    let fake_bin_dir = TempDir::new().unwrap();
+    let fake_tm = write_fake_tm_binary(fake_bin_dir.path());
+    let _path_guard = PathGuard::prepend(fake_bin_dir.path());
+
     let root = TempDir::new().unwrap();
     let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
     let mgr = state.session_manager().await;
@@ -1054,17 +1141,15 @@ async fn resume_managed_heals_stale_bare_status_line_command() {
     let command = value["statusLine"]["command"]
         .as_str()
         .expect("statusLine.command is a string");
-    assert_ne!(
-        command, "tm statusline",
-        "the stale bare command must be upgraded, not left as-is; got: {content}"
-    );
-    assert!(
-        command.contains('/'),
-        "the healed command must resolve to an absolute path; got: {command}"
-    );
-    assert!(
-        command.ends_with(" statusline"),
-        "the healed command must still invoke the statusline subcommand; got: {command}"
+    // A single exact-equality assertion subsumes "was upgraded" (differs from
+    // the seeded bare literal), "resolves to an absolute path" (the fake
+    // binary's path is absolute), and "still invokes statusline" — no need for
+    // three separate weaker assertions.
+    let expected = format!("{} statusline", fake_tm.display());
+    assert_eq!(
+        command, expected,
+        "the stale bare command must be upgraded to the PATH-resolved fake `tm` \
+         binary seeded by this test, not left as-is; got: {content}"
     );
 }
 

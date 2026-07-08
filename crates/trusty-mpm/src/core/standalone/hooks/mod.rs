@@ -44,14 +44,39 @@ const BARE_HOOK_COMMAND: &str = "trusty-mpm hook";
 /// lost. Using the absolute path of the running binary eliminates the PATH
 /// dependency entirely and is correct by construction: the binary being
 /// installed is the same binary running `tm install`.
-/// What: calls `std::env::current_exe()`, canonicalizes the path, and
-/// returns `"<abs-path> hook"`. Falls back to `BARE_HOOK_COMMAND` if
-/// resolution or canonicalization fails so the install never panics.
-/// If a caller already knows the exe path (e.g. from `current_exe()` cached
-/// at startup), they can pass it via `exe_override` to skip the syscall.
+/// What: delegates to [`resolve_stable_hook_exe`] and renders `"<abs-path>
+/// hook"`; falls back to `BARE_HOOK_COMMAND` when no stable binary resolves so
+/// the install never panics. If a caller already knows the exe path (e.g. from
+/// `current_exe()` cached at startup), they can pass it via `exe_override` to
+/// skip the syscall.
 /// Test: `test_hook_command_uses_absolute_path`.
 pub fn mpm_hook_command(exe_override: Option<&Path>) -> String {
-    let resolved = exe_override
+    match resolve_stable_hook_exe(exe_override) {
+        Some(p) => format!("{} hook", p.display()),
+        None => BARE_HOOK_COMMAND.to_string(),
+    }
+}
+
+/// Resolve a STABLE, installed absolute binary path for baking into managed
+/// hook commands — never an ephemeral build/worktree path.
+///
+/// Why (#2229): `std::env::current_exe()` returns a
+/// `target/debug/deps/trusty_mpm-<hash>` (or worktree) path when `tm` runs from
+/// a debug build. Persisting that path into the SHARED global `settings.json`
+/// breaks every managed session's hooks once the artifact is rebuilt away. The
+/// hook command must instead point at a stable installed binary (`~/.cargo/bin/tm`)
+/// or degrade to the PATH-resolved bare name — anything but the transient path.
+/// What: prefers `exe_override` (canonicalized), then `current_exe()`
+/// (canonicalized), but only when the result is absolute AND not an ephemeral
+/// build path per [`trusty_common::bin_resolve::is_ephemeral_build_path`]. When
+/// the running binary is ephemeral or unresolved, PATH-resolves the installed
+/// `tm`/`trusty-mpm` binary via [`trusty_common::bin_resolve::resolve_binary`].
+/// Returns `None` only when no stable absolute path can be found (caller then
+/// uses the bare command name).
+/// Test: covered by `test_hook_command_uses_absolute_path`,
+/// `test_hook_command_rejects_ephemeral_exe_override`.
+fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Option<PathBuf> {
+    let running = exe_override
         .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
         .or_else(|| {
             std::env::current_exe()
@@ -59,10 +84,19 @@ pub fn mpm_hook_command(exe_override: Option<&Path>) -> String {
                 .and_then(|p| p.canonicalize().ok().or(Some(p)))
         });
 
-    match resolved {
-        Some(p) if p.is_absolute() => format!("{} hook", p.display()),
-        _ => BARE_HOOK_COMMAND.to_string(),
+    if let Some(p) = running
+        && p.is_absolute()
+        && !trusty_common::bin_resolve::is_ephemeral_build_path(&p)
+    {
+        return Some(p);
     }
+
+    // Ephemeral or unresolved running path: fall back to a PATH-resolved
+    // installed binary so the hook command survives worktree/debug rebuilds.
+    MPM_BIN_NAMES
+        .iter()
+        .find_map(|name| trusty_common::bin_resolve::resolve_binary(name))
+        .filter(|p| p.is_absolute())
 }
 
 /// Build the MPM lifecycle hook additions JSON block (five events).
@@ -406,11 +440,13 @@ pub fn ensure_managed_hooks(claude_config_dir: &Path) -> anyhow::Result<()> {
 ///
 /// Why: callers that run `tm install` should pin the absolute path once
 /// (at install entry, before any `cd`) and pass it through. This helper
-/// centralises the `current_exe → canonicalize → Option<PathBuf>` dance.
-/// What: returns `Some(canonicalized_path)` or `None` if resolution fails.
-/// Test: covered indirectly by `test_hook_command_uses_absolute_path`.
+/// centralises resolution and, crucially, refuses to pin an ephemeral
+/// build/worktree path (#2229) that would 404 after a rebuild — falling back to
+/// the PATH-resolved installed binary instead.
+/// What: delegates to [`resolve_stable_hook_exe`] with no override, returning a
+/// stable installed absolute path, or `None` when none can be found.
+/// Test: covered indirectly by `test_hook_command_uses_absolute_path`,
+/// `test_hook_command_rejects_ephemeral_exe_override`.
 pub fn resolve_current_exe() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.canonicalize().ok().or(Some(p)))
+    resolve_stable_hook_exe(None)
 }

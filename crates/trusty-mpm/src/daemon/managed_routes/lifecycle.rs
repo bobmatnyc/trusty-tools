@@ -1325,6 +1325,10 @@ fn ensure_deployment_complete(
         return Ok(());
     }
     let outcome = crate::core::deploy_validate::validate_and_repair(fw, workspace, repo_url);
+    // Warn-only carrier-reachability self-check (issue #2231) — see its own
+    // doc comment. Runs regardless of the completeness verdict below and can
+    // NEVER turn this `Ok` branch into an `Err`; it only logs.
+    warn_if_no_persona_carrier(&outcome.after.gaps, workspace, session_id);
     if outcome.before.is_complete() {
         return Ok(());
     }
@@ -1342,6 +1346,93 @@ fn ensure_deployment_complete(
         detail.len(),
         detail.join("; ")
     ))
+}
+
+/// Warn-only self-check: is at least one delegation-persona CARRIER reachable
+/// under the daemon path's `--setting-sources project,local` posture (issue
+/// #2231)?
+///
+/// Why: `--setting-sources project,local` (see
+/// `core::model_inject::SETTING_SOURCES_FLAG`) restricts the launched
+/// `claude` to the project+local tiers and EXCLUDES the `user` tier that
+/// `CLAUDE_CONFIG_DIR` relocates to (see `core::managed_config`'s module doc,
+/// "WHICH LAYER ACTUALLY LOADS THE ROSTER") — so the PM's identity survives
+/// ONLY if a project-tier carrier is reachable: either the deployed
+/// `trusty-mpm` output-style file (`settings.json`'s `outputStyle` resolving
+/// to a real file under `.claude/output-styles/`), or the per-workspace
+/// instructions stash (`<workspace>/.trusty-mpm/last-instructions.md`,
+/// written by `session_launch::prepare_session_inner` and injected via
+/// `--append-system-prompt-file`). This is a DIAGNOSTIC ONLY, mirroring the
+/// #2172/98b994c3 lesson this very function already embodies
+/// (`ensure_deployment_complete` was softened from a hard gate to a
+/// non-blocking warn by #2172, commit 98b994c3) — over-reporting "no carrier
+/// reachable" must NEVER abort a real launch, so this only logs; it cannot
+/// fail this function or any caller, and it never returns a value.
+/// What: logs `tracing::warn!` with an actionable message (naming the missing
+/// carriers and how they are normally wired) when [`carrier_reachable`]
+/// returns `false`; a no-op otherwise.
+/// Test: `carrier_reachable_*` cover the pure predicate directly;
+/// `ensure_deployment_complete_does_not_abort_when_no_carrier_reachable`
+/// asserts this self-check never turns the caller's `Ok` into an `Err`.
+fn warn_if_no_persona_carrier(
+    gaps: &[crate::core::deploy_validate::DeploymentGap],
+    workspace: &std::path::Path,
+    session_id: &ManagedSessionId,
+) {
+    if carrier_reachable(gaps, workspace) {
+        return;
+    }
+    warn!(
+        id = %session_id,
+        workspace = %workspace.display(),
+        "deployment self-check: no delegation-persona carrier reachable under \
+         --setting-sources project,local (no project-tier output-style file \
+         resolved from settings.json's outputStyle, and no \
+         .trusty-mpm/last-instructions.md prompt stash) — the launched PM may \
+         be missing its identity/instructions carrier; this is diagnostic only \
+         and does not block the launch (issue #2231). Re-run `tm doctor` or \
+         `tm repair` against this workspace to re-provision the .claude/ payload."
+    );
+}
+
+/// Pure predicate: is at least one delegation-persona carrier reachable?
+///
+/// Why: isolated from the logging side effect in
+/// [`warn_if_no_persona_carrier`] so the decision itself is directly
+/// unit-testable — see that function's doc for the full carrier-reachability
+/// rationale.
+/// What: `true` when `gaps` contains NONE of the output-style-related
+/// [`crate::core::deploy_validate::DeploymentGap`] variants
+/// (`OutputStyleKeyMissing`, `OutputStyleUnknownId`, `OutputStyleFileMissing`)
+/// — the output-style carrier is intact — OR
+/// `<workspace>/.trusty-mpm/last-instructions.md` exists and is non-empty (the
+/// prompt-file carrier). `false` only when NEITHER carrier is reachable.
+/// Test: `carrier_reachable_true_when_no_output_style_gap`,
+/// `carrier_reachable_true_when_prompt_file_present_despite_style_gap`,
+/// `carrier_reachable_false_when_neither_carrier_present`.
+fn carrier_reachable(
+    gaps: &[crate::core::deploy_validate::DeploymentGap],
+    workspace: &std::path::Path,
+) -> bool {
+    use crate::core::deploy_validate::DeploymentGap;
+
+    let output_style_ok = !gaps.iter().any(|g| {
+        matches!(
+            g,
+            DeploymentGap::OutputStyleKeyMissing
+                | DeploymentGap::OutputStyleUnknownId(_)
+                | DeploymentGap::OutputStyleFileMissing(_)
+        )
+    });
+    if output_style_ok {
+        return true;
+    }
+    workspace
+        .join(".trusty-mpm")
+        .join("last-instructions.md")
+        .metadata()
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1769,5 +1860,140 @@ mod tests {
         let id = ManagedSessionId::new();
         let result = ensure_deployment_complete(&fw, &workspace, None, &id);
         assert!(result.is_ok(), "expected Ok, got {result:?}");
+    }
+
+    /// Why (#2231): when neither carrier is present (no output-style gap
+    /// resolved AND no prompt-file stash), an empty `gaps` slice trivially
+    /// satisfies the output-style branch — this proves that specific
+    /// short-circuit.
+    /// Test: itself.
+    #[test]
+    fn carrier_reachable_true_when_no_output_style_gap() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            carrier_reachable(&[], tmp.path()),
+            "no output-style gap at all must be treated as carrier-reachable"
+        );
+    }
+
+    /// Why (#2231): the prompt-file carrier is an ALTERNATIVE to the
+    /// output-style carrier — a workspace with an output-style gap but a
+    /// present, non-empty `.trusty-mpm/last-instructions.md` must still be
+    /// reachable.
+    /// Test: itself.
+    #[test]
+    fn carrier_reachable_true_when_prompt_file_present_despite_style_gap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stash_dir = tmp.path().join(".trusty-mpm");
+        std::fs::create_dir_all(&stash_dir).unwrap();
+        std::fs::write(stash_dir.join("last-instructions.md"), "you are the PM").unwrap();
+
+        let gaps = vec![crate::core::deploy_validate::DeploymentGap::OutputStyleKeyMissing];
+        assert!(
+            carrier_reachable(&gaps, tmp.path()),
+            "a present, non-empty prompt-file stash must satisfy the carrier check \
+             even when the output-style carrier has a gap"
+        );
+    }
+
+    /// Why (#2231): the false case — an output-style gap AND no prompt-file
+    /// stash at all — must resolve to "no carrier reachable" so the warn-only
+    /// diagnostic fires.
+    /// Test: itself.
+    #[test]
+    fn carrier_reachable_false_when_neither_carrier_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gaps = vec![
+            crate::core::deploy_validate::DeploymentGap::OutputStyleFileMissing(
+                "trusty-mpm".to_string(),
+            ),
+        ];
+        assert!(
+            !carrier_reachable(&gaps, tmp.path()),
+            "an output-style gap with no prompt-file stash must be unreachable"
+        );
+    }
+
+    /// Why (#2231): an EMPTY (zero-byte) prompt-file stash must not count as
+    /// "wired" — a truncated/placeholder file is not a real carrier.
+    /// Test: itself.
+    #[test]
+    fn carrier_reachable_false_when_prompt_file_present_but_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stash_dir = tmp.path().join(".trusty-mpm");
+        std::fs::create_dir_all(&stash_dir).unwrap();
+        std::fs::write(stash_dir.join("last-instructions.md"), "").unwrap();
+
+        let gaps = vec![
+            crate::core::deploy_validate::DeploymentGap::OutputStyleUnknownId("bogus".to_string()),
+        ];
+        assert!(!carrier_reachable(&gaps, tmp.path()));
+    }
+
+    /// Why (#2231): [`warn_if_no_persona_carrier`] returns `()` and is the
+    /// ONLY thing `ensure_deployment_complete` calls for this self-check — its
+    /// signature already makes it structurally impossible to turn the
+    /// caller's `Ok` into an `Err`. This proves it also never PANICS when
+    /// neither carrier is reachable (the exact condition that makes it log).
+    /// Test: itself — reaching the end of this test without panicking IS the
+    /// assertion.
+    #[test]
+    fn warn_if_no_persona_carrier_does_not_panic_when_neither_carrier_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gaps = vec![crate::core::deploy_validate::DeploymentGap::OutputStyleKeyMissing];
+        let id = ManagedSessionId::new();
+        warn_if_no_persona_carrier(&gaps, tmp.path(), &id);
+    }
+
+    /// Why (#2231): full-pipeline regression guard — even when auto-repair
+    /// cannot write anything at all (workspace directory made read-only, so
+    /// NEITHER the output-style file nor the `.trusty-mpm/last-instructions.md`
+    /// stash can be created), `ensure_deployment_complete` must still RETURN
+    /// (not panic/hang) — the carrier self-check is purely additive logging
+    /// and can never abort this call. The pre-existing (unrelated, #2172)
+    /// contract — an unrepairable gap surfaces as `Err` for the caller to log
+    /// non-blockingly — is asserted too, proving this diagnostic didn't change
+    /// it. Skipped when running as root: a read-only directory does not block
+    /// root's writes, so the "nothing got written" precondition cannot be
+    /// established.
+    /// Test: itself. Unix-only (permission bits).
+    #[cfg(unix)]
+    #[test]
+    fn ensure_deployment_complete_does_not_abort_when_no_carrier_reachable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Confirm the read-only precondition actually holds before relying on
+        // it — running as root would silently defeat it.
+        let probe = workspace.join(".probe");
+        if std::fs::write(&probe, "x").is_ok() {
+            let _ = std::fs::remove_file(&probe);
+            let _ = std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o755));
+            eprintln!(
+                "skipping ensure_deployment_complete_does_not_abort_when_no_carrier_reachable: \
+                 read-only directory did not block a write (likely running as root)"
+            );
+            return;
+        }
+
+        let mut fw =
+            crate::core::paths::FrameworkPaths::for_managed_project(tmp.path(), &workspace);
+        fw.trusty_mpm_root = None;
+        let id = ManagedSessionId::new();
+
+        let result = ensure_deployment_complete(&fw, &workspace, None, &id);
+
+        // Restore write permission so the TempDir can clean itself up.
+        let _ = std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o755));
+
+        assert!(
+            result.is_err(),
+            "expected the pre-existing incomplete-after-repair contract to still hold \
+             (unrelated to the new carrier self-check); got {result:?}"
+        );
     }
 }
