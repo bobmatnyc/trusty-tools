@@ -28,6 +28,7 @@ use crate::core::names::SessionNameError;
 use crate::core::sm::control::Submit;
 
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use super::resume_workdir;
 use super::store::{SessionStore, StoreError};
 
 /// Errors produced by the session manager.
@@ -96,6 +97,25 @@ pub enum ManagedError {
     /// variant.
     #[error("session name error: {0}")]
     SessionName(#[from] SessionNameError),
+
+    /// No fallback candidate for a session's workdir exists on disk during
+    /// `resume` (#2250).
+    ///
+    /// Why: prior to #2250, `resume()`'s recreate branch handed
+    /// `workspace_path` straight to tmux with no existence check — a
+    /// removed/stale worktree silently rooted the recreated pane at `$HOME`,
+    /// discarding the project-tier `.claude/` skills/persona/MCP config that
+    /// lives only under the real workspace. All three fallback candidates
+    /// (`last_cwd`, `workspace_path`, `cwd`) are now existence-checked by
+    /// [`super::resume_workdir::resolve_existing_workdir`]; when NONE exist,
+    /// failing loudly here beats silently spawning a pane at `$HOME`.
+    /// What: `(session_id, path)` — `path` is the most-informative candidate
+    /// considered (`workspace_path` if set, else `cwd`), surfaced in the error
+    /// message so the operator knows exactly which directory vanished.
+    #[error(
+        "workspace directory {1} no longer exists; cannot resume session {0} — the worktree may have been removed"
+    )]
+    WorkspaceMissing(String, String),
 }
 
 // [`ManagedTmuxDriver`] lives in `driver.rs` (issue #1955 SLOC split — the
@@ -495,22 +515,31 @@ impl SessionManager {
     /// (CLI restart, HTTP `/resume`, MCP `sessions.resume`, the auto-resume
     /// supervisor) inherited that destructiveness, dropping the operator into a
     /// freshly recreated pane instead of the one they were already looking at.
-    /// What: validates the session is `Stopped` or `Errored`, then branches on
+    /// What: validates the session is `Stopped` or `Errored`, resolves the
+    /// workdir via [`resume_workdir::resolve_existing_workdir`] (#2250 —
+    /// existence-checks `last_cwd` → `workspace_path` → `cwd` in order,
+    /// erroring with [`ManagedError::WorkspaceMissing`] rather than handing a
+    /// stale/removed path to tmux when none remain), then branches on
     /// [`ManagedTmuxDriver::session_exists`]: if the tmux pane is STILL alive, it
     /// is reused as-is — no `kill_session`, no `create_session` — because the
     /// caller (e.g. `resume_managed`) re-spawns the runtime via
     /// `RuntimeAdapter::spawn_resume`, which types the resume command straight
     /// into that same pane (already rooted at the right cwd from its original
-    /// creation). If the pane is gone, behavior is unchanged from before: a
-    /// best-effort `kill_session` guard followed by a fresh `create_session` with
-    /// `cwd = workspace_path` (falls back to `cwd` when `workspace_path` is
-    /// absent). Either way the record is marked `Active` and persisted.
+    /// creation). If the pane is gone: a best-effort `kill_session` guard
+    /// followed by [`resume_workdir::create_and_verify_pane`], which creates the
+    /// fresh session AND verifies (#2250) the pane actually landed at the
+    /// resolved workdir — tmux `-c <dir>` can exit 0 while silently falling back
+    /// to `$HOME`, which this catches and fails loudly on rather than typing the
+    /// resume command into a mis-rooted pane. Either way the record is marked
+    /// `Active` and persisted.
     /// Test: `manager_resume_respawns_in_existing_workspace` (`tests.rs`) —
     /// asserts a new `create_session` call is issued when no pane survives (the
     /// `stop()` path, which kills the pane); `resume_reattach_tests.rs`'s
     /// `manager_resume_reuses_live_pane_without_recreate` — asserts NEITHER
     /// `kill_session` NOR `create_session` fires when the pane survives (the
-    /// `mark_runtime_exited_stopped` path, #2148).
+    /// `mark_runtime_exited_stopped` path, #2148); `resume_reattach_tests.rs`'s
+    /// `manager_resume_errors_when_recreated_pane_cwd_mismatches` — asserts a
+    /// pane-cwd mismatch on the recreate path fails loudly (#2250).
     pub async fn resume(&self, id: &ManagedSessionId) -> Result<SessionRecord, ManagedError> {
         let mut record = self.get(id).await?;
         match record.state {
@@ -525,20 +554,12 @@ impl SessionManager {
             }
         }
 
-        // Prefer last_cwd (if it still exists on disk) → workspace_path → cwd (#1816).
-        // The existence check guards against the case where last_cwd was deleted
-        // between the stop and the resume (e.g. ephemeral workspace cleaned up).
-        // Use tokio::fs::try_exists to avoid blocking the async executor.
-        let cwd_ok = match record.last_cwd.as_deref() {
-            Some(p) => tokio::fs::try_exists(p).await.unwrap_or(false),
-            None => false,
-        };
-        let workdir = record
-            .last_cwd
-            .as_deref()
-            .filter(|_| cwd_ok)
-            .or(record.workspace_path.as_deref())
-            .unwrap_or(record.cwd.as_path())
+        // Prefer last_cwd → workspace_path → cwd (#1816), each existence-checked
+        // on disk (#2250 — workspace_path and cwd previously were NOT, so a
+        // stale/removed worktree silently rooted the recreated pane at $HOME).
+        // Errors loudly via WorkspaceMissing when none of the three remain.
+        let workdir = resume_workdir::resolve_existing_workdir(id, &record)
+            .await?
             .to_string_lossy()
             .to_string();
 
@@ -559,11 +580,14 @@ impl SessionManager {
                 warn!(name = %record.tmux_name, "resume: kill stale session failed: {e}");
             }
 
-            // Create a fresh tmux session rooted at the EXISTING workspace.
-            // No re-clone — workspace_path is reused as-is.
-            self.tmux
-                .create_session(&record.tmux_name, &workdir)
-                .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
+            // Create a fresh tmux session rooted at the EXISTING workspace, then
+            // verify tmux didn't silently fall back to $HOME (#2250). No
+            // re-clone — workspace_path is reused as-is.
+            resume_workdir::create_and_verify_pane(
+                self.tmux.as_ref(),
+                &record.tmux_name,
+                &workdir,
+            )?;
             info!(
                 id = %id,
                 name = %record.tmux_name,
