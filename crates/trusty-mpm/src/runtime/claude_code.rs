@@ -234,8 +234,10 @@ fn spawn_command(
 /// it to a fresh temp file via [`crate::core::model_inject::write_prompt_file`].
 /// Returns `None` (logged) on any write failure so `spawn` still proceeds —
 /// matching the non-fatal pattern every other `prepare_managed_config` step in
-/// this file follows; the CLAUDE.md carrier (#2125 item 1) still applies even
-/// without this flag.
+/// this file follows. There is no CLAUDE.md-carrier fallback: #2173 made
+/// "trusty-mpm must never modify the target project's CLAUDE.md" a hard
+/// constraint, so a write failure here means the session runs without the
+/// injected PM system prompt rather than falling back to a different carrier.
 /// Test: `build_prompt_file_writes_resolved_prompt_for_project`.
 fn build_prompt_file(project_dir: &Path) -> Option<std::path::PathBuf> {
     let native = crate::core::output_style::claude_supports_native_output_style();
@@ -269,24 +271,31 @@ fn build_prompt_file(project_dir: &Path) -> Option<std::path::PathBuf> {
 /// env prefix (scrub + `CLAUDE_CONFIG_DIR`) and isolation flags as
 /// [`spawn_command`], and all three get [`on_exit_hint_suffix`] appended
 /// (#2023 component D) so the pane always prints the relaunch hint once
-/// `claude` exits, whichever branch fired.
+/// `claude` exits, whichever branch fired. `prompt_file` (#2230) carries the
+/// PM system prompt via `--append-system-prompt-file` the same way
+/// [`spawn_command`] does, so resumed/guided-resume/crash-recovery sessions
+/// get the identical carrier a fresh spawn gets instead of falling back to a
+/// vanilla `claude` invocation.
 /// Test: `resume_command_with_id_uses_resume_flag`,
 /// `resume_command_without_id_with_prior_conv_uses_continue`,
 /// `resume_command_without_id_no_prior_conv_uses_plain_spawn`,
 /// `resume_command_sets_claude_config_dir`,
 /// `resume_command_exports_managed_session_id`,
-/// `resume_command_prints_relaunch_hint_after_claude_exits`.
+/// `resume_command_prints_relaunch_hint_after_claude_exits`,
+/// `resume_command_with_prompt_file_contains_flag`.
 fn resume_command(
     claude_bin: &str,
     config_dir: Option<&Path>,
     claude_session_id: Option<&str>,
     has_prior_conv: bool,
     session_id: &str,
+    prompt_file: Option<&Path>,
 ) -> String {
     let base = format!(
-        "{}{} {} {}",
+        "{}{}{} {} {}",
         session_id_export_prefix(session_id),
         env_bin_prefix(claude_bin, config_dir),
+        prompt_file_flag(prompt_file),
         crate::core::model_inject::SETTING_SOURCES_FLAG,
         crate::core::model_inject::PERMISSION_MODE_FLAG,
     );
@@ -726,8 +735,8 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         let config_dir = prepare_managed_config(tmux_name, cwd);
         // Build and inject the PM system prompt (issue #2125 item 3) so this,
         // the default daemon on-ramp, can no longer silently spawn vanilla
-        // Claude Code. Non-fatal: a write failure omits the flag and falls
-        // back to the CLAUDE.md carrier (item 1).
+        // Claude Code. Non-fatal: a write failure omits the flag (#2173 ruled
+        // out a CLAUDE.md-carrier fallback, so there is no other carrier).
         let prompt_file = build_prompt_file(cwd);
         self.tmux
             .send_line(
@@ -767,9 +776,12 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     /// `CLAUDE_CONFIG_DIR` via [`prepare_managed_config`], existence-checks
     /// `claude_session_id` against the resolved config dir, falls back when it
     /// is missing, checks for prior conversation when no usable id remains,
+    /// builds the PM system-prompt file via [`build_prompt_file`] (#2230 —
+    /// same carrier `spawn` uses, previously missing from every resume path),
     /// then sends the appropriate [`resume_command`] to the tmux pane.
     /// Test: `spawn_resume_with_id_uses_resume_flag`,
-    /// `spawn_resume_without_id_no_prior_conv_sends_plain_spawn`.
+    /// `spawn_resume_without_id_no_prior_conv_sends_plain_spawn`,
+    /// `spawn_resume_sends_prompt_file_when_binary_available`.
     fn spawn_resume(
         &self,
         tmux_name: &str,
@@ -786,6 +798,11 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             )
         })?;
         let config_dir = prepare_managed_config(tmux_name, cwd);
+        // #2230: build the PM system prompt for the resume path too — before
+        // this fix only spawn() passed --append-system-prompt-file, so every
+        // resumed/guided-resume/crash-recovery session silently ran vanilla
+        // Claude Code. Non-fatal: a write failure omits the flag.
+        let prompt_file = build_prompt_file(cwd);
 
         // #2013: a stored id can go stale — existence-check it before trusting
         // `--resume <id>` so a missing session falls back gracefully instead
@@ -837,6 +854,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
                     effective_id,
                     prior,
                     session_id,
+                    prompt_file.as_deref(),
                 ),
             )
             .map_err(|e| RuntimeError::TmuxUnavailable(e.to_string()))?;
@@ -1026,7 +1044,7 @@ mod tests {
             "config dir must never be interpolated unquoted: {cmd}"
         );
         // Resume path shares env_bin_prefix, so it must quote identically.
-        let resume = resume_command("claude", Some(dir), None, false, TEST_SESSION_ID);
+        let resume = resume_command("claude", Some(dir), None, false, TEST_SESSION_ID, None);
         assert!(
             resume.contains(
                 "CLAUDE_CONFIG_DIR='/Users/John Doe/.trusty-tools/trusty-mpm/claude-config'"
@@ -1240,7 +1258,14 @@ mod tests {
     fn resume_command_with_id_uses_resume_flag() {
         // Why (#1744): --resume <id> restores the exact prior conversation;
         // the test pins the contract so accidental regressions are caught early.
-        let cmd = resume_command("claude", None, Some("abc-123"), false, TEST_SESSION_ID);
+        let cmd = resume_command(
+            "claude",
+            None,
+            Some("abc-123"),
+            false,
+            TEST_SESSION_ID,
+            None,
+        );
         assert!(
             cmd.contains("--resume abc-123"),
             "resume command must include --resume <id>: {cmd}"
@@ -1261,7 +1286,14 @@ mod tests {
         // TM_MANAGED_SESSION_ID before the claude invocation, for the same
         // reason as the spawn path — the pane's shell must retain the id after
         // claude exits, whichever launch path (fresh spawn or resume) started it.
-        let cmd = resume_command("claude", None, Some("abc-123"), false, TEST_SESSION_ID);
+        let cmd = resume_command(
+            "claude",
+            None,
+            Some("abc-123"),
+            false,
+            TEST_SESSION_ID,
+            None,
+        );
         let expected_prefix = format!("export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; ");
         assert!(
             cmd.starts_with(&expected_prefix),
@@ -1282,7 +1314,14 @@ mod tests {
         // DOC-34: the resume path must also carry CLAUDE_CONFIG_DIR so resumed
         // sessions read the same tm-owned roster as fresh spawns.
         let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
-        let cmd = resume_command("claude", Some(dir), Some("abc-123"), false, TEST_SESSION_ID);
+        let cmd = resume_command(
+            "claude",
+            Some(dir),
+            Some("abc-123"),
+            false,
+            TEST_SESSION_ID,
+            None,
+        );
         assert!(
             cmd.contains(
                 "env -u ANTHROPIC_API_KEY \
@@ -1301,7 +1340,7 @@ mod tests {
         // Why (#1744 / #1840): when no claude_session_id is stored but prior
         // conversation history exists, --continue resumes the most-recent
         // conversation in the workspace rather than starting fresh.
-        let cmd = resume_command("claude", None, None, true, TEST_SESSION_ID);
+        let cmd = resume_command("claude", None, None, true, TEST_SESSION_ID, None);
         assert!(
             cmd.contains("--continue"),
             "resume command without id + prior conv must use --continue: {cmd}"
@@ -1317,7 +1356,7 @@ mod tests {
         // Why (#1840): when no claude_session_id is stored AND no prior
         // conversation exists, --continue would error with "No conversation
         // found to continue". The plain spawn starts a fresh session instead.
-        let cmd = resume_command("claude", None, None, false, TEST_SESSION_ID);
+        let cmd = resume_command("claude", None, None, false, TEST_SESSION_ID, None);
         assert!(
             !cmd.contains("--continue"),
             "resume command without id + no prior conv must NOT use --continue: {cmd}"
@@ -1420,6 +1459,39 @@ mod tests {
                 && key == "TM_MANAGED_SESSION_ID"
                 && value == TEST_SESSION_ID),
             "spawn_resume must call tmux set-environment with TM_MANAGED_SESSION_ID: {env_sets:?}"
+        );
+    }
+
+    #[serial_test::serial]
+    #[test]
+    fn spawn_resume_sends_prompt_file_when_binary_available() {
+        // #2230: spawn_resume must inject --append-system-prompt-file just
+        // like spawn() does — before this fix, every resume path (including
+        // guided-resume and crash-recovery, which both funnel through this
+        // adapter method) silently omitted the PM system prompt carrier.
+        // HOME is redirected so build_prompt_file's write lands in a
+        // throwaway dir, not the developer's real ~/.trusty-tools.
+        let _home = HomeGuard::set();
+        let Some(_claude_bin) = ClaudeCodeAdapter::resolve_claude() else {
+            return;
+        };
+        let fake = FakeTmux::new();
+        let adapter = ClaudeCodeAdapter::new(fake.clone());
+        adapter
+            .spawn_resume(
+                "tmpm-test",
+                Path::new("/tmp/does-not-exist-2230"),
+                "task",
+                None,
+                TEST_SESSION_ID,
+            )
+            .expect("spawn_resume");
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1);
+        assert!(
+            sends[0].1.contains("--append-system-prompt-file"),
+            "spawn_resume must inject the PM system prompt file: {}",
+            sends[0].1
         );
     }
 
@@ -1579,7 +1651,7 @@ mod tests {
         // binary so assertions ALWAYS run even when the `claude` binary is absent in CI.
         // The adapter merely calls resume_command() with the same arguments; testing the
         // function directly proves the selection logic without CI depending on claude.
-        let cmd = resume_command("__fake_claude__", None, None, false, TEST_SESSION_ID);
+        let cmd = resume_command("__fake_claude__", None, None, false, TEST_SESSION_ID, None);
         assert!(
             !cmd.contains("--continue"),
             "plain-spawn path must NOT use --continue: {cmd}"
@@ -1648,7 +1720,14 @@ mod tests {
     fn resume_command_prints_relaunch_hint_after_claude_exits() {
         // Same invariant for the resume path (--resume branch here; the
         // --continue/plain-spawn branches share the same trailing suffix).
-        let cmd = resume_command("claude", None, Some("abc-123"), false, TEST_SESSION_ID);
+        let cmd = resume_command(
+            "claude",
+            None,
+            Some("abc-123"),
+            false,
+            TEST_SESSION_ID,
+            None,
+        );
         assert!(
             cmd.contains("; echo 'tm: run `tm` to relaunch this session'"),
             "resume command must print the relaunch hint after claude exits: {cmd}"
@@ -1658,6 +1737,32 @@ mod tests {
         assert!(
             resume_pos < hint_pos,
             "relaunch hint must come AFTER --resume: {cmd}"
+        );
+    }
+
+    #[test]
+    fn resume_command_with_prompt_file_contains_flag() {
+        // #2230: the resume path must carry the same --append-system-prompt-file
+        // carrier as spawn_command — before this fix, resumed / guided-resume /
+        // crash-recovery sessions had no way to inject the PM system prompt at all.
+        let path = Path::new("/tmp/trusty-mpm-system-prompt-resume-test.txt");
+        let cmd = resume_command(
+            "claude",
+            None,
+            Some("abc-123"),
+            false,
+            TEST_SESSION_ID,
+            Some(path),
+        );
+        assert!(
+            cmd.contains(
+                "--append-system-prompt-file '/tmp/trusty-mpm-system-prompt-resume-test.txt'"
+            ),
+            "resume command must pass the prompt file via --append-system-prompt-file: {cmd}"
+        );
+        assert!(
+            cmd.contains("--resume abc-123"),
+            "--resume must still be present alongside the prompt file: {cmd}"
         );
     }
 
