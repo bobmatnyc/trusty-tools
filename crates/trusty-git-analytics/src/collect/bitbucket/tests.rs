@@ -538,3 +538,105 @@ fn resolve_auth_app_password_falls_back_to_env_when_config_absent() {
         BbAuth::Bearer(_) => panic!("expected Basic auth, got Bearer"),
     }
 }
+
+/// Build a minimal, fully-populated [`PullRequest`] for upsert-guard tests.
+fn sample_pr(repository: &str, pr_number: u64, state: PrState, fetched_at: &str) -> PullRequest {
+    PullRequest {
+        id: 0,
+        pr_number,
+        repository: repository.to_string(),
+        title: "T".to_string(),
+        author: "ada".to_string(),
+        state,
+        created_at: Utc::now(),
+        merged_at: None,
+        commit_shas: "[]".to_string(),
+        fetched_at: fetched_at.to_string(),
+    }
+}
+
+fn store_test_client() -> BitbucketClient {
+    BitbucketClient::new(&BitbucketConfig {
+        token: Some("dummy".into()),
+        workspace: Some("acme".into()),
+        repo_slug: Some("widgets".into()),
+        ..Default::default()
+    })
+    .expect("client builds")
+}
+
+/// Why: regression guard for issue #821. A background job re-ingesting an
+/// OLDER snapshot must not be able to downgrade a PR already recorded as
+/// `merged` back to `open` — the `fetched_at` guard on `store_pull_requests`
+/// must reject a conflicting write whose `fetched_at` is not strictly newer.
+/// What: upsert a `merged` PR with `fetched_at = "2026-01-02T00:00:00Z"`,
+/// then upsert the same `(provider, repository, pr_number)` with `state =
+/// "open"` and an OLDER `fetched_at = "2026-01-01T00:00:00Z"`. Asserts the
+/// row still reads `state = "merged"` afterwards.
+/// Test: this test.
+#[test]
+fn store_pull_requests_stale_write_guard_rejects_older_fetched_at() {
+    let db = Database::open_in_memory().expect("open db");
+    let client = store_test_client();
+
+    let fresh = sample_pr("acme/widgets", 42, PrState::Merged, "2026-01-02T00:00:00Z");
+    client
+        .store_pull_requests(&db, &[fresh])
+        .expect("initial upsert");
+
+    let stale = sample_pr("acme/widgets", 42, PrState::Open, "2026-01-01T00:00:00Z");
+    client
+        .store_pull_requests(&db, &[stale])
+        .expect("stale upsert must not error, just be rejected by the WHERE guard");
+
+    let state: String = db
+        .connection()
+        .query_row(
+            "SELECT state FROM pull_requests \
+             WHERE provider = 'bitbucket' AND repository = ?1 AND pr_number = 42",
+            params!["acme/widgets"],
+            |r| r.get(0),
+        )
+        .expect("read back state");
+    assert_eq!(
+        state, "merged",
+        "stale write with an older fetched_at must be rejected"
+    );
+}
+
+/// Why: the flip side of the guard — issue #821 requires both branches of
+/// the `WHERE excluded.fetched_at > pull_requests.fetched_at` predicate to
+/// be exercised, not just the rejection path.
+/// What: upsert a `merged` PR, then upsert the same triple with `state =
+/// "open"` and a genuinely NEWER `fetched_at`. Asserts the update DOES
+/// apply this time.
+/// Test: this test.
+#[test]
+fn store_pull_requests_applies_genuinely_newer_fetched_at() {
+    let db = Database::open_in_memory().expect("open db");
+    let client = store_test_client();
+
+    let first = sample_pr("acme/widgets", 77, PrState::Merged, "2026-01-01T00:00:00Z");
+    client
+        .store_pull_requests(&db, &[first])
+        .expect("initial upsert");
+
+    let newer = sample_pr("acme/widgets", 77, PrState::Open, "2026-01-02T00:00:00Z");
+    client
+        .store_pull_requests(&db, &[newer])
+        .expect("newer upsert");
+
+    let state: String = db
+        .connection()
+        .query_row(
+            "SELECT state FROM pull_requests \
+             WHERE provider = 'bitbucket' AND repository = ?1 AND pr_number = 77",
+            params!["acme/widgets"],
+            |r| r.get(0),
+        )
+        .expect("read back state");
+    assert_eq!(
+        state, "open",
+        "a genuinely newer fetched_at must overwrite the previous row"
+    );
+}
