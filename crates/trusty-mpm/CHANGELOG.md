@@ -9,6 +9,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- opt-in deny-by-default pm_guard + warn-only carrier self-check ([#2237](https://github.com/bobmatnyc/trusty-tools/pull/2237)) ([`c3328b6`](https://github.com/bobmatnyc/trusty-tools/commit/c3328b62ffc8f26a5e476d2d18c39a931cfb8a11))
+
+### Fixed
+
+- delegation persona reaches resume path + harden tm connect ([#2239](https://github.com/bobmatnyc/trusty-tools/pull/2239)) ([`df09b16`](https://github.com/bobmatnyc/trusty-tools/commit/df09b1655e9b316396ecbda47cd29395a057cf18))
+- resolve stable binary for hooks/statusLine + self-heal stale paths (closes #2229) ([#2234](https://github.com/bobmatnyc/trusty-tools/pull/2234)) ([`ae87bbb`](https://github.com/bobmatnyc/trusty-tools/commit/ae87bbb3827b9dfc9fccae4732c66104af6912b7))
+## [Unreleased]
+
+### Added
+
 - seed outputStyle/statusLine into tm-owned config dir ([#2215](https://github.com/bobmatnyc/trusty-tools/pull/2215)) ([`2ebb6e1`](https://github.com/bobmatnyc/trusty-tools/commit/2ebb6e19993524aae4df038041c4c1d1cdc64dd0))
 ## [Unreleased]
 
