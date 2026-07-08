@@ -48,6 +48,10 @@ use crate::perf::PerfCollector;
 use crate::tools::{AgentOutput, FINISH_TASK_TOOL_NAME, FinishTaskArgs, ToolRegistry, ToolResult};
 
 pub use compaction::CompactionConfig;
+// (#2260) Crate-internal re-export so `llm::bedrock::cache` can reuse the
+// same chars/4 token-estimate heuristic for its cachePoint min-size guard
+// instead of duplicating it.
+pub(crate) use compaction::estimate_tokens;
 pub use error::AgentLoopError;
 pub use sink::ToolEventSink;
 pub use transcript::Transcript;
@@ -445,7 +449,12 @@ impl AgentLoop {
     /// prompt-cache breakpoint — the byte-stable prefix this turn resends
     /// unchanged from the last. When `false` (Parity mode, or a
     /// provider/model that hasn't verified the passthrough), the request is
-    /// byte-identical to pre-#2156. Independently, when the resolved
+    /// byte-identical to pre-#2156. This marker is provider-neutral: each
+    /// transport interprets it in its own wire shape — OpenRouter's
+    /// `anthropic/*` passthrough serialises it as Anthropic's `cache_control`
+    /// content-block field (`llm::message::ChatMessage::serialize`); Bedrock's
+    /// Converse transport (#2260) translates it into a native `cachePoint`
+    /// content block (`llm::bedrock::cache`). Independently, when the resolved
     /// provider's `Provider::wants_detailed_usage()` is `true` (currently
     /// OpenRouter, unconditionally), attaches
     /// `usage: Some(RequestUsageConfig::detailed())` so the response carries
@@ -453,8 +462,9 @@ impl AgentLoop {
     /// response-side cache-usage fix).
     /// Test: Exercised by every loop test; `config_max_tokens_reaches_chat_request`
     /// pins that a configured cap flows through unchanged;
-    /// `daily_driver_anthropic_model_marks_cache_breakpoints` and
-    /// `parity_mode_never_marks_cache_breakpoints` cover the #2156 gate;
+    /// `daily_driver_anthropic_model_marks_cache_breakpoints`,
+    /// `daily_driver_bedrock_model_marks_cache_breakpoints`, and
+    /// `parity_mode_never_marks_cache_breakpoints` cover the #2156/#2260 gate;
     /// `build_request_sets_detailed_usage_for_openrouter` covers the
     /// detailed-usage gate.
     fn build_request(&self, transcript: &Transcript, schemas: &[ToolDefinition]) -> ChatRequest {
@@ -507,6 +517,7 @@ impl AgentLoop {
     /// AND `crate::provider::provider_for(&self.config.model)
     /// .supports_prompt_caching()` is `true`.
     /// Test: `agent_loop::tests::daily_driver_anthropic_model_marks_cache_breakpoints`,
+    /// `agent_loop::tests::daily_driver_bedrock_model_marks_cache_breakpoints`,
     /// `agent_loop::tests::parity_mode_never_marks_cache_breakpoints`,
     /// `agent_loop::tests::non_anthropic_model_never_marks_cache_breakpoints`.
     fn prompt_cache_enabled(&self) -> bool {
