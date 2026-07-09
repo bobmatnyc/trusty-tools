@@ -6,6 +6,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.32.3] — 2026-07-09
+
+### Changed
+
+- Add crates.io package metadata (keywords/categories/homepage/readme).
+- Repoint CI badge to trusty-tools monorepo.
+
 ## [0.32.2] — 2026-07-08
 
 ### Changed

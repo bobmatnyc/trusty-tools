@@ -1,5 +1,11 @@
 # Changelog — trusty-bm25-daemon
 
+## [0.1.3] — 2026-07-09
+
+### Changed
+
+- Version reconcile to match already-published crates.io state; no functional change.
+
 ## [0.1.2] — 2026-06-16
 
 ### Changed (BREAKING for the binary; closes part of #1318)

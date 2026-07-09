@@ -1,10 +1,9 @@
 [package]
 name = "trusty-code"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
-# license.workspace resolves to "MIT"; publish=false so crates.io validation
-# is never triggered, but LICENSE is kept in-crate for correctness.
+# license.workspace resolves to "MIT"; LICENSE is kept in-crate for correctness.
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
@@ -13,7 +12,6 @@ readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"
 keywords = ["cli", "mcp", "orchestration", "agents", "harness"]
 categories = ["command-line-utilities", "development-tools"]
-publish = false
 
 [[bin]]
 name = "tcode"
