@@ -72,11 +72,20 @@ Snapshot content:
 Branch: {current branch}
 Last commit: {hash and message}
 Uncommitted changes: {git status summary}
+
+## Tmux Window
+{session_name:window_index:window_id, e.g. main:2:@7 — omit this section entirely when not inside tmux}
 ```
 
+The `## Tmux Window` section records the originating tmux window so resume can
+re-align to it. Capture it ONLY when inside tmux (`[ -n "$TMUX" ]`) via
+`tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'`; when
+`$TMUX` is unset, omit the section (resume treats absence as a no-op).
+
 Procedure: `git status` + `git log --oneline -10` for context → `mkdir -p
-.trusty-mpm/sessions` → write `session-{timestamp}.md` → update
-`LATEST-SESSION.txt` → report the path to the user.
+.trusty-mpm/sessions` → when inside tmux, capture the window string (above) →
+write `session-{timestamp}.md` (include `## Tmux Window` only if captured) →
+update `LATEST-SESSION.txt` → report the path to the user.
 
 ## Resuming: `tm session catchup`
 

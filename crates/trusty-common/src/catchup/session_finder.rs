@@ -38,6 +38,14 @@ pub enum PausedSession {
         in_progress: Option<String>,
         /// Content of the `## Next Steps` section.
         next_steps: Option<String>,
+        /// Why: lets resume re-align to the originating tmux window instead of
+        /// leaving the operator on whatever window they happen to be on.
+        /// What: the `session_name:window_index:window_id` string captured at
+        /// pause time from `tmux display-message` and stored in the
+        /// `## Tmux Window` section; `None` when the snapshot predates the
+        /// feature or was created outside tmux.
+        /// Test: `parse_extracts_tmux_window`, `parse_missing_tmux_window_is_none`.
+        tmux_window: Option<String>,
     },
     /// A session paused by the claude-mpm Python tool (JSON format).
     ///
@@ -144,10 +152,16 @@ fn render_session(out: &mut String, session: &PausedSession) {
             git_context,
             in_progress,
             next_steps,
+            tmux_window,
         } => {
             out.push_str("**Format:** trusty-mpm (native)\n");
             if let Some(ts) = paused_at {
                 out.push_str(&format!("**Paused At:** {ts}\n"));
+            }
+            if let Some(win) = tmux_window
+                && !win.is_empty()
+            {
+                out.push_str(&format!("**Tmux Window:** {win}\n"));
             }
             out.push_str(&format!("**File:** {}\n\n", path.display()));
             if !summary.is_empty() {
@@ -243,6 +257,8 @@ fn parse_trusty_mpm_session(path: &Path) -> anyhow::Result<PausedSession> {
     let git_context = extract_section(&content, "Git Context");
     let in_progress = extract_section(&content, "In Progress");
     let next_steps = extract_section(&content, "Next Steps");
+    // `None` for snapshots without the section keeps older files back-compat.
+    let tmux_window = extract_section(&content, "Tmux Window");
 
     // Try to parse a UTC timestamp from the filename: session-YYYYMMDD-HHMMSS.md
     let paused_at = path
@@ -258,6 +274,7 @@ fn parse_trusty_mpm_session(path: &Path) -> anyhow::Result<PausedSession> {
         git_context,
         in_progress,
         next_steps,
+        tmux_window,
     })
 }
 
@@ -433,6 +450,75 @@ mod tests {
         assert!(
             !output.contains("conversation"),
             "conversation must NOT appear in rendered output"
+        );
+    }
+
+    #[test]
+    fn parse_extracts_tmux_window() {
+        let tmp = TempDir::new().unwrap();
+        let p = write_file(
+            tmp.path(),
+            "session-20260627-100000.md",
+            "## Summary\nWork.\n\n## Tmux Window\nmain:2:@7\n\n## Git Context\nbranch: main",
+        );
+        let session = parse_trusty_mpm_session(&p).unwrap();
+        match session {
+            PausedSession::TrustyMpm { tmux_window, .. } => {
+                assert_eq!(tmux_window.as_deref(), Some("main:2:@7"));
+            }
+            _ => panic!("expected TrustyMpm variant"),
+        }
+    }
+
+    #[test]
+    fn parse_missing_tmux_window_is_none() {
+        let tmp = TempDir::new().unwrap();
+        let p = write_file(
+            tmp.path(),
+            "session-20260627-100000.md",
+            "## Summary\nWork.\n\n## Git Context\nbranch: main",
+        );
+        let session = parse_trusty_mpm_session(&p).unwrap();
+        match session {
+            PausedSession::TrustyMpm { tmux_window, .. } => {
+                assert!(tmux_window.is_none(), "back-compat: absent section => None");
+            }
+            _ => panic!("expected TrustyMpm variant"),
+        }
+    }
+
+    #[test]
+    fn render_tmux_window_present_and_omitted() {
+        // Present → line renders.
+        let with = PausedSession::TrustyMpm {
+            path: PathBuf::from("/tmp/session-20260627-100000.md"),
+            paused_at: None,
+            summary: "Work.".to_string(),
+            git_context: None,
+            in_progress: None,
+            next_steps: None,
+            tmux_window: Some("main:2:@7".to_string()),
+        };
+        let output = render_resume_context(std::slice::from_ref(&with));
+        assert!(
+            output.contains("**Tmux Window:** main:2:@7"),
+            "recorded window should render"
+        );
+
+        // None → line omitted.
+        let without = PausedSession::TrustyMpm {
+            path: PathBuf::from("/tmp/session-20260627-100000.md"),
+            paused_at: None,
+            summary: "Work.".to_string(),
+            git_context: None,
+            in_progress: None,
+            next_steps: None,
+            tmux_window: None,
+        };
+        let output = render_resume_context(std::slice::from_ref(&without));
+        assert!(
+            !output.contains("Tmux Window"),
+            "absent window must not render a line"
         );
     }
 
