@@ -18,4 +18,4 @@
 /// `BASE_PREAMBLE` text so reports referencing an old run remain interpretable.
 /// Test: `prompt::tests::base_preamble_version_is_semver_shaped` asserts the
 /// three-component shape.
-pub const BASE_PREAMBLE_VERSION: &str = "1.1.0";
+pub const BASE_PREAMBLE_VERSION: &str = "1.2.0";

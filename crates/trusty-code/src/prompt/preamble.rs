@@ -68,6 +68,13 @@ an existing suite goes unrun is not verification.
 observed its output. If you could not run the suite, say so explicitly instead \
 of asserting an unverified result.
 
+## Testable design
+
+- Prefer pure, unit-testable core functions: parsing and business logic should \
+accept plain data as input and return plain data as output.
+- Keep I/O (subprocess invocation, network calls, filesystem access) in thin \
+wrapper functions, separate from the core logic they feed.
+
 ## Finish convention
 
 - You signal that the task is complete by producing an assistant turn that \
