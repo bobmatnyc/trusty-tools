@@ -373,6 +373,9 @@ pub async fn recall(
     query: &str,
     top_k: usize,
 ) -> Result<Vec<RecallResult>> {
+    // Idle-to-disk: a recall is a genuine user access — reset the idle clock
+    // so the idle-evict ticker does not drop an actively-queried palace.
+    handle.touch();
     let expanded = expand_query(query);
     let mut combined = retrieve_l0_l1(handle);
     let l2 = retrieve_l2(handle, embedder, &expanded, None, top_k).await?;
@@ -422,6 +425,8 @@ pub async fn recall_deep(
     query: &str,
     top_k: usize,
 ) -> Result<Vec<RecallResult>> {
+    // Idle-to-disk: deep recall is also a genuine user access.
+    handle.touch();
     let expanded = expand_query(query);
     let mut combined = retrieve_l0_l1(handle);
     let l3 = retrieve_l3(handle, embedder, &expanded, top_k).await?;

@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::info;
 use trusty_common::memory_core::dream::{DreamConfig, Dreamer};
 use trusty_common::memory_core::PalaceRegistry;
 
@@ -75,30 +75,19 @@ pub fn spawn_dream_scheduler(
     }
 
     let palace_ids = registry.list();
-    // Track only successfully-spawned loops; a palace evicted between list()
-    // and get() is silently skipped, so palace_ids.len() can overcount.
     let mut spawned: usize = 0;
 
     for palace_id in palace_ids {
-        let handle = match registry.get(&palace_id) {
-            Some(h) => h,
-            None => {
-                // Palace was evicted from the LRU between list() and get() —
-                // rare but possible under heavy load. Skip; the next startup
-                // hydration will pick it up.
-                warn!(
-                    palace = %palace_id,
-                    "dream_scheduler: handle not in registry after list(); skipping"
-                );
-                continue;
-            }
-        };
-
         let config = DreamConfig::default();
         let idle_secs = config.idle_secs;
         let dreamer = Arc::new(Dreamer::new(config));
-        let rx = shutdown_rx.clone();
-        dreamer.start_with_shutdown(handle, rx);
+        // Unpin (idle-to-disk): the loop takes the registry + id and resolves
+        // the handle each cycle via `peek` (no reopen), so it never captures an
+        // `Arc<PalaceHandle>` for the process lifetime. A palace idle-evicted to
+        // disk is simply skipped until the next access re-opens it — the loop
+        // keeps running and picks it back up. This is what lets the idle-evict
+        // sweep actually free a cold palace's heavy RAM.
+        dreamer.start_with_shutdown(registry.clone(), palace_id.clone(), shutdown_rx.clone());
         spawned += 1;
 
         info!(
@@ -113,6 +102,33 @@ pub fn spawn_dream_scheduler(
         "dream_scheduler: all per-palace loops running"
     );
     spawned
+}
+
+/// Spawn all background maintenance loops (dream scheduler + idle-to-disk
+/// eviction ticker) on the shared shutdown watch, then wire the shutdown bridge.
+///
+/// Why: keeps the startup wiring — and the `#1529` ordering guarantee (spawn the
+/// loops BEFORE the bridge so an early SIGTERM cannot pre-cancel them) — in one
+/// place instead of scattering it across `main::spawn_startup_tasks`. The
+/// idle-evict ticker rides the SAME `watch` receiver as the dream loops so both
+/// stop cleanly on SIGTERM/SIGINT.
+/// What: clones `dream_shutdown_rx` for the idle-evict ticker, spawns the
+/// per-palace dream loops, spawns the idle-evict ticker
+/// (`TRUSTY_MEMORY_IDLE_EVICT_SECS`-gated), then spawns the shutdown bridge on
+/// `dtx`. Returns the number of dream loops spawned (for the caller's log line).
+/// Test: exercised end-to-end by the daemon startup path; the ticker and
+/// scheduler are unit-tested in their own modules.
+pub fn spawn_background_maintenance(
+    registry: &Arc<PalaceRegistry>,
+    dream_shutdown_rx: watch::Receiver<bool>,
+    dtx: watch::Sender<bool>,
+) -> usize {
+    let idle_evict_rx = dream_shutdown_rx.clone();
+    let loops = spawn_dream_scheduler(registry, dream_shutdown_rx);
+    crate::idle_evict::spawn_idle_evict_ticker(registry.clone(), idle_evict_rx);
+    // Bridge is spawned AFTER the loops exist (see #1529 ordering note).
+    spawn_shutdown_bridge(dtx);
+    loops
 }
 
 /// Build the `(Sender, Receiver)` pair for the dream-scheduler shutdown signal.
@@ -271,7 +287,6 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let registry = PalaceRegistry::new();
         let id = register_temp_palace(&registry, tmp.path());
-        let handle = registry.get(&id).expect("handle after create");
 
         let config = DreamConfig {
             idle_secs: 1,
@@ -280,7 +295,7 @@ mod tests {
         let dreamer = Arc::new(Dreamer::new(config));
         let (tx, rx) = make_shutdown_watch();
 
-        let join = dreamer.start_with_shutdown(handle, rx);
+        let join = dreamer.start_with_shutdown(registry, id, rx);
 
         // Signal shutdown.
         tx.send(true).expect("send shutdown");

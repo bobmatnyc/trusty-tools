@@ -199,12 +199,16 @@ async fn dream_cycle_prunes_at_floor_importance() {
 #[tokio::test]
 async fn dreamer_shutdown_terminates_loop() {
     let handle = open_test_handle("dream-shutdown").await;
+    // The unpinned dream loop resolves the handle from a registry each cycle.
+    let id = handle.id.clone();
+    let registry = crate::memory_core::PalaceRegistry::new();
+    registry.register_arc(handle);
     let dreamer = Arc::new(Dreamer::new(DreamConfig {
         idle_secs: 10,
         ..DreamConfig::default()
     }));
     let (tx, rx) = tokio::sync::watch::channel(false);
-    let join = dreamer.clone().start_with_shutdown(handle, rx);
+    let join = dreamer.clone().start_with_shutdown(registry, id, rx);
 
     // Yield once so the task is scheduled.
     tokio::task::yield_now().await;
@@ -217,6 +221,49 @@ async fn dreamer_shutdown_terminates_loop() {
         "dream loop did not exit within 2s of shutdown"
     );
     outcome.unwrap().expect("join handle clean exit");
+}
+
+/// Part 1 (unpin): a running dream loop must NOT hold an `Arc<PalaceHandle>`
+/// for the process lifetime — otherwise it defeats LRU / idle-to-disk
+/// eviction (the palace can never be freed while its dream loop lives).
+///
+/// Why: the original design captured `Arc<PalaceHandle>` in the spawned task,
+/// so `registry.remove` (or an idle-evict) could not actually drop the
+/// handle's heavy state. The fix resolves the handle from the registry each
+/// cycle instead.
+/// What: registers a handle, keeps a `Weak` to it, spawns the dream loop with
+/// a long idle interval (so it only sleeps — never resolves the handle during
+/// the test), removes the palace from the registry, and asserts the handle is
+/// fully dropped (`Weak::upgrade` is `None`). Under the old pinning bug the
+/// upgrade would still succeed.
+/// Test: this test itself.
+#[tokio::test]
+async fn dream_loop_does_not_pin_palace_handle() {
+    let handle = open_test_handle("dream-unpin").await;
+    let id = handle.id.clone();
+    let weak = Arc::downgrade(&handle);
+    let registry = crate::memory_core::PalaceRegistry::new();
+    registry.register_arc(handle); // registry now holds the ONLY strong ref
+
+    // Long idle interval: the loop's first action is a `sleep(3600s)`, so it
+    // never peeks the registry during this test and holds no handle Arc.
+    let dreamer = Arc::new(Dreamer::new(DreamConfig {
+        idle_secs: 3600,
+        ..DreamConfig::default()
+    }));
+    let (_tx, rx) = tokio::sync::watch::channel(false);
+    let _join = dreamer.start_with_shutdown(registry.clone(), id.clone(), rx);
+    // Let the task reach its sleep.
+    tokio::task::yield_now().await;
+
+    // Drop the registry's strong reference. If the loop had captured an Arc
+    // (the pinning bug), the handle would survive this.
+    registry.remove(&id);
+    tokio::task::yield_now().await;
+    assert!(
+        weak.upgrade().is_none(),
+        "dream loop must not pin the handle: after registry.remove it must be fully dropped"
+    );
 }
 
 /// Why: When drawer rows disappear without their matching vector being

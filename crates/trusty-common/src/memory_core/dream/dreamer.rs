@@ -15,6 +15,8 @@ use super::cycle::{
 };
 use super::guard::CompactionGuard;
 use super::recall_benchmark::run_benchmark;
+use crate::memory_core::palace::PalaceId;
+use crate::memory_core::registry::PalaceRegistry;
 use crate::memory_core::retrieval::PalaceHandle;
 use crate::memory_core::semantic_consolidation::SemanticConsolidator;
 use anyhow::{Context, Result};
@@ -90,13 +92,24 @@ impl Dreamer {
     /// Spawn the background dream loop.
     ///
     /// Why: A long-lived daemon needs a per-palace task that wakes periodically,
-    /// checks the idle clock, and runs one cycle when appropriate.
-    /// What: Spawns a tokio task that sleeps `idle_secs`, calls `dream_cycle`
-    /// when `is_idle`, and logs the resulting stats. Runs forever; cancel by
-    /// dropping the daemon.
-    /// Test: Behavioral coverage via direct `dream_cycle` calls; the loop
-    /// itself is just a sleep + dispatch.
-    pub fn start(self: Arc<Self>, handle: Arc<PalaceHandle>) -> tokio::task::JoinHandle<()> {
+    /// checks the idle clock, and runs one cycle when appropriate. It must NOT
+    /// pin the palace handle for the process lifetime: the loop takes the
+    /// `registry` + `palace_id` and re-resolves the handle each cycle via
+    /// `peek` (no MRU promote, no reopen). Between cycles it holds no
+    /// `Arc<PalaceHandle>`, so the LRU and the idle-to-disk sweep can freely
+    /// evict a palace nobody is querying — the previous design captured the
+    /// `Arc` forever and defeated eviction.
+    /// What: Spawns a tokio task that sleeps `idle_secs`, resolves the handle
+    /// (skipping the cycle when the palace has been evicted to disk — dreaming
+    /// must never rehydrate a cold palace), calls `dream_cycle` when `is_idle`,
+    /// and logs the resulting stats. Runs forever; cancel by dropping the task.
+    /// Test: Behavioral coverage via direct `dream_cycle` calls;
+    /// `dream::tests::dream_loop_does_not_pin_palace_handle` covers unpinning.
+    pub fn start(
+        self: Arc<Self>,
+        registry: PalaceRegistry,
+        palace_id: PalaceId,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let interval = Duration::from_secs(self.config.idle_secs.max(1));
             loop {
@@ -104,24 +117,13 @@ impl Dreamer {
                 if !self.is_idle() {
                     continue;
                 }
-                match self.dream_cycle(&handle).await {
-                    Ok(stats) => tracing::info!(
-                        palace = %handle.id,
-                        merged = stats.merged,
-                        pruned = stats.pruned,
-                        content_pruned = stats.content_pruned,
-                        compacted = stats.compacted,
-                        closets_updated = stats.closets_updated,
-                        semantically_consolidated = stats.semantically_consolidated,
-                        semantic_llm_calls = stats.semantic_llm_calls,
-                        duration_ms = stats.duration_ms,
-                        drawers_before = stats.drawers_before,
-                        drawers_after = stats.drawers_after,
-                        compression_ratio = stats.compression_ratio,
-                        "dream cycle complete"
-                    ),
-                    Err(e) => tracing::warn!(palace = %handle.id, "dream cycle failed: {e:#}"),
-                }
+                // Resolve WITHOUT reopening: a palace idle-evicted to disk is
+                // skipped rather than rehydrated (which would defeat the sweep).
+                let Some(handle) = registry.peek(&palace_id) else {
+                    continue;
+                };
+                log_cycle_outcome(&palace_id, self.dream_cycle(&handle).await);
+                // `handle` drops here — nothing pins the palace between cycles.
             }
         })
     }
@@ -141,7 +143,8 @@ impl Dreamer {
     /// shutdown flag, await the join handle.
     pub fn start_with_shutdown(
         self: Arc<Self>,
-        handle: Arc<PalaceHandle>,
+        registry: PalaceRegistry,
+        palace_id: PalaceId,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
@@ -152,36 +155,26 @@ impl Dreamer {
                     res = shutdown.changed() => {
                         // Sender closed (`Err`) or value changed to true: shut down.
                         if res.is_err() || *shutdown.borrow() {
-                            tracing::info!(palace = %handle.id, "dreamer shutting down");
+                            tracing::info!(palace = %palace_id, "dreamer shutting down");
                             return;
                         }
                     }
                 }
                 if *shutdown.borrow() {
-                    tracing::info!(palace = %handle.id, "dreamer shutting down");
+                    tracing::info!(palace = %palace_id, "dreamer shutting down");
                     return;
                 }
                 if !self.is_idle() {
                     continue;
                 }
-                match self.dream_cycle(&handle).await {
-                    Ok(stats) => tracing::info!(
-                        palace = %handle.id,
-                        merged = stats.merged,
-                        pruned = stats.pruned,
-                        content_pruned = stats.content_pruned,
-                        compacted = stats.compacted,
-                        closets_updated = stats.closets_updated,
-                        semantically_consolidated = stats.semantically_consolidated,
-                        semantic_llm_calls = stats.semantic_llm_calls,
-                        duration_ms = stats.duration_ms,
-                        drawers_before = stats.drawers_before,
-                        drawers_after = stats.drawers_after,
-                        compression_ratio = stats.compression_ratio,
-                        "dream cycle complete"
-                    ),
-                    Err(e) => tracing::warn!(palace = %handle.id, "dream cycle failed: {e:#}"),
-                }
+                // Re-resolve without reopening; skip (do NOT rehydrate) a palace
+                // that has been idle-evicted to disk. This also unpins the
+                // handle so the LRU / idle-evict sweep can drop it between
+                // cycles — see `start`.
+                let Some(handle) = registry.peek(&palace_id) else {
+                    continue;
+                };
+                log_cycle_outcome(&palace_id, self.dream_cycle(&handle).await);
             }
         })
     }
@@ -321,5 +314,34 @@ impl Dreamer {
         }
 
         Ok(stats)
+    }
+}
+
+/// Emit the standard per-cycle telemetry for a dream loop.
+///
+/// Why: `start` and `start_with_shutdown` share the identical success/error
+/// logging block; hoisting it into one helper keeps them in lock-step and each
+/// well under the SLOC cap.
+/// What: on `Ok`, logs the full `DreamStats` field set at `info`; on `Err`,
+/// logs a `warn` naming the palace. Pure logging — no return value.
+/// Test: exercised by every dream-loop test that spawns `start_with_shutdown`.
+fn log_cycle_outcome(palace_id: &PalaceId, outcome: Result<DreamStats>) {
+    match outcome {
+        Ok(stats) => tracing::info!(
+            palace = %palace_id,
+            merged = stats.merged,
+            pruned = stats.pruned,
+            content_pruned = stats.content_pruned,
+            compacted = stats.compacted,
+            closets_updated = stats.closets_updated,
+            semantically_consolidated = stats.semantically_consolidated,
+            semantic_llm_calls = stats.semantic_llm_calls,
+            duration_ms = stats.duration_ms,
+            drawers_before = stats.drawers_before,
+            drawers_after = stats.drawers_after,
+            compression_ratio = stats.compression_ratio,
+            "dream cycle complete"
+        ),
+        Err(e) => tracing::warn!(palace = %palace_id, "dream cycle failed: {e:#}"),
     }
 }

@@ -25,10 +25,25 @@ use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use uuid::Uuid;
 
 const RECALL_LOG_FILENAME: &str = "recall.db";
+
+/// Current unix time in whole seconds, saturating to 0 before the epoch.
+///
+/// Why: `last_accessed` idle tracking (issue: idle-to-disk eviction) needs a
+/// cheap, monotonic-enough wall clock to stamp every recall / remember. Whole
+/// seconds are ample granularity for a multi-minute idle TTL and keep the
+/// stamp in a single lock-free `AtomicU64`.
+/// What: reads `SystemTime::now()` as seconds since the unix epoch.
+/// Test: exercised indirectly by `idle_evict` tests via `PalaceHandle::touch`.
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// Per-palace handle. Cheap to clone (all heavyweight state lives behind `Arc`).
 ///
@@ -111,6 +126,23 @@ pub struct PalaceHandle {
     /// rather than `parking_lot::Mutex` (which would deadlock the runtime).
     /// Test: `remember_concurrent_does_not_lose_writes` in this module.
     pub write_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// Unix-seconds timestamp of the last genuine user access (recall / remember
+    /// / forget). Drives idle-to-disk eviction.
+    ///
+    /// Why: a long-lived daemon hydrates every palace's drawer table, HNSW
+    /// graph, and KG adjacency into RAM (~90 MB each) and — even with the LRU
+    /// cap — keeps up to `max_open` palaces resident regardless of whether
+    /// anyone is querying them, driving idle RSS to multiple GB. The
+    /// idle-evict ticker reads this stamp to drop the entire handle (freeing
+    /// all heavy fields) for palaces idle past `TRUSTY_MEMORY_IDLE_EVICT_SECS`;
+    /// the durable redb store is the source of truth and the next access
+    /// transparently re-opens from disk (`PalaceRegistry::open_palace`).
+    /// What: `Arc<AtomicU64>` initialised to "now" at open so a freshly-opened
+    /// palace is never immediately evicted. Updated by [`PalaceHandle::touch`]
+    /// on every user recall/remember/forget; suppressed during dream cycles
+    /// (see `touch`) so internal consolidation never resets the idle clock.
+    /// Test: `registry_tests::evict_idle_drops_idle_unreferenced_handle`.
+    pub last_accessed: Arc<AtomicU64>,
 }
 
 impl PalaceHandle {
@@ -182,7 +214,39 @@ impl PalaceHandle {
             closets: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: Arc::new(AtomicBool::new(false)),
             write_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            last_accessed: Arc::new(AtomicU64::new(now_epoch_secs())),
         }
+    }
+
+    /// Record a genuine user access, resetting the idle clock.
+    ///
+    /// Why: idle-to-disk eviction must fire only for palaces no *user* has
+    /// touched in the TTL window. Internal dream-cycle consolidation (dedup /
+    /// prune / semantic passes) calls the same `remember`/`forget` methods, so
+    /// stamping unconditionally there would keep an actively-dreaming-but-idle
+    /// palace resident forever. The dream cycle sets `is_compacting` for its
+    /// whole duration (via `CompactionGuard`), so gating on that flag cleanly
+    /// suppresses maintenance-driven touches without threading a flag through
+    /// every pass.
+    /// What: stores `now` into `last_accessed` unless a dream cycle is in
+    /// flight (`is_compacting`), in which case it is a no-op.
+    /// Test: `registry_tests::touch_suppressed_during_compaction`.
+    pub fn touch(&self) {
+        if self.is_compacting.load(Ordering::Relaxed) {
+            return;
+        }
+        self.last_accessed
+            .store(now_epoch_secs(), Ordering::Relaxed);
+    }
+
+    /// Seconds since the last genuine user access.
+    ///
+    /// Why: the idle-evict ticker compares this against its TTL threshold to
+    /// decide which handles to drop.
+    /// What: `now - last_accessed`, saturating at 0 (clock skew safe).
+    /// Test: `registry_tests::evict_idle_drops_idle_unreferenced_handle`.
+    pub fn idle_secs(&self) -> u64 {
+        now_epoch_secs().saturating_sub(self.last_accessed.load(Ordering::Relaxed))
     }
 
     /// Open a palace from disk, hydrating identity.txt, the L1 snapshot, the
@@ -326,6 +390,7 @@ impl PalaceHandle {
             closets: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: Arc::new(AtomicBool::new(false)),
             write_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            last_accessed: Arc::new(AtomicU64::new(now_epoch_secs())),
         };
         Ok(Arc::new(handle))
     }
@@ -442,6 +507,11 @@ impl PalaceHandle {
         importance: f32,
         opts: RememberOptions,
     ) -> Result<Uuid> {
+        // Idle-to-disk: stamp this as a genuine user access so the idle-evict
+        // ticker does not drop a palace that is actively being written to.
+        // No-op while a dream cycle holds `is_compacting` (see `touch`).
+        self.touch();
+
         // Issue #59: short-circuit before doing any embedding work when the
         // palace is opened read-only. The store layer already rejects the
         // eventual write, but returning here saves the cost of an embed
@@ -683,6 +753,10 @@ impl PalaceHandle {
     /// Test: `cli_forget_removes_drawer` asserts a recalled drawer disappears
     /// after forget.
     pub async fn forget(&self, id: Uuid) -> Result<()> {
+        // Idle-to-disk: a forget is a genuine user access. Suppressed during
+        // dream cycles (which forget merged/pruned drawers) via `touch`.
+        self.touch();
+
         // Issue #59: short-circuit read-only handles so callers get a
         // clean error instead of two best-effort warnings followed by a
         // misleading "ok".
