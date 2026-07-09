@@ -452,7 +452,7 @@ fn derive_source_id_from_path(dir: &std::path::Path) -> Option<String> {
 /// Returns `Some("owner/repo")` on success; `None` on any failure (both cases silently
 /// ignored — the caller treats None as "no filter").
 /// Test: `derive_source_id_from_cwd_returns_none_without_git` (unit via path variant).
-fn derive_source_id_from_cwd() -> Option<String> {
+pub(crate) fn derive_source_id_from_cwd() -> Option<String> {
     derive_source_id_from_path(&std::env::current_dir().ok()?)
 }
 

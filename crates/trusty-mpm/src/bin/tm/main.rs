@@ -332,9 +332,26 @@ async fn main() -> anyhow::Result<()> {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
             commands::standalone::register_cmd(&paths, &alias, &url, force)
         }
-        Some(Command::LsAliases { json, root }) => {
-            let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
-            commands::standalone::ls_cmd(&paths, json)
+        Some(Command::Ls {
+            projects,
+            json,
+            source_id,
+            current,
+            all,
+            root,
+        }) => {
+            if projects {
+                // #2311: `--projects`/`-p` preserves the DOC-24 alias/project list.
+                let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;
+                commands::standalone::ls_cmd(&paths, json)
+            } else {
+                // #2311: bare `tm ls` is the interactive managed-session connector
+                // (TTY-aware; static + pipeable when non-TTY / --json / --all / 0).
+                commands::session_picker::run_ls_connector(
+                    &client, &url, json, source_id, current, all,
+                )
+                .await
+            }
         }
         Some(Command::Load { alias, root }) => {
             let paths = commands::managed_root::resolve_managed_paths(root.as_deref())?;

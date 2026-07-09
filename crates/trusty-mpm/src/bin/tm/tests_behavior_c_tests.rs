@@ -26,13 +26,14 @@ use crate::commands::first_run::needs_first_run_clone;
 /// racing `needs_first_run_clone_returns_some_when_no_clone`.
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 use crate::commands::guided::{
-    PickerDecision, derive_project, fallback_protected, github_host, is_github_remote,
-    nested_managed_match, non_github_refusal_message, parse_picker_choice, print_non_tty_hint,
-    print_project_context, tty_gate,
+    derive_project, fallback_protected, github_host, is_github_remote, nested_managed_match,
+    non_github_refusal_message, print_non_tty_hint, print_project_context, tty_gate,
 };
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{ResumeAction, is_zombie, needs_restart, plan_resume};
 use crate::commands::managed::{filter_live_sessions, is_live_session_state};
+// The picker decision enum + parser moved to the shared `session_picker` module.
+use crate::commands::session_picker::{PickerDecision, parse_picker_choice};
 
 // ── parse_picker_choice ───────────────────────────────────────────────────────
 
