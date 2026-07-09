@@ -69,15 +69,34 @@ pub fn estimate_tokens(text: &str) -> usize {
 /// Sum the estimated token count across a span of messages.
 ///
 /// Why: The trigger decision operates on the whole transcript's estimated
-/// size, not any single message.
-/// What: Sums `estimate_tokens` over each message's content plus role/name
-/// overhead is intentionally ignored — the heuristic only needs to track
-/// growth trend, not byte-exact accounting.
-/// Test: `compaction::tests::estimate_total_tokens_sums_content`.
+/// size, not any single message. (#2261) `content` alone systematically
+/// undercounts coding sessions: `write_file`/`edit` tool calls carry their
+/// argument bodies (the actual file contents being written) in
+/// `ChatMessage.tool_calls[].function.arguments`, not `content` — an
+/// assistant turn that only calls a tool has `content: None` entirely. A
+/// real segment measured at 23,541 tokens (by this same heuristic applied to
+/// the full request body) never compacted under the old content-only sum
+/// because the default `token_threshold: 6_000` was never crossed.
+/// What: Sums `estimate_tokens` over each message's `content` PLUS, for
+/// every entry in `tool_calls`, `estimate_tokens` over that call's
+/// `function.arguments` JSON string. Role/name overhead is still
+/// intentionally ignored — the heuristic only needs to track growth trend,
+/// not byte-exact accounting.
+/// Test: `compaction::tests::estimate_total_tokens_sums_content`,
+/// `compaction::tests::estimate_total_tokens_sums_tool_call_arguments`.
 pub fn estimate_total_tokens(messages: &[ChatMessage]) -> usize {
     messages
         .iter()
-        .map(|m| estimate_tokens(m.content.as_deref().unwrap_or_default()))
+        .map(|m| {
+            let content_tokens = estimate_tokens(m.content.as_deref().unwrap_or_default());
+            let tool_call_tokens: usize = m
+                .tool_calls
+                .iter()
+                .flatten()
+                .map(|call| estimate_tokens(&call.function.arguments))
+                .sum();
+            content_tokens + tool_call_tokens
+        })
         .sum()
 }
 
@@ -176,6 +195,92 @@ mod tests {
             ChatMessage::assistant("abcdefgh"),
         ];
         assert_eq!(estimate_total_tokens(&messages), 3);
+    }
+
+    /// A tool-call-only assistant turn (`content: None`, arguments carrying
+    /// the actual payload — e.g. a `write_file` body) contributes its
+    /// argument-string tokens to the total, not zero (#2261).
+    ///
+    /// Why: This is the exact bug #2261 reports: `estimate_total_tokens`
+    /// previously summed only `content`, so a transcript whose size lives
+    /// entirely in `write_file`/`edit` tool-call arguments was invisible to
+    /// the compaction trigger — `should_compact` never fired regardless of
+    /// how large those arguments grew.
+    /// What: Build an assistant message with `content: None` and one
+    /// `tool_calls` entry whose `function.arguments` is a known-length JSON
+    /// string; assert the total equals `estimate_tokens` of that arguments
+    /// string (content contributes 0 since it's `None`).
+    /// Test: this test.
+    #[test]
+    fn estimate_total_tokens_sums_tool_call_arguments() {
+        use crate::llm::{FunctionCall, ToolCall};
+
+        let arguments = r#"{"path":"src/main.rs","content":"fn main() {}"}"#;
+        let messages = vec![ChatMessage {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                kind: "function".into(),
+                function: FunctionCall {
+                    name: "write_file".into(),
+                    arguments: arguments.into(),
+                },
+            }]),
+            tool_call_id: None,
+            name: None,
+            cache_control: None,
+        }];
+
+        assert_eq!(estimate_total_tokens(&messages), estimate_tokens(arguments));
+    }
+
+    /// A transcript whose size comes entirely from `write_file`/`edit`
+    /// tool-call arguments now crosses `should_compact`'s threshold, even
+    /// though every message's `content` is empty or trivial (#2261).
+    ///
+    /// Why: Reproduces the reported real-world case — a segment measured at
+    /// 23,541 real tokens that compacted zero times because the default
+    /// `token_threshold: 6_000` was gated on `content` alone.
+    /// What: Build a small transcript whose only assistant turn carries a
+    /// large `write_file` argument body (well over the default threshold)
+    /// and a matching `tool` result; assert `should_compact` now returns
+    /// `true` against `CompactionConfig::default()`.
+    /// Test: this test.
+    #[test]
+    fn should_compact_triggers_on_large_tool_call_arguments() {
+        use crate::llm::{FunctionCall, ToolCall};
+
+        // ~9,000 chars -> ~2,250 estimated tokens per call; three calls sum
+        // to ~6,750 tokens, comfortably clearing the 6,000-token default
+        // threshold via tool_calls alone, with every `content` field left
+        // `None`/trivial.
+        let big_content = "x".repeat(9_000);
+        let mut messages = vec![ChatMessage::system("s"), ChatMessage::user("do the thing")];
+        for i in 0..3 {
+            messages.push(ChatMessage {
+                role: "assistant".into(),
+                content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: format!("call_{i}"),
+                    kind: "function".into(),
+                    function: FunctionCall {
+                        name: "write_file".into(),
+                        arguments: format!(r#"{{"content":"{big_content}"}}"#),
+                    },
+                }]),
+                tool_call_id: None,
+                name: None,
+                cache_control: None,
+            });
+            messages.push(ChatMessage::tool_result(
+                format!("call_{i}"),
+                "write_file",
+                "ok",
+            ));
+        }
+
+        assert!(should_compact(&messages, &CompactionConfig::default()));
     }
 
     #[test]

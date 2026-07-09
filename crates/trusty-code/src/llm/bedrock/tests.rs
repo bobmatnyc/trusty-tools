@@ -10,17 +10,19 @@
 use aws_sdk_bedrockruntime::operation::converse::ConverseOutput as ConverseOutputResponse;
 use aws_sdk_bedrockruntime::types::{
     ContentBlock, ConverseOutput as ConverseOutputKind, Message as SdkMessage, StopReason,
-    TokenUsage as SdkTokenUsage, ToolChoice as SdkToolChoice,
+    SystemContentBlock, TokenUsage as SdkTokenUsage, Tool as SdkTool, ToolChoice as SdkToolChoice,
 };
 use serde_json::json;
 
+use super::cache::MIN_CACHEABLE_TOKENS;
 use super::convert::{
     build_converse_messages, build_tool_config, converse_output_to_chat_response,
     document_to_json_string, json_to_document,
 };
 use super::{bedrock_model_id, resolve_bedrock_region};
 use crate::llm::{
-    ChatMessage, ChatRequest, FunctionCall, FunctionDefinition, ToolCall, ToolDefinition,
+    CacheControl, ChatMessage, ChatRequest, FunctionCall, FunctionDefinition, ToolCall,
+    ToolDefinition,
 };
 
 /// Serializes every test that mutates the process-wide region env vars —
@@ -199,6 +201,240 @@ fn build_converse_messages_maps_tool_use_arguments_to_document() {
         }
         other => panic!("expected ToolUse block, got {other:?}"),
     }
+}
+
+// ─── cachePoint (#2260) ─────────────────────────────────────────────────────
+
+/// Build a system message carrying `build_request`'s cache-eligibility
+/// marker (`cache_control: Some(...)`), exactly as
+/// `agent_loop::mark_cache_breakpoint_on_system` produces it.
+fn cached_system_message(text: &str) -> ChatMessage {
+    let mut msg = ChatMessage::system(text);
+    msg.cache_control = Some(CacheControl::ephemeral());
+    msg
+}
+
+/// A large-enough system prompt, marked cache-eligible, gets a Bedrock
+/// `cachePoint` block immediately after its `Text` block.
+///
+/// Why: This is the core #2260 wire-shape translation — without it,
+/// `supports_prompt_caching() == true` would be a lie: `agent_loop` would
+/// mark the request as cache-eligible but the Converse transport would never
+/// emit the native breakpoint that actually makes Bedrock cache it.
+/// What: Convert a request whose system message is marked and exceeds
+/// `MIN_CACHEABLE_TOKENS`; assert `system` has exactly two entries — the
+/// original `Text` followed by a `CachePoint`.
+/// Test: this test.
+#[test]
+fn build_converse_messages_emits_cache_point_after_large_cached_system() {
+    let large_system = "x".repeat(MIN_CACHEABLE_TOKENS * 4 + 100);
+    let req = minimal_request(vec![
+        cached_system_message(&large_system),
+        ChatMessage::user("hi"),
+    ]);
+    let (system, _) = build_converse_messages(&req).expect("convert");
+
+    assert_eq!(system.len(), 2, "expected Text + CachePoint");
+    assert!(matches!(system[0], SystemContentBlock::Text(_)));
+    assert!(matches!(system[1], SystemContentBlock::CachePoint(_)));
+}
+
+/// A system prompt marked cache-eligible but BELOW the minimum-cacheable
+/// size never gets a `cachePoint` (the size guard).
+///
+/// Why: Anthropic's minimum-cacheable-prefix floor means a checkpoint below
+/// it can never produce a cache hit — emitting one would waste one of
+/// Bedrock's 4-per-request checkpoint slots for zero benefit.
+/// What: Convert a request whose (short) system message is marked; assert
+/// `system` has exactly one entry (just the `Text` block).
+/// Test: this test.
+#[test]
+fn build_converse_messages_omits_cache_point_for_small_cached_system() {
+    let req = minimal_request(vec![
+        cached_system_message("short prompt"),
+        ChatMessage::user("hi"),
+    ]);
+    let (system, _) = build_converse_messages(&req).expect("convert");
+
+    assert_eq!(
+        system.len(),
+        1,
+        "a too-small cached prefix must not get a cachePoint"
+    );
+}
+
+/// A system prompt NOT marked cache-eligible never gets a `cachePoint`,
+/// regardless of size — the #2156 regression guard applied to Bedrock.
+///
+/// Why: Parity mode / a non-cache-eligible run must produce byte-identical
+/// Converse requests to pre-#2260 behaviour.
+/// What: Convert a request with a large but UNMARKED system message; assert
+/// `system` has exactly one entry.
+/// Test: this test.
+#[test]
+fn build_converse_messages_omits_cache_point_when_not_marked() {
+    let large_system = "x".repeat(MIN_CACHEABLE_TOKENS * 4 + 100);
+    let req = minimal_request(vec![
+        ChatMessage::system(large_system),
+        ChatMessage::user("hi"),
+    ]);
+    let (system, _) = build_converse_messages(&req).expect("convert");
+
+    assert_eq!(
+        system.len(),
+        1,
+        "unmarked system must never get a cachePoint"
+    );
+}
+
+/// A non-system message marked cache-eligible (`cache_control: Some(...)`,
+/// exactly as `agent_loop::mark_cache_breakpoint_on_history` produces it)
+/// gets a trailing Bedrock `cachePoint` content block appended after its own
+/// content, inside the SAME `Message` — the rolling-history follow-up to
+/// #2260.
+///
+/// Why: Without this, `agent_loop`'s rolling-history marker would be a lie
+/// on the Bedrock transport: the growing transcript (the dominant token
+/// cost) would never actually get a native `cachePoint`, so cache_read would
+/// stay 0 regardless of what `build_request` marks.
+/// What: Convert a request with an unmarked user message followed by a
+/// marked assistant message; assert the assistant `Message`'s content ends
+/// with a `CachePoint` block immediately after its `Text` block, and the
+/// user `Message` (unmarked) has no such block.
+/// Test: this test.
+#[test]
+fn build_converse_messages_emits_cache_point_after_marked_history_message() {
+    let mut assistant_msg = ChatMessage::assistant("on it");
+    assistant_msg.cache_control = Some(CacheControl::ephemeral());
+    let req = minimal_request(vec![
+        ChatMessage::system("s"),
+        ChatMessage::user("do the thing"),
+        assistant_msg,
+    ]);
+    let (_, messages) = build_converse_messages(&req).expect("convert");
+
+    // user(unmarked), assistant(marked) — different roles, not merged.
+    assert_eq!(messages.len(), 2);
+    assert_eq!(
+        messages[0].content().len(),
+        1,
+        "unmarked user message must not get a cachePoint"
+    );
+    assert!(matches!(&messages[0].content()[0], ContentBlock::Text(_)));
+
+    assert_eq!(
+        messages[1].content().len(),
+        2,
+        "expected Text + CachePoint on the marked assistant message"
+    );
+    assert!(matches!(&messages[1].content()[0], ContentBlock::Text(_)));
+    assert!(matches!(
+        &messages[1].content()[1],
+        ContentBlock::CachePoint(_)
+    ));
+}
+
+/// A non-system message WITHOUT `cache_control` set never gets a
+/// `cachePoint`, regardless of role or content — the regression guard for
+/// the rolling-history follow-up to #2260.
+///
+/// Why: A run outside the cache-eligible gate (Parity mode, or a
+/// provider/model that hasn't verified the passthrough) must produce
+/// byte-identical Converse requests to pre-rolling-history behaviour.
+/// What: Convert a request with ordinary (unmarked) user/assistant/tool
+/// messages; assert none of the resulting Converse messages contain a
+/// `CachePoint` block.
+/// Test: this test.
+#[test]
+fn build_converse_messages_omits_cache_point_for_unmarked_history_messages() {
+    let req = minimal_request(vec![
+        ChatMessage::system("s"),
+        ChatMessage::user("do two things"),
+        ChatMessage::assistant("on it"),
+    ]);
+    let (_, messages) = build_converse_messages(&req).expect("convert");
+
+    for message in &messages {
+        for block in message.content() {
+            assert!(
+                !matches!(block, ContentBlock::CachePoint(_)),
+                "no message should carry a cachePoint when unmarked"
+            );
+        }
+    }
+}
+
+/// A large-enough LAST tool definition, marked cache-eligible, gets a
+/// Bedrock `cachePoint` appended after all `ToolSpec` entries.
+///
+/// Why: Mirrors `mark_cache_breakpoint_on_tools`'s OpenRouter placement —
+/// marking only the last tool caches the entire (byte-stable) tools array
+/// as one prefix.
+/// What: Build tool config from one large tool definition with
+/// `function.cache_control` set; assert `config.tools()` has two entries —
+/// the `ToolSpec` followed by a `CachePoint`.
+/// Test: this test.
+#[test]
+fn build_tool_config_emits_cache_point_for_large_cached_last_tool() {
+    let tool = ToolDefinition::function(FunctionDefinition {
+        name: "write_file".into(),
+        description: Some("x".repeat(MIN_CACHEABLE_TOKENS * 4 + 100)),
+        parameters: None,
+        cache_control: Some(CacheControl::ephemeral()),
+    });
+    let config = build_tool_config(&[tool], None)
+        .expect("no error")
+        .expect("config present");
+
+    assert_eq!(config.tools().len(), 2, "expected ToolSpec + CachePoint");
+    assert!(matches!(
+        config.tools().last(),
+        Some(SdkTool::CachePoint(_))
+    ));
+}
+
+/// A LAST tool marked cache-eligible but whose combined schema is BELOW the
+/// minimum-cacheable size never gets a `cachePoint` (the size guard).
+///
+/// Why: Same rationale as the system-prompt guard — a checkpoint below the
+/// floor wastes a slot.
+/// What: Build tool config from one small marked tool; assert
+/// `config.tools()` has exactly one entry.
+/// Test: this test.
+#[test]
+fn build_tool_config_omits_cache_point_for_small_cached_tool() {
+    let tool = ToolDefinition::function(FunctionDefinition {
+        name: "ping".into(),
+        description: None,
+        parameters: None,
+        cache_control: Some(CacheControl::ephemeral()),
+    });
+    let config = build_tool_config(&[tool], None)
+        .expect("no error")
+        .expect("config present");
+
+    assert_eq!(
+        config.tools().len(),
+        1,
+        "a too-small cached tool set must not get a cachePoint"
+    );
+}
+
+/// Tools NOT marked cache-eligible never get a `cachePoint` — the #2156
+/// regression guard applied to Bedrock's tool config.
+///
+/// Why: `sample_tool()` (used throughout this file's existing tool-choice
+/// tests) has `cache_control: None`; this pins that the new cachePoint logic
+/// never fires for it, so every pre-#2260 assertion in this file
+/// (`config.tools().len() == 1`) stays correct.
+/// What: Build tool config from `sample_tool()`; assert one entry.
+/// Test: this test.
+#[test]
+fn build_tool_config_omits_cache_point_when_not_marked() {
+    let config = build_tool_config(&[sample_tool()], None)
+        .expect("no error")
+        .expect("config present");
+    assert_eq!(config.tools().len(), 1);
 }
 
 // ─── Tool-choice / tool-config ──────────────────────────────────────────────

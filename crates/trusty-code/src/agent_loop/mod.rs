@@ -48,6 +48,10 @@ use crate::perf::PerfCollector;
 use crate::tools::{AgentOutput, FINISH_TASK_TOOL_NAME, FinishTaskArgs, ToolRegistry, ToolResult};
 
 pub use compaction::CompactionConfig;
+// (#2260) Crate-internal re-export so `llm::bedrock::cache` can reuse the
+// same chars/4 token-estimate heuristic for its cachePoint min-size guard
+// instead of duplicating it.
+pub(crate) use compaction::estimate_tokens;
 pub use error::AgentLoopError;
 pub use sink::ToolEventSink;
 pub use transcript::Transcript;
@@ -443,9 +447,18 @@ impl AgentLoop {
     /// (#2156) When [`Self::prompt_cache_enabled`] is `true`, marks the LAST
     /// tool definition and the system-role message with an ephemeral
     /// prompt-cache breakpoint — the byte-stable prefix this turn resends
-    /// unchanged from the last. When `false` (Parity mode, or a
+    /// unchanged from the last — AND (rolling-history follow-up to #2260)
+    /// marks the last two non-system messages via
+    /// [`mark_cache_breakpoint_on_history`], rolling the cached prefix
+    /// forward to cover the growing transcript, the dominant token cost.
+    /// When `false` (Parity mode, or a
     /// provider/model that hasn't verified the passthrough), the request is
-    /// byte-identical to pre-#2156. Independently, when the resolved
+    /// byte-identical to pre-#2156. This marker is provider-neutral: each
+    /// transport interprets it in its own wire shape — OpenRouter's
+    /// `anthropic/*` passthrough serialises it as Anthropic's `cache_control`
+    /// content-block field (`llm::message::ChatMessage::serialize`); Bedrock's
+    /// Converse transport (#2260) translates it into a native `cachePoint`
+    /// content block (`llm::bedrock::cache`). Independently, when the resolved
     /// provider's `Provider::wants_detailed_usage()` is `true` (currently
     /// OpenRouter, unconditionally), attaches
     /// `usage: Some(RequestUsageConfig::detailed())` so the response carries
@@ -453,8 +466,9 @@ impl AgentLoop {
     /// response-side cache-usage fix).
     /// Test: Exercised by every loop test; `config_max_tokens_reaches_chat_request`
     /// pins that a configured cap flows through unchanged;
-    /// `daily_driver_anthropic_model_marks_cache_breakpoints` and
-    /// `parity_mode_never_marks_cache_breakpoints` cover the #2156 gate;
+    /// `daily_driver_anthropic_model_marks_cache_breakpoints`,
+    /// `daily_driver_bedrock_model_marks_cache_breakpoints`, and
+    /// `parity_mode_never_marks_cache_breakpoints` cover the #2156/#2260 gate;
     /// `build_request_sets_detailed_usage_for_openrouter` covers the
     /// detailed-usage gate.
     fn build_request(&self, transcript: &Transcript, schemas: &[ToolDefinition]) -> ChatRequest {
@@ -475,6 +489,7 @@ impl AgentLoop {
         let mut messages = transcript.to_messages();
         if cache_prefix {
             mark_cache_breakpoint_on_system(&mut messages);
+            mark_cache_breakpoint_on_history(&mut messages);
         }
 
         let usage = provider
@@ -507,6 +522,7 @@ impl AgentLoop {
     /// AND `crate::provider::provider_for(&self.config.model)
     /// .supports_prompt_caching()` is `true`.
     /// Test: `agent_loop::tests::daily_driver_anthropic_model_marks_cache_breakpoints`,
+    /// `agent_loop::tests::daily_driver_bedrock_model_marks_cache_breakpoints`,
     /// `agent_loop::tests::parity_mode_never_marks_cache_breakpoints`,
     /// `agent_loop::tests::non_anthropic_model_never_marks_cache_breakpoints`.
     fn prompt_cache_enabled(&self) -> bool {
@@ -588,6 +604,47 @@ fn mark_cache_breakpoint_on_tools(schemas: &mut [ToolDefinition]) {
 fn mark_cache_breakpoint_on_system(messages: &mut [ChatMessage]) {
     if let Some(system) = messages.iter_mut().find(|m| m.role == "system") {
         system.cache_control = Some(CacheControl::ephemeral());
+    }
+}
+
+/// Mark the last two non-system messages with an ephemeral prompt-cache
+/// breakpoint, rolling the cached prefix forward each turn (Bedrock
+/// history-cache follow-up to #2260).
+///
+/// Why: The tools+system prefix `mark_cache_breakpoint_on_tools`/
+/// `mark_cache_breakpoint_on_system` mark is small and static — the growing
+/// transcript is the dominant token cost. A live cost-proof of #2260
+/// as-merged showed cache_read staying 0 and ~452K fresh tokens/run on L1
+/// because nothing ever marked the history: every turn re-sent the full
+/// conversation as fresh input. Marking the LAST TWO non-system messages
+/// (rather than just the last one) mirrors opencode's verified
+/// `final.slice(-2)` pattern and guards against a single turn appending more
+/// content blocks than Bedrock's ~20-block cache lookback window covers — if
+/// only the very last message were marked and it alone exceeded that window,
+/// the previous turn's cache write would fall outside it and never hit.
+/// Uses breakpoint slots 3+4 of Bedrock's 4-per-request cachePoint budget
+/// (slots 1+2 are tools + system).
+/// Caveat: the OpenRouter/Anthropic-passthrough serializer
+/// (`llm::message::ChatMessage::serialize`) drops `cache_control` when a
+/// message has `content: None` (e.g. an assistant turn that is only
+/// `tool_calls`). Marking the last two messages already mitigates this in
+/// practice (at least one of the two usually carries text content); the
+/// Bedrock Converse path (`llm::bedrock::convert`) does not go through that
+/// serializer and is unaffected.
+/// What: Collects the indices of all non-system messages, then sets
+/// `cache_control` on the last (up to) two of them, in original order.
+/// No-op when there are zero or one non-system messages (the loop still
+/// marks whatever is present).
+/// Test: `agent_loop::tests::daily_driver_bedrock_model_marks_cache_breakpoints`.
+fn mark_cache_breakpoint_on_history(messages: &mut [ChatMessage]) {
+    let idxs: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role != "system")
+        .map(|(i, _)| i)
+        .collect();
+    for &i in idxs.iter().rev().take(2) {
+        messages[i].cache_control = Some(CacheControl::ephemeral());
     }
 }
 

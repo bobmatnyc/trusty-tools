@@ -1405,6 +1405,100 @@ async fn daily_driver_anthropic_model_marks_cache_breakpoints() {
     );
 }
 
+/// A `DailyDriver` run against a `bedrock/*` model marks the static
+/// tools+system prefix AND the rolling history (last two non-system
+/// messages) with an ephemeral prompt-cache breakpoint (#2260 +
+/// rolling-history follow-up).
+///
+/// Why: `BedrockProvider::supports_prompt_caching` now returns `true`, so
+/// `AgentLoop::prompt_cache_enabled` must treat a Bedrock route the same as
+/// an `anthropic/*` OpenRouter slug — this is the `agent_loop`-level half of
+/// #2260 (the Converse-transport half, translating this marker into a
+/// native `cachePoint` block, is covered by
+/// `llm::bedrock::tests::build_converse_messages_emits_cache_point_after_large_cached_system`
+/// and its tool-config sibling). A live cost-proof of #2260 as-merged-so-far
+/// showed cache_read staying 0 because nothing ever marked the growing
+/// transcript — this test pins that the last two non-system messages of a
+/// multi-turn request now carry the breakpoint too, while an OLDER
+/// non-system message (outside the rolling window) does not.
+/// What: Scripts a two-turn flow (tool call, then stop) so the second
+/// `ChatRequest` carries four messages: system, user, assistant(tool_calls),
+/// tool(result). Assert the system message and the last tool definition
+/// carry the breakpoint (unchanged #2260 coverage), AND that the assistant
+/// and tool messages (the last two non-system entries) carry it, AND that
+/// the user message (now outside the rolling window) does not.
+/// Test: this test.
+#[tokio::test]
+async fn daily_driver_bedrock_model_marks_cache_breakpoints() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("call_1", "world"),
+        stop_response("done"),
+    ]));
+    let registry = registry_with_echo(false);
+    let agent = make_loop(
+        llm.clone(),
+        registry,
+        AgentLoopConfig {
+            model: "bedrock/us.anthropic.claude-sonnet-4-5".into(),
+            mode: crate::mode::HarnessMode::DailyDriver,
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    agent
+        .run("you are a helpful assistant", "do the thing")
+        .await
+        .expect("two-turn flow should complete");
+
+    let requests = llm.requests();
+    let system_msg = requests[0]
+        .iter()
+        .find(|m| m.role == "system")
+        .expect("system message present");
+    assert_eq!(
+        system_msg.cache_control,
+        Some(crate::llm::CacheControl::ephemeral()),
+        "system message must carry the cache breakpoint for a Bedrock route"
+    );
+
+    let tools = llm.tools_seen()[0]
+        .clone()
+        .expect("tools array present (echo tool registered)");
+    let last_tool = tools.last().expect("at least one tool");
+    assert_eq!(
+        last_tool.function.cache_control,
+        Some(crate::llm::CacheControl::ephemeral()),
+        "last tool definition must carry the cache breakpoint for a Bedrock route"
+    );
+
+    // Second request: system, user, assistant(tool_calls), tool(result).
+    let second_request = &requests[1];
+    let non_system: Vec<&crate::llm::ChatMessage> = second_request
+        .iter()
+        .filter(|m| m.role != "system")
+        .collect();
+    assert_eq!(
+        non_system.len(),
+        3,
+        "expected user, assistant, and tool messages on the second turn"
+    );
+    assert!(
+        non_system[0].cache_control.is_none(),
+        "the oldest non-system message must NOT carry the breakpoint once it \
+         rolls outside the last-two window"
+    );
+    assert_eq!(
+        non_system[1].cache_control,
+        Some(crate::llm::CacheControl::ephemeral()),
+        "the assistant message (second-to-last) must carry the rolling history breakpoint"
+    );
+    assert_eq!(
+        non_system[2].cache_control,
+        Some(crate::llm::CacheControl::ephemeral()),
+        "the tool-result message (last) must carry the rolling history breakpoint"
+    );
+}
+
 /// `Parity` mode never marks a cache breakpoint, even for an `anthropic/*`
 /// model — the request stays byte-identical to pre-#2156.
 ///
