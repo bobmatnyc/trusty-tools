@@ -31,13 +31,19 @@ use crate::perf::TokenUsage;
 /// the full raw message history.
 /// What: `role` is the agent label; `model` is the resolved slug for that turn;
 /// `text` is the assistant prose (empty for tool-only turns); `tool_calls` lists
-/// the invoked tool names in order; `usage` is the token usage the provider
-/// reported for this turn (the per-turn unit the run aggregates over both PM and
-/// engineer turns, since the engineer's usage is otherwise lost when its output
-/// flows back to the PM as a tool-result string). `Deserialize` (#2060) lets
-/// `tcode`'s CLI thin client parse a `session.get_transcript` JSON-RPC result
-/// straight back into `Vec<TurnRecord>`.
-/// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`.
+/// the invoked tool names in order; `ran_test_command` (#2279) is a summarized
+/// signal — `true` iff this turn's tool calls included a `bash` invocation
+/// matching `crate::verify_gate::is_test_command` — the delegating PM's own
+/// `verify_gate::pm_finish_gate` consults this instead of the engineer's full
+/// transcript, since the PM never calls `bash` itself; `usage` is the token
+/// usage the provider reported for this turn (the per-turn unit the run
+/// aggregates over both PM and engineer turns, since the engineer's usage is
+/// otherwise lost when its output flows back to the PM as a tool-result
+/// string). `Deserialize` (#2060) lets `tcode`'s CLI thin client parse a
+/// `session.get_transcript` JSON-RPC result straight back into
+/// `Vec<TurnRecord>`.
+/// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`,
+/// `verify_gate::tests::pm_gate_satisfied_when_engineer_ran_tests`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TurnRecord {
     /// Agent label that produced this turn (e.g. `"pm"`, `"python-engineer"`).
@@ -48,6 +54,11 @@ pub struct TurnRecord {
     pub text: String,
     /// Names of tools the assistant called this turn, in order.
     pub tool_calls: Vec<String>,
+    /// Whether this turn ran a `bash` command matching #2279's verify-before-
+    /// finish test-command pattern. `#[serde(default)]` keeps a pre-#2279
+    /// persisted transcript deserialising cleanly with this flag `false`.
+    #[serde(default)]
+    pub ran_test_command: bool,
     /// Token usage the provider reported for this turn.
     pub usage: TokenUsage,
 }
@@ -107,23 +118,30 @@ impl LlmClientTrait for RecordingLlmClient {
     /// RESOLVED model slug (#1475 bug 2 — `resp.resolved_model(&req.model)`,
     /// which prefers the provider-reported model and falls back to the
     /// requested slug when the response omits one), the response's first
-    /// text, and its tool-call names; returns the response unchanged. Errors
-    /// propagate untouched (and are not recorded).
+    /// text, its tool-call names, and (#2279) whether any of those calls was
+    /// a matching `bash` test invocation (`ran_test_command`, computed via
+    /// `crate::verify_gate::bash_command_from_call` +
+    /// `crate::verify_gate::is_test_command` — the SAME predicate the
+    /// engineer's own in-transcript gate uses); returns the response
+    /// unchanged. Errors propagate untouched (and are not recorded).
     /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`,
-    /// `run_task::tests::transcript_records_resolved_model_not_requested_slug`.
+    /// `run_task::tests::transcript_records_resolved_model_not_requested_slug`,
+    /// `run_task::tests::recorder_flags_ran_test_command_on_matching_bash_call`.
     async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
         let resp = self.inner.chat(req).await?;
 
-        let tool_calls = resp
-            .first_tool_calls()
+        let calls = resp.first_tool_calls();
+        let ran_test_command = calls
             .iter()
-            .map(|c| c.function.name.clone())
-            .collect();
+            .filter_map(crate::verify_gate::bash_command_from_call)
+            .any(|cmd| crate::verify_gate::is_test_command(&cmd));
+        let tool_calls = calls.iter().map(|c| c.function.name.clone()).collect();
         let record = TurnRecord {
             role: self.role.clone(),
             model: resp.resolved_model(&req.model).to_string(),
             text: resp.first_text().unwrap_or_default(),
             tool_calls,
+            ran_test_command,
             usage: resp.clone().token_usage(),
         };
 

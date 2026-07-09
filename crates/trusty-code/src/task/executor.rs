@@ -231,7 +231,13 @@ async fn run_and_record(
         Arc::new(pm_registry),
     )
     .with_tool_event_sink(Arc::clone(&sink))
-    .with_cancel_flag(Arc::clone(&cancel));
+    .with_cancel_flag(Arc::clone(&cancel))
+    // #2279: mirrors `run_task::execute_run_task`'s own wiring — the PM
+    // never calls `bash` itself, so its verify-before-finish gate scans the
+    // delegated engineer's turns via the SAME shared `transcript` the
+    // engineer's `RecordingLlmClient` records into (`build_engineer_runner`
+    // above), rather than the PM's own (bash-less) transcript.
+    .with_finish_gate(crate::verify_gate::pm_finish_gate(Arc::clone(&transcript)));
 
     let result = pm_loop.run(&pm_system, &params.task).await;
 

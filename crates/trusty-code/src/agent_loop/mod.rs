@@ -17,9 +17,11 @@
 //! finish convention, preserved unchanged as the fallback), or (#2072) an
 //! explicit, successfully-validated `finish_task` tool call, whose structured
 //! `status`/`summary`/`changes`/test-count fields become the final
-//! `AgentOutput` via `build_finish_output`. Aborts with a partial output when
-//! the turn cap, timeout, (#2056) an external cancellation flag, or (#2265
-//! fix #5) an external stop signal fires.
+//! `AgentOutput` via `build_finish_output` — UNLESS (#2279) an attached
+//! `FinishGate` rejects it first, downgrading it to a recoverable retry so
+//! the model gets another turn instead of finishing prematurely. Aborts with
+//! a partial output when the turn cap, timeout, (#2056) an external
+//! cancellation flag, or (#2265 fix #5) an external stop signal fires.
 //! What: The whole `chat → dispatch → iterate` body runs inside a single
 //! `tokio::time::timeout` so a stalled model or hung tool cannot block forever.
 //! Test: `agent_loop::tests` — stubbed two-turn flow, turn-cap abort, recoverable
@@ -56,6 +58,29 @@ pub(crate) use compaction::estimate_tokens;
 pub use error::AgentLoopError;
 pub use sink::ToolEventSink;
 pub use transcript::Transcript;
+
+/// Verify-before-finish gate hook (#2279): inspects the run's own
+/// `Transcript` at the exact moment a successful `finish_task` call would
+/// otherwise terminate the loop, and may reject it with a human-readable
+/// reason instead.
+///
+/// Why: A closure (rather than a trait) lets two very different verification
+/// strategies share one turn-boundary hook without `agent_loop` knowing
+/// about either concrete strategy: a delegated engineer's own loop needs
+/// only its own `Transcript` (its `bash` calls land there directly — see
+/// `crate::verify_gate::default_finish_gate`); the delegating PM's loop
+/// never calls `bash` itself, so its gate closure instead captures an
+/// external `run_task::SharedTranscript` and consults that instead (see
+/// `crate::verify_gate::pm_finish_gate`). This is the SAME decoupling
+/// `Self::stop_signal` (#2265 fix #5) already established for "some external
+/// condition the loop must consult at a turn boundary" — reused here rather
+/// than adding a bespoke third turn-boundary check.
+/// What: Returns `None` when the gate is satisfied (or inert — nothing
+/// requires verification for this run); `Some(reason)` when it trips,
+/// carrying the message fed back to the model as the rejected `finish_task`
+/// call's recoverable tool result.
+/// Test: `agent_loop::tests::finish_gate_*`.
+pub type FinishGate = Arc<dyn Fn(&Transcript) -> Option<String> + Send + Sync>;
 
 /// Phase name used when accruing token usage into the `PerfCollector`.
 const PERF_PHASE: &str = "agent_loop";
@@ -145,7 +170,9 @@ impl Default for AgentLoopConfig {
 /// dispatch, (#2056) a `cancel` flag checked once per turn boundary, and
 /// (#2265 fix #5) a `stop_signal` closure checked at that SAME turn boundary.
 /// All three default to `None`, so every existing call site (`run_task`,
-/// `runner::in_process`) is unaffected.
+/// `runner::in_process`) is unaffected. A fourth optional collaborator,
+/// (#2279) `finish_gate`, is set via [`Self::with_finish_gate`] — see
+/// [`FinishGate`]'s docs.
 /// Test: `agent_loop::tests::*`.
 pub struct AgentLoop {
     config: AgentLoopConfig,
@@ -154,6 +181,7 @@ pub struct AgentLoop {
     sink: Option<Arc<dyn ToolEventSink>>,
     cancel: Option<Arc<AtomicBool>>,
     stop_signal: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    finish_gate: Option<FinishGate>,
 }
 
 impl AgentLoop {
@@ -182,6 +210,7 @@ impl AgentLoop {
             sink: None,
             cancel: None,
             stop_signal: None,
+            finish_gate: None,
         }
     }
 
@@ -233,6 +262,22 @@ impl AgentLoop {
     /// Test: `agent_loop::tests::stop_signal_aborts_before_next_turn`.
     pub fn with_stop_signal(mut self, signal: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
         self.stop_signal = Some(signal);
+        self
+    }
+
+    /// Attach a [`FinishGate`] consulted the moment a successful
+    /// `finish_task` call would otherwise terminate the loop (#2279).
+    ///
+    /// Why: Gives a caller a hook to reject a premature `finish_task` with a
+    /// recoverable retry instead of letting the loop terminate — see
+    /// [`FinishGate`]'s docs for how the delegated-engineer and delegating-PM
+    /// cases differ. `None` (the default) is a pure no-op; every existing
+    /// call site that never attaches a gate is unaffected.
+    /// What: Builder-style setter; returns `self` for chaining.
+    /// Test: `agent_loop::tests::finish_gate_trips_and_recovers`,
+    /// `agent_loop::tests::finish_gate_inert_without_named_test_command`.
+    pub fn with_finish_gate(mut self, gate: FinishGate) -> Self {
+        self.finish_gate = Some(gate);
         self
     }
 
@@ -389,6 +434,14 @@ impl AgentLoop {
     /// emits more than one in a single turn. A malformed/invalid `finish_task`
     /// call is reported through the same recoverable-error path as any other
     /// tool and does NOT terminate the loop, letting the model retry.
+    /// (#2279) A `finish_task` call that DID succeed is still subject to the
+    /// optional [`Self::finish_gate`] — see [`FinishGate`]'s docs. When
+    /// attached and it trips, the result is downgraded in place to
+    /// `ToolResult::err(reason)` — the SAME recoverable-error shape used
+    /// throughout this method — BEFORE the sink notification and transcript
+    /// push below, so both see the rejection, not the original success; this
+    /// also means the `finish_args` assignment below never fires for a
+    /// gate-rejected call, so the loop simply continues to the next turn.
     /// Test: `agent_loop::tests::recoverable_tool_error_continues`,
     /// `agent_loop::tests::malformed_tool_arguments_report_recoverable_error_and_loop_continues`,
     /// `sink_receives_started_then_finished_in_order`,
@@ -396,7 +449,9 @@ impl AgentLoop {
     /// `explicit_finish_task_terminates_loop_with_structured_summary`,
     /// `malformed_finish_task_repairs_then_terminates`,
     /// `finish_task_missing_required_field_is_recoverable_not_terminal`,
-    /// `finish_task_invalid_enum_value_is_recoverable_not_terminal`.
+    /// `finish_task_invalid_enum_value_is_recoverable_not_terminal`,
+    /// `finish_gate_trips_and_recovers`,
+    /// `finish_gate_inert_without_named_test_command`.
     async fn dispatch_all(
         &self,
         tool_calls: &[ToolCall],
@@ -421,7 +476,20 @@ impl AgentLoop {
                 sink.tool_started(&call.id, tool, &args.to_string()).await;
             }
 
-            let result = self.registry.dispatch_gated(tool, args.clone(), None).await;
+            let mut result = self.registry.dispatch_gated(tool, args.clone(), None).await;
+
+            // #2279: a `finish_task` call that otherwise SUCCEEDED is still
+            // subject to the verify-before-finish gate, if one is attached.
+            // Tripping it downgrades the result to the same recoverable-error
+            // shape every other tool failure uses, so the model sees WHY
+            // finish was rejected and gets another turn to fix it, rather
+            // than the loop silently declining to terminate.
+            if tool == FINISH_TASK_TOOL_NAME
+                && !result.is_error()
+                && let Some(reason) = self.finish_gate.as_ref().and_then(|gate| gate(transcript))
+            {
+                result = ToolResult::err(reason);
+            }
 
             if let Some(sink) = &self.sink {
                 notify_result(sink.as_ref(), &call.id, tool, &result).await;

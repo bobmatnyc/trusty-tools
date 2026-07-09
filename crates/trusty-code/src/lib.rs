@@ -267,6 +267,20 @@ pub mod runner;
 /// Test: `run_task::tests::*` (all offline, mocked LLM).
 pub mod run_task;
 
+/// Verify-before-finish gate (#2279): rejects a premature `finish_task` with
+/// a recoverable retry when a named test command was never run.
+///
+/// Why: (bake-off L2 diagnosis) An engineer that never runs the visible,
+/// prompt-named test suite can still call `finish_task` successfully today;
+/// this module gives both the delegated engineer's loop and the delegating
+/// PM's loop a turn-boundary hook to reject that specific case.
+/// What: [`agent_loop::FinishGate`] constructors `default_finish_gate` (own
+/// transcript) and `pm_finish_gate` (externally shared engineer transcript),
+/// plus the pure `names_test_command`/`is_test_command` regex predicates
+/// they share.
+/// Test: `verify_gate::tests::*`.
+pub mod verify_gate;
+
 /// DOC-28 catch-up context injection for the PM prompt (#1762, PR2).
 ///
 /// Why: The PM agent needs recent project-activity context (paused sessions,

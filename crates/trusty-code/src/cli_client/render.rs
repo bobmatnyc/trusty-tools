@@ -245,6 +245,7 @@ mod tests {
                 model: "openai/gpt-4o-mini".to_string(),
                 text: "done".to_string(),
                 tool_calls: vec!["delegate_to_agent".to_string()],
+                ran_test_command: false,
                 usage: TokenUsage::new(10, 5, 0, 0),
             }],
             usage: TokenUsage::new(10, 5, 0, 0),

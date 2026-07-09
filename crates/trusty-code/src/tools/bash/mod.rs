@@ -33,6 +33,14 @@ pub(crate) const MAX_OUTPUT_BYTES: usize = 100 * 1024; // 100 KB
 /// Default command timeout in seconds.
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
+/// The tool's registered/advertised name.
+///
+/// Why: Shared literal between the `ToolExecutor` impl and
+/// `crate::verify_gate`'s bash-call scan (#2279), so the two can never drift
+/// — mirrors `finish_task::FINISH_TASK_TOOL_NAME`'s existing convention.
+/// Test: `bash::tests::name_matches_constant`.
+pub const BASH_TOOL_NAME: &str = "bash";
+
 /// Executes arbitrary shell commands on behalf of the coder agent loop.
 ///
 /// Why: Lets the LLM run test suites (pytest, cargo test, etc.), build steps,
@@ -80,7 +88,7 @@ impl BashTool {
 #[async_trait]
 impl ToolExecutor for BashTool {
     fn name(&self) -> &str {
-        "bash"
+        BASH_TOOL_NAME
     }
 
     /// OpenAI-function schema for the bash tool.

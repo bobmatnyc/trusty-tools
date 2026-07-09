@@ -205,7 +205,14 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
         pm_llm,
         Arc::new(pm_registry),
     )
-    .with_stop_signal(Arc::new(move || stop_signal.is_cap_reached()));
+    .with_stop_signal(Arc::new(move || stop_signal.is_cap_reached()))
+    // #2279: the PM never calls `bash` itself (its registry above is
+    // `delegate_to_agent` + `finish_task` only), so its verify-before-finish
+    // gate must scan the delegated engineer's transcript instead of its
+    // own — `verify_gate::pm_finish_gate` does exactly that against the
+    // SAME shared `transcript` the engineer's `RecordingLlmClient` records
+    // into (see `build_engineer_runner` above).
+    .with_finish_gate(crate::verify_gate::pm_finish_gate(Arc::clone(&transcript)));
 
     // Snapshot before, run the PM, snapshot after.
     let before = diff::capture_snapshot(&params.project);

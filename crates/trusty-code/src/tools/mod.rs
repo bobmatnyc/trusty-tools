@@ -6,10 +6,11 @@
 //! What: Re-exports `ToolExecutor`, `AgentRunner`, `RunContext`, `AgentOutput`,
 //! `SearchProvider`, `SearchResult`, `SkillResolver`, and `ToolResult` from
 //! `traits`; `ToolRegistry` from `registry`; `DelegateToAgentTool` from
-//! `delegate`; `FinishTaskTool` (#2072) from `finish_task`; and `UseSkillTool`
+//! `delegate`; `FinishTaskTool` (#2072) from `finish_task`; `UseSkillTool`
 //! plus `USE_SKILL_TOOL_NAME` (#2069's progressive-disclosure on-invoke
 //! loader; the constant lets #2070's compaction pin skill outputs by tool
-//! name) from `skill`.
+//! name) from `skill`; and `BASH_TOOL_NAME` (#2279's verify-before-finish
+//! gate matches bash tool calls by this literal) from `bash`.
 //! Test: Unit tests live in each submodule; integration tests use
 //! `DelegateToAgentTool` with a `MockAgentRunner`.
 
@@ -23,7 +24,7 @@ pub mod traits;
 
 // Flat re-exports for `crate::tools::*` convenience.
 #[allow(unused_imports)]
-pub use bash::BashTool;
+pub use bash::{BASH_TOOL_NAME, BashTool};
 #[allow(unused_imports)]
 pub use delegate::DelegateToAgentTool;
 pub use finish_task::{
