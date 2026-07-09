@@ -2535,21 +2535,18 @@ async fn seed_mode_filter_corpus(idx: &CodeIndexer) {
 #[tokio::test]
 async fn test_mode_filter_code_returns_only_source() {
     // Why: code mode (the default) must return strictly source-code
-    // extensions. Prose docs, named docs, configs, and data files must
-    // be dropped from results entirely — not merely demoted.
+    // extensions for genuinely code-shaped intents. Prose docs, named
+    // docs, configs, and data files must be dropped from results
+    // entirely — not merely demoted.
     let idx = make_indexer();
     seed_mode_filter_corpus(&idx).await;
-    // Issue #119 update: query is `alpha` (no underscore, no PascalCase, no
-    // acronym) so it classifies as `Unknown` and the intent-aware
-    // effective-mode override in `search()` does not promote Code → All.
-    // The previous query `alpha_qwerty` started classifying as Definition
-    // under the v0.8.3 classifier rules, which (correctly) triggers the
-    // override for docs-only fallback paths and would defeat this test's
-    // explicit Code-mode contract. The corpus chunks all contain
-    // `alpha_qwerty`, which BM25-tokenises into `alpha` + `qwerty`, so the
-    // single-word `alpha` still matches every seeded chunk.
+    // Issue #2203: query is `where is alpha_qwerty`, classified `Usage`
+    // by the `usage_re` pattern (`where is`) — a code-shaped intent NOT
+    // in the Code→All upgrade set, so the hard file-type filter still
+    // applies. (`Unknown`, e.g. bare `alpha`, is now upgraded/down-ranked
+    // instead — see `indexer::tests_unknown_intent`.)
     let q = SearchQuery {
-        text: "alpha".to_string(),
+        text: "where is alpha_qwerty".to_string(),
         top_k: 20,
         expand_graph: false,
         compact: false,

@@ -147,9 +147,19 @@ impl CodeIndexer {
         // Issue #73: intent-aware effective mode. Conceptual and Definition
         // intents both need docs, so when the caller used the default Code mode,
         // upgrade to All. Explicit Code from the caller still wins.
+        //
+        // Issue #2203: `Unknown` intent (short 1-3 word NL queries — the
+        // `multi_noun_re` classifier requires ≥4 tokens to reach Conceptual)
+        // was NOT in this upgrade set, so it stayed `Code` and BM25's correct
+        // `.md` / `.txt` hits were hard-dropped by `apply_archive_downrank`'s
+        // file-type retain below, silently returning empty/irrelevant results
+        // for exactly the queries the semantic/NL search tool is meant to
+        // serve. Upgrading `Unknown` alongside `Conceptual`/`Definition` lets
+        // those doc hits surface.
         let effective_mode = match (&intent, query.mode) {
             (QueryIntent::Conceptual, super::SearchMode::Code) => super::SearchMode::All,
             (QueryIntent::Definition, super::SearchMode::Code) => super::SearchMode::All,
+            (QueryIntent::Unknown, super::SearchMode::Code) => super::SearchMode::All,
             _ => query.mode,
         };
 
@@ -262,47 +272,66 @@ impl CodeIndexer {
             .await;
 
         // 6) Mode-based hard file-type filter + archive downrank.
-        self.apply_archive_downrank(&mut result, effective_mode, query.exclude_archived);
+        self.apply_archive_downrank(&mut result, &intent, effective_mode, query.exclude_archived);
         Ok(result)
     }
 
-    /// Apply the mode-based hard file-type filter and the archive score
-    /// penalty.
+    /// Apply the mode-based file-type filter and the archive score penalty.
     ///
     /// Why: two distinct concerns share the post-materialisation step: (1) the
-    /// `SearchMode` filter drops chunks outside the allowed file-type set; (2)
-    /// the archive penalty demotes archived/legacy/deprecated code. Combining
-    /// them in one method keeps post-processing logic consolidated.
-    /// What: (1) retains only chunks for which
-    /// `docs_penalty::is_allowed_for_mode` returns `true` (skipped for `All`).
-    /// (2) runs `archive::classify` per chunk, multiplies score by the
-    /// penalty, stamps `archive_reason`. When `exclude_archived` is `true`,
-    /// chunks with strong archive signals are dropped. Re-sorts by score desc.
+    /// `SearchMode` filter drops (or, for `Unknown` intent, down-ranks) chunks
+    /// outside the allowed file-type set; (2) the archive penalty demotes
+    /// archived/legacy/deprecated code. Combining them in one method keeps
+    /// post-processing logic consolidated.
+    /// What: (1) for genuinely code-shaped intents, retains only chunks for
+    /// which `docs_penalty::is_allowed_for_mode` returns `true` (skipped for
+    /// `All`). Issue #2203: for `Unknown` intent specifically, the hard
+    /// retain is replaced by the existing `doc_score_penalty` multiplicative
+    /// down-rank — this is defense-in-depth alongside the `Unknown`→`All`
+    /// upgrade in `search()` so a short NL query can never come back empty
+    /// even if some other caller/path leaves `mode` at `Code`. (2) runs
+    /// `archive::classify` per chunk, multiplies score by the penalty, stamps
+    /// `archive_reason`. When `exclude_archived` is `true`, chunks with
+    /// strong archive signals are dropped. Re-sorts by score desc.
     /// Test: `test_archive_downrank_demotes_deprecated_chunks`,
-    /// `test_exclude_archived_drops_archive_chunks`, `test_mode_filter_*`.
+    /// `test_exclude_archived_drops_archive_chunks`, `test_mode_filter_*`,
+    /// `tests_unknown_intent::test_unknown_intent_downranks_docs_instead_of_dropping_them`.
     fn apply_archive_downrank(
         &self,
         results: &mut Vec<CodeChunk>,
+        intent: &QueryIntent,
         mode: super::SearchMode,
         exclude_archived: bool,
     ) {
         if results.is_empty() {
             return;
         }
+        // Issue #2203: `Unknown` intent never hard-drops non-code files when
+        // `mode` resolves to `Code` — down-rank via `doc_score_penalty`
+        // instead so NL queries can't silently come back empty. Every other
+        // intent keeps the existing hard filter (no regression for real code
+        // queries such as `Usage`/`BugDebt`/explicit `Definition`).
+        let soft_downrank_unknown =
+            matches!(intent, QueryIntent::Unknown) && matches!(mode, super::SearchMode::Code);
         if matches!(mode, super::SearchMode::Code) {
             use crate::core::chunker::ChunkType;
             results.retain(|chunk| !matches!(chunk.chunk_type, ChunkType::Docstring));
         }
-        results.retain(|chunk| docs_penalty::is_allowed_for_mode(&chunk.file, mode));
+        if !soft_downrank_unknown {
+            results.retain(|chunk| docs_penalty::is_allowed_for_mode(&chunk.file, mode));
+        }
 
         let mut markers = MarkerCache::new();
         let mut archived_ids: HashSet<String> = HashSet::new();
         for chunk in results.iter_mut() {
             let (archive_mult, archive_reason_opt) =
                 archive::classify(&self.root_path, &chunk.file, &chunk.content, &mut markers);
-            let (_docs_mult, docs_reason_opt) = docs_penalty::doc_score_penalty(&chunk.file, mode);
+            let (docs_mult, docs_reason_opt) = docs_penalty::doc_score_penalty(&chunk.file, mode);
             if archive_reason_opt.is_some() {
                 chunk.score *= archive_mult;
+            }
+            if soft_downrank_unknown {
+                chunk.score *= docs_mult;
             }
             if let Some(reason) = &archive_reason_opt {
                 if exclude_archived && !reason.starts_with("stale:") {

@@ -57,6 +57,8 @@ mod tests;
 mod tests_cursor;
 #[cfg(test)]
 mod tests_idle_evict;
+#[cfg(test)]
+mod tests_unknown_intent;
 
 // Re-export helpers so sibling modules can use the crate-internal API.
 pub(crate) use helpers::{
