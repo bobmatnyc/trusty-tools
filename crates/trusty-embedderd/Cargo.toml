@@ -9,7 +9,7 @@ description = "Unified ONNX embedding daemon with HTTP + UDS transports and Batc
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"
 keywords = ["onnx", "embeddings", "daemon", "ml", "nlp"]
-categories = ["science::ml", "network-programming"]
+categories = ["artificial-intelligence", "network-programming"]
 
 [lib]
 name = "trusty_embedderd"
