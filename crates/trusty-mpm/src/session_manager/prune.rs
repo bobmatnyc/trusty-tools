@@ -20,6 +20,7 @@ use std::fmt;
 use chrono::{Duration, Utc};
 use tracing::{info, warn};
 
+use super::driver::ManagedTmuxDriver;
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 
@@ -190,19 +191,42 @@ impl PruneOutcome {
     }
 }
 
-/// Whether a record is currently RUNNING (must not be auto-torn-down).
+/// Whether a record is currently RUNNING (must not be auto-torn-down) — a REAL
+/// liveness probe, not a persisted-state check (#2022).
 ///
-/// Why: the core #1508 safety invariant — a prune must NEVER kill an
-/// `Active`/`Provisioning` session unless the operator explicitly forces it. This
-/// single predicate is the fail-closed gate every filter consults.
-/// What: returns true for `Active` and `Provisioning`; false for `Stopped`,
-/// `Errored`, and `Decommissioned`.
-/// Test: `prune_by_state_never_touches_active`.
-pub(super) fn is_running(state: &ManagedSessionState) -> bool {
-    matches!(
-        state,
-        ManagedSessionState::Active | ManagedSessionState::Provisioning
-    )
+/// Why: the core #1508 safety invariant is "never kill a running session
+/// unless the operator explicitly forces it" — but the ORIGINAL implementation
+/// answered that question by reading the persisted `state` field
+/// (`Active`/`Provisioning`), which is a snapshot that can go stale. If the
+/// tmux session backing a record dies (crash, `tmux kill-server`, host
+/// restart, manual `tmux kill-session`) without the daemon observing it, the
+/// record keeps saying `Active` forever, and the fail-closed guard then
+/// refuses `delete`/`prune`/`decommission` on a session that is, in fact,
+/// already dead — forcing the operator to `--force` past a guard that no
+/// longer protects anything real (#2022). Probing the actual tmux backing
+/// makes the guard track reality instead of a snapshot that can drift from
+/// it. There is no persisted PID to additionally check (the `claude` PID is
+/// discovered on demand by scanning the tmux session's process tree — see
+/// `crate::core::process::find_claude_pid_in_tmux` — never stored on the
+/// record), so the tmux probe alone IS the real liveness signal; a live pane
+/// implies a live (or at least still-open) process tree underneath it.
+/// What: returns whether a tmux session named `record.tmux_name` currently
+/// exists, via [`ManagedTmuxDriver::session_exists`]. A dead/absent tmux
+/// session is NOT running regardless of the persisted `state` — so a stale
+/// `Active` record is deletable/prunable/decommissionable without `--force`.
+/// A live tmux session IS running regardless of `state` — so the guard still
+/// refuses an unforced delete/prune/decommission of a genuinely active
+/// session (and, as a bonus, closes the reverse gap noted in #2022 where a
+/// stale non-running `state` could under-guard a session whose tmux is
+/// somehow still alive).
+/// Test: `prune_by_state_never_touches_active` (live session still guarded),
+/// `delete_record_refuses_running_without_force` (live session still
+/// guarded), `delete_record_stale_active_deletable_when_tmux_dead` (#2022 —
+/// stale `Active` with a dead tmux is deletable without `--force`),
+/// `prune_stale_active_removable_without_force` (#2022 — same for
+/// `prune_managed`).
+pub(super) fn is_running(record: &SessionRecord, tmux: &dyn ManagedTmuxDriver) -> bool {
+    tmux.session_exists(&record.tmux_name)
 }
 
 /// Whether a record matches a prune `filter` (ignoring the running-state guard).
@@ -352,11 +376,13 @@ impl SessionManager {
         self.store.write().await.reload_if_changed().await?;
         let all = self.store.read().await.cached_all();
 
-        // Select the in-scope records, applying the running-state safety gate.
+        // Select the in-scope records, applying the running safety gate — a REAL
+        // tmux liveness probe (#2022), not the persisted `state` field.
+        let tmux = self.tmux.as_ref();
         let targets: Vec<SessionRecord> = all
             .into_iter()
             .filter(|r| matches_filter(r, filter))
-            .filter(|r| include_active || !is_running(&r.state))
+            .filter(|r| include_active || !is_running(r, tmux))
             .collect();
 
         let mut sessions = Vec::with_capacity(targets.len());

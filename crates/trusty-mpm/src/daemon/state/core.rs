@@ -572,8 +572,40 @@ impl DaemonState {
     /// called in production binaries.
     #[doc(hidden)]
     pub async fn with_root_isolated_managed(root: std::path::PathBuf) -> Self {
-        use crate::session_manager::SessionManager;
         use crate::session_manager::real_tmux::FakeNoopTmuxDriver;
+
+        let fake_tmux: std::sync::Arc<dyn crate::session_manager::ManagedTmuxDriver> =
+            std::sync::Arc::new(FakeNoopTmuxDriver);
+        Self::with_root_isolated_managed_and_driver(root, fake_tmux).await
+    }
+
+    /// Same as [`Self::with_root_isolated_managed`], but with an INJECTABLE tmux
+    /// driver instead of the hardcoded [`crate::session_manager::real_tmux::FakeNoopTmuxDriver`] (#2022).
+    ///
+    /// Why: `FakeNoopTmuxDriver` is intentionally stateless — `create_session`
+    /// always reports success without recording anything, and
+    /// `list_sessions`/`session_exists` always report NOTHING is live. Many
+    /// existing tests rely on exactly that ("no real tmux session escapes the
+    /// test") and must not change. But the #2022 fix made the delete/prune
+    /// running-guard a REAL tmux liveness probe — a test that specifically wants
+    /// to exercise "a genuinely running session is still guarded without
+    /// `--force`" needs a driver that actually TRACKS created/killed sessions so
+    /// the probe has something real to observe. This constructor is the
+    /// injection point for that, without touching `FakeNoopTmuxDriver`'s
+    /// behavior (and therefore without touching the many unrelated tests that
+    /// depend on it).
+    /// What: identical to `with_root_isolated_managed` (same production-store
+    /// guard, same isolated framework root, same `managed_sessions` pre-seed)
+    /// except the caller supplies `driver` instead of a fixed `FakeNoopTmuxDriver`.
+    /// Test: `session_delete_refuses_running_then_force_bypasses` (`mcp_session`
+    /// tests); `delete_route_refuses_running_without_force` in
+    /// `tests/session_manager_mvp.rs`.
+    #[doc(hidden)]
+    pub async fn with_root_isolated_managed_and_driver(
+        root: std::path::PathBuf,
+        driver: std::sync::Arc<dyn crate::session_manager::ManagedTmuxDriver>,
+    ) -> Self {
+        use crate::session_manager::SessionManager;
 
         // Hard guard: a test must NEVER bind to the production managed store.
         // Fail loudly here so the culprit test is easy to identify (#1790).
@@ -588,11 +620,9 @@ impl DaemonState {
 
         let data_dir = root.join("session-manager");
         let _ = tokio::fs::create_dir_all(&data_dir).await;
-        let fake_tmux: std::sync::Arc<dyn crate::session_manager::ManagedTmuxDriver> =
-            std::sync::Arc::new(FakeNoopTmuxDriver);
-        let mgr = SessionManager::new(&data_dir, fake_tmux)
+        let mgr = SessionManager::new(&data_dir, driver)
             .await
-            .expect("temp-dir fake-noop session store must load");
+            .expect("temp-dir fake session store must load");
         let state = Self::with_root(root);
         let _ = state.managed_sessions.set(std::sync::Arc::new(mgr));
         state

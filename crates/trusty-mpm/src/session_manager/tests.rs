@@ -1369,8 +1369,17 @@ async fn manager_get_returns_last_known_on_reload_error() {
 /// ritual; upserting a hand-built record is the cheapest way to set up the matrix.
 /// What: builds a `SessionRecord` with the given id/state/ephemeral and a
 /// workspace path that actually exists on disk (so a real decommission can remove
-/// it), upserts it, and returns the workspace path for assertions.
-/// Test: used by the prune tests below.
+/// it), upserts it, and returns the workspace path for assertions. When `state`
+/// is `Active` or `Provisioning`, also registers a LIVE tmux session for
+/// `record.tmux_name` on `mgr`'s driver (#2022) — mirroring the real production
+/// invariant that a running record has a live tmux session backing it — so every
+/// EXISTING caller that seeds an `Active`/`Provisioning` record to mean "this one
+/// is really running" keeps working under the new tmux-probe-based
+/// [`super::prune::is_running`] guard. A test that specifically needs a STALE
+/// `Active` record (state says running, tmux is actually gone — the #2022 bug
+/// scenario) should seed normally and then kill the session itself via
+/// `fake.kill_session(&format!("tmpm-seed-{id}"))`.
+/// Test: used by the prune/delete tests below.
 pub(super) async fn seed_record(
     mgr: &SessionManager,
     root: &TempDir,
@@ -1387,9 +1396,14 @@ pub(super) async fn seed_record(
         std::fs::create_dir_all(&ws).expect("mk ws");
         Some(ws.clone())
     };
+    let tmux_name = format!("tmpm-seed-{id}");
+    let seeds_live_tmux = matches!(
+        state,
+        ManagedSessionState::Active | ManagedSessionState::Provisioning
+    );
     let record = SessionRecord {
         id,
-        tmux_name: format!("tmpm-seed-{id}"),
+        tmux_name: tmux_name.clone(),
         cwd: root.path().to_path_buf(),
         task: "seed".into(),
         state,
@@ -1409,6 +1423,11 @@ pub(super) async fn seed_record(
         scrollback_path: None,
         last_cwd: None,
     };
+    if seeds_live_tmux {
+        mgr.tmux
+            .create_session(&tmux_name, &root.path().to_string_lossy())
+            .expect("seed: register live tmux session");
+    }
     mgr.store
         .write()
         .await
