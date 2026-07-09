@@ -462,8 +462,11 @@ mod tests {
     /// env var at it, call the locator, assert it returns that exact path.
     /// (We use the test binary itself as a stand-in for the daemon — we only
     /// care that the path is found, not that it is the real daemon.)
-    /// Test: this test itself.
+    /// Test: this test itself. `#[serial]` serialises it against the other
+    /// `TRUSTY_BM25_DAEMON_BIN`-mutating test so neither one's env restore can
+    /// clear the override mid-flight in the other (issue #2252).
     #[test]
+    #[serial_test::serial]
     fn locate_bm25_daemon_binary_prefers_env_override() {
         // Use the test binary itself as a "daemon" — any existing file works.
         let exe = std::env::current_exe().expect("current_exe");
@@ -484,8 +487,15 @@ mod tests {
 
     /// Why: confirm that an env-var pointing at a non-existent file returns
     /// an error rather than silently falling through to sibling / PATH.
+    /// `#[serial]` is load-bearing (issue #2252): without it this test races
+    /// the sibling env-override test, whose restore can `remove_var` the
+    /// override between this test's `set_var` and its locate call — the locator
+    /// then hits the sibling/PATH fallback and finds a host-installed
+    /// `trusty-bm25-daemon`, so the expected error never occurs and the assert
+    /// fails on machines that have the daemon installed.
     /// Test: this test itself.
     #[test]
+    #[serial_test::serial]
     fn locate_bm25_daemon_binary_env_override_nonexistent_errors() {
         let key = "TRUSTY_BM25_DAEMON_BIN";
         let prev = std::env::var(key).ok();
