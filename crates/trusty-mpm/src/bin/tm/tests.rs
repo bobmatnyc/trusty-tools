@@ -14,8 +14,8 @@
 use clap::Parser;
 
 use crate::cli::{
-    CatalogAction, Cli, Command, DEFAULT_URL, MetaAction, ProjectAction, SessionAction, SlackCmd,
-    TelegramCmd,
+    CatalogAction, Cli, Command, DEFAULT_URL, McpCmd, McpTransportArg, MetaAction, ProjectAction,
+    SessionAction, SlackCmd, TelegramCmd,
 };
 use crate::commands::misc::{CATALOG_STALE_MSG, CATALOG_UNKNOWN_MSG, NON_GIT_FALLBACK_HINT};
 use crate::formatters::banner::{
@@ -69,6 +69,125 @@ fn short_id_falls_back_when_value_not_str() {
 fn cli_parses_status() {
     let cli = Cli::try_parse_from(["trusty-mpm", "status"]).unwrap();
     assert!(matches!(cli.command.unwrap(), Command::Status));
+}
+
+#[test]
+fn cli_parses_mcp_add() {
+    // stdio (default transport): `tm mcp add echo -- echo hi`
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "mcp", "add", "echo", "--", "echo", "hi"]).unwrap();
+    let Some(Command::Mcp {
+        cmd:
+            McpCmd::Add {
+                name,
+                transport,
+                env,
+                header,
+                command_and_args,
+                root,
+            },
+    }) = cli.command
+    else {
+        panic!("expected mcp add");
+    };
+    assert_eq!(name, "echo");
+    assert_eq!(transport, McpTransportArg::Stdio);
+    assert!(env.is_empty() && header.is_empty() && root.is_none());
+    assert_eq!(command_and_args, vec!["echo", "hi"]);
+}
+
+#[test]
+fn cli_parses_mcp_add_env_and_root() {
+    // `tm mcp add srv -e A=1 -e B=2 --root /x -- npx pkg`
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "mcp",
+        "add",
+        "srv",
+        "-e",
+        "A=1",
+        "-e",
+        "B=2",
+        "--root",
+        "/x",
+        "--",
+        "npx",
+        "pkg",
+    ])
+    .unwrap();
+    let Some(Command::Mcp {
+        cmd:
+            McpCmd::Add {
+                env,
+                root,
+                command_and_args,
+                ..
+            },
+    }) = cli.command
+    else {
+        panic!("expected mcp add");
+    };
+    assert_eq!(env, vec!["A=1", "B=2"]);
+    assert_eq!(root.as_deref(), Some("/x"));
+    assert_eq!(command_and_args, vec!["npx", "pkg"]);
+}
+
+#[test]
+fn cli_parses_mcp_add_http() {
+    // `tm mcp add sentry -t http -H "Authorization: Bearer t" https://x/mcp`
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "mcp",
+        "add",
+        "sentry",
+        "-t",
+        "http",
+        "-H",
+        "Authorization: Bearer t",
+        "https://x/mcp",
+    ])
+    .unwrap();
+    let Some(Command::Mcp {
+        cmd:
+            McpCmd::Add {
+                transport,
+                header,
+                command_and_args,
+                ..
+            },
+    }) = cli.command
+    else {
+        panic!("expected mcp add http");
+    };
+    assert_eq!(transport, McpTransportArg::Http);
+    assert_eq!(header, vec!["Authorization: Bearer t"]);
+    assert_eq!(command_and_args, vec!["https://x/mcp"]);
+}
+
+#[test]
+fn cli_parses_mcp_remove_list_get() {
+    let rm = Cli::try_parse_from(["trusty-mpm", "mcp", "remove", "echo"]).unwrap();
+    assert!(matches!(
+        rm.command,
+        Some(Command::Mcp {
+            cmd: McpCmd::Remove { .. }
+        })
+    ));
+    let ls = Cli::try_parse_from(["trusty-mpm", "mcp", "list", "--json"]).unwrap();
+    let Some(Command::Mcp {
+        cmd: McpCmd::List { json, .. },
+    }) = ls.command
+    else {
+        panic!("expected mcp list");
+    };
+    assert!(json);
+    let get = Cli::try_parse_from(["trusty-mpm", "mcp", "get", "echo"]).unwrap();
+    assert!(matches!(
+        get.command,
+        Some(Command::Mcp {
+            cmd: McpCmd::Get { .. }
+        })
+    ));
 }
 
 #[test]
