@@ -114,7 +114,7 @@ impl MemoryStore for RedbUsearchStore {
                 continue;
             };
             let id = id_val.value().to_string();
-            let key = format!("{}:{}", segment.prefix(), &id);
+            let key = format!("{}:{}", segment.prefix(), id);
             let Some(payload_raw) = payloads.get(key.as_str())? else {
                 continue;
             };

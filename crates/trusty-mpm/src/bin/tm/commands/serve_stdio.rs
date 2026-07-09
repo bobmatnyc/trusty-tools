@@ -116,10 +116,7 @@ fn req_to_value(req: &Request) -> serde_json::Value {
 /// is present, or an internal error when the response is malformed.
 /// Test: `value_to_mcp_response_maps_ok_err_and_malformed`.
 fn value_to_mcp_response(v: serde_json::Value) -> Response {
-    let id = v
-        .get("id")
-        .cloned()
-        .and_then(|id| if id.is_null() { None } else { Some(id) });
+    let id = v.get("id").cloned().filter(|id| !id.is_null());
 
     if let Some(result) = v.get("result").cloned() {
         return Response::ok(id, result);
