@@ -5,7 +5,10 @@
 //! #2012-specific coverage lives here so neither file grows past its limit,
 //! mirroring the pattern established by `decommission_worktree_tests.rs` /
 //! `backfill_tests.rs`. Reuses the sibling `tests` module's `make_manager` /
-//! `seed_record` helpers rather than duplicating the scaffolding.
+//! `seed_record` helpers rather than duplicating the scaffolding. The #2022
+//! fix to the SAME guard (a real tmux liveness probe, not a persisted-state
+//! check) is covered separately in `liveness_tests.rs` to keep this file
+//! focused and both files under the SLOC cap.
 //! What: four tests exercising [`super::manager::SessionManager::delete_record`]
 //! — plain removal, the running-guard refusal, the `--force` bypass, and proof
 //! that the workspace directory is never touched by a delete.

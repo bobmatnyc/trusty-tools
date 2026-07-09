@@ -74,6 +74,55 @@ impl ManagedTmuxDriver for RecordingTmux {
     }
 }
 
+/// A tmux driver that actually TRACKS created/killed session names (#2022).
+///
+/// Why: `DaemonState::with_root_isolated_managed`'s `FakeNoopTmuxDriver` is
+/// deliberately stateless — every session always reports "not live" — which is
+/// exactly right for the many tests in this file proving "no real tmux session
+/// ever escapes the test", but wrong for the delete-route tests that exercise
+/// the #2022 fix (the delete guard is now a REAL tmux liveness probe, not a
+/// persisted-state check): those need a driver whose `session_exists` reflects
+/// reality. `create_session` records the name as live; `kill_session` removes
+/// it — mirroring exactly what `create_with_id`/`stop`/`decommission` already
+/// call in production.
+/// What: a `Mutex<HashSet<String>>` of live session names, driving
+/// `create_session`/`kill_session`/`list_sessions` (and therefore the trait's
+/// default `session_exists`). Used via
+/// `DaemonState::with_root_isolated_managed_and_driver`.
+/// Test: `delete_route_removes_record`, `delete_route_refuses_running_without_force`,
+/// `delete_route_force_bypasses_guard`.
+struct LiveTrackingTmux {
+    live: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl LiveTrackingTmux {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            live: std::sync::Mutex::new(std::collections::HashSet::new()),
+        })
+    }
+}
+
+impl ManagedTmuxDriver for LiveTrackingTmux {
+    fn create_session(&self, name: &str, _workdir: &str) -> Result<(), ManagedError> {
+        self.live.lock().unwrap().insert(name.to_owned());
+        Ok(())
+    }
+    fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+        self.live.lock().unwrap().remove(name);
+        Ok(())
+    }
+    fn send_line(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
+    fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+        Ok(String::new())
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+        Ok(self.live.lock().unwrap().iter().cloned().collect())
+    }
+}
+
 #[test]
 fn provisioner_isolates_workspace_under_root() {
     let root = TempDir::new().unwrap();
@@ -1512,25 +1561,35 @@ async fn prune_route_rejects_bad_state() {
 //
 // Same pattern as the #1508 prune-route tests above: call the handler directly
 // with axum's `State`/`Path`/`Query` extractors against a hermetic
-// `DaemonState::with_root_isolated_managed`, using `create_with_id` +
-// `ResumeRuntimeKind`/`ResumeSessionId` (aliased above) so no real tmux session
-// is ever created (#1790).
+// `DaemonState`, using `create_with_id` + `ResumeRuntimeKind`/`ResumeSessionId`
+// (aliased above) so no real tmux session is ever created (#1790). These three
+// tests specifically exercise the #2022 running-guard fix (a REAL tmux
+// liveness probe, not the persisted `state` field), so they use
+// `with_root_isolated_managed_and_driver` + `LiveTrackingTmux` instead of the
+// stateless `FakeNoopTmuxDriver` the other handler tests in this file use.
 
 /// POST …/{id}/delete removes a NON-running record from the store (#2012).
 ///
 /// Why: the common case — an operator deleting an already-stopped session's
 /// record — must succeed without `--force` and actually drop it from the store
 /// (not merely tombstone it).
-/// What: seeds a session, stops it (so it is no longer `Active`/`Provisioning`),
-/// calls [`delete_managed_session`] with `force=false`, asserts `200` with
-/// `deleted: true`, and confirms the record is gone (`SessionNotFound`).
+/// What: seeds a session (registering it as live on `LiveTrackingTmux`), stops
+/// it (which kills the tracked tmux session, so it is genuinely no longer
+/// running), calls [`delete_managed_session`] with `force=false`, asserts `200`
+/// with `deleted: true`, and confirms the record is gone (`SessionNotFound`).
 /// Test: this function IS the test.
 #[tokio::test]
 async fn delete_route_removes_record() {
     use trusty_mpm::daemon::managed_routes::{DeleteQuery, delete_managed_session};
 
     let root = TempDir::new().unwrap();
-    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let state = Arc::new(
+        DaemonState::with_root_isolated_managed_and_driver(
+            root.path().to_path_buf(),
+            LiveTrackingTmux::new(),
+        )
+        .await,
+    );
     let mgr = state.session_manager().await;
 
     let id = ResumeSessionId::new();
@@ -1576,17 +1635,25 @@ async fn delete_route_removes_record() {
 /// POST …/{id}/delete REFUSES a RUNNING session without `--force` (#2012).
 ///
 /// Why: the #2012 fail-closed safety requirement at the HTTP layer — a running
-/// session's record must survive a non-forced delete attempt.
-/// What: seeds a session (starts `Provisioning`, a running state), calls
-/// [`delete_managed_session`] with `force=false`, asserts `409 Conflict`, and
-/// confirms the record is still present afterward.
+/// session's record must survive a non-forced delete attempt. Uses
+/// `LiveTrackingTmux` (#2022) so the record's tmux session is genuinely live —
+/// exercising the corrected guard, not merely its old persisted-state check.
+/// What: seeds a session (starts `Provisioning`, a running state, with a live
+/// tracked tmux session), calls [`delete_managed_session`] with `force=false`,
+/// asserts `409 Conflict`, and confirms the record is still present afterward.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn delete_route_refuses_running_without_force() {
     use trusty_mpm::daemon::managed_routes::{DeleteQuery, delete_managed_session};
 
     let root = TempDir::new().unwrap();
-    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let state = Arc::new(
+        DaemonState::with_root_isolated_managed_and_driver(
+            root.path().to_path_buf(),
+            LiveTrackingTmux::new(),
+        )
+        .await,
+    );
     let mgr = state.session_manager().await;
 
     let id = ResumeSessionId::new();
@@ -1633,7 +1700,8 @@ async fn delete_route_refuses_running_without_force() {
 /// POST …/{id}/delete?force=true bypasses the running-state guard (#2012).
 ///
 /// Why: an operator who explicitly opts in via `--force` must be able to
-/// hard-delete a running session's record over HTTP too.
+/// hard-delete a running session's record over HTTP too, even when the tmux
+/// session backing it is genuinely still live (`LiveTrackingTmux`, #2022).
 /// What: seeds a running session, calls [`delete_managed_session`] with
 /// `force=true`, asserts `200` with `deleted: true`, and confirms the record is
 /// gone from the store.
@@ -1643,7 +1711,13 @@ async fn delete_route_force_bypasses_guard() {
     use trusty_mpm::daemon::managed_routes::{DeleteQuery, delete_managed_session};
 
     let root = TempDir::new().unwrap();
-    let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+    let state = Arc::new(
+        DaemonState::with_root_isolated_managed_and_driver(
+            root.path().to_path_buf(),
+            LiveTrackingTmux::new(),
+        )
+        .await,
+    );
     let mgr = state.session_manager().await;
 
     let id = ResumeSessionId::new();

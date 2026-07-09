@@ -278,6 +278,56 @@ mod tests {
         DaemonState::shared()
     }
 
+    /// A tmux driver that actually TRACKS created/killed session names (#2022).
+    ///
+    /// Why: `DaemonState::with_root_isolated_managed`'s `FakeNoopTmuxDriver` is
+    /// deliberately stateless — every session always reports "not live" — which
+    /// is exactly right for the many tests proving "no real tmux session ever
+    /// escapes the test", but wrong for a test that wants to exercise the #2022
+    /// fix (the delete guard is now a REAL tmux liveness probe): such a test
+    /// needs a driver whose `session_exists` reflects reality. `create_session`
+    /// records the name as live; `kill_session` removes it — mirroring exactly
+    /// what `create_with_id`/`stop`/`decommission` already call in production.
+    /// What: a `Mutex<HashSet<String>>` of live session names, driving
+    /// `create_session`/`kill_session`/`list_sessions` (and therefore the
+    /// trait's default `session_exists`).
+    /// Test: `session_delete_refuses_running_then_force_bypasses`.
+    struct LiveTrackingTmux {
+        live: std::sync::Mutex<std::collections::HashSet<String>>,
+    }
+
+    impl LiveTrackingTmux {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                live: std::sync::Mutex::new(std::collections::HashSet::new()),
+            })
+        }
+    }
+
+    impl crate::session_manager::ManagedTmuxDriver for LiveTrackingTmux {
+        fn create_session(&self, name: &str, _workdir: &str) -> Result<(), ManagedError> {
+            self.live.lock().unwrap().insert(name.to_owned());
+            Ok(())
+        }
+
+        fn kill_session(&self, name: &str) -> Result<(), ManagedError> {
+            self.live.lock().unwrap().remove(name);
+            Ok(())
+        }
+
+        fn send_line(&self, _name: &str, _text: &str) -> Result<(), ManagedError> {
+            Ok(())
+        }
+
+        fn capture(&self, _name: &str, _lines: usize) -> Result<String, ManagedError> {
+            Ok(String::new())
+        }
+
+        fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
+            Ok(self.live.lock().unwrap().iter().cloned().collect())
+        }
+    }
+
     /// Why: a non-UUID id must be rejected before any store lookup.
     /// Test: this test.
     #[test]
@@ -358,8 +408,11 @@ mod tests {
     /// Why: `unknown_id_errors_for_all_single_id_tools` only proves the
     /// not-found path; the actual running-guard/force behaviour needs a seeded
     /// record, which requires an isolated store (never the shared production
-    /// one `state()` above points at).
-    /// What: seeds an Active (running) record via `create_with_id`, asserts a
+    /// one `state()` above points at). Uses [`LiveTrackingTmux`] (#2022) rather
+    /// than the default `FakeNoopTmuxDriver` so the guard — now a real tmux
+    /// liveness probe — has a genuinely live session to observe.
+    /// What: seeds an Active (running) record via `create_with_id` (which
+    /// registers the session as live on `LiveTrackingTmux`), asserts a
     /// non-forced `session_delete` call is refused (error mentions the
     /// session), then asserts `force=true` succeeds, returns `deleted: true`,
     /// and the record is gone from the store.
@@ -369,7 +422,13 @@ mod tests {
         use crate::runtime::RuntimeKind;
 
         let root = tempfile::TempDir::new().expect("tempdir");
-        let s = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
+        let s = Arc::new(
+            DaemonState::with_root_isolated_managed_and_driver(
+                root.path().to_path_buf(),
+                LiveTrackingTmux::new(),
+            )
+            .await,
+        );
         let mgr = s.session_manager().await;
 
         let id = ManagedSessionId::new();

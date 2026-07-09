@@ -10,7 +10,8 @@
 //! What: an inherent `impl SessionManager` block adding
 //! [`SessionManager::delete_record`], which wraps
 //! [`SessionManager::compact_record`](super::prune) with the SAME fail-closed
-//! running-state guard `super::prune::is_running` enforces elsewhere.
+//! running guard `super::prune::is_running` enforces elsewhere — a real tmux
+//! liveness probe, not a persisted-state check (#2022).
 //! Test: `delete_record_*` in `super::delete_tests`.
 
 use super::manager::{ManagedError, SessionManager};
@@ -39,23 +40,28 @@ impl SessionManager {
     ///
     /// What: looks up the record (a missing id surfaces as
     /// [`ManagedError::SessionNotFound`]). When `force` is `false` (the default)
-    /// and [`is_running`] reports the record's state as `Active`/`Provisioning`,
-    /// returns [`ManagedError::InvalidState`] with an actionable message telling
-    /// the operator to stop the session first or pass `--force` — no record is
-    /// touched. Otherwise removes the record via `compact_record` and returns the
-    /// pre-deletion [`SessionRecord`] snapshot (so callers can render its identity
-    /// after it is gone from the store).
+    /// and [`is_running`] finds a LIVE tmux session backing the record (#2022 — a
+    /// real probe, not the persisted `state` field), returns
+    /// [`ManagedError::InvalidState`] with an actionable message telling the
+    /// operator to stop the session first or pass `--force` — no record is
+    /// touched. A record whose `state` still says `Active`/`Provisioning` but
+    /// whose tmux session is actually gone is NOT running by this probe, so it
+    /// deletes cleanly without `--force`. Otherwise removes the record via
+    /// `compact_record` and returns the pre-deletion [`SessionRecord`] snapshot
+    /// (so callers can render its identity after it is gone from the store).
     /// Test: `delete_record_removes_from_store`,
     /// `delete_record_refuses_running_without_force`,
     /// `delete_record_force_bypasses_running_guard`,
-    /// `delete_record_never_touches_workspace_dir` in `super::delete_tests`.
+    /// `delete_record_never_touches_workspace_dir`,
+    /// `delete_record_stale_active_deletable_when_tmux_dead` (#2022) in
+    /// `super::delete_tests`.
     pub async fn delete_record(
         &self,
         id: &ManagedSessionId,
         force: bool,
     ) -> Result<SessionRecord, ManagedError> {
         let record = self.get(id).await?;
-        if !force && is_running(&record.state) {
+        if !force && is_running(&record, self.tmux.as_ref()) {
             return Err(ManagedError::InvalidState(
                 id.to_string(),
                 format!(

@@ -46,6 +46,9 @@ mod decommission_worktree_tests;
 mod delete_tests;
 
 #[cfg(test)]
+mod liveness_tests;
+
+#[cfg(test)]
 mod reap_orphaned_worktrees_tests;
 
 #[cfg(test)]
