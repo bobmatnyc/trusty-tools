@@ -97,13 +97,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Free disk space (issue #2091): kept in sync with the more aggressive
+      # reclamation in the `test` job (see comment there for rationale).
       - name: Free disk space
         run: |
           echo "Before:"; df -h /
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
             /usr/local/share/boost /usr/local/share/powershell \
-            /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+            /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
+            /usr/local/share/vcpkg /usr/lib/jvm /usr/share/miniconda /opt/az || true
           sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* || true
           echo "After:"; df -h /
 
       - name: Install stable toolchain with clippy
@@ -177,13 +182,24 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Free disk space (issue #2091): the baseline removal set below still
+      # left the runner exhausting its disk mid-build on `cargo test --workspace`
+      # (onnxruntime/ort, ~a dozen tree-sitter grammars, aws-sdk-bedrock,
+      # usearch, etc. produce an enormous target/ tree). Extend it with more
+      # well-known unused-SDK/cache purges — vcpkg (~5 GB), preinstalled JVMs
+      # (~2-3 GB, unused by this pure-Rust workspace), miniconda (~2-3 GB),
+      # the Azure CLI (~600 MB), and stale apt package caches/lists — none of
+      # which this workspace's build or test steps touch.
       - name: Free disk space
         run: |
           echo "Before:"; df -h /
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
             /usr/local/share/boost /usr/local/share/powershell \
-            /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+            /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
+            /usr/local/share/vcpkg /usr/lib/jvm /usr/share/miniconda /opt/az || true
           sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* || true
           echo "After:"; df -h /
 
       # trusty-agents's git tests (list_branches_includes_current) assert that the
@@ -347,13 +363,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Free disk space (issue #2091): kept in sync with the more aggressive
+      # reclamation in the `test` job (see comment there for rationale).
       - name: Free disk space
         run: |
           echo "Before:"; df -h /
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
             /usr/local/share/boost /usr/local/share/powershell \
-            /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+            /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
+            /usr/local/share/vcpkg /usr/lib/jvm /usr/share/miniconda /opt/az || true
           sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* || true
           echo "After:"; df -h /
 
       - name: Install Rust 1.91 toolchain
@@ -419,13 +440,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Free disk space (issue #2091): kept in sync with the more aggressive
+      # reclamation in the `test` job (see comment there for rationale).
       - name: Free disk space
         run: |
           echo "Before:"; df -h /
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
             /usr/local/share/boost /usr/local/share/powershell \
-            /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+            /usr/share/swift "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" \
+            /usr/local/share/vcpkg /usr/lib/jvm /usr/share/miniconda /opt/az || true
           sudo docker image prune --all --force || true
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* || true
           echo "After:"; df -h /
 
       - name: Install stable toolchain
