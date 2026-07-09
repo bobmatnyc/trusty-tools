@@ -378,6 +378,30 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Banner { reconnecting }) => {
             commands::banner::run_banner_preview(reconnecting)
         }
+        // `tm mcp …` is a direct, daemon-less command family (like the standalone
+        // driver): it edits the tm-owned config dir's `.claude.json` on disk.
+        Some(Command::Mcp { cmd }) => match cmd {
+            cli::McpCmd::Add {
+                name,
+                transport,
+                env,
+                header,
+                command_and_args,
+                root,
+            } => commands::mcp::add_cmd(
+                root.as_deref(),
+                &name,
+                transport,
+                &env,
+                &header,
+                &command_and_args,
+            ),
+            cli::McpCmd::Remove { name, root } => commands::mcp::remove_cmd(root.as_deref(), &name),
+            cli::McpCmd::List { json, root } => commands::mcp::list_cmd(root.as_deref(), json),
+            cli::McpCmd::Get { name, json, root } => {
+                commands::mcp::get_cmd(root.as_deref(), &name, json)
+            }
+        },
     };
 
     // Top-level exit-code translation: a `tm session prune-idle` that found the

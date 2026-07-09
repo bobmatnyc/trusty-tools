@@ -47,6 +47,7 @@ pub mod ipc;
 pub mod llm_overseer;
 pub mod managed_config;
 pub mod manifest;
+pub mod mcp_config;
 pub mod memory;
 pub mod model_inject;
 pub mod names;

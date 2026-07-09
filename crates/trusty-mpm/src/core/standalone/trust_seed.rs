@@ -12,8 +12,11 @@
 //!
 //! What: [`preseed_managed_trust`] merges `projects.<workspace>` trust keys and
 //! `enabledMcpjsonServers` into `<claude_config_dir>/.claude.json`. The MCP
-//! server list is derived from `ensure_mcp_config` output (the same three servers
-//! written into the managed `.mcp.json`).
+//! server list is derived dynamically by
+//! [`crate::core::mcp_config::managed_mcp_server_names`] — the built-in framework
+//! three UNION any user-scope servers registered via `tm mcp add` (read from the
+//! same file's top-level `mcpServers`) — so a `tm mcp add`-ed server is trusted
+//! on the next session start with no per-project bookkeeping.
 //! Test: `test_preseed_managed_trust_marks_directory`,
 //!   `test_preseed_managed_trust_is_idempotent`,
 //!   `test_preseed_managed_trust_enables_mcp_servers`,
@@ -22,18 +25,7 @@
 
 use std::path::Path;
 
-/// The MCP server names written into the managed `.mcp.json` by `ensure_mcp_config`.
-///
-/// Why: `preseed_managed_trust` must pre-approve exactly the servers that
-/// `ensure_mcp_config` wires into the managed `.mcp.json`; deriving them from the
-/// same constant keeps the two in sync without re-parsing the file at trust-seed time.
-/// What: the sorted list of server names —
-/// `["trusty-memory", "trusty-review", "trusty-search"]` — matching the keys
-/// written by `ensure_mcp_config` in `global_config.rs`.
-/// `trusty-review` was added in WI-8 (refs #1548).
-/// Test: asserted in `test_preseed_managed_trust_enables_mcp_servers`.
-pub(super) const MANAGED_MCP_SERVERS: &[&str] =
-    &["trusty-memory", "trusty-review", "trusty-search"];
+use crate::core::mcp_config::managed_mcp_server_names;
 
 /// Pre-seed project trust and MCP-server approval into `<claude_config_dir>/.claude.json`.
 ///
@@ -114,6 +106,18 @@ pub fn preseed_managed_trust(claude_config_dir: &Path, workspace: &Path) -> anyh
 
     let workspace_key = workspace.to_string_lossy().to_string();
 
+    // Build the expected enabledMcpjsonServers list from the ACTUAL configured
+    // servers (built-in framework three ∪ any `tm mcp add`-registered user-scope
+    // servers), computed from the immutable config BEFORE the mutable navigation
+    // below borrows it. This is what keeps a `tm mcp add`-ed server trusted on
+    // the next session start without any per-project bookkeeping in the CRUD path.
+    let enabled_mcp = Value::Array(
+        managed_mcp_server_names(&config)
+            .into_iter()
+            .map(Value::String)
+            .collect(),
+    );
+
     // Navigate to (or create) projects.<workspace>.
     let projects = config
         .as_object_mut()
@@ -132,14 +136,6 @@ pub fn preseed_managed_trust(claude_config_dir: &Path, workspace: &Path) -> anyh
         *entry = Value::Object(serde_json::Map::new());
     }
     let entry = entry.as_object_mut().expect("project entry is an object");
-
-    // Build the expected enabledMcpjsonServers list from the canonical constant.
-    let enabled_mcp = Value::Array(
-        MANAGED_MCP_SERVERS
-            .iter()
-            .map(|s| Value::String(s.to_string()))
-            .collect(),
-    );
 
     // Idempotent: skip the write when all fields are already fully set AND the
     // MCP list already matches the canonical server set.
@@ -248,6 +244,47 @@ mod tests {
             names.contains(&"trusty-review"),
             "trusty-review must be in enabledMcpjsonServers (WI-8); got {names:?}"
         );
+    }
+
+    // tm mcp add sync: a user-scope server registered in the top-level
+    // `mcpServers` map must appear in the per-project `enabledMcpjsonServers`
+    // trust list after preseed, so it does not trigger an approval dialog.
+    #[test]
+    fn test_preseed_managed_trust_syncs_tm_mcp_added_server() {
+        let tmp = TempDir::new().unwrap();
+        let cfg = tmp.path().join("claude-config");
+        std::fs::create_dir_all(&cfg).unwrap();
+        let workspace = tmp.path().join("repo");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        // Simulate `tm mcp add my-custom ...`: a top-level mcpServers entry.
+        crate::core::mcp_config::add_server(
+            &cfg,
+            "my-custom",
+            serde_json::json!({"type": "stdio", "command": "my-custom", "args": []}),
+        )
+        .unwrap();
+
+        preseed_managed_trust(&cfg, &workspace).unwrap();
+
+        let val: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(cfg.join(".claude.json")).unwrap())
+                .unwrap();
+        let key = workspace.to_string_lossy().to_string();
+        let names: Vec<&str> = val["projects"][&key]["enabledMcpjsonServers"]
+            .as_array()
+            .expect("enabledMcpjsonServers array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            names.contains(&"my-custom"),
+            "tm mcp add-ed server must be trusted after preseed; got {names:?}"
+        );
+        // Built-in three must remain enabled.
+        assert!(names.contains(&"trusty-memory"));
+        assert!(names.contains(&"trusty-review"));
+        assert!(names.contains(&"trusty-search"));
     }
 
     // WI-3 TRUST-SEED idempotency: calling preseed_managed_trust twice must not
