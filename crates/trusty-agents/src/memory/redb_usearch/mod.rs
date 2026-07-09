@@ -193,7 +193,7 @@ impl RedbUsearchStore {
             let (id_v, label_v) = entry?;
             let id = id_v.value().to_string();
             let label = label_v.value();
-            let key = format!("{}:{}", segment.prefix(), &id);
+            let key = format!("{}:{}", segment.prefix(), id);
             let Some(payload_raw) = payloads.get(key.as_str())? else {
                 continue;
             };

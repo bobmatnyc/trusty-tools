@@ -252,10 +252,7 @@ fn find_csproj(start: &Path) -> Option<PathBuf> {
         if current.join(".git").exists() {
             return None;
         }
-        match current.parent() {
-            Some(p) => current = p,
-            None => return None,
-        }
+        current = current.parent()?;
     }
     None
 }
