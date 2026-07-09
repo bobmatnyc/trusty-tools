@@ -6,6 +6,9 @@ description = "MCP server (stdio + HTTP/SSE) for trusty-memory"
 license.workspace = true
 repository.workspace = true
 readme = "README.md"
+homepage = "https://github.com/bobmatnyc/trusty-tools"
+keywords = ["mcp", "memory", "vector-search", "knowledge-graph", "embeddings"]
+categories = ["command-line-utilities", "development-tools"]
 
 exclude = [".fastembed_cache/", "ui/node_modules/**"]
 

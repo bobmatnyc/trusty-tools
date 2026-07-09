@@ -11,6 +11,7 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 license.workspace = true
 repository = "https://github.com/bobmatnyc/trusty-tools"
 description = "Developer productivity analytics — git commit collection, classification, and reporting"
+homepage = "https://github.com/bobmatnyc/trusty-tools"
 keywords = ["git", "analytics", "productivity", "developer-metrics"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "README.md"

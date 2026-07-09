@@ -1,6 +1,9 @@
 [package]
 name = "trusty-progress"
 description = "Shared rustup/cargo-style progress + status display for the trusty-* tooling ecosystem"
+homepage = "https://github.com/bobmatnyc/trusty-tools"
+keywords = ["progress", "spinner", "cli", "terminal", "status"]
+categories = ["command-line-interface", "development-tools"]
 version = "0.1.0"
 edition = "2021"
 rust-version.workspace = true

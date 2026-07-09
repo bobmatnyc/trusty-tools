@@ -8,6 +8,8 @@ repository = "https://github.com/bobmatnyc/trusty-tools"
 description = "Unified ONNX embedding daemon with HTTP + UDS transports and BatchQueue (issue #164)."
 readme = "README.md"
 homepage = "https://github.com/bobmatnyc/trusty-tools"
+keywords = ["onnx", "embeddings", "daemon", "ml", "nlp"]
+categories = ["artificial-intelligence", "network-programming"]
 
 [lib]
 name = "trusty_embedderd"

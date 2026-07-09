@@ -4,6 +4,9 @@ version = "0.3.0"
 edition = "2021"
 description = "Thin control plane for the claude-mpm stack: install, upgrade, restart, health, and config coordination across all trusty-* tools."
 readme = "README.md"
+homepage = "https://github.com/bobmatnyc/trusty-tools"
+keywords = ["install", "upgrade", "control-plane", "cli", "orchestration"]
+categories = ["command-line-utilities", "development-tools"]
 # Workspace default: MIT (see root Cargo.toml [workspace.package] license = "MIT",
 # #898 relicense, and sibling crates). Use license.workspace = true so the
 # authoritative value propagates from one place.

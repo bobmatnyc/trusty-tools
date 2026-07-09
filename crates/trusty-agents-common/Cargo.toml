@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Stable agent-plugin surface (ToolExecutor, AgentPlugin, ToolResult) shared by trusty-agents and external agent crates."
+readme = "README.md"
+homepage = "https://github.com/bobmatnyc/trusty-tools"
+keywords = ["agent", "orchestration", "plugin", "rpc", "traits"]
+categories = ["development-tools", "asynchronous"]
 
 [dependencies]
 async-trait = { workspace = true }
