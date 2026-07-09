@@ -391,6 +391,79 @@ fn canonical_domain_absent_falls_back_to_first_seen_email() {
 }
 
 #[test]
+fn email_domain_basic() {
+    // Why: regression guard for the helper backing the Tier-3 domain gate
+    // (#2253).
+    assert_eq!(email_domain("ops+snyk@Duetto.COM"), "duetto.com");
+    assert_eq!(email_domain("no-at-symbol"), "");
+    // Only the last `@` delimits the domain.
+    assert_eq!(email_domain("weird@name@example.org"), "example.org");
+}
+
+/// Issue #2253: two unrelated bots sharing a long common domain suffix must
+/// NOT collapse into one identity via the Tier-3 fuzzy pass.
+///
+/// Before the fix, Tier 3 scored Jaro-Winkler on the FULL email string, so
+/// `jaro_winkler("ops+snyk@duettoresearch.com", "jenkins@duettoresearch.com")`
+/// = 0.857 ≥ 0.85 (the shared 18-char domain suffix alone cleared the bar),
+/// misattributing every Snyk-bot commit to "Jenkins CI". Comparing
+/// local-parts under a domain-equality gate keeps them distinct.
+#[test]
+fn tier3_does_not_merge_bots_sharing_domain_suffix() {
+    let team = TeamConfig {
+        members: vec![TeamMember {
+            name: "Jenkins CI".into(),
+            email: "jenkins@duettoresearch.com".into(),
+            aliases: vec![],
+        }],
+        aliases: HashMap::new(),
+        canonical_domain: None,
+    };
+    let r = IdentityResolver::new(Some(&team));
+
+    // Sanity: the pre-fix root cause really did clear the threshold on the
+    // full-string comparison, so this test is guarding a real regression.
+    assert!(
+        jaro_winkler("ops+snyk@duettoresearch.com", "jenkins@duettoresearch.com")
+            >= DEFAULT_SIMILARITY_THRESHOLD,
+        "precondition: full-string similarity should exceed the threshold"
+    );
+
+    let (name, email) = r.resolve("Snyk Bot", "ops+snyk@duettoresearch.com");
+    assert_ne!(
+        name, "Jenkins CI",
+        "Snyk bot must not be misattributed to Jenkins CI (#2253)"
+    );
+    // The unrelated bot falls through unchanged.
+    assert_eq!(name, "Snyk Bot");
+    assert_eq!(email, "ops+snyk@duettoresearch.com");
+}
+
+/// The #2253 fix must not over-tighten: a genuine same-person match — same
+/// domain, near-identical local-parts — must STILL resolve via Tier 3 even
+/// when the display name is too different to carry the match on its own.
+#[test]
+fn tier3_still_matches_same_domain_near_identical_local_parts() {
+    let team = TeamConfig {
+        members: vec![TeamMember {
+            name: "Alice Cooper".into(),
+            email: "alice.cooper@acme.com".into(),
+            aliases: vec![],
+        }],
+        aliases: HashMap::new(),
+        canonical_domain: None,
+    };
+    let r = IdentityResolver::new(Some(&team));
+
+    // Display name "acoopr" is far from "Alice Cooper"; the match rides on
+    // the email local-part `alice.coopr` ~= `alice.cooper` under the shared
+    // `acme.com` domain.
+    let (name, email) = r.resolve("acoopr", "alice.coopr@acme.com");
+    assert_eq!(name, "Alice Cooper");
+    assert_eq!(email, "alice.cooper@acme.com");
+}
+
+#[test]
 fn canonical_domain_read_from_config() {
     // Why: confirms YAML deserialization wires the new key end-to-end.
     let yaml = r#"
