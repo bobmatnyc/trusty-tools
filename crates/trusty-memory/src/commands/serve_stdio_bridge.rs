@@ -275,10 +275,7 @@ fn inject_default_palace(
 /// Test: `value_to_mcp_response_ok`, `value_to_mcp_response_err`,
 /// `value_to_mcp_response_malformed`.
 pub(crate) fn value_to_mcp_response(v: serde_json::Value) -> mcp::Response {
-    let id = v
-        .get("id")
-        .cloned()
-        .and_then(|id| if id.is_null() { None } else { Some(id) });
+    let id = v.get("id").cloned().filter(|id| !id.is_null());
 
     if let Some(result) = v.get("result").cloned() {
         return mcp::Response::ok(id, result);

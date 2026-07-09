@@ -115,10 +115,8 @@ impl TokenProvider for EnvFileTokenProvider {
         // 2. Resolve file path (override or default).
         let file_path: PathBuf = if let Ok(override_path) = std::env::var(TOKEN_FILE_ENV_VAR) {
             PathBuf::from(override_path.trim())
-        } else if let Some(home) = dirs::home_dir() {
-            home.join(TOKEN_FILE_RELATIVE)
         } else {
-            return None;
+            dirs::home_dir()?.join(TOKEN_FILE_RELATIVE)
         };
 
         // 3. Read and trim the file.
