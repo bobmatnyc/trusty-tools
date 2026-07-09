@@ -3,5 +3,6 @@
 pub mod daemon;
 pub mod daemon_guard;
 pub mod port;
+pub mod run;
 pub mod service;
 pub mod setup;
