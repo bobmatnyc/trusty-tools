@@ -15,6 +15,7 @@
 
 mod diff;
 mod recorder;
+mod redelegation;
 mod report;
 
 #[cfg(test)]
@@ -27,7 +28,7 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::agent_loop::{AgentLoop, AgentLoopConfig};
+use crate::agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopError};
 use crate::agents::AgentConfig;
 use crate::llm::LlmClientTrait;
 use crate::project_context::load_project_context;
@@ -40,6 +41,7 @@ use crate::tools::{
 };
 
 pub use recorder::{RecordingLlmClient, SharedTranscript, TurnRecord};
+pub use redelegation::{MAX_REDELEGATIONS, RedelegationCapSignal};
 pub use report::{ExitCode, RunReport, aggregate_usage_per_role};
 
 /// Default bash timeout for the engineer's tools, in seconds.
@@ -119,6 +121,13 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
     // (`build_engineer_runner`, via `with_timeout_secs`).
     let deadline_secs = resolve_deadline_secs(params.deadline_secs);
 
+    // (#2265) The re-delegation cap signal is shared between the engineer
+    // runner's retry decorator (`RedelegatingRunner`, wired inside
+    // `build_engineer_runner`) and `assemble_report` below, so a cap-hit run
+    // gets a clean terminal report regardless of what the PM's own loop
+    // subsequently does.
+    let redelegation_signal = RedelegationCapSignal::new();
+
     // Build the engineer runner, scoped to the project working dir, sharing the
     // transcript (engineer turns are tagged "python-engineer").
     let engineer_runner = build_engineer_runner(
@@ -127,6 +136,7 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
         project_context.clone(),
         Arc::clone(&transcript),
         deadline_secs,
+        redelegation_signal.clone(),
     );
 
     // The PM's tool registry: the delegate tool (the PM orchestrates; the
@@ -188,9 +198,12 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
         &transcript,
         &pm_model,
         &engineer_model,
-        before,
-        after,
-        pm_result,
+        RunOutcome {
+            before,
+            after,
+            pm_result,
+        },
+        &redelegation_signal,
     )
 }
 
@@ -202,9 +215,19 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
 /// result through the per-run model-override seam (`apply_engineer_model_override`).
 /// `deadline_secs` (#2207) is the SAME resolved wall-clock budget applied to the
 /// delegating PM's own loop, so a raised deadline covers the whole run, not just
-/// the PM's half of it.
+/// the PM's half of it. (#2265) The outermost layer is
+/// `redelegation::RedelegatingRunner`, which internally retries a failed
+/// attempt (reuse-hint-augmented, capped at `redelegation::MAX_REDELEGATIONS`)
+/// entirely within one `AgentRunner::run`/`run_with_context` call — this is
+/// the chosen "decouple retries from PM turns" design for fix #3: every
+/// retry happens inside a SINGLE `delegate_to_agent` tool dispatch, so it
+/// never consumes any of the PM's own `AgentLoopConfig::max_turns` budget
+/// (left at its crate default of 8 — raising it was the alternative design,
+/// rejected here because the cap in fix #1 is a cleaner, purpose-built ceiling
+/// than a bigger, still-somewhat-arbitrary PM turn budget would be).
 /// What: Returns an `Arc<dyn AgentRunner>` the `DelegateToAgentTool` dispatches
 /// to. The engineer's own LLM turns are recorded under the "python-engineer" role.
+/// `redelegation_signal` is shared with `assemble_report` via the caller.
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`.
 fn build_engineer_runner(
     llm: Arc<dyn LlmClientTrait>,
@@ -212,6 +235,7 @@ fn build_engineer_runner(
     project_context: Option<String>,
     transcript: SharedTranscript,
     deadline_secs: u64,
+    redelegation_signal: RedelegationCapSignal,
 ) -> Arc<dyn AgentRunner> {
     let engineer_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
         llm,
@@ -228,7 +252,12 @@ fn build_engineer_runner(
     if let Some(ctx) = project_context {
         runner = runner.with_project_context(ctx);
     }
-    apply_engineer_model_override(Arc::new(runner), params)
+    let pinned = apply_engineer_model_override(Arc::new(runner), params);
+    Arc::new(redelegation::RedelegatingRunner::new(
+        pinned,
+        redelegation_signal,
+        params.project.clone(),
+    ))
 }
 
 /// Builds the engineer's project-scoped tool registry for each delegation.
@@ -406,6 +435,22 @@ fn config_error_report(
     }
 }
 
+/// The run's raw outcome: before/after working-tree snapshots plus the PM
+/// loop's own `Result`.
+///
+/// Why: These three values are always produced and consumed together; bundling
+/// them keeps `assemble_report`'s argument count under clippy's
+/// `too_many_arguments` limit (#2265 added an 8th argument,
+/// `redelegation_signal`, that pushed the plain-argument version over it)
+/// without losing any of the fields or their names.
+/// What: Plain data holder, no behaviour.
+/// Test: Exercised through every `assemble_report` test.
+struct RunOutcome {
+    before: diff::Snapshot,
+    after: diff::Snapshot,
+    pm_result: Result<AgentOutput, AgentLoopError>,
+}
+
 /// Assemble the final report from the run's outcome.
 ///
 /// Why: Centralises the mapping from (PM loop result, before/after snapshots) to a
@@ -413,45 +458,110 @@ fn config_error_report(
 /// branches never drift.
 /// What: On a PM-loop error → `DeadlineExceeded` when the error is specifically
 /// `AgentLoopError::Timeout` (#2207 — distinct from a genuine failure so a
-/// caller can tell "timed out" from "errored"), else `RunFailure` (with
-/// whatever transcript accrued). On success → compute the diff; empty diff →
-/// `NoChanges`, else `Success`. Usage and cost are aggregated from the
-/// transcript and priced PER ROLE — `pm_model` for `"pm"` turns,
-/// `engineer_model` for the delegated engineer's — per the #1475 bug 1 fix
-/// (`aggregate_usage_per_role`), not blended under one model. #2206: this
-/// aggregation now runs on the error path too, so a `run_failure` or
-/// `deadline_exceeded` report still carries the real usage/cost of every turn
-/// that DID complete before the error/deadline, rather than the zeroed
-/// placeholder the pre-#2206 code returned unconditionally on this branch.
-/// Test: `run_task::tests::*` (success, no-change, failure, and deadline paths).
+/// caller can tell "timed out" from "errored"). (#2265 fix #4) Otherwise, when
+/// the error is `AgentLoopError::TurnCapExceeded` OR `redelegation_signal`
+/// reports the re-delegation cap (fix #1) was hit, the diff is computed
+/// (filesystem-based, independent of which turn/attempt produced it) and — if
+/// it is non-empty, i.e. a deliverable actually exists on disk — the outcome
+/// is `ExitCode::Partial`, NOT `RunFailure`; trusty-code cannot generically
+/// verify correctness, so this gates purely on "work was produced", leaving
+/// the downstream bake-off harness to score correctness itself. Every other
+/// PM-loop error (a hard `Llm`/`Cancelled` failure, or ANY error with an empty
+/// diff — including a cap/turn-cap hit that produced nothing) still maps to
+/// `RunFailure`, preserving that path for genuine no-output failures. On
+/// success → compute the diff; empty diff → `NoChanges`, else `Success`.
+/// Usage and cost are aggregated from the transcript and priced PER ROLE —
+/// `pm_model` for `"pm"` turns, `engineer_model` for the delegated engineer's
+/// — per the #1475 bug 1 fix (`aggregate_usage_per_role`), not blended under
+/// one model. #2206: this aggregation now runs on every error path too, so a
+/// `run_failure`, `partial`, or `deadline_exceeded` report still carries the
+/// real usage/cost of every turn that DID complete, rather than a zeroed
+/// placeholder.
+/// Test: `run_task::tests::*` (success, no-change, failure, deadline, and
+/// #2265 partial/cap-reached paths).
 fn assemble_report(
     params: &RunTaskParams,
     transcript: &SharedTranscript,
     pm_model: &str,
     engineer_model: &str,
-    before: diff::Snapshot,
-    after: diff::Snapshot,
-    pm_result: Result<AgentOutput, crate::agent_loop::AgentLoopError>,
+    outcome: RunOutcome,
+    redelegation_signal: &RedelegationCapSignal,
 ) -> RunReport {
+    let RunOutcome {
+        before,
+        after,
+        pm_result,
+    } = outcome;
     let turns = drain_transcript(transcript);
 
-    // A PM-loop error is a runtime failure (or, #2207, a deadline); the
-    // transcript still reflects whatever turns ran before the error. The PM's
-    // `AgentOutput` content is not needed for the report — the transcript and
-    // diff are the authoritative artifacts. #2206: usage/cost are aggregated
-    // from those completed turns here too, not zeroed.
+    // A PM-loop error is a runtime failure (or, #2207, a deadline; or, #2265,
+    // a turn-cap/re-delegation-cap hit that still produced a deliverable);
+    // the transcript still reflects whatever turns ran before the error. The
+    // PM's `AgentOutput` content is not needed for the report — the
+    // transcript and diff are the authoritative artifacts. #2206: usage/cost
+    // are aggregated from those completed turns here too, not zeroed.
     if let Err(e) = pm_result {
         let (usage, cost) = aggregate_usage_per_role(&turns, pm_model, engineer_model);
-        let is_deadline = matches!(e, crate::agent_loop::AgentLoopError::Timeout { .. });
-        let exit = if is_deadline {
-            ExitCode::DeadlineExceeded
+
+        if matches!(e, AgentLoopError::Timeout { .. }) {
+            return RunReport {
+                agent: params.agent.clone(),
+                task: format!("{} [deadline exceeded: {e}]", params.task),
+                diff: String::new(),
+                transcript: turns,
+                usage,
+                cost_usd: Some(cost),
+                exit: ExitCode::DeadlineExceeded,
+            };
+        }
+
+        // #2265 fix #4: a turn-cap or re-delegation-cap terminal condition
+        // must not be blindly reported as `run_failure` when a deliverable
+        // already exists on disk — the diff is filesystem-based, so it is
+        // authoritative regardless of which attempt produced it.
+        let cap_reached = redelegation_signal.is_cap_reached();
+        let is_turn_cap = matches!(e, AgentLoopError::TurnCapExceeded { .. });
+        let rendered_diff = diff::diff_snapshots(&before, &after);
+        let has_deliverable = !rendered_diff.trim().is_empty();
+
+        if (cap_reached || is_turn_cap) && has_deliverable {
+            let label = if cap_reached {
+                format!(
+                    "partial: re-delegation limit reached after {} attempts; partial work \
+                     preserved at {}",
+                    redelegation_signal.attempts(),
+                    params.project.display()
+                )
+            } else {
+                "partial: PM turn cap exceeded but a deliverable was produced".to_string()
+            };
+            return RunReport {
+                agent: params.agent.clone(),
+                task: format!("{} [{label}: {e}]", params.task),
+                diff: rendered_diff,
+                transcript: turns,
+                usage,
+                cost_usd: Some(cost),
+                exit: ExitCode::Partial,
+            };
+        }
+
+        // Genuine failure: no deliverable exists, or the error is neither a
+        // turn cap nor a re-delegation-cap hit (e.g. a hard `Llm`/`Cancelled`
+        // failure). This path is intentionally left mapped to `RunFailure` —
+        // "Keep genuine no-output failures mapped to RunFailure" per #2265.
+        // When the cap WAS reached but produced nothing reusable, the label
+        // still names that (so an operator/log reader is not left guessing
+        // whether this was an opaque crash or an exhausted, reuse-aware
+        // retry budget), even though the exit code itself is unchanged.
+        let label = if cap_reached {
+            format!(
+                "run failure (re-delegation limit reached after {} attempts, no deliverable \
+                 produced)",
+                redelegation_signal.attempts()
+            )
         } else {
-            ExitCode::RunFailure
-        };
-        let label = if is_deadline {
-            "deadline exceeded"
-        } else {
-            "run failure"
+            "run failure".to_string()
         };
         return RunReport {
             agent: params.agent.clone(),
@@ -460,7 +570,7 @@ fn assemble_report(
             transcript: turns,
             usage,
             cost_usd: Some(cost),
-            exit,
+            exit: ExitCode::RunFailure,
         };
     }
 
