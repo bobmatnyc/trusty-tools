@@ -1,6 +1,6 @@
 # trusty-search
 
-[![CI](https://github.com/bobmatnyc/trusty-search/actions/workflows/ci.yml/badge.svg)](https://github.com/bobmatnyc/trusty-search/actions/workflows/ci.yml)
+[![CI](https://github.com/bobmatnyc/trusty-tools/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/bobmatnyc/trusty-tools/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/trusty-search.svg)](https://crates.io/crates/trusty-search)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
