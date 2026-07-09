@@ -24,6 +24,11 @@
 #   TRUSTY_YES             Set to 1 to skip all prompts (same as -y)
 #   TRUSTY_NO_MODIFY_PATH  Set to 1 to skip PATH modification
 #   TRUSTY_FORCE           Set to 1 to re-download even if already installed
+#   GITHUB_TOKEN / GH_TOKEN  Optional. Sent as an Authorization header when
+#                          resolving the latest release, raising the GitHub
+#                          API rate limit from 60/hr (unauthenticated, easily
+#                          exhausted behind a shared/NAT'd IP) to 5000/hr.
+#                          Never required — the tokenless path still works.
 #
 # Security note: This script is served over HTTPS, which is the primary
 # integrity guarantee. The installer script itself is not signed — if you
@@ -168,6 +173,93 @@ detect_sha_tool() {
 # Version resolution
 # ---------------------------------------------------------------------------
 
+# Why: GitHub's unauthenticated REST API rate limit is 60 req/hr per source
+#      IP — trivially exhausted behind a shared NAT/VPN/CI runner — and it
+#      returns HTTP 403 (not 429) when exhausted. An authenticated request
+#      gets 5000/hr. Centralize the header construction so both the query
+#      helper below and any future API call use the same precedence.
+# What: Echo an "Authorization: Bearer <token>" header value if GITHUB_TOKEN
+#      or GH_TOKEN (in that order) is set and non-empty; echo nothing otherwise.
+# Test: With GITHUB_TOKEN=x echoes "Authorization: Bearer x"; with only
+#      GH_TOKEN=y echoes "Authorization: Bearer y"; with neither set, echoes
+#      nothing (empty string) and the caller sends no auth header.
+auth_header() {
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        printf 'Authorization: Bearer %s' "${GITHUB_TOKEN}"
+    elif [ -n "${GH_TOKEN:-}" ]; then
+        printf 'Authorization: Bearer %s' "${GH_TOKEN}"
+    fi
+}
+
+# Why: A previous version piped `curl | grep | grep | head | sed` directly
+#      into the command substitution. In POSIX sh a pipeline's exit status is
+#      the LAST command's (no pipefail), so a curl failure (e.g. HTTP 403 from
+#      rate-limiting) was silently swallowed by the downstream sed succeeding
+#      on empty input — the script then reported the misleading "no release
+#      found" instead of the true "GitHub API rate limit hit" cause (#2285).
+#      Fetching to a file and inspecting curl's own HTTP status directly (via
+#      `-w '%{http_code}'`) fixes that, and retrying transient 403/5xx a few
+#      times absorbs momentary rate-limit blips.
+# What: GET ${API_RELEASES_URL} (with an auth header if available), write the
+#      body to a temp file, retry up to 3 times with backoff on 403/429/5xx,
+#      then die with an accurate message on a non-2xx final status or echo the
+#      body file path on success. Caller is responsible for removing the file.
+# Test: query_releases_api against a live endpoint returns a body file with
+#      "tag_name" entries; simulated via a local file server returning 403,
+#      confirms it retries then reports the rate-limit message (not "no
+#      release found").
+query_releases_api() {
+    _hdr="$(auth_header)"
+    _body_file="$(mktemp 2>/dev/null || mktemp -t trusty-releases)" \
+        || die "failed to create temp file for release query"
+
+    _attempt=1
+    _max_attempts=3
+    _http_code="000"
+    while [ "${_attempt}" -le "${_max_attempts}" ]; do
+        if [ -n "${_hdr}" ]; then
+            _http_code="$(curl -sS -L -o "${_body_file}" -w '%{http_code}' -H "${_hdr}" "${API_RELEASES_URL}" 2>/dev/null)" || _http_code="000"
+        else
+            _http_code="$(curl -sS -L -o "${_body_file}" -w '%{http_code}' "${API_RELEASES_URL}" 2>/dev/null)" || _http_code="000"
+        fi
+
+        case "${_http_code}" in
+            2??)
+                break
+                ;;
+            403 | 429 | 5??)
+                if [ "${_attempt}" -lt "${_max_attempts}" ]; then
+                    warn "GitHub API returned HTTP ${_http_code} (attempt ${_attempt}/${_max_attempts}); retrying..."
+                    sleep "${_attempt}"
+                fi
+                ;;
+            *)
+                break
+                ;;
+        esac
+        _attempt=$((_attempt + 1))
+    done
+
+    case "${_http_code}" in
+        2??)
+            printf '%s\n' "${_body_file}"
+            return 0
+            ;;
+        403)
+            rm -f "${_body_file}"
+            die "GitHub API rate limit hit (HTTP 403) while resolving ${CRATE} release at ${API_RELEASES_URL}. Set GITHUB_TOKEN (or GH_TOKEN) to raise the unauthenticated 60/hr limit to 5000/hr, then retry."
+            ;;
+        000)
+            rm -f "${_body_file}"
+            die "failed to reach GitHub API at ${API_RELEASES_URL} (network error)"
+            ;;
+        *)
+            rm -f "${_body_file}"
+            die "GitHub API returned HTTP ${_http_code} querying ${API_RELEASES_URL}"
+            ;;
+    esac
+}
+
 # Why: Allow pinning a version, otherwise discover the newest published
 #      trusty-installer release so the one-liner always installs latest.
 # What: Echo a bare version (e.g. "0.2.0"). Honors TRUSTY_VERSION if set.
@@ -187,18 +279,20 @@ resolve_version() {
 
     say "Resolving latest ${CRATE} release..." >&2
 
-    # Fetch the releases list and extract the first trusty-installer-v* tag.
-    # No jq required — grep/sed only.
+    # Fetch the releases list body (status already validated by
+    # query_releases_api; a non-2xx dies there with an accurate message) and
+    # extract the first trusty-installer-v* tag. No jq required — grep/sed only.
+    _body_file="$(query_releases_api)"
     _ver="$(
-        curl -sSfL "${API_RELEASES_URL}" \
-            | grep '"tag_name"' \
+        grep '"tag_name"' "${_body_file}" \
             | grep "${TAG_PREFIX}" \
             | head -1 \
             | sed "s/.*\"${TAG_PREFIX}\\([^\"]*\\)\".*/\\1/"
-    )" || die "failed to query GitHub releases API at ${API_RELEASES_URL}"
+    )"
+    rm -f "${_body_file}"
 
     if [ -z "${_ver}" ]; then
-        die "no ${TAG_PREFIX}* release found at ${API_RELEASES_URL}"
+        die "no ${TAG_PREFIX}* release found at ${API_RELEASES_URL} (query succeeded but no matching tag in the response)"
     fi
 
     # Sanity-check it looks like a strict X.Y.Z version (digits and dots only).
@@ -523,6 +617,7 @@ main() {
                 say "  TRUSTY_INSTALL_DIR       Install dir (default: ${DEFAULT_INSTALL_DIR})"
                 say "  TRUSTY_YES=1             Skip all prompts (same as -y)"
                 say "  TRUSTY_NO_MODIFY_PATH=1  Do not modify shell PATH"
+                say "  GITHUB_TOKEN / GH_TOKEN  Auth header for release lookup (60/hr -> 5000/hr)"
                 exit 0
                 ;;
             *)
