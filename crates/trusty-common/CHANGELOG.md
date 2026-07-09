@@ -9,6 +9,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- capture tmux window id at session pause and reattach on resume ([#2269](https://github.com/bobmatnyc/trusty-tools/pull/2269)) ([`1959738`](https://github.com/bobmatnyc/trusty-tools/commit/1959738450d9a1b7adaf707d9d5980d6365fe4a7))
+## [Unreleased]
+
+### Added
+
 - `is_ephemeral_build_path` bin-resolve helper, detecting `target/debug|release`
   and worktree binary paths so callers can fall back to a PATH-resolved
   installed binary instead of baking in an ephemeral path (consumed by
