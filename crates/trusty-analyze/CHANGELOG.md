@@ -7,6 +7,12 @@ Versions correspond to `Cargo.toml` patch releases.
 
 ---
 
+## [0.7.3] — 2026-07-09
+
+### Changed
+
+- Version reconcile to match already-published crates.io state; no functional change.
+
 ## [0.7.2] — 2026-06-16
 
 ### Changed (closes part of #1318)

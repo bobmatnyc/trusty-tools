@@ -1,5 +1,11 @@
 # Changelog — trusty-embedderd
 
+## [0.3.7] — 2026-07-09
+
+### Changed
+
+- Add crates.io package metadata (keywords/categories/homepage/readme).
+
 ## [0.3.6] — 2026-07-08
 
 ### Changed

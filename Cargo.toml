@@ -25,17 +25,17 @@ authors = ["Bob Matsuoka <bob@matsuoka.com>"]
 [workspace.dependencies]
 # ── Internal crates (path deps so the monorepo builds without publish cycles) ──
 # trusty-code: per-project Claude-Code-compatible MPM orchestration harness (#587).
-# publish=false; version 0.0.0 intentionally — pre-release scaffold.
+# First published to crates.io at version 0.1.0.
 trusty-code = { path = "crates/trusty-code" }
-trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.2.0" }
+trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.2.1" }
 trusty-common = { path = "crates/trusty-common", version = "0.22.4" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
-trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.6" }
+trusty-embedderd = { path = "crates/trusty-embedderd", version = "0.3.7" }
 # trusty-bm25-daemon: per-palace BM25 lexical-index daemon — referenced by
 # trusty-memory so `cargo install trusty-memory` produces both binaries from
 # one command (mirrors the trusty-embedderd / trusty-search pattern, PR #190).
-trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.1.2" }
+trusty-bm25-daemon = { path = "crates/trusty-bm25-daemon", version = "0.1.3" }
 # tga: trusty-git-analytics — developer productivity analytics.
 # Referenced by trusty-review for contributor-profile data pipeline (#558).
 tga = { path = "crates/trusty-git-analytics", version = "2.9.0" }
@@ -52,10 +52,10 @@ trusty-review = { path = "crates/trusty-review", version = "0.6.1" }
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
 # published library crate; the path entry remains so any local lib consumers
 # resolve in-tree.
-trusty-console = { path = "crates/trusty-console", version = "0.3.1" }
+trusty-console = { path = "crates/trusty-console", version = "0.4.0" }
 # trusty-progress: shared rustup/cargo-style progress + status display (#1315).
 # Consumed by trusty-installer for install/upgrade component rows; published library crate.
-trusty-progress = { path = "crates/trusty-progress", version = "0.1.0" }
+trusty-progress = { path = "crates/trusty-progress", version = "0.1.1" }
 
 # ── Async runtime / HTTP ────────────────────────────────────────────────────
 anyhow = "1"
