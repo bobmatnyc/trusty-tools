@@ -916,4 +916,137 @@ fn assemble_report_keeps_turn_cap_exceeded_with_no_deliverable_as_run_failure() 
         ExitCode::RunFailure,
         "a TurnCapExceeded PM error with NO deliverable must stay RunFailure (fix #4)"
     );
+    let _ = &report;
+}
+
+// ── #2265 fix #5: PM stops re-delegating once the cap latches ──────────────────
+
+/// An `LlmClientTrait` that forces a retryable `LlmError` at specific GLOBAL
+/// call indices (shared across the PM's and the engineer's chat calls) and
+/// otherwise forwards to an inner `ScriptedLlm`, whose own fixture cursor
+/// only advances on forwarded (non-forced-error) calls.
+///
+/// Why: `repeated_llm_errors_trigger_redelegation_cap_not_pm_turn_cap` proves
+/// the cap latches within one `delegate_to_agent` dispatch, but its mock
+/// exhausts entirely at that point — a bare-exhaustion error also aborts the
+/// PM's OWN next `chat` call, so that test cannot distinguish "the PM's loop
+/// stopped itself before calling chat again" (this fix) from "the PM's chat
+/// call happened and failed anyway" (the pre-fix behaviour would produce the
+/// same shape of error there). This wrapper keeps VALID `delegate_to_agent`
+/// fixtures queued up behind the forced-error window, standing in for a real
+/// model that keeps deciding to re-delegate because it does not understand
+/// the cap-reached tool error — the exact bake-off L1 failure mode. If the
+/// PM's loop does NOT stop itself, those fixtures get consumed and recorded;
+/// if it does, the global call counter never reaches them.
+/// What: `error_at` global call indices return `LlmError::ApiError` (a
+/// retryable `AgentLoopError::Llm` per `redelegation_hint`) without touching
+/// `inner`; every other index forwards to `inner.chat`, so `inner`'s fixture
+/// list is consumed strictly in the order its calls are actually forwarded.
+/// Test: `pm_stops_redelegating_once_cap_latched_ends_partial_promptly`.
+struct FlakyThenRepeatLlm {
+    inner: ScriptedLlm,
+    counter: AtomicUsize,
+    error_at: Vec<usize>,
+}
+
+#[async_trait]
+impl LlmClientTrait for FlakyThenRepeatLlm {
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        let idx = self.counter.fetch_add(1, Ordering::SeqCst);
+        if self.error_at.contains(&idx) {
+            return Err(LlmError::ApiError {
+                status: 500,
+                body: "synthetic retryable transport failure".to_string(),
+            });
+        }
+        self.inner.chat(req).await
+    }
+}
+
+/// Once the shared re-delegation cap latches, the PM must stop issuing
+/// `delegate_to_agent` calls immediately (bounded total chat calls, well
+/// under the PM's `max_turns` of 8) and the run must still end `Partial`
+/// with the deliverable the engineer already wrote preserved in the diff.
+///
+/// Why: This is the exact #2265 follow-up regression closed by fix #5: before
+/// this fix, `AgentLoop::run_inner` had no way to learn the cap had latched,
+/// so the PM's own LLM — seeing only an opaque tool error, with nothing
+/// telling it re-delegating again is pointless — could keep calling
+/// `delegate_to_agent` every remaining turn, each one an instant, guaranteed
+/// dead end (bake-off L1 evidence: "re-delegation limit reached after 10
+/// attempts … turn cap of 8 exceeded", 3 productive attempts + 7 wasted PM
+/// turns). The exit code must NOT change — `assemble_report` already maps a
+/// cap-latched, deliverable-bearing run to `Partial` regardless of which
+/// `AgentLoopError` variant fired; this test proves the fix trims the wasted
+/// turns without touching that mapping.
+/// What: Script [PM delegate, engineer write_file (the deliverable), then 3
+/// forced retryable `Llm` errors — engineer's own second turn plus its two
+/// internal reuse-hint retries — landing the shared cap at
+/// `MAX_REDELEGATIONS` attempts entirely inside that ONE PM dispatch]. Queue
+/// SIX MORE valid `delegate_to_agent` fixtures behind that window (as if a
+/// real model kept trying) — enough to fill the PM's remaining `max_turns`
+/// budget if the fix did not stop it. Assert: `exit == Partial`, the diff
+/// still names `hello.py`, the PM's own turn count is exactly 1 (it never
+/// reached a second turn), and the total number of chat calls made across
+/// the whole run stayed small (well below the ~12 calls an unfixed run would
+/// need to hit its own `TurnCapExceeded`) — direct proof the trailing
+/// `delegate_response` fixtures were never consumed.
+/// Test: this test.
+#[tokio::test]
+async fn pm_stops_redelegating_once_cap_latched_ends_partial_promptly() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let inner = ScriptedLlm::from_json(&[
+        delegate_response("do work"),
+        write_file_response("hello.py", "print(1)"),
+        // Trailing fixtures a real, cap-unaware model might trigger by
+        // calling delegate_to_agent again on turns 2..8 — must NEVER be
+        // consumed once the fix is in place.
+        delegate_response("task-2"),
+        delegate_response("task-3"),
+        delegate_response("task-4"),
+        delegate_response("task-5"),
+        delegate_response("task-6"),
+        delegate_response("task-7"),
+    ]);
+    let llm = Arc::new(FlakyThenRepeatLlm {
+        inner,
+        counter: AtomicUsize::new(0),
+        // Global calls: 0=PM delegate, 1=engineer write_file, then 2,3,4 are
+        // the engineer's own failing turn plus its two internal reuse-hint
+        // retries — landing attempt 4 (> MAX_REDELEGATIONS=3) and latching
+        // the cap without a 5th call.
+        error_at: vec![2, 3, 4],
+    });
+
+    let report = execute_run_task(params(&agents, &project, None), llm.clone()).await;
+
+    assert_eq!(
+        report.exit,
+        ExitCode::Partial,
+        "the cap latched but the engineer's write_file already produced a \
+         deliverable, so this must be Partial, not RunFailure; got task: {}",
+        report.task
+    );
+    assert!(
+        report.diff.contains("hello.py"),
+        "the deliverable diff must be preserved, got: {}",
+        report.diff
+    );
+
+    let pm_turns = report.transcript.iter().filter(|t| t.role == "pm").count();
+    assert_eq!(
+        pm_turns, 1,
+        "the PM must stop after its single delegating turn — it must never \
+         reach a second turn once the cap has latched"
+    );
+
+    let total_calls = llm.counter.load(Ordering::SeqCst);
+    assert!(
+        total_calls <= 5,
+        "the PM must not have issued any further delegate_to_agent calls \
+         after the cap latched (bounded, not spinning to the ~12 calls an \
+         unfixed 8-turn PM loop would need), got {total_calls} total chat calls"
+    );
 }
