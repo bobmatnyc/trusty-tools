@@ -9,6 +9,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 description = "Per-project Claude-Code-compatible MPM orchestration harness (bin: tcode) — an original coding harness, tracked under epic #2052."
+readme = "README.md"
+homepage = "https://github.com/bobmatnyc/trusty-tools"
+keywords = ["cli", "mcp", "orchestration", "agents", "harness"]
+categories = ["command-line-utilities", "development-tools"]
 publish = false
 
 [[bin]]
