@@ -9,7 +9,7 @@
 //! `chat_response_first_text_content`, `chat_response_first_tool_calls`,
 //! `chat_response_usage_into_token_usage`.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::perf::TokenUsage;
 
@@ -20,11 +20,13 @@ use super::usage::UsageBlock;
 ///
 /// Why: Mirrors `ChatMessage` but uses explicit struct rather than re-using the
 /// request type to keep request/response paths cleanly separated and avoid
-/// accidental mis-serialisation.
+/// accidental mis-serialisation. `Serialize` (#2264) lets the debug-capture
+/// transcript (`llm::debug_capture`) dump the FULL response — including
+/// tool-call arguments, not just names — verbatim to JSONL.
 /// What: `content` is the text (or `None` for tool-only turns); `tool_calls`
 /// carries any function invocations.
 /// Test: `assistant_message_text_and_tool_calls`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
     /// Text content; `None` when the turn consists solely of tool calls.
     pub content: Option<String>,
@@ -41,7 +43,7 @@ pub struct AssistantMessage {
 /// What: `message` holds the assistant turn (text and/or tool calls);
 /// `finish_reason` carries the stop condition.
 /// Test: `chat_response_deserialises_fixture`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatChoice {
     /// The assistant message produced for this choice.
     pub message: AssistantMessage,
@@ -66,7 +68,7 @@ pub struct ChatChoice {
 /// Test: `chat_response_deserialises_fixture`,
 /// `resolved_model_prefers_response_model_over_requested`,
 /// `resolved_model_falls_back_to_requested_when_absent`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatResponse {
     /// Opaque response identifier from the provider.
     pub id: String,

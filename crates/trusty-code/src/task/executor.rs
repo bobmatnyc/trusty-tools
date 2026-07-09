@@ -40,7 +40,7 @@ use async_trait::async_trait;
 use crate::agent_loop::{AgentLoop, AgentLoopConfig, ToolEventSink};
 use crate::agents::AgentConfig;
 use crate::jsonrpc::RpcError;
-use crate::llm::LlmClientTrait;
+use crate::llm::{DebugCaptureSink, LlmClientTrait, wrap_with_debug_capture};
 use crate::mode::HarnessMode;
 use crate::project_context::load_project_context;
 use crate::prompt::assemble_system_prompt_for_mode;
@@ -151,6 +151,12 @@ async fn run_and_record(
         session_id.clone(),
     ));
 
+    // #2264: mirrors `run_task::execute_run_task`'s own resolution — one
+    // shared (optional) debug-capture sink for the whole run, so pm and
+    // engineer turns land in one globally-ordered JSONL file when
+    // `TCODE_DEBUG_TRANSCRIPT` is set, and cost nothing when it is not.
+    let debug_sink: Option<Arc<DebugCaptureSink>> = DebugCaptureSink::from_env();
+
     let pm_config_path = params
         .agents_dir
         .join(format!("{}.toml", params.agent_name));
@@ -178,7 +184,7 @@ async fn run_and_record(
     let skills_catalog = daily_driver_skills_catalog(&params);
 
     let engineer_runner = build_engineer_runner(
-        Arc::clone(&llm),
+        wrap_with_debug_capture(Arc::clone(&llm), ENGINEER_AGENT_NAME, debug_sink.as_ref()),
         &params,
         project_context.clone(),
         skills_catalog.as_ref().map(|(catalog, _)| catalog.clone()),
@@ -199,7 +205,7 @@ async fn run_and_record(
     }
 
     let pm_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
-        Arc::clone(&llm),
+        wrap_with_debug_capture(Arc::clone(&llm), "pm", debug_sink.as_ref()),
         "pm",
         Arc::clone(&transcript),
     ));

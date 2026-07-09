@@ -9,7 +9,7 @@
 //! `usage_block_maps_openrouter_prompt_tokens_details`,
 //! `usage_block_prefers_authoritative_cost`.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::perf::TokenUsage;
 
@@ -29,7 +29,7 @@ use crate::perf::TokenUsage;
 /// What: Carries the two cache counters OpenRouter reports; `audio_tokens` is
 /// deliberately not modelled (irrelevant to this crate's text-only usage).
 /// Test: `usage_block_maps_openrouter_prompt_tokens_details`.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PromptTokensDetails {
     /// Prompt tokens served from the cache (OpenRouter's OpenAI-style name for
     /// what Anthropic calls `cache_read_input_tokens`).
@@ -58,7 +58,7 @@ pub struct PromptTokensDetails {
 /// Test: `usage_block_maps_to_token_usage`,
 /// `usage_block_maps_openrouter_prompt_tokens_details`,
 /// `usage_block_prefers_authoritative_cost`.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct UsageBlock {
     /// Tokens consumed by the prompt (including cached tokens).
     #[serde(default)]

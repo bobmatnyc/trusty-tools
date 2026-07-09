@@ -12,19 +12,23 @@
 //! (Bedrock Converse), `DispatchingLlmClient` (routes each request to the
 //! right transport by model slug via `crate::provider::provider_for`),
 //! `LlmClientConfig`, all request/response types (`ChatRequest`,
-//! `ChatResponse`, `ChatMessage`, `ToolDefinition`, …), and `LlmError`. The
-//! OpenRouter API key is injected at construction time via
+//! `ChatResponse`, `ChatMessage`, `ToolDefinition`, …), `LlmError`, and
+//! (#2264) the opt-in `debug_capture` module — `DebugCaptureSink` +
+//! `wrap_with_debug_capture` — that dumps the FULL wire-level request/
+//! response of every round-trip to JSONL when `TCODE_DEBUG_TRANSCRIPT` is
+//! set. The OpenRouter API key is injected at construction time via
 //! `LlmClientConfig::new`/`from_env`; Bedrock uses the standard AWS
 //! credential chain (no key). Library helpers never read `std::env` directly
 //! except at these documented construction seams.
 //! Test: `cargo test -p trusty-code` covers all unit tests (serialisation,
 //! deserialisation, error mapping, Bedrock message/tool-choice/response
-//! conversion). `cargo test -p trusty-code -- --include-ignored` additionally
-//! runs the live `live_openrouter_call`/`live_bedrock_call` tests.
+//! conversion, debug-capture). `cargo test -p trusty-code -- --include-ignored`
+//! additionally runs the live `live_openrouter_call`/`live_bedrock_call` tests.
 
 mod bedrock;
 mod client;
 mod client_trait;
+mod debug_capture;
 mod dispatch;
 mod error;
 mod message;
@@ -38,6 +42,7 @@ mod usage;
 pub use bedrock::BedrockChatClient;
 pub use client::{LlmClient, LlmClientConfig};
 pub use client_trait::LlmClientTrait;
+pub use debug_capture::{DebugCaptureSink, wrap_with_debug_capture};
 pub use dispatch::DispatchingLlmClient;
 pub use error::LlmError;
 pub use message::ChatMessage;
