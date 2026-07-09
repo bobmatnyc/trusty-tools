@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- idle-to-disk palace eviction + unpin dream scheduler + configurable max-open ([#2276](https://github.com/bobmatnyc/trusty-tools/pull/2276)) ([`0e8e504`](https://github.com/bobmatnyc/trusty-tools/commit/0e8e50440cea09a8f5eedf2c7bba9613f96cd8a8))
+## [Unreleased]
+
 ### Added
 
 - capture tmux window id at session pause and reattach on resume ([#2269](https://github.com/bobmatnyc/trusty-tools/pull/2269)) ([`1959738`](https://github.com/bobmatnyc/trusty-tools/commit/1959738450d9a1b7adaf707d9d5980d6365fe4a7))
