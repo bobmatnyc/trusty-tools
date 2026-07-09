@@ -99,6 +99,10 @@ pub mod dream_scheduler;
 /// ceiling and current consumption without needing lsof or shell access.
 /// Test: `fd_metrics::tests::fd_metrics_returns_sane_values`.
 pub mod fd_metrics;
+/// Idle-to-disk eviction ticker: periodically drops cold palace handles to
+/// bound resident RSS. Wired in `spawn_startup_tasks` next to the dream
+/// scheduler; configured via `TRUSTY_MEMORY_IDLE_EVICT_SECS`.
+pub mod idle_evict;
 // Why (issue #226): `chat` and `web` are pure axum HTTP/SSE handler
 //      surfaces. Gating them behind the `axum-server` feature is what lets
 //      library consumers (e.g. `open-mpm` linking only `MemoryMcpService`)
@@ -811,7 +815,9 @@ impl AppState {
         tools::spawn_bm25_index_worker(bm25_index_rx, None, None);
         Self {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            registry: Arc::new(PalaceRegistry::new()),
+            // Idle-to-disk: honour TRUSTY_MEMORY_MAX_OPEN_PALACES (default 64)
+            // so operators can bound resident-palace RAM without a rebuild.
+            registry: Arc::new(PalaceRegistry::from_env()),
             data_root,
             embedder: Arc::new(OnceCell::new()),
             default_palace: None,
@@ -1082,7 +1088,9 @@ impl AppState {
         // shared one (`strong_count > 1`) would silently drop live handles or
         // strand other clones on the stale read-only registry (issue #1487).
         debug_assert!(self.registry.is_empty() && Arc::strong_count(&self.registry) == 1);
-        self.registry = Arc::new(PalaceRegistry::new().with_writer_intent());
+        // Idle-to-disk: preserve the configurable open-handle cap
+        // (TRUSTY_MEMORY_MAX_OPEN_PALACES) while marking the registry a writer.
+        self.registry = Arc::new(PalaceRegistry::from_env().with_writer_intent());
         self
     }
 
