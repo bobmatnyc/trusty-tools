@@ -60,6 +60,29 @@ continuing work.
 > auto-inject-on-session-start. Only the automatic injection path does. This is
 > intentional.
 
+## Re-aligning the Tmux Window
+
+If the catchup digest surfaces a **Tmux Window** line (recorded at pause time as
+`session_name:window_index:window_id`, e.g. `main:2:@7`), realign to the
+originating window so resumed work lands where it left off. Parse the string on
+`:` and use only the `session_name` and `window_index`:
+
+```bash
+# The digest line looks like: **Tmux Window:** main:2:@7
+if [ -n "$TMUX" ]; then
+  # inside tmux → select the recorded window (idempotent no-op if already there)
+  tmux select-window -t 'main:2'   # <session_name>:<window_index> from the digest
+else
+  # not inside tmux → just report it; do not attempt to attach
+  echo "Recorded tmux window: main:2:@7 (start tmux to re-align)"
+fi
+```
+
+This step is a **no-op** when no `Tmux Window` line is present (older snapshots
+or sessions paused outside tmux). `tmux select-window` is safe and idempotent —
+if you are already on that window it does nothing. Never force-create windows or
+attach sessions here; only align within the current tmux client.
+
 ## Session Store Location
 
 ```

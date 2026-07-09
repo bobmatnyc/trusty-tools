@@ -74,7 +74,15 @@ a deliverable. No git commit is created by pausing.
 Branch: {current branch}
 Last commit: {hash and message}
 Uncommitted changes: {git status summary}
+
+## Tmux Window
+{session_name:window_index:window_id, e.g. main:2:@7 — omit this section entirely when not inside tmux}
 ```
+
+The `## Tmux Window` section records the originating tmux window so
+`/tm-session-resume` can re-align you to it with `tmux select-window`. Only
+include the section when the capture step below produced a value; snapshots
+created outside tmux simply omit it (resume treats absence as a no-op).
 
 ## Procedure
 
@@ -82,7 +90,14 @@ Uncommitted changes: {git status summary}
 git status                       # working-tree state for the Git Context block
 git log --oneline -10            # recent commits for context
 mkdir -p .trusty-mpm/sessions    # ensure the store exists
-# write session-{timestamp}.md using the format above, then:
+
+# Capture the current tmux window ONLY when inside tmux; skip the section otherwise.
+if [ -n "$TMUX" ]; then
+  tmux display-message -p '#{session_name}:#{window_index}:#{window_id}'
+fi
+
+# write session-{timestamp}.md using the format above — include a `## Tmux Window`
+# section holding the captured string ONLY if the command above printed one, then:
 # echo "session-{timestamp}.md" > .trusty-mpm/sessions/LATEST-SESSION.txt
 ```
 
