@@ -1349,6 +1349,44 @@ async fn cancel_flag_aborts_before_next_turn() {
     );
 }
 
+/// An external stop signal (#2265 fix #5) that reports `true` must abort the
+/// loop with `AgentLoopError::StoppedBySignal` before the next turn's LLM
+/// call — never mid-tool-call. Mirrors `cancel_flag_aborts_before_next_turn`
+/// exactly, proving `with_stop_signal` shares the same turn-boundary contract
+/// as `with_cancel_flag`.
+///
+/// Why: This is the generic mechanism `run_task`'s PM loop relies on to stop
+/// issuing `delegate_to_agent` calls the turn after the shared re-delegation
+/// cap latches (see `run_task::mod`'s `execute_run_task` wiring and
+/// `run_task::tests::pm_stops_redelegating_once_cap_latched_ends_partial_promptly`
+/// for the production end-to-end proof); this test isolates the loop
+/// mechanism itself from any `run_task`-specific signal.
+/// What: A closure pre-set to always return `true` before the loop even
+/// starts must abort on the very first turn boundary, making zero `chat`
+/// calls.
+/// Test: this test.
+#[tokio::test]
+async fn stop_signal_aborts_before_next_turn() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[stop_response(
+        "should never be reached",
+    )]));
+    let registry = registry_with_echo(false);
+
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default())
+        .with_stop_signal(Arc::new(|| true));
+
+    let err = agent
+        .run("sys", "task")
+        .await
+        .expect_err("must abort as stopped-by-signal");
+    assert!(matches!(err, AgentLoopError::StoppedBySignal { .. }));
+    assert_eq!(
+        llm.calls(),
+        0,
+        "the stop signal must be observed before any chat call"
+    );
+}
+
 // ── Prompt-caching gate tests (#2156) ────────────────────────────────────────────
 
 /// A `DailyDriver` run against an `anthropic/*` model marks the static

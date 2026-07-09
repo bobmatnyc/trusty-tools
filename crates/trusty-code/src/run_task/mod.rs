@@ -93,13 +93,18 @@ pub struct RunTaskParams {
 /// What: Loads the PM config, assembles its prompt (BASE + PM prompt + project
 /// `CLAUDE.md`), builds the engineer runner (fs/bash scoped to the project, with
 /// the optional per-run model override), wraps it in the PM's
-/// `DelegateToAgentTool`, snapshots the working tree, runs the PM `AgentLoop`,
+/// `DelegateToAgentTool`, snapshots the working tree, runs the PM `AgentLoop`
+/// (#2265 fix #5: wired with `with_stop_signal` against the SAME
+/// `redelegation_signal` the engineer runner shares, so the PM stops issuing
+/// `delegate_to_agent` calls the turn after the re-delegation cap latches
+/// instead of spinning through its remaining turns on doomed retries),
 /// snapshots again, and assembles a `RunReport` (diff + transcript + usage/cost +
 /// exit code). A PM-config or loop error yields a `ConfigError`/`RunFailure`
 /// report rather than a panic.
 /// Test: `run_task::tests::end_to_end_pm_delegates_to_engineer`,
 /// `diff_reflects_engineer_file_change`, `usage_and_cost_aggregate_end_to_end`,
-/// `exit_code_reflects_run_failure`.
+/// `exit_code_reflects_run_failure`,
+/// `pm_stops_redelegating_once_cap_latched_ends_partial_promptly`.
 pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait>) -> RunReport {
     let transcript: SharedTranscript = Arc::new(Mutex::new(Vec::new()));
 
@@ -177,6 +182,19 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
         project_context.as_deref(),
         catchup_ctx.as_deref(),
     );
+    // (#2265 fix #5) Once the shared re-delegation cap latches, every further
+    // `delegate_to_agent` call the PM might issue is a guaranteed dead end —
+    // `RedelegatingRunner` will reject it immediately without even invoking
+    // the engineer. Wiring the SAME signal into the PM's own loop as a stop
+    // condition (checked at the existing turn-boundary, alongside the #2056
+    // cancellation flag) stops the PM from spending its remaining
+    // `max_turns` issuing those doomed calls one per turn — the bake-off L1
+    // regression this fix closes (see `redelegation` module docs for the
+    // full before/after). `assemble_report` already maps a cap-latched,
+    // deliverable-bearing run to `ExitCode::Partial` regardless of which
+    // `AgentLoopError` variant the PM's loop returns, so this purely trims
+    // wasted turns — it does not change the reported outcome.
+    let stop_signal = redelegation_signal.clone();
     let pm_loop = AgentLoop::new(
         AgentLoopConfig {
             model: pm_model.clone(),
@@ -186,7 +204,8 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
         },
         pm_llm,
         Arc::new(pm_registry),
-    );
+    )
+    .with_stop_signal(Arc::new(move || stop_signal.is_cap_reached()));
 
     // Snapshot before, run the PM, snapshot after.
     let before = diff::capture_snapshot(&params.project);

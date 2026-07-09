@@ -18,7 +18,8 @@
 //! explicit, successfully-validated `finish_task` tool call, whose structured
 //! `status`/`summary`/`changes`/test-count fields become the final
 //! `AgentOutput` via `build_finish_output`. Aborts with a partial output when
-//! the turn cap, timeout, or (#2056) an external cancellation flag fires.
+//! the turn cap, timeout, (#2056) an external cancellation flag, or (#2265
+//! fix #5) an external stop signal fires.
 //! What: The whole `chat → dispatch → iterate` body runs inside a single
 //! `tokio::time::timeout` so a stalled model or hung tool cannot block forever.
 //! Test: `agent_loop::tests` — stubbed two-turn flow, turn-cap abort, recoverable
@@ -139,10 +140,12 @@ impl Default for AgentLoopConfig {
 /// sites express intent ("run this task") not mechanics.
 /// What: Holds the config, an `Arc<dyn LlmClientTrait>` (mockable in tests), an
 /// `Arc<ToolRegistry>` whose schemas are advertised and whose `dispatch_gated`
-/// executes tool calls, and (#2056) two OPTIONAL collaborators set via builder
-/// methods after construction: a `sink` notified around every tool dispatch,
-/// and a `cancel` flag checked once per turn boundary. Both default to `None`,
-/// so every existing call site (`run_task`, `runner::in_process`) is unaffected.
+/// executes tool calls, and three OPTIONAL collaborators set via builder
+/// methods after construction: (#2056) a `sink` notified around every tool
+/// dispatch, (#2056) a `cancel` flag checked once per turn boundary, and
+/// (#2265 fix #5) a `stop_signal` closure checked at that SAME turn boundary.
+/// All three default to `None`, so every existing call site (`run_task`,
+/// `runner::in_process`) is unaffected.
 /// Test: `agent_loop::tests::*`.
 pub struct AgentLoop {
     config: AgentLoopConfig,
@@ -150,6 +153,7 @@ pub struct AgentLoop {
     registry: Arc<ToolRegistry>,
     sink: Option<Arc<dyn ToolEventSink>>,
     cancel: Option<Arc<AtomicBool>>,
+    stop_signal: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl AgentLoop {
@@ -158,10 +162,13 @@ impl AgentLoop {
     /// Why: Constructor injection keeps the loop testable — production passes a
     /// real `LlmClient`, tests pass a scripted mock, both as
     /// `Arc<dyn LlmClientTrait>`.
-    /// What: Stores the config, LLM client, and tool registry; `sink`/`cancel`
-    /// start `None` — attach them via [`Self::with_tool_event_sink`]/
-    /// [`Self::with_cancel_flag`] when the caller needs them (#2056's
-    /// daemon-driven task execution does; `run_task`'s CLI path does not).
+    /// What: Stores the config, LLM client, and tool registry; `sink`/`cancel`/
+    /// `stop_signal` start `None` — attach them via
+    /// [`Self::with_tool_event_sink`]/[`Self::with_cancel_flag`]/
+    /// [`Self::with_stop_signal`] when the caller needs them (#2056's
+    /// daemon-driven task execution attaches the first two; `run_task`'s PM
+    /// loop attaches `stop_signal` (#2265 fix #5); the delegated engineer's
+    /// own loop attaches none of them).
     /// Test: `agent_loop::tests::two_turn_flow_completes`.
     pub fn new(
         config: AgentLoopConfig,
@@ -174,6 +181,7 @@ impl AgentLoop {
             registry,
             sink: None,
             cancel: None,
+            stop_signal: None,
         }
     }
 
@@ -200,6 +208,31 @@ impl AgentLoop {
     /// Test: `agent_loop::tests::cancel_flag_aborts_before_next_turn`.
     pub fn with_cancel_flag(mut self, cancel: Arc<AtomicBool>) -> Self {
         self.cancel = Some(cancel);
+        self
+    }
+
+    /// Attach an external stop condition checked once per turn boundary
+    /// (#2265 fix #5).
+    ///
+    /// Why: Some callers know, independently of this loop's own turn/timeout
+    /// budget, that a shared external condition has made further turns
+    /// pointless — `run_task`'s PM loop is the motivating case: once its
+    /// shared `redelegation::RedelegationCapSignal` latches (the engineer
+    /// delegation retry decorator has exhausted `MAX_REDELEGATIONS`), every
+    /// subsequent `delegate_to_agent` call is a guaranteed dead end, so the
+    /// PM must stop issuing them rather than silently burning its remaining
+    /// `max_turns` one doomed tool call at a time (the exact bake-off L1
+    /// regression this fix closes). Modelled as a boolean-returning closure,
+    /// not a narrower `RedelegationCapSignal`-specific hook, so `agent_loop`
+    /// stays generic and does not need to depend on `run_task`.
+    /// What: Builder-style setter; returns `self` for chaining. Checked with
+    /// the SAME turn-boundary placement as [`Self::with_cancel_flag`] — once
+    /// per iteration, before the next `chat` call, never mid-tool-call — so a
+    /// tool dispatch already in flight always completes and is answered
+    /// first.
+    /// Test: `agent_loop::tests::stop_signal_aborts_before_next_turn`.
+    pub fn with_stop_signal(mut self, signal: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        self.stop_signal = Some(signal);
         self
     }
 
@@ -243,8 +276,11 @@ impl AgentLoop {
     /// assembled output — the D3 fallback, unchanged. Per D3, `finish_reason`
     /// never gates termination — pending tool calls always run first.
     /// Exhausting the turn budget returns `TurnCapExceeded`; an observed
-    /// cancellation returns `Cancelled` — both with the partial transcript.
+    /// cancellation returns `Cancelled`; an observed (#2265 fix #5) external
+    /// stop signal returns `StoppedBySignal` — all three with the partial
+    /// transcript.
     /// Test: Same tests as `run`, plus `cancel_flag_aborts_before_next_turn`,
+    /// `stop_signal_aborts_before_next_turn`,
     /// `explicit_finish_task_terminates_loop_with_structured_summary`.
     async fn run_inner(
         &self,
@@ -261,6 +297,20 @@ impl AgentLoop {
                 && cancel.load(Ordering::Relaxed)
             {
                 return Err(AgentLoopError::Cancelled {
+                    partial: Box::new(build_output(transcript, perf)),
+                });
+            }
+
+            // #2265 fix #5: the external stop-signal check, same turn
+            // boundary as the cancellation check above — never mid-tool-call.
+            // This is what stops `run_task`'s PM loop from issuing further
+            // `delegate_to_agent` calls once the shared re-delegation cap has
+            // latched, instead of silently spinning through the remaining
+            // `max_turns` on doomed retries.
+            if let Some(stop) = &self.stop_signal
+                && stop()
+            {
+                return Err(AgentLoopError::StoppedBySignal {
                     partial: Box::new(build_output(transcript, perf)),
                 });
             }

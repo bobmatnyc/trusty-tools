@@ -63,9 +63,14 @@ use crate::tools::traits::{AgentRunner, ToolExecutor, ToolResult};
 /// there is no partial transcript snapshot to point to.
 /// What: Downcasts `err` to [`RunnerError`] and matches `RunnerError::Loop`
 /// whose source is `AgentLoopError::TurnCapExceeded`, `Timeout`, `Cancelled`,
-/// or (#2265) `Llm`. Returns `None` only for `UnknownAgent`/`ConfigLoad` —
-/// failures that never reached a sub-agent loop at all, so there is nothing
-/// on disk to reuse.
+/// (#2265) `Llm`, or (#2265 fix #5) `StoppedBySignal`. Returns `None` only
+/// for `UnknownAgent`/`ConfigLoad` — failures that never reached a sub-agent
+/// loop at all, so there is nothing on disk to reuse.
+/// Note: a delegated engineer's own sub-loop never actually attaches a stop
+/// signal today (only `run_task`'s PM loop does, via
+/// `AgentLoop::with_stop_signal`), so `StoppedBySignal` is unreachable from
+/// this call site in practice; it is included for exhaustiveness and to stay
+/// correct if that ever changes.
 /// Test: `redelegation_hint_present_on_turn_cap_exceeded`,
 /// `redelegation_hint_present_on_timeout`,
 /// `redelegation_hint_present_on_cancelled`,
@@ -79,6 +84,7 @@ pub(crate) fn redelegation_hint(err: &anyhow::Error) -> Option<&'static str> {
         AgentLoopError::TurnCapExceeded { .. }
         | AgentLoopError::Timeout { .. }
         | AgentLoopError::Cancelled { .. }
+        | AgentLoopError::StoppedBySignal { .. }
         | AgentLoopError::Llm(_) => Some(
             "\n\nNOTE for re-delegation: the sub-agent's previous attempt did not reach a \
              normal finish — it ran out of turns or time, was cancelled, or hit a \
