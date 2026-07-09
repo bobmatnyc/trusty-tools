@@ -6,9 +6,12 @@
 //! fall back to `cargo install` when the target is unsupported, when no matching
 //! release asset exists, or when any download/verify/extract step fails.
 //!
-//! What: Three focused submodules:
+//! What: Four focused submodules:
 //! - [`platform`] — Tier-1 target detection (`aarch64-apple-darwin`,
-//!   `x86_64-unknown-linux-gnu`).
+//!   `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`).
+//! - [`glibc`] — host-glibc probing and glibc-aware ORT asset selection so
+//!   low-glibc Linux hosts get the portable AL2023 asset instead of a binary
+//!   that fails with `GLIBC_2.39 not found` (issue #1992).
 //! - [`release`] — GitHub Releases API queries and asset-URL construction.
 //! - [`fetch`] — HTTP download, SHA-256 verification, tar.gz extraction, and
 //!   atomic binary placement.
@@ -22,6 +25,7 @@
 //! The orchestrator's fallback decision logic is tested in `tests` below.
 
 pub mod fetch;
+pub mod glibc;
 pub mod platform;
 pub mod release;
 
@@ -104,12 +108,20 @@ pub async fn try_install_prebuilt(crate_name: &str, install_dir: &std::path::Pat
         }
     };
 
-    // Step 3: Build URLs.
-    let archive_name = release::asset_filename(crate_name, &resolved.version, target);
-    let tarball_url = release::asset_url(&resolved.tag, crate_name, &resolved.version, target);
-    let sha_url = release::sha256_url(&resolved.tag, crate_name, &resolved.version, target);
+    // Step 3: Pick the glibc-aware asset suffix. On a low-glibc x86_64 Linux
+    // host the native ORT asset would crash with `GLIBC_2.39 not found`, so an
+    // ORT crate is routed to the portable `x86_64-linux-al2023` load-dynamic
+    // asset instead (issue #1992). Non-ORT crates and adequate hosts keep the
+    // native target suffix.
+    let choice = glibc::select_asset_suffix(crate_name, target, glibc::host_glibc_version());
+    let suffix = choice.suffix.as_str();
 
-    // Step 4: Download into a temp dir, verify, extract, place — atomically.
+    // Step 4: Build URLs from the chosen suffix.
+    let archive_name = release::asset_filename(crate_name, &resolved.version, suffix);
+    let tarball_url = release::asset_url(&resolved.tag, crate_name, &resolved.version, suffix);
+    let sha_url = release::sha256_url(&resolved.tag, crate_name, &resolved.version, suffix);
+
+    // Step 5: Download into a temp dir, verify, extract, place — atomically.
     match install_from_urls(
         &client,
         crate_name,
@@ -121,10 +133,23 @@ pub async fn try_install_prebuilt(crate_name: &str, install_dir: &std::path::Pat
     )
     .await
     {
-        Ok(paths) => Outcome::Installed {
-            paths,
-            version: resolved.version,
-        },
+        Ok(paths) => {
+            // A load-dynamic asset dlopen()s libonnxruntime.so at startup and
+            // will not run until ORT_DYLIB_PATH is set — surface the setup steps
+            // rather than leaving a binary that silently fails to start.
+            if choice.load_dynamic {
+                tracing::warn!(
+                    crate_name,
+                    asset = suffix,
+                    "{}",
+                    glibc::ort_dylib_instructions(target)
+                );
+            }
+            Outcome::Installed {
+                paths,
+                version: resolved.version,
+            }
+        }
         Err(e) => Outcome::Fallback {
             reason: format!("prebuilt download failed ({e}); falling back to cargo install"),
         },
@@ -220,7 +245,7 @@ mod tests {
     fn fallback_on_unsupported_target() {
         // A non-Tier-1 triple must never reach the network.
         assert!(!platform::is_tier1_target("x86_64-apple-darwin"));
-        assert!(!platform::is_tier1_target("aarch64-unknown-linux-gnu"));
+        assert!(!platform::is_tier1_target("aarch64-unknown-linux-musl"));
         assert!(!platform::is_tier1_target("wasm32-unknown-unknown"));
     }
 
