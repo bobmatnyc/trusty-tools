@@ -7,17 +7,14 @@
 # and /* ... */ block comments (including multi-line spans). Trailing-comment lines count.
 # Ratchet: budgets may only DECREASE; when a file drops <= its applicable cap, remove it.
 # Regenerate with: scripts/check_line_cap.sh --update  (use --seed only to bootstrap).
-crates/trusty-analyze/src/core/review.rs	555
 crates/trusty-analyze/src/lang/adapters/go.rs	610
 crates/trusty-analyze/src/lang/adapters/php.rs	642
 crates/trusty-analyze/src/lang/adapters/python.rs	602
-crates/trusty-analyze/src/lang/adapters/ruby.rs	545
 crates/trusty-analyze/src/lang/adapters/typescript.rs	560
 crates/trusty-analyze/src/main.rs	567
 crates/trusty-analyze/src/mcp/mod.rs	892
 crates/trusty-gworkspace/src/tools.rs	557
-crates/trusty-memory/src/lib.rs	623
-crates/trusty-search/src/commands/doctor_checks.rs	503
+crates/trusty-memory/src/lib.rs	618
 crates/trusty-search/src/core/indexer/tests.rs	2472
 crates/trusty-search/src/service/call_chain.rs	738
 crates/trusty-search/src/service/embedder_supervisor.rs	521
