@@ -221,6 +221,30 @@ fn base_preamble_requires_running_project_test_suite_before_finishing() {
     );
 }
 
+/// `BASE_PREAMBLE` nudges toward pure, unit-testable core functions with I/O
+/// kept in thin wrappers (#2279 improvement 2, bake-off L2 diagnosis: tcode
+/// fused `git` invocation directly into `parse_git_log`, making it untestable
+/// against the visible text-fixture suite the challenge instructed it to
+/// run).
+///
+/// Why: This is a general product-quality nudge, not a benchmark-specific
+/// patch — it must apply to every agent's assembled prompt, so it belongs in
+/// the model-agnostic BASE preamble like the neighbouring verification block.
+/// What: Asserts the preamble names both halves of the principle: pure core
+/// functions, and I/O kept separate in thin wrappers.
+/// Test: this test.
+#[test]
+fn base_preamble_nudges_testable_design() {
+    assert!(
+        BASE_PREAMBLE.contains("pure, unit-testable core functions"),
+        "must nudge toward pure, unit-testable core functions"
+    );
+    assert!(
+        BASE_PREAMBLE.contains("thin wrapper functions"),
+        "must instruct keeping I/O in thin wrapper functions separate from core logic"
+    );
+}
+
 /// `BASE_PREAMBLE` carries no host- or model-specific tokens (spec §2a/§3).
 ///
 /// Why: Any model name, provider name, or host path in the BASE preamble would
@@ -258,7 +282,7 @@ fn base_preamble_version_is_semver_shaped() {
 /// Expected FNV-1a-style fold of [`BASE_PREAMBLE`]'s bytes, folded with its
 /// byte length. Regenerate this whenever the preamble legitimately changes
 /// (see [`base_preamble_hash_tripwire`] for the contributor instructions).
-const EXPECTED_PREAMBLE_HASH: u64 = 0x9376_d3b2_eb84_3e4e;
+const EXPECTED_PREAMBLE_HASH: u64 = 0xcdfb_41b6_3f06_2396;
 
 /// Test-time guard coupling `BASE_PREAMBLE` *content* to its version constant.
 ///

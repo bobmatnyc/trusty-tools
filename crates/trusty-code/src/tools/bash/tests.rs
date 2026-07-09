@@ -11,9 +11,22 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::BashTool;
+use super::{BASH_TOOL_NAME, BashTool};
 use crate::tools::registry::ToolRegistry;
 use crate::tools::traits::ToolExecutor;
+
+/// `BashTool::name()` matches the exported [`BASH_TOOL_NAME`] constant.
+///
+/// Why: `crate::verify_gate`'s bash-call scan (#2279) matches tool calls by
+/// this literal; a drift here would silently break that gate.
+/// What: Trivial equality assertion.
+/// Test: this test.
+#[test]
+fn name_matches_constant() {
+    let tool = BashTool::default_config();
+    assert_eq!(tool.name(), BASH_TOOL_NAME);
+    assert_eq!(BASH_TOOL_NAME, "bash");
+}
 
 /// A fast command (echo) returns captured stdout and exit 0.
 ///

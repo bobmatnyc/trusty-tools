@@ -147,6 +147,53 @@ fn write_file_response(path: &str, content: &str) -> Value {
     })
 }
 
+/// A response where the assistant calls `bash(command)` (#2279).
+fn bash_response(command: &str) -> Value {
+    json!({
+        "id": "gen-bash",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-bash",
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": json!({"command": command}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}
+    })
+}
+
+/// A response where the assistant calls `finish_task(status, summary)`
+/// (#2279).
+fn finish_task_response(status: &str, summary: &str) -> Value {
+    json!({
+        "id": "gen-finish",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "call-finish",
+                    "type": "function",
+                    "function": {
+                        "name": "finish_task",
+                        "arguments": json!({"status": status, "summary": summary}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {"prompt_tokens": 15, "completion_tokens": 8, "total_tokens": 23}
+    })
+}
+
 /// A response where the assistant emits final text and stops.
 fn stop_response(text: &str) -> Value {
     json!({
@@ -1048,5 +1095,108 @@ async fn pm_stops_redelegating_once_cap_latched_ends_partial_promptly() {
         "the PM must not have issued any further delegate_to_agent calls \
          after the cap latched (bounded, not spinning to the ~12 calls an \
          unfixed 8-turn PM loop would need), got {total_calls} total chat calls"
+    );
+}
+
+// ── #2279: PM-side verify-before-finish gate (symmetric with the engineer's) ────
+
+/// (#2279) The PM's verify-before-finish gate is SATISFIED — its
+/// `finish_task` call succeeds on the FIRST attempt — when the delegated
+/// engineer's OWN transcript shows a matching `bash` test invocation, even
+/// though the PM never calls `bash` itself.
+///
+/// Why: This is #2279's PM-symmetric acceptance criterion proven end to end
+/// (not just at the `verify_gate::pm_finish_gate` unit level): the real
+/// wiring in `execute_run_task` — the shared `SharedTranscript` both the PM's
+/// and the engineer's `RecordingLlmClient` record into — must actually carry
+/// the engineer's `ran_test_command` signal through to the PM's gate.
+/// What: The task names `pytest tests/ -v`. Script [PM delegates, engineer
+/// runs `pytest tests/ -v` via `bash`, engineer stops (D3), PM finish_task];
+/// assert the scripted client saw EXACTLY four calls — proving the PM's
+/// single `finish_task` attempt was accepted, not rejected into a fifth
+/// retry turn — and the run did not surface as a failure.
+/// Test: this test.
+#[tokio::test]
+async fn pm_finish_gate_satisfied_when_engineer_ran_named_tests() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        delegate_response("implement the parser; then run `pytest tests/ -v`"),
+        bash_response("pytest tests/ -v"),
+        stop_response("engineer: ran the suite"),
+        finish_task_response("completed", "verified via the named test suite"),
+    ]));
+
+    let mut task_params = params(&agents, &project, None);
+    task_params.task = "implement the parser; run `pytest tests/ -v` before finishing".into();
+
+    let report = execute_run_task(task_params, llm.clone()).await;
+
+    assert_eq!(
+        llm.models_seen().len(),
+        4,
+        "the PM's single finish_task attempt must be accepted, not rejected \
+         into a fifth retry turn; task: {}",
+        report.task
+    );
+    assert_ne!(
+        report.exit,
+        ExitCode::RunFailure,
+        "an accepted finish must not surface as a run failure; task: {}",
+        report.task
+    );
+}
+
+/// (#2279) The PM's verify-before-finish gate TRIPS — its `finish_task` call
+/// is rejected as a RECOVERABLE retry, not a run failure — when the task
+/// names a runnable test command but the delegated engineer's transcript
+/// shows no matching invocation, and the PM's run still recovers/completes
+/// via its OWN next turn.
+///
+/// Why: The negative half of the PM-symmetric acceptance criterion, proving
+/// (a) the gate actually rejects a premature finish sourced from the
+/// engineer's silence, and (b) that rejection is recoverable — the PM gets
+/// exactly one more turn, not a hung loop or a hard failure.
+/// What: The task names `pytest tests/ -v`. Script [PM delegates, engineer
+/// writes a file WITHOUT running `bash` at all, engineer stops (D3), PM's
+/// FIRST finish_task attempt (must be rejected), PM's SECOND turn (a plain
+/// D3 stop — unaffected by the gate, proving recovery)]; assert the scripted
+/// client saw exactly FIVE calls — one more than the satisfied-gate test's
+/// four, precisely the one recoverable retry turn the gate forced — and the
+/// run did not surface as a failure.
+/// Test: this test.
+#[tokio::test]
+async fn pm_finish_gate_trips_when_engineer_never_ran_named_tests() {
+    let agents = agents_dir("openai/gpt-4o-mini");
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        delegate_response("implement the parser; then run `pytest tests/ -v`"),
+        write_file_response("parser.py", "def parse():\n    pass\n"),
+        stop_response("engineer: wrote the parser (did not run tests)"),
+        finish_task_response("completed", "premature — tests never ran"),
+        stop_response("pm: recovered after the rejected finish_task"),
+    ]));
+
+    let mut task_params = params(&agents, &project, None);
+    task_params.task = "implement the parser; run `pytest tests/ -v` before finishing".into();
+
+    let report = execute_run_task(task_params, llm.clone()).await;
+
+    assert_eq!(
+        llm.models_seen().len(),
+        5,
+        "the PM's premature finish_task must be rejected into exactly one \
+         recoverable retry turn, not accepted outright and not looped \
+         indefinitely; task: {}",
+        report.task
+    );
+    assert_ne!(
+        report.exit,
+        ExitCode::RunFailure,
+        "a gate rejection must be a recoverable retry, not a run failure; \
+         task: {}",
+        report.task
     );
 }

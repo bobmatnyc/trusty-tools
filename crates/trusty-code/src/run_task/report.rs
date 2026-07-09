@@ -280,6 +280,7 @@ mod tests {
                     model: "openai/gpt-4o-mini".into(),
                     text: String::new(),
                     tool_calls: vec!["delegate_to_agent".into()],
+                    ran_test_command: false,
                     usage: TokenUsage::new(60, 20, 0, 0),
                 },
                 TurnRecord {
@@ -287,6 +288,7 @@ mod tests {
                     model: "deepseek/deepseek-chat".into(),
                     text: "wrote the file".into(),
                     tool_calls: vec!["write_file".into()],
+                    ran_test_command: false,
                     usage: TokenUsage::new(40, 20, 0, 0),
                 },
             ],
@@ -396,6 +398,7 @@ mod tests {
                 model: "openai/gpt-4o-mini".into(),
                 text: String::new(),
                 tool_calls: vec![],
+                ran_test_command: false,
                 usage: TokenUsage::new(10, 5, 0, 0),
             },
             TurnRecord {
@@ -403,6 +406,7 @@ mod tests {
                 model: "openai/gpt-4o-mini".into(),
                 text: "done".into(),
                 tool_calls: vec![],
+                ran_test_command: false,
                 usage: TokenUsage::new(20, 8, 0, 0),
             },
         ];
@@ -431,6 +435,7 @@ mod tests {
                 model: "anthropic/claude-haiku-4".into(),
                 text: String::new(),
                 tool_calls: vec!["delegate_to_agent".into()],
+                ran_test_command: false,
                 usage: TokenUsage::new(1000, 500, 0, 0),
             },
             TurnRecord {
@@ -438,6 +443,7 @@ mod tests {
                 model: "anthropic/claude-sonnet-4-5".into(),
                 text: "done".into(),
                 tool_calls: vec![],
+                ran_test_command: false,
                 usage: TokenUsage::new(2000, 1000, 0, 0),
             },
         ];
@@ -479,6 +485,7 @@ mod tests {
                 model: "anthropic/claude-sonnet-4-5".into(),
                 text: String::new(),
                 tool_calls: vec![],
+                ran_test_command: false,
                 usage: authoritative_usage,
             },
             TurnRecord {
@@ -486,6 +493,7 @@ mod tests {
                 model: "anthropic/claude-sonnet-4-5".into(),
                 text: "done".into(),
                 tool_calls: vec![],
+                ran_test_command: false,
                 usage: TokenUsage::new(100, 50, 0, 0),
             },
         ];

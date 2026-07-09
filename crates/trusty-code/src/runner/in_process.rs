@@ -325,7 +325,9 @@ impl InProcessAgentRunner {
     /// `tools.allowed`), resolves the model (`RunContext` > agent > default) and
     /// turn cap (`RunContext.max_turns_override` > runner default), assembles the
     /// system prompt (BASE + agent prompt + project context), runs the
-    /// `AgentLoop`, and maps any loop error to `RunnerError::Loop`.
+    /// `AgentLoop` — attaching (#2279) `verify_gate::default_finish_gate` so a
+    /// premature `finish_task` gets a recoverable retry rather than
+    /// terminating the loop — and maps any loop error to `RunnerError::Loop`.
     /// Test: `runner::tests::*`.
     async fn run_pipeline(
         &self,
@@ -368,7 +370,15 @@ impl InProcessAgentRunner {
             self.skills_catalog.as_deref(),
         );
 
-        let mut agent_loop = AgentLoop::new(loop_config, Arc::clone(&self.llm), registry);
+        let mut agent_loop = AgentLoop::new(loop_config, Arc::clone(&self.llm), registry)
+            // #2279: every sub-agent this runner drives gets the default
+            // verify-before-finish gate — its own `bash` calls land in its
+            // own `Transcript`, so no external state is needed. This is the
+            // ONE production construction site for every delegated
+            // sub-agent loop (both `run_task` and `task::executor` delegate
+            // through this runner), so wiring it here covers both entry
+            // points without duplicating the attachment at each call site.
+            .with_finish_gate(crate::verify_gate::default_finish_gate());
         if let Some(sink) = &self.sink {
             agent_loop = agent_loop.with_tool_event_sink(Arc::clone(sink));
         }

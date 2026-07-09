@@ -312,6 +312,43 @@ fn registry_with_finish_task() -> Arc<ToolRegistry> {
     Arc::new(reg)
 }
 
+/// A registry containing `FinishTaskTool` AND `BashTool` (#2279).
+///
+/// Why: The verify-before-finish gate tests need a real `bash` tool so a
+/// scripted `bash` call actually dispatches (its dispatch outcome does not
+/// matter to the gate — only that the call landed in the transcript — but a
+/// registered tool keeps the scenario representative of production wiring).
+fn registry_with_finish_task_and_bash() -> Arc<ToolRegistry> {
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(FinishTaskTool::new()));
+    reg.register(Arc::new(crate::tools::BashTool::default_config()));
+    Arc::new(reg)
+}
+
+/// Build a response fixture in which the assistant calls `bash` with the
+/// given `command` (#2279).
+fn bash_call_response(call_id: &str, command: &str) -> Value {
+    json!({
+        "id": "gen-bash",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "bash",
+                        "arguments": json!({"command": command}).to_string()
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": { "prompt_tokens": 8, "completion_tokens": 6, "total_tokens": 14 }
+    })
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────────
 
 /// Config defaults are present and sane.
@@ -1145,6 +1182,89 @@ async fn finish_task_full_shape_propagates_into_output() {
     assert!(out.content.contains("Task completed: shipped it"));
     assert!(out.content.contains("a.rs (+10/-2)"));
     assert!(out.content.contains("Tests: 4/4 passed"));
+}
+
+// ── #2279: verify-before-finish gate ────────────────────────────────────────────
+
+/// An attached [`crate::verify_gate::default_finish_gate`] rejects a
+/// premature `finish_task` with a RECOVERABLE retry (not a terminal error)
+/// when the task names a runnable test command that was never invoked, and
+/// the loop recovers once the named tests actually run.
+///
+/// Why: This is #2279's core acceptance criterion — a `finish_task` call
+/// that would otherwise have terminated the loop after turn 1 must instead
+/// give the model another turn to run the named tests, then succeed on a
+/// LATER `finish_task` call once the gate is satisfied.
+/// What: Script [finish_task (premature), bash("pytest tests/ -v"),
+/// finish_task (now valid)]; attach the default gate; assert the run
+/// completes only after all THREE chat calls (proving turn 1's finish was
+/// rejected and turn 3's succeeded), with the final structured summary from
+/// the second `finish_task` call.
+/// Test: this test.
+#[tokio::test]
+async fn finish_gate_trips_and_recovers() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        finish_task_call_response(
+            "call-premature",
+            r#"{"status": "completed", "summary": "done (premature)"}"#,
+        ),
+        bash_call_response("call-bash", "pytest tests/ -v"),
+        finish_task_call_response(
+            "call-verified",
+            r#"{"status": "completed", "summary": "done (verified)"}"#,
+        ),
+    ]));
+    let registry = registry_with_finish_task_and_bash();
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default())
+        .with_finish_gate(crate::verify_gate::default_finish_gate());
+
+    let out = agent
+        .run(
+            "system prompt",
+            "implement the parser; run `pytest tests/ -v` before finishing",
+        )
+        .await
+        .expect("loop should recover and terminate on the verified finish call");
+
+    assert_eq!(
+        llm.calls(),
+        3,
+        "turn 1's premature finish must be rejected, turn 2 runs the named \
+         tests, turn 3's finish must succeed"
+    );
+    assert_eq!(out.summary.as_deref(), Some("done (verified)"));
+    assert_eq!(out.content, "Task completed: done (verified)");
+}
+
+/// An attached [`crate::verify_gate::default_finish_gate`] is INERT — the
+/// success path is unchanged — when the task never names a runnable test
+/// command.
+///
+/// Why: #2279 explicitly defers general polyglot test-suite discovery; the
+/// gate must not invent a requirement nothing ever stated, and existing
+/// tasks with no test command must behave exactly as before this change.
+/// What: Script a single valid `finish_task` call for a task that names no
+/// test command; attach the default gate; assert it still terminates after
+/// exactly ONE chat call, identically to
+/// `explicit_finish_task_terminates_loop_with_structured_summary`.
+/// Test: this test.
+#[tokio::test]
+async fn finish_gate_inert_without_named_test_command() {
+    let llm = Arc::new(ScriptedLlm::from_json(&[finish_task_call_response(
+        "call-finish",
+        r#"{"status": "completed", "summary": "implemented the widget"}"#,
+    )]));
+    let registry = registry_with_finish_task_and_bash();
+    let agent = make_loop(llm.clone(), registry, AgentLoopConfig::default())
+        .with_finish_gate(crate::verify_gate::default_finish_gate());
+
+    let out = agent
+        .run("system prompt", "implement a widget")
+        .await
+        .expect("gate must stay inert when no test command is named");
+
+    assert_eq!(llm.calls(), 1, "gate must not force an extra turn");
+    assert_eq!(out.summary.as_deref(), Some("implemented the widget"));
 }
 
 /// Live OpenRouter test: trivial task through the real client + a real tool.

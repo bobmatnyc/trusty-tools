@@ -540,6 +540,7 @@ async fn set_run_outcome_stores_transcript_and_usage() {
         model: "openai/gpt-4o-mini".to_string(),
         text: "done".to_string(),
         tool_calls: vec![],
+        ran_test_command: false,
         usage: crate::perf::TokenUsage::new(10, 5, 0, 0),
     }];
     registry.set_run_outcome(
