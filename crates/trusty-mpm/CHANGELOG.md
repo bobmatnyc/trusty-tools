@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 ## [Unreleased]
+
+### Added
+
+- capture tmux window id at session pause and reattach on resume ([#2269](https://github.com/bobmatnyc/trusty-tools/pull/2269)) ([`1959738`](https://github.com/bobmatnyc/trusty-tools/commit/1959738450d9a1b7adaf707d9d5980d6365fe4a7))
+
+### Fixed
+
+- correct banner two_panel right-column no-inner-border rendering ([#2258](https://github.com/bobmatnyc/trusty-tools/pull/2258)) ([`6b9ae4a`](https://github.com/bobmatnyc/trusty-tools/commit/6b9ae4ab17ce0a07b2f69bfb14d3b477c8db6fbe))
+- keep resumed panes rooted at the workspace, not $HOME ([#2254](https://github.com/bobmatnyc/trusty-tools/pull/2254)) ([`d2c1edf`](https://github.com/bobmatnyc/trusty-tools/commit/d2c1edf4431b0cba3e94f558fc13fc9c40786307))
+## [Unreleased]
 ## [Unreleased]
 
 ### Added
