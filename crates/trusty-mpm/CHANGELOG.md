@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Fixed
+
+- probe live tmux/process for session liveness, not the stored state field ([#2275](https://github.com/bobmatnyc/trusty-tools/pull/2275)) ([`b5f8b6b`](https://github.com/bobmatnyc/trusty-tools/commit/b5f8b6b7b941b5f8939918f592374e0b4bd76d28))
+## [Unreleased]
+
 ### Added
 
 - capture tmux window id at session pause and reattach on resume ([#2269](https://github.com/bobmatnyc/trusty-tools/pull/2269)) ([`1959738`](https://github.com/bobmatnyc/trusty-tools/commit/1959738450d9a1b7adaf707d9d5980d6365fe4a7))
