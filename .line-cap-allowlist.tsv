@@ -9,6 +9,3 @@
 # Regenerate with: scripts/check_line_cap.sh --update  (use --seed only to bootstrap).
 crates/trusty-gworkspace/src/tools.rs	557
 crates/trusty-memory/src/lib.rs	618
-crates/trusty-search/src/core/indexer/tests.rs	2472
-crates/trusty-search/src/service/call_chain.rs	738
-crates/trusty-search/src/service/embedder_supervisor.rs	521
