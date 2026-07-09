@@ -522,18 +522,55 @@ pub(crate) enum Command {
         root: Option<String>,
     },
 
-    /// List registered aliases with loaded status (DOC-24).
+    /// Interactive managed-session connector — list sessions and connect (#2311).
     ///
-    /// Why: operators need a quick overview of their registered fleet and which
-    /// aliases are ready to `run`.
-    /// What: prints a table or JSON array of alias, URL, and loaded status.
-    /// Test: `cli_parses_ls_standalone`.
+    /// Why: bare `tm ls` should do the most useful fleet action for the operator's
+    /// current context. On a real terminal it opens the interactive session picker
+    /// (the same numbered menu as bare `tm`, but scoped to the managed fleet), so
+    /// resuming a session is one keystroke away. Piped, scripted, or `--json`
+    /// invocations degrade to the same static, pipeable list as `tm session ls`,
+    /// never blocking on stdin. The former top-level `tm ls` (the DOC-24 alias /
+    /// project-registry list) now lives behind `--projects`/`-p`.
+    /// What: with `--projects`/`-p`, prints the local-project + managed-fleet alias
+    /// registry (`--json` = combined JSON, `--root` overrides the managed root).
+    /// Without `--projects`, it is the session connector: a TTY with ≥1 session
+    /// opens the picker; `--json`, `--all`, a non-TTY, or 0 sessions print the
+    /// static table. `--source-id`/`--current`/`--all` mirror `tm session ls`.
+    /// Test: `cli_parses_ls_connector_bare`, `cli_parses_ls_projects`,
+    /// `cli_parses_ls_projects_short`, `cli_parses_ls_json`, `cli_parses_ls_current`,
+    /// `cli_ls_source_id_and_current_conflict`.
     #[command(name = "ls")]
-    LsAliases {
-        /// Output as JSON array instead of a table.
+    Ls {
+        /// Show the repo-alias / project registry instead of managed sessions.
+        ///
+        /// Why (#2311): preserves the pre-connector top-level `tm ls` behavior —
+        /// the DOC-24 local-project + managed-fleet alias list — as an explicit,
+        /// discoverable opt-in now that bare `tm ls` is the session connector.
+        /// With `--projects`, `--json` prints the combined alias JSON and `--root`
+        /// selects the managed root; the session flags below are ignored.
+        #[arg(long, short = 'p')]
+        projects: bool,
+        /// Output as JSON. With `--projects`: the combined alias JSON array.
+        /// Without `--projects`: the raw daemon managed-session JSON (byte-for-byte
+        /// passthrough), forcing static output even on a TTY.
         #[arg(long)]
         json: bool,
-        /// Override the managed root (default: `~/.trusty-mpm`).
+        /// Filter sessions to this `owner/repo` slug (session mode only).
+        ///
+        /// Passed to the daemon as `?source_id=`; mirrors `tm session ls`.
+        #[arg(long)]
+        source_id: Option<String>,
+        /// Derive `source_id` from the cwd's git remote (session mode only).
+        ///
+        /// Mutually exclusive with `--source-id`; passing both is a parse error.
+        #[arg(long, conflicts_with = "source_id")]
+        current: bool,
+        /// Include decommissioned tombstone sessions (session mode only).
+        ///
+        /// Forces static output (the full forensic list is not a connect target).
+        #[arg(long)]
+        all: bool,
+        /// Override the managed root (default: `~/.trusty-mpm`). `--projects` only.
         ///
         /// Precedence: this flag > `TRUSTY_MPM_ROOT` env var >
         /// `[standalone] root` in `$XDG_CONFIG_HOME/trusty-mpm/config.toml` >

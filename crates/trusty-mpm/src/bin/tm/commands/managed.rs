@@ -96,47 +96,47 @@ pub(crate) async fn session_ls(
     source_id: Option<&str>,
     all: bool,
 ) -> anyhow::Result<()> {
-    // Build the request URL, appending ?source_id= when a filter is active.
-    let endpoint = format!("{url}/api/v1/sessions/managed");
-    let mut req = client.get(&endpoint);
-    if let Some(sid) = source_id {
-        req = req.query(&[("source_id", sid)]);
-    }
-    // Fetch the response body ONCE. `--json` echoes that raw text verbatim
-    // (byte-for-byte — preserving exact field order/whitespace for scripts);
-    // the table path deserializes the SAME text rather than issuing a second GET.
-    let raw = req.send().await?.error_for_status()?.text().await?;
+    // Fetch the response body ONCE via the shared fetch path. `--json` echoes
+    // that raw text verbatim (byte-for-byte — preserving exact field
+    // order/whitespace for scripts); the table path deserializes the SAME text
+    // rather than issuing a second GET.
+    let raw = crate::commands::session_picker::fetch_managed_raw(client, url, source_id).await?;
     if json {
         // Raw JSON passthrough is always unfiltered — scripts rely on byte-for-byte.
         println!("{raw}");
         return Ok(());
     }
-    let fetched = serde_json::from_str::<trusty_mpm::client::ManagedListResponse>(&raw)?.sessions;
-    // #1809: filter decommissioned tombstones from the default table view.
-    // #1841 Fix 4: when --all is requested, sort so active/stopped sessions come
-    // first and decommissioned tombstones come last (stable sort preserves relative
-    // order within each group).
-    let sessions: Vec<_> = if all {
-        let mut s = fetched;
-        s.sort_by_key(|sess| u8::from(sess.state == "decommissioned"));
-        s
-    } else {
-        filter_live_sessions(fetched)
-    };
+    let sessions = crate::commands::session_picker::parse_scoped_sessions(&raw, all)?;
+    render_session_table(&sessions, source_id);
+    Ok(())
+}
+
+/// Render the static `tm session ls` / `tm ls` table for a scoped session list.
+///
+/// Why: both the static list command and the `tm ls` connector's non-picker path
+/// (0 sessions, or a piped/`--json`/`--all` invocation) must print the identical
+/// table, so the row formatting lives in one place rather than being duplicated
+/// across the two entry points.
+/// What: prints a "no managed sessions[ for <slug>]" line when the list is empty;
+/// otherwise prints the header + one row per session (id, state, truncated name,
+/// task/`(interactive)` placeholder, short created-at, and any pending decision).
+/// Test: `ls_source_id_filter_selects_correct_slug` covers the scoping seam; the
+/// table bytes are exercised by `tests/session_manager_mvp.rs`.
+pub(crate) fn render_session_table(sessions: &[ManagedSessionSummary], source_id: Option<&str>) {
     if sessions.is_empty() {
         if let Some(sid) = source_id {
             println!("no managed sessions for {sid}");
         } else {
             println!("no managed sessions");
         }
-        return Ok(());
+        return;
     }
     // Table header
     println!(
         "{:<36}  {:<14}  {:<24}  {:<30}  CREATED",
         "ID", "STATE", "NAME", "TASK"
     );
-    for s in &sessions {
+    for s in sessions {
         // #1841 Fix 3: show a descriptive placeholder for sessions with no task.
         let task = s
             .task
@@ -164,7 +164,6 @@ pub(crate) async fn session_ls(
             pending
         );
     }
-    Ok(())
 }
 
 /// Truncate a string to at most `max` characters, appending `…` when cut.

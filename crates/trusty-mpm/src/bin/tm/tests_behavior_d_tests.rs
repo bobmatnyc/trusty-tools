@@ -486,3 +486,152 @@ fn cli_parses_session_catchup_defaults() {
         other => panic!("expected session catchup, got {other:?}"),
     }
 }
+
+// ── Top-level `tm ls` connector CLI parse tests (#2311) ─────────────────────
+
+/// Bare `tm ls` parses as the session connector (no `--projects`, all defaults).
+///
+/// Why: the top-level `tm ls` is now the interactive managed-session connector;
+/// this asserts the default field values that route it to the session path.
+/// What: parses `tm ls` and asserts every flag defaults false / `None`.
+/// Test: this test.
+#[test]
+fn cli_parses_ls_connector_bare() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ls"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Ls {
+            projects,
+            json,
+            source_id,
+            current,
+            all,
+            root,
+        } => {
+            assert!(!projects, "bare `tm ls` must not set --projects");
+            assert!(!json);
+            assert!(source_id.is_none());
+            assert!(!current);
+            assert!(!all);
+            assert!(root.is_none());
+        }
+        other => panic!("expected top-level ls, got {other:?}"),
+    }
+}
+
+/// `tm ls --projects` routes to the legacy alias/project registry list.
+#[test]
+fn cli_parses_ls_projects() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ls", "--projects"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Ls { projects, .. } => assert!(projects, "--projects must parse to true"),
+        other => panic!("expected top-level ls --projects, got {other:?}"),
+    }
+}
+
+/// `tm ls -p` is the short alias for `--projects`.
+#[test]
+fn cli_parses_ls_projects_short() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ls", "-p"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Ls { projects, .. } => assert!(projects, "-p must parse to true"),
+        other => panic!("expected top-level ls -p, got {other:?}"),
+    }
+}
+
+/// `tm ls --json` selects JSON output while staying in session (connector) mode.
+#[test]
+fn cli_parses_ls_json() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ls", "--json"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Ls { json, projects, .. } => {
+            assert!(json, "--json must parse to true");
+            assert!(!projects, "--json alone must not imply --projects");
+        }
+        other => panic!("expected top-level ls --json, got {other:?}"),
+    }
+}
+
+/// `tm ls --current` derives the source_id scope from the cwd (session mode).
+#[test]
+fn cli_parses_ls_current() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ls", "--current"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Ls {
+            current, source_id, ..
+        } => {
+            assert!(current, "--current must parse to true");
+            assert!(source_id.is_none());
+        }
+        other => panic!("expected top-level ls --current, got {other:?}"),
+    }
+}
+
+/// `tm ls --source-id <slug>` sets the explicit fleet scope filter.
+#[test]
+fn cli_parses_ls_source_id() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "ls", "--source-id", "owner/repo"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Ls {
+            source_id, current, ..
+        } => {
+            assert_eq!(source_id, Some("owner/repo".to_string()));
+            assert!(!current);
+        }
+        other => panic!("expected top-level ls --source-id, got {other:?}"),
+    }
+}
+
+/// `tm ls --current --source-id <slug>` is a parse error (mutually exclusive).
+#[test]
+fn cli_ls_source_id_and_current_conflict() {
+    let result =
+        Cli::try_parse_from(["trusty-mpm", "ls", "--current", "--source-id", "owner/repo"]);
+    assert!(
+        result.is_err(),
+        "passing both --current and --source-id to `tm ls` must be a parse error"
+    );
+}
+
+// ── `tm ls` picker/static gate (#2311) ──────────────────────────────────────
+
+use crate::commands::session_picker::should_show_picker;
+
+/// The picker opens only on a fully-interactive terminal with ≥1 session.
+#[test]
+fn ls_connector_should_show_picker_interactive_with_sessions() {
+    assert!(should_show_picker(true, true, false, false, 1));
+    assert!(should_show_picker(true, true, false, false, 5));
+}
+
+/// A non-TTY stdin OR stdout forces the static (pipeable) list path — never a
+/// blocking picker. Mirrors guided.rs's non-TTY gate.
+#[test]
+fn ls_connector_should_show_picker_non_tty_static() {
+    assert!(
+        !should_show_picker(false, true, false, false, 3),
+        "piped stdin -> static"
+    );
+    assert!(
+        !should_show_picker(true, false, false, false, 3),
+        "piped stdout -> static"
+    );
+    assert!(!should_show_picker(false, false, false, false, 3));
+}
+
+/// `--json` and `--all` force static output even on a TTY, and 0 sessions never
+/// opens an empty picker.
+#[test]
+fn ls_connector_should_show_picker_flags_and_empty_static() {
+    assert!(
+        !should_show_picker(true, true, true, false, 3),
+        "--json -> static"
+    );
+    assert!(
+        !should_show_picker(true, true, false, true, 3),
+        "--all -> static"
+    );
+    assert!(
+        !should_show_picker(true, true, false, false, 0),
+        "0 sessions -> static"
+    );
+}

@@ -40,6 +40,7 @@ pub(crate) mod serve_stdio;
 pub(crate) mod services;
 pub(crate) mod sessctl;
 pub(crate) mod session;
+pub(crate) mod session_picker;
 pub(crate) mod slack;
 pub(crate) mod sm_serve;
 pub(crate) mod standalone;

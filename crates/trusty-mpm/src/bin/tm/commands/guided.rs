@@ -24,42 +24,7 @@ use anyhow::Context as _;
 use std::io::IsTerminal as _;
 
 pub(crate) use super::guided_autostart::github_host;
-use super::guided_launch::launch_new_session_and_attach;
-use super::managed::filter_live_sessions;
 use crate::formatters::info_box::DaemonInfo;
-
-/// Decision returned by [`parse_picker_choice`].
-///
-/// Why: extracting the parse-and-decide logic from the I/O driver makes it
-/// unit-testable without stdin/tmux. The driver calls parse, checks the variant,
-/// and shells out only for Resume and LaunchNew.
-/// What: five variants cover every valid and invalid input the picker can
-/// receive. [`Self::ConfirmRestart`] is the #2148 safety default: a bare Enter
-/// that WOULD have silently restarted (destructively recreated the tmux pane
-/// of) a stopped/errored session instead asks for an explicit numeric choice.
-/// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
-/// `guided_picker_bare_enter_live_session_resumes_first`,
-/// `guided_picker_bare_enter_stopped_session_requires_confirm`,
-/// `guided_picker_q_returns_quit`, `guided_picker_numeric_valid_resumes`,
-/// `guided_picker_numeric_launch_new`, `guided_picker_out_of_range_unrecognised`,
-/// `guided_picker_non_numeric_unrecognised`.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum PickerDecision {
-    /// Resume the session at 0-based index into the sessions slice.
-    Resume(usize),
-    /// Launch a brand-new session.
-    LaunchNew,
-    /// User chose to quit without action.
-    Quit,
-    /// Input was not recognised; the caller quits cleanly.
-    Unrecognised,
-    /// Bare Enter was pressed but the 0-based-indexed session at this slot is
-    /// stopped/errored — resuming it would KILL and recreate its tmux pane
-    /// (or, if the pane already happened to be dead, spawn a fresh one). #2148:
-    /// this is no longer an implicit default; the operator must type the
-    /// number explicitly to confirm the restart.
-    ConfirmRestart(usize),
-}
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
@@ -177,10 +142,12 @@ pub(crate) async fn run_guided_default(client: &reqwest::Client, url: &str) -> a
 /// Why: the same "list sessions → two-panel-banner → picker" sequence is needed
 /// both on the initial attempt and after a successful auto-start. A shared helper
 /// keeps `run_guided_default` DRY and avoids divergence between the two call sites.
-/// What: calls `list_project_sessions`, filters out decommissioned tombstones
-/// (#1809), runs the tty-gate, renders the two-panel daily banner (#1808), then
-/// hands off to the picker. Returns `None` when the daemon is unreachable so the
-/// caller can try auto-start; returns `Some(result)` once the daemon responded.
+/// What: fetches the project's live sessions via the shared
+/// [`super::session_picker::fetch_live_sessions`] (decommissioned tombstones
+/// already filtered, #1809), runs the tty-gate, renders the two-panel daily
+/// banner (#1808), then hands off to [`super::session_picker::run_tty_picker`].
+/// Returns `None` when the daemon is unreachable so the caller can try
+/// auto-start; returns `Some(result)` once the daemon responded.
 /// Test: indirectly covered by guided-default e2e tests; the pure sub-functions
 /// (`tty_gate`, `parse_picker_choice`, `is_live_session_state`) are unit-tested
 /// independently.
@@ -192,8 +159,11 @@ async fn try_show_picker(
     repo_url: &str,
     cwd: &std::path::Path,
 ) -> Option<anyhow::Result<()>> {
-    // #1809: exclude decommissioned tombstones from the picker by default.
-    let sessions = filter_live_sessions(list_project_sessions(client, url, source_id).await.ok()?);
+    // #1809: exclude decommissioned tombstones from the picker by default. The
+    // shared fetch path returns the same live-only list the static renderer uses.
+    let sessions = super::session_picker::fetch_live_sessions(client, url, Some(source_id), false)
+        .await
+        .ok()?;
     if !tty_gate(
         std::io::stdin().is_terminal(),
         source_id,
@@ -206,7 +176,8 @@ async fn try_show_picker(
     // title bar, 24-row clipped art, project/workspace fields — no sleep.
     let daemon = DaemonInfo::from_lock_file_with_probe().with_count(sessions.len());
     crate::formatters::banner::print_daily_banner(&cwd.to_string_lossy(), &daemon);
-    Some(run_tty_picker(client, url, repo_url, source_id, sessions).await)
+    let scope = super::session_picker::PickerScope::project(source_id, repo_url);
+    Some(super::session_picker::run_tty_picker(client, url, &scope, sessions).await)
 }
 
 // ── Project derivation ───────────────────────────────────────────────────────
@@ -308,10 +279,10 @@ pub(crate) fn nested_managed_match<'a>(
 /// with no `?source_id=` query.
 ///
 /// Why: [`nested_session_guard`] must find a match even when the record's
-/// `source_id` is missing (#2157 item 5's failure mode), so it cannot reuse
-/// [`list_project_sessions`]'s source_id-filtered query.
-/// What: identical to [`list_project_sessions`] minus the query parameter, with
-/// a 2-second timeout so a hung daemon cannot add a long stall to every bare
+/// `source_id` is missing (#2157 item 5's failure mode), so it cannot reuse the
+/// source_id-filtered picker fetch ([`super::session_picker::fetch_live_sessions`]).
+/// What: GETs the managed-list endpoint with no `?source_id=` query and a
+/// 2-second timeout so a hung daemon cannot add a long stall to every bare
 /// `tm` invocation made from inside tmux.
 /// Test: I/O path; requires a live daemon.
 async fn list_all_managed_sessions(
@@ -321,34 +292,6 @@ async fn list_all_managed_sessions(
     let resp = client
         .get(format!("{url}/api/v1/sessions/managed"))
         .timeout(std::time::Duration::from_secs(2))
-        .send()
-        .await?
-        .error_for_status()?;
-    let body: trusty_mpm::client::ManagedListResponse = resp.json().await?;
-    Ok(body.sessions)
-}
-
-// ── Daemon communication ─────────────────────────────────────────────────────
-
-/// Fetch managed sessions for a project via `GET /api/v1/sessions/managed?source_id`.
-///
-/// Why: the picker only shows sessions that belong to the current project; the
-/// `?source_id=<owner/repo>` filter keeps the response small regardless of how
-/// many total sessions the daemon manages.
-/// What: GETs the managed-list endpoint with the query param and deserializes
-/// the sessions array. Returns `Err` when the daemon is unreachable or the
-/// request fails — the caller uses this as a signal to fall back.
-/// Test: requires a live daemon; covered by the e2e test suite
-/// (`tests/session_manager_mvp.rs`) and integration tests in
-/// requires a live daemon; covered by the e2e test suite.
-async fn list_project_sessions(
-    client: &reqwest::Client,
-    base_url: &str,
-    source_id: &str,
-) -> anyhow::Result<Vec<trusty_mpm::client::ManagedSessionSummary>> {
-    let resp = client
-        .get(format!("{base_url}/api/v1/sessions/managed"))
-        .query(&[("source_id", source_id)])
         .send()
         .await?
         .error_for_status()?;
@@ -366,7 +309,7 @@ async fn list_project_sessions(
 /// thus prevents any attempt to read from stdin (#1705 AC-7 / HIGH-2b).
 /// What: always calls [`print_project_context`]. If `is_tty = false`, also
 /// calls [`print_non_tty_hint`] and returns `false`. If `is_tty = true`,
-/// returns `true` (caller should invoke [`run_tty_picker`]).
+/// returns `true` (caller should invoke [`super::session_picker::run_tty_picker`]).
 /// Test: `guided_non_tty_gate_returns_false_skips_stdin`,
 /// `guided_tty_gate_returns_true_for_tty`.
 pub(crate) fn tty_gate(
@@ -439,172 +382,6 @@ pub(crate) fn print_non_tty_hint(
         eprintln!("tm: to resume: tmux attach-session -t {}", sessions[0].name);
         eprintln!("tm: to launch: run `tm` from an interactive terminal");
     }
-}
-
-// ── TTY picker ───────────────────────────────────────────────────────────────
-
-/// Parse one line of picker input into a [`PickerDecision`].
-///
-/// Why: separating parse-and-decide from the I/O driver makes the dispatch
-/// logic unit-testable without needing a real stdin, tmux, or daemon. Folding
-/// `first_needs_restart` in here (rather than deciding safety in the I/O
-/// driver) keeps the destructive-default guard (#2148) exhaustively
-/// unit-testable alongside every other picker-input case.
-/// What: `session_count` is the number of existing sessions in the menu (the
-/// menu slot `session_count + 1` is always "launch new"); `first_needs_restart`
-/// is true when the session at index 0 is `stopped`/`errored` — i.e. resuming
-/// it goes through the daemon's restart path, which can recreate its tmux pane
-/// (see [`super::guided_resume::needs_restart`]).
-///   • `"q"` / `"Q"` → `Quit`
-///   • empty / whitespace, `session_count == 0` → `LaunchNew`
-///   • empty / whitespace, `session_count > 0`, session 0 is live → `Resume(0)`
-///   • empty / whitespace, `session_count > 0`, session 0 needs a restart →
-///     `ConfirmRestart(0)` (#2148: no longer an implicit destructive default)
-///   • `N` (1..=session_count) → `Resume(N-1)` (0-based index) — an EXPLICIT
-///     numeric choice always restarts/resumes directly, confirm or not
-///   • `session_count + 1` → `LaunchNew`
-///   • anything else → `Unrecognised`
-/// Test: `guided_picker_bare_enter_no_sessions_launches_new`,
-/// `guided_picker_bare_enter_live_session_resumes_first`,
-/// `guided_picker_bare_enter_stopped_session_requires_confirm`,
-/// `guided_picker_q_returns_quit`, `guided_picker_q_uppercase_returns_quit`,
-/// `guided_picker_numeric_valid_resumes`, `guided_picker_numeric_launch_new`,
-/// `guided_picker_out_of_range_unrecognised`,
-/// `guided_picker_non_numeric_unrecognised`.
-pub(crate) fn parse_picker_choice(
-    line: &str,
-    session_count: usize,
-    first_needs_restart: bool,
-) -> PickerDecision {
-    let choice = line.trim();
-    if choice.eq_ignore_ascii_case("q") {
-        return PickerDecision::Quit;
-    }
-    if choice.is_empty() {
-        if session_count == 0 {
-            return PickerDecision::LaunchNew;
-        }
-        return if first_needs_restart {
-            PickerDecision::ConfirmRestart(0)
-        } else {
-            PickerDecision::Resume(0)
-        };
-    }
-    if let Ok(n) = choice.parse::<usize>() {
-        if n >= 1 && n <= session_count {
-            return PickerDecision::Resume(n - 1);
-        }
-        if n == session_count + 1 {
-            return PickerDecision::LaunchNew;
-        }
-    }
-    PickerDecision::Unrecognised
-}
-
-/// Interactive numbered picker (TTY mode only).
-///
-/// Why: a simple numbered menu is the lowest-friction way to resume or launch
-/// without requiring the operator to remember session names or UUIDs. After a
-/// detach, the picker is redisplayed rather than exiting to the shell — the
-/// common "pick → Ctrl-b d → pick again" flow stays in one command.
-/// What: loops: print menu, read one line, dispatch, then re-fetch the session
-/// list so the next iteration shows current state. Exits cleanly on `Quit`,
-/// EOF (Ctrl-D), or unrecognised input; propagates attach/launch errors.
-///   • `Resume(i)` → [`resume_guided_session`] which handles daemon restart
-///     when needed and then calls [`tmux_attach`] internally;
-///   • `LaunchNew` → [`launch_new_session_and_attach`];
-///   • `ConfirmRestart(i)` (#2148) → print a one-line "type the number to
-///     confirm" notice and redisplay the SAME menu — no daemon round-trip;
-///   • `Quit` / EOF / `Unrecognised` → print notice and return `Ok`.
-/// Test: `parse_picker_choice` is the testable seam; I/O path is exercised by
-/// manual smoke tests and the e2e suite.
-async fn run_tty_picker(
-    client: &reqwest::Client,
-    url: &str,
-    repo_url: &str,
-    source_id: &str,
-    mut sessions: Vec<trusty_mpm::client::ManagedSessionSummary>,
-) -> anyhow::Result<()> {
-    loop {
-        eprintln!();
-        let new_idx = sessions.len() + 1;
-        // #2148: bare Enter must not silently restart (kill+recreate the tmux
-        // pane of) a stopped/errored session — only used to pick the menu's
-        // default hint and to gate `parse_picker_choice`'s bare-Enter branch.
-        let first_needs_restart = sessions
-            .first()
-            .map(|s| super::guided_resume::needs_restart(&s.state))
-            .unwrap_or(false);
-        if sessions.is_empty() {
-            eprintln!("tm:   [Enter] launch new session");
-            eprintln!("tm:   [q]     quit");
-        } else {
-            for (i, s) in sessions.iter().enumerate() {
-                // Show "restart" for sessions that are stopped/errored — they have no
-                // live tmux session and will be restarted via the daemon (#1742).
-                let stopped = matches!(s.state.as_str(), "stopped" | "errored");
-                let verb = if stopped { "restart" } else { "resume" };
-                eprintln!("tm:   [{}] {} {} ({})", i + 1, verb, s.name, s.state);
-            }
-            eprintln!("tm:   [{new_idx}] launch new session");
-            eprintln!("tm:   [q] quit");
-            if first_needs_restart {
-                // #2148: no implicit destructive default — an explicit [1] is required.
-                eprintln!("tm: [Enter] does NOT restart — type [1] to confirm the restart");
-            } else {
-                eprintln!("tm: default: [1] resume most recent");
-            }
-        }
-        eprint!("tm: > ");
-
-        let mut line = String::new();
-        let n = std::io::stdin()
-            .read_line(&mut line)
-            .context("failed to read choice from stdin")?;
-        if n == 0 {
-            break;
-        } // EOF (Ctrl-D): exit cleanly.
-
-        match parse_picker_choice(&line, sessions.len(), first_needs_restart) {
-            PickerDecision::Quit => {
-                eprintln!("tm: quit.");
-                break;
-            }
-            // #1742: route through daemon resume when the session is stopped or its
-            // tmux session is absent — never raw-attach a non-live session.
-            PickerDecision::Resume(i) => {
-                super::guided_resume::resume_guided_session(client, url, &sessions[i]).await?
-            }
-            PickerDecision::LaunchNew => {
-                launch_new_session_and_attach(client, url, repo_url).await?
-            }
-            // #2148: bare Enter hit a session that needs a restart — ask for an
-            // explicit choice instead of silently destroying its pane. No daemon
-            // round-trip; redisplay the SAME menu.
-            PickerDecision::ConfirmRestart(i) => {
-                eprintln!(
-                    "tm: '{}' requires a restart (its pane is gone or will be recreated) — \
-                     bare Enter no longer does this automatically.",
-                    sessions[i].name
-                );
-                eprintln!(
-                    "tm: type [{}] to confirm the restart, or [q] to quit.",
-                    i + 1
-                );
-                continue;
-            }
-            PickerDecision::Unrecognised => {
-                eprintln!("tm: unrecognised choice '{}'; quitting.", line.trim());
-                break;
-            }
-        }
-
-        // Detached or session ended — re-fetch the list before redisplaying.
-        // #1809: apply the same tombstone filter on the re-fetched list.
-        let r = list_project_sessions(client, url, source_id).await?;
-        sessions = filter_live_sessions(r);
-    }
-    Ok(())
 }
 
 // ── Guided resume/restart ────────────────────────────────────────────────────
