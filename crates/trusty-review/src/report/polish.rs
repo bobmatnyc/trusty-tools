@@ -430,9 +430,30 @@ fn collapse_recursive(lines: &[String], gaps: &mut Vec<String>) -> (Vec<String>,
         out.push(line.clone());
         idx += 1;
 
+        // Find where this heading's body ends: the next `---`, or the next
+        // boundary at the same or a shallower level.  MUST track fence state
+        // here too (#2357 wave-3.2 follow-up) — without it, a `#`-prefixed
+        // code-comment line inside a fenced evidence quote (e.g. a `.env`
+        // file's own comments) is misread by `boundary()` as a real markdown
+        // heading terminating THIS span early, which then made the outer walk
+        // re-process that comment line as a spurious heading of its own with
+        // an empty body, collapsing it (and repeating for each subsequent
+        // comment line) — the actual root cause of the mid-evidence "No data
+        // available" splice, not the outer loop's own (already-correct) fence
+        // guard.
         let body_start = idx;
+        let mut scan_in_fence = false;
         while idx < lines.len() {
             let t = lines[idx].trim();
+            if t.starts_with("```") {
+                scan_in_fence = !scan_in_fence;
+                idx += 1;
+                continue;
+            }
+            if scan_in_fence {
+                idx += 1;
+                continue;
+            }
             if t == "---" {
                 break;
             }

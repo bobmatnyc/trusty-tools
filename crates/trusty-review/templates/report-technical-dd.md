@@ -107,7 +107,7 @@ report against others normalized through this same template.
 ## 4. Per-Application Scorecard
 
 <!-- BEGIN per_application -->
-### 4.N. {{app_name}}
+### 4.{{app_index}}. {{app_name}}
 
 **Profile**
 

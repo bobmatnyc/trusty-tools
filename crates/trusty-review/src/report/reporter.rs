@@ -196,12 +196,16 @@ fn build_scope(model: &ReportModel) -> Scope {
     // One per_application block repetition per repository.  When benchmarking is
     // active, the matching per-repo placement is threaded into the scope so its
     // Benchmark Position table fills; without it the table stays honesty-marked.
-    for repo in &model.repositories {
+    // `app_index` is a real 1-based sequential number (findings-rendering fix,
+    // #2357 wave-3.2 follow-up defect #4) — the bundled templates' `### 4.N.`
+    // sub-heading was never substituted; `{{app_index}}` fixes that the same
+    // way `{{finding_index}}` fixed the finding-list literal `N.`.
+    for (i, repo) in model.repositories.iter().enumerate() {
         let bench = model
             .benchmark
             .as_ref()
             .and_then(|b| b.repositories.iter().find(|r| r.slug == repo.slug));
-        root.push_block("per_application", per_application_scope(repo, bench));
+        root.push_block("per_application", per_application_scope(repo, bench, i + 1));
     }
 
     // M3: fill the graph-appendix benchmark dataset (one headline row per ranked
@@ -666,17 +670,21 @@ fn append_synthesis_note(out: &mut String, model: &ReportModel) {
 /// Why: maps a repository's deterministic data (git provenance + metrics) onto
 /// the per-application placeholders; git fields are also emitted so a custom
 /// template can surface provenance, while the bundled templates carry it in JSON.
-/// What: sets app identity, tech stack / LoC / counts from metrics (when
-/// present), git branch/SHA/remote/dirty scalars, and — when `bench` is supplied
-/// — one `bench_row` block per comparable-metric placement (or a single small-n
-/// honesty row).  Leaves scoring/health factors unset (M1 has no scoring) so they
-/// render as honesty markers.
-/// Test: `reporter_tests.rs::{render_contains_expected, reporter_fills_benchmark}`.
+/// What: sets app identity (including the real 1-based `app_index`), tech
+/// stack / LoC / counts from metrics (when present), git branch/SHA/remote/
+/// dirty scalars, and — when `bench` is supplied — one `bench_row` block per
+/// comparable-metric placement (or a single small-n honesty row).  Leaves
+/// scoring/health factors unset (M1 has no scoring) so they render as honesty
+/// markers.
+/// Test: `reporter_tests.rs::{render_contains_expected, reporter_fills_benchmark,
+/// scorecard_heading_renders_real_index}`.
 fn per_application_scope(
     repo: &RepositoryReport,
     bench: Option<&super::benchmark::RepositoryBenchmark>,
+    app_index: usize,
 ) -> Scope {
     let mut scope = Scope::new();
+    scope.set("app_index", app_index.to_string());
     scope.set("app_name", repo.name.clone());
     scope.set("app_slug", repo.slug.clone());
     scope.set("app_source", repo.source.clone());

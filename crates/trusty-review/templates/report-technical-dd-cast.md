@@ -119,7 +119,7 @@ expected >3.40; 2–5yr >3.20; 5–10yr >3.00; >10yr >2.70.
 ## 4. Per-Application Scorecard
 
 <!-- BEGIN per_application -->
-### 4.N. {{app_name}}
+### 4.{{app_index}}. {{app_name}}
 
 **Profile**
 
