@@ -46,6 +46,8 @@ mod tests_grep;
 #[cfg(test)]
 mod tests_health;
 #[cfg(test)]
+mod tests_health_degraded;
+#[cfg(test)]
 mod tests_index;
 #[cfg(test)]
 mod tests_index_config;

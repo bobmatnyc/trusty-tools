@@ -446,6 +446,8 @@ pub struct WarmBootSummary {
     /// `true` when any of the following hold:
     /// - `indexes_skipped_tcc > 0` (TCC / FDA denial)
     /// - `indexes_skipped_timeout > 0` (scan timeout — issue #1091)
+    /// - `indexes_corpus_failed > 0` (a registered index's corpus/lane failed
+    ///   to open — issue #1870)
     /// - `indexes_loaded` is less than 80% of the prior-known count
     ///   (suggesting a large fraction of indexes are missing, e.g. after
     ///   FDA was revoked)
@@ -476,6 +478,26 @@ pub struct WarmBootSummary {
     /// `ColdIndexStore::failed_len`. `0` is the normal steady-state value.
     /// Test: `health_failed_index_reported` in server tests.
     pub indexes_failed: usize,
+    /// Number of registered indexes whose durable redb corpus (or any search
+    /// lane) failed to open on warm-boot (issue #1870).
+    ///
+    /// Why: distinct from every other counter here. `indexes_failed` and
+    /// `warmboot_failed_indexes` count entries that never made it into the
+    /// registry (cold-store restore failure / TCC denial). An index hit by
+    /// #1870, by contrast, DOES register — it warm-boots with a healthy-looking
+    /// `chunk_count` but a `DatabaseAlreadyOpen` / incompatible-format corpus
+    /// open failure marks all its stages `Failed` (see the `corpus_open_failed`
+    /// guard in `derive_warm_boot_stages`), so free-text / BM25 / hybrid queries
+    /// silently return `[]` while `/health` previously reported `"ok"`. This
+    /// counter closes that honesty gap: any non-zero value forces
+    /// `warm_boot_degraded = true` and downgrades the top-level `status` to
+    /// `"degraded"` so a `status != "ok"` probe catches the outage.
+    /// What: computed live on every `GET /health` poll by scanning registry
+    /// handles for any `Failed` stage (`IndexStages::any_failed`); not persisted.
+    /// `0` is the healthy steady state.
+    /// Test: `health_reports_degraded_when_corpus_open_failed` in `tests_health`.
+    #[serde(default)]
+    pub indexes_corpus_failed: usize,
 }
 
 /// Per-boot reconcile summary surfaced on `GET /health` (issue #1672).

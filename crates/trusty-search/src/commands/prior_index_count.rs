@@ -106,6 +106,10 @@ pub(crate) fn record_warm_boot_result(
             // re-reads from cold_store.failed_len() live so it increases as
             // restore failures are recorded during the daemon's lifetime.
             indexes_failed: 0,
+            // Issue #1870: stored at boot-completion as 0; the health handler
+            // recomputes it live every poll by scanning registry handles for a
+            // failed lane, so its stored value is never read.
+            indexes_corpus_failed: 0,
         };
     }
 
