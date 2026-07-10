@@ -61,7 +61,7 @@ pub struct SupervisorConfig {
     /// Env: `TRUSTY_EMBEDDERD_MAX_RESTARTS` (default 5).
     pub max_restarts: u32,
 
-    /// Idle-shutdown timeout in seconds (issue #315).
+    /// Idle-shutdown timeout in seconds (issue #315, default flipped in #2315).
     ///
     /// When non-zero, the lazy handle kills the embedderd subprocess after this
     /// many seconds with no embedding request and resets the spawn gate so the
@@ -69,9 +69,14 @@ pub struct SupervisorConfig {
     /// lever for `lexical_only` deployments: an embedderd that was briefly
     /// needed for one reindex session will be reclaimed once it goes quiet.
     ///
-    /// `0` (the default) disables idle-shutdown entirely.
+    /// Defaults to `300` (5 minutes). An idle `trusty-embedderd` was measured
+    /// pinning ~2.9 GB RSS indefinitely (issue #2315) because, while the
+    /// watchdog machinery existed since #315, it shipped disabled (`0`). Flipping
+    /// the default reclaims that resting RSS after a short idle window; the
+    /// cold-respawn cost on the next request is ~2–15 s, which is acceptable for
+    /// the memory win. `0` remains "explicitly disabled" for operators who set it.
     ///
-    /// Env: `TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS` (default 0 = disabled).
+    /// Env: `TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS` (default 300; `0` = disabled).
     pub idle_shutdown_secs: u64,
 }
 
@@ -80,14 +85,17 @@ impl SupervisorConfig {
     ///
     /// Why: makes the supervisor tunable in CI / production without source changes.
     /// What: reads the four `TRUSTY_EMBEDDERD_*` vars; ignores malformed
-    /// values and falls through to defaults.
-    /// Test: `config_from_env_defaults` and `config_from_env_overrides`.
+    /// values and falls through to defaults. `idle_shutdown_secs` defaults to
+    /// `300` (issue #2315) so an idle sidecar's ~2.9 GB RSS is reclaimed at rest
+    /// rather than pinned for the daemon's lifetime; `0` explicitly disables it.
+    /// Test: `config_from_env_defaults`, `config_from_env_overrides`, and
+    /// `config_from_env_idle_shutdown_explicit_zero`.
     pub fn from_env() -> Self {
         Self {
             startup_timeout_secs: parse_env_u64("TRUSTY_EMBEDDERD_STARTUP_TIMEOUT_SECS", 30),
             backoff_max_secs: parse_env_u64("TRUSTY_EMBEDDERD_RESTART_BACKOFF_MAX_SECS", 60),
             max_restarts: parse_env_u32("TRUSTY_EMBEDDERD_MAX_RESTARTS", 5),
-            idle_shutdown_secs: parse_env_u64("TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS", 0),
+            idle_shutdown_secs: parse_env_u64("TRUSTY_EMBEDDERD_IDLE_SHUTDOWN_SECS", 300),
         }
     }
 
@@ -132,14 +140,15 @@ impl Default for SupervisorConfig {
     ///
     /// Why: unit tests need a cheap config without touching env vars.
     /// What: `startup_timeout_secs=30`, `backoff_max_secs=60`,
-    /// `max_restarts=5`, `idle_shutdown_secs=0` (disabled).
+    /// `max_restarts=5`, `idle_shutdown_secs=300` (issue #2315 — matches
+    /// `from_env()` when no env vars are set).
     /// Test: used directly in unit tests.
     fn default() -> Self {
         Self {
             startup_timeout_secs: 30,
             backoff_max_secs: 60,
             max_restarts: 5,
-            idle_shutdown_secs: 0,
+            idle_shutdown_secs: 300,
         }
     }
 }
@@ -258,9 +267,18 @@ pub struct LazyEmbedderHandle {
     /// `child_pid_slot()` after construction so the health handler always
     /// reads the current child PID.
     app_pid_slot: Arc<AtomicU32>,
-    /// Last time any embed request completed successfully (monotonic clock).
+    /// Last time any embed request started or completed (monotonic clock).
     /// Used by the idle-shutdown watchdog.
     last_use: Arc<Mutex<Option<Instant>>>,
+    /// Count of embed requests currently executing `op(client)` (issue #2315).
+    ///
+    /// Why: `last_use` is only bumped at request boundaries, so a single long
+    /// request that straddles the idle deadline could otherwise be SIGKILLed
+    /// mid-flight by the watchdog. This counter is the authoritative "busy"
+    /// signal: `embed_via` holds it > 0 for the whole `op` call (via a
+    /// drop-guard that decrements on success, error, and panic unwind), and the
+    /// watchdog refuses to evict while it is non-zero.
+    in_flight: Arc<AtomicU32>,
     /// Abort handle for the pid-slot forwarder task (issue #829 — task leak).
     /// Why: old slots never reset to 0 — abort before each re-spawn.
     pid_forwarder_handle: Mutex<Option<tokio::task::AbortHandle>>,
@@ -291,6 +309,7 @@ impl LazyEmbedderHandle {
             state: Arc::new(Mutex::new(None)),
             app_pid_slot: Arc::new(AtomicU32::new(0)),
             last_use: Arc::new(Mutex::new(None)),
+            in_flight: Arc::new(AtomicU32::new(0)),
             pid_forwarder_handle: Mutex::new(None),
         }
     }
@@ -321,10 +340,15 @@ impl LazyEmbedderHandle {
     ///   3. Clone the `client_slot` Arc, drop the lock.
     ///   4. Read-lock the client slot, clone the `Arc<dyn EmbedderClient>`,
     ///      release that lock.
-    ///   5. Call `op(client)` — the actual embed request.
-    ///   6. Update `last_use` on success so the idle watchdog can fire.
+    ///   5. Bump `last_use` at request START and hold an `InFlightGuard` so the
+    ///      idle watchdog cannot SIGKILL the child mid-request (issue #2315).
+    ///   6. Call `op(client)` — the actual embed request.
+    ///   7. Update `last_use` again on success so a burst just before the idle
+    ///      deadline defers shutdown; the guard drops here, decrementing the
+    ///      in-flight count (on success, error, or panic).
     ///
-    /// Test: `lazy_handle_defers_spawn`, `lazy_handle_single_flight_concurrent`.
+    /// Test: `lazy_handle_defers_spawn`, `lazy_handle_single_flight_concurrent`,
+    /// `lazy_handle_idle_shutdown_waits_for_inflight_request`.
     pub async fn embed_via<F, Fut, T>(
         &self,
         op: F,
@@ -346,6 +370,7 @@ impl LazyEmbedderHandle {
                     Arc::clone(&self.app_pid_slot),
                     Arc::clone(&self.state),
                     Arc::clone(&self.last_use),
+                    Arc::clone(&self.in_flight),
                     &self.pid_forwarder_handle,
                 )
                 .await
@@ -365,6 +390,20 @@ impl LazyEmbedderHandle {
         // crash-restart). Drop the read lock before calling `op`.
         let client = client_slot.read().await.clone();
 
+        // Bump last_use at request START so a burst arriving just before the
+        // idle deadline defers shutdown even before the first request returns.
+        {
+            let mut last_use = self.last_use.lock().await;
+            *last_use = Some(Instant::now());
+        }
+
+        // Mark the request in-flight for the whole duration of `op`. The guard
+        // decrements on drop — on the success path below, on an error return,
+        // and on panic unwind — so the counter can never leak and strand the
+        // watchdog into never evicting. While it is > 0 the watchdog skips the
+        // kill (issue #2315 in-flight race).
+        let _in_flight = InFlightGuard::new(Arc::clone(&self.in_flight));
+
         let result = op(client).await;
 
         // Record last-use time on success so the idle watchdog doesn't evict
@@ -376,6 +415,50 @@ impl LazyEmbedderHandle {
 
         result
     }
+}
+
+/// RAII guard that tracks an in-flight embed request (issue #2315).
+///
+/// Why: the idle-shutdown watchdog must never SIGKILL the sidecar while a
+/// request is executing. A plain increment/decrement pair around `op` would
+/// leak the count if `op` returned early with `?` or panicked, permanently
+/// wedging the watchdog into "always busy". A drop-guard decrements on every
+/// scope exit — success, error, and unwind — so the count is always exact.
+///
+/// What: increments the shared `AtomicU32` on construction and decrements it
+/// in `Drop`. Uses `AcqRel` ordering so the watchdog's `Acquire` load observes
+/// a consistent value relative to the request lifecycle.
+///
+/// Test: `in_flight_guard_decrements_on_drop` and
+/// `in_flight_guard_decrements_on_panic` in the `tests` submodule.
+struct InFlightGuard {
+    counter: Arc<AtomicU32>,
+}
+
+impl InFlightGuard {
+    fn new(counter: Arc<AtomicU32>) -> Self {
+        counter.fetch_add(1, AtomicOrdering::AcqRel);
+        Self { counter }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, AtomicOrdering::AcqRel);
+    }
+}
+
+/// Decide whether the idle watchdog should evict the sidecar this tick.
+///
+/// Why: extracting the decision keeps the watchdog loop readable and gives the
+/// in-flight race a small, deterministic unit test that needs no real process.
+/// What: returns `true` only when the idle window has elapsed AND no embed
+/// request is currently in flight. A non-zero `in_flight` defers eviction to a
+/// later tick (issue #2315), by which point the request will have refreshed
+/// `last_use` on completion.
+/// Test: `should_idle_evict_respects_inflight`.
+fn should_idle_evict(idle_duration: Duration, idle_threshold: Duration, in_flight: u32) -> bool {
+    idle_duration >= idle_threshold && in_flight == 0
 }
 
 /// Spawn the sidecar, wire the supervisor, arm the idle-shutdown watchdog, and
@@ -391,6 +474,7 @@ async fn do_spawn(
     app_pid_slot: Arc<AtomicU32>,
     state_cell: Arc<Mutex<Option<SpawnedState>>>,
     last_use: Arc<Mutex<Option<Instant>>>,
+    in_flight: Arc<AtomicU32>,
     pid_forwarder_handle: &Mutex<Option<tokio::task::AbortHandle>>,
 ) -> Result<SpawnedState> {
     tracing::info!(
@@ -491,6 +575,7 @@ async fn do_spawn(
         let state_cell_clone = Arc::clone(&state_cell);
         let app_pid_slot_clone = Arc::clone(&app_pid_slot);
         let last_use_clone = Arc::clone(&last_use);
+        let in_flight_clone = Arc::clone(&in_flight);
         // shutdown_rx: fires when the watchdog wants to stop itself cleanly
         // (e.g. the process was already shut down by other means). We pass
         // it through to the watchdog task to avoid a dangling task.
@@ -499,6 +584,7 @@ async fn do_spawn(
             state_cell_clone,
             app_pid_slot_clone,
             last_use_clone,
+            in_flight_clone,
             shutdown_rx,
         ));
     }
@@ -520,8 +606,10 @@ async fn do_spawn(
 ///
 /// What: ticks every 10 seconds. On each tick:
 ///   1. Reads `last_use` to compute idle duration.
-///   2. If `idle_duration >= idle_secs`, kills the child via its OS PID,
-///      clears `state_cell` (resets the spawn gate), and exits.
+///   2. If `idle_duration >= idle_secs` AND no request is in flight, kills the
+///      child via its OS PID, clears `state_cell` (resets the spawn gate), and
+///      exits. While `in_flight > 0` it skips the kill and re-checks next tick
+///      (issue #2315 — never SIGKILL a request mid-flight).
 ///   3. If `shutdown_rx` fires, exits cleanly (the handle was dropped or the
 ///      daemon is shutting down).
 ///
@@ -532,13 +620,15 @@ async fn do_spawn(
 /// next request triggers `do_spawn` freshly rather than waiting for the
 /// old supervisor to exhaust its retry budget).
 ///
-/// Test: `lazy_handle_idle_shutdown` — creates a handle, waits for the
-/// watchdog to fire, and asserts the PID slot returns to 0.
+/// Test: `lazy_handle_idle_shutdown_waits_for_inflight_request` drives this
+/// task directly with a synthetic live state (pid 0 → no real kill) and asserts
+/// it defers eviction while `in_flight > 0`, then reclaims once it drops to 0.
 async fn idle_watchdog(
     idle_secs: u64,
     state_cell: Arc<Mutex<Option<SpawnedState>>>,
     app_pid_slot: Arc<AtomicU32>,
     last_use: Arc<Mutex<Option<Instant>>>,
+    in_flight: Arc<AtomicU32>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
     let poll_interval = Duration::from_secs(10).min(Duration::from_secs(idle_secs));
@@ -564,7 +654,14 @@ async fn idle_watchdog(
             }
         };
 
-        if idle_duration < idle_threshold {
+        // Defer eviction while the idle window has not elapsed OR a request is
+        // still executing `op` (issue #2315 in-flight race). Re-check next tick;
+        // a completing request refreshes `last_use`, pushing the deadline out.
+        if !should_idle_evict(
+            idle_duration,
+            idle_threshold,
+            in_flight.load(AtomicOrdering::Acquire),
+        ) {
             continue;
         }
 
@@ -577,6 +674,15 @@ async fn idle_watchdog(
         // Lock the state to prevent concurrent embed calls from observing a
         // partially-torn-down state.
         let mut guard = state_cell.lock().await;
+        // Close the TOCTOU window: a request may have incremented `in_flight`
+        // between the tick check above and acquiring this lock (embed_via holds
+        // the state lock only briefly at spawn, then releases it while `op`
+        // runs). If one is now in flight, back off and re-check next tick rather
+        // than killing it mid-request (issue #2315).
+        if in_flight.load(AtomicOrdering::Acquire) > 0 {
+            drop(guard);
+            continue;
+        }
         if guard.is_some() {
             // Kill the child process via its OS PID.
             let pid = app_pid_slot.load(AtomicOrdering::Acquire);
