@@ -25,13 +25,14 @@
 //! sessions and makes repeated goal-store writes. Goal-store mutations are already
 //! ATOMIC and serialized — every mutator goes through the single
 //! `Arc<Mutex<SmGoalStore>>` and SM-6 snapshots+rolls-back on a failed persist —
-//! so the loop introduces NO new last-write-wins race in the goal store. The loop
-//! does NOT touch the per-`conv_id` rolling-context engine (that path stays in
-//! `chat`), so it does not widen the #1309 context-engine race either. TODO(#1309):
-//! if `delegate_goal` ever becomes reachable concurrently for the SAME goal (e.g.
-//! re-driven by two operator turns), add a per-goal serialization seam here; today
-//! each call creates a fresh goal at INTAKE, so concurrent calls operate on
-//! disjoint goals and cannot interleave.
+//! so the loop introduces NO last-write-wins race in the goal store. The loop does
+//! NOT touch the per-`conv_id` rolling-context engine (that path stays in `chat`,
+//! where #1309's per-`conv_id` turn lock now serializes concurrent same-id turns),
+//! so it does not widen the context-engine race either. Remaining follow-up (NOT
+//! #1309): if `delegate_goal` ever becomes reachable concurrently for the SAME
+//! goal (e.g. re-driven by two operator turns), add a per-goal serialization seam
+//! here; today each call creates a fresh goal at INTAKE, so concurrent calls
+//! operate on disjoint goals and cannot interleave.
 //!
 //! What: [`DelegationOutcome`] (the loop result), [`DelegationError`] (typed
 //! failures), and the `impl` block adding

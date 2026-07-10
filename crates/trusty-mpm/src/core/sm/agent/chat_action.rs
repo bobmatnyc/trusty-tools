@@ -121,6 +121,12 @@ impl SessionManagerAgent {
         let inference = &self.config().inference;
         let rounds = &self.config().rounds;
 
+        // #1309: serialize turns for the SAME conv_id across the whole turn
+        // (open → record → save) so a concurrent turn cannot last-write-wins on the
+        // context-engine state file and lose this turn's round. Different conv_ids
+        // never block one another.
+        let _turn = self.conv_locks.acquire(&conv_id).await;
+
         let mut engine = SmContextEngine::open(&conv_id, &runtime.data_root, inference, rounds)?;
 
         // System prompt = the SM identity/floor + the inline-action instructions

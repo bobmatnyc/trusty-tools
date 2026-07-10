@@ -10,10 +10,12 @@
 //! Test: this is the test module.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tempfile::TempDir;
 
-use super::super::mock::{MockChatProvider, MockResolver};
+use super::super::mock::{CompleteGate, MockChatProvider, MockResolver};
+use crate::core::sm::SmContextEngine;
 use crate::core::sm::agent::{SessionManagerAgent, SmAgentError};
 use crate::core::sm::config::SessionManagerConfig;
 
@@ -306,6 +308,119 @@ async fn chat_records_round_when_no_provider_for_compaction() {
         joined.contains("decompose this"),
         "the round must be recorded verbatim even when compaction has no provider, got: {joined}"
     );
+}
+
+/// Why: #1309 (data integrity) — two concurrent chat turns for the SAME conv_id
+/// must NOT lose a round. The context engine opens fresh per turn and persists by
+/// atomic whole-file replace with no merge, so before the per-conv_id serialization
+/// both turns would load the same state, append their round, and save — the second
+/// save clobbering the first (total_rounds == 1, one message lost). This test
+/// reliably reproduces that interleave and asserts BOTH rounds survive post-fix.
+/// What: one shared agent (its conv_locks are shared across the two spawned
+/// clones). A gate parks turn A inside its provider call — so A has OPENED the
+/// engine and is mid-turn — while turn B runs; the paused clock lets B settle
+/// (pre-fix it saves and clobbers; post-fix it blocks on the per-conv lock) before
+/// A is released. After both finish, a fresh engine over the same data root must
+/// show `total_rounds == 2` with BOTH messages persisted.
+/// Test: this is the test (the #1309 regression guard).
+#[tokio::test(start_paused = true)]
+async fn concurrent_turns_same_conv_id_persist_both_rounds() {
+    let tmp = TempDir::new().unwrap();
+    let gate = CompleteGate::new();
+    // One shared provider (gate + request log shared via Arc across clones) so the
+    // FIRST complete() — turn A's orchestration call — parks on the gate.
+    let provider = MockChatProvider::new("reply", 0.0).gated(gate.clone());
+    let resolver = Arc::new(MockResolver::with_provider(provider));
+    let agent = agent_with(enabled_config(), resolver, tmp.path());
+
+    // Two concurrent turns on the SAME conv_id. Clones share the agent's conv_locks
+    // (an Arc), mirroring the daemon's single shared `Arc<SessionManagerAgent>`.
+    let a = {
+        let ag = agent.clone();
+        tokio::spawn(async move { ag.chat("turn A", Some("race")).await })
+    };
+    let b = {
+        let ag = agent.clone();
+        tokio::spawn(async move { ag.chat("turn B", Some("race")).await })
+    };
+
+    // Let both spawned turns run until they settle: A parks at its gated provider
+    // call (having opened the engine), B either finishes (pre-fix, no lock) or
+    // blocks on the per-conv lock (post-fix). With the paused clock, this sleep
+    // returns only once the runtime is otherwise idle, so both have settled.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Release A's provider so A records + saves; post-fix, B then proceeds.
+    gate.release();
+
+    let ra = a.await.unwrap().expect("turn A succeeds");
+    let rb = b.await.unwrap().expect("turn B succeeds");
+    assert_eq!(ra.conv_id, "race");
+    assert_eq!(rb.conv_id, "race");
+
+    // Both rounds must be persisted. Pre-fix the second save clobbers the first
+    // (total_rounds == 1, one message lost); post-fix both survive.
+    let cfg = enabled_config();
+    let engine =
+        SmContextEngine::open("race", tmp.path(), &cfg.inference, &cfg.rounds).expect("reopen");
+    let conv = engine.conversation();
+    assert_eq!(
+        conv.total_rounds, 2,
+        "both concurrent same-conv_id turns must persist their round (no loss)"
+    );
+    let users: Vec<&str> = conv.recent_rounds.iter().map(|r| r.user.as_str()).collect();
+    assert!(
+        users.contains(&"turn A") && users.contains(&"turn B"),
+        "both turns' rounds must survive, got {users:?}"
+    );
+}
+
+/// Why: the per-conv_id serialization must NOT over-serialize — turns for
+/// DIFFERENT conv_ids must run concurrently (distinct locks), or the fix would
+/// throttle unrelated conversations to one-at-a-time.
+/// What: gates turn A (conv "x") inside its provider call; turn B (conv "y") must
+/// still complete WITHOUT waiting on A's lock (a different id → a different lock).
+/// After releasing A, both persist their own single round.
+/// Test: this is the test.
+#[tokio::test(start_paused = true)]
+async fn different_conv_ids_do_not_serialize() {
+    let tmp = TempDir::new().unwrap();
+    let gate = CompleteGate::new();
+    let provider = MockChatProvider::new("reply", 0.0).gated(gate.clone());
+    let resolver = Arc::new(MockResolver::with_provider(provider));
+    let agent = agent_with(enabled_config(), resolver, tmp.path());
+
+    let a = {
+        let ag = agent.clone();
+        tokio::spawn(async move { ag.chat("for x", Some("x")).await })
+    };
+    let b = {
+        let ag = agent.clone();
+        tokio::spawn(async move { ag.chat("for y", Some("y")).await })
+    };
+
+    // A parks on the gate (conv "x"); B (conv "y") must finish independently since
+    // it holds a DIFFERENT lock. If the fix over-serialized on a single global
+    // lock, B would block behind A here and this turn would never settle.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let rb = b
+        .await
+        .unwrap()
+        .expect("turn B (conv y) finishes without waiting on A");
+    assert_eq!(rb.conv_id, "y");
+
+    // Now release A and let it finish too.
+    gate.release();
+    let ra = a.await.unwrap().expect("turn A (conv x) succeeds");
+    assert_eq!(ra.conv_id, "x");
+
+    let cfg = enabled_config();
+    for (id, msg) in [("x", "for x"), ("y", "for y")] {
+        let engine =
+            SmContextEngine::open(id, tmp.path(), &cfg.inference, &cfg.rounds).expect("reopen");
+        let conv = engine.conversation();
+        assert_eq!(conv.total_rounds, 1, "conv {id} persists its single round");
+        assert_eq!(conv.recent_rounds.back().unwrap().user, msg);
+    }
 }
 
 /// Why: §7.5 step 3 — when the SM memory palace IS wired (feature build) and
