@@ -33,7 +33,7 @@ pub use benchmark::{
     RepositoryBenchmark, build_benchmark_report, corpus_dir, load_corpus, write_snapshot,
 };
 pub use error::{ManifestError, ReportError, Result};
-pub use fill::{HONESTY_MARKER, Scope, render};
+pub use fill::{HONESTY_MARKER, Scope, render, strip_leading_comment};
 pub use git_info::{GitInfo, gather_git_info};
 pub use manifest::{
     Manifest, ReportSection, RepositoryEntry, RepositorySource, load_manifest, parse_manifest,

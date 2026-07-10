@@ -7,7 +7,7 @@
 //! What: builds scopes directly and asserts on rendered output.
 //! Test: included as `#[cfg(test)] mod tests` from `fill.rs`.
 
-use super::{HONESTY_MARKER, Scope, render};
+use super::{HONESTY_MARKER, Scope, render, strip_leading_comment};
 
 /// Why: scalars must substitute verbatim from the scope.
 /// What: sets one scalar and asserts it replaces the placeholder.
@@ -103,4 +103,69 @@ fn dataset_comment_preserved() {
     let out = render(template, &scope);
     assert!(out.contains("<!-- dataset: loc | chart: bar -->"));
     assert!(out.contains("| web |"));
+}
+
+// ─── strip_leading_comment (live-QA defect 3) ─────────────────────────────────
+
+/// Why: a leading instructional comment — including one whose documentation
+/// text embeds literal `{{field}}` / `<!-- BEGIN … --> … <!-- END … -->`
+/// examples that would otherwise be mangled by the fill engine — must be
+/// removed entirely so the generated output starts at the real content.
+/// What: strips a header shaped exactly like the bundled templates' (with a
+/// same-line BEGIN/END example nested as text) and asserts the output starts
+/// at the title with no comment residue and no mangled example content.
+/// Test: this test itself.
+#[test]
+fn strip_leading_comment_removes_header() {
+    let template = "<!--\n  PLACEHOLDER SYNTAX\n  - `{{field_name}}` a scalar.\n  - `<!-- BEGIN per_application --> ... <!-- END per_application -->`\n    marks a repeatable block.\n-->\n\n# Title: {{name}}\n";
+    let stripped = strip_leading_comment(template);
+    assert!(stripped.starts_with("# Title:"));
+    assert!(!stripped.contains("PLACEHOLDER SYNTAX"));
+    assert!(!stripped.contains("field_name"));
+
+    // Rendering the stripped template must not mangle-expand the header's fake
+    // `per_application` example (it is gone before the fill engine ever runs).
+    let mut root = Scope::new();
+    root.set("name", "Acme");
+    let mut app = Scope::new();
+    app.set("app", "irrelevant");
+    root.push_block("per_application", app);
+    let out = render(stripped, &root);
+    assert_eq!(out, "# Title: Acme\n");
+}
+
+/// Why: a template with no leading comment (e.g. a minimal custom override)
+/// must render unchanged — stripping must never touch content that isn't a
+/// leading instructional block.
+/// What: asserts a template starting directly with a heading is byte-identical
+/// after stripping.
+/// Test: this test itself.
+#[test]
+fn strip_leading_comment_noop_without_header() {
+    let template = "# Title: {{name}}\nBody text.\n";
+    assert_eq!(strip_leading_comment(template), template);
+}
+
+/// Why: the guard must remove ONLY the first leading comment block — later,
+/// independent comments (e.g. dataset markers) must survive untouched.
+/// What: a header followed by real content that itself contains further
+/// `<!-- … -->` comments; asserts those survive after stripping.
+/// Test: this test itself.
+#[test]
+fn strip_leading_comment_only_removes_first_block() {
+    let template =
+        "<!--\n  header text\n-->\n\n# Title\n\n<!-- dataset: loc | chart: bar -->\n| {{app}} |\n";
+    let stripped = strip_leading_comment(template);
+    assert!(stripped.starts_with("# Title"));
+    assert!(stripped.contains("<!-- dataset: loc | chart: bar -->"));
+}
+
+/// Why: a malformed template whose leading comment never closes must be left
+/// untouched rather than guessing a cut point and corrupting output.
+/// What: a leading `<!--` with no `-->` anywhere; asserts no change.
+/// Test: this test itself.
+#[test]
+fn strip_leading_comment_unterminated_is_untouched() {
+    let template = "<!-- never closes\n# Title\n";
+    assert_eq!(strip_leading_comment(template), template);
 }

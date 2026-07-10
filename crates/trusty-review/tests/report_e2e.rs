@@ -83,6 +83,14 @@ fn end_to_end_two_repo_report() {
     // Honesty rule: unmapped scoring fields are marked, never left as {{...}}.
     assert!(md.contains("not stated in source data"));
     assert!(!md.contains("{{"));
+    // Live-QA defect #3: the template's leading instructional comment header
+    // must never reach the generated report — output starts at the title.
+    assert!(
+        md.trim_start()
+            .starts_with("# Technical Due-Diligence Analysis:")
+    );
+    assert!(!md.contains("PLACEHOLDER SYNTAX"));
+    assert!(!md.contains("trusty-review template:"));
 
     // Write and verify the dual-output pair.
     let written = reporter.write(&model, &template).expect("write ok");

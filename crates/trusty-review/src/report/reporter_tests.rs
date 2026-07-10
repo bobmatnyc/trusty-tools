@@ -43,6 +43,36 @@ fn fixture_model(dir: &Path) -> ReportModel {
     ReportModel::build(&manifest, &manifest_path, "report-technical-dd").expect("build model")
 }
 
+/// Build a model whose single repo's metrics carry one RED, one AMBER, and two
+/// GREEN findings (live-QA defect #2314 fixture — deterministic findings fill).
+fn fixture_model_with_findings(dir: &Path) -> ReportModel {
+    let metrics = r#"{
+      "loc": { "total": 5000, "by_language": [ { "language": "Rust", "loc": 5000 } ] },
+      "counts": { "files": 20, "functions": 150 },
+      "findings": [
+        { "title": "SQL injection", "severity": "red", "category": "security", "component": "db.rs" },
+        { "title": "Stale dependency", "severity": "amber", "category": "maintainability", "component": "deps.toml" },
+        { "title": "Strong test coverage", "severity": "green", "category": "quality", "component": "" },
+        { "title": "Clean module boundaries", "severity": "green", "category": "architecture", "component": "" }
+      ]
+    }"#;
+    std::fs::write(dir.join("acme.json"), metrics).expect("write metrics");
+
+    let toml = r#"
+        [report]
+        title = "Acme Due Diligence"
+        analyst = "bobmatnyc"
+
+        [[repositories]]
+        name = "Acme Web"
+        path = "/nonexistent/acme-web"
+        metrics = "acme.json"
+    "#;
+    let manifest_path = dir.join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest parse");
+    ReportModel::build(&manifest, &manifest_path, "report-technical-dd").expect("build model")
+}
+
 /// Why: rendered markdown must carry filled report/app values and honesty
 /// markers for unmapped (M1) scoring fields.
 /// What: renders the bundled generic template and asserts key substrings.
@@ -181,6 +211,191 @@ fn reporter_appends_unavailable_note() {
     assert!(md.contains("synthesis: unavailable (provider timeout)"));
     // Deterministic fallback: exec summary was never injected.
     assert!(md.contains(HONESTY_MARKER));
+}
+
+// ─── Live-QA defect #1: deterministic findings fill ───────────────────────────
+
+/// Why: RED/AMBER findings must be listed from `metrics.findings` even with NO
+/// `--synthesize` — title/category/component verbatim; prose-only fields
+/// (description/evidence/business impact/remediation/cost) must still fall
+/// through to the honesty marker rather than being silently omitted. GREENs
+/// must appear as one-line topic titles only (no-green-analysis rule) and are
+/// independent of synthesis.
+/// What: renders the findings fixture with NO synthesis attached and asserts
+/// the RED/AMBER titles + verbatim fields render, the green titles render as
+/// bare topic bullets, and no raw placeholder survives.
+/// Test: this test itself.
+#[test]
+fn reporter_fills_findings_deterministically() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model_with_findings(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    // RED: title + component verbatim from metrics.
+    assert!(md.contains("SQL injection"));
+    assert!(md.contains("db.rs"));
+    // AMBER: title verbatim.
+    assert!(md.contains("Stale dependency"));
+    // GREEN: bare topic titles, one line each (no-green-analysis rule).
+    assert!(md.contains("Strong test coverage"));
+    assert!(md.contains("Clean module boundaries"));
+
+    // Prose-only fields have no deterministic source and stay honesty-marked —
+    // both the RED sentence's business-impact clause and the AMBER sentence's
+    // evidence clause fall through to the marker.
+    assert!(md.contains(&format!("Business impact: {HONESTY_MARKER}")));
+    assert!(md.contains(&format!("Evidence: {HONESTY_MARKER}")));
+    assert!(!md.contains("{{"), "no raw placeholder survives");
+}
+
+/// Why: with no metrics at all, RED/AMBER/GREEN sections must stay exactly as
+/// they were before this fix — honesty-marked, never fabricated.
+/// What: renders the base (findings-free) fixture and asserts the green topic
+/// slots and finding blocks fall through to markers/absence, not garbage.
+/// Test: this test itself.
+#[test]
+fn reporter_leaves_findings_honesty_marked_without_metrics() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+    assert!(md.contains(HONESTY_MARKER));
+    assert!(!md.contains("{{"));
+}
+
+/// Why: when verified synthesis prose exists for a metrics-backed finding, it
+/// must be MERGED onto the same row — never rendered as a second, duplicate
+/// entry for the same finding (the double-fill the coordinator flagged).
+/// What: attaches an available `Synthesis` whose one RED `FindingProse` title
+/// matches the fixture's metrics RED finding ("SQL injection"); asserts the
+/// metrics-verbatim fields (category/component) AND the synthesis prose fields
+/// both appear, and the finding's title appears exactly once in the rendered
+/// RED findings section (proving it is one merged row, not two).
+/// Test: this test itself.
+#[test]
+fn reporter_merges_synthesis_prose_onto_deterministic_finding() {
+    use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model_with_findings(tmp.path());
+    let slug = model.repositories[0].slug.clone();
+    model.synthesis = Some(Synthesis {
+        status: SynthesisStatus::Available,
+        executive_summary: None,
+        top_risks: vec![],
+        findings: vec![FindingProse {
+            app_slug: slug,
+            title: "SQL injection".to_string(),
+            severity: "RED".to_string(),
+            description: "Unsanitised query parameters.".to_string(),
+            evidence: "one endpoint".to_string(),
+            component: "db.rs".to_string(),
+            business_impact: "customer data exposure".to_string(),
+            remediation: "use parameterised queries".to_string(),
+            cost_effort: "low".to_string(),
+        }],
+        notes: vec![],
+    });
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    // Metrics-verbatim fields still present.
+    assert!(md.contains("SQL injection"));
+    assert!(md.contains("db.rs"));
+    // Synthesis prose merged onto the same row.
+    assert!(md.contains("Unsanitised query parameters."));
+    assert!(md.contains("customer data exposure"));
+
+    // Exactly one row for this finding: the RED findings section (5.1) contains
+    // the title exactly once, not twice (deterministic row + separate synthesis
+    // row would double it).
+    let red_section = md
+        .split("### 5.1")
+        .nth(1)
+        .and_then(|s| s.split("### 5.2").next())
+        .expect("RED section present");
+    assert_eq!(red_section.matches("SQL injection").count(), 1);
+    assert!(!md.contains("{{"));
+}
+
+// ─── Live-QA defect #2: ordinal helper ────────────────────────────────────────
+
+/// Why: naive `{n}th` formatting misrenders e.g. "71th"/"11th"-adjacent cases;
+/// the ordinal helper must special-case the 11/12/13 teens exception and
+/// otherwise follow the last digit.
+/// What: asserts the documented edge-case set.
+/// Test: this test itself.
+#[test]
+fn ordinal_edge_cases() {
+    use super::ordinal;
+    let cases = [
+        (1, "1st"),
+        (2, "2nd"),
+        (3, "3rd"),
+        (11, "11th"),
+        (12, "12th"),
+        (13, "13th"),
+        (21, "21st"),
+        (71, "71st"),
+        (101, "101st"),
+        (111, "111th"),
+    ];
+    for (n, expected) in cases {
+        assert_eq!(ordinal(n), expected, "ordinal({n})");
+    }
+}
+
+// ─── Live-QA defect #3: leading-comment header stripping ─────────────────────
+
+/// Why: a generated report must never carry the bundled template's leading
+/// instructional comment — and, before this fix, its literal `{{field_name}}`
+/// and `per_application` BEGIN/END documentation examples were mangled into
+/// the output (including duplicating the real per-application section).
+/// What: renders the real bundled generic template and asserts the header's
+/// distinctive instructional text is absent, the output starts at the title,
+/// and the per-application heading appears exactly once (proving the header's
+/// embedded example did not get expanded with live data).
+/// Test: this test itself.
+#[test]
+fn reporter_strips_leading_comment_header() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(
+        md.trim_start()
+            .starts_with("# Technical Due-Diligence Analysis:")
+    );
+    assert!(!md.contains("PLACEHOLDER SYNTAX"));
+    assert!(!md.contains("HOW IT'S USED"));
+    assert!(!md.contains("trusty-review template:"));
+    // The header's embedded `per_application` example must not have been
+    // expanded with real data — the real section 4 heading appears exactly once.
+    assert_eq!(md.matches("### 4.N. Acme Web").count(), 1);
+}
+
+/// Why: a custom template with no leading comment must render unaffected —
+/// stripping must never remove real content when there is no header to strip.
+/// What: renders a minimal inline template (no leading `<!-- … -->`) and
+/// asserts the placeholder fills normally with nothing removed.
+/// Test: this test itself.
+#[test]
+fn reporter_custom_template_without_header_is_unaffected() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let md = Reporter::new(tmp.path()).render(&model, "# Custom {{target_codename}}\nBody.\n");
+    assert_eq!(md, "# Custom Acme Due Diligence\nBody.\n");
 }
 
 /// Build a ranked single-metric benchmark for the fixture repo's slug.

@@ -206,6 +206,65 @@ fn find_from(haystack: &str, needle: &str, from: usize) -> Option<usize> {
     haystack[from..].find(needle).map(|i| i + from)
 }
 
+/// Strip a leading `<!-- … -->` instructional comment block from template
+/// source before filling (live-QA defect, epic #2312 / #2314).
+///
+/// Why: the bundled templates open with a human-authored instructional comment
+/// (placeholder syntax, the no-green-analysis rule, etc.) documenting HOW to
+/// author a template instance. A generated report must never carry that
+/// instructional text — and worse, the comment's own literal `{{field_name}}`
+/// and `<!-- BEGIN … --> … <!-- END … -->` documentation examples would
+/// otherwise be mistaken for real placeholders/blocks by [`render`] and mangled
+/// into the output (a literal `per_application`-named example inside the header
+/// would even get expanded with live per-application data). Stripping the
+/// header before rendering removes both problems at the root, without touching
+/// the on-disk template files (which still carry the instructions for a human
+/// author).
+/// What: if `template`, after trimming leading whitespace, does not start with
+/// `<!--`, returns it unchanged (no leading comment to strip — covers a custom
+/// template with no header, and guards against ever touching non-leading
+/// comments). Otherwise scans forward balancing every `<!--`/`-->` token pair —
+/// exactly like [`find_first_block`]'s nested-block balancing — so a literal
+/// `<!--`/`-->` example embedded as documentation text inside the header does
+/// not end the strip early; the strip point is where the outer comment's depth
+/// returns to zero. Any blank line(s) immediately following the closing marker
+/// are also trimmed. An unterminated leading comment (malformed template) is
+/// left untouched rather than guessing a cut point.
+/// Test: `fill_tests.rs::{strip_leading_comment_removes_header,
+/// strip_leading_comment_noop_without_header,
+/// strip_leading_comment_only_removes_first_block,
+/// strip_leading_comment_unterminated_is_untouched}`.
+pub fn strip_leading_comment(template: &str) -> &str {
+    let trimmed_start = template.trim_start();
+    if !trimmed_start.starts_with("<!--") {
+        return template;
+    }
+    let leading_ws = template.len() - trimmed_start.len();
+    let body = &template[leading_ws..];
+
+    let mut depth = 1i32; // the leading "<!--" itself opens the outer comment
+    let mut cursor = 4usize; // past that leading "<!--"
+    loop {
+        let next_open = find_from(body, "<!--", cursor);
+        let next_close = find_from(body, "-->", cursor);
+        match (next_open, next_close) {
+            (Some(o), Some(c)) if o < c => {
+                depth += 1;
+                cursor = o + 4;
+            }
+            (_, Some(c)) => {
+                depth -= 1;
+                cursor = c + 3;
+                if depth == 0 {
+                    let rest = &body[cursor..];
+                    return rest.trim_start_matches(['\n', '\r']);
+                }
+            }
+            _ => return template, // unterminated — leave the template untouched
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "fill_tests.rs"]
 mod tests;
