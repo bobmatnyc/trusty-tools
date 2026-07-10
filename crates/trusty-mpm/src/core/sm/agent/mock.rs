@@ -38,6 +38,28 @@ pub struct MockChatProvider {
     reply: String,
     cost_usd: f64,
     requests: Arc<Mutex<Vec<LlmRequest>>>,
+    /// Optional gate that BLOCKS the first `complete` call until released (#1309).
+    gate: Option<Arc<CompleteGate>>,
+}
+
+/// A one-shot gate that parks the FIRST `complete` call until the test releases it.
+///
+/// Why: the #1309 concurrency test must deterministically force two turns for the
+/// same `conv_id` to overlap — turn A must OPEN the context engine and reach its
+/// provider call while turn B is still in flight, so that (pre-fix) both open the
+/// same on-disk state before either saves and one round is lost. Gating only the
+/// FIRST `complete` (turn A's orchestration call) parks A there while turn B
+/// either races ahead (pre-fix, no lock) or blocks on the per-conv lock (post-fix)
+/// — WITHOUT deadlocking the post-fix path (only A waits on the gate, and B never
+/// needs to reach `complete` for A to be released).
+/// What: `calls` counts `complete` invocations across the shared provider; the
+/// call at index 0 awaits `release`. Later calls pass straight through.
+/// Test: `chat_tests.rs::concurrent_turns_same_conv_id_persist_both_rounds`.
+pub struct CompleteGate {
+    /// Notified by the test to release the parked first `complete` call.
+    release: tokio::sync::Notify,
+    /// Monotonic count of `complete` invocations across all clones.
+    calls: AtomicUsize,
 }
 
 impl MockChatProvider {
@@ -47,7 +69,22 @@ impl MockChatProvider {
             reply: reply.into(),
             cost_usd,
             requests: Arc::new(Mutex::new(Vec::new())),
+            gate: None,
         }
+    }
+
+    /// Gate this provider's FIRST `complete` call on `gate` (#1309 test seam).
+    ///
+    /// Why: lets the concurrency test hold turn A inside its provider call until it
+    /// releases the gate, deterministically forcing the overlap that reproduces the
+    /// round-loss race pre-fix. Clones share the gate (an `Arc`), so the gate spans
+    /// every clone the resolver hands to a `ResolvedCall`.
+    /// What: returns `self` with the gate attached. Call `CompleteGate::release` to
+    /// let the parked first call proceed.
+    /// Test: `chat_tests.rs::concurrent_turns_same_conv_id_persist_both_rounds`.
+    pub fn gated(mut self, gate: Arc<CompleteGate>) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     /// The most recent request, if any.
@@ -69,6 +106,31 @@ impl MockChatProvider {
     }
 }
 
+impl CompleteGate {
+    /// Build a gate whose first `complete` call will park until released.
+    ///
+    /// Why: the concurrency test creates one gate, shares it with the provider, and
+    /// releases it once both turns have settled.
+    /// What: returns an `Arc<CompleteGate>` (shared with the provider clones).
+    /// Test: `chat_tests.rs::concurrent_turns_same_conv_id_persist_both_rounds`.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            release: tokio::sync::Notify::new(),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    /// Release the parked first `complete` call so turn A can finish.
+    ///
+    /// Why: the test releases the gate after both turns have reached steady state.
+    /// What: notifies the parked waiter (or stores a permit if it has not parked
+    /// yet, so the release can never be lost to a race).
+    /// Test: `chat_tests.rs::concurrent_turns_same_conv_id_persist_both_rounds`.
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
 #[async_trait]
 impl LlmProvider for MockChatProvider {
     fn name(&self) -> &str {
@@ -76,6 +138,12 @@ impl LlmProvider for MockChatProvider {
     }
 
     async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, SmLlmError> {
+        // #1309 test seam: park the FIRST complete call until the gate is released.
+        if let Some(gate) = &self.gate
+            && gate.calls.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            gate.release.notified().await;
+        }
         let model = req.model.clone();
         self.requests.lock().expect("mock lock").push(req);
         Ok(LlmResponse {

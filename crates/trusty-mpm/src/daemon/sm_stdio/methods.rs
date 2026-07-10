@@ -149,11 +149,10 @@ pub async fn sm_chat(d: &SmDispatcher, params: &Value) -> Result<Value, MethodEr
 /// `Abandoned`) so a caller can distinguish in-progress from blocked/failed WITHOUT
 /// a follow-up `sm.goals.list`; `goal_done` is kept additively for back-compat. A
 /// degraded SM (no provider) maps to [`MethodError::Unavailable`]; any other failure
-/// → [`MethodError::Internal`]. Without `sm-memory` (no goal store) it returns a
-/// graceful unavailable error.
+/// → [`MethodError::Internal`]. The goal store is feature-independent, so this runs
+/// in EVERY build (#1477) — goals are non-durable in-memory on the default build.
 /// Test: `tests.rs::delegate_end_to_end_launch_observe_verify_close`,
-/// `delegate_gate_blocks_without_evidence`, `delegate_unavailable_without_feature`.
-#[cfg(feature = "sm-memory")]
+/// `delegate_gate_blocks_without_evidence`.
 pub async fn sm_delegate(d: &SmDispatcher, params: &Value) -> Result<Value, MethodError> {
     let message = req_str(params, "message")?;
     match d.agent.delegate_goal(&message, &d.sessions, &d.goals).await {
@@ -169,20 +168,6 @@ pub async fn sm_delegate(d: &SmDispatcher, params: &Value) -> Result<Value, Meth
         }
         Err(e) => Err(MethodError::Internal(e.to_string())),
     }
-}
-
-/// `sm.delegate` is unavailable without the `sm-memory` feature.
-///
-/// Why: the delegation loop persists goals through the SM-6 store, which is backed
-/// by the SM palace (memory-core); the no-memory build returns a graceful JSON-RPC
-/// error rather than failing to compile.
-/// What: always returns [`MethodError::Unavailable`].
-/// Test: `tests.rs::delegate_unavailable_without_feature`.
-#[cfg(not(feature = "sm-memory"))]
-pub async fn sm_delegate(_d: &SmDispatcher, _params: &Value) -> Result<Value, MethodError> {
-    Err(MethodError::Unavailable(
-        "sm.delegate is not available without the sm-memory feature".to_string(),
-    ))
 }
 
 /// `sm.health {}` → `{ ok, provider, degraded, model_tiers }` (§5.3).
@@ -312,20 +297,20 @@ fn map_control_err(e: SessionControlError) -> MethodError {
     }
 }
 
-// ── sm.context.get (SM-5 context engine — feature-gated) ────────────────────────
+// ── sm.context.get (SM-5 context engine — always available) ─────────────────────
 
-/// `sm.context.get { conv_id? }` → context state (§7.1/§7.5).
+/// `sm.context.get { conv_id }` → context state (§7.1/§7.5).
 ///
 /// Why: surfaces the rolling-context engine's state — the compressed block, the
 /// recent verbatim rounds, the total round count, and the token estimate — so a
-/// driver can inspect what context the SM is carrying for a conversation.
-/// What: under `sm-memory`, opens the per-`conv_id` engine under the SM data root
-/// and returns `{ compressed_context, recent_rounds, total_rounds, token_estimate }`.
-/// Without `sm-memory` (or when no `conv_id` is supplied to identify a stored
-/// conversation), returns the appropriate graceful error.
-/// Test: `tests.rs::context_get_round_trips` (feature),
-/// `context_get_unavailable_without_feature` (no feature).
-#[cfg(feature = "sm-memory")]
+/// driver can inspect what context the SM is carrying for a conversation. The
+/// context engine is compiled in EVERY build (it depends only on serde + the SM
+/// provider trait, not on memory-core), so this method is available regardless of
+/// the `sm-memory` feature (#1477) — it never needed the SM palace.
+/// What: opens the per-`conv_id` engine under the SM data root and returns
+/// `{ compressed_context, recent_rounds, total_rounds, token_estimate }`. A missing
+/// `conv_id` is an invalid-params error; a store failure is an internal error.
+/// Test: `tests.rs::context_get_feature_branches`.
 pub async fn sm_context_get(d: &SmDispatcher, params: &Value) -> Result<Value, MethodError> {
     use crate::core::sm::SmContextEngine;
 
@@ -351,29 +336,16 @@ pub async fn sm_context_get(d: &SmDispatcher, params: &Value) -> Result<Value, M
     }))
 }
 
-/// `sm.context.get` is unavailable without the `sm-memory` feature.
-///
-/// Why: the context engine state lives alongside the SM palace; the no-memory
-/// build returns a graceful JSON-RPC error rather than failing to compile.
-/// What: always returns [`MethodError::Unavailable`].
-/// Test: `tests.rs::context_get_unavailable_without_feature`.
-#[cfg(not(feature = "sm-memory"))]
-pub async fn sm_context_get(_d: &SmDispatcher, _params: &Value) -> Result<Value, MethodError> {
-    Err(MethodError::Unavailable(
-        "sm.context.get is not available without the sm-memory feature".to_string(),
-    ))
-}
-
-// ── sm.goals.* (SmGoalStore — feature-gated) ────────────────────────────────────
+// ── sm.goals.* (SmGoalStore — always available, #1477) ──────────────────────────
 
 /// `sm.goals.list { status? }` → `{ goals: [Goal] }` (SM-6).
 ///
 /// Why: lists tracked operator goals, optionally filtered by status. Maps onto the
-/// SM-6 goal store.
-/// What: under `sm-memory`, reads `store.all()` and (when `status` is supplied)
-/// filters by it; returns `{ goals }`. Without the feature → unavailable error.
-/// Test: `tests.rs::goals_list_round_trips`, `goals_unavailable_without_feature`.
-#[cfg(feature = "sm-memory")]
+/// SM-6 goal store, which is feature-independent (#1477): palace-backed durable
+/// storage under `sm-memory`, non-durable in-memory on the default build.
+/// What: reads `store.all()` and (when `status` is supplied) filters by it; returns
+/// `{ goals }`.
+/// Test: `tests.rs::goals_feature_branches`.
 pub async fn sm_goals_list(d: &SmDispatcher, params: &Value) -> Result<Value, MethodError> {
     let status = opt_str(params, "status");
     let store = d.goals.lock().await;
@@ -390,7 +362,6 @@ pub async fn sm_goals_list(d: &SmDispatcher, params: &Value) -> Result<Value, Me
 }
 
 /// `sm.goals.create { description, acceptance? }` → `{ goal: Goal }` (SM-6).
-#[cfg(feature = "sm-memory")]
 pub async fn sm_goals_create(d: &SmDispatcher, params: &Value) -> Result<Value, MethodError> {
     let description = req_str(params, "description")?;
     let acceptance = params
@@ -421,7 +392,6 @@ pub async fn sm_goals_create(d: &SmDispatcher, params: &Value) -> Result<Value, 
 /// spec's `progress` field is DERIVED by the store from session states (§9.1) and
 /// is not directly settable, so it is accepted-but-ignored with a note.
 /// Test: `tests.rs::goals_update_round_trips`.
-#[cfg(feature = "sm-memory")]
 pub async fn sm_goals_update(d: &SmDispatcher, params: &Value) -> Result<Value, MethodError> {
     let id = req_str(params, "id")?;
     let note = opt_str(params, "note");
@@ -443,7 +413,6 @@ pub async fn sm_goals_update(d: &SmDispatcher, params: &Value) -> Result<Value, 
 }
 
 /// The lowercase wire status string for a goal (matches the camelCase serde).
-#[cfg(feature = "sm-memory")]
 fn goal_status_str(goal: &crate::core::sm::Goal) -> String {
     use crate::core::sm::GoalStatus;
     match goal.status {
@@ -463,7 +432,6 @@ fn goal_status_str(goal: &crate::core::sm::Goal) -> String {
 /// What: case-insensitively matches the five statuses (accepting both
 /// `inprogress` and `in_progress`).
 /// Test: `tests.rs::goals_update_round_trips`.
-#[cfg(feature = "sm-memory")]
 fn parse_goal_status(s: &str) -> Result<crate::core::sm::GoalStatus, MethodError> {
     use crate::core::sm::GoalStatus;
     match s
@@ -491,7 +459,6 @@ fn parse_goal_status(s: &str) -> Result<crate::core::sm::GoalStatus, MethodError
 /// What: `NotFound` → [`MethodError::NotFound`]; everything else (palace/cache/
 /// gate) → [`MethodError::Internal`].
 /// Test: `tests.rs::goals_update_unknown_is_not_found`.
-#[cfg(feature = "sm-memory")]
 fn map_goal_err(e: crate::core::sm::SmGoalError) -> MethodError {
     match e {
         crate::core::sm::SmGoalError::NotFound(msg) => {
@@ -506,9 +473,8 @@ fn map_goal_err(e: crate::core::sm::SmGoalError) -> MethodError {
 /// Why: `sm.sessions.launch` with a `goal_id` must record the goal↔session link;
 /// doing it here keeps the launch handler's two-surface touch minimal. A link
 /// failure (unknown goal / persist error) is reported, never fatal to the launch.
-/// What: under `sm-memory`, calls `store.link`; returns whether it succeeded.
+/// What: calls `store.link`; returns whether it succeeded.
 /// Test: `tests.rs::launch_with_goal_links_session`.
-#[cfg(feature = "sm-memory")]
 async fn link_session_to_goal(d: &SmDispatcher, goal_id: &str, session_id: &str) -> bool {
     use crate::core::sm::SessionLink;
     let mut store = d.goals.lock().await;
@@ -519,46 +485,4 @@ async fn link_session_to_goal(d: &SmDispatcher, goal_id: &str, session_id: &str)
         )
         .await
         .is_ok()
-}
-
-/// No-memory build: there is no goal store, so a launch link is a no-op.
-///
-/// Why: keeps `sm.sessions.launch` compiling without `sm-memory`; the goal link
-/// is simply not recorded (goals are unavailable in that build).
-/// What: always returns `false`.
-/// Test: `tests.rs` (no-feature build) covers launch without a goal.
-#[cfg(not(feature = "sm-memory"))]
-async fn link_session_to_goal(_d: &SmDispatcher, _goal_id: &str, _session_id: &str) -> bool {
-    false
-}
-
-/// `sm.goals.*` are unavailable without the `sm-memory` feature.
-///
-/// Why: the goal store is backed by the SM palace (memory-core); the no-memory
-/// build returns a graceful JSON-RPC error rather than failing to compile.
-/// What: always returns [`MethodError::Unavailable`].
-/// Test: `tests.rs::goals_unavailable_without_feature`.
-#[cfg(not(feature = "sm-memory"))]
-pub async fn sm_goals_list(_d: &SmDispatcher, _params: &Value) -> Result<Value, MethodError> {
-    goals_unavailable()
-}
-
-/// See [`sm_goals_list`] (no-memory build).
-#[cfg(not(feature = "sm-memory"))]
-pub async fn sm_goals_create(_d: &SmDispatcher, _params: &Value) -> Result<Value, MethodError> {
-    goals_unavailable()
-}
-
-/// See [`sm_goals_list`] (no-memory build).
-#[cfg(not(feature = "sm-memory"))]
-pub async fn sm_goals_update(_d: &SmDispatcher, _params: &Value) -> Result<Value, MethodError> {
-    goals_unavailable()
-}
-
-/// The graceful "goals unavailable" error for the no-memory build.
-#[cfg(not(feature = "sm-memory"))]
-fn goals_unavailable() -> Result<Value, MethodError> {
-    Err(MethodError::Unavailable(
-        "sm.goals.* are not available without the sm-memory feature".to_string(),
-    ))
 }

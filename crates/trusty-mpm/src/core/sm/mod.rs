@@ -85,8 +85,8 @@ pub use control::{
     LaunchParams, RawObservation, SessionControl, SessionControlError, Submit, Summary,
 };
 pub use goals::{
-    GOAL_TAG, Goal, GoalCache, GoalMemory, GoalStatus, SessionLink, SessionTaskState,
-    SessionUpdate, SmGoalError, SmGoalResult, SmGoalStore,
+    GOAL_TAG, Goal, GoalCache, GoalMemory, GoalStatus, NoopGoalMemory, SessionLink,
+    SessionTaskState, SessionUpdate, SmGoalError, SmGoalResult, SmGoalStore,
 };
 #[cfg(feature = "sm-memory")]
 pub use memory::{SmMemory, SmMemoryError, SmMemoryResult};

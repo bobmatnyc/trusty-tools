@@ -38,38 +38,23 @@ mod methods;
 
 pub use control::{DaemonSessionControl, LaunchParams, SessionControl, SessionControlError};
 
-#[cfg(feature = "sm-memory")]
-use std::sync::Arc as StdArc;
-#[cfg(feature = "sm-memory")]
 use tokio::sync::Mutex;
 
-#[cfg(feature = "sm-memory")]
-use crate::core::sm::SmGoalStore;
+use crate::core::sm::{NoopGoalMemory, SmGoalStore};
 
-/// The shared goal-store handle `sm.goals.*` operate over (feature-gated type).
+/// The shared goal-store handle `sm.goals.*` and `sm.delegate` operate over (#1477).
 ///
-/// Why: [`SmDispatcher::new`] takes ONE signature across both `sm-memory` and
-/// the default build (a fragile dual-arity API was the prior shape). The goal
-/// store only exists under `sm-memory`, so the constructor accepts this handle
-/// as an `Option` that is simply always `None` in the no-memory build — gating
-/// the TYPE, never the arity. Under `sm-memory` it is the live store behind a
-/// mutex (the `&mut self` goal mutators serialise through it).
-/// What: an `Arc<Mutex<SmGoalStore>>` under the feature; an uninhabited
-/// `std::convert::Infallible` placeholder without it (never constructed —
-/// callers pass `None`).
-/// Test: `tests.rs::dispatcher_with` constructs `Some(..)`/`None` via this alias.
-#[cfg(feature = "sm-memory")]
-pub type SmGoalHandle = StdArc<Mutex<SmGoalStore>>;
-
-/// Placeholder goal-store handle for the no-memory build (never constructed).
-///
-/// Why: lets [`SmDispatcher::new`] keep ONE signature without referencing the
-/// `sm-memory`-only [`SmGoalStore`]. Callers in the default build always pass
-/// `None`, so no value of this type is ever created.
-/// What: a zero-sized uninhabitable-by-convention marker.
-/// Test: compile-only; the no-memory `new` ignores its `Option<SmGoalHandle>`.
-#[cfg(not(feature = "sm-memory"))]
-pub type SmGoalHandle = std::convert::Infallible;
+/// Why: the goal store (SM-6) is feature-INDEPENDENT — it works over the
+/// [`GoalMemory`](crate::core::sm::GoalMemory) seam — so `sm.goals.*` and the
+/// delegation loop can operate in EVERY build. Under `sm-memory` the store is
+/// backed by the durable SM palace; on the default build it is backed by a no-op
+/// seam ([`NoopGoalMemory`]) so goals function in-memory (non-durable) rather than
+/// returning "unavailable" (#1477). Keeping ONE handle type across both builds
+/// keeps [`SmDispatcher::new`] a single signature.
+/// What: an `Arc<Mutex<SmGoalStore>>` (the `&mut self` goal mutators serialise
+/// through the mutex).
+/// Test: `tests.rs::dispatcher_with` constructs it in both builds.
+pub type SmGoalHandle = Arc<Mutex<SmGoalStore>>;
 
 /// The transport-neutral SM dispatcher the stdio adapter drives (§1A.1).
 ///
@@ -80,29 +65,27 @@ pub type SmGoalHandle = std::convert::Infallible;
 /// dispatcher owns one handle per SM surface and does pure translation.
 /// What: the SM [`SessionManagerAgent`] (chat + health), a config snapshot + the
 /// `data_root` for opening the per-`conv_id` context engine (`sm.context.get`),
-/// the [`SessionControl`] seam for `sm.sessions.*`, and — under `sm-memory` — the
-/// shared [`SmGoalStore`] for `sm.goals.*`. Without the feature the goal store is
-/// absent and `sm.goals.*`/`sm.context.get` return a graceful JSON-RPC error.
+/// the [`SessionControl`] seam for `sm.sessions.*`, and the shared [`SmGoalStore`]
+/// for `sm.goals.*` + `sm.delegate`. All four surfaces are present in EVERY build
+/// (#1477): the goal store is palace-backed under `sm-memory` and no-op/in-memory
+/// on the default build, so no `sm.*` method returns "unavailable" purely for lack
+/// of the feature (only a degraded provider makes `sm.chat`/`sm.delegate` degrade).
 /// Test: `tests.rs` builds this over the mock resolver + mock session control.
 pub struct SmDispatcher {
     /// The SM agent (SM-7 chat + SM-2/§5.3 health). Shared, cheap to clone.
     agent: Arc<SessionManagerAgent>,
     /// Config snapshot used to open the context engine for `sm.context.get`
-    /// (inference + rounds) — read-only, never mutated here. Only consulted under
-    /// `sm-memory` (the no-memory build returns the unavailable error before
-    /// touching it).
-    #[cfg_attr(not(feature = "sm-memory"), allow(dead_code))]
+    /// (inference + rounds) — read-only, never mutated here. The context engine is
+    /// compiled in every build (#1477), so this is consulted in every build.
     config: SessionManagerConfig,
     /// Storage root under which per-`conv_id` context-engine state lives (SM-5).
-    /// Only consulted under `sm-memory` (see `config`).
-    #[cfg_attr(not(feature = "sm-memory"), allow(dead_code))]
     data_root: PathBuf,
     /// The managed-session control surface for `sm.sessions.*` (§2.6).
     sessions: Arc<dyn SessionControl>,
-    /// The SM goal store for `sm.goals.*` (SM-6), behind a mutex for the
-    /// `&mut self` mutators. Only present under `sm-memory`.
-    #[cfg(feature = "sm-memory")]
-    goals: StdArc<Mutex<SmGoalStore>>,
+    /// The SM goal store for `sm.goals.*` (SM-6) + the delegation loop, behind a
+    /// mutex for the `&mut self` mutators. Present in EVERY build (#1477): palace-
+    /// backed under `sm-memory`, no-op/in-memory on the default build.
+    goals: Arc<Mutex<SmGoalStore>>,
 }
 
 impl SmDispatcher {
@@ -111,14 +94,12 @@ impl SmDispatcher {
     /// Why: a single constructor across `sm-memory` and the default build keeps
     /// the public API stable for callers and tests — they wire the SAME five
     /// arguments regardless of feature. The goal store is an [`Option`]: `Some`
-    /// under `sm-memory` (the live store), always `None` in the no-memory build
-    /// (where `sm.goals.*`/`sm.context.get` return the graceful unavailable
-    /// error). Only the goal-handle TYPE is feature-gated (via [`SmGoalHandle`]),
-    /// never the arity.
-    /// What: stores agent/config/data_root/sessions; under `sm-memory` also stores
-    /// the unwrapped goal store (defaulting to an empty no-op store if `None`).
-    /// No I/O.
-    /// Test: `tests.rs::dispatcher_with` builds this with `Some`/`None` per build.
+    /// supplies a caller-built store (palace-backed under `sm-memory`, no-op on the
+    /// default build); `None` defaults to an empty no-op store so the dispatcher
+    /// always has a working goal surface (#1477).
+    /// What: stores agent/config/data_root/sessions and the goal store (unwrapping
+    /// the `Option`, defaulting to an empty [`NoopGoalMemory`]-backed store). No I/O.
+    /// Test: `tests.rs::dispatcher_with` builds this with `Some`/`None`.
     pub fn new(
         agent: Arc<SessionManagerAgent>,
         config: SessionManagerConfig,
@@ -127,29 +108,13 @@ impl SmDispatcher {
         goals: Option<SmGoalHandle>,
     ) -> Self {
         let data_root = data_root.into();
-        #[cfg(feature = "sm-memory")]
-        {
-            let goals =
-                goals.unwrap_or_else(|| StdArc::new(Mutex::new(empty_goal_store(&data_root))));
-            Self {
-                agent,
-                config,
-                data_root,
-                sessions,
-                goals,
-            }
-        }
-        #[cfg(not(feature = "sm-memory"))]
-        {
-            // No-memory build: there is no goal store; the handle is never
-            // constructed (callers always pass `None`).
-            let _ = goals;
-            Self {
-                agent,
-                config,
-                data_root,
-                sessions,
-            }
+        let goals = goals.unwrap_or_else(|| Arc::new(Mutex::new(empty_goal_store(&data_root))));
+        Self {
+            agent,
+            config,
+            data_root,
+            sessions,
+            goals,
         }
     }
 
@@ -206,21 +171,14 @@ async fn build_dispatcher(
     let data_root = state.sm_data_root();
     let sessions: Arc<dyn SessionControl> = Arc::new(DaemonSessionControl::new(state.clone()));
 
-    #[cfg(feature = "sm-memory")]
-    {
-        let goals = build_goal_store(&data_root, &config).await;
-        Ok(SmDispatcher::new(
-            agent,
-            config,
-            data_root,
-            sessions,
-            Some(goals),
-        ))
-    }
-    #[cfg(not(feature = "sm-memory"))]
-    {
-        Ok(SmDispatcher::new(agent, config, data_root, sessions, None))
-    }
+    let goals = build_goal_store(&data_root, &config).await;
+    Ok(SmDispatcher::new(
+        agent,
+        config,
+        data_root,
+        sessions,
+        Some(goals),
+    ))
 }
 
 /// Load the SM goal store from the dedicated SM palace (`sm-memory` build).
@@ -237,12 +195,12 @@ async fn build_dispatcher(
 async fn build_goal_store(
     data_root: &std::path::Path,
     config: &SessionManagerConfig,
-) -> StdArc<Mutex<SmGoalStore>> {
+) -> Arc<Mutex<SmGoalStore>> {
     use crate::core::sm::memory::SmMemory;
 
     let store = match SmMemory::open(data_root.join("palace"), &config.memory) {
         Ok(mem) => {
-            let mem: StdArc<dyn crate::core::sm::GoalMemory> = StdArc::new(mem);
+            let mem: Arc<dyn crate::core::sm::GoalMemory> = Arc::new(mem);
             match SmGoalStore::load(mem, data_root.to_path_buf()).await {
                 Ok(store) => store,
                 Err(e) => {
@@ -258,40 +216,35 @@ async fn build_goal_store(
             empty_goal_store(data_root)
         }
     };
-    StdArc::new(Mutex::new(store))
+    Arc::new(Mutex::new(store))
 }
 
-/// Build an empty goal store over a no-op palace seam (degraded fallback).
+/// Build the no-op/in-memory goal store for the default build (#1477).
 ///
-/// Why: when the real palace is unavailable, `sm.goals.*` must still answer
-/// (returning an empty list / accepting creates that simply do not durably
-/// persist) rather than the whole stdio surface failing. A no-op [`GoalMemory`]
-/// gives the store a seam that always succeeds with no entries.
+/// Why: without `sm-memory` there is no palace, but the goal store is
+/// feature-independent, so `sm.goals.*` and the delegation loop DEGRADE GRACEFULLY
+/// to non-durable in-memory operation (backed by [`NoopGoalMemory`]) rather than
+/// returning "unavailable". Durable persistence requires `--features sm-memory`.
+/// What: wraps an empty [`empty_goal_store`] in the shared mutex handle.
+/// Test: `tests.rs` no-feature `sm.goals.*` / `sm.delegate` branches.
+#[cfg(not(feature = "sm-memory"))]
+async fn build_goal_store(
+    data_root: &std::path::Path,
+    _config: &SessionManagerConfig,
+) -> Arc<Mutex<SmGoalStore>> {
+    Arc::new(Mutex::new(empty_goal_store(data_root)))
+}
+
+/// Build an empty goal store over the no-op palace seam ([`NoopGoalMemory`]).
+///
+/// Why: gives the store a seam that always succeeds with no entries — used both as
+/// the default-build backing (#1477) and as the `sm-memory` palace-unavailable
+/// fallback, so `sm.goals.*` answer (empty list / non-durable creates) rather than
+/// failing.
 /// What: constructs an [`SmGoalStore::new`] over a [`NoopGoalMemory`].
-/// Test: runtime fallback; the store behaviour is covered by SM-6 tests.
-#[cfg(feature = "sm-memory")]
+/// Test: covered by SM-6 store tests + the no-feature dispatch tests.
 fn empty_goal_store(data_root: &std::path::Path) -> SmGoalStore {
-    SmGoalStore::new(StdArc::new(NoopGoalMemory), data_root.to_path_buf())
-}
-
-/// A [`GoalMemory`] that persists nothing and lists nothing (degraded seam).
-///
-/// Why: lets the goal store operate (in-memory only) when the real SM palace is
-/// unavailable, so `sm.goals.*` degrade gracefully instead of erroring out.
-/// What: `remember_goal` is a no-op success; `list_goals` returns an empty vec.
-/// Test: runtime fallback only.
-#[cfg(feature = "sm-memory")]
-struct NoopGoalMemory;
-
-#[cfg(feature = "sm-memory")]
-#[async_trait::async_trait]
-impl crate::core::sm::GoalMemory for NoopGoalMemory {
-    async fn remember_goal(&self, _json: String, _tag: &str) -> Result<(), String> {
-        Ok(())
-    }
-    async fn list_goals(&self, _tag: &str) -> Result<Vec<String>, String> {
-        Ok(Vec::new())
-    }
+    SmGoalStore::new(Arc::new(NoopGoalMemory), data_root.to_path_buf())
 }
 
 #[cfg(test)]

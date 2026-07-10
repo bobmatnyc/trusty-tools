@@ -64,6 +64,35 @@ pub trait GoalMemory: Send + Sync {
     async fn list_goals(&self, tag: &str) -> Result<Vec<String>, String>;
 }
 
+/// A no-op [`GoalMemory`]: persists nothing, enumerates nothing (#1477).
+///
+/// Why: without the `sm-memory` feature there is no SM palace, but the goal store
+/// (SM-6) is feature-INDEPENDENT and works over any [`GoalMemory`]. Backing it with
+/// this no-op seam lets `sm.goals.*` and the delegation loop DEGRADE GRACEFULLY to
+/// in-memory, non-durable operation on the default build — the headline SM-8
+/// capability functions, it simply does not persist across a restart — instead of
+/// returning "unavailable". This mirrors the recall no-op pattern in `agent::chat`
+/// (memory-dependent work becomes an absent no-op, never a hard failure). Durable
+/// goal persistence remains behind `--features sm-memory`.
+/// What: `remember_goal` succeeds without storing; `list_goals` always returns an
+/// empty set (so a fresh-start store rebuilds to empty). Always compiled.
+/// Test: `store_tests.rs` exercises the store over a mock seam; the wiring that
+/// selects this seam on the default build is covered by `daemon::sm_stdio::tests`
+/// (the no-feature `sm.goals.*` / `sm.delegate` branches).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopGoalMemory;
+
+#[async_trait]
+impl GoalMemory for NoopGoalMemory {
+    async fn remember_goal(&self, _json: String, _tag: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn list_goals(&self, _tag: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+}
+
 /// `SmMemory` is the production [`GoalMemory`]: the dedicated SM palace.
 ///
 /// Why: in the daemon the goal store's source of truth is the real SM palace
