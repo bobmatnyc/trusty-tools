@@ -27,13 +27,13 @@
 //! module-level SLOC-cap convention already used by
 //! `trusty-review::llm::bedrock`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use aws_sdk_bedrockruntime::operation::converse::ConverseOutput as ConverseResponse;
 use aws_sdk_bedrockruntime::types::{
     AnyToolChoice, AutoToolChoice, ContentBlock, ConversationRole, Message, SpecificToolChoice,
     SystemContentBlock, Tool, ToolChoice as SdkToolChoice, ToolConfiguration, ToolInputSchema,
-    ToolResultBlock, ToolResultContentBlock, ToolSpecification, ToolUseBlock,
+    ToolResultBlock, ToolResultContentBlock, ToolResultStatus, ToolSpecification, ToolUseBlock,
 };
 use aws_smithy_types::{Document, Number};
 use serde_json::Value;
@@ -60,7 +60,10 @@ use super::cache;
 /// (`user` and `tool` roles) or `Assistant` (`assistant` role); consecutive
 /// messages of the same Converse role are merged into ONE `Message` with
 /// multiple content blocks, which is exactly what happens for a run of
-/// `tool`-role results answering one assistant turn's tool calls.
+/// `tool`-role results answering one assistant turn's tool calls. (#2278)
+/// Before the final return, [`enforce_tool_pairing`] rewrites `messages` so
+/// the emitted request always satisfies Bedrock's ToolUse/ToolResult
+/// pairing invariant, regardless of what produced the input history.
 /// Test: `bedrock::tests::*`.
 pub(super) fn build_converse_messages(
     req: &ChatRequest,
@@ -72,6 +75,16 @@ pub(super) fn build_converse_messages(
 
     for msg in &req.messages {
         if msg.role == "system" {
+            // (#2278) Flush the in-progress same-role batch BEFORE diverting
+            // this entry to the system-prompt array, rather than bare
+            // `continue`. A mid-conversation system-role entry (e.g. a
+            // compaction-summary placeholder, #2070) has no in-conversation
+            // home on Converse either way — the system array has no
+            // per-turn position semantics — but failing to flush here
+            // silently merges content that occurred BEFORE this entry with
+            // content that occurs AFTER it into one artificial message,
+            // corrupting ordering beyond just losing the placeholder text.
+            flush_message(&mut messages, &mut current_role, &mut current_blocks)?;
             if let Some(text) = &msg.content {
                 system_blocks.push(SystemContentBlock::Text(text.clone()));
                 // (#2260) `agent_loop::build_request` marks exactly one
@@ -116,7 +129,158 @@ pub(super) fn build_converse_messages(
     }
 
     flush_message(&mut messages, &mut current_role, &mut current_blocks)?;
+    enforce_tool_pairing(&mut messages)?;
     Ok((system_blocks, messages))
+}
+
+/// Enforce Bedrock's ToolUse/ToolResult pairing invariant on the fully
+/// role-merged Converse message list (#2278 Fix B — the Bedrock-specific
+/// backstop).
+///
+/// Why: `agent_loop::transcript::Transcript::maybe_compact` can (before Fix
+/// A) fold an assistant's `tool_calls` entry into a compaction summary while
+/// one of its answering `tool`-role entries survives verbatim, or vice
+/// versa — a count-based compaction cutoff has no tool-call awareness. Any
+/// unpaired `ToolUse`/`ToolResult` in the request makes Bedrock's Converse
+/// API reject the whole call with `ValidationException: ... toolResult`.
+/// This runs unconditionally on every request as a last-resort guarantee
+/// that the WIRE shape is always valid, independent of whatever produced
+/// the input history — it is not solely a compensating control for the
+/// transcript bug Fix A addresses.
+/// What: Two passes over `messages` (already strictly alternating
+/// `User`/`Assistant` — `build_converse_messages` merges consecutive
+/// same-role turns before this runs, so a `ToolUse`'s only possible
+/// answering window is the immediately-following message). Pass 1 walks
+/// every content block in encounter order, tracking every `tool_use_id`
+/// introduced by a `ToolUse` block; a `ToolResult` whose `tool_use_id` was
+/// never introduced by an earlier (or same, block-order) `ToolUse` is an
+/// orphan and is dropped — there is no call left to attach it to on the
+/// model's side, and Bedrock rejects an orphan just as strictly as a
+/// missing result. Pass 2 walks every `ToolUse` block and, for each whose
+/// `tool_use_id` has no matching `ToolResult` in the immediately-following
+/// message, synthesizes a placeholder `ToolResult` (status `Error`, text
+/// noting the result is unavailable) appended to that following message —
+/// or, if there is no following message at all, a brand-new trailing `User`
+/// message carrying just the placeholders.
+/// Test: `bedrock::tests::enforce_tool_pairing_*`.
+fn enforce_tool_pairing(messages: &mut Vec<Message>) -> Result<(), LlmError> {
+    // Pass 1: drop orphan ToolResult blocks; record every tool_use_id ever
+    // introduced, in block encounter order.
+    let mut introduced: HashSet<String> = HashSet::new();
+    for msg in messages.iter_mut() {
+        let role = msg.role().clone();
+        let mut kept = Vec::with_capacity(msg.content().len());
+        for block in msg.content() {
+            match block {
+                ContentBlock::ToolUse(tu) => {
+                    introduced.insert(tu.tool_use_id().to_string());
+                    kept.push(block.clone());
+                }
+                ContentBlock::ToolResult(tr) if !introduced.contains(tr.tool_use_id()) => {
+                    // Orphan: no ToolUse ever introduced this id. Silently
+                    // drop — the model has nothing to attach it to.
+                }
+                other => kept.push(other.clone()),
+            }
+        }
+        *msg = Message::builder()
+            .role(role)
+            .set_content(Some(kept))
+            .build()
+            .map_err(|e| LlmError::Bedrock(format!("rebuild Message: {e}")))?;
+    }
+
+    // Pass 2: for each ToolUse, compute any missing answers in the
+    // immediately-following message up front (before mutating anything), so
+    // index arithmetic below can't be invalidated by an earlier insertion.
+    let mut missing_by_index: Vec<Vec<String>> = vec![Vec::new(); messages.len()];
+    for (i, msg) in messages.iter().enumerate() {
+        let own_ids: Vec<String> = msg
+            .content()
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse(tu) => Some(tu.tool_use_id().to_string()),
+                _ => None,
+            })
+            .collect();
+        if own_ids.is_empty() {
+            continue;
+        }
+        let answered: HashSet<&str> = messages
+            .get(i + 1)
+            .map(|next| {
+                next.content()
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolResult(tr) => Some(tr.tool_use_id()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        missing_by_index[i] = own_ids
+            .into_iter()
+            .filter(|id| !answered.contains(id.as_str()))
+            .collect();
+    }
+
+    // Apply back-to-front: inserting a brand-new message at i+1 must never
+    // shift an index this loop still needs to visit (all remaining indices
+    // are < i+1).
+    for i in (0..messages.len()).rev() {
+        if missing_by_index[i].is_empty() {
+            continue;
+        }
+        let placeholders = missing_by_index[i]
+            .iter()
+            .map(|id| placeholder_tool_result(id))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let append_to_next = messages
+            .get(i + 1)
+            .is_some_and(|next| next.role() == &ConversationRole::User);
+        if append_to_next {
+            let mut content = messages[i + 1].content().to_vec();
+            content.extend(placeholders);
+            messages[i + 1] = Message::builder()
+                .role(ConversationRole::User)
+                .set_content(Some(content))
+                .build()
+                .map_err(|e| LlmError::Bedrock(format!("rebuild Message: {e}")))?;
+        } else {
+            let new_msg = Message::builder()
+                .role(ConversationRole::User)
+                .set_content(Some(placeholders))
+                .build()
+                .map_err(|e| LlmError::Bedrock(format!("build placeholder Message: {e}")))?;
+            messages.insert(i + 1, new_msg);
+        }
+    }
+
+    Ok(())
+}
+
+/// Build one synthesized placeholder `ToolResult` block for a `tool_use_id`
+/// that reached the end of its answering window with no real result.
+///
+/// Why: Bedrock requires every `ToolUse` to have a matching `ToolResult`;
+/// when the real result was dropped (compaction splitting a turn group, or
+/// any other history-drift source), the model still needs SOME result to
+/// keep the conversation valid — an explicit "unavailable" marker is honest
+/// about what happened, unlike silently fabricating a fake success.
+/// What: A `ToolResultBlock` keyed by `tool_use_id`, `status: Error`, and a
+/// single text content block saying the result is unavailable.
+/// Test: `bedrock::tests::enforce_tool_pairing_synthesizes_placeholder_for_unanswered_tool_use`.
+fn placeholder_tool_result(tool_use_id: &str) -> Result<ContentBlock, LlmError> {
+    let block = ToolResultBlock::builder()
+        .tool_use_id(tool_use_id)
+        .content(ToolResultContentBlock::Text(
+            "[result unavailable — history was compacted]".to_string(),
+        ))
+        .status(ToolResultStatus::Error)
+        .build()
+        .map_err(|e| LlmError::Bedrock(format!("build placeholder ToolResultBlock: {e}")))?;
+    Ok(ContentBlock::ToolResult(block))
 }
 
 /// Append one `ChatMessage`'s content as Converse `ContentBlock`s onto the

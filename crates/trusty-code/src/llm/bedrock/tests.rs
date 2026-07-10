@@ -11,6 +11,7 @@ use aws_sdk_bedrockruntime::operation::converse::ConverseOutput as ConverseOutpu
 use aws_sdk_bedrockruntime::types::{
     ContentBlock, ConverseOutput as ConverseOutputKind, Message as SdkMessage, StopReason,
     SystemContentBlock, TokenUsage as SdkTokenUsage, Tool as SdkTool, ToolChoice as SdkToolChoice,
+    ToolResultStatus,
 };
 use serde_json::json;
 
@@ -200,6 +201,194 @@ fn build_converse_messages_maps_tool_use_arguments_to_document() {
             assert_eq!(parsed["query"], "rust");
         }
         other => panic!("expected ToolUse block, got {other:?}"),
+    }
+}
+
+// ─── ToolUse/ToolResult pairing backstop (#2278 Fix B) ─────────────────────
+
+/// Assert `build_converse_messages`'s output always satisfies Bedrock's
+/// pairing invariant: every `ToolResult` has an earlier matching `ToolUse`
+/// (no orphans survive), and every `ToolUse` has a matching `ToolResult`
+/// SOMEWHERE in the output (none left unanswered).
+///
+/// Why: Shared assertion for all three `enforce_tool_pairing_*` tests below
+/// so the invariant itself is defined once, not re-derived per test.
+fn assert_tool_pairing_invariant(messages: &[aws_sdk_bedrockruntime::types::Message]) {
+    let mut introduced: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut answered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for message in messages {
+        for block in message.content() {
+            match block {
+                ContentBlock::ToolUse(tu) => {
+                    introduced.insert(tu.tool_use_id());
+                }
+                ContentBlock::ToolResult(tr) => {
+                    assert!(
+                        introduced.contains(tr.tool_use_id()),
+                        "orphan ToolResult for {:?} with no preceding ToolUse in {messages:?}",
+                        tr.tool_use_id()
+                    );
+                    answered.insert(tr.tool_use_id());
+                }
+                _ => {}
+            }
+        }
+    }
+    for id in &introduced {
+        assert!(
+            answered.contains(id),
+            "ToolUse {id:?} has no matching ToolResult anywhere in {messages:?}"
+        );
+    }
+}
+
+/// A `tool`-role result whose `tool_call_id` was never introduced by any
+/// preceding assistant `tool_calls` entry is dropped, not passed through as
+/// an orphan `ToolResult`.
+///
+/// Why: This is exactly the corrupted shape a naive count-based compaction
+/// cutoff can produce (#2278): the assistant entry carrying the matching
+/// `tool_calls` got folded into a compacted-span summary while the
+/// answering `tool`-role entry survived verbatim. Bedrock's Converse API
+/// rejects any orphan `ToolResult` with `ValidationException`, so the
+/// backstop must drop it rather than forward it.
+/// What: Build a request with a `tool`-role message whose `tool_call_id` has
+/// no matching prior `ToolUse`; assert the pairing invariant holds and that
+/// no `ToolResult` for that id appears in the output.
+/// Test: this test.
+#[test]
+fn enforce_tool_pairing_drops_orphan_tool_result() {
+    let req = minimal_request(vec![
+        ChatMessage::system("s"),
+        ChatMessage::user("do it"),
+        ChatMessage::tool_result("orphan_call", "bash", "leftover output"),
+    ]);
+    let (_, messages) = build_converse_messages(&req).expect("convert");
+
+    assert_tool_pairing_invariant(&messages);
+    for message in &messages {
+        for block in message.content() {
+            if let ContentBlock::ToolResult(tr) = block {
+                assert_ne!(
+                    tr.tool_use_id(),
+                    "orphan_call",
+                    "orphan ToolResult must be dropped, not passed through: {messages:?}"
+                );
+            }
+        }
+    }
+}
+
+/// An assistant `ToolUse` with NO following `ToolResult` at all gets a
+/// synthesized placeholder `ToolResult` appended immediately after it.
+///
+/// Why: The other half of the #2278 orphan shape — the answering `tool`-role
+/// entry itself was the one folded into a compacted-span summary (or never
+/// recorded at all). Without a synthesized answer, Bedrock rejects the
+/// request outright for a missing `toolResult`.
+/// What: Build a request with an assistant `tool_calls` entry and
+/// deliberately no matching `tool_result` entry; assert the pairing
+/// invariant holds, a placeholder `ToolResult` for that call id exists in
+/// the immediately-following message, and it carries `status: Error`.
+/// Test: this test.
+#[test]
+fn enforce_tool_pairing_synthesizes_placeholder_for_unanswered_tool_use() {
+    let mut req = minimal_request(vec![ChatMessage::system("s"), ChatMessage::user("do it")]);
+    req.messages.push(ChatMessage {
+        role: "assistant".into(),
+        content: None,
+        tool_calls: Some(vec![ToolCall {
+            id: "call_1".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "bash".into(),
+                arguments: "{}".into(),
+            },
+        }]),
+        tool_call_id: None,
+        name: None,
+        cache_control: None,
+    });
+    // Deliberately no matching tool_result entry.
+
+    let (_, messages) = build_converse_messages(&req).expect("convert");
+
+    assert_tool_pairing_invariant(&messages);
+    let assistant_idx = messages
+        .iter()
+        .position(|m| {
+            m.content()
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolUse(_)))
+        })
+        .expect("assistant ToolUse message must be present");
+    let following = messages
+        .get(assistant_idx + 1)
+        .expect("a following message with the synthesized placeholder must exist");
+    let placeholder = following
+        .content()
+        .iter()
+        .find_map(|b| match b {
+            ContentBlock::ToolResult(tr) if tr.tool_use_id() == "call_1" => Some(tr),
+            _ => None,
+        })
+        .expect("placeholder ToolResult for call_1 must exist");
+    assert!(matches!(
+        placeholder.status(),
+        Some(ToolResultStatus::Error)
+    ));
+}
+
+/// A conversation whose tool calls are already fully paired is left
+/// unchanged by the backstop — no dropped blocks, no synthesized
+/// placeholders.
+///
+/// Why: The fix must be a no-op on the overwhelmingly common valid case;
+/// regression guard against an overzealous implementation mangling healthy
+/// conversations.
+/// What: Build a request with one assistant `tool_calls` entry immediately
+/// answered by its `tool_result`; assert the message shape and the real
+/// result's content are unchanged (no `Error` status stamped onto it).
+/// Test: this test.
+#[test]
+fn enforce_tool_pairing_leaves_valid_conversation_unchanged() {
+    let mut req = minimal_request(vec![ChatMessage::system("s"), ChatMessage::user("go")]);
+    req.messages.push(ChatMessage {
+        role: "assistant".into(),
+        content: None,
+        tool_calls: Some(vec![ToolCall {
+            id: "call_1".into(),
+            kind: "function".into(),
+            function: FunctionCall {
+                name: "bash".into(),
+                arguments: "{}".into(),
+            },
+        }]),
+        tool_call_id: None,
+        name: None,
+        cache_control: None,
+    });
+    req.messages
+        .push(ChatMessage::tool_result("call_1", "bash", "ok"));
+
+    let (_, messages) = build_converse_messages(&req).expect("convert");
+
+    assert_tool_pairing_invariant(&messages);
+    assert_eq!(
+        messages.len(),
+        3,
+        "user(task), assistant(tool use), user(tool result) — no extra synthesized message"
+    );
+    assert_eq!(messages[2].content().len(), 1, "no placeholder appended");
+    match &messages[2].content()[0] {
+        ContentBlock::ToolResult(tr) => {
+            assert_eq!(tr.tool_use_id(), "call_1");
+            assert!(
+                tr.status().is_none(),
+                "a real result must not get the placeholder Error status"
+            );
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
     }
 }
 
