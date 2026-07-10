@@ -121,7 +121,7 @@ rusqlite = { workspace = true, optional = true }
 # std::time::Instant is sufficient; chrono is used for JWT iat/exp claims.
 
 [package.metadata.docs.rs]
-features = ["http-server", "mcp", "profile"]
+features = ["http-server", "mcp", "profile", "report"]
 
 [features]
 # Why: mirrors trusty-analyze / trusty-common convention — axum + tower-http
@@ -134,7 +134,7 @@ features = ["http-server", "mcp", "profile"]
 # service module, so downstream consumers can safely write:
 #   trusty-review = { features = ["http-server"] }
 # without a manifest change in a later stage.
-default     = ["http-server", "mcp", "profile"]
+default     = ["http-server", "mcp", "profile", "report"]
 http-server = ["dep:axum", "dep:tower", "dep:tower-http", "trusty-common/axum-server"]
 # Why: gates the MCP stdio JSON-RPC service + the trusty-common MCP primitives
 #      behind an opt-in feature so library-only consumers do not pull in the
@@ -152,6 +152,14 @@ mcp         = ["trusty-common/mcp", "trusty-common/console-metrics", "http-serve
 #       dependencies.
 # Test: `cargo test -p trusty-review` (default features) covers profile module tests.
 profile     = ["dep:tga", "dep:rusqlite"]
+# Why: gates the deterministic technical-DD report generator (epic #2312 / M1
+#      #2313).  Default-on so `cargo install` ships the `report` subcommand out
+#      of the box.  Pulls in NO new external dependencies — the module reuses
+#      toml/serde/serde_json/regex/chrono/tempfile/dirs already in [dependencies]
+#      — so the gate exists purely for module/subcommand opt-out, not dep weight.
+# What: enables `src/report/` and the `report` CLI subcommand.
+# Test: `cargo test -p trusty-review` (default features) covers report module tests.
+report      = []
 
 [dev-dependencies]
 # test-util enables tokio's paused-clock (`tokio::time::pause`) used by the

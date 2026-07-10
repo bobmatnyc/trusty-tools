@@ -38,8 +38,8 @@
   3. Synthesize prose (executive summary, findings descriptions, business-impact narratives) — initially via LLM, later deterministic for fully-templated sections
   4. Render markdown + JSON dual output (markdown for human reading, JSON for downstream tooling)
 - **Template Loader Pattern:** Clone `VoiceLoader` (`src/voice/loader.rs`): XDG config directory (`~/.trusty-review/templates/`) is checked first; if not found, use bundled default via `include_str!()`.
-- **Feature Gate:** New Cargo feature `report` (off by default). The standard `cargo install trusty-review` does not include report generation (keeps binary size and dependency surface minimal); users opt in via `--features report`.
-- **CLI sketch:** `trusty-review report --repo <path> --template report-technical-dd [--out <dir>]`
+- **Feature Gate:** Cargo feature `report`, **default-on** (mirrors the `profile` gate). It pulls in no new external dependencies (toml/serde/serde_json/regex/chrono/tempfile/dirs are already present), so the gate is purely for module/subcommand opt-out, not dependency weight; disable with `--no-default-features`.
+- **CLI sketch:** `trusty-review report --manifest <file> [--template <name>] [--out <dir>]` (see [CLI & Configuration](#cli--configuration)).
 
 ### Section → Data Source Mapping
 
@@ -77,7 +77,7 @@
 
 | Phase | Deliverable | Effort | Status |
 |---|---|---|---|
-| **M1** | Deterministic fill (metrics → tables) from trusty-analyze output; no LLM synthesis | Define output schema for trusty-analyze; build template loader; implement placeholder fill engine | Not started |
+| **M1** | Deterministic, manifest-driven fill (metrics → tables) from trusty-analyze output; no LLM synthesis | Manifest loader + validation; git enrichment; v0 metrics schema; template loader; placeholder fill engine; `report` subcommand | **Landed (#2313)** — `src/report/`, `report` Cargo feature (default-on), `trusty-review report --manifest` |
 | **M2** | LLM synthesis of exec summary + findings prose (RED/AMBER descriptive narratives) | Plug LLM backend (OpenRouter or Bedrock); implement synthesizer; validate output quality | Not started |
 | **M3** | Cross-repo benchmarking (percentile ranks, quartile placement like CAST Appmarq) | Maintain corpus of analyzed repos; compute percentile functions; wire into scorecard section | Not started |
 
@@ -97,20 +97,131 @@ Both are **placeholder-only** — absolutely zero deal-specific data (component 
 
 ## CLI & Configuration
 
+As of M1 (#2313) report generation is **manifest-driven** — a single TOML file
+names the target repositories and their sources; the earlier `--repo` flag is
+replaced by `--manifest`.
+
 ```bash
-trusty-review report --repo <path> --template <name> [--out <dir>]
-  --repo <path>       Repository to analyze (required)
-  --template <name>   Template name, e.g. report-technical-dd or report-technical-dd-cast (default: report-technical-dd)
-  --out <dir>         Output directory for generated report (default: ./trusty-review-reports/)
-  --format <fmt>      Output format: markdown, json, both (default: markdown)
-  --analyzer-url <u>  trusty-analyze HTTP endpoint (default: http://127.0.0.1:7879)
+trusty-review report --manifest <file> [--template <name>] [--out <dir>]
+  --manifest <file>   Path to the report manifest TOML (required)
+  --template <name>   Template override, e.g. report-technical-dd or
+                      report-technical-dd-cast. Precedence:
+                      --template flag > manifest [report].template > default
+                      (report-technical-dd)
+  --out <dir>         Output directory for the generated report pair
+                      (default: ./reports)
 ```
+
+Output is always the dual `{date}-{title-slug}.md` + `.json` pair written
+atomically (temp file + rename). The markdown is the human report; the JSON is
+the full [`ReportModel`] (report metadata + per-repository git provenance +
+metrics), the machine-readable twin for downstream tooling. STDERR carries
+progress; STDOUT emits the written paths (one per line) so
+`$(trusty-review report …)` is scriptable.
 
 Example:
 ```bash
-trusty-review report --repo /path/to/acme-web-app --template report-technical-dd-cast --out /tmp/dd-reports
-# Produces: /tmp/dd-reports/2026-07-10-report-technical-dd-cast.md + .json
+trusty-review report --manifest dd/acme.toml --template report-technical-dd-cast --out /tmp/dd-reports
+# Produces: /tmp/dd-reports/2026-07-10-acme-technical-dd.md + .json
 ```
+
+### Report Manifest
+
+The manifest is a typed TOML document with one `[report]` section and one or
+more `[[repositories]]` entries. It is parsed and validated by
+`src/report/manifest.rs` (`load_manifest`), which returns a `thiserror`
+`ManifestError` on any failure.
+
+```toml
+[report]
+title    = "Acme Technical DD"          # required — report title, codename, and slug seed
+template = "report-technical-dd"        # optional — default template if omitted
+analyst  = "bobmatnyc"                  # optional — recorded in report metadata
+
+[[repositories]]
+name    = "Acme Web"                    # required — application name
+slug    = "acme-web"                    # optional — derived from name when absent
+path    = "/path/to/local/checkout"     # EITHER a local path …
+# remote = "owner/repo"                 # … OR a remote (owner/repo or full git URL)
+# username = "bobmatnyc"                # for remote access/attribution only
+ref     = "main"                        # optional — branch, tag, or commit
+metrics = "acme-metrics.json"           # optional — trusty-analyze v0 metrics JSON (relative to the manifest dir)
+```
+
+**Validation rules (enforced by the loader):**
+
+1. At least one `[[repositories]]` entry, else `ManifestError::NoRepositories`.
+2. Each entry declares **exactly one** of `path` or `remote`:
+   - both set → `ManifestError::ConflictingSources { name }`
+   - neither set → `ManifestError::MissingSource { name }`
+3. `username` is meaningful only with `remote`. An **orphaned username** on a
+   local-path entry is **tolerated** (kept in the model) but logs a `warn!` —
+   it is ignored because local checkouts need no access/attribution in M1.
+4. A missing `slug` is derived from `name` (lowercase; non-alphanumeric runs →
+   `-`; trimmed; empty → `report`).
+5. TOML parse failures surface as `ManifestError::Parse` with line numbers.
+
+**Multi-repo → per-application mapping.** Each `[[repositories]]` entry maps to
+exactly one `<!-- BEGIN per_application --> … <!-- END per_application -->`
+repetition in the template, filled in manifest order. Report-level fields
+(`applications_list`, etc.) aggregate across all entries. Finding and
+risk-register blocks that have no deterministic M1 data render once with honesty
+markers (never invented, never duplicated per app).
+
+**Git enrichment (deterministic, local entries only).** For a `path` source the
+loader shells out to the local `git` binary (via `std::process::Command`, no
+`git2`/heavy dependency) to record current branch, short HEAD SHA, origin remote
+URL, and a dirty flag. A path that is not a git work tree yields no git info
+(the report still generates). **Remote entries perform no network fetch in M1** —
+their declared `remote`/`ref`/`username` are recorded as-is. All git provenance
+lands in the report metadata (the JSON `ReportModel`); the bundled templates
+carry it in JSON, and a custom template may surface `{{git_branch}}`,
+`{{git_head_sha}}`, `{{git_origin_url}}`, `{{git_dirty}}` in markdown.
+
+### v0 trusty-analyze Metrics JSON Schema
+
+M1 consumes a **pre-produced** trusty-analyze metrics JSON per repository (the
+`metrics = …` manifest field); live invocation of the analyzer is deferred to a
+later milestone. The v0 schema (`src/report/metrics.rs`) is intentionally small
+and every field defaults, so partial analyzer output still parses and any field
+the template needs but the metrics omit falls through to the honesty marker.
+
+```jsonc
+{
+  "schema_version": "v0",              // informational
+  "repository": "acme-web",            // informational
+  "loc": {
+    "total": 8200,                     // total lines of code
+    "by_language": [                   // per-language breakdown
+      { "language": "TypeScript", "loc": 6000 },
+      { "language": "CSS",        "loc": 2200 }
+    ]
+  },
+  "counts": { "files": 120, "functions": 640 },
+  "complexity": {                      // cyclomatic-complexity distribution buckets
+    "buckets": [
+      { "label": "low (1-5)",  "count": 250 },
+      { "label": "high (>20)", "count": 12 }
+    ]
+  },
+  "findings": [                        // top findings with severity (no LLM prose in M1)
+    { "title": "SQL injection", "severity": "red",
+      "category": "security", "component": "db.rs" }
+  ]
+}
+```
+
+**Field → template mapping (M1 deterministic subset):**
+
+| Metrics field | Per-application placeholder |
+|---|---|
+| `loc.by_language` (top 4, by LoC desc) | `{{app_tech_stack}}` |
+| `loc.total` | `{{app_loc}}` |
+| `counts.files` / `counts.functions` | `{{app_file_counts}}` |
+
+`severity` is one of `red` / `amber` / `green` (unknown/absent → `green`).
+Scoring, health-factor, and benchmark placeholders have no deterministic M1
+source and therefore render as `not stated in source data` until M2/M3 land.
 
 ## References & Related Docs
 

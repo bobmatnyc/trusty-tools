@@ -13,6 +13,8 @@
 
 #[cfg(feature = "profile")]
 mod cli_profile;
+#[cfg(feature = "report")]
+mod cli_report;
 mod cli_verify;
 mod commands;
 
@@ -125,6 +127,20 @@ enum Commands {
     #[cfg(feature = "profile")]
     Profile(cli_profile::ProfileArgs),
 
+    /// Generate a deterministic technical due-diligence report from a manifest.
+    ///
+    /// Loads a TOML manifest naming one or more target repositories, enriches
+    /// each local checkout with git provenance, consumes pre-produced
+    /// trusty-analyze metrics JSON, and fills a bundled report template — writing
+    /// a `{slug}.md` / `{slug}.json` pair to the output directory.
+    ///
+    /// Deterministic only (M1): no LLM synthesis.  Any placeholder with no source
+    /// value renders as `not stated in source data` (never invented).
+    ///
+    /// Requires the `report` Cargo feature (enabled by default).
+    #[cfg(feature = "report")]
+    Report(cli_report::ReportArgs),
+
     /// Run the calibration harness against a human-reviewed PR corpus (#1422).
     ///
     /// Loads a JSONL corpus (one CorpusEntry JSON object per line), runs the
@@ -183,6 +199,8 @@ async fn async_main(cli: Cli) -> Result<()> {
         Commands::Serve(args) => cmd_serve(config, args).await,
         #[cfg(feature = "profile")]
         Commands::Profile(args) => cli_profile::cmd_profile(config, args).await,
+        #[cfg(feature = "report")]
+        Commands::Report(args) => cli_report::cmd_report(config, args).await,
         Commands::Calibrate(args) => cmd_calibrate(config, args).await,
         // Port is handled synchronously in `main` before this function is
         // called; this arm is unreachable at runtime but required for
