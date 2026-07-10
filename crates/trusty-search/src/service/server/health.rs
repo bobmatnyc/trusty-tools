@@ -229,6 +229,58 @@ pub(super) async fn health_handler(
     warmboot_summary.indexes_lazy = state.cold_store.len();
     warmboot_summary.indexes_failed = state.cold_store.failed_len();
 
+    // Issue #1870: a registered index whose durable redb corpus failed to open
+    // on warm-boot (`DatabaseAlreadyOpen` from an in-process double-open, or an
+    // incompatible/corrupt corpus format) warm-boots into the registry with a
+    // healthy-looking `chunk_count` but every search stage marked `Failed` (see
+    // the `corpus_open_failed` guard in `derive_warm_boot_stages`). Free-text /
+    // BM25 / hybrid queries against it silently return `[]` while `/health` used
+    // to report `"ok"` — a silent, total search outage the daemon self-certified
+    // as healthy. Scan the live registry for any such index and fold the count
+    // into the warm-boot degraded signal so a `status != "ok"` (or
+    // `warm_boot_degraded`) probe detects the outage without tailing logs.
+    //
+    // Issue #1006 (non-blocking health handler): use `try_read()` on each
+    // handle's `stages` lock rather than `.read().await`. The stages lock is
+    // read-mostly and only written by the reindex pipeline, so contention is
+    // rare; on the exceedingly-rare miss we skip that handle (undercount by one
+    // for this poll) — the failure is stable across restarts and every
+    // subsequent 2 s poll re-scans, so it is never lost.
+    //
+    // Issue #1870 review follow-up: failing open on a miss is the correct
+    // trade-off (never block the health handler), but a *persistently*
+    // contended handle would otherwise be silently skipped forever — the one
+    // remaining path that could stay invisibly degraded. Count every miss into
+    // `indexes_health_scan_skipped` and name the skipped index at `debug!` so a
+    // persistent miss is detectable (a healthy poll has this at 0; a handle
+    // stuck under write-lock contention shows up as a repeated non-zero count
+    // for the same id across consecutive polls) without changing the
+    // fail-open behavior itself.
+    let mut indexes_health_scan_skipped = 0usize;
+    let indexes_corpus_failed = state
+        .registry
+        .list_handles()
+        .iter()
+        .filter(|handle| match handle.stages.try_read() {
+            Ok(stages) => stages.any_failed(),
+            Err(_) => {
+                indexes_health_scan_skipped += 1;
+                tracing::debug!(
+                    index_id = %handle.id,
+                    "health: stages lock contended — skipping this handle for this poll (#1870)"
+                );
+                false
+            }
+        })
+        .count();
+    warmboot_summary.indexes_corpus_failed = indexes_corpus_failed;
+    warmboot_summary.indexes_health_scan_skipped = indexes_health_scan_skipped;
+    if indexes_corpus_failed > 0 {
+        // Fold into the single machine-readable warm-boot health flag external
+        // monitors already poll, so #1870 rides the existing degraded channel.
+        warmboot_summary.warm_boot_degraded = true;
+    }
+
     // Issue #1672: read the reconcile summary. Returns None when reconcile has
     // not started yet (disabled via env gate or daemon still in boot). The
     // `skip_serializing_if = "Option::is_none"` on the response field keeps
@@ -255,8 +307,19 @@ pub(super) async fn health_handler(
         })
         .unwrap_or(None);
 
+    // Issue #1870: honest top-level status. `"ok"` used to be unconditional,
+    // so a total silent search outage (all-lanes-Failed corpus) still read as
+    // healthy. Downgrade to `"degraded"` when at least one registered index has
+    // a failed lane so a simple `status != "ok"` gate catches it. The healthy
+    // path is unchanged (`indexes_corpus_failed == 0` → `"ok"`).
+    let overall_status = if warmboot_summary.indexes_corpus_failed > 0 {
+        "degraded"
+    } else {
+        "ok"
+    };
+
     Json(HealthResponse {
-        status: "ok",
+        status: overall_status,
         version: env!("CARGO_PKG_VERSION"),
         indexes: state.registry.list().len(),
         uptime_secs: state.started_at.elapsed().as_secs(),

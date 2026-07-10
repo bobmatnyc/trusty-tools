@@ -446,6 +446,8 @@ pub struct WarmBootSummary {
     /// `true` when any of the following hold:
     /// - `indexes_skipped_tcc > 0` (TCC / FDA denial)
     /// - `indexes_skipped_timeout > 0` (scan timeout — issue #1091)
+    /// - `indexes_corpus_failed > 0` (a registered index's corpus/lane failed
+    ///   to open — issue #1870)
     /// - `indexes_loaded` is less than 80% of the prior-known count
     ///   (suggesting a large fraction of indexes are missing, e.g. after
     ///   FDA was revoked)
@@ -476,6 +478,47 @@ pub struct WarmBootSummary {
     /// `ColdIndexStore::failed_len`. `0` is the normal steady-state value.
     /// Test: `health_failed_index_reported` in server tests.
     pub indexes_failed: usize,
+    /// Number of registered indexes whose durable redb corpus (or any search
+    /// lane) failed to open on warm-boot (issue #1870).
+    ///
+    /// Why: distinct from every other counter here. `indexes_failed` and
+    /// `warmboot_failed_indexes` count entries that never made it into the
+    /// registry (cold-store restore failure / TCC denial). An index hit by
+    /// #1870, by contrast, DOES register — it warm-boots with a healthy-looking
+    /// `chunk_count` but a `DatabaseAlreadyOpen` / incompatible-format corpus
+    /// open failure marks all its stages `Failed` (see the `corpus_open_failed`
+    /// guard in `derive_warm_boot_stages`), so free-text / BM25 / hybrid queries
+    /// silently return `[]` while `/health` previously reported `"ok"`. This
+    /// counter closes that honesty gap: any non-zero value forces
+    /// `warm_boot_degraded = true` and downgrades the top-level `status` to
+    /// `"degraded"` so a `status != "ok"` probe catches the outage.
+    /// What: computed live on every `GET /health` poll by scanning registry
+    /// handles for any `Failed` stage (`IndexStages::any_failed`); not persisted.
+    /// `0` is the healthy steady state.
+    /// Test: `health_reports_degraded_when_corpus_open_failed` in
+    /// `tests_health_degraded`.
+    #[serde(default)]
+    pub indexes_corpus_failed: usize,
+    /// Number of registered handles whose `stages` lock was contended (a
+    /// `try_read()` miss) during the most recent `/health` scan for
+    /// `indexes_corpus_failed` (issue #1870 review follow-up).
+    ///
+    /// Why: the health handler must never block on a contended lock (issue
+    /// #1006), so a miss fails open (treated as "not failed" for that poll).
+    /// That is the correct trade-off, but it means a *persistently* contended
+    /// handle could in principle stay invisibly excluded from
+    /// `indexes_corpus_failed` forever. This counter makes that failure mode
+    /// observable: `0` on every healthy poll; a handle stuck under sustained
+    /// write-lock contention shows up as a repeated non-zero count here (and
+    /// by index id at `debug!` in the daemon log) across consecutive polls,
+    /// which is the signal an operator needs to notice a persistent miss
+    /// rather than a one-off scheduling blip.
+    /// What: computed live on every `GET /health` poll in `health_handler`;
+    /// not persisted. Does not change the underlying fail-open behavior.
+    /// Test: `health_stays_ok_when_no_corpus_failed` in `tests_health_degraded`
+    /// covers the steady-state `0` case.
+    #[serde(default)]
+    pub indexes_health_scan_skipped: usize,
 }
 
 /// Per-boot reconcile summary surfaced on `GET /health` (issue #1672).

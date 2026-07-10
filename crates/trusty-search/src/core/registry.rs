@@ -150,6 +150,26 @@ impl IndexStages {
         out
     }
 
+    /// Whether any of the three stages is `StageStatus::Failed`.
+    ///
+    /// Why (issue #1870): `/health` must detect a registered index whose
+    /// durable corpus (or any lane) failed to open and report degraded instead
+    /// of a blanket `"ok"`. Such an index warm-boots into the registry with a
+    /// healthy-looking `chunk_count` but all stages marked `Failed` (see
+    /// `derive_warm_boot_stages`' `corpus_open_failed` guard), so free-text /
+    /// BM25 / hybrid queries silently return `[]`. This is the single predicate
+    /// the health handler scans every handle with; it shares the exact
+    /// Failed-dominates rule `lifecycle_status` uses so the two never diverge.
+    /// What: `true` when lexical, semantic, or graph is `Failed`.
+    /// Test: `any_failed_*` in this module + the health-handler regression
+    /// `health_reports_degraded_when_corpus_open_failed` in
+    /// `tests_health_degraded`.
+    pub fn any_failed(&self) -> bool {
+        self.lexical.status == StageStatus::Failed
+            || self.semantic.status == StageStatus::Failed
+            || self.graph.status == StageStatus::Failed
+    }
+
     /// Compute the coarse top-level lifecycle status string used by the
     /// status endpoint's `status` field. Maps to:
     /// `created` → `walking` → `indexed_lexical` → `indexed_vector` → `ready`
@@ -158,10 +178,7 @@ impl IndexStages {
         // Issue #601: ANY failed stage dominates the lifecycle status — a
         // zero-vector embed failure must report `failed`, never `ready`, so
         // `/health` and `GET /indexes/:id` surface the dead lane loudly.
-        if self.lexical.status == StageStatus::Failed
-            || self.semantic.status == StageStatus::Failed
-            || self.graph.status == StageStatus::Failed
-        {
+        if self.any_failed() {
             return "failed";
         }
         match (self.lexical.status, self.semantic.status, self.graph.status) {
@@ -674,6 +691,41 @@ mod tests {
         assert!(!caps.contains(&"kg"));
         // And the top-level status reflects terminal completion.
         assert_eq!(stages.lifecycle_status(), "ready");
+    }
+
+    /// Issue #1870: `any_failed` is the predicate `/health` scans every handle
+    /// with. It must be false for every non-failed combination and true the
+    /// instant any single lane fails — and stay consistent with
+    /// `lifecycle_status`, which reports `"failed"` under the same condition.
+    #[test]
+    fn any_failed_matches_lifecycle_failed() {
+        // No lane failed → any_failed is false across the lifecycle.
+        let mut stages = IndexStages::default();
+        assert!(!stages.any_failed());
+        stages.lexical.status = StageStatus::Ready;
+        stages.semantic.status = StageStatus::Ready;
+        stages.graph.status = StageStatus::Ready;
+        assert!(!stages.any_failed());
+        assert_ne!(stages.lifecycle_status(), "failed");
+
+        // Each lane failing in isolation trips both any_failed and lifecycle.
+        for stages in [
+            IndexStages {
+                lexical: StageState::failed("boom"),
+                ..Default::default()
+            },
+            IndexStages {
+                semantic: StageState::failed("boom"),
+                ..Default::default()
+            },
+            IndexStages {
+                graph: StageState::failed("boom"),
+                ..Default::default()
+            },
+        ] {
+            assert!(stages.any_failed());
+            assert_eq!(stages.lifecycle_status(), "failed");
+        }
     }
 
     /// In-progress lexical → top-level status is `walking`. The search
