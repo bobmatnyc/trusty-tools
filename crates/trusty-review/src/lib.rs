@@ -40,6 +40,13 @@ pub mod store;
 #[cfg(feature = "profile")]
 pub mod profile;
 
+// Why: deterministic technical-DD report generation (epic #2312 / M1 #2313)
+// lives in its own module.  Gated behind the `report` feature (default-on) so
+// library consumers that only need the core review pipeline can opt out; it
+// pulls in no heavy new dependencies (toml/serde/regex are already present).
+#[cfg(feature = "report")]
+pub mod report;
+
 // Why: the service module is gated behind `http-server` so library consumers
 // that only need the pipeline (CLI one-shot, unit tests) do not pull in the
 // full axum + tower-http stack.
