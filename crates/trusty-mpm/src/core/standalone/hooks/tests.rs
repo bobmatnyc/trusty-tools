@@ -381,6 +381,158 @@ fn test_is_mpm_hook_command_recognises_tm_bin_name() {
     );
 }
 
+/// Why (#2235): dedup that keyed identity on the exact file name ∈
+/// {`trusty-mpm`,`tm`} could never strip a stale entry whose command carried a
+/// Cargo build-artifact path (`.../deps/trusty_mpm-<hash> hook`,
+/// `.../tm-<hash> hook`) or the retired `session_manager_mvp-<hash>` name, so
+/// those groups accumulated forever and bloated `settings.json`. The predicate
+/// must recognise the whole binary family so the strip collapses them.
+/// What: asserts hash-suffixed artifacts (underscore + dash spellings, the `tm`
+/// alias) and the defunct MVP name — bare and hash-suffixed — are all
+/// recognised, while look-alikes that merely share a stem prefix (`tm-cli`) or
+/// carry a non-hex suffix are NOT, so unrelated tools are never stripped.
+#[test]
+fn test_is_mpm_hook_command_recognises_stale_hash_and_mvp_variants() {
+    // Cargo build-artifact (deps) forms — the recurring #2235 stale patterns.
+    assert!(
+        is_mpm_hook_command("/x/target/debug/deps/trusty_mpm-1a2b3c4d5e6f7a8b hook"),
+        "underscore dep artifact with hex hash must match"
+    );
+    assert!(
+        is_mpm_hook_command("/x/target/debug/deps/tm-1a2b3c4d5e6f7a8b hook"),
+        "tm alias dep artifact with hex hash must match"
+    );
+    assert!(
+        is_mpm_hook_command("/x/target/debug/deps/trusty-mpm-1a2b3c4d hook"),
+        "dash-spelled artifact with hex hash must match"
+    );
+    // Defunct pre-rename binary — bare and hash-suffixed.
+    assert!(
+        is_mpm_hook_command("session_manager_mvp hook"),
+        "bare defunct MVP name must match"
+    );
+    assert!(
+        is_mpm_hook_command("/x/deps/session_manager_mvp-deadbeef hook"),
+        "hash-suffixed defunct MVP name must match"
+    );
+    // Negative: unrelated binaries sharing a stem prefix must NOT match.
+    assert!(
+        !is_mpm_hook_command("/usr/bin/tm-cli hook"),
+        "look-alike 'tm-cli' (non-hex suffix) must not be mis-identified as mpm"
+    );
+    assert!(
+        !is_mpm_hook_command("/usr/bin/trusty-mpmx hook"),
+        "unrelated 'trusty-mpmx' must not match"
+    );
+}
+
+/// Why (#2235): the durable fix must make provisioning self-compacting — a
+/// config pre-seeded with duplicate managed entries from stale binary paths
+/// (hash-suffixed worktree builds AND the defunct `session_manager_mvp` name)
+/// must collapse to exactly ONE canonical group per event on the next
+/// `write_project_hooks`, instead of the observed unbounded accumulation
+/// (~6900-line settings.json). Also proves N repeated writes stay bounded.
+/// What: seeds an event array with FOUR stale MPM groups (two hash-suffixed
+/// path variants + one `session_manager_mvp` variant + one bare `tm`) plus one
+/// unrelated non-MPM group, then calls `write_project_hooks` and asserts the
+/// event collapses to exactly 2 groups (1 preserved non-MPM + 1 canonical MPM)
+/// with no stale path surviving. Then writes 5 more times and asserts the raw
+/// group count never grows.
+#[test]
+fn test_write_project_hooks_collapses_stale_hash_and_mvp_entries() {
+    let tmp = TempDir::new().unwrap();
+    let settings = tmp.path().join("settings.json");
+
+    // Pre-seed PreToolUse with a pile of stale MPM variants + one non-MPM group.
+    std::fs::write(
+        &settings,
+        serde_json::json!({
+            "hooks": {
+                "PreToolUse": [
+                    { "matcher": "*", "hooks": [{ "type": "command",
+                        "command": "/a/target/debug/deps/trusty_mpm-1111111111111111 hook" }] },
+                    { "matcher": "*", "hooks": [{ "type": "command",
+                        "command": "/b/target/debug/deps/tm-2222222222222222 hook" }] },
+                    { "matcher": "*", "hooks": [{ "type": "command",
+                        "command": "/c/deps/session_manager_mvp-deadbeef hook" }] },
+                    { "matcher": "*", "hooks": [{ "type": "command",
+                        "command": "tm hook" }] },
+                    { "matcher": "*", "hooks": [{ "type": "command",
+                        "command": "trusty-memory inbox-check" }] }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let exe = PathBuf::from("/home/user/.cargo/bin/trusty-mpm");
+    write_project_hooks(&settings, Some(&exe)).unwrap();
+
+    let text = std::fs::read_to_string(&settings).unwrap();
+    let val: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let pre = val["hooks"]["PreToolUse"].as_array().unwrap();
+
+    // Raw length (NOT predicate-filtered): 1 preserved non-MPM + 1 canonical MPM.
+    assert_eq!(
+        pre.len(),
+        2,
+        "all stale MPM variants must collapse to one canonical group, found {}: {pre:?}",
+        pre.len()
+    );
+    let cmds: Vec<&str> = pre
+        .iter()
+        .filter_map(|g| g["hooks"][0]["command"].as_str())
+        .collect();
+    assert!(
+        cmds.contains(&"trusty-memory inbox-check"),
+        "non-MPM group must survive, got: {cmds:?}"
+    );
+    for stale in [
+        "trusty_mpm-1111111111111111",
+        "tm-2222222222222222",
+        "session_manager_mvp",
+    ] {
+        assert!(
+            !cmds.iter().any(|c| c.contains(stale)),
+            "stale variant {stale:?} must be stripped, got: {cmds:?}"
+        );
+    }
+    assert!(
+        cmds.iter().any(|c| c.contains("/.cargo/bin/trusty-mpm")),
+        "canonical resolved exe path must be present, got: {cmds:?}"
+    );
+
+    // N-times idempotency: 5 more writes must never grow the group count.
+    for _ in 0..5 {
+        write_project_hooks(&settings, Some(&exe)).unwrap();
+    }
+    let text2 = std::fs::read_to_string(&settings).unwrap();
+    let val2: serde_json::Value = serde_json::from_str(&text2).unwrap();
+    for event in &[
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+        "SessionStart",
+        "SessionEnd",
+    ] {
+        let arr = val2["hooks"][*event].as_array().unwrap();
+        let mpm_groups = arr
+            .iter()
+            .filter(|g| {
+                g["hooks"].as_array().is_some_and(|hs| {
+                    hs.iter()
+                        .any(|h| h["command"].as_str().is_some_and(|c| c.ends_with(" hook")))
+                })
+            })
+            .count();
+        assert_eq!(
+            mpm_groups, 1,
+            "event {event} must have exactly one MPM group after N writes, found {mpm_groups}"
+        );
+    }
+}
+
 /// Why (#2015): `merge_hook_entries` dedups only by byte-for-byte JSON
 /// equality, so writing with a different resolved exe path (bin rename —
 /// including the `tm` vs `trusty-mpm` [[bin]]-name switch, not just a
