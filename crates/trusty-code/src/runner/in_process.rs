@@ -364,6 +364,11 @@ impl InProcessAgentRunner {
             max_tokens,
             mode: self.mode,
             compaction,
+            // #2346: cadence stays disabled for the delegated sub-agent's own
+            // loop — the epic scopes cadence to the PM transcript only
+            // (`task::executor::run_and_record`'s persistent-session path);
+            // delegated engineer loops stay bounded/ephemeral per-delegation.
+            cadence: None,
         };
 
         // Assemble the mode-branched system prompt (BASE + agent prompt +

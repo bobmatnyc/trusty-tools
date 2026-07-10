@@ -19,7 +19,8 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use super::{
-    AgentLoop, AgentLoopConfig, AgentLoopError, CompactionConfig, ToolEventSink, Transcript,
+    AgentLoop, AgentLoopConfig, AgentLoopError, CadenceConfig, CompactionConfig, ToolEventSink,
+    Transcript,
 };
 use crate::llm::{ChatRequest, ChatResponse, LlmClientTrait, LlmError};
 use crate::tools::{FinishTaskTool, ToolExecutor, ToolRegistry, ToolResult};
@@ -680,6 +681,134 @@ async fn parity_mode_never_compacts_even_past_threshold() {
         last_request.len(),
         12,
         "Parity must send the full raw history"
+    );
+}
+
+// ── #2346: cadence-compressor turn-boundary wiring ──────────────────────────
+
+/// Cadence stays off by default (#2346): `AgentLoopConfig::default().cadence`
+/// is `None`, and the loop never ticks the transcript's cadence counter when
+/// it is `None` — the exact "zero behaviour change for run_task/delegated
+/// engineer" contract this ticket requires.
+///
+/// Why: Every pre-#2346 call site (`run_task`, the delegated engineer's own
+/// loop) constructs `AgentLoopConfig` via `..AgentLoopConfig::default()`;
+/// this is the direct regression guard that doing so keeps cadence off.
+/// What: Run a several-turn script under `mode: DailyDriver` (the default)
+/// with `cadence: None` (the default) via `run_with_transcript` against an
+/// externally-owned `Transcript`, then assert `cadence_turn_count() == 0`.
+/// Test: this test.
+#[tokio::test]
+async fn cadence_disabled_by_default() {
+    let mut fixtures: Vec<Value> = (0..3)
+        .map(|i| tool_call_response(&format!("call_{i}"), &format!("turn-{i}")))
+        .collect();
+    fixtures.push(stop_response("all done"));
+    let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
+    let registry = registry_with_echo(false);
+
+    let agent = make_loop(llm, registry, AgentLoopConfig::default());
+    let mut transcript = Transcript::seed("system prompt", "the task");
+    agent
+        .run_with_transcript(&mut transcript, "the task")
+        .await
+        .expect("run completes");
+
+    assert_eq!(transcript.cadence_turn_count(), 0);
+}
+
+/// `Parity` never ticks cadence even when a `CadenceConfig` is explicitly
+/// attached (#2346, mirrors `parity_mode_never_compacts_even_past_threshold`'s
+/// mode gate for the threshold compactor).
+///
+/// Why: The parity-spec (D2) byte-identical guarantee must hold for cadence
+/// exactly as it does for threshold compaction — an operator accidentally
+/// wiring `cadence: Some(_)` onto a Parity run must not silently break
+/// benchmark fairness.
+/// What: Same script shape as `cadence_disabled_by_default`, but
+/// `mode: Parity` with an aggressive `cadence: Some(CadenceConfig { cadence_turns: 1, .. })`
+/// attached; assert `cadence_turn_count() == 0` regardless.
+/// Test: this test.
+#[tokio::test]
+async fn cadence_never_fires_in_parity_mode() {
+    let mut fixtures: Vec<Value> = (0..3)
+        .map(|i| tool_call_response(&format!("call_{i}"), &format!("turn-{i}")))
+        .collect();
+    fixtures.push(stop_response("all done"));
+    let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
+    let registry = registry_with_echo(false);
+
+    let agent = make_loop(
+        llm,
+        registry,
+        AgentLoopConfig {
+            mode: crate::mode::HarnessMode::Parity,
+            cadence: Some(CadenceConfig {
+                cadence_turns: 1,
+                max_overhead_fraction_pct: 40,
+            }),
+            ..AgentLoopConfig::default()
+        },
+    );
+    let mut transcript = Transcript::seed("system prompt", "the task");
+    agent
+        .run_with_transcript(&mut transcript, "the task")
+        .await
+        .expect("run completes");
+
+    assert_eq!(transcript.cadence_turn_count(), 0);
+}
+
+/// `DailyDriver` mode with an explicit `CadenceConfig` attached ticks and
+/// fires cadence compression at the turn boundary (#2346).
+///
+/// Why: The positive case completing the mode-gate matrix — cadence must
+/// actually engage when both preconditions (`DailyDriver` + `Some(cadence)`)
+/// hold, not just correctly stay inert in the negative cases above.
+/// What: Scripts 6 tool-call round-trips then a stop (7 loop turns) under
+/// `mode: DailyDriver` with `cadence_turns: 1` (fires every turn) and an
+/// aggressive `compaction.keep_last_messages: 1` (small active zone, so
+/// cadence has fresh entries to compact on nearly every turn). Asserts both
+/// `cadence_turn_count() == 7` (one tick per loop turn) and
+/// `cadence_fire_count() > 0` (at least one turn actually compacted
+/// something).
+/// Test: this test.
+#[tokio::test]
+async fn cadence_fires_in_daily_driver_when_configured() {
+    let mut fixtures: Vec<Value> = (0..6)
+        .map(|i| tool_call_response(&format!("call_{i}"), &format!("turn-{i}")))
+        .collect();
+    fixtures.push(stop_response("all done"));
+    let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
+    let registry = registry_with_echo(false);
+
+    let agent = make_loop(
+        llm,
+        registry,
+        AgentLoopConfig {
+            max_turns: 10,
+            mode: crate::mode::HarnessMode::DailyDriver,
+            compaction: CompactionConfig {
+                token_threshold: 1_000_000, // keep the THRESHOLD backstop inert for this test
+                keep_last_messages: 1,
+            },
+            cadence: Some(CadenceConfig {
+                cadence_turns: 1,
+                max_overhead_fraction_pct: 99,
+            }),
+            ..AgentLoopConfig::default()
+        },
+    );
+    let mut transcript = Transcript::seed("system prompt", "the task");
+    agent
+        .run_with_transcript(&mut transcript, "the task")
+        .await
+        .expect("run completes");
+
+    assert_eq!(transcript.cadence_turn_count(), 7);
+    assert!(
+        transcript.cadence_fire_count() > 0,
+        "expected at least one cadence fire to actually compact something"
     );
 }
 

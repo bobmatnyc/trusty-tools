@@ -37,7 +37,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::agent_loop::{AgentLoop, AgentLoopConfig, CompactionConfig, ToolEventSink};
+use crate::agent_loop::{
+    AgentLoop, AgentLoopConfig, CompactionConfig, ToolEventSink, resolve_cadence_config,
+};
 use crate::agents::AgentConfig;
 use crate::jsonrpc::RpcError;
 use crate::llm::{DebugCaptureSink, LlmClientTrait, wrap_with_debug_capture};
@@ -304,6 +306,15 @@ async fn run_and_record(
             // struct-update `..AgentLoopConfig::default()` below must not be
             // allowed to silently supply the flat, model-blind default here.
             compaction: CompactionConfig::for_context_window(resolve_context_window(&pm_model)),
+            // #2346: the cadence compressor is opt-in per `AgentLoopConfig`
+            // (defaults to `None`) — this daemon-driven, persistent-session
+            // PM loop is the ONE call site that enables it, resolved from
+            // this project's `.claude/settings.json`/env-var precedence
+            // chain (`resolve_cadence_config`). The delegated engineer's own
+            // loop (`build_engineer_runner` below) and `run_task`'s legacy
+            // one-shot/bake-off path both keep the default `None` — zero
+            // behaviour change there, per #2346's explicit scope.
+            cadence: Some(resolve_cadence_config(&params.project)),
             ..AgentLoopConfig::default()
         },
         pm_llm,

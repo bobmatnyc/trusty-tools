@@ -207,6 +207,13 @@ pub async fn execute_run_task(params: RunTaskParams, llm: Arc<dyn LlmClientTrait
             // struct-update `..AgentLoopConfig::default()` below must not be
             // allowed to silently supply the flat, model-blind default here.
             compaction: CompactionConfig::for_context_window(resolve_context_window(&pm_model)),
+            // #2346: `cadence` stays the `..AgentLoopConfig::default()` value
+            // (`None`) here, deliberately — the legacy one-shot/bake-off
+            // `run-task` CLI path is explicitly out of scope for the cadence
+            // compressor (epic #2343 scopes it to the daemon-driven,
+            // persistent-session path in `task::executor::run_and_record`
+            // only), so this run sees zero behaviour change from before
+            // #2346.
             ..AgentLoopConfig::default()
         },
         pm_llm,

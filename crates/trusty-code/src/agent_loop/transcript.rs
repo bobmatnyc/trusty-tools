@@ -58,6 +58,15 @@ struct TranscriptEntry {
     message: ChatMessage,
     compacted: bool,
     pinned: bool,
+    /// The cadence-turn range `(start, end)` active when this entry was
+    /// marked `compacted` by the #2346 cadence compressor — `None` for an
+    /// uncompacted entry OR one compacted by the threshold path
+    /// (`Transcript::maybe_compact`), which has no turn-range concept.
+    /// `to_messages`'s `flush_span` reads this to append a
+    /// "full detail in session memory (turns N-M)" pointer onto the
+    /// synthetic summary message, but only for spans the cadence
+    /// compressor produced.
+    cadence_turn_range: Option<(usize, usize)>,
 }
 
 impl TranscriptEntry {
@@ -67,6 +76,7 @@ impl TranscriptEntry {
             message,
             compacted: false,
             pinned: false,
+            cadence_turn_range: None,
         }
     }
 
@@ -77,6 +87,7 @@ impl TranscriptEntry {
             message,
             compacted: false,
             pinned: true,
+            cadence_turn_range: None,
         }
     }
 }
@@ -110,6 +121,21 @@ pub struct Transcript {
     assistant_texts: Vec<String>,
     last_compaction_len: Option<usize>,
     goals: Arc<Mutex<GoalSlots>>,
+    /// (#2346) Count of agent-loop turn boundaries this transcript has
+    /// observed via `tick_cadence_turn`, cumulative for the transcript's
+    /// entire lifetime — including across repeated `task.run` calls on the
+    /// same persistent session transcript, since this field lives on
+    /// `Transcript` (the session-persistent piece) rather than on
+    /// `AgentLoop` (reconstructed fresh per call).
+    cadence_turn_count: usize,
+    /// (#2346) The `cadence_turn_count` value as of the last time the
+    /// cadence compressor actually marked new entries `compacted` — the
+    /// start of the NEXT reported turn range is always one past this.
+    cadence_last_fire_turn: usize,
+    /// (#2346) Number of times the cadence compressor has fired (marked at
+    /// least one new entry `compacted`) — an observability/test counter,
+    /// distinct from `compacted_count` (which counts entries, not events).
+    cadence_fire_count: usize,
 }
 
 impl Transcript {
@@ -131,6 +157,9 @@ impl Transcript {
             assistant_texts: Vec::new(),
             last_compaction_len: None,
             goals: Arc::new(Mutex::new(GoalSlots::new())),
+            cadence_turn_count: 0,
+            cadence_last_fire_turn: 0,
+            cadence_fire_count: 0,
         }
     }
 
@@ -215,25 +244,27 @@ impl Transcript {
     /// ClearGoalTool}` most recently wrote via the same `Arc<Mutex<_>>`).
     /// What: Walks entries in order; a run of one-or-more contiguous
     /// `compacted` entries is replaced by ONE synthetic `system`-role message
-    /// (`super::compaction::summarize_span`'s one-line text) in its place;
-    /// uncompacted entries pass through unchanged. (#2347) If
-    /// `self.goals.render()` returns `Some`, a synthetic `system`-role
-    /// message carrying that text is inserted at index `1` (immediately
-    /// after the real system message, which `Transcript::seed` always
-    /// places at index `0` and `maybe_compact` never touches) — or appended
-    /// if `out` is empty, a defensive case that never occurs via `seed`. A
-    /// poisoned goals lock degrades to "no goals block" rather than
-    /// panicking (mirrors `run_task::recorder`'s poisoned-lock convention).
-    /// After that insertion, if `last_compaction_len` equals the CURRENT
-    /// entry count (i.e. this call is happening on the very turn
-    /// `maybe_compact` last fired on — the loop calls `maybe_compact` then
-    /// `to_messages` back-to-back before any further entries are appended),
-    /// the LAST `user`-role entry's message is cloned and appended again at
-    /// the very end — §5.4 item 3's "re-anchor the model" replay. On every
-    /// later call the entry count has grown past `last_compaction_len`, so
-    /// the replay does not repeat until compaction fires again. A
-    /// transcript with no `user` entry (never happens via `seed`, but
-    /// guarded rather than assumed) simply skips the replay.
+    /// (`super::compaction::summarize_span`'s one-line text, plus (#2346) a
+    /// "full detail in session memory (turns N-M)" pointer appended when any
+    /// entry in the span carries a `cadence_turn_range` — see
+    /// [`flush_span`]'s docs) in its place; uncompacted entries pass through
+    /// unchanged. (#2347) If `self.goals.render()` returns `Some`, a
+    /// synthetic `system`-role message carrying that text is inserted at
+    /// index `1` (immediately after the real system message, which
+    /// `Transcript::seed` always places at index `0` and `maybe_compact`
+    /// never touches) — or appended if `out` is empty, a defensive case that
+    /// never occurs via `seed`. A poisoned goals lock degrades to "no goals
+    /// block" rather than panicking (mirrors `run_task::recorder`'s
+    /// poisoned-lock convention). After that insertion, if
+    /// `last_compaction_len` equals the CURRENT entry count (i.e. this call
+    /// is happening on the very turn `maybe_compact` last fired on — the
+    /// loop calls `maybe_compact` then `to_messages` back-to-back before any
+    /// further entries are appended), the LAST `user`-role entry's message is
+    /// cloned and appended again at the very end — §5.4 item 3's "re-anchor
+    /// the model" replay. On every later call the entry count has grown past
+    /// `last_compaction_len`, so the replay does not repeat until compaction
+    /// fires again. A transcript with no `user` entry (never happens via
+    /// `seed`, but guarded rather than assumed) simply skips the replay.
     /// Test: `transcript::tests::to_messages_collapses_compacted_span`,
     /// `transcript::tests::to_messages_replays_last_user_message_after_compaction`,
     /// `transcript::tests::to_messages_does_not_replay_on_every_subsequent_turn`,
@@ -242,12 +273,14 @@ impl Transcript {
     /// `transcript::tests::to_messages_omits_goals_message_when_all_empty`,
     /// `transcript::tests::to_messages_goals_survive_aggressive_compaction`.
     pub fn to_messages(&self) -> Vec<ChatMessage> {
+        // #2347: `+ 1` accounts for the goals-injection message inserted
+        // below, so the common case never reallocates.
         let mut out = Vec::with_capacity(self.entries.len() + 1);
-        let mut compacted_span: Vec<ChatMessage> = Vec::new();
+        let mut compacted_span: Vec<(ChatMessage, Option<(usize, usize)>)> = Vec::new();
 
         for entry in &self.entries {
             if entry.compacted {
-                compacted_span.push(entry.message.clone());
+                compacted_span.push((entry.message.clone(), entry.cadence_turn_range));
                 continue;
             }
             flush_span(&mut out, &mut compacted_span);
@@ -315,17 +348,29 @@ impl Transcript {
         if !should_compact(&self.to_messages(), cfg) {
             return false;
         }
+        let keep_from = resolve_keep_from(&self.entries, cfg.keep_last_messages);
+        self.mark_compacted(keep_from, None)
+    }
 
-        let mut keep_from = self.entries.len().saturating_sub(cfg.keep_last_messages);
-        if keep_from > 0
-            && keep_from < self.entries.len()
-            && let Some(group_start) = turn_group_start(&self.entries, keep_from - 1)
-            && turn_group_end(&self.entries, group_start) >= keep_from
-        {
-            keep_from = group_start;
-        }
+    /// Mark every eligible entry before `keep_from` as `compacted`, tagging
+    /// each newly-marked entry with `cadence_range` (#2346).
+    ///
+    /// Why: [`Self::maybe_compact`] (threshold-triggered, no turn-range
+    /// concept) and the #2346 cadence compressor's
+    /// [`Self::compact_span_tagged`] both need to apply the EXACT same
+    /// pinned/`system`/`user`/already-compacted exemptions — this is the one
+    /// place that logic lives, so the two callers can never independently
+    /// drift.
+    /// What: For every entry in `self.entries[..keep_from]` that is not
+    /// already `compacted`, not `pinned`, and not `system`/`user` role, sets
+    /// `compacted = true` and `cadence_turn_range = cadence_range`. Records
+    /// `last_compaction_len` and returns whether anything was newly marked,
+    /// exactly as `maybe_compact` did before this extraction.
+    /// Test: `transcript::tests::maybe_compact_marks_middle_span_only` (via
+    /// `maybe_compact`); `transcript::tests::compact_span_tagged_*` (via the
+    /// cadence path).
+    fn mark_compacted(&mut self, keep_from: usize, cadence_range: Option<(usize, usize)>) -> bool {
         let mut newly_compacted = false;
-
         for entry in &mut self.entries[..keep_from] {
             if entry.compacted || entry.pinned {
                 continue;
@@ -334,13 +379,106 @@ impl Transcript {
                 continue;
             }
             entry.compacted = true;
+            entry.cadence_turn_range = cadence_range;
             newly_compacted = true;
         }
-
         if newly_compacted {
             self.last_compaction_len = Some(self.entries.len());
         }
         newly_compacted
+    }
+
+    /// Advance the cadence turn counter and report whether THIS turn is a
+    /// cadence-fire turn (#2346).
+    ///
+    /// Why: `agent_loop::cadence::maybe_cadence_compress` needs a
+    /// session-persistent counter (see [`Self::cadence_turn_count`]'s field
+    /// doc for why it lives on `Transcript`, not `AgentLoop`) it can advance
+    /// exactly once per turn boundary and compare against the configured
+    /// cadence.
+    /// What: Increments `cadence_turn_count`, then returns `true` when
+    /// `cadence_turns > 0` and the new count is an exact multiple of it —
+    /// `cadence_turns == 0` never fires (guards the modulo and treats "0" as
+    /// "cadence disabled" rather than firing every turn).
+    /// Test: `cadence::tests::fires_every_n_turns`.
+    pub(super) fn tick_cadence_turn(&mut self, cadence_turns: usize) -> bool {
+        self.cadence_turn_count += 1;
+        cadence_turns > 0 && self.cadence_turn_count.is_multiple_of(cadence_turns)
+    }
+
+    /// The turn range `(start, end)` a cadence compression happening RIGHT
+    /// NOW should be tagged with (#2346).
+    ///
+    /// Why: A span's "turns N-M" label (surfaced in the summary text via
+    /// [`flush_span`]) must cover every turn since the LAST fire, not just
+    /// the current one — otherwise a gap between fires would be
+    /// unaccounted-for in the durable-memory pointer.
+    /// What: `(cadence_last_fire_turn + 1, cadence_turn_count)`.
+    /// Test: `cadence::tests::summary_references_turn_range`.
+    pub(super) fn begin_cadence_range(&self) -> (usize, usize) {
+        (self.cadence_last_fire_turn + 1, self.cadence_turn_count)
+    }
+
+    /// Record that a cadence fire just happened (#2346).
+    ///
+    /// Why: [`Self::begin_cadence_range`]'s next call must start the range
+    /// right after this fire's end, and `cadence_fire_count` is the
+    /// "cadence fires exactly every N turns" test's observability hook.
+    /// What: Sets `cadence_last_fire_turn = cadence_turn_count` and
+    /// increments `cadence_fire_count`.
+    /// Test: `cadence::tests::fires_every_n_turns`.
+    pub(super) fn advance_cadence_fire_marker(&mut self) {
+        self.cadence_last_fire_turn = self.cadence_turn_count;
+        self.cadence_fire_count += 1;
+    }
+
+    /// Unconditionally compact the span older than `keep_last_messages`,
+    /// tagged with `cadence_range` — the #2346 cadence compressor's
+    /// entry point into the shared group-safe marking machinery.
+    ///
+    /// Why: Unlike [`Self::maybe_compact`], this is NEVER gated on a token
+    /// threshold — cadence fires on a turn-count schedule regardless of
+    /// current size, and the continuous-budget-enforcement loop
+    /// (`agent_loop::cadence::enforce_budget`) calls this repeatedly with a
+    /// shrinking `keep_last_messages` until the transcript is back under
+    /// budget. Reuses [`resolve_keep_from`] (#2278 group-safety) so a
+    /// cadence-triggered cutoff can never split a tool-call/tool-result pair
+    /// any more than the threshold path can.
+    /// What: Delegates to [`resolve_keep_from`] then [`Self::mark_compacted`]
+    /// with `Some(cadence_range)`.
+    /// Test: `cadence::tests::*`.
+    pub(super) fn compact_span_tagged(
+        &mut self,
+        keep_last_messages: usize,
+        cadence_range: (usize, usize),
+    ) -> bool {
+        let keep_from = resolve_keep_from(&self.entries, keep_last_messages);
+        self.mark_compacted(keep_from, Some(cadence_range))
+    }
+
+    /// Cumulative count of agent-loop turn boundaries observed (#2346).
+    ///
+    /// Why: Lives on `Transcript` (not `AgentLoop`, which is reconstructed
+    /// fresh on every `task.run` call — see `task::executor::run_and_record`)
+    /// so cadence counts turns CUMULATIVELY across a session's whole
+    /// lifetime, matching the epic's "500+ turn interactive session" framing
+    /// rather than resetting every call.
+    /// What: The current `cadence_turn_count`.
+    /// Test: `cadence::tests::fires_every_n_turns`.
+    pub fn cadence_turn_count(&self) -> usize {
+        self.cadence_turn_count
+    }
+
+    /// Number of times the cadence compressor has fired (#2346).
+    ///
+    /// Why: The turn-count test ("cadence fires exactly every N turns") and
+    /// the "compaction_events == 0" acceptance test both need an
+    /// observability counter distinct from `compacted_count` (entries, not
+    /// events).
+    /// What: The current `cadence_fire_count`.
+    /// Test: `cadence::tests::fires_every_n_turns`.
+    pub fn cadence_fire_count(&self) -> usize {
+        self.cadence_fire_count
     }
 
     /// Number of entries currently marked `compacted`.
@@ -434,6 +572,31 @@ impl Transcript {
     }
 }
 
+/// Compute the group-safe cutoff index for a naive `keep_last_messages`
+/// active-zone size (#2278 Fix A; extracted for #2346 so the cadence
+/// compressor shares this EXACT logic with [`Transcript::maybe_compact`]).
+///
+/// Why: A raw entry-count cutoff (`entries.len() - keep_last_messages`) has
+/// no tool-call awareness — see [`Transcript::maybe_compact`]'s docs for the
+/// Bedrock `ValidationException` this fixes. Both compaction callers
+/// (threshold and cadence) need the identical adjustment, so it is pulled out
+/// once rather than risking the two independently drifting.
+/// What: Computes the naive cutoff, then — if it falls strictly inside a
+/// [`turn_group_start`]/[`turn_group_end`] group — pulls it forward to the
+/// group's start. Returns the (possibly adjusted) cutoff.
+/// Test: `transcript::tests::maybe_compact_pulls_whole_multi_tool_call_group_forward`.
+fn resolve_keep_from(entries: &[TranscriptEntry], keep_last_messages: usize) -> usize {
+    let mut keep_from = entries.len().saturating_sub(keep_last_messages);
+    if keep_from > 0
+        && keep_from < entries.len()
+        && let Some(group_start) = turn_group_start(entries, keep_from - 1)
+        && turn_group_end(entries, group_start) >= keep_from
+    {
+        keep_from = group_start;
+    }
+    keep_from
+}
+
 /// If entry `idx` belongs to a turn group, return the group's assistant
 /// entry index (#2278 Fix A).
 ///
@@ -484,14 +647,41 @@ fn turn_group_end(entries: &[TranscriptEntry], group_start: usize) -> usize {
 /// Why: `to_messages` needs to collapse a contiguous run of compacted entries
 /// exactly once, whether the run ends because a non-compacted entry follows
 /// or because the entries list ended; sharing this helper avoids duplicating
-/// the "if non-empty, summarise and clear" logic at both call sites.
+/// the "if non-empty, summarise and clear" logic at both call sites. (#2346)
+/// A span produced by the cadence compressor carries a `cadence_turn_range`
+/// on each of its entries; appending a durable-memory pointer to the summary
+/// text (rather than inventing a second, cadence-specific summary format)
+/// keeps the deterministic `summarize_span` base identical for both
+/// compaction paths.
 /// What: If `span` is non-empty, pushes one `ChatMessage::system` carrying
-/// `summarize_span(span)`'s text, then clears `span`.
-fn flush_span(out: &mut Vec<ChatMessage>, span: &mut Vec<ChatMessage>) {
+/// `summarize_span`'s text over the span's messages, then — if any entry in
+/// the span carries a `cadence_turn_range` — appends
+/// `" — full detail preserved in session memory (turns {min}-{max}); use
+/// recall_session to retrieve"` using the min start / max end across all
+/// tagged entries in the span (a span can, in principle, straddle more than
+/// one cadence fire once the continuous-budget-enforcement loop has run more
+/// than once on the same turn). A span with no tagged entries (the threshold
+/// path, or #2070 pre-#2346 behaviour) gets no pointer appended — byte-
+/// identical to before this ticket. Clears `span` either way.
+/// Test: `transcript::tests::to_messages_collapses_compacted_span` (no
+/// pointer, threshold path unchanged); `cadence::tests::summary_references_turn_range`.
+fn flush_span(out: &mut Vec<ChatMessage>, span: &mut Vec<(ChatMessage, Option<(usize, usize)>)>) {
     if span.is_empty() {
         return;
     }
-    out.push(ChatMessage::system(summarize_span(span)));
+    let messages: Vec<ChatMessage> = span.iter().map(|(m, _)| m.clone()).collect();
+    let mut text = summarize_span(&messages);
+
+    let start = span.iter().filter_map(|(_, r)| r.map(|(s, _)| s)).min();
+    let end = span.iter().filter_map(|(_, r)| r.map(|(_, e)| e)).max();
+    if let (Some(start), Some(end)) = (start, end) {
+        text.push_str(&format!(
+            " — full detail preserved in session memory (turns {start}-{end}); \
+             use recall_session to retrieve"
+        ));
+    }
+
+    out.push(ChatMessage::system(text));
     span.clear();
 }
 
