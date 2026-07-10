@@ -740,6 +740,12 @@ impl SessionManager {
         // Release write guard before auto-resume (which needs its own locks).
         drop(guard);
 
+        // #2306: collapse stale duplicate records per project. Runs after the
+        // main reconcile persisted states and the write guard was dropped;
+        // decommissions quiesced (no-live-tmux) losers via the safe path and
+        // prunes any of them from the pending auto-resume set. See dedup.rs.
+        self.dedup_stale_duplicates(&mut to_resume).await?;
+
         // #2158: best-effort validate + auto-repair the deployed `.claude/`
         // payload for every adopted session whose workspace was resolved
         // above. Non-fatal — a repair failure only leaves the workspace as-is;

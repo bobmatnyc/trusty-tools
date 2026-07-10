@@ -11,6 +11,7 @@
 pub mod adopt;
 pub mod create;
 pub mod decommission;
+pub mod dedup;
 pub mod delete;
 pub mod driver;
 pub mod hook_sync;
@@ -59,6 +60,9 @@ mod resume_reattach_tests;
 
 #[cfg(test)]
 mod set_source_id_tests;
+
+#[cfg(test)]
+mod dedup_tests;
 
 /// Real tmux driver adapter — only available when the `daemon` feature (and thus
 /// the daemon's `TmuxDriver`) is compiled in.
