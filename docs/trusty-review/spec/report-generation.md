@@ -80,6 +80,7 @@
 | **M1** | Deterministic, manifest-driven fill (metrics → tables) from trusty-analyze output; no LLM synthesis | Manifest loader + validation; git enrichment; v0 metrics schema; template loader; placeholder fill engine; `report` subcommand | **Landed (#2313)** — `src/report/`, `report` Cargo feature (default-on), `trusty-review report --manifest` |
 | **M2** | LLM synthesis of exec summary + findings prose (RED/AMBER descriptive narratives) | Plug LLM backend (OpenRouter or Bedrock); implement synthesizer; validate output quality | **Landed (#2314)** — `src/report/synthesize*.rs`, opt-in `--synthesize` flag, fail-closed + numeric guardrail (see [Synthesis (M2)](#synthesis-m2)) |
 | **M3** | Cross-repo benchmarking (percentile ranks, quartile placement like CAST Appmarq) | Maintain corpus of analyzed repos; compute percentile functions; wire into scorecard section | **Landed (#2314)** — `src/report/benchmark.rs`, opt-in `--corpus` / `--corpus-add` / `--benchmark` flags, deterministic percentile/quartile placement + small-n honesty gate (see [Benchmarking (M3)](#benchmarking-m3)) |
+| **Wave 2** | Inference-first output: analyst instructions doc, self-derived metadata, built-in repo scanning, provenance labels + omit-empty | Instructions loader + prompt injection; repo scanner; provenance model; post-render polish (comment strip + omit-empty + gaps) | **Landed (#2340 / #2342)** — `src/report/{instructions,scan,provenance,polish,reporter_fill}.rs`, `--instructions` flag (see [Inference-first output](#inference-first-output--analyst-instructions-wave-2-2340--2342)) |
 
 ### Explicit Non-Goals
 
@@ -102,9 +103,14 @@ names the target repositories and their sources; the earlier `--repo` flag is
 replaced by `--manifest`.
 
 ```bash
-trusty-review report --manifest <file> [--template <name>] [--out <dir>] [--synthesize] \
-                     [--corpus <dir>] [--corpus-add] [--benchmark]
+trusty-review report --manifest <file> [--template <name>] [--out <dir>] [--instructions <md>] \
+                     [--synthesize] [--corpus <dir>] [--corpus-add] [--benchmark]
   --manifest <file>   Path to the report manifest TOML (required)
+  --instructions <md> Free-form analyst instructions markdown (#2340). Recorded
+                      verbatim as an "Analyst Instructions" section and, under
+                      --synthesize, injected as focus directives. Precedence:
+                      this flag > manifest [report].instructions. A missing file
+                      is an error; an empty file warns and proceeds as absent.
   --template <name>   Template override, e.g. report-technical-dd or
                       report-technical-dd-cast. Precedence:
                       --template flag > manifest [report].template > default
@@ -148,9 +154,11 @@ more `[[repositories]]` entries. It is parsed and validated by
 
 ```toml
 [report]
-title    = "Acme Technical DD"          # required — report title, codename, and slug seed
-template = "report-technical-dd"        # optional — default template if omitted
-analyst  = "bobmatnyc"                  # optional — recorded in report metadata
+title        = "Acme Technical DD"      # required — report title, codename, and slug seed
+template     = "report-technical-dd"    # optional — default template if omitted
+analyst      = "bobmatnyc"              # optional — recorded in report metadata (declared)
+client       = "Acme Corp"             # optional — deal-side client (declared); omitted → Gaps
+instructions = "focus.md"              # optional — analyst brief (#2340); --instructions flag wins
 
 [[repositories]]
 name    = "Acme Web"                    # required — application name
@@ -384,6 +392,111 @@ honesty-marked; only the generic placement dataset is filled. A `## Benchmark
 Status` section (appended only when `--benchmark` is active) discloses the corpus
 size, each app's peer count or small-n marker, and any corpus load warnings. The
 placement is also recorded on the JSON twin's `benchmark` object.
+
+## Inference-first output & analyst instructions (wave 2, #2340 / #2342)
+
+Owner feedback on the first live-generated reports was that they read as empty
+templates: inline instruction comments leaked into output and "not stated in
+source data" was everywhere. The directive: **inference is the tool's job** —
+honesty markers are the last resort, not the default. Wave 2 implements this.
+
+### Analyst instructions document (#2340)
+
+An analyst hands the generator a free-form markdown brief (focus areas, deal
+concerns, questions). It is resolved by precedence **`--instructions <file>` flag
+> manifest `[report].instructions` key** (a relative manifest path resolves
+against the manifest directory), loaded by `src/report/instructions.rs`:
+
+- a **missing** file is a hard error (`ReportError::InstructionsNotFound`) — a
+  mistyped path must fail loudly, never silently drop the recorded focus;
+- an **empty** file (after trimming) logs a `warn!` and proceeds as if absent.
+
+Two consumers use the brief. **Deterministically** it is recorded verbatim as an
+`## Analyst Instructions` section (provenance: declared) so every report documents
+what it was asked to focus on. Under **`--synthesize`** it is injected into the
+synthesis prompt digest as *focus directives* that steer the emphasis of the
+executive summary and RED/AMBER prose. **All guardrails are unchanged** — the
+numeric guardrail, the structural green exclusion, and the fail-closed posture
+still bind. Instructions steer emphasis; they never authorize invention.
+
+### Self-derived metadata (#2342.2)
+
+The tool never honesty-marks what it knows about itself:
+
+- **vendor / methodology** = `trusty-review report (repository inspection) v<crate version>`;
+- **report date / generated date** = the generation date;
+- **analyst / client** = manifest fields when present (declared), else omitted → Gaps;
+- **Section 3 Scoring Model** self-describes trusty-review's own normalized 0–100
+  RED/AMBER/GREEN model (`RED < 33`, `AMBER 33–66`, `GREEN > 66`). The tool
+  defines this scale, so it is `measured`, never "not stated".
+
+### Built-in repository scanning (#2342.3)
+
+For a local-path repository `src/report/scan.rs` computes a **measured** baseline
+directly, so a bare run (no external metrics JSON) still produces a substantive
+report:
+
+- **file list** via `git ls-files` (honours `.gitignore`), falling back to a
+  filtered directory walk (skips `.git`, `node_modules`, `target`, `dist`, …) for
+  a non-git path;
+- **total LoC + per-language breakdown** by file extension. **Heuristic:** a line
+  counts when it contains any non-whitespace character (blank lines excluded);
+  comments are *not* stripped (that would need per-language lexers). Only
+  recognised source extensions contribute LoC; data/config files (`.json`,
+  `.toml`, `.yaml`) count toward the file total but not LoC. Files over 4 MiB are
+  counted but not line-scanned.
+- **file count** = all tracked files;
+- **frameworks / dependencies** from the manifests present in the root
+  (`package.json`, `Cargo.toml`, `pyproject.toml`, `go.mod`) — project name +
+  the first several declared dependency names.
+
+No new heavy dependencies — std + the already-present `serde_json`/`toml`.
+
+**Enrichment precedence.** An external trusty-analyze metrics JSON becomes
+enrichment layered on the scan. Where **both** provide a figure the **declared
+metrics win** over the **measured** scan (documented precedence); where only the
+scan has it, the measured figure fills the field. Scanned values carry `measured`
+provenance; metrics-derived values carry `declared`.
+
+### Provenance labels + omit-empty (#2342.4)
+
+Every substantive value carries one of four **provenance** kinds
+(`src/report/provenance.rs`):
+
+- **measured** — computed from the repo (superscript `⁽ᵐ⁾`);
+- **declared** — manifest / analyst / metrics input (`⁽ᵈ⁾`);
+- **inferred** — LLM judgement grounded in repo evidence (`⁽ⁱ⁾`);
+- **not stated** — genuinely unknowable (e.g. deal client name); rendered with no
+  marker because such fields are dropped, not shown.
+
+The rendering choice is a **compact trailing superscript marker** appended to the
+value, with a one-line legend rendered once near the top of the report. Synthesised
+prose sections are labelled `inferred`. The numeric guardrail's allowed-set now
+**includes repo-scanned computed figures** (they are real source data); qualitative
+LLM inferences are permitted but must be labelled inferred — invention of
+unverifiable *figures* remains forbidden.
+
+**Omit-empty** (post-render pass, `src/report/polish.rs`, applied after the
+deterministic fill and before the appended status notes):
+
+1. **Strip comments** — every template HTML comment is removed from output
+   **except** semantic `<!-- dataset: … -->` markers (downstream tooling lifts
+   tables by them). Comments inside ```` ``` ```` code fences are out of scope.
+   Nested `<!--` inside an instructional comment is balanced so an embedded
+   dataset example does not end the strip early.
+2. **Drop marker rows/bullets** — a table row whose value cells are all the
+   honesty marker is dropped; a marker-only bullet or standalone marker paragraph
+   is dropped. An unfilled repeatable block now renders **nothing** (the fill
+   engine changed from render-once-with-markers to render-nothing).
+3. **Collapse empty sections** — a section left with no data collapses to a single
+   `_No data available — see Gaps & Caveats._` line.
+4. **Gaps list** — every dropped field/section is collected into a compact
+   `Data gaps: client, native scale, …` line in the Gaps & Caveats section,
+   replacing the wall of `not stated` rows.
+
+This **deliberately changes default rendering** — the M2/M3 byte-identical-when-off
+guarantees apply to *their* flags (`--synthesize`, `--benchmark`), not to this
+default output cleanup; affected tests were updated accordingly.
 
 ## References & Related Docs
 

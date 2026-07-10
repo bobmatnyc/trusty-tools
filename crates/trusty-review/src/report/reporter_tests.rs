@@ -40,7 +40,7 @@ fn fixture_model(dir: &Path) -> ReportModel {
     "#;
     let manifest_path = dir.join("manifest.toml");
     let manifest = parse_manifest(toml, &manifest_path).expect("manifest parse");
-    ReportModel::build(&manifest, &manifest_path, "report-technical-dd").expect("build model")
+    ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("build model")
 }
 
 /// Build a model whose single repo's metrics carry one RED, one AMBER, and two
@@ -70,7 +70,7 @@ fn fixture_model_with_findings(dir: &Path) -> ReportModel {
     "#;
     let manifest_path = dir.join("manifest.toml");
     let manifest = parse_manifest(toml, &manifest_path).expect("manifest parse");
-    ReportModel::build(&manifest, &manifest_path, "report-technical-dd").expect("build model")
+    ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("build model")
 }
 
 /// Why: rendered markdown must carry filled report/app values and honesty
@@ -91,12 +91,19 @@ fn render_contains_expected() {
     assert!(md.contains("Acme Due Diligence"));
     assert!(md.contains("Acme Web"));
     assert!(md.contains("bobmatnyc"));
-    // Metrics-derived per-application fill.
+    // Metrics-derived per-application fill (values carry a provenance marker).
     assert!(md.contains("5000"));
     assert!(md.contains("20 files, 150 functions"));
     assert!(md.contains("Rust"));
-    // Unmapped scoring field falls through to the honesty marker.
-    assert!(md.contains(HONESTY_MARKER));
+    // #2342.2: self-derived metadata is filled, never honesty-marked.
+    assert!(md.contains("trusty-review report (repository inspection) v"));
+    // Provenance legend + declared/measured markers are present.
+    assert!(md.contains("Provenance:"));
+    assert!(md.contains(crate::report::provenance::DECLARED_TAG.trim()));
+    // #2342.4 omit-empty: unmapped fields are NOT rendered as marker walls;
+    // they are collected into the compact Data gaps list instead.
+    assert!(!md.contains(HONESTY_MARKER));
+    assert!(md.contains("Data gaps:"));
     // No raw placeholder survives.
     assert!(!md.contains("{{"));
 }
@@ -209,8 +216,12 @@ fn reporter_appends_unavailable_note() {
     let md = Reporter::new(tmp.path()).render(&model, &template);
 
     assert!(md.contains("synthesis: unavailable (provider timeout)"));
-    // Deterministic fallback: exec summary was never injected.
-    assert!(md.contains(HONESTY_MARKER));
+    // Deterministic fallback: the exec summary was never injected — under the
+    // omit-empty default the un-synthesised paragraph is dropped (not a marker
+    // wall) and recorded under Data gaps.
+    assert!(!md.contains("A grounded"));
+    assert!(md.contains("Data gaps:"));
+    assert!(!md.contains("{{"));
 }
 
 // ─── Live-QA defect #1: deterministic findings fill ───────────────────────────
@@ -251,20 +262,22 @@ fn reporter_fills_findings_deterministically() {
     assert!(!md.contains("{{"), "no raw placeholder survives");
 }
 
-/// Why: with no metrics at all, RED/AMBER/GREEN sections must stay exactly as
-/// they were before this fix — honesty-marked, never fabricated.
-/// What: renders the base (findings-free) fixture and asserts the green topic
-/// slots and finding blocks fall through to markers/absence, not garbage.
+/// Why: with no findings metrics, the RED/AMBER/GREEN sections must not be
+/// fabricated — under the #2342 omit-empty default they collapse to a single line
+/// (no wall of honesty markers) and the empty sections are recorded under gaps.
+/// What: renders the base (findings-free) fixture and asserts no marker survives,
+/// the collapse line is present, and the gaps list is populated.
 /// Test: this test itself.
 #[test]
-fn reporter_leaves_findings_honesty_marked_without_metrics() {
+fn reporter_omits_empty_findings_sections_without_metrics() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let model = fixture_model(tmp.path());
     let template = TemplateLoader::bundled_only()
         .load("report-technical-dd")
         .expect("bundled template");
     let md = Reporter::new(tmp.path()).render(&model, &template);
-    assert!(md.contains(HONESTY_MARKER));
+    assert!(!md.contains(HONESTY_MARKER));
+    assert!(md.contains("Data gaps:"));
     assert!(!md.contains("{{"));
 }
 
@@ -489,13 +502,15 @@ fn reporter_small_corpus_marks() {
     assert!(!md.contains("{{"));
 }
 
-/// Why: with benchmarking OFF the render must be byte-identical to M2 — no status
-/// note, and the benchmark tables render exactly as their honesty-marked M2 form.
-/// What: renders the same fixture with `benchmark = None` and asserts no status
-/// section, then asserts the render equals a second identical render.
+/// Why: with benchmarking OFF there must be no status note, and under the #2342
+/// omit-empty default the unfilled benchmark tables are omitted rather than
+/// rendered as a row of honesty markers.
+/// What: renders the fixture with `benchmark = None` and asserts no status
+/// section and no marker row, and that rendering is deterministic (stable across
+/// two renders).
 /// Test: this test itself.
 #[test]
-fn benchmark_off_is_unchanged() {
+fn benchmark_off_omits_benchmark_tables() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let model = fixture_model(tmp.path());
     let template = TemplateLoader::bundled_only()
@@ -503,12 +518,134 @@ fn benchmark_off_is_unchanged() {
         .expect("bundled template");
     let md = Reporter::new(tmp.path()).render(&model, &template);
     assert!(!md.contains("## Benchmark Status"));
-    // The appendix benchmark row is present exactly once as honesty markers.
     let marker_row = format!(
         "| {HONESTY_MARKER} | {HONESTY_MARKER} | {HONESTY_MARKER} | {HONESTY_MARKER} | {HONESTY_MARKER} |"
     );
-    assert!(md.contains(&marker_row));
+    assert!(!md.contains(&marker_row));
     assert!(!md.contains("{{"));
+    // Deterministic: a second render is byte-identical.
+    assert_eq!(md, Reporter::new(tmp.path()).render(&model, &template));
+}
+
+// ─── Wave 2 (#2340 / #2342): instructions, self-metadata, scan, provenance ────
+
+/// Why: #2340 requires the analyst brief recorded verbatim in every report.
+/// What: builds a model with instructions and asserts the section + verbatim text.
+/// Test: this test itself.
+#[test]
+fn reporter_records_instructions_verbatim() {
+    use crate::report::instructions::Instructions;
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(tmp.path().join("acme.json"), "{}").expect("metrics");
+    let toml = "[report]\ntitle = \"Acme\"\n\n[[repositories]]\nname = \"Acme Web\"\npath = \"/nonexistent/x\"\nmetrics = \"acme.json\"\n";
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest");
+    let instr = Instructions {
+        text: "Focus on auth and data retention.".to_string(),
+        source: std::path::PathBuf::from("brief.md"),
+    };
+    let model = ReportModel::build(
+        &manifest,
+        &manifest_path,
+        "report-technical-dd",
+        Some(&instr),
+    )
+    .expect("model");
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+    assert!(md.contains("## Analyst Instructions"));
+    assert!(md.contains("Focus on auth and data retention."));
+    assert!(md.contains("provenance: declared"));
+}
+
+/// Why: #2342.2 — Section 3 self-describes trusty-review's own scoring model; it
+/// must never render as "not stated".
+/// What: renders the generic template and asserts the normalized-band text.
+/// Test: this test itself.
+#[test]
+fn reporter_self_describes_scoring_model() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+    assert!(md.contains("trusty-review normalized 0–100 quality scale"));
+    assert!(md.contains("RED < 33"));
+}
+
+/// Build a model whose single repo points at a real scanned checkout (no metrics).
+fn fixture_model_scanned(dir: &Path, repo: &Path) -> ReportModel {
+    std::fs::write(repo.join("main.rs"), "fn main() {\n    run();\n}\n").expect("rs");
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"scanned\"\n\n[dependencies]\nserde = \"1\"\n",
+    )
+    .expect("cargo");
+    let toml = format!(
+        "[report]\ntitle = \"Scanned DD\"\n\n[[repositories]]\nname = \"Scanned\"\npath = \"{}\"\n",
+        repo.display()
+    );
+    let manifest_path = dir.join("manifest.toml");
+    let manifest = parse_manifest(&toml, &manifest_path).expect("manifest");
+    ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("model")
+}
+
+/// Why: #2342.3 — a bare run against a local repo (no metrics JSON) must produce
+/// measured baseline figures directly from the repository.
+/// What: renders a scanned repo and asserts the LoC, language, and framework are
+/// present and carry the measured provenance marker.
+/// Test: this test itself.
+#[test]
+fn reporter_scans_repo_baseline() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    let model = fixture_model_scanned(tmp.path(), &repo);
+    assert!(model.repositories[0].scan.is_some(), "scan computed");
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+    assert!(md.contains("Rust"));
+    assert!(md.contains("Cargo.toml: scanned"));
+    // Measured provenance marker appears on the scanned values.
+    assert!(md.contains(crate::report::provenance::MEASURED_TAG.trim()));
+}
+
+/// Why: #2342.3 precedence — an external metrics JSON (declared) wins over the
+/// scanned (measured) value where both exist.
+/// What: gives a scanned repo an explicit metrics LoC that differs from the scan
+/// and asserts the declared figure (and its marker) is what renders.
+/// Test: this test itself.
+#[test]
+fn reporter_declared_metrics_win_over_scanned() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("repo dir");
+    std::fs::write(repo.join("main.rs"), "fn main() {}\n").expect("rs");
+    std::fs::write(
+        tmp.path().join("m.json"),
+        r#"{ "loc": { "total": 99999 } }"#,
+    )
+    .expect("metrics");
+    let toml = format!(
+        "[report]\ntitle = \"P\"\n\n[[repositories]]\nname = \"R\"\npath = \"{}\"\nmetrics = \"m.json\"\n",
+        repo.display()
+    );
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(&toml, &manifest_path).expect("manifest");
+    let model =
+        ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("model");
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+    // Declared LoC wins, tagged declared (not the scanned line count).
+    assert!(md.contains(&format!("99999{}", crate::report::provenance::DECLARED_TAG)));
 }
 
 /// Why: output filenames must be date-prefixed and slug-stable.

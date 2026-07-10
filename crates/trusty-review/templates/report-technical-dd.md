@@ -39,12 +39,16 @@
 
 # Technical Due-Diligence Analysis: {{target_codename}}
 
+{{provenance_legend}}
+
+{{analyst_instructions_block}}
+
 ## 1. Report Metadata
 
 | Field | Value |
 |---|---|
 | Source document | {{source_document_filename}} |
-| Vendor / methodology | {{vendor_name}} ({{methodology_name}}) |
+| Vendor / methodology | {{vendor_methodology}} |
 | Report date / version | {{report_date}} |
 | Target / deal codename | {{target_codename}} |
 | Client | {{client_name}} |
@@ -94,6 +98,7 @@ report against others normalized through this same template.
 | Field | Value |
 |---|---|
 | Technology stack | {{app_tech_stack}} |
+| Frameworks / manifests | {{app_frameworks}} |
 | Technical size (LoC) | {{app_loc}} |
 | Files / classes / DB artifacts | {{app_file_counts}} |
 | Risk tier (native) | {{app_risk_tier}} |

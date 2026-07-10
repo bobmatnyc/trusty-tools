@@ -52,6 +52,22 @@ pub struct ReportSection {
     /// Optional analyst name recorded in the report metadata section.
     #[serde(default)]
     pub analyst: Option<String>,
+    /// Optional client / deal-side name recorded in the report metadata section.
+    ///
+    /// Why: the client is a deal-side fact the tool cannot infer from a repo; when
+    /// the manifest declares it the report records it (provenance: declared),
+    /// otherwise the field is omitted and listed under Gaps & Caveats rather than
+    /// rendered as a "not stated" row.
+    #[serde(default)]
+    pub client: Option<String>,
+    /// Optional path to a free-form analyst instructions markdown file (#2340).
+    ///
+    /// Why: the analyst brief (focus areas, deal concerns, questions) is recorded
+    /// verbatim in the report and injected as synthesis focus directives.  The
+    /// `--instructions` CLI flag takes precedence over this key; a relative path
+    /// is resolved against the manifest directory.
+    #[serde(default)]
+    pub instructions: Option<String>,
     /// Optional benchmark corpus directory (M3).  Precedence: `--corpus` CLI flag
     /// wins over this; this wins over the per-user XDG default.  A relative path
     /// is resolved against the manifest directory.

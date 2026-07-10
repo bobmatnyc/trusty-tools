@@ -92,6 +92,18 @@ pub enum ReportError {
         name: String,
     },
 
+    /// The analyst instructions file (`--instructions` / `[report].instructions`)
+    /// could not be read — almost always a mistyped path, which must fail loudly
+    /// rather than silently produce a report with no recorded focus.
+    #[error("analyst instructions file not found at {path}: {source}")]
+    InstructionsNotFound {
+        /// The instructions path that failed to read.
+        path: PathBuf,
+        /// The underlying filesystem error.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// A metrics JSON file exists but could not be parsed against the v0 schema.
     #[error("failed to parse metrics JSON at {path}: {source}")]
     Metrics {

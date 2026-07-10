@@ -20,6 +20,9 @@ use super::fill::{Scope, render, strip_leading_comment};
 use super::manifest::slugify;
 use super::metrics::Severity;
 use super::model::{ReportModel, RepositoryReport};
+use super::polish::polish;
+use super::provenance::{self, Provenance, tag};
+use super::reporter_fill::{crate_version, fill_profile, instructions_block, set_scoring_model};
 
 /// Renders a [`ReportModel`] to markdown + JSON and writes them atomically.
 ///
@@ -57,7 +60,15 @@ impl Reporter {
     /// reporter_strips_leading_comment_header}`.
     pub fn render(&self, model: &ReportModel, template: &str) -> String {
         let scope = build_scope(model);
-        let mut out = render(strip_leading_comment(template), &scope);
+        // Fill deterministically, then polish the OUTPUT (#2342): strip every
+        // non-dataset template comment, drop honesty-marker rows, collapse empty
+        // sections, and gather the gaps.  The leading-comment strip stays a
+        // pre-fill step so the header's literal `{{…}}`/BEGIN-END examples are
+        // never mistaken for real placeholders by the fill engine.
+        let filled = render(strip_leading_comment(template), &scope);
+        let mut out = polish(&filled);
+        // Status notes are appended AFTER polish so their bullets are not subject
+        // to omit-empty (they are always meaningful provenance, never markers).
         append_synthesis_note(&mut out, model);
         append_benchmark_note(&mut out, model);
         out
@@ -137,18 +148,45 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 fn build_scope(model: &ReportModel) -> Scope {
     let mut root = Scope::new();
 
-    // Report metadata (report-level scalars).
+    // Report metadata (report-level scalars).  Identity/title fields are left
+    // untagged (they would clutter the H1); data-bearing fields carry a
+    // provenance marker (see the legend rendered near the top).
     root.set("target_codename", model.title.clone());
-    root.set("report_date", model.report_date.clone());
-    root.set("analysis_generated_date", model.generated_date.clone());
-    root.set_opt("analyst_name", model.analyst.clone());
+    root.set("report_date", tag(&model.report_date, Provenance::Measured));
+    root.set(
+        "analysis_generated_date",
+        tag(&model.generated_date, Provenance::Measured),
+    );
+    // #2342.2: self-derived metadata the tool KNOWS — never honesty-marked.
+    root.set(
+        "vendor_methodology",
+        tag(&model.vendor_methodology, Provenance::Measured),
+    );
+    root.set("report_version", tag(crate_version(), Provenance::Measured));
+    root.set("provenance_legend", provenance::LEGEND);
+    root.set("analyst_instructions_block", instructions_block(model));
+    // Declared deal-side fields: filled + tagged when the manifest supplies them,
+    // otherwise omitted (→ Gaps) rather than rendered as a "not stated" row.
+    if let Some(analyst) = &model.analyst {
+        root.set("analyst_name", tag(analyst, Provenance::Declared));
+    }
+    if let Some(client) = &model.client {
+        root.set("client_name", tag(client, Provenance::Declared));
+    }
     let source_ref = format!("repository inspection (manifest: {})", model.manifest_path);
     root.set("source_document_filename", source_ref.clone());
     root.set("source_document_reference", source_ref);
 
+    // #2342.2: Section 3 self-describes trusty-review's own scoring model — the
+    // tool defines this scale, so it is measured, never "not stated".
+    set_scoring_model(&mut root);
+
     let apps: Vec<String> = model.repositories.iter().map(|r| r.name.clone()).collect();
     if !apps.is_empty() {
-        root.set("applications_list", apps.join(", "));
+        root.set(
+            "applications_list",
+            tag(apps.join(", "), Provenance::Declared),
+        );
     }
 
     // One per_application block repetition per repository.  When benchmarking is
@@ -471,22 +509,7 @@ fn per_application_scope(
         scope.set("git_dirty", if git.dirty { "dirty" } else { "clean" });
     }
 
-    if let Some(metrics) = &repo.metrics {
-        let langs = metrics.primary_languages(4);
-        if !langs.is_empty() {
-            scope.set("app_tech_stack", langs.join(", "));
-        }
-        if metrics.loc.total > 0 {
-            scope.set("app_loc", metrics.loc.total.to_string());
-        }
-        scope.set(
-            "app_file_counts",
-            format!(
-                "{} files, {} functions",
-                metrics.counts.files, metrics.counts.functions
-            ),
-        );
-    }
+    fill_profile(&mut scope, repo);
 
     if let Some(rb) = bench {
         push_bench_rows(&mut scope, rb);
