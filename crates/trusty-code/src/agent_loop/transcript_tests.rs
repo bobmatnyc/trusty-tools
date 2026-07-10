@@ -626,3 +626,157 @@ fn assistant_text_since_out_of_range_mark_is_empty_not_panicking() {
     let t = Transcript::seed("s", "task");
     assert_eq!(t.assistant_text_since(100), "");
 }
+
+// ── Goal slots (#2347) ───────────────────────────────────────────────────────
+
+/// `to_messages` omits the goals message entirely when every slot is empty.
+///
+/// Why: Acceptance criterion — a fresh session with no goals set must not
+/// inject a stub/empty block.
+/// What: Fresh `Transcript::seed`, no `goals_handle` mutation; assert
+/// `to_messages()` is exactly the passthrough system+user pair.
+/// Test: this test.
+#[test]
+fn to_messages_omits_goals_message_when_all_empty() {
+    let t = Transcript::seed("s", "u");
+    let msgs = t.to_messages();
+    assert_eq!(msgs.len(), 2, "no goals message should be injected");
+    assert_eq!(msgs[0].role, "system");
+    assert_eq!(msgs[1].role, "user");
+}
+
+/// Once a goal is set via `goals_handle`, `to_messages` injects a synthetic
+/// `system`-role message at position `[1]`, immediately after the real
+/// system message, WITHOUT altering the real system message's own content.
+///
+/// Why: This is the core #2347 acceptance criterion: position-`[1]`
+/// injection, cache-stable system message at `[0]`.
+/// What: Set a goal, call `to_messages` before and after, assert message
+/// `[0]`'s content is byte-identical across both calls while `[1]` becomes
+/// the rendered goals block.
+/// Test: this test.
+#[test]
+fn to_messages_injects_goals_at_position_one() {
+    let t = Transcript::seed("you are helpful", "u");
+    let before = t.to_messages();
+    let system_before = before[0].content.clone();
+
+    t.goals_handle()
+        .lock()
+        .expect("lock")
+        .set(1, "ship the feature", crate::agent_loop::GoalSource::Model)
+        .expect("valid slot");
+
+    let after = t.to_messages();
+    assert_eq!(
+        after[0].content, system_before,
+        "the real system message bytes must be unaffected by a goal update"
+    );
+    assert_eq!(after[0].role, "system");
+    assert_eq!(
+        after[1].role, "system",
+        "goals block is injected as system-role"
+    );
+    assert!(
+        after[1]
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("1. ship the feature")
+    );
+    assert_eq!(
+        after.len(),
+        before.len() + 1,
+        "exactly one extra message (the goals block) is injected"
+    );
+}
+
+/// Mutating the `Arc<Mutex<GoalSlots>>` returned by `goals_handle` is
+/// visible to a SUBSEQUENT `to_messages()` call on the original `Transcript`
+/// — the two share the same underlying state.
+///
+/// Why: This is the wiring `tools::goals::{SetGoalTool, ClearGoalTool}`
+/// depend on: the tool holds a cloned handle, the `Transcript` renders from
+/// its own field, and they must never drift.
+/// What: Clone the handle, mutate through it, assert the original
+/// `Transcript`'s `to_messages()` reflects the change.
+/// Test: this test.
+#[test]
+fn goals_handle_mutation_visible_in_to_messages() {
+    let t = Transcript::seed("s", "u");
+    let handle = t.goals_handle();
+
+    assert!(
+        t.to_messages()
+            .iter()
+            .all(|m| m.role != "system" || m.content.as_deref() != Some(""))
+    );
+    handle
+        .lock()
+        .expect("lock")
+        .set(
+            5,
+            "goal via shared handle",
+            crate::agent_loop::GoalSource::Operator,
+        )
+        .expect("valid slot");
+
+    let msgs = t.to_messages();
+    assert!(
+        msgs.iter().any(|m| m
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("goal via shared handle")),
+        "mutation through the cloned handle must be visible to the original transcript"
+    );
+}
+
+/// Goal slots survive an aggressive compaction pass completely untouched —
+/// they are never entries in `self.entries` at all, so `maybe_compact` has
+/// nothing to mark and the rendered block keeps appearing at position `[1]`
+/// after compaction fires.
+///
+/// Why: Core #2347 acceptance criterion (mirrors the epic's "goal slots
+/// survive an aggressive cadence-compression pass untouched").
+/// What: Set a goal, build a long transcript, compact with a tiny
+/// `CompactionConfig` (token_threshold: 1), assert compaction actually fired
+/// AND the goals block is still present, unmodified, at position `[1]`.
+/// Test: this test.
+#[test]
+fn to_messages_goals_survive_aggressive_compaction() {
+    let mut t = Transcript::seed("s", &"long task ".repeat(50));
+    t.goals_handle()
+        .lock()
+        .expect("lock")
+        .set(1, "never forget this", crate::agent_loop::GoalSource::Model)
+        .expect("valid slot");
+
+    for i in 0..10 {
+        t.push_assistant(Some(format!("assistant turn {i}")), &[]);
+        t.push_tool_result(&format!("c{i}"), "bash", "output");
+    }
+
+    let cfg = CompactionConfig {
+        token_threshold: 1,
+        keep_last_messages: 2,
+    };
+    assert!(
+        t.maybe_compact(&cfg),
+        "aggressive config must trigger compaction"
+    );
+    assert!(t.compacted_count() > 0);
+
+    let msgs = t.to_messages();
+    assert_eq!(msgs[0].role, "system");
+    assert_eq!(msgs[1].role, "system");
+    assert!(
+        msgs[1]
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("never forget this"),
+        "goals block must survive compaction unmodified, got: {:?}",
+        msgs[1].content
+    );
+}

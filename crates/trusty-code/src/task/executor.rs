@@ -54,8 +54,9 @@ use crate::runner::{InProcessAgentRunner, RegistryFactory};
 use crate::session::{SessionRegistry, SessionStatus};
 use crate::skills::{FsSkillResolver, format_skill_catalog, locate_skills_dir};
 use crate::tools::{
-    AgentOutput, AgentRunner, BashTool, DelegateToAgentTool, EditTool, FinishTaskTool,
-    ReadFileTool, RunContext, SkillResolver, ToolRegistry, UseSkillTool, WriteFileTool,
+    AgentOutput, AgentRunner, BashTool, ClearGoalTool, DelegateToAgentTool, EditTool,
+    FinishTaskTool, ReadFileTool, RunContext, SetGoalTool, SkillResolver, ToolRegistry,
+    UseSkillTool, WriteFileTool,
 };
 
 use super::sink::SessionToolEventSink;
@@ -213,13 +214,50 @@ async fn run_and_record(
         Arc::clone(&cancel),
     );
 
+    let catchup_ctx = crate::catchup::pm_catchup_context(&params.project).await;
+    let pm_system = assemble_system_prompt_for_mode(
+        params.mode,
+        &pm_config,
+        project_context.as_deref(),
+        catchup_ctx.as_deref(),
+        skills_catalog.as_ref().map(|(catalog, _)| catalog.as_str()),
+    );
+
+    // #2344: seed the PM's persistent conversation on this session's FIRST
+    // run, or append `params.task` as a new user turn onto its EXISTING,
+    // already-growing history on every run after that — see
+    // `SessionRegistry::begin_pm_transcript`'s docs. A failure here can only
+    // be `session_not_found` (the session vanished between `begin_execution`
+    // and here), handled the same way a PM-config load failure is above.
+    // (#2347) Fetched BEFORE `pm_registry` is built (moved up from its
+    // original post-registry position) so `set_goal`/`clear_goal` can be
+    // registered against this SAME transcript's live goal slots via
+    // `goals_handle` — see that method's docs for why the tools and the
+    // transcript must share one `Arc<Mutex<GoalSlots>>`.
+    let mut pm_transcript =
+        match registry.begin_pm_transcript(&session_id, &pm_system, &params.task) {
+            Ok(t) => t,
+            Err(e) => {
+                finish_with_failure(&registry, &session_id, &format!("PM transcript error: {e}"))
+                    .await;
+                return;
+            }
+        };
+    let goals = pm_transcript.goals_handle();
+
     // #2072: `finish_task` gives the PM a structured, schema-validated way to
-    // signal completion alongside the delegate tool.
+    // signal completion alongside the delegate tool. (#2347) `set_goal`/
+    // `clear_goal` are registered ONLY on this daemon-session PM registry —
+    // never on `run_task`'s one-shot/bake-off registry or a delegated
+    // engineer's registry — since goal slots are a session, not sub-agent,
+    // feature.
     let mut pm_registry = ToolRegistry::new();
     pm_registry.register(Arc::new(
         DelegateToAgentTool::new(engineer_runner).with_config_dir(params.agents_dir.clone()),
     ));
     pm_registry.register(Arc::new(FinishTaskTool::new()));
+    pm_registry.register(Arc::new(SetGoalTool::new(Arc::clone(&goals))));
+    pm_registry.register(Arc::new(ClearGoalTool::new(Arc::clone(&goals))));
     if let Some((_, resolver)) = &skills_catalog {
         pm_registry.register(Arc::new(UseSkillTool::new(Arc::clone(resolver))));
     }
@@ -229,15 +267,6 @@ async fn run_and_record(
         "pm",
         Arc::clone(&transcript),
     ));
-
-    let catchup_ctx = crate::catchup::pm_catchup_context(&params.project).await;
-    let pm_system = assemble_system_prompt_for_mode(
-        params.mode,
-        &pm_config,
-        project_context.as_deref(),
-        catchup_ctx.as_deref(),
-        skills_catalog.as_ref().map(|(catalog, _)| catalog.as_str()),
-    );
 
     let pm_loop = AgentLoop::new(
         AgentLoopConfig {
@@ -264,29 +293,15 @@ async fn run_and_record(
     // above), rather than the PM's own (bash-less) transcript.
     .with_finish_gate(crate::verify_gate::pm_finish_gate(Arc::clone(&transcript)));
 
-    // #2344: seed the PM's persistent conversation on this session's FIRST
-    // run, or append `params.task` as a new user turn onto its EXISTING,
-    // already-growing history on every run after that — see
-    // `SessionRegistry::begin_pm_transcript`'s docs. A failure here can only
-    // be `session_not_found` (the session vanished between `begin_execution`
-    // and here), handled the same way a PM-config load failure is above.
-    let mut pm_transcript =
-        match registry.begin_pm_transcript(&session_id, &pm_system, &params.task) {
-            Ok(t) => t,
-            Err(e) => {
-                finish_with_failure(&registry, &session_id, &format!("PM transcript error: {e}"))
-                    .await;
-                return;
-            }
-        };
-
     // #2345: mark "how much assistant text exists before this run" so the
     // turn recorder can later scope its durable dual-write to just THIS
     // run's new response text via `Transcript::assistant_text_since`, even
     // though `pm_transcript` is the session's whole cumulative (#2344)
-    // conversation. Fetching the sink here (rather than after the run) is
-    // just convenience — `SessionRegistry::memory_sink_for` is idempotent
-    // and cheap on every call after the first.
+    // conversation. `pm_transcript` was already fetched above (moved up for
+    // #2347's goal-tool wiring — see the comment on that fetch), so this
+    // only marks the current position; fetching the sink here (rather than
+    // after the run) is just convenience — `SessionRegistry::memory_sink_for`
+    // is idempotent and cheap on every call after the first.
     let turn_mark = pm_transcript.assistant_text_mark();
     let memory_sink = registry.memory_sink_for(&session_id, &params.project);
 

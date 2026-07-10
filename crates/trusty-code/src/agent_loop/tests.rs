@@ -1659,6 +1659,116 @@ async fn daily_driver_bedrock_model_marks_cache_breakpoints() {
     );
 }
 
+/// A goal-slot injection (#2347) at position `[1]` does NOT disturb
+/// `mark_cache_breakpoint_on_history`'s last-two-non-system-messages logic,
+/// and the real system message's bytes stay untouched by the goal write.
+///
+/// Why: This is #2347's explicit regression requirement — the goals block is
+/// system-role, so it must be excluded from
+/// `mark_cache_breakpoint_on_history`'s "last two NON-system messages"
+/// selection entirely; if it were accidentally counted, a goal update could
+/// shift which real messages get the rolling-history cache breakpoint.
+/// What: Mirrors `daily_driver_bedrock_model_marks_cache_breakpoints`'s
+/// two-turn Bedrock scenario, but drives it via `run_with_transcript` over a
+/// `Transcript` that already has a goal set through `goals_handle` before
+/// the run starts. Asserts: (1) the system message at request index `[0]`
+/// carries the SAME content as an unmodified seed (proving the goal write
+/// left it untouched), (2) the goals block appears at index `[1]` and is
+/// excluded from the "last two non-system" set, and (3) the assistant and
+/// tool-result messages (the real last-two-non-system entries) still carry
+/// the rolling-history breakpoint exactly as they do without any goal set.
+/// Test: this test.
+#[tokio::test]
+async fn daily_driver_goal_slot_injection_does_not_disturb_cache_breakpoints() {
+    let mut transcript = Transcript::seed("you are a helpful assistant", "do the thing");
+    transcript
+        .goals_handle()
+        .lock()
+        .expect("lock")
+        .set(1, "keep shipping", super::GoalSource::Model)
+        .expect("valid slot");
+
+    let llm = Arc::new(ScriptedLlm::from_json(&[
+        tool_call_response("call_1", "world"),
+        stop_response("done"),
+    ]));
+    let registry = registry_with_echo(false);
+    let agent = make_loop(
+        llm.clone(),
+        registry,
+        AgentLoopConfig {
+            model: "bedrock/us.anthropic.claude-sonnet-4-5".into(),
+            mode: crate::mode::HarnessMode::DailyDriver,
+            ..AgentLoopConfig::default()
+        },
+    );
+
+    agent
+        .run_with_transcript(&mut transcript, "do the thing")
+        .await
+        .expect("two-turn flow should complete");
+
+    let requests = llm.requests();
+
+    // First request: system, goals, user.
+    let first_request = &requests[0];
+    assert_eq!(first_request[0].role, "system");
+    assert_eq!(
+        first_request[0].content.as_deref(),
+        Some("you are a helpful assistant"),
+        "the real system message must be byte-identical to the unmodified seed"
+    );
+    assert_eq!(
+        first_request[0].cache_control,
+        Some(crate::llm::CacheControl::ephemeral()),
+        "the real system message must still carry its own cache breakpoint"
+    );
+    assert_eq!(
+        first_request[1].role, "system",
+        "the goals block is injected at position [1]"
+    );
+    assert!(
+        first_request[1]
+            .content
+            .as_deref()
+            .unwrap_or("")
+            .contains("keep shipping")
+    );
+    assert!(
+        first_request[1].cache_control.is_none(),
+        "the goals block itself is not part of the static tools+system cache prefix"
+    );
+
+    // Second request: system, goals, user, assistant(tool_calls), tool(result).
+    let second_request = &requests[1];
+    let non_system: Vec<&crate::llm::ChatMessage> = second_request
+        .iter()
+        .filter(|m| m.role != "system")
+        .collect();
+    assert_eq!(
+        non_system.len(),
+        3,
+        "the goals block (system-role) must be excluded from the non-system \
+         set entirely, leaving exactly user/assistant/tool: {second_request:?}"
+    );
+    assert!(
+        non_system[0].cache_control.is_none(),
+        "the oldest non-system message (user) must not carry the rolling breakpoint"
+    );
+    assert_eq!(
+        non_system[1].cache_control,
+        Some(crate::llm::CacheControl::ephemeral()),
+        "the assistant message must still carry the rolling history breakpoint \
+         with the goals block present"
+    );
+    assert_eq!(
+        non_system[2].cache_control,
+        Some(crate::llm::CacheControl::ephemeral()),
+        "the tool-result message must still carry the rolling history breakpoint \
+         with the goals block present"
+    );
+}
+
 /// `Parity` mode never marks a cache breakpoint, even for an `anthropic/*`
 /// model — the request stays byte-identical to pre-#2156.
 ///
