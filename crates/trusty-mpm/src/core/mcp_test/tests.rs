@@ -134,6 +134,35 @@ fn select_named_unknown_errors() {
     );
 }
 
+// ─── entry arg extraction (legacy `--` separator strip) ──────────────────────
+
+#[test]
+fn entry_args_strips_legacy_leading_separator() {
+    // A registry entry written before the fix stores the sentinel as arg 0.
+    let entry = json!({
+        "type": "stdio",
+        "command": "npx",
+        "args": ["--", "-y", "@modelcontextprotocol/server-github"]
+    });
+    assert_eq!(
+        entry_args(&entry),
+        vec!["-y", "@modelcontextprotocol/server-github"],
+        "the spawn path must drop a legacy leading `--` so npx works"
+    );
+}
+
+#[test]
+fn entry_args_preserves_deeper_separator_and_clean_args() {
+    // A `--` that is a real inner argument is preserved.
+    let deeper = json!({"command": "uv", "args": ["run", "--", "server"]});
+    assert_eq!(entry_args(&deeper), vec!["run", "--", "server"]);
+    // Clean args and missing args are unaffected.
+    let clean = json!({"command": "srv", "args": ["-y", "pkg"]});
+    assert_eq!(entry_args(&clean), vec!["-y", "pkg"]);
+    let none = json!({"command": "srv"});
+    assert!(entry_args(&none).is_empty());
+}
+
 // ─── message builders ────────────────────────────────────────────────────────
 
 #[test]

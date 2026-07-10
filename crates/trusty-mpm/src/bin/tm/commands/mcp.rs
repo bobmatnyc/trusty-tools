@@ -17,7 +17,9 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 
 use crate::cli::McpTransportArg;
-use trusty_mpm::core::mcp_config::{self, McpTransport, build_remote_entry, build_stdio_entry};
+use trusty_mpm::core::mcp_config::{
+    self, McpTransport, build_remote_entry, build_stdio_entry, strip_arg_separator,
+};
 use trusty_mpm::core::mcp_test::{self, McpTestResult};
 
 /// Resolve the `.claude.json`-bearing config dir for a `tm mcp` invocation.
@@ -92,7 +94,11 @@ pub(crate) fn add_cmd(
 ) -> Result<()> {
     let config_dir = resolve_config_dir(root)?;
     let command_or_url = command_and_args.first().map(String::as_str);
-    let args = command_and_args.get(1..).unwrap_or_default();
+    // Drop a leading `--` separator (clap's `trailing_var_arg` keeps it in the
+    // captured tail after the command positional; persisting it verbatim breaks
+    // every npx/uv-style stdio server). Only the first token is stripped — a
+    // legitimate deeper `--` is preserved. See `mcp_config::strip_arg_separator`.
+    let args = strip_arg_separator(command_and_args.get(1..).unwrap_or_default());
 
     let entry = match transport {
         McpTransportArg::Stdio => {
@@ -300,11 +306,17 @@ fn entry_target(entry: &Value) -> String {
         return url.to_string();
     }
     let cmd = entry.get("command").and_then(Value::as_str).unwrap_or("");
-    let args: Vec<&str> = entry
+    let mut args: Vec<&str> = entry
         .get("args")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
+    // Show the EFFECTIVE argv: drop a legacy stored leading `--` separator so
+    // `tm mcp list/get` reflect what actually gets spawned (mirrors the spawn-path
+    // and write-path normalisation in `mcp_config::strip_arg_separator`).
+    if args.first() == Some(&"--") {
+        args.remove(0);
+    }
     if args.is_empty() {
         cmd.to_string()
     } else {
@@ -348,5 +360,89 @@ mod tests {
         assert_eq!(entry_target(&stdio), "echo hi there");
         let http = serde_json::json!({"type":"http","url":"https://x/mcp"});
         assert_eq!(entry_target(&http), "https://x/mcp");
+    }
+
+    #[test]
+    fn entry_target_shows_effective_argv_dropping_legacy_separator() {
+        // A registry entry written before the fix still displays the effective
+        // argv (no leading `--`) in `tm mcp list/get`.
+        let legacy = serde_json::json!({
+            "type":"stdio","command":"npx",
+            "args":["--","-y","@modelcontextprotocol/server-github"]
+        });
+        assert_eq!(
+            entry_target(&legacy),
+            "npx -y @modelcontextprotocol/server-github"
+        );
+    }
+
+    /// The npx shape `tm mcp add github npx -- -y @scope/pkg` must persist WITHOUT
+    /// the `--` sentinel (clap's `trailing_var_arg` captures it as the first tail
+    /// token). `--root` is tier-1 precedence so the write lands in
+    /// `<tempdir>/claude-config`, letting us assert the stored args round-trip.
+    #[test]
+    fn add_strips_leading_separator_before_persisting() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_str().unwrap();
+        let command_and_args = vec![
+            "npx".to_string(),
+            "--".to_string(),
+            "-y".to_string(),
+            "@modelcontextprotocol/server-github".to_string(),
+        ];
+        add_cmd(
+            Some(root),
+            "github",
+            McpTransportArg::Stdio,
+            &[],
+            &[],
+            &command_and_args,
+        )
+        .unwrap();
+
+        let cfg = std::path::Path::new(root).join("claude-config");
+        let entry = mcp_config::get_server(&cfg, "github")
+            .unwrap()
+            .expect("server persisted");
+        assert_eq!(entry["command"], "npx");
+        assert_eq!(
+            entry["args"],
+            serde_json::json!(["-y", "@modelcontextprotocol/server-github"]),
+            "the `--` sentinel must not be persisted into stored args"
+        );
+    }
+
+    /// Round-trip proof that only the LEADING `--` is stripped: a deeper `--`
+    /// (a real inner separator some CLIs need) survives into the stored args.
+    #[test]
+    fn add_preserves_deeper_separator() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().to_str().unwrap();
+        // `tm mcp add x uv -- run -- tool` → tail = ["uv","--","run","--","tool"].
+        let command_and_args = vec![
+            "uv".to_string(),
+            "--".to_string(),
+            "run".to_string(),
+            "--".to_string(),
+            "tool".to_string(),
+        ];
+        add_cmd(
+            Some(root),
+            "x",
+            McpTransportArg::Stdio,
+            &[],
+            &[],
+            &command_and_args,
+        )
+        .unwrap();
+
+        let cfg = std::path::Path::new(root).join("claude-config");
+        let entry = mcp_config::get_server(&cfg, "x").unwrap().unwrap();
+        assert_eq!(entry["command"], "uv");
+        assert_eq!(
+            entry["args"],
+            serde_json::json!(["run", "--", "tool"]),
+            "leading `--` stripped once; the deeper `--` is preserved"
+        );
     }
 }
