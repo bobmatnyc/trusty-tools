@@ -32,8 +32,8 @@ pub mod inproject;
 pub mod inproject_hygiene;
 mod lifecycle;
 mod mcp_spawn_gate;
-pub mod prune;
 pub mod proxy;
+pub mod prune;
 mod reactivate;
 mod summary;
 pub use activity::{ActivityResponse, get_session_activity};
@@ -45,14 +45,14 @@ pub use lifecycle::{
     ResumeManagedError, SpawnParams, is_local_workdir, resume_managed, spawn_managed,
     spawn_runtime_for, write_task_md,
 };
-pub use prune::{
-    PruneRequest, decommission_ephemeral_route, prune_managed_route, prune_worktrees_route,
-};
 pub use proxy::{
     DirectManagedBackend, ProxyFocusRequest, ProxyFocusResponse, ProxyMessageRequest,
     ProxyMessageResponse, ProxySummaryResponse, ProxyTargetWire, ProxyUnfocusRequest,
     ProxyUnfocusResponse, proxy_focus, proxy_get_focus, proxy_message, proxy_summary,
     proxy_unfocus,
+};
+pub use prune::{
+    PruneRequest, decommission_ephemeral_route, prune_managed_route, prune_worktrees_route,
 };
 pub use reactivate::reactivate_managed_session;
 pub use summary::record_to_json;

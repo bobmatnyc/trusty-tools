@@ -202,7 +202,12 @@ async fn proxy_summary_route_returns_digest_for_focused_session() {
     assert_eq!(body["outcome"], "summary");
     assert_eq!(body["target"]["name"], name);
     assert!(body["state"].is_string());
-    assert!(body["summary"].as_str().unwrap().contains("proxy test task"));
+    assert!(
+        body["summary"]
+            .as_str()
+            .unwrap()
+            .contains("proxy test task")
+    );
 }
 
 #[tokio::test]

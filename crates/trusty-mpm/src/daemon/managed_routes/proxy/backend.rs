@@ -83,7 +83,9 @@ impl ManagedBackend for DirectManagedBackend {
     async fn send(&self, id: &str, text: &str) -> Result<(), String> {
         let parsed = parse_managed_id(id)?;
         let mgr = self.state.session_manager().await;
-        mgr.send_input(&parsed, text).await.map_err(|e| e.to_string())
+        mgr.send_input(&parsed, text)
+            .await
+            .map_err(|e| e.to_string())
     }
 
     /// Build a lightweight digest straight from the session record.
