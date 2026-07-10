@@ -11,13 +11,14 @@
 //! Test: `cli_parses_mcp_*` in `tests.rs`; parse helpers unit-tested below;
 //! CRUD in `core::mcp_config`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 
 use crate::cli::McpTransportArg;
 use trusty_mpm::core::mcp_config::{self, McpTransport, build_remote_entry, build_stdio_entry};
+use trusty_mpm::core::mcp_test::{self, McpTestResult};
 
 /// Resolve the `.claude.json`-bearing config dir for a `tm mcp` invocation.
 ///
@@ -219,6 +220,73 @@ pub(crate) fn get_cmd(root: Option<&str>, name: &str, json: bool) -> Result<()> 
         println!("  Scope:  User config (available in all managed sessions)");
     }
     Ok(())
+}
+
+/// Handle `tm mcp test [<name>] [--json]`.
+///
+/// Why: registration only proves a server's config is well-formed, not that it
+/// starts and speaks MCP. `test` spawns each server and runs the real handshake
+/// so operators (and CI) get a definitive pass/fail.
+/// What: resolves the config dir, selects targets (one named server, or the
+/// full user-scope + built-in union when `name` is `None`), probes each with a
+/// bounded timeout via [`mcp_test::run_all`], then prints a table (or `--json`).
+/// Exits with status 1 if ANY server failed (so it is usable as a CI gate);
+/// a not-found named server is a hard error. Async because the stdio handshake
+/// and http reachability check are I/O-bound.
+/// Test: `cli_parses_mcp_test` in `tests.rs`; probe/selection logic in
+/// `core::mcp_test`.
+pub(crate) async fn test_cmd(root: Option<&str>, name: Option<&str>, json: bool) -> Result<()> {
+    let config_dir = resolve_config_dir(root)?;
+    let servers = mcp_config::list_servers(&config_dir)?;
+    let targets = mcp_test::select_targets(&servers, name)?;
+    let results = mcp_test::run_all(targets, mcp_test::DEFAULT_PROBE_TIMEOUT).await;
+
+    if json {
+        let arr: Vec<Value> = results.iter().map(McpTestResult::to_json).collect();
+        println!("{}", serde_json::to_string_pretty(&Value::Array(arr))?);
+    } else {
+        print_test_table(&results, &config_dir);
+    }
+
+    // Non-zero exit if any server failed, matching `tm services`' convention so
+    // `tm mcp test` slots straight into CI. Exit here (not a returned Err) to
+    // avoid printing anyhow's error chrome after the report.
+    if mcp_test::any_failed(&results) {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Render the human-readable results table for `tm mcp test`.
+fn print_test_table(results: &[McpTestResult], config_dir: &Path) {
+    if results.is_empty() {
+        println!("No MCP servers to test in {}", config_dir.display());
+        return;
+    }
+    println!(
+        "Testing {} MCP server(s) from {}:",
+        results.len(),
+        config_dir.display()
+    );
+    let name_w = results
+        .iter()
+        .map(|r| r.name.len())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    println!("  {:<name_w$}  TRANSPORT  RESULT  DETAIL", "NAME");
+    for r in results {
+        let (label, detail) = r.render();
+        println!(
+            "  {:<name_w$}  {:<9}  {:<6}  {}",
+            r.name,
+            r.transport.as_str(),
+            label,
+            detail
+        );
+    }
+    let passed = results.iter().filter(|r| r.passed()).count();
+    println!("\n{passed}/{} passed", results.len());
 }
 
 /// The `type` discriminant of an entry, defaulting to `stdio` when absent.

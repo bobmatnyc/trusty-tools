@@ -47,6 +47,32 @@ const CLAUDE_JSON: &str = ".claude.json";
 pub const BUILTIN_MANAGED_MCP_SERVERS: &[&str] =
     &["trusty-memory", "trusty-review", "trusty-search"];
 
+/// The stdio launch entry tm provisions for a built-in framework MCP server.
+///
+/// Why: two call sites need the exact launch definition of the three framework
+/// servers — `standalone::global_config::ensure_mcp_config` (which writes them
+/// into the managed `.mcp.json`) and `core::mcp_test` (which spawns them to run
+/// a real handshake for `tm mcp test`). Keeping the catalog here, next to
+/// [`BUILTIN_MANAGED_MCP_SERVERS`], means the launch command can never drift
+/// between "what a managed session runs" and "what `tm mcp test` probes".
+/// What: returns the canonical `{"type":"stdio","command":<bin>,"args":[…]}`
+/// entry for `trusty-memory` (`serve --stdio`), `trusty-review` (`serve
+/// --stdio`), and `trusty-search` (`serve`); `None` for any other name. The
+/// entries carry no `env` — the managed session and the probe both inherit the
+/// ambient environment (matching the memory/search/review pattern).
+/// Test: `builtin_server_entry_matches_known_servers`; the parity with
+/// `ensure_mcp_config` is enforced by `global_config`'s existing tests.
+pub fn builtin_server_entry(name: &str) -> Option<Value> {
+    let (command, args): (&str, &[&str]) = match name {
+        "trusty-memory" => ("trusty-memory", &["serve", "--stdio"]),
+        "trusty-review" => ("trusty-review", &["serve", "--stdio"]),
+        "trusty-search" => ("trusty-search", &["serve"]),
+        _ => return None,
+    };
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    Some(build_stdio_entry(command, &args, &Map::new()))
+}
+
 /// Transport kind for a user-scope MCP server entry.
 ///
 /// Why: the `add` handler validates transport-specific inputs (`-e` env is
@@ -449,6 +475,28 @@ mod tests {
         let v: Value =
             serde_json::from_str(&std::fs::read_to_string(cfg.join(CLAUDE_JSON)).unwrap()).unwrap();
         assert!(v["mcpServers"]["echo"].is_object());
+    }
+
+    #[test]
+    fn builtin_server_entry_matches_known_servers() {
+        // Every name in the builtin list resolves to a stdio launch entry.
+        for name in BUILTIN_MANAGED_MCP_SERVERS {
+            let e = builtin_server_entry(name).expect("builtin resolves");
+            assert_eq!(e["type"], "stdio");
+            assert_eq!(e["command"], *name, "command matches the binary name");
+            assert!(e["args"].is_array(), "args always present");
+        }
+        // The exact launch args must stay pinned (parity with ensure_mcp_config).
+        assert_eq!(
+            builtin_server_entry("trusty-memory").unwrap()["args"],
+            serde_json::json!(["serve", "--stdio"])
+        );
+        assert_eq!(
+            builtin_server_entry("trusty-search").unwrap()["args"],
+            serde_json::json!(["serve"])
+        );
+        // Unknown names yield None.
+        assert!(builtin_server_entry("not-a-builtin").is_none());
     }
 
     #[test]

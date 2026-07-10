@@ -908,6 +908,23 @@ pub(crate) enum McpCmd {
         #[arg(long)]
         root: Option<String>,
     },
+    /// Verify MCP servers by running a real handshake against each.
+    ///
+    /// Bare (`tm mcp test`): sweeps every user-scope server unioned with the
+    /// three framework built-ins. `tm mcp test <name>`: tests just that server.
+    /// stdio servers get a full `initialize` → `tools/list` handshake (reporting
+    /// the tool count); http/sse servers get an HTTP reachability check. Exits
+    /// non-zero if ANY tested server fails, so it is CI-usable.
+    Test {
+        /// Optional server name; omit to sweep all servers + built-ins.
+        name: Option<String>,
+        /// Output as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+        /// Override the managed root (switches to the standalone config dir).
+        #[arg(long)]
+        root: Option<String>,
+    },
 }
 
 /// Transport choice for `tm mcp add` (clap `ValueEnum` mirror of
