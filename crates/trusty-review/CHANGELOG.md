@@ -7,6 +7,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ---
 ## [Unreleased]
 
+### Added
+
+- **Technical-DD report generation** (`trusty-review report --manifest <toml>`) — new manifest-driven report subcommand generating CAST-style technical due-diligence reports (markdown + JSON) from repository inspection:
+  - **M1** — deterministic manifest-driven fill: `[report]`/`[[repositories]]` manifest schema (path or remote + username/ref/metrics), git enrichment, v0 trusty-analyze metrics schema, bundled `report-technical-dd` + `report-technical-dd-cast` templates, XDG template override dir ([#2317](https://github.com/bobmatnyc/trusty-tools/pull/2317)) ([`2b916d8`](https://github.com/bobmatnyc/trusty-tools/commit/2b916d8d0cc1e162b8bddcc48d370057d59dc5c6))
+  - **M2** — opt-in `--synthesize` LLM narrative synthesis (executive summary, Top Risks, RED/AMBER findings), fail-closed on any provider/parse/guardrail failure, plus a deterministic numeric guardrail rejecting unverifiable figures; GREEN findings never synthesized ([#2324](https://github.com/bobmatnyc/trusty-tools/pull/2324)) ([`f6cbb1b`](https://github.com/bobmatnyc/trusty-tools/commit/f6cbb1bded79d37406ddac37bd28d6feda67b1ff))
+  - **M3** — opt-in `--corpus`/`--corpus-add`/`--benchmark` local benchmark corpus: privacy-redacted per-repository snapshots, deterministic percentile/quartile placement, small-n honesty gate (< 5 peers never ranked), plus live-QA fixes ([#2334](https://github.com/bobmatnyc/trusty-tools/pull/2334)) ([`3c457e2`](https://github.com/bobmatnyc/trusty-tools/commit/3c457e22fb598310e9858af43aa702138a7df8fc))
+
+### Fixed
+
+- MCP tools default to local (gh) auth, App only when creds present (closes #1993) ([#1995](https://github.com/bobmatnyc/trusty-tools/pull/1995)) ([`e11a5de`](https://github.com/bobmatnyc/trusty-tools/commit/e11a5de4e2d49c19894e4f47ec694bdf414de5b0))
+## [Unreleased]
+
 ### Fixed
 
 - MCP review path is now local-first: `review_pr`/`review_diff` authenticate with

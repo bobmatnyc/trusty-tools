@@ -315,6 +315,89 @@ Provider prefix convention:
 - `openrouter/<id>` — OpenRouter (requires `OPENROUTER_API_KEY`)
 - Bare id — uses the configured default provider
 
+## Report generation
+
+`trusty-review report` generates a CAST-style technical due-diligence report
+from repository inspection — a structured markdown + JSON pair with executive
+summary, per-application scorecards, findings by severity, risk registers, and
+graph-ready datasets. Full design detail:
+[docs/trusty-review/spec/report-generation.md](../../docs/trusty-review/spec/report-generation.md).
+
+```bash
+trusty-review report --manifest dd/acme.toml \
+  --template report-technical-dd-cast --out /tmp/dd-reports
+```
+
+### Manifest
+
+A single TOML file drives the run: a `[report]` section (title, optional
+`template`/`analyst`/`corpus`) plus one or more `[[repositories]]` entries.
+Each repository declares **exactly one** of `path` (local checkout) or
+`remote` (`owner/repo`, with optional `username` for attribution), plus an
+optional `ref` and a pre-produced trusty-analyze `metrics` JSON file:
+
+```toml
+[report]
+title = "Acme Technical DD"
+
+[[repositories]]
+name    = "Acme Web"
+path    = "/path/to/local/checkout"   # OR remote = "owner/repo"
+ref     = "main"
+metrics = "acme-metrics.json"
+```
+
+Local `path` entries get deterministic git enrichment (branch, short SHA,
+origin, dirty flag); missing deterministic data renders as an explicit honesty
+marker (e.g. `not stated in source data`) rather than being invented — a
+convention enforced throughout the deterministic fill (M1).
+
+### `--synthesize` (M2, opt-in LLM synthesis)
+
+Off by default — without it, output is the byte-for-byte deterministic M1
+fill. `--synthesize` layers LLM-written prose onto the executive summary, Top
+Risks table, and RED/AMBER finding narratives only; **GREEN findings are
+never synthesized** (filtered out before the prompt is built, so it's a
+structural guarantee, not a prompt instruction). It reuses the crate's
+existing reviewer LLM provider (no new client/dependency). Any provider,
+parse, or guardrail failure **fails closed** to the deterministic output with
+a visible `synthesis: unavailable (<reason>)` note — never a partial-trusted
+result. A deterministic numeric guardrail additionally rejects any
+synthesized field that cites a figure not present in the underlying report
+data.
+
+### `--corpus` / `--corpus-add` / `--benchmark` (M3, benchmark corpus)
+
+Opt-in, fully deterministic cross-repo percentile/quartile placement against
+a local corpus of accumulated per-repository metrics snapshots (the
+trusty-review analogue of CAST's Appmarq peer benchmark). Snapshots are
+privacy-redacted — the source path/URL is stored as a basename only, never
+the full path or remote URL. `--corpus <dir>` resolves the corpus location
+(falling back to the manifest's `[report].corpus` key, then a per-user XDG
+data directory); `--corpus-add` appends a snapshot per analyzed repository
+after a successful run; `--benchmark` computes and fills percentile/quartile
+placement tables. A corpus with fewer than 5 peers is never ranked — the
+report discloses `benchmark: corpus too small (n=<peers>)` instead of a
+fabricated placement (the small-n honesty gate).
+
+### Templates
+
+Two vendor-neutral, placeholder-only templates ship in
+`crates/trusty-review/templates/`: `report-technical-dd` (generic) and
+`report-technical-dd-cast` (CAST-specific health factors, ISO-5055 domains,
+Appmarq-style benchmarks). Override either by dropping a same-named file in
+the XDG template override directory (`~/.trusty-review/templates/`, checked
+before the bundled `include_str!()` default — same pattern as the reviewer's
+`VoiceLoader`).
+
+### No-green-analysis convention
+
+Across the whole report-generation feature, GREEN (healthy) findings are
+rendered as a one-line topic list only — no elaboration, root-cause prose, or
+recommendation ever attaches to a GREEN item, whether from deterministic fill
+or LLM synthesis. This keeps every report focused on what's actually
+actionable.
+
 ## Cargo features
 
 | Feature | Default | Description |
