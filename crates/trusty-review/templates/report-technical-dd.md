@@ -111,8 +111,8 @@ report against others normalized through this same template.
 **Benchmark Position**
 
 | Criterion | Compliance | Quartile | Rank | Peer set |
-|---|---|---|---|---|
-| {{bench_criterion}} | {{bench_compliance}} | {{bench_quartile}} | {{bench_rank}} | {{bench_peer_set}} |
+|---|---|---|---|---|<!-- BEGIN bench_row -->
+| {{bench_criterion}} | {{bench_compliance}} | {{bench_quartile}} | {{bench_rank}} | {{bench_peer_set}} |<!-- END bench_row -->
 <!-- END per_application -->
 
 ## 5. Findings by Severity
@@ -210,8 +210,8 @@ N. **{{finding_title}}** — {{finding_description}}. Evidence: {{finding_eviden
 
 <!-- dataset: tqi_benchmark_position | chart: bar | x: application | y: quartile_rank -->
 | Application | Peer set | Compliance % | Quartile | Rank |
-|---|---|---|---|---|
-| {{app_name}} | {{peer_set}} | {{compliance_pct}} | {{quartile}} | {{rank}} |
+|---|---|---|---|---|<!-- BEGIN benchmark_position -->
+| {{app_name}} | {{peer_set}} | {{compliance_pct}} | {{quartile}} | {{rank}} |<!-- END benchmark_position -->
 
 <!-- dataset: violations_by_domain | chart: stacked-bar | x: application | y: violation_count, group: domain -->
 | Application | Domain | Violation count |

@@ -79,7 +79,7 @@
 |---|---|---|---|
 | **M1** | Deterministic, manifest-driven fill (metrics → tables) from trusty-analyze output; no LLM synthesis | Manifest loader + validation; git enrichment; v0 metrics schema; template loader; placeholder fill engine; `report` subcommand | **Landed (#2313)** — `src/report/`, `report` Cargo feature (default-on), `trusty-review report --manifest` |
 | **M2** | LLM synthesis of exec summary + findings prose (RED/AMBER descriptive narratives) | Plug LLM backend (OpenRouter or Bedrock); implement synthesizer; validate output quality | **Landed (#2314)** — `src/report/synthesize*.rs`, opt-in `--synthesize` flag, fail-closed + numeric guardrail (see [Synthesis (M2)](#synthesis-m2)) |
-| **M3** | Cross-repo benchmarking (percentile ranks, quartile placement like CAST Appmarq) | Maintain corpus of analyzed repos; compute percentile functions; wire into scorecard section | Not started |
+| **M3** | Cross-repo benchmarking (percentile ranks, quartile placement like CAST Appmarq) | Maintain corpus of analyzed repos; compute percentile functions; wire into scorecard section | **Landed (#2314)** — `src/report/benchmark.rs`, opt-in `--corpus` / `--corpus-add` / `--benchmark` flags, deterministic percentile/quartile placement + small-n honesty gate (see [Benchmarking (M3)](#benchmarking-m3)) |
 
 ### Explicit Non-Goals
 
@@ -102,7 +102,8 @@ names the target repositories and their sources; the earlier `--repo` flag is
 replaced by `--manifest`.
 
 ```bash
-trusty-review report --manifest <file> [--template <name>] [--out <dir>] [--synthesize]
+trusty-review report --manifest <file> [--template <name>] [--out <dir>] [--synthesize] \
+                     [--corpus <dir>] [--corpus-add] [--benchmark]
   --manifest <file>   Path to the report manifest TOML (required)
   --template <name>   Template override, e.g. report-technical-dd or
                       report-technical-dd-cast. Precedence:
@@ -114,6 +115,15 @@ trusty-review report --manifest <file> [--template <name>] [--out <dir>] [--synt
                       (default OFF — deterministic M1 output). Spends LLM
                       tokens; fails closed to deterministic output on any
                       provider/parse/guardrail failure. See "Synthesis (M2)".
+  --corpus <dir>      Benchmark corpus directory (M3). Precedence:
+                      --corpus flag > manifest [report].corpus > per-user XDG
+                      default (~/.local/share/trusty-review/benchmark/ or the
+                      platform equivalent). A no-op without --corpus-add/--benchmark.
+  --corpus-add        After a successful run, append each analyzed repository's
+                      metrics snapshot to the corpus. See "Benchmarking (M3)".
+  --benchmark         Compute cross-repo percentile/quartile placement against the
+                      corpus and fill the benchmark tables. Deterministic; a corpus
+                      with < 5 peers is disclosed, never silently ranked.
 ```
 
 Output is always the dual `{date}-{title-slug}.md` + `.json` pair written
@@ -285,6 +295,95 @@ figure is **rejected**: it falls back to the deterministic output and a
 `synthesis: rejected (unverified figure)` note is recorded. This is the
 report-side analogue of the crate's verdict-integrity posture — the guardrail,
 not the prompt, is the last line of defence against a fabricated figure.
+
+## Benchmarking (M3)
+
+M3 layers **opt-in, fully deterministic** (no LLM anywhere) cross-repo placement
+on top of the M1/M2 fill. Without `--benchmark` the report is byte-for-byte the
+M2 output. It ranks a target against an accumulated **corpus** of per-repository
+metrics snapshots — the trusty-review analogue of CAST's Appmarq peer benchmark —
+and preserves the honesty rule: every ranking carries its population size, and a
+corpus with fewer than five peers is never ranked against.
+
+### Corpus format & location
+
+The corpus is a directory of accumulated snapshot JSON files, one per repository
+per run, keyed `<slug>-<sha-or-date>.json` (the git short-SHA when known, else the
+run date), so a re-run overwrites the same key rather than accumulating duplicates.
+Each snapshot (`src/report/benchmark.rs`, schema tag `corpus-v0`) records:
+
+```jsonc
+{
+  "schema_version": "corpus-v0",
+  "slug": "acme-web",
+  "name": "Acme Web",
+  "source_basename": "acme-web",   // source path/URL redacted to its basename (privacy)
+  "git_sha": "abc1234",            // short HEAD SHA for local checkouts, if any
+  "timestamp": "2026-07-10",       // run date, injected by the CLI (std/chrono at the edge)
+  "metrics": { /* the v0 AnalyzeMetrics document */ }
+}
+```
+
+The directory is resolved by precedence: `--corpus <dir>` flag > manifest
+`[report].corpus` key (relative to the manifest dir) > the per-user XDG data dir
+(`~/.local/share/trusty-review/benchmark/` or the platform equivalent, via the
+same `dirs` conventions the template loader uses). `--benchmark`/`--corpus-add`
+require a resolvable directory; the only hard error is a platform with no data dir
+**and** no explicit source.
+
+`--corpus-add` writes one snapshot per analyzed repository **that has metrics**
+after a successful report write (metric-less repos contribute nothing rankable).
+The loader reads every `*.json`, **skipping** — with a collected, surfaced warning
+list, never a hard error — any file that is unreadable, unparseable, or whose
+`schema_version` differs. A missing corpus directory yields an empty corpus plus a
+warning (a normal first-run condition).
+
+### Comparable metrics & percentile method
+
+For each target the engine ranks a fixed, documented set of comparable scalars,
+omitting any whose inputs are absent (so it is excluded from that metric's
+population rather than ranked as a spurious zero):
+
+- **total LoC**, **file count**, **function count** (raw size);
+- **findings / 1k LoC** — total, RED, and AMBER density;
+- **high-complexity function share (%)** — the share of functions in the highest
+  complexity bucket (the last bucket in the distribution, by convention).
+
+The **percentile** is the cumulative-share method: `100 × (count of population
+values ≤ target) / population_size`. The population **always includes the target's
+own value** (the documented choice — placement reflects where the target sits
+within the full set); a stale corpus copy of the target (same slug) is excluded so
+it is never double-counted. Consequences: a unique maximum → 100th percentile; the
+sole member of an `n=1` metric population → 100th; tied values share a percentile.
+The **quartile** maps the percentile as `≤25 → Q1`, `≤50 → Q2`, `≤75 → Q3`, else
+`Q4` (Q1 = bottom quartile by that metric, Q4 = top). The **rank** is the 1-based
+ascending position (`1 + count of strictly-smaller values`; ties share a rank),
+reported as `r of n` with `n` the per-metric population size.
+
+### Small-n honesty gate
+
+If the corpus holds fewer than **5 peers** (excluding the target), the target is
+**not ranked**: its Benchmark Position table renders a single explicit
+`benchmark: corpus too small (n=<peers>)` row instead of placements, and the same
+marker appears in the appended **Benchmark Status** section. Placement is never
+computed silently against an empty or tiny corpus.
+
+### Template wiring
+
+For each ranked application the reporter fills the per-application **Benchmark
+Position** table (one row per comparable metric: criterion, percentile
+compliance, quartile, `rank of n`, and the population as the peer set) and the
+graph-appendix `tqi_benchmark_position` dataset (one headline row per app, keyed
+on the Total LoC placement; the full per-metric breakdown lives in the
+per-application table). The bundled templates carry the benchmark row blocks with
+a **leading-newline block idiom** so that with benchmarking OFF they render exactly
+once as honesty markers — byte-identical to the M2 output. The CAST template's
+health-factor benchmark tables (TQI/Robustness/Security/…) map to quality scores
+trusty-review does not compute deterministically and therefore remain
+honesty-marked; only the generic placement dataset is filled. A `## Benchmark
+Status` section (appended only when `--benchmark` is active) discloses the corpus
+size, each app's peer count or small-n marker, and any corpus load warnings. The
+placement is also recorded on the JSON twin's `benchmark` object.
 
 ## References & Related Docs
 

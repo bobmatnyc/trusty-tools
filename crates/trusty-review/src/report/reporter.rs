@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use tracing::info;
 
 use super::error::{ReportError, Result};
-use super::fill::{Scope, render};
+use super::fill::{Scope, render, strip_leading_comment};
 use super::manifest::slugify;
+use super::metrics::Severity;
 use super::model::{ReportModel, RepositoryReport};
 
 /// Renders a [`ReportModel`] to markdown + JSON and writes them atomically.
@@ -46,12 +47,19 @@ impl Reporter {
     ///
     /// Why: exposed separately so tests can assert on rendered markdown without
     /// touching disk.
-    /// What: builds the fill [`Scope`] from the model and renders `template`.
-    /// Test: `reporter_tests.rs::render_contains_expected`.
+    /// What: strips the template's leading instructional `<!-- … -->` comment
+    /// (live-QA defect #2314 — a generated report must never carry template
+    /// authoring instructions, and the header's own literal `{{field}}` /
+    /// BEGIN-END documentation examples would otherwise be mangled by the fill
+    /// engine), builds the fill [`Scope`] from the model, and renders the
+    /// remainder.
+    /// Test: `reporter_tests.rs::{render_contains_expected,
+    /// reporter_strips_leading_comment_header}`.
     pub fn render(&self, model: &ReportModel, template: &str) -> String {
         let scope = build_scope(model);
-        let mut out = render(template, &scope);
+        let mut out = render(strip_leading_comment(template), &scope);
         append_synthesis_note(&mut out, model);
+        append_benchmark_note(&mut out, model);
         out
     }
 
@@ -143,34 +151,76 @@ fn build_scope(model: &ReportModel) -> Scope {
         root.set("applications_list", apps.join(", "));
     }
 
-    // One per_application block repetition per repository.
+    // One per_application block repetition per repository.  When benchmarking is
+    // active, the matching per-repo placement is threaded into the scope so its
+    // Benchmark Position table fills; without it the table stays honesty-marked.
     for repo in &model.repositories {
-        root.push_block("per_application", per_application_scope(repo));
+        let bench = model
+            .benchmark
+            .as_ref()
+            .and_then(|b| b.repositories.iter().find(|r| r.slug == repo.slug));
+        root.push_block("per_application", per_application_scope(repo, bench));
     }
 
-    // M2: inject verified LLM synthesis into the narrative placeholders/blocks.
-    // Absent or unavailable synthesis leaves every narrative field to the M1
-    // honesty marker (deterministic behaviour unchanged).
-    if let Some(syn) = &model.synthesis
-        && syn.is_available()
-    {
-        inject_synthesis(&mut root, model, syn);
+    // M3: fill the graph-appendix benchmark dataset (one headline row per ranked
+    // application).  Absent benchmarking leaves the block to render once empty,
+    // byte-identical to the M2 honesty-marked output.
+    if let Some(bench) = &model.benchmark {
+        inject_benchmark_dataset(&mut root, model, bench);
+    }
+
+    // Live-QA defect #2314: RED/AMBER finding blocks are deterministic, not
+    // synthesis-gated — title/category/component come verbatim from
+    // `metrics.findings` regardless of `--synthesize`.  When verified synthesis
+    // IS available, its prose is merged onto the SAME row for a matching title
+    // (never pushed as a second, duplicate row); see `push_finding_band`.
+    let available_synthesis = model.synthesis.as_ref().filter(|s| s.is_available());
+    for repo in &model.repositories {
+        push_finding_band(
+            &mut root,
+            repo,
+            available_synthesis,
+            Severity::Red,
+            "RED",
+            "per_application_red",
+            "red_finding",
+        );
+        push_finding_band(
+            &mut root,
+            repo,
+            available_synthesis,
+            Severity::Amber,
+            "AMBER",
+            "per_application_amber",
+            "amber_finding",
+        );
+    }
+
+    // GREEN topics are metrics-only (title only, no-green-analysis rule) and are
+    // never synthesized — filled independent of synthesis availability.
+    push_green_topics(&mut root, model);
+
+    // M2: the executive summary and top-risk rationale have no deterministic M1
+    // source; fill them only from verified synthesis.  Absent/unavailable
+    // synthesis leaves both to the M1 honesty marker (unchanged behaviour).
+    if let Some(syn) = available_synthesis {
+        inject_synthesis_summary(&mut root, syn);
     }
 
     root
 }
 
-/// Inject verified synthesis prose into the narrative placeholders and blocks.
+/// Inject verified synthesis prose into the report-level narrative placeholders.
 ///
-/// Why: M2 fills exactly the fields M1 leaves as honesty markers — executive
-/// summary, top-risk rows, and RED/AMBER finding elaborations — and only with
-/// prose that already passed the numeric guardrail.  Greens are never touched.
-/// What: sets the executive-summary scalar, the `risk_N_*` scalars, and pushes
-/// `per_application_red` / `per_application_amber` blocks (with nested
-/// `red_finding` / `amber_finding` blocks) for each application that has
-/// verified findings of that band.
+/// Why: the executive summary and top-risk rationale have no deterministic M1
+/// source (no `metrics` field maps to them); M2 fills exactly these — and only
+/// with prose that already passed the numeric guardrail.  RED/AMBER finding
+/// prose is handled per-finding by [`push_finding_band`] (merged onto the
+/// deterministic row, never duplicated).
+/// What: sets the executive-summary scalar and the `risk_N_*` scalars from the
+/// synthesis's verified top-risk rows.
 /// Test: `reporter_tests.rs::reporter_injects_synthesis_prose`.
-fn inject_synthesis(root: &mut Scope, model: &ReportModel, syn: &super::synthesize::Synthesis) {
+fn inject_synthesis_summary(root: &mut Scope, syn: &super::synthesize::Synthesis) {
     if let Some(exec) = &syn.executive_summary {
         root.set("executive_summary_paragraph", exec.clone());
     }
@@ -182,68 +232,194 @@ fn inject_synthesis(root: &mut Scope, model: &ReportModel, syn: &super::synthesi
         root.set(format!("risk_{n}_cost"), risk.cost.clone());
         root.set(format!("risk_{n}_apps"), risk.apps.clone());
     }
+}
 
-    for repo in &model.repositories {
-        push_band_blocks(
-            root,
-            syn,
-            &repo.name,
-            &repo.slug,
-            "RED",
-            "per_application_red",
-            "red_finding",
-        );
-        push_band_blocks(
-            root,
-            syn,
-            &repo.name,
-            &repo.slug,
-            "AMBER",
-            "per_application_amber",
-            "amber_finding",
-        );
+/// One merged RED/AMBER finding row: deterministic metrics fields plus an
+/// optional verified-synthesis prose overlay (live-QA defect #2314).
+///
+/// Why: a plain struct (rather than building [`Scope`]s directly) lets
+/// [`push_finding_band`] merge synthesis prose onto an already-built
+/// metrics-derived row by field, then convert to a `Scope` once, in one place.
+/// What: `title` is always set (metrics or synthesis); every other field is
+/// `Option` so an unset one falls through to the fill engine's honesty marker.
+#[derive(Default)]
+struct FindingRow {
+    title: String,
+    category: Option<String>,
+    component: Option<String>,
+    description: Option<String>,
+    evidence: Option<String>,
+    business_impact: Option<String>,
+    remediation: Option<String>,
+    cost_effort: Option<String>,
+}
+
+impl FindingRow {
+    /// A bare deterministic row from one `metrics.findings` entry.
+    ///
+    /// Why: title/category/component are verbatim, always-available facts from
+    /// trusty-analyze; the prose-only fields (description/evidence/business
+    /// impact/remediation/cost) are synthesis's job and start unset so they
+    /// render as the honesty marker until (and unless) synthesis fills them.
+    /// What: copies `title`/`category`/`component`, mapping an empty source
+    /// string to `None`.
+    fn from_metric(f: &super::metrics::MetricFinding) -> Self {
+        FindingRow {
+            title: f.title.clone(),
+            category: non_empty(&f.category),
+            component: non_empty(&f.component),
+            ..Default::default()
+        }
+    }
+
+    /// A synthesis-only row for a verified finding with no `metrics.findings`
+    /// title match (e.g. metrics were absent or reported the finding
+    /// differently) — preserves synthesis's own title/component alongside its
+    /// prose rather than silently dropping verified data.
+    fn from_prose(f: &super::synthesize::FindingProse) -> Self {
+        FindingRow {
+            title: f.title.clone(),
+            category: None,
+            component: non_empty(&f.component),
+            description: non_empty(&f.description),
+            evidence: non_empty(&f.evidence),
+            business_impact: non_empty(&f.business_impact),
+            remediation: non_empty(&f.remediation),
+            cost_effort: non_empty(&f.cost_effort),
+        }
+    }
+
+    /// Overlay verified synthesis prose onto this already metrics-backed row.
+    ///
+    /// Why: this is the "layer prose on top" step — the row already exists
+    /// (from metrics), so synthesis fills the gaps rather than creating a
+    /// second, duplicate entry for the same finding.
+    /// What: sets description/evidence/business_impact/remediation/cost_effort
+    /// from `f`; `component` is kept metrics-verbatim unless metrics left it
+    /// unset, in which case synthesis's value is used as a fallback.
+    fn merge_prose(&mut self, f: &super::synthesize::FindingProse) {
+        self.description = non_empty(&f.description);
+        self.evidence = non_empty(&f.evidence);
+        self.business_impact = non_empty(&f.business_impact);
+        self.remediation = non_empty(&f.remediation);
+        self.cost_effort = non_empty(&f.cost_effort);
+        if self.component.is_none() {
+            self.component = non_empty(&f.component);
+        }
+    }
+
+    /// Convert this row into a fill [`Scope`] for one `finding_block` repetition.
+    fn into_scope(self) -> Scope {
+        let mut s = Scope::new();
+        s.set("finding_title", self.title);
+        s.set_opt("finding_category", self.category);
+        s.set_opt("finding_component", self.component);
+        s.set_opt("finding_description", self.description);
+        s.set_opt("finding_evidence", self.evidence);
+        s.set_opt("finding_business_impact", self.business_impact);
+        s.set_opt("finding_remediation", self.remediation);
+        s.set_opt("finding_cost_effort", self.cost_effort);
+        s
     }
 }
 
-/// Push one per-application findings block for a single severity band.
+/// Map an empty string to `None` so a blank/absent value falls to the honesty
+/// marker instead of rendering as literal empty text.
+fn non_empty(s: &str) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+/// Fill one severity band's per-application finding blocks for one repository,
+/// merging deterministic metrics data with verified synthesis prose.
 ///
-/// Why: the RED and AMBER template sections share an identical shape (an app
-/// header block wrapping a repeated finding block); one helper covers both.
-/// What: collects this repo's verified findings of `band`, and if any exist,
-/// pushes an `app_block` scope carrying `app_name` plus one `finding_block`
-/// child per finding with all elaboration scalars set.
-/// Test: `reporter_tests.rs::reporter_injects_synthesis_prose`.
-fn push_band_blocks(
+/// Why: M1 must never leave a RED/AMBER finding entirely unlisted just because
+/// synthesis is off, unavailable, or guardrail-rejected — title/severity
+/// (implied by which block)/category/component are verbatim, always-available
+/// facts from `metrics.findings`.  When synthesis IS available, its prose is
+/// merged onto the SAME row for a matching title — never pushed as a second row
+/// — so a finding renders exactly once no matter the synthesis outcome.
+/// What: builds one [`FindingRow`] per `repo.metrics.findings` entry of `band`
+/// (bare fields), then — when `syn` is `Some` — overlays matching
+/// `FindingProse` prose by title; a synthesis finding with no metrics-title
+/// match is appended as an additional, synthesis-only row so no verified data
+/// is silently dropped.  Pushes the `app_block` (`app_name` + one
+/// `finding_block` per row) only when the merged list is non-empty.
+/// Test: `reporter_tests.rs::{reporter_fills_red_findings_deterministically,
+/// reporter_merges_synthesis_prose_onto_deterministic_finding,
+/// reporter_injects_synthesis_prose,
+/// reporter_leaves_findings_honesty_marked_without_metrics}`.
+fn push_finding_band(
     root: &mut Scope,
-    syn: &super::synthesize::Synthesis,
-    app_name: &str,
-    app_slug: &str,
-    band: &str,
+    repo: &RepositoryReport,
+    syn: Option<&super::synthesize::Synthesis>,
+    band: Severity,
+    band_label: &str,
     app_block: &str,
     finding_block: &str,
 ) {
-    let matches: Vec<&super::synthesize::FindingProse> = syn
-        .findings
+    let mut rows: Vec<FindingRow> = repo
+        .metrics
         .iter()
-        .filter(|f| f.app_slug == app_slug && f.severity.to_uppercase() == band)
+        .flat_map(|m| m.findings.iter())
+        .filter(|f| f.severity == band)
+        .map(FindingRow::from_metric)
         .collect();
-    if matches.is_empty() {
+
+    if let Some(syn) = syn {
+        for f in syn
+            .findings
+            .iter()
+            .filter(|f| f.app_slug == repo.slug && f.severity.to_uppercase() == band_label)
+        {
+            match rows.iter_mut().find(|r| r.title == f.title) {
+                Some(row) => row.merge_prose(f),
+                None => rows.push(FindingRow::from_prose(f)),
+            }
+        }
+    }
+
+    if rows.is_empty() {
         return;
     }
+
     let mut app_scope = Scope::new();
-    app_scope.set("app_name", app_name.to_string());
-    for f in matches {
-        let mut fs = Scope::new();
-        fs.set("finding_title", f.title.clone());
-        fs.set("finding_description", f.description.clone());
-        fs.set("finding_evidence", f.evidence.clone());
-        fs.set("finding_component", f.component.clone());
-        fs.set("finding_business_impact", f.business_impact.clone());
-        fs.set("finding_remediation", f.remediation.clone());
-        fs.set("finding_cost_effort", f.cost_effort.clone());
-        app_scope.push_block(finding_block, fs);
+    app_scope.set("app_name", repo.name.clone());
+    for row in rows {
+        app_scope.push_block(finding_block, row.into_scope());
     }
     root.push_block(app_block, app_scope);
+}
+
+/// Fill the root GREEN-topic bullets (`{{green_topic_N}}`, N = 1..=3) from
+/// metrics.
+///
+/// Why: the bundled templates model GREEN findings as three fixed report-level
+/// bullet placeholders (not a repeatable block); per the no-green-analysis rule
+/// they carry ONLY the finding title — no evidence, root cause, or remediation
+/// — and, unlike RED/AMBER, are never synthesized (M2 excludes greens
+/// structurally, so this fill is independent of synthesis availability).
+/// What: collects every `Severity::Green` finding across all repositories, in
+/// manifest order, and fills up to the first three titles; any remaining slot
+/// (or all three, when there are no green findings) falls through to the
+/// honesty marker.
+/// Test: `reporter_tests.rs::{reporter_fills_green_topics,
+/// reporter_leaves_findings_honesty_marked_without_metrics}`.
+fn push_green_topics(root: &mut Scope, model: &ReportModel) {
+    let greens: Vec<&str> = model
+        .repositories
+        .iter()
+        .filter_map(|r| r.metrics.as_ref())
+        .flat_map(|m| m.findings.iter())
+        .filter(|f| f.severity == Severity::Green)
+        .map(|f| f.title.as_str())
+        .collect();
+    for (i, title) in greens.iter().take(3).enumerate() {
+        root.set(format!("green_topic_{}", i + 1), (*title).to_string());
+    }
 }
 
 /// Append the visible `synthesis:` status note to the rendered markdown.
@@ -271,10 +447,15 @@ fn append_synthesis_note(out: &mut String, model: &ReportModel) {
 /// the per-application placeholders; git fields are also emitted so a custom
 /// template can surface provenance, while the bundled templates carry it in JSON.
 /// What: sets app identity, tech stack / LoC / counts from metrics (when
-/// present), and git branch/SHA/remote/dirty scalars; leaves scoring/health
-/// factors unset (M1 has no scoring) so they render as honesty markers.
-/// Test: `reporter_tests.rs::render_contains_expected`.
-fn per_application_scope(repo: &RepositoryReport) -> Scope {
+/// present), git branch/SHA/remote/dirty scalars, and — when `bench` is supplied
+/// — one `bench_row` block per comparable-metric placement (or a single small-n
+/// honesty row).  Leaves scoring/health factors unset (M1 has no scoring) so they
+/// render as honesty markers.
+/// Test: `reporter_tests.rs::{render_contains_expected, reporter_fills_benchmark}`.
+fn per_application_scope(
+    repo: &RepositoryReport,
+    bench: Option<&super::benchmark::RepositoryBenchmark>,
+) -> Scope {
     let mut scope = Scope::new();
     scope.set("app_name", repo.name.clone());
     scope.set("app_slug", repo.slug.clone());
@@ -307,7 +488,157 @@ fn per_application_scope(repo: &RepositoryReport) -> Scope {
         );
     }
 
+    if let Some(rb) = bench {
+        push_bench_rows(&mut scope, rb);
+    }
+
     scope
+}
+
+/// The ordinal-suffixed rendering of a non-negative integer (live-QA defect).
+///
+/// Why: naive `{n}th` formatting misrenders e.g. `"71th"` instead of `"71st"`;
+/// the benchmark compliance column reads as an ordinal percentile and must be
+/// grammatically correct.
+/// What: the suffix is `th` whenever `n % 100` is 11, 12, or 13 (the teens
+/// exception, e.g. 11th/111th); otherwise it follows `n % 10` (`1→st`, `2→nd`,
+/// `3→rd`, else `th`).
+/// Test: `reporter_tests.rs::ordinal_edge_cases` (1,2,3,11,12,13,21,71,101,111).
+fn ordinal(n: u64) -> String {
+    let rem100 = n % 100;
+    let suffix = if (11..=13).contains(&rem100) {
+        "th"
+    } else {
+        match n % 10 {
+            1 => "st",
+            2 => "nd",
+            3 => "rd",
+            _ => "th",
+        }
+    };
+    format!("{n}{suffix}")
+}
+
+/// Push the per-application `bench_row` blocks for one repository's placement.
+///
+/// Why: the Benchmark Position table is a repeatable row block; a ranked repo
+/// contributes one row per comparable metric, a held-back repo contributes a
+/// single explicit small-n honesty row so a reader is never left to infer that
+/// ranking silently did not happen.
+/// What: for `Ranked`, one row per placement (criterion, percentile compliance,
+/// quartile, `rank of n`, and the population size as the peer set); for
+/// `CorpusTooSmall`, one row whose criterion carries the small-n marker.
+/// Test: `reporter_tests.rs::{reporter_fills_benchmark, reporter_small_corpus_marks}`.
+fn push_bench_rows(scope: &mut Scope, rb: &super::benchmark::RepositoryBenchmark) {
+    use super::benchmark::{BenchmarkStatus, metric_label};
+    match &rb.status {
+        BenchmarkStatus::CorpusTooSmall(peers) => {
+            let mut row = Scope::new();
+            row.set(
+                "bench_criterion",
+                format!("benchmark: corpus too small (n={peers})"),
+            );
+            scope.push_block("bench_row", row);
+        }
+        BenchmarkStatus::Ranked => {
+            for p in &rb.placements {
+                let mut row = Scope::new();
+                row.set("bench_criterion", metric_label(&p.metric));
+                row.set(
+                    "bench_compliance",
+                    format!("{} pct", ordinal(p.percentile.round() as u64)),
+                );
+                row.set("bench_quartile", format!("Q{}", p.quartile));
+                row.set("bench_rank", format!("{} of {}", p.rank, p.population));
+                row.set("bench_peer_set", format!("{} repos", p.population));
+                scope.push_block("bench_row", row);
+            }
+        }
+    }
+}
+
+/// Fill the graph-appendix `benchmark_position` dataset — one row per ranked app.
+///
+/// Why: the mandated dataset appendix expects one benchmark row per application;
+/// a single headline placement (Total LoC) keys that row, while the full
+/// per-metric breakdown lives in each application's Benchmark Position table.
+/// What: for each ranked repository with a Total-LoC placement, pushes a root
+/// `benchmark_position` child carrying both the generic (`peer_set`,
+/// `compliance_pct`, `quartile`, `rank`) and CAST (`tqi_*`) placeholder aliases,
+/// so either bundled template fills from the same data.  Held-back / metric-less
+/// repos are skipped (the block renders once empty → honesty markers).
+/// Test: `reporter_tests.rs::reporter_fills_benchmark`.
+fn inject_benchmark_dataset(
+    root: &mut Scope,
+    model: &ReportModel,
+    bench: &super::benchmark::BenchmarkReport,
+) {
+    use super::benchmark::BenchmarkStatus;
+    for repo in &model.repositories {
+        let Some(rb) = bench.repositories.iter().find(|r| r.slug == repo.slug) else {
+            continue;
+        };
+        if !matches!(rb.status, BenchmarkStatus::Ranked) {
+            continue;
+        }
+        let Some(p) = rb.placements.iter().find(|p| p.metric == "total_loc") else {
+            continue;
+        };
+        let mut row = Scope::new();
+        row.set("app_name", repo.name.clone());
+        row.set("peer_set", format!("{} repos", p.population));
+        row.set("compliance_pct", format!("{:.0}", p.percentile));
+        row.set("quartile", format!("Q{}", p.quartile));
+        row.set("rank", format!("{} of {}", p.rank, p.population));
+        // CAST template aliases (same headline placement).
+        row.set("tqi_comp", format!("{:.0}", p.percentile));
+        row.set("tqi_q", format!("Q{}", p.quartile));
+        row.set("tqi_rank", p.rank.to_string());
+        row.set("tqi_rank_total", p.population.to_string());
+        root.push_block("benchmark_position", row);
+    }
+}
+
+/// Append the visible `benchmark:` status note to the rendered markdown.
+///
+/// Why: like the synthesis note, a reader must see the benchmark provenance —
+/// the corpus size, how many peers each app ranked against, any small-n gating,
+/// and any corpus load warnings — so placement is never mistaken for absolute
+/// truth and small/absent corpora are disclosed.
+/// What: when `model.benchmark` is present, appends a `## Benchmark Status`
+/// section listing the corpus size, one line per repository (ranked-against-N or
+/// the small-n marker), and one line per load warning.  Absent benchmarking
+/// appends nothing (output byte-identical to M2).
+/// Test: `reporter_tests.rs::{reporter_fills_benchmark, reporter_small_corpus_marks}`.
+fn append_benchmark_note(out: &mut String, model: &ReportModel) {
+    use super::benchmark::BenchmarkStatus;
+    let Some(bench) = &model.benchmark else {
+        return;
+    };
+    out.push_str("\n\n## Benchmark Status\n\n");
+    out.push_str(&format!(
+        "- benchmark: corpus size {} snapshot(s)\n",
+        bench.corpus_size
+    ));
+    for rb in &bench.repositories {
+        match &rb.status {
+            BenchmarkStatus::Ranked => {
+                out.push_str(&format!(
+                    "- {}: ranked against {} peer(s)\n",
+                    rb.name, rb.peers
+                ));
+            }
+            BenchmarkStatus::CorpusTooSmall(peers) => {
+                out.push_str(&format!(
+                    "- {}: benchmark: corpus too small (n={peers})\n",
+                    rb.name
+                ));
+            }
+        }
+    }
+    for w in &bench.warnings {
+        out.push_str(&format!("- warning: {w}\n"));
+    }
 }
 
 #[cfg(test)]

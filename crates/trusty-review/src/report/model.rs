@@ -50,6 +50,15 @@ pub struct ReportModel {
     /// the visible `synthesis:` status note.  `None` = deterministic M1 output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synthesis: Option<super::synthesize::Synthesis>,
+    /// Optional M3 cross-repo benchmark placement (present only under `--benchmark`).
+    ///
+    /// Why: recording the benchmark outcome on the model keeps the JSON twin a
+    /// faithful record of the percentile/quartile placement (and any corpus load
+    /// warnings or small-n gating); the reporter reads this to fill the benchmark
+    /// table and render the visible `benchmark:` status note.  `None` = no
+    /// benchmarking requested (M2-identical output).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark: Option<super::benchmark::BenchmarkReport>,
 }
 
 /// Per-repository resolved data mapped to one `per_application` block.
@@ -108,6 +117,7 @@ impl ReportModel {
             manifest_path: manifest_path.display().to_string(),
             repositories,
             synthesis: None,
+            benchmark: None,
         })
     }
 }
