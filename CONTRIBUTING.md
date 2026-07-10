@@ -4,7 +4,7 @@ Thank you for your interest in contributing to trusty-tools! This document provi
 
 ## Getting Started
 
-**Before contributing, read [CLAUDE.md](CLAUDE.md)** — it is the authoritative reference for development workflows, conventions, and internal tooling patterns.
+**Before contributing, read [.trusty-mpm/INSTRUCTIONS.md](.trusty-mpm/INSTRUCTIONS.md)** — it is the authoritative reference for development workflows, conventions, and internal tooling patterns.
 
 ### Prerequisites
 
@@ -37,7 +37,7 @@ cargo fmt --check
 cargo fmt
 ```
 
-For single-crate workflows, use `-p <crate-name>` to scope commands. See CLAUDE.md for the full command reference.
+For single-crate workflows, use `-p <crate-name>` to scope commands. See `.trusty-mpm/INSTRUCTIONS.md` for the full command reference.
 
 ## Worktree Discipline
 
@@ -155,4 +155,4 @@ All contributions are licensed under the MIT License. By contributing, you agree
 
 ---
 
-For detailed development information, references, and troubleshooting, consult [CLAUDE.md](CLAUDE.md).
+For detailed development information, references, and troubleshooting, consult [.trusty-mpm/INSTRUCTIONS.md](.trusty-mpm/INSTRUCTIONS.md).

@@ -67,7 +67,7 @@ usage() {
 
 # Why: callers may pass either the crates.io package name (e.g. `tga`) or the
 # crates/ directory name (e.g. `trusty-git-analytics`) — both are used
-# interchangeably throughout CLAUDE.md and the cargo-publish skill.
+# interchangeably throughout .trusty-mpm/INSTRUCTIONS.md and the cargo-publish skill.
 # What: resolves the input to a crate directory under crates/, trying it
 # directly first, then falling back to a `name = "<input>"` grep across every
 # crate manifest (handles the tga / trusty-git-analytics exception).
@@ -106,7 +106,7 @@ read_package_version() {
 # Why: the tag prefix equals the crate directory name for every current
 # crate EXCEPT trusty-git-analytics, whose tags are `trusty-git-analytics-v*`
 # (never `tga-v*`), matching bump-version.sh's tag_prefix_for() and the
-# CLAUDE.md abbreviations table.
+# .trusty-mpm/INSTRUCTIONS.md abbreviations table.
 # What: prints the canonical tag prefix for a given crate directory.
 tag_prefix_for() {
   echo "$1"

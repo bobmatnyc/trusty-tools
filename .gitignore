@@ -42,7 +42,6 @@
 .claude-mpm/PM_INSTRUCTIONS*.md
 .claude-mpm/pm_skills_registry.yaml
 
-!CLAUDE.md
 !README.md
 
 # trusty-search runtime artifacts

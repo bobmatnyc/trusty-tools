@@ -2,7 +2,7 @@
 #
 # check_line_cap.sh — ratcheted SLOC file-size cap enforcement (issue #610).
 #
-# Why: the 500-SLOC file cap documented in CLAUDE.md had zero mechanical
+# Why: the 500-SLOC file cap documented in .trusty-mpm/INSTRUCTIONS.md had zero mechanical
 #   enforcement, so source files silently grew past it under feature pressure
 #   (e.g. trusty-search/src/service/server.rs reached 5,403 lines). Advice
 #   without a gate loses. This script turns the cap into a CI/pre-commit gate

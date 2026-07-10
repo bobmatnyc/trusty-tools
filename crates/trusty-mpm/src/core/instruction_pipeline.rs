@@ -1,15 +1,25 @@
 //! Instruction merge pipeline — compose a session's launch instructions.
 //!
 //! Why: every Claude Code session trusty-mpm starts must receive the same
-//! framework instructions, the dynamic delegation routing context, and any
-//! project-specific notes; doing that merge ad-hoc at each launch site invites
-//! drift in ordering and content.
+//! framework instructions and the dynamic delegation routing context; doing
+//! that merge ad-hoc at each launch site invites drift in ordering and
+//! content.
 //! What: [`build_instructions`] loads `INSTRUCTIONS.md`, generates the
-//! delegation authority section from the deployed agents, loads or seeds a
-//! project `CLAUDE.md` stub, and concatenates the three sections in the fixed
-//! order 3 → 4 → 5 (framework → delegation → project).
-//! Test: `cargo test -p trusty-mpm-core instruction_pipeline` covers the full
-//! merge, a missing `INSTRUCTIONS.md`, stub creation, and stub preservation.
+//! delegation authority section from the deployed agents, and concatenates
+//! the two sections in the fixed order 3 → 4 (framework → delegation). It
+//! also seeds a project `CLAUDE.md` stub as a side effect (so a fresh
+//! workspace always has a place for project notes), but — as of the #382 fix
+//! — that project-notes content was never actually part of the text
+//! delivered to `claude --append-system-prompt-file` (the real launch prompt
+//! comes from [`crate::core::instruction_overrides::resolve_pm_prompt`] /
+//! [`crate::core::session_launch::build_system_prompt_for`], neither of which
+//! reads `PipelineOutput::merged`). Concatenating `CLAUDE.md` into `merged`
+//! was therefore dead code that only risked a FUTURE accidental re-wiring of
+//! a duplicate prompt payload (Claude Code already memory-loads `CLAUDE.md`
+//! natively); it has been removed so `merged` cannot silently regrow that
+//! duplication.
+//! Test: `cargo test -p trusty-mpm-core instruction_pipeline` covers the
+//! merge, a missing `INSTRUCTIONS.md`, and stub creation.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -214,7 +224,13 @@ pub struct PipelineInput {
 /// Test: asserted by every `pipeline_*` test.
 #[derive(Debug, Clone)]
 pub struct PipelineOutput {
-    /// The full composed instruction text.
+    /// The composed framework + delegation-authority instruction text.
+    ///
+    /// Deliberately excludes the project `CLAUDE.md` body (removed as dead
+    /// code — see the module docs): Claude Code loads `CLAUDE.md` natively,
+    /// and the actual launch prompt is built by
+    /// [`crate::core::instruction_overrides::resolve_pm_prompt`], not this
+    /// field.
     pub merged: String,
     /// False if `INSTRUCTIONS.md` was missing (treated as an empty section).
     pub instructions_loaded: bool,
@@ -261,17 +277,21 @@ impl std::error::Error for PipelineError {
 
 /// Compose the effective session launch instructions.
 ///
-/// Why: every CC session needs consistent framework instructions +
-/// dynamic routing context + project-specific notes.
+/// Why: every CC session needs consistent framework instructions + dynamic
+/// routing context. It also needs the project `CLAUDE.md` to exist (Claude
+/// Code loads it natively), so this still seeds the stub as a side effect.
 ///
 /// What: loads INSTRUCTIONS.md (falls back to empty string if missing),
-/// generates delegation authority from agents_dir, loads or creates
-/// CLAUDE.md stub, concatenates in order 3→4→5, returns merged string.
+/// generates delegation authority from agents_dir, concatenates the two in
+/// order 3→4, and returns the merged string. Separately ensures the project
+/// `CLAUDE.md` exists (creating the stub if absent) purely for its side
+/// effect — its content is intentionally NOT folded into `merged` (dead code
+/// removed; see module docs).
 ///
 /// Test: `pipeline_full`, `pipeline_missing_instructions`, `pipeline_creates_claude_md`
 pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, PipelineError> {
     // Section 3: framework instructions. A missing file is not fatal — the
-    // session can still launch with delegation context and project notes.
+    // session can still launch with delegation context.
     let (framework, instructions_loaded) =
         match std::fs::read_to_string(&input.framework_instructions_path) {
             Ok(text) => (text, true),
@@ -289,10 +309,15 @@ pub fn build_instructions(input: &PipelineInput) -> Result<PipelineOutput, Pipel
     let agent_count = agents.len();
     let authority = generate_authority(&agents);
 
-    // Section 5: the project CLAUDE.md, created from the stub if absent.
-    let (claude_md, claude_md_created) = load_or_create_claude_md(&input.claude_md_path)?;
+    // Side effect only: ensure the project CLAUDE.md stub exists so a fresh
+    // workspace always has a place for project notes. The content is
+    // deliberately discarded here rather than folded into `merged` — Claude
+    // Code already memory-loads `CLAUDE.md` natively, and the real launch
+    // prompt is built by `resolve_pm_prompt`/`build_system_prompt_for`, not
+    // this pipeline's `merged` output.
+    let (_claude_md, claude_md_created) = load_or_create_claude_md(&input.claude_md_path)?;
 
-    let merged = merge_sections(&framework, &authority, &claude_md);
+    let merged = merge_sections(&framework, &authority);
 
     Ok(PipelineOutput {
         merged,
@@ -339,16 +364,19 @@ fn load_or_create_claude_md(path: &PathBuf) -> Result<(String, bool), PipelineEr
     }
 }
 
-/// Concatenate the three instruction sections in the fixed 3 → 4 → 5 order.
+/// Concatenate the two instruction sections in the fixed 3 → 4 order.
 ///
 /// Why: the merge order is part of the framework contract; isolating it keeps
-/// the ordering rule in one auditable place.
-/// What: joins framework, delegation authority, and project sections with a
-/// `---` rule, skipping empty sections so a missing `INSTRUCTIONS.md` does not
-/// leave a dangling separator.
+/// the ordering rule in one auditable place. A third "project CLAUDE.md"
+/// section previously existed here (dead code removed — see module docs):
+/// Claude Code loads `CLAUDE.md` natively and the real launch prompt never
+/// read this function's output for that content.
+/// What: joins framework and delegation authority with a `---` rule, skipping
+/// empty sections so a missing `INSTRUCTIONS.md` does not leave a dangling
+/// separator.
 /// Test: `pipeline_full`, `pipeline_missing_instructions`.
-fn merge_sections(framework: &str, authority: &str, claude_md: &str) -> String {
-    let sections: Vec<&str> = [framework.trim(), authority.trim(), claude_md.trim()]
+fn merge_sections(framework: &str, authority: &str) -> String {
+    let sections: Vec<&str> = [framework.trim(), authority.trim()]
         .into_iter()
         .filter(|s| !s.is_empty())
         .collect();
@@ -384,8 +412,11 @@ mod tests {
 
     #[test]
     fn pipeline_full() {
-        // All three inputs present → merged output contains all three sections
-        // in the documented 3 → 4 → 5 order.
+        // All inputs present → merged output contains the two framework
+        // sections in the documented 3 → 4 order. The project CLAUDE.md is
+        // deliberately NOT folded into `merged` (dead code removed — Claude
+        // Code loads CLAUDE.md natively and the real launch prompt never
+        // read this field for that content).
         let tmp = TempDir::new().unwrap();
         let input = input_in(&tmp);
 
@@ -413,16 +444,19 @@ mod tests {
             .merged
             .find("## Delegation Authority")
             .expect("authority");
-        let proj = out.merged.find("PROJECT SECTION").expect("project");
         assert!(fw < auth, "framework precedes delegation authority");
-        assert!(auth < proj, "delegation authority precedes project notes");
         assert!(out.merged.contains("### engineer"));
+        assert!(
+            !out.merged.contains("PROJECT SECTION"),
+            "project CLAUDE.md content must not be folded into merged: {}",
+            out.merged
+        );
     }
 
     #[test]
     fn pipeline_missing_instructions() {
         // INSTRUCTIONS.md absent → pipeline still succeeds, instructions_loaded
-        // is false, and sections 4 + 5 are still present.
+        // is false, and section 4 is still present.
         let tmp = TempDir::new().unwrap();
         let input = input_in(&tmp);
         // No INSTRUCTIONS.md written.
@@ -436,15 +470,16 @@ mod tests {
         let out = build_instructions(&input).unwrap();
         assert!(!out.instructions_loaded);
         assert!(out.merged.contains("## Delegation Authority"));
-        assert!(out.merged.contains("PROJECT NOTES"));
+        assert!(!out.merged.contains("PROJECT NOTES"));
         // No dangling separator at the very start.
         assert!(!out.merged.starts_with("---"));
     }
 
     #[test]
     fn pipeline_creates_claude_md() {
-        // CLAUDE.md absent → it is created, claude_md_created is true, and the
-        // file on disk contains the stub.
+        // CLAUDE.md absent → it is created as a side effect, claude_md_created
+        // is true, and the file on disk contains the stub — but the stub text
+        // is NOT folded into `merged` (dead code removed).
         let tmp = TempDir::new().unwrap();
         let input = input_in(&tmp);
         write_file(&input.framework_instructions_path, "# Framework\n");
@@ -458,7 +493,11 @@ mod tests {
         let on_disk = fs::read_to_string(&input.claude_md_path).unwrap();
         assert!(on_disk.contains("# Project Instructions"));
         assert!(on_disk.contains("trusty-mpm will never modify this file again"));
-        assert!(out.merged.contains("# Project Instructions"));
+        assert!(
+            !out.merged.contains("# Project Instructions"),
+            "stub content must not be folded into merged: {}",
+            out.merged
+        );
     }
 
     #[test]
@@ -467,7 +506,8 @@ mod tests {
         // CLAUDE.md. An existing file — including one that happens to
         // contain the literal delegation-block markers as ordinary operator
         // text — must come back out of `build_instructions` completely
-        // untouched on disk.
+        // untouched on disk, and its content must not leak into `merged`
+        // (dead code removed).
         let tmp = TempDir::new().unwrap();
         let input = input_in(&tmp);
         write_file(&input.framework_instructions_path, "# Framework\n");
@@ -486,7 +526,11 @@ mod tests {
             !on_disk.contains(DELEGATION_BLOCK_BEGIN),
             "no delegation-directive block may be injected: {on_disk}"
         );
-        assert!(out.merged.contains("CUSTOM HAND-WRITTEN CONTENT"));
+        assert!(
+            !out.merged.contains("CUSTOM HAND-WRITTEN CONTENT"),
+            "project CLAUDE.md content must not be folded into merged: {}",
+            out.merged
+        );
     }
 
     #[test]

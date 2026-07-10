@@ -164,7 +164,7 @@ jobs:
           # ── Tag-prefix aliases (issue #1128) ─────────────────────────────────
           # Some crates publish to crates.io under a SHORT package name that
           # differs from their directory / canonical crate name, and the
-          # documented release convention (CLAUDE.md "Git Tag / Release
+          # documented release convention (.trusty-mpm/INSTRUCTIONS.md "Git Tag / Release
           # Convention", abbreviation table) lets contributors tag with either
           # form. We canonicalize the alias here so every downstream consumer —
           # the per-crate config map, the homebrew-bump case statement, the
