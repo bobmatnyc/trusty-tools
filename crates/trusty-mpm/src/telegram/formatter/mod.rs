@@ -371,6 +371,12 @@ impl TelegramFormatter {
                     Some(InlineKeyboardMarkup::new(rows))
                 }
             }
+            // `/fleet` and `/get` decorate each session with a `🎯 Focus` button
+            // so a tap focuses it (the "session click" of TELUI-6, #1440).
+            CommandResult::ManagedFleet(fleet) => fleet::focus_keyboard(fleet),
+            CommandResult::ManagedSession(view) => {
+                fleet::session_focus_keyboard(&view.id, &view.name)
+            }
             _ => None,
         }
     }
@@ -582,7 +588,7 @@ fn project_basename(path: &str) -> &str {
 /// What: returns the first [`SHORT_ID_LEN`] chars plus an ellipsis, or the id
 /// unchanged when already short.
 /// Test: `short_id_truncates_long_ids`.
-fn short_id(id: &str) -> String {
+pub(crate) fn short_id(id: &str) -> String {
     if id.len() > SHORT_ID_LEN {
         format!("{}…", &id[..SHORT_ID_LEN])
     } else {

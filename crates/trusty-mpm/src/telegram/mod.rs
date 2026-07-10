@@ -16,6 +16,7 @@
 
 pub mod alerts;
 pub mod commands;
+pub mod focus;
 pub mod formatter;
 pub mod supervisor;
 
@@ -29,7 +30,10 @@ use teloxide::types::ParseMode;
 use teloxide::utils::command::BotCommands;
 use tokio_util::sync::CancellationToken;
 
-use crate::client::{ChatMessage, CommandExecutor, CommandResult, TrustyCommand};
+use crate::client::{
+    ChatMessage, CommandExecutor, CommandResult, FreeTextRoute, SessionProxy, TrustyCommand,
+    route_free_text,
+};
 use alerts::{AlertConfig, LastSeen};
 use commands::TelegramCommand;
 use formatter::TelegramFormatter;
@@ -251,13 +255,17 @@ pub async fn run(
     let opts = Arc::new(options);
     // Per-chat LLM conversation history for free-text messages.
     let histories: ChatHistories = Arc::new(Mutex::new(HashMap::new()));
+    // The channel-agnostic session-manager proxy (TELUI-6, #1440): holds per-chat
+    // focus state and drives the INJECT/SUMMARIZE directions over the shared
+    // executor. Telegram is one thin binding; Slack/MCP reuse the same proxy.
+    let proxy = Arc::new(SessionProxy::new(Arc::clone(&executor)));
 
     let handler = dptree::entry()
         .branch(Update::filter_message().endpoint(on_message))
         .branch(Update::filter_callback_query().endpoint(on_callback));
 
     Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![executor, opts, histories])
+        .dependencies(dptree::deps![executor, opts, histories, proxy])
         .enable_ctrlc_handler()
         .build()
         .dispatch()
@@ -313,18 +321,22 @@ pub async fn run_supervised(
 ///
 /// Why: the dispatcher branch for text messages — kept thin so all command
 /// dispatch stays in the shared [`CommandExecutor`].
-/// What: rejects unauthorized users, parses the text into a [`TelegramCommand`]
-/// via teloxide, dispatches it (the pairing commands need the message's chat id
-/// so they are special-cased), formats the [`CommandResult`], and replies with
-/// the appropriate inline keyboard.
-/// Test: command conversion is covered by `commands` tests; formatting by
-/// `formatter` tests; authorization by `authorization_respects_allowed_user`.
+/// What: rejects unauthorized users, then routes the text. `/focus`/`/unfocus`
+/// are adapter-local focus-state ops (TELUI-6, #1440) handled directly; every
+/// other slash command is dispatched via teloxide + the shared executor (pairing
+/// commands are special-cased for the chat id). A non-command line routes to the
+/// focused session's `managed-send` when the chat is focused, otherwise to the
+/// action-capable coordinator ([`focus::route_free_text`]).
+/// Test: command conversion is covered by `commands` tests; the focus handlers
+/// and routing by `focus::tests`; authorization by
+/// `authorization_respects_allowed_user`.
 async fn on_message(
     bot: Bot,
     msg: Message,
     executor: Arc<CommandExecutor>,
     options: Arc<BotOptions>,
     histories: ChatHistories,
+    proxy: Arc<SessionProxy>,
 ) -> ResponseResult<()> {
     let Some(text) = msg.text() else {
         return Ok(());
@@ -340,31 +352,63 @@ async fn on_message(
         return Ok(());
     }
 
-    let command = match TelegramCommand::parse(text, &bot_username()) {
-        Ok(cmd) => cmd,
-        Err(_) => {
-            // Not a slash command — route the free text to the action-capable
-            // coordinator so natural language can DRIVE the fleet (#1283), unless
-            // the message is empty, in which case there is nothing to ask.
-            if !text.trim().is_empty() {
-                let reply = action_chat_reply(&executor, &histories, msg.chat.id.0, text).await;
-                bot.send_message(msg.chat.id, reply)
-                    .parse_mode(ParseMode::Html)
-                    .await?;
-            }
-            return Ok(());
+    let chat_id = msg.chat.id.0;
+    match TelegramCommand::parse(text, &bot_username()) {
+        // `/focus`/`/unfocus`/`/summary` drive the session-manager PROXY (per-chat
+        // focus + INJECT/SUMMARIZE), not the daemon command surface, so they are
+        // handled here and never converted to a `TrustyCommand`.
+        Ok(TelegramCommand::Focus(arg)) => {
+            let reply = focus::handle_focus(&proxy, chat_id, &arg).await;
+            bot.send_message(msg.chat.id, reply)
+                .parse_mode(ParseMode::Html)
+                .await?;
         }
-    };
-
-    let result = dispatch_command(command, &executor, msg.chat.id.0).await;
-    let body = TelegramFormatter::format(&result);
-    let mut send = bot
-        .send_message(msg.chat.id, body)
-        .parse_mode(ParseMode::Html);
-    if let Some(keyboard) = TelegramFormatter::keyboard_for(&result) {
-        send = send.reply_markup(keyboard);
+        Ok(TelegramCommand::Unfocus) => {
+            let reply = focus::handle_unfocus(&proxy, chat_id);
+            bot.send_message(msg.chat.id, reply)
+                .parse_mode(ParseMode::Html)
+                .await?;
+        }
+        Ok(TelegramCommand::Summary) => {
+            let reply = focus::handle_summary(&proxy, chat_id).await;
+            bot.send_message(msg.chat.id, reply)
+                .parse_mode(ParseMode::Html)
+                .await?;
+        }
+        // Every other recognized slash command dispatches normally — commands
+        // keep working while a session is focused (only free text is captured).
+        Ok(command) => {
+            let result = dispatch_command(command, &executor, chat_id).await;
+            let body = TelegramFormatter::format(&result);
+            let mut send = bot
+                .send_message(msg.chat.id, body)
+                .parse_mode(ParseMode::Html);
+            if let Some(keyboard) = TelegramFormatter::keyboard_for(&result) {
+                send = send.reply_markup(keyboard);
+            }
+            send.await?;
+        }
+        // Not a recognized command — route the free text. An empty message has
+        // nothing to route.
+        Err(_) => {
+            if text.trim().is_empty() {
+                return Ok(());
+            }
+            let has_focus = proxy.current_focus(&focus::conv(chat_id)).is_some();
+            let reply = match route_free_text(text, has_focus) {
+                // A focused chat injects the line straight to that session (#1440).
+                FreeTextRoute::Inject => focus::inject_reply(&proxy, chat_id, text).await,
+                // Otherwise natural language DRIVES the fleet via the coordinator
+                // (#1283).
+                FreeTextRoute::Coordinator => {
+                    action_chat_reply(&executor, &histories, chat_id, text).await
+                }
+            };
+            bot.send_message(msg.chat.id, reply)
+                .parse_mode(ParseMode::Html)
+                .await?;
+        }
     }
-    send.await?;
     Ok(())
 }
 
@@ -512,13 +556,17 @@ fn action_footer(actions: Option<&[String]>) -> Option<String> {
 /// What: parses the `verb:arg` callback data, runs the matching action through
 /// the shared executor (project registration and tmux adoption have their own
 /// executor methods), answers the callback to clear the client spinner, and
-/// posts the reply.
-/// Test: callback dispatch reuses the shared executor, covered by its tests.
+/// posts the reply. The `focus:<id>` button (TELUI-6, #1440) sets the chat's
+/// focused session so a tap in a list is the "session click" that flips the chat
+/// into that session's conversation.
+/// Test: callback dispatch reuses the shared executor, covered by its tests; the
+/// focus handler by `focus::tests`.
 async fn on_callback(
     bot: Bot,
     query: CallbackQuery,
     executor: Arc<CommandExecutor>,
     options: Arc<BotOptions>,
+    proxy: Arc<SessionProxy>,
 ) -> ResponseResult<()> {
     bot.answer_callback_query(query.id.clone()).await?;
 
@@ -534,6 +582,16 @@ async fn on_callback(
     let Some(chat_id) = query.message.as_ref().map(|m| m.chat().id) else {
         return Ok(());
     };
+
+    // `[🎯 Focus]` on a session row is the "session click" that focuses it; it
+    // drives the proxy focus state, so it is handled before the executor dispatch.
+    if let Some(("focus", id)) = data.split_once(':') {
+        let reply = focus::handle_focus(&proxy, chat_id.0, id).await;
+        bot.send_message(chat_id, reply)
+            .parse_mode(ParseMode::Html)
+            .await?;
+        return Ok(());
+    }
 
     let result = match data.split_once(':') {
         Some(("status", id)) => Some(
