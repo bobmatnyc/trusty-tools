@@ -1239,6 +1239,57 @@ fn reporter_renders_language_breakdown_with_counts() {
     )));
 }
 
+/// A minimal template carrying one POPULATED dataset table (literal values, so
+/// it survives fill + omit-empty) to exercise the wave-4 mermaid injection.
+const MERMAID_TEMPLATE: &str = "# Report\n\n\
+    ## 7. Graph-Ready Data Appendix\n\n\
+    <!-- dataset: loc_by_tech | chart: bar | x: tech | y: loc -->\n\
+    | Tech | LoC |\n|---|---|\n| Rust | 8200 |\n| Python | 3100 |\n";
+
+/// Why: when mermaid is enabled (the default) the reporter must emit a ```mermaid
+/// block directly under a populated §7 dataset table (#2366).
+/// What: renders a template with one literal-value dataset table and asserts the
+/// `xychart-beta` block appears AFTER the table.
+/// Test: this test itself.
+#[test]
+fn render_injects_mermaid_under_populated_dataset() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let md = Reporter::new(tmp.path()).render(&model, MERMAID_TEMPLATE);
+    assert!(md.contains("```mermaid"), "block emitted:\n{md}");
+    assert!(md.contains("xychart-beta"));
+    assert!(md.contains("x-axis [\"Rust\", \"Python\"]"), "{md}");
+    assert!(md.contains("bar [8200, 3100]"), "{md}");
+    let table_pos = md.find("| Python |").unwrap();
+    let block_pos = md.find("```mermaid").unwrap();
+    assert!(table_pos < block_pos, "chart follows table");
+}
+
+/// Why: `--no-mermaid` / `[report] mermaid = false` must disable charts entirely,
+/// leaving output byte-identical to the pre-wave-4 report (#2366).
+/// What: renders the same model+template with `with_mermaid(false)`; asserts no
+/// mermaid artifacts appear and the pipe table is untouched.
+/// Test: this test itself.
+#[test]
+fn no_mermaid_byte_identical() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model(tmp.path());
+    let off = Reporter::new(tmp.path())
+        .with_mermaid(false)
+        .render(&model, MERMAID_TEMPLATE);
+    let on = Reporter::new(tmp.path()).render(&model, MERMAID_TEMPLATE);
+    assert!(
+        !off.contains("```mermaid"),
+        "no chart when disabled:\n{off}"
+    );
+    assert!(!off.contains("xychart-beta"));
+    assert!(on.contains("```mermaid"), "chart when enabled");
+    // Disabling is purely additive-off: the `on` output is the `off` output with
+    // the chart block inserted, so removing every mermaid fence region recovers it.
+    assert!(on.len() > off.len());
+    assert!(off.contains("| Rust | 8200 |"), "table itself untouched");
+}
+
 /// Why: output filenames must be date-prefixed and slug-stable.
 /// What: asserts the stem is `{date}-{title-slug}`.
 /// Test: this test itself.

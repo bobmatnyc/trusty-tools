@@ -760,6 +760,67 @@ trusty-analyze daemon integration (deterministic findings) remains the future
 complement per the epic architecture; the findings schema already accepts both
 sources (a `MetricFinding` is source-agnostic).
 
+## Mermaid charts from dataset markers (wave 4, #2366)
+
+**Problem.** The Graph-Ready Data Appendix (§7) already tags each pipe table with
+a `<!-- dataset: <slug> | chart: <type> | x: <field> | y: <field>[, group:
+<field>] -->` marker, but that marker was opaque to the renderer — a human reader
+saw only the machine-readable table. Wave 4 turns each POPULATED dataset table
+into a human-viewable Mermaid chart, emitted directly under it. Implementation
+lives in `src/report/mermaid.rs`.
+
+**When it runs.** Always on by default, as a post-`polish` pass in
+`Reporter::render` (after omit-empty, before the appended status notes). It is
+deterministic — pure rendering from the already-filled table rows, **no LLM, no
+network**. Disable it with the `--no-mermaid` CLI flag OR the manifest
+`[report] mermaid = false` key (the flag forces off regardless of the manifest).
+When disabled the pass is skipped entirely and the report is **byte-identical** to
+the pre-wave-4 output. Running after `polish` guarantees a chart is only ever
+drawn under a table that survived omit-empty — an empty/dropped dataset gets no
+chart, consistent with the omit-empty rule. The `<!-- dataset: … -->` marker
+itself is preserved (it is semantic; downstream tooling still lifts tables by it).
+
+### Chart-type mapping
+
+| `chart:` | Mermaid | Rendering |
+|---|---|---|
+| `bar` | `xychart-beta` | Single bar series. Categories = distinct `x` values; each bar = the **sum** of numeric `y` over rows sharing that `x`. A declared `group:` is aggregated away (bars total across groups). |
+| `stacked-bar` | `xychart-beta` | One bar series **per `group:` value**, layered/overlaid. **Mermaid has no native stacking** — this is a documented approximation (bars are drawn over one another, not summed on top); a `%%` comment in the block and a front-to-back legend note disclose it. Falls back to a single series when the group column does not resolve. |
+| `radar` | `radar-beta` | Axes = distinct `x` values; one `curve` per `group:` value (single curve named after the `y` field when there is no group). **Requires Mermaid ≥ 11.6** — a `%% radar-beta requires Mermaid >= 11.6` comment records the version floor in every emitted block. |
+| `heatmap` | *(none)* | **No native Mermaid support.** Fallback: emit NO block and a one-line note `_(heatmap: no Mermaid rendering; see table above)_` — the pipe table remains the authoritative artifact. |
+| unknown / absent | *(none)* | No block; a `debug!` log records the skip. Never panics. |
+
+### Column resolution & numeric parsing
+
+The marker's `x`/`y`/`group` field names are semantic hints, not exact header
+text (`x: factor` → the `Factor` column; `y: tqi_rank` → `Rank`). Resolution
+normalizes both sides to lowercase alphanumerics and matches in priority order —
+exact, then header-starts-with, then header-contains — over the full field name
+then its last `_`/space token. An unresolvable `y` column yields no chart; an
+unresolvable `x` falls back to the first column.
+
+`y`-value cells are parsed tolerant of the report's rendered decoration: the
+provenance superscripts (`⁽ᵐ⁾`/`⁽ᵈ⁾`/`⁽ⁱ⁾`), thousands separators, `$`, `%`, and
+whitespace are stripped before `f64` parsing. A row whose `y` is non-numeric is
+**skipped** (not charted); if **every** row is unparseable, no chart is emitted.
+
+### Escaping & caps
+
+All category / axis / series labels are Mermaid-escaped: emitted double-quoted,
+with any interior `"` replaced by `'` (empty labels become `"?"`). To keep charts
+legible the renderer caps **12 categories** and **8 series/curves**; the remainder
+is dropped with an `_… and N more categories/series omitted from the chart; see
+table above._` note (the full set stays in the table).
+
+### Polish interaction
+
+The emitted ` ```mermaid ` block is a fenced region, so `polish`'s fence-state
+tracking (any ` ``` ` at line-start opens a fence) already treats it as opaque —
+no marker/heading/table interpretation inside it, exactly like an evidence fence.
+Because injection runs *after* `polish`, the polish pass never sees the block in
+the normal flow; a regression test (`polish_tests::mermaid_fence_is_opaque_to_polish`)
+pins the opacity defensively.
+
 ## References & Related Docs
 
 - **[crates/trusty-review/templates/](../../../crates/trusty-review/templates/)** — Template instances (generic + CAST-specific)

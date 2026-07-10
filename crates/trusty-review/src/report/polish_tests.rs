@@ -117,6 +117,36 @@ fn fenced_code_resembling_markers_is_untouched() {
     assert!(out.contains("| a | b |"));
 }
 
+/// Why: a ```mermaid fenced block (#2366) must be OPAQUE to `polish` exactly like
+/// an evidence fence — a `title`/`bar`-looking line, a `%%` comment, or a bare
+/// heading-looking token inside it must never be interpreted as a marker, table
+/// row, or heading and never trigger a spliced collapse line.
+/// What: a section whose body is a mermaid block (with an inner blank line and a
+/// `#`-looking comment) survives `polish()` verbatim with no gap splice.
+/// Test: this test itself.
+#[test]
+fn mermaid_fence_is_opaque_to_polish() {
+    let input = "## 7. Appendix\n\n\
+        <!-- dataset: d | chart: bar | x: a | y: b -->\n\
+        | A | B |\n|---|---|\n| x | 1 |\n\n\
+        ```mermaid\n\
+        xychart-beta\n\
+        %% a comment\n\
+        \n\
+        x-axis [\"x\"]\n\
+        bar [1]\n\
+        ```\n";
+    let out = polish(input);
+    assert!(
+        out.contains("```mermaid\nxychart-beta\n%% a comment\n\nx-axis [\"x\"]\nbar [1]\n```"),
+        "mermaid fence survives polish verbatim: {out}"
+    );
+    assert!(
+        !out.contains("No data available"),
+        "no splice around mermaid: {out}"
+    );
+}
+
 /// Why: a metadata row whose value is only the honesty marker is empty
 /// scaffolding — it must be dropped and the field recorded under Data gaps, while
 /// rows with real values survive.
