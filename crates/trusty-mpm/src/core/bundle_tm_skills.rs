@@ -189,6 +189,20 @@ pub const TM_INIT: &str = include_str!("../assets/skills/tm-init.md");
 /// Test: `tm_skills_are_in_bundle`.
 pub const TM_OVERVIEW: &str = include_str!("../assets/skills/tm.md");
 
+/// tm CLI operations — MCP setup/management, session lifecycle, diagnostics.
+///
+/// Why: the PM/operator needs a single reference for driving the `tm` binary
+/// itself — most importantly the user-scope MCP server management surface
+/// (`tm mcp add|remove|list|get|test`, #2286/#2316) — plus the rest of the
+/// operational CLI (sessions, services, doctor, validate, auth, register). The
+/// other tm-* skills teach the PM's in-session MCP *tools*; this teaches the
+/// `tm` command-line binary and the config it owns. Named `tm-cli-operations`
+/// (not `tm-mcp-management`) because the skill deployer refuses any skill whose
+/// stem contains "mcp" — it would shadow Claude Code's built-in `/mcp` (#2186).
+/// What: embedded markdown skill file deployed to `skills/tm-cli-operations.md`.
+/// Test: `tm_skills_are_in_bundle`, `tm_skills_have_frontmatter`.
+pub const TM_CLI_OPERATIONS: &str = include_str!("../assets/skills/tm-cli-operations.md");
+
 /// `/tm-issues-prune` — GitHub issue backlog prune & prioritize (issue #2185).
 ///
 /// Why: backlogs accumulate stale, duplicate, and obsolete issues, and open

@@ -377,6 +377,12 @@ pub const ALL: &[BundledArtifact] = &[
         contents: TM_ISSUES_PRUNE,
         install: InstallPolicy::Overwrite,
     },
+    // --- Issue #2321: tm CLI operations skill (MCP mgmt, sessions, diagnostics) ---
+    BundledArtifact {
+        rel_path: "skills/tm-cli-operations.md",
+        contents: TM_CLI_OPERATIONS,
+        install: InstallPolicy::Overwrite,
+    },
     // --- DOC-28 R1: canonical self-description doc ---
     BundledArtifact {
         rel_path: "docs/WHAT-IS-TRUSTY-MPM.md",

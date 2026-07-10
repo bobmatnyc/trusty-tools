@@ -307,18 +307,18 @@ fn install_then_deploy_deploys_skills() {
         &paths.claude_skills_dir(),
     )
     .unwrap();
-    // The full /tm- skill portfolio deploys on first install: 20 skills total
-    // — 18 /tm- portfolio skills (tm-circuit-breaker, tm-verification-protocols,
+    // The full /tm- skill portfolio deploys on first install: 21 skills total
+    // — 19 /tm- portfolio skills (tm-circuit-breaker, tm-verification-protocols,
     // tm-tool-usage-guide, tm-git-file-tracking, tm-adr, tm-workflow,
     // tm-agent-architecture, tm-postmortem, tm-bug-reporting,
     // tm-teaching-templates, tm-ticketing, tm-pr-workflow,
     // tm-delegation-patterns, tm-session-management, tm-session-pause,
-    // tm-session-resume, tm-init, tm-issues-prune) + tm-doctor + the tm
-    // overview skill (tm-skills-portfolio epic: the `example-skill.md`
-    // placeholder and the 11 mpm-* guidance skills no longer ship; the
-    // previously-orphaned tm-doctor.md is now wired in; issue #2185 added
-    // tm-issues-prune). See `bundle_tm_skills.rs`/`bundle_all.rs::ALL` for
-    // the authoritative list.
+    // tm-session-resume, tm-init, tm-issues-prune, tm-cli-operations) +
+    // tm-doctor + the tm overview skill (tm-skills-portfolio epic: the
+    // `example-skill.md` placeholder and the 11 mpm-* guidance skills no longer
+    // ship; the previously-orphaned tm-doctor.md is now wired in; issue #2185
+    // added tm-issues-prune; issue #2321 added tm-cli-operations). See
+    // `bundle_tm_skills.rs`/`bundle_all.rs::ALL` for the authoritative list.
     // Stats report stems (no .md suffix) because each skill lands as
     // <dest>/<name>/SKILL.md to match Claude Code's native discovery format.
     assert!(
@@ -336,10 +336,15 @@ fn install_then_deploy_deploys_skills() {
         "tm-issues-prune must be deployed; got {:?}",
         result.deployed
     );
+    assert!(
+        result.deployed.contains(&"tm-cli-operations".to_string()),
+        "tm-cli-operations must be deployed; got {:?}",
+        result.deployed
+    );
     assert_eq!(
         result.deployed.len(),
-        20,
-        "expected 20 skill files deployed (18 /tm- portfolio + tm-doctor + tm overview); got {:?}",
+        21,
+        "expected 21 skill files deployed (19 /tm- portfolio + tm-doctor + tm overview); got {:?}",
         result.deployed
     );
     assert!(result.skipped.is_empty());
