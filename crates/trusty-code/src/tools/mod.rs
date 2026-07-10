@@ -9,8 +9,12 @@
 //! `delegate`; `FinishTaskTool` (#2072) from `finish_task`; `UseSkillTool`
 //! plus `USE_SKILL_TOOL_NAME` (#2069's progressive-disclosure on-invoke
 //! loader; the constant lets #2070's compaction pin skill outputs by tool
-//! name) from `skill`; and `BASH_TOOL_NAME` (#2279's verify-before-finish
-//! gate matches bash tool calls by this literal) from `bash`.
+//! name) from `skill`; `BASH_TOOL_NAME` (#2279's verify-before-finish
+//! gate matches bash tool calls by this literal) from `bash`; and
+//! `RecallSessionTool` plus `RECALL_SESSION_TOOL_NAME` (#2348's
+//! session-scoped memory query — registered only on `task::executor`'s
+//! daemon-session path, never on `run_task`'s one-shot/bake-off path) from
+//! `recall_session`.
 //! Test: Unit tests live in each submodule; integration tests use
 //! `DelegateToAgentTool` with a `MockAgentRunner`.
 //!
@@ -24,6 +28,7 @@ pub mod delegate;
 pub mod finish_task;
 pub mod fs;
 pub mod goals;
+pub mod recall_session;
 pub mod registry;
 pub mod skill;
 pub mod traits;
@@ -38,6 +43,7 @@ pub use finish_task::{
 };
 pub use fs::{EditTool, ReadFileTool, WriteFileTool};
 pub use goals::{CLEAR_GOAL_TOOL_NAME, ClearGoalTool, SET_GOAL_TOOL_NAME, SetGoalTool};
+pub use recall_session::{RECALL_SESSION_TOOL_NAME, RecallSessionTool};
 pub use registry::ToolRegistry;
 pub use skill::{USE_SKILL_TOOL_NAME, UseSkillTool};
 pub use traits::{

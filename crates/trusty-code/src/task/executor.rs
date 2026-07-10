@@ -55,8 +55,8 @@ use crate::session::{SessionRegistry, SessionStatus};
 use crate::skills::{FsSkillResolver, format_skill_catalog, locate_skills_dir};
 use crate::tools::{
     AgentOutput, AgentRunner, BashTool, ClearGoalTool, DelegateToAgentTool, EditTool,
-    FinishTaskTool, ReadFileTool, RunContext, SetGoalTool, SkillResolver, ToolRegistry,
-    UseSkillTool, WriteFileTool,
+    FinishTaskTool, ReadFileTool, RecallSessionTool, RunContext, SetGoalTool, SkillResolver,
+    ToolRegistry, UseSkillTool, WriteFileTool,
 };
 
 use super::sink::SessionToolEventSink;
@@ -245,6 +245,18 @@ async fn run_and_record(
         };
     let goals = pm_transcript.goals_handle();
 
+    // #2345/#2348: fetch (lazily constructing on the session's first run)
+    // this session's turn-recorder sink BEFORE building the PM registry, so
+    // its already-resolved base_url/palace can be reused by #2348's
+    // `recall_session` tool below rather than re-derived. Fetching this
+    // early (rather than only once, right before the run, as the #2345
+    // comment near `turn_mark` below still does for its OWN purpose) is
+    // safe: `SessionRegistry::memory_sink_for` is idempotent per session, so
+    // calling it twice in one run just returns the same `Arc` both times.
+    // Independent of the `pm_transcript`/`goals` fetch above (#2347) — the
+    // two features don't touch each other's state, so either order works.
+    let memory_sink = registry.memory_sink_for(&session_id, &params.project);
+
     // #2072: `finish_task` gives the PM a structured, schema-validated way to
     // signal completion alongside the delegate tool. (#2347) `set_goal`/
     // `clear_goal` are registered ONLY on this daemon-session PM registry —
@@ -260,6 +272,19 @@ async fn run_and_record(
     pm_registry.register(Arc::new(ClearGoalTool::new(Arc::clone(&goals))));
     if let Some((_, resolver)) = &skills_catalog {
         pm_registry.register(Arc::new(UseSkillTool::new(Arc::clone(resolver))));
+    }
+    // #2348: `recall_session` is registered ONLY on this daemon-session
+    // path — never on `run_task::execute_run_task`'s one-shot/bake-off path,
+    // which has no session to scope a memory query to and must keep
+    // Parity-mode prompts byte-identical to the pre-#2343 baseline (epic
+    // #2343 scope note). `None` only when the session vanished between
+    // `begin_execution` and here.
+    if let Some(sink) = &memory_sink {
+        pm_registry.register(Arc::new(RecallSessionTool::new(
+            session_id.clone(),
+            sink.base_url().to_string(),
+            sink.palace().to_string(),
+        )));
     }
 
     let pm_llm: Arc<dyn LlmClientTrait> = Arc::new(RecordingLlmClient::new(
@@ -298,12 +323,12 @@ async fn run_and_record(
     // run's new response text via `Transcript::assistant_text_since`, even
     // though `pm_transcript` is the session's whole cumulative (#2344)
     // conversation. `pm_transcript` was already fetched above (moved up for
-    // #2347's goal-tool wiring — see the comment on that fetch), so this
-    // only marks the current position; fetching the sink here (rather than
-    // after the run) is just convenience — `SessionRegistry::memory_sink_for`
-    // is idempotent and cheap on every call after the first.
+    // #2347's goal-tool wiring — see the comment on that fetch) and
+    // `memory_sink` was already fetched above too (before building
+    // `pm_registry`, #2348) — `SessionRegistry::memory_sink_for` is
+    // idempotent per session, so reusing that same `Option<Arc<..>>` here
+    // needs no second call; this line only marks the current position.
     let turn_mark = pm_transcript.assistant_text_mark();
-    let memory_sink = registry.memory_sink_for(&session_id, &params.project);
 
     let result = pm_loop
         .run_with_transcript(&mut pm_transcript, &params.task)

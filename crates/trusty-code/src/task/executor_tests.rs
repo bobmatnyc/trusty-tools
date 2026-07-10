@@ -3,8 +3,8 @@
 //! `intent::classifier_tests` for precedent) to keep the production file
 //! under the 500-SLOC cap.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -471,5 +471,76 @@ async fn spawn_task_run_second_call_after_finish_appends_to_cumulative_transcrip
         "usage must accumulate across runs, not reset: run1={:?} run2={:?}",
         after_run_one.usage,
         after_run_two.usage
+    );
+}
+
+/// A scripted `LlmClientTrait` that records the tool-schema names of every
+/// request it receives, then immediately stops (no tool calls) — the D3
+/// no-tool-call convention `finish_task`'s own docs describe, so a run
+/// completes in a single PM turn with no delegation needed.
+///
+/// Why: #2348's `recall_session` registration is a daemon-session-path-only
+/// concern (`task::executor::run_and_record`'s `pm_registry`, never
+/// `run_task::execute_run_task`'s). Asserting on the ACTUAL tool schemas the
+/// PM's `AgentLoop` sends the LLM (rather than re-deriving the registration
+/// logic in the test) proves the real wiring, not a duplicate of it.
+struct SchemaCapturingLlm {
+    tool_names: Mutex<Vec<String>>,
+}
+
+impl SchemaCapturingLlm {
+    fn new() -> Self {
+        Self {
+            tool_names: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmClientTrait for SchemaCapturingLlm {
+    async fn chat(&self, req: &ChatRequest) -> Result<ChatResponse, LlmError> {
+        let names = req
+            .tools
+            .as_ref()
+            .map(|tools| tools.iter().map(|t| t.function.name.clone()).collect())
+            .unwrap_or_default();
+        *self.tool_names.lock().expect("tool_names lock") = names;
+        let fixture = json!({
+            "id": "mock-stop",
+            "choices": [{
+                "message": {"role": "assistant", "content": "done", "tool_calls": []},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        });
+        serde_json::from_value(fixture).map_err(|e| LlmError::MissingConfig(e.to_string()))
+    }
+}
+
+/// The daemon-session path's `pm_registry` (`task::executor::run_and_record`)
+/// must register `recall_session` (#2348) alongside `delegate_to_agent` and
+/// `finish_task`.
+#[tokio::test]
+async fn session_path_registers_recall_session_tool() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, None);
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    let mock = Arc::new(SchemaCapturingLlm::new());
+    let llm: Arc<dyn LlmClientTrait> = Arc::clone(&mock) as Arc<dyn LlmClientTrait>;
+    let p = params(&agents, &project, &session.id);
+
+    spawn_task_run(Arc::clone(&registry), llm, p).expect("run must start");
+    wait_for_terminal(&registry, &session.id).await;
+
+    let names = mock.tool_names.lock().expect("tool_names lock").clone();
+    assert!(
+        names.contains(&"recall_session".to_string()),
+        "daemon-session path must register recall_session; got {names:?}"
+    );
+    assert!(
+        names.contains(&"finish_task".to_string()),
+        "sanity: finish_task must still be registered alongside it; got {names:?}"
     );
 }
