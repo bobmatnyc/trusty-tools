@@ -432,4 +432,64 @@ mod tests {
         let value = result.expect("task.run should succeed");
         assert_eq!(value["session_id"], existing.id);
     }
+
+    /// A second `task.run` at the JSON-RPC entry point, issued AFTER the
+    /// first run against the same `session_id` has fully `Finished`, must be
+    /// ACCEPTED (#2344 resumption) rather than erroring — the acceptance
+    /// criterion "two sequential task.run calls on one session" exercised at
+    /// the actual RPC surface, not just `spawn_task_run` directly
+    /// (`task::executor::tests::spawn_task_run_second_call_after_finish_appends_to_cumulative_transcript`
+    /// covers the transcript-accumulation half; this test covers that
+    /// `task_run` itself — including its `registry.status(id)` existing-
+    /// session lookup — does not reject the resumed call).
+    #[tokio::test]
+    async fn task_run_second_call_after_finish_continues_the_session() {
+        let _guard = super::super::mock_llm::MOCK_LLM_ENV_LOCK.lock().await;
+        unsafe {
+            std::env::set_var(
+                super::super::mock_llm::MOCK_LLM_ENV,
+                super::super::mock_llm::MOCK_LLM_ECHO,
+            );
+        }
+        let registry = Arc::new(SessionRegistry::new());
+        let agents = agents_dir();
+        let project = tempfile::tempdir().expect("project tempdir");
+
+        let first = task_run(
+            Arc::clone(&registry),
+            json!({"task_description": "say hi"}),
+            project.path().to_path_buf(),
+            agents.path().to_path_buf(),
+        )
+        .await
+        .expect("first task.run should succeed");
+        let session_id = first["session_id"].as_str().unwrap().to_string();
+
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        loop {
+            let status = registry.status(&session_id).expect("session must exist");
+            if status.status.is_terminal() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "first run did not reach a terminal state within 5s"
+            );
+            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+        }
+
+        let second = task_run(
+            Arc::clone(&registry),
+            json!({"task_description": "say hi again", "session_id": session_id}),
+            project.path().to_path_buf(),
+            agents.path().to_path_buf(),
+        )
+        .await;
+        unsafe {
+            std::env::remove_var(super::super::mock_llm::MOCK_LLM_ENV);
+        }
+        let value = second.expect("a second task.run on a Finished session must be accepted");
+        assert_eq!(value["session_id"], session_id);
+        assert_eq!(value["status"], "running");
+    }
 }
