@@ -29,9 +29,10 @@ clean-runtime:
 	@rm -f tga.db trusty-analyze.facts.redb
 	@echo "Done."
 
-# Run the documented workspace quality gate referenced throughout CLAUDE.md.
+# Run the documented workspace quality gate referenced throughout
+# .trusty-mpm/INSTRUCTIONS.md.
 #
-# Why: CLAUDE.md instructs contributors to run the test/lint/format gate
+# Why: .trusty-mpm/INSTRUCTIONS.md instructs contributors to run the test/lint/format gate
 # before committing, but until now there was no single target to invoke —
 # every contributor had to remember and chain the three commands by hand.
 #

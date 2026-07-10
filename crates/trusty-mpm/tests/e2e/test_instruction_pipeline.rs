@@ -2,7 +2,10 @@
 //!
 //! Exercises `trusty_mpm::core::instruction_pipeline::build_instructions`
 //! against temp-directory inputs: a framework `INSTRUCTIONS.md`, a deployed
-//! agents directory, and a project `CLAUDE.md`.
+//! agents directory, and a project `CLAUDE.md` (the latter is only seeded as
+//! a side effect — its content is not folded into `merged`; see the crate's
+//! `instruction_pipeline` module docs for why that concatenation was removed
+//! as dead code).
 
 use std::path::PathBuf;
 
@@ -27,9 +30,12 @@ fn write(path: &PathBuf, content: &str) {
     std::fs::write(path, content).expect("write file");
 }
 
-/// With all three inputs present, the merged output carries every section in
-/// the documented framework -> delegation -> project order, and the CLAUDE.md
-/// stub is created when absent.
+/// With framework instructions and deployed agents present, the merged output
+/// carries both sections in the documented framework -> delegation order, and
+/// the CLAUDE.md stub is still created (as a side effect) when absent — but
+/// its content is NOT folded into `merged` (dead code removed: Claude Code
+/// loads CLAUDE.md natively, and the real launch prompt never read this
+/// field for that content).
 #[test]
 fn pipeline_produces_merged_output() {
     let tmp = TempDir::new().unwrap();
@@ -44,7 +50,7 @@ fn pipeline_produces_merged_output() {
         &input.agents_dir.join("engineer.md"),
         "---\nname: engineer\nrole: engineer\ndescription: Builds things.\n---\n\n# Engineer\n",
     );
-    // No CLAUDE.md — the pipeline must seed the stub.
+    // No CLAUDE.md — the pipeline must still seed the stub.
     assert!(!input.claude_md_path.exists());
 
     let out = build_instructions(&input).expect("pipeline succeeds");
@@ -57,18 +63,19 @@ fn pipeline_produces_merged_output() {
         .merged
         .find("## Delegation Authority")
         .expect("delegation section");
-    let proj = out
-        .merged
-        .find("# Project Instructions")
-        .expect("project stub section");
     assert!(fw < auth, "framework precedes delegation authority");
-    assert!(auth < proj, "delegation authority precedes project notes");
+    assert!(
+        !out.merged.contains("# Project Instructions"),
+        "project CLAUDE.md stub content must not be folded into merged: {}",
+        out.merged
+    );
 }
 
 /// An existing project `CLAUDE.md` with custom content is left completely
 /// untouched on disk (issue #2170 — trusty-mpm must never modify a target
 /// project's `CLAUDE.md`; the delegation directive is delivered exclusively
-/// via the `trusty-mpm` output style).
+/// via the `trusty-mpm` output style), and its content does not leak into
+/// `merged` (dead code removed).
 #[test]
 fn pipeline_preserves_claude_md() {
     let tmp = TempDir::new().unwrap();
@@ -91,7 +98,11 @@ fn pipeline_preserves_claude_md() {
         !on_disk.contains("trusty-mpm:delegation-directive:begin"),
         "no delegation-directive block may be injected: {on_disk}"
     );
-    assert!(out.merged.contains("CUSTOM HAND-WRITTEN CONTENT"));
+    assert!(
+        !out.merged.contains("CUSTOM HAND-WRITTEN CONTENT"),
+        "project CLAUDE.md content must not be folded into merged: {}",
+        out.merged
+    );
 }
 
 /// A missing `INSTRUCTIONS.md` is not fatal — the pipeline still succeeds and
