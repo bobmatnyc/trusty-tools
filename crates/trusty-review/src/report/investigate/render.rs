@@ -127,6 +127,36 @@ fn coverage_lines(repo: &RepoInvestigation) -> String {
     out.push_str(&format!(
         "- verified evidence-backed findings: {verified}\n"
     ));
+    out.push_str(&batch_lines(c));
+    out
+}
+
+/// Render the batch accounting + any failed-batch notes (wave-3.1, #2357).
+///
+/// Why: a truncated/failed batch must be NAMED — which files it carried and why —
+/// so a reader never mistakes a lower finding count for a clean, complete scan.
+/// What: a "batches: T total, S succeeded, F truncated/failed" line, followed by
+/// one bullet per failed batch naming its position, reason, and file list.
+/// Renders nothing when there was at most one batch and it succeeded (the common
+/// case), keeping small-repo reports unchanged.
+fn batch_lines(c: &Coverage) -> String {
+    if c.batches_total <= 1 && c.batches_failed.is_empty() {
+        return String::new();
+    }
+    let failed = c.batches_failed.len();
+    let mut out = format!(
+        "- batches: {} total, {} succeeded, {failed} truncated/failed\n",
+        c.batches_total, c.batches_succeeded,
+    );
+    for b in &c.batches_failed {
+        out.push_str(&format!(
+            "  - batch {} of {}: sent but analysis truncated/failed ({}) — files: {}\n",
+            b.index,
+            b.batch_count,
+            b.reason,
+            b.files.join(", "),
+        ));
+    }
     out
 }
 
@@ -141,9 +171,10 @@ fn join_or_none(items: &[String]) -> String {
 
 /// Render the coverage block injected into the synthesis prompt.
 ///
-/// One line per available repo (examined/total, rejected, dimensions not reached),
-/// then a standing mandate: synthesise from the findings; only claim a data gap
-/// for a listed uninvestigated dimension, and name it.
+/// One line per available repo (examined/total, rejected, dimensions not reached,
+/// and any batch failures), then a standing mandate: synthesise from the
+/// findings; only claim a data gap for a listed uninvestigated dimension or a
+/// named failed batch, and say why.
 pub fn coverage_prompt_summary(inv: &Investigation) -> String {
     let mut out = String::from("## Investigation coverage (repo-evidence pass)\n\n");
     for repo in &inv.repos {
@@ -159,6 +190,12 @@ pub fn coverage_prompt_summary(inv: &Investigation) -> String {
                     c.rejected,
                     join_or_none(&c.dimensions_absent),
                 ));
+                for b in &c.batches_failed {
+                    out.push_str(&format!(
+                        "  - batch {} of {} truncated/failed ({}); other batches' findings above still stand\n",
+                        b.index, b.batch_count, b.reason,
+                    ));
+                }
             }
             InvestigationStatus::Skipped(reason) | InvestigationStatus::Unavailable(reason) => {
                 out.push_str(&format!("- {}: not investigated ({reason})\n", repo.name));
@@ -166,7 +203,7 @@ pub fn coverage_prompt_summary(inv: &Investigation) -> String {
         }
     }
     out.push_str(
-        "\nThe findings above were produced by inspecting the actual repository code. Synthesise the executive summary FROM those findings. Do NOT claim that a dimension could not be assessed unless it is listed as \"not investigated\" for that application — and if you do, name it and say why (remote-only or budget-limited).\n",
+        "\nThe findings above were produced by inspecting the actual repository code. Synthesise the executive summary FROM those findings. Do NOT claim that a dimension could not be assessed unless it is listed as \"not investigated\" for that application, or a specific batch is named as truncated/failed above — and if you do, name it and say why (remote-only, budget-limited, or that specific batch).\n",
     );
     out
 }

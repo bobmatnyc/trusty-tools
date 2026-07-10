@@ -8,9 +8,9 @@
 //! Test: included as `#[cfg(test)] mod tests` from `render.rs`.
 
 use super::*;
-use crate::report::investigate::Budget;
 use crate::report::investigate::deps::{Dependency, DependencyInventory};
 use crate::report::investigate::verify::VerifiedFinding;
+use crate::report::investigate::{BatchNote, Budget};
 use crate::report::metrics::Severity;
 
 fn dep(name: &str, locked: Option<&str>) -> Dependency {
@@ -57,6 +57,9 @@ fn repo(
             dimensions_absent: vec!["scalability".to_string()],
             rejected: 2,
             budget: Budget::default(),
+            batches_total: 1,
+            batches_succeeded: 1,
+            batches_failed: vec![],
         },
     }
 }
@@ -148,4 +151,63 @@ fn dependency_section_empty_note() {
     };
     let out = dependency_section(&investigation);
     assert!(out.contains("No manifest-declared dependencies"));
+}
+
+/// Why: a truncated/failed batch must be NAMED — which files, which position,
+/// why — never silently lowering the finding count (#2357 wave-3.1 regression
+/// test for the live-QA incident).
+/// What: a repo with 4 batches, one truncated, renders the batch total line and
+/// a named bullet with the file list and reason.
+/// Test: this test itself.
+#[test]
+fn coverage_section_reports_batch_failure() {
+    let mut repo_inv = repo(
+        InvestigationStatus::Available,
+        vec![finding()],
+        DependencyInventory::default(),
+    );
+    repo_inv.coverage.batches_total = 4;
+    repo_inv.coverage.batches_succeeded = 3;
+    repo_inv.coverage.batches_failed = vec![BatchNote {
+        index: 2,
+        batch_count: 4,
+        files: vec!["src/b.rs".to_string(), "src/b2.rs".to_string()],
+        reason: "truncated (even after concise retry)".to_string(),
+    }];
+    let investigation = Investigation {
+        repos: vec![repo_inv],
+    };
+    let out = coverage_section(&investigation);
+    assert!(out.contains("batches: 4 total, 3 succeeded, 1 truncated/failed"));
+    assert!(out.contains("batch 2 of 4"));
+    assert!(out.contains("truncated (even after concise retry)"));
+    assert!(out.contains("src/b.rs, src/b2.rs"));
+}
+
+/// Why: the synthesis-prompt digest must carry the SAME batch-failure fact so
+/// the exec summary can only lament a gap for a genuinely failed batch and must
+/// name it (the coordinator's exact requirement).
+/// What: a batch-failure note appears in `coverage_prompt_summary`'s output.
+/// Test: this test itself.
+#[test]
+fn coverage_prompt_summary_names_failed_batch() {
+    let mut repo_inv = repo(
+        InvestigationStatus::Available,
+        vec![finding()],
+        DependencyInventory::default(),
+    );
+    repo_inv.coverage.batches_total = 4;
+    repo_inv.coverage.batches_succeeded = 3;
+    repo_inv.coverage.batches_failed = vec![BatchNote {
+        index: 2,
+        batch_count: 4,
+        files: vec!["src/b.rs".to_string()],
+        reason: "truncated (even after concise retry)".to_string(),
+    }];
+    let investigation = Investigation {
+        repos: vec![repo_inv],
+    };
+    let summary = investigation.coverage_prompt_summary();
+    assert!(summary.contains("batch 2 of 4 truncated/failed"));
+    assert!(summary.contains("truncated (even after concise retry)"));
 }

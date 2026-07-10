@@ -6,39 +6,40 @@
 //! available the tool inspects it and produces findings itself.  This module is
 //! that inspection — it runs when `--synthesize` is on and the repository is a
 //! local checkout, selects the evidence-bearing files, asks the reviewer-role LLM
-//! for findings, and admits ONLY findings whose evidence mechanically verifies.
-//! What: [`run_investigation`] drives selection → LLM → verification per local
-//! repository and also builds a deterministic dependency inventory and coverage
-//! record; [`apply_investigation`] injects the verified findings into the existing
-//! findings pipeline; [`merge_investigation_prose`] overlays their verified
-//! (measured-evidence) prose onto synthesis; [`report_sections`] renders the
-//! Dependency Inventory and Investigation Coverage sections.  Fail-closed: any
-//! provider/parse failure yields an `Unavailable` status the report names.
+//! (in bounded batches, see [`batch`]) for findings, and admits ONLY findings
+//! whose evidence mechanically verifies.
+//! What: [`run_investigation`] drives selection → batching → LLM → verification
+//! per local repository and also builds a deterministic dependency inventory and
+//! coverage record (including per-batch outcomes); [`apply_investigation`]
+//! injects the verified findings into the existing findings pipeline;
+//! [`merge_investigation_prose`] overlays their verified (measured-evidence)
+//! prose onto synthesis; [`report_sections`] renders the Dependency Inventory and
+//! Investigation Coverage sections.  Fail-closed at two granularities: a whole
+//! repository is `Unavailable` only if every batch failed; a single failed batch
+//! is recorded in coverage while its siblings' findings still survive (#2357
+//! wave-3.1 — see [`batch`] for the incident this structural fix replaces).
 //! Test: submodule unit tests + `tests/report_investigate.rs` e2e (mock provider).
 
 pub mod analyze;
+mod batch;
 pub mod deps;
 mod render;
 pub mod select;
 pub mod verify;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde::Serialize;
-use tracing::{debug, warn};
 
 use crate::llm::LlmProvider;
 use crate::report::metrics::{AnalyzeMetrics, MetricFinding, Severity};
 use crate::report::model::ReportModel;
 use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
 
+pub use batch::BatchStatus;
 pub use deps::{Dependency, DependencyInventory};
 pub use select::{Budget, Selection};
 pub use verify::VerifiedFinding;
-
-/// Default wall-clock ceiling for one repository's investigation LLM call.
-const INVESTIGATION_TIMEOUT: Duration = Duration::from_secs(180);
 
 // ─── Result types ─────────────────────────────────────────────────────────────
 
@@ -62,37 +63,82 @@ pub enum InvestigationStatus {
     Unavailable(String),
 }
 
+/// One batch's recorded fate, for the coverage section (#2357 wave-3.1).
+///
+/// Why: a truncated/failed batch must be named — which files it carried and why
+/// it failed — so the report can say "sent but analysis truncated/failed (batch
+/// N)" instead of silently omitting those files' findings.
+/// What: `index`/`batch_count` place it ("batch 2 of 4"); `files` are the
+/// repository-relative paths it carried; `reason` is empty for a completed batch
+/// or the failure/truncation reason otherwise.
+/// Test: `render_tests::coverage_section_reports_batch_failure`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BatchNote {
+    /// 1-based batch position.
+    pub index: usize,
+    /// Total batch count for this repository.
+    pub batch_count: usize,
+    /// Repository-relative paths carried by this batch.
+    pub files: Vec<String>,
+    /// Empty when completed; the failure/truncation reason otherwise.
+    pub reason: String,
+}
+
 /// Coverage-honesty record for one investigated repository.
 ///
 /// Why: #2357 mandates the report state exactly what was examined vs skipped and
 /// which DD dimensions were reached; serialising this keeps the JSON twin a
-/// faithful audit trail.
+/// faithful audit trail.  Wave-3.1 extends this with per-batch accounting so a
+/// truncated/failed batch is named rather than silently lowering the finding
+/// count.
 /// What: the file/byte counts, the dimension coverage split, the rejected-finding
-/// count, and the budget in force.
+/// count, the budget in force, and the batch totals + failed-batch notes.
 /// Test: `render_tests` (coverage section) and the select-derived counts.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Coverage {
-    /// Files actually sent to the LLM.
+    /// Files actually sent to the LLM (across all batches).
     pub files_examined: usize,
     /// Total tracked files in the repo (the denominator).
     pub total_files: usize,
     /// Files not examined (budget-capped or ranked out).
     pub skipped: usize,
-    /// Total content bytes sent.
+    /// Total content bytes sent (across all batches).
     pub bytes_sent: usize,
     /// DD dimensions at least one examined file (or a present test dir) covered.
     pub dimensions_covered: Vec<String>,
     /// DD dimensions no examined file reached.
     pub dimensions_absent: Vec<String>,
-    /// Findings rejected for unverifiable evidence.
+    /// Findings rejected for unverifiable evidence (across all batches).
     pub rejected: usize,
     /// The file/byte budget in force for this run.
     pub budget: Budget,
+    /// Total batches this repository's selection was split into.
+    pub batches_total: usize,
+    /// Batches that completed (parsed cleanly; findings may still be zero).
+    pub batches_succeeded: usize,
+    /// Batches that truncated (even after retry) or errored, with their notes.
+    pub batches_failed: Vec<BatchNote>,
 }
 
 impl Coverage {
-    /// Build a coverage record from a selection outcome + rejection count.
-    fn from_selection(sel: &Selection, rejected: usize, budget: Budget) -> Self {
+    /// Build a coverage record from a selection outcome, rejection count, and the
+    /// per-batch outcomes.
+    fn build(
+        sel: &Selection,
+        rejected: usize,
+        budget: Budget,
+        batches: &[batch::BatchOutcome],
+    ) -> Self {
+        let batches_failed: Vec<BatchNote> = batches
+            .iter()
+            .filter(|b| b.status.is_failure())
+            .map(|b| BatchNote {
+                index: b.index,
+                batch_count: b.batch_count,
+                files: b.files.clone(),
+                reason: b.status.reason(),
+            })
+            .collect();
         Coverage {
             files_examined: sel.files.len(),
             total_files: sel.total_files,
@@ -102,7 +148,16 @@ impl Coverage {
             dimensions_absent: sel.dimensions_absent.clone(),
             rejected,
             budget,
+            batches_total: batches.len(),
+            batches_succeeded: batches.len() - batches_failed.len(),
+            batches_failed,
         }
+    }
+
+    /// A coverage record for a repository whose selection was empty (no batches
+    /// were ever attempted).
+    fn empty(sel: &Selection, budget: Budget) -> Self {
+        Coverage::build(sel, 0, budget, &[])
     }
 }
 
@@ -149,14 +204,18 @@ impl Investigation {
 /// Run the investigation across every local repository in the model.
 ///
 /// Why: the single entry point the CLI awaits under `--synthesize`; it drives
-/// select → LLM → verify per local repo and fails closed per repo so one bad repo
-/// never aborts the report.
+/// select → batch → LLM → verify per local repo.  Batching (#2357 wave-3.1) means
+/// a single batch's truncation/failure no longer discards the whole repository's
+/// findings — only a whole-repository failure (every batch failed) is
+/// `Unavailable`.
 /// What: for each `local_path` repository it lists tracked files, selects within
-/// `budget`, builds the deterministic dependency inventory, and (when files were
-/// selected) calls `provider` under a timeout, parses, and verifies.  Remote or
-/// empty repos are recorded `Skipped`.  Returns `None` when no repository is a
-/// local checkout (nothing to investigate).
-/// Test: `tests/report_investigate.rs` (mock provider, verifiable + unverifiable).
+/// `budget`, builds the deterministic dependency inventory, partitions the
+/// selection into size-bounded batches ([`batch::partition_batches`]), and (when
+/// files were selected) runs them via [`batch::run_batches`].  Remote or empty
+/// repos are recorded `Skipped`.  Returns `None` when no repository is a local
+/// checkout (nothing to investigate).
+/// Test: `tests/report_investigate.rs` (mock provider, verifiable + unverifiable
+/// + multi-batch partial failure).
 pub async fn run_investigation(
     provider: Arc<dyn LlmProvider>,
     llm_model: &str,
@@ -182,27 +241,31 @@ pub async fn run_investigation(
                 name: repo.name.clone(),
                 status: InvestigationStatus::Skipped("no readable source files".to_string()),
                 findings: Vec::new(),
-                coverage: Coverage::from_selection(&selection, 0, budget),
+                coverage: Coverage::empty(&selection, budget),
                 deps,
             });
             continue;
         }
 
-        let (status, findings, rejected) = investigate_one(
+        let batches = batch::partition_batches(&selection.files);
+        let (findings, rejected, outcomes) = batch::run_batches(
             provider.clone(),
             llm_model,
             &repo.name,
-            &selection,
+            &batches,
+            selection.total_files,
             instructions,
+            &selection,
         )
         .await;
 
+        let status = repo_status(&outcomes);
         repos.push(RepoInvestigation {
             slug: repo.slug.clone(),
             name: repo.name.clone(),
             status,
             findings,
-            coverage: Coverage::from_selection(&selection, rejected, budget),
+            coverage: Coverage::build(&selection, rejected, budget, &outcomes),
             deps,
         });
     }
@@ -213,72 +276,31 @@ pub async fn run_investigation(
     Some(Investigation { repos })
 }
 
-/// Investigate one repository's selection: call the LLM, parse, verify.
+/// Roll up per-batch outcomes into one repository-level [`InvestigationStatus`].
 ///
-/// Returns the status, the verified findings, and the rejected count.  Fails
-/// closed (empty findings + `Unavailable`) on any provider/parse failure.
-async fn investigate_one(
-    provider: Arc<dyn LlmProvider>,
-    llm_model: &str,
-    app_name: &str,
-    selection: &Selection,
-    instructions: Option<&str>,
-) -> (InvestigationStatus, Vec<VerifiedFinding>, usize) {
-    let req = analyze::build_request(app_name, selection, instructions, llm_model);
-    let resp = match tokio::time::timeout(INVESTIGATION_TIMEOUT, provider.complete(req)).await {
-        Err(_) => {
-            warn!("investigation: provider timed out — failing closed");
-            return (
-                InvestigationStatus::Unavailable("provider timeout".to_string()),
-                Vec::new(),
-                0,
-            );
-        }
-        Ok(Err(e)) => {
-            warn!(error = %e, "investigation: provider error — failing closed");
-            return (
-                InvestigationStatus::Unavailable(format!("provider error: {e}")),
-                Vec::new(),
-                0,
-            );
-        }
-        Ok(Ok(r)) => r,
-    };
-
-    if matches!(
-        resp.finish_reason.as_deref(),
-        Some("length") | Some("max_tokens")
-    ) {
-        warn!("investigation: response truncated — failing closed");
-        return (
-            InvestigationStatus::Unavailable("truncated response".to_string()),
-            Vec::new(),
-            0,
-        );
+/// Why: the repository is only truly `Unavailable` when EVERY batch failed —
+/// that is the only case with zero verified findings by construction (a
+/// completed batch may legitimately find nothing, which is still `Available`).
+/// A single failed batch among several successes still yields `Available`; the
+/// coverage section names the gap.
+/// What: `Available` when at least one batch completed; `Unavailable` (naming
+/// the first batch's failure reason) when every batch failed or there were no
+/// batches at all (should not happen — callers only invoke this for a non-empty
+/// selection).
+/// Test: `tests/report_investigate.rs::investigation_survives_one_truncated_batch_of_three`.
+fn repo_status(outcomes: &[batch::BatchOutcome]) -> InvestigationStatus {
+    let succeeded = outcomes.iter().filter(|o| !o.status.is_failure()).count();
+    if succeeded > 0 {
+        return InvestigationStatus::Available;
     }
-
-    let Some(raw) = analyze::parse_findings(&resp.text) else {
-        warn!("investigation: unparseable response — failing closed");
-        return (
-            InvestigationStatus::Unavailable("unparseable response".to_string()),
-            Vec::new(),
-            0,
-        );
-    };
-
-    debug!(
-        input_tokens = resp.input_tokens,
-        output_tokens = resp.output_tokens,
-        findings = raw.findings.len(),
-        "investigation: provider call complete"
-    );
-
-    let outcome = verify::verify_findings(raw.findings, selection);
-    (
-        InvestigationStatus::Available,
-        outcome.verified,
-        outcome.rejected,
-    )
+    let reason = outcomes
+        .first()
+        .map(|o| o.status.reason())
+        .unwrap_or_else(|| "no batches attempted".to_string());
+    InvestigationStatus::Unavailable(format!(
+        "all {} batch(es) failed ({reason})",
+        outcomes.len()
+    ))
 }
 
 // ─── Integration into the findings pipeline ───────────────────────────────────
