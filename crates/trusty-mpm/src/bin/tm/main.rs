@@ -418,6 +418,9 @@ async fn main() -> anyhow::Result<()> {
             cli::McpCmd::Get { name, json, root } => {
                 commands::mcp::get_cmd(root.as_deref(), &name, json)
             }
+            cli::McpCmd::Test { name, json, root } => {
+                commands::mcp::test_cmd(root.as_deref(), name.as_deref(), json).await
+            }
         },
     };
 

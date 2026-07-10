@@ -191,6 +191,40 @@ fn cli_parses_mcp_remove_list_get() {
 }
 
 #[test]
+fn cli_parses_mcp_test() {
+    // Bare sweep: no name, no flags.
+    let bare = Cli::try_parse_from(["trusty-mpm", "mcp", "test"]).unwrap();
+    let Some(Command::Mcp {
+        cmd: McpCmd::Test { name, json, root },
+    }) = bare.command
+    else {
+        panic!("expected mcp test");
+    };
+    assert!(name.is_none() && !json && root.is_none());
+
+    // Named + --json + --root.
+    let named = Cli::try_parse_from([
+        "trusty-mpm",
+        "mcp",
+        "test",
+        "trusty-memory",
+        "--json",
+        "--root",
+        "/x",
+    ])
+    .unwrap();
+    let Some(Command::Mcp {
+        cmd: McpCmd::Test { name, json, root },
+    }) = named.command
+    else {
+        panic!("expected mcp test named");
+    };
+    assert_eq!(name.as_deref(), Some("trusty-memory"));
+    assert!(json);
+    assert_eq!(root.as_deref(), Some("/x"));
+}
+
+#[test]
 fn cli_parses_start() {
     let cli = Cli::try_parse_from(["trusty-mpm", "start"]).unwrap();
     assert!(matches!(cli.command.unwrap(), Command::Start));

@@ -319,35 +319,17 @@ fn ensure_mcp_config(claude_config_dir: &Path) -> anyhow::Result<()> {
     }
     let servers = servers.as_object_mut().expect("mcpServers is an object");
 
-    let memory_entry = serde_json::json!({
-        "type": "stdio",
-        "command": "trusty-memory",
-        "args": ["serve", "--stdio"]
-    });
-    // WI-8 (refs #1548): trusty-review MCP server, stdio transport.
+    // The three built-in framework servers' launch definitions live in a single
+    // catalog (`core::mcp_config::builtin_server_entry`) so this managed-config
+    // wiring and `tm mcp test`'s probe can never disagree on how a server starts.
     // trusty-review reads its LLM credentials (OPENROUTER_API_KEY, AWS credentials)
     // and TRUSTY_SEARCH_URL from the environment — no secrets are injected here;
     // the managed session inherits the daemon env, matching the memory/search pattern.
-    let review_entry = serde_json::json!({
-        "type": "stdio",
-        "command": "trusty-review",
-        "args": ["serve", "--stdio"]
-    });
-    let search_entry = serde_json::json!({
-        "type": "stdio",
-        "command": "trusty-search",
-        "args": ["serve"]
-    });
-
-    servers
-        .entry("trusty-memory")
-        .or_insert(memory_entry.clone());
-    servers
-        .entry("trusty-review")
-        .or_insert(review_entry.clone());
-    servers
-        .entry("trusty-search")
-        .or_insert(search_entry.clone());
+    for name in crate::core::mcp_config::BUILTIN_MANAGED_MCP_SERVERS {
+        if let Some(entry) = crate::core::mcp_config::builtin_server_entry(name) {
+            servers.entry(*name).or_insert(entry);
+        }
+    }
 
     // Compare structurally (Value == Value) rather than byte-wise so that
     // trailing newlines, editor-inserted whitespace, or any other formatting
