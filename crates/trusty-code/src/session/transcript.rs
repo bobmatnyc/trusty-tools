@@ -21,7 +21,6 @@
 //! run a task returns `turns: []`, `usage` all-zero, `cost_usd: null` — a
 //! valid, empty transcript, not an error. `mode` (#2059) is the resolved
 //! `HarnessMode` `task.run` set via `SessionRegistry::set_mode` — `None` for
-<<<<<<< HEAD
 //! the same "never run" case. `compaction_events` (#2349, epic #2343) is the
 //! session's `pm_transcript`'s cumulative count of #2308 threshold-compactor
 //! fires — `0` for a never-run session, and the field epic #2343's success
