@@ -3,12 +3,13 @@
 //! Why: splitting each subcommand group into its own file keeps every handler
 //! file well under the 500-line cap and makes the handler surface easy to
 //! navigate.
-//! What: re-exports handler modules — `compress`, `daemon`, `hook_rewrite`,
-//! `install`, `launch`, `managed`, `managed_route`, `meta`, `misc`,
-//! `project`, `services`, `session`, `slack`, `supervisor`, `telegram`.
+//! What: re-exports handler modules — `auth`, `compress`, `daemon`,
+//! `hook_rewrite`, `install`, `launch`, `managed`, `managed_route`, `meta`,
+//! `misc`, `project`, `services`, `session`, `slack`, `supervisor`, `telegram`.
 //! Test: each module has its own unit tests; integration coverage lives in
 //! `tests.rs`.
 
+pub(crate) mod auth;
 pub(crate) mod banner;
 pub(crate) mod compress;
 pub(crate) mod daemon;

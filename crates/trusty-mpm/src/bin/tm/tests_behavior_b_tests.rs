@@ -12,7 +12,7 @@
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command, RepairAction, ServicesAction, SessctlAction};
+use crate::cli::{AuthAction, Cli, Command, RepairAction, ServicesAction, SessctlAction};
 use crate::commands::session::compose_session_instructions;
 
 #[test]
@@ -412,6 +412,60 @@ fn cli_parses_repair_deploy_force() {
         }
         other => panic!("expected Repair {{ Deploy {{ force: true }} }}, got {other:?}"),
     }
+}
+
+// ── issue #2246: `tm auth` CLI parse tests ──────────────────────────────────
+
+#[test]
+fn cli_parses_auth_set_token() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "auth", "set-token", "--token", "abc"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Auth {
+            action: AuthAction::SetToken { token, stdin },
+        } => {
+            assert_eq!(token.as_deref(), Some("abc"));
+            assert!(!stdin, "stdin flag must default to false");
+        }
+        other => panic!("expected Auth {{ SetToken }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_auth_set_token_stdin() {
+    // No --token: the handler reads from stdin. --stdin is accepted for
+    // clarity but does not change behaviour (see AuthAction::SetToken docs).
+    let cli = Cli::try_parse_from(["trusty-mpm", "auth", "set-token", "--stdin"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Auth {
+            action: AuthAction::SetToken { token, stdin },
+        } => {
+            assert_eq!(token, None);
+            assert!(stdin);
+        }
+        other => panic!("expected Auth {{ SetToken }}, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_auth_clear_token() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "auth", "clear-token"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Auth {
+            action: AuthAction::ClearToken
+        }
+    ));
+}
+
+#[test]
+fn cli_parses_auth_status() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "auth", "status"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Auth {
+            action: AuthAction::Status
+        }
+    ));
 }
 
 // ── standalone rm / update CLI parse tests ──────────────────────────────────

@@ -20,8 +20,99 @@
 use std::process::Command;
 
 use crate::core::external_session::ExternalSession;
+use crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR;
 use crate::core::tmux::{TmuxCommand, TmuxTarget, tmux_argv};
 use crate::core::{Error, Result};
+
+/// Find the end (one PAST the true closing `'`, byte offset into `s`) of a
+/// POSIX shell single-quoted value, given `s` is the text immediately AFTER
+/// the opening quote.
+///
+/// Why: [`shell_single_quote`](crate::runtime::claude_code) escapes an
+/// embedded literal `'` as the 4-byte close-escape-reopen sequence `'\''`
+/// (close the current quote, backslash-escape a literal `'`, reopen a new
+/// quote) — POSIX shells have no in-quote escape, so this is the standard
+/// way to embed a quote inside a single-quoted string. A naive scan for the
+/// FIRST `'` after the opener mistakes that sequence's first byte for the
+/// closer, truncating the redaction and leaking every byte of the value AFTER
+/// the embedded quote in cleartext (a real reviewer-caught edge case: a token
+/// containing `'` would leak its tail). This walks the value treating `'\''`
+/// as one escaped-quote unit to skip over, so only a BARE `'` — one not
+/// followed by `\''` — is treated as the true closer.
+/// What: scans byte-by-byte (safe: the only bytes it compares against are `'`
+/// and `\`, both single-byte ASCII, so it can never land mid-codepoint of a
+/// multi-byte UTF-8 sequence in an untouched run of bytes). At each `'`, if
+/// the next three bytes spell `\''` the whole 4-byte run is an escaped
+/// literal quote — skipped, continue scanning; otherwise this `'` is the true
+/// closer and its index + 1 is returned. Falls back to `s.len()` if no closer
+/// is found (malformed input — treat the rest of the string as the value
+/// rather than panic or leak).
+/// Test: `find_quoted_value_end_stops_at_bare_closer`,
+/// `find_quoted_value_end_skips_escaped_embedded_quote`,
+/// `redact_oauth_token_masks_value_with_embedded_single_quote`.
+fn find_quoted_value_end(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            if bytes[i..].starts_with(b"'\\''") {
+                i += 4; // escaped embedded quote unit — not the closer
+                continue;
+            }
+            return i + 1; // bare closer — include it in the consumed span
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+/// Mask any `CLAUDE_CODE_OAUTH_TOKEN=<value>` secret in `s` before it reaches a
+/// log or a persisted record.
+///
+/// Why: managed-session pane commands interpolate a cleartext
+/// `CLAUDE_CODE_OAUTH_TOKEN='<token>'` (#2246). When [`TmuxDriver::run`] maps a
+/// failed `send-keys` to an error it formats the full argv — which would
+/// otherwise carry that OAuth secret into every downstream `warn!` log in
+/// `daemon::managed_routes::lifecycle` AND into the persisted session `task`
+/// field via `session_manager::manager::mark_errored`, where `tm session ls`
+/// surfaces it. Redacting at this single source closes every one of those
+/// paths at once, so no caller has to remember to scrub.
+/// What: replaces the value of each `CLAUDE_CODE_OAUTH_TOKEN=` assignment with
+/// `<redacted>`, handling both the single-quoted form
+/// (`CLAUDE_CODE_OAUTH_TOKEN='…'` → `CLAUDE_CODE_OAUTH_TOKEN='<redacted>'`,
+/// via [`find_quoted_value_end`] so a value containing an escaped embedded
+/// quote is masked in full, not just up to its first byte) and a bare
+/// unquoted form (value ends at the next ASCII whitespace). All other bytes
+/// are copied through unchanged, so a string with no token is returned
+/// verbatim.
+/// Test: `redact_oauth_token_masks_quoted_value`,
+/// `redact_oauth_token_masks_unquoted_value`,
+/// `redact_oauth_token_masks_value_with_embedded_single_quote`,
+/// `redact_oauth_token_leaves_unrelated_text_untouched`,
+/// `run_style_error_message_does_not_leak_oauth_token`.
+fn redact_oauth_token(s: &str) -> String {
+    let needle = format!("{OAUTH_TOKEN_ENV_VAR}=");
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find(&needle) {
+        out.push_str(&rest[..pos + needle.len()]);
+        let after = &rest[pos + needle.len()..];
+        if let Some(stripped) = after.strip_prefix('\'') {
+            // Single-quoted value: mask up to and including the TRUE closing
+            // quote, correctly skipping any escaped embedded quotes.
+            let end = find_quoted_value_end(stripped);
+            out.push_str("'<redacted>'");
+            rest = &stripped[end..];
+        } else {
+            // Bare value: mask up to the next whitespace (or end of string).
+            let end = after.find(char::is_whitespace).unwrap_or(after.len());
+            out.push_str("<redacted>");
+            rest = &after[end..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
 
 /// A parsed `tmux list-sessions` row.
 ///
@@ -129,7 +220,15 @@ impl TmuxDriver {
             Ok(String::from_utf8_lossy(&output.stdout).into_owned())
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            Err(Error::Protocol(format!("tmux {argv:?} failed: {stderr}")))
+            // #2246: the argv can embed a cleartext CLAUDE_CODE_OAUTH_TOKEN
+            // (managed-spawn pane command). Redact at this single source so the
+            // secret can never reach the ~5 warn! sites in
+            // daemon::managed_routes::lifecycle nor the persisted session `task`
+            // field (mark_errored → `tm session ls`). stderr is redacted too in
+            // case tmux echoes the offending keys back.
+            Err(Error::Protocol(redact_oauth_token(&format!(
+                "tmux {argv:?} failed: {stderr}"
+            ))))
         }
     }
 
@@ -527,6 +626,145 @@ pub struct SessionSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #2246: OAuth-token redaction in error/log strings ───────────────────
+
+    const FAKE_TOKEN: &str = "sk-ant-oat01-super-secret-value";
+
+    #[test]
+    fn redact_oauth_token_masks_quoted_value() {
+        // The exact shape a managed spawn produces: a single-quoted token inside
+        // the `env …` prefix. The value must be gone; the var name must remain.
+        let input = format!(
+            "export TM_MANAGED_SESSION_ID='id'; env -u ANTHROPIC_API_KEY \
+             CLAUDE_CODE_OAUTH_TOKEN='{FAKE_TOKEN}' /usr/bin/claude --resume x"
+        );
+        let out = redact_oauth_token(&input);
+        assert!(
+            !out.contains(FAKE_TOKEN),
+            "token value must not survive redaction: {out}"
+        );
+        assert!(
+            out.contains("CLAUDE_CODE_OAUTH_TOKEN='<redacted>'"),
+            "redacted marker must replace the value: {out}"
+        );
+        // Surrounding, non-secret context must be preserved intact.
+        assert!(out.contains("env -u ANTHROPIC_API_KEY"));
+        assert!(out.contains("/usr/bin/claude --resume x"));
+    }
+
+    #[test]
+    fn redact_oauth_token_masks_unquoted_value() {
+        // Defensive: a bare (unquoted) assignment must also be masked, with the
+        // value ending at the next whitespace.
+        let input = format!("prefix CLAUDE_CODE_OAUTH_TOKEN={FAKE_TOKEN} suffix");
+        let out = redact_oauth_token(&input);
+        assert!(
+            !out.contains(FAKE_TOKEN),
+            "unquoted value must be masked: {out}"
+        );
+        assert_eq!(out, "prefix CLAUDE_CODE_OAUTH_TOKEN=<redacted> suffix");
+    }
+
+    #[test]
+    fn redact_oauth_token_leaves_unrelated_text_untouched() {
+        let input = "tmux [\"send-keys\", \"-t\", \"tmpm-x\", \"-l\", \"echo hi\"] failed: bad";
+        assert_eq!(redact_oauth_token(input), input);
+    }
+
+    #[test]
+    fn run_style_error_message_does_not_leak_oauth_token() {
+        // Reproduce exactly how `run` formats a failed send-keys: build the real
+        // SendKeys argv carrying a token-bearing pane command, format it the same
+        // way, then redact. Proves the error string a failed spawn would surface
+        // (and everything mark_errored persists from it) is token-free.
+        let keys = format!(
+            "export TM_MANAGED_SESSION_ID='abc'; env -u ANTHROPIC_API_KEY \
+             CLAUDE_CODE_OAUTH_TOKEN='{FAKE_TOKEN}' claude --dangerously-skip-permissions"
+        );
+        let argv = tmux_argv(&TmuxCommand::SendKeys {
+            target: TmuxTarget::session("tmpm-test"),
+            keys,
+            literal: true,
+        });
+        let stderr = "can't find pane";
+        let raw = format!("tmux {argv:?} failed: {stderr}");
+        // Sanity: the un-redacted message WOULD leak (guards against the test
+        // silently passing if the token stopped appearing for another reason).
+        assert!(
+            raw.contains(FAKE_TOKEN),
+            "precondition: raw message leaks the token"
+        );
+        let redacted = redact_oauth_token(&raw);
+        assert!(
+            !redacted.contains(FAKE_TOKEN),
+            "the error string for a failed spawn must not contain the token: {redacted}"
+        );
+        assert!(
+            redacted.contains("CLAUDE_CODE_OAUTH_TOKEN='<redacted>'"),
+            "the token env var must be present but redacted: {redacted}"
+        );
+    }
+
+    #[test]
+    fn find_quoted_value_end_stops_at_bare_closer() {
+        // No embedded quote: the end is the first (and only) `'`.
+        assert_eq!(find_quoted_value_end("abcdef' rest"), 7);
+    }
+
+    #[test]
+    fn find_quoted_value_end_skips_escaped_embedded_quote() {
+        // shell_single_quote("abc'def") produces the raw command fragment
+        // 'abc'\''def' — i.e. AFTER the opening quote: abc'\''def' ...
+        // The escaped-quote unit '\'' at index 3 must be skipped so the TRUE
+        // closer (index 10) is found, not the first `'` (index 3).
+        let after_open = "abc'\\''def' trailing";
+        let end = find_quoted_value_end(after_open);
+        assert_eq!(
+            &after_open[..end],
+            "abc'\\''def'",
+            "must consume the full escaped value through the true closer"
+        );
+        assert_eq!(&after_open[end..], " trailing");
+    }
+
+    #[test]
+    fn redact_oauth_token_masks_value_with_embedded_single_quote() {
+        // Reviewer-caught edge case: a token containing a literal `'` is
+        // shell-escaped by `runtime::claude_code::shell_single_quote` as
+        // '\'' (close-escape-reopen — POSIX's standard way to embed a quote
+        // inside a single-quoted string; see that function's doc). A naive
+        // "find the first `'` after the opener" scan mistakes that
+        // sequence's first byte for the closer and lets everything after it
+        // leak in cleartext. Reproduces the exact repro from the review:
+        //   RAW:      CLAUDE_CODE_OAUTH_TOKEN='abc'\''def' claude --resume x
+        //   WRONG:    CLAUDE_CODE_OAUTH_TOKEN='<redacted>'\''def' ...  (leaks "def")
+        //   CORRECT:  CLAUDE_CODE_OAUTH_TOKEN='<redacted>' claude --resume x
+        // The secret's escaped encoding is hardcoded here (rather than calling
+        // `shell_single_quote`, which is private to `runtime::claude_code`)
+        // to keep this test's only dependency the string shape itself.
+        let secret_with_quote = "abc'def";
+        let input = "CLAUDE_CODE_OAUTH_TOKEN='abc'\\''def' claude --resume x";
+        let redacted = redact_oauth_token(input);
+        // No fragment of the secret — including the post-quote tail "def" —
+        // may survive redaction.
+        assert!(
+            !redacted.contains("abc"),
+            "no fragment of the secret must survive: {redacted}"
+        );
+        assert!(
+            !redacted.contains("def"),
+            "the tail after the embedded quote must not leak: {redacted}"
+        );
+        assert!(
+            !redacted.contains(secret_with_quote),
+            "the full secret must not survive redaction: {redacted}"
+        );
+        assert_eq!(
+            redacted, "CLAUDE_CODE_OAUTH_TOKEN='<redacted>' claude --resume x",
+            "the entire escaped quoted value must collapse to one redacted marker: {redacted}"
+        );
+    }
 
     #[test]
     fn parses_session_row() {

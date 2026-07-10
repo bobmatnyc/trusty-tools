@@ -412,6 +412,13 @@ async fn run_inplace_relaunch(
     if let Some(dir) = &resume.config_dir {
         cmd.env("CLAUDE_CONFIG_DIR", dir);
     }
+    // Issue #2246: mirror the tmux-pane spawn/resume paths — inject the
+    // resolved CLAUDE_CODE_OAUTH_TOKEN (when available) so an in-place
+    // relaunch does not silently drop back into the CLAUDE_CONFIG_DIR-keyed
+    // Keychain login loop the token exists to bypass.
+    if let Some(token) = &resume.oauth_token {
+        cmd.env(trusty_mpm::core::oauth_token::OAUTH_TOKEN_ENV_VAR, token);
+    }
 
     InPlaceOutcome::Result(exec_claude_in_place(cmd))
 }
