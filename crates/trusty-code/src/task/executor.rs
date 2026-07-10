@@ -135,11 +135,29 @@ pub fn spawn_task_run(
 /// `spawn_task_run` and the module docs carry the "why this shape" framing.
 /// What: loads the PM config (a failure here is recorded as a `Failed`
 /// outcome, not a panic); builds the engineer runner + PM registry with the
-/// SAME shape `run_task::execute_run_task` uses; runs the PM `AgentLoop`
-/// (both it and the delegated engineer share the #2056 sink + cancel flag);
-/// prices the transcript per-role; persists the outcome; and transitions the
-/// session to `Finished`/`Cancelled`/`Failed` before clearing the execution
-/// slot.
+/// SAME shape `run_task::execute_run_task` uses; (#2344) retrieves this
+/// session's persistent PM `Transcript` via
+/// `SessionRegistry::begin_pm_transcript` (seeding it fresh on the session's
+/// first run, or appending `params.task` onto its existing history on every
+/// run after that) and drives the PM `AgentLoop` against it via
+/// `AgentLoop::run_with_transcript` instead of the fresh-seeding `run` (both
+/// the PM and the delegated engineer share the #2056 sink + cancel flag);
+/// persists that transcript back UNCONDITIONALLY via
+/// `SessionRegistry::store_pm_transcript` so a future run continues from
+/// here even on failure/cancellation/timeout; prices the accounting
+/// transcript per-role; persists that run outcome (now CUMULATIVE, #2344);
+/// and transitions the session to `Finished`/`Cancelled`/`Failed` before
+/// clearing the execution slot. (#2344) `Finished` is no longer a dead end —
+/// `SessionRegistry::begin_execution` resumes a `Finished` session back to
+/// `Running` on its next `task.run`, which is what makes this whole
+/// persistence chain observable across repeated calls. (#2345) after this
+/// run's turn (prompt + whatever response text it produced, even on
+/// failure/cancellation/timeout) is captured, it is durably enqueued onto the
+/// session's lazily-constructed `session::TurnMemorySink` — fire-and-forget,
+/// never able to block or fail this run — for the ONE-time-per-session dual
+/// write to trusty-memory (`chat_turn_append` + `memory_remember`); see
+/// `session::memory_sink` module docs for the fail-open contract and the
+/// per-run (not yet per-turn) enqueue granularity this ticket settles for.
 async fn run_and_record(
     registry: Arc<SessionRegistry>,
     llm: Arc<dyn LlmClientTrait>,
@@ -246,7 +264,60 @@ async fn run_and_record(
     // above), rather than the PM's own (bash-less) transcript.
     .with_finish_gate(crate::verify_gate::pm_finish_gate(Arc::clone(&transcript)));
 
-    let result = pm_loop.run(&pm_system, &params.task).await;
+    // #2344: seed the PM's persistent conversation on this session's FIRST
+    // run, or append `params.task` as a new user turn onto its EXISTING,
+    // already-growing history on every run after that — see
+    // `SessionRegistry::begin_pm_transcript`'s docs. A failure here can only
+    // be `session_not_found` (the session vanished between `begin_execution`
+    // and here), handled the same way a PM-config load failure is above.
+    let mut pm_transcript =
+        match registry.begin_pm_transcript(&session_id, &pm_system, &params.task) {
+            Ok(t) => t,
+            Err(e) => {
+                finish_with_failure(&registry, &session_id, &format!("PM transcript error: {e}"))
+                    .await;
+                return;
+            }
+        };
+
+    // #2345: mark "how much assistant text exists before this run" so the
+    // turn recorder can later scope its durable dual-write to just THIS
+    // run's new response text via `Transcript::assistant_text_since`, even
+    // though `pm_transcript` is the session's whole cumulative (#2344)
+    // conversation. Fetching the sink here (rather than after the run) is
+    // just convenience — `SessionRegistry::memory_sink_for` is idempotent
+    // and cheap on every call after the first.
+    let turn_mark = pm_transcript.assistant_text_mark();
+    let memory_sink = registry.memory_sink_for(&session_id, &params.project);
+
+    let result = pm_loop
+        .run_with_transcript(&mut pm_transcript, &params.task)
+        .await;
+
+    // #2345: capture this run's new assistant text BEFORE `pm_transcript` is
+    // moved into `store_pm_transcript` below. Per-turn (not per-run) enqueue
+    // is the ideal granularity (#2346 upgrade path — the loop currently has
+    // no per-turn callback/event seam to hook synchronously); a per-RUN batch
+    // of "this run's prompt -> this run's aggregated response text" is the
+    // documented, acceptable fallback for this ticket.
+    let turn_response = pm_transcript.assistant_text_since(turn_mark);
+
+    // #2344: persist the (possibly partial) conversation back onto the
+    // session UNCONDITIONALLY — success, failure, cancellation, or
+    // timeout — so the NEXT `task.run` on this session continues from
+    // exactly where this one left off, rather than silently re-seeding.
+    registry.store_pm_transcript(&session_id, pm_transcript);
+
+    // #2345: durably record this run's turn (fire-and-forget, never blocks
+    // or fails this run — see `session::memory_sink` module docs). Recorded
+    // regardless of `result` (success/failure/cancellation/timeout all still
+    // produce a real prompt and whatever response text WAS generated before
+    // interruption) so the durable record matches `pm_transcript`'s own
+    // "persist unconditionally" contract above. `memory_sink` is `None` only
+    // if the session vanished between `begin_execution` and here.
+    if let Some(sink) = memory_sink {
+        sink.enqueue(session_id.clone(), params.task.clone(), turn_response);
+    }
 
     // #2206: usage/cost are aggregated from every turn that DID complete
     // regardless of `result` — this call already ran unconditionally before

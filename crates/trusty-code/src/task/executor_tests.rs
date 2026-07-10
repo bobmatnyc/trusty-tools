@@ -368,3 +368,108 @@ async fn spawn_task_run_deadline_exceeded_is_distinct_and_preserves_usage() {
         "cost must be populated (not None) on the deadline-exceeded path"
     );
 }
+
+// ── #2344: persistent session-scoped transcript across task.run calls ──────────
+
+/// Poll `registry.status(id)` until it reaches a terminal state, bounded by
+/// a 5s deadline (mirrors the inline poll loop in
+/// `spawn_task_run_deadline_exceeded_is_distinct_and_preserves_usage`).
+async fn wait_for_terminal(registry: &SessionRegistry, id: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let status = registry.status(id).expect("session must exist");
+        if status.status.is_terminal() {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "run did not reach a terminal state within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// A SECOND `spawn_task_run` on the SAME session, issued AFTER the first run
+/// has already `Finished`, must be ACCEPTED (not rejected as terminal, #2344)
+/// and must APPEND onto the first run's turns/usage rather than overwrite
+/// them — this is #2344's headline acceptance criterion exercised through
+/// the real daemon wiring (`spawn_task_run` -> `run_and_record` ->
+/// `SessionRegistry::begin_pm_transcript`/`begin_execution` resumption /
+/// `set_run_outcome` accumulation), not just the unit-level registry/loop
+/// tests.
+///
+/// Why: unit tests already cover each collaborator (`begin_pm_transcript`,
+/// `begin_execution`'s `Finished`-resumption, `set_run_outcome`
+/// accumulation, `AgentLoop::run_with_transcript`'s no-reseed/output-scoping
+/// behaviour) in isolation; this test is the integration proof that
+/// `task::executor` actually wires them together correctly end to end.
+/// What: run 1 completes via the `EchoLlmClient` script; poll to terminal;
+/// snapshot `get_transcript`. Run 2 (a FRESH `EchoLlmClient`, its own script
+/// from call 0 — the daemon builds a new LLM client per `task.run`
+/// regardless of session) targets the SAME `session_id`; assert
+/// `spawn_task_run` accepts it (not `-32003` terminal-session rejection);
+/// poll to terminal again; assert the session's cumulative turn count grew,
+/// run 1's turns are still present unchanged at the front, and usage
+/// accumulated (run 2's usage > 0 on top of run 1's).
+/// Test: this test.
+#[tokio::test]
+async fn spawn_task_run_second_call_after_finish_appends_to_cumulative_transcript() {
+    let registry = Arc::new(SessionRegistry::new());
+    let session = registry.create("t".to_string(), None, None);
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+
+    // Run 1: completes the full delegate -> bash -> stop -> stop script.
+    let llm1: Arc<dyn LlmClientTrait> = Arc::new(EchoLlmClient::new());
+    let p1 = params(&agents, &project, &session.id);
+    spawn_task_run(Arc::clone(&registry), llm1, p1).expect("run 1 must start");
+    wait_for_terminal(&registry, &session.id).await;
+    assert_eq!(
+        registry.status(&session.id).unwrap().status,
+        SessionStatus::Finished
+    );
+
+    let after_run_one = registry
+        .get_transcript(&session.id)
+        .expect("transcript must exist after run 1");
+    assert!(
+        !after_run_one.turns.is_empty(),
+        "run 1 must have recorded turns"
+    );
+
+    // Run 2 against the SAME session_id, issued only AFTER run 1 fully
+    // finished — must be ACCEPTED, not rejected as an already-terminal
+    // session.
+    let llm2: Arc<dyn LlmClientTrait> = Arc::new(EchoLlmClient::new());
+    let mut p2 = params(&agents, &project, &session.id);
+    p2.task = "do something else".to_string();
+    spawn_task_run(Arc::clone(&registry), llm2, p2)
+        .expect("a Finished session must accept a follow-up task.run (#2344)");
+    wait_for_terminal(&registry, &session.id).await;
+    assert_eq!(
+        registry.status(&session.id).unwrap().status,
+        SessionStatus::Finished,
+        "run 2 must also finish successfully"
+    );
+
+    let after_run_two = registry
+        .get_transcript(&session.id)
+        .expect("transcript must exist after run 2");
+    assert!(
+        after_run_two.turns.len() > after_run_one.turns.len(),
+        "run 2 must APPEND more turns onto run 1's, not replace them: {} vs {}",
+        after_run_two.turns.len(),
+        after_run_one.turns.len()
+    );
+    assert_eq!(
+        after_run_two.turns[..after_run_one.turns.len()],
+        after_run_one.turns[..],
+        "run 1's turns must still be present, unchanged, at the front of the cumulative list"
+    );
+    assert!(
+        after_run_two.usage.prompt_tokens > after_run_one.usage.prompt_tokens,
+        "usage must accumulate across runs, not reset: run1={:?} run2={:?}",
+        after_run_one.usage,
+        after_run_two.usage
+    );
+}

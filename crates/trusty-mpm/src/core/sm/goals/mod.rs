@@ -27,7 +27,7 @@ pub mod store;
 
 pub use cache::{GOALS_CACHE_FILE, GoalCache};
 pub use error::{SmGoalError, SmGoalResult};
-pub use memory::{GOAL_TAG, GoalMemory};
+pub use memory::{GOAL_TAG, GoalMemory, NoopGoalMemory};
 pub use model::{Goal, GoalStatus, SessionLink, SessionTaskState};
 pub use store::{SessionUpdate, SmGoalStore};
 

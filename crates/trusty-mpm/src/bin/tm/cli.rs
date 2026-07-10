@@ -1616,6 +1616,14 @@ pub(crate) enum SessionAction {
         /// with a "possible values" hint, not silently forwarded to the daemon.
         #[arg(long, default_value = "claude-code", value_enum)]
         runtime: trusty_mpm::runtime::RuntimeKind,
+        /// Do NOT auto-inject the task into the session pane (#1903/#1299).
+        ///
+        /// By default the task is turnkey: once the session's runtime is ready
+        /// it is typed into the pane so the session starts working immediately.
+        /// Pass `--no-inject` for the legacy metadata-only behavior, where the
+        /// task is stored but you deliver it yourself with `tm session send`.
+        #[arg(long)]
+        no_inject: bool,
     },
     /// List managed sessions (session-manager MVP).
     ///

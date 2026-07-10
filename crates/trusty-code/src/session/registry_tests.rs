@@ -528,6 +528,184 @@ async fn request_cancel_unknown_session_errors() {
     assert_eq!(registry.request_cancel("nope").unwrap_err().code, -32007);
 }
 
+/// (#2344) A `Finished` session is resumable: `begin_execution` must
+/// succeed on it (rather than treating `Finished` as a dead end like
+/// `Cancelled`/`Failed`/`DeadlineExceeded`), transitioning the session back
+/// to `Running` and publishing the same `SessionStatusChanged` event every
+/// other transition in this module publishes.
+///
+/// Why: this is the change that makes "two sequential `task.run` calls on
+/// one session" (#2344's acceptance criterion) possible at all — without it,
+/// the second call would be rejected here before ever reaching
+/// `begin_pm_transcript`.
+#[tokio::test]
+async fn begin_execution_resumes_a_finished_session() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+
+    let _first = registry.begin_execution(&session.id).unwrap();
+    registry.finish_execution(&session.id);
+    registry
+        .finish(&session.id, SessionStatus::Finished)
+        .unwrap();
+    assert_eq!(
+        registry.status(&session.id).unwrap().status,
+        SessionStatus::Finished
+    );
+
+    let mut events = crate::events::subscribe();
+    assert!(
+        registry.begin_execution(&session.id).is_ok(),
+        "a Finished session must be resumable for its next task.run"
+    );
+    assert_eq!(
+        registry.status(&session.id).unwrap().status,
+        SessionStatus::Running,
+        "resuming must transition the session back to Running"
+    );
+
+    let envelope = next_event_for(&mut events, &session.id).await;
+    assert!(
+        matches!(envelope.event, Event::SessionStatusChanged { status, .. } if status == "running"),
+        "resuming must publish the SAME SessionStatusChanged event other transitions do"
+    );
+}
+
+/// `begin_execution` must still reject `Cancelled`/`Failed`/
+/// `DeadlineExceeded` sessions even after the #2344 `Finished`-resumption
+/// change — only a successful finish is resumable.
+#[tokio::test]
+async fn begin_execution_still_rejects_cancelled_failed_and_deadline_exceeded() {
+    let registry = SessionRegistry::new();
+
+    let cancelled = registry.create("t".to_string(), None, None);
+    registry.cancel(&cancelled.id).unwrap();
+    assert_eq!(
+        registry.begin_execution(&cancelled.id).unwrap_err().code,
+        -32003
+    );
+
+    let failed = registry.create("t".to_string(), None, None);
+    registry.finish(&failed.id, SessionStatus::Failed).unwrap();
+    assert_eq!(
+        registry.begin_execution(&failed.id).unwrap_err().code,
+        -32003
+    );
+
+    let deadline = registry.create("t".to_string(), None, None);
+    registry
+        .finish(&deadline.id, SessionStatus::DeadlineExceeded)
+        .unwrap();
+    assert_eq!(
+        registry.begin_execution(&deadline.id).unwrap_err().code,
+        -32003
+    );
+}
+
+// ── #2344: persistent PM transcript ─────────────────────────────────────────────
+
+/// `begin_pm_transcript` seeds a fresh system+user pair on a session's FIRST
+/// call.
+#[tokio::test]
+async fn begin_pm_transcript_seeds_on_first_call() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+
+    let transcript = registry
+        .begin_pm_transcript(&session.id, "you are the pm", "first task")
+        .unwrap();
+    let messages = transcript.messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].role, "system");
+    assert_eq!(messages[0].content.as_deref(), Some("you are the pm"));
+    assert_eq!(messages[1].role, "user");
+    assert_eq!(messages[1].content.as_deref(), Some("first task"));
+}
+
+/// `begin_pm_transcript`'s second call appends the new task as a user turn
+/// onto the EXISTING history stored by `store_pm_transcript`, without
+/// re-adding a system message — the core "two sequential task.run calls
+/// share one growing Transcript" acceptance criterion.
+#[tokio::test]
+async fn begin_pm_transcript_appends_on_second_call() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+
+    let mut transcript = registry
+        .begin_pm_transcript(&session.id, "you are the pm", "first task")
+        .unwrap();
+    transcript.push_assistant(Some("first answer".into()), &[]);
+    registry.store_pm_transcript(&session.id, transcript);
+
+    let continued = registry
+        .begin_pm_transcript(&session.id, "a DIFFERENT system prompt", "second task")
+        .unwrap();
+    let messages = continued.messages();
+    assert_eq!(messages.len(), 4, "system, user, assistant, new user");
+    assert_eq!(messages[0].role, "system");
+    assert_eq!(
+        messages[0].content.as_deref(),
+        Some("you are the pm"),
+        "the ORIGINAL seed's system message must stay authoritative, not the second call's"
+    );
+    assert_eq!(messages[1].content.as_deref(), Some("first task"));
+    assert_eq!(messages[2].role, "assistant");
+    assert_eq!(messages[2].content.as_deref(), Some("first answer"));
+    assert_eq!(messages[3].role, "user");
+    assert_eq!(messages[3].content.as_deref(), Some("second task"));
+    assert_eq!(
+        messages.iter().filter(|m| m.role == "system").count(),
+        1,
+        "must never end up with two system messages across runs"
+    );
+}
+
+/// `begin_pm_transcript` on an unknown session must error.
+#[tokio::test]
+async fn begin_pm_transcript_unknown_session_errors() {
+    let registry = SessionRegistry::new();
+    let err = registry
+        .begin_pm_transcript("nope", "sys", "task")
+        .unwrap_err();
+    assert_eq!(err.code, -32007);
+}
+
+/// `memory_sink_for` (#2345) must construct exactly ONE sink for a session
+/// and return the SAME `Arc` on every subsequent call — proving the sink (and
+/// therefore its background drain task) survives across repeated
+/// `task.run`s on one session rather than being rebuilt per run.
+#[tokio::test]
+async fn memory_sink_for_reuses_the_same_sink_across_calls() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+    let project_dir = tempfile::TempDir::new().unwrap();
+
+    let first = registry
+        .memory_sink_for(&session.id, project_dir.path())
+        .expect("first call constructs a sink");
+    let second = registry
+        .memory_sink_for(&session.id, project_dir.path())
+        .expect("second call reuses the sink");
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "memory_sink_for must return the SAME Arc across calls on one session"
+    );
+}
+
+/// `memory_sink_for` on an unknown session must return `None`, not panic
+/// (best-effort, mirrors `set_run_outcome`'s framing).
+#[tokio::test]
+async fn memory_sink_for_unknown_session_returns_none() {
+    let registry = SessionRegistry::new();
+    let project_dir = tempfile::TempDir::new().unwrap();
+    assert!(
+        registry
+            .memory_sink_for("nope", project_dir.path())
+            .is_none()
+    );
+}
+
 /// `set_run_outcome` must store the transcript/usage/cost verbatim, and must
 /// not panic when the session no longer exists.
 #[tokio::test]
@@ -557,6 +735,63 @@ async fn set_run_outcome_stores_transcript_and_usage() {
 
     // A no-op on a missing session, not a panic.
     registry.set_run_outcome("nope", turns, crate::perf::TokenUsage::default(), None);
+}
+
+/// `set_run_outcome` must ACCUMULATE across two calls (#2344): the second
+/// run's turns are appended (not replacing the first run's), and usage/cost
+/// are added onto the running total — `session.get_transcript` must reflect
+/// the FULL cumulative history, not just the last run.
+#[tokio::test]
+async fn set_run_outcome_accumulates_across_two_calls() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+
+    let run_one_turn = crate::run_task::TurnRecord {
+        role: "pm".to_string(),
+        model: "openai/gpt-4o-mini".to_string(),
+        text: "run one".to_string(),
+        tool_calls: vec![],
+        ran_test_command: false,
+        usage: crate::perf::TokenUsage::new(10, 5, 0, 0),
+    };
+    registry.set_run_outcome(
+        &session.id,
+        vec![run_one_turn.clone()],
+        crate::perf::TokenUsage::new(10, 5, 0, 0),
+        Some(0.01),
+    );
+
+    let run_two_turn = crate::run_task::TurnRecord {
+        role: "pm".to_string(),
+        model: "openai/gpt-4o-mini".to_string(),
+        text: "run two".to_string(),
+        tool_calls: vec![],
+        ran_test_command: false,
+        usage: crate::perf::TokenUsage::new(20, 8, 0, 0),
+    };
+    registry.set_run_outcome(
+        &session.id,
+        vec![run_two_turn.clone()],
+        crate::perf::TokenUsage::new(20, 8, 0, 0),
+        Some(0.02),
+    );
+
+    let stored = registry.get_transcript(&session.id).unwrap();
+    assert_eq!(
+        stored.turns,
+        vec![run_one_turn, run_two_turn],
+        "both runs' turns must be present, in order, not just the last run's"
+    );
+    assert_eq!(
+        stored.usage,
+        crate::perf::TokenUsage::new(30, 13, 0, 0),
+        "usage must be the SUM of both runs, not the last run's alone"
+    );
+    assert_eq!(
+        stored.cost_usd,
+        Some(0.03),
+        "cost must be the SUM of both runs' cost"
+    );
 }
 
 /// `get_transcript` on a session that has never run a task must return an

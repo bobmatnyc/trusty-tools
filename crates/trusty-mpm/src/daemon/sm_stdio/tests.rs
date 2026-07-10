@@ -154,9 +154,9 @@ fn agent_degraded(
 
 /// Build a dispatcher over the given agent + a fresh mock session control.
 ///
-/// Why: the feature-gated goal-store field makes construction differ by build;
-/// this helper hides that so the tests read identically. Under `sm-memory` it
-/// loads an empty goal store over a no-op palace + the tempdir.
+/// Why: the goal store is feature-independent (#1477), so this wires an in-memory
+/// no-op store in EVERY build — the `sm.goals.*` / `sm.delegate` / `sm.context.get`
+/// tests read identically regardless of the `sm-memory` feature.
 fn dispatcher_with(
     agent: Arc<SessionManagerAgent>,
     cfg: SessionManagerConfig,
@@ -164,35 +164,22 @@ fn dispatcher_with(
     control: Arc<MockSessionControl>,
 ) -> SmDispatcher {
     let sessions: Arc<dyn SessionControl> = control;
-    #[cfg(feature = "sm-memory")]
     let goals = Some(test_goal_store(data_root));
-    #[cfg(not(feature = "sm-memory"))]
-    let goals = None;
     SmDispatcher::new(agent, cfg, data_root.to_path_buf(), sessions, goals)
 }
 
-/// Build an in-memory goal store over a no-op palace for `sm.goals.*` tests.
+/// Build an in-memory goal store over the no-op palace seam for the dispatch tests.
 ///
-/// Why: the goal-store methods must round-trip without a real palace (no ONNX);
-/// a no-op [`GoalMemory`] gives the SM-6 store a seam that always succeeds with no
-/// durable entries, so creates/updates are visible in-memory within one test.
-#[cfg(feature = "sm-memory")]
+/// Why: the goal-store methods must round-trip without a real palace (no ONNX) in
+/// both builds; the always-compiled [`NoopGoalMemory`] gives the SM-6 store a seam
+/// that succeeds with no durable entries, so creates/updates are visible in-memory
+/// within one test.
 fn test_goal_store(
     data_root: &std::path::Path,
 ) -> std::sync::Arc<tokio::sync::Mutex<crate::core::sm::SmGoalStore>> {
-    use crate::core::sm::{GoalMemory, SmGoalStore};
+    use crate::core::sm::{NoopGoalMemory, SmGoalStore};
 
-    struct NoopMem;
-    #[async_trait]
-    impl GoalMemory for NoopMem {
-        async fn remember_goal(&self, _json: String, _tag: &str) -> Result<(), String> {
-            Ok(())
-        }
-        async fn list_goals(&self, _tag: &str) -> Result<Vec<String>, String> {
-            Ok(Vec::new())
-        }
-    }
-    let store = SmGoalStore::new(Arc::new(NoopMem), data_root.to_path_buf());
+    let store = SmGoalStore::new(Arc::new(NoopGoalMemory), data_root.to_path_buf());
     std::sync::Arc::new(tokio::sync::Mutex::new(store))
 }
 
@@ -754,8 +741,8 @@ async fn scripted_chat_launch_get_stop_sequence() {
         .await;
     assert_eq!(ok_result(&stop, 43)["ok"], true);
 
-    // 5) goal-update (only meaningful under sm-memory; otherwise it returns the
-    //    graceful unavailable error, which is itself a valid framed response).
+    // 5) goal create + update — works in every build now (#1477; in-memory store
+    //    on the default build, palace-backed under sm-memory).
     let create = d
         .dispatch(req(
             44,
@@ -763,36 +750,29 @@ async fn scripted_chat_launch_get_stop_sequence() {
             json!({ "description": "ship X" }),
         ))
         .await;
-    #[cfg(feature = "sm-memory")]
-    {
-        let goal = ok_result(&create, 44);
-        let goal_id = goal["goal"]["id"].as_str().unwrap().to_string();
-        let upd = d
-            .dispatch(req(
-                45,
-                "sm.goals.update",
-                json!({ "id": goal_id, "note": "kicked off" }),
-            ))
-            .await;
-        assert!(
-            !ok_result(&upd, 45)["goal"]["notes"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-    }
-    #[cfg(not(feature = "sm-memory"))]
-    {
-        err_code(&create, 44, CODE_UNAVAILABLE);
-    }
+    let goal = ok_result(&create, 44);
+    let goal_id = goal["goal"]["id"].as_str().unwrap().to_string();
+    let upd = d
+        .dispatch(req(
+            45,
+            "sm.goals.update",
+            json!({ "id": goal_id, "note": "kicked off" }),
+        ))
+        .await;
+    assert!(
+        !ok_result(&upd, 45)["goal"]["notes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
 }
 
-// ── Feature-gated goals / context ───────────────────────────────────────────────
+// ── goals / context (feature-independent since #1477) ───────────────────────────
 
-/// Why: `sm.goals.*` round-trip under `sm-memory` (create then list) and degrade
-/// to a graceful unavailable error without it. This pins both branches.
-/// What: under the feature, creates a goal and lists it; without it, asserts the
-/// unavailable code on `sm.goals.list`.
+/// Why: `sm.goals.*` round-trip in EVERY build (#1477) — create then list — because
+/// the goal store is feature-independent (in-memory on the default build,
+/// palace-backed under `sm-memory`).
+/// What: creates a goal and lists it, asserting the created goal is returned.
 /// Test: this is the test.
 #[tokio::test]
 async fn goals_feature_branches() {
@@ -806,32 +786,25 @@ async fn goals_feature_branches() {
         Arc::new(MockSessionControl::default()),
     );
 
-    #[cfg(feature = "sm-memory")]
-    {
-        let create = d
-            .dispatch(req(
-                50,
-                "sm.goals.create",
-                json!({ "description": "g1", "acceptance": ["pr merged"] }),
-            ))
-            .await;
-        assert_eq!(ok_result(&create, 50)["goal"]["description"], "g1");
+    let create = d
+        .dispatch(req(
+            50,
+            "sm.goals.create",
+            json!({ "description": "g1", "acceptance": ["pr merged"] }),
+        ))
+        .await;
+    assert_eq!(ok_result(&create, 50)["goal"]["description"], "g1");
 
-        let list = d.dispatch(req(51, "sm.goals.list", json!({}))).await;
-        let goals = ok_result(&list, 51)["goals"].as_array().unwrap().clone();
-        assert_eq!(goals.len(), 1, "the created goal is listed");
-    }
-    #[cfg(not(feature = "sm-memory"))]
-    {
-        let list = d.dispatch(req(52, "sm.goals.list", json!({}))).await;
-        err_code(&list, 52, CODE_UNAVAILABLE);
-    }
+    let list = d.dispatch(req(51, "sm.goals.list", json!({}))).await;
+    let goals = ok_result(&list, 51)["goals"].as_array().unwrap().clone();
+    assert_eq!(goals.len(), 1, "the created goal is listed");
 }
 
-/// Why: `sm.context.get` returns the rolling context state under `sm-memory`
-/// (after a chat populates it) and degrades to unavailable without the feature.
-/// What: under the feature, runs a chat then `sm.context.get` for the same
-/// conv_id and asserts the four context fields; without it, asserts unavailable.
+/// Why: `sm.context.get` returns the rolling context state in EVERY build (#1477)
+/// — the context engine never needed the SM palace, it depends only on serde + the
+/// provider trait.
+/// What: runs a chat then `sm.context.get` for the same conv_id and asserts the
+/// four context fields are present with at least one recorded round.
 /// Test: this is the test.
 #[tokio::test]
 async fn context_get_feature_branches() {
@@ -845,32 +818,22 @@ async fn context_get_feature_branches() {
         Arc::new(MockSessionControl::default()),
     );
 
-    #[cfg(feature = "sm-memory")]
-    {
-        // Populate a conversation first so the context engine has a round.
-        let _ = d
-            .dispatch(req(
-                60,
-                "sm.chat",
-                json!({ "message": "hi", "conv_id": "ctx-1" }),
-            ))
-            .await;
-        let ctx = d
-            .dispatch(req(61, "sm.context.get", json!({ "conv_id": "ctx-1" })))
-            .await;
-        let result = ok_result(&ctx, 61);
-        assert!(result["recent_rounds"].is_array());
-        assert!(result["total_rounds"].as_u64().unwrap() >= 1);
-        assert!(result["token_estimate"].is_number());
-        assert!(result.get("compressed_context").is_some());
-    }
-    #[cfg(not(feature = "sm-memory"))]
-    {
-        let ctx = d
-            .dispatch(req(62, "sm.context.get", json!({ "conv_id": "ctx-1" })))
-            .await;
-        err_code(&ctx, 62, CODE_UNAVAILABLE);
-    }
+    // Populate a conversation first so the context engine has a round.
+    let _ = d
+        .dispatch(req(
+            60,
+            "sm.chat",
+            json!({ "message": "hi", "conv_id": "ctx-1" }),
+        ))
+        .await;
+    let ctx = d
+        .dispatch(req(61, "sm.context.get", json!({ "conv_id": "ctx-1" })))
+        .await;
+    let result = ok_result(&ctx, 61);
+    assert!(result["recent_rounds"].is_array());
+    assert!(result["total_rounds"].as_u64().unwrap() >= 1);
+    assert!(result["token_estimate"].is_number());
+    assert!(result.get("compressed_context").is_some());
 }
 
 // ── sm.delegate (SM-8 delegation loop) — §1A.2 step-1 e2e ───────────────────────
@@ -882,7 +845,6 @@ async fn context_get_feature_branches() {
 /// do_work JSON lets the dispatcher test drive any path deterministically.
 /// What: builds an agent (feature-aware) over a [`MockResolver`] returning a
 /// provider that always replies with `decision_json`.
-#[cfg(feature = "sm-memory")]
 fn agent_with_decision(
     cfg: SessionManagerConfig,
     data_root: &std::path::Path,
@@ -904,7 +866,6 @@ fn agent_with_decision(
 /// dispatcher-level e2e exercises the gate passing, not just the agent-level test.
 /// What: `launch` mints an id and records params (so the goal links); `get`
 /// returns the evidence pane; `send` records the delivery.
-#[cfg(feature = "sm-memory")]
 #[derive(Default)]
 struct EvidenceControl {
     evidence: String,
@@ -912,7 +873,6 @@ struct EvidenceControl {
     next: std::sync::atomic::AtomicUsize,
 }
 
-#[cfg(feature = "sm-memory")]
 #[async_trait]
 impl SessionControl for EvidenceControl {
     async fn launch(&self, _params: LaunchParams) -> Result<Value, SessionControlError> {
@@ -978,7 +938,6 @@ impl SessionControl for EvidenceControl {
 }
 
 /// Build a dispatcher over an explicit `Arc<dyn SessionControl>` (e2e helper).
-#[cfg(feature = "sm-memory")]
 fn dispatcher_with_dyn_control(
     agent: Arc<SessionManagerAgent>,
     cfg: SessionManagerConfig,
@@ -995,8 +954,7 @@ fn dispatcher_with_dyn_control(
 /// What: scripts a delegate decision + an evidence-bearing control, dispatches
 /// `sm.delegate`, and asserts the launched session, task delivery (#1299), and
 /// `goal_done == true`; then `sm.goals.list` shows the goal as `done`.
-/// Test: this is the test.
-#[cfg(feature = "sm-memory")]
+/// Test: this is the test (feature-independent since #1477).
 #[tokio::test]
 async fn delegate_end_to_end_launch_observe_verify_close() {
     let tmp = TempDir::new().unwrap();
@@ -1057,8 +1015,7 @@ async fn delegate_end_to_end_launch_observe_verify_close() {
 /// agent unit test.
 /// What: scripts a delegate decision + the default (no-evidence) control;
 /// dispatches `sm.delegate` and asserts a launch happened but `goal_done` is false.
-/// Test: this is the test.
-#[cfg(feature = "sm-memory")]
+/// Test: this is the test (feature-independent since #1477).
 #[tokio::test]
 async fn delegate_gate_blocks_without_evidence_over_wire() {
     let tmp = TempDir::new().unwrap();
@@ -1098,8 +1055,7 @@ async fn delegate_gate_blocks_without_evidence_over_wire() {
 /// and redirected, never executed. Proves SP1–SP5 enforcement reaches the surface.
 /// What: scripts a `do_work` decision; dispatches `sm.delegate`; asserts nothing
 /// launched and the reply redirects to launching a session.
-/// Test: this is the test.
-#[cfg(feature = "sm-memory")]
+/// Test: this is the test (feature-independent since #1477).
 #[tokio::test]
 async fn delegate_refuses_direct_work_over_wire() {
     let tmp = TempDir::new().unwrap();
@@ -1125,8 +1081,8 @@ async fn delegate_refuses_direct_work_over_wire() {
 /// Why: a degraded SM (no provider) must surface `sm.delegate` as a graceful
 /// JSON-RPC unavailable error (the DECOMPOSE reasoning cannot run), never a panic.
 /// What: builds a degraded agent and asserts `sm.delegate` → CODE_UNAVAILABLE.
-/// Test: this is the test.
-#[cfg(feature = "sm-memory")]
+/// Test: this is the test (feature-independent since #1477: the degraded provider,
+/// not the missing goal store, is what makes delegate unavailable).
 #[tokio::test]
 async fn delegate_degraded_is_unavailable() {
     let tmp = TempDir::new().unwrap();
@@ -1142,28 +1098,6 @@ async fn delegate_degraded_is_unavailable() {
         .dispatch(req(74, "sm.delegate", json!({ "message": "anything" })))
         .await;
     err_code(&resp, 74, CODE_UNAVAILABLE);
-}
-
-/// Why: in the no-memory build `sm.delegate` (which persists goals) is gracefully
-/// unavailable, not a compile/runtime failure.
-/// What: dispatches `sm.delegate` and asserts CODE_UNAVAILABLE.
-/// Test: this is the test.
-#[cfg(not(feature = "sm-memory"))]
-#[tokio::test]
-async fn delegate_unavailable_without_feature() {
-    let tmp = TempDir::new().unwrap();
-    let cfg = enabled_config();
-    let agent = agent_with_provider(cfg.clone(), tmp.path());
-    let d = dispatcher_with(
-        agent,
-        cfg,
-        tmp.path(),
-        Arc::new(MockSessionControl::default()),
-    );
-    let resp = d
-        .dispatch(req(75, "sm.delegate", json!({ "message": "anything" })))
-        .await;
-    err_code(&resp, 75, CODE_UNAVAILABLE);
 }
 
 // ── stdout cleanliness guard ────────────────────────────────────────────────────

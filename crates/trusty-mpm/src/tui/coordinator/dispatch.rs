@@ -216,6 +216,7 @@ fn route_new(args: &str) -> Dispatch {
         task: task.to_string(),
         name_hint: None,
         runtime: None,
+        inject_task: None,
     })
 }
 

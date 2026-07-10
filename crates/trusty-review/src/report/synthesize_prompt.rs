@@ -191,8 +191,16 @@ fn build_digest(model: &ReportModel) -> String {
         msg.push('\n');
     }
 
+    // #2340: analyst focus directives steer EMPHASIS only — they never relax the
+    // grounding rules (the numeric guardrail and no-green exclusion still bind).
+    if let Some(instructions) = &model.instructions {
+        msg.push_str("\n## Analyst focus directives (steer EMPHASIS only — never invent to satisfy them)\n\n");
+        msg.push_str(instructions);
+        msg.push('\n');
+    }
+
     msg.push_str(
-        "Synthesise the narrative sections from the data above, obeying every rule in the system prompt.\n",
+        "\nSynthesise the narrative sections from the data above, obeying every rule in the system prompt. Where the analyst focus directives above are relevant, weight the executive summary and RED/AMBER prose toward them — but only using figures and findings actually present in the data.\n",
     );
     msg
 }

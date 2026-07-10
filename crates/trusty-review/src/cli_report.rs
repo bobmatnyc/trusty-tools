@@ -19,8 +19,9 @@ use clap::Parser;
 use trusty_review::config::ReviewConfig;
 use trusty_review::llm::build_provider;
 use trusty_review::report::{
-    CorpusSnapshot, Reporter, TemplateLoader, benchmark, load_manifest, manifest::Manifest,
-    model::ReportModel, synthesize::Synthesis, synthesize::Synthesizer, template::DEFAULT_TEMPLATE,
+    CorpusSnapshot, Instructions, Reporter, TemplateLoader, benchmark, load_instructions,
+    load_manifest, manifest::Manifest, model::ReportModel, synthesize::Synthesis,
+    synthesize::Synthesizer, template::DEFAULT_TEMPLATE,
 };
 
 // ─── Report args ──────────────────────────────────────────────────────────────
@@ -41,6 +42,13 @@ pub struct ReportArgs {
     /// Precedence: this flag > manifest `[report].template` > default.
     #[arg(long, value_name = "NAME")]
     pub template: Option<String>,
+
+    /// Path to a free-form analyst instructions markdown file (#2340).  The brief
+    /// is recorded verbatim in the report and, under `--synthesize`, injected as
+    /// focus directives.  Precedence: this flag > manifest `[report].instructions`.
+    /// A missing file is an error; an empty file is a warning (proceeds as absent).
+    #[arg(long, value_name = "FILE")]
+    pub instructions: Option<PathBuf>,
 
     /// Output directory for the generated report pair (`{slug}.md`/`.json`).
     #[arg(long, value_name = "DIR", default_value = "./reports")]
@@ -106,8 +114,23 @@ pub async fn cmd_report(config: ReviewConfig, args: ReportArgs) -> Result<()> {
         .load(&template_name)
         .with_context(|| format!("failed to load template '{template_name}'"))?;
 
-    let mut model = ReportModel::build(&manifest, &args.manifest, &template_name)
-        .context("failed to assemble report model")?;
+    // Analyst instructions (#2340): CLI flag wins over the manifest key; a
+    // relative manifest path resolves against the manifest directory.
+    let instructions = load_report_instructions(&args, &manifest)?;
+    if let Some(instr) = &instructions {
+        eprintln!(
+            "[trusty-review report] Analyst instructions: {}",
+            instr.source.display()
+        );
+    }
+
+    let mut model = ReportModel::build(
+        &manifest,
+        &args.manifest,
+        &template_name,
+        instructions.as_ref(),
+    )
+    .context("failed to assemble report model")?;
 
     // M2: opt-in LLM synthesis of narrative sections.  Fails closed — on any
     // provider/parse/guardrail failure the deterministic output stands and the
@@ -215,6 +238,38 @@ fn resolve_corpus_dir(args: &ReportArgs, manifest: &Manifest) -> Result<PathBuf>
             "no benchmark corpus directory: pass --corpus <dir> or set [report].corpus (the per-user default is unavailable on this platform)"
         )
     })
+}
+
+/// Resolve and load the analyst instructions brief, honouring precedence (#2340).
+///
+/// Why: the brief may come from the `--instructions` flag or the manifest
+/// `[report].instructions` key; the flag wins, and a manifest-relative path is
+/// resolved against the manifest directory so authors write portable paths.
+/// What: returns `Ok(None)` when no source is configured; otherwise loads via
+/// [`load_instructions`] (missing file → error; empty file → warn + `None`).
+/// Test: instructions loading/validation is covered by `instructions_tests.rs`;
+/// precedence is exercised by `tests::report_args_parse_defaults` shape.
+fn load_report_instructions(
+    args: &ReportArgs,
+    manifest: &Manifest,
+) -> Result<Option<Instructions>> {
+    let manifest_dir = args.manifest.parent().unwrap_or_else(|| Path::new("."));
+    let resolved: Option<PathBuf> = match &args.instructions {
+        Some(p) => Some(p.clone()),
+        None => manifest.report.instructions.as_ref().map(|rel| {
+            let p = PathBuf::from(rel);
+            if p.is_absolute() {
+                p
+            } else {
+                manifest_dir.join(p)
+            }
+        }),
+    };
+    match resolved {
+        Some(path) => Ok(load_instructions(&path)
+            .with_context(|| format!("failed to load analyst instructions {}", path.display()))?),
+        None => Ok(None),
+    }
 }
 
 /// Build one corpus snapshot per analyzed repository that has metrics.

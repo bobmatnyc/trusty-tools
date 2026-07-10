@@ -38,6 +38,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::agent_loop::Transcript;
 use crate::events::{Event, SessionEventEnvelope};
 use crate::jsonrpc::{NotifySender, RpcError};
 use crate::mode::HarnessMode;
@@ -75,12 +76,35 @@ struct SessionEntry {
     /// #2056: the run transcript populated once an execution finishes;
     /// exposed read-only via `session.get_transcript` (#2058,
     /// `Self::get_transcript`). Empty until the first execution completes.
+    /// (#2344) CUMULATIVE across every run on this session — each
+    /// `set_run_outcome` call APPENDS its turns rather than overwriting.
     transcript: Vec<TurnRecord>,
-    /// #2056: aggregated token usage from the last completed execution.
+    /// #2056: aggregated token usage from every completed execution on this
+    /// session. (#2344) CUMULATIVE — each `set_run_outcome` call adds its
+    /// usage onto the running total rather than overwriting it.
     usage: TokenUsage,
-    /// #2056: summed USD cost from the last completed execution (`None` if
-    /// pricing was unavailable — mirrors `run_task::RunReport::cost_usd`).
+    /// #2056: summed USD cost across every completed execution on this
+    /// session (`None` if pricing was never available for any run — mirrors
+    /// `run_task::RunReport::cost_usd`). (#2344) CUMULATIVE, same rule as
+    /// `usage`.
     cost_usd: Option<f64>,
+    /// (#2344) The PM's persistent, cumulative conversation `Transcript` —
+    /// distinct from `transcript` above (which is the flat `TurnRecord`
+    /// accounting view). `None` until the session's first `task.run` seeds
+    /// it via [`SessionRegistry::begin_pm_transcript`]; briefly taken back
+    /// out to `None` while a run is in flight (safe — `execution.is_some()`
+    /// already guarantees at most one run at a time per session) and
+    /// restored by [`SessionRegistry::store_pm_transcript`] once that run
+    /// ends, regardless of outcome, so the NEXT run continues from exactly
+    /// where this one left off.
+    pm_transcript: Option<Transcript>,
+    /// (#2345) The session's durable turn-recorder sink — `None` until the
+    /// session's first `task.run` lazily constructs it via
+    /// [`SessionRegistry::memory_sink_for`] (the project directory, needed to
+    /// derive the palace id, is only known once a run starts). Built once and
+    /// reused for the life of the session (see `memory_sink` module docs for
+    /// why its background drain task must outlive any single run).
+    memory_sink: Option<Arc<super::memory_sink::TurnMemorySink>>,
 }
 
 /// #2056: bookkeeping for one in-flight background task execution.
@@ -171,6 +195,8 @@ impl SessionRegistry {
                     transcript: Vec::new(),
                     usage: TokenUsage::default(),
                     cost_usd: None,
+                    pm_transcript: None,
+                    memory_sink: None,
                 },
             );
         }
@@ -416,41 +442,75 @@ impl SessionRegistry {
             .ok_or_else(|| RpcError::session_not_found(id))
     }
 
-    /// Begin tracking a new background task execution for `id` (#2056).
+    /// Begin tracking a new background task execution for `id` (#2056; #2344
+    /// resumption semantics).
     ///
     /// Why: `task.run` (and `session.send` on an idle session) must not start
     /// a second overlapping run for the same session, and the returned flag
     /// is how the executor's `AgentLoop`(s) later observe cancellation.
+    /// (#2344) A session that already `Finished` a previous run is NOT dead —
+    /// per the infinite-sessions design, it is simply idle and ready for its
+    /// next `task.run` to continue the SAME persistent conversation
+    /// (`Self::begin_pm_transcript`). Only `Cancelled`/`Failed`/
+    /// `DeadlineExceeded` remain genuinely terminal: those represent a broken
+    /// run, and resuming one still requires a fresh session.
     /// What: errors with `session_not_found` if `id` is unknown,
-    /// `invalid_argument` if the session is already terminal or already has
-    /// an execution in flight. On success, stores a fresh `Arc<AtomicBool>`
-    /// cancel flag (initially `false`) with `handle: None` — the caller
-    /// attaches the real `JoinHandle` via
+    /// `invalid_argument` if the session is `Cancelled`/`Failed`/
+    /// `DeadlineExceeded`, or already has an execution in flight — this
+    /// SINGLE in-flight-execution guard is also this ticket's concurrency
+    /// guard for `pm_transcript`: two overlapping `task.run` calls on one
+    /// session can never both hold the transcript, because the second one is
+    /// rejected here before either reaches `begin_pm_transcript`. On success,
+    /// stores a fresh `Arc<AtomicBool>` cancel flag (initially `false`) with
+    /// `handle: None` — the caller attaches the real `JoinHandle` via
     /// [`Self::attach_execution_handle`] immediately after spawning, since
-    /// the handle cannot exist before that — and returns the flag.
+    /// the handle cannot exist before that — and returns the flag. If the
+    /// session was `Finished` (resuming), transitions it back to `Running`
+    /// and publishes `Event::SessionStatusChanged` — matching the transition
+    /// every other status change in this module publishes.
     /// Test: `registry_tests::begin_execution_rejects_second_overlapping_run`,
     /// `registry_tests::begin_execution_rejects_terminal_session`,
-    /// `registry_tests::begin_execution_unknown_session_errors`.
+    /// `registry_tests::begin_execution_unknown_session_errors`,
+    /// `registry_tests::begin_execution_resumes_a_finished_session`.
     pub fn begin_execution(&self, id: &str) -> Result<Arc<AtomicBool>, RpcError> {
-        let mut sessions = self.lock();
-        let entry = sessions
-            .get_mut(id)
-            .ok_or_else(|| RpcError::session_not_found(id))?;
-        if entry.session.status.is_terminal() {
-            return Err(RpcError::invalid_argument(format!(
-                "session {id} is already terminal"
-            )));
+        let (cancel, resumed) = {
+            let mut sessions = self.lock();
+            let entry = sessions
+                .get_mut(id)
+                .ok_or_else(|| RpcError::session_not_found(id))?;
+            if matches!(
+                entry.session.status,
+                SessionStatus::Cancelled | SessionStatus::Failed | SessionStatus::DeadlineExceeded
+            ) {
+                return Err(RpcError::invalid_argument(format!(
+                    "session {id} is already terminal"
+                )));
+            }
+            if entry.execution.is_some() {
+                return Err(RpcError::invalid_argument(format!(
+                    "session {id} already has a task running"
+                )));
+            }
+            let resumed = entry.session.status == SessionStatus::Finished;
+            if resumed {
+                entry.session.status = SessionStatus::Running;
+            }
+            let cancel = Arc::new(AtomicBool::new(false));
+            entry.execution = Some(Execution {
+                cancel: Arc::clone(&cancel),
+                handle: None,
+            });
+            (cancel, resumed)
+        };
+        if resumed {
+            self.record(
+                id,
+                Event::SessionStatusChanged {
+                    session_id: id.to_string(),
+                    status: SessionStatus::Running.as_str().to_string(),
+                },
+            );
         }
-        if entry.execution.is_some() {
-            return Err(RpcError::invalid_argument(format!(
-                "session {id} already has a task running"
-            )));
-        }
-        let cancel = Arc::new(AtomicBool::new(false));
-        entry.execution = Some(Execution {
-            cancel: Arc::clone(&cancel),
-            handle: None,
-        });
         Ok(cancel)
     }
 
@@ -527,13 +587,23 @@ impl SessionRegistry {
     }
 
     /// Persist a finished execution's transcript/usage/cost into the session
-    /// (#2056).
+    /// (#2056; #2344 made CUMULATIVE across runs).
     ///
     /// Why: populates the storage `Self::get_transcript` (#2058) reads back
-    /// over the wire.
+    /// over the wire. (#2344) A session's turns/usage/cost now accumulate
+    /// across every `task.run` rather than the last run overwriting the
+    /// previous one's — the whole point of a persistent session is that
+    /// `session.get_transcript` shows the FULL conversation, not just its
+    /// most recent slice.
     /// What: best-effort — a no-op if `id` is already gone (e.g. the daemon
-    /// is shutting down mid-run).
-    /// Test: `registry_tests::set_run_outcome_stores_transcript_and_usage`.
+    /// is shutting down mid-run). `transcript` is APPENDED onto the existing
+    /// turns (not replacing them); `usage` is added field-wise via
+    /// `TokenUsage::add` (the same accumulator `run_task::aggregate_usage_per_role`
+    /// uses internally); `cost_usd` sums the two `Option<f64>`s the same way
+    /// `TokenUsage::add` combines its own `cost_usd` field (`Some`+`Some` ->
+    /// sum, either `Some` alone passes through, `None`+`None` stays `None`).
+    /// Test: `registry_tests::set_run_outcome_stores_transcript_and_usage`,
+    /// `registry_tests::set_run_outcome_accumulates_across_two_calls`.
     pub fn set_run_outcome(
         &self,
         id: &str,
@@ -543,9 +613,80 @@ impl SessionRegistry {
     ) {
         let mut sessions = self.lock();
         if let Some(entry) = sessions.get_mut(id) {
-            entry.transcript = transcript;
-            entry.usage = usage;
-            entry.cost_usd = cost_usd;
+            entry.transcript.extend(transcript);
+            entry.usage.add(&usage);
+            entry.cost_usd = match (entry.cost_usd, cost_usd) {
+                (Some(a), Some(b)) => Some(a + b),
+                (Some(a), None) | (None, Some(a)) => Some(a),
+                (None, None) => None,
+            };
+        }
+    }
+
+    /// Retrieve this session's persistent PM conversation `Transcript`,
+    /// seeding it on the session's FIRST `task.run` and appending `task` as a
+    /// new user turn onto the existing history on every SUBSEQUENT one
+    /// (#2344 — the infinite-sessions conversation-continuity entry point).
+    ///
+    /// Why: `task::executor::run_and_record` must hand the PM's `AgentLoop`
+    /// the SAME growing `Transcript` every run drives via
+    /// `AgentLoop::run_with_transcript`, rather than reseeding fresh each
+    /// time (the pre-#2344 behaviour). Taking ownership OUT of the entry
+    /// (rather than cloning) lets the caller drive the loop against it
+    /// directly with no extra copy; briefly leaving `None` in storage while a
+    /// run is active can never be observed by a second concurrent caller —
+    /// `Self::begin_execution`'s single-in-flight-run guard already rejects a
+    /// second `task.run` on the same session before it would ever reach this
+    /// method (see that method's docs).
+    /// What: `Err(session_not_found)` if `id` is unknown. If `pm_transcript`
+    /// is `None` (the session has never run, or is between runs having been
+    /// `take`n and not yet restored — the call-order guarantee above means
+    /// the latter should never actually happen), seeds a fresh
+    /// `Transcript::seed(system, task)`. If `Some`, takes the existing
+    /// transcript out of storage and appends `task` as a new `user` turn via
+    /// `Transcript::push_user` — `system` is IGNORED on this branch: the
+    /// original seed's system message stays authoritative for the life of
+    /// the session (a refresh mechanism, if `agent`/`mode` config changes
+    /// between runs, is future work — not this ticket).
+    /// Test: `registry_tests::begin_pm_transcript_seeds_on_first_call`,
+    /// `registry_tests::begin_pm_transcript_appends_on_second_call`,
+    /// `registry_tests::begin_pm_transcript_unknown_session_errors`.
+    pub fn begin_pm_transcript(
+        &self,
+        id: &str,
+        system: &str,
+        task: &str,
+    ) -> Result<Transcript, RpcError> {
+        let mut sessions = self.lock();
+        let entry = sessions
+            .get_mut(id)
+            .ok_or_else(|| RpcError::session_not_found(id))?;
+        Ok(match entry.pm_transcript.take() {
+            Some(mut existing) => {
+                existing.push_user(task);
+                existing
+            }
+            None => Transcript::seed(system, task),
+        })
+    }
+
+    /// Persist the PM's conversation `Transcript` back onto the session once
+    /// a run ends (#2344).
+    ///
+    /// Why: pairs with [`Self::begin_pm_transcript`] — MUST be called
+    /// regardless of the run's outcome (success, failure, cancellation, or
+    /// timeout) so the conversation up to the point of interruption survives
+    /// for the NEXT `task.run` to continue from, rather than the session
+    /// being left with no `pm_transcript` at all (which would silently
+    /// re-seed from scratch on the next run instead of erroring).
+    /// What: best-effort — a no-op if `id` is already gone (mirrors
+    /// `Self::set_run_outcome`'s same best-effort framing).
+    /// Test: `registry_tests::begin_pm_transcript_appends_on_second_call`
+    /// (exercises both halves of the round trip).
+    pub fn store_pm_transcript(&self, id: &str, transcript: Transcript) {
+        let mut sessions = self.lock();
+        if let Some(entry) = sessions.get_mut(id) {
+            entry.pm_transcript = Some(transcript);
         }
     }
 
@@ -637,145 +778,6 @@ impl SessionRegistry {
             return;
         }
         let _ = tokio::time::timeout(grace, futures_util::future::join_all(handles)).await;
-    }
-
-    /// Record a tool invocation starting (#2055 emission plumbing for
-    /// #2056's agent loop).
-    ///
-    /// Why: gives the future agent loop a stable, already-wired call for
-    /// `ToolStarted` without it needing to touch the ring buffer, sequencing,
-    /// or bus directly.
-    /// What: errors with `session_not_found` if `id` is unknown; `args_preview`
-    /// is truncated via `crate::events::preview` before emission so a large
-    /// argument payload can't blow the ring buffer / wire size.
-    /// Test: `registry_tests::record_tool_started_publishes_event`.
-    pub fn record_tool_started(
-        &self,
-        id: &str,
-        tool: &str,
-        call_id: &str,
-        args: &str,
-    ) -> Result<(), RpcError> {
-        self.ensure_exists(id)?;
-        self.record(
-            id,
-            Event::ToolStarted {
-                session_id: id.to_string(),
-                tool: tool.to_string(),
-                call_id: call_id.to_string(),
-                args_preview: crate::events::preview(args, 500),
-            },
-        );
-        Ok(())
-    }
-
-    /// Record a tool invocation finishing (#2055 emission plumbing for
-    /// #2056's agent loop). See [`Self::record_tool_started`].
-    /// Test: `registry_tests::record_tool_finished_publishes_event`.
-    pub fn record_tool_finished(
-        &self,
-        id: &str,
-        tool: &str,
-        call_id: &str,
-        success: bool,
-        result: &str,
-    ) -> Result<(), RpcError> {
-        self.ensure_exists(id)?;
-        self.record(
-            id,
-            Event::ToolFinished {
-                session_id: id.to_string(),
-                tool: tool.to_string(),
-                call_id: call_id.to_string(),
-                success,
-                result_preview: crate::events::preview(result, 500),
-            },
-        );
-        Ok(())
-    }
-
-    /// Record a tool invocation raising an exceptional error (#2055 emission
-    /// plumbing for #2056's agent loop). See [`Self::record_tool_started`].
-    /// Test: `registry_tests::record_tool_error_publishes_event`.
-    pub fn record_tool_error(
-        &self,
-        id: &str,
-        tool: &str,
-        call_id: &str,
-        error: &str,
-    ) -> Result<(), RpcError> {
-        self.ensure_exists(id)?;
-        self.record(
-            id,
-            Event::ToolError {
-                session_id: id.to_string(),
-                tool: tool.to_string(),
-                call_id: call_id.to_string(),
-                error: error.to_string(),
-            },
-        );
-        Ok(())
-    }
-
-    /// Record a session-scoped diagnostic log line (#2055 emission plumbing).
-    /// Test: `registry_tests::record_log_publishes_event`.
-    pub fn record_log(&self, id: &str, level: &str, message: &str) -> Result<(), RpcError> {
-        self.ensure_exists(id)?;
-        self.record(
-            id,
-            Event::Log {
-                session_id: id.to_string(),
-                level: level.to_string(),
-                message: message.to_string(),
-            },
-        );
-        Ok(())
-    }
-
-    /// Record a coarse progress update (#2055 emission plumbing).
-    /// Test: `registry_tests::record_progress_publishes_event`.
-    pub fn record_progress(
-        &self,
-        id: &str,
-        message: &str,
-        percent: Option<f32>,
-    ) -> Result<(), RpcError> {
-        self.ensure_exists(id)?;
-        self.record(
-            id,
-            Event::Progress {
-                session_id: id.to_string(),
-                message: message.to_string(),
-                percent,
-            },
-        );
-        Ok(())
-    }
-
-    /// Record a generic freeform session message (#2055 emission plumbing).
-    /// Test: `registry_tests::record_message_publishes_event`.
-    pub fn record_message(&self, id: &str, text: &str) -> Result<(), RpcError> {
-        self.ensure_exists(id)?;
-        self.record(
-            id,
-            Event::Message {
-                session_id: id.to_string(),
-                text: text.to_string(),
-            },
-        );
-        Ok(())
-    }
-
-    /// Return `Ok(())` if `id` exists, `Err(session_not_found)` otherwise.
-    ///
-    /// Why: every `record_*` plumbing method needs the same existence guard
-    /// before recording; centralising it keeps each one a two-line body.
-    fn ensure_exists(&self, id: &str) -> Result<(), RpcError> {
-        if self.lock().contains_key(id) {
-            Ok(())
-        } else {
-            Err(RpcError::session_not_found(id))
-        }
     }
 
     /// Assign the next per-session `seq`, wrap `event` in a
@@ -889,6 +891,18 @@ fn spawn_forwarder(session_id: String, notify: NotifySender, cancel_rx: oneshot:
         }
     });
 }
+
+/// #2055 tool/log/progress/message event-recording plumbing, split out into
+/// its own file (#2344) purely to keep this production file under the
+/// 500-SLOC cap — these methods are still `impl SessionRegistry`, called
+/// exactly the same way as if they lived here.
+#[path = "registry_events.rs"]
+mod events;
+
+/// #2345 turn-recorder sink lazy-init/lookup, split out into its own file for
+/// the same 500-SLOC-cap reason as `events` above.
+#[path = "registry_memory_sink.rs"]
+mod memory_sink_ext;
 
 #[cfg(test)]
 #[path = "registry_tests.rs"]

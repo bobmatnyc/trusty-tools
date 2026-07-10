@@ -233,19 +233,17 @@ pub(crate) async fn launch_and_wait(
 
     // (4) Deliver the task to the session. `claude` reads the PM prompt from the
     // `--append-system-prompt-file` set by `prepare_session`; the concrete task
-    // is typed into the pane the same way `SessionManager::send_input` does. A
-    // brief settle gives `claude` time to reach its input prompt before we type.
+    // is typed into the pane through the shared readiness-gated injection seam
+    // (`SessionManager::inject_task_when_ready`, #1903/#1299) — which polls for
+    // the runtime to be ready instead of the blind fixed sleep this prototype
+    // used before that seam existed.
     if let Some(task) = task {
-        // TODO(M1 POC hardening follow-up): this fixed 3s settle assumes `claude`
-        // reaches its interactive input prompt within 3s before we type the task.
-        // A readiness check (poll the pane for the prompt) plus a more robust
-        // task-delivery seam is a tracked follow-up; an issue number will be
-        // attached separately.
-        tokio::time::sleep(Duration::from_secs(3)).await;
-        if let Err(e) = mgr.send_input(&record.id, task).await {
-            warn!(tmux = %record.tmux_name, "meta run: failed to inject demo task: {e}");
-        } else {
-            info!(tmux = %record.tmux_name, "meta run: demo task delivered to session");
+        match mgr.inject_task_when_ready(&record.id, task).await {
+            Ok(true) => info!(tmux = %record.tmux_name, "meta run: demo task delivered to session"),
+            Ok(false) => {
+                warn!(tmux = %record.tmux_name, "meta run: runtime never became ready; demo task not delivered")
+            }
+            Err(e) => warn!(tmux = %record.tmux_name, "meta run: failed to inject demo task: {e}"),
         }
     }
 

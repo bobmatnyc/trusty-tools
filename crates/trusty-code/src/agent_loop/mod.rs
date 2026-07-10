@@ -24,6 +24,12 @@
 //! cancellation flag, or (#2265 fix #5) an external stop signal fires.
 //! What: The whole `chat → dispatch → iterate` body runs inside a single
 //! `tokio::time::timeout` so a stalled model or hung tool cannot block forever.
+//! (#2344) `run` is now a thin wrapper over [`AgentLoop::run_with_transcript`],
+//! which drives the SAME loop body against an already-prepared `Transcript`
+//! instead of always seeding fresh — the entry point
+//! `task::executor::run_and_record` uses so a session's PM conversation
+//! persists and grows across repeated `task.run` calls instead of restarting
+//! from scratch each time.
 //! Test: `agent_loop::tests` — stubbed two-turn flow, turn-cap abort, recoverable
 //! tool-error continuation, usage accrual, sink notification order, cancellation,
 //! plus an `#[ignore]`-gated live test.
@@ -283,27 +289,76 @@ impl AgentLoop {
 
     /// Run the loop to completion (or to a budget limit) and return the output.
     ///
-    /// Why: This is the single public entry point; it owns the whole lifecycle
-    /// so callers never reconstruct the loop body incorrectly.
-    /// What: Wraps `run_inner` in a `tokio::time::timeout`. On timeout, returns
-    /// `AgentLoopError::Timeout` carrying whatever partial output `run_inner`
-    /// had accumulated up to the deadline.
+    /// Why: This is the single public entry point for a fresh, one-shot run —
+    /// `run_task` and the delegated engineer's own loop, neither of which
+    /// participate in cross-run persistence, always start from a clean slate.
+    /// What: Seeds a brand-new `Transcript` (`system` + `task`), then
+    /// delegates to [`Self::run_with_transcript`]. Because a fresh seed's
+    /// `assistant_text_mark()` is always `0`, the returned output's `content`
+    /// is identical to the pre-#2344 behaviour (the whole run's joined
+    /// assistant text) — this method's observable contract is unchanged.
     /// Test: `agent_loop::tests::two_turn_flow_completes`,
     /// `turn_cap_returns_partial_transcript`, and `timeout_returns_partial`.
     pub async fn run(&self, system: &str, task: &str) -> Result<AgentOutput, AgentLoopError> {
         let mut transcript = Transcript::seed(system, task);
+        self.run_with_transcript(&mut transcript, task).await
+    }
+
+    /// Run the loop against an ALREADY-PREPARED transcript instead of
+    /// seeding a fresh one (#2344 — the persistent-session entry point).
+    ///
+    /// Why: `task::executor::run_and_record` needs the PM's conversation to
+    /// survive across repeated `task.run` calls on the same session:
+    /// `session::SessionRegistry::begin_pm_transcript` either seeds fresh (a
+    /// session's first run) or appends the new request as a `user` turn onto
+    /// the session's existing, growing history (every run after that) —
+    /// either way, `transcript` arrives here already holding exactly the
+    /// messages this run should send. [`Self::run`] is just this method
+    /// called with a freshly seeded transcript, so both entry points share
+    /// one loop implementation.
+    /// What: Records `transcript.assistant_text_mark()` BEFORE driving the
+    /// loop, runs the SAME timeout-wrapped `run_inner` body `run` used to,
+    /// then rewrites `content` on the resulting `AgentOutput` (success or any
+    /// partial-abort variant, via `AgentLoopError::partial_output_mut`) to
+    /// `transcript.assistant_text_since(mark)` — scoping THIS call's reported
+    /// answer to only the turns it produced, even though the transcript
+    /// itself keeps the full cumulative history for the model and for
+    /// `session.get_transcript`. Skips the rewrite when `summary.is_some()`:
+    /// an explicit `finish_task` completion (#2072) already carries a
+    /// deliberate, structured summary via `build_finish_output`, which must
+    /// not be clobbered by the plain assistant-text join.
+    /// Test: `agent_loop::tests::run_with_transcript_does_not_reseed_system_message`,
+    /// `agent_loop::tests::run_with_transcript_scopes_output_to_new_turns`,
+    /// `agent_loop::tests::run_with_transcript_scopes_partial_output_on_turn_cap`,
+    /// `agent_loop::tests::run_with_transcript_does_not_clobber_finish_task_summary`.
+    pub async fn run_with_transcript(
+        &self,
+        transcript: &mut Transcript,
+        task: &str,
+    ) -> Result<AgentOutput, AgentLoopError> {
+        let mark = transcript.assistant_text_mark();
         let mut perf = PerfCollector::new(0, PERF_WORKFLOW, task);
 
         let timeout = Duration::from_secs(self.config.timeout_secs);
-        let inner = self.run_inner(&mut transcript, &mut perf);
+        let inner = self.run_inner(transcript, &mut perf);
 
-        match tokio::time::timeout(timeout, inner).await {
+        let mut result = match tokio::time::timeout(timeout, inner).await {
             Ok(result) => result,
             Err(_elapsed) => Err(AgentLoopError::Timeout {
                 timeout_secs: self.config.timeout_secs,
-                partial: Box::new(build_output(&transcript, &perf)),
+                partial: Box::new(build_output(transcript, &perf)),
             }),
+        };
+
+        match &mut result {
+            Ok(output) => scope_output_to_new_turns(output, transcript, mark),
+            Err(e) => {
+                if let Some(partial) = e.partial_output_mut() {
+                    scope_output_to_new_turns(partial, transcript, mark);
+                }
+            }
         }
+        result
     }
 
     /// The core loop body, separated so the timeout wrapper stays thin.
@@ -812,6 +867,23 @@ async fn notify_result(sink: &dyn ToolEventSink, call_id: &str, tool: &str, resu
 fn accrue_usage(perf: &mut PerfCollector, model: &str, response: &ChatResponse) {
     let usage = response.clone().token_usage();
     perf.record_phase(PERF_PHASE, 0, model, &usage);
+}
+
+/// Rewrite `output.content` to only the assistant text produced SINCE `mark`
+/// (#2344).
+///
+/// Why: `AgentLoop::run_with_transcript` scopes a persistent-session run's
+/// reported output to just its own new turns — see that method's docs.
+/// What: No-op when `output.summary` is `Some` (an explicit `finish_task`
+/// completion's structured summary must never be overwritten by the plain
+/// assistant-text join). Otherwise sets `output.content =
+/// transcript.assistant_text_since(mark)`.
+/// Test: `agent_loop::tests::run_with_transcript_scopes_output_to_new_turns`,
+/// `agent_loop::tests::run_with_transcript_does_not_clobber_finish_task_summary`.
+fn scope_output_to_new_turns(output: &mut AgentOutput, transcript: &Transcript, mark: usize) {
+    if output.summary.is_none() {
+        output.content = transcript.assistant_text_since(mark);
+    }
 }
 
 /// Assemble an `AgentOutput` from the current transcript and perf totals.

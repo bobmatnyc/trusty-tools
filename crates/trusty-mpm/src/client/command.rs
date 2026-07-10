@@ -168,6 +168,10 @@ pub enum TrustyCommand {
         name_hint: Option<String>,
         /// Optional runtime selector (`claude-code` | `tcode`).
         runtime: Option<String>,
+        /// Turnkey-injection control (#1903/#1299): `Some(false)` → metadata-only
+        /// (`--no-inject`); `None`/`Some(true)` → the daemon auto-injects the
+        /// task once the runtime is ready (the turnkey default).
+        inject_task: Option<bool>,
     },
     /// List every managed session (`sessions.list`).
     ManagedList,
@@ -303,6 +307,7 @@ mod tests {
             task: "do the thing".into(),
             name_hint: Some("api".into()),
             runtime: Some("tcode".into()),
+            inject_task: None,
         };
         assert_eq!(spawn.clone(), spawn);
         let answer = TrustyCommand::ManagedAnswer {

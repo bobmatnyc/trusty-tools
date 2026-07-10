@@ -26,8 +26,11 @@
 mod chat;
 mod chat_action;
 mod chat_action_protocol;
+mod conv_lock;
 mod delegate;
 mod health;
+
+use conv_lock::ConvLocks;
 
 #[cfg(test)]
 pub mod mock;
@@ -66,6 +69,11 @@ pub struct SessionManagerAgent {
     config: SessionManagerConfig,
     /// Inference + storage runtime; `None` for the inert SM-1 constructor.
     runtime: Option<AgentRuntime>,
+    /// Per-`conv_id` turn locks that serialize concurrent chat turns for the SAME
+    /// conversation so they cannot last-write-wins on the context-engine state file
+    /// and lose a round (#1309). Shared across clones (an `Arc`) so serialization
+    /// holds even though the agent is `Clone`; distinct conversations never block.
+    conv_locks: Arc<ConvLocks>,
 }
 
 impl std::fmt::Debug for SessionManagerAgent {
@@ -125,6 +133,7 @@ impl SessionManagerAgent {
         Self {
             config,
             runtime: None,
+            conv_locks: Arc::new(ConvLocks::new()),
         }
     }
 
@@ -153,6 +162,7 @@ impl SessionManagerAgent {
                 data_root: data_root.into(),
                 memory,
             }),
+            conv_locks: Arc::new(ConvLocks::new()),
         }
     }
 
@@ -175,6 +185,7 @@ impl SessionManagerAgent {
                 resolver,
                 data_root: data_root.into(),
             }),
+            conv_locks: Arc::new(ConvLocks::new()),
         }
     }
 

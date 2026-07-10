@@ -122,11 +122,14 @@ impl SessionManagerAgent {
         let inference = &self.config.inference;
         let rounds = &self.config.rounds;
 
-        // (2) Open (or resume) the rolling-context engine for this conversation.
-        // TODO(#1309): the engine is opened fresh per turn with no per-conv_id
-        // concurrency guard — two concurrent turns with the SAME conv_id can
-        // last-write-wins on save and lose a round. Serialize turns per conv_id
-        // (per-conv_id async lock / actor) before or within the SM-8 loop.
+        // (2a) #1309: serialize turns for the SAME conv_id. The engine is opened
+        // fresh per turn and persists by atomic whole-file replace with NO merge,
+        // so two concurrent turns for one conv_id would last-write-wins on save and
+        // silently lose a round. Hold the per-conv_id lock across the WHOLE turn
+        // (open → record → save); turns for different conv_ids never block.
+        let _turn = self.conv_locks.acquire(&conv_id).await;
+
+        // (2b) Open (or resume) the rolling-context engine for this conversation.
         let mut engine = SmContextEngine::open(&conv_id, &runtime.data_root, inference, rounds)?;
 
         // (3) The SM system prompt (SM-3), with any operator overrides layered in.

@@ -7,6 +7,7 @@
 //! Test: `dream::tests::dream_config_defaults` and
 //! `dream::tests::dream_stats_persisted_after_cycle`.
 
+use super::fading::{FadingMemory, FadingParams};
 use crate::memory_core::semantic_consolidation::SemanticConsolidationConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -59,6 +60,16 @@ pub struct DreamConfig {
     /// `recall_benchmark_enabled = false`, the cycle completes and both recall
     /// scores are `None`.
     pub recall_benchmark_enabled: bool,
+
+    /// Tunables for the fading-memories resurface pass (issue #2352).
+    ///
+    /// Why: The resurface thresholds must be configurable per deployment (and,
+    /// through this config, per palace) without recompiling. Embedded here the
+    /// same way `semantic` is, so the dream loop keeps a single config surface.
+    /// What: See [`FadingParams`]. Defaults resurface memories with base
+    /// importance >= 0.7 whose effective importance has fallen below 0.3.
+    /// Test: `dream_config_defaults`.
+    pub fading: FadingParams,
 }
 
 impl Default for DreamConfig {
@@ -78,6 +89,7 @@ impl Default for DreamConfig {
             openrouter_api_key: String::new(),
             local_model_enabled: true,
             recall_benchmark_enabled: true,
+            fading: FadingParams::default(),
         }
     }
 }
@@ -174,6 +186,21 @@ pub struct DreamStats {
     /// Test: `dream_recall_benchmark_returns_score_with_drawers`.
     #[serde(default)]
     pub recall_score_after: Option<f64>,
+
+    /// Fading high-value memories detected this cycle (issue #2352).
+    ///
+    /// Why: Ranked list of originally-important memories whose effective
+    /// importance has decayed below the resurface threshold. The cycle does
+    /// NOT auto-boost them (that would defeat the forgetting curve); it
+    /// surfaces them here so operators/agents can touch (recall re-boosts) or
+    /// `memory_forget`. Persisted into `dream_stats.json` so the list survives
+    /// until the next cycle. `#[serde(default)]` keeps older snapshots readable.
+    /// What: Ranked by base importance desc then age desc, capped at
+    /// `DreamConfig::fading.resurface_top_n`.
+    /// Test: `dream::fading::tests` (detection/ranking) and the
+    /// `palace_dream_response_includes_fading` MCP test in trusty-memory.
+    #[serde(default)]
+    pub fading: Vec<FadingMemory>,
 }
 
 impl DreamStats {

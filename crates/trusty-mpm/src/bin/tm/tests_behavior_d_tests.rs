@@ -44,6 +44,7 @@ fn cli_parses_session_new() {
                     task,
                     name_hint,
                     runtime,
+                    no_inject,
                 },
         } => {
             assert_eq!(repo, "https://github.com/owner/repo");
@@ -52,6 +53,31 @@ fn cli_parses_session_new() {
             assert_eq!(name_hint.as_deref(), Some("ticket-1"));
             // No --runtime flag → default claude-code (now a typed RuntimeKind).
             assert_eq!(runtime, trusty_mpm::runtime::RuntimeKind::ClaudeCode);
+            // No --no-inject → turnkey injection is the default (#1903/#1299).
+            assert!(!no_inject);
+        }
+        other => panic!("expected session new, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_new_no_inject() {
+    // Why: #1903/#1299 — `--no-inject` selects the legacy metadata-only spawn.
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "new",
+        "https://github.com/owner/repo",
+        "--task",
+        "do the thing",
+        "--no-inject",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action: SessionAction::New { no_inject, .. },
+        } => {
+            assert!(no_inject, "--no-inject must set the flag");
         }
         other => panic!("expected session new, got {other:?}"),
     }
