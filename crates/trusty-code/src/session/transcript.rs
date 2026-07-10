@@ -83,8 +83,7 @@ mod tests {
         let json = serde_json::to_value(&record).expect("serialize");
         assert_eq!(json["compaction_events"], 7);
 
-        let round_tripped: TranscriptRecord =
-            serde_json::from_value(json).expect("deserialize");
+        let round_tripped: TranscriptRecord = serde_json::from_value(json).expect("deserialize");
         assert_eq!(round_tripped.compaction_events, 7);
     }
 }
