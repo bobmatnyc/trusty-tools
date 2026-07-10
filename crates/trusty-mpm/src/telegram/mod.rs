@@ -31,8 +31,8 @@ use teloxide::utils::command::BotCommands;
 use tokio_util::sync::CancellationToken;
 
 use crate::client::{
-    ChatMessage, CommandExecutor, CommandResult, FreeTextRoute, SessionProxy, TrustyCommand,
-    route_free_text,
+    ChatMessage, CommandExecutor, CommandResult, FreeTextRoute, ManagedBackend, SessionProxy,
+    TrustyCommand, route_free_text,
 };
 use alerts::{AlertConfig, LastSeen};
 use commands::TelegramCommand;
@@ -258,7 +258,8 @@ pub async fn run(
     // The channel-agnostic session-manager proxy (TELUI-6, #1440): holds per-chat
     // focus state and drives the INJECT/SUMMARIZE directions over the shared
     // executor. Telegram is one thin binding; Slack/MCP reuse the same proxy.
-    let proxy = Arc::new(SessionProxy::new(Arc::clone(&executor)));
+    let proxy_backend = Arc::clone(&executor) as Arc<dyn ManagedBackend>;
+    let proxy = Arc::new(SessionProxy::new(proxy_backend));
 
     let handler = dptree::entry()
         .branch(Update::filter_message().endpoint(on_message))

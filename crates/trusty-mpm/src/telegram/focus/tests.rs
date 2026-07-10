@@ -106,6 +106,47 @@ fn render_summary_no_focus_hints() {
     assert!(html.contains("No session is focused"), "{html}");
 }
 
+#[test]
+fn truncate_summary_leaves_short_text_untouched() {
+    let short = "running cargo test, all green";
+    assert_eq!(truncate_summary(short).as_ref(), short);
+}
+
+#[test]
+fn truncate_summary_caps_long_text() {
+    // A digest far longer than the budget is capped and marked, never passed
+    // through verbatim (defensive ceiling against Telegram's 4096-char limit).
+    let long: String = "x".repeat(MAX_SUMMARY_CHARS * 3);
+    let truncated = truncate_summary(&long);
+    assert!(
+        truncated.chars().count() <= MAX_SUMMARY_CHARS + " […truncated]".chars().count(),
+        "truncated length {} exceeds budget",
+        truncated.chars().count()
+    );
+    assert!(truncated.ends_with("[…truncated]"), "{truncated}");
+}
+
+#[test]
+fn render_summary_caps_pathologically_long_digest() {
+    // End-to-end: a session that returned a runaway-long summary still renders
+    // a bounded HTML body, never an unbounded one that could exceed Telegram's
+    // per-message limit.
+    let mut ft = target();
+    ft.name = "tmpm-api".into();
+    let long_summary = "z".repeat(50_000);
+    let html = render_summary(&SummarizeOutcome::Summary {
+        target: ft,
+        state: "active".into(),
+        summary: long_summary,
+        pending_decision: None,
+    });
+    assert!(
+        html.len() < 4096,
+        "rendered summary reply must stay under Telegram's 4096-char body limit, got {}",
+        html.len()
+    );
+}
+
 #[tokio::test]
 async fn handle_unfocus_when_none() {
     let proxy = offline_proxy();

@@ -36,8 +36,8 @@ pub use http_client::{
     OverseerSnapshot, PairConfirm, PairRequest, PairStatus, SessionRow, TmuxSessionRow,
 };
 pub use proxy::{
-    FocusOutcome, FocusTarget, FreeTextRoute, InjectOutcome, SessionProxy, SummarizeOutcome,
-    route_free_text,
+    ActivityDigest, FocusOutcome, FocusTarget, FreeTextRoute, InjectOutcome, ManagedBackend,
+    SessionProxy, SummarizeOutcome, route_free_text,
 };
 pub use resolver::{Resolvable, resolve_target};
 pub(crate) use result::fleet_state_glyph;

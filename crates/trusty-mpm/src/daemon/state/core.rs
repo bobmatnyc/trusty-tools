@@ -243,6 +243,22 @@ pub struct DaemonState {
     /// `tokio::sync::RwLock`; actors are registered here via `run_session`.
     /// Test: `control_routes` handler tests register sessions and assert list/get.
     pub session_registry: Arc<SessionRegistry>,
+    /// Per-conversation focus state for the local session-manager PROXY surface
+    /// (`/api/v1/sessions/proxy/*`, TELUI-6 #1440).
+    ///
+    /// Why: the proxy routes construct a fresh
+    /// [`crate::client::SessionProxy`] PER REQUEST (mirroring every other
+    /// stateless handler in this file), but which session a conversation has
+    /// focused must persist ACROSS requests — exactly the same durability
+    /// requirement `paired_chat_id`/`pair_code` have, so this follows their
+    /// plain-`Mutex`-field pattern rather than introducing a new subsystem.
+    /// What: an `Arc<Mutex<HashMap<conversation_key, FocusTarget>>>` shared into
+    /// each request's `SessionProxy` via
+    /// [`crate::client::SessionProxy::with_focus_store`]. Volatile — does not
+    /// survive a daemon restart, matching every external channel's focus state.
+    /// Test: `daemon::managed_routes::proxy::tests`, `tests/proxy_routes.rs`.
+    pub(super) proxy_focus:
+        Arc<std::sync::Mutex<HashMap<String, crate::client::proxy::FocusTarget>>>,
 }
 
 impl Default for DaemonState {
@@ -327,6 +343,7 @@ impl DaemonState {
             activity_monitor: std::sync::OnceLock::new(),
             project_registry: tokio::sync::OnceCell::new(),
             session_registry,
+            proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -384,6 +401,7 @@ impl DaemonState {
             activity_monitor: std::sync::OnceLock::new(),
             project_registry: tokio::sync::OnceCell::new(),
             session_registry,
+            proxy_focus: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -399,6 +417,22 @@ impl DaemonState {
     /// `with_root` a tempdir and asserts the handler reads it.
     pub fn framework_root(&self) -> &std::path::Path {
         &self.framework_root
+    }
+
+    /// The shared focus-state store for the local session-manager PROXY routes.
+    ///
+    /// Why: `daemon::managed_routes::proxy` constructs a fresh
+    /// [`crate::client::SessionProxy`] per request (mirroring every other
+    /// stateless handler in this file) via
+    /// [`crate::client::SessionProxy::with_focus_store`], which needs a shared,
+    /// cross-request handle to this daemon's focus map.
+    /// What: clones the `Arc` (cheap) around the `Mutex<HashMap<..>>`; every
+    /// clone guards the SAME underlying map.
+    /// Test: `daemon::managed_routes::proxy::tests`, `tests/proxy_routes.rs`.
+    pub fn proxy_focus_store(
+        &self,
+    ) -> Arc<std::sync::Mutex<HashMap<String, crate::client::proxy::FocusTarget>>> {
+        Arc::clone(&self.proxy_focus)
     }
 
     /// The PID-file registry rooted under this daemon's framework root.

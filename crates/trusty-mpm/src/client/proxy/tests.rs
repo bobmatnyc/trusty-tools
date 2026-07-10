@@ -64,6 +64,28 @@ fn is_missing_session_detects_not_found() {
     assert!(!is_missing_session("send failed: connection refused"));
 }
 
+#[tokio::test]
+async fn is_missing_session_matches_live_resolver_not_found_format() {
+    // Regression pin (adversarial-review finding, PR #2372): `is_missing_session`
+    // is substring matching, not a typed signal, so it is only as reliable as its
+    // coupling to the ACTUAL wording the resolver produces. This drives the REAL
+    // `CommandExecutor::resolve` (the `ManagedBackend` impl every external channel
+    // uses) against a live, empty-fleet test daemon and asserts the resulting
+    // error satisfies the predicate — if the resolver's message ever drifts
+    // (e.g. `executor::managed::resolve_managed`'s wording changes), this test
+    // fails loudly instead of silently disabling the auto-unfocus safety net.
+    let url = spawn_test_daemon().await;
+    let backend = CommandExecutor::new(url);
+    let err = backend
+        .resolve("no-such-session")
+        .await
+        .expect_err("an empty fleet must fail to resolve");
+    assert!(
+        is_missing_session(&err),
+        "resolver's not-found message no longer matches is_missing_session: {err:?}"
+    );
+}
+
 #[test]
 fn set_get_clear_round_trip() {
     let proxy = offline_proxy();

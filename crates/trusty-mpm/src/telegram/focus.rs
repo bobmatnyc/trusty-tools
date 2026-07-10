@@ -23,6 +23,38 @@ use super::formatter::{html_escape, short_id};
 const NO_FOCUS_HINT: &str =
     "No session is focused — use <code>/focus &lt;session&gt;</code> first.";
 
+/// Safety ceiling (raw, pre-HTML-escape chars) for the activity summary text
+/// embedded in a `/summary` reply.
+///
+/// Why: [`html_escape`] can expand a string up to ~5x (`&` → `&amp;`); an
+/// unbounded activity digest could push a reply over Telegram's hard 4096-char
+/// message-body limit, silently dropping the message. Today's digest contract
+/// (a lightweight [`crate::client::ActivityDigest`]) is always short, so this is
+/// a DEFENSIVE ceiling for a path that should never be hit, not an expected
+/// truncation — but it is enforced, not merely assumed.
+/// What: the raw-text budget before escaping; comfortably below the 4096-char
+/// limit even at worst-case 5x escape expansion plus the surrounding template.
+/// Test: `truncate_summary_leaves_short_text_untouched`,
+/// `truncate_summary_caps_long_text`.
+const MAX_SUMMARY_CHARS: usize = 700;
+
+/// Truncate `s` to at most [`MAX_SUMMARY_CHARS`] characters, marking truncation.
+///
+/// Why: factored out of [`render_summary`] so the truncation rule is
+/// unit-testable independent of the full HTML render.
+/// What: returns `s` unchanged (borrowed, no allocation) when within budget;
+/// otherwise the first [`MAX_SUMMARY_CHARS`] chars (on a char boundary) plus a
+/// `" […truncated]"` marker.
+/// Test: `truncate_summary_leaves_short_text_untouched`,
+/// `truncate_summary_caps_long_text`.
+fn truncate_summary(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.chars().count() <= MAX_SUMMARY_CHARS {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let truncated: String = s.chars().take(MAX_SUMMARY_CHARS).collect();
+    std::borrow::Cow::Owned(format!("{truncated} […truncated]"))
+}
+
 /// Map a Telegram `chat_id` to the proxy's conversation key.
 ///
 /// Why: the proxy keys focus by an opaque channel-supplied string; Telegram's
@@ -156,7 +188,7 @@ fn render_summary(outcome: &SummarizeOutcome) -> String {
                 html_escape(&target.name),
                 short_id(&target.id),
                 html_escape(state),
-                html_escape(summary),
+                html_escape(&truncate_summary(summary)),
             )
         }
         SummarizeOutcome::AutoUnfocused { target, error } => format!(
