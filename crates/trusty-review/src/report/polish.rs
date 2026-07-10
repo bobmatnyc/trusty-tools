@@ -177,20 +177,43 @@ fn collapse_blank_runs(text: &str) -> String {
 /// the honesty marker, and — when a table loses every body row — replaces it with
 /// a single collapse line; drops marker-only bullets; records every dropped
 /// field/section label as a gap.  The Gaps & Caveats section is left untouched
-/// here (it is regenerated wholesale afterwards).  Returns the rewritten body and
-/// the ordered, de-duplicated gap labels.
-/// Test: `polish_tests.rs::{drops_marker_rows, collapses_empty_section}`.
+/// here (it is regenerated wholesale afterwards).  A fenced code block
+/// (``` … ```) is OPAQUE to every check in this pass (#2357 wave-3.2 defect #3):
+/// a blank line, a bullet-looking line, or anything else inside a fence is
+/// copied straight through, never interpreted as a marker row/bullet and never
+/// triggering a spliced "No data available" line mid-quote — a live-QA
+/// regression previously caused by a multi-line evidence quote's own blank line
+/// being read as a section boundary. Returns the rewritten body and the
+/// ordered, de-duplicated gap labels.
+/// Test: `polish_tests.rs::{drops_marker_rows, collapses_empty_section,
+/// fenced_code_with_blank_line_untouched}`.
 fn omit_empty(text: &str) -> (String, Vec<String>) {
     let mut out: Vec<String> = Vec::new();
     let mut gaps: Vec<String> = Vec::new();
     let mut section = String::new();
     let mut in_gaps_section = false;
+    let mut in_fence = false;
 
     let lines: Vec<&str> = text.lines().collect();
     let mut idx = 0usize;
     while idx < lines.len() {
         let line = lines[idx];
         let trimmed = line.trim();
+
+        // Fenced code blocks are opaque here — toggle state and pass every
+        // fenced line (including the fence markers themselves) straight
+        // through untouched, before any heading/table/marker interpretation.
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            out.push(line.to_string());
+            idx += 1;
+            continue;
+        }
+        if in_fence {
+            out.push(line.to_string());
+            idx += 1;
+            continue;
+        }
 
         if let Some(heading) = heading_text(trimmed) {
             section = heading.to_string();
@@ -356,17 +379,38 @@ fn collapse_empty_sections(lines: &[String], gaps: &mut Vec<String>) -> String {
 /// then either re-emits the child span (child had content — this also marks the
 /// parent as having content) or replaces it with [`COLLAPSE_LINE`] + a recorded
 /// gap (child was empty — does NOT count toward the parent's own content). The
-/// Gaps & Caveats section is copied through untouched (never collapsed here).
+/// Gaps & Caveats section is copied through untouched (never collapsed here). A
+/// fenced code block (``` … ```) is tracked and treated as OPAQUE content
+/// (#2357 wave-3.2 defect #3): every fenced line — including a `#`-prefixed
+/// code comment or a bare `**bold**` line that would otherwise match
+/// [`boundary`] — is copied through as non-boundary content, so an evidence
+/// snippet's own source text can never be misread as a heading and can never
+/// leave its enclosing section falsely collapsed.
 /// Test: `polish_tests.rs::{parent_with_populated_child_not_collapsed,
-/// collapses_orphaned_bold_pseudo_heading}`.
+/// collapses_orphaned_bold_pseudo_heading, fenced_code_with_blank_line_untouched}`.
 fn collapse_recursive(lines: &[String], gaps: &mut Vec<String>) -> (Vec<String>, bool) {
     let mut out: Vec<String> = Vec::new();
     let mut has_content = false;
     let mut idx = 0usize;
+    let mut in_fence = false;
 
     while idx < lines.len() {
         let line = &lines[idx];
         let trimmed = line.trim();
+
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            has_content = true;
+            out.push(line.clone());
+            idx += 1;
+            continue;
+        }
+        if in_fence {
+            has_content = true;
+            out.push(line.clone());
+            idx += 1;
+            continue;
+        }
 
         if trimmed == "---" {
             out.push(line.clone());

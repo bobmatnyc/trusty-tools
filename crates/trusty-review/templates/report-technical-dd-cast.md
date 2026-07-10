@@ -179,7 +179,12 @@ vs. All technologies (peer set size: {{all_tech_peer_set_size}}):
 **{{app_name}}:**
 
 <!-- BEGIN red_finding -->
-N. **{{finding_title}}** — {{finding_description}}. Evidence: {{finding_evidence}}. Affected component: {{finding_component}}. Business impact: {{finding_business_impact}}. Root cause: {{finding_root_cause}}. Remediation: {{finding_remediation}} (cost/effort: {{finding_cost_effort}}).
+{{finding_index}}. **{{finding_title}}** — {{finding_description}}
+- **Component:** {{finding_component}}
+- **Business impact:** {{finding_business_impact}}
+- **Root cause:** {{finding_root_cause}}
+- **Remediation:** {{finding_remediation}} (cost/effort: {{finding_cost_effort}})
+{{finding_evidence_block}}
 <!-- END red_finding -->
 <!-- END per_application_red -->
 
@@ -189,7 +194,9 @@ N. **{{finding_title}}** — {{finding_description}}. Evidence: {{finding_eviden
 **{{app_name}}:**
 
 <!-- BEGIN amber_finding -->
-N. **{{finding_title}}** — {{finding_description}}. Evidence: {{finding_evidence}}. Remediation: {{finding_remediation}}.
+{{finding_index}}. **{{finding_title}}** — {{finding_description}}
+- **Remediation:** {{finding_remediation}}
+{{finding_evidence_block}}
 <!-- END amber_finding -->
 <!-- END per_application_amber -->
 

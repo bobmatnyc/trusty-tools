@@ -216,7 +216,13 @@ fn build_scope(model: &ReportModel) -> Scope {
     // `metrics.findings` regardless of `--synthesize`.  When verified synthesis
     // IS available, its prose is merged onto the SAME row for a matching title
     // (never pushed as a second, duplicate row); see `push_finding_band`.
+    // Live-QA defect (findings-rendering wave-3.2): each severity section gets
+    // its own 1-based sequential counter, restarting at 1 for RED and again for
+    // AMBER — the counter accumulates ACROSS repositories within one band (not
+    // per-app) so the rendered list is `1. 2. 3. …` instead of a literal `N.`.
     let available_synthesis = model.synthesis.as_ref().filter(|s| s.is_available());
+    let mut red_index = 0usize;
+    let mut amber_index = 0usize;
     for repo in &model.repositories {
         push_finding_band(
             &mut root,
@@ -226,6 +232,7 @@ fn build_scope(model: &ReportModel) -> Scope {
             "RED",
             "per_application_red",
             "red_finding",
+            &mut red_index,
         );
         push_finding_band(
             &mut root,
@@ -235,6 +242,7 @@ fn build_scope(model: &ReportModel) -> Scope {
             "AMBER",
             "per_application_amber",
             "amber_finding",
+            &mut amber_index,
         );
     }
 
@@ -299,13 +307,20 @@ fn inject_synthesis_summary(root: &mut Scope, syn: &super::synthesize::Synthesis
 /// metrics-derived row by field, then convert to a `Scope` once, in one place.
 /// What: `title` is always set (metrics or synthesis); every other field is
 /// `Option` so an unset one falls through to the fill engine's honesty marker.
+/// `evidence_quote` is kept RAW (untagged, un-deduped) separately from
+/// `evidence_measured` — findings-rendering defect #2 (#2357 wave-3.2) — so
+/// [`into_scope`](FindingRow::into_scope) can compose a fenced code block
+/// (label line + verbatim quote) instead of splicing the quote inline into a
+/// prose sentence, which mangled markdown and spliced a spurious "No data"
+/// line into multi-line quotes (defects #2/#3).
 #[derive(Default)]
 struct FindingRow {
     title: String,
     category: Option<String>,
     component: Option<String>,
     description: Option<String>,
-    evidence: Option<String>,
+    evidence_quote: Option<String>,
+    evidence_measured: bool,
     business_impact: Option<String>,
     remediation: Option<String>,
     cost_effort: Option<String>,
@@ -337,17 +352,21 @@ impl FindingRow {
     /// Why: the narrative fields are LLM-written, so each is tagged `inferred`
     /// (live-QA wave-2 defect #1); `component` is identifier-like routing data
     /// copied from context rather than a narrative sentence, so it is left
-    /// untagged (dedupe-only, no provenance marker).
+    /// untagged (dedupe-only, no provenance marker).  `evidence_quote` is kept
+    /// RAW — never deduped/tagged — because it must render byte-for-byte
+    /// verbatim inside a fence (#2357 wave-3.2 defect #2); trimming it would
+    /// make the DISPLAYED quote diverge from the quote that was verified.
     /// What: builds the row from `f`, applying [`prose_field`] (dedupe trailing
-    /// terminal punctuation + tag `Inferred`) to description/evidence/
-    /// business_impact/remediation/cost_effort.
+    /// terminal punctuation + tag `Inferred`) to description/business_impact/
+    /// remediation/cost_effort.
     fn from_prose(f: &super::synthesize::FindingProse) -> Self {
         FindingRow {
             title: f.title.clone(),
             category: None,
             component: dedupe_field(&f.component),
             description: prose_field(&f.description),
-            evidence: evidence_field(&f.evidence, f.evidence_measured),
+            evidence_quote: raw_evidence(&f.evidence),
+            evidence_measured: f.evidence_measured,
             business_impact: prose_field(&f.business_impact),
             remediation: prose_field(&f.remediation),
             cost_effort: prose_field(&f.cost_effort),
@@ -360,13 +379,14 @@ impl FindingRow {
     /// (from metrics), so synthesis fills the gaps rather than creating a
     /// second, duplicate entry for the same finding.  Each narrative field is
     /// tagged `inferred` (live-QA wave-2 defect #1).
-    /// What: sets description/evidence/business_impact/remediation/cost_effort
-    /// from `f` via [`prose_field`]; `component` is kept metrics-verbatim unless
+    /// What: sets description/evidence_quote/business_impact/remediation/
+    /// cost_effort from `f`; `component` is kept metrics-verbatim unless
     /// metrics left it unset, in which case synthesis's value is used as a
     /// dedupe-only (untagged) fallback.
     fn merge_prose(&mut self, f: &super::synthesize::FindingProse) {
         self.description = prose_field(&f.description);
-        self.evidence = evidence_field(&f.evidence, f.evidence_measured);
+        self.evidence_quote = raw_evidence(&f.evidence);
+        self.evidence_measured = f.evidence_measured;
         self.business_impact = prose_field(&f.business_impact);
         self.remediation = prose_field(&f.remediation);
         self.cost_effort = prose_field(&f.cost_effort);
@@ -375,17 +395,29 @@ impl FindingRow {
         }
     }
 
-    /// Convert this row into a fill [`Scope`] for one `finding_block` repetition.
-    fn into_scope(self) -> Scope {
+    /// Convert this row into a fill [`Scope`] for one `finding_block`
+    /// repetition, numbered `index` within its severity section (#2357
+    /// wave-3.2 defect #1 — a real sequential number, never a literal `N.`).
+    fn into_scope(self, index: usize) -> Scope {
         let mut s = Scope::new();
+        s.set("finding_index", index.to_string());
         s.set("finding_title", self.title);
         s.set_opt("finding_category", self.category);
-        s.set_opt("finding_component", self.component);
         s.set_opt("finding_description", self.description);
-        s.set_opt("finding_evidence", self.evidence);
         s.set_opt("finding_business_impact", self.business_impact);
         s.set_opt("finding_remediation", self.remediation);
         s.set_opt("finding_cost_effort", self.cost_effort);
+        if let Some(quote) = &self.evidence_quote {
+            s.set(
+                "finding_evidence_block",
+                render_evidence_block(
+                    self.component.as_deref().unwrap_or(""),
+                    quote,
+                    self.evidence_measured,
+                ),
+            );
+        }
+        s.set_opt("finding_component", self.component);
         s
     }
 }
@@ -447,24 +479,75 @@ fn prose_field(s: &str) -> Option<String> {
     dedupe_field(s).map(|v| tag(v, Provenance::Inferred))
 }
 
-/// Like [`prose_field`], but tags the value `measured` ⁽ᵐ⁾ when `measured` is
-/// true — for a wave-3 investigation evidence quote that was mechanically
-/// verified verbatim against the file (#2357).  When `measured` is false the
-/// value is LLM-claimed and tagged `inferred` ⁽ⁱ⁾, identical to [`prose_field`].
+/// Trim an evidence quote and map empty to `None` — deliberately NO dedupe of
+/// trailing punctuation and NO provenance tag baked into the string (#2357
+/// wave-3.2 defect #2): the quote must render byte-for-byte verbatim inside a
+/// fenced code block, so nothing here may alter a single character of it.
+/// Test: `reporter_tests::evidence_renders_as_fenced_block`.
+fn raw_evidence(s: &str) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Render a finding's evidence as a labeled fenced code block.
 ///
-/// Why: an evidence quote proven to exist in the source is `measured` data, not
-/// an LLM judgement; tagging it ⁽ᵐ⁾ tells a reader the snippet is real code they
-/// can grep for, while the surrounding description/impact/remediation stay ⁽ⁱ⁾.
-/// What: dedupes trailing terminal punctuation, maps empty → `None`, and applies
-/// the `Measured` tag when `measured` else `Inferred`.
-/// Test: `reporter_tests::reporter_tags_investigation_evidence_measured`.
-fn evidence_field(s: &str, measured: bool) -> Option<String> {
-    let prov = if measured {
+/// Why: dumping a verbatim multi-line code snippet inline into a prose
+/// sentence mangled rendering (unescaped `<`, `{`, `_`, backticks) and a blank
+/// line inside the unfenced quote read as a section boundary to the
+/// omit-empty polish pass, splicing a spurious "No data available" line mid-
+/// quote (#2357 wave-3.2 defects #2/#3). Fencing the quote makes both
+/// structurally impossible: nothing inside a fence needs escaping, blank lines
+/// are literal, and `polish`'s fence-tracking guard (added alongside this fix)
+/// never touches fenced content.
+/// What: `file_label` (e.g. `lib/auth/session.ts:58`, or empty) becomes a
+/// backtick-wrapped label on its own bulleted line carrying the provenance
+/// marker; `quote` is embedded verbatim inside a fence chosen one backtick
+/// longer than the longest backtick run the quote itself contains (see
+/// [`fence_for`]), so a quote that itself contains a ``` fence still renders
+/// correctly.
+/// Test: `reporter_tests::{evidence_renders_as_fenced_block,
+/// evidence_with_blank_line_fences_cleanly,
+/// evidence_containing_triple_backticks_uses_longer_fence}`.
+fn render_evidence_block(file_label: &str, quote: &str, measured: bool) -> String {
+    let prov_tag = if measured {
         Provenance::Measured
     } else {
         Provenance::Inferred
+    }
+    .tag();
+    let label = if file_label.is_empty() {
+        format!("- **Evidence**{prov_tag}:")
+    } else {
+        format!("- **Evidence** (`{file_label}`){prov_tag}:")
     };
-    dedupe_field(s).map(|v| tag(v, prov))
+    let fence = fence_for(quote);
+    format!("{label}\n{fence}\n{quote}\n{fence}")
+}
+
+/// Choose a fence marker at least one backtick longer than the longest run of
+/// consecutive backticks in `content`, minimum 3 (a plain ``` fence).
+///
+/// Why: a fence no longer than a backtick run already inside the content would
+/// itself be misparsed as the closing fence, corrupting the render; scanning
+/// for the longest run and going one longer is the standard CommonMark-safe
+/// technique.
+/// Test: `reporter_tests::evidence_containing_triple_backticks_uses_longer_fence`.
+fn fence_for(content: &str) -> String {
+    let mut max_run = 0usize;
+    let mut current = 0usize;
+    for ch in content.chars() {
+        if ch == '`' {
+            current += 1;
+            max_run = max_run.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    "`".repeat((max_run + 1).max(3))
 }
 
 /// Fill one severity band's per-application finding blocks for one repository,
@@ -486,6 +569,7 @@ fn evidence_field(s: &str, measured: bool) -> Option<String> {
 /// reporter_merges_synthesis_prose_onto_deterministic_finding,
 /// reporter_injects_synthesis_prose,
 /// reporter_leaves_findings_honesty_marked_without_metrics}`.
+#[allow(clippy::too_many_arguments)]
 fn push_finding_band(
     root: &mut Scope,
     repo: &RepositoryReport,
@@ -494,6 +578,7 @@ fn push_finding_band(
     band_label: &str,
     app_block: &str,
     finding_block: &str,
+    index: &mut usize,
 ) {
     let mut rows: Vec<FindingRow> = repo
         .metrics
@@ -523,7 +608,8 @@ fn push_finding_band(
     let mut app_scope = Scope::new();
     app_scope.set("app_name", repo.name.clone());
     for row in rows {
-        app_scope.push_block(finding_block, row.into_scope());
+        *index += 1;
+        app_scope.push_block(finding_block, row.into_scope(*index));
     }
     root.push_block(app_block, app_scope);
 }

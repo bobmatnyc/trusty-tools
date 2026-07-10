@@ -73,6 +73,38 @@ fn fixture_model_with_findings(dir: &Path) -> ReportModel {
     ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("build model")
 }
 
+/// Build a model whose single repo's metrics carry TWO RED and TWO AMBER
+/// findings — needed to prove per-severity-section sequential numbering
+/// (findings-rendering fix, #2357 wave-3.2 defect #1): RED must render 1, 2
+/// and AMBER must independently restart at 1, 2 (never continue 3, 4).
+fn fixture_model_with_many_findings(dir: &Path) -> ReportModel {
+    let metrics = r#"{
+      "loc": { "total": 5000, "by_language": [ { "language": "Rust", "loc": 5000 } ] },
+      "counts": { "files": 20, "functions": 150 },
+      "findings": [
+        { "title": "SQL injection", "severity": "red", "category": "security", "component": "db.rs" },
+        { "title": "Hardcoded secret", "severity": "red", "category": "security", "component": "auth.rs" },
+        { "title": "Stale dependency", "severity": "amber", "category": "maintainability", "component": "deps.toml" },
+        { "title": "Weak hashing", "severity": "amber", "category": "security", "component": "hash.rs" }
+      ]
+    }"#;
+    std::fs::write(dir.join("acme.json"), metrics).expect("write metrics");
+
+    let toml = r#"
+        [report]
+        title = "Acme Due Diligence"
+        analyst = "bobmatnyc"
+
+        [[repositories]]
+        name = "Acme Web"
+        path = "/nonexistent/acme-web"
+        metrics = "acme.json"
+    "#;
+    let manifest_path = dir.join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest parse");
+    ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("build model")
+}
+
 /// Why: rendered markdown must carry filled report/app values and honesty
 /// markers for unmapped (M1) scoring fields.
 /// What: renders the bundled generic template and asserts key substrings.
@@ -295,11 +327,226 @@ fn reporter_fills_findings_deterministically() {
     assert!(md.contains("Clean module boundaries"));
 
     // Prose-only fields have no deterministic source and stay honesty-marked —
-    // both the RED sentence's business-impact clause and the AMBER sentence's
-    // evidence clause fall through to the marker.
-    assert!(md.contains(&format!("Business impact: {HONESTY_MARKER}")));
-    assert!(md.contains(&format!("Evidence: {HONESTY_MARKER}")));
+    // the RED row's business-impact line falls through to the marker on its
+    // own labeled line (findings-rendering fix, #2357 wave-3.2).
+    assert!(md.contains(&format!("**Business impact:** {HONESTY_MARKER}")));
+    // With no synthesis/investigation evidence at all, the whole evidence block
+    // is unset — it falls to the bare honesty-marker paragraph, which the
+    // omit-empty pass drops (never rendering a spliced "Evidence: not stated"
+    // line); it is recorded under Gaps & Caveats instead.
+    assert!(
+        !md.contains("Evidence:"),
+        "no evidence label without a quote"
+    );
+    assert!(
+        md.contains("Data gaps:"),
+        "the dropped evidence is recorded as a gap"
+    );
+    // Findings are now really-numbered (defect #1 fix), never a literal "N.".
+    assert!(md.contains("1. **SQL injection"));
+    assert!(!md.contains("N. **"), "literal N. must never render");
     assert!(!md.contains("{{"), "no raw placeholder survives");
+}
+
+// ─── Findings-rendering fix (#2357 wave-3.2): numbering, fenced evidence ──────
+
+/// Why: this is the direct regression test for defect #1 — every finding must
+/// be a REAL sequential number, and RED/AMBER are independent counters (RED
+/// restarts at 1, AMBER restarts at 1; AMBER must never continue from RED).
+/// What: a fixture with 2 RED + 2 AMBER findings; asserts "1." and "2." both
+/// appear for RED, "1." and "2." both appear for AMBER (not "3."/"4."), and no
+/// literal "N." survives anywhere.
+/// Test: this test itself.
+#[test]
+fn finding_numbering_restarts_per_severity_section() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model_with_many_findings(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("1. **SQL injection"), "RED #1");
+    assert!(md.contains("2. **Hardcoded secret"), "RED #2");
+    assert!(md.contains("1. **Stale dependency"), "AMBER restarts at 1");
+    assert!(md.contains("2. **Weak hashing"), "AMBER #2");
+    assert!(!md.contains("3. **Stale") && !md.contains("3. **Weak"));
+    assert!(
+        !md.contains("N. **"),
+        "literal N. must never render anywhere"
+    );
+}
+
+/// Why: this is the direct regression test for defect #2 — evidence must
+/// render as a labeled, fenced code block, never spliced inline into prose.
+/// What: attaches a verified (measured) evidence quote via synthesis; asserts
+/// the file:line label line, the provenance marker, and a ``` fence wrap the
+/// verbatim quote — and that the old inline "Evidence: <code>." sentence form
+/// never appears.
+/// Test: this test itself.
+#[test]
+fn evidence_renders_as_fenced_block() {
+    use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    let slug = model.repositories[0].slug.clone();
+    model.synthesis = Some(Synthesis {
+        status: SynthesisStatus::Available,
+        executive_summary: None,
+        top_risks: vec![],
+        findings: vec![FindingProse {
+            app_slug: slug,
+            title: "SQL injection".to_string(),
+            severity: "RED".to_string(),
+            description: "Unsanitised query parameters".to_string(),
+            evidence: "let query = `SELECT * FROM users WHERE id = ${id}`;".to_string(),
+            component: "lib/auth/session.ts:58".to_string(),
+            business_impact: "customer data exposure".to_string(),
+            remediation: "use parameterised queries".to_string(),
+            cost_effort: "low".to_string(),
+            evidence_measured: true,
+        }],
+        notes: vec![],
+    });
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    // The label line: file:line + measured provenance marker, on its own line.
+    assert!(
+        md.contains("- **Evidence** (`lib/auth/session.ts:58`)"),
+        "evidence label line missing; md:\n{md}"
+    );
+    assert!(md.contains(crate::report::provenance::MEASURED_TAG.trim()));
+    // The quote itself is fenced and verbatim (including its own backtick/`$`).
+    assert!(md.contains("```\nlet query = `SELECT * FROM users WHERE id = ${id}`;\n```"));
+    // The old inline, unfenced sentence form must never appear again.
+    assert!(!md.contains("Evidence: let query"));
+    assert!(!md.contains("{{"));
+}
+
+/// Why: this is the direct regression test for defect #3 — a blank line
+/// inside the evidence quote must never be read as a section boundary and
+/// must never splice a "No data available" line mid-quote.
+/// What: a verified evidence quote spanning several lines WITH a blank line in
+/// the middle; asserts the fenced block contains the blank line literally and
+/// the collapse marker never appears inside (or immediately after) it.
+/// Test: this test itself.
+#[test]
+fn evidence_with_blank_line_fences_cleanly() {
+    use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    let slug = model.repositories[0].slug.clone();
+    let quote =
+        "function serializeSession(user) {\n\n  return Buffer.from(JSON.stringify(user));\n}";
+    model.synthesis = Some(Synthesis {
+        status: SynthesisStatus::Available,
+        executive_summary: None,
+        top_risks: vec![],
+        findings: vec![FindingProse {
+            app_slug: slug,
+            title: "SQL injection".to_string(),
+            severity: "RED".to_string(),
+            description: "Session serialization leaks internal state".to_string(),
+            evidence: quote.to_string(),
+            component: "lib/auth/session.ts:58".to_string(),
+            business_impact: "session hijacking".to_string(),
+            remediation: "strip internal fields before serializing".to_string(),
+            cost_effort: "moderate".to_string(),
+            evidence_measured: true,
+        }],
+        notes: vec![],
+    });
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    let fenced = format!("```\n{quote}\n```");
+    assert!(
+        md.contains(&fenced),
+        "blank-line evidence must fence with the blank line intact; md:\n{md}"
+    );
+    // Scope the "no spurious gap splice" check to the RED findings section
+    // itself (other, genuinely-empty sections elsewhere in the report
+    // legitimately collapse to this same line — that is correct, unrelated
+    // behaviour, not the defect under test).
+    let red_start = md.find("### 5.1 RED").expect("RED section present");
+    let red_end = md.find("### 5.2 AMBER").expect("AMBER section present");
+    let red_section = &md[red_start..red_end];
+    assert!(
+        !red_section.contains("No data available"),
+        "no spurious gap splice inside/around the fenced evidence in the RED section; section:\n{red_section}"
+    );
+}
+
+/// Why: this is the direct regression test for the fence-length rule — a
+/// quote that itself contains a ``` sequence must use a LONGER fence so the
+/// embedded backticks are never mistaken for the closing fence.
+/// What: a verified evidence quote containing a literal ``` run; asserts the
+/// wrapping fence is 4+ backticks (strictly longer than the embedded run).
+/// Test: this test itself.
+#[test]
+fn evidence_containing_triple_backticks_uses_longer_fence() {
+    use crate::report::synthesize::{FindingProse, Synthesis, SynthesisStatus};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    let slug = model.repositories[0].slug.clone();
+    let quote = "const doc = \"```js\\nconsole.log(1)\\n```\";";
+    model.synthesis = Some(Synthesis {
+        status: SynthesisStatus::Available,
+        executive_summary: None,
+        top_risks: vec![],
+        findings: vec![FindingProse {
+            app_slug: slug,
+            title: "SQL injection".to_string(),
+            severity: "RED".to_string(),
+            description: "Embeds a markdown fence in a string literal".to_string(),
+            evidence: quote.to_string(),
+            component: "lib/docs.ts:12".to_string(),
+            business_impact: "n/a".to_string(),
+            remediation: "n/a".to_string(),
+            cost_effort: "low".to_string(),
+            evidence_measured: true,
+        }],
+        notes: vec![],
+    });
+
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(
+        md.contains(&format!("````\n{quote}\n````")),
+        "a quote containing ``` must be wrapped in a 4-backtick fence; md:\n{md}"
+    );
+}
+
+/// Why: the other finding fields must each be their own labeled line, not run
+/// together in one paragraph (the readability half of defect #2).
+/// What: asserts the Component/Business impact/Remediation labels each appear
+/// on their own line, bold-prefixed.
+/// Test: this test itself.
+#[test]
+fn finding_fields_have_own_labeled_lines() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let model = fixture_model_with_findings(tmp.path());
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("bundled template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("- **Component:**"));
+    assert!(md.contains("- **Business impact:**"));
+    assert!(md.contains("- **Remediation:**"));
 }
 
 /// Why: with no findings metrics, the RED/AMBER/GREEN sections must not be

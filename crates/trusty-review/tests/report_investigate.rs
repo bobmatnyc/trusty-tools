@@ -130,15 +130,21 @@ async fn investigation_renders_verified_and_rejects_unverifiable() {
 
     let md = Reporter::new(fx.path()).render(&model, &template);
 
-    // The verified finding renders with its measured evidence quote (⁽ᵐ⁾) and
-    // inferred prose (⁽ⁱ⁾).
+    // The verified finding renders as a real numbered list item, with its
+    // evidence quote fenced (never spliced inline) and measured-tagged (⁽ᵐ⁾),
+    // and its prose inferred-tagged (⁽ⁱ⁾) — findings-rendering fix (#2357
+    // wave-3.2).
     assert!(
-        md.contains("Hardcoded API key"),
-        "verified finding title present"
+        md.contains("1. **Hardcoded API key"),
+        "verified finding renders as a real numbered list item, not literal N.; md:\n{md}"
     );
     assert!(
-        md.contains(&format!("sk-hardcoded-secret-123\";{MEASURED_TAG}")),
-        "evidence quote must render measured; md:\n{md}"
+        md.contains(&format!("- **Evidence** (`src/auth.rs:2`){MEASURED_TAG}:")),
+        "evidence label line must carry the measured marker; md:\n{md}"
+    );
+    assert!(
+        md.contains("```\nlet api_key = \"sk-hardcoded-secret-123\";\n```"),
+        "evidence quote must render inside a fenced code block; md:\n{md}"
     );
     assert!(
         md.contains(&format!("committed to source{INFERRED_TAG}")),
@@ -288,10 +294,14 @@ async fn investigation_survives_one_truncated_batch_and_names_it() {
     model.synthesis = Some(synthesis);
 
     let md = Reporter::new(fx.path()).render(&model, &template);
-    assert!(md.contains("Hardcoded API key"));
+    assert!(md.contains("1. **Hardcoded API key"));
     assert!(
-        md.contains(&format!("sk-batch-e2e-secret\";{MEASURED_TAG}")),
-        "evidence quote must render measured; md:\n{md}"
+        md.contains(&format!("- **Evidence** (`src/blob1.rs:1`){MEASURED_TAG}:")),
+        "evidence label line must carry the measured marker; md:\n{md}"
+    );
+    assert!(
+        md.contains("```\nlet api_key = \"sk-batch-e2e-secret\";\n```"),
+        "evidence quote must render inside a fenced code block; md:\n{md}"
     );
     assert!(md.contains("## Investigation Coverage"));
     assert!(

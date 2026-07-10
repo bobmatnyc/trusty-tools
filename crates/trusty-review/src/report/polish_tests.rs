@@ -79,6 +79,44 @@ fn strips_comment_with_embedded_close() {
     assert!(!out.contains("dataset:"));
 }
 
+/// Why: this is the direct regression test for the findings-rendering fix
+/// (#2357 wave-3.2 defect #3) — a fenced code block containing a blank line
+/// must survive the FULL polish pass (comment strip + omit-empty + section
+/// collapse) byte-for-byte, never splicing a "No data available" line inside
+/// or around it, and never having the fence markers themselves stripped.
+/// What: a heading followed by a fenced block whose body has a blank line in
+/// the middle; asserts the whole fence (including the blank line) survives
+/// `polish()` unchanged and no collapse line appears anywhere near it.
+/// Test: this test itself.
+#[test]
+fn fenced_code_with_blank_line_untouched() {
+    let input = "## Findings\n\n1. **Some finding** — a description\n- **Evidence** (`a.rs:1`):\n```\nfunction f() {\n\n  return 1;\n}\n```\n";
+    let out = polish(input);
+    assert!(
+        out.contains("```\nfunction f() {\n\n  return 1;\n}\n```"),
+        "fenced block with its blank line must survive verbatim: {out}"
+    );
+    assert!(
+        !out.contains("No data available"),
+        "no gap splice around fenced content: {out}"
+    );
+}
+
+/// Why: `omit_empty`'s bullet/table/marker-paragraph checks must never fire
+/// INSIDE a fence — a fenced line that merely LOOKS like a marker bullet or a
+/// table row must pass through untouched.
+/// What: a fence body containing a line that looks like a marker-only bullet
+/// (`- not stated in source data`) and a `|`-prefixed line; both survive
+/// verbatim because they are inside the fence.
+/// Test: this test itself.
+#[test]
+fn fenced_code_resembling_markers_is_untouched() {
+    let input = format!("## Section\n\n```\n- {HONESTY_MARKER}\n| a | b |\n```\n");
+    let out = polish(&input);
+    assert!(out.contains(&format!("- {HONESTY_MARKER}")));
+    assert!(out.contains("| a | b |"));
+}
+
 /// Why: a metadata row whose value is only the honesty marker is empty
 /// scaffolding — it must be dropped and the field recorded under Data gaps, while
 /// rows with real values survive.
