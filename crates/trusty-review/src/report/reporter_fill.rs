@@ -110,18 +110,20 @@ pub(super) fn fill_profile(scope: &mut Scope, repo: &RepositoryReport) {
     let metrics = repo.metrics.as_ref();
     let scan = repo.scan.as_ref();
 
-    // Tech stack: declared languages win over measured scan languages.
+    // Tech stack: declared languages win over measured scan languages; render
+    // the per-language LoC breakdown (with counts), not just names (live-QA
+    // wave-2 defect #5 — the breakdown was computed but only names rendered).
     let stack = metrics
-        .map(|m| m.primary_languages(4))
-        .filter(|l| !l.is_empty())
-        .map(|l| (l, Provenance::Declared))
+        .map(|m| format_language_breakdown(&m.loc.by_language, 4))
+        .filter(|s| !s.is_empty())
+        .map(|s| (s, Provenance::Declared))
         .or_else(|| {
-            scan.map(|s| s.primary_languages(4))
-                .filter(|l| !l.is_empty())
-                .map(|l| (l, Provenance::Measured))
+            scan.map(|s| format_language_breakdown(&s.by_language, 4))
+                .filter(|s| !s.is_empty())
+                .map(|s| (s, Provenance::Measured))
         });
-    if let Some((langs, prov)) = stack {
-        scope.set("app_tech_stack", tag(langs.join(", "), prov));
+    if let Some((stack, prov)) = stack {
+        scope.set("app_tech_stack", tag(stack, prov));
     }
 
     // Total LoC: declared metrics figure wins over the measured scan count.
@@ -157,6 +159,41 @@ pub(super) fn fill_profile(scope: &mut Scope, repo: &RepositoryReport) {
     if let Some(fw) = scan.map(format_frameworks).filter(|f| !f.is_empty()) {
         scope.set("app_frameworks", tag(fw, Provenance::Measured));
     }
+}
+
+/// Render a per-language LoC breakdown as a compact `"Lang N · Lang N"` string
+/// with thousands-separated counts (live-QA wave-2 defect #5 — the breakdown
+/// was already computed, in both the scan and metrics paths, but only the
+/// language NAMES reached the rendered Profile table; the LoC split — the
+/// actually useful signal — was silently dropped).
+/// Why: a reader wants to see how the codebase splits (e.g. `TypeScript 19,568
+/// · SQL 184 · CSS 43`), not merely which languages are present.
+/// What: sorts `langs` by descending LoC (ties broken alphabetically), takes
+/// the top `n`, and joins each as `"{name} {loc}"` (thousands-grouped) with
+/// `" · "`.  Empty input renders `""` (falls through to omitted/gaps upstream).
+/// Test: `reporter_tests.rs::reporter_renders_language_breakdown_with_counts`.
+pub(super) fn format_language_breakdown(langs: &[super::metrics::LanguageLoc], n: usize) -> String {
+    let mut sorted: Vec<&super::metrics::LanguageLoc> = langs.iter().collect();
+    sorted.sort_by(|a, b| b.loc.cmp(&a.loc).then_with(|| a.language.cmp(&b.language)));
+    sorted
+        .into_iter()
+        .take(n)
+        .map(|l| format!("{} {}", l.language, format_thousands(l.loc)))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// Format a `u64` with comma thousands separators (e.g. `19568` → `"19,568"`).
+fn format_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
 }
 
 /// Render a scan's detected frameworks as a compact one-line summary.

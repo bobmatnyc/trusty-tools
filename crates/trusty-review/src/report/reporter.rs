@@ -254,20 +254,35 @@ fn build_scope(model: &ReportModel) -> Scope {
 /// source (no `metrics` field maps to them); M2 fills exactly these — and only
 /// with prose that already passed the numeric guardrail.  RED/AMBER finding
 /// prose is handled per-finding by [`push_finding_band`] (merged onto the
-/// deterministic row, never duplicated).
-/// What: sets the executive-summary scalar and the `risk_N_*` scalars from the
-/// synthesis's verified top-risk rows.
-/// Test: `reporter_tests.rs::reporter_injects_synthesis_prose`.
+/// deterministic row, never duplicated).  Every LLM-written field is tagged
+/// `inferred` (live-QA wave-2 defect #1 — the marker was defined but never
+/// wired to any synthesized content).
+/// What: sets the executive-summary scalar (tagged once, section granularity)
+/// and the `risk_N_description` / `risk_N_cost` scalars (tagged per field) from
+/// the synthesis's verified top-risk rows.  `risk_N_severity` / `risk_N_apps`
+/// are left untagged — they restate categorical/identifier data (the RED/AMBER
+/// band, the affected application names) rather than narrative prose.
+/// Test: `reporter_tests.rs::{reporter_injects_synthesis_prose,
+/// reporter_tags_top_risks_as_inferred}`.
 fn inject_synthesis_summary(root: &mut Scope, syn: &super::synthesize::Synthesis) {
     if let Some(exec) = &syn.executive_summary {
-        root.set("executive_summary_paragraph", exec.clone());
+        root.set(
+            "executive_summary_paragraph",
+            tag(exec.clone(), Provenance::Inferred),
+        );
     }
 
     for (i, risk) in syn.top_risks.iter().enumerate() {
         let n = i + 1;
-        root.set(format!("risk_{n}_description"), risk.description.clone());
+        root.set(
+            format!("risk_{n}_description"),
+            tag(risk.description.clone(), Provenance::Inferred),
+        );
         root.set(format!("risk_{n}_severity"), risk.severity.clone());
-        root.set(format!("risk_{n}_cost"), risk.cost.clone());
+        root.set(
+            format!("risk_{n}_cost"),
+            tag(risk.cost.clone(), Provenance::Inferred),
+        );
         root.set(format!("risk_{n}_apps"), risk.apps.clone());
     }
 }
@@ -305,7 +320,7 @@ impl FindingRow {
         FindingRow {
             title: f.title.clone(),
             category: non_empty(&f.category),
-            component: non_empty(&f.component),
+            component: dedupe_field(&f.component),
             ..Default::default()
         }
     }
@@ -314,16 +329,24 @@ impl FindingRow {
     /// title match (e.g. metrics were absent or reported the finding
     /// differently) — preserves synthesis's own title/component alongside its
     /// prose rather than silently dropping verified data.
+    ///
+    /// Why: the narrative fields are LLM-written, so each is tagged `inferred`
+    /// (live-QA wave-2 defect #1); `component` is identifier-like routing data
+    /// copied from context rather than a narrative sentence, so it is left
+    /// untagged (dedupe-only, no provenance marker).
+    /// What: builds the row from `f`, applying [`prose_field`] (dedupe trailing
+    /// terminal punctuation + tag `Inferred`) to description/evidence/
+    /// business_impact/remediation/cost_effort.
     fn from_prose(f: &super::synthesize::FindingProse) -> Self {
         FindingRow {
             title: f.title.clone(),
             category: None,
-            component: non_empty(&f.component),
-            description: non_empty(&f.description),
-            evidence: non_empty(&f.evidence),
-            business_impact: non_empty(&f.business_impact),
-            remediation: non_empty(&f.remediation),
-            cost_effort: non_empty(&f.cost_effort),
+            component: dedupe_field(&f.component),
+            description: prose_field(&f.description),
+            evidence: prose_field(&f.evidence),
+            business_impact: prose_field(&f.business_impact),
+            remediation: prose_field(&f.remediation),
+            cost_effort: prose_field(&f.cost_effort),
         }
     }
 
@@ -331,18 +354,20 @@ impl FindingRow {
     ///
     /// Why: this is the "layer prose on top" step — the row already exists
     /// (from metrics), so synthesis fills the gaps rather than creating a
-    /// second, duplicate entry for the same finding.
+    /// second, duplicate entry for the same finding.  Each narrative field is
+    /// tagged `inferred` (live-QA wave-2 defect #1).
     /// What: sets description/evidence/business_impact/remediation/cost_effort
-    /// from `f`; `component` is kept metrics-verbatim unless metrics left it
-    /// unset, in which case synthesis's value is used as a fallback.
+    /// from `f` via [`prose_field`]; `component` is kept metrics-verbatim unless
+    /// metrics left it unset, in which case synthesis's value is used as a
+    /// dedupe-only (untagged) fallback.
     fn merge_prose(&mut self, f: &super::synthesize::FindingProse) {
-        self.description = non_empty(&f.description);
-        self.evidence = non_empty(&f.evidence);
-        self.business_impact = non_empty(&f.business_impact);
-        self.remediation = non_empty(&f.remediation);
-        self.cost_effort = non_empty(&f.cost_effort);
+        self.description = prose_field(&f.description);
+        self.evidence = prose_field(&f.evidence);
+        self.business_impact = prose_field(&f.business_impact);
+        self.remediation = prose_field(&f.remediation);
+        self.cost_effort = prose_field(&f.cost_effort);
         if self.component.is_none() {
-            self.component = non_empty(&f.component);
+            self.component = dedupe_field(&f.component);
         }
     }
 
@@ -369,6 +394,53 @@ fn non_empty(s: &str) -> Option<String> {
     } else {
         Some(s.to_string())
     }
+}
+
+/// Strip a single trailing sentence-terminal character (`.`/`?`/`!`) from prose
+/// destined for a template slot that appends its own literal period right after
+/// the value — avoids a doubled terminal punctuation mark (live-QA wave-2
+/// defect #3: `report-technical-dd{,-cast}.md` write `{{finding_description}}.`,
+/// `{{finding_evidence}}.`, and (in the AMBER row) `{{finding_remediation}}.`).
+///
+/// Why: LLM-written prose routinely ends its own sentence with terminal
+/// punctuation; the template's trailing literal `.` then collides with it
+/// (`"...concatenation.."`).  A trailing `)` is left untouched — no template in
+/// this crate appends a bare period directly after a field closed with a
+/// parenthesis (the RED row wraps `finding_cost_effort` in `(cost/effort: …).`,
+/// not the description/evidence/remediation fields), so there is no collision
+/// to resolve for that case, and blindly chopping a legitimate closing paren
+/// would corrupt otherwise-correct prose.
+/// What: trims trailing whitespace, then removes exactly one trailing `.`, `?`,
+/// or `!` if present; a trailing `)` (or anything else) is returned unchanged.
+/// Test: `reporter_tests.rs::{dedupe_strips_trailing_period,
+/// dedupe_strips_trailing_question_mark, dedupe_leaves_trailing_paren}`.
+fn dedupe_terminal_punctuation(s: &str) -> &str {
+    let trimmed = s.trim_end();
+    match trimmed.as_bytes().last() {
+        Some(b'.') | Some(b'?') | Some(b'!') => &trimmed[..trimmed.len() - 1],
+        _ => trimmed,
+    }
+}
+
+/// Map an empty string (after terminal-punctuation dedupe) to `None`, with no
+/// provenance tag — for identifier-like fields (e.g. `component`) that share the
+/// same template punctuation collision as narrative prose but are not
+/// themselves LLM-authored sentences.
+fn dedupe_field(s: &str) -> Option<String> {
+    let cleaned = dedupe_terminal_punctuation(s);
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.to_string())
+    }
+}
+
+/// Map an empty string (after terminal-punctuation dedupe) to `None`, tagging a
+/// non-empty result `inferred` — for the LLM-authored narrative fields of a
+/// synthesized finding (live-QA wave-2 defect #1: the marker existed but was
+/// never applied to any synthesized content).
+fn prose_field(s: &str) -> Option<String> {
+    dedupe_field(s).map(|v| tag(v, Provenance::Inferred))
 }
 
 /// Fill one severity band's per-application finding blocks for one repository,

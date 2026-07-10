@@ -276,48 +276,135 @@ fn process_table(table: &[&str], section: &str, out: &mut Vec<String>, gaps: &mu
     }
 }
 
-/// Replace any section heading whose body has no content with a collapse line.
+/// The nesting level assigned to a bold-only pseudo-heading line (e.g.
+/// `**Health-Factor Scores**`, `**Benchmark Position**`) — deeper than any real
+/// `#`-heading (max level 6) so it never terminates an enclosing `#` section's
+/// span, but terminates its OWN span at the next real heading or the next
+/// sibling pseudo-heading (live-QA wave-2 defect #4).
+const PSEUDO_HEADING_LEVEL: usize = 100;
+
+/// A structural boundary line for the collapse pass: either a `#`-heading
+/// (`level` = hash count) or a bold-only pseudo-heading (`level` =
+/// [`PSEUDO_HEADING_LEVEL`]).  Returns the boundary's level and display text.
 ///
-/// Why: after row/table/bullet dropping, a heading can be left immediately
-/// followed by the next heading (or the trailing `---`) with nothing between —
-/// the "sections with zero data collapse to one line" rule.
-/// What: for each `##`/`###` heading (excluding the top title and the Gaps
-/// section), if every line until the next heading / `---` / EOF is blank, inserts
-/// a single [`COLLAPSE_LINE`] and records the heading as a gap.
-/// Test: `polish_tests.rs::collapses_empty_section`.
+/// Why: the bundled templates use bold-wrapped lines (`**Profile**`,
+/// `**Health-Factor Scores**`) as sub-headings within a `###` per-application
+/// block; without recognising them, an orphaned bold label whose table was
+/// entirely dropped rendered with nothing beneath it and no collapse note.
+/// What: `#`-headings via [`heading_text`]; a bold pseudo-heading via
+/// [`bold_heading_text`]. `None` for any other line.
+/// Test: `polish_tests.rs::{collapses_orphaned_bold_pseudo_heading,
+/// parent_with_populated_child_not_collapsed}`.
+fn boundary(trimmed: &str) -> Option<(usize, &str)> {
+    if let Some(text) = heading_text(trimmed) {
+        let level = trimmed.len() - trimmed.trim_start_matches('#').len();
+        return Some((level, text));
+    }
+    bold_heading_text(trimmed).map(|text| (PSEUDO_HEADING_LEVEL, text))
+}
+
+/// The inner text of a bold-only pseudo-heading line (`**Text**` with nothing
+/// else on the line), or `None`.
+fn bold_heading_text(trimmed: &str) -> Option<&str> {
+    let inner = trimmed.strip_prefix("**")?.strip_suffix("**")?;
+    if inner.is_empty() || inner.contains("**") {
+        None
+    } else {
+        Some(inner)
+    }
+}
+
+/// Replace any section (real heading or bold pseudo-heading) whose body has no
+/// content with a collapse line — recursively, so a parent is never falsely
+/// collapsed just because its first child happens to be a deeper boundary.
+///
+/// Why: after row/table/bullet dropping, a boundary can be left immediately
+/// followed by the next boundary (or the trailing `---`) with nothing between —
+/// the "sections with zero data collapse to one line" rule. The PREVIOUS
+/// single-pass scan terminated a heading's body at the next heading of ANY
+/// level, so a `##` parent immediately followed by a populated `###` child was
+/// scanned as empty (zero lines examined before hitting the child heading) and
+/// incorrectly collapsed right above the child's real content (live-QA wave-2
+/// defect #2). Recursion fixes this: a level-L boundary's span runs until the
+/// next boundary of level <= L (or `---`/EOF); nested deeper boundaries are
+/// processed first, and their survival (or collapse) is decided before the
+/// parent's own has-content verdict is computed.
+/// What: delegates to [`collapse_recursive`], excluding the Gaps & Caveats
+/// section (left untouched; regenerated wholesale afterwards).
+/// Test: `polish_tests.rs::{collapses_empty_section,
+/// parent_with_populated_child_not_collapsed,
+/// collapses_orphaned_bold_pseudo_heading}`.
 fn collapse_empty_sections(lines: &[String], gaps: &mut Vec<String>) -> String {
+    let (rendered, _has_content) = collapse_recursive(lines, gaps);
+    rendered.join("\n")
+}
+
+/// Recursively collapse empty boundary spans within `lines`, returning the
+/// rendered lines and whether this span (as a whole) has any content.
+///
+/// Why: a boundary's own emptiness verdict depends on whether ITS descendants
+/// (recursively) have content — a `##` parent has content whenever a nested
+/// `###`/bold-pseudo child survives non-collapsed, even if the parent's own
+/// direct text is empty.
+/// What: walks `lines` once; a boundary line recurses into its own span first,
+/// then either re-emits the child span (child had content — this also marks the
+/// parent as having content) or replaces it with [`COLLAPSE_LINE`] + a recorded
+/// gap (child was empty — does NOT count toward the parent's own content). The
+/// Gaps & Caveats section is copied through untouched (never collapsed here).
+/// Test: `polish_tests.rs::{parent_with_populated_child_not_collapsed,
+/// collapses_orphaned_bold_pseudo_heading}`.
+fn collapse_recursive(lines: &[String], gaps: &mut Vec<String>) -> (Vec<String>, bool) {
     let mut out: Vec<String> = Vec::new();
+    let mut has_content = false;
     let mut idx = 0usize;
+
     while idx < lines.len() {
         let line = &lines[idx];
         let trimmed = line.trim();
+
+        if trimmed == "---" {
+            out.push(line.clone());
+            idx += 1;
+            continue;
+        }
+
+        let Some((level, heading)) = boundary(trimmed) else {
+            if !trimmed.is_empty() {
+                has_content = true;
+            }
+            out.push(line.clone());
+            idx += 1;
+            continue;
+        };
+
         out.push(line.clone());
         idx += 1;
 
-        let Some(heading) = heading_text(trimmed) else {
-            continue;
-        };
-        if heading.contains(GAPS_HEADING_NEEDLE) {
-            continue;
-        }
-        // Scan the section body.
         let body_start = idx;
-        let mut has_content = false;
         while idx < lines.len() {
             let t = lines[idx].trim();
-            if heading_text(t).is_some() || t == "---" {
+            if t == "---" {
                 break;
             }
-            if !t.is_empty() {
-                has_content = true;
+            if let Some((child_level, _)) = boundary(t)
+                && child_level <= level
+            {
+                break;
             }
             idx += 1;
         }
-        if has_content {
-            // Re-emit the buffered body unchanged.
-            for l in &lines[body_start..idx] {
-                out.push(l.clone());
-            }
+        let child_slice = &lines[body_start..idx];
+
+        if heading.contains(GAPS_HEADING_NEEDLE) {
+            // Left untouched here — regenerated wholesale after this pass.
+            out.extend(child_slice.iter().cloned());
+            continue;
+        }
+
+        let (rendered_child, child_has_content) = collapse_recursive(child_slice, gaps);
+        if child_has_content {
+            out.extend(rendered_child);
+            has_content = true;
         } else {
             push_gap(gaps, heading);
             out.push(String::new());
@@ -325,7 +412,8 @@ fn collapse_empty_sections(lines: &[String], gaps: &mut Vec<String>) -> String {
             out.push(String::new());
         }
     }
-    out.join("\n")
+
+    (out, has_content)
 }
 
 // ─── Gaps & Caveats regeneration ────────────────────────────────────────────

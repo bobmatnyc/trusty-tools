@@ -471,10 +471,24 @@ Every substantive value carries one of four **provenance** kinds
 
 The rendering choice is a **compact trailing superscript marker** appended to the
 value, with a one-line legend rendered once near the top of the report. Synthesised
-prose sections are labelled `inferred`. The numeric guardrail's allowed-set now
-**includes repo-scanned computed figures** (they are real source data); qualitative
-LLM inferences are permitted but must be labelled inferred — invention of
-unverifiable *figures* remains forbidden.
+prose sections are labelled `inferred` — wired into BOTH synthesis-injection paths
+(`reporter.rs::inject_synthesis_summary` for the executive summary + top-risks
+`description`/`cost` fields, and `FindingRow::from_prose`/`merge_prose` for the
+per-finding `description`/`evidence`/`business_impact`/`remediation`/`cost_effort`
+fields) at field granularity — every LLM-written sentence in the rendered body
+carries the marker (live-QA wave-2 defect #1: the tag existed but had zero call
+sites until this fix). The numeric guardrail's allowed-set now **includes
+repo-scanned computed figures** (they are real source data); qualitative LLM
+inferences are permitted but must be labelled inferred — invention of unverifiable
+*figures* remains forbidden.
+
+Because several templates append a literal trailing period directly after a prose
+placeholder (e.g. `{{finding_description}}.`), a synthesized sentence that already
+ends in `.`/`?`/`!` would otherwise double up (`"...concatenation.."`). The
+fill/injection layer (`reporter.rs::dedupe_terminal_punctuation`) strips exactly
+one trailing `.`/`?`/`!` before the field is tagged; a trailing `)` is left
+untouched (no template appends a bare period directly after a field closed with a
+parenthesis, so there is no collision to resolve there) — live-QA wave-2 defect #3.
 
 **Omit-empty** (post-render pass, `src/report/polish.rs`, applied after the
 deterministic fill and before the appended status notes):
@@ -488,8 +502,21 @@ deterministic fill and before the appended status notes):
    honesty marker is dropped; a marker-only bullet or standalone marker paragraph
    is dropped. An unfilled repeatable block now renders **nothing** (the fill
    engine changed from render-once-with-markers to render-nothing).
-3. **Collapse empty sections** — a section left with no data collapses to a single
-   `_No data available — see Gaps & Caveats._` line.
+3. **Collapse empty sections, recursively** — a section (real `#`-heading OR a
+   bold-only pseudo-heading line like `**Health-Factor Scores**`/`**Benchmark
+   Position**`) left with no data collapses to a single `_No data available — see
+   Gaps & Caveats._` line. The collapse check is **level-aware and recursive**: a
+   heading's own span runs until the next boundary of the same or a shallower
+   level (real headings by hash count; bold pseudo-headings are always deeper than
+   any real heading), and a parent is never falsely collapsed merely because its
+   first child happens to be a deeper boundary — its own has-content verdict
+   propagates up from its (recursively resolved) descendants (live-QA wave-2
+   defect #2: a `##` parent immediately followed by a populated `###` child
+   previously collapsed spuriously above the child's real content). Bold-only
+   pseudo-heading lines are recognised as boundaries in their own right so an
+   orphaned label whose table was entirely dropped (all rows honesty-marked) also
+   collapses instead of rendering with nothing beneath it (live-QA wave-2 defect
+   #4).
 4. **Gaps list** — every dropped field/section is collected into a compact
    `Data gaps: client, native scale, …` line in the Gaps & Caveats section,
    replacing the wall of `not stated` rows.
@@ -497,6 +524,15 @@ deterministic fill and before the appended status notes):
 This **deliberately changes default rendering** — the M2/M3 byte-identical-when-off
 guarantees apply to *their* flags (`--synthesize`, `--benchmark`), not to this
 default output cleanup; affected tests were updated accordingly.
+
+### Language-breakdown rendering (live-QA wave-2 defect #5)
+
+The per-language LoC breakdown (from either the built-in scanner or an external
+metrics file) is rendered with its counts, not just language names —
+`reporter_fill.rs::format_language_breakdown` sorts by descending LoC and joins the
+top 4 as `"{name} {loc}"` (thousands-grouped) with `" · "`, e.g.
+`TypeScript 19,568 · SQL 184 · CSS 43 ⁽ᵐ⁾`. Previously `{{app_tech_stack}}` dropped
+the LoC split entirely and rendered language names only.
 
 ## References & Related Docs
 

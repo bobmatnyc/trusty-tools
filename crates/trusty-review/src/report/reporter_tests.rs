@@ -156,9 +156,12 @@ fn write_emits_both() {
 }
 
 /// Why: available synthesis must inject verified prose into the exec-summary and
-/// RED-finding placeholders and surface the `synthesis: available` note.
+/// RED-finding placeholders, tag every synthesized field `inferred` (live-QA
+/// wave-2 defect #1), avoid a doubled terminal period where the prose already
+/// ends in one (defect #3), and surface the `synthesis: available` note.
 /// What: attaches an available `Synthesis` (exec + one RED finding routed to the
-/// repo slug) to the model and asserts the prose and note appear in the markdown.
+/// repo slug) to the model and asserts the prose, the inferred marker, the
+/// absence of a double period, and the note appear in the markdown.
 /// Test: this test itself.
 #[test]
 fn reporter_injects_synthesis_prose() {
@@ -192,8 +195,21 @@ fn reporter_injects_synthesis_prose() {
 
     assert!(md.contains("A grounded acquirer-relevant summary."));
     assert!(md.contains("Injection risk"));
-    assert!(md.contains("Raw query concatenation."));
+    assert!(md.contains("Raw query concatenation"));
     assert!(md.contains("synthesis: available"));
+    // Defect #1: every synthesized field carries the inferred marker.
+    assert!(md.contains(crate::report::provenance::INFERRED_TAG.trim()));
+    let inferred_count = md
+        .matches(crate::report::provenance::INFERRED_TAG.trim())
+        .count();
+    // exec summary + description/evidence/business_impact/remediation/cost_effort.
+    assert!(
+        inferred_count >= 6,
+        "expected >=6 inferred tags, got {inferred_count}"
+    );
+    // Defect #3: the prose's own trailing period was deduped, so the template's
+    // literal period never doubles up.
+    assert!(!md.contains("concatenation.."));
     assert!(!md.contains("{{"), "no raw placeholder survives");
 }
 
@@ -323,9 +339,13 @@ fn reporter_merges_synthesis_prose_onto_deterministic_finding() {
     // Metrics-verbatim fields still present.
     assert!(md.contains("SQL injection"));
     assert!(md.contains("db.rs"));
-    // Synthesis prose merged onto the same row.
-    assert!(md.contains("Unsanitised query parameters."));
+    // Synthesis prose merged onto the same row; the trailing period was deduped
+    // (defect #3) so the template's own "." never doubles.
+    assert!(md.contains("Unsanitised query parameters"));
+    assert!(!md.contains("parameters.."));
     assert!(md.contains("customer data exposure"));
+    // Defect #1: the merged prose fields carry the inferred marker.
+    assert!(md.contains(crate::report::provenance::INFERRED_TAG.trim()));
 
     // Exactly one row for this finding: the RED findings section (5.1) contains
     // the title exactly once, not twice (deterministic row + separate synthesis
@@ -646,6 +666,126 @@ fn reporter_declared_metrics_win_over_scanned() {
     let md = Reporter::new(tmp.path()).render(&model, &template);
     // Declared LoC wins, tagged declared (not the scanned line count).
     assert!(md.contains(&format!("99999{}", crate::report::provenance::DECLARED_TAG)));
+}
+
+// ─── Live-QA wave-2 fixes (#1 inferred tagging, #3 punctuation dedupe, #5) ────
+
+/// Why: live-QA wave-2 defect #3 — a prose field's own trailing period must not
+/// double up with a template's literal trailing period.
+/// What: asserts the terminal `.` is stripped.
+/// Test: this test itself.
+#[test]
+fn dedupe_strips_trailing_period() {
+    use super::dedupe_terminal_punctuation;
+    assert_eq!(
+        dedupe_terminal_punctuation("Raw query concatenation."),
+        "Raw query concatenation"
+    );
+}
+
+/// Why: a prose field ending in `?` collides with a template's trailing period
+/// the same way a `.` does; it must also be deduped.
+/// What: asserts the terminal `?` is stripped.
+/// Test: this test itself.
+#[test]
+fn dedupe_strips_trailing_question_mark() {
+    use super::dedupe_terminal_punctuation;
+    assert_eq!(
+        dedupe_terminal_punctuation("Is this exploitable?"),
+        "Is this exploitable"
+    );
+}
+
+/// Why: a trailing `)` has no collision with any template in this crate (no
+/// template appends a bare period directly after these fields when they close
+/// with a parenthesis) — it must be left untouched, not stripped.
+/// What: asserts a trailing `)` survives dedupe unchanged.
+/// Test: this test itself.
+#[test]
+fn dedupe_leaves_trailing_paren() {
+    use super::dedupe_terminal_punctuation;
+    assert_eq!(
+        dedupe_terminal_punctuation("use parameterised queries (see OWASP)"),
+        "use parameterised queries (see OWASP)"
+    );
+}
+
+/// Why: live-QA wave-2 defect #1 — the top-risks table (filled by
+/// `inject_synthesis_summary`) must tag its LLM-written fields `inferred`, not
+/// just the executive summary.
+/// What: attaches a `Synthesis` with one top risk and asserts the description
+/// and cost fields carry the inferred marker.
+/// Test: this test itself.
+#[test]
+fn reporter_tags_top_risks_as_inferred() {
+    use crate::report::synthesize::{RiskRow, Synthesis, SynthesisStatus};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let mut model = fixture_model(tmp.path());
+    model.synthesis = Some(Synthesis {
+        status: SynthesisStatus::Available,
+        executive_summary: Some("Summary.".to_string()),
+        top_risks: vec![RiskRow {
+            description: "Unpatched dependency chain".to_string(),
+            severity: "RED".to_string(),
+            cost: "moderate".to_string(),
+            apps: "Acme Web".to_string(),
+        }],
+        findings: vec![],
+        notes: vec![],
+    });
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    let inferred = crate::report::provenance::INFERRED_TAG.trim();
+    assert!(md.contains("Unpatched dependency chain"));
+    assert!(md.contains("moderate"));
+    // At least the exec summary + risk description + risk cost carry the marker.
+    assert!(md.matches(inferred).count() >= 3);
+}
+
+/// Why: live-QA wave-2 defect #5 — the per-language LoC breakdown was computed
+/// (both by the scanner and from an external metrics file) but only language
+/// NAMES reached the rendered Profile table; the actual split (the useful
+/// signal) was dropped.
+/// What: builds a model with an explicit multi-language metrics breakdown and
+/// asserts the rendered tech-stack cell carries per-language counts, not just
+/// names.
+/// Test: this test itself.
+#[test]
+fn reporter_renders_language_breakdown_with_counts() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    std::fs::write(
+        tmp.path().join("acme.json"),
+        r#"{
+          "loc": { "total": 19795, "by_language": [
+            { "language": "TypeScript", "loc": 19568 },
+            { "language": "SQL", "loc": 184 },
+            { "language": "CSS", "loc": 43 }
+          ]},
+          "counts": { "files": 20, "functions": 150 }
+        }"#,
+    )
+    .expect("write metrics");
+    let toml = "[report]\ntitle = \"Acme\"\n\n[[repositories]]\nname = \"Acme Web\"\npath = \"/nonexistent/x\"\nmetrics = \"acme.json\"\n";
+    let manifest_path = tmp.path().join("manifest.toml");
+    let manifest = parse_manifest(toml, &manifest_path).expect("manifest");
+    let model =
+        ReportModel::build(&manifest, &manifest_path, "report-technical-dd", None).expect("model");
+    let template = TemplateLoader::bundled_only()
+        .load("report-technical-dd")
+        .expect("template");
+    let md = Reporter::new(tmp.path()).render(&model, &template);
+
+    assert!(md.contains("TypeScript 19,568"));
+    assert!(md.contains("SQL 184"));
+    assert!(md.contains("CSS 43"));
+    assert!(md.contains(&format!(
+        "TypeScript 19,568 · SQL 184 · CSS 43{}",
+        crate::report::provenance::DECLARED_TAG
+    )));
 }
 
 /// Why: output filenames must be date-prefixed and slug-stable.
