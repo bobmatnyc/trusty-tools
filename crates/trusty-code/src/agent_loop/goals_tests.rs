@@ -170,6 +170,64 @@ fn render_numbers_by_slot_skipping_empty() {
     assert!(!rendered.contains("2."));
 }
 
+/// `occupied()` returns only occupied slots, paired with their 1-based
+/// index, skipping gaps.
+///
+/// Why: #2350's `session.get_goals`/`TranscriptRecord.goals` both build on
+/// this snapshot; a gap in the middle (slot 2 empty) must not shift slot 3's
+/// reported index down to 2.
+/// What: Occupy slots 1 and 3 only; assert `occupied()` returns exactly
+/// `[(1, ...), (3, ...)]` in that order.
+/// Test: this test.
+#[test]
+fn occupied_skips_empty_slots_and_preserves_index() {
+    let mut goals = GoalSlots::new();
+    goals.set(1, "goal one", GoalSource::Model).expect("ok");
+    goals
+        .set(3, "goal three", GoalSource::Operator)
+        .expect("ok");
+
+    let occupied = goals.occupied();
+    assert_eq!(occupied.len(), 2);
+    assert_eq!(occupied[0].0, 1);
+    assert_eq!(occupied[0].1.text, "goal one");
+    assert_eq!(occupied[1].0, 3);
+    assert_eq!(occupied[1].1.source, GoalSource::Operator);
+}
+
+/// `occupied()` on a fresh `GoalSlots` returns an empty vec, not an error.
+///
+/// Why: `session.get_goals` on a session whose transcript has never had a
+/// goal set must return `[]`, matching `session.get_transcript`'s
+/// never-run-session convention.
+/// What: Fresh `GoalSlots::new()`, assert `occupied()` is empty.
+/// Test: this test.
+#[test]
+fn occupied_empty_when_all_slots_empty() {
+    assert!(GoalSlots::new().occupied().is_empty());
+}
+
+/// `GoalSource` serialises to the stable snake_case wire strings
+/// `session.get_goals`/`TranscriptRecord.goals` expose over JSON-RPC.
+///
+/// Why: #2350 exposes `GoalSource` directly on the wire (unlike #2347, which
+/// only used it in-process); the wire string must be stable and
+/// human-readable independent of Rust variant naming, matching
+/// `SessionStatus`'s `#[serde(rename_all = "snake_case")]` convention.
+/// What: `Model` -> `"model"`, `Operator` -> `"operator"`.
+/// Test: this test.
+#[test]
+fn goal_source_serialises_snake_case() {
+    assert_eq!(
+        serde_json::to_value(GoalSource::Model).unwrap(),
+        serde_json::json!("model")
+    );
+    assert_eq!(
+        serde_json::to_value(GoalSource::Operator).unwrap(),
+        serde_json::json!("operator")
+    );
+}
+
 /// `render()` prefixes the fixed preamble before the numbered slots.
 ///
 /// Why: Guards that the model-facing framing text ("privileged, standing

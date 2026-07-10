@@ -26,6 +26,7 @@
 //! appending.
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// The number of fixed goal slots (#2343 design decision: exactly 5).
@@ -39,23 +40,25 @@ pub const GOAL_SLOT_COUNT: usize = 5;
 /// Who last wrote a given [`GoalSlot`].
 ///
 /// Why: `set_goal` (the `tools::goals::SetGoalTool` the PM's own model
-/// calls) and the future operator-facing `session.set_goal` RPC (#2348)
+/// calls) and the future operator-facing `session.set_goal` RPC (#2350)
 /// both mutate the same [`GoalSlots`]; recording the source lets a future
 /// UI/audit view distinguish "the model decided this" from "an operator
 /// pinned this" without a second parallel data structure.
-/// Test: `goals_tests::set_records_model_source`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Test: `goals_tests::set_records_model_source`,
+/// `goals_tests::goal_source_serialises_snake_case`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GoalSource {
     /// Written by the PM's own model via the `set_goal` tool call.
     Model,
-    /// Written by a human operator (#2348's `session.set_goal` RPC).
+    /// Written by a human operator (#2350's `session.set_goal` RPC).
     Operator,
 }
 
 /// One occupied goal slot: its text, who wrote it, and when.
 ///
 /// Why: A bare `String` would lose the provenance/recency information a
-/// future operator-facing view (#2348) needs; bundling all three in one
+/// future operator-facing view (#2350) needs; bundling all three in one
 /// struct keeps `GoalSlots`'s storage a simple fixed-size array of
 /// `Option<GoalSlot>` rather than three parallel arrays.
 /// What: `text` is the free-form goal description; `source` is
@@ -63,7 +66,7 @@ pub enum GoalSource {
 /// that wrote this slot (matching the `chrono::Utc` convention already used
 /// by `session::registry`/`session::model` for session timestamps).
 /// Test: `goals_tests::set_then_get_round_trips_all_fields`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GoalSlot {
     /// Free-form goal description.
     pub text: String,
@@ -134,7 +137,7 @@ impl GoalSlots {
     /// Write (or overwrite) a 1-based `slot` with `text` from `source`.
     ///
     /// Why: The model-facing `set_goal` tool and the future operator RPC
-    /// (#2348) both need one shared, validated write path rather than
+    /// (#2350) both need one shared, validated write path rather than
     /// reaching into the array directly.
     /// What: Validates `slot` via [`Self::validate`], then replaces (does
     /// NOT append to) that slot with a fresh `GoalSlot { text, source,
@@ -179,7 +182,7 @@ impl GoalSlots {
     /// Read the current content of a 1-based `slot`, if occupied.
     ///
     /// Why: Test/observability accessor; also lets a future operator view
-    /// (#2348) inspect one slot without re-deriving the whole rendered
+    /// (#2350) inspect one slot without re-deriving the whole rendered
     /// block.
     /// What: Returns `None` for an out-of-range slot OR an empty one — the
     /// two cases are intentionally not distinguished here (callers that
@@ -189,6 +192,26 @@ impl GoalSlots {
     pub fn get(&self, slot: usize) -> Option<&GoalSlot> {
         let idx = slot.checked_sub(1)?;
         self.slots.get(idx)?.as_ref()
+    }
+
+    /// Snapshot every currently-occupied slot as `(1-based slot, GoalSlot)`
+    /// pairs, in slot order (#2350).
+    ///
+    /// Why: `session.get_goals` and `TranscriptRecord.goals`
+    /// (`session::transcript`) both need a serialisable view of every
+    /// occupied slot together with its 1-based index — cloning here (rather
+    /// than returning references) lets the caller build its own DTO without
+    /// holding this `GoalSlots`'s lock any longer than the snapshot itself.
+    /// What: Filters out empty slots, cloning each occupied `GoalSlot` paired
+    /// with its 1-based slot number.
+    /// Test: `goals_tests::occupied_skips_empty_slots_and_preserves_index`,
+    /// `goals_tests::occupied_empty_when_all_slots_empty`.
+    pub fn occupied(&self) -> Vec<(usize, GoalSlot)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| slot.clone().map(|g| (i + 1, g)))
+            .collect()
     }
 
     /// Render the privileged-goals prompt block, or `None` if every slot is

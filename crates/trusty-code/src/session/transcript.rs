@@ -21,17 +21,63 @@
 //! run a task returns `turns: []`, `usage` all-zero, `cost_usd: null` — a
 //! valid, empty transcript, not an error. `mode` (#2059) is the resolved
 //! `HarnessMode` `task.run` set via `SessionRegistry::set_mode` — `None` for
+<<<<<<< HEAD
 //! the same "never run" case. `compaction_events` (#2349, epic #2343) is the
 //! session's `pm_transcript`'s cumulative count of #2308 threshold-compactor
 //! fires — `0` for a never-run session, and the field epic #2343's success
-//! metric ("500+ turn session with `compaction_events == 0`") reads.
-//! Test: `session::registry_tests::get_transcript_*`.
+//! metric ("500+ turn session with `compaction_events == 0`") reads. (#2350)
+//! `goals` is a serialisable snapshot of the session's 5 fixed goal slots at
+//! the moment `get_transcript` was called, so a client round-tripping
+//! `session.get_transcript` sees the same goal state `session.get_goals`
+//! reports, with no separate call needed.
+//! Test: `session::registry_tests::get_transcript_*`,
+//! `session::registry_tests::get_transcript_round_trips_goal_state`.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::agent_loop::{GoalSlot, GoalSource};
 use crate::mode::HarnessMode;
 use crate::perf::TokenUsage;
 use crate::run_task::TurnRecord;
+
+/// A serialisable snapshot of one occupied goal slot, as
+/// `TranscriptRecord.goals` and `session.get_goals` (#2350) expose it.
+///
+/// Why: `agent_loop::goals::GoalSlot` carries the slot's content but not its
+/// own index (it lives at a position in `GoalSlots`'s internal array); the
+/// wire shape needs the 1-based `slot` alongside the content so a client can
+/// refer back to it in a subsequent `session.set_goal`/`session.clear_goal`
+/// call without re-deriving the index.
+/// What: `slot` (1-based), `text`, `source`, `updated_at` — field-for-field
+/// from `GoalSlot` plus the index `GoalSlots::occupied` pairs it with.
+/// Test: `session::registry_tests::get_transcript_round_trips_goal_state`,
+/// `session::registry_tests::get_goals_returns_operator_and_model_sources`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GoalSlotRecord {
+    pub slot: usize,
+    pub text: String,
+    pub source: GoalSource,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl GoalSlotRecord {
+    /// Build a `GoalSlotRecord` from an `agent_loop::goals::GoalSlots::occupied`
+    /// pair.
+    ///
+    /// Why: the one place that maps the in-process `GoalSlot` shape onto the
+    /// wire DTO, so `session::registry`'s `get_transcript`/`get_goals` can
+    /// never independently drift on field mapping.
+    /// What: copies `slot`/`text`/`source`/`updated_at` verbatim.
+    pub fn from_slot(slot: usize, goal: GoalSlot) -> Self {
+        Self {
+            slot,
+            text: goal.text,
+            source: goal.source,
+            updated_at: goal.updated_at,
+        }
+    }
+}
 
 /// The full stored run record for one session, as `session.get_transcript`
 /// returns it.
@@ -47,10 +93,13 @@ use crate::run_task::TurnRecord;
 /// `get_transcript` time. `compaction_events` (#2349) mirrors
 /// `agent_loop::Transcript::compaction_events()` on the session's
 /// `pm_transcript` — `0` when that transcript has never fired the #2308
-/// threshold compactor, or the session has never run.
+/// threshold compactor, or the session has never run. (#2350) `goals` mirrors
+/// `session.get_goals` — empty when the session has no `pm_transcript` yet
+/// (never run a task) or simply has no goal set.
 /// Test: `session::registry_tests::get_transcript_returns_stored_record`,
 /// `session::registry_tests::get_transcript_on_never_run_session_is_empty`,
-/// `session::registry_tests::get_transcript_reports_compaction_events`.
+/// `session::registry_tests::get_transcript_reports_compaction_events`,
+/// `session::registry_tests::get_transcript_round_trips_goal_state`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptRecord {
     pub session_id: String,
@@ -59,6 +108,8 @@ pub struct TranscriptRecord {
     pub cost_usd: Option<f64>,
     pub mode: Option<HarnessMode>,
     pub compaction_events: u32,
+    #[serde(default)]
+    pub goals: Vec<GoalSlotRecord>,
 }
 
 #[cfg(test)]
@@ -78,6 +129,7 @@ mod tests {
             cost_usd: None,
             mode: None,
             compaction_events: 7,
+            goals: vec![],
         };
 
         let json = serde_json::to_value(&record).expect("serialize");
