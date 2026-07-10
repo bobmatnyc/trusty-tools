@@ -812,6 +812,195 @@ async fn cadence_fires_in_daily_driver_when_configured() {
     );
 }
 
+// ── #2349: threshold compaction becomes a never-event regression signal ────
+//
+// Why: no reusable tracing-capture test utility exists elsewhere in this
+// crate — `trusty_common::error_capture::layer::BugCaptureLayer` is the
+// closest prior art (same "tap ERROR events via a `tracing_subscriber::Layer`"
+// shape) but is feature-gated behind `bug-capture` and pulls in a
+// fingerprinting/store stack this test has no use for. A small test-local
+// layer mirroring its shape is simpler than wiring that feature in for one
+// assertion.
+// What: `ErrorCaptureLayer` records every ERROR-level event's `message`
+// field into a shared `Arc<Mutex<Vec<String>>>`; `install_error_capture`
+// installs it as the thread's default subscriber (mirrors
+// `trusty_common::error_capture::layer::tests`'s identical
+// `tracing::subscriber::with_default`/`set_default` pattern) for the
+// duration of the returned guard.
+struct ErrorCaptureLayer {
+    messages: Arc<Mutex<Vec<String>>>,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorCaptureLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if *event.metadata().level() != tracing::Level::ERROR {
+            return;
+        }
+        struct MessageVisitor(String);
+        impl tracing::field::Visit for MessageVisitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut visitor = MessageVisitor(String::new());
+        event.record(&mut visitor);
+        self.messages.lock().expect("lock").push(visitor.0);
+    }
+}
+
+/// Install an [`ErrorCaptureLayer`] as this thread's default subscriber.
+///
+/// Why: `#[tokio::test]` defaults to the current-thread runtime, so a
+/// `tracing::subscriber::set_default` guard held for the test body's
+/// lifetime (including across `.await` points) captures every ERROR event
+/// the awaited future emits on this thread — no need for `with_default`'s
+/// synchronous-closure shape.
+/// What: Returns the `DefaultGuard` (drop it to restore the prior
+/// subscriber) plus the shared message buffer.
+fn install_error_capture() -> (tracing::subscriber::DefaultGuard, Arc<Mutex<Vec<String>>>) {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    let messages = Arc::new(Mutex::new(Vec::new()));
+    let layer = ErrorCaptureLayer {
+        messages: messages.clone(),
+    };
+    let subscriber = tracing_subscriber::registry().with(layer);
+    (tracing::subscriber::set_default(subscriber), messages)
+}
+
+/// A `CadenceConfig` present (cadence enabled) but sized so it never
+/// actually schedules a fire, forcing the aggressive threshold compactor to
+/// trip anyway — the "cadence sizing assumptions violated" forced-
+/// degradation scenario #2349's acceptance criteria call for.
+fn overwhelmed_cadence() -> CadenceConfig {
+    CadenceConfig {
+        cadence_turns: 1_000_000, // never a scheduled-fire turn in this test
+        max_overhead_fraction_pct: 99,
+    }
+}
+
+/// Forced-degradation acceptance test: cadence is enabled but never actually
+/// schedules a fire (`overwhelmed_cadence`), while `aggressive_compaction`'s
+/// `token_threshold: 1` trips the #2308 threshold compactor on the very
+/// first turn boundary. This must increment
+/// `Transcript::compaction_events()` AND emit an ERROR-level log — the
+/// "cadence sizing / daemon-availability / turn-size assumptions violated"
+/// regression signal.
+///
+/// Why: This is #2349's core acceptance criterion — proving the signal
+/// actually fires end-to-end through `AgentLoop::maybe_compact_transcript`,
+/// not just at the `Transcript` unit level.
+/// What: Runs a 3-tool-call-then-stop script under `mode: DailyDriver` with
+/// both `compaction: aggressive_compaction()` and
+/// `cadence: Some(overwhelmed_cadence())` attached. Asserts
+/// `transcript.compaction_events() > 0` and that the captured ERROR-level
+/// log messages contain the expected "regression signal" text.
+/// Test: this test.
+#[tokio::test]
+async fn forced_degradation_increments_counter_and_logs_error() {
+    let (_guard, captured) = install_error_capture();
+
+    let mut fixtures: Vec<Value> = (0..3)
+        .map(|i| tool_call_response(&format!("call_{i}"), &format!("turn-{i}")))
+        .collect();
+    fixtures.push(stop_response("all done"));
+    let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
+    let registry = registry_with_echo(false);
+
+    let agent = make_loop(
+        llm,
+        registry,
+        AgentLoopConfig {
+            max_turns: 10,
+            mode: crate::mode::HarnessMode::DailyDriver,
+            compaction: aggressive_compaction(),
+            cadence: Some(overwhelmed_cadence()),
+            ..AgentLoopConfig::default()
+        },
+    );
+    let mut transcript = Transcript::seed("system prompt", "the task");
+    agent
+        .run_with_transcript(&mut transcript, "the task")
+        .await
+        .expect("run completes");
+
+    drop(_guard);
+
+    assert!(
+        transcript.compaction_events() > 0,
+        "threshold compaction should have fired at least once under the tiny token_threshold"
+    );
+    let messages = captured.lock().expect("lock");
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("regression signal") && m.contains("cadence")),
+        "expected an error-level regression-signal log, got: {messages:?}"
+    );
+}
+
+/// The cadence-`None` counterpart: threshold compaction firing is the
+/// PRIMARY, EXPECTED mechanism for `run_task` one-shot / Parity / delegated
+/// sub-agent contexts (all `cadence: None`) — it must NOT emit an
+/// error-level log, and today's existing (no-log) behaviour at this call
+/// site must stay exactly as it was before this ticket.
+///
+/// Why: §3 of the ticket's semantics is explicit that the error-log framing
+/// applies ONLY when `cadence.is_some()` — this is the negative-case guard
+/// against that gate regressing to "always log" or "log regardless of
+/// cadence".
+/// What: Identical script and `aggressive_compaction` to
+/// `forced_degradation_increments_counter_and_logs_error`, but
+/// `cadence: None` (the default). Asserts `compaction_events() > 0` (the
+/// counter itself is NOT cadence-gated) while the captured ERROR log list is
+/// empty.
+/// Test: this test.
+#[tokio::test]
+async fn cadence_none_threshold_fire_does_not_log_error() {
+    let (_guard, captured) = install_error_capture();
+
+    let mut fixtures: Vec<Value> = (0..3)
+        .map(|i| tool_call_response(&format!("call_{i}"), &format!("turn-{i}")))
+        .collect();
+    fixtures.push(stop_response("all done"));
+    let llm = Arc::new(ScriptedLlm::from_json(&fixtures));
+    let registry = registry_with_echo(false);
+
+    let agent = make_loop(
+        llm,
+        registry,
+        AgentLoopConfig {
+            max_turns: 10,
+            mode: crate::mode::HarnessMode::DailyDriver,
+            compaction: aggressive_compaction(),
+            cadence: None,
+            ..AgentLoopConfig::default()
+        },
+    );
+    let mut transcript = Transcript::seed("system prompt", "the task");
+    agent
+        .run_with_transcript(&mut transcript, "the task")
+        .await
+        .expect("run completes");
+
+    drop(_guard);
+
+    assert!(
+        transcript.compaction_events() > 0,
+        "the counter itself must still increment regardless of cadence"
+    );
+    let messages = captured.lock().expect("lock");
+    assert!(
+        messages.is_empty(),
+        "cadence: None must never emit the error-level regression signal, got: {messages:?}"
+    );
+}
+
 /// The FULL parity conformance check tying the model-routing layer to the
 /// compaction layer (#2073, the "M2 integration" proof §5.9 asks for): two
 /// `HarnessMode::Parity` runs over the identical script, registry, and

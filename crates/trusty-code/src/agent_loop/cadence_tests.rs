@@ -143,7 +143,10 @@ fn fires_every_n_turns() {
 
 /// The core #2346 acceptance test: a 100-turn run of 5K-token worst-case
 /// turns never triggers the threshold compactor and never exceeds the
-/// overhead cap on any turn.
+/// overhead cap on any turn. (#2349) Also the epic #2343 success-metric
+/// proof: `Transcript::compaction_events()` — the SAME counter
+/// `agent_loop::AgentLoop::maybe_compact_transcript` increments in
+/// production — stays `0` for the whole steady-state run.
 #[test]
 fn stays_under_budget_every_turn_and_threshold_never_fires() {
     let mut t = Transcript::seed("s", "task");
@@ -153,16 +156,16 @@ fn stays_under_budget_every_turn_and_threshold_never_fires() {
     let compaction_cfg = CompactionConfig::for_context_window(context_window);
     let keep_last_messages = compaction_cfg.keep_last_messages;
 
-    let mut compaction_events = 0usize;
     for turn in 1..=100 {
         push_sized_turn(&mut t, turn, 5_000);
         maybe_cadence_compress(&mut t, &cadence_cfg, keep_last_messages, context_window);
 
         // The threshold compactor is the backstop — cadence must keep the
         // transcript under its own (looser, 75%-of-window) trigger point on
-        // every single turn.
+        // every single turn. Mirrors the real call site's
+        // `record_threshold_compaction` on every actual fire.
         if t.maybe_compact(&compaction_cfg) {
-            compaction_events += 1;
+            t.record_threshold_compaction();
         }
 
         let estimate = estimate_total_tokens(&t.to_messages());
@@ -173,7 +176,8 @@ fn stays_under_budget_every_turn_and_threshold_never_fires() {
     }
 
     assert_eq!(
-        compaction_events, 0,
+        t.compaction_events(),
+        0,
         "threshold compaction must never fire under cadence's continuous enforcement"
     );
 }

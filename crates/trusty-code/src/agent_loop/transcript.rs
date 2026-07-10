@@ -136,6 +136,15 @@ pub struct Transcript {
     /// least one new entry `compacted`) — an observability/test counter,
     /// distinct from `compacted_count` (which counts entries, not events).
     cadence_fire_count: usize,
+    /// (#2349) Number of times the #2308 threshold compactor
+    /// (`Self::maybe_compact`) has actually fired — i.e. returned `true` —
+    /// cumulative for the transcript's entire lifetime, mirroring
+    /// `cadence_fire_count`'s same "events, not entries" accounting. Under
+    /// epic #2343's cadence system this is meant to stay `0` in steady state
+    /// (see [`Self::record_threshold_compaction`]'s docs); exposed
+    /// read-only via [`Self::compaction_events`] and, from there, onto
+    /// `session::TranscriptRecord.compaction_events`.
+    threshold_compaction_events: u32,
 }
 
 impl Transcript {
@@ -160,6 +169,7 @@ impl Transcript {
             cadence_turn_count: 0,
             cadence_last_fire_turn: 0,
             cadence_fire_count: 0,
+            threshold_compaction_events: 0,
         }
     }
 
@@ -479,6 +489,41 @@ impl Transcript {
     /// Test: `cadence::tests::fires_every_n_turns`.
     pub fn cadence_fire_count(&self) -> usize {
         self.cadence_fire_count
+    }
+
+    /// Record that the #2308 threshold compactor (`Self::maybe_compact`)
+    /// actually fired on this call (#2349, epic #2343).
+    ///
+    /// Why: Under the #2346 cadence system, a threshold fire is no longer
+    /// the primary token-efficiency mechanism (cadence is) — it becomes a
+    /// never-event regression signal that cadence sizing, daemon
+    /// availability, or turn-size assumptions were violated. The call site
+    /// (`agent_loop::AgentLoop::maybe_compact_transcript`) increments this
+    /// on EVERY threshold fire regardless of whether cadence is enabled —
+    /// see that method's docs for why the *logging* half of this signal is
+    /// cadence-gated while the counter itself is not. `pub(crate)` (rather
+    /// than `pub(super)`) so `session::registry_tests` can exercise the
+    /// `session.get_transcript` wiring end-to-end without going through a
+    /// full `AgentLoop` run.
+    /// What: Saturating-increments `threshold_compaction_events` by one.
+    /// Test: `agent_loop::tests::forced_degradation_increments_counter_and_logs_error`,
+    /// `agent_loop::tests::cadence_none_threshold_fire_does_not_log_error`,
+    /// `registry_tests::get_transcript_reports_compaction_events`.
+    pub(crate) fn record_threshold_compaction(&mut self) {
+        self.threshold_compaction_events = self.threshold_compaction_events.saturating_add(1);
+    }
+
+    /// Cumulative count of #2308 threshold-compactor fires (#2349).
+    ///
+    /// Why: The epic #2343 success metric is a "500+ turn session with
+    /// `compaction_events == 0`" — this is the field that metric reads,
+    /// exposed onto `session::TranscriptRecord.compaction_events` via
+    /// `SessionRegistry::get_transcript`.
+    /// What: The current `threshold_compaction_events`.
+    /// Test: `agent_loop::tests::forced_degradation_increments_counter_and_logs_error`,
+    /// `cadence_tests::stays_under_budget_every_turn_and_threshold_never_fires`.
+    pub fn compaction_events(&self) -> u32 {
+        self.threshold_compaction_events
     }
 
     /// Number of entries currently marked `compacted`.

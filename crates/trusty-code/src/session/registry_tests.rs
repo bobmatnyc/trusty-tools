@@ -818,6 +818,37 @@ async fn get_transcript_unknown_session_errors() {
     assert_eq!(err.code, -32007);
 }
 
+/// `get_transcript` surfaces `pm_transcript`'s own cumulative
+/// `compaction_events` counter (#2349) — proving the one-line wiring in
+/// `Self::get_transcript` actually reads the stored transcript rather than
+/// always defaulting to `0`.
+///
+/// Why: `Transcript::record_threshold_compaction` is only ever called in
+/// production from `agent_loop::AgentLoop::maybe_compact_transcript`
+/// (exercised end-to-end by `agent_loop::tests::forced_degradation_*`); this
+/// test isolates the SEPARATE registry-level contract — that whatever count
+/// `pm_transcript` carries flows through `get_transcript` unchanged.
+/// What: Seeds a `pm_transcript` via `begin_pm_transcript`, increments its
+/// counter directly (the `pub(crate)` visibility this ticket adds exists
+/// exactly for this), stores it back via `store_pm_transcript`, then asserts
+/// `get_transcript(id).compaction_events` reflects it.
+/// Test: this test.
+#[tokio::test]
+async fn get_transcript_reports_compaction_events() {
+    let registry = SessionRegistry::new();
+    let session = registry.create("t".to_string(), None, None);
+
+    let mut transcript = registry
+        .begin_pm_transcript(&session.id, "you are the pm", "first task")
+        .unwrap();
+    transcript.record_threshold_compaction();
+    transcript.record_threshold_compaction();
+    registry.store_pm_transcript(&session.id, transcript);
+
+    let stored = registry.get_transcript(&session.id).unwrap();
+    assert_eq!(stored.compaction_events, 2);
+}
+
 /// `set_mode` must store the mode on the session, queryable both via
 /// `status`/`list` (`Session.mode`) and `get_transcript`
 /// (`TranscriptRecord.mode`, the SAME field) (#2059).
