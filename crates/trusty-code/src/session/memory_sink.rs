@@ -4,7 +4,7 @@
 //! turn to be durably recorded in trusty-memory, independent of the
 //! in-process `Transcript` (#2344), which only lives as long as the daemon
 //! process. Without this, a daemon restart or crash loses the entire
-//! conversation; #2348's future `recall_session` tool also needs a semantic
+//! conversation; #2348's `recall_session` tool also needs a semantic
 //! recall surface over session history that a bare `chat_turn_append` record
 //! alone would not give it (it stores the exact turn but is not
 //! embedded/indexed for recall the way `memory_remember` is).
@@ -13,10 +13,20 @@
 //! producer side, called from `task::executor::run_and_record` at each turn
 //! boundary. The drain task calls BOTH `chat_turn_append` (the exact
 //! chronological record) and `memory_remember` (tagged
-//! `["session:<id>", "turn"]` — the semantic recall surface for #2348) via
-//! `trusty_common::mcp::memory_rpc::call_memory_tool_at`, against a base URL
-//! resolved ONCE at construction — never blocking or failing the calling
-//! turn: any RPC failure is logged via `tracing::warn!` and dropped.
+//! `["session:<id>", "turn"]`, `force: true` — the semantic recall surface
+//! for #2348) via `trusty_common::mcp::memory_rpc::call_memory_tool_at`,
+//! against a base URL resolved ONCE at construction — never blocking or
+//! failing the calling turn: any RPC failure is logged via `tracing::warn!`
+//! and dropped. (#2363) `memory_remember`'s dedup gate (jaro_winkler >0.92,
+//! 5-min same-palace window) is documented as hostile to sequential
+//! conversational turns, so every turn-recorder write passes `force: true`
+//! to bypass it outright; a `"status":"skipped"` response is still checked
+//! and warned on as a belt-and-braces guard in case some OTHER gate (e.g.
+//! the content/blocklist gates, which `force` does not bypass) still skips
+//! the write. [`TurnMemorySink::base_url`]/[`TurnMemorySink::palace`] expose
+//! this sink's already-resolved binding so #2348's `recall_session` tool can
+//! target the SAME daemon/palace the turn recorder writes into, without a
+//! second, independent resolution.
 //! [`derive_palace_id_for_project`] mirrors
 //! `trusty_common::catchup`'s (private) palace-derivation convention so a
 //! session's turns land in the same palace its PM catch-up digest reads
@@ -60,6 +70,10 @@ struct QueuedTurn {
 /// naturally survives across every run on that session, not just one.
 pub struct TurnMemorySink {
     tx: mpsc::Sender<QueuedTurn>,
+    /// This sink's already-resolved trusty-memory base URL (#2348 reuse).
+    base_url: String,
+    /// This sink's already-resolved palace id (#2348 reuse).
+    palace: String,
 }
 
 impl TurnMemorySink {
@@ -89,8 +103,37 @@ impl TurnMemorySink {
     /// Test: `memory_sink::tests::enqueue_drops_newest_when_queue_full`.
     pub fn with_capacity(base_url: String, palace: String, capacity: usize) -> Self {
         let (tx, rx) = mpsc::channel(capacity);
-        tokio::spawn(drain(base_url, palace, rx));
-        Self { tx }
+        tokio::spawn(drain(base_url.clone(), palace.clone(), rx));
+        Self {
+            tx,
+            base_url,
+            palace,
+        }
+    }
+
+    /// This sink's already-resolved trusty-memory base URL.
+    ///
+    /// Why: #2348's `recall_session` tool must read from the SAME daemon the
+    /// turn recorder writes into; re-deriving it independently would risk the
+    /// two disagreeing (e.g. after a discovery-file update mid-session) and
+    /// adds a redundant resolution for no benefit.
+    /// What: Returns the URL passed to (or resolved by) [`Self::new`]/
+    /// [`Self::with_capacity`] at construction — fixed for the sink's
+    /// lifetime, mirroring `write_turn`'s own binding.
+    /// Test: `memory_sink::tests::base_url_and_palace_expose_construction_args`.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// This sink's already-resolved palace id.
+    ///
+    /// Why: see [`Self::base_url`] — the same reuse rationale applies to the
+    /// palace binding.
+    /// What: Returns the palace passed to [`Self::new`]/[`Self::with_capacity`]
+    /// at construction.
+    /// Test: `memory_sink::tests::base_url_and_palace_expose_construction_args`.
+    pub fn palace(&self) -> &str {
+        &self.palace
     }
 
     /// Enqueue one turn for durable dual-write, never blocking the caller.
@@ -144,14 +187,22 @@ async fn drain(base_url: String, palace: String, mut rx: mpsc::Receiver<QueuedTu
 /// Why: the exact and semantic representations are independent trusty-memory
 /// endpoints; a mid-outage failure of one must not block the other, so each
 /// call's error is handled separately rather than short-circuiting on the
-/// first failure.
+/// first failure. (#2363) `memory_remember` passes `force: true` because
+/// its dedup gate (jaro_winkler >0.92, same-palace, 5-min window) is
+/// documented as hostile to sequential conversational turns — near-duplicate
+/// consecutive turns are the NORMAL case here, not noise. A `"status":
+/// "skipped"` response (from a gate `force` does NOT bypass, e.g. the
+/// content/blocklist gates) is still checked and warned on so a silently
+/// thinned recall surface is at least observable in logs.
 /// What: never propagates an error — every failure is logged via
 /// `tracing::warn!` and swallowed, matching
 /// `resolve_memory_base_url_or_unreachable`'s fail-open contract (mirrored
 /// here, not reused directly, since `base_url` is already resolved by the
 /// caller of [`TurnMemorySink::new`]).
 /// Test: `memory_sink::tests::enqueue_drain_happy_path`,
-/// `memory_sink::tests::write_turn_is_fail_open_on_unreachable_daemon`.
+/// `memory_sink::tests::write_turn_is_fail_open_on_unreachable_daemon`,
+/// `memory_sink::tests::write_turn_passes_force_true_for_memory_remember`,
+/// `memory_sink::tests::write_turn_warns_on_skipped_status`.
 async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) {
     let append_params = json!({
         "palace": palace,
@@ -171,13 +222,30 @@ async fn write_turn(base_url: &str, palace: &str, turn: &QueuedTurn) {
         "palace": palace,
         "text": format!("User: {}\n\nAssistant: {}", turn.prompt, turn.response),
         "tags": [format!("session:{}", turn.session_id), "turn"],
+        "force": true,
     });
-    if let Err(e) = call_memory_tool_at(base_url, "memory_remember", remember_params).await {
-        warn!(
-            session_id = %turn.session_id,
-            error = %e,
-            "turn_recorder: memory_remember failed (fail-open)"
-        );
+    match call_memory_tool_at(base_url, "memory_remember", remember_params).await {
+        Ok(result) => {
+            if result.get("status").and_then(|v| v.as_str()) == Some("skipped") {
+                let reason = result
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                warn!(
+                    session_id = %turn.session_id,
+                    reason = %reason,
+                    "turn_recorder: memory_remember returned status=skipped despite force=true \
+                     (#2363) — session recall surface may be thinning"
+                );
+            }
+        }
+        Err(e) => {
+            warn!(
+                session_id = %turn.session_id,
+                error = %e,
+                "turn_recorder: memory_remember failed (fail-open)"
+            );
+        }
     }
 }
 
