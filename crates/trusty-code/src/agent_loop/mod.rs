@@ -34,6 +34,7 @@
 //! tool-error continuation, usage accrual, sink notification order, cancellation,
 //! plus an `#[ignore]`-gated live test.
 
+mod cadence;
 mod compaction;
 mod error;
 mod goals;
@@ -57,6 +58,7 @@ use crate::mode::HarnessMode;
 use crate::perf::PerfCollector;
 use crate::tools::{AgentOutput, FINISH_TASK_TOOL_NAME, FinishTaskArgs, ToolRegistry, ToolResult};
 
+pub use cadence::{CadenceConfig, resolve_cadence_config};
 pub use compaction::CompactionConfig;
 // (#2260) Crate-internal re-export so `llm::bedrock::cache` can reuse the
 // same chars/4 token-estimate heuristic for its cachePoint min-size guard
@@ -140,6 +142,15 @@ pub struct AgentLoopConfig {
     /// `Self::maybe_compact_transcript`'s docs for why Parity must never
     /// compact.
     pub compaction: CompactionConfig,
+
+    /// Cadence-compressor tuning (#2346, epic #2343). `None` (the default)
+    /// disables cadence entirely — the delegated engineer's own loop and
+    /// `run_task`'s legacy one-shot/bake-off path both rely on this default
+    /// to stay byte-identical to pre-#2346 behaviour; only
+    /// `task::executor::run_and_record`'s persistent-session PM loop sets
+    /// `Some(_)`. Consulted only under `HarnessMode::DailyDriver` — see
+    /// `Self::maybe_cadence_compress`'s docs.
+    pub cadence: Option<CadenceConfig>,
 }
 
 impl Default for AgentLoopConfig {
@@ -152,7 +163,8 @@ impl Default for AgentLoopConfig {
     /// `crate::provider::resolve_max_tokens`; this default is only the
     /// generous fallback for when no agent config is consulted.
     /// What: 8 turns, 120s timeout, `openai/gpt-4o-mini`,
-    /// `DEFAULT_MAX_TOKENS`, `HarnessMode::default()`, `CompactionConfig::default()`.
+    /// `DEFAULT_MAX_TOKENS`, `HarnessMode::default()`, `CompactionConfig::default()`,
+    /// `cadence: None` (#2346 — disabled unless a caller opts in).
     /// Test: `config_defaults_are_sane`.
     fn default() -> Self {
         Self {
@@ -162,6 +174,7 @@ impl Default for AgentLoopConfig {
             max_tokens: crate::provider::DEFAULT_MAX_TOKENS,
             mode: HarnessMode::default(),
             compaction: CompactionConfig::default(),
+            cadence: None,
         }
     }
 }
@@ -417,8 +430,16 @@ impl AgentLoop {
                 });
             }
 
+            // #2346: cadence compression runs FIRST, same turn boundary as
+            // the checks above — the continuous, turn-count-driven mechanism
+            // that keeps working context under budget so #2070's threshold
+            // compactor below becomes a backstop rather than the primary
+            // token-efficiency path.
+            self.maybe_cadence_compress(transcript);
+
             // #2070: compaction check, same turn boundary as the cancellation
-            // check above — never mid-tool-call.
+            // check above — never mid-tool-call. Runs AFTER cadence so it
+            // only ever sees a transcript cadence already kept under budget.
             self.maybe_compact_transcript(transcript);
 
             let request = self.build_request(transcript, &schemas);
@@ -608,6 +629,44 @@ impl AgentLoop {
         if self.config.mode == HarnessMode::DailyDriver {
             transcript.maybe_compact(&self.config.compaction);
         }
+    }
+
+    /// Apply the #2346 cadence compressor to `transcript`, gated on mode the
+    /// SAME way [`Self::maybe_compact_transcript`] is, plus an explicit
+    /// per-run opt-in.
+    ///
+    /// Why: Cadence must respect the identical `HarnessMode::Parity` carve-out
+    /// as threshold compaction (byte-identical benchmark runs), AND must stay
+    /// off by default (`self.config.cadence == None`) so every call site that
+    /// doesn't explicitly opt in — the delegated engineer's own loop,
+    /// `run_task`'s legacy one-shot/bake-off path — sees zero behavioural
+    /// change from before this ticket. Only
+    /// `task::executor::run_and_record`'s persistent-session PM loop sets
+    /// `AgentLoopConfig.cadence = Some(_)`.
+    /// What: No-op unless `mode == HarnessMode::DailyDriver` AND
+    /// `self.config.cadence` is `Some`; otherwise resolves the model's real
+    /// context window (`crate::provider::resolve_context_window`, mirroring
+    /// `Self::maybe_compact_transcript`'s own model-aware sibling) and
+    /// delegates to `cadence::maybe_cadence_compress`, reusing
+    /// `self.config.compaction.keep_last_messages` as the shared active-zone
+    /// size rather than introducing a second, possibly-inconsistent knob.
+    /// Test: `agent_loop::tests::cadence_disabled_by_default`,
+    /// `agent_loop::tests::cadence_never_fires_in_parity_mode`,
+    /// `agent_loop::tests::cadence_fires_in_daily_driver_when_configured`.
+    fn maybe_cadence_compress(&self, transcript: &mut Transcript) {
+        if self.config.mode != HarnessMode::DailyDriver {
+            return;
+        }
+        let Some(cadence_cfg) = &self.config.cadence else {
+            return;
+        };
+        let context_window = crate::provider::resolve_context_window(&self.config.model);
+        cadence::maybe_cadence_compress(
+            transcript,
+            cadence_cfg,
+            self.config.compaction.keep_last_messages,
+            context_window,
+        );
     }
 
     /// Build a `ChatRequest` from the running transcript and tool schemas.

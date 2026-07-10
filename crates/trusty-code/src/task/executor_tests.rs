@@ -143,6 +143,42 @@ fn daily_driver_skills_catalog_none_when_no_skills_dir() {
     assert!(daily_driver_skills_catalog(&p).is_none());
 }
 
+/// A project's `.claude/settings.json` `code_harness.cadence_turns` override
+/// reaches `resolve_cadence_config` exactly the way `run_and_record` calls it
+/// (#2346) — the same `params.project` path a real `spawn_task_run` would use.
+///
+/// Why: #2346's acceptance criteria explicitly call for an integration-style
+/// proof that the settings.json precedence chain changes `cadence_turns`, not
+/// just a unit test isolated to `agent_loop::cadence`'s own module (see
+/// `cadence::tests::resolve_cadence_config_settings_json_override` for that
+/// unit-level coverage) — this test exercises the SAME `TaskRunParams.project`
+/// shape `run_and_record`'s `cadence: Some(resolve_cadence_config(&params.project))`
+/// wiring consumes.
+/// What: Build a project `TempDir` (via the same `params` helper every other
+/// executor test uses) with a `.claude/settings.json` overriding
+/// `cadence_turns` to `3`; assert `crate::agent_loop::resolve_cadence_config`
+/// against `p.project` returns `3`, not the built-in default of `8`.
+/// Test: this test.
+#[test]
+fn settings_json_cadence_turns_override_reaches_resolver() {
+    let agents = agents_dir();
+    let project = tempfile::tempdir().expect("project tempdir");
+    std::fs::create_dir_all(project.path().join(".claude")).expect("mkdir .claude");
+    std::fs::write(
+        project.path().join(".claude").join("settings.json"),
+        r#"{"code_harness": {"cadence_turns": 3}}"#,
+    )
+    .expect("write settings.json");
+
+    let p = params(&agents, &project, "s");
+    let cfg = crate::agent_loop::resolve_cadence_config(&p.project);
+    assert_eq!(cfg.cadence_turns, 3);
+    assert_ne!(
+        cfg.cadence_turns,
+        crate::agent_loop::CadenceConfig::default().cadence_turns
+    );
+}
+
 /// `daily_driver_skills_catalog` returns the rendered catalog + a working
 /// resolver under `HarnessMode::DailyDriver` when skills exist.
 #[test]
