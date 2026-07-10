@@ -70,6 +70,9 @@ pub(crate) async fn start_session(
             task: String::new(),
             name_hint: None,
             runtime: trusty_mpm::runtime::RuntimeKind::default(),
+            // Empty task → injection is a no-op regardless; keep the turnkey
+            // default so `session start` mirrors `session new` semantics (#1903).
+            no_inject: false,
         };
         crate::commands::managed_route::run(client, url, &new_action).await?;
         return Ok(());

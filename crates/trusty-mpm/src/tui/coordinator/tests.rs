@@ -1312,6 +1312,7 @@ fn route_new_builds_managed_new() {
             task: "do the thing".to_string(),
             name_hint: None,
             runtime: None,
+            inject_task: None,
         })
     );
 }

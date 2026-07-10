@@ -66,6 +66,18 @@ pub struct SpawnParams {
     /// ticket` clients) and the SM-STDIO adapter (`sm.sessions.launch`) — never
     /// gates; those are trusted, explicitly-operator-driven paths.
     pub mcp_initiated: bool,
+    /// Whether to AUTO-INJECT `task` into the spawned pane once the runtime is
+    /// ready (issues #1903 / #1299).
+    ///
+    /// Why: `--task` is meant to be turnkey — the session should start working
+    /// on the task immediately after spawn. `None`/`Some(true)` inject (the
+    /// default, so `tm session new`, `tm ticket`, and MCP/SM callers are all
+    /// turnkey without opting in). `Some(false)` selects the legacy
+    /// metadata-only behavior (`tm session new --no-inject`), for callers that
+    /// deliver the task themselves via `tm session send`. Injection is
+    /// additionally gated by [`crate::session_manager::should_inject_task`]
+    /// (non-empty task, Claude Code runtime, session reached `Active`).
+    pub inject_task: Option<bool>,
 }
 
 /// Spawn a managed session, shared by the HTTP handler and the MCP tool.
@@ -131,11 +143,68 @@ pub async fn spawn_managed(
         params.repo_url.clone(),
         state.event_tx.clone(),
     );
-    crate::core::provisioning_stage::scoped(
+    // Capture the injection opt-out before `params` is moved into the routed
+    // dispatch. `None`/`Some(true)` → turnkey (inject); `Some(false)` →
+    // metadata-only (`--no-inject`).
+    let inject_flag = params.inject_task != Some(false);
+    let record = crate::core::provisioning_stage::scoped(
         emitter,
         spawn_managed_routed(state, session_id, params, runtime, config),
     )
-    .await
+    .await?;
+
+    // Turnkey task injection (#1903 / #1299): once the pane is up and the
+    // runtime is ready, deliver the task through the same seam `tm session send`
+    // uses, so `tm session new --task` / `tm ticket` start working immediately
+    // instead of sitting idle at an empty prompt.
+    spawn_task_injection(state.clone(), record.clone(), inject_flag);
+
+    Ok(record)
+}
+
+/// Kick off turnkey `--task` injection for a freshly-spawned session (#1903 / #1299).
+///
+/// Why: `--task` must be turnkey — after the runtime launches, the task is typed
+/// into the pane so the session starts working immediately. Delivery has to WAIT
+/// for the runtime to be ready (keystrokes sent before `claude` execs are lost),
+/// which can take a few seconds; blocking the spawn response on that would make
+/// every caller wait, so this runs in a detached background task (mirroring
+/// `daemon::services::session_service::spawn_pid_capture`).
+/// What: gates on [`crate::session_manager::should_inject_task`] (opt-out flag,
+/// non-empty task, Claude Code runtime — `tcode` injects the task in its own
+/// launch command — and a session that reached `Active`); when it passes, spawns
+/// a Tokio task that awaits
+/// [`crate::session_manager::SessionManager::inject_task_when_ready`]. A skip or
+/// failure is non-fatal: the task remains on the record as metadata, deliverable
+/// via `tm session send`.
+/// Test: the gate is unit-tested in `session_manager::task_inject`; the delivery
+/// via the fake seam is covered there too. This wiring is side-effect-only
+/// (fire-and-forget) and exercised by the live `#[ignore]` e2e flow.
+fn spawn_task_injection(state: Arc<DaemonState>, record: SessionRecord, inject_flag: bool) {
+    if !crate::session_manager::should_inject_task(
+        inject_flag,
+        &record.task,
+        record.runtime,
+        &record.state,
+    ) {
+        return;
+    }
+    tokio::spawn(async move {
+        let mgr = state.session_manager().await;
+        match mgr.inject_task_when_ready(&record.id, &record.task).await {
+            Ok(true) => {}
+            Ok(false) => warn!(
+                id = %record.id,
+                name = %record.tmux_name,
+                "turnkey task injection skipped (runtime never became ready); task retained as metadata"
+            ),
+            Err(e) => warn!(
+                id = %record.id,
+                name = %record.tmux_name,
+                "turnkey task injection failed: {e}; task retained as metadata"
+            ),
+        }
+    });
 }
 
 /// Route a spawn to the in-project, local-path, or clone-based branch (#1919).
@@ -1757,6 +1826,7 @@ mod tests {
             runtime: None,
             ephemeral: Some(true),
             mcp_initiated: false,
+            inject_task: None,
         };
 
         let config = crate::core::trusty_tools_config::TrustyToolsConfig::default();

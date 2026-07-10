@@ -210,6 +210,7 @@ impl From<SlackCommand> for TrustyCommand {
                     task,
                     name_hint: None,
                     runtime: None,
+                    inject_task: None,
                 }
             }
             SlackCommand::Fleet => TrustyCommand::ManagedList,
@@ -381,6 +382,7 @@ mod tests {
                 task: "build it".into(),
                 name_hint: None,
                 runtime: None,
+                inject_task: None,
             }
         );
     }

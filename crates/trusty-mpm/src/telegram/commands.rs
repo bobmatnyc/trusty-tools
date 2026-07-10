@@ -164,6 +164,7 @@ impl From<TelegramCommand> for TrustyCommand {
                     task,
                     name_hint: None,
                     runtime: None,
+                    inject_task: None,
                 }
             }
             TelegramCommand::Fleet => TrustyCommand::ManagedFleet,
@@ -380,6 +381,7 @@ mod tests {
                 task: "build it".into(),
                 name_hint: None,
                 runtime: None,
+                inject_task: None,
             }
         );
     }

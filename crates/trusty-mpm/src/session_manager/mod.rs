@@ -26,6 +26,7 @@ pub mod search_gc;
 pub mod session_guard;
 pub mod snapshot;
 pub mod store;
+pub mod task_inject;
 pub mod workspace_guard;
 
 #[cfg(test)]
@@ -74,6 +75,7 @@ pub use prune::{MAX_EPHEMERAL_AGE_HOURS, PruneAction, PruneFilter, PruneOutcome,
 pub use record::{ManagedSessionId, ManagedSessionState, RecordError, SessionRecord};
 pub use session_guard::TmuxSessionGuard;
 pub use store::{SessionStore, StoreError};
+pub use task_inject::should_inject_task;
 
 #[cfg(feature = "daemon")]
 pub use real_tmux::RealTmuxDriver;

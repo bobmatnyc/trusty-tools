@@ -55,6 +55,7 @@ pub(crate) fn to_command(action: &SessionAction) -> Option<TrustyCommand> {
             task,
             name_hint,
             runtime,
+            no_inject,
         } => TrustyCommand::ManagedNew {
             repo_url: repo.clone(),
             git_ref: git_ref.clone(),
@@ -63,6 +64,12 @@ pub(crate) fn to_command(action: &SessionAction) -> Option<TrustyCommand> {
             // Send the canonical wire spelling (`claude-code`/`tcode`); the CLI
             // already validated the value via the `RuntimeKind` value-enum.
             runtime: Some(runtime.as_str().to_string()),
+            // Turnkey by default: omit the field (daemon default = inject) and
+            // only send `Some(false)` when `--no-inject` opts into metadata-only
+            // (#1903/#1299). Keeping the default absent means `session start`
+            // (which builds a New action) posts the same minimal wire shape it
+            // always has.
+            inject_task: if *no_inject { Some(false) } else { None },
         },
         SessionAction::Ls { .. } => TrustyCommand::ManagedList,
         SessionAction::Send { id, text } => TrustyCommand::ManagedSend {
@@ -235,6 +242,7 @@ mod tests {
             task: "do it".to_string(),
             name_hint: Some("api".to_string()),
             runtime: trusty_mpm::runtime::RuntimeKind::ClaudeCode,
+            no_inject: false,
         };
         match to_command(&action) {
             Some(TrustyCommand::ManagedNew {
@@ -243,12 +251,35 @@ mod tests {
                 task,
                 name_hint,
                 runtime,
+                inject_task,
             }) => {
                 assert_eq!(repo_url, "https://example/r.git");
                 assert_eq!(git_ref, "main");
                 assert_eq!(task, "do it");
                 assert_eq!(name_hint.as_deref(), Some("api"));
                 assert_eq!(runtime.as_deref(), Some("claude-code"));
+                // Default (no `--no-inject`) → field omitted so the daemon's
+                // turnkey default (inject) applies.
+                assert_eq!(inject_task, None);
+            }
+            other => panic!("expected ManagedNew, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn to_command_new_no_inject_sets_metadata_only() {
+        // `--no-inject` maps to `inject_task: Some(false)` (metadata-only, #1903).
+        let action = SessionAction::New {
+            repo: "https://example/r.git".to_string(),
+            git_ref: "main".to_string(),
+            task: "do it".to_string(),
+            name_hint: None,
+            runtime: trusty_mpm::runtime::RuntimeKind::ClaudeCode,
+            no_inject: true,
+        };
+        match to_command(&action) {
+            Some(TrustyCommand::ManagedNew { inject_task, .. }) => {
+                assert_eq!(inject_task, Some(false));
             }
             other => panic!("expected ManagedNew, got {other:?}"),
         }
