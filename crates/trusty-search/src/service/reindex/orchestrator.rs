@@ -62,6 +62,7 @@ pub(super) fn collect_files_to_index(handle: &IndexHandle) -> crate::service::wa
     let walk_opts = WalkOptions {
         include_docs: handle.include_docs,
         respect_gitignore: handle.respect_gitignore,
+        follow_links: handle.follow_links,
         extra_skip_dirs: handle.extra_skip_dirs.clone(),
         data_file_max_bytes: handle.data_file_max_bytes,
     };

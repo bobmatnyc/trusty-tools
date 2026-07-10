@@ -243,6 +243,12 @@ pub(super) async fn create_index_handler(
     // so existing callers (CLI, MCP, integrators) get the fix automatically
     // without having to pass a new field.
     let respect_gitignore: bool = req.respect_gitignore.unwrap_or(true);
+    // Symlink policy: `None` on the wire ⇒ `false` (do NOT follow). This is the
+    // safe default for newly created indexes — a symlinked directory is a leaf,
+    // so links escaping the root cannot bloat / corrupt the index. Existing
+    // indexes keep following links via the persistence serde default; this
+    // create-time `false` only governs new registrations.
+    let follow_links: bool = req.follow_links.unwrap_or(false);
     // Issue #109, Phase 1: staged-pipeline opt-out. `None` on the wire ⇒
     // `false` (full pipeline) so existing callers see no behaviour change.
     let lexical_only: bool = req.lexical_only.unwrap_or(false);
@@ -294,6 +300,7 @@ pub(super) async fn create_index_handler(
             path_filter: path_filter.clone(),
             include_docs,
             respect_gitignore,
+            follow_links,
             extra_skip_dirs: extra_skip_dirs.clone(),
             data_file_max_bytes: data_file_max_bytes_opt,
             lexical_only,
@@ -339,6 +346,7 @@ pub(super) async fn create_index_handler(
         domain_terms,
         include_docs,
         respect_gitignore,
+        follow_links,
         extra_skip_dirs,
         data_file_max_bytes,
         path_filter,

@@ -180,6 +180,63 @@ root_path = "/tmp/legacy"
     assert!(!entries[0].respect_gitignore);
 }
 
+/// `follow_links` back-compat contract. Two DIFFERENT defaults meet here on
+/// purpose, so the test pins both. First: a legacy `indexes.toml` entry that
+/// predates the field deserialises as `true` — those indexes were built while
+/// the walker followed symlinks unconditionally, so keeping them following is
+/// the least-surprising behaviour on upgrade (no silent index reshuffle).
+/// Second: a NEW index registered via `POST /indexes` gets `false` from the
+/// create handler (`req.follow_links.unwrap_or(false)`), which is tested at the
+/// server layer rather than by this constructor default. Finally, the explicit
+/// `false` opt-out must survive a save/load round-trip.
+#[test]
+fn follow_links_missing_field_defaults_true_and_explicit_false_round_trips() {
+    // Constructor (Default) mirrors the legacy serde default.
+    assert!(
+        PersistedIndex::default().follow_links,
+        "Default::default() must carry the legacy follow_links=true"
+    );
+
+    // Loading legacy TOML without the field gives true (back-compat).
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    std::fs::write(
+        &path,
+        r#"
+[[index]]
+id = "legacy"
+root_path = "/tmp/legacy"
+"#,
+    )
+    .unwrap();
+    let entries = load_index_registry_at(&path).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(
+        entries[0].follow_links,
+        "missing field must default to true so pre-existing indexes keep following symlinks"
+    );
+
+    // A new-index opt-out (follow_links = false) survives save/load.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_path_buf();
+    save_index_registry_at(
+        &path,
+        &[PersistedIndex {
+            id: "no-follow".into(),
+            root_path: PathBuf::from("/tmp/nf"),
+            follow_links: false,
+            ..Default::default()
+        }],
+    )
+    .unwrap();
+    let entries = load_index_registry_at(&path).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(
+        !entries[0].follow_links,
+        "explicit follow_links=false must persist across a save/load cycle"
+    );
+}
+
 /// Issue #118: `include_docs` defaults to `true` on every code path —
 /// constructor, missing-field deserialisation, and after a save/load
 /// round-trip. This pins the back-compat migration story: an

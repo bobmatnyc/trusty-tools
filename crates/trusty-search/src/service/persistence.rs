@@ -69,6 +69,28 @@ pub struct PersistedIndex {
     )]
     pub respect_gitignore: bool,
 
+    /// Whether the reindex walker dereferences symlinks during traversal.
+    ///
+    /// Why: roots containing symlinks that escape the tree (self-referential
+    /// links, links into unrelated repos) bloat / corrupt the index when
+    /// followed. Newly created indexes opt out (`follow_links = false` at
+    /// `POST /indexes`); the value is persisted so `reindex` honours it.
+    ///
+    /// Backward-compat decision: the serde default is **`true`** (see
+    /// [`default_follow_links`]). Existing `indexes.toml` entries predate this
+    /// field and were built while the walker followed symlinks
+    /// unconditionally; deserialising a missing field as `true` keeps those
+    /// indexes behaving exactly as before on upgrade — the least-surprising
+    /// choice. New indexes get `false` from the create handler, not from this
+    /// default. `skip_serializing_if` keeps the TOML compact: only the value
+    /// that differs from the serde default (`false`, the new-index opt-out) is
+    /// written to disk.
+    #[serde(
+        default = "default_follow_links",
+        skip_serializing_if = "is_default_follow_links"
+    )]
+    pub follow_links: bool,
+
     /// Issue #1372: extra directory basenames pruned during the reindex walk on
     /// top of the built-in `walker::SKIP_DIRS`. Sourced from
     /// `trusty-search.yaml`'s `extra_skip_dirs:` field, the `POST /indexes`
@@ -194,6 +216,23 @@ fn default_respect_gitignore() -> bool {
     true
 }
 
+/// Default for `follow_links` when the field is ABSENT from `indexes.toml`
+/// (i.e. an index that predates the field): `true`. Those indexes were built
+/// while the walker followed symlinks unconditionally, so deserialising a
+/// missing field as `true` preserves their exact behaviour on upgrade. Newly
+/// created indexes receive `false` from the `POST /indexes` handler instead —
+/// this default only governs the legacy-migration path.
+fn default_follow_links() -> bool {
+    true
+}
+
+/// Why: skip writing `follow_links = true` to TOML (it equals the serde
+/// default) so existing `indexes.toml` files stay compact and the only value
+/// ever persisted is the new-index opt-out (`follow_links = false`).
+fn is_default_follow_links(v: &bool) -> bool {
+    *v
+}
+
 /// Default for `defer_embed`: `true` — the fast-pass / deferred-embed mode is
 /// the default behaviour for all new and loaded indexes (issue #923).
 fn default_defer_embed() -> bool {
@@ -254,6 +293,7 @@ impl Default for PersistedIndex {
             path_filter: Vec::new(),
             include_docs: true,
             respect_gitignore: true,
+            follow_links: default_follow_links(),
             extra_skip_dirs: default_extra_skip_dirs(),
             data_file_max_bytes: default_data_file_max_bytes(),
             lexical_only: false,

@@ -53,6 +53,7 @@ async fn validate_root_path_denylist_rejects_ssh() {
             path_filter: None,
             include_docs: None,
             respect_gitignore: None,
+            follow_links: None,
             lexical_only: None,
             skip_kg: None,
             defer_embed: None,
