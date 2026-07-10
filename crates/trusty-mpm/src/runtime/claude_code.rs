@@ -94,6 +94,37 @@ fn on_exit_hint_suffix() -> String {
     format!("; echo {}", shell_single_quote(RELAUNCH_HINT))
 }
 
+/// Wrap a managed launch/resume command so it is rooted at `cwd` regardless
+/// of the tmux pane shell's actual starting directory (#2250).
+///
+/// Why: `create_session -c <workdir>` is supposed to root the pane at the
+/// workspace, and `session_manager::resume_workdir::verify_pane_cwd` now
+/// fails loudly when tmux silently falls back to `$HOME` on the fresh-create
+/// resume path — but a RESUMED session that reuses an already-alive pane
+/// (created by a build that predates that verification, or whose cwd drifted
+/// after creation for any other reason) has no such guard. Prepending an
+/// explicit `cd` to the command line itself means the pane ends up in the
+/// right place independent of whatever directory the shell actually started
+/// in, closing that gap for every caller — not just the ones a point-in-time
+/// verification could catch.
+/// What: `cd '<cwd>' && { <body>; }`. `cwd` is single-quoted via
+/// [`shell_single_quote`] for the same reason [`env_bin_prefix`] quotes
+/// `CLAUDE_CONFIG_DIR` — a path with a space would otherwise word-split and
+/// break the pane. The brace GROUP (not a `( … )` subshell) is load-bearing:
+/// `body`'s `export TM_MANAGED_SESSION_ID=…` must land in the SAME shell
+/// process so it survives `claude` exiting and dropping back to the pane's
+/// shell (#2023 component B) — a subshell would discard that export the
+/// instant the group exits, breaking the in-place-relaunch fallback.
+/// Test: `spawn_command_prefixes_cd_to_workdir`,
+/// `resume_command_prefixes_cd_to_workdir`,
+/// `cd_and_group_quotes_workdir_with_space`.
+fn cd_and_group(cwd: &Path, body: &str) -> String {
+    format!(
+        "cd {} && {{ {body}; }}",
+        shell_single_quote(&cwd.display().to_string())
+    )
+}
+
 /// Compose the `env …` prefix + resolved binary that starts every managed
 /// `claude`, wiring in the tm-owned `CLAUDE_CONFIG_DIR` and, when available,
 /// a `CLAUDE_CODE_OAUTH_TOKEN` (DOC-34; issue #2246).
@@ -207,6 +238,9 @@ fn prompt_file_flag(prompt_file: Option<&Path>) -> String {
 /// does not need `claude` on its own `PATH` (#1298). `session_id` is the
 /// managed session's UUID (#2023 component B), exported so in-pane commands
 /// can identify the session after `claude` exits.
+/// `cwd` (#2250) is where the tmux pane is supposed to be rooted; the
+/// entire command is wrapped via [`cd_and_group`] so it is correct
+/// independent of the pane shell's actual starting directory.
 /// Test: `spawn_command_contains_env_scrub`,
 /// `spawn_command_contains_isolation_flags`,
 /// `spawn_command_uses_resolved_binary`,
@@ -215,16 +249,18 @@ fn prompt_file_flag(prompt_file: Option<&Path>) -> String {
 /// `spawn_command_prints_relaunch_hint_after_claude_exits`,
 /// `spawn_command_with_prompt_file_contains_flag`,
 /// `spawn_command_without_prompt_file_omits_flag`,
+/// `spawn_command_prefixes_cd_to_workdir`,
 /// `spawn_command_sets_oauth_token_when_available`,
 /// `spawn_command_omits_oauth_token_when_absent`.
 fn spawn_command(
+    cwd: &Path,
     claude_bin: &str,
     config_dir: Option<&Path>,
     session_id: &str,
     prompt_file: Option<&Path>,
     oauth_token: Option<&str>,
 ) -> String {
-    format!(
+    let body = format!(
         "{}{}{} {} {}{}",
         session_id_export_prefix(session_id),
         env_bin_prefix(claude_bin, config_dir, oauth_token),
@@ -232,7 +268,8 @@ fn spawn_command(
         crate::core::model_inject::SETTING_SOURCES_FLAG,
         crate::core::model_inject::PERMISSION_MODE_FLAG,
         on_exit_hint_suffix(),
-    )
+    );
+    cd_and_group(cwd, &body)
 }
 
 /// Build and write the PM system-prompt file for `project_dir`, for injection
@@ -305,9 +342,24 @@ fn build_prompt_file(project_dir: &Path) -> Option<std::path::PathBuf> {
 /// `resume_command_exports_managed_session_id`,
 /// `resume_command_prints_relaunch_hint_after_claude_exits`,
 /// `resume_command_with_prompt_file_contains_flag`,
+/// `resume_command_prefixes_cd_to_workdir`,
 /// `resume_command_sets_oauth_token_when_available`,
 /// `resume_command_omits_oauth_token_when_absent`.
+///
+/// `cwd` (#2250) is where the tmux pane is supposed to be rooted; the entire
+/// command is wrapped via [`cd_and_group`] — see its doc for why this must be
+/// a brace GROUP, not a subshell (the exported `TM_MANAGED_SESSION_ID` has to
+/// survive `claude` exiting).
+///
+/// `#[allow(too_many_arguments)]`: each parameter is an independently-tested,
+/// orthogonal command-builder input (cwd/#2250, config_dir/DOC-34, resume
+/// selection/#1744+#1840, session_id/#2023, prompt_file/#2230, oauth_token/
+/// #2246) — bundling them into a struct would only move the field list, not
+/// reduce it, and this is a private, single-call-site builder (mirrors the
+/// established pattern in `session_manager/create.rs`).
+#[allow(clippy::too_many_arguments)]
 fn resume_command(
+    cwd: &Path,
     claude_bin: &str,
     config_dir: Option<&Path>,
     claude_session_id: Option<&str>,
@@ -329,7 +381,8 @@ fn resume_command(
         None if has_prior_conv => format!("{base} --continue"),
         None => base, // No prior conversation: start fresh to avoid "no conversation found".
     };
-    format!("{cmd}{}", on_exit_hint_suffix())
+    let body = format!("{cmd}{}", on_exit_hint_suffix());
+    cd_and_group(cwd, &body)
 }
 
 /// Encode a workspace path the same way Claude Code names its project dir.
@@ -782,6 +835,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             .send_line(
                 tmux_name,
                 &spawn_command(
+                    cwd,
                     &claude_bin,
                     config_dir.as_deref(),
                     session_id,
@@ -899,6 +953,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
             .send_line(
                 tmux_name,
                 &resume_command(
+                    cwd,
                     &claude_bin,
                     config_dir.as_deref(),
                     effective_id,
@@ -939,6 +994,11 @@ mod tests {
     /// Fixed managed-session UUID string reused across command-builder tests
     /// (#2023 component B) — a representative id, not a real session.
     const TEST_SESSION_ID: &str = "11111111-2222-3333-4444-555555555555";
+
+    /// Fixed workdir reused across command-builder tests (#2250) — a
+    /// representative cwd, not a real workspace (these tests exercise the
+    /// string builders directly, never touching the filesystem).
+    const TEST_CWD: &str = "/tmp/ws";
 
     /// RAII guard that redirects `$HOME` to a temp dir and restores it on drop
     /// (including panic).
@@ -982,7 +1042,14 @@ mod tests {
     fn spawn_command_contains_env_scrub() {
         // The spawn command must always strip the API key from the environment
         // so the session falls back to OAuth (keyed by CLAUDE_CONFIG_DIR).
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None, None);
+        let cmd = spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
         assert!(
             cmd.contains("env -u ANTHROPIC_API_KEY"),
             "spawn command must contain env scrub: {cmd}"
@@ -1001,11 +1068,22 @@ mod tests {
         // can identify which managed session it belongs to. tmux
         // set-environment alone would NOT reach the pane's already-running
         // shell — the export must be part of the literal command line.
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None, None);
+        let cmd = spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
         let expected_prefix = format!("export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; ");
+        // #2250: the command now starts with `cd <workdir> && { ...` — the
+        // export is the first statement INSIDE that brace group, not literally
+        // the first bytes of the string.
         assert!(
-            cmd.starts_with(&expected_prefix),
-            "spawn command must start with the session-id export: {cmd}"
+            cmd.contains(&format!("{{ {expected_prefix}")),
+            "spawn command must export the session id as the first statement \
+             inside the cd-group: {cmd}"
         );
         let export_pos = cmd
             .find("export TM_MANAGED_SESSION_ID")
@@ -1024,7 +1102,14 @@ mod tests {
         // home, not the project's committed `.claude/`. It must co-exist with the
         // API-key scrub.
         let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
-        let cmd = spawn_command("claude", Some(dir), TEST_SESSION_ID, None, None);
+        let cmd = spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            Some(dir),
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
         assert!(
             cmd.contains(
                 "env -u ANTHROPIC_API_KEY \
@@ -1049,7 +1134,14 @@ mod tests {
         // (`env: -u: No such file or directory`), fatally killing every managed
         // session spawn.
         let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
-        let cmd = spawn_command("claude", Some(dir), TEST_SESSION_ID, None, None);
+        let cmd = spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            Some(dir),
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
         let u_pos = cmd
             .find("-u ANTHROPIC_API_KEY")
             .expect("cmd must contain -u ANTHROPIC_API_KEY");
@@ -1068,7 +1160,14 @@ mod tests {
         // When home is unresolvable there is no config dir to point at; the
         // command must fall back to the legacy scrub-only prefix (no bare
         // `CLAUDE_CONFIG_DIR=` token).
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None, None);
+        let cmd = spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
         assert!(
             !cmd.contains("CLAUDE_CONFIG_DIR"),
             "no config dir → must not reference CLAUDE_CONFIG_DIR: {cmd}"
@@ -1080,6 +1179,7 @@ mod tests {
     #[test]
     fn spawn_command_sets_oauth_token_when_available() {
         let cmd = spawn_command(
+            Path::new(TEST_CWD),
             "claude",
             None,
             TEST_SESSION_ID,
@@ -1099,7 +1199,14 @@ mod tests {
 
     #[test]
     fn spawn_command_omits_oauth_token_when_absent() {
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None, None);
+        let cmd = spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
         assert!(
             !cmd.contains("CLAUDE_CODE_OAUTH_TOKEN"),
             "no token available → must not reference CLAUDE_CODE_OAUTH_TOKEN: {cmd}"
@@ -1111,11 +1218,19 @@ mod tests {
         // Zero-regression guard: a caller with no config dir, no prompt file,
         // and no token must get EXACTLY the same command string this crate
         // produced before #2246 introduced the extra parameter.
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None, None);
+        let cmd = spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
         let expected = format!(
-            "export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; env -u ANTHROPIC_API_KEY claude \
+            "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
+             env -u ANTHROPIC_API_KEY claude \
              --setting-sources project,local --dangerously-skip-permissions; \
-             echo 'tm: run `tm` to relaunch this session'"
+             echo 'tm: run `tm` to relaunch this session'; }}"
         );
         assert_eq!(
             cmd, expected,
@@ -1129,6 +1244,7 @@ mod tests {
         // established assignment order), each independently single-quoted.
         let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
         let cmd = spawn_command(
+            Path::new(TEST_CWD),
             "claude",
             Some(dir),
             TEST_SESSION_ID,
@@ -1148,6 +1264,7 @@ mod tests {
     #[test]
     fn resume_command_sets_oauth_token_when_available() {
         let cmd = resume_command(
+            Path::new(TEST_CWD),
             "claude",
             None,
             Some("abc-123"),
@@ -1169,6 +1286,7 @@ mod tests {
     #[test]
     fn resume_command_omits_oauth_token_when_absent() {
         let cmd = resume_command(
+            Path::new(TEST_CWD),
             "claude",
             None,
             Some("abc-123"),
@@ -1188,6 +1306,7 @@ mod tests {
         // Zero-regression guard, resume-path counterpart to
         // spawn_command_without_token_is_byte_identical_to_pre_2246.
         let cmd = resume_command(
+            Path::new(TEST_CWD),
             "claude",
             None,
             Some("abc-123"),
@@ -1197,9 +1316,10 @@ mod tests {
             None,
         );
         let expected = format!(
-            "export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; env -u ANTHROPIC_API_KEY claude \
+            "cd '/tmp/ws' && {{ export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; \
+             env -u ANTHROPIC_API_KEY claude \
              --setting-sources project,local --dangerously-skip-permissions --resume abc-123; \
-             echo 'tm: run `tm` to relaunch this session'"
+             echo 'tm: run `tm` to relaunch this session'; }}"
         );
         assert_eq!(
             cmd, expected,
@@ -1213,7 +1333,14 @@ mod tests {
         // the pane command. The path must appear single-quoted and INTACT so
         // `env` receives one CLAUDE_CONFIG_DIR value, not two argv tokens.
         let dir = Path::new("/Users/John Doe/.trusty-tools/trusty-mpm/claude-config");
-        let cmd = spawn_command("claude", Some(dir), TEST_SESSION_ID, None, None);
+        let cmd = spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            Some(dir),
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
         assert!(
             cmd.contains(
                 "env -u ANTHROPIC_API_KEY \
@@ -1228,6 +1355,7 @@ mod tests {
         );
         // Resume path shares env_bin_prefix, so it must quote identically.
         let resume = resume_command(
+            Path::new(TEST_CWD),
             "claude",
             Some(dir),
             None,
@@ -1261,7 +1389,14 @@ mod tests {
         // Why: the session_manager spawn path must isolate from the user's global
         // settings and run fully unattended (bypass all permission prompts) so
         // multi-agent orchestration never stalls on interactive approval dialogs.
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None, None);
+        let cmd = spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
         assert!(
             cmd.contains("--setting-sources project,local"),
             "spawn command must isolate settings: {cmd}"
@@ -1283,6 +1418,7 @@ mod tests {
         // spawn command must invoke claude by the resolved (absolute) path
         // rather than a bare `claude` that the pane's PATH cannot find.
         let cmd = spawn_command(
+            Path::new(TEST_CWD),
             "/Users/me/.local/bin/claude",
             None,
             TEST_SESSION_ID,
@@ -1447,7 +1583,14 @@ mod tests {
         // inject --append-system-prompt-file pointing at it, alongside the
         // existing isolation flags — the third fail-closed carrier.
         let path = Path::new("/tmp/trusty-mpm-system-prompt-test.txt");
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID, Some(path), None);
+        let cmd = spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            TEST_SESSION_ID,
+            Some(path),
+            None,
+        );
         assert!(
             cmd.contains("--append-system-prompt-file '/tmp/trusty-mpm-system-prompt-test.txt'"),
             "spawn command must pass the prompt file via --append-system-prompt-file: {cmd}"
@@ -1462,7 +1605,14 @@ mod tests {
     fn spawn_command_without_prompt_file_omits_flag() {
         // #2125 item 3: no prompt file (e.g. the write failed) → the flag must
         // be omitted entirely rather than passed with a bad/empty path.
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None, None);
+        let cmd = spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
         assert!(
             !cmd.contains("--append-system-prompt-file"),
             "no prompt file → flag must be absent: {cmd}"
@@ -1491,6 +1641,7 @@ mod tests {
         // Why (#1744): --resume <id> restores the exact prior conversation;
         // the test pins the contract so accidental regressions are caught early.
         let cmd = resume_command(
+            Path::new(TEST_CWD),
             "claude",
             None,
             Some("abc-123"),
@@ -1520,6 +1671,7 @@ mod tests {
         // reason as the spawn path — the pane's shell must retain the id after
         // claude exits, whichever launch path (fresh spawn or resume) started it.
         let cmd = resume_command(
+            Path::new(TEST_CWD),
             "claude",
             None,
             Some("abc-123"),
@@ -1529,9 +1681,13 @@ mod tests {
             None,
         );
         let expected_prefix = format!("export TM_MANAGED_SESSION_ID='{TEST_SESSION_ID}'; ");
+        // #2250: the command now starts with `cd <workdir> && { ...` — the
+        // export is the first statement INSIDE that brace group, not literally
+        // the first bytes of the string.
         assert!(
-            cmd.starts_with(&expected_prefix),
-            "resume command must start with the session-id export: {cmd}"
+            cmd.contains(&format!("{{ {expected_prefix}")),
+            "resume command must export the session id as the first statement \
+             inside the cd-group: {cmd}"
         );
         let export_pos = cmd
             .find("export TM_MANAGED_SESSION_ID")
@@ -1549,6 +1705,7 @@ mod tests {
         // sessions read the same tm-owned roster as fresh spawns.
         let dir = Path::new("/home/bob/.trusty-tools/trusty-mpm/claude-config");
         let cmd = resume_command(
+            Path::new(TEST_CWD),
             "claude",
             Some(dir),
             Some("abc-123"),
@@ -1575,7 +1732,16 @@ mod tests {
         // Why (#1744 / #1840): when no claude_session_id is stored but prior
         // conversation history exists, --continue resumes the most-recent
         // conversation in the workspace rather than starting fresh.
-        let cmd = resume_command("claude", None, None, true, TEST_SESSION_ID, None, None);
+        let cmd = resume_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            None,
+            true,
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
         assert!(
             cmd.contains("--continue"),
             "resume command without id + prior conv must use --continue: {cmd}"
@@ -1591,7 +1757,16 @@ mod tests {
         // Why (#1840): when no claude_session_id is stored AND no prior
         // conversation exists, --continue would error with "No conversation
         // found to continue". The plain spawn starts a fresh session instead.
-        let cmd = resume_command("claude", None, None, false, TEST_SESSION_ID, None, None);
+        let cmd = resume_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            None,
+            false,
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
         assert!(
             !cmd.contains("--continue"),
             "resume command without id + no prior conv must NOT use --continue: {cmd}"
@@ -1930,6 +2105,7 @@ mod tests {
         // The adapter merely calls resume_command() with the same arguments; testing the
         // function directly proves the selection logic without CI depending on claude.
         let cmd = resume_command(
+            Path::new(TEST_CWD),
             "__fake_claude__",
             None,
             None,
@@ -1983,13 +2159,79 @@ mod tests {
         );
     }
 
+    // ── #2250: cd-prefix belt-and-suspenders ────────────────────────────────
+
+    #[test]
+    fn spawn_command_prefixes_cd_to_workdir() {
+        // #2250: the emitted command must be correct regardless of the pane
+        // shell's actual starting directory — an explicit `cd` must lead the
+        // whole line, and the exported session id / claude invocation must be
+        // wrapped in a brace GROUP (not a subshell) so the env survives.
+        let cmd = spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
+        assert!(
+            cmd.starts_with("cd '/tmp/ws' && { "),
+            "spawn command must start with an explicit cd into the workdir: {cmd}"
+        );
+        assert!(
+            cmd.trim_end().ends_with('}'),
+            "spawn command must close the brace group it opened: {cmd}"
+        );
+    }
+
+    #[test]
+    fn resume_command_prefixes_cd_to_workdir() {
+        // #2250: same cd-prefix guarantee on the resume path — the one most
+        // directly implicated by a stale/removed workspace_path silently
+        // rooting a recreated pane at $HOME.
+        let cmd = resume_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            Some("abc-123"),
+            false,
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
+        assert!(
+            cmd.starts_with("cd '/tmp/ws' && { "),
+            "resume command must start with an explicit cd into the workdir: {cmd}"
+        );
+        assert!(
+            cmd.trim_end().ends_with('}'),
+            "resume command must close the brace group it opened: {cmd}"
+        );
+    }
+
+    #[test]
+    fn cd_and_group_quotes_workdir_with_space() {
+        // A workdir with a space must not word-split the pane command — same
+        // invariant env_bin_prefix already enforces for CLAUDE_CONFIG_DIR.
+        let cmd = cd_and_group(Path::new("/Users/John Doe/work"), "echo hi");
+        assert_eq!(cmd, "cd '/Users/John Doe/work' && { echo hi; }");
+    }
+
     // ── #2023 component D: on-exit relaunch hint ────────────────────────────
 
     #[test]
     fn spawn_command_prints_relaunch_hint_after_claude_exits() {
         // The hint must appear AFTER the claude invocation, separated by `;` so
         // it only runs once claude exits and control returns to the pane shell.
-        let cmd = spawn_command("claude", None, TEST_SESSION_ID, None, None);
+        let cmd = spawn_command(
+            Path::new(TEST_CWD),
+            "claude",
+            None,
+            TEST_SESSION_ID,
+            None,
+            None,
+        );
         assert!(
             cmd.contains("; echo 'tm: run `tm` to relaunch this session'"),
             "spawn command must print the relaunch hint after claude exits: {cmd}"
@@ -2007,6 +2249,7 @@ mod tests {
         // Same invariant for the resume path (--resume branch here; the
         // --continue/plain-spawn branches share the same trailing suffix).
         let cmd = resume_command(
+            Path::new(TEST_CWD),
             "claude",
             None,
             Some("abc-123"),
@@ -2034,6 +2277,7 @@ mod tests {
         // crash-recovery sessions had no way to inject the PM system prompt at all.
         let path = Path::new("/tmp/trusty-mpm-system-prompt-resume-test.txt");
         let cmd = resume_command(
+            Path::new(TEST_CWD),
             "claude",
             None,
             Some("abc-123"),
