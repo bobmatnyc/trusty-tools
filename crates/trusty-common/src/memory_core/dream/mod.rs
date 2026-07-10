@@ -11,6 +11,7 @@
 mod config;
 mod cycle;
 mod dreamer;
+mod fading;
 mod guard;
 mod helpers;
 mod recall_benchmark;
@@ -23,4 +24,5 @@ mod tests;
 pub use config::{DreamConfig, DreamStats, PersistedDreamStats};
 pub use cycle::{RoomConsolidationStats, consolidate_scoped};
 pub use dreamer::Dreamer;
+pub use fading::{FadingMemory, FadingParams, detect_fading, rank_fading};
 pub use helpers::extract_keywords;

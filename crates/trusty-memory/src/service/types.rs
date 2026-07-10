@@ -59,6 +59,12 @@ pub struct DreamStatusPayload {
     pub compacted: usize,
     pub closets_updated: usize,
     pub duration_ms: u64,
+    /// Fading high-value memories recorded by the last dream cycle (issue
+    /// #2352). Populated from a per-palace snapshot via `From<PersistedDreamStats>`;
+    /// left empty on the cross-palace aggregate endpoint (no single palace to
+    /// attribute). `#[serde(default)]` keeps it omissible for older clients.
+    #[serde(default)]
+    pub fading: Vec<trusty_common::memory_core::dream::FadingMemory>,
 }
 
 impl From<PersistedDreamStats> for DreamStatusPayload {
@@ -70,6 +76,7 @@ impl From<PersistedDreamStats> for DreamStatusPayload {
             compacted: p.stats.compacted,
             closets_updated: p.stats.closets_updated,
             duration_ms: p.stats.duration_ms,
+            fading: p.stats.fading,
         }
     }
 }

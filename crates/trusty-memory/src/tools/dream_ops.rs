@@ -14,9 +14,9 @@
 //! `dream::tests::consolidate_scoped_*` in trusty-common (behaviour).
 
 use crate::AppState;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use trusty_common::memory_core::dream::{consolidate_scoped, DreamConfig};
+use trusty_common::memory_core::dream::{consolidate_scoped, detect_fading, DreamConfig};
 
 use super::helpers::{open_palace_handle, parse_room, resolve_palace};
 
@@ -32,9 +32,13 @@ const DEFAULT_MAX_AGE_DAYS: i64 = 7;
 /// (default 7), builds a `DreamConfig` seeded with the daemon's OpenRouter key
 /// and local-model flag, opens the palace, and runs `consolidate_scoped`. When
 /// no inference backend is configured the helper is a graceful no-op (zero
-/// counts). Returns `{ palace, room, summary_facts_created, facts_evicted }`.
-/// Test: `dream_consolidate_room_returns_shape` (no-op path) in
-/// `tests/dream_room_mcp.rs`.
+/// counts). Also computes the palace-wide fading-memories resurface list (issue
+/// #2352) — high-value memories that have decayed below the resurface threshold,
+/// surfaced (never auto-boosted) so the caller can touch or `memory_forget`
+/// them. Returns
+/// `{ palace, room, summary_facts_created, facts_evicted, fading }`.
+/// Test: `dream_consolidate_room_returns_shape` (no-op path) and
+/// `palace_dream_response_includes_fading` in `tests/dream_room_mcp.rs`.
 pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value) -> Result<Value> {
     let palace = resolve_palace(state, &args, "dream_consolidate_room")?;
     // Absent / null / empty room => all rooms; otherwise scope to that room.
@@ -68,11 +72,18 @@ pub(crate) async fn handle_dream_consolidate_room(state: &AppState, args: Value)
 
     let stats = consolidate_scoped(&handle, &dream_cfg, room, max_age_days, None).await?;
 
+    // Fading-memories resurface pass (issue #2352): palace-wide, read-only.
+    // Surfaced here so the on-demand caller sees the same list the idle dream
+    // cycle records in dream_stats.json.
+    let fading = detect_fading(&handle, &dream_cfg.fading);
+    let fading = serde_json::to_value(&fading).context("serialize fading list")?;
+
     Ok(json!({
         "palace": palace,
         "room": room_arg,
         "summary_facts_created": stats.summary_facts_created,
         "facts_evicted": stats.facts_evicted,
+        "fading": fading,
     }))
 }
 
