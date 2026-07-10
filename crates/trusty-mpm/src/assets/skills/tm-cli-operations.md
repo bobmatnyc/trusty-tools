@@ -228,8 +228,12 @@ tm session decommission-ephemeral               # tear down all test/throwaway s
 tm session prune-worktrees [--force]            # remove orphaned .worktrees/ dirs (default dry-run)
 ```
 
-`prune`/`prune-idle`/`prune-worktrees` default to a safe preview; RUNNING
-sessions are spared unless you pass `--include-active` / `--force`.
+`prune-worktrees` defaults to a safe preview (pass `--force` to act);
+`prune`/`prune-idle` act immediately unless you pass `--dry-run` yourself.
+`prune --include-active` is the only explicit override to also touch RUNNING
+sessions; `prune-idle`'s idle/done verdict policy inherently leaves
+working/blocked sessions alone, and `prune-worktrees` only ever removes
+directories that have no active session at all.
 
 ---
 
