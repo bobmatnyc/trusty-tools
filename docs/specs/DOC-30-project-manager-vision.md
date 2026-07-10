@@ -1,5 +1,7 @@
 # DOC-30 — Project Manager: Vision & Lifecycle Orchestrator
 
+> **SUPERSEDED (2026-07-10):** This vision is superseded by the #2108 (`tm project`, deterministic control plane) + #2109 (`tm manager`, portfolio inference layer) epic split. Retained for historical context; do not implement from this document. See issue #1878 for unique content folded into #2108/#2109.
+
 **Status:** DRAFT — Vision & Design Work Only (0% implemented)
 **Subsystem:** trusty-mpm — project-level orchestration / user-facing surface
 **Owner:** Product / Engineering (trusty-mpm)
